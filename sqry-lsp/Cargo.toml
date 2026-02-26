@@ -46,6 +46,6 @@ uuid = { version = "1.11", features = ["v4"] }
 assert_cmd = "2.0"
 tempfile = "3.14"
 criterion = "0.8"
-tower = { version = "0.4", features = ["buffer"] }
+tower = { version = "0.5", features = ["buffer"] }
 futures = "0.3"
 sqry-lang-rust = { path = "../sqry-lang-rust" }
