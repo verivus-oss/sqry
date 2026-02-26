@@ -4,7 +4,7 @@
 
 sqry is a blazing-fast semantic code search tool that understands code structure, not just text patterns. Find functions, classes, and symbols with ease using AST-aware queries and cross-file semantic analysis.
 
-Website: https://verivus-oss.github.io/sqry/
+Website: https://sqry.dev
 
 > 📅 **Current Version**: v4.4.2
 > ✅ **35 Languages**: Rust, Python, TypeScript, JavaScript, Go, Java, C/C++, C#, Kotlin, Ruby, Swift, Scala, Lua, R, Dart, PHP, SQL, Shell, Haskell, Perl, Elixir, Vue, Svelte, Groovy, Zig, HTML, CSS, Terraform, Puppet, Pulumi, and more
