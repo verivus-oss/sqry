@@ -30,7 +30,7 @@ ort = { version = "2.0.0-rc.10", default-features = false, features = ["std", "n
 
 # HuggingFace tokenizers (optional - enabled by default)
 # Version 0.21.4 matches Python tokenizers for tokenizer.json compatibility
-tokenizers = { version = "0.21.4", optional = true }
+tokenizers = { version = "0.22.2", optional = true }
 
 [dev-dependencies]
 tempfile = "3.10"
