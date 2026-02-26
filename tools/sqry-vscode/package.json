@@ -1,0 +1,236 @@
+{
+  "name": "sqry-vscode",
+  "displayName": "sqry Semantic Search",
+  "description": "Semantic code search for 34 languages. Navigate call graphs, inheritance hierarchies, FFI boundaries, imports/exports - powered by unified graph architecture.",
+  "version": "4.5.3",
+  "publisher": "verivuslabs",
+  "license": "MIT",
+  "icon": "media/sqry-icon-512.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/verivus-oss/sqry"
+  },
+  "bugs": {
+    "url": "https://github.com/verivus-oss/sqry/issues"
+  },
+  "homepage": "https://github.com/verivus-oss/sqry#readme",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Linters",
+    "Other"
+  ],
+  "keywords": [
+    "code search",
+    "semantic search",
+    "ast",
+    "navigation",
+    "symbols",
+    "callers",
+    "references",
+    "lsp",
+    "language server",
+    "find references",
+    "call hierarchy",
+    "code analysis",
+    "code navigation",
+    "symbol search",
+    "fuzzy search",
+    "inheritance",
+    "ffi",
+    "cross-language",
+    "rust",
+    "go",
+    "java",
+    "python",
+    "javascript",
+    "typescript"
+  ],
+  "galleryBanner": {
+    "color": "#1e1e1e",
+    "theme": "dark"
+  },
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "sqry.query",
+        "title": "Sqry: Query…",
+        "category": "Sqry",
+        "icon": "$(search-fuzzy)"
+      },
+      {
+        "command": "sqry.index",
+        "title": "Sqry: Index Workspace",
+        "category": "Sqry"
+      },
+      {
+        "command": "sqry.searchWorkspace",
+        "title": "Sqry: Search Workspace…",
+        "category": "Sqry",
+        "icon": "$(search)"
+      },
+      {
+        "command": "sqry.findReferences",
+        "title": "Sqry: Find Semantic References",
+        "category": "Sqry"
+      },
+      {
+        "command": "sqry.refreshStats",
+        "title": "Sqry: Refresh Index Stats",
+        "category": "Sqry",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "sqry.clearResults",
+        "title": "Sqry: Clear Results",
+        "category": "Sqry",
+        "icon": "$(clear-all)"
+      }
+    ],
+    "configuration": {
+      "title": "Sqry",
+      "properties": {
+        "sqry.path": {
+          "type": "string",
+          "default": "sqry",
+          "description": "Path to the sqry binary (used to launch `sqry lsp --stdio`)."
+        },
+        "sqry.limit": {
+          "type": "number",
+          "default": 200,
+          "description": "Maximum number of results to request per query."
+        },
+        "sqry.timeoutMs": {
+          "type": "number",
+          "default": 15000,
+          "description": "Timeout (in milliseconds) for sqry language server requests (search, relations, etc.)."
+        },
+        "sqry.indexTimeoutMs": {
+          "type": "number",
+          "default": 300000,
+          "description": "Timeout (in milliseconds) for sqry index rebuild operations. Larger codebases may need more time. Default: 5 minutes."
+        },
+        "sqry.autoIndexOnOpen": {
+          "type": "string",
+          "enum": [
+            "always",
+            "prompt",
+            "never"
+          ],
+          "default": "prompt",
+          "description": "Whether the extension should trigger `sqry index` when a workspace opens."
+        },
+        "sqry.codeLens.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable sqry CodeLens annotations (caller counts)."
+        }
+      }
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "sqry",
+          "title": "Sqry",
+          "icon": "media/sqry-icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "sqry": [
+        {
+          "id": "sqry.searchResults",
+          "name": "Semantic Results",
+          "icon": "media/sqry-icon.svg"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "sqry.searchResults",
+        "contents": "Semantic code search for your workspace.\n\n[Search Workspace](command:sqry.searchWorkspace) - Find symbols by name\n[Run Query](command:sqry.query) - Use structured queries\n[Index Workspace](command:sqry.index) - Build or rebuild index"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "sqry.searchWorkspace",
+          "when": "view == sqry.searchResults",
+          "group": "navigation@1"
+        },
+        {
+          "command": "sqry.query",
+          "when": "view == sqry.searchResults",
+          "group": "navigation@2"
+        },
+        {
+          "command": "sqry.refreshStats",
+          "when": "view == sqry.searchResults",
+          "group": "2_actions@1"
+        },
+        {
+          "command": "sqry.clearResults",
+          "when": "view == sqry.searchResults",
+          "group": "2_actions@2"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "sqry.findReferences",
+          "group": "navigation@11"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "sqry.findReferences",
+          "when": "editorHasSelection"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run package",
+    "compile": "webpack",
+    "watch": "webpack --watch",
+    "package": "webpack --mode production --devtool hidden-source-map",
+    "compile-tests": "tsc -p tsconfig.test.json",
+    "watch-tests": "tsc -p . -w --outDir out",
+    "pretest": "npm run compile-tests && npm run compile && npm run lint",
+    "lint": "eslint src --ext ts",
+    "test": "npm run test:unit",
+    "test:unit": "mocha -r ts-node/register 'tests/*.test.ts'",
+    "test:integration": "node ./out/tests/runTests.js"
+  },
+  "devDependencies": {
+    "@types/chai": "^4.3.11",
+    "@types/mocha": "^10.0.6",
+    "@types/node": "^20.11.30",
+    "@types/proxyquire": "^1.3.30",
+    "@types/vscode": "^1.85.0",
+    "@types/which": "^3.0.4",
+    "@typescript-eslint/eslint-plugin": "^6.21.0",
+    "@typescript-eslint/parser": "^6.21.0",
+    "@vscode/test-electron": "^2.5.2",
+    "baseline-browser-mapping": "^2.9.11",
+    "chai": "^4.4.1",
+    "eslint": "^8.56.0",
+    "glob": "^11.0.3",
+    "mocha": "^10.4.0",
+    "proxyquire": "^2.1.3",
+    "ts-loader": "^9.5.4",
+    "ts-node": "^10.9.1",
+    "typescript": "^5.3.3",
+    "webpack": "^5.102.1",
+    "webpack-cli": "^6.0.1"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1",
+    "which": "^4.0.0"
+  }
+}

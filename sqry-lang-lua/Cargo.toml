@@ -1,0 +1,27 @@
+[package]
+name = "sqry-lang-lua"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Lua language plugin for sqry"
+
+[dependencies]
+sqry-core = { path = "../sqry-core" }
+anyhow.workspace = true
+tree-sitter.workspace = true
+tree-sitter-lua.workspace = true
+streaming-iterator.workspace = true
+
+[dev-dependencies]
+sqry-tree-sitter-fuzz-support = { path = "../sqry-tree-sitter-fuzz-support" }
+log.workspace = true
+sqry-core = { path = "../sqry-core", features = ["test-support"] }
+serial_test = "3.0"
+criterion = "0.8"
+
+[features]
+default = ["has_relations"]
+has_relations = []

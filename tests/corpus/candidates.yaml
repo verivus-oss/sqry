@@ -1,0 +1,1484 @@
+# Auto-generated candidate detection corpus entries
+entries:
+  - id: sqry::CHANGELOG_md
+    repo: sqry
+    path: CHANGELOG.md
+    primary_language: markdown
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::IMMEDIATE_NEXT_STEPS_md
+    repo: sqry
+    path: IMMEDIATE_NEXT_STEPS.md
+    primary_language: markdown
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::IMPLEMENTATION_PLAN_md
+    repo: sqry
+    path: IMPLEMENTATION_PLAN.md
+    primary_language: markdown
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::PHASE1_PROGRESS_md
+    repo: sqry
+    path: PHASE1_PROGRESS.md
+    primary_language: markdown
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::README_md
+    repo: sqry
+    path: README.md
+    primary_language: markdown
+    embedded_languages:
+      - bash
+    notes: null
+
+  - id: sqry::REBRANDING_COMPLETE_md
+    repo: sqry
+    path: REBRANDING_COMPLETE.md
+    primary_language: markdown
+    embedded_languages:
+      - bash
+    notes: null
+
+  - id: sqry::RELEASE_NOTES_v0_14_0_md
+    repo: sqry
+    path: RELEASE_NOTES_v0.14.0.md
+    primary_language: markdown
+    embedded_languages:
+      - rust
+    notes: null
+
+  - id: sqry::RELEASE_v0_8_0_md
+    repo: sqry
+    path: RELEASE_v0.8.0.md
+    primary_language: markdown
+    embedded_languages:
+      - bash
+    notes: null
+
+  - id: sqry::ROADMAP_v1_0_0_md
+    repo: sqry
+    path: ROADMAP_v1.0.0.md
+    primary_language: markdown
+    embedded_languages:
+      - bash
+      - rust
+    notes: null
+
+  - id: sqry::STATUS_md
+    repo: sqry
+    path: STATUS.md
+    primary_language: markdown
+    embedded_languages:
+      - bash
+    notes: null
+
+  - id: sqry::docs_FEATURE_REQUESTS_2025_md
+    repo: sqry
+    path: docs/FEATURE_REQUESTS_2025.md
+    primary_language: markdown
+    embedded_languages:
+      - bash
+    notes: null
+
+  - id: sqry::docs_development_CODEX_ACTION_PLAN_REVIEW_md
+    repo: sqry
+    path: docs/development/CODEX_ACTION_PLAN_REVIEW.md
+    primary_language: markdown
+    embedded_languages:
+      - bash
+    notes: null
+
+  - id: sqry::docs_development_FEATURE_COMPLETENESS_ROADMAP_md
+    repo: sqry
+    path: docs/development/FEATURE_COMPLETENESS_ROADMAP.md
+    primary_language: markdown
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::docs_development_LLM_INTEGRATION_IMPLEMENTATION_STATUS_md
+    repo: sqry
+    path: docs/development/LLM_INTEGRATION_IMPLEMENTATION_STATUS.md
+    primary_language: markdown
+    embedded_languages:
+      - rust
+    notes: null
+
+  - id: sqry::docs_development_TECHNICAL_BACKLOG_ACTION_PLAN_md
+    repo: sqry
+    path: docs/development/TECHNICAL_BACKLOG_ACTION_PLAN.md
+    primary_language: markdown
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::docs_development_ast-query-fixes_01_SPEC_md
+    repo: sqry
+    path: docs/development/ast-query-fixes/01_SPEC.md
+    primary_language: markdown
+    embedded_languages:
+      - bash
+      - rust
+    notes: null
+
+  - id: sqry::docs_development_ast-query-fixes_02_DESIGN_md
+    repo: sqry
+    path: docs/development/ast-query-fixes/02_DESIGN.md
+    primary_language: markdown
+    embedded_languages:
+      - rust
+    notes: null
+
+  - id: sqry::docs_development_ast-query-fixes_03_IMPLEMENTATION_PLAN_md
+    repo: sqry
+    path: docs/development/ast-query-fixes/03_IMPLEMENTATION_PLAN.md
+    primary_language: markdown
+    embedded_languages:
+      - rust
+    notes: null
+
+  - id: sqry::docs_development_ast-query-fixes_05_TEST_PLAN_md
+    repo: sqry
+    path: docs/development/ast-query-fixes/05_TEST_PLAN.md
+    primary_language: markdown
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::docs_development_ast-query-fixes_BASELINE_PERFORMANCE_md
+    repo: sqry
+    path: docs/development/ast-query-fixes/BASELINE_PERFORMANCE.md
+    primary_language: markdown
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::docs_development_ast-query-fixes_CODEX_PLANNING_REVIEW_md
+    repo: sqry
+    path: docs/development/ast-query-fixes/CODEX_PLANNING_REVIEW.md
+    primary_language: markdown
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::docs_development_ast-query-fixes_FINAL_CODEX_REVIEW_PARTIAL_md
+    repo: sqry
+    path: docs/development/ast-query-fixes/FINAL_CODEX_REVIEW_PARTIAL.md
+    primary_language: markdown
+    embedded_languages:
+      - rust
+    notes: null
+
+  - id: sqry::docs_development_ast-query-fixes_FINAL_CODEX_REVIEW_REQUEST_md
+    repo: sqry
+    path: docs/development/ast-query-fixes/FINAL_CODEX_REVIEW_REQUEST.md
+    primary_language: markdown
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::docs_development_ast-query-fixes_H2_POSITION_MATCHING_CODEX_REVIEW_md
+    repo: sqry
+    path: docs/development/ast-query-fixes/H2_POSITION_MATCHING_CODEX_REVIEW.md
+    primary_language: markdown
+    embedded_languages:
+      - rust
+    notes: null
+
+  - id: sqry::docs_development_ast-query-fixes_H2_POSITION_MATCHING_REVIEW_md
+    repo: sqry
+    path: docs/development/ast-query-fixes/H2_POSITION_MATCHING_REVIEW.md
+    primary_language: markdown
+    embedded_languages:
+      - rust
+    notes: null
+
+  - id: sqry::docs_development_ast-query-fixes_H2_POSITION_MATCHING_REVIEW_REQUEST_md
+    repo: sqry
+    path: docs/development/ast-query-fixes/H2_POSITION_MATCHING_REVIEW_REQUEST.md
+    primary_language: markdown
+    embedded_languages:
+      - rust
+    notes: null
+
+  - id: sqry::docs_development_ast-query-fixes_H3_REGEX_VALIDATION_FOLLOWUP_REVIEW_md
+    repo: sqry
+    path: docs/development/ast-query-fixes/H3_REGEX_VALIDATION_FOLLOWUP_REVIEW.md
+    primary_language: markdown
+    embedded_languages:
+      - rust
+    notes: null
+
+  - id: sqry::docs_development_ast-query-fixes_H3_REGEX_VALIDATION_REVIEW_md
+    repo: sqry
+    path: docs/development/ast-query-fixes/H3_REGEX_VALIDATION_REVIEW.md
+    primary_language: markdown
+    embedded_languages:
+      - rust
+    notes: null
+
+  - id: sqry::docs_development_ast-query-fixes_H4_CHECKPOINT_ASSESSMENT_md
+    repo: sqry
+    path: docs/development/ast-query-fixes/H4_CHECKPOINT_ASSESSMENT.md
+    primary_language: markdown
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::docs_development_ast-query-fixes_IMPLEMENTATION_COMPLETE_md
+    repo: sqry
+    path: docs/development/ast-query-fixes/IMPLEMENTATION_COMPLETE.md
+    primary_language: markdown
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::docs_development_cache_00_DELIVERABLES_SUMMARY_md
+    repo: sqry
+    path: docs/development/cache/00_DELIVERABLES_SUMMARY.md
+    primary_language: markdown
+    embedded_languages:
+      - bash
+    notes: null
+
+  - id: sqry::docs_development_cache_00_DESIGN_DECISIONS_CHECKLIST_md
+    repo: sqry
+    path: docs/development/cache/00_DESIGN_DECISIONS_CHECKLIST.md
+    primary_language: markdown
+    embedded_languages:
+      - rust
+    notes: null
+
+  - id: sqry::docs_development_cache_00_IMPLEMENTATION_READY_md
+    repo: sqry
+    path: docs/development/cache/00_IMPLEMENTATION_READY.md
+    primary_language: markdown
+    embedded_languages:
+      - bash
+      - rust
+    notes: null
+
+  - id: sqry::docs_development_cache_01_SPEC_md
+    repo: sqry
+    path: docs/development/cache/01_SPEC.md
+    primary_language: markdown
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::docs_development_cache_02_DESIGN_md
+    repo: sqry
+    path: docs/development/cache/02_DESIGN.md
+    primary_language: markdown
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::docs_development_cache_03_IMPLEMENTATION_PLAN_md
+    repo: sqry
+    path: docs/development/cache/03_IMPLEMENTATION_PLAN.md
+    primary_language: markdown
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::docs_development_cache_03_IMPLEMENTATION_PLAN_v2_md
+    repo: sqry
+    path: docs/development/cache/03_IMPLEMENTATION_PLAN_v2.md
+    primary_language: markdown
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::docs_development_cache_04_PROGRESS_md
+    repo: sqry
+    path: docs/development/cache/04_PROGRESS.md
+    primary_language: markdown
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::docs_development_cache_05_TEST_PLAN_md
+    repo: sqry
+    path: docs/development/cache/05_TEST_PLAN.md
+    primary_language: markdown
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::docs_development_cache_05a_INTEGRATION_TEST_SCENARIOS_md
+    repo: sqry
+    path: docs/development/cache/05a_INTEGRATION_TEST_SCENARIOS.md
+    primary_language: markdown
+    embedded_languages:
+      - rust
+    notes: null
+
+  - id: sqry::docs_development_cache_06_TEST_EXECUTION_md
+    repo: sqry
+    path: docs/development/cache/06_TEST_EXECUTION.md
+    primary_language: markdown
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::docs_development_cache_ARCHITECTURE_md
+    repo: sqry
+    path: docs/development/cache/ARCHITECTURE.md
+    primary_language: markdown
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::docs_development_cache_CODEX_ISSUES_RESOLVED_md
+    repo: sqry
+    path: docs/development/cache/CODEX_ISSUES_RESOLVED.md
+    primary_language: markdown
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::docs_development_cache_CODEX_REVIEW_md
+    repo: sqry
+    path: docs/development/cache/CODEX_REVIEW.md
+    primary_language: markdown
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::docs_development_cache_CODEX_REVIEW_REQUEST_2025-10-10_md
+    repo: sqry
+    path: docs/development/cache/CODEX_REVIEW_REQUEST_2025-10-10.md
+    primary_language: markdown
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::docs_development_cache_CODEX_REVIEW_RESPONSE_2025-10-10_md
+    repo: sqry
+    path: docs/development/cache/CODEX_REVIEW_RESPONSE_2025-10-10.md
+    primary_language: markdown
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::docs_development_cache_CODEX_REVIEW_RESPONSE_FROM_CLAUDE_md
+    repo: sqry
+    path: docs/development/cache/CODEX_REVIEW_RESPONSE_FROM_CLAUDE.md
+    primary_language: markdown
+    embedded_languages:
+      - bash
+      - rust
+    notes: null
+
+  - id: sqry::docs_development_cache_CODEX_REVIEW_STATUS_2025-10-10_md
+    repo: sqry
+    path: docs/development/cache/CODEX_REVIEW_STATUS_2025-10-10.md
+    primary_language: markdown
+    embedded_languages:
+      - rust
+    notes: null
+
+  - id: sqry::docs_development_cache_CODEX_REVIEW_SUMMARY_2025-10-10_md
+    repo: sqry
+    path: docs/development/cache/CODEX_REVIEW_SUMMARY_2025-10-10.md
+    primary_language: markdown
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::docs_development_cache_CODE_DOCUMENTATION_REVIEW_2025-10-11_md
+    repo: sqry
+    path: docs/development/cache/CODE_DOCUMENTATION_REVIEW_2025-10-11.md
+    primary_language: markdown
+    embedded_languages:
+      - rust
+    notes: null
+
+  - id: sqry::docs_development_cache_CRITICAL_FIXES_COMPLETE_md
+    repo: sqry
+    path: docs/development/cache/CRITICAL_FIXES_COMPLETE.md
+    primary_language: markdown
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::docs_development_cache_DOCUMENTATION_FIXES_2025-10-11_md
+    repo: sqry
+    path: docs/development/cache/DOCUMENTATION_FIXES_2025-10-11.md
+    primary_language: markdown
+    embedded_languages:
+      - rust
+    notes: null
+
+  - id: sqry::docs_development_cache_EXTERNAL_REVIEW_RESPONSE_md
+    repo: sqry
+    path: docs/development/cache/EXTERNAL_REVIEW_RESPONSE.md
+    primary_language: markdown
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::docs_development_cache_MEDIUM_PRIORITY_FIXES_2025-10-10_md
+    repo: sqry
+    path: docs/development/cache/MEDIUM_PRIORITY_FIXES_2025-10-10.md
+    primary_language: markdown
+    embedded_languages:
+      - rust
+    notes: null
+
+  - id: sqry::docs_development_cache_MULTIPROCESS_TEST_REMEDIATION_2025-10-11_md
+    repo: sqry
+    path: docs/development/cache/MULTIPROCESS_TEST_REMEDIATION_2025-10-11.md
+    primary_language: markdown
+    embedded_languages:
+      - bash
+      - rust
+    notes: null
+
+  - id: sqry::docs_development_cache_MULTIPROCESS_TEST_REVIEW_2025-10-11_md
+    repo: sqry
+    path: docs/development/cache/MULTIPROCESS_TEST_REVIEW_2025-10-11.md
+    primary_language: markdown
+    embedded_languages:
+      - rust
+    notes: null
+
+  - id: sqry::docs_development_cache_PHASE_1_COMPLETE_md
+    repo: sqry
+    path: docs/development/cache/PHASE_1_COMPLETE.md
+    primary_language: markdown
+    embedded_languages:
+      - rust
+    notes: null
+
+  - id: sqry::docs_development_cache_PHASE_2_COMPLETE_md
+    repo: sqry
+    path: docs/development/cache/PHASE_2_COMPLETE.md
+    primary_language: markdown
+    embedded_languages:
+      - bash
+      - rust
+    notes: null
+
+  - id: sqry::docs_development_cache_REVIEW_REQUEST_PHASE_2_md
+    repo: sqry
+    path: docs/development/cache/REVIEW_REQUEST_PHASE_2.md
+    primary_language: markdown
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::docs_development_cache_SESSION_2_SUMMARY_2025-10-10_md
+    repo: sqry
+    path: docs/development/cache/SESSION_2_SUMMARY_2025-10-10.md
+    primary_language: markdown
+    embedded_languages:
+      - rust
+    notes: null
+
+  - id: sqry::docs_development_cache_SESSION_SUMMARY_2025-01-11_md
+    repo: sqry
+    path: docs/development/cache/SESSION_SUMMARY_2025-01-11.md
+    primary_language: markdown
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::docs_development_cache_SESSION_SUMMARY_2025-10-10_md
+    repo: sqry
+    path: docs/development/cache/SESSION_SUMMARY_2025-10-10.md
+    primary_language: markdown
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::docs_development_cache_TASK_1_1_IMPLEMENTATION_PLAN_md
+    repo: sqry
+    path: docs/development/cache/TASK_1.1_IMPLEMENTATION_PLAN.md
+    primary_language: markdown
+    embedded_languages:
+      - rust
+    notes: null
+
+  - id: sqry::docs_development_cache_TASK_1_1_PROGRESS_2025-10-10_md
+    repo: sqry
+    path: docs/development/cache/TASK_1.1_PROGRESS_2025-10-10.md
+    primary_language: markdown
+    embedded_languages:
+      - rust
+    notes: null
+
+  - id: sqry::docs_development_cache_VERBOSE_LOGGING_FIXES_2025-10-11_md
+    repo: sqry
+    path: docs/development/cache/VERBOSE_LOGGING_FIXES_2025-10-11.md
+    primary_language: markdown
+    embedded_languages:
+      - rust
+    notes: null
+
+  - id: sqry::docs_development_cache_VERBOSE_LOGGING_REVIEW_2025-10-11_md
+    repo: sqry
+    path: docs/development/cache/VERBOSE_LOGGING_REVIEW_2025-10-11.md
+    primary_language: markdown
+    embedded_languages:
+      - rust
+    notes: null
+
+  - id: sqry::docs_development_cli-integration_00_PLANNING_COMPLETE_md
+    repo: sqry
+    path: docs/development/cli-integration/00_PLANNING_COMPLETE.md
+    primary_language: markdown
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::docs_development_cli-integration_01_SPEC_md
+    repo: sqry
+    path: docs/development/cli-integration/01_SPEC.md
+    primary_language: markdown
+    embedded_languages:
+      - bash
+    notes: null
+
+  - id: sqry::docs_development_cli-integration_02_DESIGN_md
+    repo: sqry
+    path: docs/development/cli-integration/02_DESIGN.md
+    primary_language: markdown
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::docs_development_cli-integration_02_DESIGN_ADDENDUM_md
+    repo: sqry
+    path: docs/development/cli-integration/02_DESIGN_ADDENDUM.md
+    primary_language: markdown
+    embedded_languages:
+      - rust
+    notes: null
+
+  - id: sqry::docs_development_cli-integration_03_IMPLEMENTATION_PLAN_md
+    repo: sqry
+    path: docs/development/cli-integration/03_IMPLEMENTATION_PLAN.md
+    primary_language: markdown
+    embedded_languages:
+      - rust
+    notes: null
+
+  - id: sqry::docs_development_cli-integration_CODEX_DESIGN_REVIEW_md
+    repo: sqry
+    path: docs/development/cli-integration/CODEX_DESIGN_REVIEW.md
+    primary_language: markdown
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::docs_development_cli-integration_CODEX_FINAL_REVIEW_md
+    repo: sqry
+    path: docs/development/cli-integration/CODEX_FINAL_REVIEW.md
+    primary_language: markdown
+    embedded_languages:
+      - rust
+    notes: null
+
+  - id: sqry::docs_development_cli-integration_CODEX_FINAL_REVIEW_V2_md
+    repo: sqry
+    path: docs/development/cli-integration/CODEX_FINAL_REVIEW_V2.md
+    primary_language: markdown
+    embedded_languages:
+      - rust
+    notes: null
+
+  - id: sqry::docs_development_cli-integration_CODEX_IMPLEMENTATION_REVIEW_md
+    repo: sqry
+    path: docs/development/cli-integration/CODEX_IMPLEMENTATION_REVIEW.md
+    primary_language: markdown
+    embedded_languages:
+      - rust
+    notes: null
+
+  - id: sqry::docs_development_cli-integration_CODEX_SPEC_REVIEW_md
+    repo: sqry
+    path: docs/development/cli-integration/CODEX_SPEC_REVIEW.md
+    primary_language: markdown
+    embedded_languages:
+      - bash
+    notes: null
+
+  - id: sqry::docs_development_cli-integration_IMPLEMENTATION_COMPLETE_md
+    repo: sqry
+    path: docs/development/cli-integration/IMPLEMENTATION_COMPLETE.md
+    primary_language: markdown
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::docs_development_cli-integration_IMPLEMENTATION_PROGRESS_md
+    repo: sqry
+    path: docs/development/cli-integration/IMPLEMENTATION_PROGRESS.md
+    primary_language: markdown
+    embedded_languages:
+      - rust
+    notes: null
+
+  - id: sqry::docs_development_cli-integration_ITERATION_1_COMPLETE_md
+    repo: sqry
+    path: docs/development/cli-integration/ITERATION_1_COMPLETE.md
+    primary_language: markdown
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::docs_development_cli-integration_MUST_FIX_IMPLEMENTATION_md
+    repo: sqry
+    path: docs/development/cli-integration/MUST_FIX_IMPLEMENTATION.md
+    primary_language: markdown
+    embedded_languages:
+      - rust
+    notes: null
+
+  - id: sqry::docs_development_cli-integration_RELEASE_v0_9_0_md
+    repo: sqry
+    path: docs/development/cli-integration/RELEASE_v0.9.0.md
+    primary_language: markdown
+    embedded_languages:
+      - bash
+      - rust
+    notes: null
+
+  - id: sqry::docs_development_fuzzy-jaccard_01_SPEC_md
+    repo: sqry
+    path: docs/development/ARCHIVE/fuzzy-jaccard/01_SPEC.md
+    primary_language: markdown
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::docs_development_fuzzy-jaccard_02_DESIGN_md
+    repo: sqry
+    path: docs/development/ARCHIVE/fuzzy-jaccard/02_DESIGN.md
+    primary_language: markdown
+    embedded_languages:
+      - rust
+    notes: null
+
+  - id: sqry::docs_development_fuzzy-jaccard_03_IMPLEMENTATION_PLAN_md
+    repo: sqry
+    path: docs/development/ARCHIVE/fuzzy-jaccard/03_IMPLEMENTATION_PLAN.md
+    primary_language: markdown
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::docs_development_fuzzy-jaccard_04_PROGRESS_md
+    repo: sqry
+    path: docs/development/ARCHIVE/fuzzy-jaccard/04_PROGRESS.md
+    primary_language: markdown
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::docs_development_intelligent-code-detection_06_TEST_EXECUTION_md
+    repo: sqry
+    path: docs/development/intelligent-code-detection/06_TEST_EXECUTION.md
+    primary_language: markdown
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::docs_development_plugin-system_BACKLOG_md
+    repo: sqry
+    path: docs/development/plugin-system/BACKLOG.md
+    primary_language: markdown
+    embedded_languages:
+      - rust
+    notes: null
+
+  - id: sqry::docs_development_plugin-system_CODEX_PLANNING_REVIEW_md
+    repo: sqry
+    path: docs/development/plugin-system/CODEX_PLANNING_REVIEW.md
+    primary_language: markdown
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::docs_development_plugin-system_CODEX_REVIEW_REQUEST_md
+    repo: sqry
+    path: docs/development/plugin-system/CODEX_REVIEW_REQUEST.md
+    primary_language: markdown
+    embedded_languages:
+      - rust
+    notes: null
+
+  - id: sqry::docs_development_plugin-system_DESIGN_md
+    repo: sqry
+    path: docs/development/plugin-system/DESIGN.md
+    primary_language: markdown
+    embedded_languages:
+      - rust
+    notes: null
+
+  - id: sqry::docs_development_plugin-system_PHASE2_COMPLETE_md
+    repo: sqry
+    path: docs/development/plugin-system/PHASE2_COMPLETE.md
+    primary_language: markdown
+    embedded_languages:
+      - rust
+    notes: null
+
+  - id: sqry::docs_development_plugin-system_PHASE3_COMPLETE_md
+    repo: sqry
+    path: docs/development/plugin-system/PHASE3_COMPLETE.md
+    primary_language: markdown
+    embedded_languages:
+      - rust
+    notes: null
+
+  - id: sqry::docs_development_plugin-system_PLUGIN_DEVELOPMENT_GUIDE_md
+    repo: sqry
+    path: docs/development/plugin-system/PLUGIN_DEVELOPMENT_GUIDE.md
+    primary_language: markdown
+    embedded_languages:
+      - bash
+      - rust
+    notes: null
+
+  - id: sqry::docs_development_plugin-system_TASK7_CODEX_REVIEW_md
+    repo: sqry
+    path: docs/development/plugin-system/TASK7_CODEX_REVIEW.md
+    primary_language: markdown
+    embedded_languages:
+      - rust
+    notes: null
+
+  - id: sqry::docs_development_plugin-system_TASK7_FINAL_SUMMARY_md
+    repo: sqry
+    path: docs/development/plugin-system/TASK7_FINAL_SUMMARY.md
+    primary_language: markdown
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::docs_development_plugin-system_TASK7_IMPLEMENTATION_REVIEW_md
+    repo: sqry
+    path: docs/development/plugin-system/TASK7_IMPLEMENTATION_REVIEW.md
+    primary_language: markdown
+    embedded_languages:
+      - rust
+    notes: null
+
+  - id: sqry::docs_development_plugin-system_TASK7_IMPLEMENTATION_SUMMARY_md
+    repo: sqry
+    path: docs/development/plugin-system/TASK7_IMPLEMENTATION_SUMMARY.md
+    primary_language: markdown
+    embedded_languages:
+      - rust
+    notes: null
+
+  - id: sqry::docs_development_search-engine_01_SPEC_md
+    repo: sqry
+    path: docs/development/search-engine/01_SPEC.md
+    primary_language: markdown
+    embedded_languages:
+      - rust
+    notes: null
+
+  - id: sqry::docs_development_search-engine_02_DESIGN_md
+    repo: sqry
+    path: docs/development/search-engine/02_DESIGN.md
+    primary_language: markdown
+    embedded_languages:
+      - rust
+    notes: null
+
+  - id: sqry::docs_development_search-engine_05_TEST_PLAN_md
+    repo: sqry
+    path: docs/development/search-engine/05_TEST_PLAN.md
+    primary_language: markdown
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::docs_development_search-engine_06_TEST_EXECUTION_md
+    repo: sqry
+    path: docs/development/search-engine/06_TEST_EXECUTION.md
+    primary_language: markdown
+    embedded_languages:
+      - bash
+    notes: null
+
+  - id: sqry::docs_development_search-engine_CODEX_REVIEW_md
+    repo: sqry
+    path: docs/development/search-engine/CODEX_REVIEW.md
+    primary_language: markdown
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::docs_development_search-engine_PORT_PLAN_md
+    repo: sqry
+    path: docs/development/search-engine/PORT_PLAN.md
+    primary_language: markdown
+    embedded_languages:
+      - bash
+    notes: null
+
+  - id: sqry::docs_development_servicenow-xanadu_COMPLETION_REPORT_md
+    repo: sqry
+    path: docs/development/servicenow-xanadu/COMPLETION_REPORT.md
+    primary_language: markdown
+    embedded_languages:
+      - bash
+    notes: null
+
+  - id: sqry::docs_development_test-harness-logging_01_SPEC_md
+    repo: sqry
+    path: docs/development/test-harness-logging/01_SPEC.md
+    primary_language: markdown
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::docs_development_test-harness-logging_02_DESIGN_md
+    repo: sqry
+    path: docs/development/test-harness-logging/02_DESIGN.md
+    primary_language: markdown
+    embedded_languages:
+      - rust
+    notes: null
+
+  - id: sqry::docs_development_test-harness-logging_03_IMPLEMENTATION_PLAN_md
+    repo: sqry
+    path: docs/development/test-harness-logging/03_IMPLEMENTATION_PLAN.md
+    primary_language: markdown
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::docs_development_test-harness-logging_04_PROGRESS_md
+    repo: sqry
+    path: docs/development/test-harness-logging/04_PROGRESS.md
+    primary_language: markdown
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::docs_development_test-harness-logging_05_TEST_PLAN_md
+    repo: sqry
+    path: docs/development/test-harness-logging/05_TEST_PLAN.md
+    primary_language: markdown
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::docs_development_test-harness-logging_06_TEST_EXECUTION_md
+    repo: sqry
+    path: docs/development/test-harness-logging/06_TEST_EXECUTION.md
+    primary_language: markdown
+    embedded_languages:
+      - bash
+    notes: null
+
+  - id: sqry::docs_development_test-harness-logging_ADOPTION_COMPLETE_REPORT_md
+    repo: sqry
+    path: docs/development/test-harness-logging/ADOPTION_COMPLETE_REPORT.md
+    primary_language: markdown
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::docs_development_test-harness-logging_ADOPTION_SPRINT_1_SUMMARY_md
+    repo: sqry
+    path: docs/development/test-harness-logging/ADOPTION_SPRINT_1_SUMMARY.md
+    primary_language: markdown
+    embedded_languages:
+      - bash
+      - rust
+    notes: null
+
+  - id: sqry::docs_development_test-harness-logging_CRITICAL_ISSUES_ACTION_PLAN_md
+    repo: sqry
+    path: docs/development/test-harness-logging/CRITICAL_ISSUES_ACTION_PLAN.md
+    primary_language: markdown
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::docs_development_test-harness-logging_FIXES_APPLIED_md
+    repo: sqry
+    path: docs/development/test-harness-logging/FIXES_APPLIED.md
+    primary_language: markdown
+    embedded_languages:
+      - rust
+    notes: null
+
+  - id: sqry::docs_development_test-harness-logging_IMPLEMENTATION_COMPLETE_md
+    repo: sqry
+    path: docs/development/test-harness-logging/IMPLEMENTATION_COMPLETE.md
+    primary_language: markdown
+    embedded_languages:
+      - bash
+    notes: null
+
+  - id: sqry::docs_development_test-harness-logging_README_md
+    repo: sqry
+    path: docs/development/test-harness-logging/README.md
+    primary_language: markdown
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::docs_development_test-harness-logging_REVIEW_AND_ENHANCEMENTS_md
+    repo: sqry
+    path: docs/development/test-harness-logging/REVIEW_AND_ENHANCEMENTS.md
+    primary_language: markdown
+    embedded_languages:
+      - bash
+    notes: null
+
+  - id: sqry::docs_development_test-harness-logging_REVIEW_SUMMARY_md
+    repo: sqry
+    path: docs/development/test-harness-logging/REVIEW_SUMMARY.md
+    primary_language: markdown
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::docs_development_test-harness-logging_SPRINT_2_COMPLETION_REPORT_md
+    repo: sqry
+    path: docs/development/test-harness-logging/SPRINT_2_COMPLETION_REPORT.md
+    primary_language: markdown
+    embedded_languages:
+      - rust
+    notes: null
+
+  - id: sqry::docs_development_test-harness-logging_USAGE_DEMONSTRATION_md
+    repo: sqry
+    path: docs/development/test-harness-logging/USAGE_DEMONSTRATION.md
+    primary_language: markdown
+    embedded_languages:
+      - bash
+    notes: null
+
+  - id: sqry::docs_development_test-harness-logging_VERBOSITY_AUDIT_REPORT_md
+    repo: sqry
+    path: docs/development/test-harness-logging/VERBOSITY_AUDIT_REPORT.md
+    primary_language: markdown
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::docs_development_test-harness-logging_baseline_measurements_md
+    repo: sqry
+    path: docs/development/test-harness-logging/baseline_measurements.md
+    primary_language: markdown
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::docs_development_test-harness-logging_performance_validation_md
+    repo: sqry
+    path: docs/development/test-harness-logging/performance_validation.md
+    primary_language: markdown
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::performance_test_results_PERFORMANCE_REPORT_md
+    repo: sqry
+    path: performance_test_results/PERFORMANCE_REPORT.md
+    primary_language: markdown
+    embedded_languages:
+      - bash
+    notes: null
+
+  - id: sqry::performance_test_results_SPRINT2_PERFORMANCE_REPORT_md
+    repo: sqry
+    path: performance_test_results/SPRINT2_PERFORMANCE_REPORT.md
+    primary_language: markdown
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::scripts_add_verbosity_to_tests_sh
+    repo: sqry
+    path: scripts/add_verbosity_to_tests.sh
+    primary_language: shell
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::scripts_build_detection_corpus_py
+    repo: sqry
+    path: scripts/build_detection_corpus.py
+    primary_language: python
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::scripts_cache_benchmark_sh
+    repo: sqry
+    path: scripts/cache_benchmark.sh
+    primary_language: shell
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::scripts_create_corpus_fixtures_py
+    repo: sqry
+    path: scripts/create_corpus_fixtures.py
+    primary_language: python
+    embedded_languages:
+      - sql
+    notes: null
+
+  - id: sqry::scripts_demo_verbose_logging_sh
+    repo: sqry
+    path: scripts/demo_verbose_logging.sh
+    primary_language: shell
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::scripts_generate_benchmark_fixture_sh
+    repo: sqry
+    path: scripts/generate_benchmark_fixture.sh
+    primary_language: shell
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::scripts_generate_detection_corpus_py
+    repo: sqry
+    path: scripts/generate_detection_corpus.py
+    primary_language: python
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::scripts_generate_detection_corpus_rs
+    repo: sqry
+    path: scripts/generate_detection_corpus.rs
+    primary_language: rust
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::scripts_recalculate_metrics_sh
+    repo: sqry
+    path: scripts/recalculate_metrics.sh
+    primary_language: shell
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::scripts_run_detection_baseline_sh
+    repo: sqry
+    path: scripts/run_detection_baseline.sh
+    primary_language: shell
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::sqry-lang-c_src_lib_rs
+    repo: sqry
+    path: sqry-lang-c/src/lib.rs
+    primary_language: rust
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::sqry-lang-c_tests_integration_tests_rs
+    repo: sqry
+    path: sqry-lang-c/tests/integration_tests.rs
+    primary_language: rust
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::sqry-lang-csharp_src_lib_rs
+    repo: sqry
+    path: sqry-lang-csharp/src/lib.rs
+    primary_language: rust
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::sqry-lang-csharp_tests_integration_tests_rs
+    repo: sqry
+    path: sqry-lang-csharp/tests/integration_tests.rs
+    primary_language: rust
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::sqry-lang-go_benches_go_relations_bench_rs
+    repo: sqry
+    path: sqry-lang-go/benches/go_relations_bench.rs
+    primary_language: rust
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::sqry-lang-go_src_lib_rs
+    repo: sqry
+    path: sqry-lang-go/src/lib.rs
+    primary_language: rust
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::sqry-lang-go_src_relations_calls_rs
+    repo: sqry
+    path: sqry-lang-go/src/relations/calls.rs
+    primary_language: rust
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::sqry-lang-go_src_relations_exports_rs
+    repo: sqry
+    path: sqry-lang-go/src/relations/exports.rs
+    primary_language: rust
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::sqry-lang-go_src_relations_imports_rs
+    repo: sqry
+    path: sqry-lang-go/src/relations/imports.rs
+    primary_language: rust
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::sqry-lang-go_src_relations_mod_rs
+    repo: sqry
+    path: sqry-lang-go/src/relations/mod.rs
+    primary_language: rust
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::sqry-lang-go_src_relations_types_rs
+    repo: sqry
+    path: sqry-lang-go/src/relations/types.rs
+    primary_language: rust
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::sqry-lang-go_tests_fixtures_go_relations_comprehensive_go
+    repo: sqry
+    path: sqry-lang-go/tests/fixtures/go_relations_comprehensive.go
+    primary_language: go
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::sqry-lang-go_tests_fixtures_large_file_go
+    repo: sqry
+    path: sqry-lang-go/tests/fixtures/large_file.go
+    primary_language: go
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::sqry-lang-go_tests_integration_go_relations_rs
+    repo: sqry
+    path: sqry-lang-go/tests/integration_go_relations.rs
+    primary_language: rust
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::sqry-lang-java_src_lib_rs
+    repo: sqry
+    path: sqry-lang-java/src/lib.rs
+    primary_language: rust
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::sqry-lang-java_tests_integration_tests_rs
+    repo: sqry
+    path: sqry-lang-java/tests/integration_tests.rs
+    primary_language: rust
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::sqry-lang-javascript_src_lib_rs
+    repo: sqry
+    path: sqry-lang-javascript/src/lib.rs
+    primary_language: rust
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::sqry-lang-javascript_src_relations_calls_rs
+    repo: sqry
+    path: sqry-lang-javascript/src/relations/calls.rs
+    primary_language: rust
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::sqry-lang-javascript_src_relations_exports_rs
+    repo: sqry
+    path: sqry-lang-javascript/src/relations/exports.rs
+    primary_language: rust
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::sqry-lang-javascript_src_relations_imports_rs
+    repo: sqry
+    path: sqry-lang-javascript/src/relations/imports.rs
+    primary_language: rust
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::sqry-lang-javascript_src_relations_mod_rs
+    repo: sqry
+    path: sqry-lang-javascript/src/relations/mod.rs
+    primary_language: rust
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::sqry-lang-javascript_src_relations_types_rs
+    repo: sqry
+    path: sqry-lang-javascript/src/relations/types.rs
+    primary_language: rust
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::sqry-lang-javascript_tests_integration_critical_fixes_rs
+    repo: sqry
+    path: sqry-lang-javascript/tests/integration_critical_fixes.rs
+    primary_language: rust
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::sqry-lang-javascript_tests_integration_js_patch_rs
+    repo: sqry
+    path: sqry-lang-javascript/tests/integration_js_patch.rs
+    primary_language: rust
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::sqry-lang-kotlin_src_lib_rs
+    repo: sqry
+    path: sqry-lang-kotlin/src/lib.rs
+    primary_language: rust
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::sqry-lang-php_src_lib_rs
+    repo: sqry
+    path: sqry-lang-php/src/lib.rs
+    primary_language: rust
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::sqry-lang-php_tests_integration_tests_rs
+    repo: sqry
+    path: sqry-lang-php/tests/integration_tests.rs
+    primary_language: rust
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::sqry-lang-puppet_src_lib_rs
+    repo: sqry
+    path: sqry-lang-puppet/src/lib.rs
+    primary_language: rust
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::sqry-lang-puppet_tests_inspect_grammar_rs
+    repo: sqry
+    path: sqry-lang-puppet/tests/inspect_grammar.rs
+    primary_language: rust
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::sqry-lang-puppet_tests_integration_puppet_rs
+    repo: sqry
+    path: sqry-lang-puppet/tests/integration_puppet.rs
+    primary_language: rust
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::sqry-lang-python_src_lib_rs
+    repo: sqry
+    path: sqry-lang-python/src/lib.rs
+    primary_language: rust
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::sqry-lang-python_src_relations_calls_rs
+    repo: sqry
+    path: sqry-lang-python/src/relations/calls.rs
+    primary_language: rust
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::sqry-lang-python_src_relations_exports_rs
+    repo: sqry
+    path: sqry-lang-python/src/relations/exports.rs
+    primary_language: rust
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::sqry-lang-python_src_relations_imports_rs
+    repo: sqry
+    path: sqry-lang-python/src/relations/imports.rs
+    primary_language: rust
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::sqry-lang-python_src_relations_mod_rs
+    repo: sqry
+    path: sqry-lang-python/src/relations/mod.rs
+    primary_language: rust
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::sqry-lang-python_src_relations_types_rs
+    repo: sqry
+    path: sqry-lang-python/src/relations/types.rs
+    primary_language: rust
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::sqry-lang-swift_src_lib_rs
+    repo: sqry
+    path: sqry-lang-swift/src/lib.rs
+    primary_language: rust
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::sqry-lang-typescript_src_lib_rs
+    repo: sqry
+    path: sqry-lang-typescript/src/lib.rs
+    primary_language: rust
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::sqry-lang-typescript_src_relations_calls_rs
+    repo: sqry
+    path: sqry-lang-typescript/src/relations/calls.rs
+    primary_language: rust
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::sqry-lang-typescript_src_relations_exports_rs
+    repo: sqry
+    path: sqry-lang-typescript/src/relations/exports.rs
+    primary_language: rust
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::sqry-lang-typescript_src_relations_imports_rs
+    repo: sqry
+    path: sqry-lang-typescript/src/relations/imports.rs
+    primary_language: rust
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::sqry-lang-typescript_src_relations_mod_rs
+    repo: sqry
+    path: sqry-lang-typescript/src/relations/mod.rs
+    primary_language: rust
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::sqry-lang-typescript_src_relations_types_rs
+    repo: sqry
+    path: sqry-lang-typescript/src/relations/types.rs
+    primary_language: rust
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::sqry-lang-typescript_tests_fixtures_ts_relations_comprehensive_ts
+    repo: sqry
+    path: sqry-lang-typescript/tests/fixtures/ts_relations_comprehensive.ts
+    primary_language: typescript
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::sqry-lang-typescript_tests_integration_ts_critical_fixes_rs
+    repo: sqry
+    path: sqry-lang-typescript/tests/integration_ts_critical_fixes.rs
+    primary_language: rust
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::sqry-lang-typescript_tests_integration_ts_patch_rs
+    repo: sqry
+    path: sqry-lang-typescript/tests/integration_ts_patch.rs
+    primary_language: rust
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::sqry-lang-typescript_tests_integration_ts_relations_rs
+    repo: sqry
+    path: sqry-lang-typescript/tests/integration_ts_relations.rs
+    primary_language: rust
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::sqry-mcp_CLAUDE_CODE_INTEGRATION_md
+    repo: sqry
+    path: sqry-mcp/CLAUDE_CODE_INTEGRATION.md
+    primary_language: markdown
+    embedded_languages:
+      - bash
+    notes: null
+
+  - id: sqry::sqry-mcp_INTEGRATION_COMPLETE_md
+    repo: sqry
+    path: sqry-mcp/INTEGRATION_COMPLETE.md
+    primary_language: markdown
+    embedded_languages:
+      - bash
+    notes: null
+
+  - id: sqry::sqry-mcp_README_md
+    repo: sqry
+    path: sqry-mcp/README.md
+    primary_language: markdown
+    embedded_languages:
+      - bash
+    notes: null
+
+  - id: sqry::sqry-mcp_TEST_RESULTS_md
+    repo: sqry
+    path: sqry-mcp/TEST_RESULTS.md
+    primary_language: markdown
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::sqry-mcp_quick_query_sh
+    repo: sqry
+    path: sqry-mcp/quick_query.sh
+    primary_language: shell
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::sqry-mcp_sqry-mcp-server_sh
+    repo: sqry
+    path: sqry-mcp/sqry-mcp-server.sh
+    primary_language: shell
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::sqry-mcp_src_execution_rs
+    repo: sqry
+    path: sqry-mcp/src/execution.rs
+    primary_language: rust
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::sqry-mcp_src_handlers_rs
+    repo: sqry
+    path: sqry-mcp/src/handlers.rs
+    primary_language: rust
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::sqry-mcp_src_main_rs
+    repo: sqry
+    path: sqry-mcp/src/main.rs
+    primary_language: rust
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::sqry-mcp_src_protocol_rs
+    repo: sqry
+    path: sqry-mcp/src/protocol.rs
+    primary_language: rust
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::sqry-mcp_src_tools_mod_rs
+    repo: sqry
+    path: sqry-mcp/src/tools/mod.rs
+    primary_language: rust
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::sqry-mcp_src_tools_schemas_rs
+    repo: sqry
+    path: sqry-mcp/src/tools/schemas.rs
+    primary_language: rust
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::sqry-mcp_src_tools_validation_rs
+    repo: sqry
+    path: sqry-mcp/src/tools/validation.rs
+    primary_language: rust
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::sqry-mcp_test_mcp_server_sh
+    repo: sqry
+    path: sqry-mcp/test_mcp_server.sh
+    primary_language: shell
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::sqry-mcp_tests_common_mod_rs
+    repo: sqry
+    path: sqry-mcp/tests/common/mod.rs
+    primary_language: rust
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::sqry-mcp_tests_protocol_tests_rs
+    repo: sqry
+    path: sqry-mcp/tests/protocol_tests.rs
+    primary_language: rust
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::sqry-mcp_tests_security_tests_rs
+    repo: sqry
+    path: sqry-mcp/tests/security_tests.rs
+    primary_language: rust
+    embedded_languages: []
+    notes: null
+
+  - id: sqry::sqry-mcp_tests_tool_tests_rs
+    repo: sqry
+    path: sqry-mcp/tests/tool_tests.rs
+    primary_language: rust
+    embedded_languages: []
+    notes: null

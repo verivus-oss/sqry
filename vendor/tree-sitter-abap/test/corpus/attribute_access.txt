@@ -1,0 +1,14 @@
+==================
+static attribute access
+==================
+
+x = cl_a=>b.
+
+---
+
+(program
+  (assignment
+    (name)
+    (attribute_access_static
+      class: (name)
+      attribute: (name))))

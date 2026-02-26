@@ -1,0 +1,338 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: 'Platform to test'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - Ubuntu
+          - macOS-14
+          - Windows
+
+permissions:
+  contents: read
+
+env:
+  RUST_BACKTRACE: 1
+  CARGO_TERM_COLOR: always
+  CARGO_NET_GIT_FETCH_WITH_CLI: true
+
+jobs:
+  # Dynamic matrix: filters platforms for workflow_dispatch, runs all for push/PR.
+  # Job-level `if` cannot reference matrix.* (causes "workflow file issue"),
+  # so we compute the matrix JSON in a setup job instead.
+  setup:
+    name: Setup Matrix
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - id: set-matrix
+        run: |
+          if [[ "${{ github.event_name }}" != "workflow_dispatch" || "${{ inputs.platform }}" == "all" ]]; then
+            echo 'matrix={"include":[{"platform":"Ubuntu","runner":"ubuntu-latest","rustflags":"-Dwarnings -C debuginfo=line-tables-only"},{"platform":"macOS-14","runner":"macos-14","rustflags":"-Dwarnings -C debuginfo=line-tables-only"},{"platform":"Windows","runner":"windows-latest","rustflags":"-Dwarnings -C debuginfo=line-tables-only -C target-feature=+crt-static"}]}' >> "$GITHUB_OUTPUT"
+          elif [[ "${{ inputs.platform }}" == "Ubuntu" ]]; then
+            echo 'matrix={"include":[{"platform":"Ubuntu","runner":"ubuntu-latest","rustflags":"-Dwarnings -C debuginfo=line-tables-only"}]}' >> "$GITHUB_OUTPUT"
+          elif [[ "${{ inputs.platform }}" == "macOS-14" ]]; then
+            echo 'matrix={"include":[{"platform":"macOS-14","runner":"macos-14","rustflags":"-Dwarnings -C debuginfo=line-tables-only"}]}' >> "$GITHUB_OUTPUT"
+          elif [[ "${{ inputs.platform }}" == "Windows" ]]; then
+            echo 'matrix={"include":[{"platform":"Windows","runner":"windows-latest","rustflags":"-Dwarnings -C debuginfo=line-tables-only -C target-feature=+crt-static"}]}' >> "$GITHUB_OUTPUT"
+          fi
+
+  test:
+    name: Test (${{ matrix.platform }})
+    needs: setup
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.setup.outputs.matrix) }}
+    env:
+      # P2-3 Phase 3 Step 3: Zero-warnings gate enabled for all platforms
+      # Line-tables-only debug info saves ~40% disk vs full debuginfo (prevents "No space left on device")
+      RUSTFLAGS: ${{ matrix.rustflags }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure git credentials
+        run: git config --global url."https://x-access-token:${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}@github.com/".insteadOf "https://github.com/"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.90"
+
+      - name: Clean runner disk (Ubuntu)
+        if: matrix.platform == 'Ubuntu'
+        run: |
+          echo "## Disk Usage Before Cleanup" >> $GITHUB_STEP_SUMMARY
+          df -h >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Cleanup paths with safety checks (CI_FAILURE_REMEDIATION_PLAN.md Section 3 M-2)
+          cleanup_paths=(
+            "/usr/share/dotnet"
+            "/usr/local/lib/android"
+            "/opt/ghc"
+            "/opt/hostedtoolcache/CodeQL"
+            "/usr/share/swift"
+            "/usr/local/share/powershell"
+            "/usr/local/share/chromium"
+          )
+
+          for path in "${cleanup_paths[@]}"; do
+            if [ -d "$path" ] && [ "$path" != "/" ]; then
+              size=$(du -sh "$path" 2>/dev/null | cut -f1 || echo "unknown")
+              echo "Removing $path (size: $size)"
+              sudo rm -rf "$path" || echo "Failed to remove $path (non-fatal)"
+            fi
+          done
+
+          # Remove docker images to reclaim ~4GB
+          docker image prune -af 2>/dev/null || true
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## Disk Usage After Cleanup" >> $GITHUB_STEP_SUMMARY
+          df -h >> $GITHUB_STEP_SUMMARY
+
+          # Alert if free space is critically low
+          free_space=$(df -BG / | awk 'NR==2 {print $4}' | sed 's/G//')
+          if [ "$free_space" -lt 6 ]; then
+            echo "WARNING: Free space below 6 GB threshold: ${free_space}GB" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Cache Rust dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: rust-${{ matrix.platform }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            rust-${{ matrix.platform }}-
+
+      - name: Build
+        run: cargo build --all --verbose
+      - name: CLI smoke (sqry --help)
+        # Windows debug builds overflow the default 1MB stack on --help
+        # (deep clap subcommand tree). Skip on Windows; Build step validates.
+        if: matrix.platform != 'Windows'
+        run: cargo run -p sqry-cli --bin sqry -- --help
+      - name: Run tests
+        run: cargo test --all --verbose
+
+      - name: Malformed Input Tests (RR-09 WP-03)
+        shell: bash
+        run: |
+          echo "## Malformed Input Test Results" >> $GITHUB_STEP_SUMMARY
+          echo "Testing all 34 language plugins with malformed inputs..." >> $GITHUB_STEP_SUMMARY
+
+          RESULTS_FILE="${RUNNER_TEMP}/malformed-input-results.txt"
+          cargo test --workspace --test malformed_input 2>&1 | tee "$RESULTS_FILE"
+
+          # Extract statistics (POSIX-compatible grep, no -P flag)
+          TOTAL_PASSED=$(grep -o '[0-9]* passed' "$RESULTS_FILE" | grep -o '[0-9]*' | awk '{sum+=$1} END {print sum+0}')
+          TOTAL_FAILED=$(grep -o '[0-9]* failed' "$RESULTS_FILE" | grep -o '[0-9]*' | awk '{sum+=$1} END {print sum+0}')
+          TOTAL_IGNORED=$(grep -o '[0-9]* ignored' "$RESULTS_FILE" | grep -o '[0-9]*' | awk '{sum+=$1} END {print sum+0}')
+          PLUGIN_COUNT=$(grep -c "test result:" "$RESULTS_FILE" || echo "0")
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Metric | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Plugins Tested | $PLUGIN_COUNT |" >> $GITHUB_STEP_SUMMARY
+          echo "| Tests Passed | $TOTAL_PASSED |" >> $GITHUB_STEP_SUMMARY
+          echo "| Tests Failed | $TOTAL_FAILED |" >> $GITHUB_STEP_SUMMARY
+          echo "| Tests Ignored | $TOTAL_IGNORED (stress tests) |" >> $GITHUB_STEP_SUMMARY
+
+          if [ "${TOTAL_FAILED:-0}" -gt 0 ]; then
+            echo "::error::Malformed input tests failed - FFI safety regression detected"
+            exit 1
+          else
+            echo "All malformed input tests passed - FFI boundary is safe"
+          fi
+
+      # NOTE: Graphsync RKG check removed — graphsync is in workspace.exclude
+      # (serde-saphyr/smallvec conflict with ort) so cargo run -p graphsync
+      # always fails. Re-enable if graphsync is moved back into the workspace.
+
+
+      - name: Cache pruning (Ubuntu)
+        if: matrix.platform == 'Ubuntu'
+        run: |
+          # Free up space after tests (CI_FAILURE_REMEDIATION_PLAN.md Section 3)
+          cargo clean -p sqry-lsp
+          echo "## Post-Test Disk Usage" >> $GITHUB_STEP_SUMMARY
+          df -h >> $GITHUB_STEP_SUMMARY
+
+      - name: Warning count monitoring
+        if: matrix.platform == 'Ubuntu'
+        run: |
+          echo "## Warning Count Monitoring" >> $GITHUB_STEP_SUMMARY
+          WARNING_COUNT=$(cargo build --all 2>&1 | grep -c 'warning:' || echo "0")
+          echo "**Warnings detected**: $WARNING_COUNT" >> $GITHUB_STEP_SUMMARY
+          echo "**Expected**: 0 (enforced via RUSTFLAGS=-Dwarnings)" >> $GITHUB_STEP_SUMMARY
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure git credentials
+        run: git config --global url."https://x-access-token:${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}@github.com/".insteadOf "https://github.com/"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.90"
+          components: clippy
+
+      - name: Cache Rust dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: rust-clippy-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            rust-clippy-
+      - name: Run clippy
+        run: cargo clippy --all -- -D warnings
+
+      - name: Unwrap usage check (advisory)
+        # P2-37: Advisory lint for unwrap/expect - warns but doesn't fail build
+        # See: docs/architecture/ERROR_HANDLING.md for guidelines
+        run: |
+          echo "## Unwrap/Expect Usage Check (P2-37)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Run clippy with unwrap_used and expect_used as warnings
+          # This is advisory-only (won't fail build) to prevent CI friction
+          cargo clippy --all -- -W clippy::unwrap_used -W clippy::expect_used 2>&1 | tee /tmp/unwrap-lint.txt || true
+
+          # Count warnings
+          UNWRAP_WARNINGS=$(grep -c "unwrap_used\|expect_used" /tmp/unwrap-lint.txt || echo "0")
+
+          echo "**Advisory warnings**: $UNWRAP_WARNINGS unwrap/expect usage findings" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "This check is **advisory only** - it warns but does not fail the build." >> $GITHUB_STEP_SUMMARY
+          echo "P2-37 Phase 1 audit validated 21 production unwraps as safe internal invariants." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Before adding new unwrap/expect:**" >> $GITHUB_STEP_SUMMARY
+          echo "- Use \`Result<T>\` with \`.with_context()\` for I/O and user input" >> $GITHUB_STEP_SUMMARY
+          echo "- Document invariants with \`# Panics\` for internal assertions" >> $GITHUB_STEP_SUMMARY
+          echo "- See [ERROR_HANDLING.md](docs/architecture/ERROR_HANDLING.md)" >> $GITHUB_STEP_SUMMARY
+
+  fmt:
+    name: Rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.90"
+          components: rustfmt
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+  docs:
+    name: Documentation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure git credentials
+        run: git config --global url."https://x-access-token:${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}@github.com/".insteadOf "https://github.com/"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.90"
+
+      - name: Cache Rust dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: rust-docs-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            rust-docs-
+      - name: Build documentation
+        run: cargo doc --all --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  fuzzy-jaccard-modes:
+    name: Fuzzy Search - ${{ matrix.mode }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - mode: Jaccard (default)
+            env_var: "1"
+          - mode: Ratio (fallback)
+            env_var: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure git credentials
+        run: git config --global url."https://x-access-token:${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}@github.com/".insteadOf "https://github.com/"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.90"
+      - uses: Swatinem/rust-cache@v2
+      - name: Test fuzzy search with ${{ matrix.mode }}
+        run: cargo test -p sqry-core search::fuzzy::tests
+        env:
+          SQRY_FUZZY_USE_JACCARD: ${{ matrix.env_var }}
+
+  security:
+    name: Security Audit
+    # RKG: implements REQ:SQRY-SECURITY-AUDIT-AUTOMATION
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure git credentials
+        run: git config --global url."https://x-access-token:${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}@github.com/".insteadOf "https://github.com/"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.90"
+
+      - name: Cache Rust dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: rust-security-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            rust-security-
+
+      - name: Install cargo-audit
+        run: cargo install --locked cargo-audit || true
+
+      - name: Install cargo-deny
+        run: cargo install --locked cargo-deny || true
+
+      - name: Run cargo-audit
+        run: cargo audit
+
+      - name: Run cargo-deny
+        run: cargo deny check
+
+      - name: Install cargo-vet
+        run: cargo install --locked cargo-vet || true
+
+      - name: Run cargo-vet (supply-chain audit)
+        run: cargo vet --locked
+

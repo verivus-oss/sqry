@@ -1,0 +1,23 @@
+# Example sqry configuration file
+# Place this file as `.sqry-config.toml` in your project root, home directory, or current directory
+# FR-2025-016 Phase 3.2: Config File Support
+
+# Enable incremental indexing with hash-based change detection
+# When true, only re-indexes files that have changed since last run
+# Default: true
+enable_incremental = true
+
+# Enable index compression using zstd
+# When true, index files are compressed (typically 5-10× smaller)
+# Default: true
+compress = true
+
+# Cache directory for hash index and incremental parsing
+# If not specified, defaults to ".sqry-cache" in the indexed directory
+# Environment variable override: SQRY_CACHE_DIR=/custom/path
+# cache_dir = ".sqry-cache"
+
+# Number of threads for parallel indexing
+# If not specified, automatically detects from CPU count
+# Environment variable override: SQRY_NUM_THREADS=8
+# num_threads = 4

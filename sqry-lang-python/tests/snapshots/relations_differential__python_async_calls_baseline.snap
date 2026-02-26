@@ -1,0 +1,16 @@
+---
+source: sqry-lang-python/tests/relations_differential.rs
+expression: normalized
+---
+[
+    (
+        "process",
+        "fetch_data",
+        2,
+    ),
+    (
+        "process",
+        "transform",
+        3,
+    ),
+]

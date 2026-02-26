@@ -1,0 +1,4 @@
+interface:
+  display_name: "sqry Gemini"
+  short_description: "Gemini workflow guidance for sqry"
+  default_prompt: "Use $sqry-gemini to follow this repository's Gemini workflow, context-file behavior, and MCP setup checks."

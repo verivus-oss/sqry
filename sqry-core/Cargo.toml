@@ -1,0 +1,243 @@
+[package]
+name = "sqry-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Core library for sqry - semantic code search engine"
+
+[features]
+# Enable test support utilities (verbose logging, artifacts, subprocess helpers)
+# Automatically enabled when running tests via dev-dependencies
+test-support = ["dep:env_logger", "dep:assert_cmd"]
+
+# Enable context.rs tests (requires plugin dev-dependencies, causes circular deps)
+# These tests are disabled by default to allow `cargo test -p sqry-core` to work.
+# To run these tests, use workspace-level tests: `cargo test --workspace`
+context-tests = []
+
+# Enable allocation profiling using dhat (opt-in for Step 4 instrumentation)
+dhat-heap = ["dep:dhat"]
+
+# Enable loom for formal concurrency verification (Steps 28-30)
+loom = ["dep:loom"]
+
+# ============================================================================
+# Local Uses and Insights Features
+# ============================================================================
+# Feature hierarchy: uses → insights → troubleshoot
+# The `share` feature is independent (off by default for maximum trust stance)
+
+# Local uses recording - captures behavioral events locally
+uses = []
+
+# Local summaries and insights reports (requires uses)
+insights = ["uses"]
+
+# Support bundle generation for issue reporting (requires insights)
+troubleshoot = ["insights"]
+
+# Shareable file generation (NO network calls - just file generation)
+# NOT in default features for maximum trust stance
+share = []
+
+# Default features enabled during normal builds
+default = ["uses", "insights", "troubleshoot"]
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+miette.workspace = true
+tree-sitter.workspace = true
+regex.workspace = true
+fancy-regex.workspace = true  # For lookaround support (FT-C.1)
+serde.workspace = true
+serde_json.workspace = true
+serde_bytes.workspace = true  # Efficient byte slice serialization (P2-8 warm images)
+postcard.workspace = true
+chrono.workspace = true  # Timestamps for warm image manifests (P2-8)
+hex.workspace = true
+rapidfuzz.workspace = true
+toml.workspace = true
+tracing.workspace = true
+
+grep.workspace = true
+grep-regex.workspace = true
+grep-searcher.workspace = true
+ignore.workspace = true
+globset.workspace = true
+walkdir.workspace = true
+
+lru.workspace = true
+moka = { version = "0.12", features = ["sync"] }
+dashmap.workspace = true
+memmap2.workspace = true
+parking_lot.workspace = true
+rayon.workspace = true
+crossbeam-queue.workspace = true
+crossbeam-channel.workspace = true
+once_cell.workspace = true
+streaming-iterator.workspace = true
+semver.workspace = true
+log.workspace = true
+blake3.workspace = true
+zstd.workspace = true
+cacache.workspace = true
+sha2.workspace = true
+xxhash-rust = { version = "0.8", features = ["xxh64"] }
+notify = { version = "8.2", default-features = false, features = ["macos_fsevent"] }
+similar = "2.6"  # Fast text diffing for content-based incremental indexing
+dhat = { version = "0.3", optional = true }
+loom = { version = "0.7", optional = true }  # Concurrency verification (Steps 28-30)
+hostname = "0.4"  # For lock file hostname field
+uuid = { version = "1.11", features = ["v4"] }  # For unique lock identifiers
+fs2 = "0.4"  # File locking for concurrent stats updates (P2-8)
+tempfile = "3.13"  # Atomic file writes for uses/insights
+dirs = "6.0"  # Home directory detection for uses config
+libc = "0.2"  # For network filesystem detection on Linux
+
+# Tree-sitter language grammars
+tree-sitter-rust.workspace = true
+tree-sitter-javascript.workspace = true
+tree-sitter-typescript.workspace = true
+tree-sitter-python.workspace = true
+tree-sitter-go.workspace = true
+tree-sitter-cpp.workspace = true
+
+# Test support dependencies (available when running tests or with test-support feature)
+env_logger = { workspace = true, optional = true }
+assert_cmd = { version = "2.0", optional = true }
+
+# Windows atomic file operations (MoveFileExW for atomic manifest writes)
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem"] }
+
+# Unix process probing for cache lock detection (macOS/BSD)
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.30", features = ["signal"] }
+
+[dev-dependencies]
+tempfile = "3.13"
+criterion = "0.8"
+filetime = "0.2"
+env_logger.workspace = true
+chrono.workspace = true
+approx = "0.5"
+serial_test = "3.0"
+sqry-test-support = { path = "../sqry-test-support" }
+sqry-core = { path = ".", features = ["test-support"] }
+sqry-lang-rust = { path = "../sqry-lang-rust" }
+sqry-lang-cpp = { path = "../sqry-lang-cpp" }
+sqry-lang-javascript = { path = "../sqry-lang-javascript" }
+sqry-lang-python = { path = "../sqry-lang-python" }
+sqry-lang-typescript = { path = "../sqry-lang-typescript" }
+sqry-lang-go = { path = "../sqry-lang-go" }
+sqry-lang-java = { path = "../sqry-lang-java" }
+sqry-lang-c = { path = "../sqry-lang-c" }
+sqry-lang-dart = { path = "../sqry-lang-dart" }
+sqry-lang-swift = { path = "../sqry-lang-swift" }
+# Tier 2 plugins (for test coverage)
+sqry-lang-kotlin = { path = "../sqry-lang-kotlin" }
+sqry-lang-ruby = { path = "../sqry-lang-ruby" }
+sqry-lang-php = { path = "../sqry-lang-php" }
+sqry-lang-scala = { path = "../sqry-lang-scala" }
+sqry-lang-lua = { path = "../sqry-lang-lua" }
+sqry-lang-r = { path = "../sqry-lang-r" }
+# OOM vulnerability regression test plugins (BUG-2025-001, BUG-2025-002)
+sqry-lang-groovy = { path = "../sqry-lang-groovy" }
+sqry-lang-svelte = { path = "../sqry-lang-svelte" }
+proptest = "1.5"
+httpmock = "0.8"  # Updated to remove async-std (RUSTSEC-2025-0052)
+# Tree-sitter grammars for OOM regression tests (BUG-2025-001, BUG-2025-002)
+tree-sitter-groovy-sqry = { path = "../crates/tree-sitter-groovy-sqry" }
+tree-sitter-svelte-sqry = { path = "../crates/tree-sitter-svelte-sqry" }
+
+[[bench]]
+name = "context_extraction_baseline"
+harness = false
+
+[[bench]]
+name = "fuzzy_jaccard_benchmark"
+harness = false
+
+[[bench]]
+name = "incremental_parsing"
+harness = false
+
+[[bench]]
+name = "realistic_incremental_benchmark"
+harness = false
+
+[[bench]]
+name = "hybrid_search_benchmark"
+harness = false
+
+[[bench]]
+name = "rigorous_ripgrep_comparison"
+harness = false
+
+[[bench]]
+name = "performance_optimizations"
+harness = false
+
+[[bench]]
+name = "query_e2e_profiling"
+harness = false
+
+[[bench]]
+name = "ast_operations"
+harness = false
+
+[[bench]]
+name = "lexer_single_use_baseline"
+harness = false
+
+[[bench]]
+name = "lexer_pooled_reuse"
+harness = false
+
+[[bench]]
+name = "session_performance"
+harness = false
+
+[[bench]]
+name = "cpp_graph_build"
+harness = false
+
+[[bench]]
+name = "javascript_graph_build"
+harness = false
+
+[[bench]]
+name = "python_graph_build"
+harness = false
+
+[[bench]]
+name = "typescript_graph_build"
+harness = false
+
+[[bench]]
+name = "regex_cache_perf"
+harness = false
+
+[[bench]]
+name = "simd_search_benchmark"
+harness = false
+
+[[bench]]
+name = "parallel_query_benchmarks"
+harness = false
+
+[[bench]]
+name = "plugin_loading_benchmark"
+harness = false
+
+[[bench]]
+name = "rr15_query_execution"
+harness = false
+
+[[bench]]
+name = "query_benchmarks"
+harness = false

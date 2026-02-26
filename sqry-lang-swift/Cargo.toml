@@ -1,0 +1,32 @@
+[package]
+name = "sqry-lang-swift"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Swift language plugin for sqry"
+
+[dependencies]
+sqry-core = { path = "../sqry-core" }
+anyhow.workspace = true
+tree-sitter.workspace = true
+tree-sitter-swift.workspace = true
+tree-sitter-c.workspace = true
+streaming-iterator.workspace = true
+dashmap.workspace = true
+once_cell.workspace = true
+
+[dev-dependencies]
+sqry-tree-sitter-fuzz-support = { path = "../sqry-tree-sitter-fuzz-support" }
+log.workspace = true
+env_logger.workspace = true
+sqry-core = { path = "../sqry-core", features = ["test-support"] }
+sqry-test-support = { path = "../sqry-test-support" }
+tempfile = "3.10"
+serial_test = "3.0"
+
+[features]
+default = ["has_relations"]
+has_relations = []

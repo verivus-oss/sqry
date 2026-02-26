@@ -1,0 +1,803 @@
+# =============================================================================
+# DEPRECATED: This workflow is superseded by oss-release.yml
+#
+# oss-release.yml now covers all 3 platforms (Linux x86_64, Windows x86_64,
+# macOS ARM64) × 3 binaries (sqry, sqry-mcp, sqry-lsp) + VSCode extension,
+# with SLSA Level 2 provenance and Cosign keyless signing using the PUBLIC
+# identity (verivusOSS-releases/sqry). That workflow is the canonical public
+# release mechanism for the OSS pipeline.
+#
+# This file builds against the INTERNAL repo (verivus-oss/sqry) and uses
+# the internal signing identity. It is kept for reference and internal audit
+# trail purposes. It MUST NOT be used for new public releases.
+# =============================================================================
+
+name: Sign Release + SLSA Provenance [DEPRECATED]
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'DEPRECATED — use oss-release.yml instead. Dry run only (no upload).'
+        required: false
+        default: 'true'
+
+permissions:
+  id-token: write    # For Sigstore OIDC
+  contents: write    # For release asset upload
+
+jobs:
+  tests:
+    name: Tests (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force
+          df -h
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+
+      - name: Configure git credentials for internal repos
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+        run: |
+          git config --global url."https://x-access-token:${GH_TOKEN}@github.com/".insteadOf "https://github.com/"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.90"
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run workspace tests
+        env:
+          # split-debuginfo=unpacked keeps debug info in separate .dwo files
+          # This reduces linker memory usage by ~87% (debug info is 87% of object file size)
+          # See: https://blog.quarticcat.com/posts/no-more-oom/
+          RUSTFLAGS: "-Csplit-debuginfo=unpacked"
+        # Skip benchmarks (--benches) as they require fixtures not present in CI
+        run: cargo test --workspace --lib --bins --tests
+
+  # Build and sign jobs - one per platform to enable per-platform SLSA provenance
+
+  build-and-sign-linux:
+    name: Build & Sign - Linux x86_64
+    # Tests run in parallel - upload-release gate ensures tests pass before release
+    runs-on: ubuntu-latest
+    outputs:
+      subjects: ${{ steps.hash.outputs.subjects }}
+
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Required for SLSA provenance
+          token: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+
+      - name: Configure git credentials for internal repos
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+        run: |
+          git config --global url."https://x-access-token:${GH_TOKEN}@github.com/".insteadOf "https://github.com/"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.90"
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: x86_64-unknown-linux-gnu
+
+      - name: Build release binary
+        env:
+          RUSTFLAGS: "-Csplit-debuginfo=unpacked"
+          CARGO_BUILD_JOBS: "2"
+        run: cargo build --release --target x86_64-unknown-linux-gnu
+
+      - name: Prepare dist directory with all binaries
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp "target/x86_64-unknown-linux-gnu/release/sqry" "dist/sqry-linux-x86_64"
+          cp "target/x86_64-unknown-linux-gnu/release/sqry-mcp" "dist/sqry-mcp-linux-x86_64"
+          cp "target/x86_64-unknown-linux-gnu/release/sqry-lsp" "dist/sqry-lsp-linux-x86_64"
+          chmod 755 dist/*
+          echo "Prepared binaries for Linux x86_64:"
+          ls -lh dist/
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3.7.0
+
+      - name: Sign all binaries with Cosign
+        shell: bash
+        run: |
+          cd dist
+          echo "Signing all binaries for Linux x86_64..."
+          for binary in sqry-* ; do
+            [[ "$binary" == *.bundle ]] && continue
+            [[ "$binary" == CHECKSUMS* ]] && continue
+            echo "  Signing ${binary}..."
+            cosign sign-blob --yes --bundle "${binary}.bundle" "${binary}"
+            echo "  ✓ Signed: ${binary}.bundle"
+          done
+          echo "All binaries signed successfully"
+
+      - name: Generate checksums and SLSA subjects
+        id: hash
+        shell: bash
+        run: |
+          cd dist
+          sha256sum sqry-* | grep -v ".bundle" > CHECKSUMS.sha256
+          echo "Generated checksums for Linux x86_64:"
+          cat CHECKSUMS.sha256
+
+          # Build base64-encoded subjects list for SLSA provenance (correct JSON format)
+          subjects=""
+          for binary in sqry-*; do
+            [[ "$binary" == CHECKSUMS* ]] && continue
+            [[ "$binary" == *.bundle ]] && continue
+            digest=$(sha256sum "$binary" | awk '{print $1}')
+            # Create proper JSON object with name and digest fields
+            subject_json=$(jq -n --arg name "$binary" --arg hash "$digest" '{name: $name, digest: {sha256: $hash}}')
+            subject=$(echo -n "$subject_json" | base64 -w0)
+            subjects="${subjects}${subject}"$'\n'
+            echo "Added SLSA subject: $binary (sha256: ${digest:0:16}...)"
+          done
+          subjects="${subjects%$'\n'}"
+          echo "subjects<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$subjects" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+          echo "SLSA subjects prepared for Linux x86_64"
+
+      - name: Upload all signed artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: signed-linux-x86_64
+          path: dist/*
+          retention-days: 5
+
+  build-and-sign-windows:
+    name: Build & Sign - Windows x86_64
+    # Tests run in parallel - upload-release gate ensures tests pass before release
+    runs-on: windows-latest
+    outputs:
+      subjects: ${{ steps.hash.outputs.subjects }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+
+      - name: Configure git credentials for internal repos
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          git config --global url."https://x-access-token:${GH_TOKEN}@github.com/".insteadOf "https://github.com/"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.90"
+          targets: x86_64-pc-windows-msvc
+
+      - name: Configure cargo to use git CLI
+        shell: bash
+        run: |
+          mkdir -p ~/.cargo
+          echo '[net]' >> ~/.cargo/config.toml
+          echo 'git-fetch-with-cli = true' >> ~/.cargo/config.toml
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: x86_64-pc-windows-msvc
+
+      - name: Build release binary
+        run: cargo build --release --target x86_64-pc-windows-msvc
+
+      - name: Prepare dist directory with all binaries
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp "target/x86_64-pc-windows-msvc/release/sqry.exe" "dist/sqry-windows-x86_64.exe"
+          cp "target/x86_64-pc-windows-msvc/release/sqry-mcp.exe" "dist/sqry-mcp-windows-x86_64.exe"
+          cp "target/x86_64-pc-windows-msvc/release/sqry-lsp.exe" "dist/sqry-lsp-windows-x86_64.exe"
+          echo "Prepared binaries for Windows x86_64:"
+          ls -lh dist/
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3.7.0
+
+      - name: Sign all binaries with Cosign
+        shell: bash
+        run: |
+          cd dist
+          echo "Signing all binaries for Windows x86_64..."
+          for binary in sqry-*; do
+            [[ "$binary" == *.bundle ]] && continue
+            [[ "$binary" == CHECKSUMS* ]] && continue
+            echo "  Signing ${binary}..."
+            cosign sign-blob --yes --bundle "${binary}.bundle" "${binary}"
+            echo "  ✓ Signed: ${binary}.bundle"
+          done
+          echo "All binaries signed successfully"
+
+      - name: Generate checksums and SLSA subjects
+        id: hash
+        shell: powershell
+        run: |
+          cd dist
+
+          # Generate checksums using PowerShell Get-FileHash
+          $files = Get-ChildItem -Filter "sqry-*.exe" | Where-Object { $_.Name -notlike "*.bundle" }
+          $checksums = @()
+          foreach ($file in $files) {
+            $hash = (Get-FileHash -Algorithm SHA256 -Path $file.Name).Hash.ToLower()
+            $checksums += "$hash  $($file.Name)"
+          }
+          $checksums | Out-File -FilePath "CHECKSUMS.sha256" -Encoding ASCII
+          Write-Host "Generated checksums for Windows x86_64:"
+          Get-Content "CHECKSUMS.sha256"
+
+          # Build base64-encoded subjects list for SLSA provenance (correct JSON format)
+          $subjects = @()
+          foreach ($file in $files) {
+            $hash = (Get-FileHash -Algorithm SHA256 -Path $file.Name).Hash.ToLower()
+            # Create proper JSON object with name and digest fields
+            $subjectObj = @{
+              name = $file.Name
+              digest = @{
+                sha256 = $hash
+              }
+            } | ConvertTo-Json -Compress
+            $subjectBytes = [System.Text.Encoding]::UTF8.GetBytes($subjectObj)
+            $subjectBase64 = [System.Convert]::ToBase64String($subjectBytes)
+            $subjects += $subjectBase64
+            $hashPreview = $hash.Substring(0, 16)
+            Write-Host "Added SLSA subject: $($file.Name) (sha256: ${hashPreview}...)"
+          }
+
+          # Output subjects as multiline string
+          $subjectsOutput = $subjects -join "`n"
+          "subjects<<EOF" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding ASCII
+          $subjectsOutput | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding ASCII
+          "EOF" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding ASCII
+          Write-Host "SLSA subjects prepared for Windows x86_64"
+
+      - name: Upload all signed artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: signed-windows-x86_64
+          path: dist/*
+          retention-days: 5
+
+  build-and-sign-macos-intel:
+    name: Build & Sign - macOS x86_64 (Intel)
+    # Tests run in parallel - upload-release gate ensures tests pass before release
+    runs-on: macos-15-large
+    outputs:
+      subjects: ${{ steps.hash.outputs.subjects }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+
+      - name: Configure git credentials for internal repos
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+        run: |
+          git config --global url."https://x-access-token:${GH_TOKEN}@github.com/".insteadOf "https://github.com/"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.90"
+          targets: x86_64-apple-darwin
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: x86_64-apple-darwin
+
+      - name: Build release binary
+        run: cargo build --release --target x86_64-apple-darwin
+
+      - name: Prepare dist directory with all binaries
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp "target/x86_64-apple-darwin/release/sqry" "dist/sqry-macos-x86_64"
+          cp "target/x86_64-apple-darwin/release/sqry-mcp" "dist/sqry-mcp-macos-x86_64"
+          cp "target/x86_64-apple-darwin/release/sqry-lsp" "dist/sqry-lsp-macos-x86_64"
+          chmod 755 dist/*
+          echo "Prepared binaries for macOS x86_64:"
+          ls -lh dist/
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3.7.0
+
+      - name: Sign all binaries with Cosign
+        shell: bash
+        run: |
+          cd dist
+          echo "Signing all binaries for macOS x86_64..."
+          for binary in sqry-*; do
+            [[ "$binary" == *.bundle ]] && continue
+            [[ "$binary" == CHECKSUMS* ]] && continue
+            echo "  Signing ${binary}..."
+            cosign sign-blob --yes --bundle "${binary}.bundle" "${binary}"
+            echo "  ✓ Signed: ${binary}.bundle"
+          done
+          echo "All binaries signed successfully"
+
+      - name: Generate checksums and SLSA subjects
+        id: hash
+        shell: bash
+        run: |
+          cd dist
+          shasum -a 256 sqry-* | grep -v ".bundle" > CHECKSUMS.sha256
+          echo "Generated checksums for macOS x86_64:"
+          cat CHECKSUMS.sha256
+
+          # Build base64-encoded subjects list for SLSA provenance (correct JSON format)
+          subjects=""
+          for binary in sqry-*; do
+            [[ "$binary" == CHECKSUMS* ]] && continue
+            [[ "$binary" == *.bundle ]] && continue
+            digest=$(shasum -a 256 "$binary" | awk '{print $1}')
+            # Create proper JSON object with name and digest fields
+            subject_json=$(jq -n --arg name "$binary" --arg hash "$digest" '{name: $name, digest: {sha256: $hash}}')
+            subject=$(echo -n "$subject_json" | base64)
+            subjects="${subjects}${subject}"$'\n'
+            echo "Added SLSA subject: $binary (sha256: ${digest:0:16}...)"
+          done
+          subjects="${subjects%$'\n'}"
+          echo "subjects<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$subjects" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+          echo "SLSA subjects prepared for macOS x86_64"
+
+      - name: Upload all signed artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: signed-macos-x86_64
+          path: dist/*
+          retention-days: 5
+
+  build-and-sign-macos-arm:
+    name: Build & Sign - macOS ARM64 (Apple Silicon)
+    # Tests run in parallel - upload-release gate ensures tests pass before release
+    runs-on: macos-14
+    outputs:
+      subjects: ${{ steps.hash.outputs.subjects }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+
+      - name: Configure git credentials for internal repos
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+        run: |
+          git config --global url."https://x-access-token:${GH_TOKEN}@github.com/".insteadOf "https://github.com/"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.90"
+          targets: aarch64-apple-darwin
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: aarch64-apple-darwin
+
+      - name: Build release binary
+        run: cargo build --release --target aarch64-apple-darwin
+
+      - name: Prepare dist directory with all binaries
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp "target/aarch64-apple-darwin/release/sqry" "dist/sqry-macos-arm64"
+          cp "target/aarch64-apple-darwin/release/sqry-mcp" "dist/sqry-mcp-macos-arm64"
+          cp "target/aarch64-apple-darwin/release/sqry-lsp" "dist/sqry-lsp-macos-arm64"
+          chmod 755 dist/*
+          echo "Prepared binaries for macOS ARM64:"
+          ls -lh dist/
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3.7.0
+
+      - name: Sign all binaries with Cosign
+        shell: bash
+        run: |
+          cd dist
+          echo "Signing all binaries for macOS ARM64..."
+          for binary in sqry-*; do
+            [[ "$binary" == *.bundle ]] && continue
+            [[ "$binary" == CHECKSUMS* ]] && continue
+            echo "  Signing ${binary}..."
+            cosign sign-blob --yes --bundle "${binary}.bundle" "${binary}"
+            echo "  ✓ Signed: ${binary}.bundle"
+          done
+          echo "All binaries signed successfully"
+
+      - name: Generate checksums and SLSA subjects
+        id: hash
+        shell: bash
+        run: |
+          cd dist
+          shasum -a 256 sqry-* | grep -v ".bundle" > CHECKSUMS.sha256
+          echo "Generated checksums for macOS ARM64:"
+          cat CHECKSUMS.sha256
+
+          # Build base64-encoded subjects list for SLSA provenance (correct JSON format)
+          subjects=""
+          for binary in sqry-*; do
+            [[ "$binary" == CHECKSUMS* ]] && continue
+            [[ "$binary" == *.bundle ]] && continue
+            digest=$(shasum -a 256 "$binary" | awk '{print $1}')
+            # Create proper JSON object with name and digest fields
+            subject_json=$(jq -n --arg name "$binary" --arg hash "$digest" '{name: $name, digest: {sha256: $hash}}')
+            subject=$(echo -n "$subject_json" | base64)
+            subjects="${subjects}${subject}"$'\n'
+            echo "Added SLSA subject: $binary (sha256: ${digest:0:16}...)"
+          done
+          subjects="${subjects%$'\n'}"
+          echo "subjects<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$subjects" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+          echo "SLSA subjects prepared for macOS ARM64"
+
+      - name: Upload all signed artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: signed-macos-arm64
+          path: dist/*
+          retention-days: 5
+
+  # SLSA Level 2 Provenance Generation (Per-Platform)
+  # Each platform gets its own provenance attestation for the 3 binaries built on that platform
+
+  provenance-linux:
+    name: SLSA Provenance - Linux x86_64
+    needs: [build-and-sign-linux]
+    permissions:
+      id-token: write
+      contents: write
+      actions: read
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.0.0
+    with:
+      base64-subjects: "${{ needs.build-and-sign-linux.outputs.subjects }}"
+      upload-assets: ${{ startsWith(github.ref, 'refs/tags/') }}
+      provenance-name: sqry-linux-x86_64-provenance.intoto.jsonl
+      compile-generator: false
+      private-repository: true
+    secrets: inherit
+
+  provenance-windows:
+    name: SLSA Provenance - Windows x86_64
+    needs: [build-and-sign-windows]
+    permissions:
+      id-token: write
+      contents: write
+      actions: read
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.0.0
+    with:
+      base64-subjects: "${{ needs.build-and-sign-windows.outputs.subjects }}"
+      upload-assets: ${{ startsWith(github.ref, 'refs/tags/') }}
+      provenance-name: sqry-windows-x86_64-provenance.intoto.jsonl
+      compile-generator: false
+      private-repository: true
+    secrets: inherit
+
+  provenance-macos-intel:
+    name: SLSA Provenance - macOS x86_64
+    needs: [build-and-sign-macos-intel]
+    permissions:
+      id-token: write
+      contents: write
+      actions: read
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.0.0
+    with:
+      base64-subjects: "${{ needs.build-and-sign-macos-intel.outputs.subjects }}"
+      upload-assets: ${{ startsWith(github.ref, 'refs/tags/') }}
+      provenance-name: sqry-macos-x86_64-provenance.intoto.jsonl
+      compile-generator: false
+      private-repository: true
+    secrets: inherit
+
+  provenance-macos-arm:
+    name: SLSA Provenance - macOS ARM64
+    needs: [build-and-sign-macos-arm]
+    permissions:
+      id-token: write
+      contents: write
+      actions: read
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.0.0
+    with:
+      base64-subjects: "${{ needs.build-and-sign-macos-arm.outputs.subjects }}"
+      upload-assets: ${{ startsWith(github.ref, 'refs/tags/') }}
+      provenance-name: sqry-macos-arm64-provenance.intoto.jsonl
+      compile-generator: false
+      private-repository: true
+    secrets: inherit
+
+  # Upload all artifacts to release
+  upload-release:
+    name: Upload to GitHub Release
+    # Tests must pass before releasing (tests run in parallel with builds)
+    needs: [tests, build-and-sign-linux, build-and-sign-windows, build-and-sign-macos-intel, build-and-sign-macos-arm,
+            provenance-linux, provenance-windows, provenance-macos-intel, provenance-macos-arm]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/') && !(github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run == 'true')
+
+    steps:
+      - name: Download all signed artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: signed-*
+          path: artifacts/
+          merge-single: false
+
+      - name: Organize artifacts
+        shell: bash
+        run: |
+          mkdir -p dist
+          # Move all artifacts from subdirectories to dist
+          find artifacts -type f -exec mv {} dist/ \;
+          ls -lh dist/
+
+      - name: Generate consolidated checksums
+        shell: bash
+        run: |
+          cd dist
+          # Consolidate all CHECKSUMS.sha256 files
+          cat CHECKSUMS.sha256.* 2>/dev/null > CHECKSUMS-ALL.sha256 || true
+          # Also generate individual checksums for each binary
+          for binary in sqry-*; do
+            [[ "$binary" == *.bundle ]] && continue
+            [[ "$binary" == CHECKSUMS* ]] && continue
+            if command -v sha256sum >/dev/null 2>&1; then
+              sha256sum "$binary" >> CHECKSUMS-ALL.sha256
+            else
+              shasum -a 256 "$binary" >> CHECKSUMS-ALL.sha256
+            fi
+          done
+          mv CHECKSUMS-ALL.sha256 CHECKSUMS.sha256
+          echo "=== Consolidated Checksums ==="
+          cat CHECKSUMS.sha256
+
+      - name: Generate verification instructions
+        run: |
+          cat > dist/VERIFY.md <<'EOF'
+          # Verification Instructions - Multi-Platform Release with SLSA Level 2
+
+          This release includes **3 binaries** for each of 4 platforms (12 binaries total):
+          - **sqry**: Main CLI tool
+          - **sqry-mcp**: MCP (Model Context Protocol) server
+          - **sqry-lsp**: LSP (Language Server Protocol) server
+
+          Each platform also includes **SLSA Level 2 provenance attestations** for supply chain verification.
+
+          ## Platforms & Binaries Available
+
+          ### Linux x86_64
+          - `sqry-linux-x86_64`, `sqry-mcp-linux-x86_64`, `sqry-lsp-linux-x86_64`
+          - Provenance: `sqry-linux-x86_64-provenance.intoto.jsonl`
+
+          ### Windows x86_64
+          - `sqry-windows-x86_64.exe`, `sqry-mcp-windows-x86_64.exe`, `sqry-lsp-windows-x86_64.exe`
+          - Provenance: `sqry-windows-x86_64-provenance.intoto.jsonl`
+
+          ### macOS Intel x86_64
+          - `sqry-macos-x86_64`, `sqry-mcp-macos-x86_64`, `sqry-lsp-macos-x86_64`
+          - Provenance: `sqry-macos-x86_64-provenance.intoto.jsonl`
+
+          ### macOS ARM64 (Apple Silicon)
+          - `sqry-macos-arm64`, `sqry-mcp-macos-arm64`, `sqry-lsp-macos-arm64`
+          - Provenance: `sqry-macos-arm64-provenance.intoto.jsonl`
+
+          ## Quick Verification
+
+          ```bash
+          # Verify all checksums
+          sha256sum -c CHECKSUMS.sha256  # Linux
+          shasum -a 256 -c CHECKSUMS.sha256  # macOS/Windows
+          ```
+
+          ## Verify Cosign Signatures
+
+          All binaries are signed with Sigstore/Cosign. Replace `<binary-name>` with the specific binary you want to verify.
+
+          ### Linux Example
+          ```bash
+          cosign verify-blob \
+            --bundle sqry-linux-x86_64.bundle \
+            --certificate-identity-regexp "^https://github.com/verivus-oss/sqry/\\.github/workflows/release-signing\\.yml@" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            sqry-linux-x86_64
+          ```
+
+          ### Windows Example (PowerShell)
+          ```powershell
+          cosign verify-blob `
+            --bundle sqry-windows-x86_64.exe.bundle `
+            --certificate-identity-regexp "^https://github.com/verivus-oss/sqry/\\.github/workflows/release-signing\\.yml@" `
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" `
+            sqry-windows-x86_64.exe
+          ```
+
+          ### macOS Example
+          ```bash
+          cosign verify-blob \
+            --bundle sqry-macos-arm64.bundle \
+            --certificate-identity-regexp "^https://github.com/verivus-oss/sqry/\\.github/workflows/release-signing\\.yml@" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            sqry-macos-arm64
+          ```
+
+          ## Verify SLSA Level 2 Provenance
+
+          Each platform has its own provenance attestation. Use `slsa-verifier` to verify.
+
+          ### Install slsa-verifier
+
+          ```bash
+          # Linux
+          curl -sSfL https://github.com/slsa-framework/slsa-verifier/releases/latest/download/slsa-verifier-linux-amd64 -o slsa-verifier
+          chmod +x slsa-verifier
+
+          # macOS
+          curl -sSfL https://github.com/slsa-framework/slsa-verifier/releases/latest/download/slsa-verifier-darwin-amd64 -o slsa-verifier
+          chmod +x slsa-verifier
+
+          # Windows
+          # Download slsa-verifier-windows-amd64.exe from the slsa-verifier releases page
+          ```
+
+          ### Verify Linux Binaries
+
+          ```bash
+          ./slsa-verifier verify-artifact \
+            --provenance-path sqry-linux-x86_64-provenance.intoto.jsonl \
+            --source-uri github.com/verivus-oss/sqry \
+            sqry-linux-x86_64
+
+          ./slsa-verifier verify-artifact \
+            --provenance-path sqry-linux-x86_64-provenance.intoto.jsonl \
+            --source-uri github.com/verivus-oss/sqry \
+            sqry-mcp-linux-x86_64
+
+          ./slsa-verifier verify-artifact \
+            --provenance-path sqry-linux-x86_64-provenance.intoto.jsonl \
+            --source-uri github.com/verivus-oss/sqry \
+            sqry-lsp-linux-x86_64
+          ```
+
+          ### Verify Windows Binaries
+
+          ```bash
+          ./slsa-verifier verify-artifact \
+            --provenance-path sqry-windows-x86_64-provenance.intoto.jsonl \
+            --source-uri github.com/verivus-oss/sqry \
+            sqry-windows-x86_64.exe
+          ```
+
+          ### Verify macOS Binaries
+
+          ```bash
+          # Intel
+          ./slsa-verifier verify-artifact \
+            --provenance-path sqry-macos-x86_64-provenance.intoto.jsonl \
+            --source-uri github.com/verivus-oss/sqry \
+            sqry-macos-x86_64
+
+          # ARM64 (Apple Silicon)
+          ./slsa-verifier verify-artifact \
+            --provenance-path sqry-macos-arm64-provenance.intoto.jsonl \
+            --source-uri github.com/verivus-oss/sqry \
+            sqry-macos-arm64
+          ```
+
+          ## Complete Documentation
+
+          See the verification commands above for detailed instructions.
+
+          ## What is SLSA Level 2?
+
+          SLSA (Supply-chain Levels for Software Artifacts) Level 2 provides:
+          - **Build provenance**: Cryptographically signed attestation of how the binary was built
+          - **Source integrity**: Links the binary to the exact source commit
+          - **Non-falsifiable**: Generated by GitHub Actions using OIDC tokens (no long-lived secrets)
+
+          This means you can verify that:
+          1. The binary was built from the claimed source repository and commit
+          2. The build happened on GitHub Actions (not a developer's laptop)
+          3. The binary hasn't been tampered with since it was built
+          EOF
+          echo "✓ Verification instructions generated"
+
+      - name: List all artifacts
+        shell: bash
+        run: |
+          echo "=== All Artifacts Ready for Upload ==="
+          ls -lh dist/
+          echo ""
+          echo "=== Checksums ==="
+          cat dist/CHECKSUMS.sha256
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            dist/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Job Summary - Release Upload
+        if: always()
+        shell: bash
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'
+          ## 📦 Complete Multi-Platform Release with SLSA Level 2
+
+          ### Binaries Released (12 total)
+
+          Each platform includes 3 binaries:
+          - **sqry**: Main CLI tool
+          - **sqry-mcp**: MCP server
+          - **sqry-lsp**: LSP server
+
+          #### Platforms
+          - ✅ Linux x86_64 (3 binaries, all signed, SLSA Level 2 provenance)
+          - ✅ Windows x86_64 (3 binaries, all signed, SLSA Level 2 provenance)
+          - ✅ macOS Intel x86_64 (3 binaries, all signed, SLSA Level 2 provenance)
+          - ✅ macOS ARM64 Apple Silicon (3 binaries, all signed, SLSA Level 2 provenance)
+
+          ### Files Uploaded
+
+          - ✅ 12 platform binaries (sqry + sqry-mcp + sqry-lsp × 4 platforms)
+          - ✅ 12 Cosign signature bundles
+          - ✅ 4 SLSA Level 2 provenance attestations (one per platform)
+          - ✅ Consolidated checksums (CHECKSUMS.sha256)
+          - ✅ Verification instructions (VERIFY.md)
+
+          ### Supply Chain Security
+
+          This release achieves **SLSA Level 2** compliance:
+          - ✅ Sigstore keyless signing (all binaries)
+          - ✅ SLSA Level 2 provenance attestations (per-platform)
+          - ✅ Build integrity verification enabled
+          - ✅ Source-to-binary traceability
+
+          ### Verification
+
+          See `VERIFY.md` in the release assets for platform-specific verification commands.
+          EOF

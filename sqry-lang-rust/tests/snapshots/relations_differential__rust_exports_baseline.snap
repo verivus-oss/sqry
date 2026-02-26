@@ -1,0 +1,42 @@
+---
+source: sqry-lang-rust/tests/relations_differential.rs
+expression: normalized
+---
+[
+    (
+        "MixedStruct",
+        false,
+    ),
+    (
+        "PublicEnum",
+        false,
+    ),
+    (
+        "PublicStruct",
+        false,
+    ),
+    (
+        "PublicTrait",
+        false,
+    ),
+    (
+        "function_in_private_module",
+        false,
+    ),
+    (
+        "module_function",
+        false,
+    ),
+    (
+        "new",
+        false,
+    ),
+    (
+        "public_function",
+        false,
+    ),
+    (
+        "public_method",
+        false,
+    ),
+]

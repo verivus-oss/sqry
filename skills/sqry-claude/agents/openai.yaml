@@ -1,0 +1,4 @@
+interface:
+  display_name: "sqry Claude"
+  short_description: "Claude workflow guidance for sqry"
+  default_prompt: "Use $sqry-claude to apply this repository's Claude Code workflow, architecture checks, and validation steps."

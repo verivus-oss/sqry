@@ -1,0 +1,174 @@
+name: Generate SBOM + VEX
+
+on:
+  push:
+    tags:
+      - 'v*'
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  sbom:
+    name: Generate SBOM + VEX
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+
+      - name: Configure git credentials for internal repos
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+        run: |
+          git config --global url."https://x-access-token:${GH_TOKEN}@github.com/".insteadOf "https://github.com/"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.90"
+
+      - name: Install cargo-cyclonedx
+        run: cargo install --locked cargo-cyclonedx
+
+      - name: Install Cosign (for tool verification)
+        uses: sigstore/cosign-installer@v3.7.0
+
+      - name: Install Grype (verified)
+        shell: bash
+        run: |
+          set -euo pipefail
+          GRYPE_VERSION="v0.87.0"
+          GRYPE_VERSION_NUM="${GRYPE_VERSION#v}"
+          GRYPE_BASE_URL="https://github.com/anchore/grype/releases/download/${GRYPE_VERSION}"
+          GRYPE_CHECKSUMS="grype_${GRYPE_VERSION_NUM}_checksums.txt"
+          GRYPE_TARBALL="grype_${GRYPE_VERSION_NUM}_linux_amd64.tar.gz"
+
+          curl -sSfL "${GRYPE_BASE_URL}/${GRYPE_CHECKSUMS}" -o "/tmp/${GRYPE_CHECKSUMS}"
+          curl -sSfL "${GRYPE_BASE_URL}/${GRYPE_CHECKSUMS}.pem" -o "/tmp/${GRYPE_CHECKSUMS}.pem.b64"
+          curl -sSfL "${GRYPE_BASE_URL}/${GRYPE_CHECKSUMS}.sig" -o "/tmp/${GRYPE_CHECKSUMS}.sig.b64"
+          base64 -d "/tmp/${GRYPE_CHECKSUMS}.pem.b64" > "/tmp/${GRYPE_CHECKSUMS}.pem"
+          base64 -d "/tmp/${GRYPE_CHECKSUMS}.sig.b64" > "/tmp/${GRYPE_CHECKSUMS}.sig"
+
+          cosign verify-blob \
+            --certificate "/tmp/${GRYPE_CHECKSUMS}.pem" \
+            --signature "/tmp/${GRYPE_CHECKSUMS}.sig" \
+            --certificate-identity "https://github.com/anchore/grype/.github/workflows/release.yaml@refs/heads/main" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            "/tmp/${GRYPE_CHECKSUMS}"
+
+          curl -sSfL "${GRYPE_BASE_URL}/${GRYPE_TARBALL}" -o "/tmp/${GRYPE_TARBALL}"
+          grep -F " ${GRYPE_TARBALL}" "/tmp/${GRYPE_CHECKSUMS}" > /tmp/grype.sha256
+          (cd /tmp && sha256sum -c grype.sha256)
+
+          tar -xzf "/tmp/${GRYPE_TARBALL}" -C /tmp
+          sudo install -m 0755 /tmp/grype /usr/local/bin/grype
+
+      - name: Install vexctl (verified)
+        shell: bash
+        run: |
+          set -euo pipefail
+          VEXCTL_VERSION="v0.4.1"
+          VEXCTL_BASE_URL="https://github.com/openvex/vexctl/releases/download/${VEXCTL_VERSION}"
+          VEXCTL_CHECKSUMS="vexctl_checksums.txt"
+          VEXCTL_ASSET="vexctl-linux-amd64"
+
+          curl -sSfL "${VEXCTL_BASE_URL}/${VEXCTL_CHECKSUMS}" -o "/tmp/${VEXCTL_CHECKSUMS}"
+          curl -sSfL "${VEXCTL_BASE_URL}/${VEXCTL_CHECKSUMS}.pem" -o "/tmp/${VEXCTL_CHECKSUMS}.pem.b64"
+          curl -sSfL "${VEXCTL_BASE_URL}/${VEXCTL_CHECKSUMS}.sig" -o "/tmp/${VEXCTL_CHECKSUMS}.sig.b64"
+          base64 -d "/tmp/${VEXCTL_CHECKSUMS}.pem.b64" > "/tmp/${VEXCTL_CHECKSUMS}.pem"
+          base64 -d "/tmp/${VEXCTL_CHECKSUMS}.sig.b64" > "/tmp/${VEXCTL_CHECKSUMS}.sig"
+
+          cosign verify-blob \
+            --certificate "/tmp/${VEXCTL_CHECKSUMS}.pem" \
+            --signature "/tmp/${VEXCTL_CHECKSUMS}.sig" \
+            --certificate-identity "https://github.com/openvex/vexctl/.github/workflows/release.yaml@refs/tags/v0.4.1" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            "/tmp/${VEXCTL_CHECKSUMS}"
+
+          curl -sSfL "${VEXCTL_BASE_URL}/${VEXCTL_ASSET}" -o "/tmp/${VEXCTL_ASSET}"
+          grep -F " ${VEXCTL_ASSET}" "/tmp/${VEXCTL_CHECKSUMS}" > /tmp/vexctl.sha256
+          (cd /tmp && sha256sum -c vexctl.sha256)
+
+          sudo install -m 0755 "/tmp/${VEXCTL_ASSET}" /usr/local/bin/vexctl
+
+      - name: Install Syft (verified; used for SBOM format conversion)
+        shell: bash
+        run: |
+          set -euo pipefail
+          SYFT_VERSION="v1.38.2"
+          SYFT_VERSION_NUM="${SYFT_VERSION#v}"
+          SYFT_BASE_URL="https://github.com/anchore/syft/releases/download/${SYFT_VERSION}"
+          SYFT_CHECKSUMS="syft_${SYFT_VERSION_NUM}_checksums.txt"
+          SYFT_TARBALL="syft_${SYFT_VERSION_NUM}_linux_amd64.tar.gz"
+
+          curl -sSfL "${SYFT_BASE_URL}/${SYFT_CHECKSUMS}" -o "/tmp/${SYFT_CHECKSUMS}"
+          curl -sSfL "${SYFT_BASE_URL}/${SYFT_CHECKSUMS}.pem" -o "/tmp/${SYFT_CHECKSUMS}.pem.b64"
+          curl -sSfL "${SYFT_BASE_URL}/${SYFT_CHECKSUMS}.sig" -o "/tmp/${SYFT_CHECKSUMS}.sig.b64"
+          base64 -d "/tmp/${SYFT_CHECKSUMS}.pem.b64" > "/tmp/${SYFT_CHECKSUMS}.pem"
+          base64 -d "/tmp/${SYFT_CHECKSUMS}.sig.b64" > "/tmp/${SYFT_CHECKSUMS}.sig"
+
+          cosign verify-blob \
+            --certificate "/tmp/${SYFT_CHECKSUMS}.pem" \
+            --signature "/tmp/${SYFT_CHECKSUMS}.sig" \
+            --certificate-identity "https://github.com/anchore/syft/.github/workflows/release.yaml@refs/heads/main" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            "/tmp/${SYFT_CHECKSUMS}"
+
+          curl -sSfL "${SYFT_BASE_URL}/${SYFT_TARBALL}" -o "/tmp/${SYFT_TARBALL}"
+          grep -F " ${SYFT_TARBALL}" "/tmp/${SYFT_CHECKSUMS}" > /tmp/syft.sha256
+          (cd /tmp && sha256sum -c syft.sha256)
+
+          tar -xzf "/tmp/${SYFT_TARBALL}" -C /tmp
+          sudo install -m 0755 /tmp/syft /usr/local/bin/syft
+
+      - name: Generate SBOM (CycloneDX)
+        run: |
+          mkdir -p artifacts
+          cargo cyclonedx \
+            --manifest-path sqry-cli/Cargo.toml \
+            --all-features \
+            --format json \
+            --override-filename sbom
+          mv sqry-cli/sbom.json artifacts/sbom-cyclonedx.json
+
+      - name: Convert SBOM to SPDX
+        run: |
+          syft convert artifacts/sbom-cyclonedx.json -o spdx-json=artifacts/sbom-spdx.json
+
+      - name: Scan for vulnerabilities + generate VEX
+        run: |
+          grype sbom:artifacts/sbom-cyclonedx.json -o json > artifacts/vulnerabilities.json
+          grype sbom:artifacts/sbom-cyclonedx.json -o table > artifacts/vulnerabilities.txt
+          VERSION=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name=="sqry-cli") | .version')
+          vexctl generate \
+            --templates .openvex/templates \
+            --product "pkg:cargo/sqry@${VERSION}" \
+            --author "sqry security" \
+            --author-role "Maintainer" \
+            --file artifacts/sbom-openvex.json
+
+      - name: Upload SBOM + VEX to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            artifacts/sbom-cyclonedx.json
+            artifacts/sbom-spdx.json
+            artifacts/sbom-openvex.json
+            artifacts/vulnerabilities.json
+            artifacts/vulnerabilities.txt
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-vex
+          path: |
+            artifacts/sbom-*.json
+            artifacts/vulnerabilities.*
