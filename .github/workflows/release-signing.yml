@@ -122,7 +122,7 @@ jobs:
           ls -lh dist/
 
       - name: Install Cosign
-        uses: sigstore/cosign-installer@v3.7.0
+        uses: sigstore/cosign-installer@v4.0.0
 
       - name: Sign all binaries with Cosign
         shell: bash
@@ -225,7 +225,7 @@ jobs:
           ls -lh dist/
 
       - name: Install Cosign
-        uses: sigstore/cosign-installer@v3.7.0
+        uses: sigstore/cosign-installer@v4.0.0
 
       - name: Sign all binaries with Cosign
         shell: bash
@@ -336,7 +336,7 @@ jobs:
           ls -lh dist/
 
       - name: Install Cosign
-        uses: sigstore/cosign-installer@v3.7.0
+        uses: sigstore/cosign-installer@v4.0.0
 
       - name: Sign all binaries with Cosign
         shell: bash
@@ -432,7 +432,7 @@ jobs:
           ls -lh dist/
 
       - name: Install Cosign
-        uses: sigstore/cosign-installer@v3.7.0
+        uses: sigstore/cosign-installer@v4.0.0
 
       - name: Sign all binaries with Cosign
         shell: bash
