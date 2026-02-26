@@ -93,7 +93,7 @@ chrono = { version = "0.4", features = ["serde"] }
 
 # Regex
 regex = "1.11"
-fancy-regex = "0.13"  # Supports lookahead/lookbehind (FT-C.1)
+fancy-regex = "0.17"  # Supports lookahead/lookbehind (FT-C.1)
 
 # Fuzzy string matching
 rapidfuzz = "0.5"
