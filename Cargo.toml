@@ -100,7 +100,7 @@ fancy-regex = "0.13"  # Supports lookahead/lookbehind (FT-C.1)
 rapidfuzz = "0.5"
 
 # Search & file handling
-grep = "0.3"
+grep = "0.4"
 grep-regex = "0.1"
 grep-searcher = "0.1"
 ignore = "0.4"
