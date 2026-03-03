@@ -268,7 +268,7 @@ jobs:
 
       # --- Step 13: Upload signed artifacts ---
       - name: Upload signed artifacts
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: signed-linux
           path: dist/
@@ -441,7 +441,7 @@ jobs:
           echo "${DELIM}" >> "$GITHUB_OUTPUT"
 
       - name: Upload signed artifacts
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: signed-linux-arm64
           path: dist/
@@ -635,7 +635,7 @@ jobs:
           echo "${DELIM}" >> "$GITHUB_OUTPUT"
 
       - name: Upload signed artifacts
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: signed-windows
           path: dist/
@@ -829,7 +829,7 @@ jobs:
           echo "${DELIM}" >> "$GITHUB_OUTPUT"
 
       - name: Upload signed artifacts
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: signed-macos-arm64
           path: dist/
@@ -987,7 +987,7 @@ jobs:
           echo "${DELIM}" >> "$GITHUB_OUTPUT"
 
       - name: Upload signed artifacts
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: signed-vscode
           path: dist/
