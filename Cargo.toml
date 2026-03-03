@@ -164,7 +164,7 @@ tree-sitter-json = "0.23.0"
 tree-sitter-bash = "0.23.2"
 tree-sitter-elixir = { git = "https://github.com/elixir-lang/tree-sitter-elixir" }
 tree-sitter-html = "0.23.0"
-tree-sitter-css = "0.23.0"
+tree-sitter-css = "0.25.0"
 tree-sitter-haskell = "0.23.0"
 tree-sitter-perl = { git = "https://github.com/tree-sitter-perl/tree-sitter-perl", rev = "0c24d001dd1921e418fb933d208a7bd7dd3f923a" }
 tree-sitter-zig = "1.1.2"         # Zig language support (Phase 2 Tier 2)
