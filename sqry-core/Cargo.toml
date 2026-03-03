@@ -114,7 +114,7 @@ windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem"] }
 
 # Unix process probing for cache lock detection (macOS/BSD)
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.30", features = ["signal"] }
+nix = { version = "0.31", features = ["signal"] }
 
 [dev-dependencies]
 tempfile = "3.13"
