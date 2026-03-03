@@ -1,0 +1,29 @@
+[package]
+name = "sqry-lang-salesforce-apex"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Salesforce Apex language plugin for sqry - semantic search with platform-specific metadata"
+
+[lib]
+name = "sqry_lang_salesforce_apex"
+path = "src/lib.rs"
+
+[dependencies]
+sqry-core = { path = "../sqry-core" }
+tree-sitter = { workspace = true }
+tree-sitter-sfapex = "2.4"
+streaming-iterator = { workspace = true }
+anyhow = { workspace = true }
+
+[dev-dependencies]
+sqry-tree-sitter-fuzz-support = { path = "../sqry-tree-sitter-fuzz-support" }
+tempfile = "3.0"
+sqry-core = { path = "../sqry-core", features = ["test-support"] }
+
+[features]
+default = ["has_relations"]
+has_relations = []

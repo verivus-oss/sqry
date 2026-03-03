@@ -1,0 +1,16 @@
+[package]
+name = "tree-sitter-plsql-sqry"
+version = "0.1.0"
+edition = "2021"
+authors = ["Verivus Pty Ltd"]
+license = "MIT"
+description = "Tree-sitter grammar for Oracle PL/SQL (vendored for sqry)"
+repository = "https://github.com/verivusai-open/sqry"
+publish = false
+
+[dependencies]
+tree-sitter.workspace = true
+sqry-tree-sitter-support = { path = "../../sqry-tree-sitter-support" }
+
+[build-dependencies]
+cc = "1"

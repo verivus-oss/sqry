@@ -1,0 +1,40 @@
+---
+source: sqry-lang-python/tests/relations_differential.rs
+expression: normalized
+---
+[
+    (
+        "numpy",
+        "numpy",
+        Some(
+            "np",
+        ),
+        false,
+    ),
+    (
+        "os",
+        "os",
+        None,
+        false,
+    ),
+    (
+        "util",
+        "pkg",
+        None,
+        false,
+    ),
+    (
+        "Helper",
+        "pkg.helpers",
+        Some(
+            "HelperAlias",
+        ),
+        false,
+    ),
+    (
+        "*",
+        "pkg.tools",
+        None,
+        true,
+    ),
+]

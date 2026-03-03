@@ -1,0 +1,88 @@
+==================
+chained data statement
+==================
+
+class cls implementation.
+  method meth.
+    data: x type t1,
+          y type t2.
+  endmethod.
+endclass.
+---
+(program
+  (class_implementation
+    (name)
+    (method_implementation
+      (name)
+      (method_body
+        (chained_variable_declaration
+          (variable
+            (name)
+            (typing
+              (type)))
+          (variable
+            (name)
+            (typing
+              (type))))))))
+
+==================
+declaring a structure
+==================
+
+data: begin of struc,
+        a type t1,
+        b type t2,
+        c type t3,
+      end of struc.
+
+---
+(program
+  (chained_structure_declaration
+    (strucure_name)
+    (structure_components
+      (structure_component
+        (name)
+        (complete_typing
+          (type)))
+      (structure_component
+        (name)
+        (complete_typing
+          (type)))
+      (structure_component
+        (name)
+        (complete_typing
+          (type))))
+    (strucure_name)))
+
+==================
+chained field-symbols declaration
+==================
+
+field-symbols:  <fs1> type a,
+                <fs2> type b.
+
+---
+
+(program
+  (chained_field_symbol_declaration
+        (field_symbol
+          (name)
+          (complete_typing
+            (type)))
+        (field_symbol
+          (name)
+          (complete_typing
+            (type)))))
+
+==================
+chained write statement
+==================
+
+write: / 'hello', 'world'.
+
+---
+
+(program
+  (chained_write_statement
+    (character_literal)
+    (character_literal)))

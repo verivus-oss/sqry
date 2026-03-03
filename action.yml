@@ -1,0 +1,328 @@
+name: 'sqry Semantic Code Analysis'
+description: 'Run sqry semantic code analysis with GitHub annotations and PR comments'
+author: 'Verivus'
+
+branding:
+  icon: 'search'
+  color: 'blue'
+
+inputs:
+  version:
+    description: 'sqry version to use (e.g., v4.0.0). Use "latest" for the most recent release.'
+    required: false
+    default: 'latest'
+  command:
+    description: 'Analysis command to run: index, unused, cycles, duplicates, diff, stats'
+    required: false
+    default: 'index'
+  path:
+    description: 'Path to analyze'
+    required: false
+    default: '.'
+  args:
+    description: 'Additional CLI arguments passed to the sqry command'
+    required: false
+    default: ''
+  diff-base:
+    description: 'Base git ref for diff command (required when command=diff)'
+    required: false
+    default: ''
+  diff-target:
+    description: 'Target git ref for diff command'
+    required: false
+    default: 'HEAD'
+  annotations:
+    description: 'Post file-level annotations for findings'
+    required: false
+    default: 'true'
+  comment:
+    description: 'Post PR comment with analysis summary'
+    required: false
+    default: 'true'
+  fail-on-findings:
+    description: 'Fail the step if any findings are detected'
+    required: false
+    default: 'false'
+  sqry-path:
+    description: 'Path to a directory containing the sqry binary. Skips download when set.'
+    required: false
+    default: ''
+
+outputs:
+  findings-count:
+    description: 'Number of findings detected'
+    value: ${{ steps.parse.outputs.findings-count }}
+  result:
+    description: 'Raw JSON output from sqry'
+    value: ${{ steps.run.outputs.result }}
+
+runs:
+  using: 'composite'
+  steps:
+    # Step 1: Platform detection
+    - name: Detect platform
+      id: platform
+      shell: bash
+      run: |
+        case "${{ runner.os }}-${{ runner.arch }}" in
+          Linux-X64)
+            echo "binary=sqry-linux-x86_64" >> "$GITHUB_OUTPUT"
+            ;;
+          macOS-X64)
+            echo "binary=sqry-macos-x86_64" >> "$GITHUB_OUTPUT"
+            ;;
+          macOS-ARM64)
+            echo "binary=sqry-macos-arm64" >> "$GITHUB_OUTPUT"
+            ;;
+          Windows-X64)
+            echo "binary=sqry-windows-x86_64.exe" >> "$GITHUB_OUTPUT"
+            ;;
+          *)
+            echo "::error::Unsupported platform: ${{ runner.os }}-${{ runner.arch }}"
+            exit 1
+            ;;
+        esac
+
+    # Step 2: Resolve version tag (skipped when sqry-path is set)
+    - name: Resolve version
+      id: version
+      if: inputs.sqry-path == ''
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        version="${{ inputs.version }}"
+        if [ "$version" = "latest" ]; then
+          version=$(gh release view --repo verivusai-open/sqry --json tagName -q '.tagName' 2>/dev/null || echo "")
+          if [ -z "$version" ]; then
+            echo "::error::Could not resolve latest sqry release"
+            exit 1
+          fi
+        fi
+        echo "tag=$version" >> "$GITHUB_OUTPUT"
+
+    # Step 3: Cache binary (skipped when sqry-path is set)
+    - name: Cache sqry binary
+      id: cache
+      if: inputs.sqry-path == ''
+      uses: actions/cache@v4
+      with:
+        path: ${{ runner.temp }}/sqry-bin
+        key: sqry-${{ runner.os }}-${{ runner.arch }}-${{ steps.version.outputs.tag }}
+
+    # Step 4: Download binary (skipped when sqry-path is set or cache hit)
+    - name: Download sqry
+      if: inputs.sqry-path == '' && steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        mkdir -p "${{ runner.temp }}/sqry-bin"
+        binary="${{ steps.platform.outputs.binary }}"
+        tag="${{ steps.version.outputs.tag }}"
+        url="https://github.com/verivusai-open/sqry/releases/download/${tag}/${binary}"
+        echo "Downloading sqry ${tag} for ${{ runner.os }}-${{ runner.arch }}..."
+        curl -fsSL --retry 3 -o "${{ runner.temp }}/sqry-bin/sqry" "$url"
+        chmod +x "${{ runner.temp }}/sqry-bin/sqry"
+
+    # Step 5: Add to PATH
+    - name: Add sqry to PATH
+      shell: bash
+      run: |
+        if [ -n "${{ inputs.sqry-path }}" ]; then
+          echo "${{ inputs.sqry-path }}" >> "$GITHUB_PATH"
+        else
+          echo "${{ runner.temp }}/sqry-bin" >> "$GITHUB_PATH"
+        fi
+
+    # Step 6: Build index (unless command is index itself, since step 7 handles it)
+    - name: Build index
+      if: inputs.command != 'index'
+      shell: bash
+      run: sqry index ${{ inputs.path }}
+
+    # Step 7: Run command
+    - name: Run sqry
+      id: run
+      shell: bash
+      run: |
+        command="${{ inputs.command }}"
+        path="${{ inputs.path }}"
+        args="${{ inputs.args }}"
+        output_file="${{ runner.temp }}/sqry-output.json"
+
+        case "$command" in
+          index)
+            sqry index $path $args
+            echo '{}' > "$output_file"
+            ;;
+          stats)
+            sqry graph stats --format json --path "$path" $args > "$output_file"
+            ;;
+          unused)
+            sqry --json unused $path $args > "$output_file"
+            ;;
+          cycles)
+            sqry --json cycles $path $args > "$output_file"
+            ;;
+          duplicates)
+            sqry --json duplicates $path $args > "$output_file"
+            ;;
+          diff)
+            base="${{ inputs.diff-base }}"
+            target="${{ inputs.diff-target }}"
+            if [ -z "$base" ]; then
+              echo "::error::diff-base is required when command=diff"
+              exit 1
+            fi
+            sqry --json diff "$base" "$target" --path "$path" $args > "$output_file"
+            ;;
+          *)
+            echo "::error::Unknown command: $command"
+            exit 1
+            ;;
+        esac
+
+        # Set raw result output (truncate for GitHub output limits)
+        result=$(cat "$output_file")
+        {
+          echo "result<<SQRY_EOF"
+          echo "$result" | head -c 65000
+          echo ""
+          echo "SQRY_EOF"
+        } >> "$GITHUB_OUTPUT"
+
+    # Step 8: Parse findings count
+    - name: Parse findings
+      id: parse
+      shell: bash
+      run: |
+        command="${{ inputs.command }}"
+        output_file="${{ runner.temp }}/sqry-output.json"
+        count=0
+
+        case "$command" in
+          unused)
+            count=$(jq '[.[].symbols[]] | length' "$output_file" 2>/dev/null || echo 0)
+            ;;
+          cycles)
+            count=$(jq '. | length' "$output_file" 2>/dev/null || echo 0)
+            ;;
+          duplicates)
+            count=$(jq '. | length' "$output_file" 2>/dev/null || echo 0)
+            ;;
+          diff)
+            count=$(jq '.changes | length' "$output_file" 2>/dev/null || echo 0)
+            ;;
+          *)
+            count=0
+            ;;
+        esac
+
+        echo "findings-count=$count" >> "$GITHUB_OUTPUT"
+        echo "sqry found $count findings ($command)"
+
+    # Step 9: Emit annotations
+    - name: Emit annotations
+      if: inputs.annotations == 'true' && inputs.command != 'index' && inputs.command != 'stats'
+      shell: bash
+      run: |
+        command="${{ inputs.command }}"
+        output_file="${{ runner.temp }}/sqry-output.json"
+
+        case "$command" in
+          unused)
+            jq -r '.[].symbols[] | "::warning file=\(.file),line=\(.line)::Unused symbol: \(.name) (\(.kind))"' "$output_file" 2>/dev/null || true
+            ;;
+          cycles)
+            jq -r '. | to_entries[] | "::warning ::Dependency cycle (depth \(.value.depth)): \(.value.nodes | join(" -> "))"' "$output_file" 2>/dev/null || true
+            ;;
+          duplicates)
+            jq -r '.[] | .symbols[0] as $a | "::warning file=\($a.file),line=\($a.line)::Duplicate code: \($a.name) (\(.count) copies)"' "$output_file" 2>/dev/null || true
+            ;;
+          diff)
+            jq -r '.changes[] | "::warning file=\(.target_location.file_path // .base_location.file_path),line=\(.target_location.start_line // .base_location.start_line)::\(.change_type): \(.name) (\(.kind))"' "$output_file" 2>/dev/null || true
+            ;;
+        esac
+
+    # Step 10: Post PR comment
+    - name: Post PR comment
+      if: inputs.comment == 'true' && github.event_name == 'pull_request' && inputs.command != 'index'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        command="${{ inputs.command }}"
+        count="${{ steps.parse.outputs.findings-count }}"
+        path="${{ inputs.path }}"
+        output_file="${{ runner.temp }}/sqry-output.json"
+
+        # Build detail rows
+        details=""
+        header=""
+        case "$command" in
+          unused)
+            details=$(jq -r '.[].symbols[] | "| `\(.name)` | \(.kind) | \(.file) | \(.line) |"' "$output_file" 2>/dev/null | head -50 || true)
+            printf -v header '%s\n%s' '| Symbol | Kind | File | Line |' '|--------|------|------|------|'
+            ;;
+          cycles)
+            details=$(jq -r '. | to_entries[] | "| \(.value.depth) | \(.value.nodes | join(" → ")) |"' "$output_file" 2>/dev/null | head -50 || true)
+            printf -v header '%s\n%s' '| Depth | Cycle |' '|-------|-------|'
+            ;;
+          duplicates)
+            details=$(jq -r '.[] | .symbols[0] as $a | "| `\($a.name)` | \(.count) | \($a.file) | \($a.line) |"' "$output_file" 2>/dev/null | head -50 || true)
+            printf -v header '%s\n%s' '| Symbol | Copies | File | Line |' '|--------|--------|------|------|'
+            ;;
+          diff)
+            details=$(jq -r '.changes[] | "| `\(.name)` | \(.change_type) | \(.kind) | \(.target_location.file_path // .base_location.file_path) | \(.target_location.start_line // .base_location.start_line) |"' "$output_file" 2>/dev/null | head -50 || true)
+            printf -v header '%s\n%s' '| Symbol | Change | Kind | File | Line |' '|--------|--------|------|------|------|'
+            ;;
+          stats)
+            node_count=$(jq -r '.node_count // "N/A"' "$output_file" 2>/dev/null || echo "N/A")
+            edge_count=$(jq -r '.edge_count // "N/A"' "$output_file" 2>/dev/null || echo "N/A")
+            file_count=$(jq -r '.file_count // "N/A"' "$output_file" 2>/dev/null || echo "N/A")
+            printf -v details '%s\n%s\n%s' '| Nodes | Edges | Files |' '|-------|-------|-------|' "| $node_count | $edge_count | $file_count |"
+            ;;
+        esac
+
+        # Build comment body
+        comment_file="${{ runner.temp }}/sqry-comment.md"
+        {
+          echo "## sqry Analysis"
+          echo ""
+          echo "**Command**: \`$command\` | **Findings**: $count | **Path**: \`$path\`"
+        } > "$comment_file"
+
+        if [ -n "$details" ]; then
+          {
+            echo ""
+            echo "<details>"
+            echo "<summary>Details (click to expand)</summary>"
+            echo ""
+            echo "$header"
+            echo "$details"
+            echo ""
+            echo "</details>"
+          } >> "$comment_file"
+        fi
+
+        # Post or update comment
+        body=$(cat "$comment_file")
+        existing_comment_id=$(gh api "repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments" \
+          --jq '.[] | select(.body | startswith("## sqry Analysis")) | .id' 2>/dev/null | head -1 || true)
+
+        if [ -n "$existing_comment_id" ]; then
+          gh api "repos/${{ github.repository }}/issues/comments/$existing_comment_id" \
+            -X PATCH -f body="$body" > /dev/null
+        else
+          gh pr comment "${{ github.event.pull_request.number }}" --body-file "$comment_file"
+        fi
+
+    # Step 11: Fail gate
+    - name: Check fail gate
+      if: inputs.fail-on-findings == 'true'
+      shell: bash
+      run: |
+        count="${{ steps.parse.outputs.findings-count }}"
+        if [ "$count" -gt 0 ] 2>/dev/null; then
+          echo "::error::sqry found $count finding(s). Failing because fail-on-findings is enabled."
+          exit 1
+        fi

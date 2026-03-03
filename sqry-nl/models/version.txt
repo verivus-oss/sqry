@@ -1,0 +1,82 @@
+# sqry-nl Intent Classifier Model
+# Version and training metadata for traceability (AC-11.8)
+
+model_version=4.6.3
+model_date=2026-03-01T10:19:00Z
+model_type=MiniLM-L6-v2-intent-classifier-INT8
+
+# Version 4.6.3 Changes
+# - Switched base model from DistilBERT to all-MiniLM-L6-v2
+# - 6x smaller (57MB vs 133MB INT8), 2x faster (2.1ms vs 4.1ms P50)
+# - 0.06% accuracy tradeoff (99.75% vs 99.81%)
+# - Added token_type_ids support in Rust inference
+# - Retrained with corrected CLI commands: direct-callers/direct-callees
+
+# Quantization (AC-11.6)
+quantization=INT8-dynamic
+quantization_accuracy_drop=<2%
+original_size_mb=87.0
+quantized_size_mb=57.0
+size_reduction=34.5%
+
+# Training Configuration
+base_model=sentence-transformers/all-MiniLM-L6-v2
+params=22M
+samples_per_intent=1000
+total_samples=8000
+epochs=3
+batch_size=32
+learning_rate=2e-05
+lr_scheduler=linear
+warmup_ratio=0.1
+
+# Training Data
+training_data_source=template-based (H6 mitigation)
+
+# Evaluation Metrics (AC-11.1: >= 95% required)
+accuracy=0.9975
+f1_macro=0.9975
+f1_weighted=0.9975
+eval_loss=0.1340
+
+# Per-Intent F1 Scores
+f1_SymbolQuery=0.9910
+f1_TextSearch=0.9965
+f1_TracePath=0.9990
+f1_FindCallers=1.0000
+f1_FindCallees=0.9990
+f1_Visualize=0.9945
+f1_IndexStatus=1.0000
+f1_Ambiguous=1.0000
+
+# Calibration (AC-11.7: ECE < 0.1 required)
+temperature=0.4275
+ece_before=0.1193
+ece_after=0.0006
+calibration_samples=8000
+
+# Inference Performance (ONNX INT8)
+latency_p50_ms=2.14
+latency_p90_ms=3.00
+latency_p99_ms=7.27
+
+# Training Stack Versions
+torch_version=2.9.1
+transformers_version=4.55.4
+tokenizers_version=0.21.4
+onnxruntime_version=1.23.2
+optimum_version=2.0.0
+
+# Rust Dependency Versions (for inference)
+rust_tokenizers_version=0.21.4
+rust_ort_version=2.0.0-rc.10
+
+# Intent Labels (id2label mapping)
+intent_0=SymbolQuery
+intent_1=TextSearch
+intent_2=TracePath
+intent_3=FindCallers
+intent_4=FindCallees
+intent_5=Visualize
+intent_6=IndexStatus
+intent_7=Ambiguous
