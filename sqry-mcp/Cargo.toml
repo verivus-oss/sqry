@@ -37,7 +37,7 @@ sqry-nl = { path = "../sqry-nl", default-features = false }
 sqry-mcp-redaction = { path = "../sqry-mcp-redaction" }
 
 # MCP SDK for protocol compliance
-rmcp = { version = "0.16", features = ["server", "transport-io"] }
+rmcp = { version = "0.17", features = ["server", "transport-io"] }
 
 # JSON schema derivation for parameter types (must match rmcp's version)
 schemars = "1"
