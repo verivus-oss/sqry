@@ -1130,7 +1130,7 @@ jobs:
 
       # --- Step 1: Download all signed build artifacts ---
       - name: Download all signed artifacts
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
         with:
           pattern: signed-*
           path: dist/
@@ -1138,31 +1138,31 @@ jobs:
 
       # --- Step 2: Download provenance attestations ---
       - name: Download provenance — Linux
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
         with:
           name: ${{ needs.provenance-linux.outputs.provenance-name }}
           path: provenance/
 
       - name: Download provenance — Linux ARM64
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
         with:
           name: ${{ needs.provenance-linux-arm64.outputs.provenance-name }}
           path: provenance/
 
       - name: Download provenance — Windows
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
         with:
           name: ${{ needs.provenance-windows.outputs.provenance-name }}
           path: provenance/
 
       - name: Download provenance — macOS ARM64
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
         with:
           name: ${{ needs.provenance-macos-arm64.outputs.provenance-name }}
           path: provenance/
 
       - name: Download provenance — VSCode
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
         with:
           name: ${{ needs.provenance-vscode.outputs.provenance-name }}
           path: provenance/
