@@ -130,7 +130,7 @@ sha2 = "0.10"
 # Logging
 log = "0.4"
 env_logger = { version = "0.11", default-features = false, features = ["auto-color", "regex"] }
-tokio = { version = "1.39", features = ["rt-multi-thread", "macros", "signal", "net", "io-std", "io-util", "time"] }
+tokio = { version = "1.50", features = ["rt-multi-thread", "macros", "signal", "net", "io-std", "io-util", "time"] }
 tower-lsp = "0.20"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
