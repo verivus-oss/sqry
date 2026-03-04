@@ -1,0 +1,33 @@
+==================
+basic create object statement
+==================
+
+create object obj.
+
+---
+
+(program
+  (create_object_statement
+    (name)))
+
+==================
+create object statement with parameters
+==================
+
+create object obj
+  exporting
+    pa1 = val1
+    pa2 = val2.
+
+---
+
+(program
+  (create_object_statement
+    (name)
+    parameters: (parameter_list
+      (parameter_binding
+        formal_parameter: (name)
+        actual_parameter: (name))
+      (parameter_binding
+        formal_parameter: (name)
+        actual_parameter: (name)))))

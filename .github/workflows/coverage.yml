@@ -1,0 +1,155 @@
+name: Coverage
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  RUST_BACKTRACE: 1
+  CARGO_TERM_COLOR: always
+
+jobs:
+  coverage:
+    name: Coverage (${{ matrix.package }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        package:
+          - sqry-core
+          - sqry-mcp
+          - sqry-lsp
+          - sqry-cli
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure git credentials
+        run: git config --global url."https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/".insteadOf "https://github.com/"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.90"
+          components: llvm-tools-preview
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Cache Rust dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-coverage-${{ matrix.package }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-coverage-${{ matrix.package }}-
+            ${{ runner.os }}-cargo-coverage-
+
+      - name: Build sqry binary for integration tests
+        if: matrix.package == 'sqry-lsp' || matrix.package == 'sqry-cli'
+        run: |
+          # Some integration tests in sqry-lsp and sqry-cli shell out to the
+          # sqry binary (e.g., handlers_smoke, auto_rebuild). cargo llvm-cov
+          # --package only builds that package, not the sqry binary.
+          cargo build --bin sqry
+
+      - name: Remove pre-built graph snapshots
+        if: matrix.package == 'sqry-mcp'
+        run: |
+          # Pre-built snapshots contain absolute paths from the dev machine.
+          # Remove them so tests build fresh snapshots with CI-correct paths.
+          find . -path '*/fixtures/*/.sqry/graph/snapshot.sqry' -delete
+          find . -path '*/fixtures/*/.sqry/graph/manifest.json' -delete
+
+      - name: Run coverage for ${{ matrix.package }}
+        env:
+          RUST_MIN_STACK: "8388608"
+        run: |
+          cargo llvm-cov --package ${{ matrix.package }} --lcov --output-path ${{ matrix.package }}.lcov
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ matrix.package }}
+          path: ${{ matrix.package }}.lcov
+          retention-days: 7
+
+  coverage-summary:
+    name: Coverage Summary
+    runs-on: ubuntu-latest
+    needs: coverage
+    steps:
+      - name: Download all coverage artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: coverage-*
+          merge-multiple: true
+
+      - name: Install lcov
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq lcov
+
+      - name: Merge LCOV files and check threshold
+        run: |
+          # List downloaded LCOV files
+          echo "Downloaded LCOV files:"
+          ls -la *.lcov
+
+          # Merge all LCOV files into one
+          MERGE_ARGS=""
+          for f in *.lcov; do
+            MERGE_ARGS="$MERGE_ARGS --add-tracefile $f"
+          done
+          lcov $MERGE_ARGS --output-file merged.lcov --ignore-errors inconsistent
+
+          # Generate summary
+          lcov --summary merged.lcov --ignore-errors inconsistent 2>&1 | tee coverage-summary.txt
+
+          # Extract line coverage percentage
+          COVERAGE=$(awk -F'[:%]' '/lines\.+:/ { gsub(/ /, "", $2); print $2 }' coverage-summary.txt)
+
+          if [ -z "$COVERAGE" ]; then
+            echo "::error::Failed to parse coverage from lcov summary"
+            cat coverage-summary.txt
+            exit 1
+          fi
+
+          THRESHOLD=60
+
+          echo "## Coverage Report" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Total Line Coverage: ${COVERAGE}%**" >> $GITHUB_STEP_SUMMARY
+          echo "**Threshold: ${THRESHOLD}%**" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Per-package breakdown
+          echo "### Per-Package Coverage" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Package | Lines |" >> $GITHUB_STEP_SUMMARY
+          echo "|---------|-------|" >> $GITHUB_STEP_SUMMARY
+          for f in *.lcov; do
+            PKG=$(basename "$f" .lcov)
+            PKG_COV=$(lcov --summary "$f" --ignore-errors inconsistent 2>&1 | awk -F'[:%]' '/lines\.+:/ { gsub(/ /, "", $2); print $2 }')
+            echo "| $PKG | ${PKG_COV}% |" >> $GITHUB_STEP_SUMMARY
+          done
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          cat coverage-summary.txt >> $GITHUB_STEP_SUMMARY
+
+          # Check threshold
+          BELOW_THRESHOLD=$(awk -v cov="$COVERAGE" -v thresh="$THRESHOLD" 'BEGIN { print (cov < thresh) ? 1 : 0 }')
+
+          if [ "$BELOW_THRESHOLD" = "1" ]; then
+            echo "::error::Coverage ${COVERAGE}% is below threshold ${THRESHOLD}%"
+            exit 1
+          else
+            echo "Coverage ${COVERAGE}% meets threshold ${THRESHOLD}%"
+          fi

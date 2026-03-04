@@ -1,0 +1,11 @@
+PackageIdentifier: VerivusOSS.sqry
+PackageVersion: @VERSION@
+InstallerType: portable
+Commands:
+  - sqry
+Installers:
+  - Architecture: x64
+    InstallerUrl: https://github.com/@REPO@/releases/download/@VERSION_TAG@/sqry-windows-x86_64.exe
+    InstallerSha256: @SHA_WINDOWS_X86_64@
+ManifestType: installer
+ManifestVersion: 1.6.0

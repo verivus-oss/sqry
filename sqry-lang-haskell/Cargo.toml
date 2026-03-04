@@ -1,0 +1,26 @@
+[package]
+name = "sqry-lang-haskell"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Haskell language plugin for sqry"
+
+[dependencies]
+sqry-core = { path = "../sqry-core" }
+anyhow.workspace = true
+log.workspace = true
+tree-sitter.workspace = true
+tree-sitter-haskell.workspace = true
+streaming-iterator.workspace = true
+
+[dev-dependencies]
+sqry-tree-sitter-fuzz-support = { path = "../sqry-tree-sitter-fuzz-support" }
+sqry-core = { path = "../sqry-core", features = ["test-support"] }
+tempfile.workspace = true
+
+[features]
+default = ["has_relations"]
+has_relations = []

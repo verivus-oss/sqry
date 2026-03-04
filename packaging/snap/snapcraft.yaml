@@ -1,0 +1,31 @@
+name: sqry
+base: core24
+version: "@VERSION@"
+summary: Semantic code search tool
+description: |
+  sqry is a semantic code search tool with graph-aware relation queries,
+  dependency impact analysis, and code navigation helpers.
+grade: stable
+confinement: classic
+
+apps:
+  sqry:
+    command: bin/sqry
+  sqry-mcp:
+    command: bin/sqry-mcp
+  sqry-lsp:
+    command: bin/sqry-lsp
+
+parts:
+  sqry:
+    plugin: rust
+    source: ../..
+    build-packages:
+      - pkg-config
+      - libssl-dev
+    override-build: |
+      craftctl default
+      cargo build --release -p sqry-cli -p sqry-mcp -p sqry-lsp
+      install -Dm755 target/release/sqry "$CRAFT_PART_INSTALL/bin/sqry"
+      install -Dm755 target/release/sqry-mcp "$CRAFT_PART_INSTALL/bin/sqry-mcp"
+      install -Dm755 target/release/sqry-lsp "$CRAFT_PART_INSTALL/bin/sqry-lsp"

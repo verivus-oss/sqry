@@ -1,0 +1,14 @@
+[package]
+name = "sqry-test-support"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+sqry-core = { path = "../sqry-core" }
+tree-sitter.workspace = true
+
+[dev-dependencies]
+sqry-tree-sitter-support = { path = "../sqry-tree-sitter-support" }

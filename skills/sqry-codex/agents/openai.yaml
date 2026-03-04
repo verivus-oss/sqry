@@ -1,0 +1,4 @@
+interface:
+  display_name: "sqry Codex"
+  short_description: "Codex workflow guidance for sqry"
+  default_prompt: "Use $sqry-codex to follow this repository's Codex workflow, checks, and handoff expectations."

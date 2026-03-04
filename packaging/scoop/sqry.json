@@ -1,0 +1,23 @@
+{
+  "version": "@VERSION@",
+  "description": "Semantic code search tool",
+  "homepage": "https://sqry.dev",
+  "license": "MIT",
+  "architecture": {
+    "64bit": {
+      "url": "https://github.com/@REPO@/releases/download/@VERSION_TAG@/sqry-windows-x86_64.exe",
+      "hash": "@SHA_WINDOWS_X86_64@"
+    }
+  },
+  "bin": "sqry-windows-x86_64.exe",
+  "checkver": {
+    "github": "https://github.com/@REPO@"
+  },
+  "autoupdate": {
+    "architecture": {
+      "64bit": {
+        "url": "https://github.com/@REPO@/releases/download/v$version/sqry-windows-x86_64.exe"
+      }
+    }
+  }
+}

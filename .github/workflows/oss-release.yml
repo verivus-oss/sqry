@@ -1,0 +1,1574 @@
+# =============================================================================
+# OSS Release Distribution Workflow
+#
+# Builds, signs, and publishes release artifacts from the PUBLIC staging repo.
+# Multi-platform, multi-binary architecture with SLSA Level 2 provenance:
+#
+#   Build jobs (no secrets, except OIDC for Cosign):
+#     build-linux        — Linux x86_64: sqry, sqry-mcp, sqry-lsp
+#     build-linux-arm64  — Linux ARM64: sqry, sqry-mcp, sqry-lsp
+#     build-windows      — Windows x86_64: sqry, sqry-mcp, sqry-lsp
+#     build-macos-arm64  — macOS ARM64: sqry, sqry-mcp, sqry-lsp
+#     build-vscode       — VSCode extension (.vsix)
+#
+#   SLSA provenance jobs (reusable workflow from slsa-framework):
+#     provenance-linux       — SLSA Level 2 for Linux binaries
+#     provenance-linux-arm64 — SLSA Level 2 for Linux ARM64 binaries
+#     provenance-windows     — SLSA Level 2 for Windows binaries
+#     provenance-macos-arm64 — SLSA Level 2 for macOS ARM64 binaries
+#     provenance-vscode      — SLSA Level 2 for VSCode extension
+#
+#   Publish job (environment-gated, no rebuild):
+#     publish — Downloads all artifacts, verifies checksums + Cosign signatures,
+#               creates GitHub Release on verivus-oss/sqry
+#
+# Signing Identity (Cosign OIDC / Sigstore keyless):
+#   Certificate identity encodes this workflow's path and the EXACT version tag ref.
+#   Users verify with:
+#     cosign verify-blob \
+#       --bundle sqry-linux-x86_64.bundle \
+#       --certificate-identity-regexp \
+#         "^https://github\.com/verivus-oss/sqry/\.github/workflows/oss-release\.yml@refs/tags/vX\.Y\.Z$" \
+#       --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+#       sqry-linux-x86_64
+#
+# IMPORTANT: This workflow lives in and MUST be dispatched from verivus-oss/sqry.
+#   The Cosign certificate identity encodes the repository where the workflow runs.
+#   Dispatching from any other repo (e.g. a fork or the private internal repo) will
+#   produce a cert identity mismatch and signature verification will fail for all users.
+#
+#   In the GitHub UI: verivus-oss/sqry -> Actions -> OSS Release Distribution ->
+#     Run workflow -> select the release tag ref (not a branch).
+#   The workflow validates that github.ref_type == 'tag' and github.ref_name == inputs.version
+#   before building anything. If dispatched from a branch, it fails immediately.
+#
+# Trigger: Manual via workflow_dispatch only (must select the release tag as the ref)
+# =============================================================================
+
+name: OSS Release Distribution
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag to release (e.g., v4.2.0) — dispatch from this tag ref'
+        required: true
+        type: string
+
+concurrency:
+  group: oss-release
+  cancel-in-progress: false
+
+jobs:
+  # ===========================================================================
+  # Job: Build + Sign — Linux x86_64
+  # Produces: sqry-linux-x86_64, sqry-mcp-linux-x86_64, sqry-lsp-linux-x86_64
+  # ===========================================================================
+  build-linux:
+    name: Build + Sign — Linux x86_64
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write  # Required for Cosign OIDC keyless signing
+    outputs:
+      subjects: ${{ steps.hash.outputs.subjects }}
+
+    steps:
+      # --- Step 1: Validate version tag format ---
+      - name: Validate version tag format
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          if ! echo "$VERSION" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::Invalid version format: '$VERSION'. Must match v<MAJOR>.<MINOR>.<PATCH>"
+            exit 1
+          fi
+          echo "Version format '$VERSION' validated"
+
+      # --- Step 1b: Enforce tag-ref dispatch ---
+      # Cosign certificate identity encodes github.ref — must be refs/tags/<version>.
+      # If dispatched from a branch, the cert identity will not match the version-specific
+      # regex used in publish verification, causing the publish job to fail. Fail early.
+      - name: Enforce dispatch from tag ref
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          if [ "$REF_TYPE" != "tag" ]; then
+            echo "::error::This workflow must be dispatched from a tag ref, not a branch."
+            echo "::error::Current ref type: '$REF_TYPE', ref name: '$REF_NAME'"
+            echo "::error::In the GitHub UI, select the '$VERSION' tag from the 'Run workflow' branch/tag dropdown."
+            exit 1
+          fi
+          if [ "$REF_NAME" != "$VERSION" ]; then
+            echo "::error::Dispatch ref '$REF_NAME' does not match requested version '$VERSION'."
+            echo "::error::Select the '$VERSION' tag from the branch/tag dropdown when dispatching."
+            exit 1
+          fi
+          echo "Dispatch ref validated: refs/tags/${VERSION}"
+
+      # --- Step 2: Free disk space ---
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /opt/hostedtoolcache/go \
+            /opt/hostedtoolcache/Python /opt/hostedtoolcache/Ruby \
+            /usr/local/share/powershell /usr/share/swift
+          df -h /
+
+      # --- Step 3: Checkout public repo at tag ---
+      # This workflow runs from verivus-oss/sqry — checkout is from the same repo.
+      - name: Checkout public repo at tag
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.version }}
+          fetch-depth: 1
+          path: source
+
+      # --- Step 4: Verify exact tag checkout ---
+      - name: Verify tag checkout
+        working-directory: source
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          if ! git describe --tags --exact-match 2>/dev/null | grep -qE "^${VERSION}$"; then
+            echo "::error::Checkout does not match tag '$VERSION'"
+            exit 1
+          fi
+          echo "Tag '$VERSION' verified at $(git rev-parse --short HEAD)"
+
+      # --- Step 5: Verify no internal org references ---
+      - name: Verify no internal org references
+        working-directory: source
+        run: |
+          echo "Scanning for internal org references..."
+          FAIL=0
+          # Exclude .github/ — oss-release.yml itself contains verivus-oss references
+          # (correct end-state values) that sync-to-public.sh does not rewrite.
+          # Scanning the workflow file would produce false positives.
+          if grep -rqna 'verivusai-labs' . --exclude-dir='.github' 2>/dev/null; then
+            echo "::error::Source contains verivusai-labs references"
+            grep -rna 'verivusai-labs' . --exclude-dir='.github' 2>/dev/null | head -20
+            FAIL=1
+          fi
+          if grep -rqna 'verivus-oss' . --exclude-dir='.github' 2>/dev/null; then
+            echo "::error::Source contains verivus-oss references"
+            grep -rna 'verivus-oss' . --exclude-dir='.github' 2>/dev/null | head -20
+            FAIL=1
+          fi
+          if grep -rqna '/srv/repos/internal' . --exclude-dir='.github' 2>/dev/null; then
+            echo "::error::Source contains internal absolute paths"
+            grep -rna '/srv/repos/internal' . --exclude-dir='.github' 2>/dev/null | head -20
+            FAIL=1
+          fi
+          if [ "$FAIL" -ne 0 ]; then
+            echo "::error::Internal reference check failed — aborting build"
+            exit 1
+          fi
+          echo "No internal org references found"
+
+      # --- Step 6: Install Rust toolchain ---
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        with:
+          toolchain: "1.90"
+          targets: x86_64-unknown-linux-gnu
+
+      # --- Step 7: Cache Rust dependencies ---
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
+        with:
+          workspaces: source
+          key: x86_64-unknown-linux-gnu
+
+      # --- Step 8: Build all release binaries ---
+      - name: Build release binaries
+        working-directory: source
+        env:
+          CARGO_BUILD_JOBS: "2"
+          RUSTFLAGS: "-Csplit-debuginfo=unpacked"
+        run: |
+          cargo build --release \
+            --target x86_64-unknown-linux-gnu \
+            -p sqry-cli \
+            -p sqry-mcp \
+            -p sqry-lsp
+          echo "Release binaries built successfully"
+          ls -lh target/x86_64-unknown-linux-gnu/release/sqry \
+                  target/x86_64-unknown-linux-gnu/release/sqry-mcp \
+                  target/x86_64-unknown-linux-gnu/release/sqry-lsp
+
+      # --- Step 9: Package binaries ---
+      - name: Package binaries
+        run: |
+          mkdir -p dist
+          cp source/target/x86_64-unknown-linux-gnu/release/sqry     dist/sqry-linux-x86_64
+          cp source/target/x86_64-unknown-linux-gnu/release/sqry-mcp dist/sqry-mcp-linux-x86_64
+          cp source/target/x86_64-unknown-linux-gnu/release/sqry-lsp dist/sqry-lsp-linux-x86_64
+          chmod 755 dist/*
+
+          # Package NL model assets (ships by default for `sqry ask`)
+          if [[ -d source/sqry-nl/models ]]; then
+            mkdir -p dist/models
+            cp source/sqry-nl/models/*.onnx source/sqry-nl/models/*.json source/sqry-nl/models/version.txt dist/models/
+            tar czf dist/sqry-models.tar.gz -C dist models
+            rm -rf dist/models
+            echo "NL model archive:"
+            ls -lh dist/sqry-models.tar.gz
+          fi
+
+          echo "Packaged binaries:"
+          ls -lh dist/
+
+      # --- Step 10: Install Cosign ---
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+
+      # --- Step 11: Sign all binaries with Cosign OIDC (keyless) ---
+      - name: Sign binaries with Cosign
+        working-directory: dist
+        run: |
+          echo "Signing all Linux x86_64 binaries with Cosign (keyless OIDC)..."
+          for binary in sqry-linux-x86_64 sqry-mcp-linux-x86_64 sqry-lsp-linux-x86_64 sqry-models.tar.gz; do
+            [ -f "$binary" ] || continue
+            echo "  Signing ${binary}..."
+            cosign sign-blob --yes \
+              --bundle "${binary}.bundle" \
+              "${binary}"
+            echo "  Signed: ${binary}.bundle"
+          done
+          echo "All Linux binaries signed"
+
+      # --- Step 12: Generate checksums and SLSA subjects ---
+      - name: Generate checksums and SLSA subjects
+        id: hash
+        working-directory: dist
+        run: |
+          LINUX_ASSETS=(sqry-linux-x86_64 sqry-mcp-linux-x86_64 sqry-lsp-linux-x86_64)
+          [ -f sqry-models.tar.gz ] && LINUX_ASSETS+=(sqry-models.tar.gz)
+          sha256sum "${LINUX_ASSETS[@]}" > CHECKSUMS-linux.sha256
+          echo "Checksums for Linux x86_64:"
+          cat CHECKSUMS-linux.sha256
+
+          subjects=""
+          for binary in "${LINUX_ASSETS[@]}"; do
+            digest=$(sha256sum "$binary" | awk '{print $1}')
+            subject_json=$(jq -n --arg name "$binary" --arg hash "$digest" \
+              '{name: $name, digest: {sha256: $hash}}')
+            subject=$(printf '%s' "$subject_json" | base64 | tr -d '\n')
+            subjects="${subjects}${subject}"$'\n'
+            echo "SLSA subject: $binary (sha256: ${digest:0:16}...)"
+          done
+          subjects="${subjects%$'\n'}"
+          DELIM="EOF_${RANDOM}_${RANDOM}"
+          echo "subjects<<${DELIM}" >> "$GITHUB_OUTPUT"
+          echo "$subjects" >> "$GITHUB_OUTPUT"
+          echo "${DELIM}" >> "$GITHUB_OUTPUT"
+
+      # --- Step 13: Upload signed artifacts ---
+      - name: Upload signed artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: signed-linux
+          path: dist/
+          retention-days: 7
+          if-no-files-found: error
+
+  # ===========================================================================
+  # Job: Build + Sign — Linux ARM64
+  # Produces: sqry-linux-arm64, sqry-mcp-linux-arm64, sqry-lsp-linux-arm64
+  # ===========================================================================
+  build-linux-arm64:
+    name: Build + Sign — Linux ARM64
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      subjects: ${{ steps.hash.outputs.subjects }}
+
+    steps:
+      - name: Validate version tag format
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          if ! echo "$VERSION" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::Invalid version format: '$VERSION'. Must match v<MAJOR>.<MINOR>.<PATCH>"
+            exit 1
+          fi
+          echo "Version format '$VERSION' validated"
+
+      - name: Enforce dispatch from tag ref
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          if [ "$REF_TYPE" != "tag" ]; then
+            echo "::error::This workflow must be dispatched from a tag ref, not a branch."
+            echo "::error::Current ref type: '$REF_TYPE', ref name: '$REF_NAME'"
+            echo "::error::In the GitHub UI, select the '$VERSION' tag from the 'Run workflow' branch/tag dropdown."
+            exit 1
+          fi
+          if [ "$REF_NAME" != "$VERSION" ]; then
+            echo "::error::Dispatch ref '$REF_NAME' does not match requested version '$VERSION'."
+            echo "::error::Select the '$VERSION' tag from the branch/tag dropdown when dispatching."
+            exit 1
+          fi
+          echo "Dispatch ref validated: refs/tags/${VERSION}"
+
+      - name: Checkout public repo at tag
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.version }}
+          fetch-depth: 1
+          path: source
+
+      - name: Verify tag checkout
+        working-directory: source
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          if ! git describe --tags --exact-match 2>/dev/null | grep -qE "^${VERSION}$"; then
+            echo "::error::Checkout does not match tag '$VERSION'"
+            exit 1
+          fi
+          echo "Tag '$VERSION' verified at $(git rev-parse --short HEAD)"
+
+      - name: Verify no internal org references
+        working-directory: source
+        run: |
+          echo "Scanning for internal org references..."
+          FAIL=0
+          if grep -rqna 'verivusai-labs' . --exclude-dir='.github' 2>/dev/null; then
+            echo "::error::Source contains verivusai-labs references"
+            grep -rna 'verivusai-labs' . --exclude-dir='.github' 2>/dev/null | head -20
+            FAIL=1
+          fi
+          if grep -rqna 'verivus-oss' . --exclude-dir='.github' 2>/dev/null; then
+            echo "::error::Source contains verivus-oss references"
+            grep -rna 'verivus-oss' . --exclude-dir='.github' 2>/dev/null | head -20
+            FAIL=1
+          fi
+          if grep -rqna '/srv/repos/internal' . --exclude-dir='.github' 2>/dev/null; then
+            echo "::error::Source contains internal absolute paths"
+            grep -rna '/srv/repos/internal' . --exclude-dir='.github' 2>/dev/null | head -20
+            FAIL=1
+          fi
+          if [ "$FAIL" -ne 0 ]; then
+            echo "::error::Internal reference check failed — aborting build"
+            exit 1
+          fi
+          echo "No internal org references found"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        with:
+          toolchain: "1.90"
+          targets: aarch64-unknown-linux-gnu
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
+        with:
+          workspaces: source
+          key: aarch64-unknown-linux-gnu
+
+      - name: Build release binaries
+        working-directory: source
+        env:
+          CARGO_BUILD_JOBS: "2"
+          RUSTFLAGS: "-Csplit-debuginfo=unpacked"
+        run: |
+          cargo build --release \
+            --target aarch64-unknown-linux-gnu \
+            -p sqry-cli \
+            -p sqry-mcp \
+            -p sqry-lsp
+          echo "Release binaries built successfully"
+          ls -lh target/aarch64-unknown-linux-gnu/release/sqry \
+                  target/aarch64-unknown-linux-gnu/release/sqry-mcp \
+                  target/aarch64-unknown-linux-gnu/release/sqry-lsp
+
+      - name: Package binaries
+        run: |
+          mkdir -p dist
+          cp source/target/aarch64-unknown-linux-gnu/release/sqry     dist/sqry-linux-arm64
+          cp source/target/aarch64-unknown-linux-gnu/release/sqry-mcp dist/sqry-mcp-linux-arm64
+          cp source/target/aarch64-unknown-linux-gnu/release/sqry-lsp dist/sqry-lsp-linux-arm64
+          chmod 755 dist/*
+          echo "Packaged binaries:"
+          ls -lh dist/
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+
+      - name: Sign binaries with Cosign
+        working-directory: dist
+        run: |
+          echo "Signing all Linux ARM64 binaries with Cosign (keyless OIDC)..."
+          for binary in sqry-linux-arm64 sqry-mcp-linux-arm64 sqry-lsp-linux-arm64; do
+            echo "  Signing ${binary}..."
+            cosign sign-blob --yes \
+              --bundle "${binary}.bundle" \
+              "${binary}"
+            echo "  Signed: ${binary}.bundle"
+          done
+          echo "All Linux ARM64 binaries signed"
+
+      - name: Generate checksums and SLSA subjects
+        id: hash
+        working-directory: dist
+        run: |
+          LINUX_ARM64_ASSETS=(sqry-linux-arm64 sqry-mcp-linux-arm64 sqry-lsp-linux-arm64)
+          sha256sum "${LINUX_ARM64_ASSETS[@]}" > CHECKSUMS-linux-arm64.sha256
+          echo "Checksums for Linux ARM64:"
+          cat CHECKSUMS-linux-arm64.sha256
+
+          subjects=""
+          for binary in "${LINUX_ARM64_ASSETS[@]}"; do
+            digest=$(sha256sum "$binary" | awk '{print $1}')
+            subject_json=$(jq -n --arg name "$binary" --arg hash "$digest" \
+              '{name: $name, digest: {sha256: $hash}}')
+            subject=$(printf '%s' "$subject_json" | base64 | tr -d '\n')
+            subjects="${subjects}${subject}"$'\n'
+            echo "SLSA subject: $binary (sha256: ${digest:0:16}...)"
+          done
+          subjects="${subjects%$'\n'}"
+          DELIM="EOF_${RANDOM}_${RANDOM}"
+          echo "subjects<<${DELIM}" >> "$GITHUB_OUTPUT"
+          echo "$subjects" >> "$GITHUB_OUTPUT"
+          echo "${DELIM}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload signed artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: signed-linux-arm64
+          path: dist/
+          retention-days: 7
+          if-no-files-found: error
+
+  # ===========================================================================
+  # Job: Build + Sign — Windows x86_64
+  # ===========================================================================
+  build-windows:
+    name: Build + Sign — Windows x86_64
+    runs-on: windows-latest
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      subjects: ${{ steps.hash.outputs.subjects }}
+
+    steps:
+      - name: Validate version tag format
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          if ! echo "$VERSION" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::Invalid version format: '$VERSION'. Must match v<MAJOR>.<MINOR>.<PATCH>"
+            exit 1
+          fi
+          echo "Version format '$VERSION' validated"
+
+      - name: Enforce dispatch from tag ref
+        shell: bash
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          if [ "$REF_TYPE" != "tag" ]; then
+            echo "::error::This workflow must be dispatched from a tag ref, not a branch."
+            echo "::error::Current ref type: '$REF_TYPE', ref name: '$REF_NAME'"
+            exit 1
+          fi
+          if [ "$REF_NAME" != "$VERSION" ]; then
+            echo "::error::Dispatch ref '$REF_NAME' does not match requested version '$VERSION'."
+            exit 1
+          fi
+          echo "Dispatch ref validated: refs/tags/${VERSION}"
+
+      - name: Checkout public repo at tag
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.version }}
+          fetch-depth: 1
+          path: source
+
+      - name: Verify tag checkout
+        working-directory: source
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          if ! git describe --tags --exact-match 2>/dev/null | grep -qE "^${VERSION}$"; then
+            echo "::error::Checkout does not match tag '$VERSION'"
+            exit 1
+          fi
+          echo "Tag '$VERSION' verified at $(git rev-parse --short HEAD)"
+
+      - name: Verify no internal org references
+        working-directory: source
+        shell: bash
+        run: |
+          echo "Scanning for internal org references..."
+          FAIL=0
+          # Exclude .github/ — oss-release.yml itself contains verivus-oss references
+          # (correct end-state values) that sync-to-public.sh does not rewrite.
+          # Scanning the workflow file would produce false positives.
+          if grep -rqna 'verivusai-labs' . --exclude-dir='.github' 2>/dev/null; then
+            echo "::error::Source contains verivusai-labs references"
+            grep -rna 'verivusai-labs' . --exclude-dir='.github' 2>/dev/null | head -20
+            FAIL=1
+          fi
+          if grep -rqna 'verivus-oss' . --exclude-dir='.github' 2>/dev/null; then
+            echo "::error::Source contains verivus-oss references"
+            grep -rna 'verivus-oss' . --exclude-dir='.github' 2>/dev/null | head -20
+            FAIL=1
+          fi
+          if grep -rqna '/srv/repos/internal' . --exclude-dir='.github' 2>/dev/null; then
+            echo "::error::Source contains internal absolute paths"
+            grep -rna '/srv/repos/internal' . --exclude-dir='.github' 2>/dev/null | head -20
+            FAIL=1
+          fi
+          if [ "$FAIL" -ne 0 ]; then
+            echo "::error::Internal reference check failed — aborting build"
+            exit 1
+          fi
+          echo "No internal org references found"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        with:
+          toolchain: "1.90"
+          targets: x86_64-pc-windows-msvc
+
+      - name: Configure cargo git CLI
+        shell: bash
+        run: |
+          mkdir -p ~/.cargo
+          echo '[net]' >> ~/.cargo/config.toml
+          echo 'git-fetch-with-cli = true' >> ~/.cargo/config.toml
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
+        with:
+          workspaces: source
+          key: x86_64-pc-windows-msvc
+
+      - name: Build release binaries
+        working-directory: source
+        shell: bash
+        env:
+          CARGO_BUILD_JOBS: "2"
+        run: |
+          cargo build --release \
+            --target x86_64-pc-windows-msvc \
+            -p sqry-cli \
+            -p sqry-mcp \
+            -p sqry-lsp
+          echo "Release binaries built successfully"
+
+      - name: Package binaries
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp source/target/x86_64-pc-windows-msvc/release/sqry.exe     dist/sqry-windows-x86_64.exe
+          cp source/target/x86_64-pc-windows-msvc/release/sqry-mcp.exe dist/sqry-mcp-windows-x86_64.exe
+          cp source/target/x86_64-pc-windows-msvc/release/sqry-lsp.exe dist/sqry-lsp-windows-x86_64.exe
+
+          # Package NL model assets (ships by default for `sqry ask`)
+          if [[ -d source/sqry-nl/models ]]; then
+            mkdir -p dist/models
+            cp source/sqry-nl/models/*.onnx source/sqry-nl/models/*.json source/sqry-nl/models/version.txt dist/models/
+            tar czf dist/sqry-models.tar.gz -C dist models
+            rm -rf dist/models
+            echo "NL model archive:"
+            ls -lh dist/sqry-models.tar.gz
+          fi
+
+          echo "Packaged binaries:"
+          ls -lh dist/
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+
+      - name: Sign binaries with Cosign
+        working-directory: dist
+        shell: bash
+        run: |
+          echo "Signing all Windows x86_64 binaries with Cosign (keyless OIDC)..."
+          for binary in sqry-windows-x86_64.exe sqry-mcp-windows-x86_64.exe sqry-lsp-windows-x86_64.exe; do
+            echo "  Signing ${binary}..."
+            cosign sign-blob --yes \
+              --bundle "${binary}.bundle" \
+              "${binary}"
+            echo "  Signed: ${binary}.bundle"
+          done
+          echo "All Windows binaries signed"
+
+      - name: Generate checksums and SLSA subjects
+        id: hash
+        working-directory: dist
+        shell: bash
+        run: |
+          sha256sum sqry-windows-x86_64.exe sqry-mcp-windows-x86_64.exe sqry-lsp-windows-x86_64.exe \
+            > CHECKSUMS-windows.sha256
+          echo "Checksums for Windows x86_64:"
+          cat CHECKSUMS-windows.sha256
+
+          subjects=""
+          for binary in sqry-windows-x86_64.exe sqry-mcp-windows-x86_64.exe sqry-lsp-windows-x86_64.exe; do
+            digest=$(sha256sum "$binary" | awk '{print $1}')
+            subject_json=$(jq -n --arg name "$binary" --arg hash "$digest" \
+              '{name: $name, digest: {sha256: $hash}}')
+            subject=$(printf '%s' "$subject_json" | base64 | tr -d '\n')
+            subjects="${subjects}${subject}"$'\n'
+            echo "SLSA subject: $binary (sha256: ${digest:0:16}...)"
+          done
+          subjects="${subjects%$'\n'}"
+          DELIM="EOF_${RANDOM}_${RANDOM}"
+          echo "subjects<<${DELIM}" >> "$GITHUB_OUTPUT"
+          echo "$subjects" >> "$GITHUB_OUTPUT"
+          echo "${DELIM}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload signed artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: signed-windows
+          path: dist/
+          retention-days: 7
+          if-no-files-found: error
+
+  # ===========================================================================
+  # Job: Build + Sign — macOS ARM64 (Apple Silicon)
+  # NOTE: macOS Intel (x86_64) is intentionally excluded per release scope.
+  # ===========================================================================
+  build-macos-arm64:
+    name: Build + Sign — macOS ARM64
+    runs-on: macos-14
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      subjects: ${{ steps.hash.outputs.subjects }}
+
+    steps:
+      - name: Validate version tag format
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          if ! echo "$VERSION" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::Invalid version format: '$VERSION'. Must match v<MAJOR>.<MINOR>.<PATCH>"
+            exit 1
+          fi
+          echo "Version format '$VERSION' validated"
+
+      - name: Enforce dispatch from tag ref
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          if [ "$REF_TYPE" != "tag" ]; then
+            echo "::error::This workflow must be dispatched from a tag ref, not a branch."
+            echo "::error::Current ref type: '$REF_TYPE', ref name: '$REF_NAME'"
+            exit 1
+          fi
+          if [ "$REF_NAME" != "$VERSION" ]; then
+            echo "::error::Dispatch ref '$REF_NAME' does not match requested version '$VERSION'."
+            exit 1
+          fi
+          echo "Dispatch ref validated: refs/tags/${VERSION}"
+
+      - name: Free disk space
+        run: |
+          # Remove only non-toolchain large directories.
+          # We intentionally preserve /Library/Developer/CommandLineTools and Xcode
+          # because the Rust aarch64-apple-darwin target requires the SDK linker.
+          sudo rm -rf ~/Library/Caches/Homebrew || true
+          sudo rm -rf /opt/hostedtoolcache/go || true
+          sudo rm -rf /opt/hostedtoolcache/Python || true
+          sudo rm -rf /opt/hostedtoolcache/Ruby || true
+          df -h /
+
+      - name: Checkout public repo at tag
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.version }}
+          fetch-depth: 1
+          path: source
+
+      - name: Verify tag checkout
+        working-directory: source
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          if ! git describe --tags --exact-match 2>/dev/null | grep -qE "^${VERSION}$"; then
+            echo "::error::Checkout does not match tag '$VERSION'"
+            exit 1
+          fi
+          echo "Tag '$VERSION' verified at $(git rev-parse --short HEAD)"
+
+      - name: Verify no internal org references
+        working-directory: source
+        run: |
+          echo "Scanning for internal org references..."
+          FAIL=0
+          # Exclude .github/ — oss-release.yml itself contains verivus-oss references
+          # (correct end-state values) that sync-to-public.sh does not rewrite.
+          # Scanning the workflow file would produce false positives.
+          if grep -rqna 'verivusai-labs' . --exclude-dir='.github' 2>/dev/null; then
+            echo "::error::Source contains verivusai-labs references"
+            grep -rna 'verivusai-labs' . --exclude-dir='.github' 2>/dev/null | head -20
+            FAIL=1
+          fi
+          if grep -rqna 'verivus-oss' . --exclude-dir='.github' 2>/dev/null; then
+            echo "::error::Source contains verivus-oss references"
+            grep -rna 'verivus-oss' . --exclude-dir='.github' 2>/dev/null | head -20
+            FAIL=1
+          fi
+          if grep -rqna '/srv/repos/internal' . --exclude-dir='.github' 2>/dev/null; then
+            echo "::error::Source contains internal absolute paths"
+            grep -rna '/srv/repos/internal' . --exclude-dir='.github' 2>/dev/null | head -20
+            FAIL=1
+          fi
+          if [ "$FAIL" -ne 0 ]; then
+            echo "::error::Internal reference check failed — aborting build"
+            exit 1
+          fi
+          echo "No internal org references found"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        with:
+          toolchain: "1.90"
+          targets: aarch64-apple-darwin
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
+        with:
+          workspaces: source
+          key: aarch64-apple-darwin
+
+      - name: Build release binaries
+        working-directory: source
+        env:
+          CARGO_BUILD_JOBS: "2"
+          RUSTFLAGS: "-Csplit-debuginfo=unpacked"
+        run: |
+          cargo build --release \
+            --target aarch64-apple-darwin \
+            -p sqry-cli \
+            -p sqry-mcp \
+            -p sqry-lsp
+          echo "Release binaries built successfully"
+
+      - name: Package binaries
+        run: |
+          mkdir -p dist
+          cp source/target/aarch64-apple-darwin/release/sqry     dist/sqry-macos-arm64
+          cp source/target/aarch64-apple-darwin/release/sqry-mcp dist/sqry-mcp-macos-arm64
+          cp source/target/aarch64-apple-darwin/release/sqry-lsp dist/sqry-lsp-macos-arm64
+          chmod 755 dist/*
+
+          # Package NL model assets (ships by default for `sqry ask`)
+          if [[ -d source/sqry-nl/models ]]; then
+            mkdir -p dist/models
+            cp source/sqry-nl/models/*.onnx source/sqry-nl/models/*.json source/sqry-nl/models/version.txt dist/models/
+            tar czf dist/sqry-models.tar.gz -C dist models
+            rm -rf dist/models
+            echo "NL model archive:"
+            ls -lh dist/sqry-models.tar.gz
+          fi
+
+          ls -lh dist/
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+
+      - name: Sign binaries with Cosign
+        working-directory: dist
+        run: |
+          echo "Signing all macOS ARM64 binaries with Cosign (keyless OIDC)..."
+          for binary in sqry-macos-arm64 sqry-mcp-macos-arm64 sqry-lsp-macos-arm64; do
+            echo "  Signing ${binary}..."
+            cosign sign-blob --yes \
+              --bundle "${binary}.bundle" \
+              "${binary}"
+            echo "  Signed: ${binary}.bundle"
+          done
+          echo "All macOS ARM64 binaries signed"
+
+      # NOTE: Use portable tr -d '\n' to strip line breaks from base64 output,
+      # since BSD base64 (macOS) wraps at 76 chars by default and -w0 is GNU-only.
+      - name: Generate checksums and SLSA subjects
+        id: hash
+        working-directory: dist
+        run: |
+          shasum -a 256 sqry-macos-arm64 sqry-mcp-macos-arm64 sqry-lsp-macos-arm64 \
+            > CHECKSUMS-macos-arm64.sha256
+          echo "Checksums for macOS ARM64:"
+          cat CHECKSUMS-macos-arm64.sha256
+
+          subjects=""
+          for binary in sqry-macos-arm64 sqry-mcp-macos-arm64 sqry-lsp-macos-arm64; do
+            digest=$(shasum -a 256 "$binary" | awk '{print $1}')
+            subject_json=$(jq -n --arg name "$binary" --arg hash "$digest" \
+              '{name: $name, digest: {sha256: $hash}}')
+            subject=$(printf '%s' "$subject_json" | base64 | tr -d '\n')
+            subjects="${subjects}${subject}"$'\n'
+            echo "SLSA subject: $binary (sha256: ${digest:0:16}...)"
+          done
+          subjects="${subjects%$'\n'}"
+          DELIM="EOF_${RANDOM}_${RANDOM}"
+          echo "subjects<<${DELIM}" >> "$GITHUB_OUTPUT"
+          echo "$subjects" >> "$GITHUB_OUTPUT"
+          echo "${DELIM}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload signed artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: signed-macos-arm64
+          path: dist/
+          retention-days: 7
+          if-no-files-found: error
+
+  # ===========================================================================
+  # Job: Build + Sign — VSCode Extension
+  # Produces: sqry-vscode-<version>.vsix
+  # ===========================================================================
+  build-vscode:
+    name: Build + Sign — VSCode Extension
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      subjects: ${{ steps.hash.outputs.subjects }}
+
+    steps:
+      - name: Validate version tag format
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          if ! echo "$VERSION" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::Invalid version format: '$VERSION'. Must match v<MAJOR>.<MINOR>.<PATCH>"
+            exit 1
+          fi
+          echo "Version format '$VERSION' validated"
+
+      - name: Enforce dispatch from tag ref
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          if [ "$REF_TYPE" != "tag" ]; then
+            echo "::error::This workflow must be dispatched from a tag ref, not a branch."
+            echo "::error::Current ref type: '$REF_TYPE', ref name: '$REF_NAME'"
+            exit 1
+          fi
+          if [ "$REF_NAME" != "$VERSION" ]; then
+            echo "::error::Dispatch ref '$REF_NAME' does not match requested version '$VERSION'."
+            exit 1
+          fi
+          echo "Dispatch ref validated: refs/tags/${VERSION}"
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /opt/hostedtoolcache/go \
+            /opt/hostedtoolcache/Python /opt/hostedtoolcache/Ruby \
+            /usr/local/share/powershell /usr/share/swift
+          df -h /
+
+      - name: Checkout public repo at tag
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.version }}
+          fetch-depth: 1
+          path: source
+
+      - name: Verify tag checkout
+        working-directory: source
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          if ! git describe --tags --exact-match 2>/dev/null | grep -qE "^${VERSION}$"; then
+            echo "::error::Checkout does not match tag '$VERSION'"
+            exit 1
+          fi
+          echo "Tag '$VERSION' verified at $(git rev-parse --short HEAD)"
+
+      - name: Verify no internal org references
+        working-directory: source
+        run: |
+          echo "Scanning for internal org references..."
+          FAIL=0
+          # Exclude .github/ — oss-release.yml itself contains verivus-oss references
+          # (correct end-state values) that sync-to-public.sh does not rewrite.
+          # Scanning the workflow file would produce false positives.
+          if grep -rqna 'verivusai-labs' . --exclude-dir='.github' 2>/dev/null; then
+            echo "::error::Source contains verivusai-labs references"
+            grep -rna 'verivusai-labs' . --exclude-dir='.github' 2>/dev/null | head -20
+            FAIL=1
+          fi
+          if grep -rqna 'verivus-oss' . --exclude-dir='.github' 2>/dev/null; then
+            echo "::error::Source contains verivus-oss references"
+            grep -rna 'verivus-oss' . --exclude-dir='.github' 2>/dev/null | head -20
+            FAIL=1
+          fi
+          if grep -rqna '/srv/repos/internal' . --exclude-dir='.github' 2>/dev/null; then
+            echo "::error::Source contains internal absolute paths"
+            grep -rna '/srv/repos/internal' . --exclude-dir='.github' 2>/dev/null | head -20
+            FAIL=1
+          fi
+          if [ "$FAIL" -ne 0 ]; then
+            echo "::error::Internal reference check failed — aborting build"
+            exit 1
+          fi
+          echo "No internal org references found"
+
+      - name: Install Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '20'
+
+      - name: Package VSCode extension
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          mkdir -p dist
+          cd source/tools/sqry-vscode
+          npm ci
+          npx --yes @vscode/vsce@3.3.0 package \
+            --out "$GITHUB_WORKSPACE/dist/sqry-vscode-${VERSION}.vsix"
+          echo "VSCode extension packaged:"
+          ls -lh "$GITHUB_WORKSPACE/dist/"
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+
+      - name: Sign VSCode extension with Cosign
+        working-directory: dist
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          VSIX_FILE="sqry-vscode-${VERSION}.vsix"
+          echo "Signing ${VSIX_FILE} with Cosign (keyless OIDC)..."
+          cosign sign-blob --yes \
+            --bundle "${VSIX_FILE}.bundle" \
+            "${VSIX_FILE}"
+          echo "Signed: ${VSIX_FILE}.bundle"
+
+      - name: Generate checksums and SLSA subjects
+        id: hash
+        working-directory: dist
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          VSIX_FILE="sqry-vscode-${VERSION}.vsix"
+          sha256sum "${VSIX_FILE}" > CHECKSUMS-vscode.sha256
+          echo "Checksums for VSCode extension:"
+          cat CHECKSUMS-vscode.sha256
+
+          digest=$(sha256sum "${VSIX_FILE}" | awk '{print $1}')
+          subject_json=$(jq -n --arg name "${VSIX_FILE}" --arg hash "$digest" \
+            '{name: $name, digest: {sha256: $hash}}')
+          subject=$(printf '%s' "$subject_json" | base64 | tr -d '\n')
+          echo "SLSA subject: ${VSIX_FILE} (sha256: ${digest:0:16}...)"
+
+          DELIM="EOF_${RANDOM}_${RANDOM}"
+          echo "subjects<<${DELIM}" >> "$GITHUB_OUTPUT"
+          echo "$subject" >> "$GITHUB_OUTPUT"
+          echo "${DELIM}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload signed artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: signed-vscode
+          path: dist/
+          retention-days: 7
+          if-no-files-found: error
+
+  # ===========================================================================
+  # SLSA Level 2 Provenance jobs
+  # upload-assets: false — release doesn't exist yet; publish job uploads instead.
+  # private-repository: false — verivus-oss/sqry is a PUBLIC repo.
+  # ===========================================================================
+  provenance-linux:
+    name: SLSA Provenance — Linux x86_64
+    needs: [build-linux]
+    permissions:
+      id-token: write
+      contents: read
+      actions: read
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@5a775b367a56d5bd118a224a811bba288150a563 # v2.0.0
+    with:
+      base64-subjects: "${{ needs.build-linux.outputs.subjects }}"
+      upload-assets: false
+      provenance-name: sqry-linux-x86_64-provenance.intoto.jsonl
+      compile-generator: false
+      private-repository: false
+
+  provenance-linux-arm64:
+    name: SLSA Provenance — Linux ARM64
+    needs: [build-linux-arm64]
+    permissions:
+      id-token: write
+      contents: read
+      actions: read
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@5a775b367a56d5bd118a224a811bba288150a563 # v2.0.0
+    with:
+      base64-subjects: "${{ needs.build-linux-arm64.outputs.subjects }}"
+      upload-assets: false
+      provenance-name: sqry-linux-arm64-provenance.intoto.jsonl
+      compile-generator: false
+      private-repository: false
+
+  provenance-windows:
+    name: SLSA Provenance — Windows x86_64
+    needs: [build-windows]
+    permissions:
+      id-token: write
+      contents: read
+      actions: read
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@5a775b367a56d5bd118a224a811bba288150a563 # v2.0.0
+    with:
+      base64-subjects: "${{ needs.build-windows.outputs.subjects }}"
+      upload-assets: false
+      provenance-name: sqry-windows-x86_64-provenance.intoto.jsonl
+      compile-generator: false
+      private-repository: false
+
+  provenance-macos-arm64:
+    name: SLSA Provenance — macOS ARM64
+    needs: [build-macos-arm64]
+    permissions:
+      id-token: write
+      contents: read
+      actions: read
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@5a775b367a56d5bd118a224a811bba288150a563 # v2.0.0
+    with:
+      base64-subjects: "${{ needs.build-macos-arm64.outputs.subjects }}"
+      upload-assets: false
+      provenance-name: sqry-macos-arm64-provenance.intoto.jsonl
+      compile-generator: false
+      private-repository: false
+
+  provenance-vscode:
+    name: SLSA Provenance — VSCode Extension
+    needs: [build-vscode]
+    permissions:
+      id-token: write
+      contents: read
+      actions: read
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@5a775b367a56d5bd118a224a811bba288150a563 # v2.0.0
+    with:
+      base64-subjects: "${{ needs.build-vscode.outputs.subjects }}"
+      upload-assets: false
+      provenance-name: sqry-vscode-provenance.intoto.jsonl
+      compile-generator: false
+      private-repository: false
+
+  # ===========================================================================
+  # Job: Publish Vetted Artifacts — SECRETS LOADED, gated by environment
+  # Downloads EXACT artifacts from build jobs — NO REBUILD behind the gate.
+  # Verifies all checksums and Cosign signatures before creating the release.
+  # ===========================================================================
+  publish:
+    name: Publish Vetted Artifacts
+    needs:
+      - build-linux
+      - build-linux-arm64
+      - build-windows
+      - build-macos-arm64
+      - build-vscode
+      - provenance-linux
+      - provenance-linux-arm64
+      - provenance-windows
+      - provenance-macos-arm64
+      - provenance-vscode
+    runs-on: ubuntu-latest
+    environment: oss-release
+    permissions:
+      contents: read
+      id-token: write  # Required for Azure OIDC authentication
+
+    steps:
+      # --- Step 0: Retrieve mirror-bot credentials from Azure Key Vault ---
+      - name: Azure OIDC login
+        uses: azure/login@a65d910e8af852a8061c627c456678983e180302 # v2.2.0
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Retrieve mirror-bot credentials from Key Vault
+        id: kv-mirror
+        run: |
+          APP_ID=$(az keyvault secret show --vault-name verivus-dev-secrets-kv --name mirror-bot-app-id --query value -o tsv)
+          APP_KEY=$(az keyvault secret show --vault-name verivus-dev-secrets-kv --name mirror-bot-app-key --query value -o tsv)
+          echo "::add-mask::${APP_KEY}"
+          echo "app-id=${APP_ID}" >> "$GITHUB_OUTPUT"
+          DELIM="GHEOF_${RANDOM}_${RANDOM}"
+          echo "app-key<<${DELIM}" >> "$GITHUB_OUTPUT"
+          echo "${APP_KEY}" >> "$GITHUB_OUTPUT"
+          echo "${DELIM}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate release token
+        id: release-token
+        uses: actions/create-github-app-token@29824e69f54612133e76f7eaac726eef6c875baf # v2.2.1
+        with:
+          app-id: ${{ steps.kv-mirror.outputs.app-id }}
+          private-key: ${{ steps.kv-mirror.outputs.app-key }}
+          owner: verivus-oss
+          repositories: sqry
+
+      # --- Step 1: Download all signed build artifacts ---
+      - name: Download all signed artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: signed-*
+          path: dist/
+          merge-multiple: false
+
+      # --- Step 2: Download provenance attestations ---
+      - name: Download provenance — Linux
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ needs.provenance-linux.outputs.provenance-name }}
+          path: provenance/
+
+      - name: Download provenance — Linux ARM64
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ needs.provenance-linux-arm64.outputs.provenance-name }}
+          path: provenance/
+
+      - name: Download provenance — Windows
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ needs.provenance-windows.outputs.provenance-name }}
+          path: provenance/
+
+      - name: Download provenance — macOS ARM64
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ needs.provenance-macos-arm64.outputs.provenance-name }}
+          path: provenance/
+
+      - name: Download provenance — VSCode
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ needs.provenance-vscode.outputs.provenance-name }}
+          path: provenance/
+
+      # --- Step 3: Verify per-platform checksums ---
+      - name: Verify checksums
+        id: verify_checksums
+        run: |
+          echo "Verifying checksums for all platforms..."
+          FAIL=0
+          for dir in dist/signed-linux dist/signed-linux-arm64 dist/signed-windows dist/signed-macos-arm64 dist/signed-vscode; do
+            if [ ! -d "$dir" ]; then
+              echo "::error::Artifact directory missing: $dir"
+              FAIL=1
+              continue
+            fi
+            echo "--- Verifying checksums in $dir ---"
+            # Derive exact checksum filename from directory name (e.g. signed-linux → CHECKSUMS-linux.sha256)
+            PLATFORM="${dir##*signed-}"
+            CHECKSUM_FILE="$dir/CHECKSUMS-${PLATFORM}.sha256"
+            if [ ! -f "$CHECKSUM_FILE" ]; then
+              echo "::error::Expected checksum file missing: $CHECKSUM_FILE"
+              FAIL=1
+              continue
+            fi
+            # Fail if unexpected extra checksum files exist
+            CHECKSUM_COUNT=$(find "$dir" -name 'CHECKSUMS-*.sha256' | wc -l)
+            if [ "$CHECKSUM_COUNT" -ne 1 ]; then
+              echo "::error::Expected exactly 1 checksum file in $dir, found $CHECKSUM_COUNT"
+              FAIL=1
+              continue
+            fi
+            (cd "$dir" && sha256sum -c "$(basename "$CHECKSUM_FILE")")
+            echo "Checksums OK: $dir"
+          done
+          if [ "$FAIL" -ne 0 ]; then
+            echo "::error::Checksum verification failed"
+            exit 1
+          fi
+          echo "All checksums verified successfully"
+
+      # --- Step 4: Install Cosign ---
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+
+      # --- Step 5: Verify all Cosign signatures ---
+      # Certificate identity is bound to the EXACT version tag for this release.
+      - name: Verify Cosign signatures
+        id: verify_signatures
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          # Escape dots for regex (v4.2.0 → v4\.2\.0)
+          VERSION_ESCAPED="${VERSION//./\\.}"
+          CERT_IDENTITY="^https://github\\.com/verivus-oss/sqry/\\.github/workflows/oss-release\\.yml@refs/tags/${VERSION_ESCAPED}$"
+          OIDC_ISSUER="https://token.actions.githubusercontent.com"
+
+          echo "Verifying Cosign signatures — identity bound to refs/tags/${VERSION}"
+          echo ""
+
+          FAIL=0
+          for dir in dist/signed-linux dist/signed-linux-arm64 dist/signed-windows dist/signed-macos-arm64 dist/signed-vscode; do
+            if [ ! -d "$dir" ]; then
+              echo "::error::Artifact directory missing: $dir"
+              FAIL=1
+              continue
+            fi
+            echo "--- Verifying signatures in $dir ---"
+            for f in "$dir"/*; do
+              [ -f "$f" ] || continue
+              fname=$(basename "$f")
+              [[ "$fname" == *.bundle ]] && continue
+              [[ "$fname" == CHECKSUMS* ]] && continue
+              bundle="${f}.bundle"
+              if [ ! -f "$bundle" ]; then
+                echo "::error::Bundle file missing for: $f"
+                FAIL=1
+                continue
+              fi
+              echo "  Verifying: $fname"
+              cosign verify-blob \
+                --bundle "$bundle" \
+                --certificate-identity-regexp "$CERT_IDENTITY" \
+                --certificate-oidc-issuer "$OIDC_ISSUER" \
+                "$f"
+              echo "  OK: $fname"
+            done
+          done
+          if [ "$FAIL" -ne 0 ]; then
+            echo "::error::Cosign signature verification failed"
+            exit 1
+          fi
+          echo "All Cosign signatures verified successfully"
+
+      # --- Step 6: Checkout public repo for release notes ---
+      - name: Checkout public repo for release notes
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.version }}
+          fetch-depth: 1
+          path: source-for-notes
+
+      - name: Verify tag checkout
+        working-directory: source-for-notes
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          if ! git describe --tags --exact-match 2>/dev/null | grep -qE "^${VERSION}$"; then
+            echo "::error::Checkout does not match tag '$VERSION'"
+            exit 1
+          fi
+          echo "Tag '$VERSION' verified at $(git rev-parse --short HEAD)"
+
+      # --- Step 7: Build release notes ---
+      # Verification snippets use the exact version-specific regex, not a prefix wildcard.
+      - name: Build release notes
+        id: release_notes
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          # Escape dots for display in regex (v4.2.0 → v4\.2\.0)
+          VERSION_ESCAPED="${VERSION//./\\.}"
+          NOTES_FILE="/tmp/release-notes.md"
+
+          NOTES=""
+          if [ -f source-for-notes/CHANGELOG.md ]; then
+            # Use version-escaped, end-anchored pattern to avoid prefix collisions
+            # (e.g. v1.2.3 must not match v1.2.30).
+            # Matches headings of the form "## [v1.2.3]" or "## v1.2.3" exactly.
+            SECTION=$(sed -n "/^## \\[\\?${VERSION_ESCAPED}\\]\\?$/,/^## /p" source-for-notes/CHANGELOG.md | sed '$ d')
+            if [ -n "$SECTION" ]; then
+              NOTES="$SECTION"
+              echo "Extracted changelog section for ${VERSION}"
+            fi
+          fi
+
+          if [ -n "$NOTES" ]; then
+            echo "$NOTES" > "$NOTES_FILE"
+          else
+            cat > "$NOTES_FILE" <<EOF
+          ## sqry ${VERSION}
+
+          Release of sqry semantic code search tool.
+
+          See the [README](https://github.com/verivus-oss/sqry) for documentation.
+          EOF
+          fi
+
+          # Append version-specific verification instructions
+          cat >> "$NOTES_FILE" <<EOF
+
+          ---
+
+          ## Verification
+
+          All binaries and the VSCode extension are signed with [Sigstore Cosign](https://github.com/sigstore/cosign) using keyless OIDC signing, and SLSA Level 2 provenance attestations are included for all platforms.
+
+          ### Step 1 — Verify checksums
+
+          \`\`\`bash
+          sha256sum -c CHECKSUMS-linux.sha256        # Linux binaries
+          sha256sum -c CHECKSUMS-linux-arm64.sha256  # Linux ARM64 binaries
+          sha256sum -c CHECKSUMS-windows.sha256      # Windows binaries
+          sha256sum -c CHECKSUMS-macos-arm64.sha256  # macOS ARM64 binaries
+          sha256sum -c CHECKSUMS-vscode.sha256       # VSCode extension
+          # Or use the consolidated file:
+          sha256sum -c CHECKSUMS.sha256
+          \`\`\`
+
+          ### Step 2 — Verify Cosign signatures
+
+          Install [Cosign](https://github.com/sigstore/cosign) then verify with the exact version identity for this release:
+
+          #### Linux x86_64
+          \`\`\`bash
+          cosign verify-blob \\
+            --bundle sqry-linux-x86_64.bundle \\
+            --certificate-identity-regexp \\
+              "^https://github\\.com/verivus-oss/sqry/\\.github/workflows/oss-release\\.yml@refs/tags/${VERSION_ESCAPED}\$" \\
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \\
+            sqry-linux-x86_64
+          \`\`\`
+
+          #### Linux ARM64
+          \`\`\`bash
+          cosign verify-blob \\
+            --bundle sqry-linux-arm64.bundle \\
+            --certificate-identity-regexp \\
+              "^https://github\\.com/verivus-oss/sqry/\\.github/workflows/oss-release\\.yml@refs/tags/${VERSION_ESCAPED}\$" \\
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \\
+            sqry-linux-arm64
+          \`\`\`
+
+          #### Windows x86_64
+          \`\`\`bash
+          cosign verify-blob \\
+            --bundle sqry-windows-x86_64.exe.bundle \\
+            --certificate-identity-regexp \\
+              "^https://github\\.com/verivus-oss/sqry/\\.github/workflows/oss-release\\.yml@refs/tags/${VERSION_ESCAPED}\$" \\
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \\
+            sqry-windows-x86_64.exe
+          \`\`\`
+
+          #### macOS ARM64 (Apple Silicon)
+          \`\`\`bash
+          cosign verify-blob \\
+            --bundle sqry-macos-arm64.bundle \\
+            --certificate-identity-regexp \\
+              "^https://github\\.com/verivus-oss/sqry/\\.github/workflows/oss-release\\.yml@refs/tags/${VERSION_ESCAPED}\$" \\
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \\
+            sqry-macos-arm64
+          \`\`\`
+
+          #### VSCode Extension
+          \`\`\`bash
+          cosign verify-blob \\
+            --bundle "sqry-vscode-${VERSION}.vsix.bundle" \\
+            --certificate-identity-regexp \\
+              "^https://github\\.com/verivus-oss/sqry/\\.github/workflows/oss-release\\.yml@refs/tags/${VERSION_ESCAPED}\$" \\
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \\
+            "sqry-vscode-${VERSION}.vsix"
+          \`\`\`
+
+          ### Step 3 — Verify SLSA Level 2 provenance
+
+          Install [slsa-verifier](https://github.com/slsa-framework/slsa-verifier/releases) then:
+
+          \`\`\`bash
+          slsa-verifier verify-artifact sqry-linux-x86_64 \\
+            --provenance-path sqry-linux-x86_64-provenance.intoto.jsonl \\
+            --source-uri github.com/verivus-oss/sqry
+
+          slsa-verifier verify-artifact sqry-linux-arm64 \\
+            --provenance-path sqry-linux-arm64-provenance.intoto.jsonl \\
+            --source-uri github.com/verivus-oss/sqry
+
+          slsa-verifier verify-artifact sqry-windows-x86_64.exe \\
+            --provenance-path sqry-windows-x86_64-provenance.intoto.jsonl \\
+            --source-uri github.com/verivus-oss/sqry
+
+          slsa-verifier verify-artifact sqry-macos-arm64 \\
+            --provenance-path sqry-macos-arm64-provenance.intoto.jsonl \\
+            --source-uri github.com/verivus-oss/sqry
+
+          slsa-verifier verify-artifact "sqry-vscode-${VERSION}.vsix" \\
+            --provenance-path sqry-vscode-provenance.intoto.jsonl \\
+            --source-uri github.com/verivus-oss/sqry
+          \`\`\`
+          EOF
+          echo "Release notes prepared at $NOTES_FILE"
+
+      # --- Step 8: Flatten all artifacts to release-assets/ ---
+      - name: Flatten and consolidate artifacts
+        run: |
+          mkdir -p release-assets
+
+          for dir in dist/signed-linux dist/signed-linux-arm64 dist/signed-windows dist/signed-macos-arm64 dist/signed-vscode; do
+            echo "--- Copying from $dir ---"
+            for f in "$dir"/*; do
+              [ -f "$f" ] || continue
+              fname=$(basename "$f")
+              cp "$f" "release-assets/$fname"
+              echo "  Copied: $fname"
+            done
+          done
+
+          echo "--- Copying provenance attestations ---"
+          for f in provenance/*; do
+            [ -f "$f" ] || continue
+            fname=$(basename "$f")
+            cp "$f" "release-assets/$fname"
+            echo "  Copied: $fname"
+          done
+
+          echo "--- Rendering package manager configs ---"
+          source-for-notes/scripts/release/render-distribution-configs.sh \
+            --version "${{ inputs.version }}" \
+            --checksums-dir release-assets \
+            --output-dir release-assets/distribution \
+            --repo verivus-oss/sqry
+
+          while IFS= read -r rendered_file; do
+            [ -f "$rendered_file" ] || continue
+            relative_name="${rendered_file#release-assets/distribution/}"
+            flat_name="${relative_name//\//-}"
+            cp "$rendered_file" "release-assets/${flat_name}"
+            echo "  Added distribution config: ${flat_name}"
+          done < <(find release-assets/distribution -type f | sort)
+
+          echo "--- Generating consolidated CHECKSUMS.sha256 ---"
+          cd release-assets
+          cat CHECKSUMS-linux.sha256 \
+              CHECKSUMS-linux-arm64.sha256 \
+              CHECKSUMS-windows.sha256 \
+              CHECKSUMS-macos-arm64.sha256 \
+              CHECKSUMS-vscode.sha256 \
+            > CHECKSUMS.sha256
+          echo "Consolidated checksums:"
+          cat CHECKSUMS.sha256
+          echo ""
+          echo "--- All release assets ---"
+          ls -lh .
+
+      # --- Step 9: Create GitHub Release ---
+      - name: Create GitHub Release
+        id: create_release
+        env:
+          GH_TOKEN: ${{ steps.release-token.outputs.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+
+          ASSET_PATHS=()
+          for f in release-assets/*; do
+            [ -f "$f" ] || continue
+            ASSET_PATHS+=("$f")
+          done
+
+          echo "Creating GitHub Release ${VERSION} with ${#ASSET_PATHS[@]} assets..."
+          gh release create "${VERSION}" \
+            --repo verivus-oss/sqry \
+            --title "sqry ${VERSION}" \
+            --notes-file /tmp/release-notes.md \
+            --verify-tag \
+            "${ASSET_PATHS[@]}"
+
+          RELEASE_URL="https://github.com/verivus-oss/sqry/releases/tag/${VERSION}"
+          echo "release_url=${RELEASE_URL}" >> "$GITHUB_ENV"
+          echo "GitHub Release created: ${RELEASE_URL}"
+
+      # --- Step 10: Post step summary ---
+      - name: Post step summary
+        if: always()
+        env:
+          VERSION: ${{ inputs.version }}
+          SERVER_URL: ${{ github.server_url }}
+          REPOSITORY: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          CHECKSUM_STATUS: ${{ steps.verify_checksums.outcome }}
+          SIGNATURE_STATUS: ${{ steps.verify_signatures.outcome }}
+          RELEASE_STATUS: ${{ steps.create_release.outcome }}
+        run: |
+          RELEASE_URL="${release_url:-https://github.com/verivus-oss/sqry/releases/tag/${VERSION}}"
+
+          checksum_status="${CHECKSUM_STATUS}"
+          signature_status="${SIGNATURE_STATUS}"
+          release_status="${RELEASE_STATUS}"
+
+          checksum_icon="$( [ "$checksum_status" = "success" ] && echo "PASS" || echo "FAIL" )"
+          signature_icon="$( [ "$signature_status" = "success" ] && echo "PASS" || echo "FAIL" )"
+          release_icon="$( [ "$release_status" = "success" ] && echo "PASS" || echo "FAIL" )"
+
+          cat >> "$GITHUB_STEP_SUMMARY" <<EOF
+          ## OSS Release Distribution: ${VERSION}
+
+          | Step | Status |
+          |------|--------|
+          | Checksum verification (all platforms) | ${checksum_icon} |
+          | Cosign signature verification (all platforms) | ${signature_icon} |
+          | GitHub Release creation | ${release_icon} |
+
+          **Release URL:** ${RELEASE_URL}
+
+          ### Artifacts Published
+
+          #### Linux x86_64
+          - \`sqry-linux-x86_64\` + \`.bundle\`
+          - \`sqry-mcp-linux-x86_64\` + \`.bundle\`
+          - \`sqry-lsp-linux-x86_64\` + \`.bundle\`
+          - \`sqry-linux-x86_64-provenance.intoto.jsonl\` (SLSA Level 2)
+          - \`CHECKSUMS-linux.sha256\`
+
+          #### Linux ARM64
+          - \`sqry-linux-arm64\` + \`.bundle\`
+          - \`sqry-mcp-linux-arm64\` + \`.bundle\`
+          - \`sqry-lsp-linux-arm64\` + \`.bundle\`
+          - \`sqry-linux-arm64-provenance.intoto.jsonl\` (SLSA Level 2)
+          - \`CHECKSUMS-linux-arm64.sha256\`
+
+          #### Windows x86_64
+          - \`sqry-windows-x86_64.exe\` + \`.bundle\`
+          - \`sqry-mcp-windows-x86_64.exe\` + \`.bundle\`
+          - \`sqry-lsp-windows-x86_64.exe\` + \`.bundle\`
+          - \`sqry-windows-x86_64-provenance.intoto.jsonl\` (SLSA Level 2)
+          - \`CHECKSUMS-windows.sha256\`
+
+          #### macOS ARM64 (Apple Silicon)
+          - \`sqry-macos-arm64\` + \`.bundle\`
+          - \`sqry-mcp-macos-arm64\` + \`.bundle\`
+          - \`sqry-lsp-macos-arm64\` + \`.bundle\`
+          - \`sqry-macos-arm64-provenance.intoto.jsonl\` (SLSA Level 2)
+          - \`CHECKSUMS-macos-arm64.sha256\`
+
+          #### VSCode Extension
+          - \`sqry-vscode-${VERSION}.vsix\` + \`.bundle\`
+          - \`sqry-vscode-provenance.intoto.jsonl\` (SLSA Level 2)
+          - \`CHECKSUMS-vscode.sha256\`
+
+          #### Consolidated
+          - \`CHECKSUMS.sha256\` (all platforms combined)
+          - package manager configs: \`homebrew-sqry.rb\`, \`scoop-sqry.json\`, \`winget-*.yaml\`, \`aur-PKGBUILD\`, \`nix-default.nix\`, \`nix-flake.nix\`, \`snap-snapcraft.yaml\`
+
+          ### Supply Chain Security
+          - All released binaries + 1 .vsix signed with Cosign OIDC keyless — identity bound to refs/tags/${VERSION}
+          - SLSA Level 2 provenance attestations for all release platforms
+          - Cosign certificate identity verified to exact tag ref before publishing
+          - Checksums verified before publishing
+
+          **CI Run:** ${SERVER_URL}/${REPOSITORY}/actions/runs/${RUN_ID}
+          EOF

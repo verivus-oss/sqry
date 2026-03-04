@@ -1,0 +1,183 @@
+{
+  "schema_version": 1,
+  "config_hash": "6ec19f86098fd6020b482699689a2d8dd413bc3896436fad2f550dcab7b81d43",
+  "generated_at": 1768983058128,
+  "entries": [
+    {
+      "name": "SQRY_MAX_SOURCE_FILE_SIZE",
+      "effective_value": "52428800",
+      "default_value": "52428800",
+      "min_value": "1048576",
+      "max_value": "524288000",
+      "source": "default",
+      "scope": "global",
+      "risk": "dos",
+      "description": "Maximum source file size for indexing"
+    },
+    {
+      "name": "SQRY_MAX_REPOSITORIES",
+      "effective_value": "1000",
+      "default_value": "1000",
+      "min_value": "10",
+      "max_value": "10000",
+      "source": "default",
+      "scope": "global",
+      "risk": "dos",
+      "description": "Maximum repositories per workspace"
+    },
+    {
+      "name": "SQRY_WATCH_EVENT_QUEUE",
+      "effective_value": "10000",
+      "default_value": "10000",
+      "min_value": "100",
+      "max_value": "100000",
+      "source": "default",
+      "scope": "global",
+      "risk": "dos",
+      "description": "Maximum queued filesystem events"
+    },
+    {
+      "name": "SQRY_MAX_QUERY_LENGTH",
+      "effective_value": "10240",
+      "default_value": "10240",
+      "min_value": "1024",
+      "max_value": "102400",
+      "source": "default",
+      "scope": "global",
+      "risk": "dos",
+      "description": "Maximum query string length in bytes"
+    },
+    {
+      "name": "SQRY_MAX_PREDICATES",
+      "effective_value": "100",
+      "default_value": "100",
+      "min_value": "10",
+      "max_value": "1000",
+      "source": "default",
+      "scope": "global",
+      "risk": "dos",
+      "description": "Maximum predicates per query"
+    },
+    {
+      "name": "SQRY_GIT_MAX_OUTPUT_SIZE",
+      "effective_value": "10485760",
+      "default_value": "10485760",
+      "min_value": "1048576",
+      "max_value": "104857600",
+      "source": "default",
+      "scope": "global",
+      "risk": "dos",
+      "description": "Maximum git command output size to prevent memory exhaustion"
+    },
+    {
+      "name": "SQRY_READ_BUFFER",
+      "effective_value": "8192",
+      "default_value": "8192",
+      "min_value": "1024",
+      "max_value": "1048576",
+      "source": "default",
+      "scope": "global",
+      "risk": "perf",
+      "description": "Read buffer size for file I/O"
+    },
+    {
+      "name": "SQRY_WRITE_BUFFER",
+      "effective_value": "8192",
+      "default_value": "8192",
+      "min_value": "1024",
+      "max_value": "1048576",
+      "source": "default",
+      "scope": "global",
+      "risk": "perf",
+      "description": "Write buffer size for file I/O"
+    },
+    {
+      "name": "SQRY_PARSE_BUFFER",
+      "effective_value": "65536",
+      "default_value": "65536",
+      "min_value": "4096",
+      "max_value": "10485760",
+      "source": "default",
+      "scope": "global",
+      "risk": "perf",
+      "description": "Parse buffer size for tree-sitter"
+    },
+    {
+      "name": "SQRY_INDEX_BUFFER",
+      "effective_value": "1048576",
+      "default_value": "1048576",
+      "min_value": "65536",
+      "max_value": "104857600",
+      "source": "default",
+      "scope": "global",
+      "risk": "perf",
+      "description": "Index buffer size for serialization"
+    },
+    {
+      "name": "SQRY_MMAP_THRESHOLD",
+      "effective_value": "10485760",
+      "default_value": "10485760",
+      "min_value": "1048576",
+      "max_value": "1073741824",
+      "source": "default",
+      "scope": "global",
+      "risk": "perf",
+      "description": "File size threshold for memory-mapped I/O"
+    },
+    {
+      "name": "SQRY_CACHE_BUDGET_ENTRIES",
+      "effective_value": "10000",
+      "default_value": "10000",
+      "min_value": null,
+      "max_value": null,
+      "source": "default",
+      "scope": "global",
+      "risk": "perf",
+      "description": "Maximum cache entries"
+    },
+    {
+      "name": "SQRY_CACHE_BUDGET_BYTES",
+      "effective_value": "104857600",
+      "default_value": "104857600",
+      "min_value": null,
+      "max_value": null,
+      "source": "default",
+      "scope": "global",
+      "risk": "perf",
+      "description": "Maximum cache size in bytes"
+    },
+    {
+      "name": "SQRY_CACHE_MAX_BYTES",
+      "effective_value": "52428800",
+      "default_value": "52428800",
+      "min_value": "1048576",
+      "max_value": "10737418240",
+      "source": "default",
+      "scope": "global",
+      "risk": "dos",
+      "description": "Cache size cap (CacheConfig max_bytes limit)"
+    },
+    {
+      "name": "SQRY_REGEX_CACHE_SIZE",
+      "effective_value": "100",
+      "default_value": "100",
+      "min_value": "1",
+      "max_value": "10000",
+      "source": "default",
+      "scope": "global",
+      "risk": "perf",
+      "description": "LRU cache size for compiled regexes"
+    },
+    {
+      "name": "SQRY_LEXER_POOL_MAX",
+      "effective_value": "4",
+      "default_value": "4",
+      "min_value": null,
+      "max_value": null,
+      "source": "default",
+      "scope": "global",
+      "risk": "perf",
+      "description": "Maximum lexer pool size"
+    }
+  ]
+}

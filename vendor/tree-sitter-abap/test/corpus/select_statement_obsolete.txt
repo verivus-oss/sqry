@@ -1,0 +1,107 @@
+==================
+basic select statement
+==================
+
+select *
+  from bkpf
+  into table bkpf.
+
+---
+(program
+  (select_statement_obsolete
+    (select_list)
+    (data_source)
+    (target
+      (name))))
+
+==================
+select statement with limit
+==================
+
+select * up to 500 rows
+  from bkpf
+  into table gt_bkpf.
+
+---
+(program
+  (select_statement_obsolete
+    (select_list)
+    (numeric_literal)
+    (data_source)
+    (target
+      (name))))
+
+==================
+select statement with where clause
+==================
+
+select *
+  from bseg
+  into table gt_bseg
+  where bukrs = gt_bkpf-bukrs
+    and belnr = gt_bkpf-belnr
+    and gjahr = gt_bkpf-gjahr.
+
+---
+
+(program
+  (select_statement_obsolete
+    (select_list)
+    (data_source)
+    (target
+      (name))
+    (where
+      (comparison_expression
+        (name)
+        (structured_data_object
+          (structure_name)
+          (component_name)))
+      (comparison_expression
+        (name)
+        (structured_data_object
+          (structure_name)
+          (component_name)))
+      (comparison_expression
+        (name)
+        (structured_data_object
+          (structure_name)
+          (component_name))))))
+
+==================
+select statement with for all entries
+==================
+
+select *
+  from bseg
+  into table gt_bseg
+  for all entries in gt_bkpf
+  where bukrs = gt_bkpf-bukrs
+    and belnr = gt_bkpf-belnr
+    and gjahr = gt_bkpf-gjahr.
+
+---
+
+(program
+  (select_statement_obsolete
+    (select_list)
+    (data_source)
+    (target
+      (name))
+    (for_all_entries
+      (name))
+    (where
+      (comparison_expression
+        (name)
+        (structured_data_object
+          (structure_name)
+          (component_name)))
+      (comparison_expression
+        (name)
+        (structured_data_object
+          (structure_name)
+          (component_name)))
+      (comparison_expression
+        (name)
+        (structured_data_object
+          (structure_name)
+          (component_name))))))
