@@ -141,7 +141,7 @@ streaming-iterator = "0.1"
 # Tree-sitter language grammars (pinned versions - adjusted for compatibility)
 # Note: All grammars using 0.23.x for tree-sitter 0.24 compatibility
 tree-sitter-rust = "0.23.0"
-tree-sitter-javascript = "0.23.0"  # Updated from 0.21.4 due to cc dependency conflict
+tree-sitter-javascript = "0.25.0"  # Updated from 0.21.4 due to cc dependency conflict
 tree-sitter-typescript = "0.23.0"
 tree-sitter-python = "0.23.0"     # Updated from 0.21.0 for consistency
 tree-sitter-go = "0.23.1"
