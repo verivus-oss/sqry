@@ -1658,19 +1658,23 @@ jobs:
           done
 
           echo "--- Rendering package manager configs ---"
-          source-for-notes/scripts/release/render-distribution-configs.sh \
-            --version "${{ inputs.version }}" \
-            --checksums-dir release-assets \
-            --output-dir release-assets/distribution \
-            --repo verivus-oss/sqry
+          if [ -d source-for-notes/packaging ]; then
+            source-for-notes/scripts/release/render-distribution-configs.sh \
+              --version "${{ inputs.version }}" \
+              --checksums-dir release-assets \
+              --output-dir release-assets/distribution \
+              --repo verivus-oss/sqry
 
-          while IFS= read -r rendered_file; do
-            [ -f "$rendered_file" ] || continue
-            relative_name="${rendered_file#release-assets/distribution/}"
-            flat_name="${relative_name//\//-}"
-            cp "$rendered_file" "release-assets/${flat_name}"
-            echo "  Added distribution config: ${flat_name}"
-          done < <(find release-assets/distribution -type f | sort)
+            while IFS= read -r rendered_file; do
+              [ -f "$rendered_file" ] || continue
+              relative_name="${rendered_file#release-assets/distribution/}"
+              flat_name="${relative_name//\//-}"
+              cp "$rendered_file" "release-assets/${flat_name}"
+              echo "  Added distribution config: ${flat_name}"
+            done < <(find release-assets/distribution -type f | sort)
+          else
+            echo "::warning::source-for-notes/packaging is missing; skipping distribution config rendering"
+          fi
 
           echo "--- Generating consolidated CHECKSUMS.sha256 ---"
           cd release-assets
