@@ -1658,13 +1658,37 @@ jobs:
           done
 
           echo "--- Rendering package manager configs ---"
-          if [ -d source-for-notes/packaging ]; then
-            source-for-notes/scripts/release/render-distribution-configs.sh \
+          render_script="source-for-notes/scripts/release/render-distribution-configs.sh"
+          required_templates=(
+            "source-for-notes/packaging/homebrew/sqry.rb"
+            "source-for-notes/packaging/scoop/sqry.json"
+            "source-for-notes/packaging/winget/VerivusOSS.sqry.yaml"
+            "source-for-notes/packaging/winget/VerivusOSS.sqry.locale.en-US.yaml"
+            "source-for-notes/packaging/winget/VerivusOSS.sqry.installer.yaml"
+            "source-for-notes/packaging/aur/PKGBUILD"
+            "source-for-notes/packaging/nix/default.nix"
+            "source-for-notes/packaging/nix/flake.nix"
+            "source-for-notes/packaging/snap/snapcraft.yaml"
+          )
+
+          can_render=1
+          if [ ! -x "$render_script" ]; then
+            echo "::warning::Distribution render script missing or not executable: $render_script"
+            can_render=0
+          fi
+          for template in "${required_templates[@]}"; do
+            if [ ! -f "$template" ]; then
+              echo "::warning::Distribution template missing: $template"
+              can_render=0
+            fi
+          done
+
+          if [ "$can_render" -eq 1 ]; then
+            "$render_script" \
               --version "${{ inputs.version }}" \
               --checksums-dir release-assets \
               --output-dir release-assets/distribution \
               --repo verivus-oss/sqry
-
             while IFS= read -r rendered_file; do
               [ -f "$rendered_file" ] || continue
               relative_name="${rendered_file#release-assets/distribution/}"
@@ -1673,7 +1697,7 @@ jobs:
               echo "  Added distribution config: ${flat_name}"
             done < <(find release-assets/distribution -type f | sort)
           else
-            echo "::warning::source-for-notes/packaging is missing; skipping distribution config rendering"
+            echo "::warning::Skipping distribution config rendering due to missing script/templates"
           fi
 
           echo "--- Generating consolidated CHECKSUMS.sha256 ---"
