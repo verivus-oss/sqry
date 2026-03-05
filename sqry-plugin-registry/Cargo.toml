@@ -1,0 +1,47 @@
+[package]
+name = "sqry-plugin-registry"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Shared plugin registry for sqry - centralizes language plugin registration"
+
+[dependencies]
+sqry-core = { path = "../sqry-core" }
+sqry-lang-rust = { path = "../sqry-lang-rust" }
+sqry-lang-javascript = { path = "../sqry-lang-javascript" }
+sqry-lang-java = { path = "../sqry-lang-java" }
+sqry-lang-typescript = { path = "../sqry-lang-typescript" }
+sqry-lang-python = { path = "../sqry-lang-python" }
+sqry-lang-go = { path = "../sqry-lang-go" }
+sqry-lang-lua = { path = "../sqry-lang-lua" }
+sqry-lang-r = { path = "../sqry-lang-r" }
+sqry-lang-dart = { path = "../sqry-lang-dart" }
+sqry-lang-sql = { path = "../sqry-lang-sql" }
+sqry-lang-swift = { path = "../sqry-lang-swift" }
+sqry-lang-c = { path = "../sqry-lang-c" }
+sqry-lang-cpp = { path = "../sqry-lang-cpp" }
+sqry-lang-csharp = { path = "../sqry-lang-csharp" }
+sqry-lang-kotlin = { path = "../sqry-lang-kotlin" }
+sqry-lang-ruby = { path = "../sqry-lang-ruby" }
+sqry-lang-php = { path = "../sqry-lang-php" }
+sqry-lang-scala = { path = "../sqry-lang-scala" }
+sqry-lang-shell = { path = "../sqry-lang-shell" }
+sqry-lang-html = { path = "../sqry-lang-html" }
+sqry-lang-css = { path = "../sqry-lang-css" }
+sqry-lang-haskell = { path = "../sqry-lang-haskell" }
+sqry-lang-perl = { path = "../sqry-lang-perl" }
+sqry-lang-elixir = { path = "../sqry-lang-elixir" }
+sqry-lang-vue = { path = "../sqry-lang-vue" }
+sqry-lang-svelte = { path = "../sqry-lang-svelte" }
+sqry-lang-groovy = { path = "../sqry-lang-groovy" }
+sqry-lang-zig = { path = "../sqry-lang-zig" }
+sqry-lang-servicenow-xanadu = { path = "../sqry-lang-servicenow-xanadu" }
+sqry-lang-terraform = { path = "../sqry-lang-terraform" }
+sqry-lang-puppet = { path = "../sqry-lang-puppet" }
+sqry-lang-pulumi = { path = "../sqry-lang-pulumi" }
+sqry-lang-salesforce-apex = { path = "../sqry-lang-salesforce-apex" }
+sqry-lang-sap-abap = { path = "../sqry-lang-sap-abap" }
+sqry-lang-oracle-plsql = { path = "../sqry-lang-oracle-plsql" }

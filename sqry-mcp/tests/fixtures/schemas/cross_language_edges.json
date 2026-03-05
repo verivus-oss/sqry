@@ -1,0 +1,33 @@
+{
+  "properties": {
+    "from_lang": {
+      "description": "Optional caller language filter (e.g., 'TypeScript')",
+      "type": "string"
+    },
+    "max_results": {
+      "default": 500,
+      "maximum": 5000,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "page_size": {
+      "default": 200,
+      "maximum": 1000,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "page_token": {
+      "type": "string"
+    },
+    "path": {
+      "default": ".",
+      "description": "Workspace-relative directory",
+      "type": "string"
+    },
+    "to_lang": {
+      "description": "Optional callee language filter (e.g., 'JavaScript')",
+      "type": "string"
+    }
+  },
+  "type": "object"
+}

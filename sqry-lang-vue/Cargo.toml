@@ -1,0 +1,30 @@
+[package]
+name = "sqry-lang-vue"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Vue language plugin for sqry"
+
+[dependencies]
+sqry-core = { path = "../sqry-core" }
+anyhow.workspace = true
+tree-sitter.workspace = true
+tree-sitter-vue-sqry = { path = "../crates/tree-sitter-vue-sqry" }
+tree-sitter-javascript.workspace = true
+tree-sitter-typescript.workspace = true
+streaming-iterator.workspace = true
+sqry-lang-support = { path = "../sqry-lang-support" }
+sqry-lang-javascript = { path = "../sqry-lang-javascript" }
+sqry-lang-typescript = { path = "../sqry-lang-typescript" }
+regex.workspace = true
+
+[dev-dependencies]
+sqry-tree-sitter-fuzz-support = { path = "../sqry-tree-sitter-fuzz-support" }
+log.workspace = true
+sqry-core = { path = "../sqry-core", features = ["test-support"] }
+serde.workspace = true
+serde_json.workspace = true
+insta = { version = "1.39", features = ["yaml"] }

@@ -1,0 +1,30 @@
+[package]
+name = "sqry-lang-zig"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Zig language plugin for sqry"
+
+[dependencies]
+sqry-core = { path = "../sqry-core" }
+anyhow.workspace = true
+tree-sitter.workspace = true
+tree-sitter-zig.workspace = true
+streaming-iterator.workspace = true
+
+[dev-dependencies]
+sqry-tree-sitter-fuzz-support = { path = "../sqry-tree-sitter-fuzz-support" }
+log.workspace = true
+sqry-core = { path = "../sqry-core", features = ["test-support"] }
+criterion = { version = "0.8", features = ["html_reports"] }
+
+[[bench]]
+name = "symbol_extraction"
+harness = false
+
+[features]
+default = ["has_relations"]
+has_relations = []

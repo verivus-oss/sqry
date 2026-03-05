@@ -1,0 +1,30 @@
+[package]
+name = "sqry-mcp-redaction"
+description = "Client-side helper library for redacting sensitive data from MCP responses"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+keywords = ["mcp", "redaction", "privacy", "security", "sqry"]
+categories = ["development-tools", "encoding", "parser-implementations"]
+
+[dependencies]
+serde_json.workspace = true
+thiserror.workspace = true
+sha2.workspace = true
+regex.workspace = true
+log.workspace = true
+
+[dev-dependencies]
+serde = { workspace = true }
+
+# Benchmarks will be added in a future iteration
+# [[bench]]
+# name = "redaction_bench"
+# harness = false
+#
+# [[bench]]
+# name = "streaming_perf"
+# harness = false

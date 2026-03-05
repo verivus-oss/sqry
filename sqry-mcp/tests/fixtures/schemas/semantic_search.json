@@ -1,0 +1,78 @@
+{
+  "properties": {
+    "context_lines": {
+      "default": 3,
+      "maximum": 20,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "filters": {
+      "additionalProperties": false,
+      "properties": {
+        "language": {
+          "description": "Limit results to specific languages",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "score_min": {
+          "description": "Minimum semantic relevance score (0.0 - 1.0)",
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "type": "number"
+        },
+        "symbol_kind": {
+          "description": "Filter by symbol kinds (function, method, class, etc.)",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "visibility": {
+          "enum": [
+            "public",
+            "private"
+          ],
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "max_results": {
+      "default": 200,
+      "maximum": 10000,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "pagination": {
+      "additionalProperties": false,
+      "properties": {
+        "cursor": {
+          "description": "Opaque cursor returned from previous page",
+          "type": "string"
+        },
+        "page_size": {
+          "default": 50,
+          "maximum": 500,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "path": {
+      "default": ".",
+      "description": "Workspace-relative directory",
+      "type": "string"
+    },
+    "query": {
+      "description": "Semantic query expression",
+      "type": "string"
+    }
+  },
+  "required": [
+    "query"
+  ],
+  "type": "object"
+}

@@ -1,0 +1,17 @@
+PackageIdentifier: VerivusOSS.sqry
+PackageVersion: @VERSION@
+PackageLocale: en-US
+Publisher: Verivus Pty Ltd
+PublisherUrl: https://sqry.dev
+PublisherSupportUrl: https://github.com/@REPO@/issues
+PackageName: sqry
+PackageUrl: https://github.com/@REPO@
+ShortDescription: Semantic code search tool
+Description: sqry is a semantic code search tool with graph-aware querying and relation traversal.
+License: MIT
+LicenseUrl: https://github.com/@REPO@/blob/@VERSION_TAG@/LICENSE
+Copyright: Copyright (c) Verivus Pty Ltd
+Moniker: sqry
+ReleaseNotesUrl: https://github.com/@REPO@/releases/tag/@VERSION_TAG@
+ManifestType: defaultLocale
+ManifestVersion: 1.6.0

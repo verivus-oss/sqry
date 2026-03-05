@@ -1,0 +1,10 @@
+# Training artifacts
+hf_cache/
+*.data
+sym_shape_infer_temp.onnx
+data/*
+# Exception: vendored Unicode data for confusables (not training data)
+!data/confusables.txt
+!data/UNICODE_DATA_PROVENANCE.md
+models/intent_classifier/
+models/onnx/
