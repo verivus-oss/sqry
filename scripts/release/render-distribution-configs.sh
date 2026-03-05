@@ -90,7 +90,22 @@ lookup_sha() {
   local checksum_file="$1"
   local asset_name="$2"
   local sha
-  sha=$(awk -v name="$asset_name" '$2 == name { print $1 }' "$checksum_file")
+  sha=$(awk -v name="$asset_name" '
+    {
+      file = $2
+      # Normalize GNU/BSD/Windows variants:
+      # - remove CRLF carriage returns
+      # - remove binary marker ("*file")
+      # - remove leading relative path prefix ("./file")
+      sub(/\r$/, "", file)
+      sub(/^\*/, "", file)
+      sub(/^\.\//, "", file)
+      if (file == name) {
+        print $1
+        exit
+      }
+    }
+  ' "$checksum_file")
   if [[ -z "$sha" ]]; then
     echo "error: checksum for '$asset_name' missing in '$checksum_file'" >&2
     exit 1
