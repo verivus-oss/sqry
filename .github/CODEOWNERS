@@ -1,0 +1,5 @@
+# Default owners for everything
+* @verivus-open
+
+# Release and CI workflows require release account review
+.github/workflows/ @verivus-open @verivusOSS-releases
