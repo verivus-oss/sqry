@@ -1,4 +1,4 @@
-# sqry
+# sqry - by Verivus
 
 sqry is a semantic code search tool. It parses source code into an AST and builds a graph of symbols and relationships, so you can search by what code **means** rather than just what it says.
 
