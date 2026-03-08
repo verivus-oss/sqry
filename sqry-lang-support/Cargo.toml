@@ -1,0 +1,16 @@
+[package]
+name = "sqry-lang-support"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Language plugin support library for sqry"
+
+[dependencies]
+sqry-core = { version = "4.8.16", path = "../sqry-core" }
+tree-sitter = { workspace = true }
+
+[dev-dependencies]
+tree-sitter-javascript = { workspace = true }

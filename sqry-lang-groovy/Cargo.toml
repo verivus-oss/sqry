@@ -1,0 +1,29 @@
+[package]
+name = "sqry-lang-groovy"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Groovy language plugin for sqry"
+
+[dependencies]
+sqry-core = { version = "4.8.16", path = "../sqry-core" }
+anyhow.workspace = true
+tree-sitter.workspace = true
+tree-sitter-groovy-sqry = { version = "4.8.16", path = "../crates/tree-sitter-groovy-sqry" }
+streaming-iterator.workspace = true
+sqry-lang-support = { version = "4.8.16", path = "../sqry-lang-support" }
+
+[dev-dependencies]
+sqry-tree-sitter-fuzz-support = { path = "../sqry-tree-sitter-fuzz-support" }
+log.workspace = true
+sqry-core = { path = "../sqry-core", features = ["test-support"] }
+serde.workspace = true
+serde_json.workspace = true
+insta = { version = "1.39", features = ["yaml"] }
+
+[features]
+default = ["has_relations"]
+has_relations = []

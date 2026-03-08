@@ -1,0 +1,47 @@
+[package]
+name = "sqry-plugin-registry"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Plugin registry for sqry language plugins"
+
+[dependencies]
+sqry-core = { version = "4.8.16", path = "../sqry-core" }
+sqry-lang-rust = { version = "4.8.16", path = "../sqry-lang-rust" }
+sqry-lang-javascript = { version = "4.8.16", path = "../sqry-lang-javascript" }
+sqry-lang-java = { version = "4.8.16", path = "../sqry-lang-java" }
+sqry-lang-typescript = { version = "4.8.16", path = "../sqry-lang-typescript" }
+sqry-lang-python = { version = "4.8.16", path = "../sqry-lang-python" }
+sqry-lang-go = { version = "4.8.16", path = "../sqry-lang-go" }
+sqry-lang-lua = { version = "4.8.16", path = "../sqry-lang-lua" }
+sqry-lang-r = { version = "4.8.16", path = "../sqry-lang-r" }
+sqry-lang-dart = { version = "4.8.16", path = "../sqry-lang-dart" }
+sqry-lang-sql = { version = "4.8.16", path = "../sqry-lang-sql" }
+sqry-lang-swift = { version = "4.8.16", path = "../sqry-lang-swift" }
+sqry-lang-c = { version = "4.8.16", path = "../sqry-lang-c" }
+sqry-lang-cpp = { version = "4.8.16", path = "../sqry-lang-cpp" }
+sqry-lang-csharp = { version = "4.8.16", path = "../sqry-lang-csharp" }
+sqry-lang-kotlin = { version = "4.8.16", path = "../sqry-lang-kotlin" }
+sqry-lang-ruby = { version = "4.8.16", path = "../sqry-lang-ruby" }
+sqry-lang-php = { version = "4.8.16", path = "../sqry-lang-php" }
+sqry-lang-scala = { version = "4.8.16", path = "../sqry-lang-scala" }
+sqry-lang-shell = { version = "4.8.16", path = "../sqry-lang-shell" }
+sqry-lang-html = { version = "4.8.16", path = "../sqry-lang-html" }
+sqry-lang-css = { version = "4.8.16", path = "../sqry-lang-css" }
+sqry-lang-haskell = { version = "4.8.16", path = "../sqry-lang-haskell" }
+sqry-lang-perl = { version = "4.8.16", path = "../sqry-lang-perl" }
+sqry-lang-elixir = { version = "4.8.16", path = "../sqry-lang-elixir" }
+sqry-lang-vue = { version = "4.8.16", path = "../sqry-lang-vue" }
+sqry-lang-svelte = { version = "4.8.16", path = "../sqry-lang-svelte" }
+sqry-lang-groovy = { version = "4.8.16", path = "../sqry-lang-groovy" }
+sqry-lang-zig = { version = "4.8.16", path = "../sqry-lang-zig" }
+sqry-lang-servicenow-xanadu = { version = "4.8.16", path = "../sqry-lang-servicenow-xanadu" }
+sqry-lang-terraform = { version = "4.8.16", path = "../sqry-lang-terraform" }
+sqry-lang-puppet = { version = "4.8.16", path = "../sqry-lang-puppet" }
+sqry-lang-pulumi = { version = "4.8.16", path = "../sqry-lang-pulumi" }
+sqry-lang-salesforce-apex = { version = "4.8.16", path = "../sqry-lang-salesforce-apex" }
+sqry-lang-sap-abap = { version = "4.8.16", path = "../sqry-lang-sap-abap" }
+sqry-lang-oracle-plsql = { version = "4.8.16", path = "../sqry-lang-oracle-plsql" }

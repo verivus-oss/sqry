@@ -1,0 +1,32 @@
+[package]
+name = "sqry-lang-servicenow-xanadu"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "ServiceNow (Xanadu) JavaScript plugin scaffold for sqry"
+
+[lib]
+name = "sqry_lang_servicenow_xanadu"
+path = "src/lib.rs"
+
+[dependencies]
+sqry-core = { version = "4.8.16", path = "../sqry-core" }
+tree-sitter = { workspace = true }
+tree-sitter-javascript = { workspace = true }
+streaming-iterator = { workspace = true }
+anyhow = { workspace = true }
+
+
+[dev-dependencies]
+sqry-tree-sitter-fuzz-support = { path = "../sqry-tree-sitter-fuzz-support" }
+tempfile = { workspace = true }
+
+[features]
+default = ["has_relations"]
+has_relations = []
+
+[lints]
+workspace = true

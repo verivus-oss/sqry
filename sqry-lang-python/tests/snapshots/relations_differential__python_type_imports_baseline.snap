@@ -1,0 +1,18 @@
+---
+source: sqry-lang-python/tests/relations_differential.rs
+expression: normalized
+---
+[
+    (
+        "User",
+        "models",
+        None,
+        false,
+    ),
+    (
+        "TYPE_CHECKING",
+        "typing",
+        None,
+        false,
+    ),
+]

@@ -1,0 +1,622 @@
+import * as crypto from "node:crypto";
+import * as fs from "node:fs";
+import * as https from "node:https";
+import * as path from "node:path";
+import * as url from "node:url";
+import * as vscode from "vscode";
+
+const GITHUB_RELEASE_BASE = "https://github.com/verivus-oss/sqry/releases/download";
+const OIDC_ISSUER = "https://token.actions.githubusercontent.com";
+const CERT_IDENTITY_PATTERN = "https://github.com/verivus-oss/sqry/.github/workflows/oss-leg3-release.yml@refs/tags/v";
+const MAX_DOWNLOAD_SIZE = 200 * 1024 * 1024; // 200 MB
+const LOCK_STALE_MS = 10 * 60 * 1000; // 10 minutes
+const KEEP_VERSIONS = 2;
+
+export interface PlatformInfo {
+  asset: string;
+  binaryName: string;
+}
+
+export interface VersionInfo {
+  version: string;
+  downloadedAt: string;
+  platform: string;
+  sha256: string;
+}
+
+/**
+ * Detect the platform and return the corresponding release asset name.
+ * Throws for unsupported platforms with descriptive messages.
+ */
+export function detectPlatform(): PlatformInfo {
+  const platform = process.platform;
+  const arch = process.arch;
+
+  if (platform === "linux" && arch === "x64") {
+    return { asset: "sqry-linux-x86_64", binaryName: "sqry" };
+  }
+  if (platform === "win32" && arch === "x64") {
+    return { asset: "sqry-windows-x86_64.exe", binaryName: "sqry.exe" };
+  }
+  if (platform === "darwin" && arch === "arm64") {
+    return { asset: "sqry-macos-arm64", binaryName: "sqry" };
+  }
+  if (platform === "darwin" && arch === "x64") {
+    throw new Error(
+      "sqry does not provide pre-built binaries for macOS Intel (x86_64). " +
+      "Install via: cargo install sqry-cli"
+    );
+  }
+
+  throw new Error(
+    `sqry does not provide pre-built binaries for ${platform}-${arch}. ` +
+    "Install via: cargo install sqry-cli"
+  );
+}
+
+/**
+ * Read the binaryVersion field from the extension's package.json.
+ */
+export function getBinaryVersion(): string {
+  const extPath = path.resolve(__dirname, "..");
+  const pkgPath = path.join(extPath, "package.json");
+  const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf-8"));
+  const version = pkg.binaryVersion;
+  if (!version || typeof version !== "string") {
+    throw new Error("binaryVersion not found in package.json");
+  }
+  return version;
+}
+
+/**
+ * Check if a host is in the allowed download host list.
+ */
+export function isAllowedHost(hostname: string): boolean {
+  if (hostname === "github.com") {
+    return true;
+  }
+  // Match *.githubusercontent.com but NOT github.com.evil.com
+  if (hostname.endsWith(".githubusercontent.com")) {
+    // Ensure there's exactly one label before .githubusercontent.com
+    const prefix = hostname.slice(0, -".githubusercontent.com".length);
+    return prefix.length > 0 && !prefix.includes(".");
+  }
+  return false;
+}
+
+/**
+ * Download a file over HTTPS with progress reporting, redirect following,
+ * proxy support, and security checks.
+ */
+export async function downloadWithProgress(
+  downloadUrl: string,
+  destPath: string,
+  onProgress?: (downloaded: number, total: number) => void,
+  cancellationToken?: vscode.CancellationToken,
+  maxRedirects = 5,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (cancellationToken?.isCancellationRequested) {
+      reject(new Error("Download cancelled"));
+      return;
+    }
+
+    const parsed = new url.URL(downloadUrl);
+
+    if (parsed.protocol !== "https:") {
+      reject(new Error(`Refusing non-HTTPS download URL: ${downloadUrl}`));
+      return;
+    }
+
+    if (!isAllowedHost(parsed.hostname)) {
+      reject(new Error(`Download host not in allowlist: ${parsed.hostname}`));
+      return;
+    }
+
+    const proxyUrl = vscode.workspace.getConfiguration("http").get<string>("proxy");
+
+    let requestOptions: https.RequestOptions = {
+      hostname: parsed.hostname,
+      path: parsed.pathname + parsed.search,
+      headers: { "User-Agent": "sqry-vscode" },
+    };
+
+    if (proxyUrl) {
+      try {
+        // Dynamic require to allow the module to load even without the dep
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const { HttpsProxyAgent } = require("https-proxy-agent");
+        requestOptions.agent = new HttpsProxyAgent(proxyUrl);
+      } catch {
+        // Fall through without proxy if agent creation fails
+      }
+    }
+
+    const req = https.get(requestOptions, (res) => {
+      // Handle redirects
+      if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        res.resume(); // Drain the response
+
+        if (maxRedirects <= 0) {
+          reject(new Error("Too many redirects"));
+          return;
+        }
+
+        const redirectUrl = res.headers.location;
+        const redirectParsed = new url.URL(redirectUrl);
+
+        if (redirectParsed.protocol !== "https:") {
+          reject(new Error(`Refusing non-HTTPS redirect to: ${redirectUrl}`));
+          return;
+        }
+
+        if (!isAllowedHost(redirectParsed.hostname)) {
+          reject(new Error(`Redirect host not in allowlist: ${redirectParsed.hostname}`));
+          return;
+        }
+
+        downloadWithProgress(redirectUrl, destPath, onProgress, cancellationToken, maxRedirects - 1)
+          .then(resolve)
+          .catch(reject);
+        return;
+      }
+
+      if (res.statusCode === 404) {
+        res.resume();
+        reject(new Error("HTTP 404: Release asset not found"));
+        return;
+      }
+
+      if (!res.statusCode || res.statusCode >= 400) {
+        res.resume();
+        reject(new Error(`HTTP error: ${res.statusCode}`));
+        return;
+      }
+
+      const contentLength = parseInt(res.headers["content-length"] || "0", 10);
+      if (contentLength > MAX_DOWNLOAD_SIZE) {
+        res.resume();
+        reject(new Error(`Download rejected: file exceeds expected size limit (${contentLength} bytes > ${MAX_DOWNLOAD_SIZE} bytes)`));
+        return;
+      }
+
+      const fileStream = fs.createWriteStream(destPath);
+      let downloaded = 0;
+
+      const onCancel = cancellationToken?.onCancellationRequested(() => {
+        res.destroy();
+        fileStream.destroy();
+        cleanupFile(destPath);
+        reject(new Error("Download cancelled"));
+      });
+
+      res.on("data", (chunk: Buffer) => {
+        downloaded += chunk.length;
+        if (downloaded > MAX_DOWNLOAD_SIZE) {
+          res.destroy();
+          fileStream.destroy();
+          cleanupFile(destPath);
+          reject(new Error(`Download rejected: file exceeds expected size limit`));
+          return;
+        }
+        if (onProgress && contentLength > 0) {
+          onProgress(downloaded, contentLength);
+        }
+      });
+
+      res.pipe(fileStream);
+
+      fileStream.on("finish", () => {
+        onCancel?.dispose();
+        resolve();
+      });
+
+      fileStream.on("error", (err) => {
+        onCancel?.dispose();
+        cleanupFile(destPath);
+        reject(err);
+      });
+
+      res.on("error", (err) => {
+        onCancel?.dispose();
+        fileStream.destroy();
+        cleanupFile(destPath);
+        reject(err);
+      });
+    });
+
+    req.on("error", (err) => {
+      reject(new Error(`Network error: ${err.message}. Check your internet connection and proxy settings.`));
+    });
+  });
+}
+
+/**
+ * Parse a SHA256 checksum file (sha256sum format) and extract the hash for a given asset.
+ */
+export function parseChecksumForAsset(checksumContent: string, assetName: string): string {
+  const lines = checksumContent.split("\n");
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      continue;
+    }
+    // sha256sum format: "hash  filename" or "hash *filename"
+    const match = trimmed.match(/^([a-fA-F0-9]{64})\s+\*?(\S+)$/);
+    if (match && match[2].trim() === assetName) {
+      return match[1].toLowerCase();
+    }
+  }
+  throw new Error(`Checksum not found for asset "${assetName}" in CHECKSUMS.sha256`);
+}
+
+/**
+ * Verify the SHA256 hash of a file.
+ * Returns true if valid, throws on mismatch.
+ */
+export async function verifySha256(filePath: string, expectedHash: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const hash = crypto.createHash("sha256");
+    const stream = fs.createReadStream(filePath);
+
+    stream.on("data", (data) => hash.update(data));
+    stream.on("end", () => {
+      const actual = hash.digest("hex").toLowerCase();
+      const expected = expectedHash.toLowerCase();
+      if (actual === expected) {
+        resolve();
+      } else {
+        reject(new Error(
+          `SHA256 checksum mismatch. Expected: ${expected}, got: ${actual}. ` +
+          "The downloaded file may be corrupted."
+        ));
+      }
+    });
+    stream.on("error", reject);
+  });
+}
+
+/**
+ * Verify a Cosign signature bundle using sigstore-js.
+ * This is MANDATORY - failure means the binary is rejected.
+ */
+export async function verifyCosignBundle(
+  binaryPath: string,
+  bundlePath: string,
+  version: string,
+  outputChannel: vscode.OutputChannel,
+): Promise<void> {
+  // Check if insecure download is allowed (hidden setting)
+  const allowInsecure = vscode.workspace.getConfiguration("sqry").get<boolean>("allowInsecureDownload", false);
+
+  if (allowInsecure) {
+    outputChannel.appendLine(
+      "[sqry] ⚠️ WARNING: Cosign signature verification SKIPPED because sqry.allowInsecureDownload is enabled. " +
+      "This reduces security - the binary's provenance cannot be verified. " +
+      "Only use this in air-gapped environments where Sigstore certificate transparency logs are unreachable."
+    );
+    return;
+  }
+
+  if (!fs.existsSync(bundlePath)) {
+    throw new Error("Cosign signature bundle file is missing. Binary provenance cannot be verified.");
+  }
+
+  try {
+    const sigstore = await import("sigstore");
+    const bundleContent = JSON.parse(fs.readFileSync(bundlePath, "utf-8"));
+    const binaryData = fs.readFileSync(binaryPath);
+    const certIdentity = `${CERT_IDENTITY_PATTERN}${version}`;
+
+    outputChannel.appendLine(`[sqry] Verifying Cosign bundle (issuer: ${OIDC_ISSUER}, identity: ${certIdentity})`);
+
+    await sigstore.verify(bundleContent, binaryData, {
+      certificateIssuer: OIDC_ISSUER,
+      certificateIdentityURI: certIdentity,
+    });
+
+    outputChannel.appendLine("[sqry] Cosign signature verification succeeded - binary provenance confirmed");
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `Binary provenance could not be verified. Download rejected. ` +
+      `Cosign verification failed: ${message}`
+    );
+  }
+}
+
+/**
+ * Check for a previously downloaded binary that is still valid.
+ * Runs `sqry --version` preflight to confirm it's executable.
+ */
+export async function findExistingBinary(
+  storageUri: vscode.Uri,
+  version: string,
+): Promise<string | null> {
+  const platformInfo = detectPlatform();
+  const binDir = path.join(storageUri.fsPath, "bin", `v${version}`);
+  const binaryPath = path.join(binDir, platformInfo.binaryName);
+
+  if (!fs.existsSync(binaryPath)) {
+    return null;
+  }
+
+  // Verify it's executable via preflight check
+  try {
+    const { execFileSync } = await import("node:child_process");
+    execFileSync(binaryPath, ["--version"], { timeout: 10000 });
+    return binaryPath;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Acquire a lockfile for download. Returns true if acquired, false if contention.
+ */
+export function acquireLock(storageUri: vscode.Uri): boolean {
+  const lockPath = path.join(storageUri.fsPath, "download.lock");
+
+  // Check for stale lock
+  if (fs.existsSync(lockPath)) {
+    try {
+      const stat = fs.statSync(lockPath);
+      const age = Date.now() - stat.mtimeMs;
+      if (age < LOCK_STALE_MS) {
+        return false; // Lock is held by another window
+      }
+      // Stale lock - clean it up
+      fs.unlinkSync(lockPath);
+    } catch {
+      // If we can't stat, try to proceed
+    }
+  }
+
+  // Create lock
+  fs.mkdirSync(path.dirname(lockPath), { recursive: true });
+  fs.writeFileSync(lockPath, `${process.pid}\n${Date.now()}`);
+  return true;
+}
+
+/**
+ * Release the download lockfile.
+ */
+export function releaseLock(storageUri: vscode.Uri): void {
+  const lockPath = path.join(storageUri.fsPath, "download.lock");
+  cleanupFile(lockPath);
+}
+
+/**
+ * Remove old version directories, keeping the N most recent.
+ */
+export function cleanupOldVersions(storageUri: vscode.Uri, currentVersion: string): void {
+  const binDir = path.join(storageUri.fsPath, "bin");
+  if (!fs.existsSync(binDir)) {
+    return;
+  }
+
+  const entries = fs.readdirSync(binDir)
+    .filter((entry) => entry.startsWith("v"))
+    .sort((a, b) => a.localeCompare(b))
+    .reverse();
+
+  // Always keep current version + N-1 for rollback
+  const toKeep = new Set<string>();
+  toKeep.add(`v${currentVersion}`);
+
+  let kept = 0;
+  for (const entry of entries) {
+    if (toKeep.has(entry)) {
+      continue;
+    }
+    if (kept < KEEP_VERSIONS - 1) {
+      toKeep.add(entry);
+      kept++;
+    }
+  }
+
+  for (const entry of entries) {
+    if (!toKeep.has(entry)) {
+      const dirPath = path.join(binDir, entry);
+      try {
+        fs.rmSync(dirPath, { recursive: true, force: true });
+      } catch {
+        // Best-effort cleanup
+      }
+    }
+  }
+}
+
+/**
+ * Find the most recent previous version binary for rollback.
+ */
+async function findRollbackBinary(storageUri: vscode.Uri, currentVersion: string): Promise<string | null> {
+  const binDir = path.join(storageUri.fsPath, "bin");
+  if (!fs.existsSync(binDir)) {
+    return null;
+  }
+
+  const platformInfo = detectPlatform();
+  const entries = fs.readdirSync(binDir)
+    .filter((entry) => entry.startsWith("v") && entry !== `v${currentVersion}`)
+    .sort((a, b) => a.localeCompare(b))
+    .reverse();
+
+  for (const entry of entries) {
+    const binaryPath = path.join(binDir, entry, platformInfo.binaryName);
+    if (fs.existsSync(binaryPath)) {
+      try {
+        const { execFileSync } = await import("node:child_process");
+        execFileSync(binaryPath, ["--version"], { timeout: 10000 });
+        return binaryPath;
+      } catch {
+        continue;
+      }
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Main download orchestrator. Downloads, verifies, and installs the sqry binary.
+ * Returns the path to the installed binary.
+ */
+export async function downloadBinary(
+  context: vscode.ExtensionContext,
+  outputChannel: vscode.OutputChannel,
+  cancellationToken?: vscode.CancellationToken,
+): Promise<string> {
+  const storageUri = context.globalStorageUri;
+  const version = getBinaryVersion();
+  const platformInfo = detectPlatform();
+
+  // Acquire lock
+  if (!acquireLock(storageUri)) {
+    throw new Error("Another VS Code window is already downloading sqry. Please wait.");
+  }
+
+  const versionDir = path.join(storageUri.fsPath, "bin", `v${version}`);
+  const finalBinaryPath = path.join(versionDir, platformInfo.binaryName);
+  const tmpBinaryPath = `${finalBinaryPath}.tmp`;
+  const tmpBundlePath = `${finalBinaryPath}.bundle.tmp`;
+  const finalBundlePath = path.join(versionDir, `${platformInfo.binaryName}.bundle`);
+  const tmpChecksumPath = path.join(versionDir, "CHECKSUMS.sha256.tmp");
+
+  try {
+    // Ensure directories exist
+    fs.mkdirSync(versionDir, { recursive: true });
+
+    const releaseBase = `${GITHUB_RELEASE_BASE}/v${version}`;
+
+    // Step 1: Download CHECKSUMS.sha256
+    outputChannel.appendLine(`[sqry] Downloading checksums from ${releaseBase}/CHECKSUMS.sha256`);
+    await downloadWithProgress(
+      `${releaseBase}/CHECKSUMS.sha256`,
+      tmpChecksumPath,
+      undefined,
+      cancellationToken,
+    );
+    const checksumContent = fs.readFileSync(tmpChecksumPath, "utf-8");
+    cleanupFile(tmpChecksumPath);
+
+    // Step 2: Parse expected hash
+    const expectedHash = parseChecksumForAsset(checksumContent, platformInfo.asset);
+    outputChannel.appendLine(`[sqry] Expected SHA256 for ${platformInfo.asset}: ${expectedHash}`);
+
+    // Step 3: Download binary with progress
+    outputChannel.appendLine(`[sqry] Downloading binary: ${platformInfo.asset}`);
+    await downloadWithProgress(
+      `${releaseBase}/${platformInfo.asset}`,
+      tmpBinaryPath,
+      (downloaded, total) => {
+        const pct = Math.round((downloaded / total) * 100);
+        outputChannel.appendLine(`[sqry] Download progress: ${pct}%`);
+      },
+      cancellationToken,
+    );
+
+    // Step 4: Verify SHA256
+    outputChannel.appendLine("[sqry] Verifying SHA256 checksum...");
+    try {
+      await verifySha256(tmpBinaryPath, expectedHash);
+    } catch (err) {
+      cleanupFile(tmpBinaryPath);
+      throw err;
+    }
+    outputChannel.appendLine("[sqry] SHA256 checksum verified");
+
+    // Step 5: Download .bundle file
+    outputChannel.appendLine(`[sqry] Downloading Cosign bundle: ${platformInfo.asset}.bundle`);
+    try {
+      await downloadWithProgress(
+        `${releaseBase}/${platformInfo.asset}.bundle`,
+        tmpBundlePath,
+        undefined,
+        cancellationToken,
+      );
+    } catch (err) {
+      cleanupFile(tmpBinaryPath);
+      cleanupFile(tmpBundlePath);
+      throw err;
+    }
+
+    // Step 6: Verify Cosign bundle (MANDATORY)
+    outputChannel.appendLine("[sqry] Verifying Cosign signature bundle...");
+    try {
+      await verifyCosignBundle(tmpBinaryPath, tmpBundlePath, version, outputChannel);
+    } catch (err) {
+      cleanupFile(tmpBinaryPath);
+      cleanupFile(tmpBundlePath);
+      throw err;
+    }
+
+    // Step 7: Atomic rename to final paths
+    fs.renameSync(tmpBinaryPath, finalBinaryPath);
+    fs.renameSync(tmpBundlePath, finalBundlePath);
+
+    // Step 8: Set executable permissions on unix
+    if (process.platform !== "win32") {
+      fs.chmodSync(finalBinaryPath, 0o755);
+    }
+
+    // Step 9: Preflight check
+    outputChannel.appendLine("[sqry] Running preflight check (sqry --version)...");
+    try {
+      const { execFileSync } = await import("node:child_process");
+      const versionOutput = execFileSync(finalBinaryPath, ["--version"], {
+        timeout: 10000,
+        encoding: "utf-8",
+      });
+      outputChannel.appendLine(`[sqry] Preflight OK: ${versionOutput.trim()}`);
+    } catch (preflightError) {
+      outputChannel.appendLine("[sqry] Preflight check failed, attempting rollback...");
+
+      const rollbackPath = await findRollbackBinary(storageUri, version);
+      if (rollbackPath) {
+        outputChannel.appendLine(`[sqry] Rolling back to: ${rollbackPath}`);
+        return rollbackPath;
+      }
+
+      throw new Error(
+        "Downloaded binary failed preflight check (sqry --version) and no previous version is available for rollback."
+      );
+    }
+
+    // Step 10: Write version.json
+    const versionInfo: VersionInfo = {
+      version,
+      downloadedAt: new Date().toISOString(),
+      platform: `${process.platform}-${process.arch}`,
+      sha256: expectedHash,
+    };
+    fs.writeFileSync(
+      path.join(storageUri.fsPath, "bin", "version.json"),
+      JSON.stringify(versionInfo, null, 2),
+    );
+
+    // Step 11: Cleanup old versions
+    cleanupOldVersions(storageUri, version);
+
+    outputChannel.appendLine(`[sqry] Binary installed successfully at ${finalBinaryPath}`);
+    return finalBinaryPath;
+  } catch (error) {
+    // Cleanup temp files on any failure
+    cleanupFile(tmpBinaryPath);
+    cleanupFile(tmpBundlePath);
+    cleanupFile(tmpChecksumPath);
+    throw error;
+  } finally {
+    releaseLock(storageUri);
+  }
+}
+
+function cleanupFile(filePath: string): void {
+  try {
+    if (fs.existsSync(filePath)) {
+      fs.unlinkSync(filePath);
+    }
+  } catch {
+    // Best-effort cleanup
+  }
+}

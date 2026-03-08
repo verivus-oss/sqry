@@ -1,0 +1,14 @@
+==================
+class publication
+==================
+
+class class definition deferred.
+class class definition deferred public.
+
+---
+
+(program
+  (class_publication
+    name: (name))
+  (class_publication
+    name: (name)))

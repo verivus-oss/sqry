@@ -1,0 +1,46 @@
+---
+source: sqry-lang-python/tests/relations_differential.rs
+expression: normalized
+---
+[
+    (
+        "Repository.save",
+        "log",
+        8,
+    ),
+    (
+        "Service.persist",
+        "transform",
+        18,
+    ),
+    (
+        "Service.process",
+        "log",
+        13,
+    ),
+    (
+        "Service.process",
+        "persist",
+        14,
+    ),
+    (
+        "Service.process",
+        "save",
+        15,
+    ),
+    (
+        "log",
+        "print",
+        2,
+    ),
+    (
+        "top_level",
+        "Service",
+        26,
+    ),
+    (
+        "top_level",
+        "process",
+        27,
+    ),
+]
