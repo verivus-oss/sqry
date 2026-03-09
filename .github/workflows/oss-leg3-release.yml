@@ -60,6 +60,9 @@ permissions:
   contents: write
   packages: write
 
+env:
+  ZIG_VERSION: "0.15.2"
+
 jobs:
   # ===========================================================================
   # Job 0: Smoke Tests (INLINED)
@@ -263,10 +266,15 @@ jobs:
           echo "Tag '$VERSION' verified at $(git rev-parse --short HEAD)"
 
       - name: Install Zig and cargo-zigbuild
+        env:
+          ZIG_ARCHIVE: zig-x86_64-linux-${{ env.ZIG_VERSION }}.tar.xz
         run: |
-          python3 -m pip install --user ziglang
-          export PATH="$HOME/.local/bin:$PATH"
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          curl -fsSLo "$RUNNER_TEMP/$ZIG_ARCHIVE" \
+            "https://ziglang.org/download/${ZIG_VERSION}/${ZIG_ARCHIVE}"
+          mkdir -p "$RUNNER_TEMP/zig"
+          tar -xJf "$RUNNER_TEMP/$ZIG_ARCHIVE" -C "$RUNNER_TEMP/zig" --strip-components=1
+          echo "$RUNNER_TEMP/zig" >> "$GITHUB_PATH"
+          export PATH="$RUNNER_TEMP/zig:$PATH"
           cargo install --locked cargo-zigbuild --version 0.22.1
           "$HOME/.cargo/bin/cargo-zigbuild" --version
           zig version
@@ -426,10 +434,15 @@ jobs:
           echo "Tag '$VERSION' verified at $(git rev-parse --short HEAD)"
 
       - name: Install Zig and cargo-zigbuild
+        env:
+          ZIG_ARCHIVE: zig-aarch64-linux-${{ env.ZIG_VERSION }}.tar.xz
         run: |
-          python3 -m pip install --user ziglang
-          export PATH="$HOME/.local/bin:$PATH"
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          curl -fsSLo "$RUNNER_TEMP/$ZIG_ARCHIVE" \
+            "https://ziglang.org/download/${ZIG_VERSION}/${ZIG_ARCHIVE}"
+          mkdir -p "$RUNNER_TEMP/zig"
+          tar -xJf "$RUNNER_TEMP/$ZIG_ARCHIVE" -C "$RUNNER_TEMP/zig" --strip-components=1
+          echo "$RUNNER_TEMP/zig" >> "$GITHUB_PATH"
+          export PATH="$RUNNER_TEMP/zig:$PATH"
           cargo install --locked cargo-zigbuild --version 0.22.1
           "$HOME/.cargo/bin/cargo-zigbuild" --version
           zig version
@@ -535,13 +548,28 @@ jobs:
           retention-days: 7
           if-no-files-found: error
 
+  linux-release-gate:
+    name: Linux Release Gate
+    needs:
+      - build-linux-x86_64
+      - build-linux-arm64
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+
+    steps:
+      - name: Confirm both Linux builds succeeded
+        run: echo "Linux release gate passed"
+
   # ===========================================================================
   # Job 1c: Build + Sign — Windows x86_64 (MSVC)
   # Cosign always; SignPath Authenticode conditional on secrets.SIGNPATH_API_TOKEN
   # ===========================================================================
   build-windows-x86_64:
     name: Build + Sign — Windows x86_64
-    needs: smoke-tests
+    needs:
+      - smoke-tests
+      - linux-release-gate
     runs-on: windows-2022
     environment: oss-signing
     permissions:
@@ -613,6 +641,7 @@ jobs:
         run: |
           cargo build --release \
             --target x86_64-pc-windows-msvc \
+            --features sqry-cli/nl-classifier,sqry-mcp/nl-classifier \
             -p sqry-cli \
             -p sqry-mcp \
             -p sqry-lsp
@@ -785,7 +814,9 @@ jobs:
   # ===========================================================================
   build-macos-arm64:
     name: Build + Sign — macOS ARM64
-    needs: smoke-tests
+    needs:
+      - smoke-tests
+      - linux-release-gate
     runs-on: macos-14
     environment: oss-signing
     permissions:
@@ -856,6 +887,7 @@ jobs:
         run: |
           cargo build --release \
             --target aarch64-apple-darwin \
+            --features sqry-cli/nl-classifier,sqry-mcp/nl-classifier \
             -p sqry-cli \
             -p sqry-mcp \
             -p sqry-lsp
@@ -1110,7 +1142,9 @@ jobs:
   # ===========================================================================
   build-vscode-extension:
     name: Build + Sign — VSCode Extension
-    needs: smoke-tests
+    needs:
+      - smoke-tests
+      - linux-release-gate
     runs-on: ubuntu-24.04
     environment: oss-signing
     permissions:
