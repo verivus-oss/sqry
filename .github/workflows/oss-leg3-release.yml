@@ -1716,31 +1716,31 @@ jobs:
       - name: Download provenance — Linux x86_64
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: ${{ needs['provenance-linux-x86_64'].outputs.provenance-name }}
+          name: ${{ needs['provenance-linux-x86_64'].outputs['provenance-name'] }}
           path: provenance/
 
       - name: Download provenance — Linux ARM64
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: ${{ needs['provenance-linux-arm64'].outputs.provenance-name }}
+          name: ${{ needs['provenance-linux-arm64'].outputs['provenance-name'] }}
           path: provenance/
 
       - name: Download provenance — Windows x86_64
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: ${{ needs['provenance-windows-x86_64'].outputs.provenance-name }}
+          name: ${{ needs['provenance-windows-x86_64'].outputs['provenance-name'] }}
           path: provenance/
 
       - name: Download provenance — macOS ARM64
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: ${{ needs['provenance-macos-arm64'].outputs.provenance-name }}
+          name: ${{ needs['provenance-macos-arm64'].outputs['provenance-name'] }}
           path: provenance/
 
       - name: Download provenance — VSCode
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: ${{ needs['provenance-vscode'].outputs.provenance-name }}
+          name: ${{ needs['provenance-vscode'].outputs['provenance-name'] }}
           path: provenance/
 
       # --- Step 4: Verify per-platform checksums ---
