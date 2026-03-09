@@ -1,0 +1,26 @@
+[package]
+name = "sqry-lang-pulumi"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Pulumi YAML/JSON language plugin for sqry"
+
+[dependencies]
+sqry-core = { version = "4.8.16", path = "../sqry-core" }
+anyhow.workspace = true
+thiserror.workspace = true
+tree-sitter.workspace = true
+tree-sitter-yaml.workspace = true
+tree-sitter-json.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+sqry-tree-sitter-fuzz-support = { path = "../sqry-tree-sitter-fuzz-support" }
+sqry-test-support = { path = "../sqry-test-support" }
+
+[features]
+default = ["has_relations"]
+has_relations = []

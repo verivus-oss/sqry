@@ -1,0 +1,43 @@
+==================
+read table statement
+==================
+
+read table itab into wa with key col = val.
+
+---
+(program
+  (read_table_statement
+    (name)
+    (name)
+    (line_spec
+      (name)
+      (name))))
+
+==================
+read table statement with binary search
+==================
+
+read table gt_bseg transporting no fields
+  with key  bukrs = <gs_bkpf>-bukrs
+            belnr = <gs_bkpf>-belnr
+            gjahr = <gs_bkpf>-gjahr
+  binary search.
+
+---
+
+(program
+  (read_table_statement
+    (name)
+    (line_spec
+      (name)
+      (structured_data_object
+        (structure_name)
+        (component_name))
+      (name)
+      (structured_data_object
+        (structure_name)
+        (component_name))
+      (name)
+      (structured_data_object
+        (structure_name)
+        (component_name)))))

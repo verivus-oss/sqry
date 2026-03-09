@@ -1,0 +1,19 @@
+[package]
+name = "sqry-tree-sitter-fuzz-support"
+version = "0.1.0"
+edition = "2021"
+authors = ["Verivus AI Labs"]
+description = "Malformed input generators for tree-sitter FFI safety testing"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+# Random number generation for malformed input
+rand = { version = "0.9", features = ["small_rng"] }
+
+[dev-dependencies]
+# Test utilities
+pretty_assertions = "1.4"
+
+[lib]
+doctest = false

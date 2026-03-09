@@ -1,0 +1,16 @@
+==================
+class local friends of global classes
+==================
+
+class class definition
+  local friends class1 class2 intf1 intf2.
+
+---
+
+(program
+  (class_local_friend_publication
+    name: (name)
+    friends: (name)
+    friends: (name)
+    friends: (name)
+    friends: (name)))
