@@ -158,7 +158,7 @@ Watch for requests like:
 git branch --show-current
 
 # 2. Verify working directory
-pwd  # Should be /srv/repos/internal/verivusai-labs/sqry
+pwd  # Should be the sqry repository root
 
 # 3. Create directory structure
 mkdir -p docs/development/<component-name>

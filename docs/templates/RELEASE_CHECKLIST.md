@@ -9,7 +9,7 @@ This template enumerates the manual verification steps required before and after
 - [ ] Version bumped in workspace `Cargo.toml` and `Cargo.lock` updated
 - [ ] Release tag created and pushed: `git tag vX.Y.Z && git push origin master vX.Y.Z`
 - [ ] Run local preflight: `./scripts/release/preflight-oss-release.sh vX.Y.Z`
-- [ ] Trigger: `gh workflow run oss-leg1-sanitize.yml -f version=vX.Y.Z` (from `verivusai-labs/sqry`)
+- [ ] Trigger the private Leg 1 sanitize workflow for `vX.Y.Z`
 - [ ] Confirm Job 1 (sanitize/build/test/scan) passes
 - [ ] Approve environment gate `oss-staging` to allow Job 2 push
 
@@ -23,9 +23,9 @@ This template enumerates the manual verification steps required before and after
 - [ ] For MCP work: confirm `MCP_INTEGRATION_TEMPLATE-_SLUG_.md` is referenced in template docs and is consistent with CLI/MCP process docs.
 
 ### Leg 2 — Sync to Public
-- [ ] Human eyeball `verivusai-open/sqry` — verify no internal org references and no internal absolute paths
-- [ ] Obtain staging SHA and tree hash from Leg 1 job summary, or query: `gh api repos/verivusai-open/sqry/git/ref/tags/vX.Y.Z --jq '.object.sha'`
-- [ ] Trigger: `gh workflow run oss-leg2-publish.yml -f version=vX.Y.Z -f staging_commit_sha=<sha> -f staging_tree_hash=<tree>` (from `verivusai-labs/sqry`)
+- [ ] Human-eyeball the sanitized staging repository and verify no internal org references or internal absolute paths remain
+- [ ] Obtain the staging SHA and tree hash from the Leg 1 job summary
+- [ ] Trigger the private Leg 2 publish workflow with the staging SHA and tree hash for `vX.Y.Z`
 - [ ] Confirm Job 1 (verify/build/test/org-replace) passes
 - [ ] Approve environment gate `oss-public` to allow Job 2 push
 - [ ] Confirm `verivus-oss/sqry` has the tag and `.github/workflows/oss-leg3-release.yml` is present
@@ -104,7 +104,7 @@ This template enumerates the manual verification steps required before and after
     --source-uri github.com/verivus-oss/sqry
   ```
 - [ ] If `enable_signpath=true`, confirm SignPath Authenticode signing steps succeeded for Windows binaries, MSI, and VSIX and record evidence in `06_TEST_EXECUTION.md`.
-- [ ] Confirm Cosign cert identity encodes `verivus-oss/sqry` (not `verivusai-labs/sqry`).
+- [ ] Confirm Cosign cert identity encodes `verivus-oss/sqry`.
 - [ ] Confirm all provenance files reference the correct source commit and `verivus-oss/sqry`.
 - [ ] Confirm OCI image `ghcr.io/verivus-oss/sqry-mcp:vX.Y.Z` exists in GHCR and resolves to a multi-arch manifest (`linux/amd64`, `linux/arm64`).
 - [ ] Verify OCI image signature:
