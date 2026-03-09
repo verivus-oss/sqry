@@ -262,11 +262,14 @@ jobs:
           fi
           echo "Tag '$VERSION' verified at $(git rev-parse --short HEAD)"
 
-      - name: Install musl toolchain
+      - name: Install Zig and cargo-zigbuild
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq musl-tools
-          musl-gcc --version
+          python3 -m pip install --user ziglang
+          export PATH="$HOME/.local/bin:$PATH"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          cargo install --locked cargo-zigbuild --version 0.22.1
+          "$HOME/.cargo/bin/cargo-zigbuild" --version
+          zig version
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
@@ -280,15 +283,16 @@ jobs:
           workspaces: source
           key: x86_64-unknown-linux-musl
 
-      - name: Build release binaries (musl static)
+      - name: Build release binaries (musl static via Zig)
         working-directory: source
         env:
           CARGO_BUILD_JOBS: "2"
           RUSTFLAGS: "-Csplit-debuginfo=unpacked -Ctarget-feature=+crt-static"
           JEMALLOC_SYS_WITH_LG_PAGE: "12"
         run: |
-          cargo build --release \
+          cargo zigbuild --release --locked \
             --target x86_64-unknown-linux-musl \
+            --features sqry-cli/nl-classifier,sqry-mcp/nl-classifier \
             -p sqry-cli \
             -p sqry-mcp \
             -p sqry-lsp
@@ -421,11 +425,14 @@ jobs:
           fi
           echo "Tag '$VERSION' verified at $(git rev-parse --short HEAD)"
 
-      - name: Install musl toolchain
+      - name: Install Zig and cargo-zigbuild
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq musl-tools
-          musl-gcc --version
+          python3 -m pip install --user ziglang
+          export PATH="$HOME/.local/bin:$PATH"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          cargo install --locked cargo-zigbuild --version 0.22.1
+          "$HOME/.cargo/bin/cargo-zigbuild" --version
+          zig version
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
@@ -439,15 +446,16 @@ jobs:
           workspaces: source
           key: aarch64-unknown-linux-musl
 
-      - name: Build release binaries (musl static)
+      - name: Build release binaries (musl static via Zig)
         working-directory: source
         env:
           CARGO_BUILD_JOBS: "2"
           RUSTFLAGS: "-Csplit-debuginfo=unpacked -Ctarget-feature=+crt-static"
           JEMALLOC_SYS_WITH_LG_PAGE: "16"
         run: |
-          cargo build --release \
+          cargo zigbuild --release --locked \
             --target aarch64-unknown-linux-musl \
+            --features sqry-cli/nl-classifier,sqry-mcp/nl-classifier \
             -p sqry-cli \
             -p sqry-mcp \
             -p sqry-lsp
