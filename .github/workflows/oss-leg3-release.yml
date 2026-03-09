@@ -1572,6 +1572,7 @@ jobs:
       contents: write
       actions: read
     uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@5a775b367a56d5bd118a224a811bba288150a563 # v2.0.0
+    secrets: inherit
     with:
       base64-subjects: "${{ needs['build-linux-x86_64'].outputs.subjects }}"
       upload-assets: false
@@ -1588,6 +1589,7 @@ jobs:
       contents: write
       actions: read
     uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@5a775b367a56d5bd118a224a811bba288150a563 # v2.0.0
+    secrets: inherit
     with:
       base64-subjects: "${{ needs['build-linux-arm64'].outputs.subjects }}"
       upload-assets: false
@@ -1604,6 +1606,7 @@ jobs:
       contents: write
       actions: read
     uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@5a775b367a56d5bd118a224a811bba288150a563 # v2.0.0
+    secrets: inherit
     with:
       base64-subjects: "${{ needs['build-windows-x86_64'].outputs.subjects }}"
       upload-assets: false
@@ -1620,6 +1623,7 @@ jobs:
       contents: write
       actions: read
     uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@5a775b367a56d5bd118a224a811bba288150a563 # v2.0.0
+    secrets: inherit
     with:
       base64-subjects: "${{ needs['build-macos-arm64'].outputs.subjects }}"
       upload-assets: false
@@ -1636,6 +1640,7 @@ jobs:
       contents: write
       actions: read
     uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@5a775b367a56d5bd118a224a811bba288150a563 # v2.0.0
+    secrets: inherit
     with:
       base64-subjects: "${{ needs['build-vscode-extension'].outputs.subjects }}"
       upload-assets: false
