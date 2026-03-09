@@ -43,15 +43,15 @@ pub enum GraphConfigError {
 }
 
 #[cfg(target_os = "linux")]
-const NFS_SUPER_MAGIC: i64 = 0x6969;
+const NFS_SUPER_MAGIC: i128 = 0x6969;
 #[cfg(target_os = "linux")]
-const SMB_SUPER_MAGIC: i64 = 0x517B;
+const SMB_SUPER_MAGIC: i128 = 0x517B;
 #[cfg(target_os = "linux")]
-const CIFS_MAGIC_NUMBER: i64 = 0xFF53_4D42;
+const CIFS_MAGIC_NUMBER: i128 = 0xFF53_4D42;
 #[cfg(target_os = "linux")]
-const AFS_SUPER_MAGIC: i64 = 0x5346_414F;
+const AFS_SUPER_MAGIC: i128 = 0x5346_414F;
 #[cfg(target_os = "linux")]
-const CODA_SUPER_MAGIC: i64 = 0x7375_7245;
+const CODA_SUPER_MAGIC: i128 = 0x7375_7245;
 
 /// Result type for graph config operations
 pub type Result<T> = std::result::Result<T, GraphConfigError>;
@@ -276,7 +276,10 @@ impl GraphConfigPaths {
             return Err(GraphConfigError::IoError(path.to_path_buf(), err));
         }
 
-        let fs_type = stat.f_type;
+        // libc varies here: glibc uses signed word-sized values, musl uses
+        // unsigned longs, and some Linux targets use narrower unsigned types.
+        // Normalize to a single wide integer before comparing magic numbers.
+        let fs_type = stat.f_type as i128;
         let is_network = matches!(
             fs_type,
             NFS_SUPER_MAGIC
