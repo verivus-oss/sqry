@@ -45,7 +45,7 @@ jobs:
           # This workflow file is promoted to both the private and public repos.
           # Query all known OSS release workflows; missing
           # workflows return an empty result and are ignored.
-          workflows=("OSS Staging Release" "OSS Public Sync" "OSS Release Distribution")
+          workflows=("OSS Staging Release" "OSS Public Sync" "OSS Leg 3 Release")
 
           statuses=("queued" "waiting" "requested")
           now_epoch="$(date -u +%s)"
