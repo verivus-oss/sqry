@@ -176,18 +176,21 @@ jobs:
           fi
           echo "No internal org references found"
 
-      # --- Check: Release templates present ---
-      - name: "Check: Release templates present"
+      # --- Check: Required public docs present ---
+      - name: "Check: Required public docs present"
         run: |
-          if [ ! -d docs/templates ]; then
-            echo "::error::Missing docs/templates in public source"
+          FAIL=0
+          for doc in README.md LICENSE CHANGELOG.md CONTRIBUTING.md; do
+            if [ ! -f "$doc" ]; then
+              echo "::warning::Missing $doc"
+              FAIL=1
+            fi
+          done
+          if [ $FAIL -ne 0 ]; then
+            echo "::error::Required public documentation missing"
             exit 1
           fi
-          if [ ! -d docs/templates/streamlined ]; then
-            echo "::error::Missing docs/templates/streamlined in public source"
-            exit 1
-          fi
-          echo "Release templates verified"
+          echo "Required public docs verified"
 
       # --- Summary ---
       - name: Post smoke test summary
@@ -202,7 +205,7 @@ jobs:
             echo "| Tag-ref dispatch | verified |"
             echo "| Environments (oss-signing, oss-release) | checked |"
             echo "| Internal reference scan | passed |"
-            echo "| Release templates | present |"
+            echo "| Required public docs | present |"
           } >> "$GITHUB_STEP_SUMMARY"
 
   # ===========================================================================
