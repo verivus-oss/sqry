@@ -293,6 +293,7 @@ jobs:
         run: |
           cargo build --release \
             --target x86_64-unknown-linux-musl \
+            --features nl-classifier \
             -p sqry-cli \
             -p sqry-mcp \
             -p sqry-lsp
@@ -305,6 +306,17 @@ jobs:
           ldd target/x86_64-unknown-linux-musl/release/sqry 2>&1 | grep -q "not a dynamic executable" || \
             ldd target/x86_64-unknown-linux-musl/release/sqry 2>&1 | grep -q "statically linked" || \
             echo "::warning::Binary may not be fully statically linked"
+
+      - name: Download NL models
+        env:
+          MODELS_URL: "https://github.com/verivus-oss/sqry/releases/download/models-v1.0.0/sqry-models-v1.0.0.tar.gz"
+          MODELS_SHA256: "4f7886e2a381ee4a17bfca81bd41ec88e10169d498b68d2166587e6265d27b3e"
+        run: |
+          curl -fsSL "$MODELS_URL" -o /tmp/sqry-models.tar.gz
+          echo "${MODELS_SHA256}  /tmp/sqry-models.tar.gz" | sha256sum -c -
+          tar xzf /tmp/sqry-models.tar.gz -C source/sqry-nl
+          ls -lh source/sqry-nl/models/
+          echo "NL models downloaded and verified"
 
       - name: Package binaries
         env:
@@ -321,6 +333,7 @@ jobs:
           cp dist/sqry-linux-x86_64     "staging-tar/sqry-${VERSION}-linux-x86_64/sqry"
           cp dist/sqry-mcp-linux-x86_64 "staging-tar/sqry-${VERSION}-linux-x86_64/sqry-mcp"
           cp dist/sqry-lsp-linux-x86_64 "staging-tar/sqry-${VERSION}-linux-x86_64/sqry-lsp"
+          cp -r source/sqry-nl/models   "staging-tar/sqry-${VERSION}-linux-x86_64/models"
           tar czf "dist/sqry-${VERSION}-linux-x86_64.tar.gz" -C staging-tar "sqry-${VERSION}-linux-x86_64"
           rm -rf staging-tar
 
@@ -453,6 +466,7 @@ jobs:
         run: |
           cargo build --release \
             --target aarch64-unknown-linux-musl \
+            --features nl-classifier \
             -p sqry-cli \
             -p sqry-mcp \
             -p sqry-lsp
@@ -460,6 +474,16 @@ jobs:
           ls -lh target/aarch64-unknown-linux-musl/release/sqry \
                   target/aarch64-unknown-linux-musl/release/sqry-mcp \
                   target/aarch64-unknown-linux-musl/release/sqry-lsp
+
+      - name: Download NL models
+        env:
+          MODELS_URL: "https://github.com/verivus-oss/sqry/releases/download/models-v1.0.0/sqry-models-v1.0.0.tar.gz"
+          MODELS_SHA256: "4f7886e2a381ee4a17bfca81bd41ec88e10169d498b68d2166587e6265d27b3e"
+        run: |
+          curl -fsSL "$MODELS_URL" -o /tmp/sqry-models.tar.gz
+          echo "${MODELS_SHA256}  /tmp/sqry-models.tar.gz" | sha256sum -c -
+          tar xzf /tmp/sqry-models.tar.gz -C source/sqry-nl
+          echo "NL models downloaded and verified"
 
       - name: Package binaries
         env:
@@ -476,6 +500,7 @@ jobs:
           cp dist/sqry-linux-arm64     "staging-tar/sqry-${VERSION}-linux-arm64/sqry"
           cp dist/sqry-mcp-linux-arm64 "staging-tar/sqry-${VERSION}-linux-arm64/sqry-mcp"
           cp dist/sqry-lsp-linux-arm64 "staging-tar/sqry-${VERSION}-linux-arm64/sqry-lsp"
+          cp -r source/sqry-nl/models   "staging-tar/sqry-${VERSION}-linux-arm64/models"
           tar czf "dist/sqry-${VERSION}-linux-arm64.tar.gz" -C staging-tar "sqry-${VERSION}-linux-arm64"
           rm -rf staging-tar
 
@@ -610,10 +635,22 @@ jobs:
         run: |
           cargo build --release \
             --target x86_64-pc-windows-msvc \
+            --features nl-classifier \
             -p sqry-cli \
             -p sqry-mcp \
             -p sqry-lsp
           echo "Release binaries built successfully"
+
+      - name: Download NL models
+        shell: bash
+        env:
+          MODELS_URL: "https://github.com/verivus-oss/sqry/releases/download/models-v1.0.0/sqry-models-v1.0.0.tar.gz"
+          MODELS_SHA256: "4f7886e2a381ee4a17bfca81bd41ec88e10169d498b68d2166587e6265d27b3e"
+        run: |
+          curl -fsSL "$MODELS_URL" -o "$RUNNER_TEMP/sqry-models.tar.gz"
+          echo "${MODELS_SHA256}  $RUNNER_TEMP/sqry-models.tar.gz" | sha256sum -c -
+          tar xzf "$RUNNER_TEMP/sqry-models.tar.gz" -C source/sqry-nl
+          echo "NL models downloaded and verified"
 
       - name: Package binaries
         shell: bash
@@ -630,6 +667,7 @@ jobs:
           cp dist/sqry-windows-x86_64.exe     dist/windows-bundle/sqry.exe
           cp dist/sqry-mcp-windows-x86_64.exe dist/windows-bundle/sqry-mcp.exe
           cp dist/sqry-lsp-windows-x86_64.exe dist/windows-bundle/sqry-lsp.exe
+          cp -r source/sqry-nl/models          dist/windows-bundle/models
           cat > dist/windows-bundle/README-WINDOWS.txt <<'WEOF'
           sqry Windows bundle
 
@@ -853,6 +891,7 @@ jobs:
         run: |
           cargo build --release \
             --target aarch64-apple-darwin \
+            --features nl-classifier \
             -p sqry-cli \
             -p sqry-mcp \
             -p sqry-lsp
@@ -861,6 +900,16 @@ jobs:
                   target/aarch64-apple-darwin/release/sqry-mcp \
                   target/aarch64-apple-darwin/release/sqry-lsp
 
+      - name: Download NL models
+        env:
+          MODELS_URL: "https://github.com/verivus-oss/sqry/releases/download/models-v1.0.0/sqry-models-v1.0.0.tar.gz"
+          MODELS_SHA256: "4f7886e2a381ee4a17bfca81bd41ec88e10169d498b68d2166587e6265d27b3e"
+        run: |
+          curl -fsSL "$MODELS_URL" -o /tmp/sqry-models.tar.gz
+          echo "${MODELS_SHA256}  /tmp/sqry-models.tar.gz" | shasum -a 256 -c -
+          tar xzf /tmp/sqry-models.tar.gz -C source/sqry-nl
+          echo "NL models downloaded and verified"
+
       - name: Package binaries
         run: |
           mkdir -p dist
@@ -868,6 +917,9 @@ jobs:
           cp source/target/aarch64-apple-darwin/release/sqry-mcp dist/sqry-mcp-macos-arm64
           cp source/target/aarch64-apple-darwin/release/sqry-lsp dist/sqry-lsp-macos-arm64
           chmod 755 dist/*
+
+          # Bundle models for NL classifier
+          tar czf dist/sqry-models.tar.gz -C source/sqry-nl models
           ls -lh dist/
 
       # -----------------------------------------------------------------
