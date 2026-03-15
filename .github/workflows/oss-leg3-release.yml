@@ -655,9 +655,11 @@ jobs:
           MODELS_URL: "https://github.com/verivus-oss/sqry/releases/download/models-v1.0.0/sqry-models-v1.0.0.tar.gz"
           MODELS_SHA256: "4f7886e2a381ee4a17bfca81bd41ec88e10169d498b68d2166587e6265d27b3e"
         run: |
-          curl -fsSL "$MODELS_URL" -o "$RUNNER_TEMP/sqry-models.tar.gz"
-          echo "${MODELS_SHA256}  $RUNNER_TEMP/sqry-models.tar.gz" | sha256sum -c -
-          tar xzf "$RUNNER_TEMP/sqry-models.tar.gz" -C source/sqry-nl
+          TMPFILE="$(mktemp)"
+          curl -fsSL "$MODELS_URL" -o "$TMPFILE"
+          echo "${MODELS_SHA256}  $TMPFILE" | sha256sum -c -
+          tar xzf "$TMPFILE" -C source/sqry-nl
+          rm -f "$TMPFILE"
           echo "NL models downloaded and verified"
 
       - name: Package binaries
