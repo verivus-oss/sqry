@@ -268,8 +268,14 @@ jobs:
       - name: Install musl toolchain
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq musl-tools
+          sudo apt-get install -y -qq musl-tools musl-dev g++
           musl-gcc --version
+          # Create musl-g++ wrapper for C++ build dependencies (e.g. esaxx-rs)
+          ARCH=$(uname -m)
+          if [ ! -f "/usr/bin/${ARCH}-linux-musl-g++" ]; then
+            printf '#!/bin/sh\nexec g++ "$@"\n' | sudo tee "/usr/bin/${ARCH}-linux-musl-g++" > /dev/null
+            sudo chmod +x "/usr/bin/${ARCH}-linux-musl-g++"
+          fi
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
@@ -427,8 +433,14 @@ jobs:
       - name: Install musl toolchain
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq musl-tools
+          sudo apt-get install -y -qq musl-tools musl-dev g++
           musl-gcc --version
+          # Create musl-g++ wrapper for C++ build dependencies (e.g. esaxx-rs)
+          ARCH=$(uname -m)
+          if [ ! -f "/usr/bin/${ARCH}-linux-musl-g++" ]; then
+            printf '#!/bin/sh\nexec g++ "$@"\n' | sudo tee "/usr/bin/${ARCH}-linux-musl-g++" > /dev/null
+            sudo chmod +x "/usr/bin/${ARCH}-linux-musl-g++"
+          fi
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
