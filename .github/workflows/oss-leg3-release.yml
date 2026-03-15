@@ -1133,7 +1133,7 @@ jobs:
         env:
           VERSION: ${{ inputs.version }}
         run: |
-          MACOS_ASSETS=(sqry-macos-arm64 sqry-mcp-macos-arm64 sqry-lsp-macos-arm64)
+          MACOS_ASSETS=(sqry-macos-arm64 sqry-mcp-macos-arm64 sqry-lsp-macos-arm64 sqry-models.tar.gz)
           PKG_FILE="sqry-${VERSION}-macos-arm64.pkg"
           [ -f "$PKG_FILE" ] && MACOS_ASSETS+=("$PKG_FILE")
           shasum -a 256 "${MACOS_ASSETS[@]}" > CHECKSUMS-macos-arm64.sha256
