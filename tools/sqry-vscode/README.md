@@ -27,9 +27,9 @@ Kotlin, Scala, Ruby, Swift, PHP, Lua, Perl, Elixir, Haskell, R, Dart, Zig, Groov
 **Tier-3 (Basic Support)**:
 HTML, CSS, SQL, Oracle PL/SQL, Terraform/HCL, Puppet, Pulumi, SAP ABAP, Salesforce Apex, ServiceNow, Vue, Svelte
 
-## What's New in v4.10.0
+## What's New in v4.10.1
 
-- Version-aligned with sqry `v4.10.0` (CLI/LSP/MCP).
+- Version-aligned with sqry `v4.10.1` (CLI/LSP/MCP).
 - Release and documentation links aligned to current OSS workflow.
 - Extension packaging and verification flow aligned with current release assets.
 
@@ -38,12 +38,12 @@ HTML, CSS, SQL, Oracle PL/SQL, Terraform/HCL, Puppet, Pulumi, SAP ABAP, Salesfor
 1. **Install sqry CLI** (prerequisite):
    ```bash
    cargo install sqry-cli
-   sqry --version  # Verify: 4.10.0+
+   sqry --version  # Verify: 4.10.1+
    ```
 
 2. **Install extension** from VSIX:
    ```bash
-   code --install-extension sqry-vscode-4.10.0.vsix
+   code --install-extension sqry-vscode-4.10.1.vsix
    ```
 
 3. **Index your project**:
@@ -159,7 +159,7 @@ During indexing, sqry displays:
 
 ### Requirements
 
-- sqry CLI version 4.10.0 or later
+- sqry CLI version 4.10.1 or later
 - VSCode 1.85.0 or later
 
 ---
@@ -190,7 +190,7 @@ npm test
 
 ```bash
 npx @vscode/vsce package
-# Produces: sqry-vscode-4.10.0.vsix
+# Produces: sqry-vscode-4.10.1.vsix
 ```
 
 ### Diagnostics
@@ -214,6 +214,6 @@ Enable debug logging:
 
 MIT - See root LICENSE file
 
-**Last Updated**: 2026-03-13
-**Version**: 4.10.0
-**Requires**: sqry CLI 4.10.0+
+**Last Updated**: 2026-03-15
+**Version**: 4.10.1
+**Requires**: sqry CLI 4.10.1+

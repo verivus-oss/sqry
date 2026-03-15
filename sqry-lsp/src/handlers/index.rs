@@ -215,26 +215,20 @@ pub fn index_status(session: &SessionManager, path: Option<&str>) -> Result<Inde
     let file_count = graph.files().len();
     let languages = collect_languages_from_graph(&graph);
 
-    // Get file metadata for timestamp
-    let metadata = std::fs::metadata(graph_storage.snapshot_path())
-        .context("failed to read graph metadata")?;
-    let created = metadata
-        .created()
-        .or_else(|_| metadata.modified())
-        .context("failed to read graph timestamp")?;
-
-    let created_timestamp = created
-        .duration_since(std::time::UNIX_EPOCH)
-        .context("invalid creation timestamp")?
-        .as_secs();
-
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .context("failed to get current time")?
-        .as_secs();
-
-    let age_seconds = now.saturating_sub(created_timestamp);
-    let datetime = chrono::DateTime::<chrono::Utc>::from(created);
+    // Use manifest built_at timestamp instead of file metadata.
+    // On Linux, metadata.created() returns the inode birth time which does not
+    // update when the snapshot file is overwritten, causing stale age reports.
+    let manifest = graph_storage
+        .load_manifest()
+        .context("failed to load graph manifest")?;
+    let built_at = chrono::DateTime::parse_from_rfc3339(&manifest.built_at)
+        .context("failed to parse manifest built_at timestamp")?;
+    let now = chrono::Utc::now();
+    let age_seconds = now
+        .signed_duration_since(built_at.with_timezone(&chrono::Utc))
+        .num_seconds()
+        .max(0) as u64;
+    let datetime = built_at.with_timezone(&chrono::Utc);
 
     // Compute grouped counts for tree view grouping
     let symbol_counts_by_kind = compute_symbol_counts_from_graph(&graph);

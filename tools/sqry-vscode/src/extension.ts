@@ -492,7 +492,9 @@ async function validateIndexViaLSP(
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     outputChannel?.appendLine(`[sqry] Index validation error for ${folder.name}: ${message}`);
-    return false;
+    // Return undefined (not false) so the filesystem fallback runs.
+    // The LSP may not be ready yet at startup.
+    return undefined;
   }
 }
 
@@ -513,30 +515,27 @@ async function folderHasIndex(
   folder: vscode.WorkspaceFolder,
 ): Promise<boolean> {
   try {
-    const indexPath = vscode.Uri.joinPath(folder.uri, ".sqry-index");
-    const lockPath = vscode.Uri.joinPath(folder.uri, ".sqry-index.lock");
-
     outputChannel?.appendLine(`[sqry] Checking index for folder: ${folder.name} at ${folder.uri.fsPath}`);
 
-    // Check if index file exists
-    let indexStat;
-    try {
-      indexStat = await vscode.workspace.fs.stat(indexPath);
-      outputChannel?.appendLine(`[sqry] Index file exists at ${indexPath.fsPath}`);
-    } catch {
-      outputChannel?.appendLine(`[sqry] Index file not found at ${indexPath.fsPath}`);
-      const lockActive = await isLockFileActive(lockPath, folder.name);
-      return lockActive; // Return true only if build is in progress
-    }
-
-    // Index exists - validate via LSP if available
+    // Prefer LSP validation — it knows the actual index location (.sqry/graph/)
     const lspResult = await validateIndexViaLSP(folder);
     if (lspResult !== undefined) {
       return lspResult;
     }
 
-    // Fallback: check index age
-    return !isIndexStale(indexStat.mtime, folder.name);
+    // Fallback: check filesystem when LSP is not available
+    const manifestPath = vscode.Uri.joinPath(folder.uri, ".sqry", "graph", "manifest.json");
+    const lockPath = vscode.Uri.joinPath(folder.uri, ".sqry-index.lock");
+
+    try {
+      const manifestStat = await vscode.workspace.fs.stat(manifestPath);
+      outputChannel?.appendLine(`[sqry] Manifest exists at ${manifestPath.fsPath}`);
+      return !isIndexStale(manifestStat.mtime, folder.name);
+    } catch {
+      outputChannel?.appendLine(`[sqry] Manifest not found at ${manifestPath.fsPath}`);
+      const lockActive = await isLockFileActive(lockPath, folder.name);
+      return lockActive; // Return true only if build is in progress
+    }
   } catch (error) {
     outputChannel?.appendLine(`[sqry] Error checking index for ${folder.name}: ${error}`);
     return false;
