@@ -1112,7 +1112,7 @@ jobs:
           VERSION: ${{ inputs.version }}
         run: |
           echo "Signing all macOS ARM64 artifacts with Cosign (keyless OIDC)..."
-          MACOS_ASSETS=(sqry-macos-arm64 sqry-mcp-macos-arm64 sqry-lsp-macos-arm64)
+          MACOS_ASSETS=(sqry-macos-arm64 sqry-mcp-macos-arm64 sqry-lsp-macos-arm64 sqry-models.tar.gz)
           # Include .pkg if Apple signing produced it
           PKG_FILE="sqry-${VERSION}-macos-arm64.pkg"
           [ -f "$PKG_FILE" ] && MACOS_ASSETS+=("$PKG_FILE")
