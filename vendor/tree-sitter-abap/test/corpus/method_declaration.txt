@@ -1,0 +1,274 @@
+==================
+method declaration
+==================
+
+class class definition.
+  public section.
+    methods meth.
+endclass.
+
+---
+(program
+  (class_declaration
+    name: (name)
+    (public_section
+      (method_declaration
+        name: (name)))))
+
+==================
+method declaration abstract and final
+==================
+
+class class definition.
+  public section.
+    methods meth abstract.
+endclass.
+
+class class definition.
+  public section.
+    methods meth final.
+endclass.
+
+---
+(program
+  (class_declaration
+    name: (name)
+    (public_section
+      (method_declaration
+        name: (name))))
+  (class_declaration
+    name: (name)
+    (public_section
+      (method_declaration
+        name: (name)))))
+
+==================
+method declaration importing parameters
+==================
+
+class class definition.
+  public section.
+    methods meth importing p1 type t1.
+    methods methv importing value(p2) type t2.
+    methods methr importing reference(p3) type t3.
+endclass.
+
+---
+(program
+  (class_declaration
+    name: (name)
+    (public_section
+      (method_declaration
+        name: (name)
+        importing_parameters: (method_parameters
+          (name)
+          (complete_typing
+            (type))))
+      (method_declaration
+        name: (name)
+        importing_parameters: (method_parameters
+          (name)
+          (complete_typing
+            (type))))
+      (method_declaration
+        name: (name)
+        importing_parameters: (method_parameters
+          (name)
+          (complete_typing
+            (type)))))))
+
+==================
+TODO: method declaration default parameters
+:skip
+==================
+
+class class definition.
+  public section.
+    methods meth importing p1 type t1 default d1.
+endclass.
+
+---
+(program)
+
+==================
+method declaration parameter kinds
+==================
+
+class class definition.
+  public section.
+    methods meth_importing importing p1 type t1.
+    methods meth_exporting exporting p2 type t2.
+    methods meth_changing changing p3 type t3.
+    methods meth_returning returning value(r) type t4.
+endclass.
+
+---
+
+(program
+  (class_declaration
+    name: (name)
+    (public_section
+      (method_declaration
+        name: (name)
+        importing_parameters: (method_parameters
+          (name)
+          (complete_typing
+            (type))))
+      (method_declaration
+        name: (name)
+        exporting_parameters: (method_parameters
+          (name)
+          (complete_typing
+            (type))))
+      (method_declaration
+        name: (name)
+        changing_parameters: (method_parameters
+          (name)
+          (complete_typing
+            (type))))
+      (method_declaration
+        name: (name)
+        (returning_parameter
+          (name)
+          (complete_typing
+            (type)))))))
+
+==================
+TODO: method declaration prefered parameters
+:skip
+==================
+
+class class definition.
+  public section.
+    methods meth importing p1 type t1 optional
+                           p2 type t2 optional
+                           prefered parameter p2.
+endclass.
+
+---
+(program)
+
+==================
+method with raising exceptions
+==================
+
+class class definition.
+  public section.
+    methods meth raising exc1 exc2 resumable(exc3).
+endclass.
+
+---
+(program
+  (class_declaration
+    name: (name)
+    (public_section
+      (method_declaration
+        name: (name)
+        raising: (name)
+        raising: (name)
+        raising: (name)))))
+
+==================
+method with classic exceptions
+==================
+
+class class definition.
+  public section.
+    methods meth exceptions exc1 exc2.
+endclass.
+
+---
+(program
+  (class_declaration
+    name: (name)
+    (public_section
+      (method_declaration
+        name: (name)
+        exceptions: (name)
+        exceptions: (name)))))
+
+==================
+constructor method declaration
+==================
+
+class class definition.
+  public section.
+    methods constructor 
+      importing p1 type t1
+      raising exc1.
+endclass.
+
+---
+(program
+  (class_declaration
+    name: (name)
+    (public_section
+      (constructor_declaration
+        importing_parameters: (method_parameters
+          (name)
+          (complete_typing
+            (type)))
+        raising: (name)))))
+
+==================
+TODO: event handler declaration
+:skip
+==================
+
+class class definition.
+  public section.
+    methods meth for event evt of class_or_intf importing p1 p2.
+endclass.
+
+---
+(program)
+
+==================
+method redefinition
+==================
+
+class class definition.
+  public section.
+    methods meth final redefinition.
+endclass.
+
+---
+(program
+  (class_declaration
+    (name)
+    (public_section
+      (method_redefinition
+        (name)))))
+
+==================
+class method declaration
+==================
+
+class class definition.
+  public section.
+    class-methods meth.
+endclass.
+
+---
+(program
+  (class_declaration
+    (name)
+    (public_section
+      (class_method_declaration
+        (name)))))
+
+==================
+class constructor declaration
+==================
+
+class class definition.
+  public section.
+    class-methods class_constructor.
+endclass.
+
+---
+(program
+  (class_declaration
+    (name)
+    (public_section
+      (class_constructor_declaration))))

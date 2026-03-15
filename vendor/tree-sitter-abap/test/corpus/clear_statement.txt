@@ -1,0 +1,20 @@
+==================
+basic clear statement
+==================
+
+clear dobj.
+
+---
+
+(program
+  (clear_statement
+    (name)))
+
+
+==================
+clear statement with value
+==================
+
+clear dobj with val.
+
+---

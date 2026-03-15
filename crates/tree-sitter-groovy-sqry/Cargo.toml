@@ -1,0 +1,14 @@
+[package]
+name = "tree-sitter-groovy-sqry"
+version.workspace = true
+edition.workspace = true
+description = "Tree-sitter grammar for Groovy (sqry fork)"
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+tree-sitter.workspace = true
+sqry-tree-sitter-support = { version = "4.10.0", path = "../../sqry-tree-sitter-support" }
+
+[build-dependencies]
+cc = "1"

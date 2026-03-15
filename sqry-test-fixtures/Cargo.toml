@@ -1,0 +1,14 @@
+[package]
+name = "sqry-test-fixtures"
+version = "2.6.0"
+edition = "2024"
+rust-version = "1.89"
+description = "Shared test fixtures for high-velocity test writing in sqry"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+sqry-core = { path = "../sqry-core" }
+
+[dev-dependencies]
+# None needed - this is a test support crate

@@ -1,0 +1,11 @@
+==================
+classic exception raise
+==================
+
+raise ex1.
+
+---
+
+(program
+  (raise_statement
+    (name)))

@@ -1,0 +1,430 @@
+import * as crypto from "node:crypto";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { expect } from "chai";
+
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const proxyquire = require("proxyquire").noCallThru();
+
+// Minimal vscode stub for modules that import vscode
+const vscodeStub = {
+  __esModule: true,
+  workspace: {
+    getConfiguration: (section: string) => ({
+      get: (_key: string, fallback: unknown) => fallback,
+    }),
+  },
+  window: {
+    createOutputChannel: () => ({
+      appendLine: () => {},
+      show: () => {},
+      dispose: () => {},
+    }),
+  },
+  Uri: {
+    file: (p: string) => ({ fsPath: p }),
+  },
+};
+
+function loadModule(overrides: Record<string, unknown> = {}) {
+  return proxyquire("../src/binaryDownloader", {
+    vscode: vscodeStub,
+    ...overrides,
+  });
+}
+
+describe("binaryDownloader", () => {
+  describe("detectPlatform()", () => {
+    it("returns correct asset for linux-x64", () => {
+      const mod = loadModule();
+      // Override process.platform and process.arch for testing
+      const origPlatform = Object.getOwnPropertyDescriptor(process, "platform");
+      const origArch = Object.getOwnPropertyDescriptor(process, "arch");
+
+      Object.defineProperty(process, "platform", { value: "linux", configurable: true });
+      Object.defineProperty(process, "arch", { value: "x64", configurable: true });
+
+      try {
+        const result = mod.detectPlatform();
+        expect(result.asset).to.equal("sqry-linux-x86_64");
+        expect(result.binaryName).to.equal("sqry");
+      } finally {
+        if (origPlatform) Object.defineProperty(process, "platform", origPlatform);
+        if (origArch) Object.defineProperty(process, "arch", origArch);
+      }
+    });
+
+    it("returns correct asset for win32-x64", () => {
+      const mod = loadModule();
+      const origPlatform = Object.getOwnPropertyDescriptor(process, "platform");
+      const origArch = Object.getOwnPropertyDescriptor(process, "arch");
+
+      Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+      Object.defineProperty(process, "arch", { value: "x64", configurable: true });
+
+      try {
+        const result = mod.detectPlatform();
+        expect(result.asset).to.equal("sqry-windows-x86_64.exe");
+        expect(result.binaryName).to.equal("sqry.exe");
+      } finally {
+        if (origPlatform) Object.defineProperty(process, "platform", origPlatform);
+        if (origArch) Object.defineProperty(process, "arch", origArch);
+      }
+    });
+
+    it("returns correct asset for darwin-arm64", () => {
+      const mod = loadModule();
+      const origPlatform = Object.getOwnPropertyDescriptor(process, "platform");
+      const origArch = Object.getOwnPropertyDescriptor(process, "arch");
+
+      Object.defineProperty(process, "platform", { value: "darwin", configurable: true });
+      Object.defineProperty(process, "arch", { value: "arm64", configurable: true });
+
+      try {
+        const result = mod.detectPlatform();
+        expect(result.asset).to.equal("sqry-macos-arm64");
+        expect(result.binaryName).to.equal("sqry");
+      } finally {
+        if (origPlatform) Object.defineProperty(process, "platform", origPlatform);
+        if (origArch) Object.defineProperty(process, "arch", origArch);
+      }
+    });
+
+    it("throws for darwin-x64 with descriptive message", () => {
+      const mod = loadModule();
+      const origPlatform = Object.getOwnPropertyDescriptor(process, "platform");
+      const origArch = Object.getOwnPropertyDescriptor(process, "arch");
+
+      Object.defineProperty(process, "platform", { value: "darwin", configurable: true });
+      Object.defineProperty(process, "arch", { value: "x64", configurable: true });
+
+      try {
+        expect(() => mod.detectPlatform()).to.throw("macOS Intel");
+        expect(() => mod.detectPlatform()).to.throw("cargo install sqry-cli");
+      } finally {
+        if (origPlatform) Object.defineProperty(process, "platform", origPlatform);
+        if (origArch) Object.defineProperty(process, "arch", origArch);
+      }
+    });
+
+    it("throws for linux-arm64 (unsupported)", () => {
+      const mod = loadModule();
+      const origPlatform = Object.getOwnPropertyDescriptor(process, "platform");
+      const origArch = Object.getOwnPropertyDescriptor(process, "arch");
+
+      Object.defineProperty(process, "platform", { value: "linux", configurable: true });
+      Object.defineProperty(process, "arch", { value: "arm64", configurable: true });
+
+      try {
+        expect(() => mod.detectPlatform()).to.throw("does not provide pre-built binaries");
+        expect(() => mod.detectPlatform()).to.throw("cargo install sqry-cli");
+      } finally {
+        if (origPlatform) Object.defineProperty(process, "platform", origPlatform);
+        if (origArch) Object.defineProperty(process, "arch", origArch);
+      }
+    });
+  });
+
+  describe("parseChecksumForAsset()", () => {
+    const sampleChecksums = [
+      "abc123def456789012345678901234567890123456789012345678901234abcd  sqry-linux-x86_64",
+      "def456789012345678901234567890123456789012345678901234567890abcd  sqry-windows-x86_64.exe",
+      "789012345678901234567890123456789012345678901234567890abcdef1234  sqry-macos-arm64",
+    ].join("\n");
+
+    it("extracts correct hash for linux asset", () => {
+      const mod = loadModule();
+      const hash = mod.parseChecksumForAsset(sampleChecksums, "sqry-linux-x86_64");
+      expect(hash).to.equal("abc123def456789012345678901234567890123456789012345678901234abcd");
+    });
+
+    it("extracts correct hash for windows asset", () => {
+      const mod = loadModule();
+      const hash = mod.parseChecksumForAsset(sampleChecksums, "sqry-windows-x86_64.exe");
+      expect(hash).to.equal("def456789012345678901234567890123456789012345678901234567890abcd");
+    });
+
+    it("extracts correct hash for macos asset", () => {
+      const mod = loadModule();
+      const hash = mod.parseChecksumForAsset(sampleChecksums, "sqry-macos-arm64");
+      expect(hash).to.equal("789012345678901234567890123456789012345678901234567890abcdef1234");
+    });
+
+    it("throws on missing asset entry", () => {
+      const mod = loadModule();
+      expect(() => mod.parseChecksumForAsset(sampleChecksums, "sqry-nonexistent")).to.throw(
+        'Checksum not found for asset "sqry-nonexistent"'
+      );
+    });
+
+    it("throws on empty checksum file", () => {
+      const mod = loadModule();
+      expect(() => mod.parseChecksumForAsset("", "sqry-linux-x86_64")).to.throw(
+        "Checksum not found"
+      );
+    });
+
+    it("handles sha256sum format with asterisk prefix", () => {
+      const mod = loadModule();
+      const content = "abc123def456789012345678901234567890123456789012345678901234abcd *sqry-linux-x86_64";
+      const hash = mod.parseChecksumForAsset(content, "sqry-linux-x86_64");
+      expect(hash).to.equal("abc123def456789012345678901234567890123456789012345678901234abcd");
+    });
+  });
+
+  describe("parseContentLengthHeader()", () => {
+    it("parses a numeric header string", () => {
+      const mod = loadModule();
+      expect(mod.parseContentLengthHeader("123")).to.equal(123);
+    });
+
+    it("uses the first value from an array header", () => {
+      const mod = loadModule();
+      expect(mod.parseContentLengthHeader(["456", "789"])).to.equal(456);
+    });
+
+    it("defaults to zero for a missing header", () => {
+      const mod = loadModule();
+      expect(mod.parseContentLengthHeader(undefined)).to.equal(0);
+    });
+  });
+
+  describe("verifySha256()", () => {
+    let tmpDir: string;
+
+    beforeEach(() => {
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "sqry-test-"));
+    });
+
+    afterEach(() => {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
+
+    it("passes with matching hash", async () => {
+      const mod = loadModule();
+      const content = "hello world";
+      const filePath = path.join(tmpDir, "test.bin");
+      fs.writeFileSync(filePath, content);
+
+      const expectedHash = crypto.createHash("sha256").update(content).digest("hex");
+      await mod.verifySha256(filePath, expectedHash);
+      // Reaching here without throwing proves the hash matched
+      expect(true).to.equal(true);
+    });
+
+    it("hard-fails with mismatching hash", async () => {
+      const mod = loadModule();
+      const filePath = path.join(tmpDir, "test.bin");
+      fs.writeFileSync(filePath, "hello world");
+
+      const wrongHash = "0000000000000000000000000000000000000000000000000000000000000000";
+      try {
+        await mod.verifySha256(filePath, wrongHash);
+        expect.fail("Expected rejection");
+      } catch (error) {
+        expect((error as Error).message).to.contain("SHA256 checksum mismatch");
+      }
+    });
+
+    it("handles case-insensitive hash comparison", async () => {
+      const mod = loadModule();
+      const content = "test data";
+      const filePath = path.join(tmpDir, "test.bin");
+      fs.writeFileSync(filePath, content);
+
+      const expectedHash = crypto.createHash("sha256").update(content).digest("hex").toUpperCase();
+      await mod.verifySha256(filePath, expectedHash);
+      // Reaching here without throwing proves case-insensitive comparison works
+      expect(true).to.equal(true);
+    });
+  });
+
+  describe("isAllowedHost()", () => {
+    it("accepts github.com", () => {
+      const mod = loadModule();
+      expect(mod.isAllowedHost("github.com")).to.be.true;
+    });
+
+    it("accepts objects.githubusercontent.com", () => {
+      const mod = loadModule();
+      expect(mod.isAllowedHost("objects.githubusercontent.com")).to.be.true;
+    });
+
+    it("accepts github-releases.githubusercontent.com", () => {
+      const mod = loadModule();
+      expect(mod.isAllowedHost("github-releases.githubusercontent.com")).to.be.true;
+    });
+
+    it("rejects evil.com", () => {
+      const mod = loadModule();
+      expect(mod.isAllowedHost("evil.com")).to.be.false;
+    });
+
+    it("rejects github.com.evil.com", () => {
+      const mod = loadModule();
+      expect(mod.isAllowedHost("github.com.evil.com")).to.be.false;
+    });
+
+    it("rejects bare githubusercontent.com (no subdomain)", () => {
+      const mod = loadModule();
+      expect(mod.isAllowedHost("githubusercontent.com")).to.be.false;
+    });
+
+    it("rejects deeply nested subdomains", () => {
+      const mod = loadModule();
+      // sub.sub.githubusercontent.com should fail — only single-label prefix allowed
+      expect(mod.isAllowedHost("a.b.githubusercontent.com")).to.be.false;
+    });
+  });
+
+  describe("lockfile management", () => {
+    let tmpDir: string;
+    let storageUri: { fsPath: string };
+
+    beforeEach(() => {
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "sqry-lock-test-"));
+      storageUri = { fsPath: tmpDir };
+    });
+
+    afterEach(() => {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
+
+    it("acquires lock successfully when no lock exists", () => {
+      const mod = loadModule();
+      expect(mod.acquireLock(storageUri)).to.be.true;
+      expect(fs.existsSync(path.join(tmpDir, "download.lock"))).to.be.true;
+    });
+
+    it("fails to acquire lock when another window holds it", () => {
+      const mod = loadModule();
+      expect(mod.acquireLock(storageUri)).to.be.true;
+      expect(mod.acquireLock(storageUri)).to.be.false;
+    });
+
+    it("acquires lock when stale lock exists (>10 min)", () => {
+      const mod = loadModule();
+      const lockPath = path.join(tmpDir, "download.lock");
+      fs.writeFileSync(lockPath, "stale");
+      // Set mtime to 11 minutes ago
+      const staleTime = new Date(Date.now() - 11 * 60 * 1000);
+      fs.utimesSync(lockPath, staleTime, staleTime);
+
+      expect(mod.acquireLock(storageUri)).to.be.true;
+    });
+
+    it("releases lock", () => {
+      const mod = loadModule();
+      mod.acquireLock(storageUri);
+      mod.releaseLock(storageUri);
+      expect(fs.existsSync(path.join(tmpDir, "download.lock"))).to.be.false;
+    });
+  });
+
+  describe("cleanupOldVersions()", () => {
+    let tmpDir: string;
+    let storageUri: { fsPath: string };
+
+    beforeEach(() => {
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "sqry-cleanup-test-"));
+      storageUri = { fsPath: tmpDir };
+    });
+
+    afterEach(() => {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
+
+    it("retains exactly 2 versions (current + N-1)", () => {
+      const mod = loadModule();
+      const binDir = path.join(tmpDir, "bin");
+      // Create 4 version dirs
+      for (const v of ["v4.5.7", "v4.5.8", "v4.5.9", "v4.5.10"]) {
+        fs.mkdirSync(path.join(binDir, v), { recursive: true });
+        fs.writeFileSync(path.join(binDir, v, "sqry"), "binary");
+      }
+
+      mod.cleanupOldVersions(storageUri, "4.5.10");
+
+      const remaining = fs.readdirSync(binDir).sort();
+      // Current (v4.5.10) is always kept, plus one more for rollback
+      expect(remaining).to.include("v4.5.10");
+      expect(remaining.length).to.equal(2);
+    });
+
+    it("keeps current version even if it is the only one", () => {
+      const mod = loadModule();
+      const binDir = path.join(tmpDir, "bin");
+      fs.mkdirSync(path.join(binDir, "v4.5.10"), { recursive: true });
+
+      mod.cleanupOldVersions(storageUri, "4.5.10");
+
+      const remaining = fs.readdirSync(binDir);
+      expect(remaining).to.deep.equal(["v4.5.10"]);
+    });
+
+    it("handles missing bin directory gracefully", () => {
+      const mod = loadModule();
+      // Should not throw when bin directory doesn't exist
+      mod.cleanupOldVersions(storageUri, "4.5.10");
+      expect(fs.existsSync(path.join(storageUri.fsPath, "bin"))).to.equal(false);
+    });
+  });
+
+  describe("getBinaryVersion()", () => {
+    it("reads binaryVersion from package.json", () => {
+      const mod = loadModule();
+      // This reads from the actual package.json since __dirname in the module
+      // points to src/ (or the compiled output). We test the real value.
+      const version = mod.getBinaryVersion();
+      expect(version).to.be.a("string");
+      expect(version).to.match(/^\d+\.\d+\.\d+/);
+    });
+  });
+
+  describe("applyBinaryPermissions()", () => {
+    it("applies restrictive permissions on unix platforms", () => {
+      let chmodArgs: [string, number] | null = null;
+      const mod = loadModule({
+        "node:fs": {
+          ...fs,
+          chmodSync: (targetPath: string, mode: number) => {
+            chmodArgs = [targetPath, mode];
+          },
+        },
+      });
+
+      mod.applyBinaryPermissions("/tmp/sqry", "linux");
+
+      expect(chmodArgs).to.deep.equal(["/tmp/sqry", 0o700]);
+    });
+
+    it("skips chmod on windows", () => {
+      let chmodCalled = false;
+      const mod = loadModule({
+        "node:fs": {
+          ...fs,
+          chmodSync: () => {
+            chmodCalled = true;
+          },
+        },
+      });
+
+      mod.applyBinaryPermissions("C:\\sqry.exe", "win32");
+
+      expect(chmodCalled).to.equal(false);
+    });
+  });
+
+  describe("describePreflightError()", () => {
+    it("returns the message for Error instances", () => {
+      const mod = loadModule();
+      expect(mod.describePreflightError(new Error("preflight failed"))).to.equal("preflight failed");
+    });
+
+    it("stringifies non-Error values", () => {
+      const mod = loadModule();
+      expect(mod.describePreflightError({ code: 1 })).to.equal("[object Object]");
+    });
+  });
+});

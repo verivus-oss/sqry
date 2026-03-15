@@ -1,0 +1,21 @@
+==================
+include statement
+==================
+
+include abc.
+
+---
+(program
+  (include_statement
+    (name)))
+
+==================
+include statement with if found
+==================
+
+include abc if found.
+
+---
+(program
+  (include_statement
+    (name)))
