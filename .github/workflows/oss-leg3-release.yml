@@ -274,10 +274,13 @@ jobs:
       - name: Install Zig and cargo-zigbuild
         run: |
           pip install ziglang
-          export PATH="$HOME/.local/bin:$PATH"
+          ZIG_DIR="$(python3 -c 'import ziglang; import os; print(os.path.dirname(ziglang.__file__))')"
+          echo "Zig installed at: $ZIG_DIR"
+          export PATH="$ZIG_DIR:$HOME/.local/bin:$PATH"
+          echo "$ZIG_DIR" >> "$GITHUB_PATH"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          cargo install cargo-zigbuild --locked
           zig version
+          cargo install cargo-zigbuild --locked
           cargo zigbuild --version
 
       - name: Cache Rust dependencies
@@ -449,10 +452,13 @@ jobs:
       - name: Install Zig and cargo-zigbuild
         run: |
           pip install ziglang
-          export PATH="$HOME/.local/bin:$PATH"
+          ZIG_DIR="$(python3 -c 'import ziglang; import os; print(os.path.dirname(ziglang.__file__))')"
+          echo "Zig installed at: $ZIG_DIR"
+          export PATH="$ZIG_DIR:$HOME/.local/bin:$PATH"
+          echo "$ZIG_DIR" >> "$GITHUB_PATH"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          cargo install cargo-zigbuild --locked
           zig version
+          cargo install cargo-zigbuild --locked
           cargo zigbuild --version
 
       - name: Cache Rust dependencies
