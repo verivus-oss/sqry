@@ -90,7 +90,7 @@ similar = "2.6"  # Fast text diffing for content-based incremental indexing
 dhat = { version = "0.3", optional = true }
 loom = { version = "0.7", optional = true }  # Concurrency verification (Steps 28-30)
 hostname = "0.4"  # For lock file hostname field
-uuid = { version = "1.11", features = ["v4"] }  # For unique lock identifiers
+uuid = { version = "1.22", features = ["v4"] }  # For unique lock identifiers
 fs2 = "0.4"  # File locking for concurrent stats updates (P2-8)
 tempfile = "3.13"  # Atomic file writes for uses/insights
 dirs = "6.0"  # Home directory detection for uses config

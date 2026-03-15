@@ -40,7 +40,7 @@ parking_lot.workspace = true
 ropey = "1.6"
 dashmap = "6.1"
 base64 = "0.22.1"
-uuid = { version = "1.11", features = ["v4"] }
+uuid = { version = "1.22", features = ["v4"] }
 
 [target.'cfg(target_env = "musl")'.dependencies]
 tikv-jemallocator = "0.6"
