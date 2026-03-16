@@ -20,7 +20,7 @@ streaming-iterator.workspace = true
 sqry-tree-sitter-fuzz-support = { path = "../sqry-tree-sitter-fuzz-support" }
 log.workspace = true
 sqry-core = { path = "../sqry-core", features = ["test-support"] }
-tempfile = "3.10"
+tempfile = "3.27"
 
 [features]
 default = ["has_relations"]

@@ -24,7 +24,7 @@ log.workspace = true
 env_logger.workspace = true
 sqry-core = { path = "../sqry-core", features = ["test-support"] }
 sqry-test-support = { path = "../sqry-test-support" }
-tempfile = "3.10"
+tempfile = "3.27"
 serial_test = "3.0"
 
 [features]

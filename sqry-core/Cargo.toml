@@ -92,7 +92,7 @@ loom = { version = "0.7", optional = true }  # Concurrency verification (Steps 2
 hostname = "0.4"  # For lock file hostname field
 uuid = { version = "1.11", features = ["v4"] }  # For unique lock identifiers
 fs2 = "0.4"  # File locking for concurrent stats updates (P2-8)
-tempfile = "3.13"  # Atomic file writes for uses/insights
+tempfile = "3.27"  # Atomic file writes for uses/insights
 dirs = "6.0"  # Home directory detection for uses config
 libc = "0.2"  # For network filesystem detection on Linux
 
@@ -117,7 +117,7 @@ windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem"] }
 nix = { version = "0.30", features = ["signal"] }
 
 [dev-dependencies]
-tempfile = "3.13"
+tempfile = "3.27"
 criterion = "0.8"
 filetime = "0.2"
 env_logger.workspace = true

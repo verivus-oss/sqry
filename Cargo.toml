@@ -109,7 +109,7 @@ grep-searcher = "0.1"
 ignore = "0.4"
 globset = "0.4"
 walkdir = "2.5"
-tempfile = "3.10"
+tempfile = "3.27"
 
 # Caching & performance
 lru = "0.16"

@@ -48,7 +48,7 @@ tikv-jemalloc-sys = { version = "0.6", features = ["unprefixed_malloc_on_support
 
 [dev-dependencies]
 assert_cmd = "2.0"
-tempfile = "3.14"
+tempfile = "3.27"
 criterion = "0.8"
 tower = { version = "0.4", features = ["buffer"] }
 futures = "0.3"

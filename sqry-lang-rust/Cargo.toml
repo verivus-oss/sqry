@@ -26,7 +26,7 @@ sqry-test-support = { path = "../sqry-test-support" }
 criterion = "0.8"
 insta = "1.40"
 sqry-tree-sitter-fuzz-support = { path = "../sqry-tree-sitter-fuzz-support" }
-tempfile = "3.14"
+tempfile = "3.27"
 serial_test = "3.0"
 
 [features]

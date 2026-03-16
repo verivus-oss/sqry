@@ -21,7 +21,7 @@ log.workspace = true
 sqry-tree-sitter-fuzz-support = { path = "../sqry-tree-sitter-fuzz-support" }
 log.workspace = true
 sqry-core = { path = "../sqry-core", features = ["test-support"] }
-tempfile = "3.10"
+tempfile = "3.27"
 walkdir.workspace = true
 serde.workspace = true
 serde_json.workspace = true
