@@ -1,0 +1,24 @@
+==================
+simple macro call
+==================
+
+my_macro.
+
+---
+(program
+  (macro_include
+    name: (name)))
+
+==================
+macro call with parameters
+==================
+
+my_macro abc def.
+
+---
+(program
+  (macro_include
+    name: (name)
+    (parameter_list
+      (name)
+      (name))))

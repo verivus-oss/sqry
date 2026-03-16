@@ -1,0 +1,34 @@
+==================
+table expression in write position with index line spec
+==================
+
+itab[ 1 ] = a.
+
+---
+
+(program
+  (assignment
+    (table_expression
+      itab: (name)
+      line_spec: (numeric_literal))
+    (name)))
+
+==================
+table expression in write position with component line spec
+==================
+
+itab[ comp1 = operand1 comp2 = operand2 ] = a.
+
+---
+(program
+  (assignment
+    (table_expression
+      itab: (name)
+      line_spec: (free_key
+        (comp_spec
+          component: (name)
+          operand: (name))
+        (comp_spec
+          component: (name)
+          operand: (name))))
+    (name)))

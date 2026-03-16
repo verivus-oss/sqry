@@ -1,0 +1,25 @@
+==================
+loop statement with into
+==================
+
+loop at itab into wa.
+endloop.
+
+---
+(program
+  (loop_statement
+    (itab)
+    (result)))
+
+==================
+loop statement with into
+==================
+
+loop at itab assigning <fs>.
+endloop.
+
+---
+(program
+  (loop_statement
+    (itab)
+    (result)))

@@ -1,0 +1,30 @@
+{
+  "properties": {
+    "file_path": {
+      "description": "Workspace-relative path to the source file",
+      "type": "string"
+    },
+    "include_context": {
+      "default": true,
+      "type": "boolean"
+    },
+    "include_relations": {
+      "default": true,
+      "type": "boolean"
+    },
+    "path": {
+      "default": ".",
+      "description": "Workspace-relative directory",
+      "type": "string"
+    },
+    "symbol_name": {
+      "description": "Symbol name within the file",
+      "type": "string"
+    }
+  },
+  "required": [
+    "file_path",
+    "symbol_name"
+  ],
+  "type": "object"
+}

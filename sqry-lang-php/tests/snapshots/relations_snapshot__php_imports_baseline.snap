@@ -1,0 +1,31 @@
+---
+source: sqry-lang-php/tests/relations_snapshot.rs
+expression: normalized
+---
+- - "App\\Config\\VERSION"
+  - VERSION
+  - kind=use;type=const
+- - "App\\Helpers"
+  - CoreHelpers
+  - kind=use
+- - "App\\Jobs\\SendEmail"
+  - SendEmail
+  - kind=use
+- - "App\\Services\\Mailer"
+  - Mailer
+  - kind=use
+- - "App\\Utils\\array_flatten"
+  - array_flatten
+  - kind=use;type=function
+- - "__DIR__ . '/bootstrap.php'"
+  - ~
+  - kind=require
+- - "__DIR__ . '/config/constants.php'"
+  - ~
+  - kind=require_once
+- - helpers.php
+  - ~
+  - kind=include
+- - polyfills.php
+  - ~
+  - kind=include_once
