@@ -1,0 +1,21 @@
+[package]
+name = "sqry-lang-css"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "CSS language plugin for sqry"
+
+[dependencies]
+sqry-core = { version = "4.10.0", path = "../sqry-core" }
+anyhow.workspace = true
+log.workspace = true
+tree-sitter.workspace = true
+tree-sitter-css.workspace = true
+streaming-iterator.workspace = true
+
+[dev-dependencies]
+sqry-tree-sitter-fuzz-support = { path = "../sqry-tree-sitter-fuzz-support" }
+sqry-core = { path = "../sqry-core", features = ["test-support"] }

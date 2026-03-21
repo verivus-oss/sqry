@@ -1,0 +1,92 @@
+{
+  "properties": {
+    "base": {
+      "properties": {
+        "file_path": {
+          "description": "Optional file path to limit comparison",
+          "type": "string"
+        },
+        "ref": {
+          "description": "Git ref (commit, branch, tag) for base version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "ref"
+      ],
+      "type": "object"
+    },
+    "filters": {
+      "properties": {
+        "change_types": {
+          "description": "Filter by change types",
+          "items": {
+            "enum": [
+              "added",
+              "removed",
+              "modified",
+              "renamed",
+              "signature_changed"
+            ],
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "symbol_kinds": {
+          "description": "Filter by symbol kinds (function, class, etc.)",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "include_unchanged": {
+      "default": false,
+      "description": "Include unchanged symbols",
+      "type": "boolean"
+    },
+    "max_results": {
+      "default": 500,
+      "maximum": 5000,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "page_size": {
+      "default": 100,
+      "maximum": 500,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "page_token": {
+      "type": "string"
+    },
+    "path": {
+      "default": ".",
+      "description": "Workspace-relative directory",
+      "type": "string"
+    },
+    "target": {
+      "properties": {
+        "file_path": {
+          "description": "Optional file path to limit comparison",
+          "type": "string"
+        },
+        "ref": {
+          "description": "Git ref (commit, branch, tag) for target version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "ref"
+      ],
+      "type": "object"
+    }
+  },
+  "required": [
+    "base",
+    "target"
+  ],
+  "type": "object"
+}

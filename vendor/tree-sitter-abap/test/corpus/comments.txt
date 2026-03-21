@@ -1,0 +1,75 @@
+==================
+single line comment
+==================
+
+* This is a comment
+
+---
+(program
+  (bol_comment))
+
+==================
+statement after line comment
+==================
+
+* This is a comment
+*&This is still a comment
+data a type b.
+
+---
+
+(program
+  (bol_comment)
+  (bol_comment)
+  (variable_declaration
+    (name)
+    (typing
+      (type))))
+
+==================
+end of line comment
+==================
+
+" This is a comment
+"This is a comment
+
+---
+(program
+  (eol_comment)
+  (eol_comment))
+
+==================
+end of line comment on same line as statement
+==================
+
+data a type b. " This is a comment
+
+---
+
+(program
+  (variable_declaration
+    (name)
+    (typing
+      (type)))
+  (eol_comment))
+
+==================
+end of line comment within chained statement
+==================
+
+data: a type b, " This is a comment
+      c type d. 
+
+---
+
+(program
+  (chained_variable_declaration
+    (variable
+      (name)
+      (typing
+        (type)))
+    (eol_comment)
+    (variable
+      (name)
+      (typing
+        (type)))))

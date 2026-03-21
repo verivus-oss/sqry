@@ -1,0 +1,49 @@
+{
+  "properties": {
+    "include_files": {
+      "default": true,
+      "description": "Include affected file paths",
+      "type": "boolean"
+    },
+    "include_indirect": {
+      "default": true,
+      "description": "Include indirect dependencies",
+      "type": "boolean"
+    },
+    "max_depth": {
+      "default": 3,
+      "description": "Maximum depth of transitive dependencies",
+      "maximum": 10,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "max_results": {
+      "default": 500,
+      "maximum": 5000,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "page_size": {
+      "default": 100,
+      "maximum": 500,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "page_token": {
+      "type": "string"
+    },
+    "path": {
+      "default": ".",
+      "description": "Workspace-relative directory",
+      "type": "string"
+    },
+    "symbol": {
+      "description": "Symbol name or qualified identifier to analyze",
+      "type": "string"
+    }
+  },
+  "required": [
+    "symbol"
+  ],
+  "type": "object"
+}

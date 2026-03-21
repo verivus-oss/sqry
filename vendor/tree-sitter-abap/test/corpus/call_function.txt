@@ -1,0 +1,63 @@
+==================
+function call without parameters
+==================
+
+call function 'FUNC'.
+
+---
+
+(program
+  (call_function
+    name: (character_literal)))
+
+==================
+function call with common parameter types
+==================
+
+call function 'FUNC'
+  exporting
+    a = b
+  importing
+    c = d
+  changing
+    e = f.
+
+---
+
+(program
+  (call_function
+    name: (character_literal)
+    parameters: (parameter_list
+      (parameter_binding
+        formal_parameter: (name)
+        actual_parameter: (name)))
+    parameters: (parameter_list
+      (parameter_binding
+        formal_parameter: (name)
+        actual_parameter: (name)))
+    parameters: (parameter_list
+      (parameter_binding
+        formal_parameter: (name)
+        actual_parameter: (name)))))
+
+==================
+function call with exceptions
+==================
+
+call function 'FUNC'
+  exceptions
+    exc1 = 1
+    exc2 = 2.
+
+---
+
+(program
+  (call_function
+    name: (character_literal)
+    exceptions: (exception_list
+      (return_code_binding
+        exception: (name)
+        return_code: (numeric_literal))
+      (return_code_binding
+        exception: (name)
+        return_code: (numeric_literal)))))

@@ -1,0 +1,31 @@
+@import url("./reset.css") screen;
+
+:root {
+  --primary: #ff00ff;
+}
+
+.button, .btn-primary {
+  color: var(--primary);
+  background-image: url("/assets/bg.png");
+}
+
+@media screen and (min-width: 768px) {
+  .button {
+    font-size: 18px;
+  }
+}
+
+@supports (display: grid) {
+  .grid {
+    display: grid;
+  }
+}
+
+@keyframes fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}

@@ -1,0 +1,13 @@
+==================
+basic check statement
+==================
+
+check 1 = 1.
+
+---
+
+(program
+  (check_statement
+    (comparison_expression
+      (numeric_literal)
+      (numeric_literal))))

@@ -1,0 +1,51 @@
+{
+  "name": "tree-sitter-svelte",
+  "version": "0.11.0",
+  "description": "Tree-sitter-grammar for svelte",
+  "main": "bindings/node",
+  "engines": {
+    "node": "~18.4.0"
+  },
+  "scripts": {
+    "test": "tree-sitter test",
+    "gen": "tree-sitter generate",
+    "build": "tree-sitter generate && node-gyp configure && node-gyp build",
+    "gentsdef": "node ./script/generateTSDefinition.js",
+    "dev": "nodemon",
+    "publish-package": "np --no-tests --no-2fa --no-yarn",
+    "wasm": "tree-sitter build-wasm",
+    "ui": "tree-sitter build-wasm && tree-sitter web-ui"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Himujjal/tree-sitter-svelte.git"
+  },
+  "keywords": [
+    "tree-sitter",
+    "tree-sitter-svelte",
+    "svelte",
+    "grammar"
+  ],
+  "author": "Himujjal <himu@tuta.io>",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/Himujjal/tree-sitter-svelte/issues"
+  },
+  "homepage": "https://github.com/Himujjal/tree-sitter-svelte#readme",
+  "dependencies": {
+    "nan": "^2.17.0"
+  },
+  "devDependencies": {
+    "@types/node": "^18.15.11",
+    "tree-sitter-cli": "^0.20.7"
+  },
+  "tree-sitter": [
+    {
+      "scope": "text.svelte.basic",
+      "file-types": [
+        "svelte"
+      ],
+      "injection-regex": "svelte"
+    }
+  ]
+}
