@@ -1,0 +1,75 @@
+# Expected trace output examples
+
+## Trace 1: Frontend to Database (cross-language)
+
+Command: sqry trace "main" -> "save_to_database"
+
+Output:
+Path: main -> save_to_database (7 hops)
+
+js:frontend/api.js:main
+  -> js:frontend/api.js:createUser (Line 44)
+  -> HTTP POST /api/users (Line 21)
+  -> py:backend/server.py:create_user (Line 30)
+  -> py:backend/server.py:validate_user_data (Line 42)
+  -> py:backend/server.py:save_to_database (Line 50)
+
+Languages: JavaScript -> HTTP -> Python
+Cross-language edges: 2 (HTTP, Database)
+
+## Trace 2: Authentication Flow (with FFI)
+
+Command: sqry trace "get_users" -> "validate_token"
+
+Output:
+Path: get_users -> validate_token (2 hops, 1 FFI call)
+
+py:backend/server.py:get_users
+  -> py:backend/server.py:authenticate_request (Line 28)
+  -> cpp:native/lib.cpp:validate_token (FFI via ctypes)
+
+Languages: Python -> C++
+Cross-language edges: 1 (FFI)
+
+## Trace 3: Compression Path (JavaScript -> C++)
+
+Command: sqry trace "main" -> "compress"
+
+Output:
+Path: main -> compress (2 hops, 1 FFI call)
+
+js:frontend/api.js:main
+  -> js:frontend/api.js:compressData (Line 46)
+  -> cpp:native/lib.cpp:compress (FFI via node-ffi)
+
+Languages: JavaScript -> C++
+Cross-language edges: 1 (FFI)
+
+## Trace 4: Full Stack Trace (JavaScript -> Python -> C++)
+
+Command: sqry trace "main" -> "hash_password"
+
+Output:
+Path: main -> hash_password (5 hops, 2 cross-language edges)
+
+js:frontend/api.js:main
+  -> js:frontend/api.js:createUser (Line 44)
+  -> HTTP POST /api/users (Line 21)
+  -> py:backend/server.py:create_user (Line 30)
+  -> cpp:native/lib.cpp:hash_password (FFI via ctypes, Line 48)
+
+Languages: JavaScript -> HTTP -> Python -> C++
+Cross-language edges: 2 (HTTP, FFI)
+
+## Cross-Language Summary
+
+HTTP Calls: 2
+  - GET /api/users (fetchUsers -> get_users)
+  - POST /api/users (createUser -> create_user)
+
+FFI Calls: 3
+  - JavaScript -> C++: compressData -> compress
+  - Python -> C++: authenticate_request -> validate_token
+  - Python -> C++: create_user -> hash_password
+
+Total Cross-Language Edges: 5

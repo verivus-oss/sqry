@@ -1,0 +1,28 @@
+[package]
+name = "sqry-lang-kotlin"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Kotlin language plugin for sqry"
+
+[dependencies]
+sqry-core = { version = "4.10.0", path = "../sqry-core" }
+sqry-lang-support = { version = "4.10.0", path = "../sqry-lang-support" }
+anyhow.workspace = true
+log.workspace = true
+tree-sitter.workspace = true
+tree-sitter-kotlin-sqry = { version = "4.10.0", path = "../crates/tree-sitter-kotlin-sqry" }
+streaming-iterator.workspace = true
+
+[dev-dependencies]
+sqry-tree-sitter-fuzz-support = { path = "../sqry-tree-sitter-fuzz-support" }
+env_logger.workspace = true
+sqry-core = { path = "../sqry-core", features = ["test-support"] }
+tempfile = "3.10"
+
+[features]
+default = ["has_relations"]
+has_relations = []

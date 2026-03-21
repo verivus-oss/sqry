@@ -1,0 +1,22 @@
+---
+source: sqry-lang-elixir/tests/relations_snapshot.rs
+expression: normalized
+---
+- - "Demo::Deep::Module"
+  - AliasModule
+  - kind=alias
+- - "Demo::Math"
+  - ~
+  - kind=import
+- - "Demo::Math::Helpers"
+  - Helpers
+  - kind=alias
+- - "Demo::Math::Helpers"
+  - ~
+  - kind=import;only=double/1
+- - GenServer
+  - GenServer
+  - kind=use
+- - Logger
+  - Logger
+  - kind=require
