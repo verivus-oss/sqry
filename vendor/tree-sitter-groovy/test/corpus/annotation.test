@@ -1,0 +1,73 @@
+==========
+Annotate variable
+==========
+@annotation def x = 5
+---
+(source_file
+  (declaration
+    (annotation
+      (identifier))
+    name: (identifier)
+    value: (number_literal)))
+==========
+Annotate function
+==========
+@annotation(withArgs)
+def f() {
+}
+---
+(source_file
+  (function_definition
+    (annotation
+      (identifier)
+      (argument_list
+        (identifier)))
+    function: (identifier)
+    parameters: (parameter_list)
+    body: (closure)))
+==========
+Annotate class
+==========
+@annotation(withArgs)
+static class f {
+}
+---
+(source_file
+  (class_definition
+    (annotation
+      (identifier)
+      (argument_list
+        (identifier)))
+    (modifier)
+    name: (identifier)
+    body: (closure)))
+==========
+Create annotation
+==========
+private @interface annotation {
+}
+---
+(source_file
+  (class_definition
+    (access_modifier)
+    name: (identifier)
+    body: (closure)))
+==========
+Multiple annotations
+==========
+@annotation(withArgs)
+@annotation2
+static class f {
+}
+---
+(source_file
+  (class_definition
+    (annotation
+      (identifier)
+      (argument_list
+        (identifier)))
+    (annotation
+      (identifier))
+    (modifier)
+    name: (identifier)
+    body: (closure)))

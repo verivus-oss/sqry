@@ -1,0 +1,85 @@
+==========
+Closure with no args, no arrow, function call in body
+==========
+def myClosure = {
+       foo()
+}
+---
+(source_file
+      (declaration
+        (identifier)
+        (closure
+          (function_call
+            (identifier)
+            (argument_list)))))
+
+==========
+Closure with no args, no arrow, integer literal expression in body
+==========
+def myClosure = {
+       1
+}
+---
+(source_file
+      (declaration
+        (identifier)
+        (closure
+            (number_literal))))
+
+==========
+Closure with no args, arrow, function call in body
+==========
+def myClosure = {
+       -> 
+       foo()
+}
+---
+(source_file
+      (declaration
+        (identifier)
+        (closure
+          (function_call
+            (identifier)
+            (argument_list)))))
+
+==========
+Closure with one arg
+==========
+def myClosure = {
+       a -> 
+       y = a
+}
+---
+(source_file
+      (declaration
+        (identifier)
+        (closure
+          (parameter_list
+            (parameter
+              (identifier)))
+          (assignment
+            (identifier)
+            (identifier)))))
+
+==========
+Closure with multiple args
+==========
+def myClosure = {
+       a, b ->
+       y = a + b
+}
+---
+(source_file
+      (declaration
+        (identifier)
+        (closure
+          (parameter_list
+            (parameter
+              (identifier))
+            (parameter
+              (identifier)))
+          (assignment
+            (identifier)
+            (binary_op
+              (identifier)
+              (identifier))))))

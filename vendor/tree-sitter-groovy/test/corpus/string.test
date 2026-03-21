@@ -1,0 +1,192 @@
+==========
+Basic double quoted string
+==========
+x = "hello world"
+---
+(source_file
+  (assignment
+    (identifier)
+    (string
+      (string_content))))
+==========
+Escape sequences
+==========
+x = "hello\\world"
+y = "hello\"world"
+z = "hello \uff00 world"
+---
+(source_file
+  (assignment
+    (identifier)
+    (string
+      (string_content)
+      (escape_sequence)
+      (string_content)))
+  (assignment
+    (identifier)
+    (string
+      (string_content)
+      (escape_sequence)
+      (string_content)))
+  (assignment
+    (identifier)
+    (string
+      (string_content)
+      (escape_sequence)
+      (string_content))))
+==========
+Slashy strings
+==========
+x = /hello/
+y = /hello\/world/
+z = /hello
+world
+multiline/
+r = /regex\d+/
+---
+(source_file
+  (assignment
+    (identifier)
+    (string
+      (string_content)))
+  (assignment
+    (identifier)
+    (string
+      (string_content)
+      (escape_sequence)
+      (string_content)))
+  (assignment
+    (identifier)
+    (string
+      (string_content)))
+  (assignment
+    (identifier)
+    (string
+      (string_content)
+      (string_content)
+      (string_content))))
+==========
+interpolation
+==========
+x = "hello ${name}"
+x = "hello ${3 + 4 * 2}!"
+x = "hello \${3 + 4 * 2}"
+---
+(source_file
+  (assignment
+    (identifier)
+    (string
+      (string_content)
+      (interpolation
+        (identifier))))
+  (assignment
+    (identifier)
+    (string
+      (string_content)
+      (interpolation
+        (binary_op
+          (number_literal)
+          (binary_op
+            (number_literal)
+            (number_literal))))
+      (string_content)))
+  (assignment
+    (identifier)
+    (string
+      (string_content)
+      (escape_sequence)
+      (string_content))))
+==========
+Multiline string
+==========
+x = """"""
+y = """
+this is a multiline string with "quotes" inside
+as well as ""double quotes""
+escapes \$
+plain backslashes \
+and ${interpolation}
+"""
+---
+(source_file
+  (assignment
+    (identifier)
+    (string))
+  (assignment
+    (identifier)
+    (string
+      (string_content)
+      (escape_sequence)
+      (string_content)
+      (escape_sequence)
+      (string_content)
+      (interpolation
+        (identifier)))))
+==========
+Multiline edge case trailing quotes before interpolation
+==========
+print("""hello world ""${0}""")
+---
+(source_file
+  (function_call
+    function: (identifier)
+    args: (argument_list
+      (string
+        (string_content)
+        (interpolation
+          (number_literal))))))
+==========
+Single quoted string
+==========
+x = 'a + b \' + c'
+y = 'a + $3'
+---
+(source_file
+  (assignment
+    (identifier)
+    (string
+      (string_content)
+      (escape_sequence)
+      (string_content)))
+  (assignment
+    (identifier)
+    (string
+      (string_content))))
+==========
+Multiline single quoted string
+==========
+x = '''multiline string " with
+a bunch'' of quotes'''
+---
+(source_file
+  (assignment
+    (identifier)
+    (string
+      (string_content))))
+==========
+Dollar slashy string
+==========
+x = $/
+hello
+world
+$$ dollar
+/
+\
+$interp
+$dotted.interp
+$/ escaped slash
+/$
+---
+(source_file
+  (assignment
+    (identifier)
+    (string
+      (string_content)
+      (escape_sequence)
+      (string_content)
+      (interpolation
+        (identifier))
+      (interpolation
+        (identifier))
+      (escape_sequence)
+      (string_content))))

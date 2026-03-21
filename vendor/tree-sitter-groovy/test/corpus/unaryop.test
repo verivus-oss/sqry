@@ -1,0 +1,80 @@
+==========
+Unary precedence
+==========
+x =  5 ** ++y
+x = ~5 ** y
+---
+(source_file
+  (assignment
+    (identifier)
+    (binary_op
+      (number_literal)
+      (increment_op
+        (identifier))))
+  (assignment
+    (identifier)
+    (binary_op
+      (unary_op
+        (number_literal))
+      (identifier))))
+==========
+The `new` keyword, TODO: remove from unary ops
+==========
+import utils.SoftwareMutex
+SoftwareMutex manifestAppendLock = new SoftwareMutex()
+steps.add([(Platform.ALL): { def ctx ->
+  stage("${ctx.platform.label}: say hello") {
+    println "Hello, ${ctx.platform.label}"
+  }
+}])
+---
+(source_file
+  (groovy_import
+    import: (qualified_name
+      (identifier)
+      (identifier)))
+  (declaration
+    type: (identifier)
+    name: (identifier)
+    value: (unary_op
+      (function_call
+        function: (identifier)
+        args: (argument_list))))
+  (function_call
+    function: (dotted_identifier
+      (identifier)
+      (identifier))
+    args: (argument_list
+      (map
+        (map_item
+          key: (parenthesized_expression
+            (dotted_identifier
+              (identifier)
+              (identifier)))
+          value: (closure
+            (parameter_list
+              (parameter
+                name: (identifier)))
+            (function_call
+              function: (identifier)
+              args: (argument_list
+                (string
+                  (interpolation
+                    (dotted_identifier
+                      (dotted_identifier
+                        (identifier)
+                        (identifier))
+                      (identifier)))
+                  (string_content))
+                (closure
+                  (juxt_function_call
+                    function: (identifier)
+                    args: (argument_list
+                      (string
+                        (string_content)
+                        (interpolation
+                          (dotted_identifier
+                            (dotted_identifier
+                              (identifier)
+                              (identifier))
+                            (identifier)))))))))))))))

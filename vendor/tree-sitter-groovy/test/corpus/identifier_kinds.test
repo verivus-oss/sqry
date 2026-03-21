@@ -1,0 +1,31 @@
+==========
+Identifier parsing
+==========
+if (JOB_NAME =~ /PR-([0-9]+)/) {}
+String mazen = "hysm"
+def hysm = "system"
+import static docker.DockerImage.Platform
+---
+(source_file
+  (if_statement
+    condition: (parenthesized_expression
+      (binary_op
+        (identifier)
+        (string
+          (string_content))))
+    body: (closure))
+  (declaration
+    type: (identifier)
+    name: (identifier)
+    value: (string
+      (string_content)))
+  (declaration
+    name: (identifier)
+    value: (string
+      (string_content)))
+  (groovy_import
+    (modifier)
+    import: (qualified_name
+      (identifier)
+      (identifier)
+      (identifier))))

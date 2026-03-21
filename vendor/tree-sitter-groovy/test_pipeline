@@ -1,0 +1,50 @@
+package test
+import groovy.transform.*
+def key = val
+String str
+int y = 57
+
+/**
+* groovydoc example
+* @param x
+* @throws Exception
+* hello world
+*/
+def f(int x) {
+  return 1 + x + y // highlight parameters
+}
+
+g = { x -> x * 2 } // closure
+
+@annotation /* annotation */
+static class C {
+  public static int x = 1
+}
+
+pipeline {
+  stages {
+    stage("jenkins pipeline") {
+      steps {
+        sh "hello world ${with_interpolation}"
+        sh """\n \t \u1234 escape sequences
+          ${multiline.string} with interpolation """
+        sh '''${multiline.string} without interpolation\t
+          '''
+        sh(/slashy string/)
+        sh($/dollar slashy string/$)
+        checkout([repo_name: "hello world", clone_depth: 20])
+        mapFunc(param1: val, param2: 4)
+        sendTrackingEvents(arg1, 3 + 4 * 7, false)
+        script {
+          switch (x) {
+            case 1:
+              println("1")
+              break
+            default:
+              println("default")
+          }
+        }
+      }
+    }
+  }
+}

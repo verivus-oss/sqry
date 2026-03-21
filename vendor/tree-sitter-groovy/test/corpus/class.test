@@ -1,0 +1,65 @@
+==========
+Basic class
+==========
+class foo {
+}
+---
+(source_file
+  (class_definition
+    name: (identifier)
+    body: (closure)))
+==========
+Class with generics
+==========
+class Bar<T extends Collection> {
+}
+---
+(source_file
+  (class_definition
+    name: (identifier)
+    generics: (generic_parameters
+      (generic_param
+        name: (identifier)
+        superclass: (identifier)))
+    body: (closure)))
+==========
+Modifiers
+==========
+private static final class Baz {
+}
+---
+(source_file
+  (class_definition
+    (access_modifier)
+    (modifier)
+    (modifier)
+    name: (identifier)
+    body: (closure)))
+==========
+Interface
+==========
+interface foo {
+  public String toString()
+  public int add(int x, int y)
+}
+---
+(source_file
+  (class_definition
+    name: (identifier)
+    body: (closure
+      (function_declaration
+        (access_modifier)
+        type: (identifier)
+        function: (identifier)
+        parameters: (parameter_list))
+      (function_declaration
+        (access_modifier)
+        type: (builtintype)
+        function: (identifier)
+        parameters: (parameter_list
+          (parameter
+            type: (builtintype)
+            name: (identifier))
+          (parameter
+            type: (builtintype)
+            name: (identifier)))))))

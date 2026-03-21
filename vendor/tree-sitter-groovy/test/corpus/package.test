@@ -1,0 +1,21 @@
+==========
+Basic package
+==========
+package my_package_name
+
+---
+(source_file
+  (groovy_package
+    (qualified_name
+      (identifier))))
+==========
+Package with dotted ident
+==========
+package com.yoursite
+
+---
+(source_file
+  (groovy_package
+    (qualified_name
+      (identifier)
+      (identifier))))

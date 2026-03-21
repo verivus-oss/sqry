@@ -1,0 +1,30 @@
+==========
+Various numeric literals
+==========
+x = [
+  1,
+  24f,
+  -3,
+  54l,
+  0xff0000,
+  0b010101,
+  0.01,
+  200_000l,
+  6.2e23,
+  1.000_001,
+]
+---
+(source_file
+  (assignment
+    (identifier)
+    (list
+      (number_literal)
+      (number_literal)
+      (number_literal)
+      (number_literal)
+      (number_literal)
+      (number_literal)
+      (number_literal)
+      (number_literal)
+      (number_literal)
+      (number_literal))))

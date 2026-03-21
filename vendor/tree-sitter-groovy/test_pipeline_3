@@ -1,0 +1,18 @@
+pipeline {
+  agent none
+  stages {
+    stage("hello world") {
+      steps {
+        sh abc
+        sh "hello world"
+      }
+    }
+    stage("Script") {
+      steps {
+        script {
+          def foo = bar
+        }
+      }
+    }
+  }
+}

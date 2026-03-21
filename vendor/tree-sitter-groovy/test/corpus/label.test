@@ -1,0 +1,51 @@
+==========
+Basic labeled statement
+==========
+label: def a = 1;
+---
+(source_file
+  (label
+    name: (identifier))
+  (declaration
+    name: (identifier)
+    value: (number_literal)))
+==========
+Spock test
+==========
+class Test {
+    def testAdd() {
+        when:
+        def a = 10
+        def b = 10
+        def result = a + b
+        then:
+        result == 20
+     }
+}
+---
+(source_file
+  (class_definition
+    name: (identifier)
+    body: (closure
+      (function_definition
+        function: (identifier)
+        parameters: (parameter_list)
+        body: (closure
+          (label
+            name: (identifier))
+          (declaration
+            name: (identifier)
+            value: (number_literal))
+          (declaration
+            name: (identifier)
+            value: (number_literal))
+          (declaration
+            name: (identifier)
+            value: (binary_op
+              (identifier)
+              (identifier)))
+          (label
+            name: (identifier))
+          (binary_op
+            (identifier)
+            (number_literal)))))))

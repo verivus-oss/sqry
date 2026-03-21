@@ -1,0 +1,189 @@
+==========
+Zero-argument function call
+==========
+hello()
+---
+(source_file
+  (function_call
+    function: (identifier)
+    args: (argument_list)))
+==========
+One-argument function call
+==========
+hello(24)
+hello(24,)
+---
+(source_file
+  (function_call
+    function: (identifier)
+    args: (argument_list
+      (number_literal)))
+  (function_call
+    function: (identifier)
+    args: (argument_list
+      (number_literal))))
+==========
+Map function call
+==========
+hello(foo: bar, hello: world)
+hello(foo: bar, hello: world,)
+---
+(source_file
+  (function_call
+    function: (identifier)
+    args: (argument_list
+      (map_item
+        key: (identifier)
+        value: (identifier))
+      (map_item
+        key: (identifier)
+        value: (identifier))))
+  (function_call
+    function: (identifier)
+    args: (argument_list
+      (map_item
+        key: (identifier)
+        value: (identifier))
+      (map_item
+        key: (identifier)
+        value: (identifier)))))
+==========
+Simple function definition
+==========
+def foo() {
+  echo("hello")
+}
+---
+(source_file
+  (function_definition
+    function: (identifier)
+    parameters: (parameter_list)
+    body: (closure
+      (function_call
+        function: (identifier)
+        args: (argument_list
+          (string
+            (string_content)))))))
+==========
+Parameters
+==========
+def foo(int x, Boolean y = false) {
+  println("hi")
+}
+---
+(source_file
+  (function_definition
+    function: (identifier)
+    parameters: (parameter_list
+      (parameter
+        type: (builtintype)
+        name: (identifier))
+      (parameter
+        type: (identifier)
+        name: (identifier)
+        value: (boolean_literal)))
+    body: (closure
+      (function_call
+        function: (identifier)
+        args: (argument_list
+          (string
+            (string_content)))))))
+==========
+Return
+==========
+def foo() {
+  return 1 + 2
+  return x
+  return
+}
+---
+(source_file
+  (function_definition
+    function: (identifier)
+    parameters: (parameter_list)
+    body: (closure
+      (return
+        (binary_op
+          (number_literal)
+          (number_literal)))
+      (return
+        (identifier))
+      (return))))
+==========
+Juxtaposed function call
+==========
+f arg1: 2, arg2: "hello"
+g 3, 5
+h foo
+sh "hello"
+---
+(source_file
+  (juxt_function_call
+    function: (identifier)
+    args: (argument_list
+      (map_item
+        key: (identifier)
+        value: (number_literal))
+      (map_item
+        key: (identifier)
+        value: (string
+          (string_content)))))
+  (juxt_function_call
+    function: (identifier)
+    args: (argument_list
+      (number_literal)
+      (number_literal)))
+        (juxt_function_call
+          function: (identifier)
+          args: (argument_list
+            (identifier)))
+  (juxt_function_call
+    function: (identifier)
+    args: (argument_list
+      (string
+        (string_content)))))
+==========
+Typed function
+==========
+int foo() {
+  return 4
+}
+---
+(source_file
+  (function_definition
+    type: (builtintype)
+    function: (identifier)
+    parameters: (parameter_list)
+    body: (closure
+      (return
+        (number_literal)))))
+==========
+Immediately invoked closure
+==========
+({return "each"}())
+---
+(source_file
+  (parenthesized_expression
+    (function_call
+      function: (closure
+        (return
+          (string
+            (string_content))))
+      args: (argument_list))))
+==========
+NOT an immediately invoked closure
+==========
+def friend =
+{return "hysm"}(1..2)
+---
+(source_file
+  (declaration
+    name: (identifier)
+    value: (closure
+      (return
+        (string
+          (string_content)))))
+  (parenthesized_expression
+    (binary_op
+      (number_literal)
+      (number_literal))))

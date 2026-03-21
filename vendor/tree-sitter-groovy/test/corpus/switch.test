@@ -1,0 +1,35 @@
+==========
+Switch
+==========
+switch(x) {
+  case 1:
+    f()
+  case 24*60:
+    g()
+    break
+  default:
+    h()
+}
+---
+(source_file
+  (switch_statement
+    value: (parenthesized_expression
+      (identifier))
+    body: (switch_block
+      (case
+        value: (number_literal)
+        (function_call
+          function: (identifier)
+          args: (argument_list)))
+      (case
+        value: (binary_op
+          (number_literal)
+          (number_literal))
+        (function_call
+          function: (identifier)
+          args: (argument_list))
+        (break))
+      (case
+        (function_call
+          function: (identifier)
+          args: (argument_list))))))

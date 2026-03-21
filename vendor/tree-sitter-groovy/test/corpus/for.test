@@ -1,0 +1,114 @@
+==========
+Basic for loop
+==========
+for (int i = 0; i < 10; i++) {
+  println("hello!")
+}
+---
+(source_file
+  (for_loop
+    (for_parameters
+      initializer: (declaration
+        type: (builtintype)
+        name: (identifier)
+        value: (number_literal))
+      condition: (binary_op
+        (identifier)
+        (number_literal))
+      increment: (increment_op
+        (identifier)))
+    body: (closure
+      (function_call
+        function: (identifier)
+        args: (argument_list
+          (string
+            (string_content)))))))
+==========
+Multiple initializers and increments
+==========
+for (int x = 0, y = 0; x + y < 10; x++, y *= 2) {
+  println("hello!")
+}
+---
+(source_file
+  (for_loop
+    (for_parameters
+      initializer: (declaration
+        type: (builtintype)
+        name: (identifier)
+        value: (number_literal))
+      initializer: (assignment
+        (identifier)
+        (number_literal))
+      condition: (binary_op
+        (binary_op
+          (identifier)
+          (identifier))
+        (number_literal))
+      increment: (increment_op
+          (identifier))
+      increment: (assignment
+        (identifier)
+        (number_literal)))
+    body: (closure
+      (function_call
+        function: (identifier)
+        args: (argument_list
+          (string
+            (string_content)))))))
+==========
+Infinite loop
+==========
+for (;;) {
+  println("to infinity and beyond")
+}
+---
+(source_file
+  (for_loop
+    (for_parameters)
+    body: (closure
+      (function_call
+        function: (identifier)
+        args: (argument_list
+          (string
+            (string_content)))))))
+==========
+For in expr
+==========
+for (x in m.values()) {
+  print("hello")
+}
+---
+(source_file
+  (for_in_loop
+    variable: (identifier)
+    collection: (function_call
+      function: (dotted_identifier
+        (identifier)
+        (identifier))
+      args: (argument_list))
+    body: (closure
+      (function_call
+        function: (identifier)
+        args: (argument_list
+          (string
+            (string_content)))))))
+==========
+For in range
+==========
+for (x in 1..5) {
+  print("hello")
+}
+---
+(source_file
+  (for_in_loop
+    variable: (identifier)
+    collection: (binary_op
+      (number_literal)
+      (number_literal))
+    body: (closure
+      (function_call
+        function: (identifier)
+        args: (argument_list
+          (string
+            (string_content)))))))

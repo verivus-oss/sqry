@@ -1,0 +1,38 @@
+==========
+Basic while loop
+==========
+while (x < 5) {
+  print("hello")
+}
+---
+(source_file
+  (while_loop
+    condition: (parenthesized_expression
+      (binary_op
+        (identifier)
+        (number_literal)))
+    body: (closure
+      (function_call
+        function: (identifier)
+        args: (argument_list
+          (string
+            (string_content)))))))
+==========
+Do while loop
+==========
+do {
+  print(x--)
+} while (x > 0)
+---
+(source_file
+  (do_while_loop
+    body: (closure
+      (function_call
+        function: (identifier)
+        args: (argument_list
+          (increment_op
+            (identifier)))))
+    condition: (parenthesized_expression
+      (binary_op
+        (identifier)
+        (number_literal)))))

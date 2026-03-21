@@ -1,0 +1,103 @@
+==========
+Basic program structure
+==========
+def a = 1
+String b = 2
+pipeline {}
+---
+(source_file
+  (declaration
+    name: (identifier)
+    value: (number_literal))
+  (declaration
+    type: (identifier)
+    name: (identifier)
+    value: (number_literal))
+  (pipeline
+    (closure)))
+==========
+Jenkins-specific structure
+==========
+pipeline {
+  agent none
+  stages {
+    stage("hello world") {
+      steps {
+        sh abc
+        sh "hello world"
+      }
+    }
+    stage("Script") {
+      steps {
+        script {
+          def foo = bar
+        }
+      }
+    }
+  }
+}
+---
+(source_file
+  (pipeline
+    (closure
+      (juxt_function_call
+        function: (identifier)
+        args: (argument_list
+          (identifier)))
+      (juxt_function_call
+        function: (identifier)
+        args: (argument_list
+          (closure
+            (function_call
+              function: (identifier)
+              args: (argument_list
+                (string
+                  (string_content))
+                (closure
+                  (juxt_function_call
+                    function: (identifier)
+                    args: (argument_list
+                      (closure
+                        (juxt_function_call
+                          function: (identifier)
+                          args: (argument_list
+                            (identifier)))
+                        (juxt_function_call
+                          function: (identifier)
+                          args: (argument_list
+                            (string
+                              (string_content))))))))))
+            (function_call
+              function: (identifier)
+              args: (argument_list
+                (string
+                  (string_content))
+                (closure
+                  (juxt_function_call
+                    function: (identifier)
+                    args: (argument_list
+                      (closure
+                        (juxt_function_call
+                          function: (identifier)
+                          args: (argument_list
+                            (closure
+                              (declaration
+                                name: (identifier)
+                                value: (identifier)))))))))))))))))
+==========
+Jenkins-import underscore
+==========
+@Library('my-library') _
+
+pipeline {
+}
+---
+(source_file
+  (declaration
+    (annotation
+      (identifier)
+      (argument_list
+        (string
+          (string_content)))))
+  (pipeline
+    (closure)))

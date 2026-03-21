@@ -1,0 +1,24 @@
+==========
+Basic List indexing
+==========
+def a = [1,2,3]
+def b = a[0]
+a[0] = 2
+---
+(source_file
+  (declaration
+    name: (identifier)
+    value: (list
+      (number_literal)
+      (number_literal)
+      (number_literal)))
+  (declaration
+    name: (identifier)
+    value: (index
+      (identifier)
+      (number_literal)))
+  (assignment
+    (index
+      (identifier)
+      (number_literal))
+    (number_literal)))

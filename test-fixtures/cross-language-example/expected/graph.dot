@@ -1,0 +1,61 @@
+// Expected graph output in Graphviz DOT format
+// This represents the cross-language call graph for the example
+
+digraph CodeGraph {
+    rankdir=LR;
+    node [shape=box, style=filled];
+
+    // JavaScript nodes
+    "js:frontend/api.js:main" [fillcolor=lightyellow, label="main\n(JavaScript)"];
+    "js:frontend/api.js:fetchUsers" [fillcolor=lightyellow, label="fetchUsers\n(JavaScript)"];
+    "js:frontend/api.js:createUser" [fillcolor=lightyellow, label="createUser\n(JavaScript)"];
+    "js:frontend/api.js:compressData" [fillcolor=lightyellow, label="compressData\n(JavaScript)"];
+
+    // Python nodes
+    "py:backend/server.py:get_users" [fillcolor=lightgreen, label="get_users\n(Python)"];
+    "py:backend/server.py:create_user" [fillcolor=lightgreen, label="create_user\n(Python)"];
+    "py:backend/server.py:authenticate_request" [fillcolor=lightgreen, label="authenticate_request\n(Python)"];
+    "py:backend/server.py:validate_user_data" [fillcolor=lightgreen, label="validate_user_data\n(Python)"];
+    "py:backend/server.py:query_database" [fillcolor=lightgreen, label="query_database\n(Python)"];
+    "py:backend/server.py:save_to_database" [fillcolor=lightgreen, label="save_to_database\n(Python)"];
+
+    // C++ nodes
+    "cpp:native/lib.cpp:compress" [fillcolor=lightblue, label="compress\n(C++)"];
+    "cpp:native/lib.cpp:hash_password" [fillcolor=lightblue, label="hash_password\n(C++)"];
+    "cpp:native/lib.cpp:validate_token" [fillcolor=lightblue, label="validate_token\n(C++)"];
+    "cpp:native/lib.cpp:parse_user_id" [fillcolor=lightblue, label="parse_user_id\n(C++)"];
+    "cpp:native/lib.cpp:verify_signature" [fillcolor=lightblue, label="verify_signature\n(C++)"];
+
+    // HTTP endpoint nodes
+    "http:/api/users:GET" [fillcolor=lightpink, shape=hexagon, label="/api/users\nGET"];
+    "http:/api/users:POST" [fillcolor=lightpink, shape=hexagon, label="/api/users\nPOST"];
+
+    // JavaScript call edges
+    "js:frontend/api.js:main" -> "js:frontend/api.js:fetchUsers" [label="calls"];
+    "js:frontend/api.js:main" -> "js:frontend/api.js:createUser" [label="calls"];
+    "js:frontend/api.js:main" -> "js:frontend/api.js:compressData" [label="calls"];
+
+    // HTTP request edges (cross-language)
+    "js:frontend/api.js:fetchUsers" -> "http:/api/users:GET" [label="HTTP GET", color=red];
+    "js:frontend/api.js:createUser" -> "http:/api/users:POST" [label="HTTP POST", color=red];
+
+    // HTTP endpoint to Python handler edges
+    "http:/api/users:GET" -> "py:backend/server.py:get_users" [label="routes to", color=red];
+    "http:/api/users:POST" -> "py:backend/server.py:create_user" [label="routes to", color=red];
+
+    // Python call edges
+    "py:backend/server.py:get_users" -> "py:backend/server.py:authenticate_request" [label="calls"];
+    "py:backend/server.py:get_users" -> "py:backend/server.py:query_database" [label="calls"];
+
+    "py:backend/server.py:create_user" -> "py:backend/server.py:authenticate_request" [label="calls"];
+    "py:backend/server.py:create_user" -> "py:backend/server.py:validate_user_data" [label="calls"];
+    "py:backend/server.py:create_user" -> "py:backend/server.py:save_to_database" [label="calls"];
+
+    // FFI edges (cross-language)
+    "js:frontend/api.js:compressData" -> "cpp:native/lib.cpp:compress" [label="FFI", color=blue];
+    "py:backend/server.py:authenticate_request" -> "cpp:native/lib.cpp:validate_token" [label="FFI", color=blue];
+    "py:backend/server.py:create_user" -> "cpp:native/lib.cpp:hash_password" [label="FFI", color=blue];
+
+    // C++ internal call edges
+    "cpp:native/lib.cpp:validate_token" -> "cpp:native/lib.cpp:parse_user_id" [label="calls"];
+}

@@ -1,0 +1,44 @@
+# tree-sitter-svelte warning hardening fixes
+# Created: 2025-11-02
+# Upstream: https://github.com/Himujjal/tree-sitter-svelte
+# Commit: (vendored snapshot)
+#
+# Fixes:
+#   1. -Wunknown-pragmas: Guard Clang-specific pragmas with __clang__ checks
+#   2. -Wimplicit-fallthrough: Add explicit break in '>' case of scan_comment
+#
+# These fixes preserve parser semantics while eliminating compiler warnings
+# under GCC 13+ and Clang 15+ with -Wall -Wextra.
+
+diff --git a/vendor/tree-sitter-svelte/src/scanner.c b/vendor/tree-sitter-svelte/src/scanner.c
+index 3fd2386..ee1432f 100755
+--- a/vendor/tree-sitter-svelte/src/scanner.c
++++ b/vendor/tree-sitter-svelte/src/scanner.c
+@@ -118,6 +118,7 @@ bool scan_comment(TSLexer *lexer) {
+         lexer->mark_end(lexer);
+         return true;
+       }
++      break;
+     default:
+       dashes = 0;
+     }
+@@ -445,14 +446,18 @@ bool scan(Scanner *scanner, TSLexer *lexer, const bool *valid_symbols) {
+ 
+ #ifndef _MSC_VER
+ #pragma GCC diagnostic push
++#if defined(__clang__)
+ #pragma clang diagnostic push
+ #pragma clang diagnostic ignored "-Wunused-parameter"
+ #endif
++#endif
+ void deleter(void *tag, za_Allocator *A) {}
+ #ifndef _MSC_VER
+-#pragma GCC diagnostic pop
++#if defined(__clang__)
+ #pragma clang diagnostic pop
+ #endif
++#pragma GCC diagnostic pop
++#endif
+ 
+ void *tree_sitter_svelte_external_scanner_create() {
+   za_Allocator *A = za_New();
