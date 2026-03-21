@@ -1,0 +1,56 @@
+==========
+Try catch
+==========
+try {
+  print("hello")
+} catch (ex) {
+  print("fail")
+}
+---
+(source_file
+  (try_statement
+    body: (closure
+      (function_call
+        function: (identifier)
+        args: (argument_list
+          (string
+            (string_content)))))
+    catch_exception: (identifier)
+    catch_body: (closure
+      (function_call
+        function: (identifier)
+        args: (argument_list
+          (string
+            (string_content)))))))
+==========
+Try catch finally
+==========
+try {
+  print("hello")
+} catch (ex) {
+  print("fail")
+} finally {
+  print("finally")
+}
+---
+(source_file
+  (try_statement
+    body: (closure
+      (function_call
+        function: (identifier)
+        args: (argument_list
+          (string
+            (string_content)))))
+    catch_exception: (identifier)
+    catch_body: (closure
+      (function_call
+        function: (identifier)
+        args: (argument_list
+          (string
+            (string_content)))))
+    finally_body: (closure
+      (function_call
+        function: (identifier)
+        args: (argument_list
+          (string
+            (string_content)))))))

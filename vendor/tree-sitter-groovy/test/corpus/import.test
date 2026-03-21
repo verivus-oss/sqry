@@ -1,0 +1,75 @@
+==========
+Basic import statement
+==========
+import thing
+
+---
+(source_file
+  (groovy_import
+    import: (qualified_name
+      (identifier))))
+==========
+Import with alias
+==========
+
+import thing as other_thing
+
+---
+(source_file
+  (groovy_import
+    import: (qualified_name
+      (identifier))
+    import_alias: (identifier)))
+==========
+Import with dotted ident
+==========
+import package.subpackage
+
+---
+(source_file
+  (groovy_import
+    import: (qualified_name
+      (identifier)
+      (identifier))))
+==========
+Star import
+==========
+import all_of_the_things.*
+import java.util.*
+
+---
+(source_file
+  (groovy_import
+    import: (qualified_name
+      (identifier))
+    (wildcard_import))
+  (groovy_import
+    import: (qualified_name
+      (identifier)
+      (identifier))
+    (wildcard_import)))
+==========
+Static import statement
+==========
+import static thing
+import static groovy.lang.*
+import static Calendar.getInstance as now
+
+---
+(source_file
+  (groovy_import
+    (modifier)
+    import: (qualified_name
+      (identifier)))
+  (groovy_import
+    (modifier)
+    import: (qualified_name
+      (identifier)
+      (identifier))
+    (wildcard_import))
+  (groovy_import
+    (modifier)
+    import: (qualified_name
+      (identifier)
+      (identifier))
+    import_alias: (identifier)))

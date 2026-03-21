@@ -1,0 +1,55 @@
+name: CodeQL
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  schedule:
+    - cron: '17 3 * * 1'
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+  pull-requests: read
+  security-events: write
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    # Public sqry is primarily Rust plus workflow and extension code.
+    # We intentionally scan the security-relevant maintained languages here
+    # and do not enable CodeQL for generated/vendor-heavy incidental sources.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: actions
+            build-mode: none
+          - language: javascript-typescript
+            build-mode: none
+          - language: rust
+            build-mode: none
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@38697555549f1db7851b81482ff19f1fa5c4fedc # v4
+        with:
+          languages: ${{ matrix.language }}
+          # GitHub supports no-build extraction for Rust in advanced setup.
+          build-mode: ${{ matrix.build-mode }}
+          queries: security-extended,security-and-quality
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@38697555549f1db7851b81482ff19f1fa5c4fedc # v4
+        with:
+          category: /language:${{ matrix.language }}

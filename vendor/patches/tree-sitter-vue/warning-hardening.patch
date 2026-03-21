@@ -1,0 +1,33 @@
+# tree-sitter-vue warning hardening fixes
+# Created: 2025-11-02
+# Upstream: https://github.com/ikatyang/tree-sitter-vue
+# Commit: (vendored snapshot)
+#
+# Fixes:
+#   1. -Wsign-compare: Cast delimiter operand to unsigned char in scan_raw_text
+#   2. -Wimplicit-fallthrough: Add explicit break in '>' case of scan_comment
+#
+# These fixes preserve parser semantics while eliminating compiler warnings
+# under GCC 13+ and Clang 15+ with -Wall -Wextra.
+
+diff --git a/vendor/tree-sitter-vue/src/tree_sitter_html/scanner.cc b/vendor/tree-sitter-vue/src/tree_sitter_html/scanner.cc
+index 36211aa..40684aa 100644
+--- a/vendor/tree-sitter-vue/src/tree_sitter_html/scanner.cc
++++ b/vendor/tree-sitter-vue/src/tree_sitter_html/scanner.cc
+@@ -109,6 +109,7 @@ struct Scanner {
+             lexer->mark_end(lexer);
+             return true;
+           }
++          break;
+         default:
+           dashes = 0;
+       }
+@@ -128,7 +129,7 @@ struct Scanner {
+ 
+     unsigned delimiter_index = 0;
+     while (lexer->lookahead) {
+-      if (towupper(lexer->lookahead) == end_delimiter[delimiter_index]) {
++      if (towupper(lexer->lookahead) == static_cast<unsigned char>(end_delimiter[delimiter_index])) {
+         delimiter_index++;
+         if (delimiter_index == end_delimiter.size()) break;
+         lexer->advance(lexer, false);

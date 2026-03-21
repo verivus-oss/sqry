@@ -29,7 +29,7 @@ HTML, CSS, SQL, Oracle PL/SQL, Terraform/HCL, Puppet, Pulumi, SAP ABAP, Salesfor
 
 ## What's New
 
-### v4.10.9
+### v4.10.10
 - **Cross-language edge counting**: Index status now reports accurate per-language-pair edge counts (previously stubbed to 0)
 - **Lazy-loaded analysis panels**: Duplicates, Circular Dependencies, and Unused Code panels show "expand to check" instead of misleading zeros before data is loaded
 - **Unused code truncation**: Unused symbols panel shows truncation indicator when results are limited
@@ -37,7 +37,7 @@ HTML, CSS, SQL, Oracle PL/SQL, Terraform/HCL, Puppet, Pulumi, SAP ABAP, Salesfor
 - **Debug diagnostics**: LSP logs silent node conversion failures for easier troubleshooting
 
 ### v4.10.1
-- Version-aligned with sqry `v4.10.9` (CLI/LSP/MCP).
+- Version-aligned with sqry `v4.10.10` (CLI/LSP/MCP).
 - Release and documentation links aligned to current OSS workflow.
 - Extension packaging and verification flow aligned with current release assets.
 
@@ -46,12 +46,12 @@ HTML, CSS, SQL, Oracle PL/SQL, Terraform/HCL, Puppet, Pulumi, SAP ABAP, Salesfor
 1. **Install sqry CLI** (prerequisite):
    ```bash
    cargo install sqry-cli
-   sqry --version  # Verify: 4.10.9+
+   sqry --version  # Verify: 4.10.10+
    ```
 
 2. **Install extension** from VSIX:
    ```bash
-   code --install-extension sqry-vscode-4.10.9.vsix
+   code --install-extension sqry-vscode-4.10.10.vsix
    ```
 
 3. **Index your project**:
@@ -167,7 +167,7 @@ During indexing, sqry displays:
 
 ### Requirements
 
-- sqry CLI version 4.10.9 or later
+- sqry CLI version 4.10.10 or later
 - VSCode 1.85.0 or later
 
 ---
@@ -198,7 +198,7 @@ npm test
 
 ```bash
 npx @vscode/vsce package
-# Produces: sqry-vscode-4.10.9.vsix
+# Produces: sqry-vscode-4.10.10.vsix
 ```
 
 ### Diagnostics
@@ -223,5 +223,5 @@ Enable debug logging:
 MIT - See root LICENSE file
 
 **Last Updated**: 2026-03-21
-**Version**: 4.10.9
-**Requires**: sqry CLI 4.10.9+
+**Version**: 4.10.10
+**Requires**: sqry CLI 4.10.10+

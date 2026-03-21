@@ -1,0 +1,81 @@
+==========
+Field access with parenthesized expression
+==========
+def plusThree = {it + 3}
+(1..3)
+  .collect(plusThree)
+  .("ea"+"ch"){println it}
+---
+(source_file
+  (declaration
+    name: (identifier)
+    value: (closure
+      (juxt_function_call
+        function: (identifier)
+        args: (argument_list
+          (unary_op
+            (number_literal))))))
+  (juxt_function_call
+    function: (dotted_identifier
+      (function_call
+        function: (dotted_identifier
+          (parenthesized_expression
+            (binary_op
+              (number_literal)
+              (number_literal)))
+          (identifier))
+        args: (argument_list
+          (identifier)))
+      (parenthesized_expression
+        (binary_op
+          (string
+            (string_content))
+          (string
+            (string_content)))))
+    args: (argument_list
+      (closure
+        (juxt_function_call
+          function: (identifier)
+          args: (argument_list
+            (identifier)))))))
+==========
+Field access with immediately invoked closure
+==========
+def plusThree = {it + 3}
+(1..3)
+.collect(plusThree)
+.({ return "each"}()){println it}
+---
+(source_file
+  (declaration
+    name: (identifier)
+    value: (closure
+      (juxt_function_call
+        function: (identifier)
+        args: (argument_list
+          (unary_op
+            (number_literal))))))
+  (juxt_function_call
+    function: (dotted_identifier
+      (function_call
+        function: (dotted_identifier
+          (parenthesized_expression
+            (binary_op
+              (number_literal)
+              (number_literal)))
+          (identifier))
+        args: (argument_list
+          (identifier)))
+      (parenthesized_expression
+        (function_call
+          function: (closure
+            (return
+              (string
+                (string_content))))
+          args: (argument_list))))
+    args: (argument_list
+      (closure
+        (juxt_function_call
+          function: (identifier)
+          args: (argument_list
+            (identifier)))))))

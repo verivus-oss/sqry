@@ -1,0 +1,11 @@
+---
+source: sqry-lang-ruby/tests/relations_snapshot.rs
+assertion_line: 35
+expression: normalized
+---
+- - "../lib/my_app"
+  - ~
+  - ~
+- - active_support
+  - ~
+  - ~

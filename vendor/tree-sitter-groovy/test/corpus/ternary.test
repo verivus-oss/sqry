@@ -1,0 +1,43 @@
+==========
+Simple ternary expression
+==========
+String x = condition ? "a" : "b"
+---
+(source_file
+  (declaration
+    type: (identifier)
+    name: (identifier)
+    value: (ternary_op
+      condition: (identifier)
+      then: (string
+        (string_content))
+      else: (string
+        (string_content)))))
+==========
+Deep ternary expression
+==========
+int y = (x + 3 < 2 ? 0 :
+  (x - 1 == 2 ? 1 : 2)
+)
+---
+(source_file
+  (declaration
+    type: (builtintype)
+    name: (identifier)
+    value: (parenthesized_expression
+      (ternary_op
+        condition: (binary_op
+          (binary_op
+            (identifier)
+            (number_literal))
+          (number_literal))
+        then: (number_literal)
+        else: (parenthesized_expression
+          (ternary_op
+            condition: (binary_op
+              (binary_op
+                (identifier)
+                (number_literal))
+              (number_literal))
+            then: (number_literal)
+            else: (number_literal)))))))

@@ -1,0 +1,137 @@
+==========
+Nested pipeline style function calls
+==========
+import static docker.DockerImage.Platform
+
+Map<String, Closure> prepareSteps(def steps, def agentMap, def labelPrefix='') {
+  Platform.ALL.collectEntries { Platform platform ->
+    [(labelPrefix + platform.label): {
+      node(agentMap[platform]) {
+        steps.inject(['platform': platform])
+          { def ctx, List<Map<Platform, Closure>> stepImplementations ->
+              if (Platform.ALL in stepImplementations) {
+                ctx = stepImplementations[Platform.ALL](ctx) ?: ctx
+              } else if (platform in stepImplementations) {
+                ctx = stepImplementations[platform](ctx) ?: ctx
+              }
+
+              return ctx
+          }
+      }
+    }]
+  }
+}
+---
+(source_file
+  (groovy_import
+    (modifier)
+    import: (qualified_name
+      (identifier)
+      (identifier)
+      (identifier)))
+  (function_definition
+    type: (type_with_generics
+      (identifier)
+      (generics
+        (identifier)
+        (identifier)))
+    function: (identifier)
+    parameters: (parameter_list
+      (parameter
+        name: (identifier))
+      (parameter
+        name: (identifier))
+      (parameter
+        name: (identifier)
+        value: (string)))
+    body: (closure
+      (juxt_function_call
+        function: (dotted_identifier
+          (dotted_identifier
+            (identifier)
+            (identifier))
+          (identifier))
+        args: (argument_list
+          (closure
+            (parameter_list
+              (parameter
+                type: (identifier)
+                name: (identifier)))
+            (map
+              (map_item
+                key: (parenthesized_expression
+                  (binary_op
+                    (identifier)
+                    (dotted_identifier
+                      (identifier)
+                      (identifier))))
+                value: (closure
+                  (function_call
+                    function: (identifier)
+                    args: (argument_list
+                      (index
+                        (identifier)
+                        (identifier))
+                      (closure
+                        (function_call
+                          function: (dotted_identifier
+                            (identifier)
+                            (identifier))
+                          args: (argument_list
+                            (map
+                              (map_item
+                                key: (string
+                                  (string_content))
+                                value: (identifier)))
+                            (closure
+                              (parameter_list
+                                (parameter
+                                  name: (identifier))
+                                (parameter
+                                  type: (type_with_generics
+                                    (identifier)
+                                    (generics
+                                      (type_with_generics
+                                        (identifier)
+                                        (generics
+                                          (identifier)
+                                          (identifier)))))
+                                  name: (identifier)))
+                              (if_statement
+                                condition: (parenthesized_expression
+                                  (binary_op
+                                    (dotted_identifier
+                                      (identifier)
+                                      (identifier))
+                                    (identifier)))
+                                body: (closure
+                                  (assignment
+                                    (identifier)
+                                    (binary_op
+                                      (function_call
+                                        function: (index
+                                          (identifier)
+                                          (dotted_identifier
+                                            (identifier)
+                                            (identifier)))
+                                        args: (argument_list
+                                          (identifier)))
+                                      (identifier))))
+                                else_body: (if_statement
+                                  condition: (parenthesized_expression
+                                    (binary_op
+                                      (identifier)
+                                      (identifier)))
+                                  body: (closure
+                                    (assignment
+                                      (identifier)
+                                      (binary_op
+                                        (function_call
+                                          function: (index
+                                            (identifier)
+                                            (identifier))
+                                          args: (argument_list
+                                            (identifier)))
+                                        (identifier))))))
+                              (return
+                                (identifier)))))))))))))))))

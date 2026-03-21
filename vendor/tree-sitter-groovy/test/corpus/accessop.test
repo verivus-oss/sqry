@@ -1,0 +1,13 @@
+==========
+Method call on dotted identifier
+==========
+x.y.z()
+---
+(source_file
+  (function_call
+    function: (dotted_identifier
+      (dotted_identifier
+        (identifier)
+        (identifier))
+      (identifier))
+    args: (argument_list)))

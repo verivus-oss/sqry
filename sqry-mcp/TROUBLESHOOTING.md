@@ -1,6 +1,6 @@
 # sqry MCP Server - Troubleshooting Guide - by Verivus
 
-**Version**: 4.10.9
+**Version**: 4.10.10
 **Last Updated**: 2026-03-21
 
 Quick solutions to common issues with the sqry MCP server.
@@ -14,7 +14,7 @@ Quick solutions to common issues with the sqry MCP server.
 1. **Check sqry CLI**:
    ```bash
    sqry --version
-   # Should output: sqry 4.10.9 or later
+   # Should output: sqry 4.10.10 or later
    ```
 
 2. **Check MCP server binary**:
@@ -1014,5 +1014,5 @@ When reporting issues, include:
 ---
 
 **Last Updated**: 2026-03-21
-**MCP Server Version**: 4.10.9
+**MCP Server Version**: 4.10.10
 **Protocol**: MCP 2024-11-05
