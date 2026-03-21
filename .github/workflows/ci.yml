@@ -368,5 +368,30 @@ jobs:
         run: cargo install --locked cargo-vet || true
 
       - name: Run cargo-vet (supply-chain audit)
-        run: cargo vet --locked
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo vet --locked 2>&1 | tee cargo-vet.log
 
+      - name: Summarize Dependabot cargo-vet failure
+        if: failure() && github.event_name == 'pull_request' && github.actor == 'dependabot[bot]' && startsWith(github.head_ref, 'dependabot/cargo/')
+        shell: bash
+        run: |
+          unvetted_line="$(grep -m1 -E '^[[:space:]]+[^[:space:]]+:[^[:space:]]+ missing \["safe-to-deploy"\]' cargo-vet.log || true)"
+          {
+            echo "## Dependency PR Vet Failure"
+            echo ""
+            echo "This failure is from a Dependabot cargo update PR, not a release-tag regression."
+            echo ""
+            echo "| Field | Value |"
+            echo "|-------|-------|"
+            echo "| Actor | \`${GITHUB_ACTOR}\` |"
+            echo "| Branch | \`${GITHUB_HEAD_REF}\` |"
+            echo "| Ref | \`${GITHUB_REF}\` |"
+            echo "| Head SHA | \`${GITHUB_SHA}\` |"
+            if [ -n "$unvetted_line" ]; then
+              echo "| Unvetted dependency | \`$(printf '%s' "$unvetted_line" | sed 's/^[[:space:]]*//; s/ missing.*$//')\` |"
+            fi
+            echo ""
+            echo "Next action: review the bumped crate version and update \`supply-chain/config.toml\` with the correct \`cargo vet\` exemption or audit entry."
+          } >> "$GITHUB_STEP_SUMMARY"
