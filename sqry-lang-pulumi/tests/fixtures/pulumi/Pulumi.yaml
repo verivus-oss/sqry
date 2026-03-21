@@ -1,0 +1,20 @@
+name: pulumi-example
+runtime: yaml
+package: aws
+resources:
+  net:
+    type: aws:ec2/vpc:Vpc
+  app:
+    type: aws:ec2/instance:Instance
+    properties:
+      subnetId: ${resources.net.id}
+      env: ${config.environment}
+    dependsOn:
+      - resources.net
+outputs:
+  appId:
+    value: ${resources.app.id}
+config:
+  environment: prod
+variables:
+  owner: team
