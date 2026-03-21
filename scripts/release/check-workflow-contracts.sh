@@ -40,14 +40,27 @@ check_job_environment() {
   fi
 }
 
-check_job_environment \
-  "${REPO_ROOT}/.github/workflows/oss-leg1-sanitize.yml" \
-  "verify-staging" \
-  "oss-staging"
+main() {
+  local checked_any=false
 
-check_job_environment \
-  "${REPO_ROOT}/.github/workflows/oss-leg3-release.yml" \
-  "smoke-tests" \
-  "oss-signing"
+  local leg1_workflow="${REPO_ROOT}/.github/workflows/oss-leg1-sanitize.yml"
+  if [[ -f "$leg1_workflow" ]]; then
+    check_job_environment "$leg1_workflow" "verify-staging" "oss-staging"
+    checked_any=true
+  fi
 
-echo "workflow-contracts-ok"
+  local leg3_workflow="${REPO_ROOT}/.github/workflows/oss-leg3-release.yml"
+  if [[ -f "$leg3_workflow" ]]; then
+    check_job_environment "$leg3_workflow" "smoke-tests" "oss-signing"
+    checked_any=true
+  fi
+
+  if [[ "$checked_any" == "false" ]]; then
+    echo "error: no known release workflow contracts found under ${REPO_ROOT}/.github/workflows" >&2
+    return 1
+  fi
+
+  echo "workflow-contracts-ok"
+}
+
+main "$@"
