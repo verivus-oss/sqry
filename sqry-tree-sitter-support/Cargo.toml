@@ -1,0 +1,15 @@
+[package]
+name = "sqry-tree-sitter-support"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Tree-sitter integration helpers for sqry"
+
+[dependencies]
+tree-sitter.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
