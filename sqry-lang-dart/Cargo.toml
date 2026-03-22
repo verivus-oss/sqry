@@ -12,7 +12,7 @@ description = "Dart language plugin for sqry"
 sqry-core = { version = "4.10.0", path = "../sqry-core" }
 anyhow.workspace = true
 tree-sitter.workspace = true
-tree-sitter-dart = "0.0.4"
+tree-sitter-dart = "0.1.0"
 streaming-iterator.workspace = true
 
 [dev-dependencies]
