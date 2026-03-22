@@ -371,7 +371,7 @@ jobs:
           ls -lh dist/
 
       - name: Install Cosign
-        uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+        uses: sigstore/cosign-installer@ba7bc0a3fef59531c69a25acd34668d6d3fe6f22 # v4.1.0
 
       - name: Sign with Cosign (keyless OIDC)
         working-directory: dist
@@ -542,7 +542,7 @@ jobs:
           ls -lh dist/
 
       - name: Install Cosign
-        uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+        uses: sigstore/cosign-installer@ba7bc0a3fef59531c69a25acd34668d6d3fe6f22 # v4.1.0
 
       - name: Sign with Cosign (keyless OIDC)
         working-directory: dist
@@ -760,7 +760,7 @@ jobs:
           throw "enable_signpath=true was requested, but SignPath submission/verification is intentionally disabled until a real implementation is committed. Re-run with enable_signpath=false for the current Cosign-only Windows release path."
 
       - name: Install Cosign
-        uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+        uses: sigstore/cosign-installer@ba7bc0a3fef59531c69a25acd34668d6d3fe6f22 # v4.1.0
 
       - name: Sign with Cosign (keyless OIDC)
         working-directory: dist
@@ -1106,7 +1106,7 @@ jobs:
           fi
 
       - name: Install Cosign
-        uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+        uses: sigstore/cosign-installer@ba7bc0a3fef59531c69a25acd34668d6d3fe6f22 # v4.1.0
 
       - name: Sign with Cosign (keyless OIDC)
         working-directory: dist
@@ -1233,7 +1233,7 @@ jobs:
           ls -lh "$WORKSPACE_DIR/dist/"
 
       - name: Install Cosign
-        uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+        uses: sigstore/cosign-installer@ba7bc0a3fef59531c69a25acd34668d6d3fe6f22 # v4.1.0
 
       - name: Sign with Cosign (keyless OIDC)
         working-directory: dist
@@ -1392,7 +1392,7 @@ jobs:
           throw "SignPath is not implemented for $msiFile. Re-run with enable_signpath=false for the current Cosign-only Windows release path."
 
       - name: Install Cosign
-        uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+        uses: sigstore/cosign-installer@ba7bc0a3fef59531c69a25acd34668d6d3fe6f22 # v4.1.0
 
       - name: Sign MSI with Cosign (keyless OIDC)
         shell: bash
@@ -1484,7 +1484,7 @@ jobs:
           ls -lh "signed-linux/sqry-${VERSION}-linux-amd64.deb"
 
       - name: Install Cosign
-        uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+        uses: sigstore/cosign-installer@ba7bc0a3fef59531c69a25acd34668d6d3fe6f22 # v4.1.0
 
       - name: Sign .deb with Cosign
         env:
@@ -1608,7 +1608,7 @@ jobs:
           ls -lh "signed-linux/sqry-${VERSION}-linux-x86_64.rpm"
 
       - name: Install Cosign
-        uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+        uses: sigstore/cosign-installer@ba7bc0a3fef59531c69a25acd34668d6d3fe6f22 # v4.1.0
 
       - name: Sign .rpm with Cosign
         env:
@@ -2106,7 +2106,7 @@ jobs:
 
       # --- Step 5: Install Cosign ---
       - name: Install Cosign
-        uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+        uses: sigstore/cosign-installer@ba7bc0a3fef59531c69a25acd34668d6d3fe6f22 # v4.1.0
 
       # --- Step 6: Verify all Cosign signatures ---
       - name: Verify Cosign signatures
