@@ -1,0 +1,113 @@
+{
+  "query": {
+    "pattern": "kind:function",
+    "execution_time_ms": 1.776787
+  },
+  "stats": {
+    "total_matches": 7,
+    "returned": 7,
+    "truncated": false
+  },
+  "results": [
+    {
+      "name": "COUNT",
+      "qualified_name": "COUNT",
+      "kind": "function",
+      "file_path": "<WORKSPACE_ROOT>/tests/fixtures/polyglot_micro/schema.sql",
+      "start_line": 14,
+      "start_column": 11,
+      "end_line": 14,
+      "end_column": 19,
+      "metadata": {
+        "__raw_language": "sql",
+        "__raw_file_path": "<WORKSPACE_ROOT>/tests/fixtures/polyglot_micro/schema.sql"
+      }
+    },
+    {
+      "name": "DataStore",
+      "qualified_name": "DataStore",
+      "kind": "function",
+      "file_path": "<WORKSPACE_ROOT>/tests/fixtures/polyglot_micro/app.js",
+      "start_line": 0,
+      "start_column": 0,
+      "end_line": 0,
+      "end_column": 0,
+      "metadata": {
+        "__raw_language": "js",
+        "__raw_file_path": "<WORKSPACE_ROOT>/tests/fixtures/polyglot_micro/app.js"
+      }
+    },
+    {
+      "name": "from",
+      "qualified_name": "String::from",
+      "kind": "function",
+      "file_path": "<WORKSPACE_ROOT>/tests/fixtures/polyglot_micro/main.rs",
+      "start_line": 0,
+      "start_column": 0,
+      "end_line": 0,
+      "end_column": 0,
+      "metadata": {
+        "__raw_file_path": "<WORKSPACE_ROOT>/tests/fixtures/polyglot_micro/main.rs",
+        "__raw_language": "rust"
+      }
+    },
+    {
+      "name": "get_user_count",
+      "qualified_name": "get_user_count",
+      "kind": "function",
+      "file_path": "<WORKSPACE_ROOT>/tests/fixtures/polyglot_micro/schema.sql",
+      "start_line": 10,
+      "start_column": 0,
+      "end_line": 15,
+      "end_column": 2,
+      "metadata": {
+        "__raw_file_path": "<WORKSPACE_ROOT>/tests/fixtures/polyglot_micro/schema.sql",
+        "__raw_language": "sql"
+      }
+    },
+    {
+      "name": "helloJavaScript",
+      "qualified_name": "helloJavaScript",
+      "kind": "function",
+      "file_path": "<WORKSPACE_ROOT>/tests/fixtures/polyglot_micro/app.js",
+      "start_line": 1,
+      "start_column": 130,
+      "end_line": 1,
+      "end_column": 196,
+      "metadata": {
+        "__raw_file_path": "<WORKSPACE_ROOT>/tests/fixtures/polyglot_micro/app.js",
+        "__raw_language": "js",
+        "visibility": "public"
+      }
+    },
+    {
+      "name": "hello_rust",
+      "qualified_name": "hello_rust",
+      "kind": "function",
+      "file_path": "<WORKSPACE_ROOT>/tests/fixtures/polyglot_micro/main.rs",
+      "start_line": 4,
+      "start_column": 0,
+      "end_line": 6,
+      "end_column": 1,
+      "metadata": {
+        "visibility": "public",
+        "__raw_file_path": "<WORKSPACE_ROOT>/tests/fixtures/polyglot_micro/main.rs",
+        "__raw_language": "rust"
+      }
+    },
+    {
+      "name": "push",
+      "qualified_name": "DataStore.push",
+      "kind": "function",
+      "file_path": "<WORKSPACE_ROOT>/tests/fixtures/polyglot_micro/app.js",
+      "start_line": 0,
+      "start_column": 0,
+      "end_line": 0,
+      "end_column": 0,
+      "metadata": {
+        "__raw_language": "js",
+        "__raw_file_path": "<WORKSPACE_ROOT>/tests/fixtures/polyglot_micro/app.js"
+      }
+    }
+  ]
+}

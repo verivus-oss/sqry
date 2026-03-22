@@ -1,0 +1,47 @@
+[package]
+name = "sqry-nl"
+description = "Natural language to sqry query translation layer"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# Core dependencies from workspace
+thiserror.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+tracing.workspace = true
+regex.workspace = true
+lru.workspace = true
+parking_lot.workspace = true
+once_cell.workspace = true
+
+# NL-specific dependencies
+unicode-normalization = "0.1"
+sha2 = "0.10"
+
+# ONNX Runtime for inference (optional - enabled by default)
+# Exact-pin the known-good prerelease line until newer ort releases are validated
+# against this workspace and local install flows.
+ort = { version = "=2.0.0-rc.11", default-features = false, features = ["std", "ndarray", "load-dynamic"], optional = true }
+
+# HuggingFace tokenizers (optional - enabled by default)
+# Version 0.21.4 matches Python tokenizers for tokenizer.json compatibility
+tokenizers = { version = "0.21.4", optional = true }
+
+[dev-dependencies]
+tempfile = "3.10"
+criterion = { version = "0.8", features = ["html_reports"] }
+toml = "1.0"
+
+[features]
+default = ["classifier"]
+# Enable the MiniLM-L6-v2 intent classifier (requires ONNX Runtime)
+classifier = ["dep:ort", "dep:tokenizers"]
+
+[[bench]]
+name = "eval_harness"
+harness = false

@@ -1,0 +1,25 @@
+{
+  "name": "pulumi-json",
+  "runtime": "yaml",
+  "package": "azure-native",
+  "resources": {
+    "rg": {
+      "type": "azure-native:resources:ResourceGroup"
+    },
+    "storage": {
+      "type": "azure-native:storage:StorageAccount",
+      "properties": {
+        "resourceGroupName": "${resources.rg.name}"
+      },
+      "dependsOn": ["resources.rg"]
+    }
+  },
+  "outputs": {
+    "storageName": {
+      "value": "${resources.storage.name}"
+    }
+  },
+  "config": {
+    "location": "westus2"
+  }
+}

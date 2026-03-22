@@ -1,0 +1,48 @@
+# sqry security policy (see docs/development/security-audit-automation/01_SPEC.md)
+# RKG: implements REQ:SQRY-SECURITY-AUDIT-AUTOMATION
+
+[advisories]
+version = 2
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+# Note: All vulnerability advisories now emit errors by default (cargo-deny v0.14+)
+# To allow specific CVEs, add them to the ignore list below
+unmaintained = "workspace" # Keep failures scoped to direct dependencies until async-std is removed (RUSTSEC-2025-0052)
+yanked = "warn"
+ignore = []
+
+[licenses]
+version = 2
+allow = [
+  "Apache-2.0",
+  "BSL-1.0",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "CC0-1.0",
+  "ISC",
+  "MIT",
+  "MPL-2.0",
+  "Unicode-3.0",
+  "Zlib"
+]
+confidence-threshold = 0.9
+exceptions = []
+
+[bans]
+multiple-versions = "warn"
+wildcards = "allow"
+highlight = "simplest-path"
+deny = [
+  { crate = "async-std", reason = "Removed per RUSTSEC-2025-0052; sqry uses tokio-based async runtimes only." }
+]
+
+[sources]
+unknown-registry = "warn"
+unknown-git = "warn"
+allow-git = [
+  "https://github.com/elixir-lang/tree-sitter-elixir",
+  "https://github.com/fwcd/tree-sitter-kotlin",
+  "https://github.com/tree-sitter-perl/tree-sitter-perl",
+  # QA-2025-11-19: sqry-lang-sql depends on tree-sitter-sequel fork for PL/pgSQL support
+  "https://github.com/verivus-oss/tree-sitter-sql"
+]

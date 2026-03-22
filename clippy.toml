@@ -1,0 +1,7 @@
+# Clippy configuration for sqry workspace
+#
+# Raise the too-many-arguments threshold from 7 (default) to 8.
+# Many functions (CLI entrypoints, AST walkers, graph builders) naturally have
+# 8 parameters that map directly to user-facing flags or AST traversal contexts.
+# This eliminates annotations on functions that are 1 arg over the default limit.
+too-many-arguments-threshold = 8

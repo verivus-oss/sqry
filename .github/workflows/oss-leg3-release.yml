@@ -1,0 +1,2666 @@
+# =============================================================================
+# OSS Leg 3 Release Workflow — Publication Pipeline v2
+#
+# Builds, signs, packages, and publishes release artifacts from the PUBLIC
+# staging repo (verivus-oss/sqry). Multi-platform, multi-binary architecture
+# with Cosign OIDC keyless signing and SLSA Level 2 provenance.
+#
+# Job Architecture:
+#   Job 0 (smoke-tests):           Inlined infra checks (signing, KV, environments)
+#   Job 1a (build-linux-x86_64):   Build + Cosign sign — Linux x86_64 (musl static)
+#   Job 1b (build-linux-arm64):    Build + Cosign sign — Linux ARM64 (musl static)
+#   Job 1c (build-windows-x86_64): Build + Cosign sign + conditional SignPath — Windows x86_64
+#   Job 1d (build-macos-arm64):    Build + Apple codesign + notarize + Cosign — macOS ARM64
+#   Job 1e (build-vscode):         Package + Cosign sign — VSCode extension
+#   Job 2a (package-windows-msi):  WiX .msi + conditional SignPath
+#   Job 2b (package-linux-deb):    .deb package
+#   Job 2c (package-linux-rpm):    .rpm package
+#   provenance-*:                  SLSA Level 2 provenance (per platform)
+#   docker-build:                  Build + smoke-test container image (no push)
+#   publish:                       Verify + draft release + GHCR + Key Vault-backed Open VSX + release publish
+#
+# IMPORTANT: This workflow runs on and MUST be dispatched from verivus-oss/sqry.
+#   The Cosign certificate identity encodes the repository where the workflow runs.
+#   Dispatching from any other repo produces a cert identity mismatch.
+#
+#   In the GitHub UI: verivus-oss/sqry -> Actions -> OSS Leg 3 Release ->
+#     Run workflow -> select the release tag ref (not a branch).
+#
+# Trigger: Manual via workflow_dispatch only (must select the release tag as ref)
+#
+# Design ref: Publication Pipeline v2
+# =============================================================================
+
+name: OSS Leg 3 Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag to release (e.g., v4.2.0) — dispatch from this tag ref'
+        required: true
+        type: string
+      enable_signpath:
+        description: 'Enable SignPath Authenticode signing for Windows binaries and MSI'
+        required: false
+        default: false
+        type: boolean
+      enable_apple_signing:
+        description: 'Enable Apple Developer ID code signing and notarization for macOS'
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: oss-leg3-release
+  cancel-in-progress: false
+
+# Top-level permissions — individual jobs may further restrict.
+permissions:
+  id-token: write
+  contents: write
+  packages: write
+
+jobs:
+  # ===========================================================================
+  # Job 0: Smoke Tests (INLINED)
+  #
+  # This workflow runs on the PUBLIC repo (verivus-oss/sqry) which CANNOT call
+  # the reusable oss-smoke-tests.yml (that lives in the private repo).
+  # All smoke checks are inlined here, including the Azure OIDC -> Key Vault
+  # probe for the Open VSX publish credential used behind the final gate.
+  # ===========================================================================
+  smoke-tests:
+    name: Smoke Tests (Inlined)
+    runs-on: ubuntu-24.04
+    environment: oss-signing
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      RELEASE_VERSION: ${{ inputs.version }}
+
+    steps:
+      # --- Validate version tag format ---
+      - name: Validate version tag format
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          if ! echo "$VERSION" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::Invalid version format: '$VERSION'. Must match v<MAJOR>.<MINOR>.<PATCH>"
+            exit 1
+          fi
+          echo "Version format '$VERSION' validated"
+
+      # --- Enforce dispatch from tag ref ---
+      # Cosign certificate identity encodes github.ref — must be refs/tags/<version>.
+      - name: Enforce dispatch from tag ref
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          if [ "$REF_TYPE" != "tag" ]; then
+            echo "::error::This workflow must be dispatched from a tag ref, not a branch."
+            echo "::error::Current ref type: '$REF_TYPE', ref name: '$REF_NAME'"
+            echo "::error::In the GitHub UI, select the '$VERSION' tag from the 'Run workflow' branch/tag dropdown."
+            exit 1
+          fi
+          if [ "$REF_NAME" != "$VERSION" ]; then
+            echo "::error::Dispatch ref '$REF_NAME' does not match requested version '$VERSION'."
+            echo "::error::Select the '$VERSION' tag from the branch/tag dropdown when dispatching."
+            exit 1
+          fi
+          echo "Dispatch ref validated: refs/tags/${VERSION}"
+
+      # --- Checkout public repo at tag ---
+      - name: Checkout public repo at tag
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ inputs.version }}
+          fetch-depth: 1
+
+      # --- Verify tag checkout ---
+      - name: Verify tag checkout
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          if ! git describe --tags --exact-match 2>/dev/null | grep -qE "^${VERSION}$"; then
+            echo "::error::Checkout does not match tag '$VERSION'"
+            exit 1
+          fi
+          echo "Tag '$VERSION' verified at $(git rev-parse --short HEAD)"
+
+      # --- Check: GitHub environments exist ---
+      - name: "Check: GitHub environments exist"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          for env_name in oss-signing oss-release; do
+            if gh api "repos/${REPO}/environments/${env_name}" --silent 2>/dev/null; then
+              echo "::notice::Environment '${env_name}' exists on ${REPO}"
+            else
+              echo "::error::Environment '${env_name}' NOT found on ${REPO}"
+              exit 1
+            fi
+          done
+
+      # --- Check: Azure OIDC login for release-time Key Vault prerequisites ---
+      - name: "Check: Azure OIDC login"
+        uses: azure/login@532459ea530d8321f2fb9bb10d1e0bcf23869a43 # v3.0.0
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      # --- Check: Open VSX credential exists in Key Vault ---
+      - name: "Check: Open VSX credential in Key Vault"
+        run: |
+          SECRET_ENABLED="$(az keyvault secret show \
+            --vault-name verivus-dev-secrets-kv \
+            --name open-vsx-publish-token \
+            --query 'attributes.enabled' -o tsv)"
+          if [ "$SECRET_ENABLED" != "true" ]; then
+            echo "::error::Key Vault secret 'open-vsx-publish-token' is missing or disabled in verivus-dev-secrets-kv"
+            exit 1
+          fi
+          echo "::notice::Key Vault secret 'open-vsx-publish-token' is present and enabled"
+
+      # --- Check: Cosign installable ---
+      - name: "Check: Cosign availability"
+        run: |
+          # Verify we can download cosign — fail fast if network/release issues
+          curl -fsSL "https://github.com/sigstore/cosign/releases/latest" -o /dev/null
+          echo "::notice::Cosign release endpoint reachable"
+
+      # --- Check: No internal org references in source ---
+      - name: "Check: No internal org references"
+        run: |
+          echo "Scanning for internal org references..."
+          FAIL=0
+          if grep -rqna --exclude='sbom-*-cyclonedx.json' 'verivusai-labs' . --exclude-dir='.github' --exclude-dir='.git' 2>/dev/null; then
+            echo "::error::Source contains verivusai-labs references"
+            grep -rna --exclude='sbom-*-cyclonedx.json' 'verivusai-labs' . --exclude-dir='.github' --exclude-dir='.git' 2>/dev/null | head -20
+            FAIL=1
+          fi
+          if grep -rqna --exclude='sbom-*-cyclonedx.json' 'verivusai-open' . --exclude-dir='.github' --exclude-dir='.git' 2>/dev/null; then
+            echo "::error::Source contains verivusai-open references"
+            grep -rna --exclude='sbom-*-cyclonedx.json' 'verivusai-open' . --exclude-dir='.github' --exclude-dir='.git' 2>/dev/null | head -20
+            FAIL=1
+          fi
+          if grep -rqna '/srv/repos/internal' . --exclude-dir='.github' --exclude-dir='.git' 2>/dev/null; then
+            echo "::error::Source contains internal absolute paths"
+            grep -rna '/srv/repos/internal' . --exclude-dir='.github' --exclude-dir='.git' 2>/dev/null | head -20
+            FAIL=1
+          fi
+          if [ "$FAIL" -ne 0 ]; then
+            echo "::error::Internal reference check failed"
+            exit 1
+          fi
+          echo "No internal org references found"
+
+      # --- Check: Required public docs present ---
+      - name: "Check: Required public docs present"
+        run: |
+          FAIL=0
+          for doc in README.md LICENSE CHANGELOG.md CONTRIBUTING.md; do
+            if [ ! -f "$doc" ]; then
+              echo "::warning::Missing $doc"
+              FAIL=1
+            fi
+          done
+          if [ $FAIL -ne 0 ]; then
+            echo "::error::Required public documentation missing"
+            exit 1
+          fi
+          echo "Required public docs verified"
+
+      # --- Summary ---
+      - name: Post smoke test summary
+        if: always()
+        run: |
+          {
+            echo "## Leg 3 Smoke Test Results"
+            echo ""
+            echo "| Check | Status |"
+            echo "|-------|--------|"
+            echo "| Version format | \`${RELEASE_VERSION}\` |"
+            echo "| Tag-ref dispatch | verified |"
+            echo "| Environments (oss-signing, oss-release) | checked |"
+            echo "| Azure OIDC login | passed |"
+            echo "| Key Vault Open VSX credential (`open-vsx-publish-token`) | present |"
+            echo "| Internal reference scan | passed |"
+            echo "| Required public docs | present |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ===========================================================================
+  # Job 1a: Build + Sign — Linux x86_64 (musl, static, jemalloc)
+  # Produces: sqry-linux-x86_64, sqry-mcp-linux-x86_64, sqry-lsp-linux-x86_64
+  # ===========================================================================
+  build-linux-x86_64:
+    name: Build + Sign — Linux x86_64
+    needs: smoke-tests
+    runs-on: ubuntu-22.04
+    environment: oss-signing
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      subjects: ${{ steps.hash.outputs.subjects }}
+
+    steps:
+      - name: Validate version and enforce tag ref
+        env:
+          VERSION: ${{ inputs.version }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if ! echo "$VERSION" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::Invalid version format: '$VERSION'"
+            exit 1
+          fi
+          if [ "$REF_TYPE" != "tag" ] || [ "$REF_NAME" != "$VERSION" ]; then
+            echo "::error::Must be dispatched from tag ref '$VERSION'"
+            exit 1
+          fi
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /opt/hostedtoolcache/go \
+            /opt/hostedtoolcache/Python /opt/hostedtoolcache/Ruby \
+            /usr/local/share/powershell /usr/share/swift
+          df -h /
+
+      - name: Checkout public repo at tag
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ inputs.version }}
+          fetch-depth: 1
+          path: source
+
+      - name: Verify tag checkout
+        working-directory: source
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          if ! git describe --tags --exact-match 2>/dev/null | grep -qE "^${VERSION}$"; then
+            echo "::error::Checkout does not match tag '$VERSION'"
+            exit 1
+          fi
+          echo "Tag '$VERSION' verified at $(git rev-parse --short HEAD)"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        with:
+          toolchain: "1.90"
+          targets: x86_64-unknown-linux-musl
+
+      - name: Install Zig and cargo-zigbuild
+        run: |
+          pip install ziglang
+          ZIG_DIR="$(python3 -c 'import ziglang; import os; print(os.path.dirname(ziglang.__file__))')"
+          echo "Zig installed at: $ZIG_DIR"
+          export PATH="$ZIG_DIR:$HOME/.local/bin:$PATH"
+          echo "$ZIG_DIR" >> "$GITHUB_PATH"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          zig version
+          cargo install cargo-zigbuild --locked
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
+        with:
+          workspaces: source
+          key: x86_64-unknown-linux-musl
+
+      - name: Build release binaries (musl static via zigbuild)
+        working-directory: source
+        env:
+          CARGO_BUILD_JOBS: "2"
+          RUSTFLAGS: "-Ctarget-feature=+crt-static"
+          JEMALLOC_SYS_WITH_LG_PAGE: "12"
+        run: |
+          cargo zigbuild --release \
+            --target x86_64-unknown-linux-musl \
+            --features nl-classifier \
+            -p sqry-cli \
+            -p sqry-mcp \
+            -p sqry-lsp
+          echo "Release binaries built successfully"
+          ls -lh target/x86_64-unknown-linux-musl/release/sqry \
+                  target/x86_64-unknown-linux-musl/release/sqry-mcp \
+                  target/x86_64-unknown-linux-musl/release/sqry-lsp
+          # Verify static linking
+          file target/x86_64-unknown-linux-musl/release/sqry
+          ldd target/x86_64-unknown-linux-musl/release/sqry 2>&1 | grep -q "not a dynamic executable" || \
+            ldd target/x86_64-unknown-linux-musl/release/sqry 2>&1 | grep -q "statically linked" || \
+            echo "::warning::Binary may not be fully statically linked"
+
+      - name: Download NL models
+        env:
+          MODELS_URL: "https://github.com/verivus-oss/sqry/releases/download/models-v1.0.0/sqry-models-v1.0.0.tar.gz"
+          MODELS_SHA256: "4f7886e2a381ee4a17bfca81bd41ec88e10169d498b68d2166587e6265d27b3e"
+        run: |
+          curl -fsSL "$MODELS_URL" -o /tmp/sqry-models.tar.gz
+          echo "${MODELS_SHA256}  /tmp/sqry-models.tar.gz" | sha256sum -c -
+          tar xzf /tmp/sqry-models.tar.gz -C source/sqry-nl
+          ls -lh source/sqry-nl/models/
+          echo "NL models downloaded and verified"
+
+      - name: Package binaries
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          mkdir -p dist staging-tar
+          cp source/target/x86_64-unknown-linux-musl/release/sqry     dist/sqry-linux-x86_64
+          cp source/target/x86_64-unknown-linux-musl/release/sqry-mcp dist/sqry-mcp-linux-x86_64
+          cp source/target/x86_64-unknown-linux-musl/release/sqry-lsp dist/sqry-lsp-linux-x86_64
+          chmod 755 dist/*
+
+          # Create tarball for distribution
+          mkdir -p "staging-tar/sqry-${VERSION}-linux-x86_64"
+          cp dist/sqry-linux-x86_64     "staging-tar/sqry-${VERSION}-linux-x86_64/sqry"
+          cp dist/sqry-mcp-linux-x86_64 "staging-tar/sqry-${VERSION}-linux-x86_64/sqry-mcp"
+          cp dist/sqry-lsp-linux-x86_64 "staging-tar/sqry-${VERSION}-linux-x86_64/sqry-lsp"
+          cp -r source/sqry-nl/models   "staging-tar/sqry-${VERSION}-linux-x86_64/models"
+          tar czf "dist/sqry-${VERSION}-linux-x86_64.tar.gz" -C staging-tar "sqry-${VERSION}-linux-x86_64"
+          rm -rf staging-tar
+
+          echo "Packaged binaries:"
+          ls -lh dist/
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+
+      - name: Sign with Cosign (keyless OIDC)
+        working-directory: dist
+        run: |
+          echo "Signing all Linux x86_64 artifacts with Cosign (keyless OIDC)..."
+          for artifact in sqry-linux-x86_64 sqry-mcp-linux-x86_64 sqry-lsp-linux-x86_64 sqry-*-linux-x86_64.tar.gz; do
+            [ -f "$artifact" ] || continue
+            echo "  Signing ${artifact}..."
+            cosign sign-blob --yes \
+              --bundle "${artifact}.bundle" \
+              "${artifact}"
+            echo "  Signed: ${artifact}.bundle"
+          done
+          echo "All Linux x86_64 artifacts signed"
+
+      - name: Generate checksums and SLSA subjects
+        id: hash
+        working-directory: dist
+        run: |
+          ASSETS=(sqry-linux-x86_64 sqry-mcp-linux-x86_64 sqry-lsp-linux-x86_64)
+          for f in sqry-*-linux-x86_64.tar.gz; do [ -f "$f" ] && ASSETS+=("$f"); done
+          sha256sum "${ASSETS[@]}" > CHECKSUMS-linux-x86_64.sha256
+          echo "Checksums for Linux x86_64:"
+          cat CHECKSUMS-linux-x86_64.sha256
+
+          subjects=""
+          for binary in "${ASSETS[@]}"; do
+            digest=$(sha256sum "$binary" | awk '{print $1}')
+            subject_json=$(jq -n --arg name "$binary" --arg hash "$digest" \
+              '{name: $name, digest: {sha256: $hash}}')
+            subject=$(printf '%s' "$subject_json" | base64 | tr -d '\n')
+            subjects="${subjects}${subject}"$'\n'
+            echo "SLSA subject: $binary (sha256: ${digest:0:16}...)"
+          done
+          subjects="${subjects%$'\n'}"
+          DELIM="EOF_${RANDOM}_${RANDOM}"
+          echo "subjects<<${DELIM}" >> "$GITHUB_OUTPUT"
+          echo "$subjects" >> "$GITHUB_OUTPUT"
+          echo "${DELIM}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload signed artifacts
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: signed-linux-x86_64
+          path: dist/
+          retention-days: 7
+          if-no-files-found: error
+
+  # ===========================================================================
+  # Job 1b: Build + Sign — Linux ARM64 (musl, static, jemalloc)
+  # ===========================================================================
+  build-linux-arm64:
+    name: Build + Sign — Linux ARM64
+    needs: smoke-tests
+    runs-on: ubuntu-22.04-arm
+    environment: oss-signing
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      subjects: ${{ steps.hash.outputs.subjects }}
+
+    steps:
+      - name: Validate version and enforce tag ref
+        env:
+          VERSION: ${{ inputs.version }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if ! echo "$VERSION" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::Invalid version format: '$VERSION'"
+            exit 1
+          fi
+          if [ "$REF_TYPE" != "tag" ] || [ "$REF_NAME" != "$VERSION" ]; then
+            echo "::error::Must be dispatched from tag ref '$VERSION'"
+            exit 1
+          fi
+
+      - name: Checkout public repo at tag
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ inputs.version }}
+          fetch-depth: 1
+          path: source
+
+      - name: Verify tag checkout
+        working-directory: source
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          if ! git describe --tags --exact-match 2>/dev/null | grep -qE "^${VERSION}$"; then
+            echo "::error::Checkout does not match tag '$VERSION'"
+            exit 1
+          fi
+          echo "Tag '$VERSION' verified at $(git rev-parse --short HEAD)"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        with:
+          toolchain: "1.90"
+          targets: aarch64-unknown-linux-musl
+
+      - name: Install Zig and cargo-zigbuild
+        run: |
+          pip install ziglang
+          ZIG_DIR="$(python3 -c 'import ziglang; import os; print(os.path.dirname(ziglang.__file__))')"
+          echo "Zig installed at: $ZIG_DIR"
+          export PATH="$ZIG_DIR:$HOME/.local/bin:$PATH"
+          echo "$ZIG_DIR" >> "$GITHUB_PATH"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          zig version
+          cargo install cargo-zigbuild --locked
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
+        with:
+          workspaces: source
+          key: aarch64-unknown-linux-musl
+
+      - name: Build release binaries (musl static via zigbuild)
+        working-directory: source
+        env:
+          CARGO_BUILD_JOBS: "2"
+          RUSTFLAGS: "-Ctarget-feature=+crt-static"
+          JEMALLOC_SYS_WITH_LG_PAGE: "16"
+        run: |
+          cargo zigbuild --release \
+            --target aarch64-unknown-linux-musl \
+            --features nl-classifier \
+            -p sqry-cli \
+            -p sqry-mcp \
+            -p sqry-lsp
+          echo "Release binaries built successfully"
+          ls -lh target/aarch64-unknown-linux-musl/release/sqry \
+                  target/aarch64-unknown-linux-musl/release/sqry-mcp \
+                  target/aarch64-unknown-linux-musl/release/sqry-lsp
+
+      - name: Download NL models
+        env:
+          MODELS_URL: "https://github.com/verivus-oss/sqry/releases/download/models-v1.0.0/sqry-models-v1.0.0.tar.gz"
+          MODELS_SHA256: "4f7886e2a381ee4a17bfca81bd41ec88e10169d498b68d2166587e6265d27b3e"
+        run: |
+          curl -fsSL "$MODELS_URL" -o /tmp/sqry-models.tar.gz
+          echo "${MODELS_SHA256}  /tmp/sqry-models.tar.gz" | sha256sum -c -
+          tar xzf /tmp/sqry-models.tar.gz -C source/sqry-nl
+          echo "NL models downloaded and verified"
+
+      - name: Package binaries
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          mkdir -p dist staging-tar
+          cp source/target/aarch64-unknown-linux-musl/release/sqry     dist/sqry-linux-arm64
+          cp source/target/aarch64-unknown-linux-musl/release/sqry-mcp dist/sqry-mcp-linux-arm64
+          cp source/target/aarch64-unknown-linux-musl/release/sqry-lsp dist/sqry-lsp-linux-arm64
+          chmod 755 dist/*
+
+          # Create tarball for distribution
+          mkdir -p "staging-tar/sqry-${VERSION}-linux-arm64"
+          cp dist/sqry-linux-arm64     "staging-tar/sqry-${VERSION}-linux-arm64/sqry"
+          cp dist/sqry-mcp-linux-arm64 "staging-tar/sqry-${VERSION}-linux-arm64/sqry-mcp"
+          cp dist/sqry-lsp-linux-arm64 "staging-tar/sqry-${VERSION}-linux-arm64/sqry-lsp"
+          cp -r source/sqry-nl/models   "staging-tar/sqry-${VERSION}-linux-arm64/models"
+          tar czf "dist/sqry-${VERSION}-linux-arm64.tar.gz" -C staging-tar "sqry-${VERSION}-linux-arm64"
+          rm -rf staging-tar
+
+          echo "Packaged binaries:"
+          ls -lh dist/
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+
+      - name: Sign with Cosign (keyless OIDC)
+        working-directory: dist
+        run: |
+          echo "Signing all Linux ARM64 artifacts with Cosign (keyless OIDC)..."
+          for artifact in sqry-linux-arm64 sqry-mcp-linux-arm64 sqry-lsp-linux-arm64 sqry-*-linux-arm64.tar.gz; do
+            [ -f "$artifact" ] || continue
+            echo "  Signing ${artifact}..."
+            cosign sign-blob --yes \
+              --bundle "${artifact}.bundle" \
+              "${artifact}"
+            echo "  Signed: ${artifact}.bundle"
+          done
+          echo "All Linux ARM64 artifacts signed"
+
+      - name: Generate checksums and SLSA subjects
+        id: hash
+        working-directory: dist
+        run: |
+          ASSETS=(sqry-linux-arm64 sqry-mcp-linux-arm64 sqry-lsp-linux-arm64)
+          for f in sqry-*-linux-arm64.tar.gz; do [ -f "$f" ] && ASSETS+=("$f"); done
+          sha256sum "${ASSETS[@]}" > CHECKSUMS-linux-arm64.sha256
+          echo "Checksums for Linux ARM64:"
+          cat CHECKSUMS-linux-arm64.sha256
+
+          subjects=""
+          for binary in "${ASSETS[@]}"; do
+            digest=$(sha256sum "$binary" | awk '{print $1}')
+            subject_json=$(jq -n --arg name "$binary" --arg hash "$digest" \
+              '{name: $name, digest: {sha256: $hash}}')
+            subject=$(printf '%s' "$subject_json" | base64 | tr -d '\n')
+            subjects="${subjects}${subject}"$'\n'
+            echo "SLSA subject: $binary (sha256: ${digest:0:16}...)"
+          done
+          subjects="${subjects%$'\n'}"
+          DELIM="EOF_${RANDOM}_${RANDOM}"
+          echo "subjects<<${DELIM}" >> "$GITHUB_OUTPUT"
+          echo "$subjects" >> "$GITHUB_OUTPUT"
+          echo "${DELIM}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload signed artifacts
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: signed-linux-arm64
+          path: dist/
+          retention-days: 7
+          if-no-files-found: error
+
+  # ===========================================================================
+  # Job 1c: Build + Sign — Windows x86_64 (MSVC)
+  # Cosign always; SignPath Authenticode conditional on secrets.SIGNPATH_API_TOKEN
+  # ===========================================================================
+  build-windows-x86_64:
+    name: Build + Sign — Windows x86_64
+    needs: smoke-tests
+    runs-on: windows-2022
+    environment: oss-signing
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      subjects: ${{ steps.hash.outputs.subjects }}
+
+    steps:
+      - name: Validate version and enforce tag ref
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if ! echo "$VERSION" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::Invalid version format: '$VERSION'"
+            exit 1
+          fi
+          if [ "$REF_TYPE" != "tag" ] || [ "$REF_NAME" != "$VERSION" ]; then
+            echo "::error::Must be dispatched from tag ref '$VERSION'"
+            exit 1
+          fi
+
+      - name: Checkout public repo at tag
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ inputs.version }}
+          fetch-depth: 1
+          path: source
+
+      - name: Verify tag checkout
+        working-directory: source
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          if ! git describe --tags --exact-match 2>/dev/null | grep -qE "^${VERSION}$"; then
+            echo "::error::Checkout does not match tag '$VERSION'"
+            exit 1
+          fi
+          echo "Tag '$VERSION' verified at $(git rev-parse --short HEAD)"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        with:
+          toolchain: "1.90"
+          targets: x86_64-pc-windows-msvc
+
+      - name: Configure cargo git CLI
+        shell: bash
+        run: |
+          mkdir -p ~/.cargo
+          echo '[net]' >> ~/.cargo/config.toml
+          echo 'git-fetch-with-cli = true' >> ~/.cargo/config.toml
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
+        with:
+          workspaces: source
+          key: x86_64-pc-windows-msvc
+
+      - name: Build release binaries
+        working-directory: source
+        shell: bash
+        env:
+          CARGO_BUILD_JOBS: "2"
+        run: |
+          cargo build --release \
+            --target x86_64-pc-windows-msvc \
+            --features nl-classifier \
+            -p sqry-cli \
+            -p sqry-mcp \
+            -p sqry-lsp
+          echo "Release binaries built successfully"
+
+      - name: Download NL models
+        shell: bash
+        env:
+          MODELS_URL: "https://github.com/verivus-oss/sqry/releases/download/models-v1.0.0/sqry-models-v1.0.0.tar.gz"
+          MODELS_SHA256: "4f7886e2a381ee4a17bfca81bd41ec88e10169d498b68d2166587e6265d27b3e"
+        run: |
+          TMPFILE="$(mktemp)"
+          curl -fsSL "$MODELS_URL" -o "$TMPFILE"
+          echo "${MODELS_SHA256}  $TMPFILE" | sha256sum -c -
+          tar xzf "$TMPFILE" -C source/sqry-nl
+          rm -f "$TMPFILE"
+          echo "NL models downloaded and verified"
+
+      - name: Package binaries
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          mkdir -p dist
+          cp source/target/x86_64-pc-windows-msvc/release/sqry.exe     dist/sqry-windows-x86_64.exe
+          cp source/target/x86_64-pc-windows-msvc/release/sqry-mcp.exe dist/sqry-mcp-windows-x86_64.exe
+          cp source/target/x86_64-pc-windows-msvc/release/sqry-lsp.exe dist/sqry-lsp-windows-x86_64.exe
+
+          # Create zip bundle
+          mkdir -p dist/windows-bundle
+          cp dist/sqry-windows-x86_64.exe     dist/windows-bundle/sqry.exe
+          cp dist/sqry-mcp-windows-x86_64.exe dist/windows-bundle/sqry-mcp.exe
+          cp dist/sqry-lsp-windows-x86_64.exe dist/windows-bundle/sqry-lsp.exe
+          cp -r source/sqry-nl/models          dist/windows-bundle/models
+          cat > dist/windows-bundle/README-WINDOWS.txt <<'WEOF'
+          sqry Windows bundle
+
+          Included binaries:
+          - sqry.exe
+          - sqry-mcp.exe
+          - sqry-lsp.exe
+
+          Typical next steps:
+          1. Copy the three .exe files into a directory on PATH.
+          2. Or run scripts/install.ps1 from the repository for a guided install.
+          3. Then verify:
+             sqry --version
+             sqry-mcp --version
+             sqry-lsp --version
+          WEOF
+
+      - name: Create zip archive
+        shell: pwsh
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          Compress-Archive -Path 'dist/windows-bundle/*' -DestinationPath "dist/sqry-$env:VERSION-windows-x86_64.zip" -Force
+
+      - name: Cleanup bundle directory
+        shell: bash
+        run: rm -rf dist/windows-bundle
+
+      # --- Strict SignPath mode ---
+      - name: Reject SignPath mode until integration is implemented
+        if: inputs.enable_signpath
+        shell: pwsh
+        env:
+          SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
+          SIGNPATH_ORGANIZATION_ID: ${{ secrets.SIGNPATH_ORGANIZATION_ID }}
+          SIGNPATH_SIGNING_POLICY_SLUG: ${{ secrets.SIGNPATH_SIGNING_POLICY_SLUG }}
+          SIGNPATH_PROJECT_SLUG: ${{ secrets.SIGNPATH_PROJECT_SLUG }}
+        run: |
+          $requiredSecrets = @{
+            "SIGNPATH_API_TOKEN" = $env:SIGNPATH_API_TOKEN
+            "SIGNPATH_ORGANIZATION_ID" = $env:SIGNPATH_ORGANIZATION_ID
+            "SIGNPATH_SIGNING_POLICY_SLUG" = $env:SIGNPATH_SIGNING_POLICY_SLUG
+            "SIGNPATH_PROJECT_SLUG" = $env:SIGNPATH_PROJECT_SLUG
+          }
+          $missingSecrets = @()
+          foreach ($secretName in $requiredSecrets.Keys) {
+            if ([string]::IsNullOrEmpty($requiredSecrets[$secretName])) {
+              $missingSecrets += $secretName
+            }
+          }
+          if ($missingSecrets.Count -gt 0) {
+            throw "enable_signpath=true requires oss-signing secrets: $($missingSecrets -join ', ')"
+          }
+          throw "enable_signpath=true was requested, but SignPath submission/verification is intentionally disabled until a real implementation is committed. Re-run with enable_signpath=false for the current Cosign-only Windows release path."
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+
+      - name: Sign with Cosign (keyless OIDC)
+        working-directory: dist
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          echo "Signing all Windows x86_64 artifacts with Cosign (keyless OIDC)..."
+          WINDOWS_ASSETS=(
+            sqry-windows-x86_64.exe
+            sqry-mcp-windows-x86_64.exe
+            sqry-lsp-windows-x86_64.exe
+            "sqry-${VERSION}-windows-x86_64.zip"
+          )
+          for artifact in "${WINDOWS_ASSETS[@]}"; do
+            [ -f "$artifact" ] || continue
+            echo "  Signing ${artifact}..."
+            cosign sign-blob --yes \
+              --bundle "${artifact}.bundle" \
+              "${artifact}"
+            echo "  Signed: ${artifact}.bundle"
+          done
+          echo "All Windows x86_64 artifacts signed"
+
+      - name: Generate checksums and SLSA subjects
+        id: hash
+        working-directory: dist
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          WINDOWS_ASSETS=(
+            sqry-windows-x86_64.exe
+            sqry-mcp-windows-x86_64.exe
+            sqry-lsp-windows-x86_64.exe
+            "sqry-${VERSION}-windows-x86_64.zip"
+          )
+          sha256sum "${WINDOWS_ASSETS[@]}" > CHECKSUMS-windows-x86_64.sha256
+          echo "Checksums for Windows x86_64:"
+          cat CHECKSUMS-windows-x86_64.sha256
+
+          subjects=""
+          for binary in "${WINDOWS_ASSETS[@]}"; do
+            digest=$(sha256sum "$binary" | awk '{print $1}')
+            subject_json=$(jq -n --arg name "$binary" --arg hash "$digest" \
+              '{name: $name, digest: {sha256: $hash}}')
+            subject=$(printf '%s' "$subject_json" | base64 | tr -d '\n')
+            subjects="${subjects}${subject}"$'\n'
+            echo "SLSA subject: $binary (sha256: ${digest:0:16}...)"
+          done
+          subjects="${subjects%$'\n'}"
+          DELIM="EOF_${RANDOM}_${RANDOM}"
+          echo "subjects<<${DELIM}" >> "$GITHUB_OUTPUT"
+          echo "$subjects" >> "$GITHUB_OUTPUT"
+          echo "${DELIM}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload signed artifacts
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: signed-windows-x86_64
+          path: dist/
+          retention-days: 7
+          if-no-files-found: error
+
+  # ===========================================================================
+  # Job 1d: Build + Sign — macOS ARM64 (Apple Silicon)
+  # Full Apple pipeline: codesign -> pkgbuild -> productsign -> notarize -> staple
+  # Plus Cosign OIDC on all outputs.
+  # ===========================================================================
+  build-macos-arm64:
+    name: Build + Sign — macOS ARM64
+    needs: smoke-tests
+    runs-on: macos-14
+    environment: oss-signing
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      subjects: ${{ steps.hash.outputs.subjects }}
+
+    steps:
+      - name: Validate version and enforce tag ref
+        env:
+          VERSION: ${{ inputs.version }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if ! echo "$VERSION" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::Invalid version format: '$VERSION'"
+            exit 1
+          fi
+          if [ "$REF_TYPE" != "tag" ] || [ "$REF_NAME" != "$VERSION" ]; then
+            echo "::error::Must be dispatched from tag ref '$VERSION'"
+            exit 1
+          fi
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf ~/Library/Caches/Homebrew || true
+          sudo rm -rf /opt/hostedtoolcache/go || true
+          sudo rm -rf /opt/hostedtoolcache/Python || true
+          sudo rm -rf /opt/hostedtoolcache/Ruby || true
+          df -h /
+
+      - name: Checkout public repo at tag
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ inputs.version }}
+          fetch-depth: 1
+          path: source
+
+      - name: Verify tag checkout
+        working-directory: source
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          if ! git describe --tags --exact-match 2>/dev/null | grep -qE "^${VERSION}$"; then
+            echo "::error::Checkout does not match tag '$VERSION'"
+            exit 1
+          fi
+          echo "Tag '$VERSION' verified at $(git rev-parse --short HEAD)"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        with:
+          toolchain: "1.90"
+          targets: aarch64-apple-darwin
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
+        with:
+          workspaces: source
+          key: aarch64-apple-darwin
+
+      - name: Build release binaries
+        working-directory: source
+        env:
+          CARGO_BUILD_JOBS: "2"
+          RUSTFLAGS: "-Csplit-debuginfo=unpacked"
+        run: |
+          cargo build --release \
+            --target aarch64-apple-darwin \
+            --features nl-classifier \
+            -p sqry-cli \
+            -p sqry-mcp \
+            -p sqry-lsp
+          echo "Release binaries built successfully"
+          ls -lh target/aarch64-apple-darwin/release/sqry \
+                  target/aarch64-apple-darwin/release/sqry-mcp \
+                  target/aarch64-apple-darwin/release/sqry-lsp
+
+      - name: Download NL models
+        env:
+          MODELS_URL: "https://github.com/verivus-oss/sqry/releases/download/models-v1.0.0/sqry-models-v1.0.0.tar.gz"
+          MODELS_SHA256: "4f7886e2a381ee4a17bfca81bd41ec88e10169d498b68d2166587e6265d27b3e"
+        run: |
+          curl -fsSL "$MODELS_URL" -o /tmp/sqry-models.tar.gz
+          echo "${MODELS_SHA256}  /tmp/sqry-models.tar.gz" | shasum -a 256 -c -
+          tar xzf /tmp/sqry-models.tar.gz -C source/sqry-nl
+          echo "NL models downloaded and verified"
+
+      - name: Package binaries
+        run: |
+          mkdir -p dist
+          cp source/target/aarch64-apple-darwin/release/sqry     dist/sqry-macos-arm64
+          cp source/target/aarch64-apple-darwin/release/sqry-mcp dist/sqry-mcp-macos-arm64
+          cp source/target/aarch64-apple-darwin/release/sqry-lsp dist/sqry-lsp-macos-arm64
+          chmod 755 dist/*
+
+          # Bundle models for NL classifier
+          tar czf dist/sqry-models.tar.gz -C source/sqry-nl models
+          ls -lh dist/
+
+      # -----------------------------------------------------------------
+      # Apple Developer ID code signing + pkgbuild + notarization (opt-in)
+      # -----------------------------------------------------------------
+      - name: Azure OIDC login for Apple signing secrets
+        if: inputs.enable_apple_signing
+        uses: azure/login@532459ea530d8321f2fb9bb10d1e0bcf23869a43 # v3.0.0
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Retrieve Apple signing credentials from Key Vault
+        if: inputs.enable_apple_signing
+        run: |
+          APPLE_TEAM_ID=$(az keyvault secret show --vault-name verivus-dev-secrets-kv --name apple-team-id --query value -o tsv)
+          APPLE_DEV_EMAIL=$(az keyvault secret show --vault-name verivus-dev-secrets-kv --name apple-developer-email --query value -o tsv)
+          APPLE_NOTARIZE_PW=$(az keyvault secret show --vault-name verivus-dev-secrets-kv --name apple-notarize-password --query value -o tsv)
+          APPLE_APP_CERT_B64=$(az keyvault secret show --vault-name verivus-dev-secrets-kv --name apple-devid-application-cert --query value -o tsv)
+          APPLE_APP_KEY_B64=$(az keyvault secret show --vault-name verivus-dev-secrets-kv --name apple-devid-application-key --query value -o tsv)
+          APPLE_INST_CERT_B64=$(az keyvault secret show --vault-name verivus-dev-secrets-kv --name apple-devid-installer-cert --query value -o tsv)
+          APPLE_INST_KEY_B64=$(az keyvault secret show --vault-name verivus-dev-secrets-kv --name apple-devid-installer-key --query value -o tsv)
+
+          echo "::add-mask::$APPLE_NOTARIZE_PW"
+          echo "::add-mask::$APPLE_APP_CERT_B64"
+          echo "::add-mask::$APPLE_APP_KEY_B64"
+          echo "::add-mask::$APPLE_INST_CERT_B64"
+          echo "::add-mask::$APPLE_INST_KEY_B64"
+
+          echo "APPLE_TEAM_ID=$APPLE_TEAM_ID" >> "$GITHUB_ENV"
+          echo "APPLE_DEV_EMAIL=$APPLE_DEV_EMAIL" >> "$GITHUB_ENV"
+          echo "APPLE_NOTARIZE_PW=$APPLE_NOTARIZE_PW" >> "$GITHUB_ENV"
+          echo "APPLE_APP_CERT_B64=$APPLE_APP_CERT_B64" >> "$GITHUB_ENV"
+          echo "APPLE_APP_KEY_B64=$APPLE_APP_KEY_B64" >> "$GITHUB_ENV"
+          echo "APPLE_INST_CERT_B64=$APPLE_INST_CERT_B64" >> "$GITHUB_ENV"
+          echo "APPLE_INST_KEY_B64=$APPLE_INST_KEY_B64" >> "$GITHUB_ENV"
+          echo "Apple signing credentials retrieved"
+
+      - name: Import Apple certificates into temporary keychain
+        if: inputs.enable_apple_signing
+        run: |
+          KEYCHAIN_PATH="$RUNNER_TEMP/apple-signing.keychain-db"
+          KEYCHAIN_PW="$(openssl rand -hex 24)"
+
+          security create-keychain -p "$KEYCHAIN_PW" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 900 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PW" "$KEYCHAIN_PATH"
+
+          # Import Developer ID Application certificate + key (for codesign)
+          echo "$APPLE_APP_CERT_B64" | base64 --decode > "$RUNNER_TEMP/devid-app.cer"
+          security import "$RUNNER_TEMP/devid-app.cer" -k "$KEYCHAIN_PATH" -T /usr/bin/codesign
+          echo "$APPLE_APP_KEY_B64" | base64 --decode > "$RUNNER_TEMP/devid-app.key"
+          security import "$RUNNER_TEMP/devid-app.key" -k "$KEYCHAIN_PATH" -T /usr/bin/codesign
+
+          # Import Developer ID Installer certificate + key (for productsign)
+          echo "$APPLE_INST_CERT_B64" | base64 --decode > "$RUNNER_TEMP/devid-inst.cer"
+          security import "$RUNNER_TEMP/devid-inst.cer" -k "$KEYCHAIN_PATH" -T /usr/bin/productsign
+          echo "$APPLE_INST_KEY_B64" | base64 --decode > "$RUNNER_TEMP/devid-inst.key"
+          security import "$RUNNER_TEMP/devid-inst.key" -k "$KEYCHAIN_PATH" -T /usr/bin/productsign
+
+          # Allow codesign and productsign to access keychain without GUI prompt
+          security set-key-partition-list -S apple-tool:,apple:,codesign:,productsign: -s -k "$KEYCHAIN_PW" "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | tr -d '"')
+
+          echo "APPLE_KEYCHAIN_PATH=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
+
+          rm -f "$RUNNER_TEMP/devid-app.cer" "$RUNNER_TEMP/devid-app.key"
+          rm -f "$RUNNER_TEMP/devid-inst.cer" "$RUNNER_TEMP/devid-inst.key"
+          echo "Apple certificates imported into temporary keychain"
+
+      - name: Apple codesign macOS binaries
+        if: inputs.enable_apple_signing
+        working-directory: dist
+        env:
+          TEAM_ID: ${{ env.APPLE_TEAM_ID }}
+        run: |
+          IDENTITY="Developer ID Application: Verivus Pty Ltd ($TEAM_ID)"
+          echo "Signing with identity: $IDENTITY"
+
+          for binary in sqry-macos-arm64 sqry-mcp-macos-arm64 sqry-lsp-macos-arm64; do
+            echo "  Signing $binary..."
+            codesign --sign "$IDENTITY" \
+              --options runtime \
+              --timestamp \
+              --force \
+              "$binary"
+            codesign --verify --deep --strict "$binary"
+            echo "  Verified: $binary"
+          done
+          echo "All macOS binaries code-signed"
+
+      - name: Build .pkg installer (pkgbuild + productsign)
+        if: inputs.enable_apple_signing
+        env:
+          VERSION: ${{ inputs.version }}
+          TEAM_ID: ${{ env.APPLE_TEAM_ID }}
+        run: |
+          VERSION_NO_V="${VERSION#v}"
+
+          # Create payload structure for pkgbuild
+          PKG_ROOT="$RUNNER_TEMP/pkg-root"
+          mkdir -p "$PKG_ROOT/usr/local/bin"
+          cp dist/sqry-macos-arm64     "$PKG_ROOT/usr/local/bin/sqry"
+          cp dist/sqry-mcp-macos-arm64 "$PKG_ROOT/usr/local/bin/sqry-mcp"
+          cp dist/sqry-lsp-macos-arm64 "$PKG_ROOT/usr/local/bin/sqry-lsp"
+
+          # Build unsigned component package
+          UNSIGNED_PKG="$RUNNER_TEMP/sqry-unsigned.pkg"
+          pkgbuild \
+            --root "$PKG_ROOT" \
+            --identifier "dev.sqry.cli" \
+            --version "$VERSION_NO_V" \
+            --install-location "/" \
+            "$UNSIGNED_PKG"
+
+          # Sign the package with Developer ID Installer
+          INSTALLER_IDENTITY="Developer ID Installer: Verivus Pty Ltd ($TEAM_ID)"
+          productsign \
+            --sign "$INSTALLER_IDENTITY" \
+            --timestamp \
+            "$UNSIGNED_PKG" \
+            "dist/sqry-${VERSION}-macos-arm64.pkg"
+
+          rm -f "$UNSIGNED_PKG"
+          rm -rf "$PKG_ROOT"
+          echo "Signed .pkg created:"
+          ls -lh "dist/sqry-${VERSION}-macos-arm64.pkg"
+
+      - name: Notarize macOS binaries and .pkg
+        if: inputs.enable_apple_signing
+        working-directory: dist
+        env:
+          DEV_EMAIL: ${{ env.APPLE_DEV_EMAIL }}
+          TEAM_ID: ${{ env.APPLE_TEAM_ID }}
+          NOTARIZE_PW: ${{ env.APPLE_NOTARIZE_PW }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          # Notarize individual binaries
+          for binary in sqry-macos-arm64 sqry-mcp-macos-arm64 sqry-lsp-macos-arm64; do
+            echo "  Notarizing $binary..."
+            zip "${binary}.zip" "$binary"
+            xcrun notarytool submit "${binary}.zip" \
+              --apple-id "$DEV_EMAIL" \
+              --team-id "$TEAM_ID" \
+              --password "$NOTARIZE_PW" \
+              --wait --timeout 10m
+            rm "${binary}.zip"
+            echo "  Notarized: $binary"
+          done
+
+          # Notarize the .pkg
+          PKG_FILE="sqry-${VERSION}-macos-arm64.pkg"
+          if [ -f "$PKG_FILE" ]; then
+            echo "  Notarizing $PKG_FILE..."
+            xcrun notarytool submit "$PKG_FILE" \
+              --apple-id "$DEV_EMAIL" \
+              --team-id "$TEAM_ID" \
+              --password "$NOTARIZE_PW" \
+              --wait --timeout 10m
+            # Staple the notarization ticket to the .pkg
+            xcrun stapler staple "$PKG_FILE"
+            echo "  Notarized and stapled: $PKG_FILE"
+          fi
+          echo "All macOS artifacts notarized"
+
+      - name: Cleanup Apple keychain
+        if: always() && inputs.enable_apple_signing
+        run: |
+          if [ -n "${APPLE_KEYCHAIN_PATH:-}" ]; then
+            security delete-keychain "$APPLE_KEYCHAIN_PATH" 2>/dev/null || true
+          fi
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+
+      - name: Sign with Cosign (keyless OIDC)
+        working-directory: dist
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          echo "Signing all macOS ARM64 artifacts with Cosign (keyless OIDC)..."
+          MACOS_ASSETS=(sqry-macos-arm64 sqry-mcp-macos-arm64 sqry-lsp-macos-arm64 sqry-models.tar.gz)
+          # Include .pkg if Apple signing produced it
+          PKG_FILE="sqry-${VERSION}-macos-arm64.pkg"
+          [ -f "$PKG_FILE" ] && MACOS_ASSETS+=("$PKG_FILE")
+          for artifact in "${MACOS_ASSETS[@]}"; do
+            echo "  Signing ${artifact}..."
+            cosign sign-blob --yes \
+              --bundle "${artifact}.bundle" \
+              "${artifact}"
+            echo "  Signed: ${artifact}.bundle"
+          done
+          echo "All macOS ARM64 artifacts signed"
+
+      # NOTE: Use portable tr -d '\n' to strip line breaks from base64 output,
+      # since BSD base64 (macOS) wraps at 76 chars by default and -w0 is GNU-only.
+      - name: Generate checksums and SLSA subjects
+        id: hash
+        working-directory: dist
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          MACOS_ASSETS=(sqry-macos-arm64 sqry-mcp-macos-arm64 sqry-lsp-macos-arm64 sqry-models.tar.gz)
+          PKG_FILE="sqry-${VERSION}-macos-arm64.pkg"
+          [ -f "$PKG_FILE" ] && MACOS_ASSETS+=("$PKG_FILE")
+          shasum -a 256 "${MACOS_ASSETS[@]}" > CHECKSUMS-macos-arm64.sha256
+          echo "Checksums for macOS ARM64:"
+          cat CHECKSUMS-macos-arm64.sha256
+
+          subjects=""
+          for binary in "${MACOS_ASSETS[@]}"; do
+            digest=$(shasum -a 256 "$binary" | awk '{print $1}')
+            subject_json=$(jq -n --arg name "$binary" --arg hash "$digest" \
+              '{name: $name, digest: {sha256: $hash}}')
+            subject=$(printf '%s' "$subject_json" | base64 | tr -d '\n')
+            subjects="${subjects}${subject}"$'\n'
+            echo "SLSA subject: $binary (sha256: ${digest:0:16}...)"
+          done
+          subjects="${subjects%$'\n'}"
+          DELIM="EOF_${RANDOM}_${RANDOM}"
+          echo "subjects<<${DELIM}" >> "$GITHUB_OUTPUT"
+          echo "$subjects" >> "$GITHUB_OUTPUT"
+          echo "${DELIM}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload signed artifacts
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: signed-macos-arm64
+          path: dist/
+          retention-days: 7
+          if-no-files-found: error
+
+  # ===========================================================================
+  # Job 1e: Build + Sign — VSCode Extension (.vsix)
+  # Cosign OIDC only.
+  # ===========================================================================
+  build-vscode-extension:
+    name: Build + Sign — VSCode Extension
+    needs: smoke-tests
+    runs-on: ubuntu-24.04
+    environment: oss-signing
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      subjects: ${{ steps.hash.outputs.subjects }}
+
+    steps:
+      - name: Validate version and enforce tag ref
+        env:
+          VERSION: ${{ inputs.version }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if ! echo "$VERSION" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::Invalid version format: '$VERSION'"
+            exit 1
+          fi
+          if [ "$REF_TYPE" != "tag" ] || [ "$REF_NAME" != "$VERSION" ]; then
+            echo "::error::Must be dispatched from tag ref '$VERSION'"
+            exit 1
+          fi
+
+      - name: Checkout public repo at tag
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ inputs.version }}
+          fetch-depth: 1
+          path: source
+
+      - name: Verify tag checkout
+        working-directory: source
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          if ! git describe --tags --exact-match 2>/dev/null | grep -qE "^${VERSION}$"; then
+            echo "::error::Checkout does not match tag '$VERSION'"
+            exit 1
+          fi
+          echo "Tag '$VERSION' verified at $(git rev-parse --short HEAD)"
+
+      - name: Install Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '20'
+
+      - name: Package VSCode extension
+        env:
+          VERSION: ${{ inputs.version }}
+          WORKSPACE_DIR: ${{ github.workspace }}
+        run: |
+          mkdir -p "$WORKSPACE_DIR/dist"
+          cd source/sqry-vscode
+          npm ci
+          npx --yes @vscode/vsce@3.3.0 package \
+            --out "$WORKSPACE_DIR/dist/sqry-vscode-${VERSION}.vsix"
+          echo "VSCode extension packaged:"
+          ls -lh "$WORKSPACE_DIR/dist/"
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+
+      - name: Sign with Cosign (keyless OIDC)
+        working-directory: dist
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          VSIX_FILE="sqry-vscode-${VERSION}.vsix"
+          echo "Signing ${VSIX_FILE} with Cosign (keyless OIDC)..."
+          cosign sign-blob --yes \
+            --bundle "${VSIX_FILE}.bundle" \
+            "${VSIX_FILE}"
+          echo "Signed: ${VSIX_FILE}.bundle"
+
+      - name: Generate checksums and SLSA subjects
+        id: hash
+        working-directory: dist
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          VSIX_FILE="sqry-vscode-${VERSION}.vsix"
+          sha256sum "${VSIX_FILE}" > CHECKSUMS-vscode.sha256
+          echo "Checksums for VSCode extension:"
+          cat CHECKSUMS-vscode.sha256
+
+          digest=$(sha256sum "${VSIX_FILE}" | awk '{print $1}')
+          subject_json=$(jq -n --arg name "${VSIX_FILE}" --arg hash "$digest" \
+            '{name: $name, digest: {sha256: $hash}}')
+          subject=$(printf '%s' "$subject_json" | base64 | tr -d '\n')
+          echo "SLSA subject: ${VSIX_FILE} (sha256: ${digest:0:16}...)"
+
+          DELIM="EOF_${RANDOM}_${RANDOM}"
+          echo "subjects<<${DELIM}" >> "$GITHUB_OUTPUT"
+          echo "$subject" >> "$GITHUB_OUTPUT"
+          echo "${DELIM}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload signed artifacts
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: signed-vscode
+          path: dist/
+          retention-days: 7
+          if-no-files-found: error
+
+  # ===========================================================================
+  # Job 2a: Package — Windows MSI (WiX)
+  # Conditional SignPath for Authenticode on the .msi itself.
+  # ===========================================================================
+  package-windows-msi:
+    name: Package — Windows MSI
+    needs: build-windows-x86_64
+    runs-on: windows-2022
+    environment: oss-signing
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Download signed Windows binaries
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: signed-windows-x86_64
+          path: signed-windows
+
+      - name: Install WiX Toolset
+        shell: pwsh
+        run: |
+          dotnet tool install --global wix --version 5.0.2
+          wix --version
+
+      - name: Build MSI with WiX
+        shell: pwsh
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          $versionNoV = $env:VERSION.TrimStart('v')
+
+          # Create WiX source directory
+          $wxsDir = "wix-build"
+          New-Item -ItemType Directory -Path $wxsDir -Force | Out-Null
+
+          # Create WiX v5 source file
+          $wxsContent = @"
+          <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+            <Package Name="sqry" Version="$versionNoV" Manufacturer="Verivus Pty Ltd"
+                     UpgradeCode="6E8A9F3B-2D4C-4E5F-8A1B-3C7D9E0F2B4A"
+                     Scope="perMachine">
+              <MajorUpgrade DowngradeErrorMessage="A newer version of sqry is already installed." />
+              <MediaTemplate EmbedCab="yes" />
+              <Feature Id="Complete" Title="sqry" Level="1">
+                <ComponentGroupRef Id="BinaryComponents" />
+              </Feature>
+              <StandardDirectory Id="ProgramFiles64Folder">
+                <Directory Id="INSTALLFOLDER" Name="sqry">
+                  <Component Id="sqry_exe" Guid="*">
+                    <File Source="`$(var.BinDir)\sqry-windows-x86_64.exe" Name="sqry.exe" KeyPath="yes" />
+                  </Component>
+                  <Component Id="sqry_mcp_exe" Guid="*">
+                    <File Source="`$(var.BinDir)\sqry-mcp-windows-x86_64.exe" Name="sqry-mcp.exe" KeyPath="yes" />
+                  </Component>
+                  <Component Id="sqry_lsp_exe" Guid="*">
+                    <File Source="`$(var.BinDir)\sqry-lsp-windows-x86_64.exe" Name="sqry-lsp.exe" KeyPath="yes" />
+                  </Component>
+                  <Component Id="PathEntry" Guid="A1B2C3D4-E5F6-7890-ABCD-EF1234567890">
+                    <CreateFolder />
+                    <Environment Id="PATH" Name="PATH" Value="[INSTALLFOLDER]" Permanent="no" Part="last" Action="set" System="yes" />
+                  </Component>
+                </Directory>
+              </StandardDirectory>
+              <ComponentGroup Id="BinaryComponents">
+                <ComponentRef Id="sqry_exe" />
+                <ComponentRef Id="sqry_mcp_exe" />
+                <ComponentRef Id="sqry_lsp_exe" />
+                <ComponentRef Id="PathEntry" />
+              </ComponentGroup>
+            </Package>
+          </Wix>
+          "@
+          $wxsContent | Out-File -FilePath "$wxsDir\sqry.wxs" -Encoding utf8
+
+          $binDir = (Resolve-Path "signed-windows").Path
+
+          wix build "$wxsDir\sqry.wxs" `
+            -d "BinDir=$binDir" `
+            -o "signed-windows\sqry-$env:VERSION-windows-x86_64.msi" `
+            -arch x64
+
+          Write-Host "MSI built:"
+          Get-ChildItem "signed-windows\sqry-$env:VERSION-windows-x86_64.msi"
+
+      - name: Reject SignPath mode for MSI until integration is implemented
+        if: inputs.enable_signpath
+        shell: pwsh
+        env:
+          SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
+          SIGNPATH_ORGANIZATION_ID: ${{ secrets.SIGNPATH_ORGANIZATION_ID }}
+          SIGNPATH_SIGNING_POLICY_SLUG: ${{ secrets.SIGNPATH_SIGNING_POLICY_SLUG }}
+          SIGNPATH_PROJECT_SLUG: ${{ secrets.SIGNPATH_PROJECT_SLUG }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          $requiredSecrets = @{
+            "SIGNPATH_API_TOKEN" = $env:SIGNPATH_API_TOKEN
+            "SIGNPATH_ORGANIZATION_ID" = $env:SIGNPATH_ORGANIZATION_ID
+            "SIGNPATH_SIGNING_POLICY_SLUG" = $env:SIGNPATH_SIGNING_POLICY_SLUG
+            "SIGNPATH_PROJECT_SLUG" = $env:SIGNPATH_PROJECT_SLUG
+          }
+          $missingSecrets = @()
+          foreach ($secretName in $requiredSecrets.Keys) {
+            if ([string]::IsNullOrEmpty($requiredSecrets[$secretName])) {
+              $missingSecrets += $secretName
+            }
+          }
+          if ($missingSecrets.Count -gt 0) {
+            throw "enable_signpath=true requires oss-signing secrets: $($missingSecrets -join ', ')"
+          }
+          $msiFile = "signed-windows\sqry-$env:VERSION-windows-x86_64.msi"
+          throw "SignPath is not implemented for $msiFile. Re-run with enable_signpath=false for the current Cosign-only Windows release path."
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+
+      - name: Sign MSI with Cosign (keyless OIDC)
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          MSI_FILE="signed-windows/sqry-${VERSION}-windows-x86_64.msi"
+          echo "Signing MSI with Cosign (keyless OIDC)..."
+          cosign sign-blob --yes \
+            --bundle "${MSI_FILE}.bundle" \
+            "${MSI_FILE}"
+          echo "Signed: ${MSI_FILE}.bundle"
+
+      - name: Generate MSI checksum
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          MSI_FILE="sqry-${VERSION}-windows-x86_64.msi"
+          cd signed-windows
+          sha256sum "$MSI_FILE" > "CHECKSUMS-windows-msi.sha256"
+          echo "MSI checksum:"
+          cat CHECKSUMS-windows-msi.sha256
+
+      - name: Upload MSI artifact
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: package-windows-msi
+          path: |
+            signed-windows/sqry-*-windows-x86_64.msi
+            signed-windows/sqry-*-windows-x86_64.msi.bundle
+            signed-windows/CHECKSUMS-windows-msi.sha256
+          retention-days: 7
+          if-no-files-found: error
+
+  # ===========================================================================
+  # Job 2b: Package — Linux .deb
+  # ===========================================================================
+  package-linux-deb:
+    name: Package — Linux .deb
+    needs: build-linux-x86_64
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Download signed Linux x86_64 binaries
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: signed-linux-x86_64
+          path: signed-linux
+
+      - name: Build .deb package
+        env:
+          VERSION: ${{ inputs.version }}
+          TEMP_DIR: ${{ runner.temp }}
+        run: |
+          VERSION_NO_V="${VERSION#v}"
+
+          # Create Debian package structure
+          PKG_DIR="${TEMP_DIR}/sqry-deb"
+          mkdir -p "$PKG_DIR/DEBIAN"
+          mkdir -p "$PKG_DIR/usr/bin"
+
+          cp signed-linux/sqry-linux-x86_64     "$PKG_DIR/usr/bin/sqry"
+          cp signed-linux/sqry-mcp-linux-x86_64 "$PKG_DIR/usr/bin/sqry-mcp"
+          cp signed-linux/sqry-lsp-linux-x86_64 "$PKG_DIR/usr/bin/sqry-lsp"
+          chmod 755 "$PKG_DIR/usr/bin/"*
+
+          cat > "$PKG_DIR/DEBIAN/control" <<DEBEOF
+          Package: sqry
+          Version: ${VERSION_NO_V}
+          Section: devel
+          Priority: optional
+          Architecture: amd64
+          Maintainer: Verivus Pty Ltd <hello@sqry.dev>
+          Homepage: https://sqry.dev
+          Description: Semantic code search tool
+           sqry is a lean, focused semantic code search tool that understands code
+           structure through AST analysis. Includes sqry CLI, sqry-mcp (MCP server),
+           and sqry-lsp (Language Server Protocol).
+          DEBEOF
+
+          dpkg-deb --build --root-owner-group "$PKG_DIR" "signed-linux/sqry-${VERSION}-linux-amd64.deb"
+          rm -rf "$PKG_DIR"
+
+          echo ".deb package built:"
+          ls -lh "signed-linux/sqry-${VERSION}-linux-amd64.deb"
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+
+      - name: Sign .deb with Cosign
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          DEB_FILE="signed-linux/sqry-${VERSION}-linux-amd64.deb"
+          cosign sign-blob --yes \
+            --bundle "${DEB_FILE}.bundle" \
+            "${DEB_FILE}"
+          echo "Signed: ${DEB_FILE}.bundle"
+
+      - name: Generate .deb checksum
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          DEB_FILE="sqry-${VERSION}-linux-amd64.deb"
+          cd signed-linux
+          sha256sum "$DEB_FILE" > CHECKSUMS-linux-deb.sha256
+          echo ".deb checksum:"
+          cat CHECKSUMS-linux-deb.sha256
+
+      - name: Upload .deb artifact
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: package-linux-deb
+          path: |
+            signed-linux/sqry-*-linux-amd64.deb
+            signed-linux/sqry-*-linux-amd64.deb.bundle
+            signed-linux/CHECKSUMS-linux-deb.sha256
+          retention-days: 7
+          if-no-files-found: error
+
+  # ===========================================================================
+  # Job 2c: Package — Linux .rpm
+  # ===========================================================================
+  package-linux-rpm:
+    name: Package — Linux .rpm
+    needs: build-linux-x86_64
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Download signed Linux x86_64 binaries
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: signed-linux-x86_64
+          path: signed-linux
+
+      - name: Install RPM build tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq rpm
+
+      - name: Build .rpm package
+        env:
+          VERSION: ${{ inputs.version }}
+          TEMP_DIR: ${{ runner.temp }}
+        run: |
+          VERSION_NO_V="${VERSION#v}"
+
+          # Create RPM build structure
+          RPM_BUILD="${TEMP_DIR}/rpmbuild"
+          mkdir -p "$RPM_BUILD"/{BUILD,RPMS,SOURCES,SPECS,SRPMS,BUILDROOT}
+
+          # Create tarball source
+          SOURCE_DIR="sqry-${VERSION_NO_V}"
+          mkdir -p "${TEMP_DIR}/$SOURCE_DIR/usr/bin"
+          cp signed-linux/sqry-linux-x86_64     "${TEMP_DIR}/$SOURCE_DIR/usr/bin/sqry"
+          cp signed-linux/sqry-mcp-linux-x86_64 "${TEMP_DIR}/$SOURCE_DIR/usr/bin/sqry-mcp"
+          cp signed-linux/sqry-lsp-linux-x86_64 "${TEMP_DIR}/$SOURCE_DIR/usr/bin/sqry-lsp"
+          chmod 755 "${TEMP_DIR}/$SOURCE_DIR/usr/bin/"*
+          tar czf "$RPM_BUILD/SOURCES/sqry-${VERSION_NO_V}.tar.gz" -C "${TEMP_DIR}" "$SOURCE_DIR"
+          rm -rf "${TEMP_DIR}/$SOURCE_DIR"
+
+          cat > "$RPM_BUILD/SPECS/sqry.spec" <<'RPMEOF'
+          Name:           sqry
+          Version:        %{_version}
+          Release:        1%{?dist}
+          Summary:        Semantic code search tool
+          License:        MIT
+          URL:            https://sqry.dev
+          Source0:        sqry-%{_version}.tar.gz
+
+          %description
+          sqry is a lean, focused semantic code search tool that understands code
+          structure through AST analysis. Includes sqry CLI, sqry-mcp (MCP server),
+          and sqry-lsp (Language Server Protocol).
+
+          %prep
+          %setup -q -n sqry-%{_version}
+
+          %install
+          mkdir -p %{buildroot}/usr/bin
+          cp usr/bin/sqry     %{buildroot}/usr/bin/sqry
+          cp usr/bin/sqry-mcp %{buildroot}/usr/bin/sqry-mcp
+          cp usr/bin/sqry-lsp %{buildroot}/usr/bin/sqry-lsp
+
+          %files
+          %attr(755,root,root) /usr/bin/sqry
+          %attr(755,root,root) /usr/bin/sqry-mcp
+          %attr(755,root,root) /usr/bin/sqry-lsp
+          RPMEOF
+
+          rpmbuild -bb \
+            --define "_topdir $RPM_BUILD" \
+            --define "_version $VERSION_NO_V" \
+            "$RPM_BUILD/SPECS/sqry.spec"
+
+          # Find and copy the built RPM
+          RPM_FILE=$(find "$RPM_BUILD/RPMS" -name "sqry-*.rpm" | head -1)
+          if [ -z "$RPM_FILE" ]; then
+            echo "::error::RPM build did not produce output"
+            exit 1
+          fi
+          cp "$RPM_FILE" "signed-linux/sqry-${VERSION}-linux-x86_64.rpm"
+          rm -rf "$RPM_BUILD"
+
+          echo ".rpm package built:"
+          ls -lh "signed-linux/sqry-${VERSION}-linux-x86_64.rpm"
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+
+      - name: Sign .rpm with Cosign
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          RPM_FILE="signed-linux/sqry-${VERSION}-linux-x86_64.rpm"
+          cosign sign-blob --yes \
+            --bundle "${RPM_FILE}.bundle" \
+            "${RPM_FILE}"
+          echo "Signed: ${RPM_FILE}.bundle"
+
+      - name: Generate .rpm checksum
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          RPM_FILE="sqry-${VERSION}-linux-x86_64.rpm"
+          cd signed-linux
+          sha256sum "$RPM_FILE" > CHECKSUMS-linux-rpm.sha256
+          echo ".rpm checksum:"
+          cat CHECKSUMS-linux-rpm.sha256
+
+      - name: Upload .rpm artifact
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: package-linux-rpm
+          path: |
+            signed-linux/sqry-*-linux-x86_64.rpm
+            signed-linux/sqry-*-linux-x86_64.rpm.bundle
+            signed-linux/CHECKSUMS-linux-rpm.sha256
+          retention-days: 7
+          if-no-files-found: error
+
+  # ===========================================================================
+  # Job: Create deterministic draft release for provenance uploads
+  #
+  # The SLSA reusable workflow can upload provenance directly to a release, but
+  # only if the draft already exists. Recreate any stale draft for the tag so a
+  # rerun always starts from a clean release-asset surface.
+  # ===========================================================================
+  create-release-draft:
+    name: Create GitHub Release Draft
+    needs:
+      - package-windows-msi
+      - package-linux-deb
+      - package-linux-rpm
+      - build-macos-arm64
+      - build-vscode-extension
+    runs-on: ubuntu-latest
+    environment: oss-release
+    permissions:
+      contents: write
+    outputs:
+      release_url: ${{ steps.ensure_release_draft.outputs.release_url }}
+
+    steps:
+      - name: Validate version and enforce tag ref
+        env:
+          VERSION: ${{ inputs.version }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if ! echo "$VERSION" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::Invalid version format: '$VERSION'"
+            exit 1
+          fi
+          if [ "$REF_TYPE" != "tag" ] || [ "$REF_NAME" != "$VERSION" ]; then
+            echo "::error::Must be dispatched from tag ref '$VERSION'"
+            exit 1
+          fi
+
+      - name: Recreate clean release draft
+        id: ensure_release_draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          REPO: ${{ github.repository }}
+        run: |
+          RELEASE_URL="https://github.com/${REPO}/releases/tag/${VERSION}"
+          if gh release view "${VERSION}" --repo "${REPO}" --json isDraft >/tmp/release.json 2>/dev/null; then
+            IS_DRAFT="$(gh release view "${VERSION}" --repo "${REPO}" --json isDraft --jq '.isDraft')"
+            if [ "${IS_DRAFT}" != "true" ]; then
+              echo "::error::Release ${VERSION} already exists and is not a draft"
+              exit 1
+            fi
+            gh release delete "${VERSION}" --repo "${REPO}" --yes
+            echo "Deleted stale draft release ${VERSION}"
+          fi
+
+          gh release create "${VERSION}" \
+            --repo "${REPO}" \
+            --title "sqry ${VERSION}" \
+            --notes "Release draft in progress." \
+            --verify-tag \
+            --draft
+
+          echo "release_url=${RELEASE_URL}" >> "$GITHUB_OUTPUT"
+          echo "Created clean draft release ${VERSION}"
+
+  # ===========================================================================
+  # SLSA Level 2 Provenance jobs
+  # upload-assets: true — provenance is uploaded directly to the draft release
+  # created above, which gives publish a deterministic release-asset surface.
+  # private-repository: true  # Override: repo IS public but generator misdetects on workflow_dispatch — verivus-oss/sqry is a PUBLIC repo.
+  # ===========================================================================
+  provenance-linux-x86_64:
+    name: SLSA Provenance — Linux x86_64
+    needs: [build-linux-x86_64, create-release-draft]
+    permissions:
+      id-token: write
+      contents: write
+      actions: read
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@5a775b367a56d5bd118a224a811bba288150a563 # v2.0.0
+    with:
+      base64-subjects: "${{ needs['build-linux-x86_64'].outputs.subjects }}"
+      upload-assets: true
+      upload-tag-name: ${{ inputs.version }}
+      continue-on-error: false
+      draft-release: true
+      provenance-name: sqry-linux-x86_64-provenance.intoto.jsonl
+      compile-generator: false
+      private-repository: true  # Override: repo IS public but generator misdetects on workflow_dispatch
+
+  provenance-linux-arm64:
+    name: SLSA Provenance — Linux ARM64
+    needs: [build-linux-arm64, create-release-draft]
+    permissions:
+      id-token: write
+      contents: write
+      actions: read
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@5a775b367a56d5bd118a224a811bba288150a563 # v2.0.0
+    with:
+      base64-subjects: "${{ needs['build-linux-arm64'].outputs.subjects }}"
+      upload-assets: true
+      upload-tag-name: ${{ inputs.version }}
+      continue-on-error: false
+      draft-release: true
+      provenance-name: sqry-linux-arm64-provenance.intoto.jsonl
+      compile-generator: false
+      private-repository: true  # Override: repo IS public but generator misdetects on workflow_dispatch
+
+  provenance-windows-x86_64:
+    name: SLSA Provenance — Windows x86_64
+    needs: [build-windows-x86_64, create-release-draft]
+    permissions:
+      id-token: write
+      contents: write
+      actions: read
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@5a775b367a56d5bd118a224a811bba288150a563 # v2.0.0
+    with:
+      base64-subjects: "${{ needs['build-windows-x86_64'].outputs.subjects }}"
+      upload-assets: true
+      upload-tag-name: ${{ inputs.version }}
+      continue-on-error: false
+      draft-release: true
+      provenance-name: sqry-windows-x86_64-provenance.intoto.jsonl
+      compile-generator: false
+      private-repository: true  # Override: repo IS public but generator misdetects on workflow_dispatch
+
+  provenance-macos-arm64:
+    name: SLSA Provenance — macOS ARM64
+    needs: [build-macos-arm64, create-release-draft]
+    permissions:
+      id-token: write
+      contents: write
+      actions: read
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@5a775b367a56d5bd118a224a811bba288150a563 # v2.0.0
+    with:
+      base64-subjects: "${{ needs['build-macos-arm64'].outputs.subjects }}"
+      upload-assets: true
+      upload-tag-name: ${{ inputs.version }}
+      continue-on-error: false
+      draft-release: true
+      provenance-name: sqry-macos-arm64-provenance.intoto.jsonl
+      compile-generator: false
+      private-repository: true  # Override: repo IS public but generator misdetects on workflow_dispatch
+
+  provenance-vscode:
+    name: SLSA Provenance — VSCode Extension
+    needs: [build-vscode-extension, create-release-draft]
+    permissions:
+      id-token: write
+      contents: write
+      actions: read
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@5a775b367a56d5bd118a224a811bba288150a563 # v2.0.0
+    with:
+      base64-subjects: "${{ needs['build-vscode-extension'].outputs.subjects }}"
+      upload-assets: true
+      upload-tag-name: ${{ inputs.version }}
+      continue-on-error: false
+      draft-release: true
+      provenance-name: sqry-vscode-provenance.intoto.jsonl
+      compile-generator: false
+      private-repository: true  # Override: repo IS public but generator misdetects on workflow_dispatch
+
+  # ===========================================================================
+  # Jobs: Docker — Build, test, sign, then gated push to GHCR
+  #
+  # Two-phase trust model matching Leg 3 pattern:
+  #   docker-build: build from source, smoke test, sign (no env gate)
+  #   docker-push: environment-gated push to GHCR (oss-release)
+  # Dockerfile generated inline since packaging/ is stripped by sanitization.
+  # ===========================================================================
+  docker-build:
+    name: Build & Sign Docker Image
+    needs: [smoke-tests]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      packages: read
+    outputs:
+      image_digest: ${{ steps.digest.outputs.digest }}
+    env:
+      VERSION: ${{ inputs.version }}
+
+    steps:
+      - name: Checkout at release tag
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ inputs.version }}
+
+      - name: Strip 'v' prefix for version
+        id: ver
+        run: echo "bare=${VERSION#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate Dockerfile
+        run: |
+          cat > Dockerfile << 'DOCKERFILE_EOF'
+          FROM rust:1.90-slim-bookworm AS builder
+
+          RUN apt-get update && apt-get install -y --no-install-recommends \
+              pkg-config libssl-dev build-essential && \
+              rm -rf /var/lib/apt/lists/*
+
+          WORKDIR /build
+          COPY Cargo.toml Cargo.lock ./
+          COPY .cargo ./.cargo
+          COPY crates ./crates
+          COPY third-party ./third-party
+          COPY vendor ./vendor
+          COPY sqry-core ./sqry-core
+          COPY sqry-cli ./sqry-cli
+          COPY sqry-lsp ./sqry-lsp
+          COPY sqry-lang-support ./sqry-lang-support
+          COPY sqry-tree-sitter-support ./sqry-tree-sitter-support
+          COPY sqry-tree-sitter-fuzz-support ./sqry-tree-sitter-fuzz-support
+          COPY sqry-test-support ./sqry-test-support
+          COPY sqry-test-fixtures ./sqry-test-fixtures
+          COPY sqry-lang-rust ./sqry-lang-rust
+          COPY sqry-lang-javascript ./sqry-lang-javascript
+          COPY sqry-lang-java ./sqry-lang-java
+          COPY sqry-lang-typescript ./sqry-lang-typescript
+          COPY sqry-lang-python ./sqry-lang-python
+          COPY sqry-lang-go ./sqry-lang-go
+          COPY sqry-lang-lua ./sqry-lang-lua
+          COPY sqry-lang-r ./sqry-lang-r
+          COPY sqry-lang-dart ./sqry-lang-dart
+          COPY sqry-lang-sql ./sqry-lang-sql
+          COPY sqry-lang-swift ./sqry-lang-swift
+          COPY sqry-lang-c ./sqry-lang-c
+          COPY sqry-lang-cpp ./sqry-lang-cpp
+          COPY sqry-lang-csharp ./sqry-lang-csharp
+          COPY sqry-lang-kotlin ./sqry-lang-kotlin
+          COPY sqry-lang-ruby ./sqry-lang-ruby
+          COPY sqry-lang-php ./sqry-lang-php
+          COPY sqry-lang-scala ./sqry-lang-scala
+          COPY sqry-lang-shell ./sqry-lang-shell
+          COPY sqry-lang-html ./sqry-lang-html
+          COPY sqry-lang-css ./sqry-lang-css
+          COPY sqry-lang-haskell ./sqry-lang-haskell
+          COPY sqry-lang-perl ./sqry-lang-perl
+          COPY sqry-lang-elixir ./sqry-lang-elixir
+          COPY sqry-lang-vue ./sqry-lang-vue
+          COPY sqry-lang-svelte ./sqry-lang-svelte
+          COPY sqry-lang-groovy ./sqry-lang-groovy
+          COPY sqry-lang-zig ./sqry-lang-zig
+          COPY sqry-lang-servicenow-xanadu ./sqry-lang-servicenow-xanadu
+          COPY sqry-lang-terraform ./sqry-lang-terraform
+          COPY sqry-lang-puppet ./sqry-lang-puppet
+          COPY sqry-lang-pulumi ./sqry-lang-pulumi
+          COPY sqry-lang-salesforce-apex ./sqry-lang-salesforce-apex
+          COPY sqry-lang-sap-abap ./sqry-lang-sap-abap
+          COPY sqry-lang-oracle-plsql ./sqry-lang-oracle-plsql
+          COPY sqry-plugin-registry ./sqry-plugin-registry
+          COPY sqry-mcp-redaction ./sqry-mcp-redaction
+          COPY sqry-nl ./sqry-nl
+          COPY sqry-mcp ./sqry-mcp
+
+          RUN cargo build --release -p sqry-mcp && \
+              strip target/release/sqry-mcp
+
+          FROM debian:bookworm-slim
+
+          ARG SQRY_VERSION=dev
+
+          RUN apt-get update && apt-get install -y --no-install-recommends \
+              ca-certificates git && \
+              rm -rf /var/lib/apt/lists/*
+
+          COPY --from=builder /build/target/release/sqry-mcp /usr/local/bin/sqry-mcp
+
+          RUN groupadd --system sqry && useradd --system --gid sqry --create-home --home-dir /home/sqry sqry && \
+              chown sqry:sqry /usr/local/bin/sqry-mcp
+
+          LABEL org.opencontainers.image.title="sqry-mcp" \
+                org.opencontainers.image.description="Local stdio MCP server for sqry semantic code search" \
+                org.opencontainers.image.url="https://github.com/verivus-oss/sqry" \
+                org.opencontainers.image.source="https://github.com/verivus-oss/sqry" \
+                org.opencontainers.image.version="${SQRY_VERSION}" \
+                org.opencontainers.image.licenses="MIT" \
+                io.modelcontextprotocol.server.name="io.github.verivus-oss/sqry"
+
+          WORKDIR /workspace
+          ENV SQRY_MCP_WORKSPACE_ROOT=/workspace
+          USER sqry
+
+          ENTRYPOINT ["sqry-mcp"]
+          DOCKERFILE_EOF
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image (no push)
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: false
+          load: true
+          tags: |
+            ghcr.io/verivus-oss/sqry-mcp:v${{ steps.ver.outputs.bare }}
+          build-args: |
+            SQRY_VERSION=${{ steps.ver.outputs.bare }}
+          platforms: linux/amd64
+
+      - name: Smoke test — MCP initialize
+        run: |
+          RESPONSE=$(echo '{"jsonrpc":"2.0","method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"smoke-test","version":"1.0"}},"id":1}' | \
+            docker run -i --rm ghcr.io/verivus-oss/sqry-mcp:v${{ steps.ver.outputs.bare }} 2>/dev/null | head -1)
+          if echo "$RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); assert 'result' in d, 'No result'"; then
+            echo "MCP initialize smoke test passed"
+          else
+            echo "::error::MCP initialize smoke test failed: ${RESPONSE}"
+            exit 1
+          fi
+
+      - name: Verify MCP label
+        run: |
+          LABEL=$(docker inspect ghcr.io/verivus-oss/sqry-mcp:v${{ steps.ver.outputs.bare }} \
+            --format '{{ index .Config.Labels "io.modelcontextprotocol.server.name" }}')
+          if [ "$LABEL" != "io.github.verivus-oss/sqry" ]; then
+            echo "::error::Label mismatch: got '$LABEL', expected 'io.github.verivus-oss/sqry'"
+            exit 1
+          fi
+          echo "Label verified: $LABEL"
+
+      - name: Save image tarball
+        run: |
+          docker save ghcr.io/verivus-oss/sqry-mcp:v${{ steps.ver.outputs.bare }} | gzip > sqry-mcp-image.tar.gz
+
+      - name: Upload image artifact
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: docker-image
+          path: sqry-mcp-image.tar.gz
+          retention-days: 1
+
+      - name: Compute image digest
+        id: digest
+        run: |
+          DIGEST=$(docker inspect --format='{{.Id}}' ghcr.io/verivus-oss/sqry-mcp:v${{ steps.ver.outputs.bare }})
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+          echo "Image ID: ${DIGEST}"
+
+  # ===========================================================================
+  # Job: Publish — Verify all artifacts, create draft release, publish GHCR,
+  # retrieve the Open VSX credential from Azure Key Vault, publish Open VSX,
+  # then publish the GitHub Release and promote GHCR latest.
+  #
+  # Environment: oss-release (requires human approval)
+  # Downloads EXACT artifacts from build/package jobs — NO REBUILD behind gate.
+  # ===========================================================================
+  publish:
+    name: Publish Vetted Artifacts
+    needs:
+      - build-linux-x86_64
+      - build-linux-arm64
+      - build-windows-x86_64
+      - build-macos-arm64
+      - build-vscode-extension
+      - package-windows-msi
+      - package-linux-deb
+      - package-linux-rpm
+      - create-release-draft
+      - provenance-linux-x86_64
+      - provenance-linux-arm64
+      - provenance-windows-x86_64
+      - provenance-macos-arm64
+      - provenance-vscode
+      - docker-build
+    runs-on: ubuntu-latest
+    environment: oss-release
+    permissions:
+      contents: write
+      id-token: write
+      packages: write
+
+    steps:
+      # --- Step 0: Validate version ---
+      - name: Validate version and enforce tag ref
+        env:
+          VERSION: ${{ inputs.version }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if ! echo "$VERSION" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::Invalid version format: '$VERSION'"
+            exit 1
+          fi
+          if [ "$REF_TYPE" != "tag" ] || [ "$REF_NAME" != "$VERSION" ]; then
+            echo "::error::Must be dispatched from tag ref '$VERSION'"
+            exit 1
+          fi
+          echo "Dispatch ref validated: refs/tags/${VERSION}"
+
+      # --- Step 1: Download all signed build artifacts ---
+      - name: Download all signed artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: signed-*
+          path: dist/
+          merge-multiple: false
+
+      # --- Step 2: Download package artifacts ---
+      - name: Download package artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: package-*
+          path: packages/
+          merge-multiple: false
+
+      # --- Step 3: Download vetted Docker image artifact ---
+      - name: Download Docker image artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: docker-image
+          path: docker-image/
+
+      # --- Step 4: Verify per-platform checksums ---
+      - name: Verify checksums
+        id: verify_checksums
+        run: |
+          echo "Verifying checksums for all platforms..."
+          FAIL=0
+
+          # Verify signed build artifacts
+          for dir in dist/signed-linux-x86_64 dist/signed-linux-arm64 dist/signed-windows-x86_64 dist/signed-macos-arm64 dist/signed-vscode; do
+            if [ ! -d "$dir" ]; then
+              echo "::error::Artifact directory missing: $dir"
+              FAIL=1
+              continue
+            fi
+            PLATFORM="${dir##*signed-}"
+            CHECKSUM_FILE="$dir/CHECKSUMS-${PLATFORM}.sha256"
+            if [ ! -f "$CHECKSUM_FILE" ]; then
+              echo "::error::Expected checksum file missing: $CHECKSUM_FILE"
+              FAIL=1
+              continue
+            fi
+            echo "--- Verifying checksums in $dir ---"
+            (cd "$dir" && sha256sum -c "$(basename "$CHECKSUM_FILE")")
+            echo "Checksums OK: $dir"
+          done
+
+          # Verify package checksums
+          for dir in packages/package-windows-msi packages/package-linux-deb packages/package-linux-rpm; do
+            if [ ! -d "$dir" ]; then
+              echo "::warning::Package directory missing: $dir (may not have been built)"
+              continue
+            fi
+            CHECKSUM_FILE=$(find "$dir" -name 'CHECKSUMS-*.sha256' | head -1)
+            if [ -n "$CHECKSUM_FILE" ]; then
+              echo "--- Verifying checksums in $dir ---"
+              (cd "$dir" && sha256sum -c "$(basename "$CHECKSUM_FILE")")
+              echo "Checksums OK: $dir"
+            fi
+          done
+
+          if [ "$FAIL" -ne 0 ]; then
+            echo "::error::Checksum verification failed"
+            exit 1
+          fi
+          echo "All checksums verified successfully"
+
+      # --- Step 5: Install Cosign ---
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+
+      # --- Step 6: Verify all Cosign signatures ---
+      - name: Verify Cosign signatures
+        id: verify_signatures
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          # Escape dots for regex (v4.2.0 -> v4\.2\.0)
+          VERSION_ESCAPED="${VERSION//./\\.}"
+          CERT_IDENTITY="^https://github\\.com/verivus-oss/sqry/\\.github/workflows/oss-leg3-release\\.yml@refs/tags/${VERSION_ESCAPED}$"
+          OIDC_ISSUER="https://token.actions.githubusercontent.com"
+
+          echo "Verifying Cosign signatures -- identity bound to refs/tags/${VERSION}"
+          echo ""
+
+          FAIL=0
+          # Verify signed build artifacts
+          for dir in dist/signed-linux-x86_64 dist/signed-linux-arm64 dist/signed-windows-x86_64 dist/signed-macos-arm64 dist/signed-vscode; do
+            if [ ! -d "$dir" ]; then
+              echo "::error::Artifact directory missing: $dir"
+              FAIL=1
+              continue
+            fi
+            echo "--- Verifying signatures in $dir ---"
+            for f in "$dir"/*; do
+              [ -f "$f" ] || continue
+              fname=$(basename "$f")
+              [[ "$fname" == *.bundle ]] && continue
+              [[ "$fname" == CHECKSUMS* ]] && continue
+              bundle="${f}.bundle"
+              if [ ! -f "$bundle" ]; then
+                echo "::error::Bundle file missing for: $f"
+                FAIL=1
+                continue
+              fi
+              echo "  Verifying: $fname"
+              cosign verify-blob \
+                --bundle "$bundle" \
+                --certificate-identity-regexp "$CERT_IDENTITY" \
+                --certificate-oidc-issuer "$OIDC_ISSUER" \
+                "$f"
+              echo "  OK: $fname"
+            done
+          done
+
+          # Verify package artifacts
+          for dir in packages/package-windows-msi packages/package-linux-deb packages/package-linux-rpm; do
+            if [ ! -d "$dir" ]; then
+              continue
+            fi
+            echo "--- Verifying signatures in $dir ---"
+            for f in "$dir"/*; do
+              [ -f "$f" ] || continue
+              fname=$(basename "$f")
+              [[ "$fname" == *.bundle ]] && continue
+              [[ "$fname" == CHECKSUMS* ]] && continue
+              bundle="${f}.bundle"
+              if [ ! -f "$bundle" ]; then
+                # Not all package files necessarily have bundles
+                continue
+              fi
+              echo "  Verifying: $fname"
+              cosign verify-blob \
+                --bundle "$bundle" \
+                --certificate-identity-regexp "$CERT_IDENTITY" \
+                --certificate-oidc-issuer "$OIDC_ISSUER" \
+                "$f"
+              echo "  OK: $fname"
+            done
+          done
+
+          if [ "$FAIL" -ne 0 ]; then
+            echo "::error::Cosign signature verification failed"
+            exit 1
+          fi
+          echo "All Cosign signatures verified successfully"
+
+      # --- Step 7: Checkout public repo for release notes ---
+      - name: Checkout public repo for release notes
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ inputs.version }}
+          fetch-depth: 1
+          path: source-for-notes
+
+      - name: Verify tag checkout
+        working-directory: source-for-notes
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          if ! git describe --tags --exact-match 2>/dev/null | grep -qE "^${VERSION}$"; then
+            echo "::error::Checkout does not match tag '$VERSION'"
+            exit 1
+          fi
+          echo "Tag '$VERSION' verified at $(git rev-parse --short HEAD)"
+
+      # --- Step 8: Build release notes ---
+      - name: Build release notes
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          VERSION_ESCAPED="${VERSION//./\\.}"
+          NOTES_FILE="/tmp/release-notes.md"
+
+          NOTES=""
+          if [ -f source-for-notes/CHANGELOG.md ]; then
+            SECTION=$(sed -n "/^## \\[\\?${VERSION_ESCAPED}\\]\\?$/,/^## /p" source-for-notes/CHANGELOG.md | sed '$ d')
+            if [ -n "$SECTION" ]; then
+              NOTES="$SECTION"
+              echo "Extracted changelog section for ${VERSION}"
+            fi
+          fi
+
+          if [ -n "$NOTES" ]; then
+            echo "$NOTES" > "$NOTES_FILE"
+          else
+            cat > "$NOTES_FILE" <<EOF
+          ## sqry ${VERSION}
+
+          Release of sqry semantic code search tool.
+
+          See the [README](https://github.com/verivus-oss/sqry) for documentation.
+          EOF
+          fi
+
+          # Append verification instructions
+          cat >> "$NOTES_FILE" <<EOF
+
+          ---
+
+          ## Install
+
+          Use the primary install path for your OS:
+
+          ### Windows (recommended)
+          \`\`\`powershell
+          irm https://raw.githubusercontent.com/verivus-oss/sqry/main/scripts/install.ps1 | iex
+          \`\`\`
+
+          ### macOS and Linux (recommended)
+          \`\`\`bash
+          curl -fsSL https://raw.githubusercontent.com/verivus-oss/sqry/main/scripts/install.sh | bash -s -- --component all
+          \`\`\`
+
+          Published macOS binaries currently target Apple Silicon (\`arm64\`) only.
+          Files ending in \`.bundle\` are verification artifacts for Cosign, not the programs you run directly.
+
+          ---
+
+          ## Verification
+
+          All binaries, packages, and the VSCode extension are signed with [Sigstore Cosign](https://github.com/sigstore/cosign) using keyless OIDC signing. SLSA Level 2 provenance attestations are uploaded to the draft GitHub Release before final publication.
+
+          ### Verify checksums
+          \`\`\`bash
+          sha256sum -c CHECKSUMS.sha256
+          \`\`\`
+
+          ### Verify Cosign signatures
+          \`\`\`bash
+          cosign verify-blob \\
+            --bundle sqry-linux-x86_64.bundle \\
+            --certificate-identity-regexp \\
+              "^https://github\\.com/verivus-oss/sqry/\\.github/workflows/oss-leg3-release\\.yml@refs/tags/${VERSION_ESCAPED}\$" \\
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \\
+            sqry-linux-x86_64
+          \`\`\`
+
+          ### Verify SLSA Level 2 provenance
+          \`\`\`bash
+          slsa-verifier verify-artifact sqry-linux-x86_64 \\
+            --provenance-path sqry-linux-x86_64-provenance.intoto.jsonl \\
+            --source-uri github.com/verivus-oss/sqry
+          \`\`\`
+
+          EOF
+          echo "Release notes prepared at $NOTES_FILE"
+
+      # --- Step 9: Flatten all artifacts to release-assets/ ---
+      - name: Flatten and consolidate artifacts
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          mkdir -p release-assets
+
+          # Copy signed build artifacts
+          for dir in dist/signed-linux-x86_64 dist/signed-linux-arm64 dist/signed-windows-x86_64 dist/signed-macos-arm64 dist/signed-vscode; do
+            if [ ! -d "$dir" ]; then
+              echo "::error::Missing signed artifact directory: $dir"
+              exit 1
+            fi
+            echo "--- Copying from $dir ---"
+            for f in "$dir"/*; do
+              [ -f "$f" ] || continue
+              fname=$(basename "$f")
+              cp "$f" "release-assets/$fname"
+              echo "  Copied: $fname"
+            done
+          done
+
+          # Copy package artifacts
+          for dir in packages/package-windows-msi packages/package-linux-deb packages/package-linux-rpm; do
+            if [ ! -d "$dir" ]; then
+              echo "::warning::Package directory missing: $dir"
+              continue
+            fi
+            echo "--- Copying from $dir ---"
+            for f in "$dir"/*; do
+              [ -f "$f" ] || continue
+              fname=$(basename "$f")
+              cp "$f" "release-assets/$fname"
+              echo "  Copied: $fname"
+            done
+          done
+
+          # Render package manager configs if available
+          echo "--- Rendering package manager configs ---"
+          if [ -d source-for-notes/packaging ] && [ -f source-for-notes/scripts/release/render-distribution-configs.sh ]; then
+            source-for-notes/scripts/release/render-distribution-configs.sh \
+              --version "$VERSION" \
+              --checksums-dir release-assets \
+              --output-dir release-assets/distribution \
+              --repo verivus-oss/sqry
+
+            while IFS= read -r rendered_file; do
+              [ -f "$rendered_file" ] || continue
+              relative_name="${rendered_file#release-assets/distribution/}"
+              flat_name="${relative_name//\//-}"
+              cp "$rendered_file" "release-assets/${flat_name}"
+              echo "  Added distribution config: ${flat_name}"
+            done < <(find release-assets/distribution -type f | sort)
+          else
+            echo "::warning::packaging dir or render script missing; skipping distribution config rendering"
+          fi
+
+          # Generate consolidated CHECKSUMS.sha256
+          echo "--- Generating consolidated CHECKSUMS.sha256 ---"
+          cd release-assets
+          CHECKSUM_FILES=()
+          for cf in CHECKSUMS-linux-x86_64.sha256 CHECKSUMS-linux-arm64.sha256 CHECKSUMS-windows-x86_64.sha256 CHECKSUMS-macos-arm64.sha256 CHECKSUMS-vscode.sha256; do
+            [ -f "$cf" ] && CHECKSUM_FILES+=("$cf")
+          done
+          for cf in CHECKSUMS-windows-msi.sha256 CHECKSUMS-linux-deb.sha256 CHECKSUMS-linux-rpm.sha256; do
+            [ -f "$cf" ] && CHECKSUM_FILES+=("$cf")
+          done
+          cat "${CHECKSUM_FILES[@]}" > CHECKSUMS.sha256
+          echo "Consolidated checksums:"
+          cat CHECKSUMS.sha256
+          echo ""
+          echo "--- All release assets ---"
+          ls -lh .
+
+      # --- Step 10: Validate final public publication prerequisites ---
+      - name: Validate final public publication prerequisites
+        id: validate_publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          REPO: ${{ github.repository }}
+        run: |
+          VSIX_FILE="release-assets/sqry-vscode-${VERSION}.vsix"
+          PROVENANCE_ASSETS=(
+            "sqry-linux-x86_64-provenance.intoto.jsonl"
+            "sqry-linux-arm64-provenance.intoto.jsonl"
+            "sqry-windows-x86_64-provenance.intoto.jsonl"
+            "sqry-macos-arm64-provenance.intoto.jsonl"
+            "sqry-vscode-provenance.intoto.jsonl"
+          )
+          if [ ! -f "$VSIX_FILE" ]; then
+            echo "::error::VSIX file not found: $VSIX_FILE"
+            exit 1
+          fi
+          if [ ! -f "docker-image/sqry-mcp-image.tar.gz" ]; then
+            echo "::error::Docker image artifact missing: docker-image/sqry-mcp-image.tar.gz"
+            exit 1
+          fi
+          if ! gh release view "$VERSION" --repo "$REPO" --json isDraft,assets >/tmp/release.json 2>/dev/null; then
+            echo "::error::Expected draft release '$VERSION' to exist on $REPO before publish"
+            exit 1
+          fi
+          IS_DRAFT="$(gh release view "$VERSION" --repo "$REPO" --json isDraft --jq '.isDraft')"
+          if [ "$IS_DRAFT" != "true" ]; then
+            echo "::error::Release '$VERSION' exists but is not a draft"
+            exit 1
+          fi
+          ASSET_NAMES="$(gh release view "$VERSION" --repo "$REPO" --json assets --jq '.assets[].name')"
+          for asset_name in "${PROVENANCE_ASSETS[@]}"; do
+            if ! printf '%s\n' "$ASSET_NAMES" | grep -qx "$asset_name"; then
+              echo "::error::Missing provenance asset on draft release: $asset_name"
+              exit 1
+            fi
+          done
+          echo "All final publication prerequisites verified, including provenance assets on the draft release"
+
+      # --- Step 12: Azure OIDC login for publish-time Key Vault retrieval ---
+      - name: Azure OIDC login for Open VSX publish credential
+        uses: azure/login@532459ea530d8321f2fb9bb10d1e0bcf23869a43 # v3.0.0
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      # --- Step 13: Retrieve Open VSX credential from Key Vault ---
+      - name: Retrieve Open VSX credential from Key Vault
+        id: open_vsx_token
+        run: |
+          OVSX_PAT="$(az keyvault secret show \
+            --vault-name verivus-dev-secrets-kv \
+            --name open-vsx-publish-token \
+            --query value -o tsv)"
+          if [ -z "$OVSX_PAT" ]; then
+            echo "::error::Key Vault secret 'open-vsx-publish-token' returned an empty value"
+            exit 1
+          fi
+          echo "::add-mask::$OVSX_PAT"
+          echo "token=$OVSX_PAT" >> "$GITHUB_OUTPUT"
+          echo "Open VSX credential retrieved from Azure Key Vault"
+
+      # --- Step 14: Upload vetted assets and release notes to GitHub Release draft ---
+      - name: Update GitHub Release draft
+        id: update_release_draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          REPO: ${{ github.repository }}
+        run: |
+          ASSET_PATHS=()
+          for f in release-assets/*; do
+            [ -f "$f" ] || continue
+            ASSET_PATHS+=("$f")
+          done
+
+          echo "Uploading ${#ASSET_PATHS[@]} vetted assets to existing draft ${VERSION}..."
+          gh release upload "${VERSION}" \
+            --repo "${REPO}" \
+            --clobber \
+            "${ASSET_PATHS[@]}"
+
+          gh release edit "${VERSION}" \
+            --repo "${REPO}" \
+            --title "sqry ${VERSION}" \
+            --notes-file /tmp/release-notes.md \
+            --draft
+
+          RELEASE_URL="https://github.com/${REPO}/releases/tag/${VERSION}"
+          echo "release_url=${RELEASE_URL}" >> "$GITHUB_ENV"
+          echo "release_url=${RELEASE_URL}" >> "$GITHUB_OUTPUT"
+          echo "GitHub Release draft updated: ${RELEASE_URL}"
+
+      # --- Step 15: Load vetted Docker image ---
+      - name: Load vetted Docker image
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          docker load < docker-image/sqry-mcp-image.tar.gz
+          VERSION_NO_V="${VERSION#v}"
+          docker image inspect "ghcr.io/verivus-oss/sqry-mcp:v${VERSION_NO_V}" >/dev/null
+
+      # --- Step 16: Log in to GHCR ---
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # --- Step 17: Push versioned GHCR tag ---
+      - name: Push versioned GHCR tag
+        id: push_ghcr_versioned
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          VERSION_NO_V="${VERSION#v}"
+          IMAGE_REF="ghcr.io/verivus-oss/sqry-mcp:v${VERSION_NO_V}"
+          docker push "$IMAGE_REF"
+          cosign sign --yes "$IMAGE_REF"
+          DIGEST="$(docker inspect --format='{{index .RepoDigests 0}}' "$IMAGE_REF" 2>/dev/null | cut -d@ -f2)"
+          if [ -z "$DIGEST" ]; then
+            echo "::error::Failed to resolve GHCR digest for $IMAGE_REF"
+            exit 1
+          fi
+          echo "ghcr_image_ref=${IMAGE_REF}" >> "$GITHUB_ENV"
+          echo "ghcr_digest=${DIGEST}" >> "$GITHUB_ENV"
+          echo "image_ref=${IMAGE_REF}" >> "$GITHUB_OUTPUT"
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+          echo "::notice::Versioned GHCR image published: ${IMAGE_REF}@${DIGEST}"
+
+      # --- Step 18: Publish VSIX to Open VSX ---
+      - name: Publish VSIX to Open VSX
+        id: publish_open_vsx
+        env:
+          OVSX_PAT: ${{ steps.open_vsx_token.outputs.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          echo "::add-mask::$OVSX_PAT"
+          VSIX_FILE="release-assets/sqry-vscode-${VERSION}.vsix"
+          npx --yes ovsx publish "$VSIX_FILE" -p "$OVSX_PAT"
+          echo "VSIX published to Open VSX"
+
+      # --- Step 19: Publish GitHub Release draft ---
+      - name: Publish GitHub Release draft
+        id: publish_release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          REPO: ${{ github.repository }}
+        run: |
+          gh release edit "${VERSION}" \
+            --repo "${REPO}" \
+            --draft=false
+          RELEASE_URL="https://github.com/${REPO}/releases/tag/${VERSION}"
+          echo "release_url=${RELEASE_URL}" >> "$GITHUB_ENV"
+          echo "GitHub Release published: ${RELEASE_URL}"
+
+      # --- Step 20: Promote GHCR latest tag ---
+      - name: Promote GHCR latest tag
+        id: promote_ghcr_latest
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          VERSION_NO_V="${VERSION#v}"
+          VERSIONED_IMAGE="ghcr.io/verivus-oss/sqry-mcp:v${VERSION_NO_V}"
+          LATEST_IMAGE="ghcr.io/verivus-oss/sqry-mcp:latest"
+          docker tag "$VERSIONED_IMAGE" "$LATEST_IMAGE"
+          docker push "$LATEST_IMAGE"
+          echo "::notice::Promoted GHCR latest tag: ${LATEST_IMAGE}"
+
+      # --- Step 21: Delete draft release if publication failed mid-flight ---
+      - name: Delete release draft after publication failure
+        if: failure() && needs.create-release-draft.result == 'success' && steps.publish_release.outcome != 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          REPO: ${{ github.repository }}
+        run: |
+          gh release delete "${VERSION}" --repo "${REPO}" --yes || true
+          echo "::warning::Deleted release draft for ${VERSION} after downstream publication failure"
+
+      # --- Step 22: Post step summary ---
+      - name: Post step summary
+        if: always()
+        env:
+          VERSION: ${{ inputs.version }}
+          SERVER_URL: ${{ github.server_url }}
+          REPOSITORY: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          CHECKSUM_STATUS: ${{ steps.verify_checksums.outcome }}
+          SIGNATURE_STATUS: ${{ steps.verify_signatures.outcome }}
+          PREREQ_STATUS: ${{ steps.validate_publication.outcome }}
+          OPEN_VSX_TOKEN_STATUS: ${{ steps.open_vsx_token.outcome }}
+          RELEASE_DRAFT_STATUS: ${{ steps.update_release_draft.outcome }}
+          GHCR_VERSIONED_STATUS: ${{ steps.push_ghcr_versioned.outcome }}
+          OPEN_VSX_STATUS: ${{ steps.publish_open_vsx.outcome }}
+          RELEASE_STATUS: ${{ steps.publish_release.outcome }}
+          GHCR_LATEST_STATUS: ${{ steps.promote_ghcr_latest.outcome }}
+          ENABLE_SIGNPATH: ${{ inputs.enable_signpath }}
+        run: |
+          RELEASE_URL="${release_url:-https://github.com/${REPOSITORY}/releases/tag/${VERSION}}"
+          GHCR_IMAGE_REF="${ghcr_image_ref:-ghcr.io/verivus-oss/sqry-mcp:${VERSION#v}}"
+          GHCR_DIGEST="${ghcr_digest:-pending}"
+
+          normalize_status() {
+            case "$1" in
+              success) echo "published" ;;
+              failure) echo "failed" ;;
+              skipped|"") echo "skipped" ;;
+              *) echo "$1" ;;
+            esac
+          }
+
+          checksum_icon="$( [ "$CHECKSUM_STATUS" = "success" ] && echo "PASS" || echo "FAIL" )"
+          signature_icon="$( [ "$SIGNATURE_STATUS" = "success" ] && echo "PASS" || echo "FAIL" )"
+          prereq_icon="$( [ "$PREREQ_STATUS" = "success" ] && echo "PASS" || echo "FAIL" )"
+          open_vsx_token_icon="$( [ "$OPEN_VSX_TOKEN_STATUS" = "success" ] && echo "PASS" || echo "FAIL" )"
+          release_draft_state="$(normalize_status "$RELEASE_DRAFT_STATUS")"
+          ghcr_versioned_state="$(normalize_status "$GHCR_VERSIONED_STATUS")"
+          open_vsx_state="$(normalize_status "$OPEN_VSX_STATUS")"
+          release_state="$(normalize_status "$RELEASE_STATUS")"
+          ghcr_latest_state="$(normalize_status "$GHCR_LATEST_STATUS")"
+          signpath_mode="$( [ "$ENABLE_SIGNPATH" = "true" ] && echo "requested-strict (workflow must fail until implemented)" || echo "cosign-only" )"
+
+          cat >> "$GITHUB_STEP_SUMMARY" <<EOF
+          ## OSS Leg 3 Release: ${VERSION}
+
+          | Step | Status |
+          |------|--------|
+          | Checksum verification (all platforms) | ${checksum_icon} |
+          | Cosign signature verification (all platforms) | ${signature_icon} |
+          | Final publication prerequisite validation | ${prereq_icon} |
+          | Open VSX Key Vault credential retrieval | ${open_vsx_token_icon} |
+
+          ### Public Channel State
+
+          | Channel | State | Evidence |
+          |---------|-------|----------|
+          | GitHub Release draft | ${release_draft_state} | ${RELEASE_URL} |
+          | GHCR versioned image | ${ghcr_versioned_state} | \`${GHCR_IMAGE_REF}@${GHCR_DIGEST}\` |
+          | Open VSX | ${open_vsx_state} | \`sqry-vscode-${VERSION}.vsix\` |
+          | GitHub Release published | ${release_state} | ${RELEASE_URL} |
+          | GHCR latest tag | ${ghcr_latest_state} | \`ghcr.io/verivus-oss/sqry-mcp:latest\` |
+
+          **Release URL:** ${RELEASE_URL}
+          **SignPath mode:** ${signpath_mode}
+
+          ### Artifacts Published
+
+          #### Linux x86_64 (musl static)
+          - \`sqry-linux-x86_64\` + \`.bundle\`
+          - \`sqry-mcp-linux-x86_64\` + \`.bundle\`
+          - \`sqry-lsp-linux-x86_64\` + \`.bundle\`
+          - \`sqry-${VERSION}-linux-x86_64.tar.gz\` + \`.bundle\`
+          - \`sqry-linux-x86_64-provenance.intoto.jsonl\`
+
+          #### Linux ARM64 (musl static)
+          - \`sqry-linux-arm64\` + \`.bundle\`
+          - \`sqry-mcp-linux-arm64\` + \`.bundle\`
+          - \`sqry-lsp-linux-arm64\` + \`.bundle\`
+          - \`sqry-${VERSION}-linux-arm64.tar.gz\` + \`.bundle\`
+          - \`sqry-linux-arm64-provenance.intoto.jsonl\`
+
+          #### Windows x86_64
+          - \`sqry-windows-x86_64.exe\` + \`.bundle\`
+          - \`sqry-mcp-windows-x86_64.exe\` + \`.bundle\`
+          - \`sqry-lsp-windows-x86_64.exe\` + \`.bundle\`
+          - \`sqry-${VERSION}-windows-x86_64.zip\` + \`.bundle\`
+          - \`sqry-${VERSION}-windows-x86_64.msi\` + \`.bundle\`
+          - \`sqry-windows-x86_64-provenance.intoto.jsonl\`
+
+          #### macOS ARM64 (Apple Silicon)
+          - \`sqry-macos-arm64\` + \`.bundle\`
+          - \`sqry-mcp-macos-arm64\` + \`.bundle\`
+          - \`sqry-lsp-macos-arm64\` + \`.bundle\`
+          - \`sqry-${VERSION}-macos-arm64.pkg\` + \`.bundle\` (if Apple signing enabled)
+          - \`sqry-macos-arm64-provenance.intoto.jsonl\`
+
+          #### VSCode Extension
+          - \`sqry-vscode-${VERSION}.vsix\` + \`.bundle\`
+          - \`sqry-vscode-provenance.intoto.jsonl\`
+
+          #### Linux Packages
+          - \`sqry-${VERSION}-linux-amd64.deb\` + \`.bundle\`
+          - \`sqry-${VERSION}-linux-x86_64.rpm\` + \`.bundle\`
+
+          #### Consolidated
+          - \`CHECKSUMS.sha256\` (all platforms combined)
+
+          ### Supply Chain Security
+          - All released binaries, packages, VSIX, and provenance files are attached to the same release tag
+          - All released binaries, packages, and VSIX signed with Cosign OIDC keyless -- identity bound to refs/tags/${VERSION}
+          - SLSA Level 2 provenance attestations are published for all build platforms before final release publication
+          - Apple Developer ID codesign + notarization (if enabled)
+          - Windows release path is explicitly Cosign-only unless a real SignPath implementation is committed
+          - Cosign certificate identity verified to exact tag ref before publishing
+          - Checksums, release prerequisites, and public channel ordering verified before final publication
+
+          **CI Run:** ${SERVER_URL}/${REPOSITORY}/actions/runs/${RUN_ID}
+          EOF

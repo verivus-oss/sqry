@@ -1,0 +1,8 @@
+name: public-codeql-scope
+
+# Public CodeQL should analyze maintained sqry product code, not vendored
+# dependency snapshots or generated grammar repositories that happen to contain
+# Cargo manifests.
+paths-ignore:
+  - third-party/**
+  - vendor/**
