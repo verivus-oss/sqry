@@ -26,7 +26,7 @@ sha2 = "0.10"
 # ONNX Runtime for inference (optional - enabled by default)
 # Exact-pin the known-good prerelease line until newer ort releases are validated
 # against this workspace and local install flows.
-ort = { version = "=2.0.0-rc.11", default-features = false, features = ["std", "ndarray", "load-dynamic"], optional = true }
+ort = { version = "=2.0.0-rc.12", default-features = false, features = ["std", "ndarray", "load-dynamic"], optional = true }
 
 # HuggingFace tokenizers (optional - enabled by default)
 # Version 0.21.4 matches Python tokenizers for tokenizer.json compatibility
