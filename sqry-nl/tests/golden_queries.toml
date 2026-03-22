@@ -1,0 +1,893 @@
+# Golden Queries Test Suite for sqry-nl Intent Classification
+#
+# This file contains 120+ queries for evaluating the NL translation layer.
+# Each query has:
+#   - input: The natural language query
+#   - expected_intent: The expected intent classification
+#   - expected_command: Optional expected command pattern (flexible matching)
+#   - difficulty: easy, medium, hard
+#   - tags: Categories for filtering
+#
+# Command patterns use flexible matching:
+#   - Substring matching for key terms (e.g., "query", "authenticate")
+#   - Case-insensitive matching
+#   - Regex patterns supported
+#
+# Targets:
+#   - Intent accuracy: ≥95% (with trained model), ≥70% (rule-based)
+#   - Command accuracy: ≥85% (with trained model), ≥60% (rule-based)
+
+version = "1.0.0"
+created = "2025-12-09"
+
+# =============================================================================
+# SYMBOL QUERY (Intent 0) - 20 queries
+# =============================================================================
+
+[[queries]]
+input = "find authenticate function"
+expected_intent = "symbol_query"
+expected_command = "sqry query.*authenticate"
+difficulty = "easy"
+tags = ["symbol", "function"]
+
+[[queries]]
+input = "where is UserAuth defined"
+expected_intent = "symbol_query"
+expected_command = "sqry query.*UserAuth"
+difficulty = "easy"
+tags = ["symbol", "class"]
+
+[[queries]]
+input = "show me all public classes"
+expected_intent = "symbol_query"
+expected_command = "sqry query.*class"
+difficulty = "medium"
+tags = ["symbol", "visibility", "class"]
+
+[[queries]]
+input = "find login method in rust"
+expected_intent = "symbol_query"
+expected_command = "sqry query.*login"
+difficulty = "medium"
+tags = ["symbol", "method", "language"]
+
+[[queries]]
+input = "methods named process"
+expected_intent = "symbol_query"
+expected_command = "sqry query.*process"
+difficulty = "easy"
+tags = ["symbol", "method"]
+
+[[queries]]
+input = "find all handlers in src/api"
+expected_intent = "symbol_query"
+expected_command = "sqry query.*handler"
+difficulty = "medium"
+tags = ["symbol", "path"]
+
+[[queries]]
+input = "private methods in auth module"
+expected_intent = "symbol_query"
+expected_command = "sqry query.*(method|auth|private)"
+difficulty = "hard"
+tags = ["symbol", "visibility", "method"]
+
+[[queries]]
+input = "find Config struct"
+expected_intent = "symbol_query"
+expected_command = "sqry query.*Config"
+difficulty = "easy"
+tags = ["symbol", "struct"]
+
+[[queries]]
+input = "show constants in settings.rs"
+expected_intent = "symbol_query"
+expected_command = "sqry query.*(constant|settings)"
+difficulty = "medium"
+tags = ["symbol", "constant", "path"]
+
+[[queries]]
+input = "find enum with Status"
+expected_intent = "symbol_query"
+expected_command = "sqry query.*Status"
+difficulty = "easy"
+tags = ["symbol", "enum"]
+
+[[queries]]
+input = "list all traits"
+expected_intent = "symbol_query"
+expected_command = "sqry query.*trait"
+difficulty = "easy"
+tags = ["symbol", "trait"]
+
+[[queries]]
+input = "find parse_request function in python"
+expected_intent = "symbol_query"
+expected_command = "sqry query.*parse_request"
+difficulty = "medium"
+tags = ["symbol", "function", "language"]
+
+[[queries]]
+input = "show interfaces in typescript"
+expected_intent = "symbol_query"
+expected_command = "sqry query.*interface"
+difficulty = "medium"
+tags = ["symbol", "interface", "language"]
+
+[[queries]]
+input = "find user_id variable"
+expected_intent = "symbol_query"
+expected_command = "sqry query.*user_id"
+difficulty = "easy"
+tags = ["symbol", "variable"]
+
+[[queries]]
+input = "where is DatabaseConnection class"
+expected_intent = "symbol_query"
+expected_command = "sqry query.*DatabaseConnection"
+difficulty = "easy"
+tags = ["symbol", "class"]
+
+[[queries]]
+input = "find all error handling functions"
+expected_intent = "symbol_query"
+expected_command = "sqry query.*error"
+difficulty = "medium"
+tags = ["symbol", "function"]
+
+[[queries]]
+input = "show me modules in src/"
+expected_intent = "symbol_query"
+expected_command = "sqry query.*module"
+difficulty = "medium"
+tags = ["symbol", "module", "path"]
+
+[[queries]]
+input = "find Result type alias"
+expected_intent = "symbol_query"
+expected_command = "sqry query.*Result"
+difficulty = "hard"
+tags = ["symbol", "type_alias"]
+
+[[queries]]
+input = "authentication functions in go"
+expected_intent = "symbol_query"
+expected_command = "sqry query.*auth"
+difficulty = "medium"
+tags = ["symbol", "function", "language"]
+
+[[queries]]
+input = "find initialize method"
+expected_intent = "symbol_query"
+expected_command = "sqry query.*initialize"
+difficulty = "easy"
+tags = ["symbol", "method"]
+
+# =============================================================================
+# TEXT SEARCH (Intent 1) - 15 queries
+# =============================================================================
+
+[[queries]]
+input = "grep for TODO comments"
+expected_intent = "text_search"
+expected_command = "sqry search.*TODO"
+difficulty = "easy"
+tags = ["text", "grep"]
+
+[[queries]]
+input = "search for error messages"
+expected_intent = "text_search"
+expected_command = "sqry search.*error"
+difficulty = "easy"
+tags = ["text", "search"]
+
+[[queries]]
+input = "look for FIXME in code"
+expected_intent = "text_search"
+expected_command = "sqry search.*FIXME"
+difficulty = "easy"
+tags = ["text", "grep"]
+
+[[queries]]
+input = "find all panic! calls"
+expected_intent = "text_search"
+expected_command = "sqry search.*panic"
+difficulty = "medium"
+tags = ["text", "macro"]
+
+[[queries]]
+input = "search for deprecated annotations"
+expected_intent = "text_search"
+expected_command = "sqry search.*deprecated"
+difficulty = "medium"
+tags = ["text", "annotation"]
+
+[[queries]]
+input = "grep unsafe blocks"
+expected_intent = "text_search"
+expected_command = "sqry search.*unsafe"
+difficulty = "easy"
+tags = ["text", "keyword"]
+
+[[queries]]
+input = "look for println statements"
+expected_intent = "text_search"
+expected_command = "sqry search.*println"
+difficulty = "easy"
+tags = ["text", "debug"]
+
+[[queries]]
+input = "search for API_KEY"
+expected_intent = "text_search"
+expected_command = "sqry search.*API_KEY"
+difficulty = "easy"
+tags = ["text", "secret"]
+
+[[queries]]
+input = "find all imports of serde"
+expected_intent = "text_search"
+expected_command = "sqry search.*serde"
+difficulty = "medium"
+tags = ["text", "import"]
+
+[[queries]]
+input = "grep for hardcoded passwords"
+expected_intent = "text_search"
+expected_command = "sqry search.*password"
+difficulty = "medium"
+tags = ["text", "security"]
+
+[[queries]]
+input = "search for localhost"
+expected_intent = "text_search"
+expected_command = "sqry search.*localhost"
+difficulty = "easy"
+tags = ["text", "config"]
+
+[[queries]]
+input = "look for magic numbers"
+expected_intent = "text_search"
+expected_command = "sqry search"
+difficulty = "hard"
+tags = ["text", "pattern"]
+
+[[queries]]
+input = "find copyright headers"
+expected_intent = "text_search"
+expected_command = "sqry search.*Copyright"
+difficulty = "easy"
+tags = ["text", "legal"]
+
+[[queries]]
+input = "grep for debug logs"
+expected_intent = "text_search"
+expected_command = "sqry search.*debug"
+difficulty = "easy"
+tags = ["text", "logging"]
+
+[[queries]]
+input = "search for connection string"
+expected_intent = "text_search"
+expected_command = "sqry search.*connection"
+difficulty = "medium"
+tags = ["text", "config"]
+
+# =============================================================================
+# TRACE PATH (Intent 2) - 15 queries
+# =============================================================================
+
+[[queries]]
+input = "trace from main to database"
+expected_intent = "trace_path"
+expected_command = "sqry graph trace-path.*main.*database"
+difficulty = "easy"
+tags = ["graph", "trace"]
+
+[[queries]]
+input = "how does request reach save"
+expected_intent = "trace_path"
+expected_command = "sqry graph trace-path"
+difficulty = "medium"
+tags = ["graph", "trace"]
+
+[[queries]]
+input = "path from api to storage"
+expected_intent = "trace_path"
+expected_command = "sqry graph trace-path.*api.*storage"
+difficulty = "easy"
+tags = ["graph", "trace"]
+
+[[queries]]
+input = "trace login to db_connect"
+expected_intent = "trace_path"
+expected_command = "sqry graph trace-path.*login.*db_connect"
+difficulty = "easy"
+tags = ["graph", "trace"]
+
+[[queries]]
+input = "show path from authenticate to encrypt"
+expected_intent = "trace_path"
+expected_command = "sqry graph trace-path.*authenticate.*encrypt"
+difficulty = "medium"
+tags = ["graph", "trace"]
+
+[[queries]]
+input = "how does input flow to output"
+expected_intent = "trace_path"
+expected_command = "sqry graph trace-path"
+difficulty = "medium"
+tags = ["graph", "trace", "dataflow"]
+
+[[queries]]
+input = "trace handleRequest to sendResponse"
+expected_intent = "trace_path"
+expected_command = "sqry graph trace-path.*handleRequest.*sendResponse"
+difficulty = "easy"
+tags = ["graph", "trace"]
+
+[[queries]]
+input = "call path from init to cleanup"
+expected_intent = "trace_path"
+expected_command = "sqry graph trace-path.*init.*cleanup"
+difficulty = "easy"
+tags = ["graph", "trace"]
+
+[[queries]]
+input = "trace user validation to permissions"
+expected_intent = "trace_path"
+expected_command = "sqry graph trace-path"
+difficulty = "hard"
+tags = ["graph", "trace"]
+
+[[queries]]
+input = "show call chain from start to end"
+expected_intent = "trace_path"
+expected_command = "sqry graph trace-path.*start.*end"
+difficulty = "medium"
+tags = ["graph", "trace"]
+
+[[queries]]
+input = "path between parse and execute"
+expected_intent = "trace_path"
+expected_command = "sqry graph trace-path.*parse.*execute"
+difficulty = "easy"
+tags = ["graph", "trace"]
+
+[[queries]]
+input = "trace from controller to model"
+expected_intent = "trace_path"
+expected_command = "sqry graph trace-path.*controller.*model"
+difficulty = "easy"
+tags = ["graph", "trace", "mvc"]
+
+[[queries]]
+input = "how does data flow from read to write"
+expected_intent = "trace_path"
+expected_command = "sqry graph trace-path"
+difficulty = "medium"
+tags = ["graph", "trace", "dataflow"]
+
+[[queries]]
+input = "call sequence from bootstrap to run"
+expected_intent = "trace_path"
+expected_command = "sqry graph trace-path.*bootstrap.*run"
+difficulty = "easy"
+tags = ["graph", "trace"]
+
+[[queries]]
+input = "trace authentication flow to dashboard"
+expected_intent = "trace_path"
+expected_command = "sqry graph trace-path"
+difficulty = "medium"
+tags = ["graph", "trace"]
+
+# =============================================================================
+# FIND CALLERS (Intent 3) - 15 queries
+# =============================================================================
+
+[[queries]]
+input = "who calls login"
+expected_intent = "find_callers"
+expected_command = "sqry graph direct-callers.*login"
+difficulty = "easy"
+tags = ["graph", "callers"]
+
+[[queries]]
+input = "callers of authenticate"
+expected_intent = "find_callers"
+expected_command = "sqry graph direct-callers.*authenticate"
+difficulty = "easy"
+tags = ["graph", "callers"]
+
+[[queries]]
+input = "what calls the save function"
+expected_intent = "find_callers"
+expected_command = "sqry graph direct-callers.*save"
+difficulty = "easy"
+tags = ["graph", "callers"]
+
+[[queries]]
+input = "find all callers of process_request"
+expected_intent = "find_callers"
+expected_command = "sqry graph direct-callers.*process_request"
+difficulty = "easy"
+tags = ["graph", "callers"]
+
+[[queries]]
+input = "who uses the validate method"
+expected_intent = "find_callers"
+expected_command = "sqry graph direct-callers.*validate"
+difficulty = "medium"
+tags = ["graph", "callers"]
+
+[[queries]]
+input = "show callers of DatabaseConnection::new"
+expected_intent = "find_callers"
+expected_command = "sqry graph direct-callers.*DatabaseConnection"
+difficulty = "medium"
+tags = ["graph", "callers", "qualified"]
+
+[[queries]]
+input = "what invokes send_email"
+expected_intent = "find_callers"
+expected_command = "sqry graph direct-callers.*send_email"
+difficulty = "easy"
+tags = ["graph", "callers"]
+
+[[queries]]
+input = "callers of encrypt with depth 5"
+expected_intent = "find_callers"
+expected_command = "sqry graph direct-callers.*encrypt"
+difficulty = "hard"
+tags = ["graph", "callers", "depth"]
+
+[[queries]]
+input = "who depends on config_load"
+expected_intent = "find_callers"
+expected_command = "sqry graph direct-callers.*config_load"
+difficulty = "medium"
+tags = ["graph", "callers"]
+
+[[queries]]
+input = "find usages of parse_json"
+expected_intent = "find_callers"
+expected_command = "sqry graph direct-callers.*parse_json"
+difficulty = "easy"
+tags = ["graph", "callers"]
+
+[[queries]]
+input = "what calls hash_password"
+expected_intent = "find_callers"
+expected_command = "sqry graph direct-callers.*hash_password"
+difficulty = "easy"
+tags = ["graph", "callers"]
+
+[[queries]]
+input = "show who calls render_template"
+expected_intent = "find_callers"
+expected_command = "sqry graph direct-callers.*render_template"
+difficulty = "easy"
+tags = ["graph", "callers"]
+
+[[queries]]
+input = "callers of the cleanup function"
+expected_intent = "find_callers"
+expected_command = "sqry graph direct-callers.*cleanup"
+difficulty = "easy"
+tags = ["graph", "callers"]
+
+[[queries]]
+input = "find all references to compute_hash"
+expected_intent = "find_callers"
+expected_command = "sqry graph direct-callers.*compute_hash"
+difficulty = "medium"
+tags = ["graph", "callers"]
+
+[[queries]]
+input = "where is format_output used"
+expected_intent = "find_callers"
+expected_command = "sqry graph direct-callers.*format_output"
+difficulty = "medium"
+tags = ["graph", "callers"]
+
+# =============================================================================
+# FIND CALLEES (Intent 4) - 15 queries
+# =============================================================================
+
+[[queries]]
+input = "what does main call"
+expected_intent = "find_callees"
+expected_command = "sqry graph direct-callees.*main"
+difficulty = "easy"
+tags = ["graph", "callees"]
+
+[[queries]]
+input = "functions called by process"
+expected_intent = "find_callees"
+expected_command = "sqry graph direct-callees.*process"
+difficulty = "easy"
+tags = ["graph", "callees"]
+
+[[queries]]
+input = "callees of initialize"
+expected_intent = "find_callees"
+expected_command = "sqry graph direct-callees.*initialize"
+difficulty = "easy"
+tags = ["graph", "callees"]
+
+[[queries]]
+input = "show dependencies of handler"
+expected_intent = "find_callees"
+expected_command = "sqry graph direct-callees.*handler"
+difficulty = "medium"
+tags = ["graph", "callees"]
+
+[[queries]]
+input = "what functions does render use"
+expected_intent = "find_callees"
+expected_command = "sqry graph direct-callees.*render"
+difficulty = "medium"
+tags = ["graph", "callees"]
+
+[[queries]]
+input = "methods called by execute"
+expected_intent = "find_callees"
+expected_command = "sqry graph direct-callees.*execute"
+difficulty = "easy"
+tags = ["graph", "callees"]
+
+[[queries]]
+input = "show what dispatch invokes"
+expected_intent = "find_callees"
+expected_command = "sqry graph direct-callees.*dispatch"
+difficulty = "easy"
+tags = ["graph", "callees"]
+
+[[queries]]
+input = "callees of run with depth 3"
+expected_intent = "find_callees"
+expected_command = "sqry graph direct-callees.*run"
+difficulty = "hard"
+tags = ["graph", "callees", "depth"]
+
+[[queries]]
+input = "what does bootstrap call"
+expected_intent = "find_callees"
+expected_command = "sqry graph direct-callees.*bootstrap"
+difficulty = "easy"
+tags = ["graph", "callees"]
+
+[[queries]]
+input = "find functions invoked by setup"
+expected_intent = "find_callees"
+expected_command = "sqry graph direct-callees.*setup"
+difficulty = "easy"
+tags = ["graph", "callees"]
+
+[[queries]]
+input = "callees of RequestHandler::handle"
+expected_intent = "find_callees"
+expected_command = "sqry graph direct-callees.*RequestHandler"
+difficulty = "medium"
+tags = ["graph", "callees", "qualified"]
+
+[[queries]]
+input = "show outgoing calls from validate"
+expected_intent = "find_callees"
+expected_command = "sqry graph direct-callees.*validate"
+difficulty = "medium"
+tags = ["graph", "callees"]
+
+[[queries]]
+input = "what methods does serialize call"
+expected_intent = "find_callees"
+expected_command = "sqry graph direct-callees.*serialize"
+difficulty = "easy"
+tags = ["graph", "callees"]
+
+[[queries]]
+input = "dependencies of parse_config"
+expected_intent = "find_callees"
+expected_command = "sqry graph direct-callees.*parse_config"
+difficulty = "easy"
+tags = ["graph", "callees"]
+
+[[queries]]
+input = "functions used by handle_error"
+expected_intent = "find_callees"
+expected_command = "sqry graph direct-callees.*handle_error"
+difficulty = "easy"
+tags = ["graph", "callees"]
+
+# =============================================================================
+# VISUALIZE (Intent 5) - 10 queries
+# =============================================================================
+
+[[queries]]
+input = "visualize auth flow"
+expected_intent = "visualize"
+expected_command = "sqry visualize"
+difficulty = "medium"
+tags = ["visualize", "flow"]
+
+[[queries]]
+input = "draw call graph"
+expected_intent = "visualize"
+expected_command = "sqry visualize"
+difficulty = "easy"
+tags = ["visualize", "graph"]
+
+[[queries]]
+input = "generate diagram for module"
+expected_intent = "visualize"
+expected_command = "sqry visualize"
+difficulty = "medium"
+tags = ["visualize", "diagram"]
+
+[[queries]]
+input = "show mermaid diagram"
+expected_intent = "visualize"
+expected_command = "sqry visualize"
+difficulty = "medium"
+tags = ["visualize", "mermaid"]
+
+[[queries]]
+input = "create DOT graph"
+expected_intent = "visualize"
+expected_command = "sqry visualize"
+difficulty = "medium"
+tags = ["visualize", "dot"]
+
+[[queries]]
+input = "visualize dependencies"
+expected_intent = "visualize"
+expected_command = "sqry visualize"
+difficulty = "easy"
+tags = ["visualize", "dependencies"]
+
+[[queries]]
+input = "draw relationship diagram"
+expected_intent = "visualize"
+expected_command = "sqry visualize"
+difficulty = "medium"
+tags = ["visualize", "relationship"]
+
+[[queries]]
+input = "generate graph for login"
+expected_intent = "visualize"
+expected_command = "sqry visualize"
+difficulty = "medium"
+tags = ["visualize", "symbol"]
+
+[[queries]]
+input = "show visual of call hierarchy"
+expected_intent = "visualize"
+expected_command = "sqry visualize"
+difficulty = "medium"
+tags = ["visualize", "hierarchy"]
+
+[[queries]]
+input = "diagram the api module"
+expected_intent = "visualize"
+expected_command = "sqry visualize"
+difficulty = "medium"
+tags = ["visualize", "module"]
+
+# =============================================================================
+# INDEX STATUS (Intent 6) - 10 queries
+# =============================================================================
+
+[[queries]]
+input = "index status"
+expected_intent = "index_status"
+expected_command = "sqry index --status"
+difficulty = "easy"
+tags = ["index", "status"]
+
+[[queries]]
+input = "is index up to date"
+expected_intent = "index_status"
+expected_command = "sqry index --status"
+difficulty = "easy"
+tags = ["index", "status"]
+
+[[queries]]
+input = "check index"
+expected_intent = "index_status"
+expected_command = "sqry index --status"
+difficulty = "easy"
+tags = ["index", "status"]
+
+[[queries]]
+input = "show index info"
+expected_intent = "index_status"
+expected_command = "sqry index --status"
+difficulty = "easy"
+tags = ["index", "status"]
+
+[[queries]]
+input = "what files are indexed"
+expected_intent = "index_status"
+expected_command = "sqry index --status"
+difficulty = "medium"
+tags = ["index", "status"]
+
+[[queries]]
+input = "index statistics"
+expected_intent = "index_status"
+expected_command = "sqry index --status"
+difficulty = "easy"
+tags = ["index", "status"]
+
+[[queries]]
+input = "when was index built"
+expected_intent = "index_status"
+expected_command = "sqry index --status"
+difficulty = "medium"
+tags = ["index", "status"]
+
+[[queries]]
+input = "how many symbols indexed"
+expected_intent = "index_status"
+expected_command = "sqry index --status"
+difficulty = "medium"
+tags = ["index", "status"]
+
+[[queries]]
+input = "show indexed languages"
+expected_intent = "index_status"
+expected_command = "sqry index --status"
+difficulty = "medium"
+tags = ["index", "status"]
+
+[[queries]]
+input = "status of code index"
+expected_intent = "index_status"
+expected_command = "sqry index --status"
+difficulty = "easy"
+tags = ["index", "status"]
+
+# =============================================================================
+# AMBIGUOUS (Intent 7) - 20 queries
+# =============================================================================
+
+[[queries]]
+input = "help"
+expected_intent = "ambiguous"
+expected_command = ""
+difficulty = "easy"
+tags = ["ambiguous", "help"]
+
+[[queries]]
+input = "hello"
+expected_intent = "ambiguous"
+expected_command = ""
+difficulty = "easy"
+tags = ["ambiguous", "greeting"]
+
+[[queries]]
+input = "???"
+expected_intent = "ambiguous"
+expected_command = ""
+difficulty = "easy"
+tags = ["ambiguous", "noise"]
+
+[[queries]]
+input = "what"
+expected_intent = "ambiguous"
+expected_command = ""
+difficulty = "easy"
+tags = ["ambiguous", "incomplete"]
+
+[[queries]]
+input = "do something"
+expected_intent = "ambiguous"
+expected_command = ""
+difficulty = "easy"
+tags = ["ambiguous", "vague"]
+
+[[queries]]
+input = "find"
+expected_intent = "ambiguous"
+expected_command = ""
+difficulty = "easy"
+tags = ["ambiguous", "incomplete"]
+
+[[queries]]
+input = "show"
+expected_intent = "ambiguous"
+expected_command = ""
+difficulty = "easy"
+tags = ["ambiguous", "incomplete"]
+
+[[queries]]
+input = "code"
+expected_intent = "ambiguous"
+expected_command = ""
+difficulty = "easy"
+tags = ["ambiguous", "vague"]
+
+[[queries]]
+input = "functions"
+expected_intent = "ambiguous"
+expected_command = ""
+difficulty = "easy"
+tags = ["ambiguous", "incomplete"]
+
+[[queries]]
+input = "the thing"
+expected_intent = "ambiguous"
+expected_command = ""
+difficulty = "easy"
+tags = ["ambiguous", "vague"]
+
+[[queries]]
+input = "it"
+expected_intent = "ambiguous"
+expected_command = ""
+difficulty = "easy"
+tags = ["ambiguous", "pronoun"]
+
+[[queries]]
+input = "test"
+expected_intent = "ambiguous"
+expected_command = ""
+difficulty = "medium"
+tags = ["ambiguous", "vague"]
+
+[[queries]]
+input = "run"
+expected_intent = "ambiguous"
+expected_command = ""
+difficulty = "medium"
+tags = ["ambiguous", "vague"]
+
+[[queries]]
+input = "123"
+expected_intent = "ambiguous"
+expected_command = ""
+difficulty = "easy"
+tags = ["ambiguous", "noise"]
+
+[[queries]]
+input = "asdfjkl"
+expected_intent = "ambiguous"
+expected_command = ""
+difficulty = "easy"
+tags = ["ambiguous", "noise"]
+
+[[queries]]
+input = "more"
+expected_intent = "ambiguous"
+expected_command = ""
+difficulty = "easy"
+tags = ["ambiguous", "incomplete"]
+
+[[queries]]
+input = "again"
+expected_intent = "ambiguous"
+expected_command = ""
+difficulty = "easy"
+tags = ["ambiguous", "context"]
+
+[[queries]]
+input = "yes"
+expected_intent = "ambiguous"
+expected_command = ""
+difficulty = "easy"
+tags = ["ambiguous", "response"]
+
+[[queries]]
+input = "no"
+expected_intent = "ambiguous"
+expected_command = ""
+difficulty = "easy"
+tags = ["ambiguous", "response"]
+
+[[queries]]
+input = "please"
+expected_intent = "ambiguous"
+expected_command = ""
+difficulty = "easy"
+tags = ["ambiguous", "polite"]

@@ -1,0 +1,137 @@
+```console
+$ {{bin}} sqry --help
+sqry [VERSION]
+sqry is a semantic code search tool that understands code structure through AST analysis.
+Find functions, classes, and symbols with precision using AST-aware queries.
+
+Examples:
+  sqry main              # Search for 'main' in current directory
+  sqry test src/         # Search for 'test' in src/
+  sqry --kind function   # Find all functions
+  sqry --json main       # Output as JSON
+
+Usage: sqry [OPTIONS] [PATTERN] [PATH] [COMMAND]
+
+Commands:
+  visualize    Visualize code relationships as diagrams
+  search       Search for symbols by pattern (simple pattern matching)
+  query        Execute AST-aware query (structured queries with boolean logic)
+  graph        Graph-based queries and analysis
+  shell        Start an interactive shell that keeps the session cache warm
+  batch        Execute multiple queries from a batch file using a warm session
+  index        Build symbol index for fast queries
+  lsp          Start the sqry Language Server Protocol endpoint
+  update       Update existing symbol index
+  watch        Watch directory and auto-update index on file changes
+  cache        Manage AST cache
+  completions  Generate shell completions
+  workspace    Manage multi-repository workspaces
+  help         Print this message or the help of the given subcommand(s)
+
+Arguments:
+  [PATTERN]
+          Search pattern (shorthand for 'search' command)
+          
+          Supports regex patterns by default. Use --exact for literal matching.
+
+  [PATH]
+          Search path (defaults to current directory)
+          
+          [default: .]
+
+Options:
+  -k, --kind <KIND>
+          Filter by symbol type (function, class, struct, etc.)
+          
+          [possible values: function, class, method, struct, enum, interface, trait, variable, constant, type, module, namespace]
+
+  -l, --lang <LANG>
+          Filter by programming language
+
+  -i, --ignore-case
+          Case-insensitive search
+
+  -x, --exact
+          Exact match (disable regex)
+
+  -c, --count
+          Show count only (number of matches)
+
+      --max-depth <MAX_DEPTH>
+          Maximum directory depth to search
+          
+          [default: 32]
+
+      --hidden
+          Include hidden files and directories
+
+      --follow
+          Follow symlinks
+
+      --limit <LIMIT>
+          Maximum number of results to return
+          
+          Limits the output to prevent overwhelming LLM context windows. Defaults: search=100, query=1000, fuzzy=50
+
+      --list-languages
+          List enabled languages and exit
+
+  -t, --text
+          Force text search mode (skip semantic, use ripgrep)
+
+  -s, --semantic
+          Force semantic search mode (skip text fallback)
+
+      --no-fallback
+          Disable automatic fallback to text search
+
+      --context <CONTEXT>
+          Number of context lines for text search results
+          
+          [default: 2]
+
+      --max-text-results <MAX_TEXT_RESULTS>
+          Maximum text search results
+          
+          [default: 1000]
+
+Common Options:
+  -j, --json
+          Output format as JSON
+
+      --no-color
+          Disable colored output
+
+  -h, --help
+          Print help information and exit
+
+  -V, --version
+          Print version information and exit
+
+Search Modes > Fuzzy:
+      --fuzzy
+          Enable fuzzy search (requires index)
+
+      --fuzzy-algorithm <ALGORITHM>
+          Fuzzy matching algorithm (jaro-winkler or levenshtein)
+          
+          [default: jaro-winkler]
+
+      --fuzzy-threshold <SCORE>
+          Minimum similarity score for fuzzy matches (0.0-1.0)
+          
+          [default: 0.6]
+
+      --fuzzy-max-candidates <COUNT>
+          Maximum number of fuzzy candidates to consider
+          
+          [default: 1000]
+
+      --fuzzy-stream
+          Enable streaming mode for fuzzy search (shows results incrementally)
+
+      --json-stream
+          Enable JSON streaming mode for fuzzy search
+          
+          Emits results as JSON-lines (newline-delimited JSON). Each line is a StreamEvent with either a partial result or final summary. Requires --fuzzy (fuzzy search) and is inherently JSON output.
+```
