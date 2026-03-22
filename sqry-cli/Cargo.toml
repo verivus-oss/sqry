@@ -71,6 +71,6 @@ assert_cmd = "2.0"
 predicates = "3.0"
 sqry-core = { path = "../sqry-core", features = ["test-support"] }
 postcard.workspace = true
-trycmd = "0.15"
+trycmd = "1.1"
 serial_test = "3.0"
 tree-sitter-rust.workspace = true
