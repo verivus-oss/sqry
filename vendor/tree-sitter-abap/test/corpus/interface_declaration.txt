@@ -1,0 +1,73 @@
+==================
+interface declaration without components
+==================
+
+interface intf public.
+endinterface.
+
+---
+
+(program
+  (interface_declaration
+    name: (name)))
+
+==================
+interface declaration with components
+==================
+
+interface intf public.
+  methods meth.
+endinterface.
+
+---
+
+(program
+  (interface_declaration
+    name: (name)
+    (method_declaration
+      name: (name))))
+
+==================
+interface method declaration with default 
+==================
+
+interface intf public.
+  methods meth default ignore.
+  methods meth default fail.
+endinterface.
+
+---
+
+(program
+  (interface_declaration
+    name: (name)
+    (method_declaration
+      name: (name))
+    (method_declaration
+      name: (name))))
+
+==================
+interface method with abstract or final modifier fails
+:error
+==================
+
+interface intf public.
+  methods meth default ignore.
+  methods meth default fail.
+endinterface.
+
+==================
+class method declaration in interface
+==================
+
+interface intf public.
+  class-methods meth.
+endinterface.
+
+---
+
+(program
+  (interface_declaration
+    name: (name)
+    (class_method_declaration
+      name: (name))))

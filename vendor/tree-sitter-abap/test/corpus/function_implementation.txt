@@ -1,0 +1,13 @@
+==================
+basic function implementation
+==================
+
+function myfunc.
+
+endfunction.
+
+---
+
+(program
+  (function_implementation
+    name: (name)))

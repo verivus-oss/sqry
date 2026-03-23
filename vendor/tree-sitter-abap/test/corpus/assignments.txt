@@ -1,0 +1,95 @@
+==================
+basic assignment
+==================
+
+a = b.
+
+---
+
+(program
+  (assignment
+    (name)
+    (name)))
+
+==================
+assigning expressions
+==================
+
+a = 1 + 1.
+
+---
+
+(program
+  (assignment
+    (name)
+    (arithmetic_expression
+      (numeric_literal)
+      (numeric_literal))))
+
+==================
+operator precedence multiplication
+==================
+
+a = 1 + 1 * 2.
+
+---
+
+(program
+  (assignment
+    (name)
+    (arithmetic_expression
+      (numeric_literal)
+      (arithmetic_expression
+        (numeric_literal)
+        (numeric_literal)))))
+
+==================
+operator precedence multiplication
+==================
+
+a = 1 + 1 - 1.
+
+---
+
+(program
+  (assignment
+    (name)
+    (arithmetic_expression
+      (arithmetic_expression
+        (numeric_literal)
+        (numeric_literal))
+      (numeric_literal))))
+
+==================
+operator precedence all levels
+==================
+
+a = 1 ** 1 * 1 + 1.
+
+---
+
+(program
+  (assignment
+    (name)
+    (arithmetic_expression
+      (arithmetic_expression
+        (arithmetic_expression
+          (numeric_literal)
+          (numeric_literal))
+        (numeric_literal))
+      (numeric_literal))))
+
+==================
+assignment to structure components
+==================
+
+a-b = x.
+
+---
+
+(program
+  (assignment
+    (structured_data_object
+      (structure_name)
+      (component_name))
+    (name)))

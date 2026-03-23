@@ -1,0 +1,10 @@
+---
+title: "Demo"
+output: html_document
+---
+
+```{r}
+chunk_func <- function(value) {
+  value * 2
+}
+```

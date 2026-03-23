@@ -1,0 +1,33 @@
+==================
+class implementation with method
+==================
+
+class class implementation.
+
+  method method.
+
+  endmethod.
+
+endclass.
+
+---
+
+(program
+  (class_implementation
+    name: (name)
+    (method_implementation
+      name: (name))))
+
+==================
+class implementation without methods
+==================
+
+class class implementation.
+
+endclass.
+
+---
+
+(program
+  (class_implementation
+    name: (name)))
