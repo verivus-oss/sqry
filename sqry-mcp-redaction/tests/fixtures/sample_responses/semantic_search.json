@@ -1,0 +1,38 @@
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "results": [
+      {
+        "name": "searchFunction",
+        "kind": "function",
+        "fileUri": "file:///home/user/project/src/search.rs",
+        "location": {
+          "start": { "line": 42, "column": 1 },
+          "end": { "line": 55, "column": 2 }
+        },
+        "score": 0.95,
+        "context": {
+          "code": "pub fn search(query: &str) -> Vec<Result> {\n    // Search implementation\n    todo!()\n}"
+        },
+        "documentation": "/// Performs a semantic search across the codebase.\n/// \n/// # Arguments\n/// * `query` - The search query string"
+      },
+      {
+        "name": "indexFile",
+        "kind": "function",
+        "fileUri": "file:///home/user/project/src/index.rs",
+        "location": {
+          "start": { "line": 10, "column": 1 },
+          "end": { "line": 25, "column": 2 }
+        },
+        "score": 0.87,
+        "context": {
+          "code": "pub fn index_file(path: &Path) -> Result<Index, Error> {\n    let content = fs::read_to_string(path)?;\n    Ok(Index::new(content))\n}"
+        }
+      }
+    ],
+    "workspace_path": "/home/user/project",
+    "total_results": 2,
+    "query": "search function implementation"
+  }
+}

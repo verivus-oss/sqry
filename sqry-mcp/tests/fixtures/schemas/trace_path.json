@@ -1,0 +1,48 @@
+{
+  "properties": {
+    "cross_language": {
+      "default": true,
+      "description": "Allow paths crossing language boundaries (e.g., JS→Python→C++)",
+      "type": "boolean"
+    },
+    "from_symbol": {
+      "description": "Starting symbol (qualified or simple name)",
+      "type": "string"
+    },
+    "max_hops": {
+      "default": 5,
+      "description": "Maximum path length to search",
+      "maximum": 10,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "max_paths": {
+      "default": 5,
+      "description": "Maximum number of paths to return (top-K ranked)",
+      "maximum": 20,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "min_confidence": {
+      "default": 0.5,
+      "description": "Minimum edge confidence score to include",
+      "maximum": 1.0,
+      "minimum": 0.0,
+      "type": "number"
+    },
+    "path": {
+      "default": ".",
+      "description": "Workspace-relative directory",
+      "type": "string"
+    },
+    "to_symbol": {
+      "description": "Target symbol (qualified or simple name)",
+      "type": "string"
+    }
+  },
+  "required": [
+    "from_symbol",
+    "to_symbol"
+  ],
+  "type": "object"
+}

@@ -1,0 +1,26 @@
+[package]
+name = "sqry-lang-sql"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "SQL language plugin for sqry"
+
+[dependencies]
+sqry-core = { version = "4.10.0", path = "../sqry-core" }
+anyhow.workspace = true
+tree-sitter.workspace = true
+tree-sitter-sequel.workspace = true
+streaming-iterator.workspace = true
+
+[dev-dependencies]
+sqry-tree-sitter-fuzz-support = { path = "../sqry-tree-sitter-fuzz-support" }
+log.workspace = true
+sqry-core = { path = "../sqry-core", features = ["test-support"] }
+tempfile = "3.10"
+
+[features]
+default = ["has_relations"]
+has_relations = []

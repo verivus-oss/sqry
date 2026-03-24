@@ -1,0 +1,162 @@
+{
+  "properties": {
+    "auto_merge": {
+      "default": true,
+      "description": "Expand small symbol contexts to include parent container code",
+      "type": "boolean"
+    },
+    "container_target_tokens": {
+      "default": 1500,
+      "description": "Target tokens for container-level grouping (merge limit)",
+      "maximum": 5000,
+      "minimum": 100,
+      "type": "integer"
+    },
+    "context_cluster_target_tokens": {
+      "default": 768,
+      "description": "Target tokens for context clustering",
+      "maximum": 2000,
+      "minimum": 100,
+      "type": "integer"
+    },
+    "context_lines": {
+      "default": 3,
+      "maximum": 20,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "expand_files": {
+      "description": "File paths to expand from stubs. When files exceed limits, they become stubs (metadata only). Use this parameter with stub file paths to load their full details in a subsequent request.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "file_target_tokens": {
+      "default": 2000,
+      "description": "Target tokens for file-level grouping",
+      "maximum": 10000,
+      "minimum": 100,
+      "type": "integer"
+    },
+    "filters": {
+      "additionalProperties": false,
+      "properties": {
+        "language": {
+          "description": "Limit results to specific languages",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "score_min": {
+          "description": "Minimum relevance score",
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "type": "number"
+        },
+        "symbol_kind": {
+          "description": "Filter by symbol kinds",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "visibility": {
+          "enum": [
+            "public",
+            "private"
+          ],
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "include_container_context": {
+      "default": false,
+      "description": "Include container-level code snippets",
+      "type": "boolean"
+    },
+    "include_file_context": {
+      "default": false,
+      "description": "Include file-level code overview",
+      "type": "boolean"
+    },
+    "max_containers_per_file": {
+      "default": 50,
+      "maximum": 200,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "max_files": {
+      "default": 20,
+      "description": "Maximum files per page",
+      "maximum": 100,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "max_results": {
+      "default": 200,
+      "description": "Maximum symbols to return (before file grouping)",
+      "maximum": 1000,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "max_symbols_per_container": {
+      "default": 100,
+      "maximum": 500,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "max_total_symbols": {
+      "default": 2000,
+      "description": "Hard limit on total symbols in response (response size safeguard)",
+      "maximum": 5000,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "merge_threshold": {
+      "default": 256,
+      "description": "Token threshold below which to expand symbol to parent context",
+      "maximum": 1000,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "pagination": {
+      "additionalProperties": false,
+      "properties": {
+        "cursor": {
+          "description": "Cursor from previous response's nextPageToken",
+          "type": "string"
+        },
+        "page_size": {
+          "default": 20,
+          "maximum": 100,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "path": {
+      "default": ".",
+      "description": "Workspace-relative directory to search",
+      "type": "string"
+    },
+    "query": {
+      "description": "Semantic query expression (same syntax as semantic_search)",
+      "type": "string"
+    },
+    "symbol_target_tokens": {
+      "default": 500,
+      "description": "Target tokens for symbol-level detail",
+      "maximum": 2000,
+      "minimum": 50,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "query"
+  ],
+  "type": "object"
+}
