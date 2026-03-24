@@ -1,0 +1,49 @@
+{
+  "properties": {
+    "max_depth": {
+      "default": 1,
+      "maximum": 5,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "max_results": {
+      "default": 200,
+      "maximum": 5000,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "page_size": {
+      "default": 50,
+      "maximum": 500,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "page_token": {
+      "type": "string"
+    },
+    "path": {
+      "default": ".",
+      "description": "Workspace-relative directory",
+      "type": "string"
+    },
+    "relation_type": {
+      "enum": [
+        "callers",
+        "callees",
+        "imports",
+        "exports",
+        "returns"
+      ],
+      "type": "string"
+    },
+    "symbol": {
+      "description": "Symbol name or qualified identifier",
+      "type": "string"
+    }
+  },
+  "required": [
+    "symbol",
+    "relation_type"
+  ],
+  "type": "object"
+}

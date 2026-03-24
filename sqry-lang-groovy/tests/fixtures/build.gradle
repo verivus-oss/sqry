@@ -1,0 +1,27 @@
+plugins {
+    id 'java'
+    id 'application'
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    implementation 'org.slf4j:slf4j-api:2.0.0'
+    testImplementation 'junit:junit:4.13.2'
+}
+
+task greet {
+    doLast {
+        println 'Hello, Gradle!'
+    }
+}
+
+def multiply = { int x, int y -> x * y }
+
+task calculate {
+    doLast {
+        println "Result: ${multiply(5, 3)}"
+    }
+}

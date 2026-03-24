@@ -1,0 +1,40 @@
+==================
+raise exception using class
+==================
+
+raise exception type cx_class.
+
+---
+
+(program
+  (raise_exception_statement
+    class: (name)))
+
+==================
+raise exception using class with exporting
+==================
+
+raise exception type cx_class
+  exporting
+    p1 = a1.
+
+---
+
+(program
+  (raise_exception_statement
+    class: (name)
+    parameters: (parameter_list
+      (parameter_binding
+        formal_parameter: (name)
+        actual_parameter: (name)))))
+
+==================
+raise exception using oref
+==================
+
+raise exception oref.
+
+---
+(program
+  (raise_exception_statement
+    oref: (name)))

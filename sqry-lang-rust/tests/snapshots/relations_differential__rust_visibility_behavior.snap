@@ -1,0 +1,7 @@
+---
+source: sqry-lang-rust/tests/relations_differential.rs
+expression: exported_names
+---
+[
+    "a",
+]

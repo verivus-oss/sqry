@@ -1,0 +1,70 @@
+use anyhow::Result;
+use serde_json::json;
+use tower_lsp::jsonrpc::Request;
+use tower_lsp::lsp_types::{
+    CodeActionKind, CodeActionProviderCapability, InitializeParams, InitializeResult, OneOf,
+    TextDocumentSyncCapability, TextDocumentSyncKind, WorkspaceSymbolOptions,
+};
+
+mod common;
+
+#[tokio::test(flavor = "current_thread")]
+async fn server_reports_phase2_capabilities_new() -> Result<()> {
+    let root = common::fixture_path("sqry-lsp/tests/fixtures/mini-workspace");
+    let mut server = common::TestServer::new(&root);
+
+    let request = Request::build("initialize")
+        .params(json!(InitializeParams::default()))
+        .id(1)
+        .finish();
+
+    let response = server
+        .send_request(request)
+        .await?
+        .expect("initialize response");
+    let (_, body) = response.into_parts();
+    let result: InitializeResult = serde_json::from_value(body?)?;
+    let capabilities = result.capabilities;
+    assert!(capabilities.hover_provider.is_some());
+    assert!(capabilities.definition_provider.is_some());
+    assert!(capabilities.references_provider.is_some());
+    assert!(capabilities.document_symbol_provider.is_some());
+
+    let sync = capabilities
+        .text_document_sync
+        .expect("text document sync capability");
+    match sync {
+        TextDocumentSyncCapability::Options(options) => {
+            assert_eq!(
+                options.change,
+                Some(TextDocumentSyncKind::INCREMENTAL),
+                "server must advertise incremental sync"
+            );
+        }
+        other => panic!("expected sync options, got {other:?}"),
+    }
+
+    match capabilities.workspace_symbol_provider {
+        Some(OneOf::Right(WorkspaceSymbolOptions {
+            work_done_progress_options,
+            ..
+        })) => {
+            assert_eq!(work_done_progress_options.work_done_progress, Some(false));
+        }
+        other => panic!("expected workspace symbol options, got {other:?}"),
+    }
+
+    match capabilities.code_action_provider {
+        Some(CodeActionProviderCapability::Options(options)) => {
+            let kinds = options
+                .code_action_kinds
+                .expect("code action kinds announced");
+            assert!(
+                kinds.contains(&CodeActionKind::REFACTOR) && kinds.contains(&CodeActionKind::EMPTY),
+                "expected refactor and generic actions to be advertised"
+            );
+        }
+        other => panic!("expected code action options, got {other:?}"),
+    }
+    Ok(())
+}

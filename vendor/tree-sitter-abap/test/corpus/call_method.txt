@@ -1,0 +1,146 @@
+==================
+method call without parameters
+==================
+
+meth( ).
+
+---
+
+(program
+  (call_method
+    name: (name)))
+
+==================
+method call with single parameter
+==================
+
+meth( a ).
+
+---
+
+(program
+  (call_method
+    name: (name)
+    parameters: (name)))
+
+==================
+method call with multiple parameters
+==================
+
+meth( a = b c = d ).
+
+---
+
+(program
+  (call_method
+    name: (name)
+    parameters: (parameter_list
+      (parameter_binding
+        formal_parameter: (name)
+        actual_parameter: (name))
+      (parameter_binding
+        formal_parameter: (name)
+        actual_parameter: (name)))))
+
+==================
+method call with explicit exporting parameters
+==================
+
+meth( exporting a = b c = d ).
+
+---
+
+(program
+  (call_method
+    name: (name)
+    parameters: (parameter_list
+      (parameter_binding
+        formal_parameter: (name)
+        actual_parameter: (name))
+      (parameter_binding
+        formal_parameter: (name)
+        actual_parameter: (name)))))
+
+==================
+method call with explicit mixed parameters
+==================
+
+meth( exporting a = b c = d
+      importing e = f g = h ).
+
+---
+(program
+  (call_method
+    name: (name)
+    parameters: (parameter_list
+      (parameter_binding
+        formal_parameter: (name)
+        actual_parameter: (name))
+      (parameter_binding
+        formal_parameter: (name)
+        actual_parameter: (name)))
+    parameters: (parameter_list
+      (parameter_binding
+        formal_parameter: (name)
+        actual_parameter: (name))
+      (parameter_binding
+        formal_parameter: (name)
+        actual_parameter: (name)))))
+
+==================
+static method call 
+==================
+
+a=>meth( ).
+
+---
+
+(program
+  (call_method_static
+    class_name: (name)
+    method_name: (name)))
+
+==================
+static method call with multiple explicit parameters
+==================
+
+a=>meth(  exporting a = b c = d
+          importing e = f g = h ).
+
+---
+
+(program
+  (call_method_static
+    class_name: (name)
+    method_name: (name)
+    parameters: (parameter_list
+      (parameter_binding
+        formal_parameter: (name)
+        actual_parameter: (name))
+      (parameter_binding
+        formal_parameter: (name)
+        actual_parameter: (name)))
+    parameters: (parameter_list
+      (parameter_binding
+        formal_parameter: (name)
+        actual_parameter: (name))
+      (parameter_binding
+        formal_parameter: (name)
+        actual_parameter: (name)))))
+
+==================
+instance method call 
+==================
+
+a->meth( ).
+
+---
+
+(program
+  (call_method_instance
+    instance_name: (name)
+    method_name: (name)))
+
+==================
+TODO: should disallow expressions on rhs of importing, changing, receiving
+==================

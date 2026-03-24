@@ -1,0 +1,12 @@
+{
+  "query": {
+    "pattern": "kind:function AND name:does_not_exist",
+    "execution_time_ms": 1.935556
+  },
+  "stats": {
+    "total_matches": 0,
+    "returned": 0,
+    "truncated": false
+  },
+  "results": []
+}
