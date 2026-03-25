@@ -1,0 +1,98 @@
+==================
+try catch statement empty
+==================
+
+try.
+endtry.
+
+---
+
+(program
+  (try_catch_statement))
+
+==================
+try catch statement simple catch
+==================
+
+try.
+  catch cx_class.
+endtry.
+
+---
+
+(program
+  (try_catch_statement
+    (catch_statement
+      exception: (name))))
+
+==================
+try catch statement with multiple catch
+==================
+
+try.
+  catch cx_class1.
+  catch cx_class2.
+endtry.
+
+---
+
+(program
+  (try_catch_statement
+    (catch_statement
+      exception: (name))
+    (catch_statement
+      exception: (name))))
+
+==================
+try catch statement with try-block
+==================
+
+try.
+  check 1 = 1.
+endtry.
+
+---
+
+(program
+  (try_catch_statement
+    (try_block
+      (check_statement
+        (comparison_expression
+          (numeric_literal)
+          (numeric_literal))))))
+
+==================
+try catch statement with catch-block
+==================
+
+try.
+  catch cx_class.
+    check 1 = 1.
+endtry.
+
+---
+
+(program
+  (try_catch_statement
+    (catch_statement
+      exception: (name)
+      (catch_block
+        (check_statement
+          (comparison_expression
+            (numeric_literal)
+            (numeric_literal)))))))
+
+==================
+try catch statement with catch into oref
+==================
+
+try.
+  catch cx_class into exc.
+endtry.
+
+---
+(program
+  (try_catch_statement
+    (catch_statement
+      exception: (name)
+      oref: (name))))

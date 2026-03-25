@@ -1,0 +1,67 @@
+//! Command implementations
+
+pub mod alias;
+pub mod analyze;
+pub mod ask;
+pub mod batch;
+pub mod cache;
+pub mod completions;
+pub mod config;
+pub mod cycles;
+pub mod diff;
+pub mod duplicates;
+pub mod error;
+pub mod explain;
+pub mod export;
+pub mod graph;
+pub mod hier_search;
+pub mod history;
+pub mod impact;
+pub mod index;
+pub mod insights;
+pub mod mcp;
+pub mod query;
+pub mod repair;
+pub mod search;
+pub mod shell;
+pub mod similar;
+pub mod sort;
+pub mod subgraph;
+pub mod troubleshoot;
+pub mod unused;
+pub mod visualize;
+pub mod watch;
+pub mod workspace;
+
+pub use alias::{run_alias, save_query_alias, save_search_alias};
+pub use analyze::run_analyze;
+pub use ask::run_ask;
+pub use batch::run_batch;
+pub use cache::run_cache;
+pub use completions::run_completions;
+pub use config::{
+    run_config_alias_list, run_config_alias_remove, run_config_alias_set, run_config_get,
+    run_config_init, run_config_set, run_config_show, run_config_validate,
+};
+pub use cycles::run_cycles;
+pub use diff::run_diff;
+pub use duplicates::run_duplicates;
+pub use explain::run_explain;
+pub use export::run_export;
+pub use graph::run_graph;
+pub use hier_search::run_hier_search;
+pub use history::run_history;
+pub use impact::run_impact;
+pub use index::{run_graph_status, run_index, run_index_status, run_update};
+pub use insights::run_insights;
+pub use query::run_query;
+pub use repair::run_repair;
+pub use search::run_search;
+pub use shell::run_shell;
+pub use similar::run_similar;
+pub use subgraph::run_subgraph;
+pub use troubleshoot::run_troubleshoot;
+pub use unused::run_unused;
+pub use visualize::run_visualize;
+pub use watch::execute as run_watch;
+pub use workspace::run_workspace;
