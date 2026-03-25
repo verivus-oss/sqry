@@ -1,0 +1,194 @@
+[workspace]
+resolver = "2"
+members = [
+    "sqry-core",
+    "sqry-cli",
+    "sqry-mcp",
+    "sqry-lang-rust",
+    "sqry-lang-javascript",
+    "sqry-lang-typescript",
+    "sqry-lang-python",
+    "sqry-lang-go",
+    "sqry-lang-java",
+    "sqry-lang-c",
+    "sqry-lang-cpp",
+    "sqry-lang-csharp",
+    "sqry-lang-php",
+    "sqry-lang-sql",
+    "sqry-lang-kotlin",
+    "sqry-lang-lua",
+    "sqry-lang-ruby",
+    "sqry-lang-swift",
+    "sqry-lang-scala",
+    "sqry-lang-elixir",
+    "sqry-lang-r",
+    "sqry-lang-dart",
+    "sqry-lang-terraform",
+    "sqry-lang-puppet",
+    "sqry-lang-pulumi",
+    "sqry-lang-servicenow-xanadu",
+    "sqry-lang-salesforce-apex",
+    "sqry-lang-sap-abap",
+    "sqry-lang-shell",
+    "sqry-lang-html",
+    "sqry-lang-css",
+    "sqry-lang-haskell",
+    "sqry-lang-perl",
+    "sqry-lang-vue",
+    "sqry-lang-svelte",
+    "sqry-lang-groovy",
+    "sqry-lang-zig",
+    "sqry-lsp",
+    "sqry-lang-support",
+    "sqry-tree-sitter-support",
+    "sqry-tree-sitter-fuzz-support",
+    "sqry-test-support",
+    "sqry-test-fixtures",
+    "crates/tree-sitter-vue-sqry",
+    "crates/tree-sitter-svelte-sqry",
+    "crates/tree-sitter-groovy-sqry",
+    "crates/tree-sitter-abap-sqry",
+    "crates/tree-sitter-plsql-sqry",
+    "crates/tree-sitter-kotlin-sqry",
+    "crates/tree-sitter-elixir-sqry",
+    "crates/tree-sitter-perl-sqry",
+    "sqry-lang-oracle-plsql",
+    "sqry-mcp-redaction",
+    "sqry-nl", "sqry-plugin-registry",
+]
+
+[workspace.package]
+version = "4.11.9"
+edition = "2024"
+authors = ["Verivus Pty Ltd"]
+license = "MIT"
+repository = "https://github.com/verivus-oss/sqry"
+homepage = "https://sqry.dev"
+rust-version = "1.90"  # MINIMUM: Rust 1.90+ Edition 2024 required
+
+# Workspace-wide lint configuration
+[workspace.lints.rust]
+# Allow `#[cfg(fuzzing)]` for cargo-fuzz targets.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(disabled)', 'cfg(fuzzing)'] }
+
+[workspace.dependencies]
+# Core dependencies
+anyhow = "1.0"
+thiserror = "2.0"
+miette = { version = "7.4", features = ["fancy"] }
+tree-sitter = "0.26"
+# Note: tree-sitter 0.26 supports both ABI 14 (0.23.x grammars) and ABI 15 (1.x grammars)
+
+# CLI dependencies
+clap = { version = "4.5", features = ["derive", "env"] }
+colored = "2.1"
+
+# Serialization
+serde = { version = "1.0", features = ["derive", "rc"] }  # rc enables Arc serialization
+serde_json = "1.0"
+serde_bytes = "0.11"  # Efficient byte slice serialization (P2-8 warm images)
+toml = "1.0"  # TOML parsing for config files ( Phase 3.2)
+postcard = { version = "1", default-features = false, features = ["use-std", "alloc"] }
+hex = "0.4"  # Hex encoding/decoding for hash representations
+
+# Time handling
+chrono = { version = "0.4", features = ["serde"] }
+
+# Regex
+regex = "1.11"
+fancy-regex = "0.13"  # Supports lookahead/lookbehind (FT-C.1)
+
+# Fuzzy string matching
+rapidfuzz = "0.5"
+
+# Search & file handling
+grep = "0.3"
+grep-regex = "0.1"
+grep-searcher = "0.1"
+ignore = "0.4"
+globset = "0.4"
+walkdir = "2.5"
+tempfile = "3.10"
+
+# Caching & performance
+lru = "0.16"
+dashmap = "6.1"
+memmap2 = "0.9"
+parking_lot = "0.12"
+semver = "1.0"
+blake3 = "1.5"  # Fast cryptographic hashing for cache keys
+zstd = "0.13.3"   # Fast compression for index files (pinned for reproducibility)
+cacache = { version = "13", default-features = false, features = ["mmap", "tokio-runtime"] }
+
+# Parallel processing
+rayon = "1.10"
+crossbeam-queue = "0.3"
+crossbeam-channel = "0.5"
+
+# Lazy static initialization
+once_cell = "1.20"
+sha2 = "0.10"
+
+# Logging
+log = "0.4"
+env_logger = { version = "0.11", default-features = false, features = ["auto-color", "regex"] }
+tokio = { version = "1.39", features = ["rt-multi-thread", "macros", "signal", "net", "io-std", "io-util", "time"] }
+tower-lsp = "0.20"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+
+# Streaming iterator (used by tree-sitter)
+streaming-iterator = "0.1"
+
+# Tree-sitter language grammars (pinned versions - adjusted for compatibility)
+# Note: All grammars using 0.23.x for tree-sitter 0.24 compatibility
+tree-sitter-rust = "0.24.1"
+tree-sitter-javascript = "0.23.0"  # Updated from 0.21.4 due to cc dependency conflict
+tree-sitter-typescript = "0.23.0"
+tree-sitter-python = "0.23.0"     # Updated from 0.21.0 for consistency
+tree-sitter-go = "0.23.1"
+tree-sitter-java = "0.23.4"       # Java language support (Tier 1 priority)
+tree-sitter-c = "0.23.1"          # C language support (Tier 1 priority)
+tree-sitter-cpp = "0.23.1"        # C++ language support (Tier 1 priority)
+tree-sitter-c-sharp = "0.23.1"    # C# language support (Tier 1 priority)
+tree-sitter-php = "0.24.2"        # PHP language support (Phase 2 priority)
+tree-sitter-sequel = "0.3.11"     # SQL language support (PL/pgSQL)
+# tree-sitter-kotlin: vendored as crates/tree-sitter-kotlin-sqry
+tree-sitter-lua = "0.2.0"                # Lua language support (Phase 1 Tier 2)
+tree-sitter-ruby = "0.23.1"       # Ruby language support (Phase 1 Tier 2)
+tree-sitter-swift = "0.7.1"       # Swift language support (Phase 1 Tier 2)
+tree-sitter-scala = "0.25.0"      # Scala language support (Phase 1 Tier 2)
+tree-sitter-r = "1.2.0"           # R language support (Phase 1 Tier 2)
+tree-sitter-hcl = "1.1.0"
+tree-sitter-puppet = "1.3.0"
+tree-sitter-yaml = "0.6.1"
+tree-sitter-json = "0.23.0"
+tree-sitter-bash = "0.23.2"
+# tree-sitter-elixir: vendored as crates/tree-sitter-elixir-sqry
+tree-sitter-html = "0.23.0"
+tree-sitter-css = "0.23.0"
+tree-sitter-haskell = "0.23.0"
+# tree-sitter-perl: vendored as crates/tree-sitter-perl-sqry
+tree-sitter-zig = "1.1.2"         # Zig language support (Phase 2 Tier 2)
+
+[patch.crates-io]
+ssri = { path = "third-party/ssri" }
+lsp-types = { path = "third-party/lsp-types" }
+kqueue-sys = { path = "third-party/kqueue-sys" }
+tower-lsp = { path = "third-party/tower-lsp" }
+jobserver = { path = "third-party/jobserver" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 16
+strip = true
+debug = false
+opt-level = 3
+panic = "abort"
+
+[profile.dev]
+opt-level = 0
+debug = true
+
+[profile.bench]
+inherits = "release"

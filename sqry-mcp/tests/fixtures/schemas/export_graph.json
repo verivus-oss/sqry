@@ -1,0 +1,75 @@
+{
+  "description": "At least one of file_path or symbol_name must be provided.",
+  "properties": {
+    "file_path": {
+      "description": "Workspace-relative file path containing seed symbols",
+      "type": "string"
+    },
+    "format": {
+      "default": "json",
+      "enum": [
+        "json",
+        "dot",
+        "d2",
+        "mermaid"
+      ],
+      "type": "string"
+    },
+    "include": {
+      "description": "Edge kinds to include (default: calls only)",
+      "items": {
+        "enum": [
+          "calls",
+          "imports",
+          "exports",
+          "returns"
+        ],
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "languages": {
+      "description": "Optional language filter for nodes (e.g., ['JavaScript','Python'])",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "max_depth": {
+      "default": 2,
+      "maximum": 5,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "max_results": {
+      "default": 1000,
+      "maximum": 5000,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "page_size": {
+      "default": 200,
+      "maximum": 1000,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "page_token": {
+      "type": "string"
+    },
+    "path": {
+      "default": ".",
+      "description": "Workspace-relative directory",
+      "type": "string"
+    },
+    "symbol_name": {
+      "description": "Seed symbol qualified name or simple name",
+      "type": "string"
+    },
+    "verbose": {
+      "default": false,
+      "description": "Include more node/edge details and labels in rendered formats",
+      "type": "boolean"
+    }
+  },
+  "type": "object"
+}
