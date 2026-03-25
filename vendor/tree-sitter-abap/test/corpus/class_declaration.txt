@@ -1,0 +1,141 @@
+==================
+class declaration
+==================
+
+class class definition.
+endclass.
+
+---
+(program
+  (class_declaration
+    name: (name)))
+
+==================
+class declaration empty visibility sections
+==================
+
+class class definition.
+  public section.
+  protected section.
+  private section.
+endclass.
+
+---
+(program
+  (class_declaration
+    name: (name)
+    (public_section)
+    (protected_section)
+    (private_section)))
+
+==================
+class declaration with class components within visibility sections
+==================
+
+class class definition.
+  public section.
+    data var1 type t1. 
+  protected section.
+    data var2 type t2.
+  private section.
+    data var3 type t3.
+endclass.
+
+---
+(program
+  (class_declaration
+    name: (name)
+    (public_section
+      (variable_declaration
+        name: (name)
+        typing: (typing
+          (type))))
+    (protected_section
+      (variable_declaration
+        name: (name)
+        typing: (typing
+          (type))))
+    (private_section
+      (variable_declaration
+        name: (name)
+        typing: (typing
+          (type))))))
+
+==================
+class declaration with class options
+==================
+
+class class definition 
+  public
+  inheriting from superclass
+  abstract
+  final
+  create public
+  shared memory enabled
+  global friends class1 intf1.
+  
+endclass.
+
+---
+(program
+  (class_declaration
+    name: (name)
+    superclass: (name)
+    friends: (name)
+    friends: (name)))
+
+==================
+class declaration with create class option
+==================
+
+class class definition
+  create public.
+  
+endclass.
+
+class class definition
+  create protected.
+  
+endclass.
+
+class class definition
+  create private.
+  
+endclass.
+
+---
+(program
+  (class_declaration
+    name: (name))
+  (class_declaration
+    name: (name))
+  (class_declaration
+    name: (name)))
+
+==================
+TODO: class declaration for testing
+:skip
+==================
+
+class class definition 
+  for testing.
+  
+endclass.
+
+---
+
+(program)
+
+==================
+TODO: class declaration for behavior definition
+:skip
+==================
+
+class class definition 
+  for behavior of bdef.
+  
+endclass.
+
+---
+
+(program)

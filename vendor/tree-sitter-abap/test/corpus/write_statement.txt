@@ -1,0 +1,35 @@
+==================
+write data object
+==================
+
+write a.
+
+---
+
+(program
+  (write_statement
+    (name)))
+
+==================
+write character literal
+==================
+
+write 'hello'.
+
+---
+
+(program
+  (write_statement
+    (character_literal)))
+
+==================
+write character literal after line break
+==================
+
+write / 'hello'.
+
+---
+
+(program
+  (write_statement
+    (character_literal)))

@@ -1,0 +1,38 @@
+[package]
+name = "sqry-lang-rust"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Rust language plugin for sqry"
+
+[dependencies]
+sqry-core = { version = "4.10.0", path = "../sqry-core" }
+anyhow.workspace = true
+tree-sitter.workspace = true
+tree-sitter-rust.workspace = true
+streaming-iterator.workspace = true
+xxhash-rust = { version = "0.8", features = ["xxh64"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+lsp-types = "0.97"
+log.workspace = true
+
+[dev-dependencies]
+sqry-core = { path = "../sqry-core", features = ["test-support"] }
+sqry-test-support = { path = "../sqry-test-support" }
+criterion = "0.8"
+insta = "1.40"
+sqry-tree-sitter-fuzz-support = { path = "../sqry-tree-sitter-fuzz-support" }
+tempfile = "3.14"
+serial_test = "3.0"
+
+[features]
+default = ["has_relations"]
+has_relations = []
+
+[[bench]]
+name = "rust_relations"
+harness = false

@@ -1,0 +1,76 @@
+[package]
+name = "sqry-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "CLI for sqry - semantic code search"
+
+[[bin]]
+name = "sqry"
+path = "src/main.rs"
+
+[features]
+default = []
+# Enable MiniLM-L6-v2 ONNX intent classifier (adds ~57MB to binary, requires ONNX Runtime)
+nl-classifier = ["sqry-nl/classifier"]
+# Enable anonymous usage snapshot sharing (enables sqry-core/share)
+share = ["sqry-core/share"]
+
+[dependencies]
+sqry-core = { version = "4.10.0", path = "../sqry-core", features = ["uses", "insights", "troubleshoot"] }
+sqry-lsp = { version = "4.10.0", path = "../sqry-lsp" }
+sqry-plugin-registry = { version = "4.10.0", path = "../sqry-plugin-registry" }
+sqry-nl = { version = "4.10.0", path = "../sqry-nl", default-features = false }
+anyhow.workspace = true
+miette.workspace = true
+once_cell.workspace = true
+clap.workspace = true
+clap_complete = "4.5"
+colored.workspace = true
+serde_json.workspace = true
+serde.workspace = true
+toml.workspace = true
+regex.workspace = true
+ignore.workspace = true
+chrono.workspace = true
+postcard.workspace = true
+dirs = "6.0"
+parking_lot.workspace = true
+indicatif = "0.18.3"
+rayon.workspace = true
+log.workspace = true
+crossbeam-channel.workspace = true
+rustyline = "17"
+walkdir.workspace = true
+which = "7"
+toml_edit = "0.22"
+tree-sitter.workspace = true
+lru.workspace = true
+sha2.workspace = true
+hex.workspace = true
+notify = { version = "8.2", default-features = false, features = ["macos_fsevent"] }
+# P2-29: Paging support
+is-terminal = "0.4"      # TTY detection
+terminal_size = "0.4"    # Cross-platform terminal size detection
+shlex = "1.3"            # Shell-style command parsing
+unicode-width = "0.2"    # Unicode-aware displayed width calculation
+
+[target.'cfg(target_env = "musl")'.dependencies]
+tikv-jemallocator = "0.6"
+tikv-jemalloc-sys = { version = "0.6", features = ["unprefixed_malloc_on_supported_platforms"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3.14"
+assert_cmd = "2.0"
+predicates = "3.0"
+sqry-core = { path = "../sqry-core", features = ["test-support"] }
+postcard.workspace = true
+trycmd = "0.15"
+serial_test = "3.0"
+tree-sitter-rust.workspace = true
