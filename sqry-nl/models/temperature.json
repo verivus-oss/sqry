@@ -1,0 +1,21 @@
+{
+  "temperature": 0.4274932135660633,
+  "metrics": {
+    "accuracy": 0.998,
+    "ece_before": 0.11927086130902176,
+    "ece_after": 0.0006331414654850544,
+    "mce_before": 0.5591111481189728,
+    "mce_after": 0.4997817873954773
+  },
+  "calibration_samples": 8000,
+  "intent_labels": [
+    "SymbolQuery",
+    "TextSearch",
+    "TracePath",
+    "FindCallers",
+    "FindCallees",
+    "Visualize",
+    "IndexStatus",
+    "Ambiguous"
+  ]
+}

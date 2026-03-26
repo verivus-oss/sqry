@@ -1,0 +1,39 @@
+{
+  "properties": {
+    "file_path": {
+      "description": "Workspace-relative file path",
+      "type": "string"
+    },
+    "max_depth": {
+      "default": 2,
+      "maximum": 5,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "max_results": {
+      "default": 500,
+      "maximum": 5000,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "page_size": {
+      "default": 100,
+      "maximum": 1000,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "page_token": {
+      "type": "string"
+    },
+    "path": {
+      "default": ".",
+      "description": "Workspace-relative directory",
+      "type": "string"
+    },
+    "symbol_name": {
+      "description": "Optional symbol name to focus on",
+      "type": "string"
+    }
+  },
+  "type": "object"
+}

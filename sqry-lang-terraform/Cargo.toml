@@ -1,0 +1,27 @@
+[package]
+name = "sqry-lang-terraform"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Terraform (HCL) language plugin for sqry"
+
+[dependencies]
+sqry-core = { version = "4.10.0", path = "../sqry-core" }
+anyhow.workspace = true
+thiserror.workspace = true
+tree-sitter.workspace = true
+tree-sitter-hcl.workspace = true
+serde.workspace = true
+streaming-iterator.workspace = true
+
+[dev-dependencies]
+sqry-tree-sitter-fuzz-support = { path = "../sqry-tree-sitter-fuzz-support" }
+sqry-core = { path = "../sqry-core", features = ["test-support"] }
+tempfile.workspace = true
+
+[features]
+default = ["has_relations"]
+has_relations = []

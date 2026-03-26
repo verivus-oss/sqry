@@ -1,0 +1,470 @@
+# release-manifest.toml — Single source of truth for OSS release sanitization
+#
+# Design: default-deny. Anything not explicitly listed as public is excluded.
+# Both sanitize-for-oss.sh and validate-sanitization.sh read this file.
+# CI enforces bidirectional set-equality between manifest and repo.
+#
+# Conventions:
+#   - All paths are repo-relative
+#   - Directories end with /
+#   - Files are full repo-relative paths (no bare filenames except root_files)
+#   - No glob patterns in selection (explicit listing only)
+
+[manifest]
+version = 4
+default = "deny"
+
+# ============================================================
+# SELECTION POLICY — what survives sanitization
+# ============================================================
+
+# Workspace crates
+# CI: set_eq(cargo_metadata_members, crates.public ∪ crates.excluded)
+[selection.crates]
+public = [
+    # sqry core + CLI + servers (6)
+    "sqry-cli/",
+    "sqry-core/",
+    "sqry-lsp/",
+    "sqry-mcp/",
+    "sqry-mcp-redaction/",
+    "sqry-nl/",
+
+    # Infrastructure (5)
+    "sqry-lang-support/",
+    "sqry-plugin-registry/",
+    "sqry-test-fixtures/",
+    "sqry-test-support/",
+    "sqry-tree-sitter-fuzz-support/",
+    "sqry-tree-sitter-support/",
+
+    # Language plugins (35)
+    "sqry-lang-c/",
+    "sqry-lang-cpp/",
+    "sqry-lang-csharp/",
+    "sqry-lang-css/",
+    "sqry-lang-dart/",
+    "sqry-lang-elixir/",
+    "sqry-lang-go/",
+    "sqry-lang-groovy/",
+    "sqry-lang-haskell/",
+    "sqry-lang-html/",
+    "sqry-lang-java/",
+    "sqry-lang-javascript/",
+    "sqry-lang-json/",
+    "sqry-lang-kotlin/",
+    "sqry-lang-lua/",
+    "sqry-lang-oracle-plsql/",
+    "sqry-lang-perl/",
+    "sqry-lang-php/",
+    "sqry-lang-pulumi/",
+    "sqry-lang-puppet/",
+    "sqry-lang-python/",
+    "sqry-lang-r/",
+    "sqry-lang-ruby/",
+    "sqry-lang-rust/",
+    "sqry-lang-salesforce-apex/",
+    "sqry-lang-sap-abap/",
+    "sqry-lang-scala/",
+    "sqry-lang-servicenow-xanadu/",
+    "sqry-lang-shell/",
+    "sqry-lang-sql/",
+    "sqry-lang-svelte/",
+    "sqry-lang-swift/",
+    "sqry-lang-terraform/",
+    "sqry-lang-typescript/",
+    "sqry-lang-vue/",
+    "sqry-lang-zig/",
+
+    # Vendored tree-sitter grammars (8)
+    "crates/tree-sitter-abap-sqry/",
+    "crates/tree-sitter-elixir-sqry/",
+    "crates/tree-sitter-groovy-sqry/",
+    "crates/tree-sitter-kotlin-sqry/",
+    "crates/tree-sitter-perl-sqry/",
+    "crates/tree-sitter-plsql-sqry/",
+    "crates/tree-sitter-svelte-sqry/",
+    "crates/tree-sitter-vue-sqry/",
+]
+excluded = [
+    "tools/detection-corpus-validator/",
+    "tools/graphsync/",
+    "tools/naming-audit/",
+    "tools/slopscan/",
+    "benchmarks/",
+]
+
+# .cargo/ files
+# CI: set_eq(ls .cargo/*, cargo.public)
+[selection.cargo]
+public = [".cargo/config.toml", ".cargo/audit.toml"]
+
+# .github/ — full accounting
+# CI: set_eq(ls .github/workflows/*.yml, workflows_public ∪ workflows_excluded)
+# CI: set_eq(immediate children of .github/ excl workflows/, configs_public ∪ configs_excluded)
+[selection.github]
+configs_public = [".github/dependabot.yml"]
+configs_excluded = [".github/codeql/"]
+workflows_public = [
+    ".github/workflows/ci.yml",
+    ".github/workflows/codeql.yml",
+    ".github/workflows/oss-leg3-release.yml",
+    ".github/workflows/oss-release-watchdog.yml",
+    ".github/workflows/publish-crates.yml",
+    ".github/workflows/sbom-vex.yml",
+    ".github/workflows/version-sync.yml",
+]
+workflows_excluded = [
+    ".github/workflows/bench-full.yml",
+    ".github/workflows/benchmark-pr.yml",
+    ".github/workflows/bench-smoke.yml",
+    ".github/workflows/compression-gates.yml",
+    ".github/workflows/core-nightly.yml",
+    ".github/workflows/coverage.yml",
+    ".github/workflows/fuzz-all-buildjet.yml",
+    ".github/workflows/fuzz-extended-buildjet.yml",
+    ".github/workflows/fuzz-extended-onetime.yml",
+    ".github/workflows/fuzz-mcp-lsp.yml",
+    ".github/workflows/fuzz-test.yml",
+    ".github/workflows/geiger-unsafe-audit.yml",
+    ".github/workflows/miri-unsafe-check.yml",
+    ".github/workflows/mutation-testing.yml",
+    ".github/workflows/naming-conventions.yml",
+    ".github/workflows/oss-docs-sync.yml",
+    ".github/workflows/oss-leg1-sanitize.yml",
+    ".github/workflows/oss-pipeline-test-cleanup.yml",
+    ".github/workflows/oss-release-dryrun-pr.yml",
+    ".github/workflows/oss-leg2-publish.yml",
+    ".github/workflows/oss-release.yml",
+    ".github/workflows/oss-rollback.yml",
+    ".github/workflows/oss-smoke-tests.yml",
+    ".github/workflows/perf-nightly.yml",
+    ".github/workflows/publish-mcp-registry.yml",
+    ".github/workflows/release-signing.yml",
+    ".github/workflows/security-quarterly-audit.yml",
+    ".github/workflows/signing-smoke.yml",
+    ".github/workflows/temp-ci-auto-rebuild.yml",
+    ".github/workflows/temp-ci-lock-race.yml",
+    ".github/workflows/test-action.yml",
+    ".github/workflows/website.yml",
+]
+
+# tools/ — each immediate child classified
+# CI: set_eq(ls tools/*/, tools.public ∪ tools.excluded)
+[selection.tools]
+public = []  # Empty after sqry-vscode promotion to top-level
+excluded = [
+    "tools/detection-corpus-validator/",
+    "tools/graphsync/",
+    "tools/naming-audit/",
+    "tools/slopscan/",
+    "tools/sonarqube/",
+    "tools/tests/",
+]
+
+# docs/ — default-deny scope
+# CI: every file in sanitized docs/ must be in files_public or under dirs_public
+[selection.docs]
+files_public = ["docs/FEATURE_LIST.md", "docs/SCHEMA.md"]
+dirs_public = ["docs/user-guide/"]
+
+# Non-crate top-level directories
+[selection.dirs]
+public = [
+    "crates/",
+    "third-party/",
+    "test-fixtures/",
+    "tests/",
+    "vendor/",
+    "assets/",
+    "supply-chain/",
+    ".openvex/",
+    "sqry-vscode/",  # Promoted from tools/
+]
+
+# scripts/ — default-deny scope
+# CI: every file in sanitized scripts/ must be in scripts.public
+[selection.scripts]
+public = [
+    "scripts/install.sh",
+    "scripts/install.ps1",
+    "scripts/sync-versions.sh",
+    "scripts/release/check-workflow-contracts.sh",
+    "scripts/release/render-distribution-configs.sh",
+]
+
+# Root files (depth-0 tracked files only, excluding dotfile directories)
+# CI: set_eq(git ls-files --cached | grep -v /, root_files.public ∪ root_files.excluded)
+[selection.root_files]
+public = [
+    ".gitattributes",
+    ".gitignore",
+    "Cargo.lock",
+    "Cargo.toml",
+    "CHANGELOG.md",
+    "clippy.toml",
+    "CONTRIBUTING.md",
+    "deny.toml",
+    "ERRATA.md",
+    "LICENSE",
+    "LICENSE-MIT",
+    "Makefile",
+    "QUICKSTART.md",
+    "README.md",
+    "release-manifest.toml",
+    "rust-toolchain.toml",
+    "rustfmt.toml",
+    "THIRD-PARTY-LICENSES",
+    "TRADEMARK.md",
+]
+excluded = [
+    ".codexignore",
+    ".dockerignore",
+    ".env.test",
+    ".sqry-config.toml.example",
+    "action.yml",
+    "CHANGELOG_UPDATED.md",
+    "check_apex_ast.rs",
+    "CLAUDE.md",
+    "CODEX_REVIEW_REQUEST_SQRYD_ITERATION3.md",
+    "CODEX_REVIEW_REQUEST_SQRYD_ITERATION3_review.md",
+    "claude_baseline.claude_baseline.json",
+    "claude_treatment_sqry.claude_treatment.json",
+    "clippy-large.json",
+    "CODEX.md",
+    "comment_inventory.tsv",
+    "CONFIGURATION_TUNING_GUIDE.md",
+    "CONSTANTS_ANALYSIS_INDEX.md",
+    "CONTRIBUTORS.md",
+    "debug",
+    "err.txt",
+    "export_code_comments.py",
+    "GEMINI.md",
+    "graphsync.toml",
+    "HARDCODED_CONSTANTS_ANALYSIS.md",
+    "merge_manual_edges.py",
+    "node24_actions_migration_claude_review.md",
+    "out.txt",
+    "PHP_QUALIFIED_NAME_RESOLUTION_FIX_SUMMARY.md",
+    "REBRANDING_COMPLETE.md",
+    "RELEASE_NOTES_v0.14.0.md",
+    "RELEASE_NOTES_v0.15.0.md",
+    "RELEASE_NOTES_v1.18.0.md",
+    "RELEASE_NOTES_v1.8.0.md",
+    "RELEASE_v0.8.0.md",
+    "remove_mcp_servers.py",
+    "review_response_gemini.md",
+    "RKG_BETA_READINESS_IMPLEMENTATION_20251120.md",
+    "slopscan-low.json",
+    "sonar-project.properties",
+    "sqryd_daemon_plan_review_pre_gemini_iter1_019d059d-6ab1-7000-b7f6-b44f1bb9d423.md",
+    "sqryd_daemon_plan_review_request_pre_gemini.md",
+    "sqryd_daemon_plan_review_request_pre_gemini_iter1_019d059d-6ab1-7000-b7f6-b44f1bb9d423.md",
+    "sqryd_daemon_spec_review_request.md",
+    "sqryd_daemon_spec_review_request_review.md",
+    "spike-results-modernbert.log",
+    "split_comments_by_file.py",
+    "TASK_6_PROGRESS_UPDATE.md",
+    "TASK_6_STATUS.md",
+    "test_apex_grammar.rs",
+    "test_apex_interface_enum.cls",
+    "unmapped_reqs.txt",
+    "update_claude_mcp.py",
+    "vet_exemption_version_sync_automation_claude_followup_review.md",
+    "vet_exemption_version_sync_automation_claude_review.md",
+    "V1.20.0_BENCHMARK_REPORT.txt",
+    "validate_manual_edges.py",
+    "validate_rkg.py",
+    "verify_req_mapping.py",
+    "verify_req_mapping_corrected.py",
+]
+
+# ============================================================
+# REWRITE POLICY — org reference transformation rules
+# Used by sanitize-for-oss.sh (Phase 8) and oss-leg2-publish.yml
+# ============================================================
+
+[rewrite]
+# Files completely exempt from ALL org-name rewriting.
+# These contain canonical references (Azure OIDC subjects, KV names,
+# grep validation patterns) that must not be transformed.
+exempt_paths = [
+    ".github/workflows/oss-leg3-release.yml",
+    ".github/workflows/publish-crates.yml",
+]
+
+# Files that legitimately reference the public org (verivus-oss) even
+# in the staging tree. The sanitizer's "wrong-target org" scan skips these.
+public_org_in_staging = [
+    ".github/workflows/oss-leg3-release.yml",
+    ".github/workflows/publish-crates.yml",
+    "scripts/install.sh",
+    "scripts/install.ps1",
+    "scripts/sync-versions.sh",
+    "scripts/release/render-distribution-configs.sh",
+]
+
+# Org replacement rules applied in order during sanitization.
+# Each rule: source pattern -> replacement, with file scope.
+[[rewrite.rules]]
+description = "GitHub repo URLs"
+pattern = "verivus-oss/sqry"
+replacement = "verivus-oss/sqry"
+file_types = ["*.rs", "*.md", "*.toml", "*.yml", "*.yaml", "*.json", "*.sh", "*.properties"]
+
+[[rewrite.rules]]
+description = "GitHub Pages URLs"
+pattern = "verivus-oss.github.io"
+replacement = "verivus-oss.github.io"
+file_types = ["*.md", "*.html"]
+
+[[rewrite.rules]]
+description = "OCI registry"
+pattern = "ghcr.io/verivus-oss/"
+replacement = "ghcr.io/verivus-oss/"
+file_types = ["*.yml", "*.yaml", "*.json", "*.md"]
+
+[[rewrite.rules]]
+description = "Bare org name (catch-all, runs last)"
+pattern = "verivus-oss"
+replacement = "verivus-oss"
+file_types = ["*.rs", "*.md", "*.toml", "*.yml", "*.yaml", "*.json", "*.sh", "*.properties"]
+
+# Email normalization (separate from org rewrite)
+[[rewrite.email_rules]]
+pattern = ""
+replacement = ""
+file_types = ["*.rs", "*.md", "*.toml"]
+
+[[rewrite.email_rules]]
+pattern = ""
+replacement = "hello@sqry.dev"
+file_types = ["*.rs", "*.md", "*.toml"]
+
+[[rewrite.email_rules]]
+pattern = ""
+replacement = ""
+file_types = ["*.rs", "*.md", "*.toml"]
+
+# Internal comment markers to strip
+[rewrite.strip_markers]
+rust = ["// INTERNAL:", "// PROPRIETARY:", "// VERIVUS INTERNAL"]
+markdown = ["<!-- INTERNAL -->", "<!-- /INTERNAL -->", "<!-- PROPRIETARY -->", "<!-- /PROPRIETARY -->"]
+
+# ============================================================
+# PACKAGING POLICY — secondary defense-in-depth for tarball
+# These do NOT drive publication (selection does).
+# These reject unexpected file types within already-public paths.
+# ============================================================
+
+[packaging]
+# Allowed source/config extensions in the tarball.
+# Files in public paths with unlisted extensions are rejected.
+allowed_extensions = [
+    # Rust
+    ".rs",
+    # Build / config
+    ".toml", ".lock", ".yml", ".yaml", ".json", ".jsonl",
+    # Documentation
+    ".md", ".txt",
+    # C / C++ (tree-sitter grammars)
+    ".c", ".h", ".cc",
+    # Tree-sitter queries
+    ".scm",
+    # Web (sqry-vscode)
+    ".ts", ".js", ".css", ".html", ".svg",
+    # Shell / scripts
+    ".sh", ".ps1", ".bat",
+    # Test fixtures — language source files
+    ".py", ".rb", ".go", ".java", ".kt", ".scala", ".swift",
+    ".php", ".pl", ".pm", ".r", ".lua", ".zig", ".hs",
+    ".ex", ".exs", ".erl", ".lhs",
+    ".R", ".Rmd",
+    ".cs", ".fs",
+    ".dart", ".groovy", ".gradle",
+    ".tf", ".hcl",
+    ".sql", ".plsql",
+    ".cls", ".trigger", ".apex",
+    ".abap",
+    ".vue", ".svelte",
+    ".cpp", ".cxx", ".hpp",
+    ".m", ".mm",
+    # Test snapshot / CLI integration
+    ".snap", ".trycmd",
+    ".stderr", ".stdout",
+    # Emacs Lisp (vendor grammars)
+    ".el",
+    # Config / data
+    ".xml", ".xsl", ".xsd", ".dtd",
+    ".ini", ".cfg", ".conf",
+    ".editorconfig",
+    ".csv",
+    # AI / ML models
+    ".onnx",
+    # SBOM / VEX
+    ".cdx", ".vex",
+    # Puppet
+    ".pp",
+    # Docker
+    ".dockerfile",
+    # Makefile (no extension — handled by name, not here)
+]
+
+# Dotfiles allowed in tarball
+allowed_dotfiles = [
+    ".gitignore",
+    ".gitattributes",
+    ".dockerignore",
+    ".vscodeignore",
+    ".npmignore",
+    ".prettierrc",
+]
+
+# Binary assets explicitly staged (not covered by extension guard)
+# Glob patterns relative to repo root.
+binary_assets = [
+    "sqry-vscode/media/*.png",
+    "assets/*.png",
+    "assets/*.svg",
+    "sqry-nl/models/*.onnx",
+]
+
+# Named release artifacts (built by Leg 3, not in source tree)
+# {VERSION} is replaced with the bare version (e.g., 4.11.0)
+[packaging.release_artifacts]
+include = [
+    "sqry-{VERSION}-linux-x86_64.tar.gz",
+    "sqry-{VERSION}-linux-arm64.tar.gz",
+    "sqry-{VERSION}-macos-arm64.tar.gz",
+    "sqry-{VERSION}-windows-x86_64.msi",
+    "sqry-{VERSION}-windows-x86_64.zip",
+    "sqry-{VERSION}-macos-arm64.pkg",
+    "sqry_{VERSION}_amd64.deb",
+    "sqry_{VERSION}_arm64.deb",
+    "sqry-{VERSION}-1.x86_64.rpm",
+    "sqry-{VERSION}-1.aarch64.rpm",
+    "sqry-vscode-{VERSION}.vsix",
+]
+
+# ============================================================
+# SCANNING POLICY — secret/leak detection
+# Each exception: path, line_pattern, detector, justification, owner, expires
+# ============================================================
+
+[scanning.secret_exceptions]
+
+[[scanning.secret_exceptions.entries]]
+path = "sqry-cli/src/persistence/history.rs"
+line_pattern = "AKIA.*TEST"
+detector = "gitleaks:aws-access-key-id"
+justification = "Fake test credentials for history encryption unit tests"
+owner = "sqry-cli"
+expires = "2027-01-01"
+
+[[scanning.secret_exceptions.entries]]
+path = "sqry-nl/models/checksums.json"
+line_pattern = "[a-f0-9]{64}"
+detector = "gitleaks:generic-api-key"
+justification = "SHA256 model checksums, not secrets"
+owner = "sqry-nl"
+expires = "2027-01-01"

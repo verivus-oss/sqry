@@ -1,0 +1,52 @@
+{
+  "properties": {
+    "max_results": {
+      "default": 20,
+      "maximum": 200,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "page_size": {
+      "default": 20,
+      "maximum": 200,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "page_token": {
+      "type": "string"
+    },
+    "path": {
+      "default": ".",
+      "description": "Workspace-relative directory scope",
+      "type": "string"
+    },
+    "reference": {
+      "properties": {
+        "file_path": {
+          "description": "Workspace-relative file path containing the reference symbol",
+          "type": "string"
+        },
+        "symbol_name": {
+          "description": "Name of the reference symbol",
+          "type": "string"
+        }
+      },
+      "required": [
+        "file_path",
+        "symbol_name"
+      ],
+      "type": "object"
+    },
+    "similarity_threshold": {
+      "default": 0.7,
+      "description": "Minimum similarity score (0.0-1.0) required for results",
+      "maximum": 1.0,
+      "minimum": 0.0,
+      "type": "number"
+    }
+  },
+  "required": [
+    "reference"
+  ],
+  "type": "object"
+}

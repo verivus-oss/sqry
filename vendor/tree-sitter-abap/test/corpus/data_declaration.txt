@@ -1,0 +1,119 @@
+==================
+TODO: data with built-in numeric types
+:skip
+==================
+
+data a type b.
+data b type s.
+data c type i.
+data d type int8.
+data e type p.
+data f type decfloat16.
+data g type decfloat34.
+data h type f.
+
+---
+
+(program
+  (variable_declaration
+    (name)
+    (abap_type))
+  (variable_declaration
+    (name)
+    (abap_type))
+  (variable_declaration
+    (name)
+    (abap_type))
+  (variable_declaration
+    (name)
+    (abap_type))
+  (variable_declaration
+    (name)
+    (abap_type))
+  (variable_declaration
+    (name)
+    (abap_type))
+  (variable_declaration
+    (name)
+    (abap_type))
+  (variable_declaration
+    (name)
+    (abap_type)))
+
+==================
+data with normal type
+==================
+
+data a type xyz.
+
+---
+
+(program
+  (variable_declaration
+    (name)
+    (typing
+      (type))))
+
+==================
+data with type line of
+==================
+
+data a type line of xyz.
+
+---
+
+(program
+  (variable_declaration
+    (name)
+    (typing
+      (type))))
+
+==================
+data with ref to
+==================
+
+data a type ref to xyz.
+
+---
+
+(program
+  (variable_declaration
+    (name)
+    (typing
+      (type))))
+
+==================
+data with table specification
+==================
+
+data a type standard table of xyz.
+data a type table of xyz.
+
+---
+
+(program
+  (variable_declaration
+    (name)
+    (typing
+      (type)))
+  (variable_declaration
+    (name)
+    (typing
+      (type))))
+
+
+==================
+data with like structure component
+==================
+
+data a like sy-uname.
+
+---
+
+(program
+  (variable_declaration
+    (name)
+    (typing
+      (structured_data_object
+        (structure_name)
+        (component_name)))))

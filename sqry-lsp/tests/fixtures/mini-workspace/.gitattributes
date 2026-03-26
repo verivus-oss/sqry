@@ -1,0 +1,4 @@
+# Force LF line endings for all text files in this fixture.
+# This ensures tree-sitter produces identical byte offsets on all platforms,
+# which is required for deterministic parity test fixtures.
+* text eol=lf

@@ -1,0 +1,31 @@
+---
+source: sqry-lang-python/tests/relations_differential.rs
+expression: normalized
+---
+[
+    (
+        "process",
+        "chain",
+        2,
+    ),
+    (
+        "process",
+        "final",
+        2,
+    ),
+    (
+        "process",
+        "method",
+        2,
+    ),
+    (
+        "process",
+        "save",
+        3,
+    ),
+    (
+        "process",
+        "transform",
+        3,
+    ),
+]

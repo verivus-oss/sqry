@@ -1,0 +1,13 @@
+{
+  "watch": [
+    "grammar.js",
+    "src/scanner.cc",
+    "src/scanner.c",
+    "src/*.h",
+    "src/utils/*.h",
+    "src/*.hh",
+    "test/corpus/*.txt"
+  ],
+  "ext": "txt,js,c,hh,h",
+  "exec": "pnpm gen && pnpm test"
+}
