@@ -1,0 +1,63 @@
+{
+  "properties": {
+    "cross_language": {
+      "default": true,
+      "description": "Include cross-language edges (HTTP, FFI, etc.)",
+      "type": "boolean"
+    },
+    "include_callees": {
+      "default": true,
+      "description": "Include symbols called by the seed symbols",
+      "type": "boolean"
+    },
+    "include_callers": {
+      "default": true,
+      "description": "Include symbols that call the seed symbols",
+      "type": "boolean"
+    },
+    "include_imports": {
+      "default": false,
+      "description": "Include import relationships",
+      "type": "boolean"
+    },
+    "max_depth": {
+      "default": 2,
+      "description": "Maximum traversal depth from seed symbols",
+      "maximum": 5,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "max_nodes": {
+      "default": 50,
+      "description": "Maximum nodes to include (prevents runaway graphs)",
+      "maximum": 500,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "page_size": {
+      "default": 50,
+      "maximum": 200,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "page_token": {
+      "type": "string"
+    },
+    "path": {
+      "default": ".",
+      "description": "Workspace-relative directory",
+      "type": "string"
+    },
+    "symbols": {
+      "description": "Seed symbols to extract context around",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "symbols"
+  ],
+  "type": "object"
+}

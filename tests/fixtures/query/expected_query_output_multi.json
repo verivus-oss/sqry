@@ -1,0 +1,341 @@
+{
+  "query": {
+    "pattern": "kind:function",
+    "execution_time_ms": 1.968075
+  },
+  "stats": {
+    "total_matches": 23,
+    "returned": 23,
+    "truncated": false
+  },
+  "results": [
+    {
+      "name": "<module>",
+      "qualified_name": "<module>",
+      "kind": "function",
+      "file_path": "<WORKSPACE_ROOT>/tests/fixtures/relations/typescript/imports.ts",
+      "start_line": 0,
+      "start_column": 0,
+      "end_line": 0,
+      "end_column": 0,
+      "metadata": {
+        "__raw_file_path": "<WORKSPACE_ROOT>/tests/fixtures/relations/typescript/imports.ts",
+        "__raw_language": "ts"
+      }
+    },
+    {
+      "name": "Helpers",
+      "qualified_name": "Helpers",
+      "kind": "function",
+      "file_path": "<WORKSPACE_ROOT>/tests/fixtures/relations/typescript/exports.ts",
+      "start_line": 0,
+      "start_column": 0,
+      "end_line": 0,
+      "end_column": 0,
+      "metadata": {
+        "__raw_language": "ts",
+        "__raw_file_path": "<WORKSPACE_ROOT>/tests/fixtures/relations/typescript/exports.ts"
+      }
+    },
+    {
+      "name": "Service",
+      "qualified_name": "Service",
+      "kind": "function",
+      "file_path": "<WORKSPACE_ROOT>/tests/fixtures/relations/typescript/calls.ts",
+      "start_line": 0,
+      "start_column": 0,
+      "end_line": 0,
+      "end_column": 0,
+      "metadata": {
+        "__raw_language": "ts",
+        "__raw_file_path": "<WORKSPACE_ROOT>/tests/fixtures/relations/typescript/calls.ts"
+      }
+    },
+    {
+      "name": "bootstrap",
+      "qualified_name": "Helpers.bootstrap",
+      "kind": "function",
+      "file_path": "<WORKSPACE_ROOT>/tests/fixtures/relations/typescript/imports.ts",
+      "start_line": 0,
+      "start_column": 0,
+      "end_line": 0,
+      "end_column": 0,
+      "metadata": {
+        "__raw_file_path": "<WORKSPACE_ROOT>/tests/fixtures/relations/typescript/imports.ts",
+        "__raw_language": "ts"
+      }
+    },
+    {
+      "name": "class Controller {\n  start(): void {\n    run();\n  }\n}",
+      "qualified_name": "class Controller {\n  start(): void {\n    run();\n  }\n}",
+      "kind": "function",
+      "file_path": "<WORKSPACE_ROOT>/tests/fixtures/relations/typescript/exports.ts",
+      "start_line": 0,
+      "start_column": 0,
+      "end_line": 0,
+      "end_column": 0,
+      "metadata": {
+        "__raw_language": "ts",
+        "__raw_file_path": "<WORKSPACE_ROOT>/tests/fixtures/relations/typescript/exports.ts"
+      }
+    },
+    {
+      "name": "compute",
+      "qualified_name": "compute",
+      "kind": "function",
+      "file_path": "<WORKSPACE_ROOT>/tests/fixtures/relations/typescript/calls.ts",
+      "start_line": 0,
+      "start_column": 0,
+      "end_line": 0,
+      "end_column": 0,
+      "metadata": {
+        "__raw_language": "ts",
+        "__raw_file_path": "<WORKSPACE_ROOT>/tests/fixtures/relations/typescript/calls.ts"
+      }
+    },
+    {
+      "name": "defaultLogger",
+      "qualified_name": "defaultLogger",
+      "kind": "function",
+      "file_path": "<WORKSPACE_ROOT>/tests/fixtures/relations/typescript/calls.ts",
+      "start_line": 0,
+      "start_column": 0,
+      "end_line": 0,
+      "end_column": 0,
+      "metadata": {
+        "__raw_file_path": "<WORKSPACE_ROOT>/tests/fixtures/relations/typescript/calls.ts",
+        "__raw_language": "ts"
+      }
+    },
+    {
+      "name": "defaultLogger",
+      "qualified_name": "defaultLogger",
+      "kind": "function",
+      "file_path": "<WORKSPACE_ROOT>/tests/fixtures/relations/typescript/imports.ts",
+      "start_line": 0,
+      "start_column": 0,
+      "end_line": 0,
+      "end_column": 0,
+      "metadata": {
+        "__raw_file_path": "<WORKSPACE_ROOT>/tests/fixtures/relations/typescript/imports.ts",
+        "__raw_language": "ts"
+      }
+    },
+    {
+      "name": "fetchUser",
+      "qualified_name": "fetchUser",
+      "kind": "function",
+      "file_path": "<WORKSPACE_ROOT>/tests/fixtures/relations/typescript/returns.ts",
+      "start_line": 15,
+      "start_column": 0,
+      "end_line": 17,
+      "end_column": 1,
+      "metadata": {
+        "__raw_language": "ts",
+        "__raw_file_path": "<WORKSPACE_ROOT>/tests/fixtures/relations/typescript/returns.ts"
+      }
+    },
+    {
+      "name": "fetchValue",
+      "qualified_name": "fetchValue",
+      "kind": "function",
+      "file_path": "<WORKSPACE_ROOT>/tests/fixtures/relations/typescript/returns.ts",
+      "start_line": 11,
+      "start_column": 7,
+      "end_line": 13,
+      "end_column": 1,
+      "metadata": {
+        "__raw_file_path": "<WORKSPACE_ROOT>/tests/fixtures/relations/typescript/returns.ts",
+        "async": "true",
+        "visibility": "public",
+        "__raw_language": "ts"
+      }
+    },
+    {
+      "name": "getUser",
+      "qualified_name": "getUser",
+      "kind": "function",
+      "file_path": "<WORKSPACE_ROOT>/tests/fixtures/relations/typescript/returns.ts",
+      "start_line": 5,
+      "start_column": 7,
+      "end_line": 7,
+      "end_column": 1,
+      "metadata": {
+        "__raw_language": "ts",
+        "visibility": "public",
+        "__raw_file_path": "<WORKSPACE_ROOT>/tests/fixtures/relations/typescript/returns.ts"
+      }
+    },
+    {
+      "name": "info",
+      "qualified_name": "console.info",
+      "kind": "function",
+      "file_path": "<WORKSPACE_ROOT>/tests/fixtures/relations/typescript/calls.ts",
+      "start_line": 0,
+      "start_column": 0,
+      "end_line": 0,
+      "end_column": 0,
+      "metadata": {
+        "__raw_file_path": "<WORKSPACE_ROOT>/tests/fixtures/relations/typescript/calls.ts",
+        "__raw_language": "ts"
+      }
+    },
+    {
+      "name": "log",
+      "qualified_name": "Helpers.Hub.log",
+      "kind": "function",
+      "file_path": "<WORKSPACE_ROOT>/tests/fixtures/relations/typescript/calls.ts",
+      "start_line": 0,
+      "start_column": 0,
+      "end_line": 0,
+      "end_column": 0,
+      "metadata": {
+        "__raw_file_path": "<WORKSPACE_ROOT>/tests/fixtures/relations/typescript/calls.ts",
+        "__raw_language": "ts"
+      }
+    },
+    {
+      "name": "log",
+      "qualified_name": "console.log",
+      "kind": "function",
+      "file_path": "<WORKSPACE_ROOT>/tests/fixtures/relations/typescript/exports.ts",
+      "start_line": 0,
+      "start_column": 0,
+      "end_line": 0,
+      "end_column": 0,
+      "metadata": {
+        "__raw_language": "ts",
+        "__raw_file_path": "<WORKSPACE_ROOT>/tests/fixtures/relations/typescript/exports.ts"
+      }
+    },
+    {
+      "name": "makeList",
+      "qualified_name": "makeList",
+      "kind": "function",
+      "file_path": "<WORKSPACE_ROOT>/tests/fixtures/relations/typescript/returns.ts",
+      "start_line": 9,
+      "start_column": 24,
+      "end_line": 9,
+      "end_column": 55,
+      "metadata": {
+        "__raw_file_path": "<WORKSPACE_ROOT>/tests/fixtures/relations/typescript/returns.ts",
+        "__raw_language": "ts",
+        "visibility": "public"
+      }
+    },
+    {
+      "name": "persist",
+      "qualified_name": "Service.persist",
+      "kind": "function",
+      "file_path": "<WORKSPACE_ROOT>/tests/fixtures/relations/typescript/calls.ts",
+      "start_line": 0,
+      "start_column": 0,
+      "end_line": 0,
+      "end_column": 0,
+      "metadata": {
+        "__raw_language": "ts",
+        "__raw_file_path": "<WORKSPACE_ROOT>/tests/fixtures/relations/typescript/calls.ts"
+      }
+    },
+    {
+      "name": "process",
+      "qualified_name": "Service.process",
+      "kind": "function",
+      "file_path": "<WORKSPACE_ROOT>/tests/fixtures/relations/typescript/calls.ts",
+      "start_line": 0,
+      "start_column": 0,
+      "end_line": 0,
+      "end_column": 0,
+      "metadata": {
+        "__raw_file_path": "<WORKSPACE_ROOT>/tests/fixtures/relations/typescript/calls.ts",
+        "__raw_language": "ts"
+      }
+    },
+    {
+      "name": "process",
+      "qualified_name": "service.process",
+      "kind": "function",
+      "file_path": "<WORKSPACE_ROOT>/tests/fixtures/relations/typescript/calls.ts",
+      "start_line": 0,
+      "start_column": 0,
+      "end_line": 0,
+      "end_column": 0,
+      "metadata": {
+        "__raw_language": "ts",
+        "__raw_file_path": "<WORKSPACE_ROOT>/tests/fixtures/relations/typescript/calls.ts"
+      }
+    },
+    {
+      "name": "resolve",
+      "qualified_name": "Promise.resolve",
+      "kind": "function",
+      "file_path": "<WORKSPACE_ROOT>/tests/fixtures/relations/typescript/returns.ts",
+      "start_line": 0,
+      "start_column": 0,
+      "end_line": 0,
+      "end_column": 0,
+      "metadata": {
+        "__raw_language": "ts",
+        "__raw_file_path": "<WORKSPACE_ROOT>/tests/fixtures/relations/typescript/returns.ts"
+      }
+    },
+    {
+      "name": "run",
+      "qualified_name": "run",
+      "kind": "function",
+      "file_path": "<WORKSPACE_ROOT>/tests/fixtures/relations/typescript/exports.ts",
+      "start_line": 3,
+      "start_column": 7,
+      "end_line": 5,
+      "end_column": 1,
+      "metadata": {
+        "__raw_file_path": "<WORKSPACE_ROOT>/tests/fixtures/relations/typescript/exports.ts",
+        "__raw_language": "ts",
+        "visibility": "public"
+      }
+    },
+    {
+      "name": "save",
+      "qualified_name": "Repository.save",
+      "kind": "function",
+      "file_path": "<WORKSPACE_ROOT>/tests/fixtures/relations/typescript/calls.ts",
+      "start_line": 0,
+      "start_column": 0,
+      "end_line": 0,
+      "end_column": 0,
+      "metadata": {
+        "__raw_language": "ts",
+        "__raw_file_path": "<WORKSPACE_ROOT>/tests/fixtures/relations/typescript/calls.ts"
+      }
+    },
+    {
+      "name": "start",
+      "qualified_name": "Controller.start",
+      "kind": "function",
+      "file_path": "<WORKSPACE_ROOT>/tests/fixtures/relations/typescript/exports.ts",
+      "start_line": 0,
+      "start_column": 0,
+      "end_line": 0,
+      "end_column": 0,
+      "metadata": {
+        "__raw_language": "ts",
+        "__raw_file_path": "<WORKSPACE_ROOT>/tests/fixtures/relations/typescript/exports.ts"
+      }
+    },
+    {
+      "name": "topLevel",
+      "qualified_name": "topLevel",
+      "kind": "function",
+      "file_path": "<WORKSPACE_ROOT>/tests/fixtures/relations/typescript/calls.ts",
+      "start_line": 25,
+      "start_column": 7,
+      "end_line": 28,
+      "end_column": 1,
+      "metadata": {
+        "__raw_file_path": "<WORKSPACE_ROOT>/tests/fixtures/relations/typescript/calls.ts",
+        "visibility": "public",
+        "__raw_language": "ts"
+      }
+    }
+  ]
+}

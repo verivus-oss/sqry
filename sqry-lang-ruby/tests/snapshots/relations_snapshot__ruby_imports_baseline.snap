@@ -1,0 +1,28 @@
+---
+source: sqry-lang-ruby/tests/relations_snapshot.rs
+expression: normalized
+---
+- - "../lib/my_app"
+  - ~
+  - kind=require_relative
+- - "Audit::Hooks"
+  - Hooks
+  - kind=prepend
+- - CoreExtensions
+  - CoreExtensions
+  - kind=extend
+- - "MyApp::Support::Helpers"
+  - Helpers
+  - kind=include
+- - Service
+  - Service
+  - kind=autoload;path=my_app/service
+- - Widget
+  - Widget
+  - kind=autoload;path=my_app/widget
+- - active_support
+  - ~
+  - kind=require
+- - legacy/tasks
+  - ~
+  - kind=load
