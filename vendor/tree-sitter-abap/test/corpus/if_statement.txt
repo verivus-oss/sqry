@@ -1,0 +1,61 @@
+==================
+basic if statement
+==================
+
+if 1 = 1.
+endif.
+
+---
+
+(program
+  (if_statement
+    (comparison_expression
+      (numeric_literal)
+      (numeric_literal))))
+
+==================
+comparing data objects
+==================
+
+if sy-subrc = 0.
+endif.
+
+---
+
+(program
+  (if_statement
+    (comparison_expression
+      (structured_data_object
+        (structure_name)
+        (component_name))
+      (numeric_literal))))
+
+==================
+combining with boolean operators
+==================
+
+if 1 = 1 or 2 = 2.
+endif.
+
+---
+
+(program
+  (if_statement
+    (comparison_expression
+      (numeric_literal)
+      (numeric_literal))
+    (comparison_expression
+      (numeric_literal)
+      (numeric_literal))))
+
+==================
+comparing with initial value
+==================
+
+if a is initial.
+endif.
+
+---
+(program
+  (if_statement
+    (name)))

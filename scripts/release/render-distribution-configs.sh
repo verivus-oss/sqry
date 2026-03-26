@@ -1,0 +1,201 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<USAGE
+Usage: $(basename "$0") --version <vX.Y.Z> [--checksums-dir DIR] [--output-dir DIR] [--repo OWNER/REPO]
+
+Renders distribution package manager configs with release version and checksums.
+
+Options:
+  --version TAG          Release tag (e.g. v4.8.2)
+  --checksums-dir DIR    Directory containing CHECKSUMS.sha256 (default: release-assets)
+  --output-dir DIR       Output directory for rendered manifests (default: release-assets/distribution)
+  --repo OWNER/REPO      GitHub repo for release URLs (default: verivus-oss/sqry)
+USAGE
+}
+
+VERSION_TAG=""
+CHECKSUMS_DIR="release-assets"
+OUTPUT_DIR="release-assets/distribution"
+REPO="verivus-oss/sqry"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --version)
+      VERSION_TAG="$2"
+      shift 2
+      ;;
+    --checksums-dir)
+      CHECKSUMS_DIR="$2"
+      shift 2
+      ;;
+    --output-dir)
+      OUTPUT_DIR="$2"
+      shift 2
+      ;;
+    --repo)
+      REPO="$2"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "error: unknown argument: $1" >&2
+      usage >&2
+      exit 1
+      ;;
+  esac
+done
+
+if [[ -z "$VERSION_TAG" ]]; then
+  echo "error: --version is required" >&2
+  usage >&2
+  exit 1
+fi
+
+if [[ ! "$VERSION_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  echo "error: version must match v<MAJOR>.<MINOR>.<PATCH>, got '$VERSION_TAG'" >&2
+  exit 1
+fi
+
+if [[ ! "$REPO" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]]; then
+  echo "error: --repo must match OWNER/REPO, got '$REPO'" >&2
+  exit 1
+fi
+
+# Resolve template paths relative to this script's location (repo root),
+# so the script works regardless of the caller's working directory.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+
+VERSION="${VERSION_TAG#v}"
+
+require_file() {
+  local file_path="$1"
+  if [[ ! -f "$file_path" ]]; then
+    echo "error: required file not found: $file_path" >&2
+    exit 1
+  fi
+}
+
+require_file "$CHECKSUMS_DIR/CHECKSUMS.sha256"
+
+lookup_sha() {
+  local checksum_file="$1"
+  local asset_name="$2"
+  local sha
+  sha=$(awk -v name="$asset_name" '
+    {
+      file = $2
+      # Normalize GNU/BSD/Windows variants:
+      # - remove CRLF carriage returns
+      # - remove binary marker ("*file")
+      # - remove leading relative path prefix ("./file")
+      sub(/\r$/, "", file)
+      sub(/^\*/, "", file)
+      sub(/^\.\//, "", file)
+      if (file == name) {
+        print $1
+        exit
+      }
+    }
+  ' "$checksum_file")
+  if [[ -z "$sha" ]]; then
+    echo "error: checksum for '$asset_name' missing in '$checksum_file'" >&2
+    exit 1
+  fi
+  printf '%s\n' "$sha"
+}
+
+CHECKSUMS_FILE="$CHECKSUMS_DIR/CHECKSUMS.sha256"
+
+# v2 pipeline: tarball-based artifacts with version in name
+SHA_LINUX_X86_64=$(lookup_sha "$CHECKSUMS_FILE" "sqry-${VERSION}-linux-x86_64.tar.gz")
+SHA_LINUX_ARM64=$(lookup_sha "$CHECKSUMS_FILE" "sqry-${VERSION}-linux-arm64.tar.gz")
+SHA_MACOS_ARM64=$(lookup_sha "$CHECKSUMS_FILE" "sqry-${VERSION}-macos-arm64.tar.gz")
+SHA_WINDOWS_X86_64=$(lookup_sha "$CHECKSUMS_FILE" "sqry-${VERSION}-windows-x86_64.msi")
+SHA_WINDOWS_ZIP=$(lookup_sha "$CHECKSUMS_FILE" "sqry-${VERSION}-windows-x86_64.zip")
+SHA_MACOS_PKG=$(lookup_sha "$CHECKSUMS_FILE" "sqry-${VERSION}-macos-arm64.pkg")
+SHA_LINUX_DEB_AMD64=$(lookup_sha "$CHECKSUMS_FILE" "sqry_${VERSION}_amd64.deb")
+SHA_LINUX_DEB_ARM64=$(lookup_sha "$CHECKSUMS_FILE" "sqry_${VERSION}_arm64.deb")
+SHA_LINUX_RPM_X86_64=$(lookup_sha "$CHECKSUMS_FILE" "sqry-${VERSION}-1.x86_64.rpm")
+SHA_LINUX_RPM_AARCH64=$(lookup_sha "$CHECKSUMS_FILE" "sqry-${VERSION}-1.aarch64.rpm")
+
+validate_sha() {
+  local sha="$1"
+  local name="$2"
+  if [[ ! "$sha" =~ ^[a-f0-9]{64}$ ]]; then
+    echo "error: invalid sha256 for ${name}: '${sha}'" >&2
+    exit 1
+  fi
+}
+
+validate_sha "$SHA_LINUX_X86_64" "sqry-${VERSION}-linux-x86_64.tar.gz"
+validate_sha "$SHA_LINUX_ARM64" "sqry-${VERSION}-linux-arm64.tar.gz"
+validate_sha "$SHA_MACOS_ARM64" "sqry-${VERSION}-macos-arm64.tar.gz"
+validate_sha "$SHA_WINDOWS_X86_64" "sqry-${VERSION}-windows-x86_64.msi"
+validate_sha "$SHA_WINDOWS_ZIP" "sqry-${VERSION}-windows-x86_64.zip"
+validate_sha "$SHA_MACOS_PKG" "sqry-${VERSION}-macos-arm64.pkg"
+validate_sha "$SHA_LINUX_DEB_AMD64" "sqry_${VERSION}_amd64.deb"
+validate_sha "$SHA_LINUX_DEB_ARM64" "sqry_${VERSION}_arm64.deb"
+validate_sha "$SHA_LINUX_RPM_X86_64" "sqry-${VERSION}-1.x86_64.rpm"
+validate_sha "$SHA_LINUX_RPM_AARCH64" "sqry-${VERSION}-1.aarch64.rpm"
+
+mkdir -p "$OUTPUT_DIR" \
+  "$OUTPUT_DIR/homebrew" \
+  "$OUTPUT_DIR/scoop" \
+  "$OUTPUT_DIR/winget" \
+  "$OUTPUT_DIR/aur" \
+  "$OUTPUT_DIR/nix" \
+  "$OUTPUT_DIR/snap"
+
+render_template() {
+  local template_path="$1"
+  local output_path="$2"
+  require_file "$template_path"
+  sed \
+    -e "s|@VERSION_TAG@|$VERSION_TAG|g" \
+    -e "s|@VERSION@|$VERSION|g" \
+    -e "s|@REPO@|$REPO|g" \
+    -e "s|@SHA_LINUX_X86_64@|$SHA_LINUX_X86_64|g" \
+    -e "s|@SHA_LINUX_ARM64@|$SHA_LINUX_ARM64|g" \
+    -e "s|@SHA_MACOS_ARM64@|$SHA_MACOS_ARM64|g" \
+    -e "s|@SHA_WINDOWS_X86_64@|$SHA_WINDOWS_X86_64|g" \
+    -e "s|@SHA_WINDOWS_ZIP@|$SHA_WINDOWS_ZIP|g" \
+    -e "s|@SHA_MACOS_PKG@|$SHA_MACOS_PKG|g" \
+    -e "s|@SHA_LINUX_DEB_AMD64@|$SHA_LINUX_DEB_AMD64|g" \
+    -e "s|@SHA_LINUX_DEB_ARM64@|$SHA_LINUX_DEB_ARM64|g" \
+    -e "s|@SHA_LINUX_RPM_X86_64@|$SHA_LINUX_RPM_X86_64|g" \
+    -e "s|@SHA_LINUX_RPM_AARCH64@|$SHA_LINUX_RPM_AARCH64|g" \
+    "$template_path" > "$output_path"
+}
+
+render_template "$REPO_ROOT/packaging/homebrew/sqry.rb" "$OUTPUT_DIR/homebrew/sqry.rb"
+render_template "$REPO_ROOT/packaging/scoop/sqry.json" "$OUTPUT_DIR/scoop/sqry.json"
+render_template "$REPO_ROOT/packaging/winget/VerivusOSS.sqry.yaml" "$OUTPUT_DIR/winget/VerivusOSS.sqry.yaml"
+render_template "$REPO_ROOT/packaging/winget/VerivusOSS.sqry.locale.en-US.yaml" "$OUTPUT_DIR/winget/VerivusOSS.sqry.locale.en-US.yaml"
+render_template "$REPO_ROOT/packaging/winget/VerivusOSS.sqry.installer.yaml" "$OUTPUT_DIR/winget/VerivusOSS.sqry.installer.yaml"
+render_template "$REPO_ROOT/packaging/aur/PKGBUILD" "$OUTPUT_DIR/aur/PKGBUILD"
+render_template "$REPO_ROOT/packaging/nix/default.nix" "$OUTPUT_DIR/nix/default.nix"
+render_template "$REPO_ROOT/packaging/nix/flake.nix" "$OUTPUT_DIR/nix/flake.nix"
+render_template "$REPO_ROOT/packaging/snap/snapcraft.yaml" "$OUTPUT_DIR/snap/snapcraft.yaml"
+
+cat > "$OUTPUT_DIR/README.md" <<README
+# Distribution Configs for $VERSION_TAG
+
+Generated by:
+	scripts/release/render-distribution-configs.sh --version $VERSION_TAG --checksums-dir $CHECKSUMS_DIR --output-dir $OUTPUT_DIR
+
+Included package manager configs:
+- Homebrew tap formula
+- Scoop manifest
+- Winget manifests
+- AUR PKGBUILD
+- Nix flake/default expression
+- snapcraft config
+README
+
+echo "Rendered distribution configs into: $OUTPUT_DIR"

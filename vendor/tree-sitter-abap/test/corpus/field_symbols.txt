@@ -1,0 +1,22 @@
+==================
+field-symbols statement
+==================
+
+field-symbols <fs> type a.
+field-symbols <> type a.
+field-symbols <aaaaaaaaaaaaaaaaaaaaaaaaaaaa> type a.
+
+---
+(program
+  (field_symbol_declaration
+    (name)
+    (complete_typing
+      (type)))
+  (field_symbol_declaration
+    (name)
+    (complete_typing
+      (type)))
+  (field_symbol_declaration
+    (name)
+    (complete_typing
+      (type))))
