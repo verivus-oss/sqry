@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<record_update table="sys_dictionary">
+    <sys_dictionary action="INSERT_OR_UPDATE">
+        <name>incident</name>
+        <element>priority</element>
+        <internal_type>integer</internal_type>
+    </sys_dictionary>
+    <sys_dictionary action="INSERT_OR_UPDATE">
+        <name>incident</name>
+        <element>severity</element>
+        <internal_type>integer</internal_type>
+    </sys_dictionary>
+</record_update>

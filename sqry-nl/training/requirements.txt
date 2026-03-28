@@ -1,0 +1,46 @@
+# sqry-nl Training Pipeline Requirements
+# Python 3.10+ required
+#
+# NOTE: Versions are pinned for reproducibility (H6 mitigation).
+# Update versions carefully with full test suite verification.
+#
+# Version compatibility (December 2025):
+# - optimum 2.0.0 + optimum-onnx requires transformers<4.56.0
+# - transformers 4.55.x requires tokenizers<0.22,>=0.21
+# - numpy 1.26.x required (2.x has ABI-breaking changes)
+# - Updated 2025-12-09: torch 2.9.1, transformers 4.55.4, datasets 4.4.1
+
+# Core ML Framework
+torch==2.9.1
+transformers==4.55.4  # Max version compatible with optimum-onnx (<4.56.0)
+datasets==4.4.1
+
+# ONNX Export and Quantization
+onnx==1.20.0
+onnxruntime==1.23.2
+optimum[onnxruntime]==2.0.0
+
+# Tokenizer (transformers 4.55.x requires <0.22,>=0.21)
+tokenizers==0.21.4
+
+# Training acceleration
+accelerate>=1.0.0
+
+# Data Processing
+numpy==1.26.4
+pandas==2.3.3
+scikit-learn==1.7.2
+
+# Calibration
+netcal==1.3.5
+
+# Utilities
+tqdm==4.67.1
+pyyaml==6.0.2
+typer==0.15.1
+click==8.1.7  # Pin to 8.1.x for typer 0.15.1 compatibility (8.3.x breaks make_metavar API)
+rich==13.9.4
+
+# Testing (optional)
+pytest==8.3.4
+pytest-cov==6.0.0

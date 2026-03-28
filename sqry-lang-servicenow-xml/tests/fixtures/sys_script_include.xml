@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<record_update table="sys_script_include">
+    <sys_script_include action="INSERT_OR_UPDATE">
+        <name>TaskUtils</name>
+        <api_name>global.TaskUtils</api_name>
+        <sys_scope display_value="Global">global</sys_scope>
+        <script><![CDATA[
+var TaskUtils = Class.create();
+TaskUtils.prototype = {
+    initialize: function() {},
+    getActiveTasks: function(table) {
+        var gr = new GlideRecord(table);
+        gr.addQuery('active', 'true');
+        gr.query();
+        return gr;
+    },
+    type: 'TaskUtils'
+};
+        ]]></script>
+    </sys_script_include>
+</record_update>

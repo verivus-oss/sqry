@@ -1,0 +1,55 @@
+[package]
+name = "sqry-lsp"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "LSP server for sqry semantic code search"
+
+[lib]
+name = "sqry_lsp"
+path = "src/lib.rs"
+
+[[bin]]
+name = "sqry-lsp"
+path = "src/main.rs"
+
+[[bench]]
+name = "handlers_baseline"
+harness = false
+
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+env_logger.workspace = true
+log.workspace = true
+tokio.workspace = true
+tower-lsp.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sqry-core = { version = "4.10.0", path = "../sqry-core" }
+sqry-nl = { version = "4.10.0", path = "../sqry-nl" }
+sqry-plugin-registry = { version = "4.10.0", path = "../sqry-plugin-registry" }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+parking_lot.workspace = true
+ropey = "1.6"
+dashmap = "6.1"
+base64 = "0.22.1"
+uuid = { version = "1.11", features = ["v4"] }
+
+[target.'cfg(target_env = "musl")'.dependencies]
+tikv-jemallocator = "0.6"
+tikv-jemalloc-sys = { version = "0.6", features = ["unprefixed_malloc_on_supported_platforms"] }
+
+[dev-dependencies]
+assert_cmd = "2.0"
+tempfile = "3.14"
+criterion = "0.8"
+tower = { version = "0.4", features = ["buffer"] }
+futures = "0.3"
+sqry-lang-rust = { path = "../sqry-lang-rust" }

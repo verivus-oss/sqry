@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<record_update table="sys_script">
+    <sys_script action="INSERT_OR_UPDATE">
+        <name>Validate Incident Priority</name>
+        <collection>incident</collection>
+        <sys_scope display_value="My Scoped App">abc123</sys_scope>
+        <when>before</when>
+        <script><![CDATA[
+(function executeRule(current, previous) {
+    if (current.priority == 1) {
+        current.escalation = 1;
+        gs.info('P1 incident escalated: ' + current.number);
+    }
+})(current, previous);
+        ]]></script>
+    </sys_script>
+</record_update>

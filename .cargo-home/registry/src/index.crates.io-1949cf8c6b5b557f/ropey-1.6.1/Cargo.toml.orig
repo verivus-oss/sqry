@@ -1,0 +1,61 @@
+[package]
+name = "ropey"
+version = "1.6.1"
+authors = ["Nathan Vegdahl <cessen@cessen.com>"]
+description = "A fast and robust text rope for Rust"
+documentation = "https://docs.rs/ropey"
+repository = "https://github.com/cessen/ropey"
+readme = "README.md"
+license = "MIT"
+keywords = ["rope", "text", "edit", "buffer"]
+categories = ["text-processing", "data-structures"]
+exclude = ["/design/*", "/benches/*.txt", "/fuzz/**", "/.github/*"]
+
+[features]
+default = ["unicode_lines", "simd"]
+cr_lines = [] # Enable recognizing carriage returns as line breaks.
+unicode_lines = ["cr_lines"] # Enable recognizing all Unicode line breaks.
+simd = ["str_indices/simd"]
+
+# Internal feature: Not part of public stable API
+# enables a much smaller chunk size that makes it
+# easier to catch bugs without requiring huge text sizes during fuzzing.
+small_chunks = []
+
+[dependencies]
+smallvec = "1.0.0"
+str_indices = { version = "0.4", default-features = false }
+
+[dev-dependencies]
+rand = "0.8"
+proptest = "1.0"
+criterion = { version = "0.3", features = ["html_reports"] }
+unicode-segmentation = "1.3"
+fnv = "1"
+fxhash = "0.2"
+
+#-----------------------------------------
+
+[[bench]]
+name = "create"
+harness = false
+
+[[bench]]
+name = "insert"
+harness = false
+
+[[bench]]
+name = "hash"
+harness = false
+
+[[bench]]
+name = "remove"
+harness = false
+
+[[bench]]
+name = "queries"
+harness = false
+
+[[bench]]
+name = "iterators"
+harness = false

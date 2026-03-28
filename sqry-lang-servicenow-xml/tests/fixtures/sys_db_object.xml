@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<record_update table="sys_db_object">
+    <sys_db_object action="INSERT_OR_UPDATE">
+        <name>incident</name>
+        <label>Incident</label>
+        <super_class display_value="Task">task</super_class>
+        <sys_id>abc123</sys_id>
+    </sys_db_object>
+</record_update>

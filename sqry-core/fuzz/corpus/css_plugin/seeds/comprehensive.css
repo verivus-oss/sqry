@@ -1,0 +1,25 @@
+@import url("base.css");
+
+:root {
+    --primary-color: #007bff;
+}
+
+body {
+    margin: 0;
+    padding: 0;
+    font-family: sans-serif;
+}
+
+.container {
+    max-width: 1200px;
+}
+
+#header {
+    background-color: var(--primary-color);
+}
+
+@media (max-width: 768px) {
+    .container {
+        padding: 10px;
+    }
+}

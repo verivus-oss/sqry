@@ -1,0 +1,225 @@
+# release-manifest.toml — Single source of truth for OSS release sanitization
+#
+# Design: default-deny. Anything not explicitly listed as public is excluded.
+# sanitize-for-oss.sh and verify-sanitized-tree.sh read this file.
+
+[manifest]
+version = 5
+default = "deny"
+
+[selection.crates]
+public = [
+    "sqry-cli/",
+    "sqry-core/",
+    "sqry-lsp/",
+    "sqry-mcp/",
+    "sqry-mcp-redaction/",
+    "sqry-nl/",
+    "sqry-lang-support/",
+    "sqry-plugin-registry/",
+    "sqry-tree-sitter-support/",
+    "sqry-lang-c/",
+    "sqry-lang-cpp/",
+    "sqry-lang-csharp/",
+    "sqry-lang-css/",
+    "sqry-lang-dart/",
+    "sqry-lang-elixir/",
+    "sqry-lang-go/",
+    "sqry-lang-groovy/",
+    "sqry-lang-haskell/",
+    "sqry-lang-html/",
+    "sqry-lang-java/",
+    "sqry-lang-javascript/",
+    "sqry-lang-json/",
+    "sqry-lang-kotlin/",
+    "sqry-lang-lua/",
+    "sqry-lang-oracle-plsql/",
+    "sqry-lang-perl/",
+    "sqry-lang-php/",
+    "sqry-lang-pulumi/",
+    "sqry-lang-puppet/",
+    "sqry-lang-python/",
+    "sqry-lang-r/",
+    "sqry-lang-ruby/",
+    "sqry-lang-rust/",
+    "sqry-lang-salesforce-apex/",
+    "sqry-lang-sap-abap/",
+    "sqry-lang-scala/",
+    "sqry-lang-servicenow-xanadu/",
+    "sqry-lang-servicenow-xml/",
+    "sqry-lang-shell/",
+    "sqry-lang-sql/",
+    "sqry-lang-svelte/",
+    "sqry-lang-swift/",
+    "sqry-lang-terraform/",
+    "sqry-lang-typescript/",
+    "sqry-lang-vue/",
+    "sqry-lang-zig/",
+    "crates/tree-sitter-abap-sqry/",
+    "crates/tree-sitter-elixir-sqry/",
+    "crates/tree-sitter-groovy-sqry/",
+    "crates/tree-sitter-kotlin-sqry/",
+    "crates/tree-sitter-perl-sqry/",
+    "crates/tree-sitter-plsql-sqry/",
+    "crates/tree-sitter-svelte-sqry/",
+    "crates/tree-sitter-vue-sqry/",
+]
+excluded = [
+    "tools/",
+    "benchmarks/",
+    "sqry-test-support/",
+    "sqry-test-fixtures/",
+    "sqry-tree-sitter-fuzz-support/",
+]
+
+[selection.root_files]
+public = [
+    ".gitattributes",
+    ".gitignore",
+    "Cargo.lock",
+    "Cargo.toml",
+    "CHANGELOG.md",
+    "clippy.toml",
+    "CONTRIBUTING.md",
+    "deny.toml",
+    "ERRATA.md",
+    "LICENSE",
+    "LICENSE-MIT",
+    "QUICKSTART.md",
+    "README.md",
+    "release-manifest.toml",
+    "rust-toolchain.toml",
+    "rustfmt.toml",
+    "THIRD-PARTY-LICENSES",
+    "TRADEMARK.md",
+]
+excluded = [
+    "CLAUDE.md",
+    "AGENTS.md",
+    "CODEX.md",
+    "action.yml",
+    ".codexignore",
+    ".dockerignore",
+    ".env.test",
+]
+
+[selection.cargo]
+public = [".cargo/config.toml", ".cargo/audit.toml"]
+
+[selection.docs]
+files_public = ["docs/FEATURE_LIST.md", "docs/SCHEMA.md", "docs/SEMANTIC_VERSIONING.md"]
+dirs_public = ["docs/user-guide/"]
+
+[selection.scripts]
+public = [
+    "scripts/install.sh",
+    "scripts/install.ps1",
+    "scripts/sync-versions.sh",
+]
+
+[selection.dirs]
+public = [
+    "crates/",
+    "third-party/",
+    "test-fixtures/",
+    "tests/",
+    "vendor/",
+    "assets/",
+    "supply-chain/",
+    ".openvex/",
+    "sqry-vscode/",
+]
+
+[sanitization.forbidden_patterns]
+strings = [
+    "verivus-oss",
+    "verivus-oss",
+    "verivus.com",
+    "@verivus.com",
+    "REDACTED",
+]
+path_patterns = [
+    ".claude/",
+    ".codex",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "CODEX.md",
+    "docs/development/",
+    "docs/reviews/",
+    "docs/agent-process/",
+]
+
+[packaging]
+allowed_extensions = [
+    ".rs", ".toml", ".lock", ".md", ".txt", ".yml", ".yaml",
+    ".json", ".js", ".ts", ".css", ".html", ".sh", ".ps1",
+    ".c", ".h", ".cc", ".hh", ".scm",
+]
+allowed_dotfiles = [".gitignore", ".gitattributes", ".cargo"]
+binary_assets = [
+    "sqry-vscode/resources/*.png",
+    "sqry-nl/models/*.onnx",
+]
+
+[release.crates]
+publish_order = [
+    # Phase 1: Foundations
+    "sqry-core",
+    "sqry-mcp-redaction",
+    "sqry-nl",
+    # Phase 2: Support libraries
+    "sqry-lang-support",
+    "sqry-tree-sitter-support",
+    # Phase 3: Vendored grammars
+    "tree-sitter-vue-sqry",
+    "tree-sitter-svelte-sqry",
+    "tree-sitter-groovy-sqry",
+    "tree-sitter-abap-sqry",
+    "tree-sitter-plsql-sqry",
+    "tree-sitter-kotlin-sqry",
+    "tree-sitter-elixir-sqry",
+    "tree-sitter-perl-sqry",
+    # Phase 4: Language plugins
+    "sqry-lang-c",
+    "sqry-lang-cpp",
+    "sqry-lang-csharp",
+    "sqry-lang-css",
+    "sqry-lang-dart",
+    "sqry-lang-elixir",
+    "sqry-lang-go",
+    "sqry-lang-groovy",
+    "sqry-lang-haskell",
+    "sqry-lang-html",
+    "sqry-lang-java",
+    "sqry-lang-javascript",
+    "sqry-lang-json",
+    "sqry-lang-kotlin",
+    "sqry-lang-lua",
+    "sqry-lang-oracle-plsql",
+    "sqry-lang-perl",
+    "sqry-lang-php",
+    "sqry-lang-pulumi",
+    "sqry-lang-puppet",
+    "sqry-lang-python",
+    "sqry-lang-r",
+    "sqry-lang-ruby",
+    "sqry-lang-rust",
+    "sqry-lang-salesforce-apex",
+    "sqry-lang-sap-abap",
+    "sqry-lang-scala",
+    "sqry-lang-servicenow-xanadu",
+    "sqry-lang-servicenow-xml",
+    "sqry-lang-shell",
+    "sqry-lang-sql",
+    "sqry-lang-swift",
+    "sqry-lang-terraform",
+    "sqry-lang-typescript",
+    "sqry-lang-svelte",
+    "sqry-lang-vue",
+    "sqry-lang-zig",
+    # Phase 5: Registry & servers
+    "sqry-plugin-registry",
+    "sqry-lsp",
+    "sqry-mcp",
+    "sqry-cli",
+]

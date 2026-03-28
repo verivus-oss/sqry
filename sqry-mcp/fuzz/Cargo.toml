@@ -1,0 +1,39 @@
+[workspace]
+
+[package]
+name = "sqry-mcp-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+serde_json = "1.0"
+rmcp = { version = "0.16", features = ["server"] }
+
+[dependencies.sqry-mcp]
+path = ".."
+
+[[bin]]
+name = "mcp_request_parse"
+path = "fuzz_targets/mcp_request_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mcp_tool_validation"
+path = "fuzz_targets/mcp_tool_validation.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mcp_cursor_decode"
+path = "fuzz_targets/mcp_cursor_decode.rs"
+test = false
+doc = false
+bench = false

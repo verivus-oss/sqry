@@ -1,0 +1,28 @@
+[package]
+name = "sqry-lang-typescript"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "typescript language plugin for sqry"
+
+[dependencies]
+sqry-core = { version = "4.10.0", path = "../sqry-core" }
+anyhow.workspace = true
+tree-sitter.workspace = true
+tree-sitter-typescript.workspace = true
+streaming-iterator.workspace = true
+sqry-lang-support = { version = "4.10.0", path = "../sqry-lang-support" }
+once_cell.workspace = true
+
+[dev-dependencies]
+log.workspace = true
+sqry-core = { path = "../sqry-core", features = ["test-support"] }
+serde.workspace = true
+serde_json.workspace = true
+
+[features]
+default = ["has_relations"]
+has_relations = []

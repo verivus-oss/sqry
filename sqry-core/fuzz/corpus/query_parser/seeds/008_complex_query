@@ -1,0 +1,1 @@
+(kind:function OR kind:method) AND async:true AND NOT name~=/test/
