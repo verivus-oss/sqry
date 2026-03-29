@@ -111,7 +111,7 @@ name = "failure"
 path = "examples/failure.rs"
 
 [dependencies.anstream]
-version = "0.6.7"
+version = "0.6.8"
 optional = true
 
 [dependencies.anstyle]
