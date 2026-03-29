@@ -1,0 +1,65 @@
+[package]
+name = "ort-sys"
+description = "Unsafe Rust bindings for ONNX Runtime 1.23 - Optimize and Accelerate Machine Learning Inferencing"
+version = "2.0.0-rc.11"
+edition = "2024"
+rust-version = "1.88"
+links = "onnxruntime"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/pykeio/ort"
+homepage = "https://ort.pyke.io/"
+keywords = [ "machine-learning", "ai", "ml", "onnxruntime", "sys"]
+categories = [ "algorithms", "mathematics", "science" ]
+authors = [
+	"pyke.io <contact@pyke.io>"
+]
+include = [ "src/", "build/", "LICENSE-APACHE", "LICENSE-MIT" ]
+build = "build/main.rs"
+
+[badges.maintenance]
+status = "actively-developed"
+
+[features]
+default = [ "std" ]
+std = []
+pkg-config = [ "dep:pkg-config" ]
+training = []
+download-binaries = [ "dep:ureq", "dep:lzma-rust2", "dep:hmac-sha256" ]
+copy-dylibs = []
+
+disable-linking = []
+
+cuda = []
+tensorrt = []
+openvino = []
+onednn = []
+directml = []
+nnapi = []
+coreml = []
+xnnpack = []
+rocm = []
+acl = []
+armnn = []
+tvm = []
+migraphx = []
+rknpu = []
+vitis = []
+cann = []
+qnn = []
+webgpu = [ "dep:glob" ]
+azure = []
+nvrtx = []
+
+tls-rustls = [ "tls-rustls-no-provider", "ureq?/rustls" ]
+tls-rustls-no-provider = [ "__tls", "ureq?/rustls-no-provider" ]
+tls-native = [ "__tls", "ureq?/native-tls" ]
+tls-native-vendored = [ "tls-native", "ureq?/vendored" ]
+__tls = []
+
+[build-dependencies]
+ureq = { version = "3", optional = true, default-features = false, features = [ "socks-proxy" ] }
+# The `optimization` feature enables the use of unsafe code, which is unfortunate, but LZMA is so slow we kinda need all the speed we can get.
+lzma-rust2 = { version = "0.15", optional = true, default-features = false, features = [ "std", "optimization" ] }
+hmac-sha256 = { version = "1.1", optional = true }
+pkg-config = { version = "0.3", optional = true }
+glob = { version = "0.3", optional = true }

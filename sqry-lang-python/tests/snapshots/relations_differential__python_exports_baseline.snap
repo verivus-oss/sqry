@@ -1,0 +1,18 @@
+---
+source: sqry-lang-python/tests/relations_differential.rs
+expression: normalized
+---
+[
+    (
+        "ALIAS",
+        false,
+    ),
+    (
+        "PublicClass",
+        false,
+    ),
+    (
+        "public_function",
+        false,
+    ),
+]

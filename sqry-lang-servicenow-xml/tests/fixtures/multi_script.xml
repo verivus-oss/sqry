@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<record_update table="sys_script">
+    <sys_script action="INSERT_OR_UPDATE">
+        <name>Rule One</name>
+        <script><![CDATA[
+function ruleOne() {
+    gs.info('Rule 1');
+}
+        ]]></script>
+    </sys_script>
+    <sys_script action="INSERT_OR_UPDATE">
+        <name>Rule Two</name>
+        <script><![CDATA[
+function ruleTwo() {
+    gs.info('Rule 2');
+}
+        ]]></script>
+    </sys_script>
+</record_update>

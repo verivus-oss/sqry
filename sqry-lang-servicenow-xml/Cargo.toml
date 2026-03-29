@@ -1,0 +1,30 @@
+[package]
+name = "sqry-lang-servicenow-xml"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "ServiceNow XML record extraction with JS delegation for sqry"
+
+[lib]
+name = "sqry_lang_servicenow_xml"
+path = "src/lib.rs"
+
+[dependencies]
+sqry-core = { version = "4.10.0", path = "../sqry-core" }
+sqry-lang-servicenow-xanadu = { version = "4.10.0", path = "../sqry-lang-servicenow-xanadu" }
+roxmltree = "0.20"
+tree-sitter = { workspace = true }
+tree-sitter-html = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[features]
+default = ["has_relations"]
+has_relations = []
+
+[lints]
+workspace = true

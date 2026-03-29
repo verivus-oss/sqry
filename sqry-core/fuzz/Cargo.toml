@@ -1,0 +1,377 @@
+[workspace]
+
+[package]
+name = "sqry-core-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.sqry-core]
+path = ".."
+
+[dependencies.sqry-lang-typescript]
+path = "../../sqry-lang-typescript"
+
+[dependencies.sqry-lang-java]
+path = "../../sqry-lang-java"
+
+[dependencies.sqry-lang-cpp]
+path = "../../sqry-lang-cpp"
+
+[dependencies.sqry-lang-c]
+path = "../../sqry-lang-c"
+
+[dependencies.sqry-lang-csharp]
+path = "../../sqry-lang-csharp"
+
+[dependencies.sqry-lang-css]
+path = "../../sqry-lang-css"
+
+[dependencies.sqry-lang-dart]
+path = "../../sqry-lang-dart"
+
+[dependencies.sqry-lang-elixir]
+path = "../../sqry-lang-elixir"
+
+[dependencies.sqry-lang-go]
+path = "../../sqry-lang-go"
+
+[dependencies.sqry-lang-groovy]
+path = "../../sqry-lang-groovy"
+
+[dependencies.sqry-lang-haskell]
+path = "../../sqry-lang-haskell"
+
+[dependencies.sqry-lang-html]
+path = "../../sqry-lang-html"
+
+[dependencies.sqry-lang-javascript]
+path = "../../sqry-lang-javascript"
+
+[dependencies.sqry-lang-kotlin]
+path = "../../sqry-lang-kotlin"
+
+[dependencies.sqry-lang-lua]
+path = "../../sqry-lang-lua"
+
+[dependencies.sqry-lang-oracle-plsql]
+path = "../../sqry-lang-oracle-plsql"
+
+[dependencies.sqry-lang-perl]
+path = "../../sqry-lang-perl"
+
+[dependencies.sqry-lang-php]
+path = "../../sqry-lang-php"
+
+[dependencies.sqry-lang-puppet]
+path = "../../sqry-lang-puppet"
+
+[dependencies.sqry-lang-python]
+path = "../../sqry-lang-python"
+
+[dependencies.sqry-lang-r]
+path = "../../sqry-lang-r"
+
+[dependencies.sqry-lang-ruby]
+path = "../../sqry-lang-ruby"
+
+[dependencies.sqry-lang-rust]
+path = "../../sqry-lang-rust"
+
+[dependencies.sqry-lang-salesforce-apex]
+path = "../../sqry-lang-salesforce-apex"
+
+[dependencies.sqry-lang-sap-abap]
+path = "../../sqry-lang-sap-abap"
+
+[dependencies.sqry-lang-scala]
+path = "../../sqry-lang-scala"
+
+[dependencies.sqry-lang-servicenow-xanadu]
+path = "../../sqry-lang-servicenow-xanadu"
+
+[dependencies.sqry-lang-shell]
+path = "../../sqry-lang-shell"
+
+[dependencies.sqry-lang-sql]
+path = "../../sqry-lang-sql"
+
+[dependencies.sqry-lang-svelte]
+path = "../../sqry-lang-svelte"
+
+[dependencies.sqry-lang-swift]
+path = "../../sqry-lang-swift"
+
+[dependencies.sqry-lang-terraform]
+path = "../../sqry-lang-terraform"
+
+[dependencies.sqry-lang-vue]
+path = "../../sqry-lang-vue"
+
+[dependencies.sqry-lang-zig]
+path = "../../sqry-lang-zig"
+
+[[bin]]
+name = "fuzz_target_1"
+path = "fuzz_targets/fuzz_target_1.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "query_parser"
+path = "fuzz_targets/query_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "unified_parser"
+path = "fuzz_targets/unified_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "typescript_plugin"
+path = "fuzz_targets/typescript_plugin.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "java_plugin"
+path = "fuzz_targets/java_plugin.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cpp_plugin"
+path = "fuzz_targets/cpp_plugin.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "c_plugin"
+path = "fuzz_targets/c_plugin.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "csharp_plugin"
+path = "fuzz_targets/csharp_plugin.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "css_plugin"
+path = "fuzz_targets/css_plugin.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dart_plugin"
+path = "fuzz_targets/dart_plugin.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "elixir_plugin"
+path = "fuzz_targets/elixir_plugin.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "go_plugin"
+path = "fuzz_targets/go_plugin.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "groovy_plugin"
+path = "fuzz_targets/groovy_plugin.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "haskell_plugin"
+path = "fuzz_targets/haskell_plugin.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "html_plugin"
+path = "fuzz_targets/html_plugin.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "javascript_plugin"
+path = "fuzz_targets/javascript_plugin.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "kotlin_plugin"
+path = "fuzz_targets/kotlin_plugin.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "lua_plugin"
+path = "fuzz_targets/lua_plugin.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "oracle_plsql_plugin"
+path = "fuzz_targets/oracle_plsql_plugin.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "perl_plugin"
+path = "fuzz_targets/perl_plugin.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "php_plugin"
+path = "fuzz_targets/php_plugin.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "puppet_plugin"
+path = "fuzz_targets/puppet_plugin.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "python_plugin"
+path = "fuzz_targets/python_plugin.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "r_plugin"
+path = "fuzz_targets/r_plugin.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ruby_plugin"
+path = "fuzz_targets/ruby_plugin.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rust_plugin"
+path = "fuzz_targets/rust_plugin.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "salesforce_apex_plugin"
+path = "fuzz_targets/salesforce_apex_plugin.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sap_abap_plugin"
+path = "fuzz_targets/sap_abap_plugin.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "scala_plugin"
+path = "fuzz_targets/scala_plugin.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "servicenow_xanadu_plugin"
+path = "fuzz_targets/servicenow_xanadu_plugin.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "shell_plugin"
+path = "fuzz_targets/shell_plugin.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sql_plugin"
+path = "fuzz_targets/sql_plugin.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "svelte_plugin"
+path = "fuzz_targets/svelte_plugin.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "swift_plugin"
+path = "fuzz_targets/swift_plugin.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "terraform_plugin"
+path = "fuzz_targets/terraform_plugin.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "vue_plugin"
+path = "fuzz_targets/vue_plugin.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "zig_plugin"
+path = "fuzz_targets/zig_plugin.rs"
+test = false
+doc = false
+bench = false

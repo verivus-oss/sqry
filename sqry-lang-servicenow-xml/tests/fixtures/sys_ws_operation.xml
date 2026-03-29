@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<record_update table="sys_ws_operation">
+    <sys_ws_operation action="INSERT_OR_UPDATE">
+        <name>Get Incidents</name>
+        <operation_script><![CDATA[
+(function process(request, response) {
+    var gr = new GlideRecord('incident');
+    gr.addQuery('active', 'true');
+    gr.query();
+    var results = [];
+    while (gr.next()) {
+        results.push(gr.number.toString());
+    }
+    response.setBody(JSON.stringify(results));
+})(request, response);
+        ]]></operation_script>
+    </sys_ws_operation>
+</record_update>

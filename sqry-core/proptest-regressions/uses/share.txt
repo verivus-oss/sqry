@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 6b19beff5ca34a2639d923b790a2888e7f2a337bc7e8d91b9aa928b1b2911156 # shrinks to summary = DiagnosticsSummary { period: IsoWeekPeriod("2020-W01"), top_workflows: [], avg_time_to_result_sec: 0.0, median_time_to_result_sec: 0.0, abandon_rate: 0.0, abandonment: [], ai_requery_rate: 0.9600607714533617, total_uses: 0, dropped_events: 0 }

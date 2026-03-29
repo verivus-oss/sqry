@@ -1,0 +1,112 @@
+[workspace]
+resolver = "3"
+members = [ 'ort-sys' ]
+default-members = [ '.' ]
+exclude = [
+	'backends/candle',
+	'backends/tract',
+	'backends/web',
+	'examples/async-gpt2-api',
+	'examples/cudarc',
+	'examples/custom-ops',
+	'examples/gpt2',
+	'examples/model-info',
+	'examples/modnet',
+	'examples/phi-3-vision',
+	'examples/sentence-transformers',
+	'examples/training',
+	'examples/wasm-emscripten',
+	'examples/yolov8',
+	'tests/leak-check'
+]
+
+[package]
+name = "ort"
+description = "A safe Rust wrapper for ONNX Runtime 1.23 - Optimize and accelerate machine learning inference & training"
+version = "2.0.0-rc.11"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/pykeio/ort"
+homepage = "https://ort.pyke.io/"
+readme = "README.md"
+keywords = [ "machine-learning", "ai", "ml", "onnxruntime" ]
+categories = [ "algorithms", "mathematics", "science" ]
+authors = [
+	"pyke.io <contact@pyke.io>",
+	"Nicolas Bigaouette <nbigaouette@gmail.com>"
+]
+include = [ "/src/", "/LICENSE-APACHE", "/LICENSE-MIT", "/README.md" ]
+
+[badges.maintenance]
+status = "actively-developed"
+
+[package.metadata.docs.rs]
+features = [ "std", "ndarray", "half", "num-complex", "training", "fetch-models", "load-dynamic", "copy-dylibs" ]
+targets = ["x86_64-unknown-linux-gnu"]
+rustdoc-args = [ "--cfg", "docsrs" ]
+
+[features]
+default = [ "std", "ndarray", "tracing", "download-binaries", "tls-native", "copy-dylibs" ]
+
+std = [ "ort-sys/std", "ndarray/std", "tracing?/std" ]
+training = [ "ort-sys/training" ]
+
+ndarray = [ "dep:ndarray" ]
+half = [ "dep:half" ]
+num-complex = [ "dep:num-complex" ]
+tracing = [ "dep:tracing" ]
+
+fetch-models = [ "std", "dep:ureq", "dep:sha2" ]
+download-binaries = [ "ort-sys/download-binaries" ]
+preload-dylibs = [ "dep:libloading" ]
+load-dynamic = [ "std", "preload-dylibs", "ort-sys/disable-linking" ]
+copy-dylibs = [ "ort-sys/copy-dylibs" ]
+pkg-config = [ "ort-sys/pkg-config" ]
+
+tls-rustls = [ "ort-sys/tls-rustls", "ureq?/rustls" ]
+tls-rustls-no-provider = [ "ort-sys/tls-rustls-no-provider", "ureq?/rustls-no-provider" ]
+tls-native = [ "ort-sys/tls-native", "ureq?/native-tls" ]
+tls-native-vendored = [ "ort-sys/tls-native-vendored", "ureq?/native-tls", "ureq?/vendored" ]
+
+alternative-backend = [ "ort-sys/disable-linking" ]
+
+cuda = [ "ort-sys/cuda" ]
+tensorrt = [ "ort-sys/tensorrt" ]
+openvino = [ "ort-sys/openvino" ]
+onednn = [ "ort-sys/onednn" ]
+directml = [ "ort-sys/directml" ]
+nnapi = [ "ort-sys/nnapi" ]
+coreml = [ "ort-sys/coreml" ]
+xnnpack = [ "ort-sys/xnnpack" ]
+rocm = [ "ort-sys/rocm" ]
+acl = [ "ort-sys/acl" ]
+armnn = [ "ort-sys/armnn" ]
+tvm = [ "ort-sys/tvm" ]
+migraphx = [ "ort-sys/migraphx" ]
+rknpu = [ "ort-sys/rknpu" ]
+vitis = [ "ort-sys/vitis" ]
+cann = [ "ort-sys/cann" ]
+qnn = [ "ort-sys/qnn" ]
+webgpu = [ "ort-sys/webgpu" ]
+azure = [ "ort-sys/azure" ]
+nvrtx = [ "ort-sys/nvrtx" ]
+
+[dependencies]
+ort-sys = { version = "=2.0.0-rc.11", path = "ort-sys", default-features = false }
+smallvec = { version = "1.15", default-features = false, features = [ "const_generics" ] }
+
+ndarray = { version = "0.17", default-features = false, optional = true }
+libloading = { version = "0.9", optional = true }
+ureq = { version = "3.1", optional = true, default-features = false }
+sha2 = { version = "0.10", optional = true }
+tracing = { version = "0.1", optional = true, default-features = false }
+half = { version = "2.1", default-features = false, optional = true }
+num-complex = { version = "0.4", default-features = false, optional = true }
+
+[dev-dependencies]
+anyhow = "1.0"
+ureq = { version = "3", default-features = false, features = [ "native-tls" ] }
+image = "0.25"
+tracing-subscriber = { version = "0.3", default-features = false, features = [ "env-filter", "fmt" ] }
+tokio = { version = "1.36", features = [ "test-util" ] }
