@@ -1,0 +1,72 @@
+name: Bug report
+description: Report a reproducible defect in sqry
+title: "bug: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. Please provide a minimal, reproducible report.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Public release version affected, for example `v4.12.7`
+      placeholder: vX.Y.Z
+    validations:
+      required: true
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - CLI
+        - LSP
+        - MCP
+        - VS Code extension
+        - Release artifact
+        - Documentation
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, architecture, shell, editor, and any relevant tooling details
+      placeholder: |
+        OS:
+        Architecture:
+        Shell:
+        Editor:
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or screenshots
+      description: Paste relevant output, stack traces, or screenshots
+      render: shell

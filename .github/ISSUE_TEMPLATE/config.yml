@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security report
+    url: mailto:oss@sqry.dev
+    about: Report security vulnerabilities privately
+  - name: Discussions
+    url: https://github.com/verivus-oss/sqry/discussions
+    about: Ask questions or start broader design discussions

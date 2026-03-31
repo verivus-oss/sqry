@@ -1,0 +1,34 @@
+name: Feature request
+description: Suggest an improvement for sqry
+title: "feature: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describe the problem you are trying to solve and the proposed improvement.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem statement
+      description: What is missing or painful today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What do you want sqry to do instead?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other approaches or workarounds you considered
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Repros, examples, screenshots, or related tools/issues
