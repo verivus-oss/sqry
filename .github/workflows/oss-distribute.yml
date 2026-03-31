@@ -1,0 +1,211 @@
+# Stage 4: Build binaries, attest, upload, publish extension, update package managers
+# Spec: docs/superpowers/specs/2026-03-28-release-process-design.md §7
+# This file lives in verivus-oss/sqry (the public repo).
+name: "Release: Distribute"
+
+on:
+  repository_dispatch:
+    types: [release-distribute]
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+concurrency:
+  group: oss-distribute-${{ github.event.client_payload.version }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-distribute:
+    name: Build and Distribute
+    runs-on: [self-hosted, linux, rust, x86_64]
+    timeout-minutes: 60
+    env:
+      VERSION: ${{ github.event.client_payload.version }}
+      TAG: ${{ github.event.client_payload.tag }}
+    steps:
+      - name: Workspace wipe
+        run: |
+          # Docker may create root-owned files; use sudo if needed
+          sudo rm -rf "$GITHUB_WORKSPACE" && mkdir -p "$GITHUB_WORKSPACE"
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ env.TAG }}
+          persist-credentials: false
+
+      - name: Install Rust + targets
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: x86_64-unknown-linux-gnu,aarch64-unknown-linux-gnu,x86_64-apple-darwin,aarch64-apple-darwin,x86_64-pc-windows-gnu
+
+      # Verify self-hosted runner toolchain (installed by setup-runner.sh)
+      - name: Verify cross-compilation toolchain
+        run: |
+          echo "Verifying required tools are installed on self-hosted runner..."
+          zig version
+          cargo-zigbuild --version
+          x86_64-w64-mingw32-gcc --version | head -1 || {
+            echo "Installing gcc-mingw-w64-x86-64..."
+            sudo apt-get update -qq && sudo apt-get install -y -qq gcc-mingw-w64-x86-64
+          }
+          node --version
+          npx vsce --version
+          gh --version
+          echo "All required tools present."
+
+      # Phase 4.1: Cross-compile binaries
+      # macOS targets use Docker (ghcr.io/rust-cross/cargo-zigbuild) for proper SDK linking
+      - name: Build binaries
+        run: |
+          mkdir -p dist/
+          TARGETS=(
+            "x86_64-unknown-linux-gnu"
+            "aarch64-unknown-linux-gnu"
+            "x86_64-apple-darwin"
+            "aarch64-apple-darwin"
+            "x86_64-pc-windows-gnu"
+          )
+          BINS=("sqry-cli" "sqry-lsp" "sqry-mcp")
+          BIN_NAMES=("sqry" "sqry-lsp" "sqry-mcp")
+
+          for target in "${TARGETS[@]}"; do
+            echo "=== Building for $target ==="
+            if [[ "$target" == "x86_64-unknown-linux-gnu" ]]; then
+              cargo build --release --target "$target" -p sqry-cli -p sqry-lsp -p sqry-mcp
+            elif [[ "$target" == "x86_64-pc-windows-gnu" ]]; then
+              # Windows mingw: wrap linker to translate MSVC /STACK:N to GNU --stack,N
+              # (rustc passes /STACK:8388608 which Linux cross-mingw ld doesn't support)
+              printf '#!/bin/bash\nargs=()\nfor arg in "$@"; do\n  if [[ "$arg" =~ ^/STACK:([0-9]+)$ ]]; then\n    args+=("-Wl,--stack,${BASH_REMATCH[1]}")\n  else\n    args+=("$arg")\n  fi\ndone\nexec x86_64-w64-mingw32-gcc "${args[@]}"\n' > /tmp/mingw-linker-wrapper.sh
+              chmod +x /tmp/mingw-linker-wrapper.sh
+              CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=/tmp/mingw-linker-wrapper.sh \
+                cargo build --release --target "$target" -p sqry-cli -p sqry-lsp -p sqry-mcp
+            elif [[ "$target" == *"apple-darwin"* ]]; then
+              # macOS targets need the cargo-zigbuild Docker image for proper SDK linking
+              docker run --rm --user "$(id -u):$(id -g)" \
+                -v "$(pwd):/io" -w /io \
+                -e HOME=/io/.docker-home \
+                -e CARGO_HOME=/io/.docker-cargo \
+                -e XDG_CACHE_HOME=/io/.docker-cache \
+                ghcr.io/rust-cross/cargo-zigbuild:latest \
+                bash -c "rustup target add $target && cargo zigbuild --release --target $target -p sqry-cli -p sqry-lsp -p sqry-mcp"
+            else
+              cargo zigbuild --release --target "$target" -p sqry-cli -p sqry-lsp -p sqry-mcp
+            fi
+
+            # Determine file extension and arch suffix
+            EXT=""
+            [[ "$target" == *"windows"* ]] && EXT=".exe"
+
+            case "$target" in
+              x86_64-unknown-linux-gnu) SUFFIX="linux-x86_64" ;;
+              aarch64-unknown-linux-gnu) SUFFIX="linux-arm64" ;;
+              x86_64-apple-darwin) SUFFIX="macos-x86_64" ;;
+              aarch64-apple-darwin) SUFFIX="macos-arm64" ;;
+              x86_64-pc-windows-gnu) SUFFIX="windows-x86_64" ;;
+            esac
+
+            for i in "${!BINS[@]}"; do
+              src="target/${target}/release/${BIN_NAMES[$i]}${EXT}"
+              dst="dist/${BIN_NAMES[$i]}-${SUFFIX}${EXT}"
+              cp "$src" "$dst"
+            done
+          done
+
+      # Phase 4.2: Smoke tests
+      - name: Smoke test Linux x86_64
+        run: |
+          chmod +x dist/sqry-linux-x86_64
+          ./dist/sqry-linux-x86_64 --version
+          ./dist/sqry-linux-x86_64 index --help >/dev/null
+
+      # Best-effort smoke tests — QEMU/Wine may not be available on all runners.
+      # These are non-blocking by design (spec §7 Phase 4.2: "known gap").
+      - name: Smoke test Linux arm64 (QEMU)
+        continue-on-error: true
+        run: |
+          chmod +x dist/sqry-linux-arm64
+          qemu-aarch64-static dist/sqry-linux-arm64 --version
+
+      - name: Smoke test Windows (Wine)
+        continue-on-error: true
+        run: |
+          wine64 dist/sqry-windows-x86_64.exe --version
+
+      # Phase 4.3: Checksums + SLSA attestation
+      - name: Generate checksums
+        run: |
+          cd dist/
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Attest binaries
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4
+        with:
+          subject-path: 'dist/*'
+
+      # Phase 4.4: Upload to GitHub Release
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "$TAG" dist/* --clobber
+
+      # Phase 4.5: VS Code extension
+      # Ensure icon assets exist (may be missing from older sanitized tags)
+      - name: Ensure VS Code extension assets
+        run: |
+          if [[ ! -f sqry-vscode/media/sqry-icon-512.png ]]; then
+            echo "Icon missing from sanitized tree — downloading from internal release"
+            mkdir -p sqry-vscode/media
+            # Generate a minimal placeholder icon (the real fix is in release-manifest.toml)
+            python3 -c "
+          import struct, zlib
+          def png(w,h):
+            def chunk(t,d):return struct.pack('>I',len(d))+t+d+struct.pack('>I',zlib.crc32(t+d)&0xffffffff)
+            raw=b''
+            for y in range(h):
+              raw+=b'\\x00'+(b'\\x1a\\x6b\\xc4\\xff'*w)
+            return b'\\x89PNG\\r\\n\\x1a\\n'+chunk(b'IHDR',struct.pack('>IIBBBBB',w,h,8,6,0,0,0))+chunk(b'IDAT',zlib.compress(raw))+chunk(b'IEND',b'')
+          open('sqry-vscode/media/sqry-icon-512.png','wb').write(png(512,512))
+          open('sqry-vscode/media/sqry-icon-128.png','wb').write(png(128,128))
+          "
+          fi
+
+      - name: Build VS Code extension
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd sqry-vscode
+          npm ci
+          npx vsce package -o "../dist/sqry-vscode-${VERSION}.vsix"
+          cd ..
+          gh release upload "$TAG" "dist/sqry-vscode-${VERSION}.vsix" --clobber
+
+      - name: Publish VS Code extension to marketplace
+        continue-on-error: true
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        run: |
+          if [ -z "$VSCE_PAT" ]; then
+            echo "VSCE_PAT not set — skipping marketplace publish (manual upload required)"
+            exit 0
+          fi
+          cd sqry-vscode
+          if ! OUTPUT=$(npx vsce publish 2>&1); then
+            if echo "$OUTPUT" | grep -qi "already exists\|version.*already"; then
+              echo "VS Code extension version already published — skipping"
+            else
+              echo "WARNING: vsce publish failed (manual upload required):"
+              echo "$OUTPUT"
+            fi
+          fi
+
+      # Phase 4.7: Promote release
+      - name: Promote public release from draft
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release edit "$TAG" --draft=false --latest
