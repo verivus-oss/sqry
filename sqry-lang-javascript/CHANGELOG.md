@@ -1,0 +1,38 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+## [5.0.1](https://github.com/verivus-oss/sqry/compare/v4.12.7...v5.0.1) - 2026-03-31
+
+### Added
+- *(index)* surface structural indexing phases and highlights- *(index)* reunify analysis generation during indexing- *(graph)* add Pass 5 global cross-language edge detection- *(javascript)* add local variable reference tracking with scope resolution- *(javascript)* add visibility inference based on naming conventions- *(core)* [**breaking**] remove symbol types and migrate to CodeGraph- *(symbol-removal)* [**breaking**] migrate core and plugins to graph-only- *(exports)* enable Export edge support across all languages- *(imports)* enable import edge tests and add CommonJS support- *(graph)* add Export edge emission for 18 language plugins- *(graph)* complete legacy architecture removal and add Rust relation features- *(core)* consolidate relations-shared into sqry-core (FR-2025-022)- *(graph)* add OOP and FFI edges for 6 languages (Wave 2)- *(relations)* expand plugin graph builders for exports and inheritance- *(relations)* implement staging graph relation extraction- *(unified-graph)* add query APIs to GraphSnapshot and language tracking to FileRegistry- *(plugins)* enable passing graph builder tests after unified graph migration- *(graph)* migrate all language plugins to GraphBuildHelper (FR-2025-007 Phase 2)- *(graph)* make unified CodeGraph primary export (FR-2025-007 Phase 1)- [**breaking**] remove legacy hooks from relations-shared and plugins (FR-2025-021 WP5)
+- *(plugin)* [**breaking**] remove deprecated extract_calls/imports/exports methods- *(graph)* add caller/callee identity fields to EdgeMetadata (FR-2025-022)- *(plugins)* enhance Go/Python/Zig with rich metadata + fix evaluate_field semantics- *(graphbuilders)* implement Phase 7 GraphBuilder for 7 domain-specific plugins- *(plugins)* enhance TypeScript/Dart/Groovy/SQL with metadata and strict tests- *(rr-09)* update tree-sitter wrappers and language plugins for validation layer- *(FR-JS-PATCH-2)* implement arrow/class expression symbol extraction with hash-based naming- *(js)* implement arrow function symbol extraction (FR-JS-PATCH-2)- *(P2-3)* migrate sqry-lang-javascript to PluginSymbolBuilder- *(P2-33)* complete Phase 1 - cross-file symbol resolution- *(P2-34)* implement scope nesting & file path support (Phase 1)- *(cli)* implement rich query diagnostics with miette integration (P1-8)- consolidate multiple feature implementations and documentation updates
+- *(FR-2025-006-phase4)* complete Step 7 - migrate all 21 plugins to extract_symbols_from_tree()- *(graph)* complete Phase 6 - unified graph architecture rollout- *(javascript)* implement JavaScript GraphBuilder for unified graph- *(relations)* achieve 90% milestone - TypeScript/JavaScript migrations verified- *(plugins)* add tier-2 plugins and metadata- *(plugins)* complete FT-B.4 metadata migration for TypeScript, JavaScript, and Go (FINAL)- *(hybrid)* add JSON output support for text and combined search results- *(test)* expand verbose logging to language plugin tests (Sprint 3)- *(search)* fuzzy-search accelerators (v0.16.0)- *(js-patch-step4)* add integration tests and fixtures- *(js-patch-step3)* attach re-export provenance metadata- *(js-patch-step2)* correct import alias handling (ESM + CommonJS)- *(js)* implement synthetic naming for anonymous functions/classes (Step 1)- *(js)* implement export edge extraction for JavaScript (JS-4)- *(js)* implement import edge extraction for JavaScript (JS-3)- *(js)* implement call edge extraction for JavaScript (JS-2)- *(javascript)* scaffold relation tracking modules (JS-1)- *(plugins)* implement symbol extraction for JS, TS, Python, and Go- *(query)* implement AST-aware query command- initial sqry repository setup (Phase 0)
+
+### Changed
+- *(plugins)* migrate type extractors to shared utilities- migrate CLI commands from SymbolIndex to unified graph
+- *(FR-2025-021)* stub deprecated extract_* methods and remove legacy tests (WP5)- *(relations)* deprecate legacy hook surfaces and extractors- fix 73 clippy warnings across language modules
+- apply clippy pedantic auto-fixes - reduce warnings by 54%
+- *(clippy)* apply automated pedantic quick-fix sweep- *(relations)* apply clippy auto-fixes to graph builders- *(plugins)* standardize language plugin implementations and test improvements- *(js)* address code review recommendations
+### Documentation
+- comprehensive benchmark suite and competitive analysis
+
+### Fixed
+- *(release)* remove 408 files tracked in git but matched by .gitignore- *(sonar)* resolve quality gate failures and scan infrastructure issues- *(release)* resolve preflight native-name regressions- *(graph)* address Codex review findings for Pass 5 cross-language detection- *(cpp,python)* address all Codex review findings (100% test pass)- *(lang)* resolve unused warnings across language plugins- *(FR-2025-021)* convert all language plugins from unit structs to struct-with-field- *(serde)* replace skip_serializing_if with serde(default) for bincode compat- *(FR-JS-PATCH-2)* update remaining integration tests for hash-based naming- *(FR-JS-PATCH-2)* update test for hash-based naming + RKG edge + fmt- *(js)* differentiate variable-assigned vs truly anonymous arrow functions- *(javascript)* generate synthetic names for anonymous arrow functions- complete P2-2 Symbol interning migration compatibility (215 errors → 0)
+- *(js)* Extract arrow function names from variable declarators- Resolve rust-analyzer warnings in tests and benchmarks
+- *(relations)* improve JavaScript/TypeScript anonymous caller handling and optional chains- *(javascript)* implement proper anonymous caller naming with SyntheticNameBuilder- *(javascript)* prevent corruption of ternary and nullish operators by optional chain normalization- *(javascript)* fix optional chain call extraction + clean up dead code- *(relations)* correct callers query false positive bug- *(js-critical)* fix optional chains, default/namespace imports, and re-export flags
+### Other
+- release v5.0.1 ([#60](https://github.com/verivus-oss/sqry/pull/60))
+- release v5.0.0 ([#58](https://github.com/verivus-oss/sqry/pull/58))
+- *(clippy)* reduce pedantic lint backlog- *(packaging)* prepare all crates for crates.io publishing- strip internal requirement IDs and LLM references from comments
+- *(plugins)* standardize metadata version to env!("CARGO_PKG_VERSION")- *(clippy)* resolve pedantic lints- *(swift)* resolve clippy pedantic lints- fix dead_code warnings and complete unified graph migration cleanup
+- *(clippy)* finalize cleanup and regenerate rkg- *(pedantic)* clean up missing doc warnings- sync outstanding modifications
+- complete ServiceNow rebranding - update all plugin authors
+
+### Style
+- Fix rustfmt formatting issues
+- *(clippy)* Fix float_cmp warnings batch 2 (benchmarks, sqry-mcp, javascript)

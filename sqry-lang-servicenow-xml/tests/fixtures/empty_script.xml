@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<record_update table="sys_script">
+    <sys_script action="INSERT_OR_UPDATE">
+        <name>Empty Rule</name>
+        <script/>
+    </sys_script>
+</record_update>

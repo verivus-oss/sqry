@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<record_update table="sys_processor">
+    <sys_processor action="INSERT_OR_UPDATE">
+        <name>CustomProcessor</name>
+        <script><![CDATA[
+function process() {
+    var request = g_request;
+    var response = g_response;
+    response.setContentType('application/json');
+}
+        ]]></script>
+    </sys_processor>
+</record_update>

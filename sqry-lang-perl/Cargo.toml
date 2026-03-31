@@ -1,0 +1,26 @@
+[package]
+name = "sqry-lang-perl"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Perl language plugin for sqry"
+
+[dependencies]
+sqry-core = { version = "5.0.1", path = "../sqry-core" }
+anyhow.workspace = true
+log.workspace = true
+tree-sitter.workspace = true
+tree-sitter-perl-sqry = { version = "5.0.1", path = "../crates/tree-sitter-perl-sqry" }
+streaming-iterator.workspace = true
+once_cell.workspace = true
+
+[dev-dependencies]
+sqry-core = { path = "../sqry-core", features = ["test-support"] }
+tempfile.workspace = true
+
+[features]
+default = ["has_relations"]
+has_relations = []

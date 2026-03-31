@@ -1,0 +1,31 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+## [5.0.1](https://github.com/verivus-oss/sqry/compare/v4.12.7...v5.0.1) - 2026-03-31
+
+### Added
+- *(index)* surface structural indexing phases and highlights- *(index)* reunify analysis generation during indexing- *(swift)* implement extension nodes for Swift plugin- *(core)* [**breaking**] remove symbol types and migrate to CodeGraph- *(symbol-removal)* [**breaking**] migrate core and plugins to graph-only- *(exports)* enable Export edge support across all languages- *(imports)* add Import edge support for Swift, Dart, Zig, Vue, Svelte- *(graph)* add Export edge emission for 18 language plugins- *(cli)* add per-step progress output for indexing- *(graph)* complete legacy architecture removal and add Rust relation features- *(core)* consolidate relations-shared into sqry-core (FR-2025-022)- *(lang)* implement v2.6.0 Call and Table edges for Swift, Dart, SQL, ABAP, Apex, ServiceNow- *(graph)* add OOP and FFI edges for 6 languages (Wave 2)- *(relations)* implement staging graph relation extraction- *(unified-graph)* add metadata fields to EdgeKind (Calls, Imports, Exports)- *(graph)* migrate all language plugins to GraphBuildHelper (FR-2025-007 Phase 2)- *(graph)* make unified CodeGraph primary export (FR-2025-007 Phase 1)- [**breaking**] remove legacy hooks from relations-shared and plugins (FR-2025-021 WP5)
+- *(plugin)* [**breaking**] remove deprecated extract_calls/imports/exports methods- *(graph)* add caller/callee identity fields to EdgeMetadata (FR-2025-022)- *(plugins)* enhance Go/Python/Zig with rich metadata + fix evaluate_field semantics- *(rr-09)* update tree-sitter wrappers and language plugins for validation layer- *(P2-3)* migrate sqry-lang-swift to PluginSymbolBuilder- *(P2-34)* implement scope nesting & file path support (Phase 1)- *(lang)* promote Elixir, Shell, SQL, Zig to Tier 1- *(swift)* Add import extraction support- *(swift)* Implement full relation tracking support- *(cli)* implement rich query diagnostics with miette integration (P1-8)- consolidate multiple feature implementations and documentation updates
+- *(lang)* complete FR-2025-009 Phase 2 critical fixes for Ruby/PHP/Swift- *(FR-2025-006-phase4)* complete Step 7 - migrate all 21 plugins to extract_symbols_from_tree()- *(plugins)* add tier-2 plugins and metadata- *(core)* add shared metadata constants module (FT-B.2)- *(swift)* replace async string-contains with AST-based detection (FT-B.1)- *(swift)* add Swift language plugin with comprehensive symbol extraction- *(ruby)* add Ruby language plugin with full symbol extraction
+### Changed
+- migrate CLI commands from SymbolIndex to unified graph
+- *(sonarqube)* critical cleanup batch- *(FR-2025-021)* stub deprecated extract_* methods and remove legacy tests (WP5)- *(relations)* deprecate legacy hook surfaces and extractors- fix 73 clippy warnings across language modules
+- apply clippy pedantic auto-fixes - reduce warnings by 54%
+- *(clippy)* apply automated pedantic quick-fix sweep- *(plugins)* standardize language plugin implementations and test improvements
+### Fixed
+- *(release)* resolve preflight native-name regressions- *(native-display)* preserve native names and synthetic ffi ids- *(ci)* resolve all CI failures across platforms- *(swift)* validate actual multi-binding syntax in TypeOf tests- *(swift)* resolve iteration 3 Codex findings- *(swift)* address Codex review findings for TypeOf/Reference edges- *(cpp,python)* address all Codex review findings (100% test pass)- *(lang,tools)* address Codex review recommendations for production quality- *(graph)* Wave 3 review fixes for language plugins- *(lang)* resolve unused warnings across language plugins- *(FR-2025-021)* convert all language plugins from unit structs to struct-with-field- *(serde)* replace skip_serializing_if with serde(default) for bincode compat- *(FR-JS-PATCH-2)* update test for hash-based naming + RKG edge + fmt- complete P2-2 Symbol interning migration compatibility (215 errors → 0)
+- Resolve rust-analyzer warnings in tests and benchmarks
+
+### Other
+- release v5.0.1 ([#60](https://github.com/verivus-oss/sqry/pull/60))
+- release v5.0.0 ([#58](https://github.com/verivus-oss/sqry/pull/58))
+- fix clippy warnings for Rust 1.94
+- *(packaging)* prepare all crates for crates.io publishing- *(plugins)* standardize metadata version to env!("CARGO_PKG_VERSION")- *(clippy)* resolve pedantic lints- *(swift)* resolve clippy pedantic lints- apply cargo fmt formatting across workspace
+- *(swift)* remove unused debug function from extension extraction- *(clippy)* finalize cleanup and regenerate rkg- *(pedantic)* clean up missing doc warnings
+### Style
+- Fix rustfmt formatting issues

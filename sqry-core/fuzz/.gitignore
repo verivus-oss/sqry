@@ -1,0 +1,215 @@
+target
+artifacts
+coverage
+
+# Ignore fuzzer-generated corpus files (keep only seeds/)
+corpus/*
+!corpus/query_parser/
+!corpus/query_parser/seeds/
+corpus/query_parser/generated/
+# Ignore hash-named files in corpus root (fuzzer's active working set)
+corpus/query_parser/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*
+
+# TypeScript plugin corpus
+!corpus/typescript_plugin/
+!corpus/typescript_plugin/seeds/
+corpus/typescript_plugin/generated/
+corpus/typescript_plugin/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*
+
+# Java plugin corpus
+!corpus/java_plugin/
+!corpus/java_plugin/seeds/
+corpus/java_plugin/generated/
+corpus/java_plugin/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*
+
+# C++ plugin corpus
+!corpus/cpp_plugin/
+!corpus/cpp_plugin/seeds/
+corpus/cpp_plugin/generated/
+corpus/cpp_plugin/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*
+
+# C plugin corpus
+!corpus/c_plugin/
+!corpus/c_plugin/seeds/
+corpus/c_plugin/generated/
+corpus/c_plugin/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*
+
+# C# plugin corpus
+!corpus/csharp_plugin/
+!corpus/csharp_plugin/seeds/
+corpus/csharp_plugin/generated/
+corpus/csharp_plugin/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*
+
+# CSS plugin corpus
+!corpus/css_plugin/
+!corpus/css_plugin/seeds/
+corpus/css_plugin/generated/
+corpus/css_plugin/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*
+
+# Dart plugin corpus
+!corpus/dart_plugin/
+!corpus/dart_plugin/seeds/
+corpus/dart_plugin/generated/
+corpus/dart_plugin/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*
+
+# Elixir plugin corpus
+!corpus/elixir_plugin/
+!corpus/elixir_plugin/seeds/
+corpus/elixir_plugin/generated/
+corpus/elixir_plugin/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*
+
+# Go plugin corpus
+!corpus/go_plugin/
+!corpus/go_plugin/seeds/
+corpus/go_plugin/generated/
+corpus/go_plugin/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*
+
+# Groovy plugin corpus
+!corpus/groovy_plugin/
+!corpus/groovy_plugin/seeds/
+corpus/groovy_plugin/generated/
+corpus/groovy_plugin/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*
+
+# Haskell plugin corpus
+!corpus/haskell_plugin/
+!corpus/haskell_plugin/seeds/
+corpus/haskell_plugin/generated/
+corpus/haskell_plugin/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*
+
+# HTML plugin corpus
+!corpus/html_plugin/
+!corpus/html_plugin/seeds/
+corpus/html_plugin/generated/
+corpus/html_plugin/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*
+
+# JavaScript plugin corpus
+!corpus/javascript_plugin/
+!corpus/javascript_plugin/seeds/
+corpus/javascript_plugin/generated/
+corpus/javascript_plugin/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*
+
+# Kotlin plugin corpus
+!corpus/kotlin_plugin/
+!corpus/kotlin_plugin/seeds/
+corpus/kotlin_plugin/generated/
+corpus/kotlin_plugin/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*
+
+# Lua plugin corpus
+!corpus/lua_plugin/
+!corpus/lua_plugin/seeds/
+corpus/lua_plugin/generated/
+corpus/lua_plugin/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*
+
+# Oracle PL/SQL plugin corpus
+!corpus/oracle_plsql_plugin/
+!corpus/oracle_plsql_plugin/seeds/
+corpus/oracle_plsql_plugin/generated/
+corpus/oracle_plsql_plugin/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*
+
+# Perl plugin corpus
+!corpus/perl_plugin/
+!corpus/perl_plugin/seeds/
+corpus/perl_plugin/generated/
+corpus/perl_plugin/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*
+
+# PHP plugin corpus
+!corpus/php_plugin/
+!corpus/php_plugin/seeds/
+corpus/php_plugin/generated/
+corpus/php_plugin/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*
+
+# Puppet plugin corpus
+!corpus/puppet_plugin/
+!corpus/puppet_plugin/seeds/
+corpus/puppet_plugin/generated/
+corpus/puppet_plugin/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*
+
+# Python plugin corpus
+!corpus/python_plugin/
+!corpus/python_plugin/seeds/
+corpus/python_plugin/generated/
+corpus/python_plugin/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*
+
+# R plugin corpus
+!corpus/r_plugin/
+!corpus/r_plugin/seeds/
+corpus/r_plugin/generated/
+corpus/r_plugin/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*
+
+# Ruby plugin corpus
+!corpus/ruby_plugin/
+!corpus/ruby_plugin/seeds/
+corpus/ruby_plugin/generated/
+corpus/ruby_plugin/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*
+
+# Rust plugin corpus
+!corpus/rust_plugin/
+!corpus/rust_plugin/seeds/
+corpus/rust_plugin/generated/
+corpus/rust_plugin/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*
+
+# SalesforceApexPlugin corpus
+!corpus/salesforce_apex_plugin/
+!corpus/salesforce_apex_plugin/seeds/
+corpus/salesforce_apex_plugin/generated/
+corpus/salesforce_apex_plugin/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*
+
+# SapAbapPlugin corpus
+!corpus/sap_abap_plugin/
+!corpus/sap_abap_plugin/seeds/
+corpus/sap_abap_plugin/generated/
+corpus/sap_abap_plugin/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*
+
+# ScalaPlugin corpus
+!corpus/scala_plugin/
+!corpus/scala_plugin/seeds/
+corpus/scala_plugin/generated/
+corpus/scala_plugin/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*
+
+# ServiceNowXanaduPlugin corpus
+!corpus/servicenow_xanadu_plugin/
+!corpus/servicenow_xanadu_plugin/seeds/
+corpus/servicenow_xanadu_plugin/generated/
+corpus/servicenow_xanadu_plugin/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*
+
+# ShellPlugin corpus
+!corpus/shell_plugin/
+!corpus/shell_plugin/seeds/
+corpus/shell_plugin/generated/
+corpus/shell_plugin/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*
+
+# SqlPlugin corpus
+!corpus/sql_plugin/
+!corpus/sql_plugin/seeds/
+corpus/sql_plugin/generated/
+corpus/sql_plugin/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*
+
+# SveltePlugin corpus
+!corpus/svelte_plugin/
+!corpus/svelte_plugin/seeds/
+corpus/svelte_plugin/generated/
+corpus/svelte_plugin/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*
+
+# SwiftPlugin corpus
+!corpus/swift_plugin/
+!corpus/swift_plugin/seeds/
+corpus/swift_plugin/generated/
+corpus/swift_plugin/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*
+
+# TerraformPlugin corpus
+!corpus/terraform_plugin/
+!corpus/terraform_plugin/seeds/
+corpus/terraform_plugin/generated/
+corpus/terraform_plugin/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*
+
+# VuePlugin corpus
+!corpus/vue_plugin/
+!corpus/vue_plugin/seeds/
+corpus/vue_plugin/generated/
+corpus/vue_plugin/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*
+
+# ZigPlugin corpus
+!corpus/zig_plugin/
+!corpus/zig_plugin/seeds/
+corpus/zig_plugin/generated/
+corpus/zig_plugin/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*

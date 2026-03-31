@@ -1,0 +1,32 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+## [5.0.1](https://github.com/verivus-oss/sqry/compare/v4.12.7...v5.0.1) - 2026-03-31
+
+### Added
+- *(index)* surface structural indexing phases and highlights- *(index)* reunify analysis generation during indexing- *(servicenow)* add Import edge detection for ES6 imports and require() calls- *(core)* [**breaking**] remove symbol types and migrate to CodeGraph- *(symbol-removal)* [**breaking**] migrate core and plugins to graph-only- *(sql,ts)* add SQL trigger call edges and TypeScript import specifiers- *(exports)* enable Export edge support across all languages- *(graph)* add Export edge emission for 18 language plugins- *(graph)* complete legacy architecture removal and add Rust relation features- *(core)* consolidate relations-shared into sqry-core (FR-2025-022)- *(lang)* implement v2.6.0 Call and Table edges for Swift, Dart, SQL, ABAP, Apex, ServiceNow- *(relations)* implement staging graph relation extraction- *(graph)* migrate all language plugins to GraphBuildHelper (FR-2025-007 Phase 2)- *(graph)* make unified CodeGraph primary export (FR-2025-007 Phase 1)- *(plugin)* [**breaking**] remove deprecated extract_calls/imports/exports methods- *(graph)* add caller/callee identity fields to EdgeMetadata (FR-2025-022)- *(plugins)* enhance Go/Python/Zig with rich metadata + fix evaluate_field semantics- *(plugins)* enhance TypeScript/Dart/Groovy/SQL with metadata and strict tests- *(rr-09)* update tree-sitter wrappers and language plugins for validation layer- *(P2-34)* implement scope nesting & file path support (Phase 1)- *(lang)* promote Elixir, Shell, SQL, Zig to Tier 1- *(sql)* Integrate tree-sitter-sql fork with PL/pgSQL assignment support- *(lang-sql)* Implement Tier 1 relation extraction (extract_calls, extract_exports, extract_imports)- *(cli)* implement rich query diagnostics with miette integration (P1-8)- consolidate multiple feature implementations and documentation updates
+- *(dart)* broaden GraphBuilder to extract all classes and functions- *(sql)* implement table read/write edge extraction- *(sql,dart)* implement Phase 3 GraphBuilder with critical bug fixes- *(FR-2025-006-phase4)* complete Step 7 - migrate all 21 plugins to extract_symbols_from_tree()- *(sql)* add SQL language plugin with table and view extraction
+### Changed
+- *(plugins)* migrate type extractors to shared utilities- migrate CLI commands from SymbolIndex to unified graph
+- *(sonarqube)* complete critical cleanup and lint passes- *(relations)* rename helper extractors- *(relations)* deprecate legacy hook surfaces and extractors- *(sql)* migrate to PluginSymbolBuilder pattern- fix 73 clippy warnings across language modules
+- apply clippy pedantic auto-fixes - reduce warnings by 54%
+- *(clippy)* apply automated pedantic quick-fix sweep- *(plugins)* standardize language plugin implementations and test improvements
+### Documentation
+- *(review)* add LOW priority post-implementation review responses
+### Fixed
+- *(clippy)* resolve all -D warnings across workspace- *(release)* prepare v4.8.17 for leg1- *(sql)* mark visibility tests as ignored - feature not yet implemented- *(tests)* update NodeKind variants in SQL and Oracle PL/SQL tests- *(cpp,python)* address all Codex review findings (100% test pass)- *(graph)* Wave 3 review fixes for language plugins- *(lang)* resolve unused warnings across language plugins- *(FR-2025-021)* convert all language plugins from unit structs to struct-with-field- *(serde)* replace skip_serializing_if with serde(default) for bincode compat- *(FR-JS-PATCH-2)* update test for hash-based naming + RKG edge + fmt- complete P2-2 Symbol interning migration compatibility (215 errors → 0)
+- *(P2-34)* add missing scope_id field to Symbol literals in tests/benchmarks- *(sql)* strengthen tests and ensure consistent table node kinds
+### Other
+- release v5.0.1 ([#60](https://github.com/verivus-oss/sqry/pull/60))
+- release v5.0.0 ([#58](https://github.com/verivus-oss/sqry/pull/58))
+- *(packaging)* prepare all crates for crates.io publishing- *(plugins)* standardize metadata version to env!("CARGO_PKG_VERSION")- apply cargo fmt formatting across workspace
+- apply cargo fmt formatting fixes
+- fix dead_code warnings and complete unified graph migration cleanup
+- *(clippy)* finalize cleanup and regenerate rkg
+### Style
+- Fix rustfmt formatting issues

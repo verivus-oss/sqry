@@ -1,0 +1,14 @@
+name: pulumi-example-dev
+runtime: yaml
+package: aws
+resources:
+  cache:
+    type: aws:elasticache/cluster:Cluster
+    properties:
+      nodeType: cache.t3.small
+      name: ${resources.cache.name}
+outputs:
+  cacheId:
+    value: ${resources.cache.id}
+config:
+  environment: dev

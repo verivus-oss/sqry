@@ -1,0 +1,14 @@
+{
+    "crate_name": "test-consumer",
+    "rust_version": "1.94.0",
+    "generated_at": "2026-03-30T00:00:00Z",
+    "source_hash": "abc123",
+    "files": {
+        "src/lib.rs": {
+            "original_symbols": ["test_consumer::Derived", "test_consumer::attributed"],
+            "expanded_symbols": ["test_consumer::Derived", "test_consumer::attributed", "test_consumer::<Derived as MyDerive>::__dummy"],
+            "generated_symbols": ["test_consumer::<Derived as MyDerive>::__dummy"],
+            "confidence": "heuristic"
+        }
+    }
+}

@@ -1,0 +1,15 @@
+[package]
+name = "tree-sitter-kotlin-sqry"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Tree-sitter grammar for Kotlin (sqry fork)"
+include = ["src/", "grammar-src/", "build.rs", "Cargo.toml"]
+
+[dependencies]
+tree-sitter.workspace = true
+sqry-tree-sitter-support = { version = "5.0.1", path = "../../sqry-tree-sitter-support" }
+
+[build-dependencies]
+cc = "1"

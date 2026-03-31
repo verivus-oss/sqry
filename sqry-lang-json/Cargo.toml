@@ -1,0 +1,21 @@
+[package]
+name = "sqry-lang-json"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "JSON config file language plugin for sqry"
+
+[dependencies]
+sqry-core = { version = "5.0.1", path = "../sqry-core" }
+tree-sitter.workspace = true
+tree-sitter-json.workspace = true
+
+[dev-dependencies]
+serial_test = "3.0"
+
+[features]
+default = ["has_relations"]
+has_relations = []

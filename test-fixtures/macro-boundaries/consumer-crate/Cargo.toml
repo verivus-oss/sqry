@@ -1,0 +1,7 @@
+[package]
+name = "test-consumer"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+test-proc-macro = { path = "../proc-macro-crate" }

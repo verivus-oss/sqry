@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<record_update table="sys_ui_action">
+    <sys_ui_action action="INSERT_OR_UPDATE">
+        <name>Close Incident</name>
+        <script><![CDATA[
+function serverAction() {
+    current.state = 7;
+    current.update();
+}
+        ]]></script>
+        <client_script><![CDATA[
+function clientAction() {
+    var confirmed = confirm('Close this incident?');
+    if (confirmed) {
+        gsftSubmit(null, g_form.getFormElement(), 'close_incident');
+    }
+}
+        ]]></client_script>
+    </sys_ui_action>
+</record_update>

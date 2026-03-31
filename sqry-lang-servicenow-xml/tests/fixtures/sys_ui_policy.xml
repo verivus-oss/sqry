@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<record_update table="sys_ui_policy">
+    <sys_ui_policy action="INSERT_OR_UPDATE">
+        <name>Priority Visibility</name>
+        <script_true><![CDATA[
+function onCondition() {
+    g_form.setDisplay('priority', true);
+}
+        ]]></script_true>
+        <script_false><![CDATA[
+function onConditionFalse() {
+    g_form.setDisplay('priority', false);
+}
+        ]]></script_false>
+    </sys_ui_policy>
+</record_update>

@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<record_update table="sys_script_client">
+    <sys_script_client action="INSERT_OR_UPDATE">
+        <name>Validate Form</name>
+        <script><![CDATA[
+function onSubmit() {
+    var desc = g_form.getValue('short_description');
+    if (!desc) {
+        g_form.addErrorMessage('Description is required');
+        return false;
+    }
+    return true;
+}
+        ]]></script>
+    </sys_script_client>
+</record_update>

@@ -1,0 +1,44 @@
+{
+  "@context": "https://openvex.dev/ns/v0.2.0",
+  "author": "sqry security",
+  "role": "Maintainer",
+  "timestamp": "2025-01-01T00:00:00Z",
+  "version": 1,
+  "statements": [
+    {
+      "vulnerability": {
+        "name": "CVE-2021-44228",
+        "aliases": ["GHSA-jfh8-c2jp-5v3q"],
+        "description": "Apache Log4j remote code execution vulnerability"
+      },
+      "products": [
+        {
+          "@id": "pkg:cargo/sqry",
+          "identifiers": {
+            "purl": "pkg:cargo/sqry"
+          }
+        }
+      ],
+      "status": "not_affected",
+      "justification": "component_not_present",
+      "impact_statement": "sqry is implemented in Rust and does not bundle the Java log4j library."
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2023-44487",
+        "description": "HTTP/2 Rapid Reset denial of service impacting HTTP servers"
+      },
+      "products": [
+        {
+          "@id": "pkg:cargo/sqry",
+          "identifiers": {
+            "purl": "pkg:cargo/sqry"
+          }
+        }
+      ],
+      "status": "not_affected",
+      "justification": "component_not_present",
+      "impact_statement": "sqry does not expose any HTTP/2 endpoints or embed an HTTP server."
+    }
+  ]
+}

@@ -1,0 +1,24 @@
+# Cargo Configuration
+# Prevents runaway process spawning by limiting parallelism
+
+[build]
+# Limit parallel jobs to prevent memory exhaustion
+# Default would be unlimited (one per CPU core, but can spawn more)
+# Set to 8 to balance performance with resource usage
+jobs = 8
+
+# Optional: Limit test parallelism separately
+# Uncomment if you want stricter limits for tests
+# [test]
+# jobs = 4
+
+[target.x86_64-pc-windows-gnu]
+linker = "x86_64-w64-mingw32-gcc"
+
+[net]
+# Optional: Configure network retries to prevent hanging
+retry = 2
+
+# Optional: Timeout for network operations (seconds)
+# git-fetch-with-cli = true
+

@@ -1,0 +1,26 @@
+[package]
+name = "sqry-lang-dart"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Dart language plugin for sqry"
+
+[dependencies]
+sqry-core = { version = "5.0.1", path = "../sqry-core" }
+anyhow.workspace = true
+tree-sitter.workspace = true
+tree-sitter-dart = "0.0.4"
+streaming-iterator.workspace = true
+
+[dev-dependencies]
+log.workspace = true
+env_logger.workspace = true
+sqry-core = { path = "../sqry-core", features = ["test-support"] }
+tempfile = "3.10"
+
+[features]
+default = ["has_relations"]
+has_relations = []

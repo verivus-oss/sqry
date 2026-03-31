@@ -1,0 +1,29 @@
+[package]
+name = "sqry-lang-oracle-plsql"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Oracle PL/SQL language plugin for sqry - semantic search with Oracle-specific metadata"
+
+[lib]
+name = "sqry_lang_oracle_plsql"
+path = "src/lib.rs"
+
+[dependencies]
+sqry-core = { version = "5.0.1", path = "../sqry-core" }
+tree-sitter = { workspace = true }
+tree-sitter-plsql-sqry = { version = "5.0.1", path = "../crates/tree-sitter-plsql-sqry" }
+streaming-iterator = { workspace = true }
+
+[dev-dependencies]
+sqry-core = { path = "../sqry-core", features = ["test-support"] }
+
+[features]
+default = ["has_relations"]
+has_relations = []
+
+[lints]
+workspace = true

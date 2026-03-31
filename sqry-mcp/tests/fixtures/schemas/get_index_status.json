@@ -1,0 +1,10 @@
+{
+  "properties": {
+    "path": {
+      "default": ".",
+      "description": "Workspace-relative directory",
+      "type": "string"
+    }
+  },
+  "type": "object"
+}
