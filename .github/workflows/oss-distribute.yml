@@ -24,17 +24,45 @@ jobs:
     env:
       VERSION: ${{ github.event.client_payload.version }}
       TAG: ${{ github.event.client_payload.tag }}
+      EXPECTED_SHA: ${{ github.event.client_payload.sha }}
     steps:
+      # Guard: validate dispatch payload before doing any work
+      - name: Validate dispatch payload
+        run: |
+          FAIL=0
+          if [[ -z "$VERSION" ]]; then echo "ERROR: missing client_payload.version"; FAIL=1; fi
+          if [[ -z "$TAG" ]]; then echo "ERROR: missing client_payload.tag"; FAIL=1; fi
+          if [[ -z "$EXPECTED_SHA" ]]; then echo "ERROR: missing client_payload.sha"; FAIL=1; fi
+          if [[ "$FAIL" -eq 1 ]]; then exit 1; fi
+          echo "Dispatch payload OK: version=$VERSION tag=$TAG sha=$EXPECTED_SHA"
+
       - name: Workspace wipe
         run: |
           # Docker may create root-owned files; use sudo if needed
           sudo rm -rf "$GITHUB_WORKSPACE" && mkdir -p "$GITHUB_WORKSPACE"
 
+      # Checkout by immutable SHA, not mutable tag
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          ref: ${{ env.TAG }}
+          ref: ${{ env.EXPECTED_SHA }}
+          fetch-depth: 0
           persist-credentials: false
+
+      # Verify checkout integrity: HEAD matches payload SHA and tag resolves to same commit
+      - name: Verify checkout integrity
+        run: |
+          ACTUAL_SHA=$(git rev-parse HEAD)
+          if [[ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]]; then
+            echo "FATAL: HEAD ($ACTUAL_SHA) does not match expected SHA ($EXPECTED_SHA)" >&2
+            exit 1
+          fi
+          TAG_SHA=$(git rev-list -n1 "$TAG" 2>/dev/null || true)
+          if [[ -n "$TAG_SHA" && "$TAG_SHA" != "$EXPECTED_SHA" ]]; then
+            echo "FATAL: tag $TAG resolves to $TAG_SHA but expected $EXPECTED_SHA" >&2
+            exit 1
+          fi
+          echo "Checkout verified: HEAD=$ACTUAL_SHA tag=$TAG"
 
       - name: Install Rust + targets
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
