@@ -1,13 +1,8 @@
 .github/ISSUE_TEMPLATE/bug_report.yml
 .github/ISSUE_TEMPLATE/config.yml
 .github/ISSUE_TEMPLATE/feature_request.yml
-.github/dependabot.yml
 .github/pull_request_template.md
-.github/workflows/ci.yml
-.github/workflows/coverage.yml
 .github/workflows/oss-distribute.yml
-.github/workflows/sbom-vex.yml
-.github/workflows/version-sync.yml
 .verivus/release-managed-paths.txt
 CODE_OF_CONDUCT.md
 CONTRIBUTING.md
