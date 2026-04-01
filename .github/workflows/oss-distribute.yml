@@ -1,6 +1,9 @@
-# Stage 4: Build binaries, attest, upload, publish extension, update package managers
-# Spec: docs/superpowers/specs/2026-03-28-release-process-design.md §7
+# Stage 6: Build binaries, attest, upload, publish extension
+# Spec: docs/superpowers/specs/2026-04-01-release-target-design.md §6 Stage 6
 # This file lives in verivus-oss/sqry (the public repo).
+#
+# Stage 6 is the public distribution boundary. It only runs from
+# staged-approved dispatch originating from verivusai-open/sqry (Stage 5).
 name: "Release: Distribute"
 
 on:
@@ -25,6 +28,10 @@ jobs:
       VERSION: ${{ github.event.client_payload.version }}
       TAG: ${{ github.event.client_payload.tag }}
       EXPECTED_SHA: ${{ github.event.client_payload.sha }}
+      STAGED_ORIGIN: ${{ github.event.client_payload.staged_origin }}
+      STAGED_SHA: ${{ github.event.client_payload.staged_sha }}
+      EXPECTED_DIGEST: ${{ github.event.client_payload.sanitized_tree_sha256 }}
+      CARGO_ZIGBUILD_IMAGE: ghcr.io/rust-cross/cargo-zigbuild@sha256:af1bc2242f74ffec1ded60f9719f9272fce4f3c4ecf1ef0aabfd78bc8a0fb0ef
     steps:
       # Guard: validate dispatch payload before doing any work
       - name: Validate dispatch payload
@@ -33,8 +40,17 @@ jobs:
           if [[ -z "$VERSION" ]]; then echo "ERROR: missing client_payload.version"; FAIL=1; fi
           if [[ -z "$TAG" ]]; then echo "ERROR: missing client_payload.tag"; FAIL=1; fi
           if [[ -z "$EXPECTED_SHA" ]]; then echo "ERROR: missing client_payload.sha"; FAIL=1; fi
+          if [[ -z "$STAGED_ORIGIN" ]]; then echo "ERROR: missing client_payload.staged_origin"; FAIL=1; fi
+          if [[ -z "$STAGED_SHA" ]]; then echo "ERROR: missing client_payload.staged_sha"; FAIL=1; fi
+          if [[ -z "$EXPECTED_DIGEST" ]]; then echo "ERROR: missing client_payload.sanitized_tree_sha256"; FAIL=1; fi
           if [[ "$FAIL" -eq 1 ]]; then exit 1; fi
-          echo "Dispatch payload OK: version=$VERSION tag=$TAG sha=$EXPECTED_SHA"
+          # Verify staged origin is verivusai-open/sqry
+          if [[ "$STAGED_ORIGIN" != "verivusai-open/sqry" ]]; then
+            echo "FATAL: staged_origin is '$STAGED_ORIGIN', required 'verivusai-open/sqry'" >&2
+            echo "Direct publication from verivusai-labs/sqry is forbidden." >&2
+            exit 1
+          fi
+          echo "Dispatch payload OK: version=$VERSION tag=$TAG sha=$EXPECTED_SHA staged_origin=$STAGED_ORIGIN"
 
       - name: Workspace wipe
         run: |
@@ -64,6 +80,83 @@ jobs:
           fi
           echo "Checkout verified: HEAD=$ACTUAL_SHA tag=$TAG"
 
+      - name: Download release ledger
+        id: ledger
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          LEDGER_DIR="$RUNNER_TEMP/release-ledger"
+          mkdir -p "$LEDGER_DIR"
+          gh release download "$TAG" --dir "$LEDGER_DIR" --pattern "release-ledger-v${VERSION}.json"
+          LEDGER_PATH="$LEDGER_DIR/release-ledger-v${VERSION}.json"
+          if [[ ! -f "$LEDGER_PATH" ]]; then
+            echo "FATAL: release ledger asset missing for $TAG" >&2
+            exit 1
+          fi
+          echo "path=$LEDGER_PATH" >> "$GITHUB_OUTPUT"
+
+      - name: Verify staged-origin proof in ledger
+        env:
+          LEDGER_PATH: ${{ steps.ledger.outputs.path }}
+        run: |
+          set -euo pipefail
+
+          # Verify schema version supports staged path
+          SCHEMA_VER=$(jq -r '.schema_version // 0' "$LEDGER_PATH")
+          if [[ "$SCHEMA_VER" -lt 3 ]]; then
+            echo "FATAL: ledger schema_version=$SCHEMA_VER, required >=3 for staged path" >&2
+            exit 1
+          fi
+
+          # Verify release path is staged
+          RELEASE_PATH=$(jq -r '.release_path // empty' "$LEDGER_PATH")
+          if [[ "$RELEASE_PATH" != "staged" ]]; then
+            echo "FATAL: ledger release_path='$RELEASE_PATH', required 'staged'" >&2
+            exit 1
+          fi
+
+          # Verify Stage 5 completed (published from staging)
+          STAGE5_STATUS=$(jq -r '.stages.stage_5_publish.status // empty' "$LEDGER_PATH")
+          if [[ "$STAGE5_STATUS" != "completed" ]]; then
+            echo "FATAL: stage_5_publish status is '$STAGE5_STATUS', required 'completed'" >&2
+            exit 1
+          fi
+
+          # Verify staged origin recorded in ledger
+          LEDGER_STAGED_ORIGIN=$(jq -r '.stages.stage_5_publish.staged_origin // empty' "$LEDGER_PATH")
+          if [[ "$LEDGER_STAGED_ORIGIN" != "verivusai-open/sqry" ]]; then
+            echo "FATAL: ledger staged_origin='$LEDGER_STAGED_ORIGIN', required 'verivusai-open/sqry'" >&2
+            exit 1
+          fi
+
+          # Verify public commit SHA matches
+          LEDGER_PUBLIC_SHA=$(jq -r '.stages.stage_5_publish.public_commit_sha // empty' "$LEDGER_PATH")
+          if [[ -n "$LEDGER_PUBLIC_SHA" && "$LEDGER_PUBLIC_SHA" != "$EXPECTED_SHA" ]]; then
+            echo "FATAL: ledger public_commit_sha ($LEDGER_PUBLIC_SHA) does not match expected ($EXPECTED_SHA)" >&2
+            exit 1
+          fi
+
+          # Verify Stage 6 is not already completed
+          if jq -e '.stages.stage_6_distribute.status == "completed"' "$LEDGER_PATH" >/dev/null; then
+            echo "FATAL: stage_6_distribute is already completed in the ledger" >&2
+            exit 1
+          fi
+
+          echo "[OK] Staged-origin proof verified. Publication originated from verivusai-open/sqry."
+
+      - name: Mark Stage 6 as running in ledger
+        env:
+          LEDGER_PATH: ${{ steps.ledger.outputs.path }}
+        run: |
+          set -euo pipefail
+          tmp=$(mktemp)
+          jq '
+            .stages.stage_6_distribute.status = "running" |
+            .stages.stage_6_distribute.started_at = (now | todateiso8601)
+          ' "$LEDGER_PATH" > "$tmp"
+          mv "$tmp" "$LEDGER_PATH"
+
       - name: Install Rust + targets
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
@@ -84,8 +177,7 @@ jobs:
           gh --version
           echo "All required tools present."
 
-      # Phase 4.1: Cross-compile binaries
-      # macOS targets use Docker (ghcr.io/rust-cross/cargo-zigbuild) for proper SDK linking
+      # Phase 6.1: Cross-compile binaries
       - name: Build binaries
         run: |
           mkdir -p dist/
@@ -104,26 +196,22 @@ jobs:
             if [[ "$target" == "x86_64-unknown-linux-gnu" ]]; then
               cargo build --release --target "$target" -p sqry-cli -p sqry-lsp -p sqry-mcp
             elif [[ "$target" == "x86_64-pc-windows-gnu" ]]; then
-              # Windows mingw: wrap linker to translate MSVC /STACK:N to GNU --stack,N
-              # (rustc passes /STACK:8388608 which Linux cross-mingw ld doesn't support)
               printf '#!/bin/bash\nargs=()\nfor arg in "$@"; do\n  if [[ "$arg" =~ ^/STACK:([0-9]+)$ ]]; then\n    args+=("-Wl,--stack,${BASH_REMATCH[1]}")\n  else\n    args+=("$arg")\n  fi\ndone\nexec x86_64-w64-mingw32-gcc "${args[@]}"\n' > /tmp/mingw-linker-wrapper.sh
               chmod +x /tmp/mingw-linker-wrapper.sh
               CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=/tmp/mingw-linker-wrapper.sh \
                 cargo build --release --target "$target" -p sqry-cli -p sqry-lsp -p sqry-mcp
             elif [[ "$target" == *"apple-darwin"* ]]; then
-              # macOS targets need the cargo-zigbuild Docker image for proper SDK linking
               docker run --rm --user "$(id -u):$(id -g)" \
                 -v "$(pwd):/io" -w /io \
                 -e HOME=/io/.docker-home \
                 -e CARGO_HOME=/io/.docker-cargo \
                 -e XDG_CACHE_HOME=/io/.docker-cache \
-                ghcr.io/rust-cross/cargo-zigbuild:latest \
+                "$CARGO_ZIGBUILD_IMAGE" \
                 bash -c "rustup target add $target && cargo zigbuild --release --target $target -p sqry-cli -p sqry-lsp -p sqry-mcp"
             else
               cargo zigbuild --release --target "$target" -p sqry-cli -p sqry-lsp -p sqry-mcp
             fi
 
-            # Determine file extension and arch suffix
             EXT=""
             [[ "$target" == *"windows"* ]] && EXT=".exe"
 
@@ -142,15 +230,13 @@ jobs:
             done
           done
 
-      # Phase 4.2: Smoke tests
+      # Phase 6.2: Smoke tests
       - name: Smoke test Linux x86_64
         run: |
           chmod +x dist/sqry-linux-x86_64
           ./dist/sqry-linux-x86_64 --version
           ./dist/sqry-linux-x86_64 index --help >/dev/null
 
-      # Best-effort smoke tests — QEMU/Wine may not be available on all runners.
-      # These are non-blocking by design (spec §7 Phase 4.2: "known gap").
       - name: Smoke test Linux arm64 (QEMU)
         continue-on-error: true
         run: |
@@ -162,78 +248,194 @@ jobs:
         run: |
           wine64 dist/sqry-windows-x86_64.exe --version
 
-      # Phase 4.3: Checksums + SLSA attestation
-      - name: Generate checksums
+      # Phase 6.5: VS Code extension
+      - name: Verify VS Code extension assets
         run: |
-          cd dist/
-          sha256sum * > SHA256SUMS.txt
-          cat SHA256SUMS.txt
+          set -euo pipefail
+          missing_assets=()
+          for asset in \
+            sqry-vscode/media/sqry-icon-512.png \
+            sqry-vscode/media/sqry-icon-128.png \
+            sqry-vscode/media/sqry-icon.svg
+          do
+            if [[ ! -f "$asset" ]]; then
+              missing_assets+=("$asset")
+            fi
+          done
 
-      - name: Attest binaries
-        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4
-        with:
-          subject-path: 'dist/*'
-
-      # Phase 4.4: Upload to GitHub Release
-      - name: Upload release assets
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh release upload "$TAG" dist/* --clobber
-
-      # Phase 4.5: VS Code extension
-      # Ensure icon assets exist (may be missing from older sanitized tags)
-      - name: Ensure VS Code extension assets
-        run: |
-          if [[ ! -f sqry-vscode/media/sqry-icon-512.png ]]; then
-            echo "Icon missing from sanitized tree — downloading from internal release"
-            mkdir -p sqry-vscode/media
-            # Generate a minimal placeholder icon (the real fix is in release-manifest.toml)
-            python3 -c "
-          import struct, zlib
-          def png(w,h):
-            def chunk(t,d):return struct.pack('>I',len(d))+t+d+struct.pack('>I',zlib.crc32(t+d)&0xffffffff)
-            raw=b''
-            for y in range(h):
-              raw+=b'\\x00'+(b'\\x1a\\x6b\\xc4\\xff'*w)
-            return b'\\x89PNG\\r\\n\\x1a\\n'+chunk(b'IHDR',struct.pack('>IIBBBBB',w,h,8,6,0,0,0))+chunk(b'IDAT',zlib.compress(raw))+chunk(b'IEND',b'')
-          open('sqry-vscode/media/sqry-icon-512.png','wb').write(png(512,512))
-          open('sqry-vscode/media/sqry-icon-128.png','wb').write(png(128,128))
-          "
+          if [[ ${#missing_assets[@]} -gt 0 ]]; then
+            echo "FATAL: Required VS Code extension assets are missing from the sanitized tree:" >&2
+            printf '  - %s\n' "${missing_assets[@]}" >&2
+            echo "This indicates a Stage 3 sanitization failure. Verify release-manifest.toml includes the required sqry-vscode media assets." >&2
+            exit 1
           fi
 
+          echo "All required VS Code extension assets are present."
+
       - name: Build VS Code extension
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           cd sqry-vscode
           npm ci
           npx vsce package -o "../dist/sqry-vscode-${VERSION}.vsix"
-          cd ..
-          gh release upload "$TAG" "dist/sqry-vscode-${VERSION}.vsix" --clobber
+
+      # Phase 6.3: Checksums + SLSA attestation
+      - name: Generate checksums
+        run: |
+          set -euo pipefail
+          cd dist
+          find . -maxdepth 1 -type f \
+            ! -name 'SHA256SUMS.txt' \
+            ! -name 'release-manifest.json' \
+            ! -name 'release-artifacts.attestation.json' \
+            -printf '%P\n' | sort | while IFS= read -r file; do
+              [[ -z "$file" ]] && continue
+              sha256sum "$file"
+            done > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Attest release artifacts
+        id: attest-release-assets
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4
+        with:
+          subject-checksums: 'dist/SHA256SUMS.txt'
+
+      - name: Copy attestation bundle
+        run: |
+          set -euo pipefail
+          cp "${{ steps.attest-release-assets.outputs.bundle-path }}" dist/release-artifacts.attestation.json
 
       - name: Publish VS Code extension to marketplace
-        continue-on-error: true
+        id: publish-vscode
         env:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}
         run: |
+          set -euo pipefail
           if [ -z "$VSCE_PAT" ]; then
             echo "VSCE_PAT not set — skipping marketplace publish (manual upload required)"
+            echo "status=skipped_missing_token" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           cd sqry-vscode
           if ! OUTPUT=$(npx vsce publish 2>&1); then
             if echo "$OUTPUT" | grep -qi "already exists\|version.*already"; then
               echo "VS Code extension version already published — skipping"
+              echo "status=already_published" >> "$GITHUB_OUTPUT"
             else
               echo "WARNING: vsce publish failed (manual upload required):"
               echo "$OUTPUT"
+              echo "status=failed" >> "$GITHUB_OUTPUT"
             fi
+          else
+            echo "status=published" >> "$GITHUB_OUTPUT"
           fi
 
-      # Phase 4.7: Promote release
+      - name: Generate release manifest and update ledger
+        env:
+          LEDGER_PATH: ${{ steps.ledger.outputs.path }}
+          ATTESTATION_ID: ${{ steps.attest-release-assets.outputs.attestation-id }}
+          ATTESTATION_URL: ${{ steps.attest-release-assets.outputs.attestation-url }}
+          VSCE_STATUS: ${{ steps.publish-vscode.outputs.status }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import pathlib
+          import subprocess
+
+          dist_dir = pathlib.Path("dist")
+          ledger_path = pathlib.Path(os.environ["LEDGER_PATH"])
+          attestation_id = os.environ.get("ATTESTATION_ID", "")
+          attestation_url = os.environ.get("ATTESTATION_URL", "")
+          vsce_status = os.environ.get("VSCE_STATUS", "unknown")
+
+          checksums = {}
+          for line in (dist_dir / "SHA256SUMS.txt").read_text(encoding="utf-8").splitlines():
+              digest, filename = line.split(maxsplit=1)
+              checksums[filename.lstrip("*")] = digest
+
+          binaries = {}
+          vscode_extension = None
+          for path in sorted(dist_dir.iterdir()):
+              if not path.is_file():
+                  continue
+              if path.name in {"SHA256SUMS.txt", "release-manifest.json", "release-artifacts.attestation.json"}:
+                  continue
+              entry = {
+                  "sha256": checksums.get(path.name),
+                  "size": path.stat().st_size,
+                  "attestation_id": attestation_id or None,
+                  "attestation_url": attestation_url or None,
+              }
+              if path.suffix == ".vsix":
+                  entry["marketplace_status"] = vsce_status
+                  vscode_extension = entry
+              else:
+                  binaries[path.name] = entry
+
+          ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
+          stage_5 = ledger.setdefault("stages", {}).setdefault("stage_5_publish", {})
+          stage_6 = ledger["stages"].setdefault("stage_6_distribute", {})
+          stage_6["status"] = "completed"
+          stage_6["binaries"] = binaries
+          stage_6["vscode_extension"] = vscode_extension or {}
+          stage_6["public_release_status"] = "draft"
+          stage_6["completed_at"] = subprocess.check_output(
+              ["date", "-u", "+%Y-%m-%dT%H:%M:%SZ"], text=True
+          ).strip()
+
+          build_environment = {
+              "rust_version": subprocess.check_output(["rustc", "--version"], text=True).strip(),
+              "zig_version": subprocess.check_output(["zig", "version"], text=True).strip(),
+              "runner_os": subprocess.check_output(["uname", "-srm"], text=True).strip(),
+          }
+          ledger["build_environment"] = build_environment
+
+          manifest = {
+              "version": os.environ["VERSION"],
+              "tag": os.environ["TAG"],
+              "public_commit_sha": os.environ["EXPECTED_SHA"],
+              "staged_origin": os.environ.get("STAGED_ORIGIN", "verivusai-open/sqry"),
+              "sanitized_tree_sha256": stage_5.get("sanitized_tree_sha256") or ledger.get("stages", {}).get("stage_3_sanitize_and_stage", {}).get("sanitized_tree_sha256"),
+              "binaries": binaries,
+              "crates": stage_5.get("crates", {}),
+              "vscode_extension": vscode_extension or {},
+              "build_environment": build_environment,
+              "attestation": {
+                  "id": attestation_id or None,
+                  "url": attestation_url or None,
+                  "bundle": "release-artifacts.attestation.json",
+              },
+          }
+
+          (dist_dir / "release-manifest.json").write_text(
+              json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          ledger_path.write_text(json.dumps(ledger, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+          PY
+
+      # Phase 6.4: Upload to GitHub Release
+      - name: Upload release assets and ledger
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          LEDGER_PATH: ${{ steps.ledger.outputs.path }}
+        run: |
+          gh release upload "$TAG" dist/* "$LEDGER_PATH" --clobber
+
+      # Phase 6.7: Promote release
       - name: Promote public release from draft
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          LEDGER_PATH: ${{ steps.ledger.outputs.path }}
         run: |
+          set -euo pipefail
+          tmp=$(mktemp)
+          jq '
+            .stages.stage_6_distribute.public_release_status = "published" |
+            .finalized = true |
+            .finalized_at = (now | todateiso8601)
+          ' "$LEDGER_PATH" > "$tmp"
+          mv "$tmp" "$LEDGER_PATH"
+          gh release upload "$TAG" "$LEDGER_PATH" --clobber
           gh release edit "$TAG" --draft=false --latest
