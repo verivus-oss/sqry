@@ -7,14 +7,14 @@ import * as vscode from "vscode";
 
 suite("Extension Activation Tests", () => {
   test("should be present in VS Code", () => {
-    const extension = vscode.extensions.getExtension("verivuslabs.sqry-vscode");
+    const extension = vscode.extensions.getExtension("verivus.sqry-vscode");
     assert.ok(extension, "Extension should be installed");
   });
 
   test("should activate successfully", async function() {
     this.timeout(10000);
 
-    const extension = vscode.extensions.getExtension("verivuslabs.sqry-vscode");
+    const extension = vscode.extensions.getExtension("verivus.sqry-vscode");
     assert.ok(extension, "Extension should be installed");
 
     await extension!.activate();
@@ -53,11 +53,11 @@ suite("Extension Activation Tests", () => {
   });
 
   test("should have correct publisher and version", () => {
-    const extension = vscode.extensions.getExtension("verivuslabs.sqry-vscode");
+    const extension = vscode.extensions.getExtension("verivus.sqry-vscode");
     assert.ok(extension, "Extension should be installed");
 
     const packageJson = extension!.packageJSON;
-    assert.strictEqual(packageJson.publisher, "verivuslabs", "Publisher should be verivuslabs");
+    assert.strictEqual(packageJson.publisher, "verivus", "Publisher should be verivus");
     assert.ok(packageJson.version, "Should have a version");
     assert.match(packageJson.version, /^\d+\.\d+\.\d+$/, "Version should be semantic");
   });
@@ -96,7 +96,7 @@ suite("View Registration Tests", () => {
     this.timeout(10000);
 
     // Ensure extension is activated
-    const extension = vscode.extensions.getExtension("verivuslabs.sqry-vscode");
+    const extension = vscode.extensions.getExtension("verivus.sqry-vscode");
     await extension!.activate();
 
     // Check if view is registered by trying to reveal it

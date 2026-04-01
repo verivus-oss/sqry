@@ -2,12 +2,12 @@
 # cargo-vet audits file
 
 [[audits.tree-sitter-kotlin]]
-who = "Werner Kasselman <oss@sqry.dev>"
+who = "Werner Kasselman <werner@sqry.dev>"
 criteria = "safe-to-deploy"
 version = "0.3.9"
 
 [[audits.tree-sitter-sequel]]
-who = "Werner Kasselman <oss@sqry.dev>"
+who = "Werner Kasselman <werner@sqry.dev>"
 criteria = "safe-to-deploy"
 version = "0.3.11"
 

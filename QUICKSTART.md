@@ -1,6 +1,6 @@
 # sqry Quick Start Guide - by Verivus
 
-**Version**: 5.0.1
+**Version**: 6.0.12
 **Rust**: 1.90+ (Edition 2024)
 
 ---

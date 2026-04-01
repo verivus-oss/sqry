@@ -33,11 +33,24 @@ use crate::graph::unified::resolution::{
 use crate::graph::unified::storage::arena::NodeEntry;
 use crate::plugin::PluginManager;
 use crate::query::name_matching::segments_match;
-use crate::query::regex_cache::get_or_compile_regex;
+use crate::query::regex_cache::{CompiledRegex, get_or_compile_regex};
 use crate::query::types::{Condition, Expr, JoinEdgeKind, JoinExpr, Operator, Value};
 use anyhow::{Result, anyhow};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+
+/// Try `re.is_match(text)`, logging a warning and returning `false` if the
+/// regex engine hits its backtrack limit.  This prevents silent failures
+/// while keeping the predicate-evaluation chain infallible.
+fn regex_is_match(re: &CompiledRegex, text: &str) -> bool {
+    match re.is_match(text) {
+        Ok(b) => b,
+        Err(e) => {
+            log::warn!("regex match aborted (backtrack limit?): {e}");
+            false
+        }
+    }
+}
 use std::sync::Arc;
 
 /// Cache of precomputed subquery result sets, keyed by `(span.start, span.end)`.
@@ -443,7 +456,7 @@ fn match_kind(
             regex_val.flags.multiline,
             regex_val.flags.dot_all,
         )
-        .map(|re| re.is_match(actual))
+        .map(|re| regex_is_match(&re, actual))
         .unwrap_or(false),
         _ => false,
     }
@@ -478,7 +491,7 @@ fn match_name(
         .map(|re| {
             entry_query_texts(ctx.graph, entry)
                 .iter()
-                .any(|candidate| re.is_match(candidate))
+                .any(|candidate| regex_is_match(&re, candidate))
         })
         .unwrap_or(false),
         _ => false,
@@ -531,7 +544,7 @@ fn match_path(
                 regex_val.flags.multiline,
                 regex_val.flags.dot_all,
             )
-            .map(|re| re.is_match(file_path.to_string_lossy().as_ref()))
+            .map(|re| regex_is_match(&re, file_path.to_string_lossy().as_ref()))
             .unwrap_or(false)
         }
         _ => false,
@@ -613,7 +626,7 @@ fn match_lang(
             rv.flags.multiline,
             rv.flags.dot_all,
         )
-        .map(|re| re.is_match(actual))
+        .map(|re| regex_is_match(&re, actual))
         .unwrap_or(false),
         _ => false,
     }
@@ -1113,7 +1126,7 @@ fn match_references(
         .map(|re| {
             entry_query_texts(ctx.graph, entry)
                 .iter()
-                .any(|candidate| re.is_match(candidate))
+                .any(|candidate| regex_is_match(&re, candidate))
         })
         .unwrap_or(false),
         _ => false,
@@ -1241,7 +1254,7 @@ fn match_scope_type(
                     rv.flags.multiline,
                     rv.flags.dot_all,
                 )
-                .map(|re| re.is_match(scope_type))
+                .map(|re| regex_is_match(&re, scope_type))
                 .unwrap_or(false),
                 _ => false,
             };
@@ -1270,7 +1283,7 @@ fn match_scope_name(
                     rv.flags.multiline,
                     rv.flags.dot_all,
                 )
-                .map(|re| re.is_match(&name))
+                .map(|re| regex_is_match(&re, &name))
                 .unwrap_or(false),
                 _ => false,
             };
@@ -1302,7 +1315,7 @@ fn match_scope_parent_name(
                     rv.flags.multiline,
                     rv.flags.dot_all,
                 )
-                .map(|re| re.is_match(&name))
+                .map(|re| regex_is_match(&re, &name))
                 .unwrap_or(false),
                 _ => false,
             };
@@ -1349,7 +1362,7 @@ fn match_scope_ancestor_name(
                             rv.flags.multiline,
                             rv.flags.dot_all,
                         )
-                        .map(|re| re.is_match(&name))
+                        .map(|re| regex_is_match(&re, &name))
                         .unwrap_or(false),
                         _ => false,
                     };

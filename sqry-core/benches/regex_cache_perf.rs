@@ -19,7 +19,7 @@ fn bench_regex_cached(c: &mut Criterion) {
         b.iter(|| {
             for _ in 0..1000 {
                 let re = get_or_compile_regex("process.*", false, false, false).unwrap();
-                black_box(re.is_match("process_data"));
+                let _ = black_box(re.is_match("process_data"));
             }
         });
     });

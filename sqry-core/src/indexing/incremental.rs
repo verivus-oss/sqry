@@ -469,7 +469,18 @@ impl HashIndex {
             return Ok(Self::new());
         }
 
-        // Read file
+        // Read file with size cap to prevent memory exhaustion from crafted files
+        const MAX_HASH_INDEX_BYTES: u64 = 256 * 1024 * 1024; // 256 MiB
+        let metadata = fs::metadata(&hash_file)
+            .with_context(|| format!("Failed to stat hash index: {}", hash_file.display()))?;
+        if metadata.len() > MAX_HASH_INDEX_BYTES {
+            anyhow::bail!(
+                "Hash index file is too large ({} bytes, max {}): {}",
+                metadata.len(),
+                MAX_HASH_INDEX_BYTES,
+                hash_file.display()
+            );
+        }
         let bytes = fs::read(&hash_file)
             .with_context(|| format!("Failed to read hash index from {}", hash_file.display()))?;
 

@@ -898,6 +898,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "diff"
+version = "0.1.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "56254986775e3233ffa9c4d7d3faaf6d36a2c09d30b20687e9f88bc8bafc16c8"
+
+[[package]]
 name = "difflib"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2750,6 +2756,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "pretty_assertions"
+version = "1.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3ae130e2f271fbc2ac3a40fb1d07180839cdbbe443c7a27e1e3c13c5cac0116d"
+dependencies = [
+ "diff",
+ "yansi",
+]
+
+[[package]]
 name = "prettyplease"
 version = "0.2.37"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3437,7 +3453,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-cli"
-version = "5.0.1"
+version = "6.0.12"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -3489,7 +3505,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-core"
-version = "5.0.1"
+version = "6.0.12"
 dependencies = [
  "anyhow",
  "approx",
@@ -3557,6 +3573,8 @@ dependencies = [
  "sqry-lang-svelte",
  "sqry-lang-swift",
  "sqry-lang-typescript",
+ "sqry-test-fixtures",
+ "sqry-test-support",
  "streaming-iterator",
  "tempfile",
  "thiserror 2.0.18",
@@ -3580,12 +3598,14 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-c"
-version = "5.0.1"
+version = "6.0.12"
 dependencies = [
  "anyhow",
  "log",
  "serial_test",
  "sqry-core",
+ "sqry-test-support",
+ "sqry-tree-sitter-fuzz-support",
  "streaming-iterator",
  "tempfile",
  "tree-sitter",
@@ -3594,12 +3614,13 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-cpp"
-version = "5.0.1"
+version = "6.0.12"
 dependencies = [
  "anyhow",
  "log",
  "sqry-core",
  "sqry-lang-support",
+ "sqry-tree-sitter-fuzz-support",
  "streaming-iterator",
  "tempfile",
  "tree-sitter",
@@ -3608,12 +3629,14 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-csharp"
-version = "5.0.1"
+version = "6.0.12"
 dependencies = [
  "anyhow",
  "log",
  "sqry-core",
  "sqry-lang-support",
+ "sqry-test-support",
+ "sqry-tree-sitter-fuzz-support",
  "streaming-iterator",
  "tempfile",
  "tree-sitter",
@@ -3622,11 +3645,12 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-css"
-version = "5.0.1"
+version = "6.0.12"
 dependencies = [
  "anyhow",
  "log",
  "sqry-core",
+ "sqry-tree-sitter-fuzz-support",
  "streaming-iterator",
  "tree-sitter",
  "tree-sitter-css",
@@ -3634,12 +3658,13 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-dart"
-version = "5.0.1"
+version = "6.0.12"
 dependencies = [
  "anyhow",
  "env_logger",
  "log",
  "sqry-core",
+ "sqry-tree-sitter-fuzz-support",
  "streaming-iterator",
  "tempfile",
  "tree-sitter",
@@ -3648,12 +3673,13 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-elixir"
-version = "5.0.1"
+version = "6.0.12"
 dependencies = [
  "anyhow",
  "insta",
  "log",
  "sqry-core",
+ "sqry-tree-sitter-fuzz-support",
  "streaming-iterator",
  "tracing",
  "tree-sitter",
@@ -3662,13 +3688,15 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-go"
-version = "5.0.1"
+version = "6.0.12"
 dependencies = [
  "anyhow",
  "criterion",
  "log",
  "sqry-core",
  "sqry-lang-support",
+ "sqry-test-support",
+ "sqry-tree-sitter-fuzz-support",
  "streaming-iterator",
  "tree-sitter",
  "tree-sitter-go",
@@ -3676,7 +3704,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-groovy"
-version = "5.0.1"
+version = "6.0.12"
 dependencies = [
  "anyhow",
  "insta",
@@ -3685,6 +3713,7 @@ dependencies = [
  "serde_json",
  "sqry-core",
  "sqry-lang-support",
+ "sqry-tree-sitter-fuzz-support",
  "streaming-iterator",
  "tree-sitter",
  "tree-sitter-groovy-sqry",
@@ -3692,11 +3721,12 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-haskell"
-version = "5.0.1"
+version = "6.0.12"
 dependencies = [
  "anyhow",
  "log",
  "sqry-core",
+ "sqry-tree-sitter-fuzz-support",
  "streaming-iterator",
  "tempfile",
  "tree-sitter",
@@ -3705,11 +3735,12 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-html"
-version = "5.0.1"
+version = "6.0.12"
 dependencies = [
  "anyhow",
  "log",
  "sqry-core",
+ "sqry-tree-sitter-fuzz-support",
  "streaming-iterator",
  "tree-sitter",
  "tree-sitter-html",
@@ -3717,7 +3748,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-java"
-version = "5.0.1"
+version = "6.0.12"
 dependencies = [
  "anyhow",
  "criterion",
@@ -3726,6 +3757,7 @@ dependencies = [
  "serde_json",
  "sqry-core",
  "sqry-lang-support",
+ "sqry-tree-sitter-fuzz-support",
  "streaming-iterator",
  "tempfile",
  "tree-sitter",
@@ -3735,7 +3767,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-javascript"
-version = "5.0.1"
+version = "6.0.12"
 dependencies = [
  "anyhow",
  "approx",
@@ -3745,6 +3777,7 @@ dependencies = [
  "serde_json",
  "sqry-core",
  "sqry-lang-support",
+ "sqry-tree-sitter-fuzz-support",
  "streaming-iterator",
  "tree-sitter",
  "tree-sitter-javascript",
@@ -3752,23 +3785,25 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-json"
-version = "5.0.1"
+version = "6.0.12"
 dependencies = [
  "serial_test",
  "sqry-core",
+ "sqry-test-support",
  "tree-sitter",
  "tree-sitter-json",
 ]
 
 [[package]]
 name = "sqry-lang-kotlin"
-version = "5.0.1"
+version = "6.0.12"
 dependencies = [
  "anyhow",
  "env_logger",
  "log",
  "sqry-core",
  "sqry-lang-support",
+ "sqry-tree-sitter-fuzz-support",
  "streaming-iterator",
  "tempfile",
  "tree-sitter",
@@ -3777,13 +3812,14 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-lua"
-version = "5.0.1"
+version = "6.0.12"
 dependencies = [
  "anyhow",
  "criterion",
  "log",
  "serial_test",
  "sqry-core",
+ "sqry-tree-sitter-fuzz-support",
  "streaming-iterator",
  "tree-sitter",
  "tree-sitter-lua",
@@ -3791,9 +3827,10 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-oracle-plsql"
-version = "5.0.1"
+version = "6.0.12"
 dependencies = [
  "sqry-core",
+ "sqry-tree-sitter-fuzz-support",
  "streaming-iterator",
  "tree-sitter",
  "tree-sitter-plsql-sqry",
@@ -3801,12 +3838,13 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-perl"
-version = "5.0.1"
+version = "6.0.12"
 dependencies = [
  "anyhow",
  "log",
  "once_cell",
  "sqry-core",
+ "sqry-tree-sitter-fuzz-support",
  "streaming-iterator",
  "tempfile",
  "tree-sitter",
@@ -3815,7 +3853,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-php"
-version = "5.0.1"
+version = "6.0.12"
 dependencies = [
  "anyhow",
  "criterion",
@@ -3825,6 +3863,7 @@ dependencies = [
  "serial_test",
  "sqry-core",
  "sqry-lang-support",
+ "sqry-tree-sitter-fuzz-support",
  "streaming-iterator",
  "tempfile",
  "tree-sitter",
@@ -3833,11 +3872,13 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-pulumi"
-version = "5.0.1"
+version = "6.0.12"
 dependencies = [
  "anyhow",
  "serde",
  "sqry-core",
+ "sqry-test-support",
+ "sqry-tree-sitter-fuzz-support",
  "thiserror 2.0.18",
  "tree-sitter",
  "tree-sitter-json",
@@ -3846,11 +3887,12 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-puppet"
-version = "5.0.1"
+version = "6.0.12"
 dependencies = [
  "anyhow",
  "serde",
  "sqry-core",
+ "sqry-tree-sitter-fuzz-support",
  "streaming-iterator",
  "tempfile",
  "thiserror 2.0.18",
@@ -3860,7 +3902,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-python"
-version = "5.0.1"
+version = "6.0.12"
 dependencies = [
  "anyhow",
  "insta",
@@ -3868,6 +3910,8 @@ dependencies = [
  "regex",
  "serde_json",
  "sqry-core",
+ "sqry-test-support",
+ "sqry-tree-sitter-fuzz-support",
  "streaming-iterator",
  "tempfile",
  "tree-sitter",
@@ -3876,11 +3920,12 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-r"
-version = "5.0.1"
+version = "6.0.12"
 dependencies = [
  "anyhow",
  "log",
  "sqry-core",
+ "sqry-tree-sitter-fuzz-support",
  "streaming-iterator",
  "tempfile",
  "tree-sitter",
@@ -3889,7 +3934,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-ruby"
-version = "5.0.1"
+version = "6.0.12"
 dependencies = [
  "anyhow",
  "criterion",
@@ -3899,6 +3944,8 @@ dependencies = [
  "once_cell",
  "sqry-core",
  "sqry-lang-support",
+ "sqry-test-support",
+ "sqry-tree-sitter-fuzz-support",
  "streaming-iterator",
  "tempfile",
  "tree-sitter",
@@ -3907,7 +3954,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-rust"
-version = "5.0.1"
+version = "6.0.12"
 dependencies = [
  "anyhow",
  "criterion",
@@ -3918,6 +3965,8 @@ dependencies = [
  "serde_json",
  "serial_test",
  "sqry-core",
+ "sqry-test-support",
+ "sqry-tree-sitter-fuzz-support",
  "streaming-iterator",
  "tempfile",
  "tree-sitter",
@@ -3927,10 +3976,11 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-salesforce-apex"
-version = "5.0.1"
+version = "6.0.12"
 dependencies = [
  "anyhow",
  "sqry-core",
+ "sqry-tree-sitter-fuzz-support",
  "streaming-iterator",
  "tempfile",
  "tree-sitter",
@@ -3939,9 +3989,10 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-sap-abap"
-version = "5.0.1"
+version = "6.0.12"
 dependencies = [
  "sqry-core",
+ "sqry-tree-sitter-fuzz-support",
  "streaming-iterator",
  "tempfile",
  "tree-sitter",
@@ -3950,12 +4001,13 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-scala"
-version = "5.0.1"
+version = "6.0.12"
 dependencies = [
  "anyhow",
  "env_logger",
  "log",
  "sqry-core",
+ "sqry-tree-sitter-fuzz-support",
  "streaming-iterator",
  "tempfile",
  "tree-sitter",
@@ -3964,10 +4016,11 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-servicenow-xanadu"
-version = "5.0.1"
+version = "6.0.12"
 dependencies = [
  "anyhow",
  "sqry-core",
+ "sqry-tree-sitter-fuzz-support",
  "streaming-iterator",
  "tempfile",
  "tree-sitter",
@@ -3976,7 +4029,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-servicenow-xml"
-version = "5.0.1"
+version = "6.0.12"
 dependencies = [
  "roxmltree",
  "sqry-core",
@@ -3988,11 +4041,12 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-shell"
-version = "5.0.1"
+version = "6.0.12"
 dependencies = [
  "anyhow",
  "log",
  "sqry-core",
+ "sqry-tree-sitter-fuzz-support",
  "streaming-iterator",
  "tree-sitter",
  "tree-sitter-bash",
@@ -4000,11 +4054,12 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-sql"
-version = "5.0.1"
+version = "6.0.12"
 dependencies = [
  "anyhow",
  "log",
  "sqry-core",
+ "sqry-tree-sitter-fuzz-support",
  "streaming-iterator",
  "tempfile",
  "tree-sitter",
@@ -4013,7 +4068,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-support"
-version = "5.0.1"
+version = "6.0.12"
 dependencies = [
  "sqry-core",
  "tree-sitter",
@@ -4022,7 +4077,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-svelte"
-version = "5.0.1"
+version = "6.0.12"
 dependencies = [
  "anyhow",
  "insta",
@@ -4034,6 +4089,7 @@ dependencies = [
  "sqry-lang-javascript",
  "sqry-lang-support",
  "sqry-lang-typescript",
+ "sqry-tree-sitter-fuzz-support",
  "streaming-iterator",
  "tree-sitter",
  "tree-sitter-javascript",
@@ -4043,7 +4099,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-swift"
-version = "5.0.1"
+version = "6.0.12"
 dependencies = [
  "anyhow",
  "dashmap",
@@ -4052,6 +4108,8 @@ dependencies = [
  "once_cell",
  "serial_test",
  "sqry-core",
+ "sqry-test-support",
+ "sqry-tree-sitter-fuzz-support",
  "streaming-iterator",
  "tempfile",
  "tree-sitter",
@@ -4061,11 +4119,12 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-terraform"
-version = "5.0.1"
+version = "6.0.12"
 dependencies = [
  "anyhow",
  "serde",
  "sqry-core",
+ "sqry-tree-sitter-fuzz-support",
  "streaming-iterator",
  "tempfile",
  "thiserror 2.0.18",
@@ -4075,7 +4134,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-typescript"
-version = "5.0.1"
+version = "6.0.12"
 dependencies = [
  "anyhow",
  "log",
@@ -4084,6 +4143,8 @@ dependencies = [
  "serde_json",
  "sqry-core",
  "sqry-lang-support",
+ "sqry-test-support",
+ "sqry-tree-sitter-fuzz-support",
  "streaming-iterator",
  "tree-sitter",
  "tree-sitter-typescript",
@@ -4091,7 +4152,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-vue"
-version = "5.0.1"
+version = "6.0.12"
 dependencies = [
  "anyhow",
  "insta",
@@ -4103,6 +4164,7 @@ dependencies = [
  "sqry-lang-javascript",
  "sqry-lang-support",
  "sqry-lang-typescript",
+ "sqry-tree-sitter-fuzz-support",
  "streaming-iterator",
  "tree-sitter",
  "tree-sitter-javascript",
@@ -4112,12 +4174,13 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-zig"
-version = "5.0.1"
+version = "6.0.12"
 dependencies = [
  "anyhow",
  "criterion",
  "log",
  "sqry-core",
+ "sqry-tree-sitter-fuzz-support",
  "streaming-iterator",
  "tree-sitter",
  "tree-sitter-zig",
@@ -4125,7 +4188,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lsp"
-version = "5.0.1"
+version = "6.0.12"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -4158,7 +4221,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-mcp"
-version = "5.0.1"
+version = "6.0.12"
 dependencies = [
  "anyhow",
  "approx",
@@ -4198,7 +4261,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-mcp-redaction"
-version = "5.0.1"
+version = "6.0.12"
 dependencies = [
  "log",
  "regex",
@@ -4210,7 +4273,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-nl"
-version = "5.0.1"
+version = "6.0.12"
 dependencies = [
  "criterion",
  "lru",
@@ -4231,7 +4294,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-plugin-registry"
-version = "5.0.1"
+version = "6.0.12"
 dependencies = [
  "sqry-core",
  "sqry-lang-c",
@@ -4274,8 +4337,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "sqry-test-fixtures"
+version = "2.6.0"
+dependencies = [
+ "sqry-core",
+]
+
+[[package]]
+name = "sqry-test-support"
+version = "6.0.12"
+dependencies = [
+ "sqry-core",
+ "sqry-tree-sitter-support",
+ "tree-sitter",
+]
+
+[[package]]
+name = "sqry-tree-sitter-fuzz-support"
+version = "0.1.0"
+dependencies = [
+ "pretty_assertions",
+ "rand",
+]
+
+[[package]]
 name = "sqry-tree-sitter-support"
-version = "5.0.1"
+version = "6.0.12"
 dependencies = [
  "thiserror 2.0.18",
  "tree-sitter",
@@ -4860,7 +4947,7 @@ dependencies = [
 
 [[package]]
 name = "tree-sitter-abap-sqry"
-version = "5.0.1"
+version = "6.0.12"
 dependencies = [
  "cc",
  "sqry-tree-sitter-support",
@@ -4929,7 +5016,7 @@ dependencies = [
 
 [[package]]
 name = "tree-sitter-elixir-sqry"
-version = "5.0.1"
+version = "6.0.12"
 dependencies = [
  "cc",
  "sqry-tree-sitter-support",
@@ -4948,7 +5035,7 @@ dependencies = [
 
 [[package]]
 name = "tree-sitter-groovy-sqry"
-version = "5.0.1"
+version = "6.0.12"
 dependencies = [
  "cc",
  "sqry-tree-sitter-support",
@@ -5017,7 +5104,7 @@ dependencies = [
 
 [[package]]
 name = "tree-sitter-kotlin-sqry"
-version = "5.0.1"
+version = "6.0.12"
 dependencies = [
  "cc",
  "sqry-tree-sitter-support",
@@ -5042,7 +5129,7 @@ dependencies = [
 
 [[package]]
 name = "tree-sitter-perl-sqry"
-version = "5.0.1"
+version = "6.0.12"
 dependencies = [
  "cc",
  "sqry-tree-sitter-support",
@@ -5061,7 +5148,7 @@ dependencies = [
 
 [[package]]
 name = "tree-sitter-plsql-sqry"
-version = "5.0.1"
+version = "6.0.12"
 dependencies = [
  "cc",
  "sqry-tree-sitter-support",
@@ -5150,7 +5237,7 @@ dependencies = [
 
 [[package]]
 name = "tree-sitter-svelte-sqry"
-version = "5.0.1"
+version = "6.0.12"
 dependencies = [
  "cc",
  "sqry-tree-sitter-support",
@@ -5179,7 +5266,7 @@ dependencies = [
 
 [[package]]
 name = "tree-sitter-vue-sqry"
-version = "5.0.1"
+version = "6.0.12"
 dependencies = [
  "cc",
  "sqry-tree-sitter-support",
@@ -5936,6 +6023,12 @@ name = "xxhash-rust"
 version = "0.8.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fdd20c5420375476fbd4394763288da7eb0cc0b8c11deed431a91562af7335d3"
+
+[[package]]
+name = "yansi"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cfe53a6657fd280eaa890a3bc59152892ffa3e30101319d168b781ed6529b049"
 
 [[package]]
 name = "yoke"

@@ -51,4 +51,4 @@ The following files in this repository are trademarked assets:
 ## Contact
 
 For trademark usage requests or questions, contact Verivus Pty Ltd at:
-**oss@sqry.dev**
+**hello@sqry.dev**

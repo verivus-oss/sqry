@@ -35,6 +35,24 @@ function loadModule(overrides: Record<string, unknown> = {}) {
 }
 
 describe("binaryDownloader", () => {
+  describe("release asset selection", () => {
+    it("prefers current checksum manifest name with legacy fallback", () => {
+      const mod = loadModule();
+      expect(mod.getChecksumAssetCandidates()).to.deep.equal([
+        "SHA256SUMS.txt",
+        "CHECKSUMS.sha256",
+      ]);
+    });
+
+    it("prefers the shared attestation bundle with legacy per-asset fallback", () => {
+      const mod = loadModule();
+      expect(mod.getBundleAssetCandidates("sqry-linux-x86_64")).to.deep.equal([
+        "release-artifacts.attestation.json",
+        "sqry-linux-x86_64.bundle",
+      ]);
+    });
+  });
+
   describe("detectPlatform()", () => {
     it("returns correct asset for linux-x64", () => {
       const mod = loadModule();

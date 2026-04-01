@@ -156,7 +156,17 @@ pub struct McpConfig {
     #[serde(default = "default_query_cache_ttl")]
     pub query_cache_ttl_secs: u64,
 
-    /// Redaction preset for MCP responses (default: "none")
+    /// Timeout for index rebuild operations in milliseconds (default: 600000 = 10 min).
+    ///
+    /// Separate from the general tool timeout because index builds are inherently
+    /// slow on large codebases. Only applies to the `rebuild_index` MCP tool.
+    ///
+    /// # Environment Override
+    /// Can be overridden with `SQRY_MCP_INDEX_TIMEOUT_MS` environment variable.
+    #[serde(default = "default_index_timeout")]
+    pub index_timeout_ms: u64,
+
+    /// Redaction preset for MCP responses (default: "minimal")
     ///
     /// Controls what sensitive data is redacted from MCP tool responses
     /// before they are sent to clients. Presets: `none` (passthrough),
@@ -189,8 +199,12 @@ fn default_query_cache_ttl() -> u64 {
     300
 }
 
+fn default_index_timeout() -> u64 {
+    600_000 // 10 minutes
+}
+
 fn default_redaction_preset() -> String {
-    "none".to_string()
+    "minimal".to_string()
 }
 
 impl Default for McpConfig {
@@ -206,6 +220,7 @@ impl Default for McpConfig {
             trace_path_cache_capacity: default_trace_path_cache_capacity(),
             subgraph_cache_capacity: default_subgraph_cache_capacity(),
             query_cache_ttl_secs: default_query_cache_ttl(),
+            index_timeout_ms: default_index_timeout(),
             redaction_preset: default_redaction_preset(),
         }
     }
@@ -327,6 +342,7 @@ impl McpConfig {
             trace_path_cache_capacity: default_trace_path_cache_capacity(),
             subgraph_cache_capacity: default_subgraph_cache_capacity(),
             query_cache_ttl_secs: default_query_cache_ttl(),
+            index_timeout_ms: default_index_timeout(),
             redaction_preset: default_redaction_preset(),
         };
         config.validate()?;
@@ -392,6 +408,11 @@ impl McpConfig {
         if let Ok(ttl_str) = env::var("SQRY_MCP_QUERY_CACHE_TTL_SECS") {
             config.query_cache_ttl_secs =
                 Self::parse_env_var(&ttl_str, "SQRY_MCP_QUERY_CACHE_TTL_SECS")?;
+        }
+
+        if let Ok(index_timeout_str) = env::var("SQRY_MCP_INDEX_TIMEOUT_MS") {
+            config.index_timeout_ms =
+                Self::parse_env_var(&index_timeout_str, "SQRY_MCP_INDEX_TIMEOUT_MS")?;
         }
 
         // Store preset for logging; fine-grained overrides (SQRY_REDACT_PATHS, etc.)
@@ -795,11 +816,37 @@ impl McpConfig {
         Ok(self.query_cache_ttl_secs)
     }
 
+    /// Get effective index rebuild timeout with validation.
+    ///
+    /// # Errors
+    /// Returns an error if value is 0 or exceeds the absolute hard cap.
+    pub fn effective_index_timeout_ms(&self) -> Result<u64> {
+        if self.index_timeout_ms == 0 {
+            bail!("mcp.index_timeout_ms cannot be 0 (unlimited not allowed for safety)");
+        }
+        if self.index_timeout_ms < Self::MIN_TIMEOUT_MS {
+            bail!(
+                "mcp.index_timeout_ms {} is below minimum {}ms",
+                self.index_timeout_ms,
+                Self::MIN_TIMEOUT_MS
+            );
+        }
+        if self.index_timeout_ms > Self::ABSOLUTE_MAX_TIMEOUT_MS {
+            bail!(
+                "mcp.index_timeout_ms {} exceeds absolute hard cap {}ms",
+                self.index_timeout_ms,
+                Self::ABSOLUTE_MAX_TIMEOUT_MS
+            );
+        }
+        Ok(self.index_timeout_ms)
+    }
+
     /// Validate the configuration
     fn validate(&self) -> Result<()> {
         // Validation happens in effective_* methods
         self.effective_timeout_ms()?;
         self.effective_retry_delay_ms()?;
+        self.effective_index_timeout_ms()?;
         self.effective_trace_cache_size()?;
         self.effective_subgraph_cache_size()?;
         self.effective_max_cross_lang_edges()?;
@@ -1488,6 +1535,7 @@ mod tests {
             trace_path_cache_capacity: default_trace_path_cache_capacity(),
             subgraph_cache_capacity: default_subgraph_cache_capacity(),
             query_cache_ttl_secs: default_query_cache_ttl(),
+            index_timeout_ms: default_index_timeout(),
             redaction_preset: default_redaction_preset(),
         };
         assert_eq!(config.effective_timeout_ms().unwrap(), 600_000);
@@ -1506,6 +1554,7 @@ mod tests {
             trace_path_cache_capacity: default_trace_path_cache_capacity(),
             subgraph_cache_capacity: default_subgraph_cache_capacity(),
             query_cache_ttl_secs: default_query_cache_ttl(),
+            index_timeout_ms: default_index_timeout(),
             redaction_preset: default_redaction_preset(),
         };
         assert_eq!(config.effective_retry_delay_ms().unwrap(), 30_000);
@@ -1515,5 +1564,39 @@ mod tests {
     fn test_config_validation() {
         let config = McpConfig::default();
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_index_timeout_default() {
+        let config = McpConfig::default();
+        assert_eq!(config.index_timeout_ms, 600_000);
+    }
+
+    #[test]
+    fn test_effective_index_timeout_rejects_zero() {
+        let mut config = McpConfig::default();
+        config.index_timeout_ms = 0;
+        assert!(config.effective_index_timeout_ms().is_err());
+    }
+
+    #[test]
+    fn test_effective_index_timeout_rejects_below_minimum() {
+        let mut config = McpConfig::default();
+        config.index_timeout_ms = 1; // below MIN_TIMEOUT_MS (1000)
+        assert!(config.effective_index_timeout_ms().is_err());
+    }
+
+    #[test]
+    fn test_effective_index_timeout_rejects_over_hard_cap() {
+        let mut config = McpConfig::default();
+        config.index_timeout_ms = McpConfig::ABSOLUTE_MAX_TIMEOUT_MS + 1;
+        assert!(config.effective_index_timeout_ms().is_err());
+    }
+
+    #[test]
+    fn test_effective_index_timeout_accepts_valid() {
+        let mut config = McpConfig::default();
+        config.index_timeout_ms = 300_000;
+        assert_eq!(config.effective_index_timeout_ms().unwrap(), 300_000);
     }
 }

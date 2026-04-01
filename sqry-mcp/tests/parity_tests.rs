@@ -90,10 +90,14 @@ fn load_expected(name: &str, workspace_root: &str) -> Result<Value> {
 fn run_tool_call(name: &str, arguments: Value, workspace_root: &Path) -> Result<Value> {
     ensure_graph_snapshot(workspace_root)?;
 
-    let envs = vec![(
-        "SQRY_MCP_WORKSPACE_ROOT".to_string(),
-        workspace_root.to_string_lossy().to_string(),
-    )];
+    let envs = vec![
+        (
+            "SQRY_MCP_WORKSPACE_ROOT".to_string(),
+            workspace_root.to_string_lossy().to_string(),
+        ),
+        // Disable redaction so fixture paths are not scrubbed (default is now "minimal")
+        ("SQRY_REDACTION_PRESET".to_string(), "none".to_string()),
+    ];
     let mut client = McpTestClient::new_with_env_initialized(&envs)?;
     let response = client.call(
         "tools/call",

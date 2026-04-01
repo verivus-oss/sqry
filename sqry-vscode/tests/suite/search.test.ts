@@ -11,7 +11,7 @@ suite("Search Integration Tests", () => {
 
   suiteSetup(async () => {
     // Load the extension
-    extension = vscode.extensions.getExtension("verivuslabs.sqry-vscode")!;
+    extension = vscode.extensions.getExtension("verivus.sqry-vscode")!;
     assert.ok(extension, "Extension should be installed");
 
     // Activate the extension

@@ -19,6 +19,14 @@ use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
+/// Backtrack limit for `fancy_regex` patterns.
+///
+/// The default `fancy_regex` limit is 1,000,000 which is generous enough to
+/// allow a malicious MCP client to burn significant CPU.  We lower it to
+/// 100,000 which still handles all practical lookaround patterns while
+/// bounding worst-case execution time.
+const FANCY_REGEX_BACKTRACK_LIMIT: usize = 100_000;
+
 /// Compiled regex that supports both standard and lookaround patterns
 #[derive(Clone)]
 pub enum CompiledRegex {
@@ -29,15 +37,40 @@ pub enum CompiledRegex {
 }
 
 impl CompiledRegex {
-    /// Check if the pattern matches the text
-    #[must_use]
-    pub fn is_match(&self, text: &str) -> bool {
+    /// Check if the pattern matches the text.
+    ///
+    /// Returns `false` on standard-regex mismatches.  For `fancy_regex`
+    /// patterns, a [`BacktrackLimitExceeded`] error is **propagated** so
+    /// callers can distinguish "no match" from "aborted evaluation".
+    pub fn is_match(&self, text: &str) -> Result<bool, RegexMatchError> {
         match self {
-            CompiledRegex::Standard(re) => re.is_match(text),
-            CompiledRegex::Fancy(re) => re.is_match(text).unwrap_or(false),
+            CompiledRegex::Standard(re) => Ok(re.is_match(text)),
+            CompiledRegex::Fancy(re) => re
+                .is_match(text)
+                .map_err(|e| RegexMatchError::Fancy(Box::new(e))),
         }
     }
 }
+
+/// Error returned when a compiled regex fails during matching (not
+/// compilation).  Currently only `fancy_regex` can produce runtime errors
+/// (e.g. backtrack-limit exceeded).
+#[derive(Debug)]
+pub enum RegexMatchError {
+    /// `fancy_regex` runtime error (typically `BacktrackLimitExceeded`).
+    /// Boxed to satisfy `clippy::result_large_err` (`fancy_regex::Error` is 136+ bytes).
+    Fancy(Box<fancy_regex::Error>),
+}
+
+impl std::fmt::Display for RegexMatchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RegexMatchError::Fancy(e) => write!(f, "regex match failed: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for RegexMatchError {}
 
 /// Check if a pattern contains lookaround assertions
 fn has_lookaround(pattern: &str) -> bool {
@@ -113,6 +146,9 @@ pub struct RegexCache {
     misses: AtomicU64,
     evictions: AtomicU64,
     policy: Arc<dyn CachePolicy<RegexCacheKey>>,
+    /// Backtrack limit applied to `fancy_regex` patterns compiled through
+    /// this cache.  Defaults to [`FANCY_REGEX_BACKTRACK_LIMIT`].
+    fancy_backtrack_limit: usize,
 }
 
 impl RegexCache {
@@ -178,7 +214,9 @@ impl RegexCache {
                 flag_prefix.push_str("(?s)");
             }
             let full_pattern = format!("{flag_prefix}{pattern}");
-            let fancy_re = fancy_regex::Regex::new(&full_pattern)?;
+            let fancy_re = fancy_regex::RegexBuilder::new(&full_pattern)
+                .backtrack_limit(self.fancy_backtrack_limit)
+                .build()?;
             CompiledRegex::Fancy(Arc::new(fancy_re))
         } else {
             // Standard regex for performance
@@ -258,7 +296,16 @@ impl RegexCache {
             misses: AtomicU64::new(0),
             evictions: AtomicU64::new(0),
             policy: build_cache_policy(&config),
+            fancy_backtrack_limit: FANCY_REGEX_BACKTRACK_LIMIT,
         }
+    }
+
+    /// Create a cache with a custom `fancy_regex` backtrack limit (test-only).
+    #[cfg(test)]
+    fn with_backtrack_limit(capacity: usize, limit: usize) -> Self {
+        let mut cache = Self::new(capacity);
+        cache.fancy_backtrack_limit = limit;
+        cache
     }
 
     fn policy_params_from_env() -> (CachePolicyKind, f32) {
@@ -328,7 +375,7 @@ mod tests {
         let _re2 = cache.get_or_compile("foo.*", false, false, false).unwrap();
         assert_eq!(cache.len(), 1);
         // Both should match
-        assert!(re1.is_match("foobar"));
+        assert!(re1.is_match("foobar").unwrap());
     }
 
     #[test]
@@ -339,9 +386,9 @@ mod tests {
         let re2 = cache.get_or_compile("foo", true, false, false).unwrap(); // case_insensitive=true
 
         assert_eq!(cache.len(), 2); // Two different cache entries
-        assert!(re1.is_match("foo"));
-        assert!(!re1.is_match("FOO")); // Case-sensitive
-        assert!(re2.is_match("FOO")); // Case-insensitive
+        assert!(re1.is_match("foo").unwrap());
+        assert!(!re1.is_match("FOO").unwrap()); // Case-sensitive
+        assert!(re2.is_match("FOO").unwrap()); // Case-insensitive
     }
 
     #[test]
@@ -394,8 +441,8 @@ mod tests {
             .get_or_compile("hot", false, false, false)
             .expect("retrieve hot regex");
         // Both should still match the same
-        assert!(hot.is_match("hot"));
-        assert!(warmed.is_match("hot"));
+        assert!(hot.is_match("hot").unwrap());
+        assert!(warmed.is_match("hot").unwrap());
 
         let metrics = cache.policy_metrics();
         assert!(
@@ -411,8 +458,8 @@ mod tests {
         let re = cache
             .get_or_compile("foo(?=bar)", false, false, false)
             .expect("lookahead should compile");
-        assert!(re.is_match("foobar"));
-        assert!(!re.is_match("foobaz"));
+        assert!(re.is_match("foobar").unwrap());
+        assert!(!re.is_match("foobaz").unwrap());
     }
 
     #[test]
@@ -421,8 +468,8 @@ mod tests {
         let re = cache
             .get_or_compile("(?<=test_)foo", false, false, false)
             .expect("lookbehind should compile");
-        assert!(re.is_match("test_foo"));
-        assert!(!re.is_match("prod_foo"));
+        assert!(re.is_match("test_foo").unwrap());
+        assert!(!re.is_match("prod_foo").unwrap());
     }
 
     #[test]
@@ -431,8 +478,8 @@ mod tests {
         let re = cache
             .get_or_compile("foo(?!bar)", false, false, false)
             .expect("negative lookahead should compile");
-        assert!(re.is_match("foobaz"));
-        assert!(!re.is_match("foobar"));
+        assert!(re.is_match("foobaz").unwrap());
+        assert!(!re.is_match("foobar").unwrap());
     }
 
     #[test]
@@ -441,8 +488,8 @@ mod tests {
         let re = cache
             .get_or_compile("(?<!test_)foo", false, false, false)
             .expect("negative lookbehind should compile");
-        assert!(re.is_match("prod_foo"));
-        assert!(!re.is_match("test_foo"));
+        assert!(re.is_match("prod_foo").unwrap());
+        assert!(!re.is_match("test_foo").unwrap());
     }
 
     #[test]
@@ -452,8 +499,61 @@ mod tests {
         let re = cache
             .get_or_compile("(?<=TEST_)foo", true, false, false)
             .expect("lookaround with flags should compile");
-        assert!(re.is_match("TEST_foo"));
-        assert!(re.is_match("test_foo")); // Case insensitive
-        assert!(re.is_match("TEST_FOO")); // Case insensitive applies to whole pattern
+        assert!(re.is_match("TEST_foo").unwrap());
+        assert!(re.is_match("test_foo").unwrap()); // Case insensitive
+        assert!(re.is_match("TEST_FOO").unwrap()); // Case insensitive applies to whole pattern
+    }
+
+    /// Regression test: verify that our lowered backtrack limit is actually
+    /// wired through.  We construct a `fancy_regex::Regex` directly with an
+    /// intentionally tiny limit and a pattern that forces the backtracker.
+    ///
+    /// The production `FANCY_REGEX_BACKTRACK_LIMIT` (100,000) is hard to hit
+    /// reliably in a unit test without a very long input, so we test the
+    /// mechanism itself with limit=1 and verify the `RegexMatchError` path.
+    #[test]
+    fn test_backtrack_limit_exceeded_returns_error() {
+        // Build a regex with a limit of 1 — any backtracking at all will exceed it
+        let re = fancy_regex::RegexBuilder::new("(?=a*)b")
+            .backtrack_limit(1)
+            .build()
+            .expect("pattern should compile");
+        let compiled = CompiledRegex::Fancy(Arc::new(re));
+
+        // This input forces the lookahead to backtrack at least once
+        let result = compiled.is_match("aaa");
+        assert!(
+            result.is_err(),
+            "expected backtrack-limit error, got {result:?}"
+        );
+    }
+
+    /// Verify that the cache path actually wires through its backtrack limit.
+    ///
+    /// Uses `RegexCache::with_backtrack_limit(_, 1)` to compile a lookaround
+    /// pattern through the full cache code path with limit=1.  If the limit
+    /// were not applied in `get_or_compile`, the `is_match` call would return
+    /// `Ok(false)` instead of `Err`.
+    #[test]
+    fn test_cache_compiled_regex_enforces_backtrack_limit() {
+        // Build a cache that sets backtrack_limit=1 — any backtracking exceeds it
+        let cache = RegexCache::with_backtrack_limit(10, 1);
+
+        let re = cache
+            .get_or_compile("(?=a*)b", false, false, false)
+            .expect("lookahead should compile through cache");
+
+        assert!(
+            matches!(re, CompiledRegex::Fancy(_)),
+            "expected Fancy variant for lookaround pattern"
+        );
+
+        // This MUST return Err — proving the cache path applied limit=1.
+        // If the limit were not wired, this would return Ok(false).
+        let result = re.is_match("aaa");
+        assert!(
+            result.is_err(),
+            "cache-compiled regex must enforce backtrack limit, got {result:?}"
+        );
     }
 }

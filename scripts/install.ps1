@@ -108,7 +108,7 @@ try {
         }
         $bundlePath = "$archivePath.bundle"
         $versionEscaped = [regex]::Escape($Version)
-        $identity = "^https://github\.com/$([regex]::Escape($Repo).Replace('/', '\/'))/\.github/workflows/oss-leg3-release\.yml@refs/tags/$versionEscaped$"
+        $identity = "^https://github\.com/$([regex]::Escape($Repo).Replace('/', '\/'))/\.github/workflows/oss-distribute\.yml@refs/tags/$versionEscaped$"
         Write-Host "Downloading $assetName.bundle..."
         Invoke-WebRequest -Uri "$releaseBase/$assetName.bundle" -OutFile $bundlePath
         & $cosign.Source verify-blob --bundle $bundlePath --certificate-identity-regexp $identity --certificate-oidc-issuer "https://token.actions.githubusercontent.com" $archivePath | Out-Null

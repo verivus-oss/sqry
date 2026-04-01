@@ -1,1 +1,0 @@
-((((((((kind:function AND async:true) OR (name:test AND scope.type:class)) AND (path:src OR path:lib)) OR (lang:rust AND NOT name~=/^_/)) AND (lines>100 AND lines<1000)) OR (kind:method AND scope.parent:Database)) AND (text~=/TODO/ OR text~=/FIXME/)) OR (kind:class AND name~=/^Test/))

@@ -134,8 +134,8 @@ public = [
 strings = [
     "verivus-oss",
     "verivus-oss",
-    "verivus.com",
-    "@verivus.com",
+    "sqry.dev",
+    "@sqry.dev",
     "REDACTED",
 ]
 path_patterns = [

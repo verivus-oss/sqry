@@ -4,7 +4,7 @@
 //! to/from disk using postcard serialization with length-prefixed framing.
 
 use std::fs::File;
-use std::io::{BufReader, BufWriter, Read, Write};
+use std::io::{BufReader, BufWriter, Cursor, Read, Write};
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -528,6 +528,138 @@ fn validate_plugin_versions(
     }
 
     Ok(())
+}
+
+/// Verify snapshot bytes against the expected SHA256 hash from the manifest.
+///
+/// If `expected_sha256` is empty (pre-hash index format), verification is
+/// skipped and `Ok(())` is returned.
+///
+/// # Errors
+///
+/// Returns an error if the computed SHA256 does not match `expected_sha256`.
+pub fn verify_snapshot_bytes(data: &[u8], expected_sha256: &str) -> anyhow::Result<()> {
+    if expected_sha256.is_empty() {
+        return Ok(());
+    }
+
+    use sha2::{Digest, Sha256};
+    let actual_hash = format!("{:x}", Sha256::digest(data));
+    if actual_hash != expected_sha256 {
+        anyhow::bail!(
+            "Snapshot integrity check failed: expected SHA256 {}, got {}. \
+             The index may be corrupt or tampered with. Run `sqry index` to rebuild.",
+            expected_sha256,
+            actual_hash,
+        );
+    }
+    Ok(())
+}
+
+/// Loads a graph from in-memory bytes.
+///
+/// Same validation as [`load_from_path`] but operates on a byte slice,
+/// enabling single-read integrity verification (hash once, deserialize
+/// from the same bytes — no TOCTOU window).
+///
+/// # Errors
+///
+/// Returns an error if the bytes are invalid, corrupt, or incompatible.
+#[allow(clippy::cast_possible_truncation)] // data_len validated < MAX_SNAPSHOT_BYTES (2 GB)
+pub fn load_from_bytes(
+    bytes: &[u8],
+    plugins: Option<&PluginManager>,
+) -> Result<CodeGraph, PersistenceError> {
+    let total_len = bytes.len() as u64;
+    let mut reader = Cursor::new(bytes);
+    let mut bytes_consumed: u64 = 0;
+
+    // Read and validate magic bytes
+    let mut magic = [0u8; 13];
+    reader.read_exact(&mut magic)?;
+    bytes_consumed += 13;
+    if &magic != MAGIC_BYTES {
+        return Err(PersistenceError::InvalidMagic {
+            expected: MAGIC_BYTES.to_vec(),
+            found: magic.to_vec(),
+        });
+    }
+
+    // Read header length and validate before allocation
+    let header_len = read_u32_le(&mut reader)? as usize;
+    bytes_consumed += 4;
+    if header_len > MAX_HEADER_BYTES {
+        return Err(PersistenceError::ValidationFailed(
+            "header too large".to_string(),
+        ));
+    }
+    let remaining = total_len.saturating_sub(bytes_consumed);
+    if (header_len as u64) > remaining {
+        return Err(PersistenceError::ValidationFailed(
+            "header length exceeds remaining file bytes".to_string(),
+        ));
+    }
+
+    // Read and deserialize header
+    let mut header_buf = vec![0u8; header_len];
+    reader.read_exact(&mut header_buf)?;
+    bytes_consumed += header_len as u64;
+    let header: GraphHeader = postcard::from_bytes(&header_buf)?;
+
+    // Validate version
+    if header.version != VERSION {
+        return Err(PersistenceError::IncompatibleVersion {
+            expected: VERSION,
+            found: header.version,
+        });
+    }
+
+    // Validate plugin versions (requires rebuild if mismatch) - skip if no plugin manager
+    if let Some(plugin_manager) = plugins {
+        validate_plugin_versions(&header, plugin_manager)?;
+    }
+
+    // Validate header counts before attempting data deserialization
+    validate_header_sanity(&header)?;
+
+    // Read data length and validate before allocation
+    let data_len = read_u64_le(&mut reader)?;
+    bytes_consumed += 8;
+    if data_len > MAX_SNAPSHOT_BYTES {
+        return Err(PersistenceError::ValidationFailed(
+            "data section too large".to_string(),
+        ));
+    }
+    let remaining = total_len.saturating_sub(bytes_consumed);
+    if data_len > remaining {
+        return Err(PersistenceError::ValidationFailed(
+            "data length exceeds remaining file bytes".to_string(),
+        ));
+    }
+
+    // Read and deserialize data
+    let mut data_buf = vec![0u8; data_len as usize];
+    reader.read_exact(&mut data_buf)?;
+    let snapshot_data: GraphSnapshotData = postcard::from_bytes(&data_buf)?;
+
+    // Reject trailing bytes
+    let mut trailing = [0u8; 1];
+    if reader.read(&mut trailing)? > 0 {
+        return Err(PersistenceError::ValidationFailed(
+            "unexpected trailing bytes after data section".to_string(),
+        ));
+    }
+
+    validate_loaded_snapshot(&header, &snapshot_data)?;
+
+    Ok(CodeGraph::from_components(
+        snapshot_data.nodes,
+        snapshot_data.edges,
+        snapshot_data.strings,
+        snapshot_data.files,
+        snapshot_data.indices,
+        snapshot_data.macro_metadata,
+    ))
 }
 
 /// Loads a graph from the specified path.
@@ -1390,5 +1522,45 @@ mod tests {
             }
             other => panic!("Expected ValidationFailed, got: {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_verify_snapshot_bytes_correct_hash() {
+        use sha2::{Digest, Sha256};
+        let data = b"some graph snapshot data";
+        let correct_hash = format!("{:x}", Sha256::digest(data));
+        assert!(verify_snapshot_bytes(data, &correct_hash).is_ok());
+    }
+
+    #[test]
+    fn test_verify_snapshot_bytes_wrong_hash() {
+        let data = b"some graph snapshot data";
+        let err = verify_snapshot_bytes(data, "deadbeef").unwrap_err();
+        assert!(err.to_string().contains("integrity check failed"));
+    }
+
+    #[test]
+    fn test_verify_snapshot_bytes_empty_hash_skips() {
+        let data = b"anything";
+        assert!(verify_snapshot_bytes(data, "").is_ok());
+    }
+
+    #[test]
+    fn test_load_from_bytes_matches_load_from_path() {
+        // Save a graph, then verify load_from_bytes produces the same result
+        let plugins = crate::plugin::PluginManager::new();
+        let graph = CodeGraph::new();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.sqry");
+
+        save_to_path(&graph, &path).unwrap();
+
+        let path_graph = load_from_path(&path, Some(&plugins)).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let bytes_graph = load_from_bytes(&bytes, Some(&plugins)).unwrap();
+
+        // Both should produce graphs with the same node/edge counts
+        assert_eq!(path_graph.node_count(), bytes_graph.node_count());
+        assert_eq!(path_graph.edge_count(), bytes_graph.edge_count());
     }
 }

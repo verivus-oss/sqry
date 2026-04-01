@@ -19,13 +19,18 @@ That autodownload path verifies:
 The expected signing identity is:
 
 ```text
-https://github.com/verivus-oss/sqry/.github/workflows/oss-leg3-release.yml@refs/tags/v<version>
+https://github.com/verivus-oss/sqry/.github/workflows/oss-distribute.yml@refs/tags/v<version>
 ```
 
-Release artifacts must therefore be published from `verivus-oss/sqry` Leg 3 and
-their `.bundle` files must use the modern Sigstore bundle schema that
-`sigstore-js` accepts (`mediaType`, `content`, `verificationMaterial`). Legacy
-compact blob bundles are not acceptable for marketplace autodownload.
+Release artifacts must therefore be published from `verivus-oss/sqry`, and the
+public release must include:
+
+- `SHA256SUMS.txt`
+- the platform binary assets
+- `release-artifacts.attestation.json`
+
+The attestation bundle must use the modern Sigstore bundle schema that
+`sigstore-js` accepts (`mediaType`, `content`, `verificationMaterial`).
 
 `binaryVersion` sequencing is strict: the matching public release for that
 version must already exist on `verivus-oss/sqry` before the marketplace/Open VSX

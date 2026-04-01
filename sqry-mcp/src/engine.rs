@@ -3,7 +3,9 @@ use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
 use sqry_core::graph::unified::concurrent::CodeGraph;
-use sqry_core::graph::unified::persistence::{GraphStorage, load_from_path};
+use sqry_core::graph::unified::persistence::{
+    GraphStorage, Manifest, load_from_bytes, verify_snapshot_bytes,
+};
 use sqry_core::plugin::PluginManager;
 use sqry_core::query::QueryExecutor;
 use sqry_plugin_registry::create_plugin_manager;
@@ -162,10 +164,55 @@ impl Engine {
             return None;
         }
 
-        match load_from_path(
-            storage.snapshot_path(),
-            Some(self.executor.plugin_manager()),
-        ) {
+        // Read manifest to get expected SHA256 for integrity verification.
+        // If the manifest exists but is corrupt/unreadable, fail closed (return None)
+        // rather than skipping verification — a corrupt manifest is suspicious.
+        // Only skip verification when NO manifest exists (pre-manifest index format).
+        let expected_sha256 = if storage.manifest_path().exists() {
+            match std::fs::File::open(storage.manifest_path()).and_then(|f| {
+                serde_json::from_reader::<_, Manifest>(f)
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+            }) {
+                Ok(manifest) => manifest.snapshot_sha256,
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        manifest_path = %storage.manifest_path().display(),
+                        "Manifest exists but cannot be read/parsed — refusing to load snapshot"
+                    );
+                    return None;
+                }
+            }
+        } else {
+            // No manifest at all — pre-manifest index format, skip integrity check
+            String::new()
+        };
+
+        // Single-read: read bytes, verify hash, then deserialize (no TOCTOU)
+        let snapshot_bytes = match std::fs::read(storage.snapshot_path()) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    snapshot_path = %storage.snapshot_path().display(),
+                    "Failed to read snapshot"
+                );
+                return None;
+            }
+        };
+
+        if let Err(e) = verify_snapshot_bytes(&snapshot_bytes, &expected_sha256) {
+            // Could be transient during rebuild — log warning and return None
+            tracing::warn!(
+                error = %e,
+                snapshot_path = %storage.snapshot_path().display(),
+                "Snapshot integrity verification failed"
+            );
+            return None;
+        }
+
+        // Deserialize from the already-verified bytes (no second file read)
+        match load_from_bytes(&snapshot_bytes, Some(self.executor.plugin_manager())) {
             Ok(graph) => {
                 let arc = Arc::new(graph);
                 let mut cache = self.graph_cache.write();
@@ -1303,5 +1350,97 @@ mod engine_cache_tests {
         };
         let result = is_manifest_fresh(&fake_metadata, temp.path());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_engine_graph_rejects_corrupted_snapshot() {
+        let temp = tempfile::tempdir().unwrap();
+        let graph_dir = temp.path().join(".sqry/graph");
+        std::fs::create_dir_all(&graph_dir).unwrap();
+
+        // Write a snapshot file
+        let snapshot_data = b"fake snapshot data";
+        std::fs::write(graph_dir.join("snapshot.sqry"), snapshot_data).unwrap();
+
+        // Write a manifest with a WRONG sha256
+        let manifest = serde_json::json!({
+            "root_path": temp.path().to_string_lossy(),
+            "node_count": 0,
+            "edge_count": 0,
+            "snapshot_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+            "built_at": "2026-01-01T00:00:00+00:00",
+            "schema_version": 5,
+            "snapshot_format_version": 5,
+            "build_provenance": { "sqry_version": "test", "rustc_version": "test" }
+        });
+        std::fs::write(
+            graph_dir.join("manifest.json"),
+            serde_json::to_string_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        // Create an Engine and try to load graph — should return None
+        let engine =
+            Engine::for_workspace(temp.path().to_path_buf()).expect("engine should create");
+        assert!(
+            engine.graph().is_none(),
+            "Engine::graph() should return None when snapshot hash is wrong"
+        );
+    }
+
+    #[test]
+    fn test_engine_graph_rejects_corrupt_manifest() {
+        let temp = tempfile::tempdir().unwrap();
+        let graph_dir = temp.path().join(".sqry/graph");
+        std::fs::create_dir_all(&graph_dir).unwrap();
+
+        // Write a valid snapshot file
+        std::fs::write(graph_dir.join("snapshot.sqry"), b"some data").unwrap();
+
+        // Write INVALID JSON to manifest — must fail closed, not skip verification
+        std::fs::write(graph_dir.join("manifest.json"), b"not valid json!!!").unwrap();
+
+        let engine =
+            Engine::for_workspace(temp.path().to_path_buf()).expect("engine should create");
+        assert!(
+            engine.graph().is_none(),
+            "Engine::graph() must return None when manifest is corrupt (fail closed)"
+        );
+    }
+
+    #[test]
+    fn test_engine_graph_accepts_empty_hash() {
+        let temp = tempfile::tempdir().unwrap();
+        let graph_dir = temp.path().join(".sqry/graph");
+        std::fs::create_dir_all(&graph_dir).unwrap();
+
+        // Write a snapshot with garbage data (will fail deserialization, not integrity)
+        std::fs::write(graph_dir.join("snapshot.sqry"), b"not a real snapshot").unwrap();
+
+        // Write manifest with empty sha256 (pre-hash index)
+        let manifest = serde_json::json!({
+            "root_path": temp.path().to_string_lossy(),
+            "node_count": 0,
+            "edge_count": 0,
+            "snapshot_sha256": "",
+            "built_at": "2026-01-01T00:00:00+00:00",
+            "schema_version": 5,
+            "snapshot_format_version": 5,
+            "build_provenance": { "sqry_version": "test", "rustc_version": "test" }
+        });
+        std::fs::write(
+            graph_dir.join("manifest.json"),
+            serde_json::to_string_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        // Should skip integrity check (empty hash), then fail on deserialization
+        // — returning None, not panicking
+        let engine =
+            Engine::for_workspace(temp.path().to_path_buf()).expect("engine should create");
+        assert!(
+            engine.graph().is_none(),
+            "Should return None (deserialization fails on garbage data, but integrity check skipped)"
+        );
     }
 }

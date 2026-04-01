@@ -268,6 +268,18 @@ impl PersistManager {
             return Ok(None);
         }
 
+        // Size cap to prevent memory exhaustion from crafted cache entries
+        const MAX_CACHE_ENTRY_BYTES: u64 = 64 * 1024 * 1024; // 64 MiB
+        let metadata = fs::metadata(&entry_path)
+            .with_context(|| format!("Failed to stat cache entry: {}", entry_path.display()))?;
+        if metadata.len() > MAX_CACHE_ENTRY_BYTES {
+            anyhow::bail!(
+                "Cache entry is too large ({} bytes, max {}): {}",
+                metadata.len(),
+                MAX_CACHE_ENTRY_BYTES,
+                entry_path.display()
+            );
+        }
         let data = fs::read(&entry_path)
             .with_context(|| format!("Failed to read cache entry: {}", entry_path.display()))?;
 

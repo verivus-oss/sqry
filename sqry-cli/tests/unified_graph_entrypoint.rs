@@ -287,6 +287,7 @@ fn macro_expansion_kind_name(kind: MacroExpansionKind) -> &'static str {
         MacroExpansionKind::Attribute => "attribute",
         MacroExpansionKind::Declarative => "declarative",
         MacroExpansionKind::Function => "function",
+        MacroExpansionKind::CfgGate => "cfg_gate",
     }
 }
 

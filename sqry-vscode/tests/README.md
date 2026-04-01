@@ -91,7 +91,7 @@ import * as vscode from "vscode";
 
 suite("My Feature Tests", () => {
   test("should activate extension", async () => {
-    const ext = vscode.extensions.getExtension("verivuslabs.sqry-vscode");
+    const ext = vscode.extensions.getExtension("verivus.sqry-vscode");
     assert.ok(ext, "Extension should be installed");
     await ext.activate();
     assert.ok(ext.isActive, "Extension should be active");

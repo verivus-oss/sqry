@@ -374,9 +374,10 @@ mod tests {
         }
 
         fn language(&self) -> tree_sitter::Language {
-            // Return a test language (this is just for testing)
-            // In real plugins, this would return tree_sitter_rust::LANGUAGE, etc.
-            sqry_test_support::test_language()
+            // Keep this inline test self-contained so sanitized OSS release
+            // validation can still compile lib tests after internal-only
+            // support crates are removed from the workspace.
+            tree_sitter_rust::LANGUAGE.into()
         }
 
         fn parse_ast(

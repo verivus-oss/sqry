@@ -152,7 +152,7 @@ release_base="https://github.com/${REPO}/releases/download/${VERSION_TAG}"
 oidc_issuer="https://token.actions.githubusercontent.com"
 repo_regex="${REPO//./\\.}"
 version_escaped="${VERSION_TAG//./\\.}"
-cert_identity="^https://github\\.com/${repo_regex}/\\.github/workflows/oss-leg3-release\\.yml@refs/tags/${version_escaped}$"
+cert_identity="^https://github\\.com/${repo_regex}/\\.github/workflows/oss-distribute\\.yml@refs/tags/${version_escaped}$"
 
 version_num="${VERSION_TAG#v}"
 tarball_name="sqry-${version_num}-${platform_suffix}.tar.gz"

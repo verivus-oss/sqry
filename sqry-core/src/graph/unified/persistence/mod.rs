@@ -65,8 +65,8 @@ pub use manifest::{
     default_provenance,
 };
 pub use snapshot::{
-    PersistenceError, check_config_drift, load_from_path, load_header_from_path, save_to_path,
-    save_to_path_with_provenance, validate_snapshot,
+    PersistenceError, check_config_drift, load_from_bytes, load_from_path, load_header_from_path,
+    save_to_path, save_to_path_with_provenance, validate_snapshot, verify_snapshot_bytes,
 };
 
 // ============================================================================

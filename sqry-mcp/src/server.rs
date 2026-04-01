@@ -53,8 +53,10 @@ use tracing::{Instrument, info_span};
 pub struct SqryServer {
     /// Feature flags control tool visibility
     feature_flags: FeatureFlags,
-    /// Execution timeout (default: 30s)
+    /// Execution timeout for general tools (default: 60s)
     timeout_ms: u64,
+    /// Execution timeout for index rebuild operations (default: 600s = 10 min)
+    index_timeout_ms: u64,
     /// Retry delay for deadline exceeded errors (default: 500ms)
     retry_delay_ms: u64,
     /// Tool router for rmcp
@@ -72,6 +74,7 @@ impl SqryServer {
         Self {
             feature_flags,
             timeout_ms: 60_000,
+            index_timeout_ms: 600_000,
             retry_delay_ms: 500,
             tool_router,
             prompt_router: create_prompt_router(),
@@ -83,6 +86,7 @@ impl SqryServer {
     pub fn with_config(
         feature_flags: FeatureFlags,
         timeout_ms: u64,
+        index_timeout_ms: u64,
         retry_delay_ms: u64,
         redactor: Option<Arc<Redactor>>,
     ) -> Self {
@@ -90,6 +94,7 @@ impl SqryServer {
         Self {
             feature_flags,
             timeout_ms,
+            index_timeout_ms,
             retry_delay_ms,
             tool_router,
             prompt_router: create_prompt_router(),
@@ -165,17 +170,35 @@ impl SqryServer {
         Err(McpError::invalid_request(reason, None))
     }
 
-    /// Execute a tool function with timeout and tracing.
+    /// Execute a tool function with the default timeout and tracing.
     /// Returns the full `ToolExecution` response including metadata (`execution_ms`, pagination, etc.)
     async fn execute_tool<F, T>(&self, tool_name: &str, f: F) -> Result<serde_json::Value, McpError>
     where
         F: FnOnce() -> anyhow::Result<ToolExecution<T>> + Send + 'static,
         T: Serialize + Send + 'static,
     {
+        self.execute_tool_with_timeout(tool_name, self.timeout_ms, f)
+            .await
+    }
+
+    /// Execute a tool function with a custom timeout.
+    ///
+    /// Used for long-running operations (e.g., `rebuild_index`) that need a
+    /// longer timeout than the general tool default.
+    async fn execute_tool_with_timeout<F, T>(
+        &self,
+        tool_name: &str,
+        timeout_ms: u64,
+        f: F,
+    ) -> Result<serde_json::Value, McpError>
+    where
+        F: FnOnce() -> anyhow::Result<ToolExecution<T>> + Send + 'static,
+        T: Serialize + Send + 'static,
+    {
         let span = info_span!("tool_execution", tool = tool_name);
-        let timeout_duration = Duration::from_millis(self.timeout_ms);
+        let timeout_duration = Duration::from_millis(timeout_ms);
         let tool_name_owned = tool_name.to_string();
-        let timeout_ms = self.timeout_ms;
+        let retry_delay_ms = self.retry_delay_ms;
         let redactor_clone = self.redactor.clone();
 
         async move {
@@ -219,7 +242,7 @@ impl SqryServer {
                 Err(_) => Err(rpc_error_to_mcp(RpcError::deadline_exceeded(
                     &tool_name_owned,
                     timeout_ms,
-                    self.retry_delay_ms,
+                    retry_delay_ms,
                 ))),
             }
         }
@@ -500,7 +523,7 @@ impl SqryServer {
 
         let args = convert_rebuild_index_params(params);
         let result = self
-            .execute_tool("rebuild_index", move || {
+            .execute_tool_with_timeout("rebuild_index", self.index_timeout_ms, move || {
                 execution::execute_rebuild_index(&args)
             })
             .await?;

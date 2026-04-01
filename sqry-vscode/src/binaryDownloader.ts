@@ -7,10 +7,12 @@ import * as vscode from "vscode";
 
 const GITHUB_RELEASE_BASE = "https://github.com/verivus-oss/sqry/releases/download";
 const OIDC_ISSUER = "https://token.actions.githubusercontent.com";
-const CERT_IDENTITY_PATTERN = "https://github.com/verivus-oss/sqry/.github/workflows/oss-leg3-release.yml@refs/tags/v";
+const CERT_IDENTITY_PATTERN = "https://github.com/verivus-oss/sqry/.github/workflows/oss-distribute.yml@refs/tags/v";
 const MAX_DOWNLOAD_SIZE = 200 * 1024 * 1024; // 200 MB
 const LOCK_STALE_MS = 10 * 60 * 1000; // 10 minutes
 const KEEP_VERSIONS = 2;
+const CHECKSUM_ASSET_NAMES = ["SHA256SUMS.txt", "CHECKSUMS.sha256"] as const;
+const ATTESTATION_BUNDLE_NAMES = ["release-artifacts.attestation.json"] as const;
 
 export interface PlatformInfo {
   asset: string;
@@ -22,6 +24,14 @@ export interface VersionInfo {
   downloadedAt: string;
   platform: string;
   sha256: string;
+}
+
+export function getChecksumAssetCandidates(): readonly string[] {
+  return CHECKSUM_ASSET_NAMES;
+}
+
+export function getBundleAssetCandidates(assetName: string): string[] {
+  return [...ATTESTATION_BUNDLE_NAMES, `${assetName}.bundle`];
 }
 
 /**
@@ -247,7 +257,7 @@ export function parseChecksumForAsset(checksumContent: string, assetName: string
       return checksumMatch[1].toLowerCase();
     }
   }
-  throw new Error(`Checksum not found for asset "${assetName}" in CHECKSUMS.sha256`);
+  throw new Error(`Checksum not found for asset "${assetName}" in downloaded checksum manifest`);
 }
 
 export function parseContentLengthHeader(headerValue: string | string[] | undefined): number {
@@ -328,6 +338,39 @@ export async function verifyCosignBundle(
       `Cosign verification failed: ${message}`
     );
   }
+}
+
+async function downloadReleaseAsset(
+  releaseBase: string,
+  assetNames: readonly string[],
+  destPath: string,
+  outputChannel: vscode.OutputChannel,
+  description: string,
+  cancellationToken?: vscode.CancellationToken,
+): Promise<string> {
+  const failures: string[] = [];
+
+  for (const assetName of assetNames) {
+    outputChannel.appendLine(`[sqry] Downloading ${description}: ${releaseBase}/${assetName}`);
+    try {
+      await downloadWithProgress(
+        `${releaseBase}/${assetName}`,
+        destPath,
+        undefined,
+        cancellationToken,
+      );
+      return assetName;
+    } catch (error) {
+      cleanupFile(destPath);
+      const message = error instanceof Error ? error.message : String(error);
+      failures.push(`${assetName}: ${message}`);
+    }
+  }
+
+  throw new Error(
+    `None of the expected ${description} assets were available. Tried: ${assetNames.join(", ")}. ` +
+    `Errors: ${failures.join(" | ")}`
+  );
 }
 
 /**
@@ -484,9 +527,8 @@ export async function downloadBinary(
   const versionDir = path.join(storageUri.fsPath, "bin", `v${version}`);
   const finalBinaryPath = path.join(versionDir, platformInfo.binaryName);
   const tmpBinaryPath = `${finalBinaryPath}.tmp`;
-  const tmpBundlePath = `${finalBinaryPath}.bundle.tmp`;
-  const finalBundlePath = path.join(versionDir, `${platformInfo.binaryName}.bundle`);
-  const tmpChecksumPath = path.join(versionDir, "CHECKSUMS.sha256.tmp");
+  const tmpBundlePath = path.join(versionDir, "attestation.tmp");
+  const tmpChecksumPath = path.join(versionDir, "checksums.tmp");
 
   try {
     // Ensure directories exist
@@ -494,16 +536,18 @@ export async function downloadBinary(
 
     const releaseBase = `${GITHUB_RELEASE_BASE}/v${version}`;
 
-    // Step 1: Download CHECKSUMS.sha256
-    outputChannel.appendLine(`[sqry] Downloading checksums from ${releaseBase}/CHECKSUMS.sha256`);
-    await downloadWithProgress(
-      `${releaseBase}/CHECKSUMS.sha256`,
+    // Step 1: Download checksum manifest
+    const checksumAssetName = await downloadReleaseAsset(
+      releaseBase,
+      getChecksumAssetCandidates(),
       tmpChecksumPath,
-      undefined,
+      outputChannel,
+      "checksum manifest",
       cancellationToken,
     );
     const checksumContent = fs.readFileSync(tmpChecksumPath, "utf-8");
     cleanupFile(tmpChecksumPath);
+    outputChannel.appendLine(`[sqry] Parsed checksums from ${checksumAssetName}`);
 
     // Step 2: Parse expected hash
     const expectedHash = parseChecksumForAsset(checksumContent, platformInfo.asset);
@@ -531,20 +575,17 @@ export async function downloadBinary(
     }
     outputChannel.appendLine("[sqry] SHA256 checksum verified");
 
-    // Step 5: Download .bundle file
-    outputChannel.appendLine(`[sqry] Downloading Cosign bundle: ${platformInfo.asset}.bundle`);
-    try {
-      await downloadWithProgress(
-        `${releaseBase}/${platformInfo.asset}.bundle`,
-        tmpBundlePath,
-        undefined,
-        cancellationToken,
-      );
-    } catch (err) {
-      cleanupFile(tmpBinaryPath);
-      cleanupFile(tmpBundlePath);
-      throw err;
-    }
+    // Step 5: Download attestation bundle
+    const bundleAssetName = await downloadReleaseAsset(
+      releaseBase,
+      getBundleAssetCandidates(platformInfo.asset),
+      tmpBundlePath,
+      outputChannel,
+      "attestation bundle",
+      cancellationToken,
+    );
+    const finalBundlePath = path.join(versionDir, bundleAssetName);
+    outputChannel.appendLine(`[sqry] Downloaded attestation bundle: ${bundleAssetName}`);
 
     // Step 6: Verify Cosign bundle (MANDATORY)
     outputChannel.appendLine("[sqry] Verifying Cosign signature bundle...");

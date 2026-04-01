@@ -32,7 +32,8 @@ OPTIONS:
 ENVIRONMENT VARIABLES:
     SQRY_MCP_WORKSPACE_ROOT               Root directory for searches (security boundary)
     SQRY_MCP_MAX_OUTPUT_BYTES             Max output size per response (default: 50000)
-    SQRY_MCP_TIMEOUT_MS                   Timeout per request in ms (default: 30000)
+    SQRY_MCP_TIMEOUT_MS                   Timeout per request in ms (default: 60000)
+    SQRY_MCP_INDEX_TIMEOUT_MS             Timeout for index rebuilds in ms (default: 600000 = 10min)
     SQRY_MCP_RETRY_DELAY_MS               Retry delay for exceeded deadlines in ms (default: 500)
     SQRY_MCP_ENGINE_CACHE_CAPACITY        Max cached workspace engines (default: 5)
     SQRY_MCP_DISCOVERY_CACHE_CAPACITY     Max cached workspace paths (default: 100)
@@ -40,7 +41,7 @@ ENVIRONMENT VARIABLES:
     SQRY_MCP_SUBGRAPH_CACHE_CAPACITY      Subgraph cache capacity (default: 128)
     SQRY_MCP_QUERY_CACHE_TTL_SECS         Query cache TTL in seconds (default: 300)
     SQRY_MCP_MAX_CROSS_LANG_EDGES         Max edges for cross-language analysis (default: 50000)
-    SQRY_REDACTION_PRESET                 Response redaction: none|minimal|standard|strict (default: none)
+    SQRY_REDACTION_PRESET                 Response redaction: none|minimal|standard|strict (default: minimal)
 
 AVAILABLE TOOLS:
     Use --list-tools to view the full rmcp tool catalog
@@ -142,9 +143,11 @@ async fn run_rmcp_server() -> Result<()> {
     let mcp_config = mcp_config::McpConfig::load_or_default()?;
     let timeout_ms = mcp_config.effective_timeout_ms()?;
     let retry_delay_ms = mcp_config.effective_retry_delay_ms()?;
+    let index_timeout_ms = mcp_config.effective_index_timeout_ms()?;
 
     tracing::info!(
         timeout_ms = timeout_ms,
+        index_timeout_ms = index_timeout_ms,
         retry_delay_ms = retry_delay_ms,
         "MCP config loaded"
     );
@@ -204,7 +207,13 @@ async fn run_rmcp_server() -> Result<()> {
         tracing::info!("Response redaction disabled (passthrough mode)");
     }
 
-    let server = server::SqryServer::with_config(flags, timeout_ms, retry_delay_ms, redactor);
+    let server = server::SqryServer::with_config(
+        flags,
+        timeout_ms,
+        index_timeout_ms,
+        retry_delay_ms,
+        redactor,
+    );
 
     let service = server
         .serve(stdio())

@@ -14,7 +14,7 @@ suite("Command Execution Tests", () => {
     this.timeout(30000);
 
     // Ensure extension is activated
-    const extension = vscode.extensions.getExtension("verivuslabs.sqry-vscode");
+    const extension = vscode.extensions.getExtension("verivus.sqry-vscode");
     if (extension && !extension.isActive) {
       await extension.activate();
     }
