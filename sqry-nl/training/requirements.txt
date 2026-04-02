@@ -16,7 +16,7 @@ transformers==4.55.4  # Max version compatible with optimum-onnx (<4.56.0)
 datasets==4.4.1
 
 # ONNX Export and Quantization
-onnx==1.20.0
+onnx==1.21.0
 onnxruntime==1.23.2
 optimum[onnxruntime]==2.0.0
 
