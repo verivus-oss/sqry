@@ -9,6 +9,7 @@ use sqry_core::graph::{GraphBuilder, GraphResult};
 use sqry_core::plugin::LanguagePlugin;
 
 use crate::metadata::{RecordMetadata, child_text, synthetic_path};
+use crate::replay::ReplayState;
 
 /// Maximum script size to extract.
 ///
@@ -43,8 +44,12 @@ fn max_schema_name_len() -> usize {
 
 /// Extract scripts from a record element and delegate to ServiceNow JS builder.
 ///
-/// Creates a separate `StagingGraph` per delegation for multi-record files,
-/// or delegates directly for single-record files.
+/// Each script field delegation creates a fresh `StagingGraph` and replays it
+/// into the main staging with remapped `StringId`s/`NodeId`s. This prevents
+/// duplicate local `StringId` collisions when multiple script fields (e.g.
+/// `script` + `client_script`) exist in the same record — each inner
+/// `GraphBuildHelper` starts its local counter at 0, so without separate
+/// staging the second field would re-emit `StringId(local:0)`.
 #[allow(clippy::too_many_arguments)]
 pub fn extract_scripts(
     record: &roxmltree::Node<'_, '_>,
@@ -58,6 +63,8 @@ pub fn extract_scripts(
     staging: &mut StagingGraph,
 ) -> GraphResult<()> {
     let synth_path = synthetic_path(xml_path, metadata, record_idx, multi_record);
+
+    let mut replay_state = ReplayState::new(staging);
 
     for field_name in script_fields {
         let Some(script_text) = child_text(record, field_name) else {
@@ -79,14 +86,22 @@ pub fn extract_scripts(
             continue;
         }
 
-        // Delegate to ServiceNowGraphBuilder
-        sn_builder.build_graph(&js_tree, script_bytes, &synth_path, staging)?;
+        // Delegate into a fresh staging to avoid StringId collisions.
+        // Each build_graph() call creates a GraphBuildHelper that starts
+        // next_string_id at 0, so sharing one staging across multiple
+        // delegations produces duplicate InternString local IDs.
+        let mut del_staging = StagingGraph::new();
+        sn_builder.build_graph(&js_tree, script_bytes, &synth_path, &mut del_staging)?;
 
         // Attach body hashes immediately while we have the exact script bytes.
         // Must happen per-field so spans and hash input stay aligned.
         // The pipeline's later attach_body_hashes() against XML bytes will skip
         // nodes that already have hashes (body_hash.is_none() check).
-        staging.attach_body_hashes(script_bytes);
+        del_staging.attach_body_hashes(script_bytes);
+
+        if !del_staging.is_empty() {
+            replay_state.replay(staging, &mut del_staging)?;
+        }
     }
 
     Ok(())

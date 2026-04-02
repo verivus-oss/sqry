@@ -9,7 +9,7 @@ rust-version.workspace = true
 description = "Lua language plugin for sqry"
 
 [dependencies]
-sqry-core = { version = "6.0.15", path = "../sqry-core" }
+sqry-core = { version = "6.0.17", path = "../sqry-core" }
 anyhow.workspace = true
 tree-sitter.workspace = true
 tree-sitter-lua.workspace = true
