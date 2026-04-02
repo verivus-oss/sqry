@@ -519,13 +519,152 @@ jobs:
           GH_TOKEN: ${{ steps.public-release-auth.outputs.token }}
         run: |
           set -euo pipefail
-          current_tag_sha="$(gh api repos/verivus-oss/sqry/git/ref/tags/$TAG --jq '.object.sha' 2>/dev/null || true)"
-          if [[ -z "$current_tag_sha" ]]; then
-            gh api repos/verivus-oss/sqry/git/refs \
-              -f ref="refs/tags/$TAG" \
-              -f sha="$EXPECTED_SHA"
-            current_tag_sha="$(gh api repos/verivus-oss/sqry/git/ref/tags/$TAG --jq '.object.sha')"
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "FATAL: TAG '$TAG' does not match the expected release tag format" >&2
+            exit 1
           fi
+
+          github_api_get() {
+            local endpoint="$1"
+            local output_file="$2"
+            curl -sS \
+              -o "$output_file" \
+              -w '%{http_code}' \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/${endpoint}"
+          }
+
+          github_api_post() {
+            local endpoint="$1"
+            local json_payload="$2"
+            local output_file="$3"
+            curl -sS \
+              -o "$output_file" \
+              -w '%{http_code}' \
+              -X POST \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              -H "Content-Type: application/json" \
+              "https://api.github.com/${endpoint}" \
+              -d "$json_payload"
+          }
+
+          resolve_tag_commit_sha_from_file() {
+            local ref_file="$1"
+            local object_type object_sha tag_object_file http_code depth
+
+            object_type="$(jq -r '.object.type // empty' "$ref_file")"
+            object_sha="$(jq -r '.object.sha // empty' "$ref_file")"
+            if [[ -z "$object_type" || -z "$object_sha" || "$object_sha" == "null" ]]; then
+              echo "FATAL: malformed tag ref payload:" >&2
+              cat "$ref_file" >&2
+              exit 1
+            fi
+
+            depth=0
+            while [[ "$object_type" == "tag" ]]; do
+              depth=$((depth + 1))
+              if (( depth > 4 )); then
+                echo "FATAL: annotated tag dereference exceeded maximum depth for $TAG" >&2
+                exit 1
+              fi
+
+              tag_object_file="$(mktemp)"
+              http_code="$(github_api_get "repos/verivus-oss/sqry/git/tags/${object_sha}" "$tag_object_file")"
+              if [[ "$http_code" != "200" ]]; then
+                echo "FATAL: could not dereference annotated tag object for $TAG (HTTP $http_code)" >&2
+                cat "$tag_object_file" >&2
+                rm -f "$tag_object_file"
+                exit 1
+              fi
+
+              object_type="$(jq -r '.object.type // empty' "$tag_object_file")"
+              object_sha="$(jq -r '.object.sha // empty' "$tag_object_file")"
+              rm -f "$tag_object_file"
+
+              if [[ -z "$object_type" || -z "$object_sha" || "$object_sha" == "null" ]]; then
+                echo "FATAL: malformed annotated tag object for $TAG" >&2
+                exit 1
+              fi
+            done
+
+            if [[ "$object_type" != "commit" ]]; then
+              echo "FATAL: tag $TAG resolved to unexpected object type '$object_type'" >&2
+              exit 1
+            fi
+
+            echo "$object_sha"
+          }
+
+          fetch_tag_ref_file() {
+            local tag_ref_file http_code
+            tag_ref_file="$(mktemp)"
+            http_code="$(github_api_get "repos/verivus-oss/sqry/git/ref/tags/${TAG}" "$tag_ref_file")"
+            case "$http_code" in
+              200)
+                echo "$tag_ref_file"
+                return 0
+                ;;
+              404)
+                rm -f "$tag_ref_file"
+                return 4
+                ;;
+              *)
+                echo "FATAL: tag lookup for $TAG returned unexpected HTTP $http_code" >&2
+                cat "$tag_ref_file" >&2
+                rm -f "$tag_ref_file"
+                return 1
+                ;;
+            esac
+          }
+
+          create_tag_ref() {
+            local create_file http_code payload
+            create_file="$(mktemp)"
+            payload="$(jq -nc --arg ref "refs/tags/${TAG}" --arg sha "$EXPECTED_SHA" '{ref: $ref, sha: $sha}')"
+            http_code="$(github_api_post "repos/verivus-oss/sqry/git/refs" "$payload" "$create_file")"
+            case "$http_code" in
+              201)
+                rm -f "$create_file"
+                return 0
+                ;;
+              422)
+                if jq -e '.message | strings | test("Reference already exists")' "$create_file" >/dev/null 2>&1; then
+                  rm -f "$create_file"
+                  return 0
+                fi
+                echo "FATAL: tag create for $TAG returned HTTP 422 with unexpected body" >&2
+                cat "$create_file" >&2
+                rm -f "$create_file"
+                return 1
+                ;;
+              *)
+                echo "FATAL: tag create for $TAG returned unexpected HTTP $http_code" >&2
+                cat "$create_file" >&2
+                rm -f "$create_file"
+                return 1
+                ;;
+            esac
+          }
+
+          if tag_ref_file="$(fetch_tag_ref_file)"; then
+            current_tag_sha="$(resolve_tag_commit_sha_from_file "$tag_ref_file")"
+            rm -f "$tag_ref_file"
+          else
+            tag_lookup_status=$?
+            if [[ "$tag_lookup_status" -ne 4 ]]; then
+              exit "$tag_lookup_status"
+            fi
+            create_tag_ref
+            if ! tag_ref_file="$(fetch_tag_ref_file)"; then
+              echo "FATAL: public tag $TAG could not be re-read after creation" >&2
+              exit 1
+            fi
+            current_tag_sha="$(resolve_tag_commit_sha_from_file "$tag_ref_file")"
+            rm -f "$tag_ref_file"
+          fi
+
           if [[ "$current_tag_sha" != "$EXPECTED_SHA" ]]; then
             echo "FATAL: public tag $TAG points to $current_tag_sha, expected $EXPECTED_SHA" >&2
             exit 1
