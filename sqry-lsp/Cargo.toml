@@ -32,9 +32,9 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sqry-core = { version = "6.0.16", path = "../sqry-core" }
-sqry-nl = { version = "6.0.16", path = "../sqry-nl" }
-sqry-plugin-registry = { version = "6.0.16", path = "../sqry-plugin-registry" }
+sqry-core = { version = "6.0.15", path = "../sqry-core" }
+sqry-nl = { version = "6.0.15", path = "../sqry-nl" }
+sqry-plugin-registry = { version = "6.0.15", path = "../sqry-plugin-registry" }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 parking_lot.workspace = true
 ropey = "1.6"
