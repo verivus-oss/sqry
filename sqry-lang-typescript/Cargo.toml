@@ -9,12 +9,12 @@ rust-version.workspace = true
 description = "typescript language plugin for sqry"
 
 [dependencies]
-sqry-core = { version = "6.0.15", path = "../sqry-core" }
+sqry-core = { version = "6.0.16", path = "../sqry-core" }
 anyhow.workspace = true
 tree-sitter.workspace = true
 tree-sitter-typescript.workspace = true
 streaming-iterator.workspace = true
-sqry-lang-support = { version = "6.0.15", path = "../sqry-lang-support" }
+sqry-lang-support = { version = "6.0.16", path = "../sqry-lang-support" }
 once_cell.workspace = true
 
 [dev-dependencies]
