@@ -31,7 +31,7 @@ jobs:
       STAGED_ORIGIN: ${{ github.event.client_payload.staged_origin }}
       STAGED_SHA: ${{ github.event.client_payload.staged_sha }}
       EXPECTED_DIGEST: ${{ github.event.client_payload.sanitized_tree_sha256 }}
-      CARGO_ZIGBUILD_IMAGE: ghcr.io/rust-cross/cargo-zigbuild@sha256:af1bc2242f74ffec1ded60f9719f9272fce4f3c4ecf1ef0aabfd78bc8a0fb0ef
+      CARGO_ZIGBUILD_IMAGE: ghcr.io/rust-cross/cargo-zigbuild@sha256:dce4ea213244423439d97a2070031c6ea287fc32f01b0aaa38f8b4d46f52e68c
     steps:
       # Guard: validate dispatch payload before doing any work
       - name: Validate dispatch payload
