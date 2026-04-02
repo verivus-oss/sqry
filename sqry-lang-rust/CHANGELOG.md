@@ -6,7 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
-## [6.0.2](https://github.com/verivus-oss/sqry/compare/v5.0.1...v6.0.2) - 2026-03-31
+## [6.0.18](https://github.com/verivus-oss/sqry/compare/v6.0.17...v6.0.18) - 2026-04-02
+
+### Fixed
+- *(release)* add VERSION stamps to all public directories for consistent release metadata## [6.0.2](https://github.com/verivus-oss/sqry/compare/v5.0.1...v6.0.2) - 2026-03-31
 
 ### Other
 - *(rustfmt)* normalize code for Rust 1.90 toolchain## [5.0.1](https://github.com/verivus-oss/sqry/compare/v4.12.7...v5.0.1) - 2026-03-31

@@ -31,10 +31,10 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tracing = "0.1"
 tracing-subscriber = "0.3"
-sqry-core = { version = "6.0.17", path = "../sqry-core" }
-sqry-plugin-registry = { version = "6.0.17", path = "../sqry-plugin-registry" }
-sqry-nl = { version = "6.0.17", path = "../sqry-nl", default-features = false }
-sqry-mcp-redaction = { version = "6.0.17", path = "../sqry-mcp-redaction" }
+sqry-core = { version = "6.0.18", path = "../sqry-core" }
+sqry-plugin-registry = { version = "6.0.18", path = "../sqry-plugin-registry" }
+sqry-nl = { version = "6.0.18", path = "../sqry-nl", default-features = false }
+sqry-mcp-redaction = { version = "6.0.18", path = "../sqry-mcp-redaction" }
 
 # MCP SDK for protocol compliance
 rmcp = { version = "0.16", features = ["server", "transport-io"] }
