@@ -603,7 +603,7 @@ jobs:
             http_code="$(github_api_get "repos/verivus-oss/sqry/git/ref/tags/${TAG}" "$tag_ref_file")"
             case "$http_code" in
               200)
-                echo "$tag_ref_file"
+                FETCHED_TAG_REF_FILE="$tag_ref_file"
                 return 0
                 ;;
               404)
@@ -649,20 +649,20 @@ jobs:
           }
 
           if tag_ref_file="$(fetch_tag_ref_file)"; then
-            current_tag_sha="$(resolve_tag_commit_sha_from_file "$tag_ref_file")"
-            rm -f "$tag_ref_file"
+            current_tag_sha="$(resolve_tag_commit_sha_from_file "$FETCHED_TAG_REF_FILE")"
+            rm -f "$FETCHED_TAG_REF_FILE"
           else
             tag_lookup_status=$?
             if [[ "$tag_lookup_status" -ne 4 ]]; then
               exit "$tag_lookup_status"
             fi
             create_tag_ref
-            if ! tag_ref_file="$(fetch_tag_ref_file)"; then
+            if ! fetch_tag_ref_file; then
               echo "FATAL: public tag $TAG could not be re-read after creation" >&2
               exit 1
             fi
-            current_tag_sha="$(resolve_tag_commit_sha_from_file "$tag_ref_file")"
-            rm -f "$tag_ref_file"
+            current_tag_sha="$(resolve_tag_commit_sha_from_file "$FETCHED_TAG_REF_FILE")"
+            rm -f "$FETCHED_TAG_REF_FILE"
           fi
 
           if [[ "$current_tag_sha" != "$EXPECTED_SHA" ]]; then
