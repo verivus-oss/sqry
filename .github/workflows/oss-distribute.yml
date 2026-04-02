@@ -181,6 +181,8 @@ jobs:
       - name: Build binaries
         run: |
           mkdir -p dist/
+          PUBLIC_REPO_ROOT="/workspace/sqry"
+          export RUSTFLAGS="--remap-path-prefix=$(pwd)=${PUBLIC_REPO_ROOT} --remap-path-prefix=/io=${PUBLIC_REPO_ROOT}"
           TARGETS=(
             "x86_64-unknown-linux-gnu"
             "aarch64-unknown-linux-gnu"
@@ -206,6 +208,7 @@ jobs:
                 -e HOME=/io/.docker-home \
                 -e CARGO_HOME=/io/.docker-cargo \
                 -e XDG_CACHE_HOME=/io/.docker-cache \
+                -e RUSTFLAGS="$RUSTFLAGS" \
                 "$CARGO_ZIGBUILD_IMAGE" \
                 bash -c "rustup target add $target && cargo zigbuild --release --target $target -p sqry-cli -p sqry-lsp -p sqry-mcp"
             else
@@ -343,6 +346,9 @@ jobs:
           import pathlib
           import subprocess
 
+          def pick_fields(source, allowed_keys):
+              return {key: source[key] for key in allowed_keys if key in source}
+
           dist_dir = pathlib.Path("dist")
           ledger_path = pathlib.Path(os.environ["LEDGER_PATH"])
           attestation_id = os.environ.get("ATTESTATION_ID", "")
@@ -395,7 +401,7 @@ jobs:
               "version": os.environ["VERSION"],
               "tag": os.environ["TAG"],
               "public_commit_sha": os.environ["EXPECTED_SHA"],
-              "staged_origin": os.environ.get("STAGED_ORIGIN", "verivusai-open/sqry"),
+              "public_origin": os.environ.get("GITHUB_REPOSITORY", "verivus-oss/sqry"),
               "sanitized_tree_sha256": stage_5.get("sanitized_tree_sha256") or ledger.get("stages", {}).get("stage_3_sanitize_and_stage", {}).get("sanitized_tree_sha256"),
               "binaries": binaries,
               "crates": stage_5.get("crates", {}),
@@ -412,21 +418,161 @@ jobs:
               json.dumps(manifest, indent=2, sort_keys=True) + "\n",
               encoding="utf-8",
           )
+          stages = ledger.get("stages", {})
+          public_ledger = {
+              "schema_version": ledger.get("schema_version"),
+              "version": ledger.get("version"),
+              "commit_sha": ledger.get("commit_sha"),
+              "initiated_at": ledger.get("initiated_at"),
+              "release_path": "public",
+              "stages": {
+                  "stage_1_pr": pick_fields(stages.get("stage_1_pr", {}), {"status"}),
+                  "stage_2_release": pick_fields(stages.get("stage_2_release", {}), {"status"}),
+                  "stage_3_sanitize_and_stage": pick_fields(
+                      stages.get("stage_3_sanitize_and_stage", {}),
+                      {
+                          "status",
+                          "sanitized_tree_sha256",
+                          "hermetic_validation",
+                          "hermetic_validated_at",
+                          "leak_review_gate",
+                          "leak_review_passed_at",
+                          "leak_reviewers",
+                          "completed_at",
+                      },
+                  ),
+                  "stage_4_staged_approval": pick_fields(
+                      stages.get("stage_4_staged_approval", {}),
+                      {
+                          "status",
+                          "approved_at",
+                          "promotion_authorized",
+                          "staged_sha_verified",
+                          "ledger_integrity_verified",
+                          "leak_gate_verified",
+                      },
+                  ),
+                  "stage_5_publish": pick_fields(
+                      stages.get("stage_5_publish", {}),
+                      {
+                          "status",
+                          "started_at",
+                          "failed_at",
+                          "crates",
+                          "public_commit_sha",
+                          "public_release_status",
+                          "published_at",
+                          "completed_at",
+                      },
+                  ),
+                  "stage_6_distribute": pick_fields(
+                      stages.get("stage_6_distribute", {}),
+                      {
+                          "status",
+                          "started_at",
+                          "failed_at",
+                          "binaries",
+                          "vscode_extension",
+                          "public_release_status",
+                          "completed_at",
+                      },
+                  ),
+              },
+              "build_environment": ledger.get("build_environment", {}),
+              "finalized": ledger.get("finalized", False),
+              "finalized_at": ledger.get("finalized_at"),
+          }
+          (dist_dir / f"release-ledger-v{os.environ['VERSION']}.json").write_text(
+              json.dumps(public_ledger, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
           ledger_path.write_text(json.dumps(ledger, indent=2, sort_keys=True) + "\n", encoding="utf-8")
           PY
+
+      - name: Select public release credential
+        id: public-release-auth
+        env:
+          DEFAULT_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TOKEN="$(gh auth token -u verivusOSS-releases)"
+          if [[ -z "$TOKEN" ]]; then
+            echo "FATAL: verivusOSS-releases token not configured on the runner" >&2
+            exit 1
+          fi
+          LOGIN="$(GH_TOKEN="$TOKEN" gh api user --jq '.login')"
+          if [[ "$LOGIN" != "verivusOSS-releases" ]]; then
+            echo "FATAL: release credential resolved to '$LOGIN', expected 'verivusOSS-releases'" >&2
+            exit 1
+          fi
+          BYPASS="$(GH_TOKEN="$TOKEN" gh api repos/verivus-oss/sqry/rulesets/13600966 --jq '.current_user_can_bypass')"
+          if [[ "$BYPASS" != "always" ]]; then
+            echo "FATAL: release credential cannot bypass release-tag-protection (current_user_can_bypass=$BYPASS)" >&2
+            exit 1
+          fi
+          echo "::add-mask::$TOKEN"
+          echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
+          echo "login=$LOGIN" >> "$GITHUB_OUTPUT"
+
+      - name: Ensure public tag exists at expected SHA
+        env:
+          GH_TOKEN: ${{ steps.public-release-auth.outputs.token }}
+        run: |
+          set -euo pipefail
+          current_tag_sha="$(gh api repos/verivus-oss/sqry/git/ref/tags/$TAG --jq '.object.sha' 2>/dev/null || true)"
+          if [[ -z "$current_tag_sha" ]]; then
+            gh api repos/verivus-oss/sqry/git/refs \
+              -f ref="refs/tags/$TAG" \
+              -f sha="$EXPECTED_SHA"
+            current_tag_sha="$(gh api repos/verivus-oss/sqry/git/ref/tags/$TAG --jq '.object.sha')"
+          fi
+          if [[ "$current_tag_sha" != "$EXPECTED_SHA" ]]; then
+            echo "FATAL: public tag $TAG points to $current_tag_sha, expected $EXPECTED_SHA" >&2
+            exit 1
+          fi
+
+      - name: Validate public release artifacts are sanitized
+        run: |
+          set -euo pipefail
+          patterns=(
+            "verivusai-open"
+            "/srv/repos/internal"
+            "/srv/repos/external"
+            "staged_origin"
+          )
+
+          scan_failure=false
+          for artifact in dist/*; do
+            [[ -f "$artifact" ]] || continue
+            for pattern in "${patterns[@]}"; do
+              if [[ "$artifact" == *.vsix ]]; then
+                matches=$(unzip -p "$artifact" | strings | grep -F "$pattern" | head -5 || true)
+              else
+                matches=$(strings -a "$artifact" 2>/dev/null | grep -F "$pattern" | head -5 || true)
+              fi
+              if [[ -n "$matches" ]]; then
+                echo "FATAL: artifact '$artifact' still contains forbidden content '$pattern':" >&2
+                printf '%s\n' "$matches" >&2
+                scan_failure=true
+              fi
+            done
+          done
+
+          if [[ "$scan_failure" == "true" ]]; then
+            exit 1
+          fi
 
       # Phase 6.4: Upload to GitHub Release
       - name: Upload release assets and ledger
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          LEDGER_PATH: ${{ steps.ledger.outputs.path }}
+          GH_TOKEN: ${{ steps.public-release-auth.outputs.token }}
         run: |
-          gh release upload "$TAG" dist/* "$LEDGER_PATH" --clobber
+          gh release upload "$TAG" dist/* --clobber
 
       # Phase 6.7: Promote release
       - name: Promote public release from draft
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ steps.public-release-auth.outputs.token }}
           LEDGER_PATH: ${{ steps.ledger.outputs.path }}
         run: |
           set -euo pipefail
@@ -437,5 +583,83 @@ jobs:
             .finalized_at = (now | todateiso8601)
           ' "$LEDGER_PATH" > "$tmp"
           mv "$tmp" "$LEDGER_PATH"
-          gh release upload "$TAG" "$LEDGER_PATH" --clobber
+          python3 - <<'PY'
+          import json
+          import os
+          import pathlib
+
+          def pick_fields(source, allowed_keys):
+              return {key: source[key] for key in allowed_keys if key in source}
+
+          ledger_path = pathlib.Path(os.environ["LEDGER_PATH"])
+          public_ledger_path = pathlib.Path("dist") / f"release-ledger-v{os.environ['VERSION']}.json"
+          ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
+          stages = ledger.get("stages", {})
+          public_ledger = {
+              "schema_version": ledger.get("schema_version"),
+              "version": ledger.get("version"),
+              "commit_sha": ledger.get("commit_sha"),
+              "initiated_at": ledger.get("initiated_at"),
+              "release_path": "public",
+              "stages": {
+                  "stage_1_pr": pick_fields(stages.get("stage_1_pr", {}), {"status"}),
+                  "stage_2_release": pick_fields(stages.get("stage_2_release", {}), {"status"}),
+                  "stage_3_sanitize_and_stage": pick_fields(
+                      stages.get("stage_3_sanitize_and_stage", {}),
+                      {
+                          "status",
+                          "sanitized_tree_sha256",
+                          "hermetic_validation",
+                          "hermetic_validated_at",
+                          "leak_review_gate",
+                          "leak_review_passed_at",
+                          "leak_reviewers",
+                          "completed_at",
+                      },
+                  ),
+                  "stage_4_staged_approval": pick_fields(
+                      stages.get("stage_4_staged_approval", {}),
+                      {
+                          "status",
+                          "approved_at",
+                          "promotion_authorized",
+                          "staged_sha_verified",
+                          "ledger_integrity_verified",
+                          "leak_gate_verified",
+                      },
+                  ),
+                  "stage_5_publish": pick_fields(
+                      stages.get("stage_5_publish", {}),
+                      {
+                          "status",
+                          "started_at",
+                          "failed_at",
+                          "crates",
+                          "public_commit_sha",
+                          "public_release_status",
+                          "published_at",
+                          "completed_at",
+                      },
+                  ),
+                  "stage_6_distribute": pick_fields(
+                      stages.get("stage_6_distribute", {}),
+                      {
+                          "status",
+                          "started_at",
+                          "failed_at",
+                          "binaries",
+                          "vscode_extension",
+                          "public_release_status",
+                          "completed_at",
+                      },
+                  ),
+              },
+              "build_environment": ledger.get("build_environment", {}),
+              "finalized": ledger.get("finalized", False),
+              "finalized_at": ledger.get("finalized_at"),
+          }
+          public_ledger_path.write_text(json.dumps(public_ledger, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+          PY
+          ! rg -n 'verivusai-open|/srv/repos/(internal|external)|staged_origin' "dist/release-ledger-v${VERSION}.json"
+          gh release upload "$TAG" "dist/release-ledger-v${VERSION}.json" --clobber
           gh release edit "$TAG" --draft=false --latest
