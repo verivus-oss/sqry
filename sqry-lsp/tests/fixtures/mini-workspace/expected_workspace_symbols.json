@@ -3,7 +3,7 @@
     "name": "<file_module>",
     "kind": 3,
     "location": {
-      "uri": "file:///srv/repos/internal/verivus-oss/sqry/sqry-lsp/tests/fixtures/mini-workspace/src/extra.rs",
+      "uri": "<WORKSPACE_ROOT>/sqry-lsp/tests/fixtures/mini-workspace/src/extra.rs",
       "range": {
         "start": {
           "line": 0,
@@ -20,7 +20,7 @@
     "name": "extra::helper",
     "kind": 12,
     "location": {
-      "uri": "file:///srv/repos/internal/verivus-oss/sqry/sqry-lsp/tests/fixtures/mini-workspace/src/extra.rs",
+      "uri": "<WORKSPACE_ROOT>/sqry-lsp/tests/fixtures/mini-workspace/src/extra.rs",
       "range": {
         "start": {
           "line": 0,
@@ -37,7 +37,7 @@
     "name": "helper",
     "kind": 12,
     "location": {
-      "uri": "file:///srv/repos/internal/verivus-oss/sqry/sqry-lsp/tests/fixtures/mini-workspace/src/extra.rs",
+      "uri": "<WORKSPACE_ROOT>/sqry-lsp/tests/fixtures/mini-workspace/src/extra.rs",
       "range": {
         "start": {
           "line": 0,
@@ -54,7 +54,7 @@
     "name": "super::format_state",
     "kind": 12,
     "location": {
-      "uri": "file:///srv/repos/internal/verivus-oss/sqry/sqry-lsp/tests/fixtures/mini-workspace/src/extra.rs",
+      "uri": "<WORKSPACE_ROOT>/sqry-lsp/tests/fixtures/mini-workspace/src/extra.rs",
       "range": {
         "start": {
           "line": 0,
@@ -71,7 +71,7 @@
     "name": "::static",
     "kind": 19,
     "location": {
-      "uri": "file:///srv/repos/internal/verivus-oss/sqry/sqry-lsp/tests/fixtures/mini-workspace/src/lib.rs",
+      "uri": "<WORKSPACE_ROOT>/sqry-lsp/tests/fixtures/mini-workspace/src/lib.rs",
       "range": {
         "start": {
           "line": 0,
@@ -88,7 +88,7 @@
     "name": "<field:state.value>",
     "kind": 13,
     "location": {
-      "uri": "file:///srv/repos/internal/verivus-oss/sqry/sqry-lsp/tests/fixtures/mini-workspace/src/lib.rs",
+      "uri": "<WORKSPACE_ROOT>/sqry-lsp/tests/fixtures/mini-workspace/src/lib.rs",
       "range": {
         "start": {
           "line": 0,
@@ -105,7 +105,7 @@
     "name": "<file_module>",
     "kind": 3,
     "location": {
-      "uri": "file:///srv/repos/internal/verivus-oss/sqry/sqry-lsp/tests/fixtures/mini-workspace/src/lib.rs",
+      "uri": "<WORKSPACE_ROOT>/sqry-lsp/tests/fixtures/mini-workspace/src/lib.rs",
       "range": {
         "start": {
           "line": 0,
@@ -122,7 +122,7 @@
     "name": "InnerState::new",
     "kind": 12,
     "location": {
-      "uri": "file:///srv/repos/internal/verivus-oss/sqry/sqry-lsp/tests/fixtures/mini-workspace/src/lib.rs",
+      "uri": "<WORKSPACE_ROOT>/sqry-lsp/tests/fixtures/mini-workspace/src/lib.rs",
       "range": {
         "start": {
           "line": 0,
@@ -139,7 +139,7 @@
     "name": "extra::helper",
     "kind": 12,
     "location": {
-      "uri": "file:///srv/repos/internal/verivus-oss/sqry/sqry-lsp/tests/fixtures/mini-workspace/src/lib.rs",
+      "uri": "<WORKSPACE_ROOT>/sqry-lsp/tests/fixtures/mini-workspace/src/lib.rs",
       "range": {
         "start": {
           "line": 0,
@@ -156,7 +156,7 @@
     "name": "format!",
     "kind": 19,
     "location": {
-      "uri": "file:///srv/repos/internal/verivus-oss/sqry/sqry-lsp/tests/fixtures/mini-workspace/src/lib.rs",
+      "uri": "<WORKSPACE_ROOT>/sqry-lsp/tests/fixtures/mini-workspace/src/lib.rs",
       "range": {
         "start": {
           "line": 0,
@@ -173,7 +173,7 @@
     "name": "format_state",
     "kind": 12,
     "location": {
-      "uri": "file:///srv/repos/internal/verivus-oss/sqry/sqry-lsp/tests/fixtures/mini-workspace/src/lib.rs",
+      "uri": "<WORKSPACE_ROOT>/sqry-lsp/tests/fixtures/mini-workspace/src/lib.rs",
       "range": {
         "start": {
           "line": 0,
@@ -190,7 +190,7 @@
     "name": "helper",
     "kind": 12,
     "location": {
-      "uri": "file:///srv/repos/internal/verivus-oss/sqry/sqry-lsp/tests/fixtures/mini-workspace/src/lib.rs",
+      "uri": "<WORKSPACE_ROOT>/sqry-lsp/tests/fixtures/mini-workspace/src/lib.rs",
       "range": {
         "start": {
           "line": 0,
@@ -207,7 +207,7 @@
     "name": "helper_",
     "kind": 12,
     "location": {
-      "uri": "file:///srv/repos/internal/verivus-oss/sqry/sqry-lsp/tests/fixtures/mini-workspace/src/lib.rs",
+      "uri": "<WORKSPACE_ROOT>/sqry-lsp/tests/fixtures/mini-workspace/src/lib.rs",
       "range": {
         "start": {
           "line": 0,
@@ -224,7 +224,7 @@
     "name": "summarize",
     "kind": 12,
     "location": {
-      "uri": "file:///srv/repos/internal/verivus-oss/sqry/sqry-lsp/tests/fixtures/mini-workspace/src/lib.rs",
+      "uri": "<WORKSPACE_ROOT>/sqry-lsp/tests/fixtures/mini-workspace/src/lib.rs",
       "range": {
         "start": {
           "line": 0,
@@ -241,7 +241,7 @@
     "name": "extra",
     "kind": 3,
     "location": {
-      "uri": "file:///srv/repos/internal/verivus-oss/sqry/sqry-lsp/tests/fixtures/mini-workspace/src/lib.rs",
+      "uri": "<WORKSPACE_ROOT>/sqry-lsp/tests/fixtures/mini-workspace/src/lib.rs",
       "range": {
         "start": {
           "line": 2,
@@ -258,7 +258,7 @@
     "name": "internal",
     "kind": 3,
     "location": {
-      "uri": "file:///srv/repos/internal/verivus-oss/sqry/sqry-lsp/tests/fixtures/mini-workspace/src/lib.rs",
+      "uri": "<WORKSPACE_ROOT>/sqry-lsp/tests/fixtures/mini-workspace/src/lib.rs",
       "range": {
         "start": {
           "line": 4,
@@ -275,7 +275,7 @@
     "name": "internal::InnerState",
     "kind": 23,
     "location": {
-      "uri": "file:///srv/repos/internal/verivus-oss/sqry/sqry-lsp/tests/fixtures/mini-workspace/src/lib.rs",
+      "uri": "<WORKSPACE_ROOT>/sqry-lsp/tests/fixtures/mini-workspace/src/lib.rs",
       "range": {
         "start": {
           "line": 6,
@@ -292,7 +292,7 @@
     "name": "internal::InnerState::new",
     "kind": 6,
     "location": {
-      "uri": "file:///srv/repos/internal/verivus-oss/sqry/sqry-lsp/tests/fixtures/mini-workspace/src/lib.rs",
+      "uri": "<WORKSPACE_ROOT>/sqry-lsp/tests/fixtures/mini-workspace/src/lib.rs",
       "range": {
         "start": {
           "line": 11,
@@ -309,7 +309,7 @@
     "name": "internal::helper",
     "kind": 12,
     "location": {
-      "uri": "file:///srv/repos/internal/verivus-oss/sqry/sqry-lsp/tests/fixtures/mini-workspace/src/lib.rs",
+      "uri": "<WORKSPACE_ROOT>/sqry-lsp/tests/fixtures/mini-workspace/src/lib.rs",
       "range": {
         "start": {
           "line": 16,
@@ -326,7 +326,7 @@
     "name": "internal::helper::format@19:9",
     "kind": 19,
     "location": {
-      "uri": "file:///srv/repos/internal/verivus-oss/sqry/sqry-lsp/tests/fixtures/mini-workspace/src/lib.rs",
+      "uri": "<WORKSPACE_ROOT>/sqry-lsp/tests/fixtures/mini-workspace/src/lib.rs",
       "range": {
         "start": {
           "line": 17,
@@ -343,7 +343,7 @@
     "name": "process_data",
     "kind": 12,
     "location": {
-      "uri": "file:///srv/repos/internal/verivus-oss/sqry/sqry-lsp/tests/fixtures/mini-workspace/src/lib.rs",
+      "uri": "<WORKSPACE_ROOT>/sqry-lsp/tests/fixtures/mini-workspace/src/lib.rs",
       "range": {
         "start": {
           "line": 25,
@@ -360,7 +360,7 @@
     "name": "process_data::format@30:5",
     "kind": 19,
     "location": {
-      "uri": "file:///srv/repos/internal/verivus-oss/sqry/sqry-lsp/tests/fixtures/mini-workspace/src/lib.rs",
+      "uri": "<WORKSPACE_ROOT>/sqry-lsp/tests/fixtures/mini-workspace/src/lib.rs",
       "range": {
         "start": {
           "line": 28,
@@ -377,7 +377,7 @@
     "name": "orchestrate",
     "kind": 12,
     "location": {
-      "uri": "file:///srv/repos/internal/verivus-oss/sqry/sqry-lsp/tests/fixtures/mini-workspace/src/lib.rs",
+      "uri": "<WORKSPACE_ROOT>/sqry-lsp/tests/fixtures/mini-workspace/src/lib.rs",
       "range": {
         "start": {
           "line": 32,
@@ -394,7 +394,7 @@
     "name": "orchestrate::format@37:5",
     "kind": 19,
     "location": {
-      "uri": "file:///srv/repos/internal/verivus-oss/sqry/sqry-lsp/tests/fixtures/mini-workspace/src/lib.rs",
+      "uri": "<WORKSPACE_ROOT>/sqry-lsp/tests/fixtures/mini-workspace/src/lib.rs",
       "range": {
         "start": {
           "line": 35,
@@ -411,7 +411,7 @@
     "name": "alternate",
     "kind": 12,
     "location": {
-      "uri": "file:///srv/repos/internal/verivus-oss/sqry/sqry-lsp/tests/fixtures/mini-workspace/src/lib.rs",
+      "uri": "<WORKSPACE_ROOT>/sqry-lsp/tests/fixtures/mini-workspace/src/lib.rs",
       "range": {
         "start": {
           "line": 44,
@@ -428,7 +428,7 @@
     "name": "use_extra_helper",
     "kind": 12,
     "location": {
-      "uri": "file:///srv/repos/internal/verivus-oss/sqry/sqry-lsp/tests/fixtures/mini-workspace/src/lib.rs",
+      "uri": "<WORKSPACE_ROOT>/sqry-lsp/tests/fixtures/mini-workspace/src/lib.rs",
       "range": {
         "start": {
           "line": 49,
@@ -445,7 +445,7 @@
     "name": "multi_call_line",
     "kind": 12,
     "location": {
-      "uri": "file:///srv/repos/internal/verivus-oss/sqry/sqry-lsp/tests/fixtures/mini-workspace/src/lib.rs",
+      "uri": "<WORKSPACE_ROOT>/sqry-lsp/tests/fixtures/mini-workspace/src/lib.rs",
       "range": {
         "start": {
           "line": 53,
@@ -462,7 +462,7 @@
     "name": "recursive",
     "kind": 12,
     "location": {
-      "uri": "file:///srv/repos/internal/verivus-oss/sqry/sqry-lsp/tests/fixtures/mini-workspace/src/lib.rs",
+      "uri": "<WORKSPACE_ROOT>/sqry-lsp/tests/fixtures/mini-workspace/src/lib.rs",
       "range": {
         "start": {
           "line": 62,
@@ -479,7 +479,7 @@
     "name": "emoji_fn",
     "kind": 12,
     "location": {
-      "uri": "file:///srv/repos/internal/verivus-oss/sqry/sqry-lsp/tests/fixtures/mini-workspace/src/lib.rs",
+      "uri": "<WORKSPACE_ROOT>/sqry-lsp/tests/fixtures/mini-workspace/src/lib.rs",
       "range": {
         "start": {
           "line": 71,
@@ -496,7 +496,7 @@
     "name": "rocket_launcher",
     "kind": 12,
     "location": {
-      "uri": "file:///srv/repos/internal/verivus-oss/sqry/sqry-lsp/tests/fixtures/mini-workspace/src/lib.rs",
+      "uri": "<WORKSPACE_ROOT>/sqry-lsp/tests/fixtures/mini-workspace/src/lib.rs",
       "range": {
         "start": {
           "line": 76,
@@ -513,7 +513,7 @@
     "name": "unused_helper",
     "kind": 12,
     "location": {
-      "uri": "file:///srv/repos/internal/verivus-oss/sqry/sqry-lsp/tests/fixtures/mini-workspace/src/lib.rs",
+      "uri": "<WORKSPACE_ROOT>/sqry-lsp/tests/fixtures/mini-workspace/src/lib.rs",
       "range": {
         "start": {
           "line": 84,
@@ -530,7 +530,7 @@
     "name": "lonely_function",
     "kind": 12,
     "location": {
-      "uri": "file:///srv/repos/internal/verivus-oss/sqry/sqry-lsp/tests/fixtures/mini-workspace/src/lib.rs",
+      "uri": "<WORKSPACE_ROOT>/sqry-lsp/tests/fixtures/mini-workspace/src/lib.rs",
       "range": {
         "start": {
           "line": 88,
@@ -544,10 +544,10 @@
     }
   },
   {
-    "name": "/srv/repos/internal/verivus-oss/sqry/sqry-lsp/tests/fixtures/mini-workspace/src/utils.ts",
+    "name": "<WORKSPACE_ROOT>/sqry-lsp/tests/fixtures/mini-workspace/src/utils.ts",
     "kind": 3,
     "location": {
-      "uri": "file:///srv/repos/internal/verivus-oss/sqry/sqry-lsp/tests/fixtures/mini-workspace/src/utils.ts",
+      "uri": "<WORKSPACE_ROOT>/sqry-lsp/tests/fixtures/mini-workspace/src/utils.ts",
       "range": {
         "start": {
           "line": 0,
@@ -564,7 +564,7 @@
     "name": "Result",
     "kind": 11,
     "location": {
-      "uri": "file:///srv/repos/internal/verivus-oss/sqry/sqry-lsp/tests/fixtures/mini-workspace/src/utils.ts",
+      "uri": "<WORKSPACE_ROOT>/sqry-lsp/tests/fixtures/mini-workspace/src/utils.ts",
       "range": {
         "start": {
           "line": 0,
@@ -581,7 +581,7 @@
     "name": "callEmoji",
     "kind": 12,
     "location": {
-      "uri": "file:///srv/repos/internal/verivus-oss/sqry/sqry-lsp/tests/fixtures/mini-workspace/src/utils.ts",
+      "uri": "<WORKSPACE_ROOT>/sqry-lsp/tests/fixtures/mini-workspace/src/utils.ts",
       "range": {
         "start": {
           "line": 0,
@@ -598,7 +598,7 @@
     "name": "describe",
     "kind": 12,
     "location": {
-      "uri": "file:///srv/repos/internal/verivus-oss/sqry/sqry-lsp/tests/fixtures/mini-workspace/src/utils.ts",
+      "uri": "<WORKSPACE_ROOT>/sqry-lsp/tests/fixtures/mini-workspace/src/utils.ts",
       "range": {
         "start": {
           "line": 0,
@@ -615,7 +615,7 @@
     "name": "function transform(input: string): Result {\n  const trimmed = input.trim();\n  return { value: trimmed, length: trimmed.length };\n}",
     "kind": 12,
     "location": {
-      "uri": "file:///srv/repos/internal/verivus-oss/sqry/sqry-lsp/tests/fixtures/mini-workspace/src/utils.ts",
+      "uri": "<WORKSPACE_ROOT>/sqry-lsp/tests/fixtures/mini-workspace/src/utils.ts",
       "range": {
         "start": {
           "line": 0,
@@ -632,7 +632,7 @@
     "name": "input.trim",
     "kind": 12,
     "location": {
-      "uri": "file:///srv/repos/internal/verivus-oss/sqry/sqry-lsp/tests/fixtures/mini-workspace/src/utils.ts",
+      "uri": "<WORKSPACE_ROOT>/sqry-lsp/tests/fixtures/mini-workspace/src/utils.ts",
       "range": {
         "start": {
           "line": 0,
@@ -649,7 +649,7 @@
     "name": "star.repeat",
     "kind": 12,
     "location": {
-      "uri": "file:///srv/repos/internal/verivus-oss/sqry/sqry-lsp/tests/fixtures/mini-workspace/src/utils.ts",
+      "uri": "<WORKSPACE_ROOT>/sqry-lsp/tests/fixtures/mini-workspace/src/utils.ts",
       "range": {
         "start": {
           "line": 0,
@@ -666,7 +666,7 @@
     "name": "transform",
     "kind": 12,
     "location": {
-      "uri": "file:///srv/repos/internal/verivus-oss/sqry/sqry-lsp/tests/fixtures/mini-workspace/src/utils.ts",
+      "uri": "<WORKSPACE_ROOT>/sqry-lsp/tests/fixtures/mini-workspace/src/utils.ts",
       "range": {
         "start": {
           "line": 0,

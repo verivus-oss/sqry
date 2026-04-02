@@ -15,13 +15,9 @@ use std::path::{Path, PathBuf};
 // - Phase 2: Batch Parallelism (6-8× speedup for 50+ queries)
 // - Phase 3: Symbol Filtering (2-4× speedup for 100+ symbols)
 //
-// See: docs/development/p2-7-parallel-query-execution/
-
 // ========================================================================
 // Helper Functions
 // ========================================================================
-
-const DEFAULT_REPO: &str = "/srv/repos/internal/verivus-oss/sqry";
 
 fn expand_tilde(input: &str) -> PathBuf {
     if let Some(stripped) = input.strip_prefix("~/")
@@ -32,9 +28,17 @@ fn expand_tilde(input: &str) -> PathBuf {
     PathBuf::from(input)
 }
 
+fn default_repo_path() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("workspace root")
+        .to_path_buf()
+}
+
 fn repo_path() -> PathBuf {
-    let path = env::var("SQRY_PARALLEL_BENCH_REPO").unwrap_or_else(|_| DEFAULT_REPO.to_string());
-    let base = expand_tilde(&path);
+    let base = env::var("SQRY_PARALLEL_BENCH_REPO")
+        .map(|path| expand_tilde(&path))
+        .unwrap_or_else(|_| default_repo_path());
     assert!(
         base.join(".sqry-index").exists(),
         "repo {} must contain a prebuilt .sqry-index before running the benchmark",

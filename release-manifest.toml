@@ -157,6 +157,8 @@ allowed_extensions = [
 ]
 allowed_dotfiles = [".gitignore", ".gitattributes", ".cargo"]
 binary_assets = [
+    "assets/*.png",
+    "assets/*.svg",
     "sqry-vscode/media/*.png",
     "sqry-vscode/media/*.svg",
     "sqry-vscode/resources/*.png",

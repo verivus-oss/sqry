@@ -36,5 +36,5 @@ From `lib.rs`:
 If the `.sqry` directory is deleted or corrupted, rebuild it with:
 
 ```bash
-sqry index /srv/repos/internal/verivus-oss/sqry/test-fixtures/cli-basic
+sqry index test-fixtures/cli-basic
 ```

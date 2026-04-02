@@ -13,7 +13,7 @@
       "name": "hello_rust",
       "qualified_name": "hello_rust",
       "kind": "function",
-      "file_path": "/srv/repos/internal/verivus-oss/sqry/tests/fixtures/polyglot_micro/main.rs",
+      "file_path": "<WORKSPACE_ROOT>/tests/fixtures/polyglot_micro/main.rs",
       "start_line": 4,
       "start_column": 0,
       "end_line": 6,
@@ -21,7 +21,7 @@
       "metadata": {
         "__raw_language": "rust",
         "visibility": "public",
-        "__raw_file_path": "/srv/repos/internal/verivus-oss/sqry/tests/fixtures/polyglot_micro/main.rs"
+        "__raw_file_path": "<WORKSPACE_ROOT>/tests/fixtures/polyglot_micro/main.rs"
       }
     }
   ]
