@@ -147,6 +147,10 @@ export class SqryClient implements vscode.Disposable {
     this.config = newConfig;
     this.onDidChangeConfigEmitter.fire(newConfig);
 
+    if (binaryChanged || !this.languageClient) {
+      this.outputChannel.appendLine(`[sqry] Binary resolved: ${newConfig.resolvedBinaryPath}`);
+    }
+
     if (!this.languageClient || binaryChanged) {
       await this.restartLanguageClient(newConfig);
     }

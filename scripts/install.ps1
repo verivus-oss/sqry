@@ -77,7 +77,7 @@ if ($processorArch -and $processorArch -ne "AMD64") {
 $releaseBase = "https://github.com/$Repo/releases/download/$Version"
 $versionNum = $Version -replace '^v', ''
 $assetName = "sqry-${versionNum}-windows-x86_64.zip"
-$checksumName = "CHECKSUMS.sha256"
+$checksumName = "SHA256SUMS.txt"
 $tmpRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("sqry-install-" + [guid]::NewGuid().ToString("N"))
 $archivePath = Join-Path $tmpRoot $assetName
 $checksumPath = Join-Path $tmpRoot $checksumName

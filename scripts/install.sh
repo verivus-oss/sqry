@@ -96,27 +96,18 @@ case "$arch" in
     ;;
 esac
 
-platform_suffix=""
-checksum_file="CHECKSUMS.sha256"
+checksum_file="SHA256SUMS.txt"
 
 case "$os" in
   linux)
-    if [[ "$arch" == "x86_64" ]]; then
-      platform_suffix="linux-x86_64"
-    else
-      platform_suffix="linux-arm64"
-    fi
+    platform_suffix="linux-${arch}"
     ;;
   darwin)
-    if [[ "$arch" != "arm64" ]]; then
-      echo "error: macOS builds are currently published for ARM64 only" >&2
-      exit 1
-    fi
-    platform_suffix="macos-arm64"
+    platform_suffix="macos-${arch}"
     ;;
   *)
     echo "error: unsupported operating system: $os" >&2
-    echo "For Windows, use scripts/install.ps1 or the sqry-windows-x86_64.zip release asset." >&2
+    echo "For Windows, use scripts/install.ps1 or download from GitHub Releases." >&2
     exit 1
     ;;
 esac
@@ -154,19 +145,10 @@ repo_regex="${REPO//./\\.}"
 version_escaped="${VERSION_TAG//./\\.}"
 cert_identity="^https://github\\.com/${repo_regex}/\\.github/workflows/oss-distribute\\.yml@refs/tags/${version_escaped}$"
 
-version_num="${VERSION_TAG#v}"
-tarball_name="sqry-${version_num}-${platform_suffix}.tar.gz"
-
+# Map component name to release asset name
 asset_name_for_component() {
-  # v2 pipeline: components are inside a platform tarball, not separate downloads
   local component_name="$1"
-  case "$component_name" in
-    sqry|sqry-mcp|sqry-lsp) printf '%s\n' "$component_name" ;;
-    *)
-      echo "error: unsupported component name '$component_name'" >&2
-      exit 1
-      ;;
-  esac
+  printf '%s-%s\n' "$component_name" "$platform_suffix"
 }
 
 sha256_of_file() {
@@ -181,63 +163,66 @@ sha256_of_file() {
 tmp_dir=$(mktemp -d)
 trap 'rm -rf "$tmp_dir"' EXIT
 
-# Download and verify the platform tarball
+# Download checksums once
 checksum_path="$tmp_dir/$checksum_file"
 if [[ "$VERIFY_CHECKSUMS" == true ]]; then
   echo "Downloading checksums: $checksum_file"
   curl -fsSL "${release_base}/${checksum_file}" -o "$checksum_path"
 fi
 
-echo "Downloading ${tarball_name}..."
-curl -fsSL "${release_base}/${tarball_name}" -o "$tmp_dir/$tarball_name"
-
-if [[ "$VERIFY_CHECKSUMS" == true ]]; then
-  expected_sha=$(awk -v name="$tarball_name" '$2 ~ name {print $1}' "$checksum_path")
-  if [[ -z "$expected_sha" ]]; then
-    echo "error: missing checksum entry for '$tarball_name' in '$checksum_file'" >&2
-    exit 1
-  fi
-  actual_sha=$(sha256_of_file "$tmp_dir/$tarball_name")
-  if [[ "$expected_sha" != "$actual_sha" ]]; then
-    echo "error: checksum mismatch for $tarball_name" >&2
-    echo "expected: $expected_sha" >&2
-    echo "actual:   $actual_sha" >&2
-    exit 1
-  fi
-  echo "Checksum verified: $tarball_name"
-fi
-
-if [[ "$VERIFY_SIGNATURES" == true ]]; then
-  echo "Verifying Cosign bundle: ${tarball_name}.bundle"
-  curl -fsSL "${release_base}/${tarball_name}.bundle" -o "$tmp_dir/${tarball_name}.bundle"
-  cosign verify-blob \
-    --bundle "$tmp_dir/${tarball_name}.bundle" \
-    --certificate-identity-regexp "$cert_identity" \
-    --certificate-oidc-issuer "$oidc_issuer" \
-    "$tmp_dir/$tarball_name" >/dev/null
-  echo "Signature verified: $tarball_name"
-fi
-
-# Extract tarball
-tar xzf "$tmp_dir/$tarball_name" -C "$tmp_dir"
-
-install_component() {
+# Download, verify, and install a single component binary
+download_and_install() {
   local component_name="$1"
-  if [[ ! -f "$tmp_dir/$component_name" ]]; then
-    echo "error: component '$component_name' not found in tarball" >&2
-    exit 1
+  local asset_name
+  asset_name=$(asset_name_for_component "$component_name")
+  local asset_path="$tmp_dir/$asset_name"
+
+  echo "Downloading ${asset_name}..."
+  curl -fsSL "${release_base}/${asset_name}" -o "$asset_path"
+
+  if [[ "$VERIFY_CHECKSUMS" == true ]]; then
+    # SHA256SUMS.txt uses "hash  filename" format (two spaces)
+    expected_sha=$(awk -v name="$asset_name" '$2 == name || $2 == "./"name { print $1 }' "$checksum_path")
+    if [[ -z "$expected_sha" ]]; then
+      echo "error: missing checksum entry for '$asset_name' in '$checksum_file'" >&2
+      exit 1
+    fi
+    actual_sha=$(sha256_of_file "$asset_path")
+    if [[ "$expected_sha" != "$actual_sha" ]]; then
+      echo "error: checksum mismatch for $asset_name" >&2
+      echo "expected: $expected_sha" >&2
+      echo "actual:   $actual_sha" >&2
+      exit 1
+    fi
+    echo "Checksum verified: $asset_name"
   fi
+
+  if [[ "$VERIFY_SIGNATURES" == true ]]; then
+    local bundle_name="${asset_name}.bundle"
+    echo "Verifying Cosign bundle: $bundle_name"
+    if curl -fsSL "${release_base}/${bundle_name}" -o "$tmp_dir/${bundle_name}" 2>/dev/null; then
+      cosign verify-blob \
+        --bundle "$tmp_dir/${bundle_name}" \
+        --certificate-identity-regexp "$cert_identity" \
+        --certificate-oidc-issuer "$oidc_issuer" \
+        "$asset_path" >/dev/null
+      echo "Signature verified: $asset_name"
+    else
+      echo "warning: no Cosign bundle found for $asset_name, skipping signature verification" >&2
+    fi
+  fi
+
   mkdir -p "$INSTALL_DIR"
-  install -m 0755 "$tmp_dir/$component_name" "$INSTALL_DIR/$component_name"
+  install -m 0755 "$asset_path" "$INSTALL_DIR/$component_name"
   echo "Installed: $INSTALL_DIR/$component_name"
 }
 
 if [[ "$COMPONENT" == "all" ]]; then
-  install_component "sqry"
-  install_component "sqry-mcp"
-  install_component "sqry-lsp"
+  download_and_install "sqry"
+  download_and_install "sqry-mcp"
+  download_and_install "sqry-lsp"
 else
-  install_component "$COMPONENT"
+  download_and_install "$COMPONENT"
 fi
 
 if [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
