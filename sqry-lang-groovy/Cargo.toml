@@ -9,12 +9,12 @@ rust-version.workspace = true
 description = "Groovy language plugin for sqry"
 
 [dependencies]
-sqry-core = { version = "6.0.21", path = "../sqry-core" }
+sqry-core = { version = "6.0.22", path = "../sqry-core" }
 anyhow.workspace = true
 tree-sitter.workspace = true
-tree-sitter-groovy-sqry = { version = "6.0.21", path = "../crates/tree-sitter-groovy-sqry" }
+tree-sitter-groovy-sqry = { version = "6.0.22", path = "../crates/tree-sitter-groovy-sqry" }
 streaming-iterator.workspace = true
-sqry-lang-support = { version = "6.0.21", path = "../sqry-lang-support" }
+sqry-lang-support = { version = "6.0.22", path = "../sqry-lang-support" }
 
 [dev-dependencies]
 log.workspace = true

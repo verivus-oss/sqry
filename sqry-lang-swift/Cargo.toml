@@ -9,7 +9,7 @@ rust-version.workspace = true
 description = "Swift language plugin for sqry"
 
 [dependencies]
-sqry-core = { version = "6.0.21", path = "../sqry-core" }
+sqry-core = { version = "6.0.22", path = "../sqry-core" }
 anyhow.workspace = true
 tree-sitter.workspace = true
 tree-sitter-swift.workspace = true
