@@ -20,11 +20,11 @@ nl-classifier = ["sqry-nl/classifier"]
 share = ["sqry-core/share"]
 
 [dependencies]
-sqry-core = { version = "6.0.20", path = "../sqry-core", features = ["uses", "insights", "troubleshoot"] }
-sqry-lang-rust = { version = "6.0.20", path = "../sqry-lang-rust" }
-sqry-lsp = { version = "6.0.20", path = "../sqry-lsp" }
-sqry-plugin-registry = { version = "6.0.20", path = "../sqry-plugin-registry" }
-sqry-nl = { version = "6.0.20", path = "../sqry-nl", default-features = false }
+sqry-core = { version = "6.0.21", path = "../sqry-core", features = ["uses", "insights", "troubleshoot"] }
+sqry-lang-rust = { version = "6.0.21", path = "../sqry-lang-rust" }
+sqry-lsp = { version = "6.0.21", path = "../sqry-lsp" }
+sqry-plugin-registry = { version = "6.0.21", path = "../sqry-plugin-registry" }
+sqry-nl = { version = "6.0.21", path = "../sqry-nl", default-features = false }
 anyhow.workspace = true
 miette.workspace = true
 once_cell.workspace = true
