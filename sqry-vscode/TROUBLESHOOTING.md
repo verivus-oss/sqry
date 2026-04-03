@@ -1,6 +1,6 @@
 # sqry VS Code Extension - Troubleshooting Guide
 
-**Version**: 6.0.19
+**Version**: 6.0.20
 **Last Updated**: 2026-04-03
 
 Quick solutions to common issues with the sqry VS Code extension.
@@ -18,7 +18,7 @@ Quick solutions to common issues with the sqry VS Code extension.
 2. **Check sqry CLI**:
    ```bash
    sqry --version
-   # Should output: sqry 6.0.19 or later
+   # Should output: sqry 6.0.20 or later
    ```
 
 3. **Check extension logs**:
@@ -150,7 +150,7 @@ Quick solutions to common issues with the sqry VS Code extension.
 ```bash
 cd /path/to/sqry/repo
 cargo install --path sqry-cli --force
-sqry --version  # Verify: 6.0.19+
+sqry --version  # Verify: 6.0.20+
 ```
 
 ### Binary Execution Fails
@@ -480,7 +480,7 @@ sqry index --force .
 1. **Check sqry version**:
    ```bash
    sqry --version
-   # Extension version 6.0.19+ required for progress indicators
+   # Extension version 6.0.20+ required for progress indicators
    ```
 
 2. **Check notifications are enabled**:
