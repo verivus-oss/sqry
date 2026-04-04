@@ -1736,8 +1736,20 @@ pub fn execute_pattern_search(
     // Find nodes matching the pattern
     let matching_ids = snapshot.find_by_pattern(&args.pattern);
 
+    // Filter out classpath (external) nodes unless explicitly requested
+    let filtered_ids: Vec<_> = if args.include_classpath {
+        matching_ids
+    } else {
+        matching_ids
+            .into_iter()
+            .filter(|&node_id| {
+                !crate::execution::symbol_utils::is_node_external(&snapshot, node_id)
+            })
+            .collect()
+    };
+
     // Convert to output format
-    let mut matches: Vec<PatternMatchData> = matching_ids
+    let mut matches: Vec<PatternMatchData> = filtered_ids
         .into_iter()
         .filter_map(|node_id| {
             let entry = snapshot.get_node(node_id)?;
@@ -1758,6 +1770,10 @@ pub fn execute_pattern_search(
 
             let kind = format!("{:?}", entry.kind).to_lowercase();
 
+            let provenance = crate::execution::symbol_utils::get_classpath_provenance_for_node(
+                &snapshot, node_id,
+            );
+
             Some(PatternMatchData {
                 name,
                 qualified_name,
@@ -1765,6 +1781,7 @@ pub fn execute_pattern_search(
                 file_uri,
                 line: entry.start_line,
                 language,
+                provenance,
             })
         })
         .collect();

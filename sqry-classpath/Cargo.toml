@@ -1,0 +1,43 @@
+[package]
+name = "sqry-classpath"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "JVM classpath analysis for sqry - bytecode parsing, build system resolution, and graph integration"
+
+[dependencies]
+sqry-core = { version = "7.1.3", path = "../sqry-core" }
+anyhow.workspace = true
+thiserror.workspace = true
+log.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+postcard.workspace = true
+sha2.workspace = true
+hex.workspace = true
+rayon.workspace = true
+walkdir.workspace = true
+tempfile.workspace = true
+
+# LRU cache for source JAR doc extraction
+lru.workspace = true
+# ZIP/JAR reading
+zip.workspace = true
+# JVM .class file parsing
+cafebabe.workspace = true
+
+[dev-dependencies]
+sqry-core = { path = "../sqry-core", features = ["test-support"] }
+tempfile.workspace = true
+env_logger.workspace = true
+criterion = "0.8"
+
+[[bench]]
+name = "classpath_bench"
+harness = false
+
+[lints]
+workspace = true

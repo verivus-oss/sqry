@@ -349,6 +349,37 @@ pub struct Cli {
     pub max_text_results: usize,
 }
 
+/// Plugin-selection controls shared by indexing and selected read paths.
+#[derive(Args, Debug, Clone, Default)]
+pub struct PluginSelectionArgs {
+    /// Enable all high-cost plugins.
+    ///
+    /// High-cost plugins are those classified as `high_wall_clock` in the
+    /// shared plugin registry.
+    #[arg(long, conflicts_with = "exclude_high_cost", help_heading = headings::PLUGIN_SELECTION, display_order = 10)]
+    pub include_high_cost: bool,
+
+    /// Exclude all high-cost plugins.
+    ///
+    /// This is mainly useful to override `SQRY_INCLUDE_HIGH_COST=1`.
+    #[arg(long, conflicts_with = "include_high_cost", help_heading = headings::PLUGIN_SELECTION, display_order = 20)]
+    pub exclude_high_cost: bool,
+
+    /// Force-enable a plugin by id.
+    ///
+    /// Repeat this flag to enable multiple plugins. Explicit enable beats the
+    /// global high-cost mode unless the same plugin is also explicitly disabled.
+    #[arg(long = "enable-plugin", alias = "enable-language", value_name = "ID", help_heading = headings::PLUGIN_SELECTION, display_order = 30)]
+    pub enable_plugins: Vec<String>,
+
+    /// Force-disable a plugin by id.
+    ///
+    /// Repeat this flag to disable multiple plugins. Explicit disable wins over
+    /// explicit enable and global high-cost mode.
+    #[arg(long = "disable-plugin", alias = "disable-language", value_name = "ID", help_heading = headings::PLUGIN_SELECTION, display_order = 40)]
+    pub disable_plugins: Vec<String>,
+}
+
 /// Batch command arguments with taxonomy headings and workflow ordering
 #[derive(Args, Debug, Clone)]
 pub struct BatchCommand {
@@ -610,6 +641,9 @@ pub enum Command {
         ///   sqry query "kind:\$k AND lang:\$l" --var k=function --var l=rust
         #[arg(long = "var", value_name = "KEY=VALUE", help_heading = headings::QUERY_INPUT, display_order = 30)]
         var: Vec<String>,
+
+        #[command(flatten)]
+        plugin_selection: PluginSelectionArgs,
     },
 
     /// Graph-based queries and analysis
@@ -745,6 +779,48 @@ pub enum Command {
         /// during indexing.
         #[arg(long, value_name = "DIR", help_heading = headings::ADVANCED_CONFIGURATION, display_order = 32)]
         expand_cache: Option<PathBuf>,
+
+        /// Enable JVM classpath analysis.
+        ///
+        /// Detects the project's build system (Gradle, Maven, Bazel, sbt),
+        /// resolves dependency JARs, parses bytecode into class stubs, and
+        /// emits synthetic graph nodes for classpath types. Enables cross-
+        /// reference resolution from workspace source to library classes.
+        ///
+        /// Requires the `jvm-classpath` feature at compile time.
+        #[arg(long, help_heading = headings::ADVANCED_CONFIGURATION, display_order = 40)]
+        classpath: bool,
+
+        /// Disable classpath analysis (overrides config defaults).
+        #[arg(long, conflicts_with = "classpath", help_heading = headings::ADVANCED_CONFIGURATION, display_order = 41)]
+        no_classpath: bool,
+
+        /// Classpath analysis depth.
+        ///
+        /// `full` (default): include all transitive dependencies.
+        /// `shallow`: only direct (compile-scope) dependencies.
+        #[arg(long, value_enum, default_value = "full", help_heading = headings::ADVANCED_CONFIGURATION, display_order = 42)]
+        classpath_depth: ClasspathDepthArg,
+
+        /// Manual classpath file (one JAR path per line).
+        ///
+        /// When provided, skips build system detection and resolution entirely.
+        /// Lines starting with `#` are treated as comments.
+        #[arg(long, value_name = "FILE", help_heading = headings::ADVANCED_CONFIGURATION, display_order = 43)]
+        classpath_file: Option<PathBuf>,
+
+        /// Override build system detection for classpath analysis.
+        ///
+        /// Valid values: gradle, maven, bazel, sbt (case-insensitive).
+        #[arg(long, value_name = "SYSTEM", help_heading = headings::ADVANCED_CONFIGURATION, display_order = 44)]
+        build_system: Option<String>,
+
+        /// Force classpath re-resolution (ignore cached classpath).
+        #[arg(long, help_heading = headings::ADVANCED_CONFIGURATION, display_order = 45)]
+        force_classpath: bool,
+
+        #[command(flatten)]
+        plugin_selection: PluginSelectionArgs,
     },
 
     /// Build precomputed graph analyses for fast query performance
@@ -853,6 +929,9 @@ pub enum Command {
         /// Show statistics about the update.
         #[arg(long, help_heading = headings::OUTPUT_CONTROL, display_order = 10)]
         stats: bool,
+
+        #[command(flatten)]
+        plugin_selection: PluginSelectionArgs,
     },
 
     /// Watch directory and auto-update index on file changes
@@ -892,6 +971,9 @@ pub enum Command {
         /// Show detailed statistics for each update.
         #[arg(long, short = 's', help_heading = headings::OUTPUT_CONTROL, display_order = 10)]
         stats: bool,
+
+        #[command(flatten)]
+        plugin_selection: PluginSelectionArgs,
     },
 
     /// Repair corrupted index by fixing common issues
@@ -2864,6 +2946,16 @@ pub enum MetricsFormat {
     Prometheus,
 }
 
+/// Classpath analysis depth for the `--classpath-depth` flag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[value(rename_all = "lower")]
+pub enum ClasspathDepthArg {
+    /// Include all transitive dependencies.
+    Full,
+    /// Only direct (compile-scope) dependencies.
+    Shallow,
+}
+
 // Helper function to get the command with applied taxonomy
 impl Cli {
     /// Get the command with taxonomy headings applied
@@ -2903,6 +2995,28 @@ impl Cli {
     #[must_use]
     pub fn search_path(&self) -> &str {
         self.path.as_deref().unwrap_or(".")
+    }
+
+    /// Return the plugin-selection arguments for the active subcommand.
+    #[must_use]
+    pub fn plugin_selection_args(&self) -> PluginSelectionArgs {
+        match self.command.as_deref() {
+            Some(
+                Command::Query {
+                    plugin_selection, ..
+                }
+                | Command::Index {
+                    plugin_selection, ..
+                }
+                | Command::Update {
+                    plugin_selection, ..
+                }
+                | Command::Watch {
+                    plugin_selection, ..
+                },
+            ) => plugin_selection.clone(),
+            _ => PluginSelectionArgs::default(),
+        }
     }
 
     /// Check if tabular output mode is enabled
@@ -3013,6 +3127,42 @@ mod tests {
         let cli = Cli::parse_from(["sqry", "index", "--validate", "fail", "--auto-rebuild"]);
         assert_eq!(cli.validate, ValidationMode::Fail);
         assert!(cli.auto_rebuild);
+    }
+    }
+
+    large_stack_test! {
+    #[test]
+    fn test_plugin_selection_flags_parse() {
+        let cli = Cli::parse_from([
+            "sqry",
+            "index",
+            "--include-high-cost",
+            "--enable-plugin",
+            "json",
+            "--disable-plugin",
+            "rust",
+        ]);
+        let plugin_selection = cli.plugin_selection_args();
+        assert!(plugin_selection.include_high_cost);
+        assert_eq!(plugin_selection.enable_plugins, vec!["json".to_string()]);
+        assert_eq!(plugin_selection.disable_plugins, vec!["rust".to_string()]);
+    }
+    }
+
+    large_stack_test! {
+    #[test]
+    fn test_plugin_selection_language_aliases_parse() {
+        let cli = Cli::parse_from([
+            "sqry",
+            "index",
+            "--enable-language",
+            "json",
+            "--disable-language",
+            "rust",
+        ]);
+        let plugin_selection = cli.plugin_selection_args();
+        assert_eq!(plugin_selection.enable_plugins, vec!["json".to_string()]);
+        assert_eq!(plugin_selection.disable_plugins, vec!["rust".to_string()]);
     }
     }
 

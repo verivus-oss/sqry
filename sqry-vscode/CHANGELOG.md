@@ -4,7 +4,25 @@ All notable changes to the "sqry-vscode" extension will be documented in this fi
 
 Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
 
+## [7.1.0] - 2026-04-04
+
+### Changed
+- Bump bundled sqry toolchain compatibility to `7.1.0`
+
+### Fixed
+- Align extension release metadata with plugin cost tiering and manifest-backed plugin selection support in the core sqry toolchain
+
+## [7.0.2] - 2026-04-03
+
+### Fixed
+- Version bump for workspace release verification and pipeline stabilization fixes
+
 ## [Unreleased]
+
+## [6.0.24] - 2026-04-03
+
+### Fixed
+- Resolve SonarQube issues: modernize graph.js (let/const, for-of, globalThis), add sort comparators, simplify optional chaining, reduce cognitive complexity, mark readonly members
 
 ## [4.12.7] - 2026-03-29
 

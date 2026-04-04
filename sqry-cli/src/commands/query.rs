@@ -6,6 +6,7 @@ use crate::index_discovery::{augment_query_with_scope, find_nearest_index};
 use crate::output::{
     DisplaySymbol, OutputStreams, call_identity_from_qualified_name, create_formatter,
 };
+use crate::plugin_defaults::{self, PluginSelectionMode};
 use anyhow::{Context, Result, bail};
 use sqry_core::query::QueryExecutor;
 use sqry_core::query::parser_new::Parser as QueryParser;
@@ -412,6 +413,7 @@ fn execute_query_mode(
         execute_hybrid_query(streams, &params)
     } else {
         execute_semantic_query(
+            cli,
             query_string,
             search_path,
             validation_options,
@@ -490,7 +492,8 @@ fn execute_hybrid_query(
     // Use hybrid search engine with plugin-enabled executor
     // This allows metadata queries like async:true and visibility:public to work
     let config = build_hybrid_config(cli);
-    let mut executor = create_executor_with_plugins().with_validation_options(validation_options);
+    let mut executor = create_executor_with_plugins_for_cli(cli, search_path)?
+        .with_validation_options(validation_options);
     if no_parallel {
         executor = executor.without_parallel();
     }
@@ -518,13 +521,15 @@ fn execute_hybrid_query(
 }
 
 fn execute_semantic_query(
+    cli: &Cli,
     query_string: &str,
     search_path: &Path,
     validation_options: ValidationOptions,
     no_parallel: bool,
     variables: Option<&std::collections::HashMap<String, String>>,
 ) -> Result<QueryExecutionOutcome> {
-    let mut executor = create_executor_with_plugins().with_validation_options(validation_options);
+    let mut executor = create_executor_with_plugins_for_cli(cli, search_path)?
+        .with_validation_options(validation_options);
     if no_parallel {
         executor = executor.without_parallel();
     }
@@ -1309,6 +1314,22 @@ pub(crate) fn create_executor_with_plugins() -> QueryExecutor {
     QueryExecutor::with_plugin_manager(plugin_manager)
 }
 
+pub(crate) fn create_executor_with_plugins_for_cli(
+    cli: &Cli,
+    search_path: &Path,
+) -> Result<QueryExecutor> {
+    let effective_root = find_nearest_index(search_path)
+        .map_or_else(|| search_path.to_path_buf(), |location| location.index_root);
+    let resolved_plugins = plugin_defaults::resolve_plugin_selection(
+        cli,
+        &effective_root,
+        PluginSelectionMode::ReadOnly,
+    )?;
+    Ok(QueryExecutor::with_plugin_manager(
+        resolved_plugins.plugin_manager,
+    ))
+}
+
 fn u64_to_f64_lossy(value: u64) -> f64 {
     let narrowed = u32::try_from(value).unwrap_or(u32::MAX);
     f64::from(narrowed)
@@ -1375,7 +1396,8 @@ fn run_join_query(
     variables: Option<&std::collections::HashMap<String, String>>,
 ) -> Result<()> {
     let validation_options = build_validation_options(cli);
-    let mut executor = create_executor_with_plugins().with_validation_options(validation_options);
+    let mut executor = create_executor_with_plugins_for_cli(cli, Path::new(search_path))?
+        .with_validation_options(validation_options);
     if no_parallel {
         executor = executor.without_parallel();
     }
@@ -1455,7 +1477,8 @@ fn run_pipeline_query(
     variables: Option<&std::collections::HashMap<String, String>>,
 ) -> Result<()> {
     let validation_options = build_validation_options(cli);
-    let mut executor = create_executor_with_plugins().with_validation_options(validation_options);
+    let mut executor = create_executor_with_plugins_for_cli(cli, Path::new(search_path))?
+        .with_validation_options(validation_options);
     if no_parallel {
         executor = executor.without_parallel();
     }

@@ -73,6 +73,41 @@ sqry index --status --json .
 sqry index --status --metrics-format prometheus .
 ```
 
+## Plugin Cost Tiering And Index Semantics
+
+sqry now persists the active plugin ids that built an index into the unified
+graph manifest. That means later `sqry query`, `sqry watch`, `sqry diff`, and
+other graph-loading paths reuse the plugin semantics that built the snapshot
+instead of silently drifting to current defaults.
+
+The default write path uses a curated fast path. Plugins marked
+`high_wall_clock` are excluded by default unless you opt back in.
+
+Examples:
+
+```bash
+# Default fast path
+sqry index .
+
+# Enable all high-cost plugins
+sqry index --include-high-cost .
+
+# Enable one plugin explicitly
+sqry index --enable-plugin json .
+
+# Disable one plugin explicitly
+sqry index --disable-plugin json .
+```
+
+Notes:
+- `--include-high-cost` and `--exclude-high-cost` are mutually exclusive.
+- `--enable-language` and `--disable-language` remain accepted compatibility aliases for `--enable-plugin` and `--disable-plugin`.
+- For older manifests without `plugin_selection`, sqry preserves legacy
+  all-plugins behavior instead of silently applying the fast-path default.
+- Current `high_wall_clock` plugins:
+  - `json`
+  - `servicenow-xml`
+
 ## Index Discovery
 
 When running `sqry query` or `sqry search` from a subdirectory, sqry
@@ -121,6 +156,8 @@ sqry query "kind:function" ./src/         # All src/** functions
 - **Graph storage**: `.sqry/graph/` holds the unified graph snapshot and manifest.
 - **Config**: `.sqry/graph/config/config.json` controls graph limits and behavior.
 - **Entry point**: graph build and load go through the unified graph pipeline.
+- **Large C++ repos**: pathological single-file graph builds are bounded so one
+  oversized translation unit cannot stall the entire index indefinitely.
 
 Note: Relation predicates in `sqry query` (`callers:`, `callees:`, `imports:`,
 `exports:`) are served from the symbol index RelationStore/ImportStore today.
@@ -147,6 +184,8 @@ sqry config show --path .
 
 - `sqry index` builds the symbol index and unified graph snapshot.
 - `sqry update` updates the symbol index (currently performs a full rebuild via the unified pipeline).
+- `sqry index` and `sqry update` accept plugin-selection flags for fast-path and
+  high-cost plugin control.
 - `sqry search` performs pattern-based symbol search.
 - `sqry query` runs AST-aware predicate queries with boolean logic (relation
   predicates use the index RelationStore/ImportStore).

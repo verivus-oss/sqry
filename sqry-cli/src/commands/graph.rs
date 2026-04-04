@@ -18,8 +18,7 @@ pub mod loader;
 
 use crate::args::{Cli, GraphOperation};
 use anyhow::{Context, Result, bail};
-use loader::GraphLoadConfig;
-pub use loader::load_unified_graph;
+use loader::{GraphLoadConfig, load_unified_graph_for_cli};
 use sqry_core::graph::Language;
 // Unified graph types
 use sqry_core::graph::CodeGraph as UnifiedCodeGraph;
@@ -54,7 +53,7 @@ pub fn run_graph(
 
     let config = build_graph_load_config(cli);
     let unified_graph =
-        load_unified_graph(&root, &config).context("Failed to load unified graph")?;
+        load_unified_graph_for_cli(&root, &config, cli).context("Failed to load unified graph")?;
 
     match operation {
         GraphOperation::Stats {
@@ -3077,7 +3076,19 @@ fn edge_metadata_json(
         | UnifiedEdgeKind::TypeOf { .. }
         | UnifiedEdgeKind::Inherits
         | UnifiedEdgeKind::Implements
-        | UnifiedEdgeKind::WebAssemblyCall => json!({}),
+        | UnifiedEdgeKind::WebAssemblyCall
+        | UnifiedEdgeKind::GenericBound
+        | UnifiedEdgeKind::AnnotatedWith
+        | UnifiedEdgeKind::AnnotationParam
+        | UnifiedEdgeKind::LambdaCaptures
+        | UnifiedEdgeKind::ModuleExports
+        | UnifiedEdgeKind::ModuleRequires
+        | UnifiedEdgeKind::ModuleOpens
+        | UnifiedEdgeKind::ModuleProvides
+        | UnifiedEdgeKind::TypeArgument
+        | UnifiedEdgeKind::ExtensionReceiver
+        | UnifiedEdgeKind::CompanionOf
+        | UnifiedEdgeKind::SealedPermit => json!({}),
         UnifiedEdgeKind::Calls {
             argument_count,
             is_async,

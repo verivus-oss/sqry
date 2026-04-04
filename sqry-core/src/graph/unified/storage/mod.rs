@@ -27,5 +27,8 @@ pub use arena::{ArenaError, NodeArena, NodeEntry, Slot, SlotState};
 pub use csr::{CsrBuilder, CsrError, CsrGraph, CsrStats, EdgeRef};
 pub use indices::{AuxiliaryIndices, IndicesStats};
 pub use interner::{InternError, InternerStats, ResolveError, StringInterner};
-pub use metadata::{MacroNodeMetadata, NodeMetadataStore, ProcMacroFunctionKind};
+pub use metadata::{
+    ClasspathNodeMetadata, MacroNodeMetadata, NodeMetadata, NodeMetadataStore,
+    ProcMacroFunctionKind,
+};
 pub use registry::{FileRegistry, RegistryError, RegistryStats};

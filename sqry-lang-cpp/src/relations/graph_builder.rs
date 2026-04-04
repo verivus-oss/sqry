@@ -19,7 +19,8 @@ use sqry_core::graph::unified::{FfiConvention, GraphBuildHelper, StagingGraph};
 use sqry_core::graph::{GraphBuilder, GraphBuilderError, GraphResult, Language, Position, Span};
 use std::{
     collections::{HashMap, HashSet},
-    path::Path,
+    path::{Path, PathBuf},
+    time::{Duration, Instant},
 };
 use tree_sitter::{Node, Tree};
 
@@ -43,6 +44,62 @@ type FfiRegistry = HashMap<String, (String, FfiConvention)>;
 ///
 /// Maps interface name to their qualified names for Implements edge creation.
 type PureVirtualRegistry = HashSet<String>;
+
+const DEFAULT_GRAPH_BUILD_TIMEOUT_MS: u64 = 10_000;
+const MIN_GRAPH_BUILD_TIMEOUT_MS: u64 = 1_000;
+const MAX_GRAPH_BUILD_TIMEOUT_MS: u64 = 60_000;
+const BUDGET_CHECK_INTERVAL: u32 = 1024;
+
+fn cpp_graph_build_timeout() -> Duration {
+    let timeout_ms = std::env::var("SQRY_CPP_GRAPH_BUILD_TIMEOUT_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_GRAPH_BUILD_TIMEOUT_MS)
+        .clamp(MIN_GRAPH_BUILD_TIMEOUT_MS, MAX_GRAPH_BUILD_TIMEOUT_MS);
+    Duration::from_millis(timeout_ms)
+}
+
+struct BuildBudget {
+    file: PathBuf,
+    phase_timeout: Duration,
+    started_at: Instant,
+    checkpoints: u32,
+}
+
+impl BuildBudget {
+    fn new(file: &Path) -> Self {
+        Self {
+            file: file.to_path_buf(),
+            phase_timeout: cpp_graph_build_timeout(),
+            started_at: Instant::now(),
+            checkpoints: 0,
+        }
+    }
+
+    #[cfg(test)]
+    fn already_expired(file: &Path) -> Self {
+        Self {
+            file: file.to_path_buf(),
+            phase_timeout: Duration::from_secs(1),
+            started_at: Instant::now() - Duration::from_secs(60),
+            checkpoints: BUDGET_CHECK_INTERVAL - 1,
+        }
+    }
+
+    fn checkpoint(&mut self, phase: &'static str) -> GraphResult<()> {
+        self.checkpoints = self.checkpoints.wrapping_add(1);
+        if self.checkpoints.is_multiple_of(BUDGET_CHECK_INTERVAL)
+            && self.started_at.elapsed() > self.phase_timeout
+        {
+            return Err(GraphBuilderError::BuildTimedOut {
+                file: self.file.clone(),
+                phase,
+                timeout_ms: self.phase_timeout.as_millis() as u64,
+            });
+        }
+        Ok(())
+    }
+}
 
 // Helper extension trait for Span creation
 #[allow(dead_code)] // Reserved for future span-based analysis
@@ -74,6 +131,8 @@ impl SpanExt for Span {
 struct ASTGraph {
     /// All function/method contexts with their qualified names and byte spans
     contexts: Vec<FunctionContext>,
+    /// Maps function definition start byte to its context index.
+    context_start_index: HashMap<usize, usize>,
 
     /// Maps (`class_fqn`, `field_name`) to field's FQN type.
     /// Example: ("`demo::Service`", "repo") -> "`demo::Repository`"
@@ -101,30 +160,51 @@ struct ASTGraph {
 
 impl ASTGraph {
     /// Build `ASTGraph` from tree-sitter AST
-    fn from_tree(root: Node, content: &[u8]) -> Self {
+    fn from_tree(root: Node, content: &[u8], budget: &mut BuildBudget) -> GraphResult<Self> {
         // Extract namespace context
-        let namespace_map = extract_namespace_map(root, content);
+        let namespace_map = extract_namespace_map(root, content, budget)?;
 
         // Extract function contexts
-        let contexts = extract_cpp_contexts(root, content, &namespace_map);
+        let mut contexts = extract_cpp_contexts(root, content, &namespace_map, budget)?;
+        contexts.sort_by_key(|ctx| ctx.span.0);
+        let context_start_index = contexts
+            .iter()
+            .enumerate()
+            .map(|(idx, ctx)| (ctx.span.0, idx))
+            .collect();
 
         // Extract field declarations and type mappings
-        let (field_types, type_map) = extract_field_and_type_info(root, content, &namespace_map);
+        let (field_types, type_map) =
+            extract_field_and_type_info(root, content, &namespace_map, budget)?;
 
-        Self {
+        Ok(Self {
             contexts,
+            context_start_index,
             field_types,
             type_map,
             namespace_map,
-        }
+        })
     }
 
-    /// Find the enclosing function context for a given byte position
+    /// Find the enclosing function context for a given byte position.
+    ///
+    /// C++ has no nested function definitions, so at most one function span can
+    /// contain any byte offset. With contexts sorted by start byte we can use a
+    /// binary search instead of scanning every function for every call site.
     fn find_enclosing(&self, byte_pos: usize) -> Option<&FunctionContext> {
-        self.contexts
-            .iter()
-            .filter(|ctx| byte_pos >= ctx.span.0 && byte_pos < ctx.span.1)
-            .max_by_key(|ctx| ctx.depth)
+        let insertion_point = self.contexts.partition_point(|ctx| ctx.span.0 <= byte_pos);
+        if insertion_point == 0 {
+            return None;
+        }
+
+        let candidate = &self.contexts[insertion_point - 1];
+        (byte_pos < candidate.span.1).then_some(candidate)
+    }
+
+    fn context_for_start(&self, start_byte: usize) -> Option<&FunctionContext> {
+        self.context_start_index
+            .get(&start_byte)
+            .and_then(|idx| self.contexts.get(*idx))
     }
 }
 
@@ -135,8 +215,6 @@ struct FunctionContext {
     qualified_name: String,
     /// Byte span of the function body
     span: (usize, usize),
-    /// Nesting depth (for resolving ambiguity in nested functions)
-    depth: usize,
     /// Whether this is a static method
     /// Reserved for future method resolution enhancements
     is_static: bool,
@@ -196,6 +274,58 @@ impl CppGraphBuilder {
     #[must_use]
     pub fn new() -> Self {
         Self
+    }
+
+    fn build_graph_with_budget(
+        &self,
+        tree: &Tree,
+        content: &[u8],
+        file: &Path,
+        staging: &mut StagingGraph,
+        budget: &mut BuildBudget,
+    ) -> GraphResult<()> {
+        // Create helper for staging graph population
+        let mut helper = GraphBuildHelper::new(staging, file, Language::Cpp);
+
+        // Build AST graph for call context tracking
+        let ast_graph = ASTGraph::from_tree(tree.root_node(), content, budget)?;
+
+        // Track seen includes for deduplication
+        let mut seen_includes: HashSet<String> = HashSet::new();
+
+        // Track namespace and class context for qualified naming
+        let mut namespace_stack: Vec<String> = Vec::new();
+        let mut class_stack: Vec<String> = Vec::new();
+
+        // Two-pass approach for FFI call linking:
+        // Pass 1: Collect FFI declarations so calls can be resolved regardless of source order
+        let mut ffi_registry = FfiRegistry::new();
+        collect_ffi_declarations(tree.root_node(), content, &mut ffi_registry, budget)?;
+
+        // Pass 1b: Collect pure virtual interfaces for Implements edge detection
+        let mut pure_virtual_registry = PureVirtualRegistry::new();
+        collect_pure_virtual_interfaces(
+            tree.root_node(),
+            content,
+            &mut pure_virtual_registry,
+            budget,
+        )?;
+
+        // Walk tree to find classes, functions, methods, and calls
+        walk_tree_for_graph(
+            tree.root_node(),
+            content,
+            &ast_graph,
+            &mut helper,
+            &mut seen_includes,
+            &mut namespace_stack,
+            &mut class_stack,
+            &ffi_registry,
+            &pure_virtual_registry,
+            budget,
+        )?;
+
+        Ok(())
     }
 
     /// Extract class attributes from modifiers.
@@ -310,42 +440,8 @@ impl GraphBuilder for CppGraphBuilder {
         file: &Path,
         staging: &mut StagingGraph,
     ) -> GraphResult<()> {
-        // Create helper for staging graph population
-        let mut helper = GraphBuildHelper::new(staging, file, Language::Cpp);
-
-        // Build AST graph for call context tracking
-        let ast_graph = ASTGraph::from_tree(tree.root_node(), content);
-
-        // Track seen includes for deduplication
-        let mut seen_includes: HashSet<String> = HashSet::new();
-
-        // Track namespace and class context for qualified naming
-        let mut namespace_stack: Vec<String> = Vec::new();
-        let mut class_stack: Vec<String> = Vec::new();
-
-        // Two-pass approach for FFI call linking:
-        // Pass 1: Collect FFI declarations so calls can be resolved regardless of source order
-        let mut ffi_registry = FfiRegistry::new();
-        collect_ffi_declarations(tree.root_node(), content, &mut ffi_registry);
-
-        // Pass 1b: Collect pure virtual interfaces for Implements edge detection
-        let mut pure_virtual_registry = PureVirtualRegistry::new();
-        collect_pure_virtual_interfaces(tree.root_node(), content, &mut pure_virtual_registry);
-
-        // Walk tree to find classes, functions, methods, and calls
-        walk_tree_for_graph(
-            tree.root_node(),
-            content,
-            &ast_graph,
-            &mut helper,
-            &mut seen_includes,
-            &mut namespace_stack,
-            &mut class_stack,
-            &ffi_registry,
-            &pure_virtual_registry,
-        )?;
-
-        Ok(())
+        let mut budget = BuildBudget::new(file);
+        self.build_graph_with_budget(tree, content, file, staging, &mut budget)
     }
 }
 
@@ -360,7 +456,11 @@ impl GraphBuilder for CppGraphBuilder {
 /// map to "`demo::`".
 ///
 /// Returns: `HashMap`<Range<usize>, String> mapping byte ranges to namespace prefixes
-fn extract_namespace_map(node: Node, content: &[u8]) -> HashMap<std::ops::Range<usize>, String> {
+fn extract_namespace_map(
+    node: Node,
+    content: &[u8],
+    budget: &mut BuildBudget,
+) -> GraphResult<HashMap<std::ops::Range<usize>, String>> {
     let mut map = HashMap::new();
 
     // Create recursion guard with configured limit
@@ -372,11 +472,17 @@ fn extract_namespace_map(node: Node, content: &[u8]) -> HashMap<std::ops::Range<
     let mut guard = sqry_core::query::security::RecursionGuard::new(file_ops_depth)
         .expect("Failed to create recursion guard");
 
-    if let Err(e) = extract_namespaces_recursive(node, content, "", &mut map, &mut guard) {
-        eprintln!("Warning: C++ namespace extraction hit recursion limit: {e}");
-    }
+    extract_namespaces_recursive(node, content, "", &mut map, &mut guard, budget).map_err(|e| {
+        match e {
+            timeout @ GraphBuilderError::BuildTimedOut { .. } => timeout,
+            other => GraphBuilderError::ParseError {
+                span: span_from_node(node),
+                reason: format!("C++ namespace extraction failed: {other}"),
+            },
+        }
+    })?;
 
-    map
+    Ok(map)
 }
 
 /// Recursive helper for namespace extraction
@@ -390,8 +496,13 @@ fn extract_namespaces_recursive(
     current_ns: &str,
     map: &mut HashMap<std::ops::Range<usize>, String>,
     guard: &mut sqry_core::query::security::RecursionGuard,
-) -> Result<(), sqry_core::query::security::RecursionError> {
-    guard.enter()?;
+    budget: &mut BuildBudget,
+) -> GraphResult<()> {
+    budget.checkpoint("cpp:extract_namespace_map")?;
+    guard.enter().map_err(|e| GraphBuilderError::ParseError {
+        span: span_from_node(node),
+        reason: format!("C++ namespace extraction hit recursion limit: {e}"),
+    })?;
 
     if node.kind() == "namespace_definition" {
         // Extract namespace name from the namespace_identifier or identifier child
@@ -417,14 +528,14 @@ fn extract_namespaces_recursive(
             // Recurse into nested namespaces within the body
             let mut cursor = body.walk();
             for child in body.children(&mut cursor) {
-                extract_namespaces_recursive(child, content, &new_ns, map, guard)?;
+                extract_namespaces_recursive(child, content, &new_ns, map, guard, budget)?;
             }
         }
     } else {
         // Recurse with current namespace
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
-            extract_namespaces_recursive(child, content, current_ns, map, guard)?;
+            extract_namespaces_recursive(child, content, current_ns, map, guard, budget)?;
         }
     }
 
@@ -468,7 +579,8 @@ fn extract_cpp_contexts(
     node: Node,
     content: &[u8],
     namespace_map: &HashMap<std::ops::Range<usize>, String>,
-) -> Vec<FunctionContext> {
+    budget: &mut BuildBudget,
+) -> GraphResult<Vec<FunctionContext>> {
     let mut contexts = Vec::new();
     let mut class_stack = Vec::new();
 
@@ -481,19 +593,24 @@ fn extract_cpp_contexts(
     let mut guard = sqry_core::query::security::RecursionGuard::new(file_ops_depth)
         .expect("Failed to create recursion guard");
 
-    if let Err(e) = extract_contexts_recursive(
+    extract_contexts_recursive(
         node,
         content,
         namespace_map,
         &mut contexts,
         &mut class_stack,
-        0, // depth
         &mut guard,
-    ) {
-        eprintln!("Warning: C++ AST traversal hit recursion limit: {e}");
-    }
+        budget,
+    )
+    .map_err(|e| match e {
+        timeout @ GraphBuilderError::BuildTimedOut { .. } => timeout,
+        other => GraphBuilderError::ParseError {
+            span: span_from_node(node),
+            reason: format!("C++ context extraction failed: {other}"),
+        },
+    })?;
 
-    contexts
+    Ok(contexts)
 }
 
 /// Recursive helper for function context extraction
@@ -506,10 +623,14 @@ fn extract_contexts_recursive(
     namespace_map: &HashMap<std::ops::Range<usize>, String>,
     contexts: &mut Vec<FunctionContext>,
     class_stack: &mut Vec<String>,
-    depth: usize,
     guard: &mut sqry_core::query::security::RecursionGuard,
-) -> Result<(), sqry_core::query::security::RecursionError> {
-    guard.enter()?;
+    budget: &mut BuildBudget,
+) -> GraphResult<()> {
+    budget.checkpoint("cpp:extract_contexts")?;
+    guard.enter().map_err(|e| GraphBuilderError::ParseError {
+        span: span_from_node(node),
+        reason: format!("C++ context extraction hit recursion limit: {e}"),
+    })?;
 
     match node.kind() {
         "class_specifier" | "struct_specifier" => {
@@ -528,8 +649,8 @@ fn extract_contexts_recursive(
                             namespace_map,
                             contexts,
                             class_stack,
-                            depth + 1,
                             guard,
+                            budget,
                         )?;
                     }
                 }
@@ -588,7 +709,6 @@ fn extract_contexts_recursive(
                 contexts.push(FunctionContext {
                     qualified_name,
                     span,
-                    depth,
                     is_static,
                     is_virtual,
                     is_inline,
@@ -611,8 +731,8 @@ fn extract_contexts_recursive(
                     namespace_map,
                     contexts,
                     class_stack,
-                    depth,
                     guard,
+                    budget,
                 )?;
             }
         }
@@ -741,7 +861,8 @@ fn extract_field_and_type_info(
     node: Node,
     content: &[u8],
     namespace_map: &HashMap<std::ops::Range<usize>, String>,
-) -> (QualifiedNameMap, QualifiedNameMap) {
+    budget: &mut BuildBudget,
+) -> GraphResult<(QualifiedNameMap, QualifiedNameMap)> {
     let mut field_types = HashMap::new();
     let mut type_map = HashMap::new();
     let mut class_stack = Vec::new();
@@ -753,9 +874,10 @@ fn extract_field_and_type_info(
         &mut field_types,
         &mut type_map,
         &mut class_stack,
-    );
+        budget,
+    )?;
 
-    (field_types, type_map)
+    Ok((field_types, type_map))
 }
 
 /// Recursive helper for field and type extraction
@@ -766,7 +888,9 @@ fn extract_fields_recursive(
     field_types: &mut HashMap<(String, String), String>,
     type_map: &mut HashMap<(String, String), String>,
     class_stack: &mut Vec<String>,
-) {
+    budget: &mut BuildBudget,
+) -> GraphResult<()> {
+    budget.checkpoint("cpp:extract_fields")?;
     match node.kind() {
         "class_specifier" | "struct_specifier" => {
             // Extract class name and build FQN
@@ -799,7 +923,8 @@ fn extract_fields_recursive(
                         field_types,
                         type_map,
                         class_stack,
-                    );
+                        budget,
+                    )?;
                 }
 
                 class_stack.pop();
@@ -841,10 +966,13 @@ fn extract_fields_recursive(
                     field_types,
                     type_map,
                     class_stack,
-                );
+                    budget,
+                )?;
             }
         }
     }
+
+    Ok(())
 }
 
 /// Extract a field declaration and store its type
@@ -1386,12 +1514,14 @@ fn walk_class_body(
     class_stack: &mut Vec<String>,
     ffi_registry: &FfiRegistry,
     pure_virtual_registry: &PureVirtualRegistry,
+    budget: &mut BuildBudget,
 ) -> GraphResult<()> {
     // Default visibility: struct = public, class = private
     let mut current_visibility = if is_struct { "public" } else { "private" };
 
     let mut cursor = body_node.walk();
     for child in body_node.children(&mut cursor) {
+        budget.checkpoint("cpp:walk_class_body")?;
         match child.kind() {
             "access_specifier" => {
                 // Update current visibility (public:, private:, protected:)
@@ -1413,11 +1543,7 @@ fn walk_class_body(
             "function_definition" => {
                 // Process method with current visibility
                 // Extract function context from AST graph by matching start position
-                if let Some(context) = ast_graph
-                    .contexts
-                    .iter()
-                    .find(|ctx| ctx.span.0 == child.start_byte())
-                {
+                if let Some(context) = ast_graph.context_for_start(child.start_byte()) {
                     let span = span_from_node(child);
                     helper.add_method_with_signature(
                         &context.qualified_name,
@@ -1439,6 +1565,7 @@ fn walk_class_body(
                     class_stack,
                     ffi_registry,
                     pure_virtual_registry,
+                    budget,
                 )?;
             }
             _ => {
@@ -1453,6 +1580,7 @@ fn walk_class_body(
                     class_stack,
                     ffi_registry,
                     pure_virtual_registry,
+                    budget,
                 )?;
             }
         }
@@ -1474,7 +1602,9 @@ fn walk_tree_for_graph(
     class_stack: &mut Vec<String>,
     ffi_registry: &FfiRegistry,
     pure_virtual_registry: &PureVirtualRegistry,
+    budget: &mut BuildBudget,
 ) -> GraphResult<()> {
+    budget.checkpoint("cpp:walk_tree_for_graph")?;
     match node.kind() {
         "preproc_include" => {
             // Handle #include directives - create Import edges
@@ -1504,6 +1634,7 @@ fn walk_tree_for_graph(
                         class_stack,
                         ffi_registry,
                         pure_virtual_registry,
+                        budget,
                     )?;
                 }
 
@@ -1573,6 +1704,7 @@ fn walk_tree_for_graph(
                         class_stack,
                         ffi_registry,
                         pure_virtual_registry,
+                        budget,
                     )?;
                 }
 
@@ -1614,17 +1746,14 @@ fn walk_tree_for_graph(
                         class_stack,
                         ffi_registry,
                         pure_virtual_registry,
+                        budget,
                     )?;
                 }
                 return Ok(());
             }
 
             // Extract function context from AST graph by matching start position
-            if let Some(context) = ast_graph
-                .contexts
-                .iter()
-                .find(|ctx| ctx.span.0 == node.start_byte())
-            {
+            if let Some(context) = ast_graph.context_for_start(node.start_byte()) {
                 let span = span_from_node(node);
 
                 // Determine if this is a method or free function based on context
@@ -1733,6 +1862,7 @@ fn walk_tree_for_graph(
             class_stack,
             ffi_registry,
             pure_virtual_registry,
+            budget,
         )?;
     }
 
@@ -1871,7 +2001,13 @@ fn build_import_edge(
 /// and populates the FFI registry with function name → (qualified name, convention)
 /// mappings. This must be done before processing calls so that FFI calls can be
 /// properly linked regardless of source code order.
-fn collect_ffi_declarations(node: Node<'_>, content: &[u8], ffi_registry: &mut FfiRegistry) {
+fn collect_ffi_declarations(
+    node: Node<'_>,
+    content: &[u8],
+    ffi_registry: &mut FfiRegistry,
+    budget: &mut BuildBudget,
+) -> GraphResult<()> {
+    budget.checkpoint("cpp:collect_ffi_declarations")?;
     if node.kind() == "linkage_specification" {
         // Get the ABI string (e.g., "C")
         let abi = extract_ffi_abi(node, content);
@@ -1886,8 +2022,10 @@ fn collect_ffi_declarations(node: Node<'_>, content: &[u8], ffi_registry: &mut F
     // Recurse into children
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        collect_ffi_declarations(child, content, ffi_registry);
+        collect_ffi_declarations(child, content, ffi_registry, budget)?;
     }
+
+    Ok(())
 }
 
 /// Collect FFI declarations from a linkage specification body.
@@ -2085,7 +2223,9 @@ fn collect_pure_virtual_interfaces(
     node: Node<'_>,
     content: &[u8],
     registry: &mut PureVirtualRegistry,
-) {
+    budget: &mut BuildBudget,
+) -> GraphResult<()> {
+    budget.checkpoint("cpp:collect_pure_virtual_interfaces")?;
     if matches!(node.kind(), "class_specifier" | "struct_specifier")
         && let Some(name_node) = node.child_by_field_name("name")
         && let Ok(class_name) = name_node.utf8_text(content)
@@ -2099,8 +2239,10 @@ fn collect_pure_virtual_interfaces(
     // Recurse into children
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        collect_pure_virtual_interfaces(child, content, registry);
+        collect_pure_virtual_interfaces(child, content, registry, budget)?;
     }
+
+    Ok(())
 }
 
 /// Check if a class/struct has any pure virtual methods.
@@ -2303,6 +2445,88 @@ mod tests {
             .expect("Failed to parse Cpp source")
     }
 
+    fn test_budget() -> BuildBudget {
+        BuildBudget::new(Path::new("test.cpp"))
+    }
+
+    fn extract_namespace_map_for_test(
+        tree: &Tree,
+        source: &str,
+    ) -> HashMap<std::ops::Range<usize>, String> {
+        let mut budget = test_budget();
+        extract_namespace_map(tree.root_node(), source.as_bytes(), &mut budget)
+            .expect("namespace extraction should succeed in tests")
+    }
+
+    fn extract_cpp_contexts_for_test(
+        tree: &Tree,
+        source: &str,
+        namespace_map: &HashMap<std::ops::Range<usize>, String>,
+    ) -> Vec<FunctionContext> {
+        let mut budget = test_budget();
+        extract_cpp_contexts(
+            tree.root_node(),
+            source.as_bytes(),
+            namespace_map,
+            &mut budget,
+        )
+        .expect("context extraction should succeed in tests")
+    }
+
+    fn extract_field_and_type_info_for_test(
+        tree: &Tree,
+        source: &str,
+        namespace_map: &HashMap<std::ops::Range<usize>, String>,
+    ) -> (QualifiedNameMap, QualifiedNameMap) {
+        let mut budget = test_budget();
+        extract_field_and_type_info(
+            tree.root_node(),
+            source.as_bytes(),
+            namespace_map,
+            &mut budget,
+        )
+        .expect("field/type extraction should succeed in tests")
+    }
+
+    #[test]
+    fn test_build_graph_times_out_with_expired_budget() {
+        let source = r"
+            namespace demo {
+                class Service {
+                public:
+                    void process() {}
+                };
+            }
+        ";
+        let tree = parse_cpp(source);
+        let builder = CppGraphBuilder::new();
+        let mut staging = StagingGraph::new();
+        let mut budget = BuildBudget::already_expired(Path::new("timeout.cpp"));
+
+        let err = builder
+            .build_graph_with_budget(
+                &tree,
+                source.as_bytes(),
+                Path::new("timeout.cpp"),
+                &mut staging,
+                &mut budget,
+            )
+            .expect_err("expired budget should force timeout");
+
+        match err {
+            GraphBuilderError::BuildTimedOut {
+                file,
+                phase,
+                timeout_ms,
+            } => {
+                assert_eq!(file, PathBuf::from("timeout.cpp"));
+                assert_eq!(phase, "cpp:extract_namespace_map");
+                assert_eq!(timeout_ms, 1_000);
+            }
+            other => panic!("expected BuildTimedOut, got {other:?}"),
+        }
+    }
+
     #[test]
     fn test_extract_class() {
         let source = "class User { }";
@@ -2460,7 +2684,7 @@ mod tests {
             }
         ";
         let tree = parse_cpp(source);
-        let namespace_map = extract_namespace_map(tree.root_node(), source.as_bytes());
+        let namespace_map = extract_namespace_map_for_test(&tree, source);
 
         // Should have one entry mapping the namespace body to "demo::"
         assert_eq!(namespace_map.len(), 1);
@@ -2480,7 +2704,7 @@ mod tests {
             }
         ";
         let tree = parse_cpp(source);
-        let namespace_map = extract_namespace_map(tree.root_node(), source.as_bytes());
+        let namespace_map = extract_namespace_map_for_test(&tree, source);
 
         // Should have entries for both outer and inner namespaces
         assert!(namespace_map.len() >= 2);
@@ -2502,7 +2726,7 @@ mod tests {
             }
         ";
         let tree = parse_cpp(source);
-        let namespace_map = extract_namespace_map(tree.root_node(), source.as_bytes());
+        let namespace_map = extract_namespace_map_for_test(&tree, source);
 
         // Should have entries for both namespaces
         assert_eq!(namespace_map.len(), 2);
@@ -2520,7 +2744,7 @@ mod tests {
             }
         ";
         let tree = parse_cpp(source);
-        let namespace_map = extract_namespace_map(tree.root_node(), source.as_bytes());
+        let namespace_map = extract_namespace_map_for_test(&tree, source);
 
         // Find the byte offset of "func" (should be inside demo namespace)
         let func_offset = source.find("func").unwrap();
@@ -2538,8 +2762,8 @@ mod tests {
             void helper() {}
         ";
         let tree = parse_cpp(source);
-        let namespace_map = extract_namespace_map(tree.root_node(), source.as_bytes());
-        let contexts = extract_cpp_contexts(tree.root_node(), source.as_bytes(), &namespace_map);
+        let namespace_map = extract_namespace_map_for_test(&tree, source);
+        let contexts = extract_cpp_contexts_for_test(&tree, source, &namespace_map);
 
         assert_eq!(contexts.len(), 1);
         assert_eq!(contexts[0].qualified_name, "helper");
@@ -2555,8 +2779,8 @@ mod tests {
             }
         ";
         let tree = parse_cpp(source);
-        let namespace_map = extract_namespace_map(tree.root_node(), source.as_bytes());
-        let contexts = extract_cpp_contexts(tree.root_node(), source.as_bytes(), &namespace_map);
+        let namespace_map = extract_namespace_map_for_test(&tree, source);
+        let contexts = extract_cpp_contexts_for_test(&tree, source, &namespace_map);
 
         assert_eq!(contexts.len(), 1);
         assert_eq!(contexts[0].qualified_name, "demo::helper");
@@ -2572,8 +2796,8 @@ mod tests {
             };
         ";
         let tree = parse_cpp(source);
-        let namespace_map = extract_namespace_map(tree.root_node(), source.as_bytes());
-        let contexts = extract_cpp_contexts(tree.root_node(), source.as_bytes(), &namespace_map);
+        let namespace_map = extract_namespace_map_for_test(&tree, source);
+        let contexts = extract_cpp_contexts_for_test(&tree, source, &namespace_map);
 
         assert_eq!(contexts.len(), 1);
         assert_eq!(contexts[0].qualified_name, "Service::process");
@@ -2591,8 +2815,8 @@ mod tests {
             }
         ";
         let tree = parse_cpp(source);
-        let namespace_map = extract_namespace_map(tree.root_node(), source.as_bytes());
-        let contexts = extract_cpp_contexts(tree.root_node(), source.as_bytes(), &namespace_map);
+        let namespace_map = extract_namespace_map_for_test(&tree, source);
+        let contexts = extract_cpp_contexts_for_test(&tree, source, &namespace_map);
 
         assert_eq!(contexts.len(), 1);
         assert_eq!(contexts[0].qualified_name, "demo::Service::process");
@@ -2609,8 +2833,8 @@ mod tests {
             };
         ";
         let tree = parse_cpp(source);
-        let namespace_map = extract_namespace_map(tree.root_node(), source.as_bytes());
-        let contexts = extract_cpp_contexts(tree.root_node(), source.as_bytes(), &namespace_map);
+        let namespace_map = extract_namespace_map_for_test(&tree, source);
+        let contexts = extract_cpp_contexts_for_test(&tree, source, &namespace_map);
 
         assert_eq!(contexts.len(), 1);
         assert_eq!(contexts[0].qualified_name, "Repository::save");
@@ -2626,8 +2850,8 @@ mod tests {
             };
         ";
         let tree = parse_cpp(source);
-        let namespace_map = extract_namespace_map(tree.root_node(), source.as_bytes());
-        let contexts = extract_cpp_contexts(tree.root_node(), source.as_bytes(), &namespace_map);
+        let namespace_map = extract_namespace_map_for_test(&tree, source);
+        let contexts = extract_cpp_contexts_for_test(&tree, source, &namespace_map);
 
         assert_eq!(contexts.len(), 1);
         assert_eq!(contexts[0].qualified_name, "Base::render");
@@ -2640,8 +2864,8 @@ mod tests {
             inline void helper() {}
         ";
         let tree = parse_cpp(source);
-        let namespace_map = extract_namespace_map(tree.root_node(), source.as_bytes());
-        let contexts = extract_cpp_contexts(tree.root_node(), source.as_bytes(), &namespace_map);
+        let namespace_map = extract_namespace_map_for_test(&tree, source);
+        let contexts = extract_cpp_contexts_for_test(&tree, source, &namespace_map);
 
         assert_eq!(contexts.len(), 1);
         assert_eq!(contexts[0].qualified_name, "helper");
@@ -2663,8 +2887,8 @@ mod tests {
             }
         ";
         let tree = parse_cpp(source);
-        let namespace_map = extract_namespace_map(tree.root_node(), source.as_bytes());
-        let contexts = extract_cpp_contexts(tree.root_node(), source.as_bytes(), &namespace_map);
+        let namespace_map = extract_namespace_map_for_test(&tree, source);
+        let contexts = extract_cpp_contexts_for_test(&tree, source, &namespace_map);
 
         // Only the definition should be captured (not the declaration)
         assert_eq!(contexts.len(), 1);
@@ -2681,9 +2905,9 @@ mod tests {
             };
         ";
         let tree = parse_cpp(source);
-        let namespace_map = extract_namespace_map(tree.root_node(), source.as_bytes());
+        let namespace_map = extract_namespace_map_for_test(&tree, source);
         let (field_types, _type_map) =
-            extract_field_and_type_info(tree.root_node(), source.as_bytes(), &namespace_map);
+            extract_field_and_type_info_for_test(&tree, source, &namespace_map);
 
         // Should have one field: Service.repo -> Repository
         assert_eq!(field_types.len(), 1);
@@ -2704,9 +2928,9 @@ mod tests {
             }
         ";
         let tree = parse_cpp(source);
-        let namespace_map = extract_namespace_map(tree.root_node(), source.as_bytes());
+        let namespace_map = extract_namespace_map_for_test(&tree, source);
         let (field_types, _type_map) =
-            extract_field_and_type_info(tree.root_node(), source.as_bytes(), &namespace_map);
+            extract_field_and_type_info_for_test(&tree, source, &namespace_map);
 
         // Should have one field with namespace-qualified class
         assert_eq!(field_types.len(), 1);
@@ -2730,9 +2954,9 @@ mod tests {
             };
         ";
         let tree = parse_cpp(source);
-        let namespace_map = extract_namespace_map(tree.root_node(), source.as_bytes());
+        let namespace_map = extract_namespace_map_for_test(&tree, source);
         let (field_types, _type_map) =
-            extract_field_and_type_info(tree.root_node(), source.as_bytes(), &namespace_map);
+            extract_field_and_type_info_for_test(&tree, source, &namespace_map);
 
         // Should have two distinct fields with no collision
         assert_eq!(field_types.len(), 2);
@@ -2757,9 +2981,9 @@ mod tests {
             };
         ";
         let tree = parse_cpp(source);
-        let namespace_map = extract_namespace_map(tree.root_node(), source.as_bytes());
+        let namespace_map = extract_namespace_map_for_test(&tree, source);
         let (field_types, type_map) =
-            extract_field_and_type_info(tree.root_node(), source.as_bytes(), &namespace_map);
+            extract_field_and_type_info_for_test(&tree, source, &namespace_map);
 
         // Verify field extraction resolves type via using declaration
         assert_eq!(field_types.len(), 1);
@@ -2786,9 +3010,9 @@ mod tests {
             };
         ";
         let tree = parse_cpp(source);
-        let namespace_map = extract_namespace_map(tree.root_node(), source.as_bytes());
+        let namespace_map = extract_namespace_map_for_test(&tree, source);
         let (field_types, _type_map) =
-            extract_field_and_type_info(tree.root_node(), source.as_bytes(), &namespace_map);
+            extract_field_and_type_info_for_test(&tree, source, &namespace_map);
 
         // Should extract field even for pointer types
         assert_eq!(field_types.len(), 1);
@@ -2807,9 +3031,9 @@ mod tests {
             };
         ";
         let tree = parse_cpp(source);
-        let namespace_map = extract_namespace_map(tree.root_node(), source.as_bytes());
+        let namespace_map = extract_namespace_map_for_test(&tree, source);
         let (field_types, _type_map) =
-            extract_field_and_type_info(tree.root_node(), source.as_bytes(), &namespace_map);
+            extract_field_and_type_info_for_test(&tree, source, &namespace_map);
 
         // Should extract all three fields
         assert_eq!(field_types.len(), 3);
@@ -2843,9 +3067,9 @@ mod tests {
             }
         ";
         let tree = parse_cpp(source);
-        let namespace_map = extract_namespace_map(tree.root_node(), source.as_bytes());
+        let namespace_map = extract_namespace_map_for_test(&tree, source);
         let (field_types, _type_map) =
-            extract_field_and_type_info(tree.root_node(), source.as_bytes(), &namespace_map);
+            extract_field_and_type_info_for_test(&tree, source, &namespace_map);
 
         // Should have fields from both Outer and Inner with properly qualified class FQNs
         // The critical assertion: Inner's field must use "demo::Outer::Inner", not "demo::Inner"

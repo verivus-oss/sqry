@@ -181,6 +181,13 @@ pub fn execute_semantic_search(
         .copied()
         .collect();
 
+    // Filter out classpath (external) nodes unless explicitly requested
+    if !args.include_classpath {
+        filtered.retain(|&node_id| {
+            !crate::execution::symbol_utils::is_node_external(&snapshot, node_id)
+        });
+    }
+
     // Sort by user-facing display identity for deterministic MCP output.
     filtered.sort_by_key(|&node_id| semantic_sort_key(&snapshot, node_id, workspace_root));
 

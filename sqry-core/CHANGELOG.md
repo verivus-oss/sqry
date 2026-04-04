@@ -6,7 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
-## [6.0.19](https://github.com/verivus-oss/sqry/compare/v6.0.18...v6.0.19) - 2026-04-03
+## [7.1.0](https://github.com/verivus-oss/sqry/compare/v6.0.23...v7.1.0) - 2026-04-04
+
+### Added
+- *(cli)* add plugin cost tiering and manifest-backed selection- *(classpath)* add JVM classpath analysis (Track C Tier 1)
+### Documentation
+- *(rust)* add macro and proc-macro boundaries design spec
+### Fixed
+- *(cpp)* bound pathological graph builds- *(release)* add VERSION stamps to all public directories for consistent release metadata- *(release)* harden public sanitization outputs- *(release)* resolve hermetic clippy bench warning- *(release)* unblock hermetic sanitized-tree validation- *(security)* harden MCP server against red team findings- *(graph)* resolve Method/Function NodeKind mismatch dropping get_references callers
+### Other
+- sync versions and VERSION stamps to 6.0.18
+- *(rustfmt)* normalize code for Rust 1.90 toolchain- apply rustfmt to fix formatting in sanitized tree build
+## [6.0.24](https://github.com/verivus-oss/sqry/compare/v6.0.23...v6.0.24) - 2026-04-03
+
+### Added
+- *(classpath)* add JVM classpath analysis (Track C Tier 1)## [6.0.19](https://github.com/verivus-oss/sqry/compare/v6.0.18...v6.0.19) - 2026-04-03
 
 ### Other
 - sync versions and VERSION stamps to 6.0.18

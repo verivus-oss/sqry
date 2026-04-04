@@ -65,6 +65,9 @@ struct FileEntry {
     path: Arc<Path>,
     /// The language of this file (if known).
     language: Option<Language>,
+    /// Whether this file originates from an external source (e.g., classpath JAR).
+    #[serde(default)]
+    is_external: bool,
 }
 
 /// File registry for path deduplication.
@@ -211,6 +214,7 @@ impl FileRegistry {
         let entry = FileEntry {
             path: Arc::clone(&arc_path),
             language,
+            is_external: false,
         };
 
         // Allocate new slot
@@ -265,6 +269,7 @@ impl FileRegistry {
         let entry = FileEntry {
             path: Arc::clone(&arc_path),
             language: None,
+            is_external: false,
         };
 
         // Allocate new slot
@@ -323,6 +328,7 @@ impl FileRegistry {
         let entry = FileEntry {
             path: Arc::clone(&arc_path),
             language,
+            is_external: false,
         };
 
         // Allocate new slot
@@ -390,6 +396,79 @@ impl FileRegistry {
         } else {
             false
         }
+    }
+
+    /// Returns whether a file is external (e.g., from a classpath JAR).
+    ///
+    /// Returns `false` if the file ID is invalid or the file was unregistered.
+    #[must_use]
+    pub fn is_external(&self, id: FileId) -> bool {
+        if id.is_invalid() {
+            return false;
+        }
+
+        let index = id.index() as usize;
+        self.entries
+            .get(index)
+            .and_then(|opt| opt.as_ref())
+            .is_some_and(|entry| entry.is_external)
+    }
+
+    /// Registers an external file path and returns its `FileId`.
+    ///
+    /// External files originate from outside the project (e.g., classpath JARs).
+    /// They are marked with `is_external = true` for filtering in queries and
+    /// visualizations.
+    ///
+    /// The path is stored as-is (no normalization), since external files may
+    /// reference virtual paths within JAR archives.
+    ///
+    /// # Errors
+    ///
+    /// Returns `RegistryError::CapacityExhausted` if the registry has
+    /// exhausted all available IDs.
+    pub fn register_external(
+        &mut self,
+        path: impl AsRef<Path>,
+        language: Option<Language>,
+    ) -> Result<FileId, RegistryError> {
+        let path = path.as_ref();
+        let arc_path: Arc<Path> = Arc::from(path);
+
+        // Check if already registered
+        if let Some(&index) = self.lookup.get(&arc_path) {
+            // Update external flag and language if entry exists
+            if let Some(Some(entry)) = self.entries.get_mut(index as usize) {
+                entry.is_external = true;
+                if let Some(lang) = language {
+                    entry.language = Some(lang);
+                }
+            }
+            return Ok(FileId::new(index));
+        }
+
+        // Create new external file entry
+        let entry = FileEntry {
+            path: Arc::clone(&arc_path),
+            language,
+            is_external: true,
+        };
+
+        // Allocate new slot
+        let index = if let Some(free_idx) = self.free_list.pop() {
+            self.entries[free_idx as usize] = Some(entry);
+            free_idx
+        } else {
+            let idx = self.entries.len();
+            if idx > u32::MAX as usize - 1 {
+                return Err(RegistryError::CapacityExhausted);
+            }
+            self.entries.push(Some(entry));
+            u32::try_from(idx).map_err(|_| RegistryError::CapacityExhausted)?
+        };
+
+        self.lookup.insert(arc_path, index);
+        Ok(FileId::new(index))
     }
 
     /// Gets all files that match the specified language.

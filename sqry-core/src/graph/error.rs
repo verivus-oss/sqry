@@ -59,6 +59,17 @@ pub enum GraphBuilderError {
         #[source]
         source: std::io::Error,
     },
+
+    /// Graph building exceeded its per-file time budget.
+    #[error("Graph build timed out after {timeout_ms} ms during {phase} in {file}")]
+    BuildTimedOut {
+        /// File being built when the timeout was reached.
+        file: PathBuf,
+        /// The build phase in progress when the timeout fired.
+        phase: &'static str,
+        /// Timeout budget in milliseconds.
+        timeout_ms: u64,
+    },
 }
 
 #[cfg(test)]
@@ -221,6 +232,19 @@ mod tests {
         assert!(debug.contains("test.rs"));
     }
 
+    #[test]
+    fn test_build_timed_out_display() {
+        let err = GraphBuilderError::BuildTimedOut {
+            file: PathBuf::from("large.cpp"),
+            phase: "walk_tree_for_graph",
+            timeout_ms: 10_000,
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("Graph build timed out"));
+        assert!(msg.contains("large.cpp"));
+        assert!(msg.contains("walk_tree_for_graph"));
+    }
+
     // Pattern matching tests
     #[test]
     fn test_error_pattern_matching() {
@@ -261,6 +285,11 @@ mod tests {
             GraphBuilderError::IoError {
                 file: PathBuf::from("test.rs"),
                 source: std::io::Error::other("test"),
+            },
+            GraphBuilderError::BuildTimedOut {
+                file: PathBuf::from("test.rs"),
+                phase: "test-phase",
+                timeout_ms: 1_000,
             },
         ];
 

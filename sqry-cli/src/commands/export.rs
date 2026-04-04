@@ -3,7 +3,7 @@
 //! Provides CLI interface for exporting the code graph in various formats.
 
 use crate::args::Cli;
-use crate::commands::graph::loader::{GraphLoadConfig, load_unified_graph};
+use crate::commands::graph::loader::{GraphLoadConfig, load_unified_graph_for_cli};
 use crate::output::OutputStreams;
 use anyhow::{Context, Result};
 use sqry_core::graph::Language;
@@ -22,7 +22,7 @@ use std::path::PathBuf;
 /// Returns an error if the graph cannot be loaded or exported.
 #[allow(clippy::too_many_arguments)]
 pub fn run_export(
-    _cli: &Cli,
+    cli: &Cli,
     path: Option<&str>,
     format: &str,
     direction: &str,
@@ -43,7 +43,7 @@ pub fn run_export(
 
     // Load unified graph
     let config = GraphLoadConfig::default();
-    let graph = load_unified_graph(&root, &config)
+    let graph = load_unified_graph_for_cli(&root, &config, cli)
         .context("Failed to load unified graph. Run 'sqry index' first.")?;
 
     let snapshot = graph.snapshot();

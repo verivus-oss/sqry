@@ -13,7 +13,7 @@ name = "sqry_lang_servicenow_xanadu"
 path = "src/lib.rs"
 
 [dependencies]
-sqry-core = { version = "6.0.23", path = "../sqry-core" }
+sqry-core = { version = "7.1.3", path = "../sqry-core" }
 tree-sitter = { workspace = true }
 tree-sitter-javascript = { workspace = true }
 streaming-iterator = { workspace = true }

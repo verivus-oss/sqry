@@ -8,7 +8,7 @@
 //! rebuilding the index for fixes.
 
 use crate::args::Cli;
-use crate::commands::graph::loader::{GraphLoadConfig, load_unified_graph};
+use crate::commands::graph::loader::{GraphLoadConfig, load_unified_graph_for_cli};
 use crate::index_discovery::find_nearest_index;
 use anyhow::{Context, Result};
 use std::path::Path;
@@ -50,7 +50,7 @@ pub fn run_repair(
 
     // Load unified graph
     let config = GraphLoadConfig::default();
-    let graph = load_unified_graph(&loc.index_root, &config)
+    let graph = load_unified_graph_for_cli(&loc.index_root, &config, cli)
         .context("Failed to load graph. Run 'sqry index' to build the graph.")?;
 
     let Some(actions) =

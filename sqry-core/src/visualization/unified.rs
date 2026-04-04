@@ -1337,6 +1337,19 @@ impl<'a> UnifiedJsonExporter<'a> {
             EdgeKind::LifetimeConstraint { .. } => "lifetime_constraint",
             EdgeKind::TraitMethodBinding { .. } => "trait_method_binding",
             EdgeKind::MacroExpansion { .. } => "macro_expansion",
+            // JVM Classpath (Track C)
+            EdgeKind::GenericBound => "generic_bound",
+            EdgeKind::AnnotatedWith => "annotated_with",
+            EdgeKind::AnnotationParam => "annotation_param",
+            EdgeKind::LambdaCaptures => "lambda_captures",
+            EdgeKind::ModuleExports => "module_exports",
+            EdgeKind::ModuleRequires => "module_requires",
+            EdgeKind::ModuleOpens => "module_opens",
+            EdgeKind::ModuleProvides => "module_provides",
+            EdgeKind::TypeArgument => "type_argument",
+            EdgeKind::ExtensionReceiver => "extension_receiver",
+            EdgeKind::CompanionOf => "companion_of",
+            EdgeKind::SealedPermit => "sealed_permit",
         }
     }
 }

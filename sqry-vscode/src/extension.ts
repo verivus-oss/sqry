@@ -65,7 +65,7 @@ export async function activate(
     );
   }
 
-  // Refresh diagnostics when a file is opened
+  // Diagnostics lifecycle + config change refresh
   context.subscriptions.push(
     vscode.workspace.onDidOpenTextDocument((doc) => {
       const workspace = doc.uri.scheme === "file"
@@ -75,17 +75,9 @@ export async function activate(
         void diagnosticsProvider.refreshForFile(doc.uri, workspace);
       }
     }),
-  );
-
-  // Clear diagnostics when a file is closed
-  context.subscriptions.push(
     vscode.workspace.onDidCloseTextDocument((doc) => {
       diagnosticsProvider?.clearFile(doc.uri);
     }),
-  );
-
-  // Refresh status bar when config changes (e.g., binary path changed)
-  context.subscriptions.push(
     client.onDidChangeConfig(async () => {
       if (client) {
         try {
@@ -239,71 +231,7 @@ export async function activate(
         },
       );
     }),
-    vscode.commands.registerCommand("sqry.index", async () => {
-      const activeClient = client;
-      if (!activeClient) {
-        return;
-      }
-      const folders = getAllWorkspaceFolders();
-      if (folders.length === 0) {
-        void vscode.window.showWarningMessage(
-          "sqry: No workspace folder detected. Open a folder before indexing.",
-        );
-        return;
-      }
-
-      if (folders.length > 1) {
-        // Multi-root: offer "All Workspace Folders" plus individual folders
-        const allLabel = "All Workspace Folders";
-        const items = [
-          { label: allLabel, description: `Index all ${folders.length} roots`, folder: undefined as vscode.WorkspaceFolder | undefined },
-          ...folders.map(f => ({ label: f.name, description: f.uri.fsPath, folder: f as vscode.WorkspaceFolder | undefined })),
-        ];
-        const picked = await vscode.window.showQuickPick(items, {
-          placeHolder: "Select workspace folder to index",
-        });
-        if (!picked) {
-          return;
-        }
-
-        if (!picked.folder) {
-          // "All Workspace Folders" selected — index each sequentially
-          for (const folder of folders) {
-            try {
-              await activeClient.runIndex(folder);
-              await refreshWorkspaceIndexStatus(activeClient, folder);
-            } catch (error) {
-              const message = error instanceof Error ? error.message : String(error);
-              outputChannel?.appendLine(`[sqry] Failed to index ${folder.name}: ${message}`);
-            }
-          }
-          await refreshAllIndexStatuses(activeClient);
-          return;
-        }
-
-        // Single folder selected
-        try {
-          await activeClient.runIndex(picked.folder);
-          await refreshWorkspaceIndexStatus(activeClient, picked.folder);
-          await refreshAllIndexStatuses(activeClient);
-        } catch (error) {
-          await handleError(error);
-        }
-      } else {
-        // Single-root workspace
-        const workspace = getActiveWorkspaceFolder();
-        if (!workspace) {
-          return;
-        }
-        try {
-          await activeClient.runIndex(workspace);
-          await refreshWorkspaceIndexStatus(activeClient, workspace);
-          await refreshAllIndexStatuses(activeClient);
-        } catch (error) {
-          await handleError(error);
-        }
-      }
-    }),
+    vscode.commands.registerCommand("sqry.index", () => handleIndexCommand()),
     vscode.commands.registerCommand("sqry.refreshStats", async () => {
       const activeClient = client;
       if (!activeClient) {
@@ -375,12 +303,14 @@ export async function activate(
       if (!workspace) {
         return;
       }
+      const provider = diagnosticsProvider;
+      const selectedWorkspace = workspace;
       await vscode.window.withProgress(
         {
           location: vscode.ProgressLocation.Notification,
           title: "sqry: Scanning workspace...",
         },
-        () => diagnosticsProvider!.scanWorkspace(workspace!),
+        () => provider.scanWorkspace(selectedWorkspace),
       );
     }),
     vscode.commands.registerCommand("sqry.restartLsp", async () => {
@@ -732,6 +662,78 @@ export async function activate(
   // that already have an index also get their status populated in the tree view.
   if (client) {
     await refreshAllIndexStatuses(client);
+  }
+}
+
+async function handleIndexCommand(): Promise<void> {
+  const activeClient = client;
+  if (!activeClient) {
+    return;
+  }
+  const folders = getAllWorkspaceFolders();
+  if (folders.length === 0) {
+    void vscode.window.showWarningMessage(
+      "sqry: No workspace folder detected. Open a folder before indexing.",
+    );
+    return;
+  }
+
+  if (folders.length === 1) {
+    await indexSingleRoot(activeClient);
+    return;
+  }
+
+  await indexMultiRoot(activeClient, folders);
+}
+
+async function indexSingleRoot(activeClient: SqryClient): Promise<void> {
+  const workspace = getActiveWorkspaceFolder();
+  if (!workspace) {
+    return;
+  }
+  try {
+    await activeClient.runIndex(workspace);
+    await refreshWorkspaceIndexStatus(activeClient, workspace);
+    await refreshAllIndexStatuses(activeClient);
+  } catch (error) {
+    await handleError(error);
+  }
+}
+
+async function indexMultiRoot(activeClient: SqryClient, folders: readonly vscode.WorkspaceFolder[]): Promise<void> {
+  const items: Array<{ label: string; description: string; folder: vscode.WorkspaceFolder | undefined }> = [
+    { label: "All Workspace Folders", description: `Index all ${folders.length} roots`, folder: undefined },
+    ...folders.map(f => ({ label: f.name, description: f.uri.fsPath, folder: f })),
+  ];
+  const picked = await vscode.window.showQuickPick(items, {
+    placeHolder: "Select workspace folder to index",
+  });
+  if (!picked) {
+    return;
+  }
+
+  if (!picked.folder) {
+    // "All Workspace Folders" selected — index each sequentially
+    for (const folder of folders) {
+      try {
+        await activeClient.runIndex(folder);
+        await refreshWorkspaceIndexStatus(activeClient, folder);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        outputChannel?.appendLine(`[sqry] Failed to index ${folder.name}: ${message}`);
+      }
+    }
+    await refreshAllIndexStatuses(activeClient);
+    return;
+  }
+
+  // Single folder selected
+  try {
+    await activeClient.runIndex(picked.folder);
+    await refreshWorkspaceIndexStatus(activeClient, picked.folder);
+    await refreshAllIndexStatuses(activeClient);
+  } catch (error) {
+    await handleError(error);
   }
 }
 

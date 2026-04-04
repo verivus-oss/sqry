@@ -272,17 +272,56 @@ pub fn execute_get_graph_stats(args: &GetGraphStatsArgs) -> Result<ToolExecution
         nodes_by_kind.insert(kind_str, count as u64);
     }
 
-    // Count files by language
+    // Count files by language, and track external file count
     let mut files_by_language: HashMap<String, u64> = HashMap::new();
-    for (_file_id, _path, language) in graph.files().iter_with_language() {
+    let mut classpath_file_count: u64 = 0;
+    for (file_id, _path, language) in graph.files().iter_with_language() {
         let lang_str = language.map_or_else(|| "unknown".to_string(), |l| l.to_string());
         *files_by_language.entry(lang_str).or_insert(0) += 1;
+        if graph.files().is_external(file_id) {
+            classpath_file_count += 1;
+        }
     }
+
+    // Count workspace vs classpath nodes using a snapshot for iteration
+    let mut classpath_node_count: u64 = 0;
+    {
+        let snapshot = graph.snapshot();
+        let files_ref = snapshot.files();
+        for (_node_id, entry) in snapshot.iter_nodes() {
+            if files_ref.is_external(entry.file) {
+                classpath_node_count += 1;
+            }
+        }
+    }
+
+    // Only include workspace/classpath breakdown if there are external files
+    let has_classpath = classpath_file_count > 0 || classpath_node_count > 0;
 
     let data = GraphStatsData {
         total_nodes,
         total_edges,
         total_files,
+        workspace_nodes: if has_classpath {
+            Some(total_nodes.saturating_sub(classpath_node_count))
+        } else {
+            None
+        },
+        classpath_nodes: if has_classpath {
+            Some(classpath_node_count)
+        } else {
+            None
+        },
+        workspace_files: if has_classpath {
+            Some(total_files.saturating_sub(classpath_file_count))
+        } else {
+            None
+        },
+        classpath_files: if has_classpath {
+            Some(classpath_file_count)
+        } else {
+            None
+        },
         nodes_by_kind,
         files_by_language,
         graph_epoch,

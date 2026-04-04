@@ -720,6 +720,7 @@ fn test_e2e_index_status_manifest_only_fallback() -> Result<()> {
         config: HashMap::new(),
         confidence: Default::default(),
         last_indexed_commit: None,
+        plugin_selection: None,
     };
 
     // Save manifest

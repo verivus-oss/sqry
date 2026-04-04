@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+## [7.1.0](https://github.com/verivus-oss/sqry/compare/v6.0.23...v7.1.0) - 2026-04-04
+
+### Documentation
+- *(rust)* add macro and proc-macro boundaries design spec
+### Fixed
+- *(release)* add VERSION stamps to all public directories for consistent release metadata- *(servicenow-xml)* use per-field staging to prevent duplicate StringId panic
+### Other
+- sync versions and VERSION stamps to 6.0.18
+## [6.0.24](https://github.com/verivus-oss/sqry/compare/v6.0.23...v6.0.24) - 2026-04-03
 ## [6.0.19](https://github.com/verivus-oss/sqry/compare/v6.0.18...v6.0.19) - 2026-04-03
 
 ### Other

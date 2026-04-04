@@ -6,6 +6,38 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+## [7.1.3](https://github.com/verivus-oss/sqry/compare/v7.1.2...v7.1.3) - 2026-04-04
+
+### Other
+- update Cargo.lock dependencies
+## [7.1.2](https://github.com/verivus-oss/sqry/compare/v6.0.23...v7.1.2) - 2026-04-04
+
+### Style
+- apply rustfmt to release fixes
+## [7.1.0](https://github.com/verivus-oss/sqry/compare/v6.0.23...v7.1.0) - 2026-04-04
+
+### Added
+- *(classpath)* add JVM classpath analysis (Track C Tier 1)- *(mcp)* add macro boundary metadata to MCP tool responses- *(core)* [**breaking**] add NodeMetadataStore, CfgGate edge kind, and snapshot V6
+### Documentation
+- *(rust)* add macro and proc-macro boundaries design spec
+### Fixed
+- *(cpp)* bound pathological graph builds- rewrite install scripts for direct binary downloads and register MCP
+- *(release)* add VERSION stamps to all public directories for consistent release metadata- *(security)* harden MCP server against red team findings- *(mcp)* filter attribute_macros_detected to Attribute kind only
+### Other
+- sync versions and VERSION stamps to 6.0.18
+- *(rustfmt)* normalize code for Rust 1.90 toolchain- apply rustfmt to fix formatting in sanitized tree build
+## [7.0.1](https://github.com/verivus-oss/sqry/compare/v7.0.0...v7.0.1) - 2026-04-03
+
+### Other
+- update Cargo.lock dependencies
+## [7.0.0](https://github.com/verivus-oss/sqry/compare/v6.0.24...v7.0.0) - 2026-04-03
+
+### Other
+- update Cargo.lock dependencies
+## [6.0.24](https://github.com/verivus-oss/sqry/compare/v6.0.23...v6.0.24) - 2026-04-03
+
+### Other
+- update Cargo.lock dependencies
 ## [6.0.23](https://github.com/verivus-oss/sqry/compare/v6.0.22...v6.0.23) - 2026-04-03
 
 ### Other

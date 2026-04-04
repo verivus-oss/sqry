@@ -61,8 +61,8 @@ use std::time::Duration;
 pub use format::{GraphHeader, MAGIC_BYTES, VERSION};
 pub use manifest::{
     BuildProvenance, ConfigProvenance, ConfigProvenanceBuilder, MANIFEST_SCHEMA_VERSION, Manifest,
-    OverrideEntry, OverrideSource, SNAPSHOT_FORMAT_VERSION, compute_config_checksum,
-    default_provenance,
+    OverrideEntry, OverrideSource, PluginSelectionManifest, SNAPSHOT_FORMAT_VERSION,
+    compute_config_checksum, default_provenance,
 };
 pub use snapshot::{
     PersistenceError, check_config_drift, load_from_bytes, load_from_path, load_header_from_path,

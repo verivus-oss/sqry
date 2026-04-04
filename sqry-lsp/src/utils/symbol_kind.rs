@@ -20,6 +20,11 @@ pub fn node_kind_to_symbol_kind(kind: NodeKind) -> SymbolKind {
         NodeKind::Module => SymbolKind::NAMESPACE,
         NodeKind::Property => SymbolKind::PROPERTY,
         NodeKind::Import | NodeKind::Export => SymbolKind::PACKAGE,
+        NodeKind::EnumConstant => SymbolKind::ENUM_MEMBER,
+        NodeKind::TypeParameter => SymbolKind::TYPE_PARAMETER,
+        NodeKind::Annotation | NodeKind::AnnotationValue => SymbolKind::EVENT,
+        NodeKind::LambdaTarget => SymbolKind::FUNCTION,
+        NodeKind::JavaModule => SymbolKind::NAMESPACE,
         NodeKind::Component
         | NodeKind::StyleRule
         | NodeKind::StyleAtRule

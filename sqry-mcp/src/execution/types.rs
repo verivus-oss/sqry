@@ -7,6 +7,30 @@ use serde_json::Value;
 
 use super::graph_cache;
 
+// ============================================================================
+// Classpath Provenance Types
+// ============================================================================
+
+/// Provenance information for symbols originating from external classpath JARs.
+///
+/// Only present in tool results when the symbol comes from a classpath dependency
+/// (e.g., a Maven/Gradle library). Workspace symbols do not carry provenance.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProvenanceData {
+    /// Source type — always `"classpath"` for JAR-sourced symbols.
+    pub source: &'static str,
+    /// Maven coordinates (e.g., `"com.google.guava:guava:33.0.0"`).
+    /// `None` when the JAR has no embedded POM metadata.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coordinates: Option<String>,
+    /// Whether this is a direct (vs. transitive) dependency.
+    pub is_direct: bool,
+    /// JAR file path this symbol was extracted from.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jar_path: Option<String>,
+}
+
 /// Result wrapper for tool executions
 pub struct ToolExecution<T>
 where
@@ -153,6 +177,9 @@ pub struct SearchHit {
     /// Macro boundary metadata (only present when the node has macro-related info)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub macro_metadata: Option<MacroMetadataResponse>,
+    /// Classpath provenance (only present for symbols from external JARs)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<ProvenanceData>,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -282,6 +309,9 @@ pub struct ExplainCodeData {
     pub context: Option<CodeContext>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub relations: Option<ExplainRelations>,
+    /// Classpath provenance (only present for symbols from external JARs)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<ProvenanceData>,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -631,6 +661,9 @@ pub struct PatternMatchData {
     pub line: u32,
     /// Language
     pub language: String,
+    /// Classpath provenance (only present for symbols from external JARs)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<ProvenanceData>,
 }
 
 /// Response data for `direct_callers` tool
@@ -738,6 +771,18 @@ pub struct GraphStatsData {
     pub total_edges: u64,
     /// Total number of files
     pub total_files: u64,
+    /// Number of workspace (non-external) nodes
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_nodes: Option<u64>,
+    /// Number of classpath (external) nodes
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub classpath_nodes: Option<u64>,
+    /// Number of workspace (non-external) files
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_files: Option<u64>,
+    /// Number of classpath (external) files
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub classpath_files: Option<u64>,
     /// Symbol counts by kind
     pub nodes_by_kind: std::collections::HashMap<String, u64>,
     /// File counts by language
@@ -774,6 +819,9 @@ pub struct DefinitionData {
     /// Macro boundary metadata (only present when the node has macro-related info)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub macro_metadata: Option<MacroMetadataResponse>,
+    /// Classpath provenance (only present for symbols from external JARs)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<ProvenanceData>,
 }
 
 /// Response data for `get_definition` tool (may have multiple results)
@@ -801,6 +849,9 @@ pub struct ReferenceLocationData {
     pub preview: Option<String>,
     /// Is this the declaration?
     pub is_declaration: bool,
+    /// Classpath provenance (only present for references in external JARs)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<ProvenanceData>,
 }
 
 /// Response data for `get_references` tool
@@ -840,6 +891,9 @@ pub struct HoverInfoData {
     /// Documentation
     #[serde(skip_serializing_if = "Option::is_none")]
     pub documentation: Option<String>,
+    /// Classpath provenance (only present for symbols from external JARs)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<ProvenanceData>,
 }
 
 /// Document symbol with children
@@ -1629,6 +1683,7 @@ mod tests {
                 expansion_cached: None,
                 unresolved_attributes: vec![],
             }),
+            provenance: None,
         };
         let json = serde_json::to_value(&def).unwrap();
         let mm = json.get("macroMetadata").unwrap();
@@ -1648,6 +1703,7 @@ mod tests {
             language: "rust".to_string(),
             preview: None,
             macro_metadata: None,
+            provenance: None,
         };
         let json = serde_json::to_value(&def).unwrap();
         assert!(json.get("macroMetadata").is_none());

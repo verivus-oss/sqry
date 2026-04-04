@@ -301,6 +301,22 @@ pub struct BuildProvenance {
     pub plugin_hashes: HashMap<String, String>,
 }
 
+/// Persisted plugin selection used to build a graph snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PluginSelectionManifest {
+    /// Deterministic ordered list of active built-in plugin ids.
+    ///
+    /// This is the authoritative field for reconstructing the plugin manager.
+    pub active_plugin_ids: Vec<String>,
+
+    /// High-cost selection mode used when the active ids were resolved.
+    ///
+    /// This is diagnostic provenance only; readers must not treat it as the
+    /// source of truth for plugin reconstruction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub high_cost_mode: Option<String>,
+}
+
 impl BuildProvenance {
     /// Creates a new build provenance record.
     #[must_use]
@@ -402,6 +418,10 @@ pub struct Manifest {
     /// commits or is not a git repository, this will be `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_indexed_commit: Option<String>,
+
+    /// Plugin selection that built the persisted snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin_selection: Option<PluginSelectionManifest>,
 }
 
 impl Manifest {
@@ -429,6 +449,7 @@ impl Manifest {
             config: HashMap::new(),
             confidence: HashMap::new(),
             last_indexed_commit: None,
+            plugin_selection: None,
         }
     }
 
@@ -496,6 +517,16 @@ impl Manifest {
     #[must_use]
     pub fn with_confidence(mut self, confidence: HashMap<String, ConfidenceMetadata>) -> Self {
         self.confidence = confidence;
+        self
+    }
+
+    /// Sets the persisted plugin selection metadata.
+    #[must_use]
+    pub fn with_plugin_selection(
+        mut self,
+        plugin_selection: Option<PluginSelectionManifest>,
+    ) -> Self {
+        self.plugin_selection = plugin_selection;
         self
     }
 }
@@ -868,6 +899,57 @@ mod tests {
         let json = serde_json::to_string(&manifest).unwrap();
         // Empty confidence map should be omitted due to skip_serializing_if
         assert!(!json.contains("\"confidence\""));
+    }
+
+    #[test]
+    fn test_manifest_plugin_selection_serialization() {
+        let build_prov = BuildProvenance::new("2.8.0", "sqry index");
+        let plugin_selection = PluginSelectionManifest {
+            active_plugin_ids: vec![String::from("rust"), String::from("json")],
+            high_cost_mode: Some(String::from("include_all")),
+        };
+        let manifest = Manifest::new("/test/path", 100, 200, "abc123", build_prov)
+            .with_plugin_selection(Some(plugin_selection.clone()));
+
+        let json = serde_json::to_string(&manifest).unwrap();
+        assert!(json.contains("\"plugin_selection\""));
+        assert!(json.contains("\"active_plugin_ids\""));
+        assert!(json.contains("\"include_all\""));
+
+        let round_trip: Manifest = serde_json::from_str(&json).unwrap();
+        assert_eq!(round_trip.plugin_selection, Some(plugin_selection));
+    }
+
+    #[test]
+    fn test_manifest_plugin_selection_omitted_when_absent() {
+        let build_prov = BuildProvenance::new("2.8.0", "sqry index");
+        let manifest = Manifest::new("/test/path", 100, 200, "abc123", build_prov);
+
+        let json = serde_json::to_string(&manifest).unwrap();
+        assert!(!json.contains("\"plugin_selection\""));
+    }
+
+    #[test]
+    fn test_legacy_manifest_without_plugin_selection_loads() {
+        let legacy_manifest = r#"{
+            "schema_version": 1,
+            "snapshot_format_version": 2,
+            "built_at": "2026-04-04T08:00:00Z",
+            "root_path": "/test/path",
+            "node_count": 100,
+            "edge_count": 200,
+            "snapshot_sha256": "abc123",
+            "build_provenance": {
+                "sqry_version": "1.0.0",
+                "build_timestamp": "2026-04-04T08:00:00Z",
+                "build_command": "test",
+                "plugin_hashes": {}
+            }
+        }"#;
+
+        let manifest: Manifest = serde_json::from_str(legacy_manifest).unwrap();
+        assert!(manifest.plugin_selection.is_none());
+        assert!(manifest.last_indexed_commit.is_none());
     }
 
     /// Regression test (Step 10, #6): New manifests have `raw_edge_count` field.

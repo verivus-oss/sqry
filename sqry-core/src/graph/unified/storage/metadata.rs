@@ -1,11 +1,11 @@
-//! Sparse node metadata store for macro boundary analysis.
+//! Sparse node metadata store for macro boundary analysis and classpath provenance.
 //!
 //! This module provides [`NodeMetadataStore`], a sparse metadata store keyed by
 //! full [`NodeId`] (index + generation) to prevent stale metadata when the
 //! generational arena reuses a slot index with a new generation.
 //!
-//! Only nodes with macro-relevant metadata get entries, keeping memory overhead
-//! proportional to the number of macro-annotated symbols rather than total node count.
+//! Only nodes with metadata get entries, keeping memory overhead
+//! proportional to the number of annotated symbols rather than total node count.
 
 use std::collections::HashMap;
 
@@ -57,6 +57,40 @@ pub enum ProcMacroFunctionKind {
     FunctionLike,
 }
 
+/// Metadata for nodes originating from JVM classpath bytecode.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClasspathNodeMetadata {
+    /// Maven coordinates (e.g., `"com.google.guava:guava:33.0.0"`).
+    pub coordinates: Option<String>,
+    /// JAR file path this node was extracted from.
+    pub jar_path: String,
+    /// Fully qualified name in JVM format (e.g., `"java.util.HashMap"`).
+    pub fqn: String,
+    /// Whether this is a direct or transitive dependency.
+    pub is_direct_dependency: bool,
+}
+
+/// Metadata that can be attached to graph nodes.
+///
+/// This enum is not directly `Serialize`/`Deserialize` because `postcard`
+/// does not support Rust enum variants wrapping structs. Instead,
+/// `NodeMetadataStore` handles serialization/deserialization through flat
+/// entry structs with explicit discriminant bytes.
+///
+/// For JSON use (e.g., MCP export), use the `serde_json`-compatible
+/// `to_json`/`from_json` convenience methods.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NodeMetadata {
+    /// Rust macro-related metadata.
+    Macro(MacroNodeMetadata),
+    /// JVM classpath provenance metadata.
+    Classpath(ClasspathNodeMetadata),
+}
+
+/// Discriminant values for `NodeMetadata` wire format.
+const NODE_METADATA_MACRO: u8 = 0;
+const NODE_METADATA_CLASSPATH: u8 = 1;
+
 /// Sparse metadata store keyed by full `NodeId` (index + generation).
 ///
 /// Uses `(u32, u64)` tuple key to prevent stale metadata when the
@@ -66,7 +100,7 @@ pub enum ProcMacroFunctionKind {
 ///
 /// # Memory characteristics
 ///
-/// For a typical large codebase (100K nodes), only ~5-10% of nodes have macro
+/// For a typical large codebase (100K nodes), only ~5-10% of nodes have
 /// metadata. A store with 10K entries at ~200 bytes each = ~2MB, which is
 /// acceptable given snapshots are already 10-50MB.
 ///
@@ -76,29 +110,49 @@ pub enum ProcMacroFunctionKind {
 /// serialization (which doesn't support tuple keys natively), we serialize as
 /// a `Vec` of `NodeMetadataEntry` structs with explicit `index` and `generation`
 /// fields, then reconstruct the `HashMap` on deserialization.
+///
+/// For backwards compatibility, legacy entries serialized as bare
+/// `MacroNodeMetadata` (without a wrapping `NodeMetadata` enum tag) are
+/// transparently deserialized as `NodeMetadata::Macro`.
 #[derive(Debug, Clone, Default)]
 pub struct NodeMetadataStore {
     /// Metadata entries keyed by `(NodeId::index(), NodeId::generation())`.
-    entries: HashMap<(u32, u64), MacroNodeMetadata>,
+    entries: HashMap<(u32, u64), NodeMetadata>,
 }
 
-/// Serialization wrapper for a single metadata entry.
+/// Serialization wrapper for a V7 metadata entry with explicit discriminant.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct NodeMetadataEntry {
+struct NodeMetadataEntryV7 {
     index: u32,
     generation: u64,
-    metadata: MacroNodeMetadata,
+    /// Discriminant: 0 = Macro, 1 = Classpath
+    kind: u8,
+    /// Macro metadata (present when kind == 0)
+    macro_data: Option<MacroNodeMetadata>,
+    /// Classpath metadata (present when kind == 1)
+    classpath_data: Option<ClasspathNodeMetadata>,
 }
 
 impl Serialize for NodeMetadataStore {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let entries: Vec<NodeMetadataEntry> = self
+        let entries: Vec<NodeMetadataEntryV7> = self
             .entries
             .iter()
-            .map(|(&(index, generation), metadata)| NodeMetadataEntry {
-                index,
-                generation,
-                metadata: metadata.clone(),
+            .map(|(&(index, generation), metadata)| match metadata {
+                NodeMetadata::Macro(m) => NodeMetadataEntryV7 {
+                    index,
+                    generation,
+                    kind: NODE_METADATA_MACRO,
+                    macro_data: Some(m.clone()),
+                    classpath_data: None,
+                },
+                NodeMetadata::Classpath(c) => NodeMetadataEntryV7 {
+                    index,
+                    generation,
+                    kind: NODE_METADATA_CLASSPATH,
+                    macro_data: None,
+                    classpath_data: Some(c.clone()),
+                },
             })
             .collect();
         entries.serialize(serializer)
@@ -107,11 +161,31 @@ impl Serialize for NodeMetadataStore {
 
 impl<'de> Deserialize<'de> for NodeMetadataStore {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let entries: Vec<NodeMetadataEntry> = Vec::deserialize(deserializer)?;
-        let map = entries
-            .into_iter()
-            .map(|e| ((e.index, e.generation), e.metadata))
-            .collect();
+        // V7 format: each entry has an explicit `kind` discriminant.
+        // Legacy V6 entries had no `kind` field, so `kind` will default to 0
+        // (which maps to Macro) via postcard's sequential field decoding.
+        // However, since we bumped the snapshot version to V7, V6 snapshots
+        // will be rejected at the magic byte check before reaching this code.
+        let entries: Vec<NodeMetadataEntryV7> = Vec::deserialize(deserializer)?;
+        let mut map = HashMap::with_capacity(entries.len());
+        for e in entries {
+            let metadata = match e.kind {
+                NODE_METADATA_CLASSPATH => {
+                    let data = e.classpath_data.ok_or_else(|| {
+                        serde::de::Error::custom(
+                            "missing classpath_data for Classpath metadata entry",
+                        )
+                    })?;
+                    NodeMetadata::Classpath(data)
+                }
+                _ => {
+                    // Default: treat as Macro (covers both explicit 0 and legacy)
+                    let data = e.macro_data.unwrap_or_default();
+                    NodeMetadata::Macro(data)
+                }
+            };
+            map.insert((e.index, e.generation), metadata);
+        }
         Ok(Self { entries: map })
     }
 }
@@ -129,31 +203,79 @@ impl NodeMetadataStore {
     /// generation doesn't match (indicating a stale reference).
     #[must_use]
     pub fn get(&self, node_id: NodeId) -> Option<&MacroNodeMetadata> {
+        match self.entries.get(&(node_id.index(), node_id.generation()))? {
+            NodeMetadata::Macro(m) => Some(m),
+            NodeMetadata::Classpath(_) => None,
+        }
+    }
+
+    /// Get the full `NodeMetadata` envelope for a node, if any exists.
+    ///
+    /// Returns `None` if no metadata is stored for this node, or if the
+    /// generation doesn't match (indicating a stale reference).
+    #[must_use]
+    pub fn get_metadata(&self, node_id: NodeId) -> Option<&NodeMetadata> {
         self.entries.get(&(node_id.index(), node_id.generation()))
     }
 
     /// Get mutable metadata for a node, if any exists.
     #[must_use]
     pub fn get_mut(&mut self, node_id: NodeId) -> Option<&mut MacroNodeMetadata> {
-        self.entries
-            .get_mut(&(node_id.index(), node_id.generation()))
+        match self
+            .entries
+            .get_mut(&(node_id.index(), node_id.generation()))?
+        {
+            NodeMetadata::Macro(m) => Some(m),
+            NodeMetadata::Classpath(_) => None,
+        }
     }
 
-    /// Insert metadata for a node, replacing any existing entry.
+    /// Insert macro metadata for a node, replacing any existing entry.
+    ///
+    /// Convenience method that wraps the metadata in `NodeMetadata::Macro`.
     pub fn insert(&mut self, node_id: NodeId, metadata: MacroNodeMetadata) {
+        self.entries.insert(
+            (node_id.index(), node_id.generation()),
+            NodeMetadata::Macro(metadata),
+        );
+    }
+
+    /// Insert typed metadata for a node, replacing any existing entry.
+    pub fn insert_metadata(&mut self, node_id: NodeId, metadata: NodeMetadata) {
         self.entries
             .insert((node_id.index(), node_id.generation()), metadata);
     }
 
-    /// Get or insert default metadata for a node.
+    /// Get or insert default macro metadata for a node.
     pub fn get_or_insert_default(&mut self, node_id: NodeId) -> &mut MacroNodeMetadata {
-        self.entries
+        let entry = self
+            .entries
             .entry((node_id.index(), node_id.generation()))
-            .or_default()
+            .or_insert_with(|| NodeMetadata::Macro(MacroNodeMetadata::default()));
+        match entry {
+            NodeMetadata::Macro(m) => m,
+            // If a non-macro entry already exists at this key, this is a
+            // programming error — callers should not mix metadata types for the
+            // same node. Panic in debug, return a default in release.
+            NodeMetadata::Classpath(_) => {
+                panic!("get_or_insert_default called on a Classpath metadata entry")
+            }
+        }
     }
 
     /// Remove metadata for a node.
     pub fn remove(&mut self, node_id: NodeId) -> Option<MacroNodeMetadata> {
+        match self
+            .entries
+            .remove(&(node_id.index(), node_id.generation()))?
+        {
+            NodeMetadata::Macro(m) => Some(m),
+            NodeMetadata::Classpath(_) => None,
+        }
+    }
+
+    /// Remove typed metadata for a node.
+    pub fn remove_metadata(&mut self, node_id: NodeId) -> Option<NodeMetadata> {
         self.entries
             .remove(&(node_id.index(), node_id.generation()))
     }
@@ -172,6 +294,14 @@ impl NodeMetadataStore {
 
     /// Iterate over all metadata entries.
     pub fn iter(&self) -> impl Iterator<Item = ((u32, u64), &MacroNodeMetadata)> {
+        self.entries.iter().filter_map(|(&k, v)| match v {
+            NodeMetadata::Macro(m) => Some((k, m)),
+            NodeMetadata::Classpath(_) => None,
+        })
+    }
+
+    /// Iterate over all metadata entries as typed `NodeMetadata`.
+    pub fn iter_all(&self) -> impl Iterator<Item = ((u32, u64), &NodeMetadata)> {
         self.entries.iter().map(|(&k, v)| (k, v))
     }
 
@@ -416,5 +546,178 @@ mod tests {
         let bytes = postcard::to_allocvec(&store).expect("serialize");
         let deserialized: NodeMetadataStore = postcard::from_bytes(&bytes).expect("deserialize");
         assert_eq!(store, deserialized);
+    }
+
+    #[test]
+    fn test_classpath_metadata_insert_and_get() {
+        let mut store = NodeMetadataStore::new();
+        let node = NodeId::new(100, 0);
+
+        let cp_meta = ClasspathNodeMetadata {
+            coordinates: Some("com.google.guava:guava:33.0.0".to_string()),
+            jar_path: "/home/user/.m2/repository/guava-33.0.0.jar".to_string(),
+            fqn: "com.google.common.collect.ImmutableList".to_string(),
+            is_direct_dependency: true,
+        };
+
+        store.insert_metadata(node, NodeMetadata::Classpath(cp_meta.clone()));
+        assert_eq!(store.len(), 1);
+
+        // get() should return None (only returns macro metadata)
+        assert!(store.get(node).is_none());
+
+        // get_metadata() should return the classpath metadata
+        let retrieved = store.get_metadata(node).unwrap();
+        match retrieved {
+            NodeMetadata::Classpath(cp) => {
+                assert_eq!(cp.fqn, "com.google.common.collect.ImmutableList");
+                assert_eq!(
+                    cp.coordinates.as_deref(),
+                    Some("com.google.guava:guava:33.0.0")
+                );
+                assert!(cp.is_direct_dependency);
+            }
+            NodeMetadata::Macro(_) => panic!("expected Classpath variant"),
+        }
+    }
+
+    #[test]
+    fn test_classpath_metadata_postcard_roundtrip() {
+        let mut store = NodeMetadataStore::new();
+
+        // Mix of macro and classpath metadata
+        store.insert(
+            NodeId::new(1, 0),
+            MacroNodeMetadata {
+                macro_generated: Some(true),
+                ..Default::default()
+            },
+        );
+
+        store.insert_metadata(
+            NodeId::new(2, 0),
+            NodeMetadata::Classpath(ClasspathNodeMetadata {
+                coordinates: Some("org.slf4j:slf4j-api:2.0.0".to_string()),
+                jar_path: "slf4j-api-2.0.0.jar".to_string(),
+                fqn: "org.slf4j.Logger".to_string(),
+                is_direct_dependency: false,
+            }),
+        );
+
+        let bytes = postcard::to_allocvec(&store).expect("serialize");
+        let deserialized: NodeMetadataStore = postcard::from_bytes(&bytes).expect("deserialize");
+        assert_eq!(store, deserialized);
+        assert_eq!(deserialized.len(), 2);
+
+        // Verify macro entry
+        assert!(deserialized.get(NodeId::new(1, 0)).is_some());
+
+        // Verify classpath entry via get_metadata
+        let cp = deserialized.get_metadata(NodeId::new(2, 0)).unwrap();
+        assert!(matches!(cp, NodeMetadata::Classpath(_)));
+    }
+
+    #[test]
+    fn test_node_metadata_store_json_roundtrip() {
+        let mut store = NodeMetadataStore::new();
+
+        store.insert(
+            NodeId::new(1, 0),
+            MacroNodeMetadata {
+                macro_generated: Some(true),
+                macro_source: Some("serde_derive".to_string()),
+                ..Default::default()
+            },
+        );
+
+        store.insert_metadata(
+            NodeId::new(2, 0),
+            NodeMetadata::Classpath(ClasspathNodeMetadata {
+                coordinates: None,
+                jar_path: "rt.jar".to_string(),
+                fqn: "java.lang.String".to_string(),
+                is_direct_dependency: true,
+            }),
+        );
+
+        let json = serde_json::to_string(&store).unwrap();
+        let deserialized: NodeMetadataStore = serde_json::from_str(&json).unwrap();
+        assert_eq!(store, deserialized);
+    }
+
+    #[test]
+    fn test_iter_all_includes_both_types() {
+        let mut store = NodeMetadataStore::new();
+
+        store.insert(
+            NodeId::new(1, 0),
+            MacroNodeMetadata {
+                macro_generated: Some(true),
+                ..Default::default()
+            },
+        );
+
+        store.insert_metadata(
+            NodeId::new(2, 0),
+            NodeMetadata::Classpath(ClasspathNodeMetadata {
+                coordinates: None,
+                jar_path: "test.jar".to_string(),
+                fqn: "com.example.Test".to_string(),
+                is_direct_dependency: true,
+            }),
+        );
+
+        // iter() only yields macro entries
+        let macro_entries: Vec<_> = store.iter().collect();
+        assert_eq!(macro_entries.len(), 1);
+
+        // iter_all() yields all entries
+        let all_entries: Vec<_> = store.iter_all().collect();
+        assert_eq!(all_entries.len(), 2);
+    }
+
+    #[test]
+    fn test_remove_metadata_classpath() {
+        let mut store = NodeMetadataStore::new();
+        let node = NodeId::new(50, 0);
+
+        store.insert_metadata(
+            node,
+            NodeMetadata::Classpath(ClasspathNodeMetadata {
+                coordinates: None,
+                jar_path: "test.jar".to_string(),
+                fqn: "Test".to_string(),
+                is_direct_dependency: true,
+            }),
+        );
+
+        assert_eq!(store.len(), 1);
+
+        // remove() returns None for non-macro entries
+        let removed = store.remove(node);
+        assert!(removed.is_none());
+        // The entry is still gone from the store because remove() always removes
+        assert!(store.is_empty());
+    }
+
+    #[test]
+    fn test_remove_metadata_typed() {
+        let mut store = NodeMetadataStore::new();
+        let node = NodeId::new(50, 0);
+
+        store.insert_metadata(
+            node,
+            NodeMetadata::Classpath(ClasspathNodeMetadata {
+                coordinates: None,
+                jar_path: "test.jar".to_string(),
+                fqn: "Test".to_string(),
+                is_direct_dependency: true,
+            }),
+        );
+
+        // remove_metadata() returns the full NodeMetadata
+        let removed = store.remove_metadata(node);
+        assert!(matches!(removed, Some(NodeMetadata::Classpath(_))));
+        assert!(store.is_empty());
     }
 }

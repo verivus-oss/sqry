@@ -268,6 +268,11 @@ pub struct SemanticSearchParams {
     #[schemars(range(min = 0, max = 20))]
     pub context_lines: i64,
 
+    /// Include classpath (external dependency) results.
+    /// Defaults to false — only workspace results are returned.
+    #[serde(default)]
+    pub include_classpath: bool,
+
     #[serde(default)]
     pub pagination: Option<PaginationParams>,
 }
@@ -1204,6 +1209,11 @@ pub struct PatternSearchParams {
     #[schemars(range(min = 1, max = 1000))]
     pub max_results: i64,
 
+    /// Include classpath (external dependency) results.
+    /// Defaults to false — only workspace results are returned.
+    #[serde(default)]
+    pub include_classpath: bool,
+
     #[serde(default)]
     pub pagination: Option<PaginationParams>,
 }
@@ -1835,6 +1845,7 @@ mod tests {
             pattern: "test".to_string(),
             path: ".".to_string(),
             max_results: 100,
+            include_classpath: false,
             pagination: None,
         };
         assert!(params.validate().is_ok());
@@ -1846,6 +1857,7 @@ mod tests {
             pattern: "".to_string(),
             path: ".".to_string(),
             max_results: 100,
+            include_classpath: false,
             pagination: None,
         };
         assert!(params.validate().is_err());
@@ -1857,6 +1869,7 @@ mod tests {
             pattern: "   ".to_string(),
             path: ".".to_string(),
             max_results: 100,
+            include_classpath: false,
             pagination: None,
         };
         assert!(params.validate().is_err());

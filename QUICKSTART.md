@@ -1,6 +1,6 @@
 # sqry Quick Start Guide - by Verivus
 
-**Version**: 6.0.23
+**Version**: 7.1.3
 **Rust**: 1.90+ (Edition 2024)
 
 ---
@@ -73,9 +73,35 @@ sqry index
 # Index a specific path
 sqry index /path/to/project
 
+# Include all high-cost plugins
+sqry index --include-high-cost
+
+# Force the fast path even if SQRY_INCLUDE_HIGH_COST=1 is set
+sqry index --exclude-high-cost
+
+# Opt into one plugin explicitly
+sqry index --enable-plugin json
+
 # Check index status
 sqry graph stats
 ```
+
+sqry now persists the active plugin ids in the unified graph manifest. That
+means later `query`, `watch`, `diff`, and graph-loader operations reuse the
+plugin semantics that built the index instead of silently drifting to whatever
+the current defaults happen to be.
+
+Currently, the default fast path excludes:
+- `json`
+- `servicenow-xml`
+
+The same plugin-selection flags also apply to `sqry update` and `sqry watch`.
+`--enable-language` and `--disable-language` remain accepted compatibility
+aliases for `--enable-plugin` and `--disable-plugin`.
+
+For very large C++ codebases, the graph builder now bounds pathological
+single-file builds so one oversized translation unit cannot stall the index run
+indefinitely.
 
 ---
 

@@ -455,16 +455,28 @@ fn remap_edge_kind_local_string_ids(kind: &mut EdgeKind, remap: &HashMap<StringI
             remap_option_local(metadata, remap);
         }
         // Variants without StringId fields — exhaustive, no wildcard.
-        EdgeKind::Defines => {}
-        EdgeKind::Contains => {}
-        EdgeKind::Calls { .. } => {}
-        EdgeKind::References => {}
-        EdgeKind::Inherits => {}
-        EdgeKind::Implements => {}
-        EdgeKind::LifetimeConstraint { .. } => {}
-        EdgeKind::MacroExpansion { .. } => {}
-        EdgeKind::FfiCall { .. } => {}
-        EdgeKind::WebAssemblyCall => {}
+        EdgeKind::Defines
+        | EdgeKind::Contains
+        | EdgeKind::Calls { .. }
+        | EdgeKind::References
+        | EdgeKind::Inherits
+        | EdgeKind::Implements
+        | EdgeKind::LifetimeConstraint { .. }
+        | EdgeKind::MacroExpansion { .. }
+        | EdgeKind::FfiCall { .. }
+        | EdgeKind::WebAssemblyCall
+        | EdgeKind::GenericBound
+        | EdgeKind::AnnotatedWith
+        | EdgeKind::AnnotationParam
+        | EdgeKind::LambdaCaptures
+        | EdgeKind::ModuleExports
+        | EdgeKind::ModuleRequires
+        | EdgeKind::ModuleOpens
+        | EdgeKind::ModuleProvides
+        | EdgeKind::TypeArgument
+        | EdgeKind::ExtensionReceiver
+        | EdgeKind::CompanionOf
+        | EdgeKind::SealedPermit => {}
     }
 }
 
@@ -661,16 +673,28 @@ pub fn remap_edge_kind_string_ids(kind: &mut EdgeKind, remap: &HashMap<StringId,
             remap_option_string_id(metadata, remap);
         }
         // === Variants WITHOUT StringId fields — exhaustive, no wildcard ===
-        EdgeKind::Defines => {}
-        EdgeKind::Contains => {}
-        EdgeKind::Calls { .. } => {}
-        EdgeKind::References => {}
-        EdgeKind::Inherits => {}
-        EdgeKind::Implements => {}
-        EdgeKind::LifetimeConstraint { .. } => {}
-        EdgeKind::MacroExpansion { .. } => {}
-        EdgeKind::FfiCall { .. } => {}
-        EdgeKind::WebAssemblyCall => {}
+        EdgeKind::Defines
+        | EdgeKind::Contains
+        | EdgeKind::Calls { .. }
+        | EdgeKind::References
+        | EdgeKind::Inherits
+        | EdgeKind::Implements
+        | EdgeKind::LifetimeConstraint { .. }
+        | EdgeKind::MacroExpansion { .. }
+        | EdgeKind::FfiCall { .. }
+        | EdgeKind::WebAssemblyCall
+        | EdgeKind::GenericBound
+        | EdgeKind::AnnotatedWith
+        | EdgeKind::AnnotationParam
+        | EdgeKind::LambdaCaptures
+        | EdgeKind::ModuleExports
+        | EdgeKind::ModuleRequires
+        | EdgeKind::ModuleOpens
+        | EdgeKind::ModuleProvides
+        | EdgeKind::TypeArgument
+        | EdgeKind::ExtensionReceiver
+        | EdgeKind::CompanionOf
+        | EdgeKind::SealedPermit => {}
     }
 }
 

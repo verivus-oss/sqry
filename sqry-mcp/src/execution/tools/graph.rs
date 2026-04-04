@@ -22,8 +22,6 @@ use sqry_core::graph::unified::node::kind::NodeKind;
 use sqry_core::graph::unified::{FileScope, ResolutionMode, SymbolCandidateOutcome, SymbolQuery};
 use url::Url;
 
-#[cfg(test)]
-use crate::engine::engine;
 use crate::engine::{canonicalize_in_workspace, engine_for_workspace, get_graph_identity};
 use crate::tools::{ExportGraphArgs, ShowDependenciesArgs, SubgraphArgs};
 use sqry_core::visualization::unified::{
@@ -1527,15 +1525,10 @@ mod tests {
 
     #[test]
     fn test_execute_get_dependencies_no_engine() {
-        // This test verifies the function handles missing engine gracefully
-        // In CI without a configured workspace, engine() will error
-        if engine().is_err() {
-            // Expected in test environments without workspace
-            return;
-        }
+        let missing_path = missing_workspace_path();
 
         let args = ShowDependenciesArgs {
-            path: ".".to_string(),
+            path: missing_path,
             file_path: Some("src/lib.rs".to_string()),
             symbol_name: None,
             max_depth: 2,
@@ -1547,21 +1540,15 @@ mod tests {
         };
 
         let result = execute_get_dependencies(&args);
-        // Should either succeed or fail gracefully (not panic)
-        assert!(
-            result.is_ok() || result.is_err(),
-            "Should return a Result, not panic"
-        );
+        assert!(result.is_err(), "missing workspace should fail gracefully");
     }
 
     #[test]
     fn test_execute_export_graph_no_engine() {
-        if engine().is_err() {
-            return;
-        }
+        let missing_path = missing_workspace_path();
 
         let args = ExportGraphArgs {
-            path: ".".to_string(),
+            path: missing_path,
             file_path: Some("src/lib.rs".to_string()),
             symbol_name: None,
             symbols: vec![],
@@ -1581,20 +1568,15 @@ mod tests {
         };
 
         let result = execute_export_graph(&args);
-        assert!(
-            result.is_ok() || result.is_err(),
-            "Should return a Result, not panic"
-        );
+        assert!(result.is_err(), "missing workspace should fail gracefully");
     }
 
     #[test]
     fn test_execute_subgraph_no_engine() {
-        if engine().is_err() {
-            return;
-        }
+        let missing_path = missing_workspace_path();
 
         let args = SubgraphArgs {
-            path: ".".to_string(),
+            path: missing_path,
             symbols: vec!["main".to_string()],
             max_depth: 2,
             max_nodes: 50,
@@ -1609,10 +1591,16 @@ mod tests {
         };
 
         let result = execute_subgraph(&args);
-        assert!(
-            result.is_ok() || result.is_err(),
-            "Should return a Result, not panic"
-        );
+        assert!(result.is_err(), "missing workspace should fail gracefully");
+    }
+
+    fn missing_workspace_path() -> String {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir should be created");
+        temp_dir
+            .path()
+            .join("missing-workspace")
+            .display()
+            .to_string()
     }
 
     // ============================================================================

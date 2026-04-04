@@ -6,6 +6,40 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+## [7.1.3](https://github.com/verivus-oss/sqry/compare/v7.1.2...v7.1.3) - 2026-04-04
+
+### Other
+- update Cargo.lock dependencies
+## [7.1.2](https://github.com/verivus-oss/sqry/compare/v7.1.1...v7.1.2) - 2026-04-04
+
+### Other
+- update Cargo.lock dependencies
+## [7.1.1](https://github.com/verivus-oss/sqry/compare/v7.1.0...v7.1.1) - 2026-04-04
+
+### Other
+- update Cargo.lock dependencies
+## [7.1.0](https://github.com/verivus-oss/sqry/compare/v6.0.23...v7.1.0) - 2026-04-04
+
+### Added
+- *(classpath)* add JVM classpath analysis (Track C Tier 1)
+### Documentation
+- *(rust)* add macro and proc-macro boundaries design spec
+### Fixed
+- *(lsp)* preserve plugin selection provenance on rebuild- *(release)* add VERSION stamps to all public directories for consistent release metadata- *(release)* harden public sanitization outputs
+### Other
+- sync versions and VERSION stamps to 6.0.18
+## [7.0.1](https://github.com/verivus-oss/sqry/compare/v7.0.0...v7.0.1) - 2026-04-03
+
+### Other
+- update Cargo.lock dependencies
+## [7.0.0](https://github.com/verivus-oss/sqry/compare/v6.0.24...v7.0.0) - 2026-04-03
+
+### Other
+- update Cargo.lock dependencies
+## [6.0.24](https://github.com/verivus-oss/sqry/compare/v6.0.23...v6.0.24) - 2026-04-03
+
+### Other
+- update Cargo.lock dependencies
 ## [6.0.23](https://github.com/verivus-oss/sqry/compare/v6.0.22...v6.0.23) - 2026-04-03
 
 ### Other

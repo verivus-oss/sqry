@@ -880,6 +880,19 @@ fn edge_kind_name(kind: &EdgeKind) -> &'static str {
         EdgeKind::LifetimeConstraint { .. } => "LifetimeConstraint",
         EdgeKind::TraitMethodBinding { .. } => "TraitMethodBinding",
         EdgeKind::MacroExpansion { .. } => "MacroExpansion",
+        // JVM Classpath (Track C)
+        EdgeKind::GenericBound => "GenericBound",
+        EdgeKind::AnnotatedWith => "AnnotatedWith",
+        EdgeKind::AnnotationParam => "AnnotationParam",
+        EdgeKind::LambdaCaptures => "LambdaCaptures",
+        EdgeKind::ModuleExports => "ModuleExports",
+        EdgeKind::ModuleRequires => "ModuleRequires",
+        EdgeKind::ModuleOpens => "ModuleOpens",
+        EdgeKind::ModuleProvides => "ModuleProvides",
+        EdgeKind::TypeArgument => "TypeArgument",
+        EdgeKind::ExtensionReceiver => "ExtensionReceiver",
+        EdgeKind::CompanionOf => "CompanionOf",
+        EdgeKind::SealedPermit => "SealedPermit",
     }
 }
 

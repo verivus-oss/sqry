@@ -21,7 +21,7 @@ use crate::engine::{canonicalize_in_workspace, engine_for_workspace};
 use crate::execution::graph_builders::build_graph_metadata;
 use crate::tools::ExplainCodeArgs;
 
-use crate::execution::symbol_utils::build_context;
+use crate::execution::symbol_utils::{build_context, get_classpath_provenance_for_node};
 use crate::execution::types::{ExplainCodeData, ExplainRelations, NodeRefData, ToolExecution};
 use crate::execution::utils::duration_to_ms;
 
@@ -168,11 +168,14 @@ fn explain_symbol_unified(
     // This would require extending the node metadata
     let documentation = None;
 
+    let provenance = get_classpath_provenance_for_node(snapshot, node_id);
+
     Ok(ExplainCodeData {
         symbol: node_ref,
         documentation,
         context,
         relations,
+        provenance,
     })
 }
 

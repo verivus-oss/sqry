@@ -15,7 +15,7 @@ export class SqryStatusBar implements vscode.Disposable {
   }
 
   public update(status: SqryIndexStatus | null): void {
-    if (!status || status.symbol_count === undefined) {
+    if (status?.symbol_count === undefined) {
       this.setState("noIndex");
       return;
     }
@@ -58,7 +58,7 @@ export class SqryStatusBar implements vscode.Disposable {
   }
 
   private classifyStatus(status: SqryIndexStatus): IndexState {
-    if (!status || status.symbol_count === undefined) {
+    if (status?.symbol_count === undefined) {
       return "noIndex";
     }
     if (status.building) {

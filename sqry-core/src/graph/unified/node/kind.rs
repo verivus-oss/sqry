@@ -126,6 +126,25 @@ pub enum NodeKind {
     /// A test function or test case.
     Test,
 
+    // ==================== JVM Classpath (Track C) ====================
+    /// Type parameter declaration (e.g., `T` in `class Foo<T>`).
+    TypeParameter,
+
+    /// Annotation type or usage (e.g., `@Override`, `@RequestMapping`).
+    Annotation,
+
+    /// Annotation element value (e.g., `value = "/api"` in `@RequestMapping`).
+    AnnotationValue,
+
+    /// Lambda or method reference target (e.g., `String::toUpperCase`).
+    LambdaTarget,
+
+    /// Java 9+ module declaration (from `module-info.java`).
+    JavaModule,
+
+    /// Enum constant (e.g., `MONDAY` in `enum DayOfWeek`).
+    EnumConstant,
+
     // ==================== Extensibility ====================
     /// A custom or language-specific node kind.
     ///
@@ -167,6 +186,7 @@ impl NodeKind {
                 | Self::Enum
                 | Self::StyleRule
                 | Self::StyleAtRule
+                | Self::JavaModule
         )
     }
 
@@ -215,6 +235,12 @@ impl NodeKind {
             Self::Resource => "resource",
             Self::Endpoint => "endpoint",
             Self::Test => "test",
+            Self::TypeParameter => "type_parameter",
+            Self::Annotation => "annotation",
+            Self::AnnotationValue => "annotation_value",
+            Self::LambdaTarget => "lambda_target",
+            Self::JavaModule => "java_module",
+            Self::EnumConstant => "enum_constant",
             Self::Other => "other",
         }
     }
@@ -252,6 +278,12 @@ impl NodeKind {
             "resource" => Some(Self::Resource),
             "endpoint" => Some(Self::Endpoint),
             "test" => Some(Self::Test),
+            "type_parameter" => Some(Self::TypeParameter),
+            "annotation" => Some(Self::Annotation),
+            "annotation_value" => Some(Self::AnnotationValue),
+            "lambda_target" => Some(Self::LambdaTarget),
+            "java_module" => Some(Self::JavaModule),
+            "enum_constant" => Some(Self::EnumConstant),
             "other" => Some(Self::Other),
             _ => None,
         }

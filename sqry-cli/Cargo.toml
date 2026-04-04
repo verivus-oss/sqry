@@ -18,13 +18,16 @@ default = []
 nl-classifier = ["sqry-nl/classifier"]
 # Enable anonymous usage snapshot sharing (enables sqry-core/share)
 share = ["sqry-core/share"]
+# Enable JVM classpath analysis (Track C)
+jvm-classpath = ["dep:sqry-classpath", "sqry-core/jvm-classpath"]
 
 [dependencies]
-sqry-core = { version = "6.0.23", path = "../sqry-core", features = ["uses", "insights", "troubleshoot"] }
-sqry-lang-rust = { version = "6.0.23", path = "../sqry-lang-rust" }
-sqry-lsp = { version = "6.0.23", path = "../sqry-lsp" }
-sqry-plugin-registry = { version = "6.0.23", path = "../sqry-plugin-registry" }
-sqry-nl = { version = "6.0.23", path = "../sqry-nl", default-features = false }
+sqry-core = { version = "7.1.3", path = "../sqry-core", features = ["uses", "insights", "troubleshoot"] }
+sqry-lang-rust = { version = "7.1.3", path = "../sqry-lang-rust" }
+sqry-lsp = { version = "7.1.3", path = "../sqry-lsp" }
+sqry-plugin-registry = { version = "7.1.3", path = "../sqry-plugin-registry" }
+sqry-nl = { version = "7.1.3", path = "../sqry-nl", default-features = false }
+sqry-classpath = { version = "7.1.3", path = "../sqry-classpath", optional = true }
 anyhow.workspace = true
 miette.workspace = true
 once_cell.workspace = true

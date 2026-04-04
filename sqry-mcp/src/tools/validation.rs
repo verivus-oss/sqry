@@ -32,6 +32,9 @@ pub struct SemanticSearchArgs {
     pub context_lines: usize,
     pub pagination: PaginationArgs,
     pub score_min: Option<f64>,
+    /// Whether to include classpath (external dependency) results.
+    /// Defaults to `false` — only workspace results are returned.
+    pub include_classpath: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -361,6 +364,11 @@ pub fn validate_semantic_search_args(args: &Value) -> Result<SemanticSearchArgs>
 
     let score_min = filters.min_score;
 
+    let include_classpath = args
+        .get("include_classpath")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
     Ok(SemanticSearchArgs {
         query: query.to_string(),
         path: path.to_string(),
@@ -374,6 +382,7 @@ pub fn validate_semantic_search_args(args: &Value) -> Result<SemanticSearchArgs>
             .map_err(|_| anyhow::anyhow!("context_lines out of range"))?,
         pagination,
         score_min,
+        include_classpath,
     })
 }
 
@@ -1703,6 +1712,9 @@ pub struct PatternSearchArgs {
     pub max_results: usize,
     /// Pagination
     pub pagination: PaginationArgs,
+    /// Whether to include classpath (external dependency) results.
+    /// Defaults to `false` — only workspace results are returned.
+    pub include_classpath: bool,
 }
 
 /// Arguments for `direct_callers` tool.

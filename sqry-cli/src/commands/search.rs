@@ -1,7 +1,7 @@
 //! Symbol search command implementation
 
 use crate::args::Cli;
-use crate::commands::graph::loader::{GraphLoadConfig, load_unified_graph};
+use crate::commands::graph::loader::{GraphLoadConfig, load_unified_graph_for_cli};
 use crate::index_discovery::find_nearest_index;
 use crate::output::{
     DisplaySymbol, FormatterMetadata, JsonSymbol, OutputStreams, create_formatter,
@@ -282,7 +282,7 @@ fn run_regular_search(cli: &Cli, pattern: &str, search_path: &str) -> Result<Vec
         .map_or(search_path_path, |loc| loc.index_root.as_path());
 
     let config = GraphLoadConfig::default();
-    let graph = load_unified_graph(index_root, &config)
+    let graph = load_unified_graph_for_cli(index_root, &config, cli)
         .context("Failed to load graph. Run 'sqry index' to build the graph.")?;
 
     // Build regex for pattern matching if regex mode
@@ -414,6 +414,12 @@ fn node_kind_to_string(kind: NodeKind) -> &'static str {
         NodeKind::StyleAtRule => "style_at_rule",
         NodeKind::StyleVariable => "style_variable",
         NodeKind::Lifetime => "lifetime",
+        NodeKind::TypeParameter => "type_parameter",
+        NodeKind::Annotation => "annotation",
+        NodeKind::AnnotationValue => "annotation_value",
+        NodeKind::LambdaTarget => "lambda_target",
+        NodeKind::JavaModule => "java_module",
+        NodeKind::EnumConstant => "enum_constant",
         NodeKind::Other => "other",
     }
 }
@@ -499,7 +505,7 @@ fn run_fuzzy_search(
     } = resolution;
 
     let config = GraphLoadConfig::default();
-    let graph = load_unified_graph(&index_root, &config)
+    let graph = load_unified_graph_for_cli(&index_root, &config, cli)
         .context("Failed to load graph. Run 'sqry index' to build the graph.")?;
 
     // Age of graph (approximate, since we don't have file metadata here easily, return 0 for now)

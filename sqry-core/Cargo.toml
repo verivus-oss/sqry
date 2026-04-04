@@ -24,6 +24,11 @@ dhat-heap = ["dep:dhat"]
 # Enable loom for formal concurrency verification (Steps 28-30)
 loom = ["dep:loom"]
 
+# Enable JVM classpath analysis (Track C)
+# When enabled, the build pipeline runs a classpath pre-pass that parses JVM
+# bytecode from dependency JARs and registers classpath nodes in the ExportMap.
+jvm-classpath = []
+
 # ============================================================================
 # Local Uses and Insights Features
 # ============================================================================

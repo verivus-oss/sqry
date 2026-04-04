@@ -857,7 +857,19 @@ impl StagingGraph {
             | EdgeKind::FfiCall { .. }
             | EdgeKind::WebAssemblyCall
             | EdgeKind::LifetimeConstraint { .. }
-            | EdgeKind::MacroExpansion { .. } => {
+            | EdgeKind::MacroExpansion { .. }
+            | EdgeKind::GenericBound
+            | EdgeKind::AnnotatedWith
+            | EdgeKind::AnnotationParam
+            | EdgeKind::LambdaCaptures
+            | EdgeKind::ModuleExports
+            | EdgeKind::ModuleRequires
+            | EdgeKind::ModuleOpens
+            | EdgeKind::ModuleProvides
+            | EdgeKind::TypeArgument
+            | EdgeKind::ExtensionReceiver
+            | EdgeKind::CompanionOf
+            | EdgeKind::SealedPermit => {
                 // No StringIds to remap
             }
         }

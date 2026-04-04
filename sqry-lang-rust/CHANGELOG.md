@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+## [7.1.0](https://github.com/verivus-oss/sqry/compare/v6.0.23...v7.1.0) - 2026-04-04
+
+### Added
+- *(rust)* implement macro boundary sub-analyzers and pipeline integration
+### Documentation
+- *(rust)* add macro and proc-macro boundaries design spec
+### Fixed
+- *(release)* add VERSION stamps to all public directories for consistent release metadata- *(rust)* resolve 12 clippy lints in macro_boundaries for sanitized tree- *(rust)* address Codex review - remove derive macros from attr registry, fix cfg eval format, add cache size guard
+### Other
+- sync versions and VERSION stamps to 6.0.18
+- *(rustfmt)* normalize code for Rust 1.90 toolchain## [6.0.24](https://github.com/verivus-oss/sqry/compare/v6.0.23...v6.0.24) - 2026-04-03
 ## [6.0.19](https://github.com/verivus-oss/sqry/compare/v6.0.18...v6.0.19) - 2026-04-03
 
 ### Other

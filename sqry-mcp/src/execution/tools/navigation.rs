@@ -10,7 +10,9 @@ use anyhow::{Result, anyhow};
 use sqry_core::graph::unified::{FileScope, ResolutionMode, SymbolCandidateOutcome, SymbolQuery};
 
 use crate::engine::engine_for_workspace;
-use crate::execution::symbol_utils::get_macro_metadata_for_node;
+use crate::execution::symbol_utils::{
+    get_classpath_provenance_for_node, get_macro_metadata_for_node,
+};
 use crate::execution::types::{
     DefinitionData, DocumentSymbolData, GetDefinitionData, GetDocumentSymbolsData,
     GetReferencesData, GetWorkspaceSymbolsData, HoverInfoData, ReferenceLocationData,
@@ -111,6 +113,7 @@ pub fn execute_get_definition(
             .map_or_else(|| "unknown".to_string(), |l| l.to_string());
 
         let macro_metadata = get_macro_metadata_for_node(&snapshot, node_id);
+        let provenance = get_classpath_provenance_for_node(&snapshot, node_id);
 
         definitions.push(DefinitionData {
             name,
@@ -122,6 +125,7 @@ pub fn execute_get_definition(
             language,
             preview: None, // Would need file content to provide preview
             macro_metadata,
+            provenance,
         });
     }
 
@@ -174,6 +178,27 @@ fn collect_declaration_refs(
                 })
                 .unwrap_or_default();
 
+            // Build provenance if this declaration is in an external (classpath) file
+            let provenance = if files.is_external(entry.file) {
+                use sqry_core::graph::unified::storage::NodeMetadata;
+                graph
+                    .macro_metadata()
+                    .get_metadata(*node_id)
+                    .and_then(|m| match m {
+                        NodeMetadata::Classpath(cp) => {
+                            Some(crate::execution::types::ProvenanceData {
+                                source: "classpath",
+                                coordinates: cp.coordinates.clone(),
+                                is_direct: cp.is_direct_dependency,
+                                jar_path: Some(cp.jar_path.clone()),
+                            })
+                        }
+                        NodeMetadata::Macro(_) => None,
+                    })
+            } else {
+                None
+            };
+
             let loc_key = (file_path.clone(), entry.start_line, entry.start_column);
             if !seen.contains(&loc_key) {
                 seen.insert(loc_key);
@@ -183,6 +208,7 @@ fn collect_declaration_refs(
                     column: entry.start_column,
                     preview: None,
                     is_declaration: true,
+                    provenance,
                 });
             }
         }
@@ -216,6 +242,29 @@ fn collect_caller_refs(
             // Edge spans contain the exact call-site position recorded by the graph
             // builder via `span_from_node(node)`, giving accurate line numbers even
             // when the source node's span is imprecise or missing.
+            // Build provenance for the source node if it's from a classpath file
+            let provenance = {
+                use sqry_core::graph::unified::storage::NodeMetadata;
+                if files.is_external(edge_ref.file) {
+                    graph
+                        .macro_metadata()
+                        .get_metadata(edge_ref.source)
+                        .and_then(|m| match m {
+                            NodeMetadata::Classpath(cp) => {
+                                Some(crate::execution::types::ProvenanceData {
+                                    source: "classpath",
+                                    coordinates: cp.coordinates.clone(),
+                                    is_direct: cp.is_direct_dependency,
+                                    jar_path: Some(cp.jar_path.clone()),
+                                })
+                            }
+                            NodeMetadata::Macro(_) => None,
+                        })
+                } else {
+                    None
+                }
+            };
+
             if !edge_ref.spans.is_empty() {
                 // Resolve file path from the edge's FileId (preferred), falling back
                 // to the source node's file if edge file resolution fails.
@@ -261,6 +310,7 @@ fn collect_caller_refs(
                             column,
                             preview: None,
                             is_declaration: false,
+                            provenance: provenance.clone(),
                         });
                     }
                 }
@@ -286,6 +336,7 @@ fn collect_caller_refs(
                             column: entry.start_column,
                             preview: None,
                             is_declaration: false,
+                            provenance: provenance.clone(),
                         });
                     }
                 }
@@ -413,6 +464,8 @@ pub fn execute_get_hover_info(args: &GetHoverInfoArgs) -> Result<ToolExecution<H
         .and_then(|id| strings.resolve(id))
         .map(|s| s.to_string());
 
+    let provenance = get_classpath_provenance_for_node(&snapshot, node_id);
+
     let data = HoverInfoData {
         name,
         qualified_name,
@@ -422,6 +475,7 @@ pub fn execute_get_hover_info(args: &GetHoverInfoArgs) -> Result<ToolExecution<H
         language,
         signature,
         documentation,
+        provenance,
     };
 
     Ok(ToolExecution {

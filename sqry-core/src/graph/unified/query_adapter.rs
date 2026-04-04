@@ -314,7 +314,13 @@ fn node_kind_to_scope_type(kind: UnifiedNodeKind) -> String {
         | UnifiedNodeKind::Lifetime
         | UnifiedNodeKind::StyleRule
         | UnifiedNodeKind::StyleAtRule
-        | UnifiedNodeKind::StyleVariable => kind.as_str().to_lowercase(),
+        | UnifiedNodeKind::StyleVariable
+        | UnifiedNodeKind::TypeParameter
+        | UnifiedNodeKind::Annotation
+        | UnifiedNodeKind::AnnotationValue
+        | UnifiedNodeKind::LambdaTarget
+        | UnifiedNodeKind::JavaModule
+        | UnifiedNodeKind::EnumConstant => kind.as_str().to_lowercase(),
     }
 }
 

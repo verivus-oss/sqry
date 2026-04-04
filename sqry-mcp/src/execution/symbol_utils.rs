@@ -71,6 +71,70 @@ pub(crate) fn get_macro_metadata_for_node(
         .and_then(macro_metadata_to_response)
 }
 
+/// Look up classpath provenance for a node from the snapshot metadata store.
+///
+/// Returns `Some(ProvenanceData)` if the node has `ClasspathNodeMetadata`,
+/// `None` otherwise (workspace nodes, or nodes without metadata).
+///
+/// Uses two strategies for robustness:
+/// 1. Direct metadata lookup on the node itself.
+/// 2. Fallback: if no metadata is found but the node's file path contains `!`
+///    (the JAR entry convention `{jar}!/{class}.class`), treat it as an
+///    external classpath node.
+pub(crate) fn get_classpath_provenance_for_node(
+    snapshot: &GraphSnapshot,
+    node_id: NodeId,
+) -> Option<super::types::ProvenanceData> {
+    use sqry_core::graph::unified::storage::NodeMetadata;
+
+    // Strategy 1: Direct metadata lookup.
+    if let Some(metadata) = snapshot.macro_metadata().get_metadata(node_id) {
+        return match metadata {
+            NodeMetadata::Classpath(cp) => Some(super::types::ProvenanceData {
+                source: "classpath",
+                coordinates: cp.coordinates.clone(),
+                is_direct: cp.is_direct_dependency,
+                jar_path: Some(cp.jar_path.clone()),
+            }),
+            NodeMetadata::Macro(_) => None,
+        };
+    }
+
+    // Strategy 2: Fallback — check if the file path uses the JAR convention.
+    // This handles nodes that may not have metadata attached (e.g., from
+    // older index snapshots or edge cases).
+    if is_node_external(snapshot, node_id) {
+        let entry = snapshot.get_node(node_id)?;
+        let file_path = snapshot
+            .files()
+            .resolve(entry.file)
+            .map(|p| p.as_ref().to_string_lossy().to_string())?;
+
+        // JAR entry paths use the convention: `{jar_path}!/{class_path}.class`
+        if let Some(bang_pos) = file_path.find('!') {
+            let jar_path = &file_path[..bang_pos];
+            return Some(super::types::ProvenanceData {
+                source: "classpath",
+                coordinates: None,
+                is_direct: false,
+                jar_path: Some(jar_path.to_string()),
+            });
+        }
+    }
+
+    None
+}
+
+/// Check whether a node is from an external (classpath) file.
+///
+/// Uses the file registry's `is_external` flag. Returns `false` if the
+/// node entry cannot be resolved.
+pub(crate) fn is_node_external(snapshot: &GraphSnapshot, node_id: NodeId) -> bool {
+    snapshot
+        .get_node(node_id)
+        .is_some_and(|entry| snapshot.files().is_external(entry.file))
+}
+
 /// Convert a relative file path to a forward-slash string for JSON output.
 ///
 /// On Windows, `Path::display()` and `to_string_lossy()` produce backslashes.
@@ -287,6 +351,7 @@ fn build_search_hit_from_node(
         .map(|s| s.to_string());
 
     let macro_metadata = get_macro_metadata_for_node(snapshot, node_id);
+    let provenance = get_classpath_provenance_for_node(snapshot, node_id);
 
     Ok(SearchHit {
         name: reference.name.clone(),
@@ -301,6 +366,7 @@ fn build_search_hit_from_node(
         signature,
         relations: None,
         macro_metadata,
+        provenance,
     })
 }
 
@@ -414,6 +480,12 @@ fn node_kind_to_string(kind: NodeKind) -> &'static str {
         NodeKind::StyleAtRule => "style_at_rule",
         NodeKind::StyleVariable => "style_variable",
         NodeKind::Lifetime => "lifetime",
+        NodeKind::TypeParameter => "type_parameter",
+        NodeKind::Annotation => "annotation",
+        NodeKind::AnnotationValue => "annotation_value",
+        NodeKind::LambdaTarget => "lambda_target",
+        NodeKind::JavaModule => "java_module",
+        NodeKind::EnumConstant => "enum_constant",
         NodeKind::Other => "other",
     }
 }

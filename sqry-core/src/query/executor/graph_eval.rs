@@ -1212,6 +1212,12 @@ fn node_kind_to_scope_type(kind: NodeKind) -> &'static str {
         NodeKind::StyleAtRule => "style_at_rule",
         NodeKind::StyleVariable => "style_variable",
         NodeKind::Lifetime => "lifetime",
+        NodeKind::TypeParameter => "type_parameter",
+        NodeKind::Annotation => "annotation",
+        NodeKind::AnnotationValue => "annotation_value",
+        NodeKind::LambdaTarget => "lambda_target",
+        NodeKind::JavaModule => "java_module",
+        NodeKind::EnumConstant => "enum_constant",
         NodeKind::Other => "other",
     }
 }

@@ -65,6 +65,9 @@ pub const PERFORMANCE_TUNING: &str = "Performance Tuning";
 /// Advanced configuration (cache dirs, etc.)
 pub const ADVANCED_CONFIGURATION: &str = "Advanced Configuration";
 
+/// Plugin selection and cost-tier controls.
+pub const PLUGIN_SELECTION: &str = "Plugin Selection";
+
 /// Query input specification
 pub const QUERY_INPUT: &str = "Query Input";
 

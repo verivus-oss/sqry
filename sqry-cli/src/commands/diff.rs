@@ -4,13 +4,13 @@
 
 use crate::args::Cli;
 use crate::output::{CsvColumn, OutputStreams, parse_columns, resolve_theme};
+use crate::plugin_defaults::{self, PluginSelectionMode};
 use anyhow::{Context, Result, bail};
 use colored::Colorize;
 use serde::Serialize;
 use sqry_core::git::WorktreeManager;
 use sqry_core::graph::diff::{DiffSummary, GraphComparator, NodeChange, NodeLocation};
 use sqry_core::graph::unified::build::{BuildConfig, build_unified_graph};
-use sqry_plugin_registry::create_plugin_manager;
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::PathBuf;
@@ -106,17 +106,27 @@ pub fn run_diff(
     );
 
     // 3. Build graphs for both refs
-    let plugins = create_plugin_manager();
+    let resolved_plugins =
+        plugin_defaults::resolve_plugin_selection(cli, &root, PluginSelectionMode::Diff)?;
     let config = BuildConfig::default();
 
     let base_graph = Arc::new(
-        build_unified_graph(worktree_mgr.base_path(), &plugins, &config)
-            .context(format!("Failed to build graph for base ref '{base_ref}'"))?,
+        build_unified_graph(
+            worktree_mgr.base_path(),
+            &resolved_plugins.plugin_manager,
+            &config,
+        )
+        .context(format!("Failed to build graph for base ref '{base_ref}'"))?,
     );
     log::debug!("Built base graph: ref={base_ref}");
 
     let target_graph = Arc::new(
-        build_unified_graph(worktree_mgr.target_path(), &plugins, &config).context(format!(
+        build_unified_graph(
+            worktree_mgr.target_path(),
+            &resolved_plugins.plugin_manager,
+            &config,
+        )
+        .context(format!(
             "Failed to build graph for target ref '{target_ref}'"
         ))?,
     );

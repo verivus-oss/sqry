@@ -16,7 +16,7 @@ export class SqryCodeActionProvider implements vscode.CodeActionProvider {
       switch (diagnostic.code) {
         case "sqry:unused": {
           // Extract symbol name from message: "'symbolName' appears to be unused"
-          const match = diagnostic.message.match(/^'(.+)' appears to be unused$/);
+          const match = /^'(.+)' appears to be unused$/.exec(diagnostic.message);
           if (match) {
             const action = new vscode.CodeAction(
               `Show callers of '${match[1]}' in sqry`,
@@ -38,7 +38,7 @@ export class SqryCodeActionProvider implements vscode.CodeActionProvider {
             vscode.CodeActionKind.QuickFix,
           );
           // Extract cycle members from message
-          const cycleMatch = diagnostic.message.match(/circular dependency: (.+)$/);
+          const cycleMatch = /circular dependency: (.+)$/.exec(diagnostic.message);
           if (cycleMatch) {
             action.command = {
               command: "sqry.runQueryInternal",

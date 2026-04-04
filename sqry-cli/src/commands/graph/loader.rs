@@ -4,12 +4,13 @@
 //! by invoking the core `build_unified_graph` entrypoint with the shared plugin
 //! registry.
 
+use crate::args::Cli;
+use crate::plugin_defaults::{self, PluginSelectionMode};
 use anyhow::{Context, Result, bail};
 use sqry_core::graph::CodeGraph;
 use sqry_core::graph::unified::build::{BuildConfig, build_unified_graph_with_progress};
 use sqry_core::graph::unified::persistence::{GraphStorage, load_from_path};
 use sqry_core::progress::{SharedReporter, no_op_reporter};
-use sqry_plugin_registry::create_plugin_manager;
 use std::path::Path;
 
 /// Loader configuration derived from CLI flags.
@@ -52,8 +53,35 @@ pub struct GraphLoadConfig {
 /// let graph = load_unified_graph(Path::new("."), &config)?;
 /// # Ok::<(), anyhow::Error>(())
 /// ```
+#[allow(dead_code)]
 pub fn load_unified_graph(root: &Path, config: &GraphLoadConfig) -> Result<CodeGraph> {
-    load_unified_graph_with_progress(root, config, no_op_reporter())
+    load_unified_graph_with_progress_and_plugins(
+        root,
+        config,
+        &sqry_plugin_registry::create_plugin_manager_all(),
+        no_op_reporter(),
+    )
+}
+
+/// CLI-aware graph loader that enforces manifest-backed plugin semantics.
+///
+/// # Errors
+///
+/// Returns an error if the workspace path is invalid, manifest-selected plugins
+/// cannot load the persisted snapshot, or the fallback source build fails.
+pub fn load_unified_graph_for_cli(
+    root: &Path,
+    config: &GraphLoadConfig,
+    cli: &Cli,
+) -> Result<CodeGraph> {
+    let resolved_plugins =
+        plugin_defaults::resolve_plugin_selection(cli, root, PluginSelectionMode::ReadOnly)?;
+    load_unified_graph_with_progress_and_plugins(
+        root,
+        config,
+        &resolved_plugins.plugin_manager,
+        no_op_reporter(),
+    )
 }
 
 /// Load a unified code graph with progress reporting.
@@ -71,17 +99,29 @@ pub fn load_unified_graph(root: &Path, config: &GraphLoadConfig) -> Result<CodeG
 ///
 /// # Errors
 /// Returns an error if the path is missing, the snapshot is invalid, or the graph build fails.
+#[allow(dead_code)]
 pub fn load_unified_graph_with_progress(
     root: &Path,
     config: &GraphLoadConfig,
     progress: SharedReporter,
 ) -> Result<CodeGraph> {
+    load_unified_graph_with_progress_and_plugins(
+        root,
+        config,
+        &sqry_plugin_registry::create_plugin_manager_all(),
+        progress,
+    )
+}
+
+fn load_unified_graph_with_progress_and_plugins(
+    root: &Path,
+    config: &GraphLoadConfig,
+    plugins: &sqry_core::plugin::PluginManager,
+    progress: SharedReporter,
+) -> Result<CodeGraph> {
     if !root.exists() {
         bail!("Path {} does not exist", root.display());
     }
-
-    // Create plugin manager for both loading and building
-    let plugins = create_plugin_manager();
 
     // Try to load from persisted snapshot first (unless force_build is set)
     if config.force_build {
@@ -93,7 +133,7 @@ pub fn load_unified_graph_with_progress(
                 "Loading unified graph from snapshot: {}",
                 storage.snapshot_path().display()
             );
-            match load_from_path(storage.snapshot_path(), Some(&plugins)) {
+            match load_from_path(storage.snapshot_path(), Some(plugins)) {
                 Ok(mut graph) => {
                     log::info!("Loaded graph from snapshot");
 
@@ -139,7 +179,7 @@ pub fn load_unified_graph_with_progress(
         ..BuildConfig::default()
     };
 
-    let graph = build_unified_graph_with_progress(root, &plugins, &build_config, progress)
+    let graph = build_unified_graph_with_progress(root, plugins, &build_config, progress)
         .context("Failed to build unified graph")?;
 
     log::info!("Built unified graph with {} nodes", graph.node_count());

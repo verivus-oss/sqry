@@ -5,7 +5,7 @@
 //! execution and multiple output formats.
 
 use crate::args::{BatchFormat, Cli};
-use crate::commands::query::create_executor_with_plugins;
+use crate::commands::query::create_executor_with_plugins_for_cli;
 use crate::output::{DisplaySymbol, JsonSymbol};
 use anyhow::{Context, Result, bail};
 use rayon::prelude::*;
@@ -46,7 +46,7 @@ pub fn run_batch(
     }
 
     let load_start = Instant::now();
-    let executor = create_executor_with_plugins();
+    let executor = create_executor_with_plugins_for_cli(cli, &workspace)?;
     let preload_elapsed = load_start.elapsed();
 
     let should_capture_results =

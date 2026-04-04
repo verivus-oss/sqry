@@ -5,6 +5,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use ignore::WalkBuilder;
@@ -21,8 +22,10 @@ use crate::graph::unified::build::parallel_commit::{
 use crate::graph::unified::build::pass3_intra::PendingEdge;
 use crate::graph::unified::build::progress::GraphBuildProgressTracker;
 use crate::graph::unified::concurrent::CodeGraph;
+use crate::io::FileReader;
 use crate::plugin::PluginManager;
 use crate::plugin::error::ParseError;
+use crate::plugin::{SafeParser, SafeParserConfig};
 use crate::progress::{SharedReporter, no_op_reporter};
 use crate::project::path_utils::normalize_path_components;
 
@@ -58,6 +61,9 @@ pub struct BuildResult {
     /// Reflects the effective thread count from the rayon pool, not the
     /// CLI-requested value. Useful for build diagnostics.
     pub thread_count: usize,
+
+    /// Deterministic ordered built-in plugin ids active during the build.
+    pub active_plugin_ids: Vec<String>,
 
     /// Reachability strategy used by each persisted analysis kind.
     pub analysis_strategies: Vec<AnalysisStrategySummary>,
@@ -347,7 +353,8 @@ fn build_unified_graph_inner(
         total_files,
     );
 
-    let (mut succeeded, mut parse_errors, mut skipped) = (0usize, 0usize, 0usize);
+    let (mut succeeded, mut parse_errors, mut skipped, mut timed_out) =
+        (0usize, 0usize, 0usize, 0usize);
     let mut total_staging_bytes = 0usize;
     let mut peak_chunk_staging_bytes = 0usize;
     let mut max_file_staging_bytes = 0usize;
@@ -367,7 +374,7 @@ fn build_unified_graph_inner(
         let chunk_files = &files[chunk_range];
 
         // Phase 1: Parallel parse this chunk
-        let staged_results: Vec<(PathBuf, Result<Option<ParsedFile>>)> = pool.install(|| {
+        let staged_results: Vec<(PathBuf, Result<ParsedFileOutcome>)> = pool.install(|| {
             chunk_files
                 .par_iter()
                 .map(|path| {
@@ -383,7 +390,7 @@ fn build_unified_graph_inner(
         let mut chunk_staging_bytes = 0usize;
         for (path, result) in staged_results {
             match result {
-                Ok(Some(parsed)) => {
+                Ok(ParsedFileOutcome::Parsed(parsed)) => {
                     let file_bytes = parsed.staging.estimated_byte_size();
                     total_staging_bytes += file_bytes;
                     chunk_staging_bytes += file_bytes;
@@ -392,7 +399,20 @@ fn build_unified_graph_inner(
                     }
                     chunk_parsed.push((path, parsed));
                 }
-                Ok(None) => skipped += 1,
+                Ok(ParsedFileOutcome::Skipped) => skipped += 1,
+                Ok(ParsedFileOutcome::TimedOut {
+                    file,
+                    phase,
+                    timeout_ms,
+                }) => {
+                    timed_out += 1;
+                    log::warn!(
+                        "Timed out building graph for {} during {} after {} ms",
+                        file.display(),
+                        phase,
+                        timeout_ms,
+                    );
+                }
                 Err(e) => {
                     parse_errors += 1;
                     log::warn!("Failed to parse {}: {e}", path.display());
@@ -516,14 +536,14 @@ fn build_unified_graph_inner(
 
     log::info!(
         "Parallel indexing complete: {succeeded} committed, {skipped} skipped, \
-         {parse_errors} parse errors, \
+         {timed_out} timed out, {parse_errors} parse errors, \
          ~{} MB total staged, ~{} MB peak chunk (max single file: ~{} KB)",
         total_staging_bytes / (1024 * 1024),
         peak_chunk_staging_bytes / (1024 * 1024),
         max_file_staging_bytes / 1024,
     );
 
-    let attempted = succeeded + parse_errors;
+    let attempted = succeeded + parse_errors + timed_out;
 
     if attempted == 0 {
         log::warn!(
@@ -568,7 +588,34 @@ pub fn build_and_persist_graph(
     config: &BuildConfig,
     build_command: &str,
 ) -> Result<(CodeGraph, BuildResult)> {
-    build_and_persist_graph_with_progress(root, plugins, config, build_command, no_op_reporter())
+    build_and_persist_graph_with_progress(
+        root,
+        plugins,
+        config,
+        build_command,
+        inferred_plugin_selection_manifest(plugins),
+        no_op_reporter(),
+    )
+}
+
+fn inferred_plugin_selection_manifest(
+    plugins: &PluginManager,
+) -> Option<crate::graph::unified::persistence::PluginSelectionManifest> {
+    let active_plugin_ids = plugins
+        .plugins()
+        .iter()
+        .map(|plugin| plugin.metadata().id.to_string())
+        .collect::<Vec<_>>();
+    if active_plugin_ids.is_empty() {
+        return None;
+    }
+
+    Some(
+        crate::graph::unified::persistence::PluginSelectionManifest {
+            active_plugin_ids,
+            high_cost_mode: None,
+        },
+    )
 }
 
 /// Build unified graph with progress, persist snapshot + manifest, and run analysis.
@@ -600,6 +647,7 @@ pub fn build_and_persist_graph_with_progress(
     plugins: &PluginManager,
     config: &BuildConfig,
     build_command: &str,
+    plugin_selection: Option<crate::graph::unified::persistence::PluginSelectionManifest>,
     progress: SharedReporter,
 ) -> Result<(CodeGraph, BuildResult)> {
     use crate::graph::unified::analysis::csr::CsrAdjacency;
@@ -807,6 +855,7 @@ pub fn build_and_persist_graph_with_progress(
         config: std::collections::HashMap::default(),
         confidence: graph.confidence().clone(),
         last_indexed_commit: get_git_head_commit(root),
+        plugin_selection: plugin_selection.clone(),
     };
 
     // Step 9: Serialize manifest to bytes and compute hash
@@ -873,6 +922,8 @@ pub fn build_and_persist_graph_with_progress(
         built_at,
         root_path: root.to_string_lossy().to_string(),
         thread_count: effective_threads,
+        active_plugin_ids: plugin_selection
+            .map_or_else(Vec::new, |selection| selection.active_plugin_ids),
         analysis_strategies,
     };
 
@@ -880,7 +931,8 @@ pub fn build_and_persist_graph_with_progress(
 }
 
 /// Get the current HEAD commit SHA from a git repository.
-fn get_git_head_commit(path: &Path) -> Option<String> {
+#[must_use]
+pub fn get_git_head_commit(path: &Path) -> Option<String> {
     let output = std::process::Command::new("git")
         .arg("-C")
         .arg(path)
@@ -959,6 +1011,7 @@ fn file_sort_key(root: &Path, path: &Path) -> String {
 }
 
 /// Result of successfully parsing a single file (parallel-safe, no shared state).
+#[derive(Debug)]
 struct ParsedFile {
     /// Language identifier for file counting and confidence merging.
     language: crate::graph::Language,
@@ -966,36 +1019,75 @@ struct ParsedFile {
     staging: StagingGraph,
 }
 
+#[derive(Debug)]
+enum ParsedFileOutcome {
+    Parsed(ParsedFile),
+    Skipped,
+    TimedOut {
+        file: PathBuf,
+        phase: &'static str,
+        timeout_ms: u64,
+    },
+}
+
 /// Parse a single file into a `StagingGraph` without touching the shared graph.
 ///
 /// This function is safe to call from multiple threads — it creates its own
 /// parser, reads the file, and builds a self-contained staging graph.
 ///
-/// Returns `Ok(None)` if the file has no matching plugin or graph builder.
-fn parse_file(path: &Path, plugins: &PluginManager) -> Result<Option<ParsedFile>> {
+/// Returns [`ParsedFileOutcome::Skipped`] if the file has no matching plugin or graph builder.
+fn parse_file(path: &Path, plugins: &PluginManager) -> Result<ParsedFileOutcome> {
     let plugin = plugins.plugin_for_path(path);
     let Some(plugin) = plugin else {
-        return Ok(None);
+        return Ok(ParsedFileOutcome::Skipped);
     };
 
     let Some(builder) = plugin.graph_builder() else {
-        return Ok(None);
+        return Ok(ParsedFileOutcome::Skipped);
     };
 
-    let content = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let reader =
+        FileReader::open(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let content = reader.as_slice();
 
-    let tree = plugin
-        .parse_ast(&content)
+    let safe_parser = SafeParser::new(SafeParserConfig::new().with_max_input_size(
+        usize::try_from(crate::config::buffers::max_source_file_size()).unwrap_or(usize::MAX),
+    ));
+    let parse_start = Instant::now();
+    let tree = safe_parser
+        .parse_file(&plugin.language(), content, path)
         .map_err(|err| map_parse_error(path, err))?;
+    let parse_duration = parse_start.elapsed();
+    if parse_duration >= Duration::from_secs(2) {
+        log::warn!("Slow parse ({parse_duration:.2?}): {}", path.display());
+    }
 
     let mut staging = StagingGraph::new();
-    builder
-        .build_graph(&tree, &content, path, &mut staging)
-        .map_err(|err| map_builder_error(path, &err))?;
+    let build_start = Instant::now();
+    match builder.build_graph(&tree, content, path, &mut staging) {
+        Ok(()) => {}
+        Err(GraphBuilderError::BuildTimedOut {
+            phase, timeout_ms, ..
+        }) => {
+            return Ok(ParsedFileOutcome::TimedOut {
+                file: path.to_path_buf(),
+                phase,
+                timeout_ms,
+            });
+        }
+        Err(err) => return Err(map_builder_error(path, &err)),
+    }
+    let build_duration = build_start.elapsed();
+    if build_duration >= Duration::from_secs(2) {
+        log::warn!(
+            "Slow graph build ({build_duration:.2?}): {}",
+            path.display()
+        );
+    }
 
-    staging.attach_body_hashes(&content);
+    staging.attach_body_hashes(content);
 
-    Ok(Some(ParsedFile {
+    Ok(ParsedFileOutcome::Parsed(ParsedFile {
         language: builder.language(),
         staging,
     }))
@@ -1011,6 +1103,20 @@ fn map_parse_error(path: &Path, err: ParseError) -> anyhow::Error {
             path.display(),
             reason
         ),
+        ParseError::InputTooLarge { size, max, .. } => anyhow::anyhow!(
+            "input too large for {}: {} bytes exceeds {} byte parser limit",
+            path.display(),
+            size,
+            max
+        ),
+        ParseError::ParseTimedOut { timeout_micros, .. } => anyhow::anyhow!(
+            "parse timed out for {} after {} ms",
+            path.display(),
+            timeout_micros / 1000
+        ),
+        ParseError::ParseCancelled { reason, .. } => {
+            anyhow::anyhow!("parse cancelled for {}: {}", path.display(), reason)
+        }
         _ => anyhow::anyhow!("parse error in {}: {:?}", path.display(), err),
     }
 }
@@ -1065,6 +1171,20 @@ mod tests {
                 file_id,
                 edge.spans.clone(),
             );
+        }
+    }
+
+    fn expect_parsed_file(outcome: ParsedFileOutcome) -> ParsedFile {
+        match outcome {
+            ParsedFileOutcome::Parsed(parsed) => parsed,
+            ParsedFileOutcome::Skipped => panic!("expected parsed file, got skipped outcome"),
+            ParsedFileOutcome::TimedOut { file, phase, .. } => {
+                panic!(
+                    "expected parsed file, got timeout outcome for {} during {}",
+                    file.display(),
+                    phase,
+                )
+            }
         }
     }
 
@@ -1175,6 +1295,64 @@ mod tests {
         }
     }
 
+    struct TimeoutGraphBuilder;
+
+    impl GraphBuilder for TimeoutGraphBuilder {
+        fn build_graph(
+            &self,
+            _tree: &Tree,
+            _content: &[u8],
+            file: &Path,
+            _staging: &mut StagingGraph,
+        ) -> GraphResult<()> {
+            Err(GraphBuilderError::BuildTimedOut {
+                file: file.to_path_buf(),
+                phase: "test-timeout",
+                timeout_ms: 42,
+            })
+        }
+
+        fn language(&self) -> Language {
+            Language::Rust
+        }
+    }
+
+    struct SelectiveTimeoutGraphBuilder;
+
+    impl GraphBuilder for SelectiveTimeoutGraphBuilder {
+        fn build_graph(
+            &self,
+            _tree: &Tree,
+            _content: &[u8],
+            file: &Path,
+            staging: &mut StagingGraph,
+        ) -> GraphResult<()> {
+            use crate::graph::unified::build::helper::GraphBuildHelper;
+
+            let mut helper = GraphBuildHelper::new(staging, file, Language::Rust);
+            let file_name = file
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default();
+
+            if file_name == "timeout.rs" {
+                helper.add_function("timeout_partial", None, false, false);
+                return Err(GraphBuilderError::BuildTimedOut {
+                    file: file.to_path_buf(),
+                    phase: "test-timeout",
+                    timeout_ms: 42,
+                });
+            }
+
+            helper.add_function("survivor_fn", None, false, false);
+            Ok(())
+        }
+
+        fn language(&self) -> Language {
+            Language::Rust
+        }
+    }
+
     #[test]
     fn test_build_config_default() {
         let config = BuildConfig::default();
@@ -1250,9 +1428,7 @@ mod tests {
         )));
         let mut graph = CodeGraph::new();
 
-        let parsed = parse_file(&file_path, &plugins)
-            .expect("parse file")
-            .expect("should not be skipped");
+        let parsed = expect_parsed_file(parse_file(&file_path, &plugins).expect("parse file"));
         commit_parsed_file_for_test(&file_path, parsed, &mut graph);
     }
 
@@ -1270,9 +1446,7 @@ mod tests {
         )));
         let mut graph = CodeGraph::new();
 
-        let parsed = parse_file(&file_path, &plugins)
-            .expect("parse file")
-            .expect("should not be skipped");
+        let parsed = expect_parsed_file(parse_file(&file_path, &plugins).expect("parse file"));
         commit_parsed_file_for_test(&file_path, parsed, &mut graph);
     }
 
@@ -1290,10 +1464,88 @@ mod tests {
         )));
         let mut graph = CodeGraph::new();
 
-        let parsed = parse_file(&file_path, &plugins)
-            .expect("parse file")
-            .expect("should not be skipped");
+        let parsed = expect_parsed_file(parse_file(&file_path, &plugins).expect("parse file"));
         commit_parsed_file_for_test(&file_path, parsed, &mut graph);
+    }
+
+    #[test]
+    fn test_parse_file_returns_timed_out_outcome() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let file_path = temp_dir.path().join("timeout.rs");
+        fs::write(&file_path, "fn main() {}").expect("write test file");
+
+        let mut plugins = PluginManager::new();
+        plugins.register_builtin(Box::new(TestPlugin::new(
+            "rust-timeout",
+            RUST_TEST_EXTENSIONS,
+            Some(Box::new(TimeoutGraphBuilder)),
+        )));
+
+        let outcome = parse_file(&file_path, &plugins).expect("parse file");
+        match outcome {
+            ParsedFileOutcome::TimedOut {
+                file,
+                phase,
+                timeout_ms,
+            } => {
+                assert_eq!(file, file_path);
+                assert_eq!(phase, "test-timeout");
+                assert_eq!(timeout_ms, 42);
+            }
+            other => panic!("expected timed out outcome, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_file_rejects_oversized_input() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let file_path = temp_dir.path().join("oversized.rs");
+        fs::write(&file_path, vec![b'a'; 1_048_577]).expect("write oversized file");
+
+        let mut plugins = PluginManager::new();
+        plugins.register_builtin(Box::new(TestPlugin::new(
+            "rust-oversized",
+            RUST_TEST_EXTENSIONS,
+            Some(Box::new(NoopGraphBuilder)),
+        )));
+
+        unsafe {
+            std::env::set_var("SQRY_MAX_SOURCE_FILE_SIZE", "1048576");
+        }
+        let err = parse_file(&file_path, &plugins).expect_err("oversized file should fail");
+        unsafe {
+            std::env::remove_var("SQRY_MAX_SOURCE_FILE_SIZE");
+        }
+
+        let err_text = err.to_string();
+        assert!(err_text.contains("oversized.rs"));
+    }
+
+    #[test]
+    fn test_build_unified_graph_skips_timed_out_file_without_partial_commit() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let ok_path = temp_dir.path().join("ok.rs");
+        let timeout_path = temp_dir.path().join("timeout.rs");
+        fs::write(&ok_path, "fn ok() {}").expect("write ok file");
+        fs::write(&timeout_path, "fn timeout() {}").expect("write timeout file");
+
+        let mut plugins = PluginManager::new();
+        plugins.register_builtin(Box::new(TestPlugin::new(
+            "rust-selective-timeout",
+            RUST_TEST_EXTENSIONS,
+            Some(Box::new(SelectiveTimeoutGraphBuilder)),
+        )));
+        let config = BuildConfig::default();
+
+        let graph = build_unified_graph(temp_dir.path(), &plugins, &config)
+            .expect("graph build should succeed with surviving files");
+        let snapshot = graph.snapshot();
+
+        assert_eq!(snapshot.find_by_pattern("survivor_fn").len(), 1);
+        assert!(
+            snapshot.find_by_pattern("timeout_partial").is_empty(),
+            "timed out file staging must not be committed"
+        );
     }
 
     // ========================================================================
@@ -1474,6 +1726,51 @@ mod tests {
         assert_eq!(
             manifest.build_provenance.build_command, "cli:index",
             "Build command provenance should match"
+        );
+    }
+
+    /// Wrapper-based builds infer plugin-selection provenance from the active
+    /// plugin manager so non-CLI callers do not silently persist legacy-looking
+    /// manifests.
+    #[test]
+    fn test_wrapper_infers_plugin_selection_from_manager() {
+        use crate::graph::unified::persistence::GraphStorage;
+
+        let temp_dir = TempDir::new().expect("temp dir");
+        let file_path = temp_dir.path().join("test.rs");
+        fs::write(&file_path, "fn main() {}").expect("write test file");
+
+        let mut plugins = PluginManager::new();
+        plugins.register_builtin(Box::new(TestPlugin::new(
+            "rust-simple",
+            RUST_TEST_EXTENSIONS,
+            Some(Box::new(SimpleGraphBuilder)),
+        )));
+        let config = BuildConfig::default();
+
+        let (_graph, build_result) =
+            build_and_persist_graph(temp_dir.path(), &plugins, &config, "test:wrapper_plugins")
+                .expect("wrapper build should succeed");
+
+        assert_eq!(
+            build_result.active_plugin_ids,
+            vec!["rust-simple".to_string()],
+            "build result should expose the inferred active plugin ids"
+        );
+
+        let storage = GraphStorage::new(temp_dir.path());
+        let manifest = storage.load_manifest().expect("manifest should load");
+        let plugin_selection = manifest
+            .plugin_selection
+            .expect("wrapper should persist plugin selection metadata");
+        assert_eq!(
+            plugin_selection.active_plugin_ids,
+            vec!["rust-simple".to_string()],
+            "wrapper should persist the manager-derived plugin ids"
+        );
+        assert_eq!(
+            plugin_selection.high_cost_mode, None,
+            "wrapper-inferred plugin selection should keep high_cost_mode diagnostic-only"
         );
     }
 

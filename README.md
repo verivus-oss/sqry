@@ -122,6 +122,37 @@ Primary install methods should provide `sqry`, `sqry-mcp`, and `sqry-lsp`; raw b
 
 ## Commands
 
+### Indexing Controls
+
+```bash
+# Default fast-path index
+sqry index
+
+# Include all high-cost plugins
+sqry index --include-high-cost
+
+# Force the fast path even if SQRY_INCLUDE_HIGH_COST=1 is set
+sqry index --exclude-high-cost
+
+# Include one high-cost plugin explicitly
+sqry index --enable-plugin json
+
+# Exclude a plugin explicitly
+sqry index --disable-plugin json
+```
+
+sqry persists the active plugin set in the unified graph manifest, so later
+`query`, `watch`, `diff`, and graph-loader paths reuse the indexed semantics
+instead of silently reinterpreting the workspace under current defaults.
+
+Currently, the default fast path excludes these high-cost plugins:
+- `json`
+- `servicenow-xml`
+
+The same plugin-selection flags also apply to `sqry update` and `sqry watch`.
+`--enable-language` and `--disable-language` remain accepted compatibility
+aliases for `--enable-plugin` and `--disable-plugin`.
+
 ### Search and Query
 
 ```bash
@@ -165,6 +196,10 @@ sqry impact parse_config                    # Dependency impact analysis
 sqry graph complexity                       # Complexity metrics
 sqry diff HEAD~1 HEAD                       # Semantic diff between git refs
 ```
+
+For very large C++ codebases, pathological single-file graph builds are now
+bounded so one oversized translation unit does not pin the entire index run
+indefinitely.
 
 ### Natural Language
 

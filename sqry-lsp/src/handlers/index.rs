@@ -94,6 +94,12 @@ fn node_kind_to_string(kind: NodeKind) -> &'static str {
         NodeKind::Resource => "resource",
         NodeKind::Endpoint => "endpoint",
         NodeKind::Test => "test",
+        NodeKind::TypeParameter => "type_parameter",
+        NodeKind::Annotation => "annotation",
+        NodeKind::AnnotationValue => "annotation_value",
+        NodeKind::LambdaTarget => "lambda_target",
+        NodeKind::JavaModule => "java_module",
+        NodeKind::EnumConstant => "enum_constant",
         NodeKind::Other => "other",
     }
 }
@@ -332,12 +338,23 @@ pub fn rebuild_index(
         )?,
         ..BuildConfig::default()
     };
+    let plugin_selection = (!plugins.plugins().is_empty()).then(|| {
+        sqry_core::graph::unified::persistence::PluginSelectionManifest {
+            active_plugin_ids: plugins
+                .plugins()
+                .iter()
+                .map(|plugin| plugin.metadata().id.to_string())
+                .collect(),
+            high_cost_mode: None,
+        }
+    });
 
     let (graph, _build_result) = build_and_persist_graph_with_progress(
         target,
         &plugins,
         &build_config,
         "lsp:rebuild_index",
+        plugin_selection,
         reporter.clone(),
     )
     .context("Failed to build and persist unified graph")?;

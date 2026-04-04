@@ -1,18 +1,18 @@
 //! Index command implementation
 
 use crate::args::Cli;
+use crate::plugin_defaults::{self, PluginSelectionMode};
 use crate::progress::{CliProgressReporter, CliStepProgressReporter, StepRunner};
 use anyhow::{Context, Result};
 use sqry_core::graph::unified::analysis::ReachabilityStrategy;
 use sqry_core::graph::unified::build::BuildResult;
-use sqry_core::graph::unified::build::entrypoint::AnalysisStrategySummary;
+use sqry_core::graph::unified::build::entrypoint::{AnalysisStrategySummary, get_git_head_commit};
 use sqry_core::graph::unified::persistence::{GraphStorage, load_header_from_path};
 use sqry_core::json_response::IndexStatus;
 use sqry_core::progress::{SharedReporter, no_op_reporter};
 use std::fs;
 use std::io::{BufRead, BufReader, IsTerminal, Write};
 use std::path::Path;
-use std::process::Command;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -23,33 +23,6 @@ use std::time::Instant;
 #[derive(serde::Serialize)]
 struct ThreadPoolMetrics {
     thread_pool_creations: u64,
-}
-
-/// Get the current HEAD commit SHA from a git repository.
-///
-/// # Arguments
-///
-/// * `path` - Path to the repository root (or any path within it)
-///
-/// # Returns
-///
-/// Returns `Some(commit_sha)` if the path is in a git repository with at least one commit,
-/// `None` otherwise (not a git repo, no commits, or git not available).
-fn get_git_head_commit(path: &Path) -> Option<String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(path)
-        .args(["rev-parse", "HEAD"])
-        .output()
-        .ok()?;
-
-    if output.status.success() {
-        let sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if sha.len() == 40 && sha.chars().all(|c| c.is_ascii_hexdigit()) {
-            return Some(sha);
-        }
-    }
-    None
 }
 
 // format_validation_prometheus removed
@@ -72,7 +45,6 @@ fn get_git_head_commit(path: &Path) -> Option<String> {
 /// # Panics
 ///
 /// Panics if the index is missing after a successful build-and-save sequence.
-#[allow(clippy::too_many_arguments)]
 #[allow(clippy::fn_params_excessive_bools)] // CLI flags map directly to booleans.
 #[allow(clippy::too_many_arguments)]
 pub fn run_index(
@@ -107,10 +79,7 @@ pub fn run_index(
     // Log macro boundary analysis configuration
     if enable_macro_expansion || !cfg_flags.is_empty() || expand_cache.is_some() {
         log::info!(
-            "Macro boundary config: expansion={}, cfg_flags={:?}, expand_cache={:?}",
-            enable_macro_expansion,
-            cfg_flags,
-            expand_cache,
+            "Macro boundary config: expansion={enable_macro_expansion}, cfg_flags={cfg_flags:?}, expand_cache={expand_cache:?}",
         );
     }
 
@@ -123,13 +92,16 @@ pub fn run_index(
 
     // Build unified graph using the consolidated pipeline
     let build_config = create_build_config(cli, root_path, threads)?;
+    let resolved_plugins =
+        plugin_defaults::resolve_plugin_selection(cli, root_path, PluginSelectionMode::FreshWrite)?;
     let build_result = step_runner.step("Build unified graph", || -> Result<_> {
         let (_graph, build_result) =
             sqry_core::graph::unified::build::build_and_persist_graph_with_progress(
                 root_path,
-                &sqry_plugin_registry::create_plugin_manager(),
+                &resolved_plugins.plugin_manager,
                 &build_config,
                 "cli:index",
+                resolved_plugins.persisted_selection.clone(),
                 progress.clone(),
             )?;
         Ok(build_result)
@@ -192,6 +164,12 @@ fn emit_graph_summary(
         "  Reachability: {}",
         format_analysis_strategy_highlights(&build_result.analysis_strategies)
     );
+    if !build_result.active_plugin_ids.is_empty() {
+        println!(
+            "  Active plugins: {}",
+            build_result.active_plugin_ids.join(", ")
+        );
+    }
     if status.supports_relations {
         println!("  Relations: Enabled");
     }
@@ -475,13 +453,19 @@ pub fn run_update(
 
     // Update graph using consolidated pipeline
     let build_config = create_build_config(cli, root_path, threads)?;
+    let resolved_plugins = plugin_defaults::resolve_plugin_selection(
+        cli,
+        root_path,
+        PluginSelectionMode::ExistingWrite,
+    )?;
     let build_result = step_runner.step("Update unified graph", || -> Result<_> {
         let (_graph, build_result) =
             sqry_core::graph::unified::build::build_and_persist_graph_with_progress(
                 root_path,
-                &sqry_plugin_registry::create_plugin_manager(),
+                &resolved_plugins.plugin_manager,
                 &build_config,
                 "cli:update",
+                resolved_plugins.persisted_selection.clone(),
                 progress.clone(),
             )?;
         Ok(build_result)

@@ -43,6 +43,12 @@ This document provides a comprehensive list of all features available across sqr
 | `sqry watch` | Watch for file changes and update index in real-time |
 | `sqry repair` | Repair corrupted index files |
 
+Indexing behavior highlights:
+- `sqry index` / `sqry update` support `--include-high-cost`, `--exclude-high-cost`, `--enable-plugin`, `--disable-plugin`
+- active plugin ids are persisted in the unified graph manifest
+- read-only indexed commands reuse manifest-backed plugin selection by default
+- pathological single-file C++ graph builds are bounded for large repositories
+
 ### Cache Management
 
 | Command | Description |
@@ -117,6 +123,14 @@ This document provides a comprehensive list of all features available across sqr
 | `sqry alias import` | Import aliases from file |
 
 ---
+
+## Release Highlights (v7.1.0)
+
+- Plugin cost tiering with manifest-backed plugin selection persistence
+- Bounded pathological C++ graph builds for very large repositories
+- Consistent classpath `source_jar` provenance across stubs, tests, and benches
+- LSP rebuilds now preserve inferred plugin-selection provenance
+- Stage 3 release temp-tree isolation and cleanup hardening
 
 ## MCP Tools (Model Context Protocol)
 

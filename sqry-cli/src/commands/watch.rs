@@ -2,6 +2,7 @@
 
 use crate::args::Cli;
 use crate::commands::index::{create_build_config, create_progress_reporter};
+use crate::plugin_defaults::{self, PluginSelectionMode};
 use anyhow::{Context, Result};
 use sqry_core::graph::unified::persistence::GraphStorage;
 use sqry_core::watch::FileWatcher;
@@ -22,7 +23,6 @@ pub fn execute(
 ) -> Result<()> {
     let root_path = resolve_path(path)?;
     let build_config = create_build_config(cli, &root_path, threads)?;
-    let plugins = sqry_plugin_registry::create_plugin_manager();
 
     // Check if graph exists
     let storage = GraphStorage::new(&root_path);
@@ -30,11 +30,17 @@ pub fn execute(
         if build_if_missing {
             println!("🔨 Building initial graph...");
             let (_, progress) = create_progress_reporter(cli);
+            let resolved_plugins = plugin_defaults::resolve_plugin_selection(
+                cli,
+                &root_path,
+                PluginSelectionMode::FreshWrite,
+            )?;
             sqry_core::graph::unified::build::build_and_persist_graph_with_progress(
                 &root_path,
-                &plugins,
+                &resolved_plugins.plugin_manager,
                 &build_config,
                 "cli:watch",
+                resolved_plugins.persisted_selection.clone(),
                 progress,
             )?;
         } else {
@@ -73,11 +79,17 @@ pub fn execute(
         let start = std::time::Instant::now();
 
         // Full rebuild using consolidated pipeline
+        let resolved_plugins = plugin_defaults::resolve_plugin_selection(
+            cli,
+            &root_path,
+            PluginSelectionMode::ExistingWrite,
+        )?;
         match sqry_core::graph::unified::build::build_and_persist_graph_with_progress(
             &root_path,
-            &plugins,
+            &resolved_plugins.plugin_manager,
             &build_config,
             "cli:watch",
+            resolved_plugins.persisted_selection.clone(),
             progress.clone(),
         ) {
             Ok((_graph, _build_result)) => {

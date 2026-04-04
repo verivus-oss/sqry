@@ -217,6 +217,19 @@ fn edge_metadata_summary(snapshot: &GraphSnapshot, kind: &EdgeKind) -> String {
             macro_expansion_kind_name(*expansion_kind),
             is_verified
         ),
+        // JVM Classpath (Track C) edge kinds
+        EdgeKind::GenericBound => "generic_bound".to_string(),
+        EdgeKind::AnnotatedWith => "annotated_with".to_string(),
+        EdgeKind::AnnotationParam => "annotation_param".to_string(),
+        EdgeKind::LambdaCaptures => "lambda_captures".to_string(),
+        EdgeKind::ModuleExports => "module_exports".to_string(),
+        EdgeKind::ModuleRequires => "module_requires".to_string(),
+        EdgeKind::ModuleOpens => "module_opens".to_string(),
+        EdgeKind::ModuleProvides => "module_provides".to_string(),
+        EdgeKind::TypeArgument => "type_argument".to_string(),
+        EdgeKind::ExtensionReceiver => "extension_receiver".to_string(),
+        EdgeKind::CompanionOf => "companion_of".to_string(),
+        EdgeKind::SealedPermit => "sealed_permit".to_string(),
     }
 }
 

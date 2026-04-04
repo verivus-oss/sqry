@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use super::manifest::ConfigProvenance;
 
-/// Magic bytes identifying a sqry graph file: "`SQRY_GRAPH_V6`"
+/// Magic bytes identifying a sqry graph file: "`SQRY_GRAPH_V7`"
 ///
 /// Version history:
 /// - V1: Initial format (bincode)
@@ -17,10 +17,11 @@ use super::manifest::ConfigProvenance;
 /// - V4: Migrated to postcard serialization with length-prefixed framing
 /// - V5: Added `HttpMethod::All` variant for wildcard endpoint matching
 /// - V6: Added `NodeMetadataStore` for macro boundary analysis + `CfgGate` edge kind
-pub const MAGIC_BYTES: &[u8; 13] = b"SQRY_GRAPH_V6";
+/// - V7: Added classpath NodeKind/EdgeKind variants, NodeMetadata enum, FileEntry.is_external
+pub const MAGIC_BYTES: &[u8; 13] = b"SQRY_GRAPH_V7";
 
 /// Current format version
-pub const VERSION: u32 = 6;
+pub const VERSION: u32 = 7;
 
 /// Header for persisted graph files.
 ///
@@ -177,13 +178,13 @@ mod tests {
 
     #[test]
     fn test_magic_bytes() {
-        assert_eq!(MAGIC_BYTES, b"SQRY_GRAPH_V6");
+        assert_eq!(MAGIC_BYTES, b"SQRY_GRAPH_V7");
         assert_eq!(MAGIC_BYTES.len(), 13);
     }
 
     #[test]
     fn test_version() {
-        assert_eq!(VERSION, 6);
+        assert_eq!(VERSION, 7);
     }
 
     #[test]

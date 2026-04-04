@@ -19,8 +19,8 @@ const MAX_NODES = 500;
 const MAX_EDGES = 2000;
 
 export class SqryGraphPanel implements vscode.Disposable {
-  private static panels = new Map<string, SqryGraphPanel>();
-  private panel: vscode.WebviewPanel;
+  private static readonly panels = new Map<string, SqryGraphPanel>();
+  private readonly panel: vscode.WebviewPanel;
   private disposed = false;
 
   private constructor(

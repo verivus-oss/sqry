@@ -135,10 +135,10 @@ pub use resolution::{
     SymbolCandidateOutcome, SymbolQuery, SymbolResolutionOutcome,
 };
 pub use storage::{
-    AuxiliaryIndices, CsrBuilder, CsrError, CsrGraph, CsrStats, EdgeRef, FileRegistry,
-    IndicesStats, InternerStats, MacroNodeMetadata, NodeArena, NodeEntry, NodeMetadataStore,
-    ProcMacroFunctionKind, RegistryError, RegistryStats, ResolveError, Slot, SlotState,
-    StringInterner,
+    AuxiliaryIndices, ClasspathNodeMetadata, CsrBuilder, CsrError, CsrGraph, CsrStats, EdgeRef,
+    FileRegistry, IndicesStats, InternerStats, MacroNodeMetadata, NodeArena, NodeEntry,
+    NodeMetadata, NodeMetadataStore, ProcMacroFunctionKind, RegistryError, RegistryStats,
+    ResolveError, Slot, SlotState, StringInterner,
 };
 pub use string::StringId;
 pub use txn::GraphWriteTxn;

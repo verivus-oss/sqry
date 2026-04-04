@@ -89,11 +89,11 @@ export function buildFilterSummary(filters: ActiveFilters): string {
   const parts: string[] = [];
 
   if (filters.languages.size > 0) {
-    parts.push([...filters.languages].sort().join(", "));
+    parts.push([...filters.languages].sort((a, b) => a.localeCompare(b)).join(", "));
   }
 
   if (filters.kinds.size > 0) {
-    parts.push([...filters.kinds].sort().join(", "));
+    parts.push([...filters.kinds].sort((a, b) => a.localeCompare(b)).join(", "));
   }
 
   if (filters.pathGlob !== null && filters.pathGlob.length > 0) {
@@ -117,7 +117,7 @@ export function extractLanguages(symbols: SqrySymbolResult[]): string[] {
       langs.add(s.language);
     }
   }
-  return [...langs].sort();
+  return [...langs].sort((a, b) => a.localeCompare(b));
 }
 
 /**
@@ -130,7 +130,7 @@ export function extractKinds(symbols: SqrySymbolResult[]): string[] {
       kinds.add(s.kind);
     }
   }
-  return [...kinds].sort();
+  return [...kinds].sort((a, b) => a.localeCompare(b));
 }
 
 /**

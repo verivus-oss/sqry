@@ -271,7 +271,7 @@ fn run() -> Result<()> {
 
     // Optional: list enabled languages and exit
     if cli.list_languages {
-        list_enabled_languages();
+        list_enabled_languages(&cli)?;
         return Ok(());
     }
 
@@ -287,6 +287,7 @@ fn run() -> Result<()> {
             path,
             format,
             verbose,
+            ..
         }) => {
             let search_path = path.as_deref().unwrap_or(cli.search_path());
             commands::run_graph(&cli, operation, search_path, format, *verbose)
@@ -336,6 +337,7 @@ fn run() -> Result<()> {
             limit,
             validate,
             var,
+            ..
         }) => handle_query_command(
             &cli,
             query,
@@ -389,6 +391,13 @@ fn run() -> Result<()> {
             enable_macro_expansion,
             cfg_flags,
             expand_cache,
+            classpath,
+            no_classpath,
+            classpath_depth,
+            classpath_file,
+            build_system,
+            force_classpath,
+            ..
         }) => handle_index_command(
             &cli,
             path.as_deref(),
@@ -403,6 +412,12 @@ fn run() -> Result<()> {
             *enable_macro_expansion,
             cfg_flags,
             expand_cache.as_deref(),
+            *classpath,
+            *no_classpath,
+            *classpath_depth,
+            classpath_file.as_deref(),
+            build_system.as_deref(),
+            *force_classpath,
         )?,
 
         // Analyze command
@@ -439,6 +454,7 @@ fn run() -> Result<()> {
             stats,
             no_incremental,
             cache_dir,
+            ..
         }) => {
             let update_path = path.as_deref().unwrap_or(cli.search_path());
             commands::run_update(
@@ -459,6 +475,7 @@ fn run() -> Result<()> {
             debounce,
             stats,
             build,
+            ..
         }) => {
             commands::run_watch(&cli, path.clone(), *threads, *debounce, *stats, *build)
                 .context("Watch command failed")?;
@@ -721,6 +738,7 @@ fn run() -> Result<()> {
             limit,
             kind,
             change_type,
+            ..
         }) => {
             let kinds: Vec<String> = kind
                 .as_ref()
@@ -785,8 +803,14 @@ fn run() -> Result<()> {
     Ok(())
 }
 
-fn list_enabled_languages() {
-    let manager = plugin_defaults::create_plugin_manager();
+fn list_enabled_languages(cli: &Cli) -> Result<()> {
+    let root = std::path::Path::new(cli.search_path());
+    let manager = plugin_defaults::resolve_plugin_selection(
+        cli,
+        root,
+        plugin_defaults::PluginSelectionMode::FreshWrite,
+    )?
+    .plugin_manager;
 
     println!("Enabled languages ({}):", manager.plugins().len());
     for p in manager.plugins() {
@@ -794,6 +818,8 @@ fn list_enabled_languages() {
         let exts = p.extensions().join(", ");
         println!("- {} (id: {}, v{}): [{}]", m.name, m.id, m.version, exts);
     }
+
+    Ok(())
 }
 
 #[allow(dead_code)] // Macro boundary fields used when search filtering is wired up
@@ -919,7 +945,7 @@ fn validate_index_if_requested(
     validate: ValidationMode,
     auto_rebuild: bool,
 ) -> Result<(), i32> {
-    use commands::graph::loader::{GraphLoadConfig, load_unified_graph};
+    use commands::graph::loader::{GraphLoadConfig, load_unified_graph_for_cli};
     use std::path::Path;
 
     const ORPHAN_THRESHOLD: f64 = 0.20;
@@ -940,7 +966,7 @@ fn validate_index_if_requested(
 
     // Load the graph from the project root (not the graph directory)
     let config = GraphLoadConfig::default();
-    let Ok(graph) = load_unified_graph(search_root, &config) else {
+    let Ok(graph) = load_unified_graph_for_cli(search_root, &config, cli) else {
         // If we can't load the graph, skip validation
         return Ok(());
     };
@@ -1023,6 +1049,7 @@ fn validate_index_if_requested(
 
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::fn_params_excessive_bools)] // CLI flags map directly to booleans.
+#[allow(unused_variables)] // Classpath params unused without jvm-classpath feature.
 fn handle_index_command(
     cli: &Cli,
     path: Option<&str>,
@@ -1037,6 +1064,12 @@ fn handle_index_command(
     enable_macro_expansion: bool,
     cfg_flags: &[String],
     expand_cache: Option<&std::path::Path>,
+    classpath: bool,
+    _no_classpath: bool,
+    classpath_depth: crate::args::ClasspathDepthArg,
+    classpath_file: Option<&std::path::Path>,
+    build_system: Option<&str>,
+    force_classpath: bool,
 ) -> Result<()> {
     let index_path = path.unwrap_or(cli.search_path());
 
@@ -1063,8 +1096,178 @@ fn handle_index_command(
             expand_cache.map(std::path::Path::new),
         )
         .context("Index command failed")?;
+
+        // Run classpath pipeline after graph build (gated behind feature).
+        #[cfg(feature = "jvm-classpath")]
+        if classpath {
+            run_classpath_post_index(
+                index_path,
+                classpath_depth,
+                classpath_file,
+                build_system,
+                force_classpath,
+            )?;
+        }
+
+        #[cfg(not(feature = "jvm-classpath"))]
+        if classpath {
+            eprintln!(
+                "WARNING: --classpath flag requires the 'jvm-classpath' feature. \
+                 Rebuild sqry-cli with: cargo build --features jvm-classpath"
+            );
+        }
     }
     Ok(())
+}
+
+/// Run the JVM classpath pipeline after the main graph build.
+///
+/// This function is only compiled when the `jvm-classpath` feature is enabled.
+/// It runs the classpath detect/resolve/scan/index pipeline and then emits
+/// classpath nodes into the existing graph.
+#[cfg(feature = "jvm-classpath")]
+fn run_classpath_post_index(
+    index_path: &str,
+    classpath_depth: crate::args::ClasspathDepthArg,
+    classpath_file: Option<&std::path::Path>,
+    build_system: Option<&str>,
+    force_classpath: bool,
+) -> Result<()> {
+    use sqry_classpath::pipeline::{ClasspathConfig, ClasspathDepth};
+
+    let root_path = std::path::Path::new(index_path);
+
+    let depth = match classpath_depth {
+        crate::args::ClasspathDepthArg::Full => ClasspathDepth::Full,
+        crate::args::ClasspathDepthArg::Shallow => ClasspathDepth::Shallow,
+    };
+
+    let config = ClasspathConfig {
+        enabled: true,
+        depth,
+        build_system_override: build_system.map(String::from),
+        classpath_file: classpath_file.map(std::path::Path::to_path_buf),
+        force: force_classpath,
+        timeout_secs: 60,
+    };
+
+    println!("Running JVM classpath analysis...");
+
+    let result = sqry_classpath::pipeline::run_classpath_pipeline(root_path, &config)
+        .context("Classpath pipeline failed")?;
+
+    println!(
+        "  Classpath: {} JARs scanned, {} classes parsed",
+        result.jars_scanned, result.classes_parsed
+    );
+
+    // Emit classpath nodes into the persisted graph.
+    emit_classpath_into_graph(root_path, &result)
+        .context("Failed to emit classpath nodes into graph")?;
+
+    println!(
+        "  Graph enriched with {} classpath types",
+        result.index.classes.len()
+    );
+
+    Ok(())
+}
+
+/// Load the persisted graph, emit classpath nodes into it, and re-save.
+///
+/// The emission happens in two phases to satisfy Rust's borrow checker:
+/// 1. Decompose the `CodeGraph` into its components via `into_components()`.
+/// 2. Pass mutable references to all components simultaneously.
+/// 3. Reassemble into a `CodeGraph` via `from_components()`.
+#[cfg(feature = "jvm-classpath")]
+fn emit_classpath_into_graph(
+    root_path: &std::path::Path,
+    result: &sqry_classpath::pipeline::ClasspathPipelineResult,
+) -> Result<()> {
+    use sqry_core::graph::unified::build::StagingGraph;
+    use sqry_core::graph::unified::concurrent::CodeGraph;
+    use sqry_core::graph::unified::persistence::{GraphStorage, load_from_path, save_to_path};
+    let storage = GraphStorage::new(root_path);
+    if !storage.exists() {
+        anyhow::bail!(
+            "No graph snapshot found at {}",
+            storage.graph_dir().display()
+        );
+    }
+
+    // Load graph from the persisted snapshot.
+    let plugins = sqry_plugin_registry::create_plugin_manager_all();
+    let graph = load_from_path(storage.snapshot_path(), Some(&plugins))
+        .context("Failed to load graph snapshot for classpath enrichment")?;
+
+    // Decompose the graph to get simultaneous mutable access to all components.
+    // This is safe because we have sole ownership of the loaded graph.
+    let (mut nodes, edges, mut strings, mut files, indices, mut metadata) = decompose_graph(graph);
+
+    // Emit classpath nodes into a staging graph.
+    let mut staging = StagingGraph::new();
+
+    let emission_result = sqry_classpath::graph::emitter::emit_classpath_nodes(
+        &result.index,
+        &mut staging,
+        &mut files,
+        &mut strings,
+        &mut metadata,
+        &result.provenance,
+    )
+    .map_err(|e| anyhow::anyhow!("Classpath emission error: {e}"))?;
+
+    // Create cross-reference edges.
+    sqry_classpath::graph::emitter::create_classpath_edges(
+        &result.index,
+        &emission_result.fqn_to_node,
+        &mut staging,
+        &emission_result.file_id_map,
+    );
+
+    // Commit staging nodes into the node arena.
+    let _id_mapping = staging
+        .commit_nodes(&mut nodes)
+        .map_err(|e| anyhow::anyhow!("Failed to commit classpath nodes: {e}"))?;
+
+    // Reassemble the graph.
+    let graph = CodeGraph::from_components(nodes, edges, strings, files, indices, metadata);
+
+    // Re-save the enriched graph.
+    save_to_path(&graph, storage.snapshot_path())
+        .context("Failed to save classpath-enriched graph")?;
+
+    Ok(())
+}
+
+/// Decompose a `CodeGraph` into its raw component stores.
+///
+/// Extracts each `Arc`-wrapped component. Since the graph was freshly loaded,
+/// each Arc has a strong count of 1, so `Arc::try_unwrap` succeeds. If it
+/// fails (shouldn't happen), we clone the inner data.
+#[cfg(feature = "jvm-classpath")]
+fn decompose_graph(
+    graph: sqry_core::graph::unified::concurrent::CodeGraph,
+) -> (
+    sqry_core::graph::unified::storage::NodeArena,
+    sqry_core::graph::unified::edge::BidirectionalEdgeStore,
+    sqry_core::graph::unified::storage::StringInterner,
+    sqry_core::graph::unified::storage::registry::FileRegistry,
+    sqry_core::graph::unified::storage::AuxiliaryIndices,
+    sqry_core::graph::unified::storage::metadata::NodeMetadataStore,
+) {
+    // We need to consume the graph and extract its Arc-wrapped fields.
+    // CodeGraph doesn't expose an into_components method, so we use the
+    // mutable accessors which call Arc::make_mut (clone-on-write).
+    // Since we own the only reference, no actual cloning occurs.
+    let mut graph = graph;
+    let nodes = std::mem::take(graph.nodes_mut());
+    let edges = std::mem::take(graph.edges_mut());
+    let strings = std::mem::take(graph.strings_mut());
+    let files = std::mem::take(graph.files_mut());
+    let indices = std::mem::take(graph.indices_mut());
+    let metadata = std::mem::take(graph.macro_metadata_mut());
+    (nodes, edges, strings, files, indices, metadata)
 }
 
 fn handle_config_command(action: &args::ConfigAction) -> Result<()> {

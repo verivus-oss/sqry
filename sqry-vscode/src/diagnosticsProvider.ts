@@ -3,7 +3,6 @@ import { SqryClient } from "./sqryClient";
 import {
   SqrySearchItem,
   SqryCycle,
-  SqryCycleMemberLocation,
   SqryDuplicateGroup,
 } from "./lspProtocol";
 
@@ -129,71 +128,9 @@ export class SqryDiagnosticsProvider implements vscode.Disposable {
     let totalCount = 0;
 
     try {
-      // 1. Unused symbols
-      if (this.isUnusedCodeEnabled()) {
-        const unused = await this.client.listUnusedSymbols(
-          workspace,
-          "all",
-          MAX_DIAGNOSTICS_PER_WORKSPACE,
-        );
-        for (const symbol of unused.symbols) {
-          if (totalCount >= MAX_DIAGNOSTICS_PER_WORKSPACE) {
-            break;
-          }
-          allEntries.push({
-            uri: symbol.location.uri,
-            diagnostic: createUnusedDiagnostic(symbol),
-          });
-          totalCount++;
-        }
-        this.log(
-          `Workspace scan: ${unused.symbols.length} unused symbols (total=${unused.total})`,
-        );
-      }
-
-      // 2. Circular dependencies
-      if (totalCount < MAX_DIAGNOSTICS_PER_WORKSPACE) {
-        const cycles = await this.client.listCircularDependencies(
-          workspace,
-          "calls",
-          MAX_DIAGNOSTICS_PER_WORKSPACE,
-        );
-        for (const cycle of cycles.cycles) {
-          const cycleDiags = createCycleDiagnostics(cycle);
-          for (const entry of cycleDiags) {
-            if (totalCount >= MAX_DIAGNOSTICS_PER_WORKSPACE) {
-              break;
-            }
-            allEntries.push(entry);
-            totalCount++;
-          }
-        }
-        this.log(
-          `Workspace scan: ${cycles.cycles.length} cycles (total=${cycles.total_cycles})`,
-        );
-      }
-
-      // 3. Duplicate groups
-      if (totalCount < MAX_DIAGNOSTICS_PER_WORKSPACE) {
-        const duplicates = await this.client.listDuplicateGroups(
-          workspace,
-          "body",
-          MAX_DIAGNOSTICS_PER_WORKSPACE,
-        );
-        for (const group of duplicates.groups) {
-          const dupDiags = createDuplicateDiagnostics(group);
-          for (const entry of dupDiags) {
-            if (totalCount >= MAX_DIAGNOSTICS_PER_WORKSPACE) {
-              break;
-            }
-            allEntries.push(entry);
-            totalCount++;
-          }
-        }
-        this.log(
-          `Workspace scan: ${duplicates.groups.length} duplicate groups (total=${duplicates.total_groups})`,
-        );
-      }
+      totalCount = await this.collectUnusedSymbols(workspace, allEntries, totalCount);
+      totalCount = await this.collectCircularDependencies(workspace, allEntries, totalCount);
+      totalCount = await this.collectDuplicateGroups(workspace, allEntries, totalCount);
 
       // Group by URI and publish
       const byUri = groupByUri(allEntries);
@@ -206,6 +143,70 @@ export class SqryDiagnosticsProvider implements vscode.Disposable {
     } catch (error) {
       this.log(`Workspace scan failed: ${errorMessage(error)}`);
     }
+  }
+
+  private async collectUnusedSymbols(
+    workspace: vscode.WorkspaceFolder,
+    entries: Array<{ uri: string; diagnostic: vscode.Diagnostic }>,
+    count: number,
+  ): Promise<number> {
+    if (!this.isUnusedCodeEnabled() || count >= MAX_DIAGNOSTICS_PER_WORKSPACE) {
+      return count;
+    }
+    const unused = await this.client.listUnusedSymbols(workspace, "all", MAX_DIAGNOSTICS_PER_WORKSPACE);
+    for (const symbol of unused.symbols) {
+      if (count >= MAX_DIAGNOSTICS_PER_WORKSPACE) {
+        break;
+      }
+      entries.push({ uri: symbol.location.uri, diagnostic: createUnusedDiagnostic(symbol) });
+      count++;
+    }
+    this.log(`Workspace scan: ${unused.symbols.length} unused symbols (total=${unused.total})`);
+    return count;
+  }
+
+  private async collectCircularDependencies(
+    workspace: vscode.WorkspaceFolder,
+    entries: Array<{ uri: string; diagnostic: vscode.Diagnostic }>,
+    count: number,
+  ): Promise<number> {
+    if (count >= MAX_DIAGNOSTICS_PER_WORKSPACE) {
+      return count;
+    }
+    const cycles = await this.client.listCircularDependencies(workspace, "calls", MAX_DIAGNOSTICS_PER_WORKSPACE);
+    for (const cycle of cycles.cycles) {
+      for (const entry of createCycleDiagnostics(cycle)) {
+        if (count >= MAX_DIAGNOSTICS_PER_WORKSPACE) {
+          break;
+        }
+        entries.push(entry);
+        count++;
+      }
+    }
+    this.log(`Workspace scan: ${cycles.cycles.length} cycles (total=${cycles.total_cycles})`);
+    return count;
+  }
+
+  private async collectDuplicateGroups(
+    workspace: vscode.WorkspaceFolder,
+    entries: Array<{ uri: string; diagnostic: vscode.Diagnostic }>,
+    count: number,
+  ): Promise<number> {
+    if (count >= MAX_DIAGNOSTICS_PER_WORKSPACE) {
+      return count;
+    }
+    const duplicates = await this.client.listDuplicateGroups(workspace, "body", MAX_DIAGNOSTICS_PER_WORKSPACE);
+    for (const group of duplicates.groups) {
+      for (const entry of createDuplicateDiagnostics(group)) {
+        if (count >= MAX_DIAGNOSTICS_PER_WORKSPACE) {
+          break;
+        }
+        entries.push(entry);
+        count++;
+      }
+    }
+    this.log(`Workspace scan: ${duplicates.groups.length} duplicate groups (total=${duplicates.total_groups})`);
+    return count;
   }
 
   /** Clear all diagnostics. */
@@ -279,7 +280,7 @@ function createCycleDiagnostics(
         ? loc.file
         : vscode.Uri.file(loc.file).toString();
       const line = Math.max(0, loc.line - 1); // 1-based to 0-based
-      const col = loc.column !== undefined ? Math.max(0, loc.column - 1) : 0;
+      const col = loc.column === undefined ? 0 : Math.max(0, loc.column - 1);
       resolvedLocations.push({
         name: loc.name,
         uri,

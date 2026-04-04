@@ -1349,6 +1349,7 @@ fn convert_semantic_search_params(
         context_lines,
         pagination,
         score_min,
+        include_classpath: params.include_classpath,
     })
 }
 
@@ -1813,6 +1814,7 @@ fn convert_pattern_search_params(
         path: params.path,
         max_results,
         pagination,
+        include_classpath: params.include_classpath,
     })
 }
 

@@ -680,8 +680,8 @@ class SqryTreeDataProvider
     }
   }
 
-  private async loadMoreSymbols(workspace: vscode.WorkspaceFolder | undefined, offset: number, rootPath?: string): Promise<void> {
-    const rootKey = rootPath ?? "";
+  private async loadMoreSymbols(workspace: vscode.WorkspaceFolder | undefined, offset: number, rootPath: string = ""): Promise<void> {
+    const rootKey = rootPath;
     const activeClient = this.client;
     if (this.loadingSymbols.has(rootKey) || !activeClient) {
       return;
@@ -719,8 +719,8 @@ class SqryTreeDataProvider
     }
   }
 
-  private async loadMoreFiles(workspace: vscode.WorkspaceFolder | undefined, offset: number, rootPath?: string): Promise<void> {
-    const rootKey = rootPath ?? "";
+  private async loadMoreFiles(workspace: vscode.WorkspaceFolder | undefined, offset: number, rootPath: string = ""): Promise<void> {
+    const rootKey = rootPath;
     const activeClient = this.client;
     if (this.loadingFiles.has(rootKey) || !activeClient) {
       return;
@@ -805,9 +805,9 @@ class SqryTreeDataProvider
   private async loadMoreCrossLanguage(
     workspace: vscode.WorkspaceFolder | undefined,
     offset: number,
-    rootPath?: string,
+    rootPath: string = "",
   ): Promise<void> {
-    const rootKey = rootPath ?? "";
+    const rootKey = rootPath;
     const activeClient = this.client;
     if (this.loadingCrossLanguage.has(rootKey) || !activeClient) {
       return;

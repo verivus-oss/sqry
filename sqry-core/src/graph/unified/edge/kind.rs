@@ -425,6 +425,43 @@ pub enum EdgeKind {
         /// Optional JSON-encoded metadata
         metadata: Option<StringId>,
     },
+
+    // ==================== JVM Classpath (Track C) ====================
+    /// Generic type bound (e.g., `T extends Comparable<T>`).
+    GenericBound,
+
+    /// Symbol annotated with annotation type.
+    AnnotatedWith,
+
+    /// Annotation parameter binding (annotation -> element value).
+    AnnotationParam,
+
+    /// Lambda captures a method reference target.
+    LambdaCaptures,
+
+    /// Java module exports a package.
+    ModuleExports,
+
+    /// Java module requires another module.
+    ModuleRequires,
+
+    /// Java module opens a package for reflection.
+    ModuleOpens,
+
+    /// Java module provides a service implementation.
+    ModuleProvides,
+
+    /// Generic type argument (e.g., `String` in `List<String>`).
+    TypeArgument,
+
+    /// Kotlin extension function receiver type.
+    ExtensionReceiver,
+
+    /// Kotlin companion object relationship.
+    CompanionOf,
+
+    /// Kotlin sealed class permits a subclass.
+    SealedPermit,
 }
 
 impl EdgeKind {
@@ -455,7 +492,13 @@ impl EdgeKind {
     pub const fn is_type_relation(&self) -> bool {
         matches!(
             self,
-            Self::Inherits | Self::Implements | Self::TypeOf { .. }
+            Self::Inherits
+                | Self::Implements
+                | Self::TypeOf { .. }
+                | Self::GenericBound
+                | Self::TypeArgument
+                | Self::ExtensionReceiver
+                | Self::SealedPermit
         )
     }
 
@@ -558,6 +601,18 @@ impl EdgeKind {
             Self::ProcessExec { .. } => "process_exec",
             Self::FileIpc { .. } => "file_ipc",
             Self::ProtocolCall { .. } => "protocol_call",
+            Self::GenericBound => "generic_bound",
+            Self::AnnotatedWith => "annotated_with",
+            Self::AnnotationParam => "annotation_param",
+            Self::LambdaCaptures => "lambda_captures",
+            Self::ModuleExports => "module_exports",
+            Self::ModuleRequires => "module_requires",
+            Self::ModuleOpens => "module_opens",
+            Self::ModuleProvides => "module_provides",
+            Self::TypeArgument => "type_argument",
+            Self::ExtensionReceiver => "extension_receiver",
+            Self::CompanionOf => "companion_of",
+            Self::SealedPermit => "sealed_permit",
         }
     }
 
@@ -578,7 +633,19 @@ impl EdgeKind {
             | Self::References
             | Self::Inherits
             | Self::Implements
-            | Self::WebAssemblyCall => 1,
+            | Self::WebAssemblyCall
+            | Self::GenericBound
+            | Self::AnnotatedWith
+            | Self::AnnotationParam
+            | Self::LambdaCaptures
+            | Self::ModuleExports
+            | Self::ModuleRequires
+            | Self::ModuleOpens
+            | Self::ModuleProvides
+            | Self::TypeArgument
+            | Self::ExtensionReceiver
+            | Self::CompanionOf
+            | Self::SealedPermit => 1,
 
             // u8 + bool: 1 + 1 + 1
             // MacroExpansionKind + bool: 1 + 1

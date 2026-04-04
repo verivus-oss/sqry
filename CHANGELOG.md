@@ -13,6 +13,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+## [7.1.0] - 2026-04-04
+
+### Added
+- Plugin cost tiering in `sqry-plugin-registry` with deterministic built-in plugin selection
+- CLI plugin-selection controls: `--include-high-cost`, `--exclude-high-cost`, `--enable-plugin`, `--disable-plugin`
+- C++ graph builder timeout budget to bound pathological single-file builds on very large repositories
+
+### Changed
+- `sqry index`, `sqry update`, and `sqry watch` now persist active plugin ids in the unified graph manifest
+- Read-only indexed commands now honor manifest-backed plugin selection by default
+- Default fast-path plugin selection excludes plugins tagged `high_wall_clock`
+- Existing manifests without `plugin_selection` continue to use legacy all-plugins behavior until explicitly rebuilt
+- JVM classpath fixtures and metadata now carry `source_jar` provenance consistently across stubs, tests, and benches
+
+### Fixed
+- Non-CLI graph persistence now infers plugin-selection provenance instead of dropping it from wrapper-based builds
+- LSP rebuilds now preserve inferred plugin-selection provenance in persisted manifests
+- Stage 3 release sanitization now uses isolated temp roots with cleanup and disk-headroom checks to reduce release-runner failures
+
+### Notes
+- The indexing-cost changes in this release address two distinct issues that were easy to conflate after JSON shipped in `v4.12.0`. JSON increased default indexing cost and was partially mitigated earlier by graph-layer fast pre-checks for JSON/HTML before being addressed properly here with plugin cost tiering and manifest-backed selection. Firefox-scale “stuck index” reports were a separate pathological C++ graph-build issue, fixed independently by bounding single-file C++ graph builds.
+
+## [7.0.2] - 2026-04-03
+
+### Fixed
+- Release pipeline: isolate and clean Stage 3 temp trees so staged sanitization no longer fails from self-hosted runner disk exhaustion
+- Release verification: restore a clean hermetic `fmt` and `clippy --all-targets` gate on the current release head
+
+## [6.0.24] - 2026-04-03
+
+### Added
+- JVM classpath analysis via `sqry-classpath` crate (Track C Tier 1): bytecode parsing, Scala signature decoding, source JAR resolution
+
+### Fixed
+- Resolve all 132 SonarQube issues across VS Code extension, Python benchmarks, and Rust crates (0 remaining)
+
 ## [4.12.7] - 2026-03-29
 
 ### Fixed
