@@ -5,7 +5,4 @@
 .github/workflows/oss-distribute.yml
 .verivus/release-managed-paths.txt
 CODE_OF_CONDUCT.md
-CONTRIBUTING.md
-LICENSE
-LICENSE-MIT
 SECURITY.md

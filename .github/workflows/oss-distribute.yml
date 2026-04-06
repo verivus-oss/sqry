@@ -9,6 +9,12 @@ name: "Release: Distribute"
 on:
   repository_dispatch:
     types: [release-distribute]
+  workflow_dispatch:
+    inputs:
+      tag:
+        required: true
+        type: string
+        description: "Release tag (e.g. v6.0.15) - all other values derived from ledger"
 
 permissions:
   contents: write
@@ -16,46 +22,82 @@ permissions:
   attestations: write
 
 concurrency:
-  group: oss-distribute-${{ github.event.client_payload.version }}
+  group: oss-distribute-${{ github.event.client_payload.tag || github.event.inputs.tag }}
   cancel-in-progress: false
 
 jobs:
   build-and-distribute:
     name: Build and Distribute
-    runs-on: [self-hosted, linux, rust, x86_64]
+    runs-on: [self-hosted, linux, rust, x86_64, workhorse2]
     timeout-minutes: 60
     env:
-      VERSION: ${{ github.event.client_payload.version }}
-      TAG: ${{ github.event.client_payload.tag }}
-      EXPECTED_SHA: ${{ github.event.client_payload.sha }}
-      STAGED_ORIGIN: ${{ github.event.client_payload.staged_origin }}
-      STAGED_SHA: ${{ github.event.client_payload.staged_sha }}
-      EXPECTED_DIGEST: ${{ github.event.client_payload.sanitized_tree_sha256 }}
+      TAG: ${{ github.event.client_payload.tag || github.event.inputs.tag }}
+      VERSION: ${{ github.event.client_payload.version || '' }}
+      EXPECTED_SHA: ${{ github.event.client_payload.sha || '' }}
+      STAGED_ORIGIN: ${{ github.event.client_payload.staged_origin || '' }}
+      STAGED_SHA: ${{ github.event.client_payload.staged_sha || '' }}
+      EXPECTED_DIGEST: ${{ github.event.client_payload.sanitized_tree_sha256 || '' }}
       CARGO_ZIGBUILD_IMAGE: ghcr.io/rust-cross/cargo-zigbuild@sha256:dce4ea213244423439d97a2070031c6ea287fc32f01b0aaa38f8b4d46f52e68c
     steps:
-      # Guard: validate dispatch payload before doing any work
+      - name: Workspace wipe
+        run: |
+          # Docker may create root-owned files; use sudo if needed
+          sudo rm -rf "$GITHUB_WORKSPACE" && mkdir -p "$GITHUB_WORKSPACE"
+
+      # For workflow_dispatch, resolve all env vars from ledger before validation
+      - name: Resolve inputs from ledger (manual trigger)
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$TAG" ]]; then
+            echo "FATAL: tag input is required for workflow_dispatch" >&2
+            exit 1
+          fi
+
+          LEDGER_DIR="$RUNNER_TEMP/dispatch-ledger"
+          mkdir -p "$LEDGER_DIR"
+          gh release download "$TAG" --dir "$LEDGER_DIR" --pattern "release-ledger-*.json"
+          LEDGER_FILE=$(find "$LEDGER_DIR" -name 'release-ledger-*.json' -type f | head -1)
+          if [[ -z "$LEDGER_FILE" || ! -f "$LEDGER_FILE" ]]; then
+            echo "FATAL: no release ledger found for tag $TAG" >&2
+            exit 1
+          fi
+
+          DISPATCH=$(jq -r '.stages.stage_5_publish.dispatch_payload // empty' "$LEDGER_FILE")
+          if [[ -z "$DISPATCH" || "$DISPATCH" == "null" ]]; then
+            echo "FATAL: stage_5_publish.dispatch_payload missing from ledger for $TAG" >&2
+            exit 1
+          fi
+
+          echo "VERSION=$(jq -r '.stages.stage_5_publish.dispatch_payload.version' "$LEDGER_FILE")" >> "$GITHUB_ENV"
+          echo "EXPECTED_SHA=$(jq -r '.stages.stage_5_publish.dispatch_payload.sha' "$LEDGER_FILE")" >> "$GITHUB_ENV"
+          echo "STAGED_ORIGIN=$(jq -r '.stages.stage_5_publish.dispatch_payload.staged_origin' "$LEDGER_FILE")" >> "$GITHUB_ENV"
+          echo "STAGED_SHA=$(jq -r '.stages.stage_5_publish.dispatch_payload.staged_sha' "$LEDGER_FILE")" >> "$GITHUB_ENV"
+          echo "EXPECTED_DIGEST=$(jq -r '.stages.stage_5_publish.dispatch_payload.sanitized_tree_sha256' "$LEDGER_FILE")" >> "$GITHUB_ENV"
+
+          echo "Resolved from ledger: version=$(jq -r '.stages.stage_5_publish.dispatch_payload.version' "$LEDGER_FILE") sha=$(jq -r '.stages.stage_5_publish.dispatch_payload.sha' "$LEDGER_FILE" | head -c 12)"
+
+          rm -rf "$LEDGER_DIR"
+
+      # Guard: validate dispatch payload (runs after ledger resolution for workflow_dispatch)
       - name: Validate dispatch payload
         run: |
           FAIL=0
-          if [[ -z "$VERSION" ]]; then echo "ERROR: missing client_payload.version"; FAIL=1; fi
-          if [[ -z "$TAG" ]]; then echo "ERROR: missing client_payload.tag"; FAIL=1; fi
-          if [[ -z "$EXPECTED_SHA" ]]; then echo "ERROR: missing client_payload.sha"; FAIL=1; fi
-          if [[ -z "$STAGED_ORIGIN" ]]; then echo "ERROR: missing client_payload.staged_origin"; FAIL=1; fi
-          if [[ -z "$STAGED_SHA" ]]; then echo "ERROR: missing client_payload.staged_sha"; FAIL=1; fi
-          if [[ -z "$EXPECTED_DIGEST" ]]; then echo "ERROR: missing client_payload.sanitized_tree_sha256"; FAIL=1; fi
+          if [[ -z "$VERSION" ]]; then echo "ERROR: missing version"; FAIL=1; fi
+          if [[ -z "$TAG" ]]; then echo "ERROR: missing tag"; FAIL=1; fi
+          if [[ -z "$EXPECTED_SHA" ]]; then echo "ERROR: missing sha"; FAIL=1; fi
+          if [[ -z "$STAGED_ORIGIN" ]]; then echo "ERROR: missing staged_origin"; FAIL=1; fi
+          if [[ -z "$STAGED_SHA" ]]; then echo "ERROR: missing staged_sha"; FAIL=1; fi
+          if [[ -z "$EXPECTED_DIGEST" ]]; then echo "ERROR: missing sanitized_tree_sha256"; FAIL=1; fi
           if [[ "$FAIL" -eq 1 ]]; then exit 1; fi
-          # Verify staged origin is verivusai-open/sqry
           if [[ "$STAGED_ORIGIN" != "verivusai-open/sqry" ]]; then
             echo "FATAL: staged_origin is '$STAGED_ORIGIN', required 'verivusai-open/sqry'" >&2
             echo "Direct publication from verivusai-labs/sqry is forbidden." >&2
             exit 1
           fi
           echo "Dispatch payload OK: version=$VERSION tag=$TAG sha=$EXPECTED_SHA staged_origin=$STAGED_ORIGIN"
-
-      - name: Workspace wipe
-        run: |
-          # Docker may create root-owned files; use sudo if needed
-          sudo rm -rf "$GITHUB_WORKSPACE" && mkdir -p "$GITHUB_WORKSPACE"
 
       # Checkout by immutable SHA, not mutable tag
       - name: Checkout
@@ -143,6 +185,15 @@ jobs:
             exit 1
           fi
 
+          # Block running state — prevents overlapping Stage 6 runs
+          STAGE6_STATUS=$(jq -r '.stages.stage_6_distribute.status // empty' "$LEDGER_PATH")
+          if [[ "$STAGE6_STATUS" == "running" ]]; then
+            echo "FATAL: stage_6_distribute is currently 'running' in the ledger" >&2
+            echo "Another Stage 6 run may be active. Verify no active run exists," >&2
+            echo "then manually update the ledger asset to set status to 'failed' before retrying." >&2
+            exit 1
+          fi
+
           echo "[OK] Staged-origin proof verified. Publication originated from verivusai-open/sqry."
 
       - name: Mark Stage 6 as running in ledger
@@ -156,6 +207,15 @@ jobs:
             .stages.stage_6_distribute.started_at = (now | todateiso8601)
           ' "$LEDGER_PATH" > "$tmp"
           mv "$tmp" "$LEDGER_PATH"
+
+      - name: Upload early acknowledgment ledger
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          LEDGER_PATH: ${{ steps.ledger.outputs.path }}
+        run: |
+          set -euo pipefail
+          gh release upload "$TAG" "$LEDGER_PATH" --clobber
+          echo "Uploaded running-state ledger for Stage 5 verification"
 
       - name: Install Rust + targets
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
@@ -802,3 +862,19 @@ jobs:
           ! rg -n 'verivusai-open|/srv/repos/(internal|external)|staged_origin' "dist/release-ledger-v${VERSION}.json"
           gh release upload "$TAG" "dist/release-ledger-v${VERSION}.json" --clobber
           gh release edit "$TAG" --draft=false --latest
+
+      - name: Persist failed Stage 6 ledger state
+        if: failure()
+        env:
+          LEDGER_PATH: ${{ steps.ledger.outputs.path }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${LEDGER_PATH:-}" && -f "$LEDGER_PATH" ]]; then
+            tmp=$(mktemp)
+            jq '
+              .stages.stage_6_distribute.status = "failed" |
+              .stages.stage_6_distribute.failed_at = (now | todateiso8601)
+            ' "$LEDGER_PATH" > "$tmp" && mv "$tmp" "$LEDGER_PATH"
+            GH_TOKEN="${{ secrets.GITHUB_TOKEN }}" gh release upload "$TAG" "$LEDGER_PATH" --clobber || true
+            echo "Uploaded failed-state ledger"
+          fi
