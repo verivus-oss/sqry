@@ -134,7 +134,7 @@ Indexing behavior highlights:
 
 ## MCP Tools (Model Context Protocol)
 
-sqry provides 33 MCP tools for AI/LLM integration:
+sqry provides 34 MCP tools for AI/LLM integration:
 
 ### MCP Response Redaction
 
@@ -204,6 +204,7 @@ sqry provides 33 MCP tools for AI/LLM integration:
 | `get_index_status` | Get current status and metadata of the symbol index |
 | `rebuild_index` | Rebuild the semantic index |
 | `semantic_diff` | Compare semantic changes between git commits/branches |
+| `expand_cache_status` | Get macro expansion cache statistics and status |
 
 ### Code Analysis
 

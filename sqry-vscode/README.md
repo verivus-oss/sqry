@@ -1,6 +1,6 @@
 # sqry VS Code Extension
 
-Semantic code search for **35 languages**. Navigate call graphs, inheritance hierarchies, FFI boundaries, imports/exports — powered by unified graph architecture with AST-based analysis.
+Semantic code search for **37 languages**. Navigate call graphs, inheritance hierarchies, FFI boundaries, imports/exports — powered by unified graph architecture with AST-based analysis.
 
 ## Features
 
@@ -190,5 +190,5 @@ MIT — See root LICENSE file
 
 ---
 
-**Version**: 7.1.4
-**Last Updated**: 2026-04-04
+**Version**: 7.1.5
+**Last Updated**: 2026-04-05

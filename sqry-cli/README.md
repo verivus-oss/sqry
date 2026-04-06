@@ -6,7 +6,7 @@
 
 `sqry` is a command-line tool for searching code by **what it means**, not just what it says. It parses source code into an AST using tree-sitter, builds a graph of symbols and relationships, and lets you query that graph with structured predicates.
 
-**35 languages** supported. See [QUICKSTART.md](../QUICKSTART.md) for the full list.
+**37 languages** supported. See [QUICKSTART.md](../QUICKSTART.md) for the full list.
 
 ## Installation
 
@@ -197,4 +197,4 @@ cargo run --package sqry-cli -- main src/
 
 MIT - See [LICENSE-MIT](../LICENSE-MIT)
 
-**Version**: 7.1.4
+**Version**: 7.1.5

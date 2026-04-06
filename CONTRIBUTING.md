@@ -19,7 +19,7 @@ Thank you for your interest in contributing to sqry! This guide covers everythin
 
 ## Project Overview
 
-sqry is a semantic code search tool built in Rust that understands code structure through AST analysis. It supports 35 languages (28 with full relation extraction), provides CLI, LSP, and MCP interfaces, and runs entirely locally with no telemetry.
+sqry is a semantic code search tool built in Rust that understands code structure through AST analysis. It supports 37 languages (28 with full relation extraction, 9 with symbol extraction + imports), provides CLI, LSP, and MCP interfaces, and runs entirely locally with no telemetry.
 
 ---
 
@@ -106,7 +106,7 @@ sqry/
 ├── sqry-lsp/               # LSP server (sqry lsp)
 ├── sqry-mcp/               # MCP server for AI assistants
 ├── sqry-nl/                # Natural language query translation
-├── sqry-lang-*/            # 35 language plugins
+├── sqry-lang-*/            # 37 language plugins
 ├── sqry-lang-support/      # Plugin infrastructure
 ├── sqry-tree-sitter-support/ # Tree-sitter bindings
 ├── sqry-test-support/      # Test utilities
@@ -128,7 +128,7 @@ sqry/
 | `sqry-core` | Graph architecture, symbol types, search engine, query parser, plugin system |
 | `sqry-cli` | CLI commands (`sqry index`, `sqry query`, `sqry graph`, etc.) |
 | `sqry-lsp` | LSP server with 27 custom handlers (hover, definition, references, call hierarchy) |
-| `sqry-mcp` | MCP server with 33 tools for AI assistants |
+| `sqry-mcp` | MCP server with 34 tools for AI assistants |
 
 ### Language Plugins
 

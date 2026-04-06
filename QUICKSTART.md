@@ -1,6 +1,6 @@
 # sqry Quick Start Guide - by Verivus
 
-**Version**: 7.1.4
+**Version**: 7.1.5
 **Rust**: 1.90+ (Edition 2024)
 
 ---
@@ -247,7 +247,7 @@ sqry batch commands.txt
 
 ## MCP Server (AI Assistant Integration)
 
-sqry includes a Model Context Protocol server with 33 tools for AI assistants:
+sqry includes a Model Context Protocol server with 34 tools for AI assistants:
 
 ```bash
 # Start MCP server (stdio transport)
@@ -281,13 +281,11 @@ sqry lsp
 
 ## Language Support
 
-**35 languages** across three tiers:
+**37 languages** in two capability groups:
 
-**General-purpose (28)**: C, C++, C#, CSS, Dart, Elixir, Go, Groovy, Haskell, HTML, Java, JavaScript, Kotlin, Lua, Perl, PHP, Python, R, Ruby, Rust, Scala, Shell, SQL, Svelte, Swift, TypeScript, Vue, Zig
+**Full relation support (28)**: C, C++, C#, CSS, Dart, Elixir, Go, Groovy, Haskell, HTML, Java, JavaScript, Kotlin, Lua, Perl, PHP, Python, R, Ruby, Rust, Scala, Shell, SQL, Svelte, Swift, TypeScript, Vue, Zig
 
-**Domain-specific (4)**: Oracle PL/SQL, Salesforce Apex, SAP ABAP, ServiceNow Xanadu
-
-**IaC (3)**: Terraform, Puppet, Pulumi
+**Symbol extraction + imports (9)**: JSON, Oracle PL/SQL, Pulumi, Puppet, Salesforce Apex, SAP ABAP, ServiceNow Xanadu, ServiceNow XML, Terraform
 
 ---
 
@@ -301,7 +299,7 @@ sqry/
 ├── sqry-mcp/               # MCP server (AI assistant integration)
 ├── sqry-nl/                # Natural language translation
 ├── sqry-plugin-registry/   # Plugin registration
-├── sqry-lang-*/            # 35 language plugins
+├── sqry-lang-*/            # 37 language plugins
 ├── test-fixtures/          # Shared test fixtures
 └── supply-chain/           # cargo-vet audit data
 ```
