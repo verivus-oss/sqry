@@ -12,7 +12,7 @@
 
 # Core ML Framework
 torch==2.9.1
-transformers==4.55.4  # Max version compatible with optimum-onnx (<4.56.0)
+transformers==5.0.0rc3  # Max version compatible with optimum-onnx (<4.56.0)
 datasets==4.4.1
 
 # ONNX Export and Quantization
