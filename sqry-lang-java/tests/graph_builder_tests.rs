@@ -1500,14 +1500,14 @@ public class UserController {
 
 #[test]
 fn test_spring_no_endpoint_for_plain_method() {
-    let content = r#"
+    let content = r"
 package com.example;
 
 public class HelperClass {
     public void doWork() {}
     private int compute(int x) { return x * 2; }
 }
-"#;
+";
 
     let staging = build_staging_graph(content, "HelperClass.java");
 
@@ -2320,13 +2320,11 @@ public class UserController {
 
     assert!(
         has_endpoint_with_name(&staging, "route::GET::/api/users"),
-        "Expected 'route::GET::/api/users' with class prefix, found: {:?}",
-        endpoints
+        "Expected 'route::GET::/api/users' with class prefix, found: {endpoints:?}"
     );
     assert!(
         has_endpoint_with_name(&staging, "route::POST::/api/items"),
-        "Expected 'route::POST::/api/items' with class prefix, found: {:?}",
-        endpoints
+        "Expected 'route::POST::/api/items' with class prefix, found: {endpoints:?}"
     );
     // Verify the prefix IS composed (not just /users)
     assert!(
@@ -2357,7 +2355,6 @@ public class SimpleController {
 
     assert!(
         has_endpoint_with_name(&staging, "route::GET::/health"),
-        "Expected 'route::GET::/health' (no class prefix), found: {:?}",
-        endpoints
+        "Expected 'route::GET::/health' (no class prefix), found: {endpoints:?}"
     );
 }

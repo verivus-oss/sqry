@@ -26,7 +26,7 @@ class UserController {
 fn find_and_walk_method(node: &Node, source: &[u8]) {
     if node.kind() == "method_declaration" {
         if let Some(method_name) = node_name(node, source) {
-            println!("\nFound method: '{}'", method_name);
+            println!("\nFound method: '{method_name}'");
 
             println!("\nWalking up parent chain from method node:");
             walk_parent_chain(node, source);
@@ -58,21 +58,18 @@ fn describe_parent_node(parent: &Node, source: &[u8]) {
     match parent.kind() {
         "class_declaration" | "trait_declaration" | "interface_declaration" => {
             if let Some(name) = node_name(parent, source) {
-                println!(" -> ✅ Name: '{}'", name);
+                println!(" -> ✅ Name: '{name}'");
                 println!(
                     "\n  CONCLUSION: Tree-sitter DOES provide class name via parent traversal!"
                 );
-                println!(
-                    "  We can use: node.parent() chain to find '{}' from method node",
-                    name
-                );
+                println!("  We can use: node.parent() chain to find '{name}' from method node");
             } else {
                 println!();
             }
         }
         "namespace_definition" => {
             if let Some(name) = node_name(parent, source) {
-                println!(" -> Namespace: '{}'", name);
+                println!(" -> Namespace: '{name}'");
             } else {
                 println!();
             }

@@ -75,7 +75,7 @@ fn debug_metadata_persistence() -> Result<(), Box<dyn std::error::Error>> {
     let head_commit = String::from_utf8_lossy(&head_output.stdout)
         .trim()
         .to_string();
-    println!("HEAD commit: {}", head_commit);
+    println!("HEAD commit: {head_commit}");
 
     // Build index
     println!("\n=== Building Index ===");

@@ -404,9 +404,10 @@ fn run_expand_cache(
 
     // Discover workspace root
     let workspace_root = discover_workspace_root()?;
-    let cache_dir = output
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| workspace_root.join(DEFAULT_EXPAND_CACHE_DIR));
+    let cache_dir = output.map_or_else(
+        || workspace_root.join(DEFAULT_EXPAND_CACHE_DIR),
+        Path::to_path_buf,
+    );
 
     // Discover workspace crates
     let crates = discover_workspace_crates(&workspace_root)?;
@@ -527,7 +528,7 @@ fn compute_source_hash(crate_dir: &Path) -> Result<String> {
         .into_iter()
         .filter_map(std::result::Result::ok)
         .filter(|e| e.file_type().is_file() && e.path().extension().is_some_and(|ext| ext == "rs"))
-        .map(|e| e.into_path())
+        .map(walkdir::DirEntry::into_path)
         .collect();
 
     // Sort for deterministic hashing
@@ -747,10 +748,10 @@ fn extract_decl_name(line: &str, keyword: &str) -> Option<String> {
         .unwrap_or(stripped);
 
     // Only strip "const " as modifier when keyword is NOT "const " itself
-    let stripped = if keyword != "const " {
-        stripped.strip_prefix("const ").unwrap_or(stripped)
-    } else {
+    let stripped = if keyword == "const " {
         stripped
+    } else {
+        stripped.strip_prefix("const ").unwrap_or(stripped)
     };
 
     if !stripped.starts_with(keyword) {
@@ -801,8 +802,7 @@ fn get_rust_version() -> String {
                 None
             }
         })
-        .map(|v| v.trim().to_string())
-        .unwrap_or_else(|| "unknown".to_string())
+        .map_or_else(|| "unknown".to_string(), |v| v.trim().to_string())
 }
 
 /// Get current UTC timestamp as ISO 8601 string.
@@ -992,7 +992,7 @@ mod tests {
 
     #[test]
     fn test_extract_rust_symbols_from_source() {
-        let source = r#"
+        let source = r"
 pub fn hello() {}
 struct MyStruct {
     field: i32,
@@ -1000,7 +1000,7 @@ struct MyStruct {
 enum Color { Red, Green, Blue }
 const MAX: usize = 100;
 mod inner {}
-"#;
+";
         let symbols = extract_rust_symbols_from_source(source);
         assert!(symbols.contains(&"hello".to_string()));
         assert!(symbols.contains(&"MyStruct".to_string()));

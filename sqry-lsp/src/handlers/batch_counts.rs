@@ -1,7 +1,7 @@
 //! Batch caller/callee count handler for LSP.
 //!
 //! Returns caller and callee counts for multiple symbols in a single request,
-//! avoiding per-symbol round-trip overhead for CodeLens.
+//! avoiding per-symbol round-trip overhead for `CodeLens`.
 
 use anyhow::{Context, Result};
 use std::time::Instant;
@@ -21,6 +21,10 @@ use super::index::perf_log;
 /// # Errors
 ///
 /// Returns an error if the workspace path cannot be resolved or a query fails.
+#[allow(
+    clippy::similar_names,
+    reason = "callers_query/callees_query and callers_count/callees_count are intentionally symmetric"
+)]
 pub fn batch_caller_callee_count(
     session: &SessionManager,
     params: &SqryBatchCallerCalleeCountParams,

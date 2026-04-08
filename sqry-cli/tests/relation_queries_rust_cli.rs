@@ -100,7 +100,7 @@ pub const API_VERSION: &str = "1.0.0";
 fn cli_rust_exports_traits_and_enums() {
     let project = TempDir::new().unwrap();
 
-    let rust_code = r#"
+    let rust_code = r"
 pub trait Repository {
     fn save(&self, item: &str);
     fn find_by_id(&self, id: u32) -> Option<String>;
@@ -123,7 +123,7 @@ impl Repository for UserRepository {
         None
     }
 }
-"#;
+";
     std::fs::write(project.path().join("repository.rs"), rust_code).unwrap();
 
     Command::new(sqry_bin())
@@ -198,7 +198,7 @@ fn main() {
 fn cli_rust_callers_method_calls() {
     let project = TempDir::new().unwrap();
 
-    let rust_code = r#"
+    let rust_code = r"
 struct DataService {
     data: Vec<i32>,
 }
@@ -222,7 +222,7 @@ fn main() {
     let service = DataService { data: vec![1, 2, 3] };
     service.process();
 }
-"#;
+";
     std::fs::write(project.path().join("service.rs"), rust_code).unwrap();
 
     Command::new(sqry_bin())
@@ -606,7 +606,7 @@ async fn main() {
 fn cli_rust_private_functions() {
     let project = TempDir::new().unwrap();
 
-    let rust_code = r#"
+    let rust_code = r"
 pub fn public_api() -> i32 {
     private_helper()
 }
@@ -614,7 +614,7 @@ pub fn public_api() -> i32 {
 fn private_helper() -> i32 {
     42
 }
-"#;
+";
     std::fs::write(project.path().join("api.rs"), rust_code).unwrap();
 
     Command::new(sqry_bin())

@@ -199,8 +199,7 @@ fn test_es6_imports() {
     let import_count = count_import_edges(&staging);
     assert!(
         import_count >= 1,
-        "Expected at least 1 import edge, got {}",
-        import_count
+        "Expected at least 1 import edge, got {import_count}"
     );
     assert!(
         has_interned_string_containing(&staging, "svelte")
@@ -239,8 +238,7 @@ fn test_multiple_imports() {
     let import_count = count_import_edges(&staging);
     assert!(
         import_count >= 2,
-        "Expected at least 2 import edges, got {}",
-        import_count
+        "Expected at least 2 import edges, got {import_count}"
     );
 }
 

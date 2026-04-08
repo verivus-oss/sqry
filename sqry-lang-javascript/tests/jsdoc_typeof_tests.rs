@@ -1,6 +1,6 @@
-//! Integration tests for JavaScript JSDoc TypeOf and Reference edges
+//! Integration tests for JavaScript `JSDoc` `TypeOf` and Reference edges
 //!
-//! Tests JSDoc @param, @returns, and @type annotations
+//! Tests `JSDoc` @param, @returns, and @type annotations
 
 use sqry_core::graph::GraphBuilder;
 use sqry_core::graph::unified::build::{StagingGraph, StagingOp};
@@ -10,7 +10,7 @@ use sqry_lang_javascript::JavaScriptGraphBuilder;
 use std::collections::HashMap;
 use std::path::Path;
 
-/// Helper: Build StagingGraph from JavaScript source code
+/// Helper: Build `StagingGraph` from JavaScript source code
 fn build_graph(source: &str) -> StagingGraph {
     let builder = JavaScriptGraphBuilder::default();
     let mut parser = tree_sitter::Parser::new();
@@ -30,7 +30,7 @@ fn build_graph(source: &str) -> StagingGraph {
     staging
 }
 
-/// Build a string lookup map from staged InternString operations
+/// Build a string lookup map from staged `InternString` operations
 fn build_string_lookup(staging: &StagingGraph) -> HashMap<u32, String> {
     staging
         .operations()
@@ -45,7 +45,7 @@ fn build_string_lookup(staging: &StagingGraph) -> HashMap<u32, String> {
         .collect()
 }
 
-/// Build a node name lookup map from staged AddNode operations
+/// Build a node name lookup map from staged `AddNode` operations
 fn build_node_name_lookup(staging: &StagingGraph) -> HashMap<u32, String> {
     let strings = build_string_lookup(staging);
     staging
@@ -102,7 +102,7 @@ where
     edges
 }
 
-/// Helper: Check if TypeOf edge exists with context
+/// Helper: Check if `TypeOf` edge exists with context
 fn has_typeof_edge(
     staging: &StagingGraph,
     source_name: &str,
@@ -137,14 +137,14 @@ fn has_reference_edge(staging: &StagingGraph, source_name: &str, target_type: &s
 
 #[test]
 fn test_simple_parameter_types() {
-    let source = r#"
+    let source = r"
         /**
          * @param {string} name
          * @param {number} age
          * @param {boolean} active
          */
         function createUser(name, age, active) {}
-    "#;
+    ";
 
     let graph = build_graph(source);
 
@@ -176,13 +176,13 @@ fn test_simple_parameter_types() {
 
 #[test]
 fn test_complex_parameter_types() {
-    let source = r#"
+    let source = r"
         /**
          * @param {Array<User>} users
          * @param {Map<string, number>} scores
          */
         function processData(users, scores) {}
-    "#;
+    ";
 
     let graph = build_graph(source);
 
@@ -210,13 +210,13 @@ fn test_complex_parameter_types() {
 
 #[test]
 fn test_optional_parameters() {
-    let source = r#"
+    let source = r"
         /**
          * @param {string} name
          * @param {string} [optionalTag]
          */
         function process(name, optionalTag) {}
-    "#;
+    ";
 
     let graph = build_graph(source);
 
@@ -231,13 +231,13 @@ fn test_optional_parameters() {
 
 #[test]
 fn test_rest_parameters() {
-    let source = r#"
+    let source = r"
         /**
          * @param {string} name
          * @param {...number} scores
          */
         function calculate(name, ...scores) {}
-    "#;
+    ";
 
     let graph = build_graph(source);
 
@@ -262,14 +262,14 @@ fn test_rest_parameters() {
 
 #[test]
 fn test_default_parameters() {
-    let source = r#"
+    let source = r"
         /**
          * @param {string} name
          * @param {number} [count=10]
          * @param {boolean} [active=false]
          */
         function create(name, count = 10, active = false) {}
-    "#;
+    ";
 
     let graph = build_graph(source);
 
@@ -298,7 +298,7 @@ fn test_default_parameters() {
 
 #[test]
 fn test_simple_return_types() {
-    let source = r#"
+    let source = r"
         /**
          * @returns {boolean}
          */
@@ -312,7 +312,7 @@ fn test_simple_return_types() {
         function getUser() {
             return currentUser;
         }
-    "#;
+    ";
 
     let graph = build_graph(source);
 
@@ -337,7 +337,7 @@ fn test_simple_return_types() {
 
 #[test]
 fn test_promise_return_types() {
-    let source = r#"
+    let source = r"
         /**
          * @param {string} id
          * @returns {Promise<User>}
@@ -352,7 +352,7 @@ fn test_promise_return_types() {
         async function fetchItems() {
             return items;
         }
-    "#;
+    ";
 
     let graph = build_graph(source);
 
@@ -379,14 +379,14 @@ fn test_promise_return_types() {
 
 #[test]
 fn test_complex_return_types() {
-    let source = r#"
+    let source = r"
         /**
          * @returns {{id: string, user: User, count: number}}
          */
         function getData() {
             return data;
         }
-    "#;
+    ";
 
     let graph = build_graph(source);
 
@@ -408,7 +408,7 @@ fn test_complex_return_types() {
 
 #[test]
 fn test_variable_type_annotations() {
-    let source = r#"
+    let source = r"
         /**
          * @type {Map<string, User>}
          */
@@ -418,7 +418,7 @@ fn test_variable_type_annotations() {
          * @type {Array<number>}
          */
         let scores = [];
-    "#;
+    ";
 
     let graph = build_graph(source);
 
@@ -446,7 +446,7 @@ fn test_variable_type_annotations() {
 
 #[test]
 fn test_constant_type_annotations() {
-    let source = r#"
+    let source = r"
         /**
          * @type {Config}
          */
@@ -456,7 +456,7 @@ fn test_constant_type_annotations() {
          * @type {Logger}
          */
         const logger = createLogger();
-    "#;
+    ";
 
     let graph = build_graph(source);
 
@@ -481,7 +481,7 @@ fn test_constant_type_annotations() {
 
 #[test]
 fn test_nested_object_type_parsing() {
-    let source = r#"
+    let source = r"
         /**
          * @param {{id: string, meta: {tags: string[]}}} obj
          */
@@ -491,7 +491,7 @@ fn test_nested_object_type_parsing() {
          * @type {{user: {id: string, name: string}, count: number}}
          */
         const data = loadData();
-    "#;
+    ";
 
     let graph = build_graph(source);
 
@@ -519,7 +519,7 @@ fn test_nested_object_type_parsing() {
 
 #[test]
 fn test_class_field_type_annotations() {
-    let source = r#"
+    let source = r"
         class DataService {
             /**
              * @type {Database}
@@ -536,7 +536,7 @@ fn test_class_field_type_annotations() {
              */
             cache = new Map();
         }
-    "#;
+    ";
 
     let graph = build_graph(source);
 
@@ -569,7 +569,7 @@ fn test_class_field_type_annotations() {
 
 #[test]
 fn test_multi_param_function() {
-    let source = r#"
+    let source = r"
         /**
          * @param {User} user
          * @param {number} count
@@ -577,7 +577,7 @@ fn test_multi_param_function() {
          * @param {boolean} force
          */
         function updateUser(user, count, tags, force) {}
-    "#;
+    ";
 
     let graph = build_graph(source);
 
@@ -617,7 +617,7 @@ fn test_multi_param_function() {
 
 #[test]
 fn test_class_with_multiple_fields() {
-    let source = r#"
+    let source = r"
         class Service {
             /**
              * @type {API}
@@ -631,7 +631,7 @@ fn test_class_with_multiple_fields() {
              */
             events;
         }
-    "#;
+    ";
 
     let graph = build_graph(source);
 
@@ -662,13 +662,13 @@ fn test_class_with_multiple_fields() {
 
 #[test]
 fn test_union_types() {
-    let source = r#"
+    let source = r"
         /**
          * @param {string|number|boolean} value
          * @param {User|Admin|Guest} actor
          */
         function process(value, actor) {}
-    "#;
+    ";
 
     let graph = build_graph(source);
 
@@ -697,14 +697,14 @@ fn test_union_types() {
 
 #[test]
 fn test_generic_types() {
-    let source = r#"
+    let source = r"
         /**
          * @param {Array<T>} items
          * @param {Map<K, V>} lookup
          * @param {Promise<Result<Data>>} result
          */
         function handle(items, lookup, result) {}
-    "#;
+    ";
 
     let graph = build_graph(source);
 
@@ -741,13 +741,13 @@ fn test_generic_types() {
 
 #[test]
 fn test_intersection_types() {
-    let source = r#"
+    let source = r"
         /**
          * @param {Readable&Writable} stream
          * @param {User&Admin} superuser
          */
         function operate(stream, superuser) {}
-    "#;
+    ";
 
     let graph = build_graph(source);
 
@@ -774,12 +774,12 @@ fn test_intersection_types() {
 
 #[test]
 fn test_nested_generics() {
-    let source = r#"
+    let source = r"
         /**
          * @param {Promise<Array<User>>} users
          */
         function processUsers(users) {}
-    "#;
+    ";
 
     let graph = build_graph(source);
 
@@ -801,7 +801,7 @@ fn test_nested_generics() {
 
 #[test]
 fn test_no_jsdoc_comments() {
-    let source = r#"
+    let source = r"
         // Regular comment
         function noJsDoc(a, b) {
             return a + b;
@@ -813,7 +813,7 @@ fn test_no_jsdoc_comments() {
         class NoTypes {
             field = 'value';
         }
-    "#;
+    ";
 
     let graph = build_graph(source);
 
@@ -823,17 +823,16 @@ fn test_no_jsdoc_comments() {
 
     assert!(
         typeof_edges.is_empty(),
-        "Expected no TypeOf edges, but found: {:?}",
-        typeof_edges
+        "Expected no TypeOf edges, but found: {typeof_edges:?}"
     );
 }
 
 #[test]
 fn test_line_comments() {
-    let source = r#"
+    let source = r"
         // @param {string} name - this is not JSDoc
         function notJsDoc(name) {}
-    "#;
+    ";
 
     let graph = build_graph(source);
 
@@ -848,12 +847,12 @@ fn test_line_comments() {
 
 #[test]
 fn test_multi_line_comments() {
-    let source = r#"
+    let source = r"
         /*
          * @param {string} name - this is not JSDoc either
          */
         function alsoNotJsDoc(name) {}
-    "#;
+    ";
 
     let graph = build_graph(source);
 
@@ -868,7 +867,7 @@ fn test_multi_line_comments() {
 
 #[test]
 fn test_distant_comments() {
-    let source = r#"
+    let source = r"
         /**
          * @param {string} name
          */
@@ -876,7 +875,7 @@ fn test_distant_comments() {
 
         // Too far away (more than 1 blank line)
         function distantJsDoc(name) {}
-    "#;
+    ";
 
     let graph = build_graph(source);
 
@@ -893,7 +892,7 @@ fn test_distant_comments() {
 
 #[test]
 fn test_full_file_integration() {
-    let source = r#"
+    let source = r"
         /**
          * @type {Config}
          */
@@ -922,7 +921,7 @@ fn test_full_file_integration() {
                 return true;
             }
         }
-    "#;
+    ";
 
     let graph = build_graph(source);
 
@@ -994,14 +993,14 @@ fn test_full_file_integration() {
 
 #[test]
 fn test_qualified_types() {
-    let source = r#"
+    let source = r"
         /**
          * @param {import('./models').User} user
          * @param {React.Component} comp
          * @param {API.Response<Data>} response
          */
         function processImports(user, comp, response) {}
-    "#;
+    ";
 
     let graph = build_graph(source);
 
@@ -1036,12 +1035,12 @@ fn test_qualified_types() {
 
 #[test]
 fn test_edge_cases() {
-    let source = r#"
+    let source = r"
         /**
          * @param {string|null|undefined} maybeValue
          */
         function process(maybeValue) {}
-    "#;
+    ";
 
     let graph = build_graph(source);
 
@@ -1063,7 +1062,7 @@ fn test_edge_cases() {
 
 #[test]
 fn test_top_level_vs_function_scoped_variables() {
-    let source = r#"
+    let source = r"
         /**
          * @type {Config}
          */
@@ -1075,7 +1074,7 @@ fn test_top_level_vs_function_scoped_variables() {
              */
             const functionScoped = 42;
         }
-    "#;
+    ";
 
     let graph = build_graph(source);
 
@@ -1098,13 +1097,13 @@ fn test_top_level_vs_function_scoped_variables() {
 
 #[test]
 fn test_optional_parameter() {
-    let source = r#"
+    let source = r"
         /**
          * @param {string} name
          * @param {number} [age]
          */
         function createPerson(name, age) {}
-    "#;
+    ";
 
     let graph = build_graph(source);
 
@@ -1125,12 +1124,12 @@ fn test_optional_parameter() {
 
 #[test]
 fn test_rest_parameter_normalization() {
-    let source = r#"
+    let source = r"
         /**
          * @param {...string} args
          */
         function concat(...args) {}
-    "#;
+    ";
 
     let graph = build_graph(source);
 
@@ -1145,13 +1144,13 @@ fn test_rest_parameter_normalization() {
 
 #[test]
 fn test_dotted_parameter_names() {
-    let source = r#"
+    let source = r"
         /**
          * @param {string} options.name
          * @param {number} options.count
          */
         function configure(options) {}
-    "#;
+    ";
 
     let graph = build_graph(source);
 
@@ -1172,7 +1171,7 @@ fn test_dotted_parameter_names() {
 
 #[test]
 fn test_export_wrappers() {
-    let source = r#"
+    let source = r"
         /**
          * @param {User} user
          * @returns {boolean}
@@ -1180,7 +1179,7 @@ fn test_export_wrappers() {
         export default function validateUser(user) {
             return true;
         }
-    "#;
+    ";
 
     let graph = build_graph(source);
 
@@ -1201,7 +1200,7 @@ fn test_export_wrappers() {
 
 #[test]
 fn test_class_methods_with_jsdoc() {
-    let source = r#"
+    let source = r"
         class UserService {
             /**
              * @param {string} id
@@ -1220,7 +1219,7 @@ fn test_class_methods_with_jsdoc() {
                 return true;
             }
         }
-    "#;
+    ";
 
     let graph = build_graph(source);
 
@@ -1278,11 +1277,11 @@ fn test_class_methods_with_jsdoc() {
 
 // ========== ISSUE 1: Parameter Index Metadata Tests ==========
 
-/// Test: JSDoc params in different order than AST
-/// Validates that TypeOf edges use AST index, not JSDoc order
+/// Test: `JSDoc` params in different order than AST
+/// Validates that `TypeOf` edges use AST index, not `JSDoc` order
 #[test]
 fn test_param_jsdoc_out_of_order() {
-    let source = r#"
+    let source = r"
         /**
          * @param {number} age - second in JSDoc, but first in AST
          * @param {string} name - first in JSDoc, but second in AST
@@ -1290,7 +1289,7 @@ fn test_param_jsdoc_out_of_order() {
         function greet(name, age) {
             return `Hello ${name}, ${age}`;
         }
-    "#;
+    ";
 
     let graph = build_graph(source);
 
@@ -1328,18 +1327,18 @@ fn test_param_jsdoc_out_of_order() {
     );
 }
 
-/// Test: JSDoc missing some parameters
-/// Only parameters with JSDoc tags should get TypeOf edges
+/// Test: `JSDoc` missing some parameters
+/// Only parameters with `JSDoc` tags should get `TypeOf` edges
 #[test]
 fn test_param_jsdoc_missing_some() {
-    let source = r#"
+    let source = r"
         /**
          * @param {string} name
          */
         function greet(name, age, city) {
             return `Hello ${name}`;
         }
-    "#;
+    ";
 
     let graph = build_graph(source);
 
@@ -1369,11 +1368,11 @@ fn test_param_jsdoc_missing_some() {
     );
 }
 
-/// Test: JSDoc has extra parameters not in AST
-/// Extra JSDoc tags should be skipped (no matching AST parameter)
+/// Test: `JSDoc` has extra parameters not in AST
+/// Extra `JSDoc` tags should be skipped (no matching AST parameter)
 #[test]
 fn test_param_jsdoc_extra_tags() {
-    let source = r#"
+    let source = r"
         /**
          * @param {string} name
          * @param {number} age
@@ -1382,7 +1381,7 @@ fn test_param_jsdoc_extra_tags() {
         function greet(name) {
             return `Hello ${name}`;
         }
-    "#;
+    ";
 
     let graph = build_graph(source);
 
@@ -1415,10 +1414,10 @@ fn test_param_jsdoc_extra_tags() {
     assert!(!has_reference_edge(&graph, "greet", "number"));
 }
 
-/// Test: Method parameters with out-of-order JSDoc
+/// Test: Method parameters with out-of-order `JSDoc`
 #[test]
 fn test_method_param_jsdoc_out_of_order() {
-    let source = r#"
+    let source = r"
         class UserService {
             /**
              * @param {UpdateOptions} options - second in JSDoc
@@ -1429,7 +1428,7 @@ fn test_method_param_jsdoc_out_of_order() {
                 return true;
             }
         }
-    "#;
+    ";
 
     let graph = build_graph(source);
 
@@ -1466,15 +1465,15 @@ fn test_method_param_jsdoc_out_of_order() {
 
 // ========== ISSUE 2: Block-Scoped Variable Tests ==========
 
-/// Test: Variable inside if block should NOT get TypeOf edge
+/// Test: Variable inside if block should NOT get `TypeOf` edge
 #[test]
 fn test_variable_in_if_block_no_typeof() {
-    let source = r#"
+    let source = r"
         if (true) {
             /** @type {User} */
             const user = getUser();
         }
-    "#;
+    ";
 
     let graph = build_graph(source);
 
@@ -1496,15 +1495,15 @@ fn test_variable_in_if_block_no_typeof() {
     );
 }
 
-/// Test: Variable inside for loop should NOT get TypeOf edge
+/// Test: Variable inside for loop should NOT get `TypeOf` edge
 #[test]
 fn test_variable_in_for_loop_no_typeof() {
-    let source = r#"
+    let source = r"
         for (let i = 0; i < 10; i++) {
             /** @type {Item} */
             const item = items[i];
         }
-    "#;
+    ";
 
     let graph = build_graph(source);
 
@@ -1525,10 +1524,10 @@ fn test_variable_in_for_loop_no_typeof() {
     );
 }
 
-/// Test: Variable inside try/catch block should NOT get TypeOf edge
+/// Test: Variable inside try/catch block should NOT get `TypeOf` edge
 #[test]
 fn test_variable_in_try_block_no_typeof() {
-    let source = r#"
+    let source = r"
         try {
             /** @type {Result} */
             const result = riskyOperation();
@@ -1536,7 +1535,7 @@ fn test_variable_in_try_block_no_typeof() {
             /** @type {Error} */
             const error = e;
         }
-    "#;
+    ";
 
     let graph = build_graph(source);
 
@@ -1557,13 +1556,13 @@ fn test_variable_in_try_block_no_typeof() {
     );
 }
 
-/// Test: Module-level variable SHOULD get TypeOf edge
+/// Test: Module-level variable SHOULD get `TypeOf` edge
 #[test]
 fn test_module_level_variable_gets_typeof() {
-    let source = r#"
+    let source = r"
         /** @type {Config} */
         const config = loadConfig();
-    "#;
+    ";
 
     let graph = build_graph(source);
 
@@ -1591,13 +1590,13 @@ fn test_module_level_variable_gets_typeof() {
     );
 }
 
-/// Test: Exported variable SHOULD get TypeOf edge
+/// Test: Exported variable SHOULD get `TypeOf` edge
 #[test]
 fn test_exported_variable_gets_typeof() {
-    let source = r#"
+    let source = r"
         /** @type {Settings} */
         export const settings = {};
-    "#;
+    ";
 
     let graph = build_graph(source);
 
@@ -1625,15 +1624,15 @@ fn test_exported_variable_gets_typeof() {
     );
 }
 
-/// Test: Variable in while loop should NOT get TypeOf edge
+/// Test: Variable in while loop should NOT get `TypeOf` edge
 #[test]
 fn test_variable_in_while_loop_no_typeof() {
-    let source = r#"
+    let source = r"
         while (condition) {
             /** @type {Item} */
             const item = getNext();
         }
-    "#;
+    ";
 
     let graph = build_graph(source);
 
@@ -1656,10 +1655,10 @@ fn test_variable_in_while_loop_no_typeof() {
 
 // ========== ISSUE 3: Anonymous Class Tests ==========
 
-/// Test: Anonymous class assigned to variable with JSDoc
+/// Test: Anonymous class assigned to variable with `JSDoc`
 #[test]
 fn test_anonymous_class_variable_assignment() {
-    let source = r#"
+    let source = r"
         const UserService = class {
             /**
              * @param {string} id
@@ -1669,7 +1668,7 @@ fn test_anonymous_class_variable_assignment() {
                 return await fetch(`/users/${id}`);
             }
         };
-    "#;
+    ";
 
     let graph = build_graph(source);
 
@@ -1699,10 +1698,10 @@ fn test_anonymous_class_variable_assignment() {
 }
 
 /// Test: Anonymous class expression (not assigned)
-/// This validates graceful handling - methods exist but JSDoc edges may not
+/// This validates graceful handling - methods exist but `JSDoc` edges may not
 #[test]
 fn test_anonymous_class_expression() {
-    let source = r#"
+    let source = r"
         export default class {
             /**
              * @param {number} count
@@ -1711,7 +1710,7 @@ fn test_anonymous_class_expression() {
                 this.value += count;
             }
         };
-    "#;
+    ";
 
     let graph = build_graph(source);
 
@@ -1723,10 +1722,10 @@ fn test_anonymous_class_expression() {
     // Test passes if no panic occurred
 }
 
-/// Test: Anonymous class with field JSDoc
+/// Test: Anonymous class with field `JSDoc`
 #[test]
 fn test_anonymous_class_field_jsdoc() {
-    let source = r#"
+    let source = r"
         const DataService = class {
             /**
              * @type {Database}
@@ -1738,7 +1737,7 @@ fn test_anonymous_class_field_jsdoc() {
              */
             logger;
         };
-    "#;
+    ";
 
     let graph = build_graph(source);
 

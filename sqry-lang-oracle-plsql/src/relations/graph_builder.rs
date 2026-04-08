@@ -535,10 +535,7 @@ fn extract_typeof_edges_from_text(
         if is_variable_declaration_candidate(&upper)
             && let Some((var_name, type_text)) = parse_variable_declaration(trimmed)
         {
-            let caller = current_callable
-                .as_ref()
-                .map(|(id, _)| *id)
-                .unwrap_or(module_id);
+            let caller = current_callable.as_ref().map_or(module_id, |(id, _)| *id);
             emit_typeof_edge(
                 caller,
                 &type_text,

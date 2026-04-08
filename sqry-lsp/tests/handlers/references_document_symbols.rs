@@ -31,6 +31,7 @@ fn collect_symbols<'a>(symbols: &'a [DocumentSymbol], acc: &mut Vec<&'a Document
 }
 
 #[test]
+#[allow(clippy::default_trait_access)] // Type inference handles default
 fn references_include_declaration_when_requested_new() -> Result<()> {
     let root = common::fixture_path("sqry-lsp/tests/fixtures/mini-workspace");
     let session = new_session(&root);
@@ -69,6 +70,8 @@ fn references_include_declaration_when_requested_new() -> Result<()> {
 }
 
 #[test]
+#[allow(clippy::match_wildcard_for_single_variants)] // Wildcard covers future variants
+#[allow(clippy::default_trait_access)] // Type inference handles default
 fn document_symbol_emits_hierarchy_new() -> Result<()> {
     let root = common::fixture_path("sqry-lsp/tests/fixtures/mini-workspace");
     let session = new_session(&root);

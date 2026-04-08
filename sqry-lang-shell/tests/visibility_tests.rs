@@ -87,8 +87,7 @@ function bash_style {
         assert_eq!(
             visibility.as_deref(),
             Some("public"),
-            "Function '{}' should have public visibility in shell scripts",
-            name
+            "Function '{name}' should have public visibility in shell scripts"
         );
     }
 
@@ -165,10 +164,10 @@ function cleanup() {
 #[test]
 fn test_empty_script_no_functions() {
     // Empty script should have no functions
-    let source = r#"
+    let source = r"
 #!/bin/bash
 # Just comments, no functions
-"#;
+";
 
     let tree = parse_shell(source);
     let mut staging = StagingGraph::new();

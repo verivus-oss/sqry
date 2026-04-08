@@ -213,6 +213,8 @@ fn walk_tree_for_edges(
 
     // Recurse to children
     for i in 0..node.child_count() {
+        #[allow(clippy::cast_possible_truncation)]
+        // Graph storage: node/edge index counts fit in u32
         if let Some(child) = node.child(i as u32) {
             walk_tree_for_edges(child, content, ast_graph, helper, inserted, scope_tree)?;
         }
@@ -469,6 +471,8 @@ fn walk_function_body_for_calls(
 
     // Recurse to children
     for i in 0..node.child_count() {
+        #[allow(clippy::cast_possible_truncation)]
+        // Graph storage: node/edge index counts fit in u32
         if let Some(child) = node.child(i as u32) {
             walk_function_body_for_calls(
                 child,
@@ -497,6 +501,8 @@ fn walk_function_body_children_for_calls(
 ) -> GraphResult<()> {
     // Recurse to children only, don't process the node itself
     for i in 0..node.child_count() {
+        #[allow(clippy::cast_possible_truncation)]
+        // Graph storage: node/edge index counts fit in u32
         if let Some(child) = node.child(i as u32) {
             walk_function_body_for_calls(
                 child,
@@ -540,6 +546,8 @@ fn handle_go_statement(
     // Go statement structure: (go_statement (call_expression ...))
     // The call_expression is a child, not a named field
     for i in 0..node.child_count() {
+        #[allow(clippy::cast_possible_truncation)]
+        // Graph storage: node/edge index counts fit in u32
         if let Some(child) = node.child(i as u32)
             && child.kind() == "call_expression"
         {
@@ -581,6 +589,8 @@ fn handle_defer_statement(
     // Defer statement structure: (defer_statement (call_expression ...))
     // The call_expression is a child, not a named field
     for i in 0..node.child_count() {
+        #[allow(clippy::cast_possible_truncation)]
+        // Graph storage: node/edge index counts fit in u32
         if let Some(child) = node.child(i as u32)
             && child.kind() == "call_expression"
         {
@@ -754,6 +764,8 @@ fn extract_function_contexts(
     }
 
     for i in 0..node.child_count() {
+        #[allow(clippy::cast_possible_truncation)]
+        // Graph storage: node/edge index counts fit in u32
         if let Some(child) = node.child(i as u32) {
             extract_function_contexts(
                 child,
@@ -819,6 +831,8 @@ fn extract_method_context(node: Node, content: &[u8], package: &str) -> Option<F
 fn extract_receiver_type(node: Node, content: &[u8]) -> Option<String> {
     let receiver_node = node.child_by_field_name("receiver")?;
     for i in 0..receiver_node.child_count() {
+        #[allow(clippy::cast_possible_truncation)]
+        // Graph storage: node/edge index counts fit in u32
         if let Some(param) = receiver_node.child(i as u32)
             && param.kind() == "parameter_declaration"
             && let Some(type_node) = param.child_by_field_name("type")

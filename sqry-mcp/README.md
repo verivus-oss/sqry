@@ -11,7 +11,7 @@ Integrate sqry with Codex, Claude Desktop, Windsurf, Cursor, and other AI coding
 With sqry MCP, your AI assistant can:
 
 - 🔍 **Search** your codebase semantically (fuzzy, typo-tolerant)
-- 🎯 **Query** with structured filters (kind, async, visibility, etc.)
+- 🎯 **Query** with structured JSON filters (language, kind, visibility, score) — separate from query string predicates
 - 🔗 **Navigate** relationships (callers, callees, imports, exports)
 - 📊 **Analyze** dependencies and impact
 - 💡 **Explain** code symbols with context
@@ -123,6 +123,31 @@ sqry index .
 @sqry explain the authenticate function in src/auth.ts
 ```
 
+### MCP Tool Call Example
+
+The `semantic_search` tool accepts a `query` string (with predicates) and an
+optional `filters` JSON object:
+
+```json
+{
+  "method": "tools/call",
+  "params": {
+    "name": "semantic_search",
+    "arguments": {
+      "query": "kind:function name~=/^auth/",
+      "filters": {
+        "language": ["rust", "typescript"],
+        "visibility": "public"
+      },
+      "max_results": 50
+    }
+  }
+}
+```
+
+> **Note:** The `filters` parameter is a JSON object, not a string. For
+> string-style predicates like `lang:rust`, use the `query` parameter.
+
 ---
 
 ## Context Files vs Skills
@@ -158,16 +183,17 @@ When MCP responses leave your local machine (for hosted cloud models), redact
 paths and code context before transmission.
 
 - Library: [sqry-mcp-redaction](../sqry-mcp-redaction/README.md)
-- Presets: `minimal`, `standard` (default recommendation), `strict`
+- Runtime default: `minimal` (via `SQRY_REDACTION_PRESET`, see config table above)
+- Presets: `none`, `minimal` (runtime default), `standard` (recommended for external LLMs), `strict`
 - Coverage: absolute paths, file URIs, workspace roots, optional code/docs fields
 
-Use `standard` or `strict` for external providers.
+Use `standard` or `strict` when sending responses to external/hosted LLM providers.
 
 ---
 
 ## Features
 
-### Tool Catalog (33 tools)
+### Tool Catalog (34 tools)
 
 | Category | Tool | Purpose |
 |----------|------|---------|
@@ -203,6 +229,7 @@ Use `standard` or `strict` for external providers.
 | Navigation | `get_hover_info` | Hover info |
 | Navigation | `get_document_symbols` | Symbols in a file |
 | Navigation | `get_workspace_symbols` | Workspace symbol search |
+| Introspection | `expand_cache_status` | Macro expansion cache status (Rust) |
 | Natural Language | `sqry_ask` | NL → sqry command translation |
 
 See [User Guide](USER_GUIDE.md#available-tools) for full parameters and examples.
@@ -251,7 +278,10 @@ Disable specific tool groups via environment variables:
 |----------|---------|---------|
 | `SQRY_MCP_WORKSPACE_ROOT` | Workspace root directory | Current directory |
 | `SQRY_MCP_TIMEOUT_MS` | Per-operation timeout | `60000` (60s) |
+| `SQRY_MCP_INDEX_TIMEOUT_MS` | Index rebuild timeout | `600000` (10min) |
 | `SQRY_MCP_MAX_OUTPUT_BYTES` | Output size limit | `50000` (50KB) |
+| `SQRY_REDACTION_PRESET` | Response redaction level | `minimal` |
+| `SQRY_INCLUDE_HIGH_COST` | Include high-cost plugins | `0` (disabled) |
 | `SQRY_MCP_ENGINE_CACHE_CAPACITY` | Max cached workspace engines | `5` |
 | `SQRY_MCP_DISCOVERY_CACHE_CAPACITY` | Max cached workspace paths | `100` |
 | `SQRY_MCP_TRACE_PATH_CACHE_CAPACITY` | Max cached trace path results | `256` |
@@ -442,6 +472,6 @@ MIT - See root LICENSE file
 
 ---
 
-**Last Updated**: 2026-04-05
-**Version**: 7.1.5
+**Last Updated**: 2026-04-08
+**Version**: 7.2.0
 **Tested With**: sqry v4.8.2, Claude Desktop, Windsurf, Claude Code, Codex, Gemini CLI

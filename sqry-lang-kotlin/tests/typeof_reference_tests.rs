@@ -1,4 +1,4 @@
-//! Comprehensive tests for Kotlin TypeOf and Reference edge extraction.
+//! Comprehensive tests for Kotlin `TypeOf` and Reference edge extraction.
 //!
 //! Tests cover all Kotlin type constructs and declaration forms:
 //! - Property declarations (val/var, class properties, top-level)
@@ -54,8 +54,7 @@ fn build_node_name_lookup(staging: &StagingGraph) -> std::collections::HashMap<u
                 let expected_id = expected_id.as_ref()?;
                 let node_name = staging
                     .resolve_node_canonical_name(entry)
-                    .map(str::to_owned)
-                    .unwrap_or_else(|| "<unknown>".to_owned());
+                    .map_or_else(|| "<unknown>".to_owned(), str::to_owned);
                 Some((expected_id.index(), node_name))
             } else {
                 None
@@ -80,7 +79,7 @@ fn collect_node_display_names(staging: &StagingGraph, language: Language) -> Vec
         .collect()
 }
 
-/// Collect TypeOf edges filtered by context.
+/// Collect `TypeOf` edges filtered by context.
 fn collect_typeof_edges_by_context(
     staging: &StagingGraph,
     context: TypeOfContext,
@@ -117,7 +116,7 @@ fn collect_typeof_edges_by_context(
         .collect()
 }
 
-/// Collect all TypeOf edges (any context).
+/// Collect all `TypeOf` edges (any context).
 #[allow(dead_code)] // Helper function for future tests
 fn collect_all_typeof_edges(staging: &StagingGraph) -> Vec<(String, String)> {
     let node_names = build_node_name_lookup(staging);
@@ -214,11 +213,11 @@ class User {
 
 #[test]
 fn test_var_simple_type() {
-    let source = r#"
+    let source = r"
 class Config {
     var port: Int = 8080
 }
-"#;
+";
     let staging = build_test_graph(source, "test.kt");
 
     // Should have TypeOf edge: Config.port → Int
@@ -242,11 +241,11 @@ class Config {
 
 #[test]
 fn test_nullable_type() {
-    let source = r#"
+    let source = r"
 class User {
     val email: String? = null
 }
-"#;
+";
     let staging = build_test_graph(source, "test.kt");
 
     // Should have TypeOf edge: User.email → String?
@@ -270,11 +269,11 @@ class User {
 
 #[test]
 fn test_generic_list_type() {
-    let source = r#"
+    let source = r"
 class Repository {
     val items: List<String> = emptyList()
 }
-"#;
+";
     let staging = build_test_graph(source, "test.kt");
 
     // Should have TypeOf edge: Repository.items → List<String>
@@ -303,11 +302,11 @@ class Repository {
 
 #[test]
 fn test_generic_map_type() {
-    let source = r#"
+    let source = r"
 class Cache {
     val data: Map<String, User> = emptyMap()
 }
-"#;
+";
     let staging = build_test_graph(source, "test.kt");
 
     // Should have TypeOf edge: Cache.data → Map<String, User>
@@ -339,11 +338,11 @@ class Cache {
 
 #[test]
 fn test_function_type_property() {
-    let source = r#"
+    let source = r"
 class Handler {
     val callback: (Int) -> String = { it.toString() }
 }
-"#;
+";
     let staging = build_test_graph(source, "test.kt");
 
     // Should have TypeOf edge: Handler.callback → (Int) -> String
@@ -403,9 +402,9 @@ class User {
 
 #[test]
 fn test_data_class_properties() {
-    let source = r#"
+    let source = r"
 data class User(val id: Int, val name: String, var age: Int)
-"#;
+";
     let staging = build_test_graph(source, "test.kt");
 
     // Data class constructor properties (val/var) should create property nodes with Field TypeOf edges
@@ -459,11 +458,11 @@ data class User(val id: Int, val name: String, var age: Int)
 
 #[test]
 fn test_function_single_parameter() {
-    let source = r#"
+    let source = r"
 fun greet(name: String) {
     println(name)
 }
-"#;
+";
     let staging = build_test_graph(source, "test.kt");
 
     let param_typeof_edges = collect_typeof_edges_by_context(&staging, TypeOfContext::Parameter);
@@ -477,11 +476,11 @@ fun greet(name: String) {
 
 #[test]
 fn test_function_multiple_parameters() {
-    let source = r#"
+    let source = r"
 fun create(id: Int, name: String, active: Boolean) {
     // implementation
 }
-"#;
+";
     let staging = build_test_graph(source, "test.kt");
 
     let param_typeof_edges = collect_typeof_edges_by_context(&staging, TypeOfContext::Parameter);
@@ -523,11 +522,11 @@ fun getName(): String {
 
 #[test]
 fn test_function_nullable_return() {
-    let source = r#"
+    let source = r"
 fun findUser(): User? {
     return null
 }
-"#;
+";
     let staging = build_test_graph(source, "test.kt");
 
     let return_typeof_edges = collect_typeof_edges_by_context(&staging, TypeOfContext::Return);
@@ -541,11 +540,11 @@ fun findUser(): User? {
 
 #[test]
 fn test_function_generic_return() {
-    let source = r#"
+    let source = r"
 fun getItems(): List<String> {
     return emptyList()
 }
-"#;
+";
     let staging = build_test_graph(source, "test.kt");
 
     let return_typeof_edges = collect_typeof_edges_by_context(&staging, TypeOfContext::Return);

@@ -17,8 +17,8 @@ use std::time::Instant;
 use anyhow::{Result, bail};
 use sqry_core::graph::unified::concurrent::GraphSnapshot;
 use sqry_core::graph::unified::edge::EdgeKind;
+use sqry_core::graph::unified::materialize::find_nodes_by_name;
 use sqry_core::graph::unified::node::NodeId;
-use sqry_core::graph::unified::{FileScope, ResolutionMode, SymbolCandidateOutcome, SymbolQuery};
 
 use crate::engine::{canonicalize_in_workspace, engine_for_workspace, get_graph_identity};
 use crate::tools::TracePathArgs;
@@ -265,8 +265,8 @@ fn build_path_steps(
             continue;
         };
 
+        let sym_ref = build_node_ref_from_node(entry, snapshot, workspace_root);
         let lang = files.language_for_file(entry.file);
-        let sym_ref = build_node_ref_from_node(entry, lang, snapshot, workspace_root);
 
         if let (Some(prev), Some(current)) = (prev_lang, lang)
             && prev != current
@@ -302,18 +302,6 @@ fn edge_info_for_step(
     }
 
     ("call".to_string(), Some(1.0))
-}
-
-/// Find nodes by name (simple or qualified) in the unified graph.
-fn find_nodes_by_name(snapshot: &GraphSnapshot, name: &str) -> Vec<NodeId> {
-    match snapshot.find_symbol_candidates(&SymbolQuery {
-        symbol: name,
-        file_scope: FileScope::Any,
-        mode: ResolutionMode::AllowSuffixCandidates,
-    }) {
-        SymbolCandidateOutcome::Candidates(matches) => matches,
-        SymbolCandidateOutcome::NotFound | SymbolCandidateOutcome::FileNotIndexed => Vec::new(),
-    }
 }
 
 /// Compute confidence score for an edge based on `EdgeKind` metadata.
@@ -480,7 +468,6 @@ fn get_edge_info_between(
 /// Build `NodeRefData` from a unified graph `NodeEntry`.
 fn build_node_ref_from_node(
     node: &sqry_core::graph::unified::storage::arena::NodeEntry,
-    language: Option<sqry_core::graph::Language>,
     snapshot: &GraphSnapshot,
     workspace_root: &std::path::Path,
 ) -> NodeRefData {
@@ -496,9 +483,8 @@ fn build_node_ref_from_node(
         .unwrap_or_default();
 
     // Get qualified name if present
-    let qualified_name = crate::execution::symbol_utils::display_entry_qualified_name(
-        node, strings, language, &name,
-    );
+    let qualified_name =
+        crate::execution::symbol_utils::display_entry_qualified_name(node, strings, files, &name);
 
     // Map NodeKind to kind string
     let kind = match node.kind {
@@ -530,7 +516,9 @@ fn build_node_ref_from_node(
         name,
         qualified_name,
         kind: kind.to_string(),
-        language: language.map_or_else(|| "unknown".to_string(), |l| l.to_string()),
+        language: files
+            .language_for_file(node.file)
+            .map_or_else(|| "unknown".to_string(), |l| l.to_string()),
         file_uri,
         range: RangeData {
             start: PositionData {

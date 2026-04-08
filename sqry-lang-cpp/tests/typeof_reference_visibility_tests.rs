@@ -1,7 +1,7 @@
-//! C++ GraphBuilder tests for TypeOf edges, Reference edges, and visibility metadata.
+//! C++ `GraphBuilder` tests for `TypeOf` edges, Reference edges, and visibility metadata.
 //!
 //! Tests the unified graph builder implementation for:
-//! - TypeOf edges (variable -> type relationships)
+//! - `TypeOf` edges (variable -> type relationships)
 //! - Reference edges (variable references type)
 //! - Visibility metadata (public/private/protected for class members, static for file scope)
 
@@ -64,7 +64,7 @@ fn count_reference_edges(staging: &StagingGraph) -> usize {
         .count()
 }
 
-/// Build a map from StringId to string value from staging operations
+/// Build a map from `StringId` to string value from staging operations
 fn build_string_map(staging: &StagingGraph) -> HashMap<StringId, String> {
     staging
         .operations()
@@ -79,12 +79,12 @@ fn build_string_map(staging: &StagingGraph) -> HashMap<StringId, String> {
         .collect()
 }
 
-/// Get node name from NodeEntry using string map
+/// Get node name from `NodeEntry` using string map
 fn get_node_name(entry: &NodeEntry, string_map: &HashMap<StringId, String>) -> Option<String> {
     string_map.get(&entry.name).cloned()
 }
 
-/// Collect (source, target) pairs for TypeOf edges
+/// Collect (source, target) pairs for `TypeOf` edges
 fn collect_typeof_edges(staging: &StagingGraph) -> Vec<(String, String)> {
     let string_map = build_string_map(staging);
     let mut node_names: HashMap<NodeId, String> = HashMap::new();
@@ -159,10 +159,10 @@ fn find_variable_visibility(staging: &StagingGraph, name: &str) -> Option<String
 
 #[test]
 fn test_simple_variable_typeof() {
-    let content = r#"
+    let content = r"
 int x;
 double y;
-"#;
+";
     let tree = parse_cpp(content);
     let mut staging = StagingGraph::new();
     let builder = CppGraphBuilder::new();
@@ -177,23 +177,23 @@ double y;
     assert!(
         typeof_edges
             .iter()
-            .any(|(src, tgt)| src.ends_with("x") && tgt == "int"),
+            .any(|(src, tgt)| src.ends_with('x') && tgt == "int"),
         "Expected TypeOf edge from x to int"
     );
     assert!(
         typeof_edges
             .iter()
-            .any(|(src, tgt)| src.ends_with("y") && tgt == "double"),
+            .any(|(src, tgt)| src.ends_with('y') && tgt == "double"),
         "Expected TypeOf edge from y to double"
     );
 }
 
 #[test]
 fn test_qualified_type_typeof() {
-    let content = r#"
+    let content = r"
 #include <string>
 std::string name;
-"#;
+";
     let tree = parse_cpp(content);
     let mut staging = StagingGraph::new();
     let builder = CppGraphBuilder::new();
@@ -215,10 +215,10 @@ std::string name;
 
 #[test]
 fn test_template_type_typeof() {
-    let content = r#"
+    let content = r"
 #include <vector>
 std::vector<int> numbers;
-"#;
+";
     let tree = parse_cpp(content);
     let mut staging = StagingGraph::new();
     let builder = CppGraphBuilder::new();
@@ -240,10 +240,10 @@ std::vector<int> numbers;
 
 #[test]
 fn test_pointer_type_typeof() {
-    let content = r#"
+    let content = r"
 int* ptr;
 const char* str;
-"#;
+";
     let tree = parse_cpp(content);
     let mut staging = StagingGraph::new();
     let builder = CppGraphBuilder::new();
@@ -271,10 +271,10 @@ const char* str;
 
 #[test]
 fn test_reference_type_typeof() {
-    let content = r#"
+    let content = r"
 int value = 42;
 int& ref = value;
-"#;
+";
     let tree = parse_cpp(content);
     let mut staging = StagingGraph::new();
     let builder = CppGraphBuilder::new();
@@ -296,13 +296,13 @@ int& ref = value;
 
 #[test]
 fn test_class_member_typeof() {
-    let content = r#"
+    let content = r"
 class User {
 public:
     int id;
     std::string name;
 };
-"#;
+";
     let tree = parse_cpp(content);
     let mut staging = StagingGraph::new();
     let builder = CppGraphBuilder::new();
@@ -332,9 +332,9 @@ public:
 
 #[test]
 fn test_typeof_and_reference_paired() {
-    let content = r#"
+    let content = r"
 int x;
-"#;
+";
     let tree = parse_cpp(content);
     let mut staging = StagingGraph::new();
     let builder = CppGraphBuilder::new();
@@ -358,13 +358,13 @@ int x;
 
 #[test]
 fn test_public_class_member_visibility() {
-    let content = r#"
+    let content = r"
 class MyClass {
 public:
     int publicField;
     void publicMethod() {}
 };
-"#;
+";
     let tree = parse_cpp(content);
     let mut staging = StagingGraph::new();
     let builder = CppGraphBuilder::new();
@@ -392,13 +392,13 @@ public:
 
 #[test]
 fn test_private_class_member_visibility() {
-    let content = r#"
+    let content = r"
 class MyClass {
 private:
     int privateField;
     void privateMethod() {}
 };
-"#;
+";
     let tree = parse_cpp(content);
     let mut staging = StagingGraph::new();
     let builder = CppGraphBuilder::new();
@@ -426,13 +426,13 @@ private:
 
 #[test]
 fn test_protected_class_member_visibility() {
-    let content = r#"
+    let content = r"
 class Base {
 protected:
     int protectedField;
     void protectedMethod() {}
 };
-"#;
+";
     let tree = parse_cpp(content);
     let mut staging = StagingGraph::new();
     let builder = CppGraphBuilder::new();
@@ -460,7 +460,7 @@ protected:
 
 #[test]
 fn test_mixed_visibility_sections() {
-    let content = r#"
+    let content = r"
 class MyClass {
 public:
     int publicField;
@@ -471,7 +471,7 @@ private:
 public:
     int anotherPublicField;
 };
-"#;
+";
     let tree = parse_cpp(content);
     let mut staging = StagingGraph::new();
     let builder = CppGraphBuilder::new();
@@ -510,12 +510,12 @@ public:
 
 #[test]
 fn test_class_default_private_visibility() {
-    let content = r#"
+    let content = r"
 class MyClass {
     int defaultField;
     void defaultMethod() {}
 };
-"#;
+";
     let tree = parse_cpp(content);
     let mut staging = StagingGraph::new();
     let builder = CppGraphBuilder::new();
@@ -539,12 +539,12 @@ class MyClass {
 
 #[test]
 fn test_struct_default_public_visibility() {
-    let content = r#"
+    let content = r"
 struct MyStruct {
     int defaultField;
     void defaultMethod() {}
 };
-"#;
+";
     let tree = parse_cpp(content);
     let mut staging = StagingGraph::new();
     let builder = CppGraphBuilder::new();
@@ -568,11 +568,11 @@ struct MyStruct {
 
 #[test]
 fn test_static_function_private_visibility() {
-    let content = r#"
+    let content = r"
 static int helper() {
     return 42;
 }
-"#;
+";
     let tree = parse_cpp(content);
     let mut staging = StagingGraph::new();
     let builder = CppGraphBuilder::new();
@@ -592,11 +592,11 @@ static int helper() {
 
 #[test]
 fn test_non_static_function_public_visibility() {
-    let content = r#"
+    let content = r"
 int publicFunction() {
     return 42;
 }
-"#;
+";
     let tree = parse_cpp(content);
     let mut staging = StagingGraph::new();
     let builder = CppGraphBuilder::new();
@@ -618,7 +618,7 @@ int publicFunction() {
 
 #[test]
 fn test_full_example_with_typeof_reference_visibility() {
-    let content = r#"
+    let content = r"
 class User {
 public:
     int id;
@@ -635,7 +635,7 @@ private:
         return password == pwd;
     }
 };
-"#;
+";
     let tree = parse_cpp(content);
     let mut staging = StagingGraph::new();
     let builder = CppGraphBuilder::new();

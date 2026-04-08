@@ -92,7 +92,7 @@ export default {
 
 #[test]
 fn test_composition_api_functions_public() {
-    let source = r#"
+    let source = r"
 <script setup>
 import { ref } from 'vue'
 
@@ -106,7 +106,7 @@ function reset() {
   count.value = 0
 }
 </script>
-"#;
+";
 
     let tree = parse_vue(source);
     let mut staging = StagingGraph::new();
@@ -130,7 +130,7 @@ function reset() {
 
 #[test]
 fn test_lifecycle_hooks_public() {
-    let source = r#"
+    let source = r"
 <script>
 export default {
   mounted() {
@@ -141,7 +141,7 @@ export default {
   }
 }
 </script>
-"#;
+";
 
     let tree = parse_vue(source);
     let mut staging = StagingGraph::new();

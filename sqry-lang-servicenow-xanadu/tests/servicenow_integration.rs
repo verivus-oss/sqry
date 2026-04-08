@@ -1,10 +1,10 @@
-//! Integration tests for ServiceNow Xanadu plugin (graph-native).
+//! Integration tests for `ServiceNow` Xanadu plugin (graph-native).
 //!
 //! Validates:
 //! - Script Include class nodes from Class.create
 //! - Function and method nodes
 //! - Variable/function dual emit for var function expressions
-//! - GlideRecord table read edges from callers
+//! - `GlideRecord` table read edges from callers
 //! - gs.* API call nodes
 
 use sqry_core::graph::Language;

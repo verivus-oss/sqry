@@ -174,10 +174,7 @@ pub fn execute_list_symbols(args: &ListSymbolsArgs) -> Result<ToolExecution<List
             .map(|s| s.to_string())
             .unwrap_or_default();
         let qualified_name = crate::execution::symbol_utils::display_entry_qualified_name(
-            entry,
-            strings,
-            files.language_for_file(entry.file),
-            &name,
+            entry, strings, files, &name,
         );
 
         let kind_str = format!("{:?}", entry.kind);
@@ -457,6 +454,11 @@ fn estimate_unused_count(snapshot: &sqry_core::graph::unified::concurrent::Graph
 }
 
 /// Execute the `get_insights` tool to provide codebase health metrics.
+#[allow(clippy::too_many_lines)] // Introspection tool handles all graph metadata types
+#[allow(
+    clippy::too_many_lines,
+    reason = "aggregates multiple health metrics in a single pass; extraction into helpers would obscure the data-flow logic"
+)]
 pub fn execute_get_insights(
     args: &crate::tools::GetInsightsArgs,
 ) -> Result<ToolExecution<super::super::types::GetInsightsData>> {
@@ -800,12 +802,8 @@ fn collect_complexity_metric(
     let strings = snapshot.strings();
     let files = snapshot.files();
     let name = strings.resolve(entry.name)?.to_string();
-    let qualified_name = crate::execution::symbol_utils::display_entry_qualified_name(
-        entry,
-        strings,
-        files.language_for_file(entry.file),
-        &name,
-    );
+    let qualified_name =
+        crate::execution::symbol_utils::display_entry_qualified_name(entry, strings, files, &name);
     let file_path =
         crate::execution::symbol_utils::path_to_forward_slash(&files.resolve(entry.file)?);
 

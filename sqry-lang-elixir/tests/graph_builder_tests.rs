@@ -234,8 +234,7 @@ end
     let call_count = count_call_edges(&staging);
     assert!(
         call_count >= 1,
-        "Expected at least 1 call edge, got {}",
-        call_count
+        "Expected at least 1 call edge, got {call_count}"
     );
 }
 
@@ -325,8 +324,7 @@ end
     let import_count = count_import_edges(&staging);
     assert!(
         import_count >= 1,
-        "Expected at least 1 import edge, got {}",
-        import_count
+        "Expected at least 1 import edge, got {import_count}"
     );
 }
 

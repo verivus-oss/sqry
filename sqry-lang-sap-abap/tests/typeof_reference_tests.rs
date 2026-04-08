@@ -1,7 +1,7 @@
-//! Integration tests for SAP ABAP TypeOf and References edge extraction.
+//! Integration tests for SAP ABAP `TypeOf` and References edge extraction.
 //!
 //! Tests that DATA/TYPES/FIELD-SYMBOLS/CLASS-DATA declarations produce
-//! TypeOf edges and References edges for non-builtin types.
+//! `TypeOf` edges and References edges for non-builtin types.
 
 use sqry_core::graph::unified::NodeId;
 use sqry_core::graph::unified::build::staging::{StagingGraph, StagingOp};
@@ -261,12 +261,12 @@ fn test_abap_user_type_has_references() {
 #[test]
 fn test_abap_coexists_with_table_edges() {
     // This test uses source that has both table operations and type declarations
-    let source = br#"
+    let source = br"
 REPORT ztest.
 DATA lt_items TYPE TABLE OF zmaterial.
 DATA lv_count TYPE i.
 SELECT * FROM zmaterial INTO TABLE lt_items.
-"#;
+";
     let staging = build_staging(source);
     assert!(has_typeof_edge(&staging), "Expected TypeOf edges");
     assert!(staging.stats().nodes_staged > 0, "Should have nodes");
@@ -482,7 +482,7 @@ fn test_abap_typeof_source_is_variable_node() {
 #[test]
 fn test_abap_mixed_types_and_table_ops() {
     // Comprehensive test with type declarations, table operations, and method structure
-    let source = br#"
+    let source = br"
 CLASS zcl_processor IMPLEMENTATION.
   METHOD process_data.
     DATA lt_items TYPE TABLE OF zmaterial.
@@ -492,7 +492,7 @@ CLASS zcl_processor IMPLEMENTATION.
     INSERT zcustomer FROM @ls_customer.
   ENDMETHOD.
 ENDCLASS.
-"#;
+";
     let staging = build_staging(source);
 
     // Should have TypeOf edges from type declarations

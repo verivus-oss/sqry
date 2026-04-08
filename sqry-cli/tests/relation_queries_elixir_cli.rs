@@ -22,7 +22,7 @@ use tempfile::TempDir;
 fn cli_elixir_callers_simple_function() {
     let project = TempDir::new().unwrap();
 
-    let elixir_code = r#"
+    let elixir_code = r"
 defmodule Demo do
   def helper do
     :ok
@@ -33,7 +33,7 @@ defmodule Demo do
     :done
   end
 end
-"#;
+";
     std::fs::write(project.path().join("demo.ex"), elixir_code).unwrap();
 
     Command::new(sqry_bin())
@@ -91,7 +91,7 @@ end
 fn cli_elixir_callers_pipe_operator() {
     let project = TempDir::new().unwrap();
 
-    let elixir_code = r#"
+    let elixir_code = r"
 defmodule Pipeline do
   def transform(data) do
     data |> String.upcase()
@@ -107,7 +107,7 @@ defmodule Pipeline do
     |> validate()
   end
 end
-"#;
+";
     std::fs::write(project.path().join("pipeline.ex"), elixir_code).unwrap();
 
     Command::new(sqry_bin())
@@ -130,13 +130,13 @@ end
 fn cli_elixir_callers_erlang_ffi() {
     let project = TempDir::new().unwrap();
 
-    let elixir_code = r#"
+    let elixir_code = r"
 defmodule ErlangFFI do
   def get_timestamp do
     :erlang.system_time(:second)
   end
 end
-"#;
+";
     std::fs::write(project.path().join("ffi.ex"), elixir_code).unwrap();
 
     Command::new(sqry_bin())
@@ -246,7 +246,7 @@ end
 fn cli_elixir_nested_module_calls() {
     let project = TempDir::new().unwrap();
 
-    let elixir_code = r#"
+    let elixir_code = r"
 defmodule Parent do
   defmodule Child do
     def helper, do: :ok
@@ -256,7 +256,7 @@ defmodule Parent do
     Child.helper()
   end
 end
-"#;
+";
     std::fs::write(project.path().join("nested.ex"), elixir_code).unwrap();
 
     Command::new(sqry_bin())
@@ -319,7 +319,7 @@ end
 fn cli_elixir_exports_public_function() {
     let project = TempDir::new().unwrap();
 
-    let elixir_code = r#"
+    let elixir_code = r"
 defmodule Visibility do
   def public_fun do
     :ok
@@ -329,7 +329,7 @@ defmodule Visibility do
     :secret
   end
 end
-"#;
+";
     std::fs::write(project.path().join("visibility.ex"), elixir_code).unwrap();
 
     Command::new(sqry_bin())
@@ -351,12 +351,12 @@ end
 fn cli_elixir_exports_hide_private_functions() {
     let project = TempDir::new().unwrap();
 
-    let elixir_code = r#"
+    let elixir_code = r"
 defmodule Secret do
   def public_fun, do: :ok
   defp private_fun, do: :secret
 end
-"#;
+";
     std::fs::write(project.path().join("secret.ex"), elixir_code).unwrap();
 
     Command::new(sqry_bin())
@@ -378,7 +378,7 @@ end
 fn cli_elixir_exports_public_macro() {
     let project = TempDir::new().unwrap();
 
-    let elixir_code = r#"
+    let elixir_code = r"
 defmodule MacroModule do
   defmacro public_macro do
     quote do: :ok
@@ -388,7 +388,7 @@ defmodule MacroModule do
     quote do: :secret
   end
 end
-"#;
+";
     std::fs::write(project.path().join("macros.ex"), elixir_code).unwrap();
 
     Command::new(sqry_bin())
@@ -410,12 +410,12 @@ end
 fn cli_elixir_exports_hide_private_macros() {
     let project = TempDir::new().unwrap();
 
-    let elixir_code = r#"
+    let elixir_code = r"
 defmodule MacroModule do
   defmacro public_macro, do: quote(do: :ok)
   defmacrop private_macro, do: quote(do: :secret)
 end
-"#;
+";
     std::fs::write(project.path().join("macros.ex"), elixir_code).unwrap();
 
     Command::new(sqry_bin())
@@ -437,14 +437,14 @@ end
 fn cli_elixir_exports_mixed_functions_and_macros() {
     let project = TempDir::new().unwrap();
 
-    let elixir_code = r#"
+    let elixir_code = r"
 defmodule MixedModule do
   def public_fun, do: :ok
   defp private_fun, do: :secret
   defmacro public_macro, do: quote(do: :ok)
   defmacrop private_macro, do: quote(do: :secret)
 end
-"#;
+";
     std::fs::write(project.path().join("mixed.ex"), elixir_code).unwrap();
 
     Command::new(sqry_bin())

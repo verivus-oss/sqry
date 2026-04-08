@@ -1,4 +1,4 @@
-//! Comprehensive tests for TypeOf and Reference edge extraction in Swift.
+//! Comprehensive tests for `TypeOf` and Reference edge extraction in Swift.
 //!
 //! Tests cover all Swift type constructs and declaration forms supported by the plugin.
 
@@ -37,7 +37,7 @@ fn build_test_graph(source: &str, filename: &str) -> StagingGraph {
     staging
 }
 
-/// Build a string lookup map from staged InternString operations
+/// Build a string lookup map from staged `InternString` operations
 fn build_string_lookup(staging: &StagingGraph) -> HashMap<u32, String> {
     staging
         .operations()
@@ -52,7 +52,7 @@ fn build_string_lookup(staging: &StagingGraph) -> HashMap<u32, String> {
         .collect()
 }
 
-/// Build a node name lookup map from staged AddNode operations
+/// Build a node name lookup map from staged `AddNode` operations
 fn build_node_name_lookup(staging: &StagingGraph) -> HashMap<u32, String> {
     let strings = build_string_lookup(staging);
     staging
@@ -96,7 +96,7 @@ fn resolve_display_name(
         )
 }
 
-/// Helper to collect all edges of a specific kind and return (from_name, to_name) pairs
+/// Helper to collect all edges of a specific kind and return (`from_name`, `to_name`) pairs
 fn collect_edges_by_kind<F>(staging: &StagingGraph, predicate: F) -> Vec<(String, String)>
 where
     F: Fn(&EdgeKind) -> bool,
@@ -130,7 +130,7 @@ where
     edges
 }
 
-/// Helper to collect TypeOf edges filtered by context (Parameter, Return, Variable, Field)
+/// Helper to collect `TypeOf` edges filtered by context (Parameter, Return, Variable, Field)
 fn collect_typeof_edges_by_context(
     staging: &StagingGraph,
     context: TypeOfContext,
@@ -155,9 +155,9 @@ type TypeOfEdgeMetadata = (
     Option<NodeKind>,
 );
 
-/// Enhanced helper to collect TypeOf edges with full metadata (M-3: metadata validation).
+/// Enhanced helper to collect `TypeOf` edges with full metadata (M-3: metadata validation).
 ///
-/// Returns tuples of (from_name, to_name, index, param_name, node_kind).
+/// Returns tuples of (`from_name`, `to_name`, index, `param_name`, `node_kind`).
 fn collect_typeof_edges_with_metadata(
     staging: &StagingGraph,
     context: TypeOfContext,
@@ -238,22 +238,19 @@ var active: Bool = true
         typeof_edges
             .iter()
             .any(|(var, typ)| var == "name" && typ == "String"),
-        "Expected TypeOf edge from name to String, got: {:?}",
-        typeof_edges
+        "Expected TypeOf edge from name to String, got: {typeof_edges:?}"
     );
     assert!(
         typeof_edges
             .iter()
             .any(|(var, typ)| var == "count" && typ == "Int"),
-        "Expected TypeOf edge from count to Int, got: {:?}",
-        typeof_edges
+        "Expected TypeOf edge from count to Int, got: {typeof_edges:?}"
     );
     assert!(
         typeof_edges
             .iter()
             .any(|(var, typ)| var == "active" && typ == "Bool"),
-        "Expected TypeOf edge from active to Bool, got: {:?}",
-        typeof_edges
+        "Expected TypeOf edge from active to Bool, got: {typeof_edges:?}"
     );
 }
 
@@ -272,24 +269,22 @@ let maxSize: Int = 100
         typeof_edges
             .iter()
             .any(|(var, typ)| var == "username" && typ == "String"),
-        "Expected TypeOf edge from username to String, got: {:?}",
-        typeof_edges
+        "Expected TypeOf edge from username to String, got: {typeof_edges:?}"
     );
     assert!(
         typeof_edges
             .iter()
             .any(|(var, typ)| var == "maxSize" && typ == "Int"),
-        "Expected TypeOf edge from maxSize to Int, got: {:?}",
-        typeof_edges
+        "Expected TypeOf edge from maxSize to Int, got: {typeof_edges:?}"
     );
 }
 
 #[test]
 fn test_var_optional_types() {
-    let source = r#"
+    let source = r"
 var user: User? = nil
 var config: Config? = nil
-"#;
+";
 
     let staging = build_test_graph(source, "test.swift");
 
@@ -305,8 +300,7 @@ var config: Config? = nil
         typeof_edges
             .iter()
             .any(|(var, typ)| var == "user" && typ.contains("User")),
-        "Expected TypeOf edge from user to User?, got: {:?}",
-        typeof_edges
+        "Expected TypeOf edge from user to User?, got: {typeof_edges:?}"
     );
 
     // Check Reference edges (should point to the underlying type)
@@ -314,17 +308,16 @@ var config: Config? = nil
         reference_edges
             .iter()
             .any(|(var, typ)| var == "user" && typ == "User"),
-        "Expected Reference edge from user to User, got: {:?}",
-        reference_edges
+        "Expected Reference edge from user to User, got: {reference_edges:?}"
     );
 }
 
 #[test]
 fn test_var_array_types() {
-    let source = r#"
+    let source = r"
 var items: [String] = []
 var numbers: [Int] = [1, 2, 3]
-"#;
+";
 
     let staging = build_test_graph(source, "test.swift");
 
@@ -337,8 +330,7 @@ var numbers: [Int] = [1, 2, 3]
         typeof_edges
             .iter()
             .any(|(var, typ)| var == "items" && typ.contains("String")),
-        "Expected TypeOf edge from items to [String], got: {:?}",
-        typeof_edges
+        "Expected TypeOf edge from items to [String], got: {typeof_edges:?}"
     );
 
     // Check Reference edges (should point to element type)
@@ -346,17 +338,16 @@ var numbers: [Int] = [1, 2, 3]
         reference_edges
             .iter()
             .any(|(var, typ)| var == "items" && typ == "String"),
-        "Expected Reference edge from items to String, got: {:?}",
-        reference_edges
+        "Expected Reference edge from items to String, got: {reference_edges:?}"
     );
 }
 
 #[test]
 fn test_var_dictionary_types() {
-    let source = r#"
+    let source = r"
 var mapping: [String: Int] = [:]
 var cache: [UUID: User] = [:]
-"#;
+";
 
     let staging = build_test_graph(source, "test.swift");
 
@@ -368,24 +359,22 @@ var cache: [UUID: User] = [:]
         reference_edges
             .iter()
             .any(|(var, typ)| var == "mapping" && typ == "String"),
-        "Expected Reference edge from mapping to String, got: {:?}",
-        reference_edges
+        "Expected Reference edge from mapping to String, got: {reference_edges:?}"
     );
     assert!(
         reference_edges
             .iter()
             .any(|(var, typ)| var == "mapping" && typ == "Int"),
-        "Expected Reference edge from mapping to Int, got: {:?}",
-        reference_edges
+        "Expected Reference edge from mapping to Int, got: {reference_edges:?}"
     );
 }
 
 #[test]
 fn test_var_generic_types() {
-    let source = r#"
+    let source = r"
 var result: Result<Data, Error> = .success(Data())
 var container: Array<String> = []
-"#;
+";
 
     let staging = build_test_graph(source, "test.swift");
 
@@ -397,22 +386,19 @@ var container: Array<String> = []
         reference_edges
             .iter()
             .any(|(var, typ)| var == "result" && typ == "Result"),
-        "Expected Reference edge from result to Result, got: {:?}",
-        reference_edges
+        "Expected Reference edge from result to Result, got: {reference_edges:?}"
     );
     assert!(
         reference_edges
             .iter()
             .any(|(var, typ)| var == "result" && typ == "Data"),
-        "Expected Reference edge from result to Data, got: {:?}",
-        reference_edges
+        "Expected Reference edge from result to Data, got: {reference_edges:?}"
     );
     assert!(
         reference_edges
             .iter()
             .any(|(var, typ)| var == "result" && typ == "Error"),
-        "Expected Reference edge from result to Error, got: {:?}",
-        reference_edges
+        "Expected Reference edge from result to Error, got: {reference_edges:?}"
     );
 }
 
@@ -437,25 +423,23 @@ func greet(name: String, age: Int) {
         typeof_edges
             .iter()
             .any(|(func, typ)| func == "greet" && typ == "String"),
-        "Expected TypeOf edge from greet to String (parameter), got: {:?}",
-        typeof_edges
+        "Expected TypeOf edge from greet to String (parameter), got: {typeof_edges:?}"
     );
     assert!(
         typeof_edges
             .iter()
             .any(|(func, typ)| func == "greet" && typ == "Int"),
-        "Expected TypeOf edge from greet to Int (parameter), got: {:?}",
-        typeof_edges
+        "Expected TypeOf edge from greet to Int (parameter), got: {typeof_edges:?}"
     );
 }
 
 #[test]
 fn test_function_param_optional_types() {
-    let source = r#"
+    let source = r"
 func findUser(id: UUID?) -> User? {
     return nil
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.swift");
 
@@ -468,8 +452,7 @@ func findUser(id: UUID?) -> User? {
         typeof_edges
             .iter()
             .any(|(func, typ)| func == "findUser" && typ.contains("UUID")),
-        "Expected TypeOf edge from findUser to UUID? (parameter), got: {:?}",
-        typeof_edges
+        "Expected TypeOf edge from findUser to UUID? (parameter), got: {typeof_edges:?}"
     );
 
     // Check Reference edge
@@ -477,18 +460,17 @@ func findUser(id: UUID?) -> User? {
         reference_edges
             .iter()
             .any(|(func, typ)| func == "findUser" && typ == "UUID"),
-        "Expected Reference edge from findUser to UUID, got: {:?}",
-        reference_edges
+        "Expected Reference edge from findUser to UUID, got: {reference_edges:?}"
     );
 }
 
 #[test]
 fn test_function_param_array_types() {
-    let source = r#"
+    let source = r"
 func processItems(items: [String]) -> Int {
     return items.count
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.swift");
 
@@ -500,18 +482,17 @@ func processItems(items: [String]) -> Int {
         reference_edges
             .iter()
             .any(|(func, typ)| func == "processItems" && typ == "String"),
-        "Expected Reference edge from processItems to String (array element), got: {:?}",
-        reference_edges
+        "Expected Reference edge from processItems to String (array element), got: {reference_edges:?}"
     );
 }
 
 #[test]
 fn test_function_param_dictionary_types() {
-    let source = r#"
+    let source = r"
 func lookup(cache: [String: User], key: String) -> User? {
     return cache[key]
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.swift");
 
@@ -523,15 +504,13 @@ func lookup(cache: [String: User], key: String) -> User? {
         reference_edges
             .iter()
             .any(|(func, typ)| func == "lookup" && typ == "String"),
-        "Expected Reference edge from lookup to String, got: {:?}",
-        reference_edges
+        "Expected Reference edge from lookup to String, got: {reference_edges:?}"
     );
     assert!(
         reference_edges
             .iter()
             .any(|(func, typ)| func == "lookup" && typ == "User"),
-        "Expected Reference edge from lookup to User, got: {:?}",
-        reference_edges
+        "Expected Reference edge from lookup to User, got: {reference_edges:?}"
     );
 }
 
@@ -560,25 +539,23 @@ func getAge() -> Int {
         typeof_edges
             .iter()
             .any(|(func, typ)| func == "getName" && typ == "String"),
-        "Expected TypeOf edge from getName to String (return), got: {:?}",
-        typeof_edges
+        "Expected TypeOf edge from getName to String (return), got: {typeof_edges:?}"
     );
     assert!(
         typeof_edges
             .iter()
             .any(|(func, typ)| func == "getAge" && typ == "Int"),
-        "Expected TypeOf edge from getAge to Int (return), got: {:?}",
-        typeof_edges
+        "Expected TypeOf edge from getAge to Int (return), got: {typeof_edges:?}"
     );
 }
 
 #[test]
 fn test_function_return_optional_types() {
-    let source = r#"
+    let source = r"
 func findUser(id: Int) -> User? {
     return nil
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.swift");
 
@@ -591,8 +568,7 @@ func findUser(id: Int) -> User? {
         typeof_edges
             .iter()
             .any(|(func, typ)| func == "findUser" && typ.contains("User")),
-        "Expected TypeOf edge from findUser to User? (return), got: {:?}",
-        typeof_edges
+        "Expected TypeOf edge from findUser to User? (return), got: {typeof_edges:?}"
     );
 
     // Check Reference edge
@@ -600,18 +576,17 @@ func findUser(id: Int) -> User? {
         reference_edges
             .iter()
             .any(|(func, typ)| func == "findUser" && typ == "User"),
-        "Expected Reference edge from findUser to User, got: {:?}",
-        reference_edges
+        "Expected Reference edge from findUser to User, got: {reference_edges:?}"
     );
 }
 
 #[test]
 fn test_function_return_array_types() {
-    let source = r#"
+    let source = r"
 func getItems() -> [String] {
     return []
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.swift");
 
@@ -623,18 +598,17 @@ func getItems() -> [String] {
         reference_edges
             .iter()
             .any(|(func, typ)| func == "getItems" && typ == "String"),
-        "Expected Reference edge from getItems to String (array element), got: {:?}",
-        reference_edges
+        "Expected Reference edge from getItems to String (array element), got: {reference_edges:?}"
     );
 }
 
 #[test]
 fn test_function_return_generic_types() {
-    let source = r#"
+    let source = r"
 func loadData() -> Result<Data, Error> {
     return .failure(NSError())
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.swift");
 
@@ -646,22 +620,19 @@ func loadData() -> Result<Data, Error> {
         reference_edges
             .iter()
             .any(|(func, typ)| func == "loadData" && typ == "Result"),
-        "Expected Reference edge from loadData to Result, got: {:?}",
-        reference_edges
+        "Expected Reference edge from loadData to Result, got: {reference_edges:?}"
     );
     assert!(
         reference_edges
             .iter()
             .any(|(func, typ)| func == "loadData" && typ == "Data"),
-        "Expected Reference edge from loadData to Data, got: {:?}",
-        reference_edges
+        "Expected Reference edge from loadData to Data, got: {reference_edges:?}"
     );
     assert!(
         reference_edges
             .iter()
             .any(|(func, typ)| func == "loadData" && typ == "Error"),
-        "Expected Reference edge from loadData to Error, got: {:?}",
-        reference_edges
+        "Expected Reference edge from loadData to Error, got: {reference_edges:?}"
     );
 }
 
@@ -671,13 +642,13 @@ func loadData() -> Result<Data, Error> {
 
 #[test]
 fn test_method_param_types() {
-    let source = r#"
+    let source = r"
 class UserService {
     func createUser(name: String, age: Int) -> User {
         return User()
     }
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.swift");
 
@@ -688,27 +659,25 @@ class UserService {
         typeof_edges
             .iter()
             .any(|(method, typ)| method == "UserService.createUser" && typ == "String"),
-        "Expected TypeOf edge from UserService.createUser to String (parameter), got: {:?}",
-        typeof_edges
+        "Expected TypeOf edge from UserService.createUser to String (parameter), got: {typeof_edges:?}"
     );
     assert!(
         typeof_edges
             .iter()
             .any(|(method, typ)| method == "UserService.createUser" && typ == "Int"),
-        "Expected TypeOf edge from UserService.createUser to Int (parameter), got: {:?}",
-        typeof_edges
+        "Expected TypeOf edge from UserService.createUser to Int (parameter), got: {typeof_edges:?}"
     );
 }
 
 #[test]
 fn test_method_return_types() {
-    let source = r#"
+    let source = r"
 class DataLoader {
     func loadData() -> Data? {
         return nil
     }
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.swift");
 
@@ -719,8 +688,7 @@ class DataLoader {
         typeof_edges
             .iter()
             .any(|(method, typ)| method == "DataLoader.loadData" && typ.contains("Data")),
-        "Expected TypeOf edge from DataLoader.loadData to Data? (return), got: {:?}",
-        typeof_edges
+        "Expected TypeOf edge from DataLoader.loadData to Data? (return), got: {typeof_edges:?}"
     );
 }
 
@@ -730,13 +698,13 @@ class DataLoader {
 
 #[test]
 fn test_struct_property_types() {
-    let source = r#"
+    let source = r"
 struct User {
     var name: String
     var age: Int
     let id: UUID
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.swift");
 
@@ -747,34 +715,31 @@ struct User {
         typeof_edges
             .iter()
             .any(|(prop, typ)| prop == "User.name" && typ == "String"),
-        "Expected TypeOf edge from User.name to String, got: {:?}",
-        typeof_edges
+        "Expected TypeOf edge from User.name to String, got: {typeof_edges:?}"
     );
     assert!(
         typeof_edges
             .iter()
             .any(|(prop, typ)| prop == "User.age" && typ == "Int"),
-        "Expected TypeOf edge from User.age to Int, got: {:?}",
-        typeof_edges
+        "Expected TypeOf edge from User.age to Int, got: {typeof_edges:?}"
     );
     assert!(
         typeof_edges
             .iter()
             .any(|(prop, typ)| prop == "User.id" && typ == "UUID"),
-        "Expected TypeOf edge from User.id to UUID, got: {:?}",
-        typeof_edges
+        "Expected TypeOf edge from User.id to UUID, got: {typeof_edges:?}"
     );
 }
 
 #[test]
 fn test_class_property_types() {
-    let source = r#"
+    let source = r"
 class Config {
     var host: String
     var port: Int
     var options: [String: Any]
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.swift");
 
@@ -787,15 +752,13 @@ class Config {
         typeof_edges
             .iter()
             .any(|(prop, typ)| prop == "Config.host" && typ == "String"),
-        "Expected TypeOf edge from Config.host to String, got: {:?}",
-        typeof_edges
+        "Expected TypeOf edge from Config.host to String, got: {typeof_edges:?}"
     );
     assert!(
         typeof_edges
             .iter()
             .any(|(prop, typ)| prop == "Config.port" && typ == "Int"),
-        "Expected TypeOf edge from Config.port to Int, got: {:?}",
-        typeof_edges
+        "Expected TypeOf edge from Config.port to Int, got: {typeof_edges:?}"
     );
 
     // Check Reference edges for dictionary type
@@ -803,15 +766,13 @@ class Config {
         reference_edges
             .iter()
             .any(|(prop, typ)| prop == "Config.options" && typ == "String"),
-        "Expected Reference edge from Config.options to String, got: {:?}",
-        reference_edges
+        "Expected Reference edge from Config.options to String, got: {reference_edges:?}"
     );
     assert!(
         reference_edges
             .iter()
             .any(|(prop, typ)| prop == "Config.options" && typ == "Any"),
-        "Expected Reference edge from Config.options to Any, got: {:?}",
-        reference_edges
+        "Expected Reference edge from Config.options to Any, got: {reference_edges:?}"
     );
 }
 
@@ -851,7 +812,7 @@ enum Result {
 
 #[test]
 fn test_tuple_types() {
-    let source = r#"
+    let source = r"
 func getCoordinates() -> (Int, Int) {
     return (0, 0)
 }
@@ -859,7 +820,7 @@ func getCoordinates() -> (Int, Int) {
 func getNamedCoordinates() -> (x: Double, y: Double) {
     return (x: 0.0, y: 0.0)
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.swift");
 
@@ -871,25 +832,23 @@ func getNamedCoordinates() -> (x: Double, y: Double) {
         reference_edges
             .iter()
             .any(|(func, typ)| func == "getCoordinates" && typ == "Int"),
-        "Expected Reference edge from getCoordinates to Int, got: {:?}",
-        reference_edges
+        "Expected Reference edge from getCoordinates to Int, got: {reference_edges:?}"
     );
     assert!(
         reference_edges
             .iter()
             .any(|(func, typ)| func == "getNamedCoordinates" && typ == "Double"),
-        "Expected Reference edge from getNamedCoordinates to Double, got: {:?}",
-        reference_edges
+        "Expected Reference edge from getNamedCoordinates to Double, got: {reference_edges:?}"
     );
 }
 
 #[test]
 fn test_function_type_parameters() {
-    let source = r#"
+    let source = r"
 func process(handler: (Int) -> String) -> Void {
     let result = handler(42)
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.swift");
 
@@ -901,15 +860,13 @@ func process(handler: (Int) -> String) -> Void {
         reference_edges
             .iter()
             .any(|(func, typ)| func == "process" && typ == "Int"),
-        "Expected Reference edge from process to Int (function type param), got: {:?}",
-        reference_edges
+        "Expected Reference edge from process to Int (function type param), got: {reference_edges:?}"
     );
     assert!(
         reference_edges
             .iter()
             .any(|(func, typ)| func == "process" && typ == "String"),
-        "Expected Reference edge from process to String (function type return), got: {:?}",
-        reference_edges
+        "Expected Reference edge from process to String (function type return), got: {reference_edges:?}"
     );
 }
 
@@ -942,16 +899,16 @@ let inferredBool = true
 
     // Accept either 0 (no edges) or edges if type inference is implemented
     // Current scope: only explicit annotations
-    println!("Inferred type edges count: {}", inferred_edges);
+    println!("Inferred type edges count: {inferred_edges}");
 }
 
 #[test]
 fn test_multiple_params_same_type() {
-    let source = r#"
+    let source = r"
 func compare(first: String, second: String, third: String) -> Bool {
     return first == second && second == third
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.swift");
 
@@ -965,14 +922,13 @@ func compare(first: String, second: String, third: String) -> Bool {
 
     assert_eq!(
         string_param_count, 3,
-        "Expected 3 TypeOf edges for 3 String parameters, got: {}",
-        string_param_count
+        "Expected 3 TypeOf edges for 3 String parameters, got: {string_param_count}"
     );
 }
 
 #[test]
 fn test_nested_struct_properties() {
-    let source = r#"
+    let source = r"
 struct Outer {
     struct Inner {
         var value: Int
@@ -981,7 +937,7 @@ struct Outer {
     var inner: Inner
     var name: String
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.swift");
 
@@ -992,15 +948,13 @@ struct Outer {
         typeof_edges
             .iter()
             .any(|(prop, typ)| prop == "Outer.inner" && typ == "Inner"),
-        "Expected TypeOf edge from Outer.inner to Inner, got: {:?}",
-        typeof_edges
+        "Expected TypeOf edge from Outer.inner to Inner, got: {typeof_edges:?}"
     );
     assert!(
         typeof_edges
             .iter()
             .any(|(prop, typ)| prop == "Outer.name" && typ == "String"),
-        "Expected TypeOf edge from Outer.name to String, got: {:?}",
-        typeof_edges
+        "Expected TypeOf edge from Outer.name to String, got: {typeof_edges:?}"
     );
 
     // Check nested struct properties
@@ -1008,8 +962,7 @@ struct Outer {
         typeof_edges
             .iter()
             .any(|(prop, typ)| prop.contains("Inner.value") && typ == "Int"),
-        "Expected TypeOf edge from Inner.value to Int, got: {:?}",
-        typeof_edges
+        "Expected TypeOf edge from Inner.value to Int, got: {typeof_edges:?}"
     );
 }
 
@@ -1019,11 +972,11 @@ struct Outer {
 
 #[test]
 fn test_parameter_metadata_validation() {
-    let source = r#"
+    let source = r"
 func authenticate(username: String, password: String, remember: Bool) -> Token {
     return Token()
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.swift");
 
@@ -1088,13 +1041,13 @@ func authenticate(username: String, password: String, remember: Bool) -> Token {
 
 #[test]
 fn test_method_parameter_node_kind() {
-    let source = r#"
+    let source = r"
 class AuthService {
     func login(email: String, code: Int) -> User {
         return User()
     }
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.swift");
 
@@ -1124,7 +1077,7 @@ class AuthService {
 
 #[test]
 fn test_return_type_node_kind() {
-    let source = r#"
+    let source = r"
 class DataService {
     func fetchData() -> Data {
         return Data()
@@ -1134,7 +1087,7 @@ class DataService {
 func processData() -> Result {
     return Result()
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.swift");
 
@@ -1169,13 +1122,13 @@ func processData() -> Result {
 
 #[test]
 fn test_protocol_composition_types() {
-    let source = r#"
+    let source = r"
 func register(user: Codable & Sendable) {
     print(user)
 }
 
 var handler: Equatable & Hashable = MyType()
-"#;
+";
 
     let staging = build_test_graph(source, "test.swift");
 
@@ -1187,42 +1140,38 @@ var handler: Equatable & Hashable = MyType()
         reference_edges
             .iter()
             .any(|(func, typ)| func == "register" && typ == "Codable"),
-        "Expected Reference edge to Codable in protocol composition, got: {:?}",
-        reference_edges
+        "Expected Reference edge to Codable in protocol composition, got: {reference_edges:?}"
     );
     assert!(
         reference_edges
             .iter()
             .any(|(func, typ)| func == "register" && typ == "Sendable"),
-        "Expected Reference edge to Sendable in protocol composition, got: {:?}",
-        reference_edges
+        "Expected Reference edge to Sendable in protocol composition, got: {reference_edges:?}"
     );
 
     assert!(
         reference_edges
             .iter()
             .any(|(var, typ)| var == "handler" && typ == "Equatable"),
-        "Expected Reference edge to Equatable, got: {:?}",
-        reference_edges
+        "Expected Reference edge to Equatable, got: {reference_edges:?}"
     );
     assert!(
         reference_edges
             .iter()
             .any(|(var, typ)| var == "handler" && typ == "Hashable"),
-        "Expected Reference edge to Hashable, got: {:?}",
-        reference_edges
+        "Expected Reference edge to Hashable, got: {reference_edges:?}"
     );
 }
 
 #[test]
 fn test_some_any_types() {
-    let source = r#"
+    let source = r"
 func buildView() -> some View {
     return EmptyView()
 }
 
 var storage: any Codable = Data()
-"#;
+";
 
     let staging = build_test_graph(source, "test.swift");
 
@@ -1234,8 +1183,7 @@ var storage: any Codable = Data()
         reference_edges
             .iter()
             .any(|(func, typ)| func == "buildView" && typ == "View"),
-        "Expected Reference edge to View from 'some View', got: {:?}",
-        reference_edges
+        "Expected Reference edge to View from 'some View', got: {reference_edges:?}"
     );
 
     // `any Codable` should extract Codable
@@ -1243,19 +1191,18 @@ var storage: any Codable = Data()
         reference_edges
             .iter()
             .any(|(var, typ)| var == "storage" && typ == "Codable"),
-        "Expected Reference edge to Codable from 'any Codable', got: {:?}",
-        reference_edges
+        "Expected Reference edge to Codable from 'any Codable', got: {reference_edges:?}"
     );
 }
 
 #[test]
 fn test_implicitly_unwrapped_optional() {
-    let source = r#"
+    let source = r"
 var outlet: UIView! = nil
 func setup(delegate: AppDelegate!) {
     print(delegate)
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.swift");
 
@@ -1267,28 +1214,26 @@ func setup(delegate: AppDelegate!) {
         reference_edges
             .iter()
             .any(|(var, typ)| var == "outlet" && typ == "UIView"),
-        "Expected Reference edge to UIView from UIView!, got: {:?}",
-        reference_edges
+        "Expected Reference edge to UIView from UIView!, got: {reference_edges:?}"
     );
 
     assert!(
         reference_edges
             .iter()
             .any(|(func, typ)| func == "setup" && typ == "AppDelegate"),
-        "Expected Reference edge to AppDelegate from AppDelegate!, got: {:?}",
-        reference_edges
+        "Expected Reference edge to AppDelegate from AppDelegate!, got: {reference_edges:?}"
     );
 }
 
 #[test]
 fn test_metatype() {
-    let source = r#"
+    let source = r"
 func register(type: User.Type) {
     print(type)
 }
 
 var typeRef: Codable.Type = String.self
-"#;
+";
 
     let staging = build_test_graph(source, "test.swift");
 
@@ -1300,28 +1245,26 @@ var typeRef: Codable.Type = String.self
         reference_edges
             .iter()
             .any(|(func, typ)| func == "register" && typ == "User"),
-        "Expected Reference edge to User from User.Type, got: {:?}",
-        reference_edges
+        "Expected Reference edge to User from User.Type, got: {reference_edges:?}"
     );
 
     assert!(
         reference_edges
             .iter()
             .any(|(var, typ)| var == "typeRef" && typ == "Codable"),
-        "Expected Reference edge to Codable from Codable.Type, got: {:?}",
-        reference_edges
+        "Expected Reference edge to Codable from Codable.Type, got: {reference_edges:?}"
     );
 }
 
 #[test]
 fn test_attributed_types() {
-    let source = r#"
+    let source = r"
 func process(handler: @escaping (Int) -> Void) {
     DispatchQueue.main.async {
         handler(42)
     }
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.swift");
 
@@ -1333,8 +1276,7 @@ func process(handler: @escaping (Int) -> Void) {
         reference_edges
             .iter()
             .any(|(func, typ)| func == "process" && typ == "Int"),
-        "Expected Reference edge to Int from @escaping function type, got: {:?}",
-        reference_edges
+        "Expected Reference edge to Int from @escaping function type, got: {reference_edges:?}"
     );
 
     // Note: Void may or may not be extracted depending on implementation
@@ -1343,11 +1285,11 @@ func process(handler: @escaping (Int) -> Void) {
 
 #[test]
 fn test_inout_parameters() {
-    let source = r#"
+    let source = r"
 func swap(a: inout Int, b: inout String) {
     // swap implementation
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.swift");
 
@@ -1363,9 +1305,7 @@ func swap(a: inout Int, b: inout String) {
             || reference_edges
                 .iter()
                 .any(|(func, typ)| func == "swap" && typ == "Int"),
-        "Expected type edge to Int from inout parameter, got typeof: {:?}, ref: {:?}",
-        typeof_edges,
-        reference_edges
+        "Expected type edge to Int from inout parameter, got typeof: {typeof_edges:?}, ref: {reference_edges:?}"
     );
 
     assert!(
@@ -1375,21 +1315,19 @@ func swap(a: inout Int, b: inout String) {
             || reference_edges
                 .iter()
                 .any(|(func, typ)| func == "swap" && typ == "String"),
-        "Expected type edge to String from inout parameter, got typeof: {:?}, ref: {:?}",
-        typeof_edges,
-        reference_edges
+        "Expected type edge to String from inout parameter, got typeof: {typeof_edges:?}, ref: {reference_edges:?}"
     );
 }
 
 #[test]
 fn test_variadic_parameters() {
-    let source = r#"
+    let source = r"
 func log(messages: String...) {
     for msg in messages {
         print(msg)
     }
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.swift");
 
@@ -1405,15 +1343,13 @@ func log(messages: String...) {
             || reference_edges
                 .iter()
                 .any(|(func, typ)| func == "log" && typ == "String"),
-        "Expected type edge to String from variadic parameter, got typeof: {:?}, ref: {:?}",
-        typeof_edges,
-        reference_edges
+        "Expected type edge to String from variadic parameter, got typeof: {typeof_edges:?}, ref: {reference_edges:?}"
     );
 }
 
 #[test]
 fn test_async_throws_return_types() {
-    let source = r#"
+    let source = r"
 func fetchUser() async -> User {
     return User()
 }
@@ -1429,7 +1365,7 @@ func process() async throws -> Result {
 func asyncRethrows(_ handler: () async throws -> Void) rethrows {
     try await handler()
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.swift");
 
@@ -1440,8 +1376,7 @@ func asyncRethrows(_ handler: () async throws -> Void) rethrows {
         typeof_edges
             .iter()
             .any(|(func, typ)| func == "fetchUser" && typ == "User"),
-        "Expected Return TypeOf edge for async function, got: {:?}",
-        typeof_edges
+        "Expected Return TypeOf edge for async function, got: {typeof_edges:?}"
     );
 
     // throws function should extract return type
@@ -1449,8 +1384,7 @@ func asyncRethrows(_ handler: () async throws -> Void) rethrows {
         typeof_edges
             .iter()
             .any(|(func, typ)| func == "loadData" && typ == "Data"),
-        "Expected Return TypeOf edge for throws function, got: {:?}",
-        typeof_edges
+        "Expected Return TypeOf edge for throws function, got: {typeof_edges:?}"
     );
 
     // async throws function should extract return type
@@ -1458,8 +1392,7 @@ func asyncRethrows(_ handler: () async throws -> Void) rethrows {
         typeof_edges
             .iter()
             .any(|(func, typ)| func == "process" && typ == "Result"),
-        "Expected Return TypeOf edge for async throws function, got: {:?}",
-        typeof_edges
+        "Expected Return TypeOf edge for async throws function, got: {typeof_edges:?}"
     );
 
     // Note: rethrows may or may not have a return type detected
@@ -1541,15 +1474,13 @@ struct Point {
         typeof_edges
             .iter()
             .any(|(var, typ)| var == "a" && typ == "Int"),
-        "Expected TypeOf edge for 'a' in multiple binding, got: {:?}",
-        typeof_edges
+        "Expected TypeOf edge for 'a' in multiple binding, got: {typeof_edges:?}"
     );
     assert!(
         typeof_edges
             .iter()
             .any(|(var, typ)| var == "b" && typ == "Int"),
-        "Expected TypeOf edge for 'b' in multiple binding, got: {:?}",
-        typeof_edges
+        "Expected TypeOf edge for 'b' in multiple binding, got: {typeof_edges:?}"
     );
 
     // Multiple bindings in let declaration
@@ -1557,22 +1488,19 @@ struct Point {
         typeof_edges
             .iter()
             .any(|(var, typ)| var == "x" && typ == "String"),
-        "Expected TypeOf edge for 'x' in multiple binding, got: {:?}",
-        typeof_edges
+        "Expected TypeOf edge for 'x' in multiple binding, got: {typeof_edges:?}"
     );
     assert!(
         typeof_edges
             .iter()
             .any(|(var, typ)| var == "y" && typ == "String"),
-        "Expected TypeOf edge for 'y' in multiple binding, got: {:?}",
-        typeof_edges
+        "Expected TypeOf edge for 'y' in multiple binding, got: {typeof_edges:?}"
     );
     assert!(
         typeof_edges
             .iter()
             .any(|(var, typ)| var == "z" && typ == "String"),
-        "Expected TypeOf edge for 'z' in multiple binding, got: {:?}",
-        typeof_edges
+        "Expected TypeOf edge for 'z' in multiple binding, got: {typeof_edges:?}"
     );
 
     // Multiple bindings in struct properties
@@ -1580,15 +1508,13 @@ struct Point {
         field_edges
             .iter()
             .any(|(prop, typ)| prop == "Point.x" && typ == "Double"),
-        "Expected TypeOf edge for Point.x in multiple binding, got: {:?}",
-        field_edges
+        "Expected TypeOf edge for Point.x in multiple binding, got: {field_edges:?}"
     );
     assert!(
         field_edges
             .iter()
             .any(|(prop, typ)| prop == "Point.y" && typ == "Double"),
-        "Expected TypeOf edge for Point.y in multiple binding, got: {:?}",
-        field_edges
+        "Expected TypeOf edge for Point.y in multiple binding, got: {field_edges:?}"
     );
 }
 
@@ -1601,7 +1527,7 @@ struct Point {
 /// Validates that the pattern+type pairing logic correctly handles both forms.
 #[test]
 fn test_mixed_type_multi_binding_toplevel() {
-    let source = r#"
+    let source = r"
 // Shared-type multi-binding (valid Swift)
 var a, b, c: Int
 
@@ -1610,7 +1536,7 @@ var x: Bool, y: Double, z: Float
 
 // Mix of shared and per-binding
 var p, q: String, r: [UInt8]
-"#;
+";
 
     let staging = build_test_graph(source, "test.swift");
     let typeof_edges = collect_typeof_edges_by_context(&staging, TypeOfContext::Variable);
@@ -1620,22 +1546,19 @@ var p, q: String, r: [UInt8]
         typeof_edges
             .iter()
             .any(|(var, typ)| var == "a" && typ == "Int"),
-        "Expected TypeOf edge a -> Int, got: {:?}",
-        typeof_edges
+        "Expected TypeOf edge a -> Int, got: {typeof_edges:?}"
     );
     assert!(
         typeof_edges
             .iter()
             .any(|(var, typ)| var == "b" && typ == "Int"),
-        "Expected TypeOf edge b -> Int, got: {:?}",
-        typeof_edges
+        "Expected TypeOf edge b -> Int, got: {typeof_edges:?}"
     );
     assert!(
         typeof_edges
             .iter()
             .any(|(var, typ)| var == "c" && typ == "Int"),
-        "Expected TypeOf edge c -> Int, got: {:?}",
-        typeof_edges
+        "Expected TypeOf edge c -> Int, got: {typeof_edges:?}"
     );
 
     // Per-binding types: var x: Bool, y: Double, z: Float
@@ -1643,22 +1566,19 @@ var p, q: String, r: [UInt8]
         typeof_edges
             .iter()
             .any(|(var, typ)| var == "x" && typ == "Bool"),
-        "Expected TypeOf edge x -> Bool, got: {:?}",
-        typeof_edges
+        "Expected TypeOf edge x -> Bool, got: {typeof_edges:?}"
     );
     assert!(
         typeof_edges
             .iter()
             .any(|(var, typ)| var == "y" && typ == "Double"),
-        "Expected TypeOf edge y -> Double, got: {:?}",
-        typeof_edges
+        "Expected TypeOf edge y -> Double, got: {typeof_edges:?}"
     );
     assert!(
         typeof_edges
             .iter()
             .any(|(var, typ)| var == "z" && typ == "Float"),
-        "Expected TypeOf edge z -> Float, got: {:?}",
-        typeof_edges
+        "Expected TypeOf edge z -> Float, got: {typeof_edges:?}"
     );
 
     // Mixed: var p, q: String, r: [UInt8]
@@ -1666,22 +1586,19 @@ var p, q: String, r: [UInt8]
         typeof_edges
             .iter()
             .any(|(var, typ)| var == "p" && typ == "String"),
-        "Expected TypeOf edge p -> String, got: {:?}",
-        typeof_edges
+        "Expected TypeOf edge p -> String, got: {typeof_edges:?}"
     );
     assert!(
         typeof_edges
             .iter()
             .any(|(var, typ)| var == "q" && typ == "String"),
-        "Expected TypeOf edge q -> String, got: {:?}",
-        typeof_edges
+        "Expected TypeOf edge q -> String, got: {typeof_edges:?}"
     );
     assert!(
         typeof_edges
             .iter()
             .any(|(var, typ)| var == "r" && typ == "[UInt8]"),
-        "Expected TypeOf edge r -> [UInt8], got: {:?}",
-        typeof_edges
+        "Expected TypeOf edge r -> [UInt8], got: {typeof_edges:?}"
     );
 }
 
@@ -1689,7 +1606,7 @@ var p, q: String, r: [UInt8]
 /// Tests both shared-type and per-binding syntax for class/struct properties.
 #[test]
 fn test_mixed_type_multi_binding_property() {
-    let source = r#"
+    let source = r"
 class MyClass {
     // Shared-type multi-binding
     var x, y: Double
@@ -1705,7 +1622,7 @@ struct Point {
     // Per-binding
     var x: Bool, y: Character
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.swift");
     let field_edges = collect_typeof_edges_by_context(&staging, TypeOfContext::Field);
@@ -1715,15 +1632,13 @@ struct Point {
         field_edges
             .iter()
             .any(|(prop, typ)| prop == "MyClass.x" && typ == "Double"),
-        "Expected TypeOf edge MyClass.x -> Double, got: {:?}",
-        field_edges
+        "Expected TypeOf edge MyClass.x -> Double, got: {field_edges:?}"
     );
     assert!(
         field_edges
             .iter()
             .any(|(prop, typ)| prop == "MyClass.y" && typ == "Double"),
-        "Expected TypeOf edge MyClass.y -> Double, got: {:?}",
-        field_edges
+        "Expected TypeOf edge MyClass.y -> Double, got: {field_edges:?}"
     );
 
     // MyClass properties - Per-binding: var p: Int, q: String, r: [UInt8]
@@ -1731,22 +1646,19 @@ struct Point {
         field_edges
             .iter()
             .any(|(prop, typ)| prop == "MyClass.p" && typ == "Int"),
-        "Expected TypeOf edge MyClass.p -> Int, got: {:?}",
-        field_edges
+        "Expected TypeOf edge MyClass.p -> Int, got: {field_edges:?}"
     );
     assert!(
         field_edges
             .iter()
             .any(|(prop, typ)| prop == "MyClass.q" && typ == "String"),
-        "Expected TypeOf edge MyClass.q -> String, got: {:?}",
-        field_edges
+        "Expected TypeOf edge MyClass.q -> String, got: {field_edges:?}"
     );
     assert!(
         field_edges
             .iter()
             .any(|(prop, typ)| prop == "MyClass.r" && typ == "[UInt8]"),
-        "Expected TypeOf edge MyClass.r -> [UInt8], got: {:?}",
-        field_edges
+        "Expected TypeOf edge MyClass.r -> [UInt8], got: {field_edges:?}"
     );
 
     // Point properties - Shared-type: var a, b: Float
@@ -1754,15 +1666,13 @@ struct Point {
         field_edges
             .iter()
             .any(|(prop, typ)| prop == "Point.a" && typ == "Float"),
-        "Expected TypeOf edge Point.a -> Float, got: {:?}",
-        field_edges
+        "Expected TypeOf edge Point.a -> Float, got: {field_edges:?}"
     );
     assert!(
         field_edges
             .iter()
             .any(|(prop, typ)| prop == "Point.b" && typ == "Float"),
-        "Expected TypeOf edge Point.b -> Float, got: {:?}",
-        field_edges
+        "Expected TypeOf edge Point.b -> Float, got: {field_edges:?}"
     );
 
     // Point properties - Per-binding: var x: Bool, y: Character
@@ -1770,15 +1680,13 @@ struct Point {
         field_edges
             .iter()
             .any(|(prop, typ)| prop == "Point.x" && typ == "Bool"),
-        "Expected TypeOf edge Point.x -> Bool, got: {:?}",
-        field_edges
+        "Expected TypeOf edge Point.x -> Bool, got: {field_edges:?}"
     );
     assert!(
         field_edges
             .iter()
             .any(|(prop, typ)| prop == "Point.y" && typ == "Character"),
-        "Expected TypeOf edge Point.y -> Character, got: {:?}",
-        field_edges
+        "Expected TypeOf edge Point.y -> Character, got: {field_edges:?}"
     );
 }
 
@@ -1786,7 +1694,7 @@ struct Point {
 /// Tests that both `metatype` and `metatype_type` node kinds are handled.
 #[test]
 fn test_metatype_node_kind_coverage() {
-    let source = r#"
+    let source = r"
 var t: User.Type
 var p: Protocol.Type
 
@@ -1797,7 +1705,7 @@ func getType() -> SomeClass.Type {
 class Container {
     var metaRef: Service.Type
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.swift");
 
@@ -1807,15 +1715,13 @@ class Container {
         var_edges
             .iter()
             .any(|(var, typ)| var == "t" && typ == "User.Type"),
-        "Expected TypeOf edge t -> User.Type, got: {:?}",
-        var_edges
+        "Expected TypeOf edge t -> User.Type, got: {var_edges:?}"
     );
     assert!(
         var_edges
             .iter()
             .any(|(var, typ)| var == "p" && typ == "Protocol.Type"),
-        "Expected TypeOf edge p -> Protocol.Type, got: {:?}",
-        var_edges
+        "Expected TypeOf edge p -> Protocol.Type, got: {var_edges:?}"
     );
 
     // Check return type TypeOf edge
@@ -1824,8 +1730,7 @@ class Container {
         return_edges
             .iter()
             .any(|(func, typ)| func == "getType" && typ == "SomeClass.Type"),
-        "Expected TypeOf edge getType -> SomeClass.Type, got: {:?}",
-        return_edges
+        "Expected TypeOf edge getType -> SomeClass.Type, got: {return_edges:?}"
     );
 
     // Check property TypeOf edge
@@ -1834,30 +1739,25 @@ class Container {
         field_edges
             .iter()
             .any(|(prop, typ)| prop == "Container.metaRef" && typ == "Service.Type"),
-        "Expected TypeOf edge Container.metaRef -> Service.Type, got: {:?}",
-        field_edges
+        "Expected TypeOf edge Container.metaRef -> Service.Type, got: {field_edges:?}"
     );
 
     // Check Reference edges to the base types
     let ref_edges = collect_edges_by_kind(&staging, |kind| matches!(kind, EdgeKind::References));
     assert!(
         ref_edges.iter().any(|(_, to)| to == "User"),
-        "Expected Reference edge to User, got: {:?}",
-        ref_edges
+        "Expected Reference edge to User, got: {ref_edges:?}"
     );
     assert!(
         ref_edges.iter().any(|(_, to)| to == "Protocol"),
-        "Expected Reference edge to Protocol, got: {:?}",
-        ref_edges
+        "Expected Reference edge to Protocol, got: {ref_edges:?}"
     );
     assert!(
         ref_edges.iter().any(|(_, to)| to == "SomeClass"),
-        "Expected Reference edge to SomeClass, got: {:?}",
-        ref_edges
+        "Expected Reference edge to SomeClass, got: {ref_edges:?}"
     );
     assert!(
         ref_edges.iter().any(|(_, to)| to == "Service"),
-        "Expected Reference edge to Service, got: {:?}",
-        ref_edges
+        "Expected Reference edge to Service, got: {ref_edges:?}"
     );
 }

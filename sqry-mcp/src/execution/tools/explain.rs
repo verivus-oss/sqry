@@ -237,12 +237,8 @@ fn build_node_ref_from_entry(
         .map(|s| s.to_string())
         .unwrap_or_default();
 
-    let qualified_name = crate::execution::symbol_utils::display_entry_qualified_name(
-        entry,
-        strings,
-        files.language_for_file(entry.file),
-        &name,
-    );
+    let qualified_name =
+        crate::execution::symbol_utils::display_entry_qualified_name(entry, strings, files, &name);
 
     let kind = node_kind_to_str(entry.kind);
 

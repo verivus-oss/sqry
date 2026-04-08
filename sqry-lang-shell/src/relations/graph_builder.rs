@@ -996,11 +996,11 @@ user_function() {
 
     #[test]
     fn test_source_creates_import_edges() {
-        let source = r#"
+        let source = r"
 #!/bin/bash
 source ./config.sh
 source /etc/profile.sh
-"#;
+";
 
         let tree = parse_shell(source);
         let mut staging = StagingGraph::new();
@@ -1019,11 +1019,11 @@ source /etc/profile.sh
 
     #[test]
     fn test_dot_creates_import_edges() {
-        let source = r#"
+        let source = r"
 #!/bin/bash
 . ./init.sh
 . config.sh
-"#;
+";
 
         let tree = parse_shell(source);
         let mut staging = StagingGraph::new();
@@ -1042,11 +1042,11 @@ source /etc/profile.sh
 
     #[test]
     fn test_source_inside_function() {
-        let source = r#"
+        let source = r"
 load_config() {
     source ./config.sh
 }
-"#;
+";
 
         let tree = parse_shell(source);
         let mut staging = StagingGraph::new();
@@ -1064,10 +1064,10 @@ load_config() {
 
     #[test]
     fn test_source_with_variable_expansion() {
-        let source = r#"
+        let source = r"
 #!/bin/bash
 source $CONFIG_DIR/file.sh
-"#;
+";
 
         let tree = parse_shell(source);
         let mut staging = StagingGraph::new();
@@ -1108,11 +1108,11 @@ source "./path with spaces.sh"
 
     #[test]
     fn test_source_does_not_create_call_edge() {
-        let source = r#"
+        let source = r"
 #!/bin/bash
 source ./config.sh
 . ./init.sh
-"#;
+";
 
         let tree = parse_shell(source);
         let mut staging = StagingGraph::new();

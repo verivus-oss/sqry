@@ -929,6 +929,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // Config validation covers many fields
     fn test_new_boundary_cases() {
         let cases = [
             // timeout_ms boundaries
@@ -1253,6 +1254,7 @@ mod tests {
             }
             "query_cache_ttl_secs" => {
                 config.query_cache_ttl_secs = case.value as u64;
+                #[allow(clippy::cast_possible_truncation)] // Port number fits in u16
                 config.effective_query_cache_ttl_secs().map(|v| v as usize)
             }
             _ => panic!("Unknown field: {}", case.field),
@@ -1289,6 +1291,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // Complex function kept cohesive
     fn test_cache_capacity_boundary_cases() {
         let cases = [
             // engine_cache_capacity: default=5, min=1 (no below_min distinct from zero), cap=1000

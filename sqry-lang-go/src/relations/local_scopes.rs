@@ -84,6 +84,7 @@ pub(crate) fn build(root: Node, content: &[u8]) -> GraphResult<GoScopeTree> {
 // Phase 1: Build scopes
 // ============================================================================
 
+#[allow(clippy::too_many_lines)] // Go scope resolution covers all AST node types
 fn build_scopes_recursive(
     tree: &mut GoScopeTree,
     node: Node,
@@ -695,6 +696,7 @@ fn is_type_or_call_context(node: Node) -> bool {
         return false;
     };
 
+    #[allow(clippy::match_same_arms)] // Arms separated by AST node type for documentation clarity
     match parent.kind() {
         // Type identifier context
         "type_identifier" => true,

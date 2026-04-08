@@ -26,7 +26,7 @@ fn init_logging() {
 
 /// Create a simple Rust test fixture
 fn create_rust_fixture(dir: &std::path::Path) {
-    let rust_code = r#"
+    let rust_code = r"
 pub fn add(a: i32, b: i32) -> i32 {
     a + b
 }
@@ -48,7 +48,7 @@ impl Calculator {
         add(self.value, multiply(2, 3))
     }
 }
-"#;
+";
     fs::write(dir.join("lib.rs"), rust_code).unwrap();
 }
 
@@ -112,7 +112,7 @@ fn test_graph_mode_multi_language() {
     create_rust_fixture(tmp_dir.path());
 
     // Create JavaScript file
-    let js_code = r#"
+    let js_code = r"
 class ShoppingCart {
     constructor() {
         this.items = [];
@@ -128,11 +128,11 @@ class ShoppingCart {
 }
 
 export { ShoppingCart };
-"#;
+";
     fs::write(tmp_dir.path().join("cart.js"), js_code).unwrap();
 
     // Create Python file
-    let py_code = r#"
+    let py_code = r"
 def calculate_total(items):
     return sum(item['price'] for item in items)
 
@@ -142,7 +142,7 @@ class Cart:
 
     def add_item(self, item):
         self.items.append(item)
-"#;
+";
     fs::write(tmp_dir.path().join("cart.py"), py_code).unwrap();
 
     let path = sqry_bin();
@@ -198,11 +198,11 @@ fn test_graph_mode_update_command() {
         Manifest::load(manifest_path).expect("Failed to load graph manifest after index");
 
     // Add a new file
-    let new_code = r#"
+    let new_code = r"
 pub fn subtract(a: i32, b: i32) -> i32 {
     a - b
 }
-"#;
+";
     fs::write(tmp_dir.path().join("math.rs"), new_code).unwrap();
 
     // Update
@@ -249,7 +249,7 @@ fn test_graph_mode_large_fixture() {
     // Create 20 Rust files
     for i in 0..20 {
         let code = format!(
-            r#"
+            r"
 pub fn func_{i}_a() -> i32 {{
     {i}
 }}
@@ -261,7 +261,7 @@ pub fn func_{i}_b() -> i32 {{
 pub struct Struct{i} {{
     pub value: i32,
 }}
-"#
+"
         );
         fs::write(tmp_dir.path().join(format!("file_{i}.rs")), code).unwrap();
     }
@@ -294,9 +294,9 @@ fn test_graph_mode_with_incremental() {
     create_rust_fixture(tmp_dir.path());
 
     // Create config enabling incremental (no use_graph_mode - always on)
-    let config_content = r#"
+    let config_content = r"
 enable_incremental = true
-"#;
+";
     fs::write(tmp_dir.path().join(".sqry-config.toml"), config_content).unwrap();
 
     let path = sqry_bin();

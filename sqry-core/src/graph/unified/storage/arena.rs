@@ -1141,7 +1141,10 @@ mod tests {
         let slot_count_before = arena.slot_count();
 
         let start = arena.alloc_range(0, &test_entry(NodeKind::Class)).unwrap();
-        assert_eq!(start, slot_count_before as u32);
+        #[allow(clippy::cast_possible_truncation)]
+        // Arena slot count fits in u32 for graph storage indices
+        let expected_start = slot_count_before as u32;
+        assert_eq!(start, expected_start);
         assert_eq!(arena.len(), len_before);
         assert_eq!(arena.slot_count(), slot_count_before);
     }
@@ -1421,7 +1424,7 @@ mod tests {
         let corruption_err = ArenaError::FreeListCorruption { index: 5 };
         let display = format!("{corruption_err}");
         assert!(display.contains("free list corruption"));
-        assert!(display.contains("5"));
+        assert!(display.contains('5'));
 
         let capacity_err = ArenaError::CapacityExceeded;
         let display = format!("{capacity_err}");

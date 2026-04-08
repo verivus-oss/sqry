@@ -98,7 +98,7 @@ const std::string API_VERSION = "1.0.0";
 fn cli_cpp_exports_namespaces() {
     let project = TempDir::new().unwrap();
 
-    let cpp_code = r#"
+    let cpp_code = r"
 #include <string>
 
 namespace utils {
@@ -120,7 +120,7 @@ namespace api {
         void execute() {}
     };
 }
-"#;
+";
     std::fs::write(project.path().join("namespaces.cpp"), cpp_code).unwrap();
 
     Command::new(sqry_bin())
@@ -197,7 +197,7 @@ int main() {
 fn cli_cpp_callers_method_calls() {
     let project = TempDir::new().unwrap();
 
-    let cpp_code = r#"
+    let cpp_code = r"
 #include <vector>
 
 class DataService {
@@ -226,7 +226,7 @@ int main() {
     service.process();
     return 0;
 }
-"#;
+";
     std::fs::write(project.path().join("service.cpp"), cpp_code).unwrap();
 
     Command::new(sqry_bin())
@@ -310,7 +310,7 @@ int main() {
 fn cli_cpp_templates() {
     let project = TempDir::new().unwrap();
 
-    let cpp_code = r#"
+    let cpp_code = r"
 #include <iostream>
 
 template<typename T>
@@ -340,7 +340,7 @@ int main() {
     container.process();
     return 0;
 }
-"#;
+";
     std::fs::write(project.path().join("templates.cpp"), cpp_code).unwrap();
 
     Command::new(sqry_bin())
@@ -363,7 +363,7 @@ int main() {
 fn cli_cpp_lambdas() {
     let project = TempDir::new().unwrap();
 
-    let cpp_code = r#"
+    let cpp_code = r"
 #include <vector>
 #include <algorithm>
 
@@ -381,7 +381,7 @@ int main() {
     processData();
     return 0;
 }
-"#;
+";
     std::fs::write(project.path().join("lambdas.cpp"), cpp_code).unwrap();
 
     Command::new(sqry_bin())
@@ -458,7 +458,7 @@ int main() {
 fn cli_cpp_private_methods() {
     let project = TempDir::new().unwrap();
 
-    let cpp_code = r#"
+    let cpp_code = r"
 class Service {
 public:
     void execute() {
@@ -470,7 +470,7 @@ private:
         // private method
     }
 };
-"#;
+";
     std::fs::write(project.path().join("service.cpp"), cpp_code).unwrap();
 
     Command::new(sqry_bin())
@@ -495,7 +495,7 @@ fn cli_cpp_inline_and_out_of_line_deduplication() {
     // and defined out-of-line, we don't create duplicate symbols
     let project = TempDir::new().unwrap();
 
-    let cpp_code = r#"
+    let cpp_code = r"
 class Calculator {
 public:
     // Inline method declaration and definition
@@ -518,7 +518,7 @@ int main() {
     calc.multiply(3, 4);
     return 0;
 }
-"#;
+";
     std::fs::write(project.path().join("calculator.cpp"), cpp_code).unwrap();
 
     Command::new(sqry_bin())

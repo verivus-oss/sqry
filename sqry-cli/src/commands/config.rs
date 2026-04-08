@@ -491,7 +491,7 @@ fn set_limits_config_value(
             )?;
             config.config.limits.analysis_budget_exceeded_policy = value.to_string();
         }
-        _ => anyhow::bail!("Unknown limits key: {:?}", subsection),
+        _ => anyhow::bail!("Unknown limits key: {subsection:?}"),
     }
 
     Ok(())
@@ -524,7 +524,7 @@ fn set_locking_config_value(
             )?;
             config.config.locking.stale_takeover_policy = value.to_string();
         }
-        _ => anyhow::bail!("Unknown locking key: {:?}", subsection),
+        _ => anyhow::bail!("Unknown locking key: {subsection:?}"),
     }
 
     Ok(())
@@ -556,7 +556,7 @@ fn set_output_config_value(
                 "Invalid value for max_preview_bytes (expected u64)",
             )?;
         }
-        _ => anyhow::bail!("Unknown output key: {:?}", subsection),
+        _ => anyhow::bail!("Unknown output key: {subsection:?}"),
     }
 
     Ok(())
@@ -572,7 +572,7 @@ fn set_parallelism_config_value(
             config.config.parallelism.max_threads =
                 parse_u64_config_value(value, "Invalid value for max_threads (expected u64)")?;
         }
-        _ => anyhow::bail!("Unknown parallelism key: {:?}", subsection),
+        _ => anyhow::bail!("Unknown parallelism key: {subsection:?}"),
     }
 
     Ok(())

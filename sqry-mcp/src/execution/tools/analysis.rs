@@ -322,9 +322,8 @@ fn build_unused_symbol_data(
         .resolve(entry.name)
         .map_or_else(String::new, |s| s.to_string());
     let language = files.language_for_file(entry.file);
-    let qualified_name = crate::execution::symbol_utils::display_entry_qualified_name(
-        entry, strings, language, &name,
-    );
+    let qualified_name =
+        crate::execution::symbol_utils::display_entry_qualified_name(entry, strings, files, &name);
 
     let file_path = files.resolve(entry.file);
     let full_path = file_path
@@ -843,12 +842,8 @@ fn build_node_ref_from_node(
         .unwrap_or_default();
 
     // Get qualified name if present
-    let qualified_name = crate::execution::symbol_utils::display_entry_qualified_name(
-        node,
-        strings,
-        Some(language),
-        &name,
-    );
+    let qualified_name =
+        crate::execution::symbol_utils::display_entry_qualified_name(node, strings, files, &name);
 
     // Map NodeKind to kind string
     let kind = match node.kind {
@@ -906,12 +901,8 @@ fn build_impact_node_ref(
     let name = strings
         .resolve(entry.name)
         .map_or_else(String::new, |s| s.to_string());
-    let qualified_name = crate::execution::symbol_utils::display_entry_qualified_name(
-        entry,
-        strings,
-        files.language_for_file(entry.file),
-        &name,
-    );
+    let qualified_name =
+        crate::execution::symbol_utils::display_entry_qualified_name(entry, strings, files, &name);
 
     let file_path = files.resolve(entry.file);
     let full_path = file_path
@@ -1250,7 +1241,7 @@ fn convert_duplicate_groups(
                     let language = files.language_for_file(entry.file);
                     let qualified_name =
                         crate::execution::symbol_utils::display_entry_qualified_name(
-                            entry, strings, language, &name,
+                            entry, strings, files, &name,
                         );
 
                     let file_path = files.resolve(entry.file)?;
@@ -1387,9 +1378,8 @@ fn resolve_cycle_node(
         let node_name = strings
             .resolve(entry.name)
             .map_or_else(|| name.to_string(), |s| s.to_string());
-        let language = files.language_for_file(entry.file);
         let qualified_name = crate::execution::symbol_utils::display_entry_qualified_name(
-            entry, strings, language, &node_name,
+            entry, strings, files, &node_name,
         );
         let file_path = files
             .resolve(entry.file)
@@ -1756,7 +1746,7 @@ pub fn execute_pattern_search(
             let name = strings.resolve(entry.name)?.to_string();
             let language = files.language_for_file(entry.file);
             let qualified_name = crate::execution::symbol_utils::display_entry_qualified_name(
-                entry, strings, language, &name,
+                entry, strings, files, &name,
             );
 
             let file_path = files.resolve(entry.file)?;
@@ -1950,7 +1940,7 @@ pub fn execute_direct_callers(
             let name = strings.resolve(entry.name)?.to_string();
             let language = files.language_for_file(entry.file);
             let qualified_name = crate::execution::symbol_utils::display_entry_qualified_name(
-                entry, strings, language, &name,
+                entry, strings, files, &name,
             );
 
             let file_path = files.resolve(entry.file)?;
@@ -2031,7 +2021,7 @@ pub fn execute_direct_callees(
             let name = strings.resolve(entry.name)?.to_string();
             let language = files.language_for_file(entry.file);
             let qualified_name = crate::execution::symbol_utils::display_entry_qualified_name(
-                entry, strings, language, &name,
+                entry, strings, files, &name,
             );
 
             let file_path = files.resolve(entry.file)?;
@@ -2155,6 +2145,7 @@ mod tests {
 
     /// Helper to create a test graph with entry points and reachable/unreachable nodes
     fn create_test_graph_for_unused() -> CodeGraph {
+        use sqry_core::graph::unified::ExportKind;
         let mut graph = CodeGraph::new();
 
         // Register test files
@@ -2221,7 +2212,6 @@ mod tests {
             .add_edge(node_public, node_used, call_kind, lib_rs);
 
         // Add export edge from lib.rs for public_function
-        use sqry_core::graph::unified::ExportKind;
         let export_kind = EdgeKind::Exports {
             kind: ExportKind::Direct,
             alias: None,

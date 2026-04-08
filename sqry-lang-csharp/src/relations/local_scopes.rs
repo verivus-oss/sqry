@@ -96,6 +96,7 @@ pub(crate) fn build(root: Node, content: &[u8]) -> GraphResult<CSharpScopeTree> 
 // Phase 1: Build scopes
 // ============================================================================
 
+#[allow(clippy::too_many_lines)] // C# scope resolution covers all AST node types
 fn build_scopes_recursive(
     tree: &mut CSharpScopeTree,
     node: Node,
@@ -847,7 +848,10 @@ fn is_type_or_call_context(node: Node) -> bool {
         return false;
     };
 
+    #[allow(clippy::match_same_arms)] // Arms separated for documentation clarity
     match parent.kind() {
+        #[allow(clippy::match_same_arms)]
+        // Arms separated by AST node type for documentation clarity
         // Type identifiers
         "predefined_type" | "generic_name" | "type_argument_list" => true,
         // Qualified name left side (namespace prefix)

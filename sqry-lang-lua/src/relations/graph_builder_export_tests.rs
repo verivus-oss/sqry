@@ -40,7 +40,7 @@ mod tests {
 
     #[test]
     fn test_export_function_declaration() {
-        let source = r#"
+        let source = r"
             local M = {}
 
             function M.public_function(x)
@@ -48,7 +48,7 @@ mod tests {
             end
 
             return M
-        "#;
+        ";
 
         let tree = parse_lua(source);
         let mut staging = StagingGraph::new();
@@ -78,7 +78,7 @@ mod tests {
 
     #[test]
     fn test_export_assignment() {
-        let source = r#"
+        let source = r"
             local M = {}
 
             M.fetch = function(url)
@@ -86,7 +86,7 @@ mod tests {
             end
 
             return M
-        "#;
+        ";
 
         let tree = parse_lua(source);
         let mut staging = StagingGraph::new();
@@ -106,7 +106,7 @@ mod tests {
 
     #[test]
     fn test_export_colon_method() {
-        let source = r#"
+        let source = r"
             local Class = {}
 
             function Class:method_one()
@@ -114,7 +114,7 @@ mod tests {
             end
 
             return Class
-        "#;
+        ";
 
         let tree = parse_lua(source);
         let mut staging = StagingGraph::new();
@@ -190,7 +190,7 @@ mod tests {
 
     #[test]
     fn test_export_no_local_functions() {
-        let source = r#"
+        let source = r"
             local M = {}
 
             local function private_helper()
@@ -202,7 +202,7 @@ mod tests {
             end
 
             return M
-        "#;
+        ";
 
         let tree = parse_lua(source);
         let mut staging = StagingGraph::new();
@@ -252,8 +252,7 @@ mod tests {
         for name in &exported_names {
             assert!(
                 !name.contains("private_helper"),
-                "private_helper should NOT be exported, but found export target: {}",
-                name
+                "private_helper should NOT be exported, but found export target: {name}"
             );
         }
     }

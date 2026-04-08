@@ -15,6 +15,8 @@ fn print_tree(node: Node, source: &[u8], indent: usize) {
     println!("{}{:20} | {}", "  ".repeat(indent), kind, text_preview);
 
     for i in 0..node.child_count() {
+        #[allow(clippy::cast_possible_truncation)]
+        // Graph storage: node/edge index counts fit in u32
         if let Some(child) = node.child(i as u32) {
             print_tree(child, source, indent + 1);
         }

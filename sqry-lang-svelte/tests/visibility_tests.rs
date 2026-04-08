@@ -53,7 +53,7 @@ fn find_function_visibility(staging: &StagingGraph, name: &str) -> Option<String
 #[test]
 fn test_script_function_public() {
     // Functions in script blocks are public
-    let source = r#"
+    let source = r"
 <script>
     function handleClick() {
         console.log('clicked');
@@ -65,7 +65,7 @@ fn test_script_function_public() {
 </script>
 
 <button on:click={handleClick}>Click me</button>
-"#;
+";
 
     let tree = parse_svelte(source);
     let mut staging = StagingGraph::new();
@@ -97,7 +97,7 @@ fn test_script_function_public() {
 #[test]
 fn test_exported_function_public() {
     // Exported functions are public
-    let source = r#"
+    let source = r"
 <script>
     export function publicApi() {
         return 'public';
@@ -107,7 +107,7 @@ fn test_exported_function_public() {
         return 'helper';
     }
 </script>
-"#;
+";
 
     let tree = parse_svelte(source);
     let mut staging = StagingGraph::new();

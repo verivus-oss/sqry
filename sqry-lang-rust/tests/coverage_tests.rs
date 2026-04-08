@@ -7,7 +7,7 @@
 //! - `src/proc_macro_detector.rs` (contradiction arm, `FunctionAttributeOnly` source)
 //! - `src/relations/graph_builder.rs` (config modes, scope extraction for
 //!   impl/trait/module/struct/enum)
-//! - `src/lib.rs` (extract_scopes — all 6 scope types)
+//! - `src/lib.rs` (`extract_scopes` — all 6 scope types)
 
 use sqry_core::graph::GraphBuilder;
 use sqry_core::graph::unified::build::staging::StagingGraph;
@@ -160,13 +160,13 @@ fn safe_mode_parses_function() {
 
 #[test]
 fn full_mode_parses_impl_block() {
-    let source = r#"
+    let source = r"
 struct Counter { val: u32 }
 impl Counter {
     fn increment(&mut self) { self.val += 1; }
     fn value(&self) -> u32 { self.val }
 }
-"#;
+";
     let staging = build_graph(source);
     assert!(staging.stats().nodes_staged >= 2);
     // impl methods are Method nodes
@@ -188,7 +188,7 @@ impl Counter {
 /// Method scope (function inside impl)
 #[test]
 fn scope_method_inside_impl() {
-    let source = r#"
+    let source = r"
 struct Foo;
 impl Foo {
     fn bar(&self) -> u32 {
@@ -196,7 +196,7 @@ impl Foo {
         x
     }
 }
-"#;
+";
     let staging = build_graph(source);
     assert!(staging.stats().nodes_staged >= 1);
     // `bar` is inside an impl block, so it must be staged as a Method
@@ -209,12 +209,12 @@ impl Foo {
 /// Closure scope
 #[test]
 fn scope_closure_expression() {
-    let source = r#"
+    let source = r"
 fn main() {
     let add = |a: i32, b: i32| a + b;
     let _ = add(1, 2);
 }
-"#;
+";
     let staging = build_graph(source);
     assert!(staging.stats().nodes_staged >= 1);
     // The closure is called: `add(1, 2)` — must produce a Calls edge
@@ -224,10 +224,10 @@ fn main() {
     );
 }
 
-/// ForLoop scope
+/// `ForLoop` scope
 #[test]
 fn scope_for_loop() {
-    let source = r#"
+    let source = r"
 fn sum_vec(v: &[i32]) -> i32 {
     let mut total = 0;
     for item in v {
@@ -235,7 +235,7 @@ fn sum_vec(v: &[i32]) -> i32 {
     }
     total
 }
-"#;
+";
     let staging = build_graph(source);
     assert!(staging.stats().nodes_staged >= 1);
     // The for loop body is parsed under a Function node
@@ -245,16 +245,16 @@ fn sum_vec(v: &[i32]) -> i32 {
     );
 }
 
-/// WhileLoop scope
+/// `WhileLoop` scope
 #[test]
 fn scope_while_loop() {
-    let source = r#"
+    let source = r"
 fn countdown(mut n: i32) {
     while n > 0 {
         n -= 1;
     }
 }
-"#;
+";
     let staging = build_graph(source);
     assert!(staging.stats().nodes_staged >= 1);
     assert!(
@@ -263,16 +263,16 @@ fn countdown(mut n: i32) {
     );
 }
 
-/// WhileLet scope
+/// `WhileLet` scope
 #[test]
 fn scope_while_let() {
-    let source = r#"
+    let source = r"
 fn drain(mut v: Vec<i32>) {
     while let Some(x) = v.pop() {
         let _ = x;
     }
 }
-"#;
+";
     let staging = build_graph(source);
     assert!(staging.stats().nodes_staged >= 1);
     // `v.pop()` is a method call — must produce a Calls edge
@@ -285,13 +285,13 @@ fn drain(mut v: Vec<i32>) {
 /// Loop scope (infinite loop)
 #[test]
 fn scope_loop_expression() {
-    let source = r#"
+    let source = r"
 fn spin() {
     loop {
         break;
     }
 }
-"#;
+";
     let staging = build_graph(source);
     assert!(staging.stats().nodes_staged >= 1);
     assert!(
@@ -300,10 +300,10 @@ fn spin() {
     );
 }
 
-/// IfBranch scope (plain if)
+/// `IfBranch` scope (plain if)
 #[test]
 fn scope_if_branch() {
-    let source = r#"
+    let source = r"
 fn check(x: i32) -> bool {
     if x > 0 {
         true
@@ -311,7 +311,7 @@ fn check(x: i32) -> bool {
         false
     }
 }
-"#;
+";
     let staging = build_graph(source);
     assert!(staging.stats().nodes_staged >= 1);
     assert!(
@@ -320,10 +320,10 @@ fn check(x: i32) -> bool {
     );
 }
 
-/// IfLet scope
+/// `IfLet` scope
 #[test]
 fn scope_if_let() {
-    let source = r#"
+    let source = r"
 fn first(v: &[i32]) -> Option<i32> {
     if let Some(x) = v.first().copied() {
         Some(x)
@@ -331,7 +331,7 @@ fn first(v: &[i32]) -> Option<i32> {
         None
     }
 }
-"#;
+";
     let staging = build_graph(source);
     assert!(staging.stats().nodes_staged >= 1);
     // `v.first()` and `.copied()` are method calls
@@ -341,7 +341,7 @@ fn first(v: &[i32]) -> Option<i32> {
     );
 }
 
-/// MatchArm scope
+/// `MatchArm` scope
 #[test]
 fn scope_match_arm() {
     let source = r#"
@@ -360,16 +360,16 @@ fn describe(x: Option<i32>) -> &'static str {
     );
 }
 
-/// UnsafeBlock scope
+/// `UnsafeBlock` scope
 #[test]
 fn scope_unsafe_block() {
-    let source = r#"
+    let source = r"
 fn raw_copy(src: *const u8, dst: *mut u8) {
     unsafe {
         *dst = *src;
     }
 }
-"#;
+";
     let staging = build_graph(source);
     assert!(staging.stats().nodes_staged >= 1);
     assert!(
@@ -381,7 +381,7 @@ fn raw_copy(src: *const u8, dst: *mut u8) {
 /// Block scope (standalone block expression)
 #[test]
 fn scope_standalone_block() {
-    let source = r#"
+    let source = r"
 fn compute() -> i32 {
     let result = {
         let a = 1;
@@ -390,7 +390,7 @@ fn compute() -> i32 {
     };
     result
 }
-"#;
+";
     let staging = build_graph(source);
     assert!(staging.stats().nodes_staged >= 1);
     assert!(
@@ -406,13 +406,13 @@ fn compute() -> i32 {
 /// `mut_pattern` in let binding
 #[test]
 fn pattern_mut_binding() {
-    let source = r#"
+    let source = r"
 fn mutate() {
     let mut x = 0;
     x += 1;
     let _ = x;
 }
-"#;
+";
     let staging = build_graph(source);
     assert!(staging.stats().nodes_staged >= 1);
     // The function itself must be staged
@@ -425,12 +425,12 @@ fn mutate() {
 /// `ref_pattern` in let binding
 #[test]
 fn pattern_ref_binding() {
-    let source = r#"
+    let source = r"
 fn borrow_name(name: &String) {
     let ref r = name;
     let _ = r;
 }
-"#;
+";
     let staging = build_graph(source);
     assert!(staging.stats().nodes_staged >= 1);
     assert!(
@@ -442,12 +442,12 @@ fn borrow_name(name: &String) {
 /// `tuple_pattern` in let binding
 #[test]
 fn pattern_tuple_destructure() {
-    let source = r#"
+    let source = r"
 fn swap(pair: (i32, i32)) -> (i32, i32) {
     let (a, b) = pair;
     (b, a)
 }
-"#;
+";
     let staging = build_graph(source);
     assert!(staging.stats().nodes_staged >= 1);
     assert!(
@@ -459,14 +459,14 @@ fn swap(pair: (i32, i32)) -> (i32, i32) {
 /// `tuple_struct_pattern` in match arm (e.g., `Some(x)`)
 #[test]
 fn pattern_tuple_struct_match() {
-    let source = r#"
+    let source = r"
 fn unwrap_or_zero(v: Option<i32>) -> i32 {
     match v {
         Some(x) => x,
         None => 0,
     }
 }
-"#;
+";
     let staging = build_graph(source);
     assert!(staging.stats().nodes_staged >= 1);
     assert!(
@@ -478,13 +478,13 @@ fn unwrap_or_zero(v: Option<i32>) -> i32 {
 /// `struct_pattern` in let binding
 #[test]
 fn pattern_struct_destructure() {
-    let source = r#"
+    let source = r"
 struct Point { x: f64, y: f64 }
 fn magnitude(p: Point) -> f64 {
     let Point { x, y } = p;
     (x * x + y * y).sqrt()
 }
-"#;
+";
     let staging = build_graph(source);
     assert!(staging.stats().nodes_staged >= 1);
     // Both Function and Struct nodes expected
@@ -501,14 +501,14 @@ fn magnitude(p: Point) -> f64 {
 /// `slice_pattern` in match arm
 #[test]
 fn pattern_slice_match() {
-    let source = r#"
+    let source = r"
 fn head_tail(s: &[i32]) -> Option<(i32, &[i32])> {
     match s {
         [head, tail @ ..] => Some((*head, tail)),
         [] => None,
     }
 }
-"#;
+";
     let staging = build_graph(source);
     assert!(staging.stats().nodes_staged >= 1);
     assert!(
@@ -520,14 +520,14 @@ fn head_tail(s: &[i32]) -> Option<(i32, &[i32])> {
 /// `or_pattern` in match arm (A | B)
 #[test]
 fn pattern_or_match() {
-    let source = r#"
+    let source = r"
 fn is_end(c: char) -> bool {
     match c {
         '.' | '!' | '?' => true,
         _ => false,
     }
 }
-"#;
+";
     let staging = build_graph(source);
     assert!(staging.stats().nodes_staged >= 1);
     assert!(
@@ -539,14 +539,14 @@ fn is_end(c: char) -> bool {
 /// `reference_pattern` in let binding (`&x`)
 #[test]
 fn pattern_reference_binding() {
-    let source = r#"
+    let source = r"
 fn deref_first(v: &[i32]) -> i32 {
     match v {
         [&first, ..] => first,
         _ => 0,
     }
 }
-"#;
+";
     let staging = build_graph(source);
     assert!(staging.stats().nodes_staged >= 1);
     assert!(
@@ -558,14 +558,14 @@ fn deref_first(v: &[i32]) -> i32 {
 /// Closure with bare identifier parameters (`|x| x + 1`)
 #[test]
 fn closure_bare_identifier_param() {
-    let source = r#"
+    let source = r"
 fn apply<F: Fn(i32) -> i32>(f: F, x: i32) -> i32 { f(x) }
 
 fn main() {
     let double = |x| x * 2;
     let _ = apply(double, 5);
 }
-"#;
+";
     let staging = build_graph(source);
     assert!(staging.stats().nodes_staged >= 1);
     // `f(x)` and `apply(double, 5)` are call expressions
@@ -578,12 +578,12 @@ fn main() {
 /// Closure with typed parameter in `|x: i32|` form (uses `parameter` child)
 #[test]
 fn closure_typed_parameter() {
-    let source = r#"
+    let source = r"
 fn main() {
     let add_one = |x: i32| -> i32 { x + 1 };
     let _ = add_one(3);
 }
-"#;
+";
     let staging = build_graph(source);
     assert!(staging.stats().nodes_staged >= 1);
     // `add_one(3)` is a call
@@ -596,7 +596,7 @@ fn main() {
 /// if-let with pattern that creates let condition binding
 #[test]
 fn binding_let_condition_while_let() {
-    let source = r#"
+    let source = r"
 fn consume(mut q: std::collections::VecDeque<i32>) -> i32 {
     let mut total = 0;
     while let Some(v) = q.pop_front() {
@@ -604,7 +604,7 @@ fn consume(mut q: std::collections::VecDeque<i32>) -> i32 {
     }
     total
 }
-"#;
+";
     let staging = build_graph(source);
     assert!(staging.stats().nodes_staged >= 1);
     // `q.pop_front()` is a method call
@@ -617,7 +617,7 @@ fn consume(mut q: std::collections::VecDeque<i32>) -> i32 {
 /// For-loop variable binding
 #[test]
 fn binding_for_variable() {
-    let source = r#"
+    let source = r"
 fn sum(items: &[i32]) -> i32 {
     let mut acc = 0;
     for n in items {
@@ -625,7 +625,7 @@ fn sum(items: &[i32]) -> i32 {
     }
     acc
 }
-"#;
+";
     let staging = build_graph(source);
     assert!(staging.stats().nodes_staged >= 1);
     assert!(
@@ -637,7 +637,7 @@ fn sum(items: &[i32]) -> i32 {
 /// Match arm with struct pattern that binds via `field_pattern`
 #[test]
 fn binding_match_arm_struct_pattern() {
-    let source = r#"
+    let source = r"
 struct Pair { a: i32, b: i32 }
 fn larger(p: Pair) -> i32 {
     match p {
@@ -645,7 +645,7 @@ fn larger(p: Pair) -> i32 {
         Pair { b, .. } => b,
     }
 }
-"#;
+";
     let staging = build_graph(source);
     assert!(staging.stats().nodes_staged >= 1);
     // Both Struct and Function must be staged
@@ -690,9 +690,9 @@ mod lifetime_coverage {
         sqry_lang_rust::lifetime_extractor::LifetimeExtractionResult::default()
     }
 
-    /// dyn Trait + 'a → TraitObject edge
-    /// The tree-sitter grammar uses "dynamic_type" or "trait_object_type" for `dyn Trait + 'a`.
-    /// We verify that the extractor is called by checking if there is a TraitObject edge, OR
+    /// dyn Trait + 'a → `TraitObject` edge
+    /// The tree-sitter grammar uses "`dynamic_type`" or "`trait_object_type`" for `dyn Trait + 'a`.
+    /// We verify that the extractor is called by checking if there is a `TraitObject` edge, OR
     /// that processing doesn't panic (grammar may emit the lifetime as part of a parent reference).
     #[test]
     fn dyn_trait_lifetime_no_panic() {
@@ -704,7 +704,7 @@ mod lifetime_coverage {
         let _ = result;
     }
 
-    /// impl Trait + 'a → ImplTrait edge (grammar may produce "abstract_type" or "impl_type")
+    /// impl Trait + 'a → `ImplTrait` edge (grammar may produce "`abstract_type`" or "`impl_type`")
     #[test]
     fn impl_trait_lifetime_no_panic() {
         // Intentionally no strong assertion — verifies no panic on edge-case grammar.
@@ -713,7 +713,7 @@ mod lifetime_coverage {
         let _ = result;
     }
 
-    /// Higher-ranked trait bounds → HigherRanked edge.
+    /// Higher-ranked trait bounds → `HigherRanked` edge.
     /// This test exercises the `extract_hrtb` code path by targeting a `where_predicate`
     /// that contains a `higher_ranked_trait_bound` field.
     #[test]
@@ -756,7 +756,7 @@ mod lifetime_coverage {
         );
     }
 
-    /// T: 'static in type_parameters → Static edge from TypeBound path
+    /// T: 'static in `type_parameters` → Static edge from `TypeBound` path
     #[test]
     fn type_param_static_bound() {
         let result = extract("fn foo<T: 'static>(x: T) {}");
@@ -812,7 +812,7 @@ mod lifetime_coverage {
         assert!(result.is_empty());
     }
 
-    /// Outlives in type_parameters inline (`'a: 'b`) or in where clause.
+    /// Outlives in `type_parameters` inline (`'a: 'b`) or in where clause.
     /// The tree-sitter grammar may put inline outlives constraints in `lifetime_parameter`
     /// or in a `where_clause`. Either way, extraction should complete without panic.
     #[test]
@@ -822,7 +822,7 @@ mod lifetime_coverage {
         let _ = result;
     }
 
-    /// Lifetime outlives inline in type_parameters (`'a: 'b` in generic list)
+    /// Lifetime outlives inline in `type_parameters` (`'a: 'b` in generic list)
     #[test]
     fn outlives_inline_type_param() {
         // `'a: 'b` in type_parameters produces `lifetime_predicate` or `lifetime_parameter`
@@ -1024,12 +1024,12 @@ mod scope_extraction {
 
 #[test]
 fn graph_extracts_trait_definition() {
-    let source = r#"
+    let source = r"
 trait Drawable {
     fn draw(&self);
     fn color(&self) -> u32 { 0 }
 }
-"#;
+";
     let staging = build_graph(source);
     assert!(staging.stats().nodes_staged >= 1);
     // Rust traits are added via `add_interface_with_visibility`, producing NodeKind::Interface
@@ -1041,13 +1041,13 @@ trait Drawable {
 
 #[test]
 fn graph_extracts_enum_with_variants() {
-    let source = r#"
+    let source = r"
 enum Color {
     Red,
     Green,
     Blue,
 }
-"#;
+";
     let staging = build_graph(source);
     assert!(staging.stats().nodes_staged >= 1);
     // Enum definition must produce an Enum node
@@ -1059,10 +1059,10 @@ enum Color {
 
 #[test]
 fn graph_extracts_extern_crate() {
-    let source = r#"
+    let source = r"
 extern crate serde;
 fn use_serde() {}
-"#;
+";
     let staging = build_graph(source);
     assert!(staging.stats().nodes_staged >= 1);
     // `extern crate` produces an Import node
@@ -1074,10 +1074,10 @@ fn use_serde() {}
 
 #[test]
 fn graph_extracts_use_declaration() {
-    let source = r#"
+    let source = r"
 use std::collections::HashMap;
 fn make_map() -> HashMap<String, i32> { HashMap::new() }
-"#;
+";
     let staging = build_graph(source);
     assert!(staging.stats().nodes_staged >= 1);
     // `use` declaration must produce an Import node or Imports edge
@@ -1113,11 +1113,11 @@ async fn fetch_data(url: &str) -> String {
 
 #[test]
 fn graph_handles_const_fn() {
-    let source = r#"
+    let source = r"
 const fn max(a: i32, b: i32) -> i32 {
     if a > b { a } else { b }
 }
-"#;
+";
     let staging = build_graph(source);
     assert!(staging.stats().nodes_staged >= 1);
     assert!(
@@ -1128,9 +1128,9 @@ const fn max(a: i32, b: i32) -> i32 {
 
 #[test]
 fn graph_handles_pub_fn() {
-    let source = r#"
+    let source = r"
 pub fn public_api() -> bool { true }
-"#;
+";
     let staging = build_graph(source);
     assert!(staging.stats().nodes_staged >= 1);
     assert!(
@@ -1163,13 +1163,13 @@ extern "C" {
 fn graph_handles_derive_macro() {
     // The struct must be `pub` so `is_exported` is true — `process_derive_attributes`
     // is only called for exported items when macro expansion is enabled.
-    let source = r#"
+    let source = r"
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
     pub name: String,
     pub value: i32,
 }
-"#;
+";
     let staging = build_graph(source);
     assert!(staging.stats().nodes_staged >= 1);
     // Derived pub struct must produce a Struct node

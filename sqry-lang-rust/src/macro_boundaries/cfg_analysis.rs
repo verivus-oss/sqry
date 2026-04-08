@@ -1,4 +1,4 @@
-//! cfg/cfg_attr conditional compilation analysis (4.5e).
+//! `cfg/cfg_attr` conditional compilation analysis (4.5e).
 //!
 //! Parses `#[cfg()]` and `#[cfg_attr()]` attributes into structured predicates,
 //! stores cfg metadata on gated items, and emits `MacroExpansion{CfgGate}` edges
@@ -11,7 +11,7 @@
 //! automatically. Validation only happens at evaluation time when
 //! `active_cfg_flags` is provided.
 //!
-//! # cfg_attr Nesting
+//! # `cfg_attr` Nesting
 //!
 //! `cfg_attr` can nest recursively:
 //! ```ignore
@@ -109,7 +109,7 @@ impl CfgPredicate {
     }
 }
 
-/// Analyze cfg and cfg_attr attributes on an item node.
+/// Analyze cfg and `cfg_attr` attributes on an item node.
 ///
 /// For each `#[cfg(...)]` attribute:
 /// - Parses the predicate into a structured [`CfgPredicate`]
@@ -144,12 +144,9 @@ pub fn analyze_cfg_attributes(
             break;
         }
 
-        let attr_text = match sib.utf8_text(content) {
-            Ok(text) => text,
-            Err(_) => {
-                sibling = sib.prev_sibling();
-                continue;
-            }
+        let Ok(attr_text) = sib.utf8_text(content) else {
+            sibling = sib.prev_sibling();
+            continue;
         };
 
         // Check for #[cfg(...)]
@@ -168,12 +165,7 @@ pub fn analyze_cfg_attributes(
             meta.cfg_condition = Some(condition_str.clone());
             meta.cfg_active = cfg_active;
 
-            log::debug!(
-                "cfg({}) on node {:?}, active: {:?}",
-                condition_str,
-                item_id,
-                cfg_active
-            );
+            log::debug!("cfg({condition_str}) on node {item_id:?}, active: {cfg_active:?}");
         }
 
         // Check for #[cfg_attr(...)]
@@ -196,7 +188,7 @@ pub fn analyze_cfg_attributes(
 /// Extract the content inside `#[kind(...)]` from the full attribute text.
 ///
 /// For `#[cfg(test)]`, with kind="cfg", returns `Some("test")`.
-/// For `#[cfg_attr(feature = "serde", derive(Serialize))]`, with kind="cfg_attr",
+/// For `#[cfg_attr(feature = "serde", derive(Serialize))]`, with `kind="cfg_attr`",
 /// returns `Some("feature = \"serde\", derive(Serialize)")`.
 fn extract_cfg_content<'a>(attr_text: &'a str, kind: &str) -> Option<&'a str> {
     let trimmed = attr_text.trim();
@@ -243,6 +235,7 @@ fn find_matching_close_paren(s: &str) -> Option<usize> {
 /// - Conjunction: `"all(unix, test)"`
 /// - Disjunction: `"any(unix, windows)"`
 /// - Compound nesting: `"all(target_arch = \"x86_64\", any(unix, target_os = \"macos\"))"`
+#[must_use]
 pub fn parse_predicate(text: &str) -> Option<CfgPredicate> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
@@ -287,7 +280,7 @@ pub fn parse_predicate(text: &str) -> Option<CfgPredicate> {
     }
 
     // Unrecognized pattern — log and return None.
-    log::debug!("Unrecognized cfg predicate: '{}'", trimmed);
+    log::debug!("Unrecognized cfg predicate: '{trimmed}'");
     None
 }
 
@@ -370,9 +363,8 @@ fn process_cfg_attr(
     }
 
     let predicate_text = parts[0].trim();
-    let predicate = match parse_predicate(predicate_text) {
-        Some(p) => p,
-        None => return,
+    let Some(predicate) = parse_predicate(predicate_text) else {
+        return;
     };
 
     let condition_str = predicate.to_condition_string();
@@ -430,12 +422,7 @@ fn process_cfg_attr(
         }
     }
 
-    log::debug!(
-        "cfg_attr({}) on node {:?}, active: {:?}",
-        condition_str,
-        item_id,
-        cfg_active
-    );
+    log::debug!("cfg_attr({condition_str}) on node {item_id:?}, active: {cfg_active:?}");
 }
 
 #[cfg(test)]
@@ -468,12 +455,12 @@ mod tests {
 
     #[test]
     fn test_cfg_test() {
-        let source = r#"
+        let source = r"
 #[cfg(test)]
 mod tests {
     fn test_something() {}
 }
-"#;
+";
         let tree = parse_rust(source);
         let mut staging = StagingGraph::new();
         let file = Path::new("test.rs");
@@ -618,12 +605,12 @@ struct MyStruct { x: u32 }
 
     #[test]
     fn test_cfg_on_mod() {
-        let source = r#"
+        let source = r"
 #[cfg(unix)]
 mod unix_only {
     pub fn platform_specific() {}
 }
-"#;
+";
         let tree = parse_rust(source);
         let mut staging = StagingGraph::new();
         let file = Path::new("test.rs");

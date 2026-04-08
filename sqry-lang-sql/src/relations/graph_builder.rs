@@ -942,7 +942,7 @@ mod tests {
                 {
                     // table_name is a StringId, we need to look it up
                     // For testing, we just check that the edge was created
-                    Some(format!("TableRead({:?})", table_name))
+                    Some(format!("TableRead({table_name:?})"))
                 } else {
                     None
                 }
@@ -967,7 +967,7 @@ mod tests {
                     ..
                 } = op
                 {
-                    Some((format!("TableWrite({:?})", table_name), *operation))
+                    Some((format!("TableWrite({table_name:?})"), *operation))
                 } else {
                     None
                 }

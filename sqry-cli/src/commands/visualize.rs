@@ -4,13 +4,16 @@ use crate::args::{Cli, DiagramFormatArg, DirectionArg, VisualizeCommand};
 use crate::commands::graph::loader::{GraphLoadConfig, load_unified_graph_for_cli};
 use anyhow::{Context, Result, anyhow, bail};
 use sqry_core::graph::unified::GraphSnapshot;
-use sqry_core::graph::unified::edge::{EdgeKind, ExportKind, StoreEdgeRef};
+use sqry_core::graph::unified::edge::{EdgeKind, ExportKind};
 use sqry_core::graph::unified::node::{NodeId, NodeKind};
+use sqry_core::graph::unified::{
+    EdgeFilter, TraversalConfig, TraversalDirection, TraversalLimits, traverse,
+};
 use sqry_core::output::diagram::{
     D2Formatter, Diagram, DiagramEdge, DiagramFormat, DiagramFormatter, DiagramOptions, Direction,
     GraphType, GraphVizFormatter, MermaidFormatter, Node,
 };
-use std::collections::{HashSet, VecDeque};
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -120,43 +123,6 @@ fn validate_command(cli: &Cli, cmd: &VisualizeCommand) -> Result<()> {
     Ok(())
 }
 
-/// Context for graph traversal.
-struct TraversalContext<'a> {
-    snapshot: &'a GraphSnapshot,
-    relation_kind: RelationKind,
-    max_depth: usize,
-    max_edges: usize,
-}
-
-/// Initialize root nodes for traversal, returning placeholder if none found.
-fn init_root_nodes(
-    relation: &RelationQuery,
-    snapshot: &GraphSnapshot,
-    nodes: &mut NodeSet,
-    queue: &mut VecDeque<(NodeId, usize)>,
-    visited: &mut HashSet<NodeId>,
-) -> Option<GraphData> {
-    let root_nodes = resolve_nodes(snapshot, &relation.target, relation.kind);
-
-    if root_nodes.is_empty() {
-        let placeholder = placeholder_node(&relation.target);
-        return Some(GraphData {
-            nodes: Vec::new(),
-            edges: Vec::new(),
-            extra_nodes: vec![placeholder],
-        });
-    }
-
-    for start_node in root_nodes {
-        nodes.add_node(snapshot, start_node);
-        if visited.insert(start_node) {
-            queue.push_back((start_node, 0usize));
-        }
-    }
-
-    None
-}
-
 /// Create a placeholder node for no-match queries.
 fn placeholder_node(name: &str) -> Node {
     Node {
@@ -167,82 +133,95 @@ fn placeholder_node(name: &str) -> Node {
     }
 }
 
-/// Convert a graph edge to a `DiagramEdge`, adding nodes to the set.
-fn edge_to_diagram_edge(
-    edge: &StoreEdgeRef,
-    snapshot: &GraphSnapshot,
-    nodes: &mut NodeSet,
-) -> DiagramEdge {
-    nodes.add_node(snapshot, edge.source);
-    nodes.add_node(snapshot, edge.target);
-
-    let label = edge_label_for_kind(snapshot, &edge.kind);
-
-    DiagramEdge {
-        source: edge.source,
-        target: edge.target,
-        label,
-    }
-}
-
-/// Determine the next node to visit based on relation kind.
-fn next_node_for_relation(edge: &StoreEdgeRef, relation_kind: RelationKind) -> NodeId {
-    match relation_kind {
-        RelationKind::Callers | RelationKind::Imports | RelationKind::Exports => edge.source,
-        RelationKind::Callees => edge.target,
-    }
-}
-
+/// Collect graph data for visualization using the traversal kernel.
+///
+/// Uses the kernel for BFS traversal, then converts the result into
+/// diagram-specific `GraphData` with sorted edges and labeled edges.
 fn collect_graph_data_unified(
     relation: &RelationQuery,
     snapshot: &GraphSnapshot,
     max_depth: usize,
     max_nodes: usize,
 ) -> GraphData {
-    let mut edges = Vec::new();
-    let mut queue = VecDeque::new();
-    let mut visited = HashSet::new();
-    let mut nodes = NodeSet::default();
+    // Resolve root nodes
+    let root_nodes = resolve_nodes(snapshot, &relation.target, relation.kind);
 
-    // Initialize roots - return early if placeholder
-    if let Some(placeholder_data) =
-        init_root_nodes(relation, snapshot, &mut nodes, &mut queue, &mut visited)
-    {
-        return placeholder_data;
+    if root_nodes.is_empty() {
+        let placeholder = placeholder_node(&relation.target);
+        return GraphData {
+            nodes: Vec::new(),
+            edges: Vec::new(),
+            extra_nodes: vec![placeholder],
+        };
     }
 
-    let ctx = TraversalContext {
-        snapshot,
-        relation_kind: relation.kind,
-        max_depth,
-        max_edges: max_nodes.saturating_mul(max_depth.max(1)).max(32),
+    // Map relation kind to traversal direction and edge filter
+    let (direction, edge_filter) = match relation.kind {
+        RelationKind::Callers => (TraversalDirection::Incoming, EdgeFilter::calls_only()),
+        RelationKind::Callees => (TraversalDirection::Outgoing, EdgeFilter::calls_only()),
+        RelationKind::Imports => (TraversalDirection::Incoming, edge_filter_imports_only()),
+        RelationKind::Exports => (TraversalDirection::Incoming, edge_filter_exports_only()),
     };
 
-    while let Some((current_node, depth)) = queue.pop_front() {
-        if depth >= ctx.max_depth || edges.len() >= ctx.max_edges {
-            continue;
-        }
+    let max_edges = max_nodes.saturating_mul(max_depth.max(1)).max(32);
 
-        let mut outgoing_edges =
-            collect_relation_edges(ctx.snapshot, ctx.relation_kind, current_node);
-        outgoing_edges.sort_by_key(|edge| {
-            let source_key = node_sort_key(ctx.snapshot, edge.source);
-            let target_key = node_sort_key(ctx.snapshot, edge.target);
-            (source_key, target_key, edge.kind.tag())
-        });
+    let config = TraversalConfig {
+        direction,
+        edge_filter,
+        limits: TraversalLimits {
+            max_depth: u32::try_from(max_depth).unwrap_or(u32::MAX),
+            max_nodes: Some(max_nodes),
+            max_edges: Some(max_edges),
+            max_paths: None,
+        },
+    };
 
-        for edge in outgoing_edges {
-            if edges.len() >= ctx.max_edges {
-                break;
-            }
+    let result = traverse(snapshot, &root_nodes, &config, None);
 
-            edges.push(edge_to_diagram_edge(&edge, ctx.snapshot, &mut nodes));
+    // Convert TraversalResult into GraphData
+    let mut nodes = NodeSet::default();
+    let mut edges: Vec<DiagramEdge> = Vec::new();
 
-            let next_node = next_node_for_relation(&edge, ctx.relation_kind);
-            if visited.insert(next_node) && depth + 1 < ctx.max_depth {
-                queue.push_back((next_node, depth + 1));
-            }
-        }
+    // Add root nodes first to preserve ordering
+    for &root in &root_nodes {
+        nodes.add_node(snapshot, root);
+    }
+
+    // Build sorted diagram edges from kernel result
+    let mut diagram_edges: Vec<(DiagramEdge, (String, String, &'static str))> = result
+        .edges
+        .iter()
+        .map(|mat_edge| {
+            let source_id = result.nodes[mat_edge.source_idx].node_id;
+            let target_id = result.nodes[mat_edge.target_idx].node_id;
+
+            let label = edge_label_for_kind(snapshot, &mat_edge.raw_kind);
+
+            let source_key = node_sort_key(snapshot, source_id);
+            let target_key = node_sort_key(snapshot, target_id);
+            let sort_key = (
+                source_key.0.clone(),
+                target_key.0.clone(),
+                mat_edge.raw_kind.tag(),
+            );
+
+            (
+                DiagramEdge {
+                    source: source_id,
+                    target: target_id,
+                    label,
+                },
+                sort_key,
+            )
+        })
+        .collect();
+
+    diagram_edges.sort_by(|a, b| a.1.cmp(&b.1));
+
+    for (edge, _sort_key) in diagram_edges {
+        nodes.add_node(snapshot, edge.source);
+        nodes.add_node(snapshot, edge.target);
+        edges.push(edge);
     }
 
     GraphData {
@@ -252,36 +231,33 @@ fn collect_graph_data_unified(
     }
 }
 
-fn collect_relation_edges(
-    snapshot: &GraphSnapshot,
-    relation_kind: RelationKind,
-    current_node: NodeId,
-) -> Vec<StoreEdgeRef> {
-    match relation_kind {
-        RelationKind::Callers => snapshot
-            .edges()
-            .edges_to(current_node)
-            .into_iter()
-            .filter(|edge| matches!(edge.kind, EdgeKind::Calls { .. }))
-            .collect(),
-        RelationKind::Callees => snapshot
-            .edges()
-            .edges_from(current_node)
-            .into_iter()
-            .filter(|edge| matches!(edge.kind, EdgeKind::Calls { .. }))
-            .collect(),
-        RelationKind::Imports => snapshot
-            .edges()
-            .edges_to(current_node)
-            .into_iter()
-            .filter(|edge| matches!(edge.kind, EdgeKind::Imports { .. }))
-            .collect(),
-        RelationKind::Exports => snapshot
-            .edges()
-            .edges_to(current_node)
-            .into_iter()
-            .filter(|edge| matches!(edge.kind, EdgeKind::Exports { .. }))
-            .collect(),
+/// Edge filter that only includes import edges.
+fn edge_filter_imports_only() -> EdgeFilter {
+    EdgeFilter {
+        include_calls: false,
+        include_imports: true,
+        include_references: false,
+        include_inheritance: false,
+        include_structural: false,
+        include_type_edges: false,
+        include_database: false,
+        include_service: false,
+    }
+}
+
+/// Edge filter that only includes export edges.
+fn edge_filter_exports_only() -> EdgeFilter {
+    // Exports are classified under `include_imports` in EdgeFilter (both import+export).
+    // We include imports flag which covers both Import and Export classifications.
+    EdgeFilter {
+        include_calls: false,
+        include_imports: true,
+        include_references: false,
+        include_inheritance: false,
+        include_structural: false,
+        include_type_edges: false,
+        include_database: false,
+        include_service: false,
     }
 }
 

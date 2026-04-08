@@ -73,10 +73,8 @@ impl GraphBuilder for ApexGraphBuilder {
         // (if any) is also public/global. This prevents exporting public methods
         // inside private or default-visibility classes.
         for callable in &callables {
-            let is_public_or_global = matches!(
-                callable.visibility.as_deref(),
-                Some("public") | Some("global")
-            );
+            let is_public_or_global =
+                matches!(callable.visibility.as_deref(), Some("public" | "global"));
             let should_export = callable.is_trigger || is_public_or_global;
             if !should_export {
                 continue;
@@ -85,10 +83,7 @@ impl GraphBuilder for ApexGraphBuilder {
             // the enclosing class must also be public/global
             let enclosing_class_exported =
                 find_enclosing_class(callable, &callables).is_none_or(|parent| {
-                    matches!(
-                        parent.visibility.as_deref(),
-                        Some("public") | Some("global")
-                    )
+                    matches!(parent.visibility.as_deref(), Some("public" | "global"))
                 });
             if enclosing_class_exported {
                 helper.add_export_edge(module_id, callable.node_id);
@@ -221,6 +216,7 @@ struct ApexQueries {
 }
 
 impl ApexQueries {
+    #[allow(clippy::too_many_lines)] // Tree-sitter query construction requires defining all queries in one place
     fn new(language: &tree_sitter::Language) -> GraphResult<Self> {
         // Query for callable definitions (classes, methods, triggers)
         let callables = Query::new(
@@ -1210,37 +1206,34 @@ fn qualify_method_call(
     // Check if the method invocation has an object field
     let object_node = call_node.child_by_field_name("object");
 
-    match object_node {
-        Some(obj) => {
-            match obj.kind() {
-                "this" => {
-                    // this.foo() → ClassName.foo (enclosing class)
-                    let class_name = find_enclosing_class_name(caller, callables);
-                    format!("{class_name}.{method_name}")
-                }
-                "super" => {
-                    // super.foo() → super.foo (fallback; superclass not resolvable at this stage)
-                    format!("super.{method_name}")
-                }
-                _ => {
-                    // obj.foo() → obj.foo (use object text as qualifier)
-                    let qualifier = obj
-                        .utf8_text(content)
-                        .map(|s| s.trim().to_string())
-                        .unwrap_or_default();
-                    if qualifier.is_empty() {
-                        method_name.to_string()
-                    } else {
-                        format!("{qualifier}.{method_name}")
-                    }
+    if let Some(obj) = object_node {
+        match obj.kind() {
+            "this" => {
+                // this.foo() → ClassName.foo (enclosing class)
+                let class_name = find_enclosing_class_name(caller, callables);
+                format!("{class_name}.{method_name}")
+            }
+            "super" => {
+                // super.foo() → super.foo (fallback; superclass not resolvable at this stage)
+                format!("super.{method_name}")
+            }
+            _ => {
+                // obj.foo() → obj.foo (use object text as qualifier)
+                let qualifier = obj
+                    .utf8_text(content)
+                    .map(|s| s.trim().to_string())
+                    .unwrap_or_default();
+                if qualifier.is_empty() {
+                    method_name.to_string()
+                } else {
+                    format!("{qualifier}.{method_name}")
                 }
             }
         }
-        None => {
-            // Unqualified call: foo() → ClassName.foo
-            let class_name = find_enclosing_class_name(caller, callables);
-            format!("{class_name}.{method_name}")
-        }
+    } else {
+        // Unqualified call: foo() → ClassName.foo
+        let class_name = find_enclosing_class_name(caller, callables);
+        format!("{class_name}.{method_name}")
     }
 }
 
@@ -2041,11 +2034,13 @@ mod tests {
             .collect()
     }
 
+    #[allow(clippy::similar_names)] // Domain variable naming is intentional
     fn assert_has_display_call_edge(staging: &StagingGraph, caller: &str, callee: &str) {
         let node_names = build_apex_display_name_lookup(staging);
 
         let found = staging.operations().iter().any(|op| {
             if let StagingOp::AddEdge {
+                #[allow(clippy::similar_names)] // AST node variables
                 source,
                 target,
                 kind: EdgeKind::Calls { .. },

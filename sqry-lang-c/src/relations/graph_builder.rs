@@ -230,6 +230,8 @@ fn extract_function_contexts(
 
     // Recurse into children
     for i in 0..node.child_count() {
+        #[allow(clippy::cast_possible_truncation)]
+        // Graph storage: node/edge index counts fit in u32
         if let Some(child) = node.child(i as u32) {
             extract_function_contexts(child, content, contexts, depth + 1, max_depth, guard)?;
         }
@@ -695,6 +697,8 @@ fn extract_initializer_list_targets(
 
         // The value is typically the last named child (after the designator)
         // tree-sitter C: initializer_pair has designator(s) then value
+        #[allow(clippy::cast_possible_truncation)]
+        // Graph storage: node/edge index counts fit in u32
         let child_count = pair.named_child_count() as u32;
         if child_count < 2 {
             continue;
@@ -1366,6 +1370,8 @@ fn find_parameter_list(declarator: Node) -> Option<Node> {
 
     // Recurse into nested declarators (e.g., pointer_declarator)
     for i in 0..declarator.child_count() {
+        #[allow(clippy::cast_possible_truncation)]
+        // Graph storage: node/edge index counts fit in u32
         if let Some(child) = declarator.child(i as u32)
             && let Some(params) = find_parameter_list(child)
         {
@@ -1868,6 +1874,8 @@ fn extract_field_declarator_name(declarator: Node, content: &[u8]) -> Option<Str
         _ => {
             // Check for direct field_identifier child
             for i in 0..declarator.child_count() {
+                #[allow(clippy::cast_possible_truncation)]
+                // Graph storage: node/edge index counts fit in u32
                 if let Some(child) = declarator.child(i as u32)
                     && child.kind() == "field_identifier"
                 {

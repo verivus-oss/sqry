@@ -85,6 +85,7 @@ pub fn extract_type_names_from_haskell_type(node: Node, content: &[u8]) -> Vec<S
 fn collect_type_names(node: Node, content: &[u8], names: &mut Vec<String>) {
     match node.kind() {
         // Leaf: type constructor or type name (e.g., Int, String, Show)
+        #[allow(clippy::match_same_arms)] // Type extractor arms separated for documentation clarity
         "name" => {
             if let Ok(text) = node.utf8_text(content) {
                 let trimmed = text.trim();
@@ -148,6 +149,7 @@ fn collect_type_names(node: Node, content: &[u8], names: &mut Vec<String>) {
         }
 
         // Container nodes — recurse all named children
+        #[allow(clippy::match_same_arms)] // Arms separated for documentation clarity
         "apply" | "parens" | "tuple" | "list" | "constraints" | "strict_field" | "lazy_field"
         | "quantified_type" | "infix" => {
             let mut cursor = node.walk();
@@ -190,6 +192,7 @@ mod tests {
             return node.child_by_field_name("type");
         }
         let mut cursor = node.walk();
+        #[allow(clippy::used_underscore_binding)] // Underscore prefix indicates partial use pattern
         for child in node.named_children(&mut cursor) {
             if let Some(found) = find_signature_type_node(child, _content) {
                 return Some(found);

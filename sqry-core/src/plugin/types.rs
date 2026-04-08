@@ -1,10 +1,12 @@
 //! Core plugin types and traits.
 
+use std::borrow::Cow;
+use std::path::Path;
+
 use crate::ast::Scope;
 use crate::query::results::QueryMatch;
 use crate::query::types::{FieldDescriptor, Value};
-use std::path::Path;
-use tree_sitter::Tree;
+use tree_sitter::{Parser, Tree};
 
 use super::error::{ParseError, PluginResult, ScopeError};
 
@@ -61,6 +63,50 @@ pub trait LanguagePlugin: Send + Sync {
     /// (constant time) so plugins don't need to cache it.
     fn language(&self) -> tree_sitter::Language;
 
+    /// Preprocess source bytes before parsing/building when the language requires it.
+    ///
+    /// Languages with parse-sensitive source transforms (for example, literate Haskell or
+    /// POD-stripping Perl) must override this method so every execution path can parse and
+    /// traverse against the same byte slice.
+    ///
+    /// The returned content must be the exact byte slice used for any AST built from this
+    /// source when tree node byte ranges are later dereferenced with `utf8_text()`.
+    fn preprocess<'a>(&self, content: &'a [u8]) -> Cow<'a, [u8]> {
+        Cow::Borrowed(content)
+    }
+
+    /// Parse content that has already been passed through [`Self::preprocess`].
+    ///
+    /// Plugins with unusual parsing requirements may override this, but the default path is the
+    /// standard tree-sitter parse for the plugin language.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ParseError`] if the parser cannot build an AST.
+    fn parse_preprocessed(&self, content: &[u8]) -> Result<Tree, ParseError> {
+        let mut parser = Parser::new();
+        parser
+            .set_language(&self.language())
+            .map_err(|err| ParseError::LanguageSetFailed(err.to_string()))?;
+        parser
+            .parse(content, None)
+            .ok_or(ParseError::TreeSitterFailed)
+    }
+
+    /// Prepare parse-aligned bytes and build an AST from that same content buffer.
+    ///
+    /// This is the invariant-preserving entrypoint for callers that need both the parsed tree
+    /// and the exact source bytes the tree was parsed from.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ParseError`] if preprocessing succeeds but parsing fails.
+    fn prepare_ast<'a>(&self, content: &'a [u8]) -> Result<(Cow<'a, [u8]>, Tree), ParseError> {
+        let prepared = self.preprocess(content);
+        let tree = self.parse_preprocessed(prepared.as_ref())?;
+        Ok((prepared, tree))
+    }
+
     /// Build AST for querying.
     ///
     /// Parses source code and returns tree-sitter AST.
@@ -77,7 +123,10 @@ pub trait LanguagePlugin: Send + Sync {
     ///
     /// Returns [`ParseError`] if the parser cannot build an AST (invalid UTF-8 input,
     /// language configuration errors, or tree-sitter failures).
-    fn parse_ast(&self, content: &[u8]) -> Result<Tree, ParseError>;
+    fn parse_ast(&self, content: &[u8]) -> Result<Tree, ParseError> {
+        let (_prepared, tree) = self.prepare_ast(content)?;
+        Ok(tree)
+    }
 
     /// Extract scope information (for context-aware search).
     ///
@@ -87,7 +136,8 @@ pub trait LanguagePlugin: Send + Sync {
     /// # Arguments
     ///
     /// * `tree` - Parsed AST from `parse_ast()`
-    /// * `content` - Source code as bytes (UTF-8 encoded), required for tree-sitter query captures
+    /// * `content` - Source code as bytes (UTF-8 encoded), required for tree-sitter query captures.
+    ///   This must be the same byte slice the provided `tree` was parsed from.
     ///
     /// # Returns
     ///

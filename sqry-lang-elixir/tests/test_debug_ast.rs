@@ -4,11 +4,11 @@ use sqry_lang_elixir::ElixirPlugin;
 #[test]
 fn debug_ast_structure() {
     let plugin = ElixirPlugin::default();
-    let content = br#"
+    let content = br"
 defmodule Demo do
   def my_func, do: :ok
 end
-"#;
+";
 
     let tree = plugin.parse_ast(content).expect("should parse");
     let root = tree.root_node();
@@ -22,11 +22,11 @@ end
             eprintln!("  Found call node");
             if let Some(identifier) = child.child_by_field_name("identifier") {
                 let text = identifier.utf8_text(content).unwrap_or("???");
-                eprintln!("  identifier: {}", text);
+                eprintln!("  identifier: {text}");
             }
             if let Some(target) = child.child_by_field_name("target") {
                 let text = target.utf8_text(content).unwrap_or("???");
-                eprintln!("  target: {}", text);
+                eprintln!("  target: {text}");
             }
         }
     }
@@ -45,14 +45,14 @@ fn explore_type_spec_ast() {
         } else {
             ""
         };
-        println!("{}{} '{}'", indent, kind, text);
+        println!("{indent}{kind} '{text}'");
         let mut cursor = node.walk();
         for child in node.named_children(&mut cursor) {
             print_ast(child, content, depth + 1);
         }
     }
 
-    let source = r#"
+    let source = r"
 defmodule User do
   @type t :: %{name: String.t(), age: integer()}
 
@@ -61,7 +61,7 @@ defmodule User do
     %{name: name, age: age}
   end
 end
-"#;
+";
 
     let plugin = crate::ElixirPlugin::default();
     let tree = plugin.parse_ast(source.as_bytes()).expect("parse failed");

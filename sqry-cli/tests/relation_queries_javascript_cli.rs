@@ -3,7 +3,7 @@
 //! Tests that relation queries work end-to-end through the CLI for JavaScript:
 //! - Callers queries (function calls, method calls, constructor calls)
 //! - Callees queries (what a function calls)
-//! - Exports queries (ES6 modules, CommonJS, named/default exports)
+//! - Exports queries (ES6 modules, `CommonJS`, named/default exports)
 //! - Imports queries (import statements, require calls)
 
 mod common;
@@ -86,7 +86,7 @@ function internalHelper() {
 fn cli_javascript_exports_default_export() {
     let project = TempDir::new().unwrap();
 
-    let js_code = r#"
+    let js_code = r"
 export default class Application {
     constructor(config) {
         this.config = config;
@@ -96,7 +96,7 @@ export default class Application {
         console.log('App running');
     }
 }
-"#;
+";
     std::fs::write(project.path().join("app.js"), js_code).unwrap();
 
     Command::new(sqry_bin())
@@ -119,7 +119,7 @@ export default class Application {
 fn cli_javascript_exports_commonjs() {
     let project = TempDir::new().unwrap();
 
-    let js_code = r#"
+    let js_code = r"
 function helper(x) {
     return x * 2;
 }
@@ -132,7 +132,7 @@ module.exports = {
     helper,
     calculate
 };
-"#;
+";
     std::fs::write(project.path().join("utils.js"), js_code).unwrap();
 
     Command::new(sqry_bin())
@@ -203,7 +203,7 @@ process("test");
 fn cli_javascript_callers_method_calls() {
     let project = TempDir::new().unwrap();
 
-    let js_code = r#"
+    let js_code = r"
 class DataService {
     fetchData() {
         return [];
@@ -221,7 +221,7 @@ class DataService {
 
 const service = new DataService();
 service.process();
-"#;
+";
     std::fs::write(project.path().join("service.js"), js_code).unwrap();
 
     Command::new(sqry_bin())
@@ -253,7 +253,7 @@ service.process();
 fn cli_javascript_callers_chained_methods() {
     let project = TempDir::new().unwrap();
 
-    let js_code = r#"
+    let js_code = r"
 class QueryBuilder {
     where(condition) {
         return this;
@@ -281,7 +281,7 @@ function runQuery() {
 }
 
 runQuery();
-"#;
+";
     std::fs::write(project.path().join("query.js"), js_code).unwrap();
 
     Command::new(sqry_bin())
@@ -317,7 +317,7 @@ runQuery();
 fn cli_javascript_callees_function() {
     let project = TempDir::new().unwrap();
 
-    let js_code = r#"
+    let js_code = r"
 function log(message) {
     console.log(message);
 }
@@ -333,7 +333,7 @@ function handleError(error) {
 }
 
 handleError(new Error('Test'));
-"#;
+";
     std::fs::write(project.path().join("logger.js"), js_code).unwrap();
 
     Command::new(sqry_bin())
@@ -357,7 +357,7 @@ handleError(new Error('Test'));
 fn cli_javascript_callees_method() {
     let project = TempDir::new().unwrap();
 
-    let js_code = r#"
+    let js_code = r"
 class UserService {
     findUser(id) {
         return { id, name: 'Test' };
@@ -378,7 +378,7 @@ class UserService {
 
 const service = new UserService();
 service.getUser(1);
-"#;
+";
     std::fs::write(project.path().join("user-service.js"), js_code).unwrap();
 
     Command::new(sqry_bin())
@@ -406,7 +406,7 @@ service.getUser(1);
 fn cli_javascript_imports_es6_imports() {
     let project = TempDir::new().unwrap();
 
-    let js_code = r#"
+    let js_code = r"
 import { greet, farewell } from './utils';
 import User from './user';
 import * as helpers from './helpers';
@@ -418,7 +418,7 @@ function main() {
 }
 
 main();
-"#;
+";
     std::fs::write(project.path().join("main.js"), js_code).unwrap();
 
     Command::new(sqry_bin())
@@ -450,7 +450,7 @@ main();
 fn cli_javascript_imports_commonjs_require() {
     let project = TempDir::new().unwrap();
 
-    let js_code = r#"
+    let js_code = r"
 const fs = require('fs');
 const path = require('path');
 const { helper } = require('./utils');
@@ -461,7 +461,7 @@ function readConfig() {
 }
 
 readConfig();
-"#;
+";
     std::fs::write(project.path().join("config.js"), js_code).unwrap();
 
     Command::new(sqry_bin())
@@ -488,7 +488,7 @@ readConfig();
 fn cli_javascript_arrow_functions() {
     let project = TempDir::new().unwrap();
 
-    let js_code = r#"
+    let js_code = r"
 const double = (x) => x * 2;
 const triple = (x) => x * 3;
 
@@ -499,7 +499,7 @@ const calculate = (value) => {
 };
 
 export { double, triple, calculate };
-"#;
+";
     std::fs::write(project.path().join("math.js"), js_code).unwrap();
 
     Command::new(sqry_bin())
@@ -532,7 +532,7 @@ export { double, triple, calculate };
 fn cli_javascript_async_await() {
     let project = TempDir::new().unwrap();
 
-    let js_code = r#"
+    let js_code = r"
 async function fetchUser(id) {
     return { id, name: 'Test' };
 }
@@ -548,7 +548,7 @@ async function getUserData(id) {
 }
 
 getUserData(1);
-"#;
+";
     std::fs::write(project.path().join("async.js"), js_code).unwrap();
 
     Command::new(sqry_bin())
@@ -576,7 +576,7 @@ getUserData(1);
 fn cli_javascript_exports_private_functions_not_exported() {
     let project = TempDir::new().unwrap();
 
-    let js_code = r#"
+    let js_code = r"
 function privateHelper() {
     return 42;
 }
@@ -584,7 +584,7 @@ function privateHelper() {
 export function publicAPI() {
     return privateHelper();
 }
-"#;
+";
     std::fs::write(project.path().join("api.js"), js_code).unwrap();
 
     Command::new(sqry_bin())
@@ -610,7 +610,7 @@ export function publicAPI() {
 fn cli_javascript_callers_no_results() {
     let project = TempDir::new().unwrap();
 
-    let js_code = r#"
+    let js_code = r"
 function unusedFunction() {
     return 42;
 }
@@ -620,7 +620,7 @@ function main() {
 }
 
 main();
-"#;
+";
     std::fs::write(project.path().join("unused.js"), js_code).unwrap();
 
     Command::new(sqry_bin())

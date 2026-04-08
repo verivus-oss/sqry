@@ -664,7 +664,6 @@ fn find_binding_scope(tree: &PythonScopeTree, byte: usize) -> Option<ScopeId> {
             }
             ScopeKind::Class | ScopeKind::Comprehension => {
                 // Skip — assignments don't bind here
-                continue;
             }
         }
     }
@@ -685,7 +684,7 @@ fn find_function_scope(tree: &PythonScopeTree, byte: usize) -> Option<ScopeId> {
             ScopeKind::Function | ScopeKind::Lambda | ScopeKind::Module => {
                 return Some(*scope_id);
             }
-            ScopeKind::Class | ScopeKind::Comprehension => continue,
+            ScopeKind::Class | ScopeKind::Comprehension => {}
         }
     }
     None
@@ -771,6 +770,7 @@ pub(crate) fn handle_identifier_for_reference(
 /// - Assignment left-hand side target
 /// - For-loop variable
 /// - Parameter name in definition
+#[allow(clippy::match_same_arms)] // Arms separated for documentation clarity; each pattern is semantically distinct
 fn is_declaration_context(node: Node) -> bool {
     let Some(parent) = node.parent() else {
         return false;
@@ -797,6 +797,8 @@ fn is_declaration_context(node: Node) -> bool {
         "typed_parameter" | "typed_default_parameter" | "default_parameter" => parent
             .child_by_field_name("name")
             .is_some_and(|n| n.id() == node.id()),
+        #[allow(clippy::match_same_arms)]
+        // Arms separated by AST node type for documentation clarity
         // Plain parameter identifier (not wrapped in typed_parameter)
         "parameters" | "lambda_parameters" => true,
         // Pattern list elements (e.g., `a, b = pair` — the `a` and `b`)

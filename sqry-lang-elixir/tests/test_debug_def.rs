@@ -4,15 +4,16 @@ use sqry_lang_elixir::ElixirPlugin;
 #[test]
 fn debug_def_structure() {
     let plugin = ElixirPlugin::default();
-    let content = br#"
+    let content = br"
 defmodule Demo do
   def my_func, do: :ok
 end
-"#;
+";
 
     let tree = plugin.parse_ast(content).expect("should parse");
     let root = tree.root_node();
 
+    #[allow(clippy::items_after_statements)] // Const defined near usage for clarity
     fn print_tree(node: tree_sitter::Node, content: &[u8], depth: usize) {
         if !node.is_named() {
             return;

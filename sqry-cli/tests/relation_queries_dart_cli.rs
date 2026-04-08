@@ -21,7 +21,7 @@ use tempfile::TempDir;
 fn cli_dart_exports_classes_and_functions() {
     let project = TempDir::new().unwrap();
 
-    let dart_code = r#"
+    let dart_code = r"
 class User {
   final String name;
   final int age;
@@ -42,7 +42,7 @@ void processUser(User user) {
 void _privateFunction() {
   // This should not be exported
 }
-"#;
+";
     std::fs::write(project.path().join("user.dart"), dart_code).unwrap();
 
     Command::new(sqry_bin())
@@ -83,7 +83,7 @@ void _privateFunction() {
 fn cli_dart_exports_hide_private_elements() {
     let project = TempDir::new().unwrap();
 
-    let dart_code = r#"
+    let dart_code = r"
 class PublicClass {
   void publicMethod() {}
 }
@@ -99,7 +99,7 @@ void publicFunction() {
 void _privateFunction() {
   print('private');
 }
-"#;
+";
     std::fs::write(project.path().join("visibility.dart"), dart_code).unwrap();
 
     Command::new(sqry_bin())
@@ -152,7 +152,7 @@ void _privateFunction() {
 fn cli_dart_imports() {
     let project = TempDir::new().unwrap();
 
-    let dart_code = r#"
+    let dart_code = r"
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
@@ -163,7 +163,7 @@ class DataService {
     print(response.body);
   }
 }
-"#;
+";
     std::fs::write(project.path().join("service.dart"), dart_code).unwrap();
 
     Command::new(sqry_bin())
@@ -208,7 +208,7 @@ class DataService {
 fn cli_dart_callers_function_calls() {
     let project = TempDir::new().unwrap();
 
-    let dart_code = r#"
+    let dart_code = r"
 bool validate(int value) {
   return value > 0;
 }
@@ -226,7 +226,7 @@ String analyze(int num) {
   }
   return 'invalid';
 }
-"#;
+";
     std::fs::write(project.path().join("validator.dart"), dart_code).unwrap();
 
     Command::new(sqry_bin())
@@ -250,7 +250,7 @@ String analyze(int num) {
 fn cli_dart_callers_method_calls() {
     let project = TempDir::new().unwrap();
 
-    let dart_code = r#"
+    let dart_code = r"
 class DataRepository {
   List<int> _fetchData() {
     return [1, 2, 3];
@@ -265,7 +265,7 @@ class DataRepository {
     return _transformData(data);
   }
 }
-"#;
+";
     std::fs::write(project.path().join("repository.dart"), dart_code).unwrap();
 
     Command::new(sqry_bin())
@@ -301,7 +301,7 @@ class DataRepository {
 fn cli_dart_callees_function() {
     let project = TempDir::new().unwrap();
 
-    let dart_code = r#"
+    let dart_code = r"
 void log(String message) {
   print('LOG: $message');
 }
@@ -314,7 +314,7 @@ void handleError(String error) {
   log('Error occurred');
   warn(error);
 }
-"#;
+";
     std::fs::write(project.path().join("logger.dart"), dart_code).unwrap();
 
     Command::new(sqry_bin())
@@ -342,7 +342,7 @@ void handleError(String error) {
 fn cli_dart_flutter_widgets() {
     let project = TempDir::new().unwrap();
 
-    let dart_code = r#"
+    let dart_code = r"
 import 'package:flutter/material.dart';
 
 class UserWidget extends StatelessWidget {
@@ -364,7 +364,7 @@ class HomeScreen extends StatelessWidget {
     );
   }
 }
-"#;
+";
     std::fs::write(project.path().join("widgets.dart"), dart_code).unwrap();
 
     Command::new(sqry_bin())
@@ -399,7 +399,7 @@ class HomeScreen extends StatelessWidget {
 fn cli_dart_async_functions() {
     let project = TempDir::new().unwrap();
 
-    let dart_code = r#"
+    let dart_code = r"
 import 'dart:async';
 
 Future<String> fetchData() async {
@@ -411,7 +411,7 @@ Future<void> processData() async {
   final data = await fetchData();
   print(data);
 }
-"#;
+";
     std::fs::write(project.path().join("async.dart"), dart_code).unwrap();
 
     Command::new(sqry_bin())
@@ -447,7 +447,7 @@ Future<void> processData() async {
 fn cli_dart_callers_no_results() {
     let project = TempDir::new().unwrap();
 
-    let dart_code = r#"
+    let dart_code = r"
 void unusedFunction() {
   print('Never called');
 }
@@ -455,7 +455,7 @@ void unusedFunction() {
 void main() {
   print('Hello');
 }
-"#;
+";
     std::fs::write(project.path().join("unused.dart"), dart_code).unwrap();
 
     Command::new(sqry_bin())

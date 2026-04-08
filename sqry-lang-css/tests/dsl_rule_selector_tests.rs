@@ -51,7 +51,7 @@ fn count_contains_edges(staging: &StagingGraph) -> usize {
 
 #[test]
 fn test_simple_rule_with_class_selector() {
-    let source = r#".button { color: red; }"#;
+    let source = r".button { color: red; }";
 
     let tree = parse_css(source);
     let mut staging = StagingGraph::new();
@@ -66,30 +66,27 @@ fn test_simple_rule_with_class_selector() {
     let rule_count = count_nodes_by_kind(&staging, NodeKind::Module);
     assert!(
         rule_count >= 1,
-        "Expected at least 1 Rule node, got {}",
-        rule_count
+        "Expected at least 1 Rule node, got {rule_count}"
     );
 
     // Should have at least 1 Selector node
     let selector_count = count_nodes_by_kind(&staging, NodeKind::Variable);
     assert!(
         selector_count >= 1,
-        "Expected at least 1 Selector node, got {}",
-        selector_count
+        "Expected at least 1 Selector node, got {selector_count}"
     );
 
     // Should have Contains edges
     let contains_count = count_contains_edges(&staging);
     assert!(
         contains_count >= 2,
-        "Expected at least 2 Contains edges (module->rule, rule->selector), got {}",
-        contains_count
+        "Expected at least 2 Contains edges (module->rule, rule->selector), got {contains_count}"
     );
 }
 
 #[test]
 fn test_rule_with_id_selector() {
-    let source = r#"#main { width: 100%; }"#;
+    let source = r"#main { width: 100%; }";
 
     let tree = parse_css(source);
     let mut staging = StagingGraph::new();
@@ -110,7 +107,7 @@ fn test_rule_with_id_selector() {
 
 #[test]
 fn test_multiple_selectors_in_rule() {
-    let source = r#"div, span { margin: 0; }"#;
+    let source = r"div, span { margin: 0; }";
 
     let tree = parse_css(source);
     let mut staging = StagingGraph::new();
@@ -129,18 +126,17 @@ fn test_multiple_selectors_in_rule() {
     let selector_count = count_nodes_by_kind(&staging, NodeKind::Variable);
     assert!(
         selector_count >= 2,
-        "Expected at least 2 Selector nodes, got {}",
-        selector_count
+        "Expected at least 2 Selector nodes, got {selector_count}"
     );
 }
 
 #[test]
 fn test_multiple_rules() {
-    let source = r#"
+    let source = r"
 .container { display: flex; }
 #header { background: blue; }
 .button { color: red; }
-"#;
+";
 
     let tree = parse_css(source);
     let mut staging = StagingGraph::new();
@@ -155,22 +151,20 @@ fn test_multiple_rules() {
     let rule_count = count_nodes_by_kind(&staging, NodeKind::Module);
     assert!(
         rule_count >= 3,
-        "Expected at least 3 Rule nodes, got {}",
-        rule_count
+        "Expected at least 3 Rule nodes, got {rule_count}"
     );
 
     // Should have 3 Selector nodes
     let selector_count = count_nodes_by_kind(&staging, NodeKind::Variable);
     assert!(
         selector_count >= 3,
-        "Expected at least 3 Selector nodes, got {}",
-        selector_count
+        "Expected at least 3 Selector nodes, got {selector_count}"
     );
 }
 
 #[test]
 fn test_nested_selectors() {
-    let source = r#".container > .item { padding: 10px; }"#;
+    let source = r".container > .item { padding: 10px; }";
 
     let tree = parse_css(source);
     let mut staging = StagingGraph::new();
@@ -189,14 +183,13 @@ fn test_nested_selectors() {
     let selector_count = count_nodes_by_kind(&staging, NodeKind::Variable);
     assert!(
         selector_count >= 2,
-        "Expected at least 2 Selector nodes, got {}",
-        selector_count
+        "Expected at least 2 Selector nodes, got {selector_count}"
     );
 }
 
 #[test]
 fn test_complex_css_structure() {
-    let source = r#"
+    let source = r"
 :root {
     --primary-color: #007bff;
 }
@@ -212,7 +205,7 @@ fn test_complex_css_structure() {
 .container > .item {
     display: flex;
 }
-"#;
+";
 
     let tree = parse_css(source);
     let mut staging = StagingGraph::new();
@@ -227,22 +220,20 @@ fn test_complex_css_structure() {
     let rule_count = count_nodes_by_kind(&staging, NodeKind::Module);
     assert!(
         rule_count >= 4,
-        "Expected at least 4 Rule nodes, got {}",
-        rule_count
+        "Expected at least 4 Rule nodes, got {rule_count}"
     );
 
     // Should have Selector nodes
     let selector_count = count_nodes_by_kind(&staging, NodeKind::Variable);
     assert!(
         selector_count >= 4,
-        "Expected at least 4 Selector nodes, got {}",
-        selector_count
+        "Expected at least 4 Selector nodes, got {selector_count}"
     );
 }
 
 #[test]
 fn test_element_selector() {
-    let source = r#"div { margin: 0; }"#;
+    let source = r"div { margin: 0; }";
 
     let tree = parse_css(source);
     let mut staging = StagingGraph::new();
@@ -263,7 +254,7 @@ fn test_element_selector() {
 
 #[test]
 fn test_pseudo_class_selector() {
-    let source = r#".button:hover { background: blue; }"#;
+    let source = r".button:hover { background: blue; }";
 
     let tree = parse_css(source);
     let mut staging = StagingGraph::new();
@@ -282,7 +273,6 @@ fn test_pseudo_class_selector() {
     let selector_count = count_nodes_by_kind(&staging, NodeKind::Variable);
     assert!(
         selector_count >= 1,
-        "Expected at least 1 Selector node, got {}",
-        selector_count
+        "Expected at least 1 Selector node, got {selector_count}"
     );
 }

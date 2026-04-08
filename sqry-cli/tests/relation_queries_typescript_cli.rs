@@ -80,7 +80,7 @@ function internalHelper(): number {
 fn cli_typescript_exports_interfaces_and_types() {
     let project = TempDir::new().unwrap();
 
-    let ts_code = r#"
+    let ts_code = r"
 export interface UserData {
     id: number;
     name: string;
@@ -99,7 +99,7 @@ export enum UserRole {
 export function createUser(data: UserData): UserData {
     return data;
 }
-"#;
+";
     std::fs::write(project.path().join("types.ts"), ts_code).unwrap();
 
     Command::new(sqry_bin())
@@ -131,7 +131,7 @@ export function createUser(data: UserData): UserData {
 fn cli_typescript_exports_namespaces() {
     let project = TempDir::new().unwrap();
 
-    let ts_code = r#"
+    let ts_code = r"
 export namespace Utils {
     export function validate(input: string): boolean {
         return input.length > 0;
@@ -154,7 +154,7 @@ export namespace API {
         return { status: 200, data: {} };
     }
 }
-"#;
+";
     std::fs::write(project.path().join("namespaces.ts"), ts_code).unwrap();
 
     Command::new(sqry_bin())
@@ -325,7 +325,7 @@ repo.save({ id: 1, name: "Test" });
 fn cli_typescript_callees_function() {
     let project = TempDir::new().unwrap();
 
-    let ts_code = r#"
+    let ts_code = r"
 function log(message: string): void {
     console.log(message);
 }
@@ -341,7 +341,7 @@ function handleError(error: Error): void {
 }
 
 handleError(new Error('Test'));
-"#;
+";
     std::fs::write(project.path().join("logger.ts"), ts_code).unwrap();
 
     Command::new(sqry_bin())
@@ -365,7 +365,7 @@ handleError(new Error('Test'));
 fn cli_typescript_callees_async_function() {
     let project = TempDir::new().unwrap();
 
-    let ts_code = r#"
+    let ts_code = r"
 async function fetchUser(id: number): Promise<User> {
     return { id, name: 'Test' };
 }
@@ -396,7 +396,7 @@ interface UserData {
 }
 
 getUserData(1);
-"#;
+";
     std::fs::write(project.path().join("async.ts"), ts_code).unwrap();
 
     Command::new(sqry_bin())
@@ -424,7 +424,7 @@ getUserData(1);
 fn cli_typescript_imports_es6_imports() {
     let project = TempDir::new().unwrap();
 
-    let ts_code = r#"
+    let ts_code = r"
 import { greet, farewell } from './utils';
 import User from './user';
 import type { UserData } from './types';
@@ -437,7 +437,7 @@ function main(): void {
 }
 
 main();
-"#;
+";
     std::fs::write(project.path().join("main.ts"), ts_code).unwrap();
 
     Command::new(sqry_bin())
@@ -469,14 +469,14 @@ main();
 fn cli_typescript_imports_type_only() {
     let project = TempDir::new().unwrap();
 
-    let ts_code = r#"
+    let ts_code = r"
 import type { UserData, UserRole } from './types';
 import { type UserId, createUser } from './user';
 
 function processUser(data: UserData, role: UserRole): void {
     createUser(data);
 }
-"#;
+";
     std::fs::write(project.path().join("processor.ts"), ts_code).unwrap();
 
     Command::new(sqry_bin())
@@ -571,7 +571,7 @@ service.createUser("Alice");
 fn cli_typescript_private_methods_not_in_exports() {
     let project = TempDir::new().unwrap();
 
-    let ts_code = r#"
+    let ts_code = r"
 export class Service {
     public execute(): void {
         this.validate();
@@ -581,7 +581,7 @@ export class Service {
         // private method
     }
 }
-"#;
+";
     std::fs::write(project.path().join("service.ts"), ts_code).unwrap();
 
     Command::new(sqry_bin())
@@ -606,7 +606,7 @@ export class Service {
 fn cli_typescript_callers_no_results() {
     let project = TempDir::new().unwrap();
 
-    let ts_code = r#"
+    let ts_code = r"
 function unusedFunction(): number {
     return 42;
 }
@@ -616,7 +616,7 @@ function main(): void {
 }
 
 main();
-"#;
+";
     std::fs::write(project.path().join("unused.ts"), ts_code).unwrap();
 
     Command::new(sqry_bin())

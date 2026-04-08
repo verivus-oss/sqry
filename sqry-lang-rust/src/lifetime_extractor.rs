@@ -826,7 +826,7 @@ mod tests {
     fn test_extract_impl_trait_path_lifetime() {
         // Test: impl<'a> Trait<'a> for Foo<'a>
         // Should extract lifetime references from trait path
-        let source = r#"
+        let source = r"
 trait MyTrait<'a> {
     fn get(&self) -> &'a str;
 }
@@ -840,7 +840,7 @@ impl<'a> MyTrait<'a> for Foo<'a> {
         self.data
     }
 }
-"#;
+";
         let tree = parse_rust(source);
         let root = tree.root_node();
 
@@ -875,8 +875,7 @@ impl<'a> MyTrait<'a> for Foo<'a> {
         // At least 2 references: one from MyTrait<'a> and one from Foo<'a>
         assert!(
             reference_edges.len() >= 2,
-            "Should have at least 2 Reference edges (trait path and impl type), found: {:?}",
-            reference_edges
+            "Should have at least 2 Reference edges (trait path and impl type), found: {reference_edges:?}"
         );
     }
 }

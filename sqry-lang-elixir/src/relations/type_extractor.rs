@@ -218,11 +218,12 @@ mod tests {
 
     #[test]
     fn test_debug_ast_structure() {
-        let source = r#"
+        let source = r"
 @spec test() :: integer()
-"#;
+";
         let tree = parse_elixir(source);
 
+        #[allow(clippy::items_after_statements)] // Const defined near usage for clarity
         fn print_tree(node: Node, content: &[u8], depth: usize) {
             let indent = "  ".repeat(depth);
             let text = if node.named_child_count() == 0 {
@@ -243,9 +244,9 @@ mod tests {
 
     #[test]
     fn test_extract_simple_builtin_type() {
-        let source = r#"
+        let source = r"
 @spec test() :: integer()
-"#;
+";
         let tree = parse_elixir(source);
         let type_node = find_type_node(tree.root_node(), source.as_bytes()).expect("type node");
 
@@ -255,9 +256,9 @@ mod tests {
 
     #[test]
     fn test_extract_module_qualified_type() {
-        let source = r#"
+        let source = r"
 @spec test() :: String.t()
-"#;
+";
         let tree = parse_elixir(source);
         let type_node = find_type_node(tree.root_node(), source.as_bytes()).expect("type node");
 
@@ -267,9 +268,9 @@ mod tests {
 
     #[test]
     fn test_extract_tuple_type() {
-        let source = r#"
+        let source = r"
 @spec test() :: {:ok, String.t()}
-"#;
+";
         let tree = parse_elixir(source);
         let type_node = find_type_node(tree.root_node(), source.as_bytes()).expect("type node");
 
@@ -279,9 +280,9 @@ mod tests {
 
     #[test]
     fn test_extract_union_type() {
-        let source = r#"
+        let source = r"
 @spec test() :: String.t() | integer()
-"#;
+";
         let tree = parse_elixir(source);
         let type_node = find_type_node(tree.root_node(), source.as_bytes()).expect("type node");
 

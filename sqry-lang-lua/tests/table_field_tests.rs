@@ -149,14 +149,14 @@ fn test_nested_table_constructors() {
 
 #[test]
 fn test_dot_field_access() {
-    let source = r#"
+    let source = r"
         local module = {}
 
         function module.init()
             local value = module.config
             module.state = value
         end
-    "#;
+    ";
 
     let (tree, content) = parse_lua(source);
     let mut staging = StagingGraph::new();

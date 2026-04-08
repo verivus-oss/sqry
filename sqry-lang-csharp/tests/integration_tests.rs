@@ -90,13 +90,13 @@ fn build_graph(source: &[u8]) -> StagingGraph {
 
 #[test]
 fn test_class_and_methods() {
-    let source = br#"
+    let source = br"
 public class MyClass
 {
     public void PublicMethod() { }
     private void PrivateMethod() { }
 }
-"#;
+";
     let staging = build_graph(source);
 
     assert!(
@@ -125,7 +125,7 @@ public class MyClass
 
 #[test]
 fn test_async_static_methods() {
-    let source = br#"
+    let source = br"
 using System.Threading.Tasks;
 
 public class AsyncService
@@ -141,7 +141,7 @@ public class AsyncService
         await Task.Delay(100);
     }
 }
-"#;
+";
     let staging = build_graph(source);
 
     let get_data = find_node_entry(
@@ -165,7 +165,7 @@ public class AsyncService
 
 #[test]
 fn test_inherits_and_implements_edges() {
-    let source = br#"
+    let source = br"
 public interface IService
 {
     void Execute();
@@ -179,7 +179,7 @@ public class Derived : Base, IService
 {
     public void Execute() { }
 }
-"#;
+";
     let staging = build_graph(source);
     let nodes = build_node_lookup(&staging);
 
@@ -219,7 +219,7 @@ public class Derived : Base, IService
 
 #[test]
 fn test_import_edges_from_using() {
-    let source = br#"
+    let source = br"
 using System;
 using System.Collections.Generic;
 using IO = System.IO;
@@ -228,7 +228,7 @@ public class Importer
 {
     public void Use() { }
 }
-"#;
+";
     let staging = build_graph(source);
 
     let mut import_count = 0;
@@ -245,14 +245,14 @@ public class Importer
 
 #[test]
 fn test_export_edges_for_public_members() {
-    let source = br#"
+    let source = br"
 public class Exported
 {
     public int Count { get; set; }
     public void PublicMethod() { }
     private void PrivateMethod() { }
 }
-"#;
+";
     let staging = build_graph(source);
     let nodes = build_node_lookup(&staging);
 

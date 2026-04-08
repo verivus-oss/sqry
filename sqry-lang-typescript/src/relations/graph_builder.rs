@@ -123,6 +123,7 @@ impl GraphBuilder for TypeScriptGraphBuilder {
 
 /// Walk the AST to build call, constructor, import, export, OOP, and FFI edges
 /// This function tracks namespaces across the entire file to support namespace augmentation
+#[allow(clippy::too_many_lines)] // TS graph builder covers all AST node types
 fn walk_for_edges_with_namespaces(
     node: Node,
     content: &[u8],
@@ -2685,9 +2686,8 @@ fn detect_route_endpoint(
     };
 
     // Extract the property name (the HTTP method)
-    let property_node = match callee.child_by_field_name("property") {
-        Some(p) => p,
-        None => return false,
+    let Some(property_node) = callee.child_by_field_name("property") else {
+        return false;
     };
 
     let property_text = match property_node.utf8_text(content) {
@@ -2704,16 +2704,15 @@ fn detect_route_endpoint(
     let method = if property_text == "all" {
         HttpMethod::All
     } else {
-        match http_method_from_name(property_text) {
-            Some(m) => m,
-            None => return false,
-        }
+        let Some(m) = http_method_from_name(property_text) else {
+            return false;
+        };
+        m
     };
 
     // Extract the path from the first argument
-    let args = match call_node.child_by_field_name("arguments") {
-        Some(a) => a,
-        None => return false,
+    let Some(args) = call_node.child_by_field_name("arguments") else {
+        return false;
     };
 
     let mut cursor = args.walk();
@@ -2721,14 +2720,12 @@ fn detect_route_endpoint(
         .children(&mut cursor)
         .filter(|child| !matches!(child.kind(), "(" | ")" | ","));
 
-    let first_arg = match non_trivia.next() {
-        Some(a) => a,
-        None => return false,
+    let Some(first_arg) = non_trivia.next() else {
+        return false;
     };
 
-    let path = match extract_string_literal(&first_arg, content) {
-        Some(p) => p,
-        None => return false,
+    let Some(path) = extract_string_literal(&first_arg, content) else {
+        return false;
     };
 
     // Build the qualified name: route::METHOD::/path

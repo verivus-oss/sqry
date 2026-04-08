@@ -1231,6 +1231,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::similar_names)] // file1/file2/file3 vs files: intentional test variable names
     fn test_register_batch() {
         let tmp = TempDir::new().unwrap();
         let file1 = tmp.path().join("alpha.rs");

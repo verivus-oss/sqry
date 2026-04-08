@@ -124,13 +124,13 @@ Indexing behavior highlights:
 
 ---
 
-## Release Highlights (v7.1.0)
+## Release Highlights (v7.2.0)
 
-- Plugin cost tiering with manifest-backed plugin selection persistence
-- Bounded pathological C++ graph builds for very large repositories
-- Consistent classpath `source_jar` provenance across stubs, tests, and benches
-- LSP rebuilds now preserve inferred plugin-selection provenance
-- Stage 3 release temp-tree isolation and cleanup hardening
+- Shared traversal kernel across CLI, LSP, and MCP graph analysis operations
+- Deterministic path enumeration with atomic node/edge truncation and leaf-path reporting
+- `sqry-bind` facade plus reusable traversal/materialization result types in `sqry-core`
+- MCP `expand_cache_status` introspection tool and dynamic assistant-facing tool docs
+- LSP workspace-boundary hardening for path resolution
 
 ## MCP Tools (Model Context Protocol)
 

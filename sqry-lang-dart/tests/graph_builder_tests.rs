@@ -213,8 +213,7 @@ void main() {
     let call_count = count_call_edges(&staging);
     assert!(
         call_count >= 1,
-        "Expected at least 1 call edge, got {}",
-        call_count
+        "Expected at least 1 call edge, got {call_count}"
     );
 }
 
@@ -297,7 +296,7 @@ Future<void> processAsync() async {
 
 #[test]
 fn test_import_dart_package() {
-    let source = r#"
+    let source = r"
 import 'dart:math';
 import 'dart:async';
 import 'package:flutter/material.dart';
@@ -306,7 +305,7 @@ void main() {
   final r = Random();
   print(r.nextInt(10));
 }
-"#;
+";
     let tree = parse_dart(source);
     let mut staging = StagingGraph::new();
     let builder = DartGraphBuilder::new();
@@ -323,8 +322,7 @@ void main() {
     let import_count = count_import_edges(&staging);
     assert!(
         import_count >= 1,
-        "Expected at least 1 import edge, got {}",
-        import_count
+        "Expected at least 1 import edge, got {import_count}"
     );
 }
 
@@ -352,8 +350,7 @@ void main() {}
     let import_count = count_import_edges(&staging);
     assert!(
         import_count >= 1,
-        "Expected at least 1 import edge for local files, got {}",
-        import_count
+        "Expected at least 1 import edge for local files, got {import_count}"
     );
 }
 

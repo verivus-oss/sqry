@@ -1048,14 +1048,16 @@ fn parse_file(path: &Path, plugins: &PluginManager) -> Result<ParsedFileOutcome>
 
     let reader =
         FileReader::open(path).with_context(|| format!("failed to read {}", path.display()))?;
-    let content = reader.as_slice();
+    let raw_content = reader.as_slice();
 
     let safe_parser = SafeParser::new(SafeParserConfig::new().with_max_input_size(
         usize::try_from(crate::config::buffers::max_source_file_size()).unwrap_or(usize::MAX),
     ));
+    let prepared_content = plugin.preprocess(raw_content);
+    let parse_content = prepared_content.as_ref();
     let parse_start = Instant::now();
     let tree = safe_parser
-        .parse_file(&plugin.language(), content, path)
+        .parse_file(&plugin.language(), parse_content, path)
         .map_err(|err| map_parse_error(path, err))?;
     let parse_duration = parse_start.elapsed();
     if parse_duration >= Duration::from_secs(2) {
@@ -1064,7 +1066,7 @@ fn parse_file(path: &Path, plugins: &PluginManager) -> Result<ParsedFileOutcome>
 
     let mut staging = StagingGraph::new();
     let build_start = Instant::now();
-    match builder.build_graph(&tree, content, path, &mut staging) {
+    match builder.build_graph(&tree, parse_content, path, &mut staging) {
         Ok(()) => {}
         Err(GraphBuilderError::BuildTimedOut {
             phase, timeout_ms, ..
@@ -1085,7 +1087,7 @@ fn parse_file(path: &Path, plugins: &PluginManager) -> Result<ParsedFileOutcome>
         );
     }
 
-    staging.attach_body_hashes(content);
+    staging.attach_body_hashes(raw_content);
 
     Ok(ParsedFileOutcome::Parsed(ParsedFile {
         language: builder.language(),
@@ -1934,7 +1936,7 @@ mod tests {
 
     // ===== CSR Compaction Persistence Regression Tests =====
 
-    /// Graph builder that creates duplicate edges to exercise raw_edge_count > edge_count.
+    /// Graph builder that creates duplicate edges to exercise `raw_edge_count` > `edge_count`.
     struct DuplicateCallsGraphBuilder;
 
     impl GraphBuilder for DuplicateCallsGraphBuilder {
@@ -2008,11 +2010,14 @@ mod tests {
         );
     }
 
-    /// Loaded snapshot supports reverse traversal (direct-callers / edges_to).
+    /// Loaded snapshot supports reverse traversal (direct-callers / `edges_to`).
     #[test]
     fn test_loaded_snapshot_edges_to_works_after_round_trip() {
         use crate::graph::unified::edge::EdgeKind;
         use crate::graph::unified::persistence::{GraphStorage, load_from_path};
+        use crate::graph::unified::{
+            FileScope, ResolutionMode, SymbolCandidateOutcome, SymbolQuery,
+        };
 
         let temp_dir = TempDir::new().expect("temp dir");
         let file_path = temp_dir.path().join("test.rs");
@@ -2033,9 +2038,6 @@ mod tests {
         let loaded = load_from_path(storage.snapshot_path(), None).expect("load should succeed");
 
         // Find main and helper node IDs through symbol resolution
-        use crate::graph::unified::{
-            FileScope, ResolutionMode, SymbolCandidateOutcome, SymbolQuery,
-        };
         let snapshot = loaded.snapshot();
 
         let main_id = match snapshot.find_symbol_candidates(&SymbolQuery {
@@ -2074,7 +2076,7 @@ mod tests {
         );
     }
 
-    /// raw_edge_count >= edge_count still holds after pre-save compaction.
+    /// `raw_edge_count` >= `edge_count` still holds after pre-save compaction.
     #[test]
     fn test_raw_edge_count_preserved_across_pre_save_compaction() {
         use crate::graph::unified::persistence::GraphStorage;
@@ -2120,7 +2122,11 @@ mod tests {
     /// Full round-trip: build -> save -> load -> query produces correct results.
     #[test]
     fn test_build_save_load_query_round_trip_preserves_edge_queries() {
+        use crate::graph::unified::edge::EdgeKind;
         use crate::graph::unified::persistence::{GraphStorage, load_from_path};
+        use crate::graph::unified::{
+            FileScope, ResolutionMode, SymbolCandidateOutcome, SymbolQuery,
+        };
 
         let temp_dir = TempDir::new().expect("temp dir");
         let file_path = temp_dir.path().join("test.rs");
@@ -2157,10 +2163,6 @@ mod tests {
         );
 
         // Verify edge queries work on loaded graph
-        use crate::graph::unified::edge::EdgeKind;
-        use crate::graph::unified::{
-            FileScope, ResolutionMode, SymbolCandidateOutcome, SymbolQuery,
-        };
         let snapshot = loaded.snapshot();
 
         let main_id = match snapshot.find_symbol_candidates(&SymbolQuery {

@@ -133,7 +133,7 @@ const result = process("test");
 fn cli_svelte_callers_reactive_statements() {
     let project = TempDir::new().unwrap();
 
-    let svelte_code = r#"
+    let svelte_code = r"
 <script>
 let count = 0;
 
@@ -149,7 +149,7 @@ function handleClick() {
 <button on:click={handleClick}>
     Count: {count}
 </button>
-"#;
+";
     std::fs::write(project.path().join("Counter.svelte"), svelte_code).unwrap();
 
     Command::new(sqry_bin())
@@ -221,7 +221,7 @@ handleError(new Error("Test"));
 fn cli_svelte_imports() {
     let project = TempDir::new().unwrap();
 
-    let svelte_code = r#"
+    let svelte_code = r"
 <script>
 import { greet } from './utils';
 import UserCard from './UserCard.svelte';
@@ -235,7 +235,7 @@ const store = createStore();
     <p>{message}</p>
     <UserCard />
 </div>
-"#;
+";
     std::fs::write(project.path().join("App.svelte"), svelte_code).unwrap();
 
     Command::new(sqry_bin())

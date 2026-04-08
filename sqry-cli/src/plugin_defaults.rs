@@ -374,6 +374,7 @@ mod tests {
                 result.is_err(),
                 "conflicting explicit selection should be rejected"
             );
+            #[allow(clippy::manual_let_else)] // Plugin lookup uses match for error path
             let err = match result {
                 Ok(_) => unreachable!("conflicting explicit selection should be rejected"),
                 Err(err) => err,

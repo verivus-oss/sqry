@@ -18,9 +18,9 @@ use anyhow::{Result, bail};
 use serde_json::{Map, Value, json};
 use sqry_core::graph::unified::concurrent::GraphSnapshot;
 use sqry_core::graph::unified::edge::EdgeKind;
+use sqry_core::graph::unified::materialize::find_nodes_by_name;
 use sqry_core::graph::unified::node::NodeId;
 use sqry_core::graph::unified::node::NodeKind;
-use sqry_core::graph::unified::{FileScope, ResolutionMode, SymbolCandidateOutcome, SymbolQuery};
 
 use crate::engine::{canonicalize_in_workspace, engine_for_workspace};
 use crate::tools::{CallHierarchyArgs, CallHierarchyDirection, RelationQueryArgs, RelationType};
@@ -93,21 +93,6 @@ pub fn execute_relation_query(
         candidates_scanned: None,
         workspace_path: crate::execution::symbol_utils::path_to_forward_slash(workspace_root),
     })
-}
-
-/// Find nodes by name (simple or qualified) in the unified graph.
-///
-/// Uses indexed lookup via `StringInterner::get()` + `AuxiliaryIndices::by_name()`
-/// for O(1) + O(log n) performance instead of O(N) arena scan.
-fn find_nodes_by_name(snapshot: &GraphSnapshot, name: &str) -> Vec<NodeId> {
-    match snapshot.find_symbol_candidates(&SymbolQuery {
-        symbol: name,
-        file_scope: FileScope::Any,
-        mode: ResolutionMode::AllowSuffixCandidates,
-    }) {
-        SymbolCandidateOutcome::Candidates(matches) => matches,
-        SymbolCandidateOutcome::NotFound | SymbolCandidateOutcome::FileNotIndexed => Vec::new(),
-    }
 }
 
 /// Returns true if the node kind is a "definition" kind suitable as a call hierarchy root.
@@ -446,12 +431,8 @@ fn build_node_ref(snapshot: &GraphSnapshot, node_id: NodeId, workspace_root: &Pa
         .resolve(entry.name)
         .map_or_else(|| "unknown".to_string(), |s| s.to_string());
 
-    let qualified_name = crate::execution::symbol_utils::display_entry_qualified_name(
-        entry,
-        strings,
-        files.language_for_file(entry.file),
-        &name,
-    );
+    let qualified_name =
+        crate::execution::symbol_utils::display_entry_qualified_name(entry, strings, files, &name);
 
     let kind = match entry.kind {
         NodeKind::Class => "class",

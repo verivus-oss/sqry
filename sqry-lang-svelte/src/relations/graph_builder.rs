@@ -2195,7 +2195,7 @@ mod tests {
 
     #[test]
     fn test_import_from_svelte() {
-        let source = r#"
+        let source = r"
 <script>
   import { onMount, onDestroy } from 'svelte';
 
@@ -2205,7 +2205,7 @@ mod tests {
 </script>
 
 <div>Hello</div>
-"#;
+";
 
         let (tree, content) = parse_svelte(source);
         let mut staging = StagingGraph::new();
@@ -2224,14 +2224,14 @@ mod tests {
 
     #[test]
     fn test_import_component() {
-        let source = r#"
+        let source = r"
 <script>
   import Component from './Component.svelte';
   import { helper } from './utils.js';
 </script>
 
 <Component />
-"#;
+";
 
         let (tree, content) = parse_svelte(source);
         let mut staging = StagingGraph::new();
@@ -2251,7 +2251,7 @@ mod tests {
 
     #[test]
     fn test_import_namespace() {
-        let source = r#"
+        let source = r"
 <script>
   import * as utils from './utils.js';
 
@@ -2259,7 +2259,7 @@ mod tests {
     return utils.helper();
   }
 </script>
-"#;
+";
 
         let (tree, content) = parse_svelte(source);
         let mut staging = StagingGraph::new();
@@ -2279,14 +2279,14 @@ mod tests {
 
     #[test]
     fn test_multiple_imports() {
-        let source = r#"
+        let source = r"
 <script>
   import { onMount } from 'svelte';
   import Component from './Component.svelte';
   import * as utils from './utils.js';
   import './styles.css';
 </script>
-"#;
+";
 
         let (tree, content) = parse_svelte(source);
         let mut staging = StagingGraph::new();
@@ -2403,7 +2403,7 @@ mod tests {
 
     #[test]
     fn test_export_function() {
-        let source = r#"
+        let source = r"
 <script>
   export function greet(name) {
     return `Hello, ${name}!`;
@@ -2415,7 +2415,7 @@ mod tests {
 </script>
 
 <div>Hello</div>
-"#;
+";
 
         let (tree, content) = parse_svelte(source);
         let mut staging = StagingGraph::new();
@@ -2446,7 +2446,7 @@ mod tests {
 
     #[test]
     fn test_export_class() {
-        let source = r#"
+        let source = r"
 <script>
   export class User {
     constructor(name) {
@@ -2460,7 +2460,7 @@ mod tests {
     }
   }
 </script>
-"#;
+";
 
         let (tree, content) = parse_svelte(source);
         let mut staging = StagingGraph::new();
@@ -2540,14 +2540,14 @@ mod tests {
 
     #[test]
     fn test_multiple_exports() {
-        let source = r#"
+        let source = r"
 <script>
   export function foo() {}
   export function bar() {}
   export class Baz {}
   export const x = 1;
 </script>
-"#;
+";
 
         let (tree, content) = parse_svelte(source);
         let mut staging = StagingGraph::new();
@@ -2891,14 +2891,14 @@ const v: string | number = "";
 
     #[test]
     fn test_js_script_no_type_edges() {
-        let source = r#"
+        let source = r"
 <script>
 function calc(x, y) {
   return x + y;
 }
 const user = {};
 </script>
-"#;
+";
         let (tree, content) = parse_svelte(source);
         let mut staging = StagingGraph::new();
         SvelteGraphBuilder::default()

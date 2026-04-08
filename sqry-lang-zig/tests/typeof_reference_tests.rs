@@ -1,7 +1,7 @@
-//! Integration tests for TypeOf and Reference edge extraction in Zig.
+//! Integration tests for `TypeOf` and Reference edge extraction in Zig.
 //!
 //! This test suite validates that the Zig graph builder correctly extracts
-//! type information and creates appropriate TypeOf and Reference edges for:
+//! type information and creates appropriate `TypeOf` and Reference edges for:
 //! - Variable and constant declarations
 //! - Function parameters and return types
 //! - Struct, union, and enum fields
@@ -38,7 +38,7 @@ fn build_test_graph(code: &str) -> StagingGraph {
     staging
 }
 
-/// Build a node name lookup map from staged AddNode operations
+/// Build a node name lookup map from staged `AddNode` operations
 fn build_node_name_lookup(staging: &StagingGraph) -> HashMap<u32, String> {
     staging
         .operations()
@@ -56,7 +56,7 @@ fn build_node_name_lookup(staging: &StagingGraph) -> HashMap<u32, String> {
         .collect()
 }
 
-/// Build a Zig-native display name lookup map from staged AddNode operations.
+/// Build a Zig-native display name lookup map from staged `AddNode` operations.
 fn build_node_display_name_lookup(staging: &StagingGraph) -> HashMap<u32, String> {
     staging
         .operations()
@@ -74,7 +74,7 @@ fn build_node_display_name_lookup(staging: &StagingGraph) -> HashMap<u32, String
         .collect()
 }
 
-/// Helper to collect TypeOf edges filtered by context
+/// Helper to collect `TypeOf` edges filtered by context
 fn collect_typeof_edges_by_context(
     staging: &StagingGraph,
     context: TypeOfContext,
@@ -256,9 +256,9 @@ fn has_reference_display_edge(graph: &StagingGraph, from_name: &str, to_type: &s
 
 #[test]
 fn test_variable_primitive_type() {
-    let code = r#"
+    let code = r"
         var counter: u32 = 0;
-    "#;
+    ";
 
     let graph = build_test_graph(code);
 
@@ -274,10 +274,10 @@ fn test_variable_primitive_type() {
 
 #[test]
 fn test_variable_pointer_type() {
-    let code = r#"
+    let code = r"
         const User = struct { id: u32 };
         var user_ptr: *User = undefined;
-    "#;
+    ";
 
     let graph = build_test_graph(code);
 
@@ -293,9 +293,9 @@ fn test_variable_pointer_type() {
 
 #[test]
 fn test_variable_const_pointer_type() {
-    let code = r#"
+    let code = r"
         var data: *const i32 = undefined;
-    "#;
+    ";
 
     let graph = build_test_graph(code);
 
@@ -311,9 +311,9 @@ fn test_variable_const_pointer_type() {
 
 #[test]
 fn test_variable_slice_type() {
-    let code = r#"
+    let code = r"
         var items: []const u8 = &[_]u8{};
-    "#;
+    ";
 
     let graph = build_test_graph(code);
 
@@ -329,9 +329,9 @@ fn test_variable_slice_type() {
 
 #[test]
 fn test_variable_array_type() {
-    let code = r#"
+    let code = r"
         var buffer: [1024]u8 = undefined;
-    "#;
+    ";
 
     let graph = build_test_graph(code);
 
@@ -347,10 +347,10 @@ fn test_variable_array_type() {
 
 #[test]
 fn test_variable_optional_type() {
-    let code = r#"
+    let code = r"
         const User = struct { id: u32 };
         var maybe_user: ?User = null;
-    "#;
+    ";
 
     let graph = build_test_graph(code);
 
@@ -366,9 +366,9 @@ fn test_variable_optional_type() {
 
 #[test]
 fn test_variable_error_union_anyerror() {
-    let code = r#"
+    let code = r"
         var result: !i32 = 42;
-    "#;
+    ";
 
     let graph = build_test_graph(code);
 
@@ -384,11 +384,11 @@ fn test_variable_error_union_anyerror() {
 
 #[test]
 fn test_variable_error_union_named() {
-    let code = r#"
+    let code = r"
         const FileError = error{AccessDenied, FileNotFound};
         const User = struct { id: u32 };
         var user_or_error: FileError!User = undefined;
-    "#;
+    ";
 
     let graph = build_test_graph(code);
 
@@ -414,9 +414,9 @@ fn test_variable_error_union_named() {
 
 #[test]
 fn test_constant_with_type() {
-    let code = r#"
+    let code = r"
         const MAX_SIZE: usize = 1024;
-    "#;
+    ";
 
     let graph = build_test_graph(code);
 
@@ -433,9 +433,9 @@ fn test_constant_with_type() {
 // Type alias test - verifies type aliases create TypeOf and Reference edges
 #[test]
 fn test_type_alias_constant() {
-    let code = r#"
+    let code = r"
         const ByteArray = []const u8;
-    "#;
+    ";
 
     let graph = build_test_graph(code);
 
@@ -461,10 +461,10 @@ fn test_type_alias_constant() {
 
 #[test]
 fn test_constant_custom_type() {
-    let code = r#"
+    let code = r"
         const Point = struct { x: f32, y: f32 };
         const origin: Point = Point{ .x = 0.0, .y = 0.0 };
-    "#;
+    ";
 
     let graph = build_test_graph(code);
 
@@ -480,9 +480,9 @@ fn test_constant_custom_type() {
 
 #[test]
 fn test_constant_array() {
-    let code = r#"
+    let code = r"
         const PRIMES: [6]u32 = [_]u32{ 2, 3, 5, 7, 11, 13 };
-    "#;
+    ";
 
     let graph = build_test_graph(code);
 
@@ -502,11 +502,11 @@ fn test_constant_array() {
 
 #[test]
 fn test_function_simple_parameters() {
-    let code = r#"
+    let code = r"
         pub fn add(a: i32, b: i32) i32 {
             return a + b;
         }
-    "#;
+    ";
 
     let graph = build_test_graph(code);
 
@@ -523,11 +523,11 @@ fn test_function_simple_parameters() {
 
 #[test]
 fn test_function_slice_parameter() {
-    let code = r#"
+    let code = r"
         fn process(data: []const u8) void {
             _ = data;
         }
-    "#;
+    ";
 
     let graph = build_test_graph(code);
 
@@ -543,12 +543,12 @@ fn test_function_slice_parameter() {
 
 #[test]
 fn test_function_pointer_parameter() {
-    let code = r#"
+    let code = r"
         const User = struct { id: u32 };
         fn updateUser(user: *User) void {
             _ = user;
         }
-    "#;
+    ";
 
     let graph = build_test_graph(code);
 
@@ -564,11 +564,11 @@ fn test_function_pointer_parameter() {
 
 #[test]
 fn test_function_optional_parameter() {
-    let code = r#"
+    let code = r"
         fn findById(id: ?u32) void {
             _ = id;
         }
-    "#;
+    ";
 
     let graph = build_test_graph(code);
 
@@ -584,14 +584,14 @@ fn test_function_optional_parameter() {
 
 #[test]
 fn test_function_multiple_parameters() {
-    let code = r#"
+    let code = r"
         const Point = struct { x: f32, y: f32 };
         fn distance(p1: *const Point, p2: *const Point) f32 {
             _ = p1;
             _ = p2;
             return 0.0;
         }
-    "#;
+    ";
 
     let graph = build_test_graph(code);
 
@@ -611,11 +611,11 @@ fn test_function_multiple_parameters() {
 
 #[test]
 fn test_function_simple_return() {
-    let code = r#"
+    let code = r"
         pub fn add(a: i32, b: i32) i32 {
             return a + b;
         }
-    "#;
+    ";
 
     let graph = build_test_graph(code);
 
@@ -627,11 +627,11 @@ fn test_function_simple_return() {
 
 #[test]
 fn test_function_void_return() {
-    let code = r#"
+    let code = r"
         fn doSomething() void {
             // no-op
         }
-    "#;
+    ";
 
     let graph = build_test_graph(code);
 
@@ -643,13 +643,13 @@ fn test_function_void_return() {
 
 #[test]
 fn test_function_optional_return() {
-    let code = r#"
+    let code = r"
         const User = struct { id: u32 };
         fn findUser(id: u32) ?User {
             _ = id;
             return null;
         }
-    "#;
+    ";
 
     let graph = build_test_graph(code);
 
@@ -665,12 +665,12 @@ fn test_function_optional_return() {
 
 #[test]
 fn test_function_error_union_return() {
-    let code = r#"
+    let code = r"
         pub fn divide(a: i32, b: i32) !f32 {
             if (b == 0) return error.DivisionByZero;
             return @as(f32, @floatFromInt(a)) / @as(f32, @floatFromInt(b));
         }
-    "#;
+    ";
 
     let graph = build_test_graph(code);
 
@@ -690,12 +690,12 @@ fn test_function_error_union_return() {
 
 #[test]
 fn test_struct_simple_fields() {
-    let code = r#"
+    let code = r"
         pub const Point = struct {
             x: f32,
             y: f32,
         };
-    "#;
+    ";
 
     let graph = build_test_graph(code);
 
@@ -719,12 +719,12 @@ fn test_struct_simple_fields() {
 
 #[test]
 fn test_struct_pointer_fields() {
-    let code = r#"
+    let code = r"
         const Node = struct {
             value: i32,
             next: ?*Node,
         };
-    "#;
+    ";
 
     let graph = build_test_graph(code);
 
@@ -748,12 +748,12 @@ fn test_struct_pointer_fields() {
 
 #[test]
 fn test_struct_slice_fields() {
-    let code = r#"
+    let code = r"
         pub const User = struct {
             name: []const u8,
             id: u32,
         };
-    "#;
+    ";
 
     let graph = build_test_graph(code);
 
@@ -782,12 +782,12 @@ fn test_struct_slice_fields() {
 
 #[test]
 fn test_struct_array_fields() {
-    let code = r#"
+    let code = r"
         const Buffer = struct {
             data: [1024]u8,
             len: usize,
         };
-    "#;
+    ";
 
     let graph = build_test_graph(code);
 
@@ -816,13 +816,13 @@ fn test_struct_array_fields() {
 
 #[test]
 fn test_struct_custom_type_fields() {
-    let code = r#"
+    let code = r"
         const Address = struct { street: []const u8, zip: u32 };
         const User = struct {
             name: []const u8,
             address: Address,
         };
-    "#;
+    ";
 
     let graph = build_test_graph(code);
 
@@ -855,13 +855,13 @@ fn test_struct_custom_type_fields() {
 
 #[test]
 fn test_union_simple_fields() {
-    let code = r#"
+    let code = r"
         pub const Value = union(enum) {
             int: i32,
             float: f64,
             boolean: bool,
         };
-    "#;
+    ";
 
     let graph = build_test_graph(code);
 
@@ -885,14 +885,14 @@ fn test_union_simple_fields() {
 
 #[test]
 fn test_union_custom_type_fields() {
-    let code = r#"
+    let code = r"
         const User = struct { id: u32 };
         const Guest = struct { session: []const u8 };
         const Account = union(enum) {
             user: User,
             guest: Guest,
         };
-    "#;
+    ";
 
     let graph = build_test_graph(code);
 
@@ -920,10 +920,10 @@ fn test_union_custom_type_fields() {
 
 #[test]
 fn test_nested_pointers() {
-    let code = r#"
+    let code = r"
         const User = struct { id: u32 };
         var ptr_to_ptr: *[*]User = undefined;
-    "#;
+    ";
 
     let graph = build_test_graph(code);
 
@@ -939,10 +939,10 @@ fn test_nested_pointers() {
 
 #[test]
 fn test_optional_pointer() {
-    let code = r#"
+    let code = r"
         const Node = struct { value: i32 };
         var maybe_ptr: ?*const Node = null;
-    "#;
+    ";
 
     let graph = build_test_graph(code);
 
@@ -958,9 +958,9 @@ fn test_optional_pointer() {
 
 #[test]
 fn test_many_item_pointer() {
-    let code = r#"
+    let code = r"
         var items: [*]const i32 = undefined;
-    "#;
+    ";
 
     let graph = build_test_graph(code);
 
@@ -976,9 +976,9 @@ fn test_many_item_pointer() {
 
 #[test]
 fn test_c_pointer() {
-    let code = r#"
+    let code = r"
         var c_ptr: [*c]u8 = undefined;
-    "#;
+    ";
 
     let graph = build_test_graph(code);
 
@@ -994,9 +994,9 @@ fn test_c_pointer() {
 
 #[test]
 fn test_pointer_to_array() {
-    let code = r#"
+    let code = r"
         var buffer_ptr: *[1024]u8 = undefined;
-    "#;
+    ";
 
     let graph = build_test_graph(code);
 
@@ -1012,9 +1012,9 @@ fn test_pointer_to_array() {
 
 #[test]
 fn test_nested_slices() {
-    let code = r#"
+    let code = r"
         var matrix: [][]const u8 = undefined;
-    "#;
+    ";
 
     let graph = build_test_graph(code);
 
@@ -1030,7 +1030,7 @@ fn test_nested_slices() {
 
 #[test]
 fn test_multiple_primitive_types() {
-    let code = r#"
+    let code = r"
         var a: i8 = 0;
         var b: i16 = 0;
         var c: i32 = 0;
@@ -1043,7 +1043,7 @@ fn test_multiple_primitive_types() {
         var j: f64 = 0.0;
         var k: bool = false;
         var l: usize = 0;
-    "#;
+    ";
 
     let graph = build_test_graph(code);
 
@@ -1090,9 +1090,9 @@ fn test_multiple_primitive_types() {
 
 #[test]
 fn test_comptime_parameter() {
-    let code = r#"
+    let code = r"
         fn generic(comptime T: type) void {}
-    "#;
+    ";
 
     let graph = build_test_graph(code);
 
@@ -1106,9 +1106,9 @@ fn test_comptime_parameter() {
 
 #[test]
 fn test_threadlocal_variable() {
-    let code = r#"
+    let code = r"
         threadlocal var counter: u32 = 0;
-    "#;
+    ";
 
     let graph = build_test_graph(code);
 
@@ -1122,12 +1122,12 @@ fn test_threadlocal_variable() {
 
 #[test]
 fn test_struct_with_optional_fields() {
-    let code = r#"
+    let code = r"
         const User = struct {
             name: ?[]const u8,
             age: ?u32,
         };
-    "#;
+    ";
 
     let graph = build_test_graph(code);
 
@@ -1159,10 +1159,10 @@ fn test_generic_arraylist() {
 
 #[test]
 fn test_error_union_with_custom_error() {
-    let code = r#"
+    let code = r"
         const FileError = error{ NotFound, PermissionDenied };
         var result: FileError![]const u8 = undefined;
-    "#;
+    ";
 
     let graph = build_test_graph(code);
 
@@ -1173,9 +1173,9 @@ fn test_error_union_with_custom_error() {
 
 #[test]
 fn test_namespaced_type() {
-    let code = r#"
+    let code = r"
         var allocator: std.mem.Allocator = undefined;
-    "#;
+    ";
 
     let graph = build_test_graph(code);
 
@@ -1212,9 +1212,9 @@ fn test_namespaced_type() {
 
 #[test]
 fn test_implicit_error_union() {
-    let code = r#"
+    let code = r"
         var maybe_user: !User = undefined;
-    "#;
+    ";
 
     let graph = build_test_graph(code);
 
@@ -1246,9 +1246,9 @@ fn test_implicit_error_union() {
 
 #[test]
 fn test_function_with_many_parameters() {
-    let code = r#"
+    let code = r"
         fn complex(a: i32, b: u32, c: f32, d: bool, e: usize) void {}
-    "#;
+    ";
 
     let graph = build_test_graph(code);
 

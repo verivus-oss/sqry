@@ -49,7 +49,7 @@ impl User {
 
     fs::write(
         src_path.join("utils.rs"),
-        r#"
+        r"
 pub fn calculate(x: i32, y: i32) -> i32 {
     x + y
 }
@@ -67,7 +67,7 @@ impl Calculator {
         self.result += value;
     }
 }
-"#,
+",
     )
     .expect("Failed to write utils.rs");
 
@@ -92,6 +92,7 @@ fn create_batch_queries(path: &PathBuf) {
 
 /// Test that batch parallel and sequential modes produce same ordering.
 #[test]
+#[allow(clippy::too_many_lines)] // Integration test with comprehensive assertion set
 fn test_batch_parallel_vs_sequential_ordering() {
     // Setup workspace
     let workspace = setup_test_workspace();
@@ -173,8 +174,7 @@ fn test_batch_parallel_vs_sequential_ordering() {
         // Verify positions match
         assert_eq!(
             parallel_result["position"], sequential_result["position"],
-            "Position mismatch at index {}",
-            idx
+            "Position mismatch at index {idx}"
         );
 
         // Verify query strings match
@@ -254,7 +254,7 @@ fn test_batch_parallel_vs_sequential_ordering() {
             .as_u64()
             .expect("Missing or invalid position field");
         assert_eq!(
-            position as usize,
+            usize::try_from(position).expect("position fits in usize"),
             idx + 1,
             "Position mismatch at index {}: expected {}, got {}",
             idx,

@@ -4,21 +4,21 @@
 //! - `src/relations/graph_builder.rs`:
 //!   - goroutine (`go foo()`) → Goroutine call modifier
 //!   - deferred calls (`defer foo()`) → Deferred call modifier
-//!   - type assertions (`x.(Type)`) → TypeOf edges
+//!   - type assertions (`x.(Type)`) → `TypeOf` edges
 //!   - type aliases (`type Alias = Base`)
 //!   - const/var declarations
 //!   - interface types with embedding
 //!   - channel types in parameters
-//!   - CGo import detection (`import "C"`)
+//!   - `CGo` import detection (`import "C"`)
 //!   - HTTP route registration (net/http patterns)
 //!   - struct type declarations
 //!   - exported vs unexported identifiers
 //! - `src/relations/local_scopes.rs`:
-//!   - all 10 ScopeKind variants (Function, Method, Block, IfBranch, ForLoop,
-//!     SwitchBlock, CaseClause, SelectBlock, CommClause, FuncLiteral)
+//!   - all 10 `ScopeKind` variants (Function, Method, Block, `IfBranch`, `ForLoop`,
+//!     `SwitchBlock`, `CaseClause`, `SelectBlock`, `CommClause`, `FuncLiteral`)
 //!   - short variable declaration (`:=`)
 //!   - range clause
-//!   - var_spec binding
+//!   - `var_spec` binding
 
 use sqry_core::graph::GraphBuilder;
 use sqry_core::graph::unified::build::staging::StagingGraph;
@@ -185,7 +185,7 @@ func withDefer() {
 // Type assertions
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// `x.(Type)` type assertion creates TypeOf edges
+/// `x.(Type)` type assertion creates `TypeOf` edges
 #[test]
 fn type_assertion_creates_edge() {
     let source = r#"package main
@@ -239,14 +239,14 @@ func GetUser(id UserID) string {
 /// Type alias with pointer: `type Handler = func(string) error`
 #[test]
 fn type_alias_func_type() {
-    let source = r#"package main
+    let source = r"package main
 
 type Handler = func(string) error
 
 func Apply(h Handler, s string) error {
     return h(s)
 }
-"#;
+";
     let staging = build_graph(source);
     assert!(staging.stats().nodes_staged >= 1);
     // type_alias produces a TypeOf edge: Handler → func(string) error
@@ -260,7 +260,7 @@ func Apply(h Handler, s string) error {
 /// Struct type declaration creates Type node
 #[test]
 fn struct_type_declaration() {
-    let source = r#"package main
+    let source = r"package main
 
 type Point struct {
     X float64
@@ -270,7 +270,7 @@ type Point struct {
 func NewPoint(x, y float64) Point {
     return Point{X: x, Y: y}
 }
-"#;
+";
     let staging = build_graph(source);
     assert!(staging.stats().nodes_staged >= 2);
 }
@@ -278,7 +278,7 @@ func NewPoint(x, y float64) Point {
 /// Interface type declaration
 #[test]
 fn interface_type_declaration() {
-    let source = r#"package main
+    let source = r"package main
 
 type Writer interface {
     Write([]byte) (int, error)
@@ -292,7 +292,7 @@ type ReadWriter interface {
     Reader
     Writer
 }
-"#;
+";
     let staging = build_graph(source);
     // Three interface nodes: Writer, Reader, ReadWriter
     assert!(
@@ -315,11 +315,11 @@ type ReadWriter interface {
 /// Exported const creates export edge
 #[test]
 fn exported_const_declaration() {
-    let source = r#"package mypackage
+    let source = r"package mypackage
 
 const MaxRetries = 3
 const DefaultTimeout = 30.0
-"#;
+";
     let staging = build_graph(source);
     assert!(
         has_edge_tag(&staging, "exports"),
@@ -331,10 +331,10 @@ const DefaultTimeout = 30.0
 /// Unexported const does not create export edge
 #[test]
 fn unexported_const_no_export() {
-    let source = r#"package mypackage
+    let source = r"package mypackage
 
 const maxBuffer = 4096
-"#;
+";
     let staging = build_graph(source);
     assert!(
         !has_edge_tag(&staging, "exports"),
@@ -362,14 +362,14 @@ var ErrNotFound = "not found"
 /// Const block declaration
 #[test]
 fn const_block_declaration() {
-    let source = r#"package main
+    let source = r"package main
 
 const (
     StatusOK    = 200
     StatusNotFound = 404
     StatusError = 500
 )
-"#;
+";
     let staging = build_graph(source);
     assert!(staging.stats().nodes_staged >= 1);
     // All three constants are uppercase (exported), producing export edges
@@ -387,7 +387,7 @@ const (
 /// Function with channel parameter
 #[test]
 fn channel_parameter() {
-    let source = r#"package main
+    let source = r"package main
 
 func producer(out chan<- int) {
     for i := 0; i < 10; i++ {
@@ -402,7 +402,7 @@ func consumer(in <-chan int) int {
     }
     return total
 }
-"#;
+";
     let staging = build_graph(source);
     assert!(staging.stats().nodes_staged >= 2);
 }
@@ -411,7 +411,7 @@ func consumer(in <-chan int) int {
 // CGo import detection
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// `import "C"` triggers CGo detection
+/// `import "C"` triggers `CGo` detection
 #[test]
 fn cgo_import_detection() {
     let source = r#"package main
@@ -536,14 +536,14 @@ func main() {
 /// Function scope with short variable declaration
 #[test]
 fn scope_function_with_short_var() {
-    let source = r#"package main
+    let source = r"package main
 
 func compute() int {
     x := 10
     y := 20
     return x + y
 }
-"#;
+";
     let staging = build_graph(source);
     // At minimum the compute function node; parameters may produce type nodes
     assert!(
@@ -594,10 +594,10 @@ func (s *Service) Run() {
     );
 }
 
-/// IfBranch scope
+/// `IfBranch` scope
 #[test]
 fn scope_if_branch() {
-    let source = r#"package main
+    let source = r"package main
 
 func abs(x int) int {
     if x < 0 {
@@ -605,7 +605,7 @@ func abs(x int) int {
     }
     return x
 }
-"#;
+";
     let staging = build_graph(source);
     // At minimum the abs function node; parameters produce type nodes
     assert!(
@@ -626,10 +626,10 @@ func abs(x int) int {
     );
 }
 
-/// ForLoop scope
+/// `ForLoop` scope
 #[test]
 fn scope_for_loop() {
-    let source = r#"package main
+    let source = r"package main
 
 func sum(n int) int {
     total := 0
@@ -638,7 +638,7 @@ func sum(n int) int {
     }
     return total
 }
-"#;
+";
     let staging = build_graph(source);
     // At minimum the sum function node; parameters produce type nodes
     assert!(
@@ -662,7 +662,7 @@ func sum(n int) int {
 /// Range clause in for loop
 #[test]
 fn scope_for_range() {
-    let source = r#"package main
+    let source = r"package main
 
 func sumSlice(items []int) int {
     total := 0
@@ -671,7 +671,7 @@ func sumSlice(items []int) int {
     }
     return total
 }
-"#;
+";
     let staging = build_graph(source);
     // At minimum the sumSlice function node; parameters produce type nodes
     assert!(
@@ -692,7 +692,7 @@ func sumSlice(items []int) int {
     );
 }
 
-/// SwitchBlock and CaseClause scopes
+/// `SwitchBlock` and `CaseClause` scopes
 #[test]
 fn scope_switch_case() {
     let source = r#"package main
@@ -728,7 +728,7 @@ func dayName(d int) string {
     );
 }
 
-/// Type switch creates CaseClause scopes
+/// Type switch creates `CaseClause` scopes
 #[test]
 fn scope_type_switch() {
     let source = r#"package main
@@ -756,7 +756,7 @@ func describe(i interface{}) string {
     );
 }
 
-/// SelectBlock and CommClause scopes
+/// `SelectBlock` and `CommClause` scopes
 #[test]
 fn scope_select_block() {
     let source = r#"package main
@@ -879,10 +879,10 @@ func main() {
 // TypeOf edges for typed parameters and return types
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Function with typed parameters creates TypeOf edges
+/// Function with typed parameters creates `TypeOf` edges
 #[test]
 fn typed_parameters_create_typeof_edges() {
-    let source = r#"package main
+    let source = r"package main
 
 type User struct {
     Name string
@@ -892,7 +892,7 @@ type User struct {
 func ProcessUser(u User) string {
     return u.Name
 }
-"#;
+";
     let staging = build_graph(source);
     assert!(staging.stats().nodes_staged >= 2);
 }
@@ -900,7 +900,7 @@ func ProcessUser(u User) string {
 /// Function with pointer parameter
 #[test]
 fn pointer_parameter_typeof_edge() {
-    let source = r#"package main
+    let source = r"package main
 
 type Config struct {
     Debug bool
@@ -910,7 +910,7 @@ type Config struct {
 func ApplyConfig(cfg *Config) {
     cfg.Debug = false
 }
-"#;
+";
     let staging = build_graph(source);
     // Config struct node + ApplyConfig function node
     assert!(

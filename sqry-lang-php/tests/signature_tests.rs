@@ -59,11 +59,11 @@ fn find_return_type(staging: &StagingGraph, name_pattern: &str) -> Option<String
 
 #[test]
 fn test_function_with_string_return_type() {
-    let source = r###"<?php
+    let source = r#"<?php
 function greet(string $name): string {
     return "Hello, $name";
 }
-"###;
+"#;
     let tree = parse_php(source);
     let file = unique_php_path("func_return_string");
     let mut staging = StagingGraph::new();
@@ -82,11 +82,11 @@ function greet(string $name): string {
 
 #[test]
 fn test_function_with_int_return_type() {
-    let source = r###"<?php
+    let source = r"<?php
 function calculate(int $a, int $b): int {
     return $a + $b;
 }
-"###;
+";
     let tree = parse_php(source);
     let file = unique_php_path("func_return_int");
     let mut staging = StagingGraph::new();
@@ -105,11 +105,11 @@ function calculate(int $a, int $b): int {
 
 #[test]
 fn test_function_with_float_return_type() {
-    let source = r###"<?php
+    let source = r"<?php
 function divide(float $a, float $b): float {
     return $a / $b;
 }
-"###;
+";
     let tree = parse_php(source);
     let file = unique_php_path("func_return_float");
     let mut staging = StagingGraph::new();
@@ -128,11 +128,11 @@ function divide(float $a, float $b): float {
 
 #[test]
 fn test_function_with_bool_return_type() {
-    let source = r###"<?php
+    let source = r"<?php
 function isValid(string $email): bool {
     return filter_var($email, FILTER_VALIDATE_EMAIL) !== false;
 }
-"###;
+";
     let tree = parse_php(source);
     let file = unique_php_path("func_return_bool");
     let mut staging = StagingGraph::new();
@@ -151,11 +151,11 @@ function isValid(string $email): bool {
 
 #[test]
 fn test_function_with_array_return_type() {
-    let source = r###"<?php
+    let source = r"<?php
 function getItems(): array {
     return [];
 }
-"###;
+";
     let tree = parse_php(source);
     let file = unique_php_path("func_return_array");
     let mut staging = StagingGraph::new();
@@ -174,13 +174,13 @@ function getItems(): array {
 
 #[test]
 fn test_function_with_class_return_type() {
-    let source = r###"<?php
+    let source = r"<?php
 class User {}
 
 function createUser(): User {
     return new User();
 }
-"###;
+";
     let tree = parse_php(source);
     let file = unique_php_path("func_return_class");
     let mut staging = StagingGraph::new();
@@ -199,11 +199,11 @@ function createUser(): User {
 
 #[test]
 fn test_function_without_return_type() {
-    let source = r###"<?php
+    let source = r#"<?php
 function doSomething() {
     echo "Hello";
 }
-"###;
+"#;
     let tree = parse_php(source);
     let file = unique_php_path("func_no_return");
     let mut staging = StagingGraph::new();
@@ -225,11 +225,11 @@ function doSomething() {
 
 #[test]
 fn test_function_with_nullable_string_return_type() {
-    let source = r###"<?php
+    let source = r"<?php
 function findUser(int $id): ?string {
     return null;
 }
-"###;
+";
     let tree = parse_php(source);
     let file = unique_php_path("func_return_nullable_string");
     let mut staging = StagingGraph::new();
@@ -249,11 +249,11 @@ function findUser(int $id): ?string {
 
 #[test]
 fn test_function_with_nullable_int_return_type() {
-    let source = r###"<?php
+    let source = r"<?php
 function getCount(): ?int {
     return null;
 }
-"###;
+";
     let tree = parse_php(source);
     let file = unique_php_path("func_return_nullable_int");
     let mut staging = StagingGraph::new();
@@ -276,11 +276,11 @@ function getCount(): ?int {
 
 #[test]
 fn test_function_with_union_return_type() {
-    let source = r###"<?php
+    let source = r"<?php
 function process($value): string|int {
     return $value;
 }
-"###;
+";
     let tree = parse_php(source);
     let file = unique_php_path("func_return_union");
     let mut staging = StagingGraph::new();
@@ -300,11 +300,11 @@ function process($value): string|int {
 
 #[test]
 fn test_function_with_nullable_union_return_type() {
-    let source = r###"<?php
+    let source = r"<?php
 function getValue(): string|null {
     return null;
 }
-"###;
+";
     let tree = parse_php(source);
     let file = unique_php_path("func_return_nullable_union");
     let mut staging = StagingGraph::new();
@@ -328,13 +328,13 @@ function getValue(): string|null {
 
 #[test]
 fn test_method_with_return_type() {
-    let source = r###"<?php
+    let source = r"<?php
 class User {
     public function getName(): string {
         return $this->name;
     }
 }
-"###;
+";
     let tree = parse_php(source);
     let file = unique_php_path("method_return_type");
     let mut staging = StagingGraph::new();
@@ -353,13 +353,13 @@ class User {
 
 #[test]
 fn test_method_with_nullable_return_type() {
-    let source = r###"<?php
+    let source = r"<?php
 class User {
     public function getEmail(): ?string {
         return $this->email;
     }
 }
-"###;
+";
     let tree = parse_php(source);
     let file = unique_php_path("method_return_nullable");
     let mut staging = StagingGraph::new();
@@ -378,13 +378,13 @@ class User {
 
 #[test]
 fn test_method_without_return_type() {
-    let source = r###"<?php
+    let source = r"<?php
 class Logger {
     public function log($message) {
         echo $message;
     }
 }
-"###;
+";
     let tree = parse_php(source);
     let file = unique_php_path("method_no_return");
     let mut staging = StagingGraph::new();
@@ -399,13 +399,13 @@ class Logger {
 
 #[test]
 fn test_private_method_with_return_type() {
-    let source = r###"<?php
+    let source = r"<?php
 class Calculator {
     private function add(int $a, int $b): int {
         return $a + $b;
     }
 }
-"###;
+";
     let tree = parse_php(source);
     let file = unique_php_path("private_method_return");
     let mut staging = StagingGraph::new();
@@ -424,13 +424,13 @@ class Calculator {
 
 #[test]
 fn test_protected_method_with_return_type() {
-    let source = r###"<?php
+    let source = r"<?php
 class Service {
     protected function process(array $data): bool {
         return true;
     }
 }
-"###;
+";
     let tree = parse_php(source);
     let file = unique_php_path("protected_method_return");
     let mut staging = StagingGraph::new();
@@ -449,13 +449,13 @@ class Service {
 
 #[test]
 fn test_static_method_with_return_type() {
-    let source = r###"<?php
+    let source = r#"<?php
 class Config {
     public static function get(string $key): string {
         return "value";
     }
 }
-"###;
+"#;
     let tree = parse_php(source);
     let file = unique_php_path("static_method_return");
     let mut staging = StagingGraph::new();
@@ -478,13 +478,13 @@ class Config {
 
 #[test]
 fn test_namespaced_function_with_return_type() {
-    let source = r###"<?php
+    let source = r"<?php
 namespace App\Utils;
 
 function slugify(string $text): string {
     return strtolower($text);
 }
-"###;
+";
     let tree = parse_php(source);
     let file = unique_php_path("namespaced_func_return");
     let mut staging = StagingGraph::new();
@@ -503,7 +503,7 @@ function slugify(string $text): string {
 
 #[test]
 fn test_namespaced_class_method_with_return_type() {
-    let source = r###"<?php
+    let source = r"<?php
 namespace App\Services;
 
 class UserService {
@@ -511,7 +511,7 @@ class UserService {
         return null;
     }
 }
-"###;
+";
     let tree = parse_php(source);
     let file = unique_php_path("namespaced_method_return");
     let mut staging = StagingGraph::new();
@@ -534,7 +534,7 @@ class UserService {
 
 #[test]
 fn test_multiple_functions_with_different_return_types() {
-    let source = r###"<?php
+    let source = r#"<?php
 function getString(): string {
     return "hello";
 }
@@ -550,7 +550,7 @@ function getBool(): bool {
 function getNothing() {
     echo "nothing";
 }
-"###;
+"#;
     let tree = parse_php(source);
     let file = unique_php_path("multiple_funcs_return");
     let mut staging = StagingGraph::new();
@@ -576,7 +576,7 @@ function getNothing() {
 
 #[test]
 fn test_class_with_multiple_methods_with_return_types() {
-    let source = r###"<?php
+    let source = r#"<?php
 class Calculator {
     public function add(int $a, int $b): int {
         return $a + $b;
@@ -594,7 +594,7 @@ class Calculator {
         return true;
     }
 }
-"###;
+"#;
     let tree = parse_php(source);
     let file = unique_php_path("class_multiple_methods_return");
     let mut staging = StagingGraph::new();

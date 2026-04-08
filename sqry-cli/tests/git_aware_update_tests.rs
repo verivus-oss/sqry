@@ -146,7 +146,7 @@ fn get_head_commit(dir: &Path) -> Result<String, Box<dyn std::error::Error>> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-/// Helper to read index metadata and check last_indexed_commit
+/// Helper to read index metadata and check `last_indexed_commit`
 ///
 /// Reads the graph manifest to get the last indexed commit SHA.
 fn get_last_indexed_commit(dir: &Path) -> Result<Option<String>, Box<dyn std::error::Error>> {

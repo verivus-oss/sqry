@@ -572,13 +572,11 @@ mod tests {
         let output = test.stdout_string();
         assert!(
             output.contains("name,line"),
-            "Header should contain name,line: {}",
-            output
+            "Header should contain name,line: {output}"
         );
         assert!(
             output.contains("test_func,42"),
-            "Output should contain test_func,42: {}",
-            output
+            "Output should contain test_func,42: {output}"
         );
     }
 
@@ -687,7 +685,7 @@ mod tests {
 
     #[test]
     fn test_parse_columns_empty_string_errors() {
-        let spec = Some("".to_string());
+        let spec = Some(String::new());
         let err = parse_columns(spec.as_ref()).unwrap_err();
         assert!(err.contains("No valid columns"), "Unexpected error: {err}");
     }
@@ -876,8 +874,7 @@ mod tests {
         let output = test.stdout_string();
         assert!(
             output.contains("test_func\t42"),
-            "Output should contain test_func<tab>42: {}",
-            output
+            "Output should contain test_func<tab>42: {output}"
         );
     }
 }

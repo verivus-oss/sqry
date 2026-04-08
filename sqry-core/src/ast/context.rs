@@ -115,15 +115,16 @@ impl ContextExtractor {
         })?;
 
         // Read file content once
-        let content = std::fs::read(path)?;
+        let raw_content = std::fs::read(path)?;
 
         // Get language metadata
         let lang_name = plugin.metadata().id;
 
-        // Parse AST once using plugin
-        let tree = plugin
-            .parse_ast(&content)
+        // Prepare parse-aligned bytes and parse once using the plugin contract.
+        let (prepared_content, tree) = plugin
+            .prepare_ast(&raw_content)
             .map_err(|e| AstQueryError::ContextExtraction(format!("Failed to parse AST: {e:?}")))?;
+        let parse_content = prepared_content.as_ref();
 
         let builder = plugin.graph_builder().ok_or_else(|| {
             AstQueryError::ContextExtraction(format!("No graph builder registered for {lang_name}"))
@@ -132,7 +133,7 @@ impl ContextExtractor {
         // Build nodes via graph builder using the pre-parsed tree.
         let mut staging = StagingGraph::new();
         builder
-            .build_graph(&tree, &content, path, &mut staging)
+            .build_graph(&tree, parse_content, path, &mut staging)
             .map_err(|e| {
                 AstQueryError::ContextExtraction(format!(
                     "Failed to build graph for {}: {e}",
@@ -140,7 +141,7 @@ impl ContextExtractor {
                 ))
             })?;
 
-        staging.attach_body_hashes(&content);
+        staging.attach_body_hashes(&raw_content);
 
         let mut graph = CodeGraph::new();
         let file_id = graph
@@ -174,7 +175,7 @@ impl ContextExtractor {
         })?;
 
         // Convert content to string for context building
-        let content_str = String::from_utf8_lossy(&content);
+        let content_str = String::from_utf8_lossy(&raw_content);
         let root_node = tree.root_node();
 
         // Extract context for each node using our tree

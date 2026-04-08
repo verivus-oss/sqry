@@ -220,7 +220,7 @@ impl PagerDecision {
 // Test helper for constructing PagerDecision with overrides
 #[cfg(test)]
 impl PagerDecision {
-    /// Test-only constructor that allows overriding is_tty and terminal_height.
+    /// Test-only constructor that allows overriding `is_tty` and `terminal_height`.
     /// Use this in unit tests to simulate different TTY/terminal configurations.
     #[must_use]
     pub fn for_testing(config: PagerConfig, is_tty: bool, terminal_height: Option<usize>) -> Self {
@@ -425,6 +425,7 @@ impl BufferedOutput {
     /// This forces Buffering mode regardless of TTY detection, allowing tests
     /// to verify the line counting logic without needing a real TTY.
     #[cfg(test)]
+    #[must_use]
     pub fn new_for_testing(config: PagerConfig) -> Self {
         let decision = PagerDecision::new(config.clone());
         let terminal_width = PagerDecision::detect_terminal_width();

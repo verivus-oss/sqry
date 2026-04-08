@@ -80,6 +80,7 @@ fn has_contains_edge(staging: &StagingGraph, parent: NodeId, child: NodeId) -> b
     })
 }
 
+#[allow(clippy::similar_names)] // Test fixture variables
 fn has_call_edge(staging: &StagingGraph, caller: NodeId, callee: NodeId) -> bool {
     staging.operations().iter().any(|op| {
         matches!(
@@ -96,13 +97,13 @@ fn has_call_edge(staging: &StagingGraph, caller: NodeId, callee: NodeId) -> bool
 
 #[test]
 fn test_class_node_with_visibility() {
-    let source = br#"
+    let source = br"
 CLASS zcl_customer_mgmt IMPLEMENTATION.
   METHOD create_customer.
     INSERT zcustomers FROM @ls_customer.
   ENDMETHOD.
 ENDCLASS.
-"#;
+";
 
     let staging = build_staging(source);
 
@@ -132,7 +133,7 @@ ENDCLASS.
 
 #[test]
 fn test_class_with_public_visibility() {
-    let source = br#"
+    let source = br"
 CLASS zcl_public DEFINITION PUBLIC.
   PUBLIC SECTION.
     METHODS test_method.
@@ -142,7 +143,7 @@ CLASS zcl_public IMPLEMENTATION.
   METHOD test_method.
   ENDMETHOD.
 ENDCLASS.
-"#;
+";
 
     let staging = build_staging(source);
 
@@ -155,7 +156,7 @@ ENDCLASS.
 
 #[test]
 fn test_class_with_private_visibility() {
-    let source = br#"
+    let source = br"
 CLASS lcl_private DEFINITION.
   PRIVATE SECTION.
     METHODS internal_method.
@@ -165,7 +166,7 @@ CLASS lcl_private IMPLEMENTATION.
   METHOD internal_method.
   ENDMETHOD.
 ENDCLASS.
-"#;
+";
 
     let staging = build_staging(source);
 
@@ -178,7 +179,7 @@ ENDCLASS.
 
 #[test]
 fn test_multiple_classes() {
-    let source = br#"
+    let source = br"
 CLASS zcl_first IMPLEMENTATION.
   METHOD process_first.
   ENDMETHOD.
@@ -188,7 +189,7 @@ CLASS zcl_second IMPLEMENTATION.
   METHOD process_second.
   ENDMETHOD.
 ENDCLASS.
-"#;
+";
 
     let staging = build_staging(source);
 
@@ -212,13 +213,13 @@ ENDCLASS.
 
 #[test]
 fn test_submit_program_call() {
-    let source = br#"
+    let source = br"
 CLASS zcl_runner IMPLEMENTATION.
   METHOD execute_report.
     SUBMIT z_background_job AND RETURN.
   ENDMETHOD.
 ENDCLASS.
-"#;
+";
 
     let staging = build_staging(source);
 
@@ -242,13 +243,13 @@ ENDCLASS.
 
 #[test]
 fn test_call_transaction() {
-    let source = br#"
+    let source = br"
 CLASS zcl_transaction_caller IMPLEMENTATION.
   METHOD call_sales_order.
     CALL TRANSACTION 'VA01' USING bdcdata.
   ENDMETHOD.
 ENDCLASS.
-"#;
+";
 
     let staging = build_staging(source);
 
@@ -272,7 +273,7 @@ ENDCLASS.
 
 #[test]
 fn test_multiple_program_calls() {
-    let source = br#"
+    let source = br"
 CLASS zcl_orchestrator IMPLEMENTATION.
   METHOD run_batch.
     SUBMIT z_extract_data AND RETURN.
@@ -280,7 +281,7 @@ CLASS zcl_orchestrator IMPLEMENTATION.
     CALL TRANSACTION 'SE38' USING bdcdata.
   ENDMETHOD.
 ENDCLASS.
-"#;
+";
 
     let staging = build_staging(source);
 
@@ -301,12 +302,12 @@ ENDCLASS.
 
 #[test]
 fn test_function_module_structure() {
-    let source = br#"
+    let source = br"
 FUNCTION z_calculate_price.
   SELECT * FROM zpricing INTO TABLE @DATA(lt_prices).
   SUBMIT z_price_update AND RETURN.
 ENDFUNCTION.
-"#;
+";
 
     let staging = build_staging(source);
 

@@ -26,23 +26,62 @@ use sqry_core::schema::{
 // Helper Types
 // ============================================================================
 
-/// Search filters.
+/// Structured search filter object for narrowing `semantic_search` and
+/// `hierarchical_search` results by language, symbol kind, visibility, or
+/// minimum relevance score.
+///
+/// **This is a JSON object, not a query string.** Pass it as the `filters`
+/// parameter alongside the `query` parameter.
+///
+/// For string-style filtering, use query predicates like `lang:rust` in the
+/// `query` parameter instead.
+///
+/// # Example (JSON)
+///
+/// ```json
+/// {
+///   "language": ["rust", "typescript"],
+///   "symbol_kind": ["function", "method"],
+///   "visibility": "public",
+///   "score_min": 0.5
+/// }
+/// ```
+///
+/// # Query predicates vs structured filters
+///
+/// | Approach | Parameter | Syntax |
+/// |----------|-----------|--------|
+/// | Query predicates | `query` | `"lang:rust kind:function vis:public"` |
+/// | Structured filters | `filters` | `{"language":["rust"],"symbol_kind":["function"],"visibility":"public"}` |
+///
+/// Both can be combined: use `query` for complex boolean expressions
+/// (AND/OR/NOT/regex) and `filters` for simple pre-filtering.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(default)]
 pub struct SearchFiltersParams {
-    /// Limit results to specific languages
+    /// Limit results to specific programming languages.
+    ///
+    /// Example: `["rust", "typescript", "python"]`
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub language: Vec<String>,
 
-    /// Filter by visibility
+    /// Filter by symbol visibility (`"public"` or `"private"`).
+    ///
+    /// Example: `"public"`
     #[serde(skip_serializing_if = "Option::is_none")]
     pub visibility: Option<VisibilityParam>,
 
-    /// Filter by symbol kinds (function, method, class, etc.)
+    /// Filter by symbol kinds such as `"function"`, `"method"`, `"class"`,
+    /// `"struct"`, `"trait"`, `"interface"`, `"enum"`, etc.
+    ///
+    /// Example: `["function", "method"]`
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub symbol_kind: Vec<String>,
 
-    /// Minimum semantic relevance score (0.0 - 1.0)
+    /// Minimum semantic relevance score (0.0 – 1.0). Results below this
+    /// threshold are excluded.
+    ///
+    /// Example: `0.5`
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 0.0, max = 1.0))]
     pub score_min: Option<f64>,
@@ -249,13 +288,16 @@ pub struct ReferenceParams {
     \"context_lines\": 3
 })")]
 pub struct SemanticSearchParams {
-    /// Semantic query expression
+    /// Semantic query expression (supports predicates like `lang:rust`,
+    /// `kind:function`, combinators `AND`/`OR`/`NOT`, and regex `name~=/pat/`).
     pub query: String,
 
     #[serde(default = "default_path")]
     pub path: String,
 
-    /// Search filters
+    /// Structured filter object for pre-filtering by language, kind,
+    /// visibility, or minimum score. Pass a JSON object — for string-style
+    /// predicates, use the `query` parameter instead.
     #[serde(default)]
     pub filters: Option<SearchFiltersParams>,
 
@@ -286,13 +328,16 @@ pub struct SemanticSearchParams {
     \"max_files\": 10
 })")]
 pub struct HierarchicalSearchParams {
-    /// Query expression
+    /// Query expression (supports predicates like `lang:rust`,
+    /// `kind:function`, combinators `AND`/`OR`/`NOT`, and regex `name~=/pat/`).
     pub query: String,
 
     #[serde(default = "default_path")]
     pub path: String,
 
-    /// Search filters
+    /// Structured filter object for pre-filtering by language, kind,
+    /// visibility, or minimum score. Pass a JSON object — for string-style
+    /// predicates, use the `query` parameter instead.
     #[serde(default)]
     pub filters: Option<SearchFiltersParams>,
 
@@ -527,7 +572,7 @@ pub struct ExportGraphParams {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub symbol_name: Option<String>,
 
-    /// Multiple seed symbol names (alternative to symbol_name for multi-seed exports)
+    /// Multiple seed symbol names (alternative to `symbol_name` for multi-seed exports)
     #[serde(default)]
     pub symbols: Vec<String>,
 
@@ -1734,7 +1779,7 @@ mod tests {
     #[test]
     fn test_is_node_in_cycle_empty_symbol_invalid() {
         let params = IsNodeInCycleParams {
-            symbol: "".to_string(),
+            symbol: String::new(),
             path: ".".to_string(),
             cycle_type: CycleTypeParam::Calls,
             min_depth: 2,
@@ -1854,7 +1899,7 @@ mod tests {
     #[test]
     fn test_pattern_search_empty_pattern_invalid() {
         let params = PatternSearchParams {
-            pattern: "".to_string(),
+            pattern: String::new(),
             path: ".".to_string(),
             max_results: 100,
             include_classpath: false,
@@ -1893,7 +1938,7 @@ mod tests {
     #[test]
     fn test_direct_callers_empty_symbol_invalid() {
         let params = DirectCallersParams {
-            symbol: "".to_string(),
+            symbol: String::new(),
             path: ".".to_string(),
             max_results: 100,
             pagination: None,
@@ -1930,7 +1975,7 @@ mod tests {
     #[test]
     fn test_direct_callees_empty_symbol_invalid() {
         let params = DirectCalleesParams {
-            symbol: "".to_string(),
+            symbol: String::new(),
             path: ".".to_string(),
             max_results: 100,
             pagination: None,

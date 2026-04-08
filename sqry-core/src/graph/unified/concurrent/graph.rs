@@ -52,7 +52,7 @@ pub struct CodeGraph {
     files: Arc<FileRegistry>,
     /// Auxiliary indices for fast lookup.
     indices: Arc<AuxiliaryIndices>,
-    /// Sparse macro boundary metadata (keyed by full NodeId).
+    /// Sparse macro boundary metadata (keyed by full `NodeId`).
     macro_metadata: Arc<NodeMetadataStore>,
     /// Epoch for version tracking.
     epoch: u64,

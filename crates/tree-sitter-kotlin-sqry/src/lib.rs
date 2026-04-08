@@ -20,6 +20,7 @@ pub fn language() -> Language {
 }
 
 /// Fallible alternative to [`language()`]
+#[allow(clippy::missing_errors_doc)] // Vendored tree-sitter binding
 pub fn try_language() -> Result<Language, sqry_tree_sitter_support::TreeSitterError> {
     let lang = unsafe { tree_sitter_kotlin() };
     sqry_tree_sitter_support::validate_language(lang)

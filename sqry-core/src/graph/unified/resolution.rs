@@ -69,6 +69,32 @@ pub struct NormalizedSymbolQuery {
     pub mode: ResolutionMode,
 }
 
+/// Candidate bucket that produced a symbol match.
+///
+/// This is the formal baseline for future binding work. All resolution
+/// consumers that will feed into `sqry-bind` should use the witness-bearing
+/// API ([`GraphSnapshot::find_symbol_candidates_with_witness`],
+/// [`GraphSnapshot::resolve_symbol_with_witness`]) to preserve bucket
+/// provenance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SymbolCandidateBucket {
+    /// Exact qualified-name bucket.
+    ExactQualified,
+    /// Exact simple-name bucket.
+    ExactSimple,
+    /// Bounded canonical suffix bucket.
+    CanonicalSuffix,
+}
+
+/// Witness for one candidate produced during symbol lookup.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SymbolCandidateWitness {
+    /// Matching node id.
+    pub node_id: NodeId,
+    /// Bucket that produced the candidate.
+    pub bucket: SymbolCandidateBucket,
+}
+
 /// Single-node resolution outcome.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SymbolResolutionOutcome {
@@ -93,58 +119,102 @@ pub enum SymbolCandidateOutcome {
     FileNotIndexed,
 }
 
+/// Witness-bearing symbol resolution result.
+///
+/// Formal baseline for the binding query facade. Captures not just the
+/// resolution outcome but the bucket provenance and candidate witnesses
+/// that produced it. Future `sqry-bind` work builds on this seam.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SymbolResolutionWitness {
+    /// Normalized query when file scoping resolved successfully.
+    pub normalized_query: Option<NormalizedSymbolQuery>,
+    /// Resolution outcome (the same value `resolve_symbol` returns).
+    pub outcome: SymbolResolutionOutcome,
+    /// Winning bucket for successful or ambiguous resolutions.
+    pub selected_bucket: Option<SymbolCandidateBucket>,
+    /// Ordered candidate witnesses from the first non-empty bucket.
+    pub candidates: Vec<SymbolCandidateWitness>,
+}
+
 impl GraphSnapshot {
     /// Resolves one symbol with explicit file-aware outcome classification.
     #[must_use]
     pub fn resolve_symbol(&self, query: &SymbolQuery<'_>) -> SymbolResolutionOutcome {
-        match self.find_symbol_candidates(query) {
-            SymbolCandidateOutcome::Candidates(candidates) => match candidates.as_slice() {
-                [] => SymbolResolutionOutcome::NotFound,
-                [node_id] => SymbolResolutionOutcome::Resolved(*node_id),
-                _ => SymbolResolutionOutcome::Ambiguous(candidates),
-            },
-            SymbolCandidateOutcome::NotFound => SymbolResolutionOutcome::NotFound,
-            SymbolCandidateOutcome::FileNotIndexed => SymbolResolutionOutcome::FileNotIndexed,
-        }
+        self.resolve_symbol_with_witness(query).outcome
     }
 
     /// Finds ordered candidates from the first eligible non-empty bucket.
     #[must_use]
     pub fn find_symbol_candidates(&self, query: &SymbolQuery<'_>) -> SymbolCandidateOutcome {
+        self.find_symbol_candidates_with_witness(query).outcome
+    }
+
+    /// Finds ordered candidates from the first eligible non-empty bucket,
+    /// preserving the bucket that produced them.
+    #[must_use]
+    pub fn find_symbol_candidates_with_witness(
+        &self,
+        query: &SymbolQuery<'_>,
+    ) -> SymbolCandidateSearchWitness {
         let resolved_file_scope = match self.resolve_file_scope(&query.file_scope) {
             Ok(scope) => scope,
-            Err(FileScopeError::FileNotIndexed) => return SymbolCandidateOutcome::FileNotIndexed,
+            Err(FileScopeError::FileNotIndexed) => {
+                return SymbolCandidateSearchWitness {
+                    normalized_query: None,
+                    outcome: SymbolCandidateOutcome::FileNotIndexed,
+                    selected_bucket: None,
+                    candidates: Vec::new(),
+                };
+            }
         };
 
         let normalized_query = self.normalize_symbol_query(query, &resolved_file_scope);
 
-        let exact_qualified = self.filtered_bucket(
-            self.exact_qualified_bucket(&normalized_query),
-            resolved_file_scope,
-        );
-        if !exact_qualified.is_empty() {
-            return SymbolCandidateOutcome::Candidates(exact_qualified);
+        if let Some((selected_bucket, candidates)) =
+            self.first_candidate_bucket_with_witness(&normalized_query, resolved_file_scope)
+        {
+            return SymbolCandidateSearchWitness {
+                normalized_query: Some(normalized_query),
+                outcome: SymbolCandidateOutcome::Candidates(
+                    candidates
+                        .iter()
+                        .map(|candidate| candidate.node_id)
+                        .collect(),
+                ),
+                selected_bucket: Some(selected_bucket),
+                candidates,
+            };
         }
 
-        let exact_simple = self.filtered_bucket(
-            self.exact_simple_bucket(&normalized_query),
-            resolved_file_scope,
-        );
-        if !exact_simple.is_empty() {
-            return SymbolCandidateOutcome::Candidates(exact_simple);
+        SymbolCandidateSearchWitness {
+            normalized_query: Some(normalized_query),
+            outcome: SymbolCandidateOutcome::NotFound,
+            selected_bucket: None,
+            candidates: Vec::new(),
         }
+    }
 
-        if matches!(normalized_query.mode, ResolutionMode::AllowSuffixCandidates) {
-            let suffix_candidates = self.filtered_bucket(
-                self.bounded_suffix_bucket(&normalized_query),
-                resolved_file_scope,
-            );
-            if !suffix_candidates.is_empty() {
-                return SymbolCandidateOutcome::Candidates(suffix_candidates);
-            }
+    /// Resolve one symbol while preserving witness metadata about the winning
+    /// candidate bucket and ordered candidates.
+    #[must_use]
+    pub fn resolve_symbol_with_witness(&self, query: &SymbolQuery<'_>) -> SymbolResolutionWitness {
+        let candidate_witness = self.find_symbol_candidates_with_witness(query);
+        let outcome = match &candidate_witness.outcome {
+            SymbolCandidateOutcome::Candidates(candidates) => match candidates.as_slice() {
+                [] => SymbolResolutionOutcome::NotFound,
+                [node_id] => SymbolResolutionOutcome::Resolved(*node_id),
+                _ => SymbolResolutionOutcome::Ambiguous(candidates.clone()),
+            },
+            SymbolCandidateOutcome::NotFound => SymbolResolutionOutcome::NotFound,
+            SymbolCandidateOutcome::FileNotIndexed => SymbolResolutionOutcome::FileNotIndexed,
+        };
+
+        SymbolResolutionWitness {
+            normalized_query: candidate_witness.normalized_query,
+            outcome,
+            selected_bucket: candidate_witness.selected_bucket,
+            candidates: candidate_witness.candidates,
         }
-
-        SymbolCandidateOutcome::NotFound
     }
 
     /// Resolves an external file scope into an indexed file scope.
@@ -265,6 +335,49 @@ impl GraphSnapshot {
         bucket
     }
 
+    fn first_candidate_bucket_with_witness(
+        &self,
+        query: &NormalizedSymbolQuery,
+        file_scope: ResolvedFileScope,
+    ) -> Option<(SymbolCandidateBucket, Vec<SymbolCandidateWitness>)> {
+        for bucket in [
+            SymbolCandidateBucket::ExactQualified,
+            SymbolCandidateBucket::ExactSimple,
+            SymbolCandidateBucket::CanonicalSuffix,
+        ] {
+            if bucket == SymbolCandidateBucket::CanonicalSuffix
+                && !matches!(query.mode, ResolutionMode::AllowSuffixCandidates)
+            {
+                continue;
+            }
+
+            let candidates = self.bucket_witnesses(query, file_scope, bucket);
+            if !candidates.is_empty() {
+                return Some((bucket, candidates));
+            }
+        }
+
+        None
+    }
+
+    fn bucket_witnesses(
+        &self,
+        query: &NormalizedSymbolQuery,
+        file_scope: ResolvedFileScope,
+        bucket: SymbolCandidateBucket,
+    ) -> Vec<SymbolCandidateWitness> {
+        let raw_bucket = match bucket {
+            SymbolCandidateBucket::ExactQualified => self.exact_qualified_bucket(query),
+            SymbolCandidateBucket::ExactSimple => self.exact_simple_bucket(query),
+            SymbolCandidateBucket::CanonicalSuffix => self.bounded_suffix_bucket(query),
+        };
+
+        self.filtered_bucket(raw_bucket, file_scope)
+            .into_iter()
+            .map(|node_id| SymbolCandidateWitness { node_id, bucket })
+            .collect()
+    }
+
     fn candidate_sort_key(&self, node_id: NodeId) -> CandidateSortKey {
         let Some(entry) = self.get_node(node_id) else {
             return CandidateSortKey::default_for(node_id);
@@ -295,6 +408,19 @@ impl GraphSnapshot {
             node_id,
         }
     }
+}
+
+/// Witness-bearing candidate-search result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SymbolCandidateSearchWitness {
+    /// Normalized query when file scoping resolved successfully.
+    pub normalized_query: Option<NormalizedSymbolQuery>,
+    /// Legacy candidate-search outcome.
+    pub outcome: SymbolCandidateOutcome,
+    /// Winning bucket when a non-empty bucket exists.
+    pub selected_bucket: Option<SymbolCandidateBucket>,
+    /// Ordered candidate witnesses from the first non-empty bucket.
+    pub candidates: Vec<SymbolCandidateWitness>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -529,7 +655,7 @@ mod tests {
     use crate::graph::unified::storage::arena::NodeEntry;
 
     use super::{
-        FileScope, NormalizedSymbolQuery, ResolutionMode, ResolvedFileScope,
+        FileScope, NormalizedSymbolQuery, ResolutionMode, ResolvedFileScope, SymbolCandidateBucket,
         SymbolCandidateOutcome, SymbolQuery, SymbolResolutionOutcome,
         canonicalize_graph_qualified_name, display_graph_qualified_name,
     };
@@ -761,6 +887,67 @@ mod tests {
     }
 
     #[test]
+    fn test_find_symbol_candidates_with_witness_reports_exact_qualified_bucket() {
+        let mut graph = CodeGraph::new();
+        let qualified_path = abs_path("src/qualified.rs");
+        let simple_path = abs_path("src/simple.rs");
+
+        let qualified = add_node(
+            &mut graph,
+            NodeKind::Function,
+            "target",
+            Some("pkg::target"),
+            &qualified_path,
+            Some(Language::Rust),
+            1,
+            0,
+        );
+        let _simple_only = add_node(
+            &mut graph,
+            NodeKind::Function,
+            "pkg::target",
+            None,
+            &simple_path,
+            Some(Language::Rust),
+            1,
+            0,
+        );
+
+        let snapshot = graph.snapshot();
+        let query = SymbolQuery {
+            symbol: "pkg::target",
+            file_scope: FileScope::Any,
+            mode: ResolutionMode::AllowSuffixCandidates,
+        };
+
+        let witness = snapshot.find_symbol_candidates_with_witness(&query);
+
+        assert_eq!(
+            witness.outcome,
+            SymbolCandidateOutcome::Candidates(vec![qualified.node_id])
+        );
+        assert_eq!(
+            witness.selected_bucket,
+            Some(SymbolCandidateBucket::ExactQualified)
+        );
+        assert_eq!(
+            witness.candidates,
+            vec![super::SymbolCandidateWitness {
+                node_id: qualified.node_id,
+                bucket: SymbolCandidateBucket::ExactQualified,
+            }]
+        );
+        assert_eq!(
+            witness.normalized_query,
+            Some(NormalizedSymbolQuery {
+                symbol: "pkg::target".to_string(),
+                file_scope: ResolvedFileScope::Any,
+                mode: ResolutionMode::AllowSuffixCandidates,
+            })
+        );
+    }
+
+    #[test]
     fn test_find_symbol_candidates_preserves_file_not_indexed() {
         let mut graph = CodeGraph::new();
         let indexed_path = abs_path("src/indexed.rs");
@@ -791,6 +978,64 @@ mod tests {
         assert_eq!(
             snapshot.find_symbol_candidates(&query),
             SymbolCandidateOutcome::FileNotIndexed
+        );
+    }
+
+    #[test]
+    fn test_resolve_symbol_with_witness_reports_ambiguous_bucket_candidates() {
+        let mut graph = CodeGraph::new();
+        let file_path = abs_path("src/lib.rs");
+
+        let first = add_node(
+            &mut graph,
+            NodeKind::Function,
+            "dup",
+            Some("pkg::dup"),
+            &file_path,
+            Some(Language::Rust),
+            2,
+            0,
+        );
+        let second = add_node(
+            &mut graph,
+            NodeKind::Method,
+            "dup",
+            Some("pkg::dup_method"),
+            &file_path,
+            Some(Language::Rust),
+            8,
+            0,
+        );
+
+        let snapshot = graph.snapshot();
+        let query = SymbolQuery {
+            symbol: "dup",
+            file_scope: FileScope::Path(&file_path),
+            mode: ResolutionMode::Strict,
+        };
+
+        let witness = snapshot.resolve_symbol_with_witness(&query);
+
+        assert_eq!(
+            witness.outcome,
+            SymbolResolutionOutcome::Ambiguous(vec![first.node_id, second.node_id])
+        );
+        assert_eq!(
+            witness.selected_bucket,
+            Some(SymbolCandidateBucket::ExactSimple)
+        );
+        assert_eq!(
+            witness.candidates,
+            vec![
+                super::SymbolCandidateWitness {
+                    node_id: first.node_id,
+                    bucket: SymbolCandidateBucket::ExactSimple,
+                },
+                super::SymbolCandidateWitness {
+                    node_id: second.node_id,
+                    bucket: SymbolCandidateBucket::ExactSimple,
+                },
+            ]
         );
     }
 

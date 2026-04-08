@@ -1,9 +1,9 @@
-//! Graph builder tests for the ServiceNow Xanadu language plugin.
+//! Graph builder tests for the `ServiceNow` Xanadu language plugin.
 //!
 //! Covers:
 //! - Function/method node extraction
-//! - ES6 import and CommonJS require edges
-//! - GlideRecord table access
+//! - ES6 import and `CommonJS` require edges
+//! - `GlideRecord` table access
 //! - gs.* API call detection
 //! - Script Include (Class.create) patterns
 //! - Error handling for malformed input
@@ -156,8 +156,7 @@ function doWork() {
     let import_count = count_import_edges(&staging);
     assert!(
         import_count >= 1,
-        "Expected at least 1 import edge for ES6 imports, got {}",
-        import_count
+        "Expected at least 1 import edge for ES6 imports, got {import_count}"
     );
 }
 
@@ -187,8 +186,7 @@ function execute() {
     let import_count = count_import_edges(&staging);
     assert!(
         import_count >= 1,
-        "Expected at least 1 import edge for require(), got {}",
-        import_count
+        "Expected at least 1 import edge for require(), got {import_count}"
     );
     assert!(
         has_interned_string_containing(&staging, "helper_script")
@@ -328,8 +326,7 @@ function main() {
     let call_count = count_call_edges(&staging);
     assert!(
         call_count >= 1,
-        "Expected at least 1 call edge, got {}",
-        call_count
+        "Expected at least 1 call edge, got {call_count}"
     );
 }
 

@@ -4,11 +4,11 @@ use sqry_lang_elixir::ElixirPlugin;
 #[test]
 fn debug_node_fields() {
     let plugin = ElixirPlugin::default();
-    let content = br#"
+    let content = br"
 defmodule Demo do
   def my_func, do: :ok
 end
-"#;
+";
 
     let tree = plugin.parse_ast(content).expect("should parse");
     let root = tree.root_node();
@@ -22,7 +22,7 @@ end
             continue;
         }
 
-        eprintln!("\n=== Child {} ===", i);
+        eprintln!("\n=== Child {i} ===");
         eprintln!("Kind: {}", child.kind());
 
         // Try all possible field names

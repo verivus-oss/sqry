@@ -73,7 +73,7 @@ pub fn build_display_name_map(staging: &StagingGraph) -> HashMap<NodeId, String>
             && let Some(expected_id) = expected_id
             && let Some(name) = staging.resolve_node_display_name(Language::Pulumi, entry)
         {
-            node_names.insert(*expected_id, name.to_owned());
+            node_names.insert(*expected_id, name.clone());
         }
     }
     node_names

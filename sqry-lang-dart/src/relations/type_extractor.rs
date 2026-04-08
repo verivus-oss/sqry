@@ -412,6 +412,7 @@ mod tests {
         let tree = parse_dart_type(type_str);
 
         // Find the type annotation node - need to traverse deeply
+        #[allow(clippy::items_after_statements)] // Items near usage for clarity
         fn find_type_node(node: tree_sitter::Node) -> Option<tree_sitter::Node> {
             if is_type_node(node.kind()) {
                 return Some(node);

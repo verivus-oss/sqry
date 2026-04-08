@@ -38,11 +38,9 @@ use sqry_core::graph::unified::node::NodeId;
 use sqry_core::graph::{GraphBuilder, GraphBuilderError, GraphResult, Language, Span};
 use tree_sitter::{Node, Tree};
 
+use crate::relations::type_extractor::extract_type_names_from_haskell_type;
 #[cfg(test)]
 use sqry_core::graph::unified::storage::NodeEntry;
-
-use crate::preprocess::preprocess_content;
-use crate::relations::type_extractor::extract_type_names_from_haskell_type;
 
 // ============================================================================
 // FFI Support Data Structures
@@ -107,8 +105,6 @@ impl GraphBuilder for HaskellGraphBuilder {
         file: &Path,
         staging: &mut StagingGraph,
     ) -> GraphResult<()> {
-        let processed = preprocess_content(content);
-        let content = processed.as_ref();
         let mut helper = GraphBuildHelper::new(staging, file, Language::Haskell);
 
         // Extract module name and exports if present
@@ -2129,9 +2125,11 @@ mod tests {
             .any(|(node_name, node_kind)| node_name == name && *node_kind == kind)
     }
 
+    #[allow(clippy::similar_names)] // Domain variable naming is intentional
     fn has_call_edge(
         staging: &StagingGraph,
         caller: Option<&str>,
+        #[allow(clippy::similar_names)] // AST node variables
         callee: &str,
         arg_count: Option<u8>,
     ) -> bool {
@@ -3028,11 +3026,11 @@ foreign import capi "math.h sin" capi_sin :: Double -> Double
 
     #[test]
     fn test_no_ffi_regular_function() {
-        let source = r#"
+        let source = r"
 module NoFFI where
 regularFunc :: Int -> Int
 regularFunc x = x + 1
-        "#;
+        ";
 
         let (tree, content) = parse_haskell(source);
         let mut staging = StagingGraph::new();
@@ -3218,7 +3216,7 @@ foreign import ccall "strcpy" c_strcpy :: CString -> CString -> IO CString
         assert!(has_ffi_edge(&staging, FfiConvention::C, "strcpy"));
     }
 
-    /// End-to-end test: Build a complete CodeGraph and verify is_unsafe persists
+    /// End-to-end test: Build a complete `CodeGraph` and verify `is_unsafe` persists
     /// through the full staging → commit → query cycle.
     #[test]
     fn test_ffi_unsafe_persists_in_code_graph() {
@@ -3322,7 +3320,7 @@ foreign import ccall unsafe "fast_sqrt" fast_sqrt :: Double -> Double
 
     use sqry_core::graph::unified::edge::kind::TypeOfContext;
 
-    /// Helper to check if a TypeOf edge exists with the expected context, index, and name.
+    /// Helper to check if a `TypeOf` edge exists with the expected context, index, and name.
     /// `source_name` uses substring matching (e.g., `Some("foo")` matches `"Module.foo"`).
     /// For exact matching, use `has_typeof_edge_exact`.
     fn has_typeof_edge(
@@ -3508,7 +3506,7 @@ foreign import ccall unsafe "fast_sqrt" fast_sqrt :: Double -> Double
         false
     }
 
-    /// Helper to count TypeOf edges in staging graph
+    /// Helper to count `TypeOf` edges in staging graph
     fn count_typeof_edges(staging: &StagingGraph) -> usize {
         staging
             .operations()
@@ -4636,6 +4634,7 @@ class Container f where
         );
     }
 
+    #[allow(clippy::too_many_lines)] // Haskell type extraction covers all AST forms
     #[test]
     fn test_typeof_rank2_forall_not_decomposed() {
         // Regression guard: `forall` in return position must NOT be unwrapped
@@ -4648,7 +4647,7 @@ class Container f where
         // verifies that `unwrap_quantified_type` does not inadvertently strip
         // `forall`/`context` wrappers in positions where they represent
         // meaningful type structure (rank-2 types).
-        let source = r#"
+        let source = r"
 foo :: a -> forall b. b -> a
 foo x _ = x
 
@@ -4657,7 +4656,7 @@ bar _ = show
 
 baz :: a -> (forall b. b -> a)
 baz x _ = x
-        "#;
+        ";
 
         let (tree, content) = parse_haskell(source);
         let mut staging = StagingGraph::new();
@@ -4884,13 +4883,13 @@ withBoth = show
         // check so that constraint, parameters, and return type are extracted.
         // Also tests `(Show a, Ord a) => (a -> String)` where only the return
         // type is parenthesized.
-        let source = r#"
+        let source = r"
 showIt :: (Show a => a -> String)
 showIt = show
 
 showBoth :: (Show a, Ord a) => (a -> String)
 showBoth = show
-        "#;
+        ";
 
         let (tree, content) = parse_haskell(source);
         let mut staging = StagingGraph::new();
@@ -5003,10 +5002,10 @@ showBoth = show
         // the `forall` node. The unwrapping order must handle parens→forall:
         // unwrap_forall (no-op) → unwrap_parens (strips parens) → unwrap_forall
         // (now strips forall) → flatten_function_type decomposes the function.
-        let source = r#"
+        let source = r"
 idParens :: (forall a. a -> a)
 idParens = id
-        "#;
+        ";
 
         let (tree, content) = parse_haskell(source);
         let mut staging = StagingGraph::new();
@@ -5057,10 +5056,10 @@ idParens = id
     fn test_typeof_parenthesized_forall_constrained_signature() {
         // Regression: top-level signature with `(forall a. Show a => a -> String)`
         // exercises the full parens → forall → context unwrapping chain.
-        let source = r#"
+        let source = r"
 showParens :: (forall a. Show a => a -> String)
 showParens = show
-        "#;
+        ";
 
         let (tree, content) = parse_haskell(source);
         let mut staging = StagingGraph::new();
@@ -5408,11 +5407,11 @@ class Formatter f where
 
     #[test]
     fn test_references_simple_signature() {
-        let code = r#"
+        let code = r"
 module Ref where
 foo :: Int -> Int
 foo x = x
-"#;
+";
         let (tree, content) = parse_haskell(code);
         let mut staging = StagingGraph::new();
         let builder = HaskellGraphBuilder::default();
@@ -5433,11 +5432,11 @@ foo x = x
 
     #[test]
     fn test_references_multi_param() {
-        let code = r#"
+        let code = r"
 module Ref where
 calc :: Int -> String -> Bool
 calc x y = True
-"#;
+";
         let (tree, content) = parse_haskell(code);
         let mut staging = StagingGraph::new();
         let builder = HaskellGraphBuilder::default();
@@ -5452,11 +5451,11 @@ calc x y = True
 
     #[test]
     fn test_references_complex_type() {
-        let code = r#"
+        let code = r"
 module Ref where
 proc :: IO String -> Maybe Int -> Bool
 proc x y = True
-"#;
+";
         let (tree, content) = parse_haskell(code);
         let mut staging = StagingGraph::new();
         let builder = HaskellGraphBuilder::default();
@@ -5473,11 +5472,11 @@ proc x y = True
 
     #[test]
     fn test_references_no_type_vars() {
-        let code = r#"
+        let code = r"
 module Ref where
 identity :: a -> a
 identity x = x
-"#;
+";
         let (tree, content) = parse_haskell(code);
         let mut staging = StagingGraph::new();
         let builder = HaskellGraphBuilder::default();
@@ -5493,11 +5492,11 @@ identity x = x
 
     #[test]
     fn test_references_constraint() {
-        let code = r#"
+        let code = r"
 module Ref where
 showIt :: Show a => a -> String
 showIt x = show x
-"#;
+";
         let (tree, content) = parse_haskell(code);
         let mut staging = StagingGraph::new();
         let builder = HaskellGraphBuilder::default();
@@ -5511,11 +5510,11 @@ showIt x = show x
 
     #[test]
     fn test_references_multi_constraint() {
-        let code = r#"
+        let code = r"
 module Ref where
 f :: (Show a, Ord a) => a -> String
 f x = show x
-"#;
+";
         let (tree, content) = parse_haskell(code);
         let mut staging = StagingGraph::new();
         let builder = HaskellGraphBuilder::default();
@@ -5530,11 +5529,11 @@ f x = show x
 
     #[test]
     fn test_references_qualified_type() {
-        let code = r#"
+        let code = r"
 module Ref where
 f :: Data.Map.Map String Int -> Bool
 f x = True
-"#;
+";
         let (tree, content) = parse_haskell(code);
         let mut staging = StagingGraph::new();
         let builder = HaskellGraphBuilder::default();
@@ -5550,10 +5549,10 @@ f x = True
 
     #[test]
     fn test_references_data_record() {
-        let code = r#"
+        let code = r"
 module Ref where
 data Rec = Rec { name :: String, age :: Int }
-"#;
+";
         let (tree, content) = parse_haskell(code);
         let mut staging = StagingGraph::new();
         let builder = HaskellGraphBuilder::default();
@@ -5566,10 +5565,10 @@ data Rec = Rec { name :: String, age :: Int }
 
     #[test]
     fn test_references_data_prefix() {
-        let code = r#"
+        let code = r"
 module Ref where
 data Wrapper = Wrapper Int String
-"#;
+";
         let (tree, content) = parse_haskell(code);
         let mut staging = StagingGraph::new();
         let builder = HaskellGraphBuilder::default();
@@ -5582,10 +5581,10 @@ data Wrapper = Wrapper Int String
 
     #[test]
     fn test_references_newtype() {
-        let code = r#"
+        let code = r"
 module Ref where
 newtype Wrapped = Wrapped Int
-"#;
+";
         let (tree, content) = parse_haskell(code);
         let mut staging = StagingGraph::new();
         let builder = HaskellGraphBuilder::default();
@@ -5597,10 +5596,10 @@ newtype Wrapped = Wrapped Int
 
     #[test]
     fn test_references_type_synonym() {
-        let code = r#"
+        let code = r"
 module Ref where
 type Table = Map String Int
-"#;
+";
         let (tree, content) = parse_haskell(code);
         let mut staging = StagingGraph::new();
         let builder = HaskellGraphBuilder::default();
@@ -5614,11 +5613,11 @@ type Table = Map String Int
 
     #[test]
     fn test_references_class_method() {
-        let code = r#"
+        let code = r"
 module Ref where
 class Container f where
   extract :: f a -> Int
-"#;
+";
         let (tree, content) = parse_haskell(code);
         let mut staging = StagingGraph::new();
         let builder = HaskellGraphBuilder::default();
@@ -5630,10 +5629,10 @@ class Container f where
 
     #[test]
     fn test_references_no_edges_without_sig() {
-        let code = r#"
+        let code = r"
 module Ref where
 bar = 42
-"#;
+";
         let (tree, content) = parse_haskell(code);
         let mut staging = StagingGraph::new();
         let builder = HaskellGraphBuilder::default();
@@ -5649,11 +5648,11 @@ bar = 42
 
     #[test]
     fn test_references_forall() {
-        let code = r#"
+        let code = r"
 module Ref where
 foo :: forall a. a -> Int
 foo x = 42
-"#;
+";
         let (tree, content) = parse_haskell(code);
         let mut staging = StagingGraph::new();
         let builder = HaskellGraphBuilder::default();
@@ -5666,11 +5665,11 @@ foo x = 42
 
     #[test]
     fn test_references_gadt() {
-        let code = r#"
+        let code = r"
 module Ref where
 data Expr a where
   Lit :: Int -> Expr Int
-"#;
+";
         let (tree, content) = parse_haskell(code);
         let mut staging = StagingGraph::new();
         let builder = HaskellGraphBuilder::default();
@@ -5682,10 +5681,10 @@ data Expr a where
 
     #[test]
     fn test_references_strict_lazy_fields() {
-        let code = r#"
+        let code = r"
 module Ref where
 data Strict = Strict !Int ~String
-"#;
+";
         let (tree, content) = parse_haskell(code);
         let mut staging = StagingGraph::new();
         let builder = HaskellGraphBuilder::default();
@@ -5702,11 +5701,11 @@ data Strict = Strict !Int ~String
         // TypeOf treats the forall return as opaque, but References extracts ALL
         // type constructors from the full signature type node, including those
         // inside the rank-2 return. This is correct behavior.
-        let code = r#"
+        let code = r"
 module Ref where
 foo :: Int -> forall a. Show a => a -> String
 foo x = show
-"#;
+";
         let (tree, content) = parse_haskell(code);
         let mut staging = StagingGraph::new();
         let builder = HaskellGraphBuilder::default();
@@ -5735,11 +5734,11 @@ foo x = show
     #[test]
     fn test_references_dedup_repeated_type() {
         // Same type appears in multiple positions; exactly one References edge per unique type
-        let code = r#"
+        let code = r"
 module Ref where
 swap :: (Int, Int) -> (Int, Int)
 swap (a, b) = (b, a)
-"#;
+";
         let (tree, content) = parse_haskell(code);
         let mut staging = StagingGraph::new();
         let builder = HaskellGraphBuilder::default();
@@ -5757,10 +5756,10 @@ swap (a, b) = (b, a)
     #[test]
     fn test_references_dedup_record_shared_type() {
         // Multiple record fields with the same type should produce one References edge
-        let code = r#"
+        let code = r"
 module Ref where
 data Rec = Rec { name :: Int, age :: Int }
-"#;
+";
         let (tree, content) = parse_haskell(code);
         let mut staging = StagingGraph::new();
         let builder = HaskellGraphBuilder::default();
@@ -5778,10 +5777,10 @@ data Rec = Rec { name :: Int, age :: Int }
     #[test]
     fn test_references_dedup_prefix_shared_type() {
         // Multiple prefix constructor fields with same type
-        let code = r#"
+        let code = r"
 module Ref where
 data Pair = Pair Int Int
-"#;
+";
         let (tree, content) = parse_haskell(code);
         let mut staging = StagingGraph::new();
         let builder = HaskellGraphBuilder::default();
@@ -5800,10 +5799,10 @@ data Pair = Pair Int Int
     fn test_references_dedup_multi_constructor_prefix() {
         // Multiple constructors of the same data type sharing a type should produce one edge
         // data T = A Int | B Int  →  exactly one T -> Int References edge
-        let code = r#"
+        let code = r"
 module Ref where
 data T = A Int | B Int
-"#;
+";
         let (tree, content) = parse_haskell(code);
         let mut staging = StagingGraph::new();
         let builder = HaskellGraphBuilder::default();
@@ -5822,10 +5821,10 @@ data T = A Int | B Int
     fn test_references_dedup_multi_constructor_record() {
         // Multiple record constructors sharing the same type
         // data T = A { x :: Int } | B { y :: Int }  →  exactly one T -> Int References edge
-        let code = r#"
+        let code = r"
 module Ref where
 data T = A { x :: Int } | B { y :: Int }
-"#;
+";
         let (tree, content) = parse_haskell(code);
         let mut staging = StagingGraph::new();
         let builder = HaskellGraphBuilder::default();
@@ -5846,12 +5845,12 @@ data T = A { x :: Int } | B { y :: Int }
         // data E a where Lit :: Int -> E Int; Add :: Int -> Int -> E Int
         // Int appears in both constructors → exactly one E -> Int edge (dedup)
         // E appears in return types → one E -> E self-reference edge (GADTs always self-ref)
-        let code = r#"
+        let code = r"
 module Ref where
 data E a where
   Lit :: Int -> E Int
   Add :: Int -> Int -> E Int
-"#;
+";
         let (tree, content) = parse_haskell(code);
         let mut staging = StagingGraph::new();
         let builder = HaskellGraphBuilder::default();
@@ -5872,10 +5871,10 @@ data E a where
     fn test_references_dedup_multi_constructor_infix() {
         // Multiple infix constructors sharing the same type across constructors
         // data T = Int `A` Int | Int `B` Int  →  exactly one T -> Int References edge
-        let code = r#"
+        let code = r"
 module Ref where
 data T = Int `A` Int | Int `B` Int
-"#;
+";
         let (tree, content) = parse_haskell(code);
         let mut staging = StagingGraph::new();
         let builder = HaskellGraphBuilder::default();

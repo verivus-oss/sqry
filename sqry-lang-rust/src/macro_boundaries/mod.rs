@@ -42,6 +42,7 @@ use tree_sitter::{Node, Tree};
 /// Controls which sub-analyzers are enabled and provides configuration for
 /// cfg evaluation. All features are enabled by default.
 #[derive(Debug, Clone)]
+#[allow(clippy::struct_excessive_bools)] // Each bool controls a distinct sub-analyzer; a state machine would obscure this intent
 pub struct MacroBoundaryConfig {
     /// Enable attribute macro detection (4.5a). Default: `true`.
     pub enable_attribute_macros: bool,
@@ -116,7 +117,7 @@ impl MacroBoundaryConfig {
 /// - **4.5a** Attribute macro detection on all attributable items
 /// - **4.5b** Metavariable extraction from `macro_rules!` definitions
 /// - **4.5c** Proc-macro function classification
-/// - **4.5e** cfg/cfg_attr analysis
+/// - **4.5e** `cfg/cfg_attr` analysis
 ///
 /// Sub-analyzers 4.5d (cross-crate) and 4.5f (expand cache) run outside
 /// `build_graph()` and are not called here.
@@ -130,13 +131,13 @@ impl MacroBoundaryConfig {
 /// * `config` — configuration controlling which analyzers are enabled
 /// * `node_map` — mapping from tree-sitter node IDs to graph `NodeId`s, provided
 ///   by the caller so we can associate AST nodes with their graph nodes
-pub fn analyze_macro_boundaries_in_build_graph(
+pub fn analyze_macro_boundaries_in_build_graph<S: std::hash::BuildHasher>(
     tree: &Tree,
     content: &[u8],
     helper: &mut GraphBuildHelper,
     metadata_store: &mut NodeMetadataStore,
     config: &MacroBoundaryConfig,
-    node_map: &std::collections::HashMap<usize, (sqry_core::graph::unified::NodeId, String)>,
+    node_map: &std::collections::HashMap<usize, (sqry_core::graph::unified::NodeId, String), S>,
 ) {
     if !config.any_build_graph_analyzer_enabled() {
         return;
@@ -155,13 +156,13 @@ pub fn analyze_macro_boundaries_in_build_graph(
 }
 
 /// Recursively walk the AST and run enabled analyzers on relevant nodes.
-fn walk_and_analyze(
+fn walk_and_analyze<S: std::hash::BuildHasher>(
     node: Node,
     content: &[u8],
     helper: &mut GraphBuildHelper,
     metadata_store: &mut NodeMetadataStore,
     config: &MacroBoundaryConfig,
-    node_map: &std::collections::HashMap<usize, (sqry_core::graph::unified::NodeId, String)>,
+    node_map: &std::collections::HashMap<usize, (sqry_core::graph::unified::NodeId, String), S>,
 ) {
     let kind = node.kind();
 
@@ -301,10 +302,10 @@ mod tests {
         use std::path::Path;
         use tree_sitter::Parser;
 
-        let source = r#"
+        let source = r"
 #[tokio::main]
 async fn main() {}
-"#;
+";
         let mut parser = Parser::new();
         let lang: tree_sitter::Language = tree_sitter_rust::LANGUAGE.into();
         parser.set_language(&lang).unwrap();

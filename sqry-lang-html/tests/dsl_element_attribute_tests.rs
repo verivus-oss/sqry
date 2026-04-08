@@ -51,7 +51,7 @@ fn count_contains_edges(staging: &StagingGraph) -> usize {
 
 #[test]
 fn test_simple_element() {
-    let source = r#"<div></div>"#;
+    let source = r"<div></div>";
 
     let tree = parse_html(source);
     let mut staging = StagingGraph::new();
@@ -66,8 +66,7 @@ fn test_simple_element() {
     let element_count = count_nodes_by_kind(&staging, NodeKind::CallSite);
     assert!(
         element_count >= 1,
-        "Expected at least 1 Element node, got {}",
-        element_count
+        "Expected at least 1 Element node, got {element_count}"
     );
 }
 
@@ -88,30 +87,27 @@ fn test_element_with_attributes() {
     let element_count = count_nodes_by_kind(&staging, NodeKind::CallSite);
     assert!(
         element_count >= 1,
-        "Expected at least 1 Element node, got {}",
-        element_count
+        "Expected at least 1 Element node, got {element_count}"
     );
 
     // Should have Attribute nodes (class and id)
     let attribute_count = count_nodes_by_kind(&staging, NodeKind::Variable);
     assert!(
         attribute_count >= 2,
-        "Expected at least 2 Attribute nodes (class, id), got {}",
-        attribute_count
+        "Expected at least 2 Attribute nodes (class, id), got {attribute_count}"
     );
 
     // Should have Contains edges (element -> attributes)
     let contains_count = count_contains_edges(&staging);
     assert!(
         contains_count >= 2,
-        "Expected at least 2 Contains edges, got {}",
-        contains_count
+        "Expected at least 2 Contains edges, got {contains_count}"
     );
 }
 
 #[test]
 fn test_nested_elements() {
-    let source = r#"<div><span>text</span></div>"#;
+    let source = r"<div><span>text</span></div>";
 
     let tree = parse_html(source);
     let mut staging = StagingGraph::new();
@@ -126,8 +122,7 @@ fn test_nested_elements() {
     let element_count = count_nodes_by_kind(&staging, NodeKind::CallSite);
     assert!(
         element_count >= 2,
-        "Expected at least 2 Element nodes (div, span), got {}",
-        element_count
+        "Expected at least 2 Element nodes (div, span), got {element_count}"
     );
 }
 
@@ -148,16 +143,14 @@ fn test_self_closing_element() {
     let element_count = count_nodes_by_kind(&staging, NodeKind::CallSite);
     assert!(
         element_count >= 1,
-        "Expected at least 1 Element node (img), got {}",
-        element_count
+        "Expected at least 1 Element node (img), got {element_count}"
     );
 
     // Should have Attribute nodes (src and alt)
     let attribute_count = count_nodes_by_kind(&staging, NodeKind::Variable);
     assert!(
         attribute_count >= 2,
-        "Expected at least 2 Attribute nodes (src, alt), got {}",
-        attribute_count
+        "Expected at least 2 Attribute nodes (src, alt), got {attribute_count}"
     );
 }
 
@@ -181,16 +174,14 @@ fn test_multiple_elements_with_attributes() {
     let element_count = count_nodes_by_kind(&staging, NodeKind::CallSite);
     assert!(
         element_count >= 2,
-        "Expected at least 2 Element nodes (button, input), got {}",
-        element_count
+        "Expected at least 2 Element nodes (button, input), got {element_count}"
     );
 
     // Should have multiple Attribute nodes
     let attribute_count = count_nodes_by_kind(&staging, NodeKind::Variable);
     assert!(
         attribute_count >= 4,
-        "Expected at least 4 Attribute nodes, got {}",
-        attribute_count
+        "Expected at least 4 Attribute nodes, got {attribute_count}"
     );
 }
 
@@ -225,16 +216,14 @@ fn test_complex_html_structure() {
     let element_count = count_nodes_by_kind(&staging, NodeKind::CallSite);
     assert!(
         element_count >= 7,
-        "Expected at least 7 Element nodes (html, head, meta, title, body, div, h1, p), got {}",
-        element_count
+        "Expected at least 7 Element nodes (html, head, meta, title, body, div, h1, p), got {element_count}"
     );
 
     // Should have Attribute nodes
     let attribute_count = count_nodes_by_kind(&staging, NodeKind::Variable);
     assert!(
         attribute_count >= 4,
-        "Expected at least 4 Attribute nodes, got {}",
-        attribute_count
+        "Expected at least 4 Attribute nodes, got {attribute_count}"
     );
 
     // Should have Contains edges
@@ -244,7 +233,7 @@ fn test_complex_html_structure() {
 
 #[test]
 fn test_element_without_attributes() {
-    let source = r#"<span>text content</span>"#;
+    let source = r"<span>text content</span>";
 
     let tree = parse_html(source);
     let mut staging = StagingGraph::new();
@@ -259,15 +248,13 @@ fn test_element_without_attributes() {
     let element_count = count_nodes_by_kind(&staging, NodeKind::CallSite);
     assert!(
         element_count >= 1,
-        "Expected at least 1 Element node, got {}",
-        element_count
+        "Expected at least 1 Element node, got {element_count}"
     );
 
     // May have 0 Attribute nodes if element has no attributes
     let attribute_count = count_nodes_by_kind(&staging, NodeKind::Variable);
     assert!(
         attribute_count == 0,
-        "Expected 0 Attribute nodes for element without attributes, got {}",
-        attribute_count
+        "Expected 0 Attribute nodes for element without attributes, got {attribute_count}"
     );
 }

@@ -203,7 +203,7 @@ fn graph_builder_detects_multiple_ffi_calls() {
 
 #[test]
 fn graph_builder_detects_advanced_ffi_patterns() {
-    let source = r###"<?php
+    let source = r#"<?php
 
 class FfiAdvanced {
     // Fully-qualified FFI with leading backslash
@@ -222,7 +222,7 @@ class FfiAdvanced {
         return (FFI::load("/usr/lib/test.h"))->baz();
     }
 }
-"###;
+"#;
 
     let tree = parse_php(source);
     let file = unique_php_path("advanced_ffi");
@@ -277,7 +277,7 @@ class FfiAdvanced {
 
 #[test]
 fn graph_builder_handles_php8_named_arguments() {
-    let source = r###"<?php
+    let source = r#"<?php
 
 class FfiNamedArgs {
     // PHP 8 named arguments with FFI::cdef
@@ -300,7 +300,7 @@ class FfiNamedArgs {
         return FFI::cdef("int foo();", lib: "libmixed.so");
     }
 }
-"###;
+"#;
 
     let tree = parse_php(source);
     let file = unique_php_path("php8_named_args");
@@ -340,7 +340,7 @@ class FfiNamedArgs {
 
 #[test]
 fn graph_builder_handles_reordered_named_arguments() {
-    let source = r###"<?php
+    let source = r#"<?php
 
 class FfiReordered {
     // Reversed order: lib comes before cdef
@@ -363,7 +363,7 @@ class FfiReordered {
         return $ffi->process();
     }
 }
-"###;
+"#;
 
     let tree = parse_php(source);
     let file = unique_php_path("reordered_named_args");
@@ -429,7 +429,7 @@ class FfiReordered {
 
 #[test]
 fn graph_builder_rejects_interpolated_ffi_strings() {
-    let source = r###"<?php
+    let source = r#"<?php
 
 class FfiInterpolated {
     // Interpolated library name should fall back to native::unknown
@@ -449,7 +449,7 @@ class FfiInterpolated {
         return FFI::cdef("int bar();", "libpure.so");
     }
 }
-"###;
+"#;
 
     let tree = parse_php(source);
     let file = unique_php_path("interpolated_strings");
@@ -508,7 +508,7 @@ class FfiInterpolated {
 
 #[test]
 fn graph_builder_rejects_complex_interpolation() {
-    let source = r###"<?php
+    let source = r#"<?php
 
 class FfiComplexInterpolation {
     private $config = ['lib_path' => '/usr/lib'];
@@ -537,7 +537,7 @@ class FfiComplexInterpolation {
         return FFI::cdef("int bar();", "libpure.so");
     }
 }
-"###;
+"#;
 
     let tree = parse_php(source);
     let file = unique_php_path("complex_interpolation");
@@ -652,7 +652,7 @@ fn count_edges_of_kind_local(
         .count()
 }
 
-/// Build a map from StringId to string value from staging operations.
+/// Build a map from `StringId` to string value from staging operations.
 fn build_string_map(staging: &StagingGraph) -> HashMap<StringId, String> {
     staging
         .operations()
@@ -707,7 +707,7 @@ fn has_ffi_edge(staging: &StagingGraph, source_pattern: &str, target_pattern: &s
     })
 }
 
-/// Get node name from NodeEntry using string map.
+/// Get node name from `NodeEntry` using string map.
 fn get_node_name(entry: &NodeEntry, string_map: &HashMap<StringId, String>) -> Option<String> {
     entry
         .qualified_name
@@ -741,8 +741,7 @@ fn has_import_edge_to(staging: &StagingGraph, target_pattern: &str) -> bool {
         {
             node_names
                 .get(target)
-                .map(|name| name.contains(target_pattern))
-                .unwrap_or(false)
+                .is_some_and(|name| name.contains(target_pattern))
         } else {
             false
         }
@@ -765,8 +764,7 @@ fn has_import_edge_with_alias(staging: &StagingGraph, alias_pattern: &str) -> bo
         {
             string_map
                 .get(alias_id)
-                .map(|alias_str| alias_str.contains(alias_pattern))
-                .unwrap_or(false)
+                .is_some_and(|alias_str| alias_str.contains(alias_pattern))
         } else {
             false
         }
@@ -775,9 +773,9 @@ fn has_import_edge_with_alias(staging: &StagingGraph, alias_pattern: &str) -> bo
 
 #[test]
 fn graph_builder_extracts_simple_use_statement() {
-    let source = r###"<?php
+    let source = r"<?php
 use App\Services\Mailer;
-"###;
+";
     let tree = parse_php(source);
     let file = unique_php_path("simple_use");
     let mut staging = StagingGraph::new();
@@ -796,9 +794,9 @@ use App\Services\Mailer;
 
 #[test]
 fn graph_builder_extracts_aliased_use_statement() {
-    let source = r###"<?php
+    let source = r"<?php
 use App\Services\Mailer as Mail;
-"###;
+";
     let tree = parse_php(source);
     let file = unique_php_path("aliased_use");
     let mut staging = StagingGraph::new();
@@ -821,9 +819,9 @@ use App\Services\Mailer as Mail;
 
 #[test]
 fn graph_builder_extracts_grouped_use_statement() {
-    let source = r###"<?php
+    let source = r"<?php
 use App\Models\{User, Post, Comment};
-"###;
+";
     let tree = parse_php(source);
     let file = unique_php_path("grouped_use");
     let mut staging = StagingGraph::new();
@@ -850,9 +848,9 @@ use App\Models\{User, Post, Comment};
 
 #[test]
 fn graph_builder_extracts_function_use_statement() {
-    let source = r###"<?php
+    let source = r"<?php
 use function App\Utils\array_flatten;
-"###;
+";
     let tree = parse_php(source);
     let file = unique_php_path("function_use");
     let mut staging = StagingGraph::new();
@@ -871,9 +869,9 @@ use function App\Utils\array_flatten;
 
 #[test]
 fn graph_builder_extracts_const_use_statement() {
-    let source = r###"<?php
+    let source = r"<?php
 use const App\Config\VERSION;
-"###;
+";
     let tree = parse_php(source);
     let file = unique_php_path("const_use");
     let mut staging = StagingGraph::new();
@@ -892,9 +890,9 @@ use const App\Config\VERSION;
 
 #[test]
 fn graph_builder_extracts_require_statement() {
-    let source = r###"<?php
+    let source = r"<?php
 require 'bootstrap.php';
-"###;
+";
     let tree = parse_php(source);
     let file = unique_php_path("require");
     let mut staging = StagingGraph::new();
@@ -913,9 +911,9 @@ require 'bootstrap.php';
 
 #[test]
 fn graph_builder_extracts_require_once_statement() {
-    let source = r###"<?php
+    let source = r"<?php
 require_once 'config.php';
-"###;
+";
     let tree = parse_php(source);
     let file = unique_php_path("require_once");
     let mut staging = StagingGraph::new();
@@ -934,9 +932,9 @@ require_once 'config.php';
 
 #[test]
 fn graph_builder_extracts_include_statement() {
-    let source = r###"<?php
+    let source = r"<?php
 include 'helpers.php';
-"###;
+";
     let tree = parse_php(source);
     let file = unique_php_path("include");
     let mut staging = StagingGraph::new();
@@ -955,9 +953,9 @@ include 'helpers.php';
 
 #[test]
 fn graph_builder_extracts_include_once_statement() {
-    let source = r###"<?php
+    let source = r"<?php
 include_once 'polyfills.php';
-"###;
+";
     let tree = parse_php(source);
     let file = unique_php_path("include_once");
     let mut staging = StagingGraph::new();
@@ -980,10 +978,10 @@ include_once 'polyfills.php';
 
 #[test]
 fn graph_builder_extracts_class_inheritance() {
-    let source = r###"<?php
+    let source = r"<?php
 class Child extends Parent {
 }
-"###;
+";
     let tree = parse_php(source);
     let file = unique_php_path("class_inheritance");
     let mut staging = StagingGraph::new();
@@ -1003,12 +1001,12 @@ class Child extends Parent {
 
 #[test]
 fn graph_builder_extracts_qualified_class_inheritance() {
-    let source = r###"<?php
+    let source = r"<?php
 namespace App\Controllers;
 
 class UserController extends App\Base\Controller {
 }
-"###;
+";
     let tree = parse_php(source);
     let file = unique_php_path("qualified_inheritance");
     let mut staging = StagingGraph::new();
@@ -1032,10 +1030,10 @@ class UserController extends App\Base\Controller {
 
 #[test]
 fn graph_builder_extracts_single_interface_implementation() {
-    let source = r###"<?php
+    let source = r"<?php
 class UserRepository implements Repository {
 }
-"###;
+";
     let tree = parse_php(source);
     let file = unique_php_path("single_interface");
     let mut staging = StagingGraph::new();
@@ -1056,10 +1054,10 @@ class UserRepository implements Repository {
 
 #[test]
 fn graph_builder_extracts_multiple_interface_implementation() {
-    let source = r###"<?php
+    let source = r"<?php
 class User implements Serializable, JsonSerializable, ArrayAccess {
 }
-"###;
+";
     let tree = parse_php(source);
     let file = unique_php_path("multiple_interfaces");
     let mut staging = StagingGraph::new();
@@ -1080,10 +1078,10 @@ class User implements Serializable, JsonSerializable, ArrayAccess {
 
 #[test]
 fn graph_builder_extracts_extends_and_implements() {
-    let source = r###"<?php
+    let source = r"<?php
 class UserController extends BaseController implements Authenticatable {
 }
-"###;
+";
     let tree = parse_php(source);
     let file = unique_php_path("extends_and_implements");
     let mut staging = StagingGraph::new();
@@ -1114,11 +1112,11 @@ class UserController extends BaseController implements Authenticatable {
 
 #[test]
 fn graph_builder_extracts_single_trait_usage() {
-    let source = r###"<?php
+    let source = r"<?php
 class User {
     use Timestampable;
 }
-"###;
+";
     let tree = parse_php(source);
     let file = unique_php_path("single_trait");
     let mut staging = StagingGraph::new();
@@ -1139,11 +1137,11 @@ class User {
 
 #[test]
 fn graph_builder_extracts_multiple_trait_usage() {
-    let source = r###"<?php
+    let source = r"<?php
 class Post {
     use Timestampable, SoftDeletes, Loggable;
 }
-"###;
+";
     let tree = parse_php(source);
     let file = unique_php_path("multiple_traits");
     let mut staging = StagingGraph::new();
@@ -1168,10 +1166,10 @@ class Post {
 
 #[test]
 fn graph_builder_extracts_interface_inheritance() {
-    let source = r###"<?php
+    let source = r"<?php
 interface Cacheable extends Serializable {
 }
-"###;
+";
     let tree = parse_php(source);
     let file = unique_php_path("interface_inheritance");
     let mut staging = StagingGraph::new();
@@ -1191,10 +1189,10 @@ interface Cacheable extends Serializable {
 
 #[test]
 fn graph_builder_extracts_interface_multiple_inheritance() {
-    let source = r###"<?php
+    let source = r"<?php
 interface UserInterface extends Authenticatable, Authorizable, CanResetPassword {
 }
-"###;
+";
     let tree = parse_php(source);
     let file = unique_php_path("interface_multiple_inheritance");
     let mut staging = StagingGraph::new();
@@ -1218,7 +1216,7 @@ interface UserInterface extends Authenticatable, Authorizable, CanResetPassword 
 
 #[test]
 fn graph_builder_handles_complex_class_with_all_features() {
-    let source = r###"<?php
+    let source = r"<?php
 namespace App\Models;
 
 use App\Traits\Timestampable;
@@ -1232,7 +1230,7 @@ class User extends BaseModel implements Authenticatable, Serializable {
         $this->validate();
     }
 }
-"###;
+";
     let tree = parse_php(source);
     let file = unique_php_path("complex_class");
     let mut staging = StagingGraph::new();
@@ -1326,8 +1324,7 @@ fn has_export_edge_to(staging: &StagingGraph, target_pattern: &str) -> bool {
         {
             node_names
                 .get(target)
-                .map(|name| name.contains(target_pattern))
-                .unwrap_or(false)
+                .is_some_and(|name| name.contains(target_pattern))
         } else {
             false
         }
@@ -1336,13 +1333,13 @@ fn has_export_edge_to(staging: &StagingGraph, target_pattern: &str) -> bool {
 
 #[test]
 fn graph_builder_exports_top_level_class() {
-    let source = r###"<?php
+    let source = r"<?php
 class User {
     public function getId() {
         return $this->id;
     }
 }
-"###;
+";
     let tree = parse_php(source);
     let file = unique_php_path("export_class");
     let mut staging = StagingGraph::new();
@@ -1361,11 +1358,11 @@ class User {
 
 #[test]
 fn graph_builder_exports_top_level_function() {
-    let source = r###"<?php
+    let source = r#"<?php
 function greet(string $name): string {
     return "Hello, {$name}!";
 }
-"###;
+"#;
     let tree = parse_php(source);
     let file = unique_php_path("export_function");
     let mut staging = StagingGraph::new();
@@ -1384,12 +1381,12 @@ function greet(string $name): string {
 
 #[test]
 fn graph_builder_exports_interface() {
-    let source = r###"<?php
+    let source = r"<?php
 interface Repository {
     public function findById($id);
     public function save($entity);
 }
-"###;
+";
     let tree = parse_php(source);
     let file = unique_php_path("export_interface");
     let mut staging = StagingGraph::new();
@@ -1408,13 +1405,13 @@ interface Repository {
 
 #[test]
 fn graph_builder_exports_trait() {
-    let source = r###"<?php
+    let source = r"<?php
 trait Timestampable {
     public function getCreatedAt() {
         return $this->created_at;
     }
 }
-"###;
+";
     let tree = parse_php(source);
     let file = unique_php_path("export_trait");
     let mut staging = StagingGraph::new();
@@ -1433,7 +1430,7 @@ trait Timestampable {
 
 #[test]
 fn graph_builder_exports_namespaced_class() {
-    let source = r###"<?php
+    let source = r"<?php
 namespace App\Services;
 
 class UserService {
@@ -1441,7 +1438,7 @@ class UserService {
         return [];
     }
 }
-"###;
+";
     let tree = parse_php(source);
     let file = unique_php_path("export_namespaced_class");
     let mut staging = StagingGraph::new();
@@ -1460,13 +1457,13 @@ class UserService {
 
 #[test]
 fn graph_builder_exports_namespaced_function() {
-    let source = r###"<?php
+    let source = r"<?php
 namespace App\Helpers;
 
 function slugify($text) {
     return strtolower(preg_replace('/[^a-z0-9]+/', '-', $text));
 }
-"###;
+";
     let tree = parse_php(source);
     let file = unique_php_path("export_namespaced_function");
     let mut staging = StagingGraph::new();
@@ -1485,7 +1482,7 @@ function slugify($text) {
 
 #[test]
 fn graph_builder_exports_multiple_classes_in_file() {
-    let source = r###"<?php
+    let source = r"<?php
 class User {
     public function getId() {
         return $this->id;
@@ -1501,7 +1498,7 @@ class Post {
 interface Repository {
     public function findById($id);
 }
-"###;
+";
     let tree = parse_php(source);
     let file = unique_php_path("export_multiple");
     let mut staging = StagingGraph::new();
@@ -1528,7 +1525,7 @@ interface Repository {
 
 #[test]
 fn graph_builder_exports_brace_style_namespace() {
-    let source = r###"<?php
+    let source = r"<?php
 namespace App\Services {
     class UserService {
         public function getUsers() {
@@ -1540,7 +1537,7 @@ namespace App\Services {
         return true;
     }
 }
-"###;
+";
     let tree = parse_php(source);
     let file = unique_php_path("export_brace_namespace");
     let mut staging = StagingGraph::new();
@@ -1563,7 +1560,7 @@ namespace App\Services {
 
 #[test]
 fn graph_builder_exports_semicolon_style_namespace() {
-    let source = r###"<?php
+    let source = r"<?php
 namespace App\Services;
 
 class UserService {
@@ -1575,7 +1572,7 @@ class UserService {
 function helper() {
     return true;
 }
-"###;
+";
     let tree = parse_php(source);
     let file = unique_php_path("export_semicolon_namespace");
     let mut staging = StagingGraph::new();
@@ -1598,13 +1595,13 @@ function helper() {
 
 #[test]
 fn graph_builder_exports_enum() {
-    let source = r###"<?php
+    let source = r"<?php
 enum Status {
     case PENDING;
     case APPROVED;
     case REJECTED;
 }
-"###;
+";
     let tree = parse_php(source);
     let file = unique_php_path("export_enum");
     let mut staging = StagingGraph::new();

@@ -1,10 +1,10 @@
 //! CLI integration tests for Groovy relation queries
 //!
 //! Tests that relation queries work end-to-end through the CLI for Groovy:
-//! - Callers queries (method calls, closures) - ✅ via GraphBuilder
-//! - Callees queries (what a method calls) - ✅ via GraphBuilder
-//! - Exports queries (classes, methods, closures) - ✅ via GraphBuilder
-//! - Imports queries (import statements) - ✅ via GraphBuilder
+//! - Callers queries (method calls, closures) - ✅ via `GraphBuilder`
+//! - Callees queries (what a method calls) - ✅ via `GraphBuilder`
+//! - Exports queries (classes, methods, closures) - ✅ via `GraphBuilder`
+//! - Imports queries (import statements) - ✅ via `GraphBuilder`
 
 mod common;
 use common::sqry_bin;
@@ -128,7 +128,7 @@ process("test")
 fn cli_groovy_callers_closures() {
     let project = TempDir::new().unwrap();
 
-    let groovy_code = r#"
+    let groovy_code = r"
 def transform(int x) {
     return x * 2
 }
@@ -139,7 +139,7 @@ def processData() {
 }
 
 processData()
-"#;
+";
     std::fs::write(project.path().join("Closures.groovy"), groovy_code).unwrap();
 
     Command::new(sqry_bin())

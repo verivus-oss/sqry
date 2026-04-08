@@ -169,20 +169,15 @@ impl<'de> Deserialize<'de> for NodeMetadataStore {
         let entries: Vec<NodeMetadataEntryV7> = Vec::deserialize(deserializer)?;
         let mut map = HashMap::with_capacity(entries.len());
         for e in entries {
-            let metadata = match e.kind {
-                NODE_METADATA_CLASSPATH => {
-                    let data = e.classpath_data.ok_or_else(|| {
-                        serde::de::Error::custom(
-                            "missing classpath_data for Classpath metadata entry",
-                        )
-                    })?;
-                    NodeMetadata::Classpath(data)
-                }
-                _ => {
-                    // Default: treat as Macro (covers both explicit 0 and legacy)
-                    let data = e.macro_data.unwrap_or_default();
-                    NodeMetadata::Macro(data)
-                }
+            let metadata = if e.kind == NODE_METADATA_CLASSPATH {
+                let data = e.classpath_data.ok_or_else(|| {
+                    serde::de::Error::custom("missing classpath_data for Classpath metadata entry")
+                })?;
+                NodeMetadata::Classpath(data)
+            } else {
+                // Default: treat as Macro (covers both explicit 0 and legacy)
+                let data = e.macro_data.unwrap_or_default();
+                NodeMetadata::Macro(data)
             };
             map.insert((e.index, e.generation), metadata);
         }
@@ -247,6 +242,12 @@ impl NodeMetadataStore {
     }
 
     /// Get or insert default macro metadata for a node.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the node already has a `Classpath` metadata entry at this key,
+    /// which indicates a programming error — callers must not mix metadata types
+    /// for the same node.
     pub fn get_or_insert_default(&mut self, node_id: NodeId) -> &mut MacroNodeMetadata {
         let entry = self
             .entries

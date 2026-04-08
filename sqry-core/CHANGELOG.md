@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+## [7.2.0](https://github.com/verivus-oss/sqry/compare/v7.1.4...v7.2.0) - 2026-04-06
+
+### Added
+- *(graph)* add sqry-bind facade with SymbolClassification and BindingQuery- *(graph)* add path enumeration mode with SCC pruning strategy to BFS kernel
+### Fixed
+- *(graph)* enforce node/edge limits atomically and add leaf enumeration in path BFS- *(graph)* use discovery-order vector in path enumeration BFS per spec invariant
+### Other
+- bump version to 7.2.0
+- *(clippy)* resolve pedantic lints after BFS kernel migration- *(core)* fix collapsible-if clippy lints in kernel.rs## [7.1.5](https://github.com/verivus-oss/sqry/compare/v7.1.4...v7.1.5) - 2026-04-06
+
+### Added
+- *(core)* add shared materialize module for node materialization and seed lookup- *(graph)* add shared graph helpers and witness-bearing resolution
+### Documentation
+- *(graph)* formalize witness seam as baseline API and update progress
+### Plan
+- add DAG TOML implementation plan for MCP resource-backed skills
 ## [7.1.0](https://github.com/verivus-oss/sqry/compare/v6.0.23...v7.1.0) - 2026-04-04
 
 ### Added

@@ -138,7 +138,7 @@ fn count_table_writes(staging: &StagingGraph, table: &str, op: TableWriteOp) -> 
 
 #[test]
 fn test_method_and_function_nodes() {
-    let source = br#"
+    let source = br"
 CLASS zcl_example IMPLEMENTATION.
   METHOD get_customer_data.
     SELECT id name
@@ -150,7 +150,7 @@ ENDCLASS.
 FUNCTION z_my_function.
   SELECT * FROM zorders INTO TABLE @DATA(orders).
 ENDFUNCTION.
-"#;
+";
 
     let staging = build_staging(source);
 
@@ -160,29 +160,28 @@ ENDFUNCTION.
 
 #[test]
 fn test_table_edges_from_method() {
-    let source = br#"
+    let source = br"
 CLASS zcl_example IMPLEMENTATION.
   METHOD get_customer_data.
     SELECT * FROM zcustomers INTO TABLE @DATA(lt_customers).
     INSERT zcustomers FROM @ls_row.
   ENDMETHOD.
 ENDCLASS.
-"#;
+";
 
     let staging = build_staging(source);
 
     let table_reads = list_table_reads(&staging);
     assert!(
         count_table_reads(&staging, "zcustomers") >= 1,
-        "Expected table read for zcustomers, saw {:?}",
-        table_reads
+        "Expected table read for zcustomers, saw {table_reads:?}"
     );
     assert!(count_table_writes(&staging, "zcustomers", TableWriteOp::Insert) >= 1);
 }
 
 #[test]
 fn test_full_abap_module_integration() {
-    let source = br#"
+    let source = br"
 CLASS zcl_customer_mgmt IMPLEMENTATION.
   METHOD create_customer.
     INSERT zcustomers FROM @ls_customer.
@@ -193,20 +192,18 @@ CLASS zcl_customer_mgmt IMPLEMENTATION.
     UPDATE zcustomers SET status = @lv_status WHERE id = @lv_id.
   ENDMETHOD.
 ENDCLASS.
-"#;
+";
 
     let staging = build_staging(source);
 
     let method_names = list_nodes_by_kind(&staging, NodeKind::Method);
     assert!(
         find_node(&staging, "create_customer", NodeKind::Method),
-        "Expected method create_customer, saw {:?}",
-        method_names
+        "Expected method create_customer, saw {method_names:?}"
     );
     assert!(
         find_node(&staging, "update_status", NodeKind::Method),
-        "Expected method update_status, saw {:?}",
-        method_names
+        "Expected method update_status, saw {method_names:?}"
     );
     assert!(count_table_reads(&staging, "zcustomers") >= 1);
     assert!(count_table_writes(&staging, "zcustomers", TableWriteOp::Insert) >= 1);

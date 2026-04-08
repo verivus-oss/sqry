@@ -9,19 +9,19 @@ rust-version.workspace = true
 description = "Groovy language plugin for sqry"
 
 [dependencies]
-sqry-core = { version = "7.1.5", path = "../sqry-core" }
+sqry-core = { version = "7.2.0", path = "../sqry-core" }
 anyhow.workspace = true
 tree-sitter.workspace = true
-tree-sitter-groovy-sqry = { version = "7.1.5", path = "../crates/tree-sitter-groovy-sqry" }
+tree-sitter-groovy-sqry = { version = "7.2.0", path = "../crates/tree-sitter-groovy-sqry" }
 streaming-iterator.workspace = true
-sqry-lang-support = { version = "7.1.5", path = "../sqry-lang-support" }
+sqry-lang-support = { version = "7.2.0", path = "../sqry-lang-support" }
 
 [dev-dependencies]
 log.workspace = true
 sqry-core = { path = "../sqry-core", features = ["test-support"] }
 serde.workspace = true
 serde_json.workspace = true
-insta = { version = "1.39", features = ["yaml"] }
+insta = { version = "1.47", features = ["yaml"] }
 
 [features]
 default = ["has_relations"]

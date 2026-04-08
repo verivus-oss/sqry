@@ -40,29 +40,31 @@
       "type": "integer"
     },
     "filters": {
+      "description": "Structured filter object for pre-filtering by language, kind, visibility, or minimum score. Pass a JSON object — for string-style predicates, use the `query` parameter instead.",
       "additionalProperties": false,
       "properties": {
         "language": {
-          "description": "Limit results to specific languages",
+          "description": "Limit results to specific programming languages. Example: [\"rust\", \"typescript\", \"python\"]",
           "items": {
             "type": "string"
           },
           "type": "array"
         },
         "score_min": {
-          "description": "Minimum relevance score",
+          "description": "Minimum semantic relevance score (0.0 – 1.0). Results below this threshold are excluded.",
           "maximum": 1.0,
           "minimum": 0.0,
           "type": "number"
         },
         "symbol_kind": {
-          "description": "Filter by symbol kinds",
+          "description": "Filter by symbol kinds such as \"function\", \"method\", \"class\", \"struct\", \"trait\", \"interface\", \"enum\", etc. Example: [\"function\", \"method\"]",
           "items": {
             "type": "string"
           },
           "type": "array"
         },
         "visibility": {
+          "description": "Filter by symbol visibility (\"public\" or \"private\").",
           "enum": [
             "public",
             "private"
@@ -144,7 +146,7 @@
       "type": "string"
     },
     "query": {
-      "description": "Semantic query expression (same syntax as semantic_search)",
+      "description": "Query expression (supports predicates like `lang:rust`, `kind:function`, combinators `AND`/`OR`/`NOT`, and regex `name~=/pat/`).",
       "type": "string"
     },
     "symbol_target_tokens": {

@@ -365,12 +365,12 @@ fn build_staging_from_source(source: &str, filename: &str) -> StagingGraph {
 
 #[test]
 fn test_apex_field_typeof() {
-    let source = r#"
+    let source = r"
 public class AccountService {
     private Account currentAccount;
     private String accountName;
 }
-"#;
+";
     let staging = build_staging_from_source(source, "AccountService.cls");
     let edges = collect_typeof_edges(&staging);
     assert!(
@@ -385,14 +385,14 @@ public class AccountService {
 
 #[test]
 fn test_apex_local_variable_typeof() {
-    let source = r#"
+    let source = r"
 public class DataService {
     public void processData() {
         Account acc = new Account();
         String name = 'test';
     }
 }
-"#;
+";
     let staging = build_staging_from_source(source, "DataService.cls");
     let edges = collect_typeof_edges(&staging);
     assert!(
@@ -403,12 +403,12 @@ public class DataService {
 
 #[test]
 fn test_apex_method_parameter_typeof() {
-    let source = r#"
+    let source = r"
 public class ContactHandler {
     public void handleContact(Contact con, String name) {
     }
 }
-"#;
+";
     let staging = build_staging_from_source(source, "ContactHandler.cls");
     let edges = collect_typeof_edges(&staging);
     assert!(
@@ -423,13 +423,13 @@ public class ContactHandler {
 
 #[test]
 fn test_apex_return_type_typeof() {
-    let source = r#"
+    let source = r"
 public class AccountService {
     public Account getAccount() {
         return null;
     }
 }
-"#;
+";
     let staging = build_staging_from_source(source, "AccountService.cls");
     let edges = collect_typeof_edges(&staging);
     assert!(
@@ -440,12 +440,12 @@ public class AccountService {
 
 #[test]
 fn test_apex_void_return_skipped() {
-    let source = r#"
+    let source = r"
 public class VoidService {
     public void doNothing() {
     }
 }
-"#;
+";
     let staging = build_staging_from_source(source, "VoidService.cls");
     let edges = collect_typeof_edges(&staging);
     assert!(
@@ -456,11 +456,11 @@ public class VoidService {
 
 #[test]
 fn test_apex_generic_type_typeof() {
-    let source = r#"
+    let source = r"
 public class ListService {
     private List<Account> accounts;
 }
-"#;
+";
     let staging = build_staging_from_source(source, "ListService.cls");
     let edges = collect_typeof_edges(&staging);
     assert!(
@@ -471,11 +471,11 @@ public class ListService {
 
 #[test]
 fn test_apex_generic_type_references() {
-    let source = r#"
+    let source = r"
 public class ListService {
     private List<Account> accounts;
 }
-"#;
+";
     let staging = build_staging_from_source(source, "ListService.cls");
     assert!(
         has_reference_edge_to(&staging, "List"),
@@ -489,11 +489,11 @@ public class ListService {
 
 #[test]
 fn test_apex_nested_generic_references() {
-    let source = r#"
+    let source = r"
 public class NestedService {
     private List<List<Account>> nestedAccounts;
 }
-"#;
+";
     let staging = build_staging_from_source(source, "NestedService.cls");
     assert!(
         has_reference_edge_to(&staging, "Account"),
@@ -503,11 +503,11 @@ public class NestedService {
 
 #[test]
 fn test_apex_scoped_type() {
-    let source = r#"
+    let source = r"
 public class OuterService {
     private Outer.Inner scopedField;
 }
-"#;
+";
     let staging = build_staging_from_source(source, "OuterService.cls");
     let edges = collect_typeof_edges(&staging);
     assert!(
@@ -524,11 +524,11 @@ public class OuterService {
 
 #[test]
 fn test_apex_reference_dedup() {
-    let source = r#"
+    let source = r"
 public class DedupService {
     private Map<String, String> stringMap;
 }
-"#;
+";
     let staging = build_staging_from_source(source, "DedupService.cls");
     // Count References edges to "String" -- should be deduped to 1
     let nodes = build_node_lookup(&staging);
@@ -556,12 +556,12 @@ public class DedupService {
 
 #[test]
 fn test_apex_multiple_params_indexed() {
-    let source = r#"
+    let source = r"
 public class ParamService {
     public void process(Account acc, Contact con, String name) {
     }
 }
-"#;
+";
     let staging = build_staging_from_source(source, "ParamService.cls");
     let edges = collect_typeof_edges(&staging);
     assert!(
@@ -599,11 +599,11 @@ fn test_apex_typeof_coexists_with_existing_edges() {
 
 #[test]
 fn test_apex_map_generic_references() {
-    let source = r#"
+    let source = r"
 public class MapService {
     private Map<String, Contact> contactMap;
 }
-"#;
+";
     let staging = build_staging_from_source(source, "MapService.cls");
     assert!(
         has_reference_edge_to(&staging, "Map"),
@@ -621,12 +621,12 @@ public class MapService {
 
 #[test]
 fn test_apex_parameter_typeof_target_is_type_node() {
-    let source = r#"
+    let source = r"
 public class ParamService {
     public void process(Account acc, Contact con) {
     }
 }
-"#;
+";
     let staging = build_staging_from_source(source, "ParamService.cls");
     let nodes = build_node_lookup(&staging);
 
@@ -651,12 +651,12 @@ public class ParamService {
 #[test]
 fn test_apex_duplicate_param_type_references_dedup() {
     // Two parameters with the same type should produce only one References edge per type
-    let source = r#"
+    let source = r"
 public class DupService {
     public void merge(Account first, Account second) {
     }
 }
-"#;
+";
     let staging = build_staging_from_source(source, "DupService.cls");
     let nodes = build_node_lookup(&staging);
 

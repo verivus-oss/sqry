@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+## [7.2.0](https://github.com/verivus-oss/sqry/compare/v7.1.5...v7.2.0) - 2026-04-06
+
+### Added
+- graph analysis commands now share the unified traversal kernel used by LSP and MCP
+
+### Changed
+- `trace-path`, dependency, subgraph, and graph-export style operations now report truncation and path-ordering behavior more consistently
+
+### Fixed
+- path-BFS output now preserves deterministic discovery order and handles leaf-path enumeration correctly
+
 ## [7.1.5](https://github.com/verivus-oss/sqry/compare/v7.1.4...v7.1.5) - 2026-04-05
 
 ### Documentation

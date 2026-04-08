@@ -405,6 +405,8 @@ enum OptionsContext {
     Watch,
 }
 
+#[allow(clippy::too_many_lines)] // Vue graph builder handles template+script+style
+#[allow(clippy::similar_names)] // `content` and `context` are intentionally distinct parameters
 fn collect_object_methods(
     object_node: Node<'_>,
     content: &[u8],
@@ -2615,7 +2617,7 @@ mod tests {
 
     #[test]
     fn test_import_from_vue() {
-        let source = r#"
+        let source = r"
 <script setup>
 import { ref, computed } from 'vue';
 
@@ -2626,7 +2628,7 @@ const doubled = computed(() => count.value * 2);
 <template>
   <div>{{ count }} doubled is {{ doubled }}</div>
 </template>
-"#;
+";
 
         let (tree, content) = parse_vue(source);
         let mut staging = StagingGraph::new();
@@ -2643,7 +2645,7 @@ const doubled = computed(() => count.value * 2);
 
     #[test]
     fn test_import_component() {
-        let source = r#"
+        let source = r"
 <script>
 import MyComponent from './MyComponent.vue';
 import AnotherComponent from './AnotherComponent.vue';
@@ -2662,7 +2664,7 @@ export default {
     <AnotherComponent />
   </div>
 </template>
-"#;
+";
 
         let (tree, content) = parse_vue(source);
         let mut staging = StagingGraph::new();
@@ -2682,7 +2684,7 @@ export default {
 
     #[test]
     fn test_import_namespace() {
-        let source = r#"
+        let source = r"
 <script setup>
 import * as utils from './utils';
 
@@ -2694,7 +2696,7 @@ function doSomething() {
 <template>
   <div>Test</div>
 </template>
-"#;
+";
 
         let (tree, content) = parse_vue(source);
         let mut staging = StagingGraph::new();
@@ -2749,7 +2751,7 @@ const user: User = await fetchUser('123');
 
     #[test]
     fn test_import_multiple_scripts() {
-        let source = r#"
+        let source = r"
 <script>
 import { helperA } from './helperA';
 </script>
@@ -2764,7 +2766,7 @@ const value = ref(0);
 <template>
   <div>{{ value }}</div>
 </template>
-"#;
+";
 
         let (tree, content) = parse_vue(source);
         let mut staging = StagingGraph::new();
@@ -2805,7 +2807,7 @@ const value = ref(0);
 
     #[test]
     fn test_export_default_function() {
-        let source = r#"
+        let source = r"
 <script>
 export default function MyComponent() {
   return 'Hello';
@@ -2815,7 +2817,7 @@ export default function MyComponent() {
 <template>
   <div>{{ message }}</div>
 </template>
-"#;
+";
 
         let (tree, content) = parse_vue(source);
         let mut staging = StagingGraph::new();
@@ -2832,7 +2834,7 @@ export default function MyComponent() {
 
     #[test]
     fn test_export_named_function() {
-        let source = r#"
+        let source = r"
 <script>
 export function greet() {
   return 'Hello';
@@ -2842,7 +2844,7 @@ export function greet() {
 <template>
   <div>Test</div>
 </template>
-"#;
+";
 
         let (tree, content) = parse_vue(source);
         let mut staging = StagingGraph::new();
@@ -2884,7 +2886,7 @@ export const API_VERSION = "1.0.0";
 
     #[test]
     fn test_define_expose_setup_script() {
-        let source = r#"
+        let source = r"
 <script setup>
 function handleClick() {
   console.log('clicked');
@@ -2900,7 +2902,7 @@ defineExpose({ handleClick, getMessage });
 <template>
   <div>Test</div>
 </template>
-"#;
+";
 
         let (tree, content) = parse_vue(source);
         let mut staging = StagingGraph::new();
@@ -2914,8 +2916,7 @@ defineExpose({ handleClick, getMessage });
         let export_edges = count_export_edges(&staging);
         assert!(
             export_edges >= 2,
-            "Expected at least 2 Export edges for defineExpose with {} exports",
-            export_edges
+            "Expected at least 2 Export edges for defineExpose with {export_edges} exports"
         );
     }
 
@@ -2933,7 +2934,7 @@ defineExpose({ handleClick, getMessage });
             {
                 let name = staging
                     .resolve_node_canonical_name(entry)
-                    .map(|s| s.to_string())
+                    .map(std::string::ToString::to_string)
                     .unwrap_or_default();
                 nodes.insert(*node_id, (name, entry.kind));
             }
@@ -3178,7 +3179,7 @@ const v: string | number = "";
 
     #[test]
     fn test_js_script_no_type_edges() {
-        let source = r#"
+        let source = r"
 <script>
 function calc(x, y) {
   return x + y;
@@ -3186,7 +3187,7 @@ function calc(x, y) {
 const user = {};
 </script>
 <template><div>Test</div></template>
-"#;
+";
         let (tree, content) = parse_vue(source);
         let mut staging = StagingGraph::new();
         VueGraphBuilder::default()

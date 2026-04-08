@@ -223,8 +223,7 @@ fun main() {
     let call_count = count_call_edges(&staging);
     assert!(
         call_count >= 1,
-        "Expected at least 1 call edge, got {}",
-        call_count
+        "Expected at least 1 call edge, got {call_count}"
     );
 }
 
@@ -281,8 +280,7 @@ fun level1(): Int = level2() + 1
     // level2 calls level3, level1 calls level2 → exactly 2 call edges
     assert_eq!(
         call_count, 2,
-        "Expected exactly 2 call edges (level2→level3, level1→level2), got {}",
-        call_count
+        "Expected exactly 2 call edges (level2→level3, level1→level2), got {call_count}"
     );
 }
 
@@ -315,8 +313,7 @@ fun compute(x: Double): Double {
     let import_count = count_import_edges(&staging);
     assert!(
         import_count >= 1,
-        "Expected at least 1 import edge, got {}",
-        import_count
+        "Expected at least 1 import edge, got {import_count}"
     );
 }
 
@@ -338,8 +335,7 @@ fun compute(x: Double): Double = sqrt(x)
     let import_count = count_import_edges(&staging);
     assert!(
         import_count >= 1,
-        "Expected at least 1 wildcard import edge, got {}",
-        import_count
+        "Expected at least 1 wildcard import edge, got {import_count}"
     );
 }
 

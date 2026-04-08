@@ -346,7 +346,7 @@ fn test_pass5_stats_reported_correctly() {
 // Go CGo FFI Integration Tests
 // ============================================================================
 
-/// Test that Pass 5 links Go CGo `C.func()` calls to C function implementations.
+/// Test that Pass 5 links Go `CGo` `C.func()` calls to C function implementations.
 ///
 /// Fixture files:
 /// - `test-fixtures/cross-language/ffi/cgo_bindings.go`: `C.calculate_sum(3, 4)`
@@ -403,7 +403,7 @@ fn test_ffi_go_cgo_to_c_linking() {
 // HTTP Go Endpoint Integration Test
 // ============================================================================
 
-/// Test that Go HandleFunc creates Endpoint nodes that JS clients can link to.
+/// Test that Go `HandleFunc` creates Endpoint nodes that JS clients can link to.
 #[test]
 fn test_http_go_to_js_linking() {
     let fixtures_path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -497,8 +497,7 @@ fn test_http_java_spring_with_class_prefix() {
         .any(|name| name.contains("/api/users") || name.contains("/api/items"));
     assert!(
         has_prefixed,
-        "Java endpoints should have class-level prefix composed: {:?}",
-        java_endpoints
+        "Java endpoints should have class-level prefix composed: {java_endpoints:?}"
     );
 }
 
@@ -547,7 +546,7 @@ fn test_http_all_method_endpoint_matching() {
     );
 }
 
-/// Helper: commit a staging graph into the main CodeGraph.
+/// Helper: commit a staging graph into the main `CodeGraph`.
 fn commit_staging(
     graph: &mut sqry_core::graph::unified::concurrent::CodeGraph,
     path: &std::path::Path,

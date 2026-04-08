@@ -31,11 +31,11 @@ fn build_staging_from_fixture(name: &str) -> StagingGraph {
     let plugin = PerlPlugin::default();
     let path = PathBuf::from(format!("tests/fixtures/{name}"));
     let content = std::fs::read(&path).expect("read fixture");
-    let tree = plugin.parse_ast(&content).expect("parse fixture");
+    let (prepared_content, tree) = plugin.prepare_ast(&content).expect("parse fixture");
     let builder = plugin.graph_builder().expect("graph builder");
     let mut staging = StagingGraph::new();
     builder
-        .build_graph(&tree, &content, &path, &mut staging)
+        .build_graph(&tree, prepared_content.as_ref(), &path, &mut staging)
         .expect("build graph");
     staging
 }
@@ -64,6 +64,7 @@ fn has_import_edge(staging: &StagingGraph, import_name: &str) -> bool {
     false
 }
 
+#[allow(clippy::similar_names)] // Test graph variables
 fn has_call_edge(staging: &StagingGraph, caller: &str, callee: &str) -> bool {
     let nodes = build_node_lookup(staging);
     for op in staging.operations() {

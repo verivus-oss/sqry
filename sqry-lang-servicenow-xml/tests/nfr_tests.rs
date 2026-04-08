@@ -22,8 +22,7 @@ fn test_nfr1_performance_500kb_xml() {
     let script = "function test() { var gr = new GlideRecord('incident'); gr.query(); }\n";
     let repeated = script.repeat(7000); // ~490KB of JS
     let xml = format!(
-        r#"<?xml version="1.0"?><record_update table="sys_script_include"><sys_script_include><name>PerfTest</name><script><![CDATA[{}]]></script></sys_script_include></record_update>"#,
-        repeated,
+        r#"<?xml version="1.0"?><record_update table="sys_script_include"><sys_script_include><name>PerfTest</name><script><![CDATA[{repeated}]]></script></sys_script_include></record_update>"#,
     );
     // Pad to ~500KB
     assert!(
@@ -67,8 +66,7 @@ fn test_nfr2_memory_bounded() {
     let script = "function test() { var gr = new GlideRecord('incident'); }\n";
     let repeated = script.repeat(100);
     let xml = format!(
-        r#"<?xml version="1.0"?><record_update table="sys_script"><sys_script><name>MemTest</name><script><![CDATA[{}]]></script></sys_script></record_update>"#,
-        repeated,
+        r#"<?xml version="1.0"?><record_update table="sys_script"><sys_script><name>MemTest</name><script><![CDATA[{repeated}]]></script></sys_script></record_update>"#,
     );
 
     let staging = build_graph_from_xml(&xml);
@@ -81,11 +79,14 @@ fn test_nfr2_memory_bounded() {
         staging_bytes / 1024,
         xml.len() / 1024,
     );
+    #[allow(clippy::cast_precision_loss)]
+    // usize→f64 precision loss is acceptable for diagnostic output
+    let expansion_ratio = staging_bytes as f64 / xml.len() as f64;
     eprintln!(
         "NFR-2: {}KB input -> {}KB staging ({:.1}x expansion)",
         xml.len() / 1024,
         staging_bytes / 1024,
-        staging_bytes as f64 / xml.len() as f64,
+        expansion_ratio,
     );
 }
 

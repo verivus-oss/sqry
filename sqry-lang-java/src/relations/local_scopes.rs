@@ -351,6 +351,7 @@ fn recurse_catch_finally(
 }
 
 /// Dispatch on Java AST node kind to build scope tree entries.
+#[allow(clippy::too_many_lines)] // Java scope resolution covers all AST node types
 fn build_scopes_dispatch(
     tree: &mut JavaScopeTree,
     node: Node,
@@ -1462,6 +1463,7 @@ fn bind_try_with_resources(tree: &mut JavaScopeTree, node: Node, content: &[u8])
     }
 }
 
+#[allow(clippy::too_many_lines)] // Java pattern matching covers all instanceof forms
 fn bind_instanceof_pattern(tree: &mut JavaScopeTree, node: Node, content: &[u8]) {
     let mut patterns = Vec::new();
     collect_pattern_identifiers(node, content, &mut patterns);

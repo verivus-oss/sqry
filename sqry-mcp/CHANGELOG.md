@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+## [7.2.0](https://github.com/verivus-oss/sqry/compare/v7.1.5...v7.2.0) - 2026-04-06
+
+### Added
+- `expand_cache_status` introspection tool for Rust macro expansion cache visibility
+- capability-map resource and dynamic tool-reference generation
+
+### Changed
+- graph/navigation responses now use the shared materialization and traversal contracts from `sqry-core`
+
+### Fixed
+- removed stale hard-coded tool/resource counts from user-visible MCP documentation and resources
+- completed `FileRegistry` migration for graph trace/materialization output paths
+
 ## [7.1.5](https://github.com/verivus-oss/sqry/compare/v7.1.4...v7.1.5) - 2026-04-05
 
 ### Other

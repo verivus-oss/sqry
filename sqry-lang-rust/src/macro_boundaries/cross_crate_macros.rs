@@ -29,7 +29,7 @@ use sqry_core::graph::unified::node::{NodeId, NodeKind};
 /// Follows the same pattern as `PendingCrossLanguageEdge` from Pass 5.
 #[derive(Debug, Clone)]
 pub struct PendingMacroEdge {
-    /// Source node (the CallSite invoking the macro).
+    /// Source node (the `CallSite` invoking the macro).
     pub source: NodeId,
     /// Target node (the Macro definition).
     pub target: NodeId,
@@ -57,6 +57,7 @@ pub struct PendingMacroEdge {
 /// # Returns
 ///
 /// Vector of pending edges to merge into the graph.
+#[must_use]
 pub fn resolve_cross_crate_macros(
     snapshot: &GraphSnapshot,
     export_map: &ExportMap,
@@ -77,12 +78,11 @@ pub fn resolve_cross_crate_macros(
         }
 
         // Resolve the qualified name string.
-        let qualified_name = match entry
+        let Some(qualified_name) = entry
             .qualified_name
             .and_then(|sid| snapshot.strings().resolve(sid))
-        {
-            Some(name) => name,
-            None => continue,
+        else {
+            continue;
         };
 
         attempt_cross_crate_resolution(
@@ -151,10 +151,7 @@ fn attempt_cross_crate_resolution(
                 });
 
                 log::debug!(
-                    "Resolved cross-crate macro: {:?} -> {:?} ({})",
-                    callsite_id,
-                    target_node,
-                    macro_path,
+                    "Resolved cross-crate macro: {callsite_id:?} -> {target_node:?} ({macro_path})",
                 );
             }
         }
@@ -163,13 +160,13 @@ fn attempt_cross_crate_resolution(
 
 /// Extract the macro target path from a callsite qualified name.
 ///
-/// CallSite qualified names for attribute macros follow the pattern:
+/// `CallSite` qualified names for attribute macros follow the pattern:
 /// `item_qualified::attr_macro_path@line:col`
 ///
 /// For regular macro invocations:
 /// `module::macro_name` or just `macro_name`
 ///
-/// This function extracts the macro path that can be looked up in the ExportMap.
+/// This function extracts the macro path that can be looked up in the `ExportMap`.
 fn extract_macro_target_path(qualified_name: &str) -> String {
     // Strip the @line:col suffix if present.
     let without_location = qualified_name

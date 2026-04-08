@@ -31,7 +31,11 @@ fn copy_fixture_dir(relative: &str) -> TempDir {
     let binding = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let root = binding.parent().expect("workspace root");
     let source = root.join(relative);
-    assert!(source.exists(), "fixture directory {source:?} not found");
+    assert!(
+        source.exists(),
+        "fixture directory {} not found",
+        source.display()
+    );
 
     let temp = TempDir::new().expect("create temp dir");
     copy_dir_all(&source, temp.path()).expect("copy fixture into temp dir");
@@ -158,15 +162,21 @@ fn polyglot_project_extracts_nodes_from_multiple_languages() {
         .expect("nodes_by_file map missing");
 
     assert!(
-        file_summary.keys().any(|file| file.ends_with(".rs")),
+        file_summary.keys().any(|file| std::path::Path::new(file)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("rs"))),
         "expected Rust file (.rs) in nodes_by_file summary"
     );
     assert!(
-        file_summary.keys().any(|file| file.ends_with(".js")),
+        file_summary.keys().any(|file| std::path::Path::new(file)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("js"))),
         "expected JavaScript file (.js) in nodes_by_file summary"
     );
     assert!(
-        file_summary.keys().any(|file| file.ends_with(".sql")),
+        file_summary.keys().any(|file| std::path::Path::new(file)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("sql"))),
         "expected SQL file (.sql) in nodes_by_file summary"
     );
 

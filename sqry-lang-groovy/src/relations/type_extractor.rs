@@ -279,6 +279,7 @@ mod tests {
         let tree = parse_groovy_type(type_str);
 
         // Find the type annotation node - traverse to find type nodes
+        #[allow(clippy::items_after_statements)] // Const defined near usage for clarity
         fn find_type_node(node: tree_sitter::Node) -> Option<tree_sitter::Node> {
             if is_type_node(node.kind()) {
                 return Some(node);
@@ -367,6 +368,7 @@ mod tests {
         let tree = plugin.parse_ast(source).expect("Failed to parse");
 
         // Find any identifier nodes with text "def"
+        #[allow(clippy::items_after_statements)] // Items near usage for clarity
         fn find_def_identifier<'a>(
             node: tree_sitter::Node<'a>,
             content: &[u8],

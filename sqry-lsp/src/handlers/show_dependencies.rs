@@ -2,12 +2,13 @@
 //!
 //! Shows dependency tree for a file or symbol.
 
-use std::collections::{HashSet, VecDeque};
-
 use anyhow::Result;
-use sqry_core::graph::unified::edge::EdgeKind;
 use sqry_core::graph::unified::node::NodeId;
-use sqry_core::graph::unified::{FileScope, ResolutionMode, SymbolQuery, SymbolResolutionOutcome};
+use sqry_core::graph::unified::traversal::EdgeClassification;
+use sqry_core::graph::unified::{
+    EdgeFilter, FileScope, ResolutionMode, SymbolQuery, SymbolResolutionOutcome, TraversalConfig,
+    TraversalDirection, TraversalLimits, traverse,
+};
 
 use crate::protocol::{SqryDependency, SqryShowDependenciesParams, SqryShowDependenciesResult};
 use crate::session::SessionManager;
@@ -81,7 +82,7 @@ pub fn execute(
     })
 }
 
-/// Collect dependencies via BFS traversal.
+/// Collect dependencies via BFS traversal using the kernel.
 ///
 /// Returns a tuple of (`dependencies`, `truncated_flag`).
 fn collect_dependencies_bfs(
@@ -90,68 +91,68 @@ fn collect_dependencies_bfs(
     max_depth: usize,
     max_results: usize,
 ) -> (Vec<SqryDependency>, bool) {
-    let mut dependencies: Vec<SqryDependency> = Vec::new();
-    let mut visited = HashSet::new();
-    let mut queue: VecDeque<(NodeId, u32)> = seeds.iter().map(|&id| (id, 0u32)).collect();
-    let mut truncated = false;
+    let config = TraversalConfig {
+        direction: TraversalDirection::Outgoing,
+        edge_filter: EdgeFilter::dependency_edges(),
+        limits: TraversalLimits {
+            max_depth: u32::try_from(max_depth).unwrap_or(u32::MAX),
+            max_nodes: Some(max_results),
+            max_edges: None,
+            max_paths: None,
+        },
+    };
 
-    // Mark seeds as visited
-    for seed in seeds {
-        visited.insert(*seed);
-    }
+    let result = traverse(snapshot, seeds, &config, None);
+    let truncated = result.metadata.truncation.is_some();
 
-    while let Some((current_id, depth)) = queue.pop_front() {
-        if dependencies.len() >= max_results {
-            truncated = true;
-            break;
-        }
+    // Build dependencies from edges — each edge's target node becomes a dependency
+    // Seeds are excluded (they are the roots, not dependencies).
+    let seed_set: std::collections::HashSet<NodeId> = seeds.iter().copied().collect();
+    let mut seen_targets = std::collections::HashSet::new();
 
-        if depth as usize > max_depth {
-            continue;
-        }
-
-        // Process outgoing edges (dependencies)
-        process_outgoing_deps(
-            snapshot,
-            current_id,
-            depth,
-            max_depth,
-            &mut visited,
-            &mut dependencies,
-            &mut queue,
-        );
-    }
+    let dependencies: Vec<SqryDependency> = result
+        .edges
+        .iter()
+        .filter_map(|mat_edge| {
+            let target_node = &result.nodes[mat_edge.target_idx];
+            // Skip edges pointing back to seeds
+            if seed_set.contains(&target_node.node_id) {
+                return None;
+            }
+            // Dedup by target node
+            if !seen_targets.insert(target_node.node_id) {
+                return None;
+            }
+            let dep_type = classify_edge_classification(mat_edge.classification);
+            Some(SqryDependency {
+                name: target_node.name.clone(),
+                qualified_name: target_node.qualified_name.clone(),
+                kind: target_node.kind.clone(),
+                file_path: target_node.file_path.clone(),
+                depth: mat_edge.depth,
+                dependency_type: dep_type.to_string(),
+            })
+        })
+        .collect();
 
     (dependencies, truncated)
 }
 
-/// Process outgoing dependency edges from a single node.
-fn process_outgoing_deps(
-    snapshot: &sqry_core::graph::unified::concurrent::GraphSnapshot,
-    current_id: NodeId,
-    depth: u32,
-    max_depth: usize,
-    visited: &mut HashSet<NodeId>,
-    dependencies: &mut Vec<SqryDependency>,
-    queue: &mut VecDeque<(NodeId, u32)>,
-) {
-    for edge in snapshot.edges().edges_from(current_id) {
-        let Some(dep_type) = classify_dependency_edge(&edge.kind) else {
-            continue;
-        };
-
-        let target_id = edge.target;
-        if !visited.insert(target_id) {
-            continue;
-        }
-
-        if let Some(dep) = build_dependency_entry(snapshot, target_id, depth, dep_type) {
-            dependencies.push(dep);
-
-            if ((depth + 1) as usize) < max_depth {
-                queue.push_back((target_id, depth + 1));
-            }
-        }
+/// Map an `EdgeClassification` to a dependency type string.
+#[allow(
+    clippy::match_same_arms,
+    reason = "Reference is explicitly mapped for documentation clarity; wildcard is a fallback"
+)]
+fn classify_edge_classification(classification: EdgeClassification) -> &'static str {
+    match classification {
+        EdgeClassification::Call { .. } => "call",
+        EdgeClassification::Import { .. } => "import",
+        #[allow(clippy::match_same_arms)] // Dependency direction arms intentionally separate
+        EdgeClassification::Export { .. } => "export",
+        EdgeClassification::Reference => "reference",
+        EdgeClassification::Inherits => "inherits",
+        EdgeClassification::Implements => "implements",
+        _ => "reference",
     }
 }
 
@@ -185,68 +186,18 @@ fn find_seed_nodes(
     }
 }
 
-/// Classify an edge kind as a dependency type, returning `None` if not relevant.
-fn classify_dependency_edge(kind: &EdgeKind) -> Option<&'static str> {
-    match kind {
-        EdgeKind::Calls { .. } => Some("call"),
-        EdgeKind::Imports { .. } => Some("import"),
-        EdgeKind::References => Some("reference"),
-        _ => None,
-    }
-}
-
-/// Build a `SqryDependency` entry from a target node.
-fn build_dependency_entry(
-    snapshot: &sqry_core::graph::unified::concurrent::GraphSnapshot,
-    target_id: NodeId,
-    depth: u32,
-    dep_type: &str,
-) -> Option<SqryDependency> {
-    let strings = snapshot.strings();
-    let files = snapshot.files();
-
-    let entry = snapshot.get_node(target_id)?;
-
-    let name = strings
-        .resolve(entry.name)
-        .map(|s| s.to_string())
-        .unwrap_or_default();
-
-    let qualified_name =
-        crate::conversion::display_entry_qualified_name(entry, strings, files, &name);
-
-    if qualified_name.is_empty() {
-        return None;
-    }
-
-    let kind = format!("{:?}", entry.kind).to_lowercase();
-
-    let dep_file_path = files
-        .resolve(entry.file)
-        .map(|p| p.display().to_string())
-        .unwrap_or_default();
-
-    Some(SqryDependency {
-        name,
-        qualified_name,
-        kind,
-        file_path: dep_file_path,
-        depth: depth + 1,
-        dependency_type: dep_type.to_string(),
-    })
-}
-
 /// Find symbol in file by name.
 fn find_symbol_in_file(
     snapshot: &sqry_core::graph::unified::concurrent::GraphSnapshot,
     target_file: &std::path::Path,
     symbol_name: &str,
 ) -> Option<NodeId> {
-    match snapshot.resolve_symbol(&SymbolQuery {
+    let witness = snapshot.resolve_symbol_with_witness(&SymbolQuery {
         symbol: symbol_name,
         file_scope: FileScope::Path(target_file),
         mode: ResolutionMode::Strict,
-    }) {
+    });
+    match witness.outcome {
         SymbolResolutionOutcome::Resolved(node_id) => Some(node_id),
         SymbolResolutionOutcome::NotFound
         | SymbolResolutionOutcome::FileNotIndexed
@@ -258,6 +209,16 @@ fn find_symbol_in_file(
 mod tests {
     use super::*;
     use sqry_core::graph::unified::edge::EdgeKind;
+
+    /// Classify an edge kind as a dependency type, returning `None` if not relevant.
+    fn classify_dependency_edge(kind: &EdgeKind) -> Option<&'static str> {
+        match kind {
+            EdgeKind::Calls { .. } => Some("call"),
+            EdgeKind::Imports { .. } => Some("import"),
+            EdgeKind::References => Some("reference"),
+            _ => None,
+        }
+    }
 
     // ── classify_dependency_edge ──────────────────────────────────────────────
 

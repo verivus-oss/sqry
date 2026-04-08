@@ -3,7 +3,7 @@
 //! Covers:
 //! - Function node extraction (global, local, module methods)
 //! - Call edge detection
-//! - LuaJIT FFI detection
+//! - `LuaJIT` FFI detection
 //! - Export edge detection
 //! - Error handling for malformed input
 
@@ -232,8 +232,7 @@ end
     let call_count = count_call_edges(&staging);
     assert!(
         call_count >= 1,
-        "Expected at least 1 call edge, got {}",
-        call_count
+        "Expected at least 1 call edge, got {call_count}"
     );
 }
 
@@ -289,8 +288,7 @@ end
     let call_count = count_call_edges(&staging);
     assert!(
         call_count >= 2,
-        "Expected at least 2 call edges, got {}",
-        call_count
+        "Expected at least 2 call edges, got {call_count}"
     );
 }
 
@@ -324,8 +322,7 @@ return M
     let export_count = count_export_edges(&staging);
     assert!(
         export_count >= 1,
-        "Expected at least 1 export edge for module method, got {}",
-        export_count
+        "Expected at least 1 export edge for module method, got {export_count}"
     );
 }
 

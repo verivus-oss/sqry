@@ -299,9 +299,9 @@ mod tests {
 
     #[test]
     fn test_parse_yard_tags() {
-        let yard = r#"# @param [String] name
+        let yard = r"# @param [String] name
 # @param [Integer] age
-# @return [User]"#;
+# @return [User]";
 
         let tags = parse_yard_tags(yard);
         assert_eq!(tags.params.len(), 2);
@@ -312,7 +312,7 @@ mod tests {
 
     #[test]
     fn test_parse_yard_type_tag() {
-        let yard = r#"# @type [String]"#;
+        let yard = r"# @type [String]";
 
         let tags = parse_yard_tags(yard);
         assert_eq!(tags.type_annotation, Some("String".to_string()));
@@ -320,8 +320,8 @@ mod tests {
 
     #[test]
     fn test_parse_yard_union_types() {
-        let yard = r#"# @param [String, Integer] value
-# @return [Boolean]"#;
+        let yard = r"# @param [String, Integer] value
+# @return [Boolean]";
 
         let tags = parse_yard_tags(yard);
         assert_eq!(tags.params[0].type_str, "String, Integer");
@@ -330,8 +330,8 @@ mod tests {
 
     #[test]
     fn test_parse_yard_array_types() {
-        let yard = r#"# @param [Array<User>] users
-# @return [Hash{String => Integer}]"#;
+        let yard = r"# @param [Array<User>] users
+# @return [Hash{String => Integer}]";
 
         let tags = parse_yard_tags(yard);
         assert_eq!(tags.params[0].type_str, "Array<User>");
@@ -340,8 +340,8 @@ mod tests {
 
     #[test]
     fn test_parse_yard_nullable_types() {
-        let yard = r#"# @param [String, nil] value
-# @return [User, nil]"#;
+        let yard = r"# @param [String, nil] value
+# @return [User, nil]";
 
         let tags = parse_yard_tags(yard);
         assert_eq!(tags.params[0].type_str, "String, nil");

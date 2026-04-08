@@ -198,8 +198,11 @@ impl McpTestClient {
     /// Spawn a new MCP server process with additional environment variables
     /// and configurable stderr handling.
     #[allow(dead_code)]
+    #[allow(clippy::needless_continue)] // Continue clarifies control flow
+    #[allow(clippy::needless_pass_by_value)] // Convenience for callers
     pub fn new_with_env_and_stderr_mode(
         envs: &[(String, String)],
+        #[allow(clippy::needless_pass_by_value)] // Test helper takes owned value for convenience
         stderr_mode: StderrMode,
     ) -> Result<Self> {
         // Use the pre-built binary directly instead of cargo run.
@@ -285,6 +288,7 @@ impl McpTestClient {
     }
 
     /// Send a JSON-RPC request without waiting for response
+    #[allow(clippy::needless_pass_by_value)] // Convenience for callers
     pub fn send_request(&mut self, method: &str, params: Value, id: i64) -> Result<()> {
         let request = json!({
             "jsonrpc": "2.0",
@@ -322,7 +326,7 @@ impl McpTestClient {
             revents: 0,
         };
 
-        let ret = unsafe { libc::poll(&mut pollfd, 1, timeout_ms) };
+        let ret = unsafe { libc::poll(&raw mut pollfd, 1, timeout_ms) };
         if ret == 0 {
             let _ = self.child.kill();
             return Err(anyhow::anyhow!(

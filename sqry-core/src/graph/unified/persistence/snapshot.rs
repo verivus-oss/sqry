@@ -143,7 +143,7 @@ struct GraphSnapshotData {
     files: FileRegistry,
     /// Auxiliary indices
     indices: AuxiliaryIndices,
-    /// Sparse macro boundary metadata (keyed by full NodeId)
+    /// Sparse macro boundary metadata (keyed by full `NodeId`)
     macro_metadata: NodeMetadataStore,
 }
 
@@ -539,18 +539,17 @@ fn validate_plugin_versions(
 ///
 /// Returns an error if the computed SHA256 does not match `expected_sha256`.
 pub fn verify_snapshot_bytes(data: &[u8], expected_sha256: &str) -> anyhow::Result<()> {
+    use sha2::{Digest, Sha256};
+
     if expected_sha256.is_empty() {
         return Ok(());
     }
 
-    use sha2::{Digest, Sha256};
     let actual_hash = format!("{:x}", Sha256::digest(data));
     if actual_hash != expected_sha256 {
         anyhow::bail!(
-            "Snapshot integrity check failed: expected SHA256 {}, got {}. \
+            "Snapshot integrity check failed: expected SHA256 {expected_sha256}, got {actual_hash}. \
              The index may be corrupt or tampered with. Run `sqry index` to rebuild.",
-            expected_sha256,
-            actual_hash,
         );
     }
     Ok(())
@@ -930,8 +929,13 @@ mod tests {
         let data_bytes = postcard::to_allocvec(snapshot_data)?;
 
         let mut file = File::create(path)?;
+        // Header and data bytes sizes validated < MAX_SNAPSHOT_BYTES (2 GB)
         file.write_all(MAGIC_BYTES)?;
-        file.write_all(&(header_bytes.len() as u32).to_le_bytes())?;
+        file.write_all(
+            &u32::try_from(header_bytes.len())
+                .expect("header fits in u32")
+                .to_le_bytes(),
+        )?;
         file.write_all(&header_bytes)?;
         file.write_all(&(data_bytes.len() as u64).to_le_bytes())?;
         file.write_all(&data_bytes)?;
@@ -1134,8 +1138,12 @@ mod tests {
 
         let mut file = File::create(path).unwrap();
         file.write_all(MAGIC_BYTES).unwrap();
-        file.write_all(&(header_bytes.len() as u32).to_le_bytes())
-            .unwrap();
+        file.write_all(
+            &u32::try_from(header_bytes.len())
+                .expect("header fits in u32")
+                .to_le_bytes(),
+        )
+        .unwrap();
         file.write_all(&header_bytes).unwrap();
         // Write dummy data length and no data
         file.write_all(&0u64.to_le_bytes()).unwrap();
@@ -1187,8 +1195,12 @@ mod tests {
 
         let mut file = File::create(path).unwrap();
         file.write_all(MAGIC_BYTES).unwrap();
-        file.write_all(&(header_bytes.len() as u32).to_le_bytes())
-            .unwrap();
+        file.write_all(
+            &u32::try_from(header_bytes.len())
+                .expect("header fits in u32")
+                .to_le_bytes(),
+        )
+        .unwrap();
         file.write_all(&header_bytes).unwrap();
         file.write_all(&999_999u64.to_le_bytes()).unwrap(); // data_len way too big
         file.flush().unwrap();
@@ -1361,8 +1373,12 @@ mod tests {
 
         let mut file = File::create(path).unwrap();
         file.write_all(MAGIC_BYTES).unwrap();
-        file.write_all(&(header_bytes.len() as u32).to_le_bytes())
-            .unwrap();
+        file.write_all(
+            &u32::try_from(header_bytes.len())
+                .expect("header fits in u32")
+                .to_le_bytes(),
+        )
+        .unwrap();
         file.write_all(&header_bytes).unwrap();
         file.write_all(&0u64.to_le_bytes()).unwrap();
         file.flush().unwrap();
@@ -1391,8 +1407,12 @@ mod tests {
 
         let mut file = File::create(path).unwrap();
         file.write_all(MAGIC_BYTES).unwrap();
-        file.write_all(&(header_bytes.len() as u32).to_le_bytes())
-            .unwrap();
+        file.write_all(
+            &u32::try_from(header_bytes.len())
+                .expect("header fits in u32")
+                .to_le_bytes(),
+        )
+        .unwrap();
         file.write_all(&header_bytes).unwrap();
         file.write_all(&0u64.to_le_bytes()).unwrap();
         file.flush().unwrap();
@@ -1420,8 +1440,12 @@ mod tests {
 
         let mut file = File::create(path).unwrap();
         file.write_all(MAGIC_BYTES).unwrap();
-        file.write_all(&(header_bytes.len() as u32).to_le_bytes())
-            .unwrap();
+        file.write_all(
+            &u32::try_from(header_bytes.len())
+                .expect("header fits in u32")
+                .to_le_bytes(),
+        )
+        .unwrap();
         file.write_all(&header_bytes).unwrap();
         file.write_all(&0u64.to_le_bytes()).unwrap();
         file.flush().unwrap();
@@ -1466,6 +1490,8 @@ mod tests {
         let temp_file = NamedTempFile::new().unwrap();
         let path = temp_file.path();
 
+        #[allow(clippy::cast_possible_truncation)]
+        // Snapshot data lengths validated < MAX_SNAPSHOT_BYTES (2 GB)
         // Write magic, then a header_len that exceeds MAX_HEADER_BYTES (1 MB)
         let declared_header_len: u32 = (MAX_HEADER_BYTES as u32) + 1;
         let mut file = File::create(path).unwrap();
@@ -1504,8 +1530,12 @@ mod tests {
         let declared_data_len: u64 = MAX_SNAPSHOT_BYTES + 1;
         let mut file = File::create(path).unwrap();
         file.write_all(MAGIC_BYTES).unwrap();
-        file.write_all(&(header_bytes.len() as u32).to_le_bytes())
-            .unwrap();
+        file.write_all(
+            &u32::try_from(header_bytes.len())
+                .expect("header fits in u32")
+                .to_le_bytes(),
+        )
+        .unwrap();
         file.write_all(&header_bytes).unwrap();
         file.write_all(&declared_data_len.to_le_bytes()).unwrap();
         // We don't need actual data — the check happens before reading the data section

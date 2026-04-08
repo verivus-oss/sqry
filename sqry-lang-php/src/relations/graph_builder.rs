@@ -2194,8 +2194,10 @@ fn process_ffi_static_call(
 
     // Extract library name from call arguments
     let library_name = extract_php_ffi_library_name(node, content, method_name == "cdef")
-        .map(|lib| php_ffi_library_simple_name(&lib))
-        .unwrap_or_else(|| "unknown".to_string());
+        .map_or_else(
+            || "unknown".to_string(),
+            |lib| php_ffi_library_simple_name(&lib),
+        );
 
     // Create a native module node for the library
     let ffi_name = format!("native::{library_name}");
@@ -2402,6 +2404,7 @@ fn unwrap_argument_node(node: Node) -> Option<Node> {
 
     // Find the value child by excluding structural field nodes
     for i in 0..node.named_child_count() {
+        #[allow(clippy::cast_possible_truncation)] // tree-sitter child count fits in u32
         if let Some(child) = node.named_child(i as u32) {
             // Skip if this child is the name field or reference_modifier field
             let is_name_field = name_field_node.is_some_and(|n| n.id() == child.id());
@@ -2489,6 +2492,7 @@ fn has_variable_node(node: Node) -> bool {
 
     // Recursively check all children
     for i in 0..node.child_count() {
+        #[allow(clippy::cast_possible_truncation)] // tree-sitter child count fits in u32
         if let Some(child) = node.child(i as u32)
             && has_variable_node(child)
         {

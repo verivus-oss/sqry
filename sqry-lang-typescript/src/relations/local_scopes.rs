@@ -95,6 +95,7 @@ pub(crate) fn build(root: Node, content: &[u8]) -> GraphResult<TypeScriptScopeTr
 // Phase 1: Build scopes
 // ============================================================================
 
+#[allow(clippy::too_many_lines)] // AST walker covering all TypeScript scope-creating node kinds
 fn build_scopes_recursive(
     tree: &mut TypeScriptScopeTree,
     node: Node,
@@ -374,6 +375,7 @@ fn recurse_children(
 // ============================================================================
 
 #[allow(clippy::too_many_lines)]
+#[allow(clippy::match_same_arms)] // Arms separated for documentation clarity; each pattern is semantically distinct
 fn bind_declarations_recursive(
     tree: &mut TypeScriptScopeTree,
     node: Node,
@@ -568,6 +570,7 @@ fn bind_identifier_as_param(
 }
 
 /// Bind a pattern node (identifier, `array_pattern`, or `object_pattern`).
+#[allow(clippy::too_many_lines)] // Destructuring pattern binder covers all TypeScript pattern kinds
 fn bind_pattern(
     tree: &mut TypeScriptScopeTree,
     scope_id: ScopeId,
@@ -857,6 +860,7 @@ fn add_reference_edge(
 // ============================================================================
 
 /// Check if an identifier is in a declaration context (should not be resolved).
+#[allow(clippy::match_same_arms)] // Arms separated for documentation clarity; each pattern is semantically distinct
 fn is_declaration_context(node: Node) -> bool {
     let Some(parent) = node.parent() else {
         return false;
@@ -930,11 +934,17 @@ fn is_type_or_call_context(node: Node) -> bool {
     };
 
     match parent.kind() {
-        // Type annotations
-        "type_annotation" | "type_identifier" | "predefined_type" | "generic_type"
-        | "type_arguments" | "type_parameter" | "constraint" => true,
-        // Extends/implements clauses
-        "extends_clause" | "implements_clause" | "extends_type_clause" => true,
+        // Type annotations and extends/implements clauses
+        "type_annotation"
+        | "type_identifier"
+        | "predefined_type"
+        | "generic_type"
+        | "type_arguments"
+        | "type_parameter"
+        | "constraint"
+        | "extends_clause"
+        | "implements_clause"
+        | "extends_type_clause" => true,
         // Call expression function name
         "call_expression" => parent
             .child_by_field_name("function")

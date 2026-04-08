@@ -184,7 +184,7 @@ process("test")
 fn cli_ruby_callers_blocks() {
     let project = TempDir::new().unwrap();
 
-    let ruby_code = r#"
+    let ruby_code = r"
 def transform(x)
   x * 2
 end
@@ -195,7 +195,7 @@ def process_data
 end
 
 process_data
-"#;
+";
     std::fs::write(project.path().join("blocks.rb"), ruby_code).unwrap();
 
     Command::new(sqry_bin())
@@ -392,7 +392,7 @@ bootstrap_database
 fn cli_ruby_imports() {
     let project = TempDir::new().unwrap();
 
-    let ruby_code = r#"
+    let ruby_code = r"
 require 'json'
 require 'fileutils'
 require_relative 'user'
@@ -403,7 +403,7 @@ def read_config
 end
 
 read_config
-"#;
+";
     std::fs::write(project.path().join("config.rb"), ruby_code).unwrap();
 
     Command::new(sqry_bin())
@@ -438,7 +438,7 @@ read_config
 fn cli_ruby_private_methods() {
     let project = TempDir::new().unwrap();
 
-    let ruby_code = r#"
+    let ruby_code = r"
 class Service
   def execute
     validate
@@ -450,7 +450,7 @@ class Service
     # private method
   end
 end
-"#;
+";
     std::fs::write(project.path().join("service.rb"), ruby_code).unwrap();
 
     Command::new(sqry_bin())

@@ -1754,7 +1754,7 @@ mod tests {
     // collect_subquery_exprs tests
     // ================================================================
 
-    /// Helper: build `field:(inner_expr)` as a Condition with Value::Subquery.
+    /// Helper: build `field:(inner_expr)` as a Condition with `Value::Subquery`.
     fn subquery_condition(field: &str, inner: Expr, start: usize, end: usize) -> Expr {
         Expr::Condition(Condition {
             field: Field(field.to_string()),

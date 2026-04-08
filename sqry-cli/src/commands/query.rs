@@ -1869,7 +1869,7 @@ mod tests {
     fn test_parse_variable_args_empty_value_allowed() {
         let args = vec!["KEY=".to_string()];
         let result = parse_variable_args(&args).unwrap();
-        assert_eq!(result.get("KEY"), Some(&"".to_string()));
+        assert_eq!(result.get("KEY"), Some(&String::new()));
     }
 
     // ==========================================================================
@@ -1947,7 +1947,7 @@ mod tests {
                 start_column: 0,
                 end_line: i,
                 end_column: 0,
-                metadata: Default::default(),
+                metadata: std::collections::HashMap::new(),
                 caller_identity: None,
                 callee_identity: None,
             })
@@ -1972,7 +1972,7 @@ mod tests {
                 start_column: 0,
                 end_line: i,
                 end_column: 0,
-                metadata: Default::default(),
+                metadata: std::collections::HashMap::new(),
                 caller_identity: None,
                 callee_identity: None,
             })
@@ -1997,7 +1997,7 @@ mod tests {
                 start_column: 0,
                 end_line: i,
                 end_column: 0,
-                metadata: Default::default(),
+                metadata: std::collections::HashMap::new(),
                 caller_identity: None,
                 callee_identity: None,
             })

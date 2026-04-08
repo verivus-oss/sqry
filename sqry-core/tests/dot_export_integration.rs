@@ -12,6 +12,7 @@ use sqry_core::visualization::unified::{Direction, DotConfig, EdgeFilter, Unifie
 use std::path::Path;
 
 /// Create a sample cross-language graph for testing.
+#[allow(clippy::similar_names)] // lang_name/lang_qname pairs are intentional variable naming
 fn create_sample_graph() -> CodeGraph {
     let mut graph = CodeGraph::new();
 
@@ -325,8 +326,8 @@ fn test_valid_dot_syntax() {
 
     // Basic DOT syntax validation
     assert!(dot.starts_with("digraph"));
-    assert!(dot.contains("{"));
-    assert!(dot.contains("}"));
+    assert!(dot.contains('{'));
+    assert!(dot.contains('}'));
 
     // Should have balanced braces
     let open_braces = dot.matches('{').count();
@@ -334,6 +335,6 @@ fn test_valid_dot_syntax() {
     assert_eq!(open_braces, close_braces);
 
     // Should have node definitions with brackets
-    assert!(dot.contains("["));
-    assert!(dot.contains("]"));
+    assert!(dot.contains('['));
+    assert!(dot.contains(']'));
 }

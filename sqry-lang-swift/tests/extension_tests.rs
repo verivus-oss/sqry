@@ -16,7 +16,7 @@ fn parse_swift(source: &str) -> tree_sitter::Tree {
     parser.parse(source.as_bytes(), None).unwrap()
 }
 
-/// Build a map from StringId to string value from staging operations
+/// Build a map from `StringId` to string value from staging operations
 fn build_string_map(staging: &StagingGraph) -> HashMap<StringId, String> {
     staging
         .operations()
@@ -49,13 +49,13 @@ fn has_extension_node(staging: &StagingGraph, extended_type: &str) -> bool {
 
 #[test]
 fn test_extension_creates_node() {
-    let source = r#"
+    let source = r"
 extension String {
     func reversed() -> String {
         return String(self.reversed())
     }
 }
-"#;
+";
 
     let tree = parse_swift(source);
     let mut staging = StagingGraph::new();
@@ -73,7 +73,7 @@ extension String {
 
 #[test]
 fn test_multiple_extensions() {
-    let source = r#"
+    let source = r"
 extension Array {
     func sum() -> Int {
         return 0
@@ -85,7 +85,7 @@ extension Dictionary {
         // merge logic
     }
 }
-"#;
+";
 
     let tree = parse_swift(source);
     let mut staging = StagingGraph::new();
@@ -108,7 +108,7 @@ extension Dictionary {
 
 #[test]
 fn test_protocol_extension() {
-    let source = r#"
+    let source = r"
 protocol DataProcessor {
     func process()
 }
@@ -118,7 +118,7 @@ extension DataProcessor {
         // default implementation
     }
 }
-"#;
+";
 
     let tree = parse_swift(source);
     let mut staging = StagingGraph::new();
@@ -136,13 +136,13 @@ extension DataProcessor {
 
 #[test]
 fn test_extension_with_where_clause() {
-    let source = r#"
+    let source = r"
 extension Array where Element: Equatable {
     func removeDuplicates() -> [Element] {
         return []
     }
 }
-"#;
+";
 
     let tree = parse_swift(source);
     let mut staging = StagingGraph::new();

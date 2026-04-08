@@ -1247,7 +1247,7 @@ mod tests {
             .collect()
     }
 
-    /// Helper to build a StringId → String map from staged InternString operations.
+    /// Helper to build a `StringId` → String map from staged `InternString` operations.
     /// This allows tests to assert the exact alias values.
     fn build_string_map(staging: &StagingGraph) -> HashMap<StringId, String> {
         staging
@@ -1263,9 +1263,9 @@ mod tests {
             .collect()
     }
 
-    /// Helper to resolve a StringId to its string value using the staging operations.
+    /// Helper to resolve a `StringId` to its string value using the staging operations.
     fn resolve_alias(
-        alias: &Option<StringId>,
+        alias: Option<&StringId>,
         string_map: &HashMap<StringId, String>,
     ) -> Option<String> {
         alias.as_ref().and_then(|id| string_map.get(id).cloned())
@@ -1565,7 +1565,7 @@ mod tests {
                 "Alias should NOT be wildcard (it's a reference)"
             );
             // Assert the exact alias value
-            let alias_value = resolve_alias(alias, &string_map);
+            let alias_value = resolve_alias(alias.as_ref(), &string_map);
             assert_eq!(
                 alias_value,
                 Some("Controller".to_string()),
@@ -1607,7 +1607,7 @@ mod tests {
                 "Alias should NOT be wildcard (it's a reference)"
             );
             // Assert the exact alias value
-            let alias_value = resolve_alias(alias, &string_map);
+            let alias_value = resolve_alias(alias.as_ref(), &string_map);
             assert_eq!(
                 alias_value,
                 Some("Ctrl".to_string()),
@@ -1653,7 +1653,7 @@ mod tests {
                 if let UnifiedEdgeKind::Imports { alias, is_wildcard } = edge {
                     // Each element should NOT be wildcard
                     assert!(!*is_wildcard, "Multi-alias elements should NOT be wildcard");
-                    resolve_alias(alias, &string_map)
+                    resolve_alias(alias.as_ref(), &string_map)
                 } else {
                     None
                 }
@@ -2198,7 +2198,7 @@ mod tests {
 
     #[test]
     fn test_nif_multiple_calls() {
-        let source = r#"
+        let source = r"
             defmodule MultiNif do
               def load_crypto do
                 :erlang.load_nif('./crypto_nif', 0)
@@ -2208,7 +2208,7 @@ mod tests {
                 :erlang.load_nif('./math_nif', 0)
               end
             end
-        "#;
+        ";
 
         let (tree, content) = parse_elixir(source);
         let mut staging = StagingGraph::new();
@@ -2447,6 +2447,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::similar_names)] // Domain variable naming is intentional
     fn test_nif_edge_endpoints() {
         let source = r"
             defmodule NifModule do
@@ -2481,6 +2482,7 @@ mod tests {
 
         // Extract all nodes to find caller and callee by name
         let mut caller_node_id: Option<NodeId> = None;
+        #[allow(clippy::similar_names)] // AST node variables
         let mut callee_node_id: Option<NodeId> = None;
 
         for op in staging.operations() {

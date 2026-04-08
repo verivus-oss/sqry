@@ -1,6 +1,6 @@
 //! Comprehensive tests for Oracle PL/SQL database nodes.
 //!
-//! Tests all database-specific NodeKind variants:
+//! Tests all database-specific `NodeKind` variants:
 //! - Package (Oracle-specific)
 //! - Procedure (procedures and functions)
 //! - Trigger
@@ -118,11 +118,11 @@ fn count_table_writes(staging: &StagingGraph, op_type: TableWriteOp) -> usize {
 
 #[test]
 fn test_create_package_node_kind() {
-    let source = br#"
+    let source = br"
 CREATE OR REPLACE PACKAGE hr_utils AS
   PROCEDURE hire_employee(emp_name VARCHAR2);
 END hr_utils;
-"#;
+";
 
     let staging = build_staging(source);
 
@@ -142,12 +142,12 @@ END hr_utils;
 #[test]
 #[ignore = "Grammar limitation: tree-sitter-plsql does not support standalone procedures outside packages"]
 fn test_create_procedure_standalone_node_kind() {
-    let source = br#"
+    let source = br"
 CREATE OR REPLACE PROCEDURE update_salary(emp_id NUMBER, new_sal NUMBER) IS
 BEGIN
   UPDATE employees SET salary = new_sal WHERE id = emp_id;
 END update_salary;
-"#;
+";
 
     let staging = build_staging(source);
 
@@ -166,14 +166,14 @@ END update_salary;
 
 #[test]
 fn test_create_procedure_in_package_node_kind() {
-    let source = br#"
+    let source = br"
 CREATE OR REPLACE PACKAGE BODY payroll AS
   PROCEDURE process_payroll IS
   BEGIN
     SELECT * FROM employees;
   END process_payroll;
 END payroll;
-"#;
+";
 
     let staging = build_staging(source);
 
@@ -193,12 +193,12 @@ END payroll;
 #[test]
 #[ignore = "Grammar limitation: tree-sitter-plsql does not support standalone functions outside packages"]
 fn test_create_function_standalone_node_kind() {
-    let source = br#"
+    let source = br"
 CREATE OR REPLACE FUNCTION get_employee_count RETURN NUMBER IS
 BEGIN
   RETURN (SELECT COUNT(*) FROM employees);
 END get_employee_count;
-"#;
+";
 
     let staging = build_staging(source);
 
@@ -211,14 +211,14 @@ END get_employee_count;
 
 #[test]
 fn test_create_function_in_package_node_kind() {
-    let source = br#"
+    let source = br"
 CREATE OR REPLACE PACKAGE BODY hr_utils AS
   FUNCTION get_salary(emp_id NUMBER) RETURN NUMBER IS
   BEGIN
     RETURN (SELECT salary FROM employees WHERE id = emp_id);
   END get_salary;
 END hr_utils;
-"#;
+";
 
     let staging = build_staging(source);
 
@@ -232,14 +232,14 @@ END hr_utils;
 #[test]
 #[ignore = "Grammar limitation: tree-sitter-plsql does not support standalone triggers outside packages"]
 fn test_create_trigger_node_kind() {
-    let source = br#"
+    let source = br"
 CREATE OR REPLACE TRIGGER audit_employee_changes
 BEFORE UPDATE ON employees
 FOR EACH ROW
 BEGIN
   INSERT INTO audit_log VALUES (SYSDATE, USER, :OLD.id);
 END;
-"#;
+";
 
     let staging = build_staging(source);
 
@@ -264,7 +264,7 @@ END;
 
 #[test]
 fn test_create_table_node_kind() {
-    let source = br#"
+    let source = br"
 CREATE OR REPLACE PROCEDURE test_proc IS
 BEGIN
   SELECT * FROM employees;
@@ -272,7 +272,7 @@ BEGIN
   UPDATE employees SET status = 'active';
   DELETE FROM temp_data;
 END test_proc;
-"#;
+";
 
     let staging = build_staging(source);
 
@@ -313,7 +313,7 @@ END test_proc;
 
 #[test]
 fn test_package_contains_procedures() {
-    let source = br#"
+    let source = br"
 CREATE OR REPLACE PACKAGE BODY employee_mgmt AS
   PROCEDURE hire(name VARCHAR2) IS
   BEGIN
@@ -330,7 +330,7 @@ CREATE OR REPLACE PACKAGE BODY employee_mgmt AS
     RETURN (SELECT COUNT(*) FROM employees);
   END get_count;
 END employee_mgmt;
-"#;
+";
 
     let staging = build_staging(source);
 
@@ -364,7 +364,7 @@ END employee_mgmt;
 #[test]
 fn test_procedure_table_read_write() {
     // Grammar limitation: wrap in package body
-    let source = br#"
+    let source = br"
 CREATE OR REPLACE PACKAGE BODY test_pkg AS
   PROCEDURE manage_employees IS
   BEGIN
@@ -377,7 +377,7 @@ CREATE OR REPLACE PACKAGE BODY test_pkg AS
     DELETE FROM expired_records;
   END manage_employees;
 END test_pkg;
-"#;
+";
 
     let staging = build_staging(source);
 
@@ -419,14 +419,14 @@ END test_pkg;
 #[test]
 #[ignore = "Grammar limitation: tree-sitter-plsql does not support standalone triggers"]
 fn test_trigger_table_attachment() {
-    let source = br#"
+    let source = br"
 CREATE OR REPLACE TRIGGER log_changes
 AFTER UPDATE ON employees
 FOR EACH ROW
 BEGIN
   INSERT INTO change_log VALUES (:NEW.id, SYSDATE);
 END;
-"#;
+";
 
     let staging = build_staging(source);
 
@@ -463,7 +463,7 @@ END;
 fn test_cross_package_calls() {
     // Test that qualified calls to other packages create procedure nodes
     // Note: The current grammar has limited support for qualified calls
-    let source = br#"
+    let source = br"
 CREATE OR REPLACE PACKAGE BODY pkg1 AS
   PROCEDURE proc1 IS
   BEGIN
@@ -476,7 +476,7 @@ CREATE OR REPLACE PACKAGE BODY pkg1 AS
     DELETE FROM table3;
   END proc2;
 END pkg1;
-"#;
+";
 
     let staging = build_staging(source);
 
@@ -528,7 +528,7 @@ END pkg1;
 #[test]
 fn test_mixed_database_objects() {
     // Grammar limitation: only packages are fully supported
-    let source = br#"
+    let source = br"
 -- Package with procedures
 CREATE OR REPLACE PACKAGE BODY utils AS
   PROCEDURE util_proc IS
@@ -549,7 +549,7 @@ CREATE OR REPLACE PACKAGE BODY audit_pkg AS
     INSERT INTO audit_trail VALUES (SYSDATE);
   END log_event;
 END audit_pkg;
-"#;
+";
 
     let staging = build_staging(source);
 

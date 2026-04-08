@@ -946,7 +946,7 @@ fn process_variable_typeof_edges(
         };
 
         // Build qualified name
-        let qualified_name = format!("{}.{}", owner_class_name, variable_name);
+        let qualified_name = format!("{owner_class_name}.{variable_name}");
 
         // Create field node
         let visibility = visibility_for_qualified_name(&qualified_name);
@@ -1931,6 +1931,7 @@ fn is_lookup_function_call(node: &Node, content: &[u8]) -> bool {
 }
 
 /// Detect DynamicLibrary.{open, executable, process} calls and create FFI edges.
+#[allow(clippy::items_after_statements)] // FFI use imports near usage
 fn detect_library_loading(
     node: Node,
     content: &[u8],
@@ -1985,6 +1986,7 @@ fn detect_library_loading(
 }
 
 /// Detect `lookup().asFunction()` chains and create FFI edges.
+#[allow(clippy::items_after_statements)] // FFI use imports near usage
 fn detect_lookup_chain(
     node: Node,
     content: &[u8],
@@ -2083,6 +2085,7 @@ fn detect_lookup_chain(
 }
 
 /// Detect `lookupFunction()` calls and create FFI edges.
+#[allow(clippy::items_after_statements)] // FFI use imports near usage
 fn detect_lookup_function(
     node: Node,
     content: &[u8],
@@ -2166,6 +2169,7 @@ fn detect_lookup_function(
 /// Detect `@Native` and `@FfiNative` annotations on external functions and create FFI edges.
 /// Detect FFI annotations from the `marker_annotation` + `function_signature` pattern
 /// used when tree-sitter does not create `external_declaration` nodes.
+#[allow(clippy::items_after_statements)] // FFI use imports near usage
 fn detect_ffi_annotation_from_marker(
     annotation_node: Node,
     func_sig: Node,
@@ -2272,6 +2276,7 @@ fn extract_function_name_from_error_node(error_node: &Node, content: &[u8]) -> O
 }
 
 /// Simplified version of `detect_ffi_annotation_from_marker` that takes just the function name.
+#[allow(clippy::items_after_statements)] // FFI use imports near usage
 fn detect_ffi_annotation_from_marker_simple(
     annotation_node: Node,
     func_name: &str,
@@ -2301,6 +2306,7 @@ fn detect_ffi_annotation_from_marker_simple(
     helper.add_ffi_edge(caller_id, ffi_target_id, FfiConvention::C);
 }
 
+#[allow(clippy::items_after_statements)] // FFI use imports near usage
 fn detect_ffi_annotation(node: Node, content: &[u8], helper: &mut GraphBuildHelper) {
     // The node is external_declaration, get the function_signature from it
     let func_sig = node.child_by_field_name("signature");
@@ -2666,7 +2672,7 @@ mod tests {
                 {
                     // We need to extract the node names from the staging graph
                     // This is a simplified extraction for testing
-                    Some((format!("{:?}", source), format!("{:?}", target)))
+                    Some((format!("{source:?}"), format!("{target:?}")))
                 } else {
                     None
                 }

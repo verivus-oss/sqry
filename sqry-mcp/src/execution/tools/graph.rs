@@ -17,9 +17,9 @@ use anyhow::{Result, bail};
 use serde_json::{Map, Value, json};
 use sqry_core::graph::unified::concurrent::GraphSnapshot;
 use sqry_core::graph::unified::edge::{EdgeKind, StoreEdgeRef};
+use sqry_core::graph::unified::materialize::find_nodes_by_name;
 use sqry_core::graph::unified::node::NodeId;
 use sqry_core::graph::unified::node::kind::NodeKind;
-use sqry_core::graph::unified::{FileScope, ResolutionMode, SymbolCandidateOutcome, SymbolQuery};
 use url::Url;
 
 use crate::engine::{canonicalize_in_workspace, engine_for_workspace, get_graph_identity};
@@ -170,7 +170,7 @@ fn collect_unified_seeds(
     }
 
     if let Some(ref symbol_name) = args.symbol_name {
-        seeds.extend(find_nodes_by_name_unified(snapshot, symbol_name));
+        seeds.extend(find_nodes_by_name(snapshot, symbol_name));
     }
 
     Ok(seeds)
@@ -344,18 +344,6 @@ fn collect_seeds_by_file(
     Ok(seeds)
 }
 
-/// Collect seed nodes by symbol name (simple or qualified).
-fn collect_seeds_by_symbol(snapshot: &GraphSnapshot, symbol_name: &str) -> Vec<NodeId> {
-    match snapshot.find_symbol_candidates(&SymbolQuery {
-        symbol: symbol_name,
-        file_scope: FileScope::Any,
-        mode: ResolutionMode::AllowSuffixCandidates,
-    }) {
-        SymbolCandidateOutcome::Candidates(matches) => matches,
-        SymbolCandidateOutcome::NotFound | SymbolCandidateOutcome::FileNotIndexed => Vec::new(),
-    }
-}
-
 /// Collect seed node IDs from unified graph for export.
 fn collect_export_graph_seeds_unified(
     args: &ExportGraphArgs,
@@ -369,11 +357,11 @@ fn collect_export_graph_seeds_unified(
     }
 
     if let Some(ref symbol_name) = args.symbol_name {
-        seeds.extend(collect_seeds_by_symbol(snapshot, symbol_name));
+        seeds.extend(find_nodes_by_name(snapshot, symbol_name));
     }
 
     for symbol in &args.symbols {
-        seeds.extend(collect_seeds_by_symbol(snapshot, symbol));
+        seeds.extend(find_nodes_by_name(snapshot, symbol));
     }
 
     // Deduplicate seeds while preserving relative order
@@ -873,7 +861,7 @@ fn traversal_decision(
 fn collect_seed_nodes_unified(ctx: &UnifiedSubgraphContext<'_>) -> Result<Vec<NodeId>> {
     let mut seeds = Vec::new();
     for symbol_name in &ctx.args.symbols {
-        let matches = find_nodes_by_name_unified(ctx.snapshot, symbol_name);
+        let matches = find_nodes_by_name(ctx.snapshot, symbol_name);
         if matches.is_empty() {
             bail!("Seed symbol '{symbol_name}' not found in unified graph");
         }
@@ -1128,18 +1116,6 @@ fn compute_subgraph_unified(
     })
 }
 
-/// Find nodes by name (simple or qualified) in the unified graph.
-fn find_nodes_by_name_unified(snapshot: &GraphSnapshot, name: &str) -> Vec<NodeId> {
-    match snapshot.find_symbol_candidates(&SymbolQuery {
-        symbol: name,
-        file_scope: FileScope::Any,
-        mode: ResolutionMode::AllowSuffixCandidates,
-    }) {
-        SymbolCandidateOutcome::Candidates(matches) => matches,
-        SymbolCandidateOutcome::NotFound | SymbolCandidateOutcome::FileNotIndexed => Vec::new(),
-    }
-}
-
 /// Build `NodeRefData` from a unified graph node.
 fn build_node_ref_unified(
     snapshot: &GraphSnapshot,
@@ -1157,12 +1133,8 @@ fn build_node_ref_unified(
         .resolve(entry.name)
         .map_or_else(|| "unknown".to_string(), |s| s.to_string());
 
-    let qualified_name = crate::execution::symbol_utils::display_entry_qualified_name(
-        entry,
-        strings,
-        files.language_for_file(entry.file),
-        &name,
-    );
+    let qualified_name =
+        crate::execution::symbol_utils::display_entry_qualified_name(entry, strings, files, &name);
 
     let kind = match entry.kind {
         NodeKind::Class => "class",
@@ -1395,7 +1367,7 @@ mod tests {
         let graph = create_test_graph();
         let snapshot = graph.snapshot();
 
-        let matches = find_nodes_by_name_unified(&snapshot, "main");
+        let matches = find_nodes_by_name(&snapshot, "main");
         assert_eq!(matches.len(), 1, "Should find exactly one 'main' node");
     }
 
@@ -1404,7 +1376,7 @@ mod tests {
         let graph = create_test_graph();
         let snapshot = graph.snapshot();
 
-        let matches = find_nodes_by_name_unified(&snapshot, "crate::helper");
+        let matches = find_nodes_by_name(&snapshot, "crate::helper");
         assert_eq!(
             matches.len(),
             1,
@@ -1418,7 +1390,7 @@ mod tests {
         let snapshot = graph.snapshot();
 
         // Qualified name search also matches suffix pattern "::name"
-        let matches = find_nodes_by_name_unified(&snapshot, "helper");
+        let matches = find_nodes_by_name(&snapshot, "helper");
         assert!(
             !matches.is_empty(),
             "Should find helper by simple name or suffix"
@@ -1430,7 +1402,7 @@ mod tests {
         let graph = create_test_graph();
         let snapshot = graph.snapshot();
 
-        let matches = find_nodes_by_name_unified(&snapshot, "nonexistent_function");
+        let matches = find_nodes_by_name(&snapshot, "nonexistent_function");
         assert!(matches.is_empty(), "Should not find nonexistent function");
     }
 
@@ -1439,7 +1411,7 @@ mod tests {
         let graph = create_test_graph();
         let snapshot = graph.snapshot();
 
-        let matches = find_nodes_by_name_unified(&snapshot, "");
+        let matches = find_nodes_by_name(&snapshot, "");
         assert!(matches.is_empty(), "Empty name should not match any nodes");
     }
 
@@ -1454,7 +1426,7 @@ mod tests {
         let workspace = PathBuf::from("/workspace");
 
         // Find main node
-        let matches = find_nodes_by_name_unified(&snapshot, "main");
+        let matches = find_nodes_by_name(&snapshot, "main");
         assert!(!matches.is_empty(), "Should find main node");
 
         let node_id = matches[0];
@@ -1480,7 +1452,7 @@ mod tests {
         let workspace = PathBuf::from("/workspace");
 
         // Find helper node (which is async)
-        let matches = find_nodes_by_name_unified(&snapshot, "helper");
+        let matches = find_nodes_by_name(&snapshot, "helper");
         assert!(!matches.is_empty(), "Should find helper node");
 
         let node_id = matches[0];
@@ -1614,7 +1586,7 @@ mod tests {
         let snapshot = graph.snapshot();
         let workspace = PathBuf::from("/workspace");
 
-        let matches = find_nodes_by_name_unified(&snapshot, "main");
+        let matches = find_nodes_by_name(&snapshot, "main");
         let result = build_node_ref_unified(&snapshot, matches[0], &workspace);
 
         // NodeKind::Function should map to "function"
@@ -1634,7 +1606,7 @@ mod tests {
         assert_eq!(snapshot.nodes().len(), 0);
 
         // Find should return empty
-        let matches = find_nodes_by_name_unified(&snapshot, "anything");
+        let matches = find_nodes_by_name(&snapshot, "anything");
         assert!(matches.is_empty());
     }
 
@@ -1649,7 +1621,7 @@ mod tests {
         let workspace = PathBuf::from("/workspace");
 
         // Build a NodeRefData for "main" only
-        let main_matches = find_nodes_by_name_unified(&snapshot, "main");
+        let main_matches = find_nodes_by_name(&snapshot, "main");
         assert!(!main_matches.is_empty(), "test graph must have 'main' node");
         let main_node_ref = build_node_ref_unified(&snapshot, main_matches[0], &workspace);
 
@@ -1688,7 +1660,7 @@ mod tests {
         let snapshot = graph.snapshot();
 
         // Collect only the "main" node
-        let main_matches = find_nodes_by_name_unified(&snapshot, "main");
+        let main_matches = find_nodes_by_name(&snapshot, "main");
         assert!(!main_matches.is_empty(), "test graph must have 'main' node");
 
         let page_node_ids: HashSet<NodeId> = main_matches.into_iter().collect();
@@ -1904,7 +1876,7 @@ mod tests {
         let snapshot = graph.snapshot();
         let workspace = PathBuf::from("/my/workspace");
 
-        let matches = find_nodes_by_name_unified(&snapshot, "main");
+        let matches = find_nodes_by_name(&snapshot, "main");
         let result = build_node_ref_unified(&snapshot, matches[0], &workspace);
 
         // File URI should be a valid file URI containing the file path
@@ -1917,7 +1889,7 @@ mod tests {
         );
         // Should be a valid file URI format
         assert!(
-            result.file_uri.starts_with("file://") || result.file_uri.starts_with("/"),
+            result.file_uri.starts_with("file://") || result.file_uri.starts_with('/'),
             "file_uri should be a valid path or file URI: {}",
             result.file_uri
         );
@@ -1986,7 +1958,7 @@ mod tests {
         let graph = create_test_graph();
         let snapshot = graph.snapshot();
 
-        let main_nodes: Vec<NodeId> = find_nodes_by_name_unified(&snapshot, "main");
+        let main_nodes: Vec<NodeId> = find_nodes_by_name(&snapshot, "main");
         assert_eq!(main_nodes.len(), 1, "test graph has exactly 1 'main' node");
 
         let node_ref =

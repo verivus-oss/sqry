@@ -127,8 +127,7 @@ fn test_oversized_script_skipped() {
     // Generate an XML file with a script >1MB
     let big_script = "x".repeat(1_100_000);
     let xml = format!(
-        r#"<?xml version="1.0"?><record_update table="sys_script"><sys_script><name>Big</name><script><![CDATA[{}]]></script></sys_script></record_update>"#,
-        big_script,
+        r#"<?xml version="1.0"?><record_update table="sys_script"><sys_script><name>Big</name><script><![CDATA[{big_script}]]></script></sys_script></record_update>"#,
     );
     let staging = build_graph_from_xml(&xml);
     // The oversized script should be skipped, but the file itself processes without error.
@@ -145,6 +144,7 @@ fn test_malformed_xml_no_panic() {
 }
 
 #[test]
+#[allow(clippy::items_after_statements)] // Items near usage for clarity
 fn test_non_utf8_empty_graph() {
     // Non-UTF-8 bytes should return empty graph
     let content: &[u8] = &[0xFF, 0xFE, 0x00, 0x3C]; // UTF-16 BOM

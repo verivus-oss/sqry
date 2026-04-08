@@ -903,7 +903,7 @@ mod tests {
         assert_eq!(stats.ffi_edges_created, 0);
     }
 
-    /// Helper to commit a staging graph to the main CodeGraph.
+    /// Helper to commit a staging graph to the main `CodeGraph`.
     ///
     /// This mirrors the logic in `entrypoint.rs::process_file` but simplified for tests.
     fn commit_staging_to_graph(

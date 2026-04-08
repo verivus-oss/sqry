@@ -42,7 +42,8 @@ fn copy_fixture(relative: &str) -> TempDir {
     let source = workspace_root.join(relative);
     assert!(
         source.exists(),
-        "fixture directory {source:?} not found — expected at {relative}"
+        "fixture directory {} not found — expected at {relative}",
+        source.display()
     );
 
     let dest = TempDir::new().expect("create temp dir");

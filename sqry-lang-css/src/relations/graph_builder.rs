@@ -1020,7 +1020,7 @@ mod tests {
     use sqry_core::graph::unified::build::staging::StagingOp;
     use sqry_core::graph::unified::edge::EdgeKind;
 
-    /// Build a string lookup map from InternString operations
+    /// Build a string lookup map from `InternString` operations
     fn build_string_lookup(staging: &StagingGraph) -> std::collections::HashMap<u32, String> {
         staging
             .operations()
@@ -1035,7 +1035,7 @@ mod tests {
             .collect()
     }
 
-    /// Resolve a StringId to its value using the string lookup map
+    /// Resolve a `StringId` to its value using the string lookup map
     fn resolve_string(
         strings: &std::collections::HashMap<u32, String>,
         id: sqry_core::graph::unified::StringId,
@@ -1089,13 +1089,11 @@ mod tests {
             let alias_str = resolve_string(&strings, *alias.as_ref().unwrap());
             assert!(
                 alias_str.starts_with("@layer:"),
-                "Layer alias should have @layer: prefix, got: {:?}",
-                alias_str
+                "Layer alias should have @layer: prefix, got: {alias_str:?}"
             );
             assert!(
                 alias_str.contains("base"),
-                "Layer alias should contain the layer name 'base', got: {:?}",
-                alias_str
+                "Layer alias should contain the layer name 'base', got: {alias_str:?}"
             );
             assert!(!*is_wildcard, "Layer import should not be wildcard");
         }
@@ -1146,8 +1144,7 @@ mod tests {
             let alias_str = resolve_string(&strings, *alias.as_ref().unwrap());
             assert_eq!(
                 alias_str, "@layer:",
-                "Anonymous layer alias should be exactly '@layer:', got: {:?}",
-                alias_str
+                "Anonymous layer alias should be exactly '@layer:', got: {alias_str:?}"
             );
         }
     }
@@ -1210,7 +1207,7 @@ mod tests {
     #[test]
     fn test_layer_ordering_declaration() {
         // @layer base, utils, components; should create module nodes for each layer
-        let source = r#"@layer base, utils, components;"#;
+        let source = r"@layer base, utils, components;";
 
         let tree = parse_css(source);
         let mut staging = StagingGraph::new();
@@ -1259,7 +1256,7 @@ mod tests {
     #[test]
     fn test_layer_block_definition() {
         // @layer name { .foo { color: red; } } should create layer module
-        let source = r#"@layer name { .foo { color: red; } }"#;
+        let source = r"@layer name { .foo { color: red; } }";
 
         let tree = parse_css(source);
         let mut staging = StagingGraph::new();
@@ -1354,10 +1351,10 @@ mod tests {
     #[test]
     fn test_multiple_layer_declarations() {
         // Multiple @layer declarations in same file
-        let source = r#"
+        let source = r"
 @layer reset, base;
 @layer components, utils;
-"#;
+";
 
         let tree = parse_css(source);
         let mut staging = StagingGraph::new();
@@ -1394,13 +1391,13 @@ mod tests {
     #[test]
     fn test_layer_with_css_inside() {
         // @layer with CSS rules inside should extract CSS custom properties
-        let source = r#"
+        let source = r"
 @layer base {
     :root {
         --primary-color: blue;
     }
 }
-"#;
+";
 
         let tree = parse_css(source);
         let mut staging = StagingGraph::new();
@@ -1420,8 +1417,7 @@ mod tests {
             .count();
         assert!(
             node_count >= 3,
-            "Expected at least 3 nodes (module, layer, variable), got {}",
-            node_count
+            "Expected at least 3 nodes (module, layer, variable), got {node_count}"
         );
     }
 
@@ -1476,8 +1472,7 @@ mod tests {
                 let alias_str = resolve_string(&strings, *alias.as_ref().unwrap());
                 assert!(
                     alias_str.starts_with("@layer:"),
-                    "Layer alias should have @layer: prefix, got: {:?}",
-                    alias_str
+                    "Layer alias should have @layer: prefix, got: {alias_str:?}"
                 );
             }
         }
@@ -1519,7 +1514,7 @@ mod tests {
     #[test]
     fn test_single_layer_declaration() {
         // Single layer: @layer base;
-        let source = r#"@layer base;"#;
+        let source = r"@layer base;";
 
         let tree = parse_css(source);
         let mut staging = StagingGraph::new();

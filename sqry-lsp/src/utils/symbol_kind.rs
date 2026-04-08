@@ -3,6 +3,10 @@ use tower_lsp::lsp_types::SymbolKind;
 
 /// Map graph-native `NodeKind` to LSP `SymbolKind`.
 #[must_use]
+#[allow(
+    clippy::match_same_arms,
+    reason = "arms are kept separate for semantic clarity; EnumVariant vs EnumConstant, Type vs TypeParameter, Module vs JavaModule are distinct domain concepts"
+)]
 pub fn node_kind_to_symbol_kind(kind: NodeKind) -> SymbolKind {
     match kind {
         NodeKind::Function | NodeKind::Macro | NodeKind::CallSite | NodeKind::Test => {

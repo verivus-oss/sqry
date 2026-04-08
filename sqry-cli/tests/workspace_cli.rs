@@ -28,6 +28,7 @@ fn workspace_help_lists_subcommands() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // CLI integration test covers many subcommands
 fn workspace_query_and_stats_flow() {
     let workspace = TempDir::new().unwrap();
     let workspace_path = workspace.path();
@@ -154,6 +155,7 @@ fn workspace_query_and_stats_flow() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // End-to-end integration test exercises many query/assertion combinations
 fn workspace_query_qualified_names_for_relations() {
     let workspace = TempDir::new().unwrap();
     let workspace_path = workspace.path();
@@ -181,7 +183,7 @@ end
         );
 
         let mut file = fs::File::create(repo_path.join("app.rb")).unwrap();
-        write!(file, "{}", ruby_code).unwrap();
+        write!(file, "{ruby_code}").unwrap();
 
         // Index the repository
         sqry_cmd()
@@ -317,6 +319,8 @@ end
 /// Test workspace relation queries (callers:, callees:) across multiple repositories
 /// Regression test for BUG-3: Workspace relation queries now work (fixed 2025-11-20)
 #[test]
+#[allow(clippy::too_many_lines)] // End-to-end integration test exercises many query/assertion combinations
+#[allow(clippy::similar_names)] // callers_output/callers_text and callees_output/callees_text are intentional
 fn workspace_relation_queries_cross_repo() {
     let workspace_dir = TempDir::new().unwrap();
     let workspace_path = workspace_dir.path();
@@ -457,6 +461,7 @@ end
     );
 
     // Test 3: Workspace callees: query
+    #[allow(clippy::similar_names)] // Test variables: expected_nodes/expected_edges
     let callees_output = sqry_cmd()
         .args([
             "workspace",

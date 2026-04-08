@@ -178,7 +178,9 @@ fn extract_from_node(
                     qualified_name: qualified.clone(),
                     simple_name: name.to_string(),
                     signature,
+                    #[allow(clippy::cast_possible_truncation)] // Graph storage: node/edge index counts fit in u32
                     start_line: node.start_position().row as u32 + 1,
+                    #[allow(clippy::cast_possible_truncation)] // Graph storage: node/edge index counts fit in u32
                     end_line: node.end_position().row as u32 + 1,
                 });
 
@@ -424,7 +426,7 @@ mod tests {
 
     #[test]
     fn test_extract_symbols_from_tree() {
-        let source = r#"
+        let source = r"
 pub struct MyStruct {
     x: u32,
 }
@@ -438,7 +440,7 @@ impl MyStruct {
 fn helper() -> u32 {
     42
 }
-"#;
+";
         let tree = parse_rust(source);
         let symbols = extract_symbols_from_tree(&tree, source.as_bytes(), "my_crate");
 

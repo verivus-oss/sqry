@@ -1,7 +1,7 @@
 //! Unit tests for trigger extraction (graph-native).
 //!
 //! Verifies that CREATE TRIGGER statements produce trigger nodes and
-//! TriggeredBy edges in the staging graph.
+//! `TriggeredBy` edges in the staging graph.
 
 use sqry_core::graph::unified::NodeId;
 use sqry_core::graph::unified::build::staging::{StagingGraph, StagingOp};
@@ -77,12 +77,12 @@ fn build_graph(source: &[u8]) -> StagingGraph {
 
 #[test]
 fn test_trigger_graph_extraction() {
-    let sql = br#"
+    let sql = br"
         CREATE TRIGGER audit_log_trigger
         AFTER INSERT ON users
         FOR EACH ROW
         EXECUTE FUNCTION log_user_changes();
-    "#;
+    ";
 
     let staging = build_graph(sql);
     let nodes = build_node_lookup(&staging);
@@ -126,7 +126,7 @@ fn test_trigger_graph_extraction() {
 
 #[test]
 fn test_multiple_trigger_extraction() {
-    let sql = br#"
+    let sql = br"
         CREATE TRIGGER before_update_trigger
         BEFORE UPDATE ON accounts
         FOR EACH ROW
@@ -136,7 +136,7 @@ fn test_multiple_trigger_extraction() {
         AFTER DELETE ON orders
         FOR EACH ROW
         EXECUTE FUNCTION archive_order();
-    "#;
+    ";
 
     let staging = build_graph(sql);
 
@@ -152,7 +152,7 @@ fn test_multiple_trigger_extraction() {
 
 #[test]
 fn test_function_and_trigger_extraction_together() {
-    let sql = br#"
+    let sql = br"
         CREATE FUNCTION calculate_total(order_id INT)
         RETURNS DECIMAL(10,2)
         AS $$
@@ -163,7 +163,7 @@ fn test_function_and_trigger_extraction_together() {
         AFTER INSERT ON order_items
         FOR EACH ROW
         EXECUTE FUNCTION calculate_total();
-    "#;
+    ";
 
     let staging = build_graph(sql);
 

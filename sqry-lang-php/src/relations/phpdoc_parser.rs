@@ -269,11 +269,11 @@ mod tests {
 
     #[test]
     fn test_parse_phpdoc_tags() {
-        let phpdoc = r#"/**
+        let phpdoc = r"/**
          * @param {string} $name
          * @param {int} $age
          * @return {User}
-         */"#;
+         */";
 
         let tags = parse_phpdoc_tags(phpdoc);
         assert_eq!(tags.params.len(), 2);
@@ -284,9 +284,9 @@ mod tests {
 
     #[test]
     fn test_parse_phpdoc_var_tag() {
-        let phpdoc = r#"/**
+        let phpdoc = r"/**
          * @var {string} $username
-         */"#;
+         */";
 
         let tags = parse_phpdoc_tags(phpdoc);
         assert_eq!(tags.var_type, Some("string".to_string()));
@@ -294,10 +294,10 @@ mod tests {
 
     #[test]
     fn test_parse_phpdoc_union_types() {
-        let phpdoc = r#"/**
+        let phpdoc = r"/**
          * @param {string|int} $value
          * @return {bool}
-         */"#;
+         */";
 
         let tags = parse_phpdoc_tags(phpdoc);
         assert_eq!(tags.params[0].type_str, "string|int");
@@ -306,10 +306,10 @@ mod tests {
 
     #[test]
     fn test_parse_phpdoc_array_types() {
-        let phpdoc = r#"/**
+        let phpdoc = r"/**
          * @param {User[]} $users
          * @return {array<string, mixed>}
-         */"#;
+         */";
 
         let tags = parse_phpdoc_tags(phpdoc);
         assert_eq!(tags.params[0].type_str, "User[]");

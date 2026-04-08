@@ -193,6 +193,7 @@ impl TypeExtractionConfig {
 /// let result = extract_type_names("String, nil, Integer", &ruby);
 /// assert_eq!(result, vec!["Integer", "String"]);
 /// ```
+#[must_use]
 pub fn extract_type_names(type_str: &str, config: &TypeExtractionConfig) -> Vec<String> {
     let mut type_names = Vec::new();
     let mut current_token = String::new();

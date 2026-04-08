@@ -15,6 +15,7 @@ fn sqry_cmd() -> Command {
 /// Test workspace relation queries with same-name functions across languages
 /// Tests lang: filter composition with relation predicates (CODEX recommendation)
 #[test]
+#[allow(clippy::too_many_lines)] // Tests language filter combinations
 fn workspace_relation_queries_with_lang_filter() {
     let workspace_dir = TempDir::new().unwrap();
     let workspace_path = workspace_dir.path();
@@ -174,6 +175,7 @@ function render_view() {
 /// Test workspace relation queries with repo: filter
 /// Tests repo: predicate composition with relation predicates (CODEX recommendation)
 #[test]
+#[allow(clippy::too_many_lines)] // End-to-end integration test exercises many query/assertion combinations
 fn workspace_relation_queries_with_repo_filter() {
     let workspace_dir = TempDir::new().unwrap();
     let workspace_path = workspace_dir.path();
@@ -304,6 +306,7 @@ end
 /// Test JavaScript/TypeScript imports with lang: filter
 /// Verifies lang validator fix unlocked JS/TS import queries
 #[test]
+#[allow(clippy::too_many_lines)] // End-to-end integration test exercises many query/assertion combinations
 fn workspace_javascript_typescript_imports() {
     let workspace_dir = TempDir::new().unwrap();
     let workspace_path = workspace_dir.path();
@@ -313,7 +316,7 @@ fn workspace_javascript_typescript_imports() {
     fs::create_dir_all(&js_project).unwrap();
     fs::write(
         js_project.join("app.js"),
-        r#"import React from 'react';
+        r"import React from 'react';
 import { useState } from 'react';
 import lodash from 'lodash';
 
@@ -321,7 +324,7 @@ function App() {
   const [state, setState] = useState(0);
   return React.createElement('div', null, 'Hello');
 }
-"#,
+",
     )
     .unwrap();
 
@@ -330,14 +333,14 @@ function App() {
     fs::create_dir_all(&ts_project).unwrap();
     fs::write(
         ts_project.join("app.ts"),
-        r#"import React from 'react';
+        r"import React from 'react';
 import type { FC } from 'react';
 import axios from 'axios';
 
 const App: FC = () => {
   return <div>Hello</div>;
 };
-"#,
+",
     )
     .unwrap();
 
@@ -602,6 +605,7 @@ main();
 /// Test Python imports with lang: filter
 /// Verifies lang validator fix unlocked Python import queries
 #[test]
+#[allow(clippy::too_many_lines)] // End-to-end integration test exercises many query/assertion combinations
 fn workspace_python_imports() {
     let workspace_dir = TempDir::new().unwrap();
     let workspace_path = workspace_dir.path();
@@ -611,7 +615,7 @@ fn workspace_python_imports() {
     fs::create_dir_all(&py_data).unwrap();
     fs::write(
         py_data.join("processor.py"),
-        r#"import pandas as pd
+        r"import pandas as pd
 import numpy as np
 from sklearn.model_selection import train_test_split
 
@@ -620,7 +624,7 @@ def process_data(df):
 
 def split_data(X, y):
     return train_test_split(X, y, test_size=0.2)
-"#,
+",
     )
     .unwrap();
 
@@ -629,7 +633,7 @@ def split_data(X, y):
     fs::create_dir_all(&py_web).unwrap();
     fs::write(
         py_web.join("app.py"),
-        r#"from flask import Flask, request
+        r"from flask import Flask, request
 import pandas as pd
 
 app = Flask(__name__)
@@ -638,7 +642,7 @@ app = Flask(__name__)
 def get_data():
     df = pd.read_csv('data.csv')
     return df.to_json()
-"#,
+",
     )
     .unwrap();
 
@@ -773,6 +777,7 @@ end
 /// Test Go imports and callers with lang: filter
 /// Verifies lang validator fix unlocked Go queries
 #[test]
+#[allow(clippy::too_many_lines)] // End-to-end integration test exercises many query/assertion combinations
 fn workspace_go_imports_and_callers() {
     let workspace_dir = TempDir::new().unwrap();
     let workspace_path = workspace_dir.path();
@@ -934,6 +939,7 @@ func main() {
 /// Test Rust callers with lang: filter
 /// Verifies lang validator fix unlocked Rust queries
 #[test]
+#[allow(clippy::too_many_lines)] // End-to-end integration test exercises many query/assertion combinations
 fn workspace_rust_callers() {
     let workspace_dir = TempDir::new().unwrap();
     let workspace_path = workspace_dir.path();
@@ -1093,6 +1099,7 @@ fn main() {
 /// Test boolean combinations with multiple languages
 /// Verifies complex lang: filter combinations work correctly
 #[test]
+#[allow(clippy::too_many_lines)] // End-to-end integration test exercises many query/assertion combinations
 fn workspace_lang_boolean_combinations() {
     let workspace_dir = TempDir::new().unwrap();
     let workspace_path = workspace_dir.path();

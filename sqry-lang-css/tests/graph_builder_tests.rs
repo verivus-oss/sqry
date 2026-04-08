@@ -4,7 +4,7 @@
 //! - Module node creation
 //! - CSS variable (custom property) node extraction
 //! - @import edge detection
-//! - url() reference edges
+//! - `url()` reference edges
 //! - @layer support
 //! - Error handling for malformed input
 
@@ -132,8 +132,7 @@ body { color: black; }
     let import_count = count_import_edges(&staging);
     assert!(
         import_count >= 1,
-        "Expected at least 1 import edge for @import, got {}",
-        import_count
+        "Expected at least 1 import edge for @import, got {import_count}"
     );
 }
 
@@ -161,8 +160,7 @@ body { margin: 0; }
     let import_count = count_import_edges(&staging);
     assert!(
         import_count >= 3,
-        "Expected at least 3 import edges, got {}",
-        import_count
+        "Expected at least 3 import edges, got {import_count}"
     );
 }
 
@@ -187,8 +185,7 @@ body { color: blue; }
     let import_count = count_import_edges(&staging);
     assert!(
         import_count >= 1,
-        "Expected at least 1 import edge for url() syntax, got {}",
-        import_count
+        "Expected at least 1 import edge for url() syntax, got {import_count}"
     );
 }
 
@@ -218,8 +215,7 @@ body { color: black; }
     let import_count = count_import_edges(&staging);
     assert_eq!(
         import_count, 3,
-        "Expected exactly 3 import edges for 3 repeated @imports, got {}",
-        import_count
+        "Expected exactly 3 import edges for 3 repeated @imports, got {import_count}"
     );
 }
 
@@ -306,8 +302,7 @@ body { color: black; }
     let import_count = count_import_edges(&staging);
     assert!(
         import_count >= 2,
-        "Expected at least 2 import edges for layer imports, got {}",
-        import_count
+        "Expected at least 2 import edges for layer imports, got {import_count}"
     );
 }
 
@@ -474,7 +469,6 @@ body {
     let import_count = count_import_edges(&staging);
     assert!(
         import_count >= 2,
-        "Expected at least 2 import edges, got {}",
-        import_count
+        "Expected at least 2 import edges, got {import_count}"
     );
 }

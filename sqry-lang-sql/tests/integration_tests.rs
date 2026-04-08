@@ -58,7 +58,7 @@ fn build_graph(source: &[u8]) -> StagingGraph {
 
 #[test]
 fn test_create_table() {
-    let source = br#"
+    let source = br"
 CREATE TABLE users (
     id INT PRIMARY KEY,
     username VARCHAR(50) NOT NULL,
@@ -71,7 +71,7 @@ CREATE TABLE posts (
     title VARCHAR(200),
     FOREIGN KEY (user_id) REFERENCES users(id)
 );
-"#;
+";
     let staging = build_graph(source);
 
     assert!(
@@ -86,7 +86,7 @@ CREATE TABLE posts (
 
 #[test]
 fn test_create_view() {
-    let source = br#"
+    let source = br"
 CREATE VIEW active_users AS
 SELECT id, username, email
 FROM users
@@ -96,7 +96,7 @@ CREATE VIEW user_posts AS
 SELECT u.username, p.title, p.created_at
 FROM users u
 JOIN posts p ON u.id = p.user_id;
-"#;
+";
     let staging = build_graph(source);
 
     assert!(
@@ -111,7 +111,7 @@ JOIN posts p ON u.id = p.user_id;
 
 #[test]
 fn test_mixed_ddl_statements() {
-    let source = br#"
+    let source = br"
 CREATE TABLE products (
     id INT PRIMARY KEY,
     name VARCHAR(100),
@@ -130,7 +130,7 @@ CREATE TABLE orders (
 
 CREATE FUNCTION calculate_tax(amount DECIMAL)
 RETURNS DECIMAL AS $$ BEGIN RETURN amount * 0.1; END; $$ LANGUAGE plpgsql;
-"#;
+";
     let staging = build_graph(source);
 
     assert!(

@@ -1022,6 +1022,7 @@ mod tests {
         let kinds = [NodeKind::Class, NodeKind::Function, NodeKind::Method];
 
         for i in 0..3 {
+            #[allow(clippy::cast_possible_truncation)] // Index position fits in u32 for CSR storage
             let entry = NodeEntry::new(kinds[i], names[i], files[i])
                 .with_qualified_name(test_name(100 + i as u32));
             arena.alloc(entry).unwrap();

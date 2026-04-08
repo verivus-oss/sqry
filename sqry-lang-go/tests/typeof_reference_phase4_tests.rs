@@ -110,11 +110,11 @@ fn collect_reference_edges(staging: &StagingGraph) -> Vec<(String, String)> {
 
 #[test]
 fn test_type_alias_simple() {
-    let source = r#"package main
+    let source = r"package main
 
 type UserID = int
 type Status = string
-"#;
+";
 
     let staging = build_test_graph(source, "test.go");
     let typeof_edges = collect_typeof_edges_by_context(&staging, TypeOfContext::TypeParameter);
@@ -151,14 +151,14 @@ type Status = string
 
 #[test]
 fn test_type_alias_pointer() {
-    let source = r#"package main
+    let source = r"package main
 
 type User struct {
     ID int
 }
 
 type UserPtr = *User
-"#;
+";
 
     let staging = build_test_graph(source, "test.go");
     let typeof_edges = collect_typeof_edges_by_context(&staging, TypeOfContext::TypeParameter);
@@ -219,14 +219,14 @@ type HandlerFunc = func(context.Context) error
 
 #[test]
 fn test_type_alias_complex() {
-    let source = r#"package main
+    let source = r"package main
 
 type User struct {
     ID int
 }
 
 type Cache = map[string]*User
-"#;
+";
 
     let staging = build_test_graph(source, "test.go");
     let typeof_edges = collect_typeof_edges_by_context(&staging, TypeOfContext::TypeParameter);
@@ -261,12 +261,12 @@ type Cache = map[string]*User
 
 #[test]
 fn test_generic_single_param() {
-    let source = r#"package main
+    let source = r"package main
 
 type List[T any] struct {
     items []T
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.go");
     let constraint_edges = collect_typeof_edges_by_context(&staging, TypeOfContext::Constraint);
@@ -292,12 +292,12 @@ type List[T any] struct {
 
 #[test]
 fn test_generic_multiple_params() {
-    let source = r#"package main
+    let source = r"package main
 
 type Map[K comparable, V any] struct {
     data map[K]V
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.go");
     let constraint_edges = collect_typeof_edges_by_context(&staging, TypeOfContext::Constraint);
@@ -351,12 +351,12 @@ type Processor[T io.Reader] struct {
 
 #[test]
 fn test_generic_union_constraint() {
-    let source = r#"package main
+    let source = r"package main
 
 type Number[T int | float64] struct {
     value T
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.go");
     let constraint_edges = collect_typeof_edges_by_context(&staging, TypeOfContext::Constraint);
@@ -391,7 +391,7 @@ type Number[T int | float64] struct {
 
 #[test]
 fn test_instantiated_variable() {
-    let source = r#"package main
+    let source = r"package main
 
 type List[T any] struct {
     items []T
@@ -402,7 +402,7 @@ type User struct {
 }
 
 var users List[User]
-"#;
+";
 
     let staging = build_test_graph(source, "test.go");
     let var_edges = collect_typeof_edges_by_context(&staging, TypeOfContext::Variable);
@@ -433,7 +433,7 @@ var users List[User]
 
 #[test]
 fn test_instantiated_field() {
-    let source = r#"package main
+    let source = r"package main
 
 type Map[K comparable, V any] struct {
     data map[K]V
@@ -446,7 +446,7 @@ type User struct {
 type Cache struct {
     data Map[string, User]
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.go");
     let field_edges = collect_typeof_edges_by_context(&staging, TypeOfContext::Field);
@@ -483,7 +483,7 @@ type Cache struct {
 
 #[test]
 fn test_instantiated_parameter() {
-    let source = r#"package main
+    let source = r"package main
 
 type Map[K comparable, V any] struct {
     data map[K]V
@@ -495,7 +495,7 @@ type User struct {
 
 func process(cache Map[string, User]) {
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.go");
     let param_edges = collect_typeof_edges_by_context(&staging, TypeOfContext::Parameter);
@@ -532,7 +532,7 @@ func process(cache Map[string, User]) {
 
 #[test]
 fn test_nested_generic() {
-    let source = r#"package main
+    let source = r"package main
 
 type List[T any] struct {
     items []T
@@ -543,7 +543,7 @@ type User struct {
 }
 
 var data map[string]List[User]
-"#;
+";
 
     let staging = build_test_graph(source, "test.go");
     let var_edges = collect_typeof_edges_by_context(&staging, TypeOfContext::Variable);
@@ -584,10 +584,10 @@ var data map[string]List[User]
 
 #[test]
 fn test_generic_function_alias() {
-    let source = r#"package main
+    let source = r"package main
 
 type Transform[T any] func(T) T
-"#;
+";
 
     let staging = build_test_graph(source, "test.go");
     let constraint_edges = collect_typeof_edges_by_context(&staging, TypeOfContext::Constraint);
@@ -604,12 +604,12 @@ type Transform[T any] func(T) T
 #[test]
 fn test_empty_type_params() {
     // Edge case: Empty type parameters (should not crash)
-    let source = r#"package main
+    let source = r"package main
 
 type Invalid[] struct {
     data int
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.go");
     // Should not crash, just skip empty params
@@ -626,12 +626,12 @@ type Invalid[] struct {
 
 #[test]
 fn test_anonymous_constraint() {
-    let source = r#"package main
+    let source = r"package main
 
 type Handler[T interface{ Close() error }] struct {
     resource T
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.go");
     let constraint_edges = collect_typeof_edges_by_context(&staging, TypeOfContext::Constraint);
@@ -664,19 +664,19 @@ fn node_exists(staging: &StagingGraph, display_name: &str) -> bool {
 /// Test Fix 1 (HIGH): Type parameter references resolve to qualified nodes
 ///
 /// **Before**: Fields using type parameter `T` created Reference edges to bare `T`,
-/// leaving TypeParameter nodes (`main.List.T`) isolated.
+/// leaving `TypeParameter` nodes (`main.List.T`) isolated.
 ///
 /// **After**: Fields using `T` create Reference edges to qualified `main.List.T`,
 /// properly connecting usage to declaration.
 #[test]
 fn test_fix1_type_param_qualified_references() {
-    let source = r#"package main
+    let source = r"package main
 
 type List[T any] struct {
     items []T
     head  *T
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.go");
     let ref_edges = collect_reference_edges(&staging);
@@ -691,8 +691,7 @@ type List[T any] struct {
     // Should have 2 references (one for `items []T`, one for `head *T`)
     assert!(
         list_to_param_refs >= 2,
-        "Expected at least 2 Reference edges: List→List.T (for items and head fields), got {}",
-        list_to_param_refs
+        "Expected at least 2 Reference edges: List→List.T (for items and head fields), got {list_to_param_refs}"
     );
 
     // Should NOT have bare `T` references
@@ -706,15 +705,15 @@ type List[T any] struct {
 ///
 /// **Before**: Type aliases didn't create Export edges, even if exported.
 ///
-/// **After**: Exported type aliases (PublicAlias) create Export edges from module,
+/// **After**: Exported type aliases (`PublicAlias`) create Export edges from module,
 /// while private aliases do not.
 #[test]
 fn test_fix2_type_alias_export_edges() {
-    let source = r#"package mylib
+    let source = r"package mylib
 
 type PublicAlias = int
 type privateAlias = string
-"#;
+";
 
     let staging = build_test_graph(source, "test.go");
     let export_edges = collect_export_edges(&staging);
@@ -739,14 +738,14 @@ type privateAlias = string
 /// **Before**: Generic type aliases like `type Alias[T any] = []T` were treated as
 /// non-generic; type parameters were ignored.
 ///
-/// **After**: Generic type aliases process type parameters, creating TypeParameter
+/// **After**: Generic type aliases process type parameters, creating `TypeParameter`
 /// nodes and constraint edges. References in RHS use qualified parameter names.
 #[test]
 fn test_fix3_generic_type_alias_with_params() {
-    let source = r#"package main
+    let source = r"package main
 
 type GenericAlias[T any] = []T
-"#;
+";
 
     let staging = build_test_graph(source, "test.go");
     let constraint_edges = collect_typeof_edges_by_context(&staging, TypeOfContext::Constraint);
@@ -783,10 +782,10 @@ type GenericAlias[T any] = []T
 /// **After Fix**: References qualified `main.ResponseFunc.T`
 #[test]
 fn test_type_param_in_nested_function_returns() {
-    let source = r#"package main
+    let source = r"package main
 
 type ResponseFunc[T any] = func() (T, error)
-"#;
+";
 
     let staging = build_test_graph(source, "test.go");
     let ref_edges = collect_reference_edges(&staging);
@@ -821,13 +820,13 @@ type ResponseFunc[T any] = func() (T, error)
 /// **After Fix**: References qualified `main.Getter.T`
 #[test]
 fn test_type_param_in_interface_methods() {
-    let source = r#"package main
+    let source = r"package main
 
 type Getter[T any] interface {
     Get() T
     Set(T) error
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.go");
     let ref_edges = collect_reference_edges(&staging);
@@ -858,13 +857,13 @@ type Getter[T any] interface {
 /// Test combined scenario: Type parameter in nested struct within alias
 #[test]
 fn test_type_param_in_nested_struct() {
-    let source = r#"package main
+    let source = r"package main
 
 type Wrapper[T any] = struct {
     Value T
     Handler func(T) error
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.go");
     let ref_edges = collect_reference_edges(&staging);
@@ -877,8 +876,7 @@ type Wrapper[T any] = struct {
 
     assert!(
         wrapper_to_t_refs >= 2,
-        "Expected at least 2 References: Wrapper→Wrapper.T (for Value field and Handler parameter), got {}",
-        wrapper_to_t_refs
+        "Expected at least 2 References: Wrapper→Wrapper.T (for Value field and Handler parameter), got {wrapper_to_t_refs}"
     );
 
     // Should NOT have bare `T` references
@@ -888,14 +886,14 @@ type Wrapper[T any] = struct {
     );
 }
 
-/// Test Fix 3: Interface method return types with generic_type
+/// Test Fix 3: Interface method return types with `generic_type`
 ///
 /// **Scenario**: Generic interface method returning instantiated generic type
 /// **Before Fix**: `Get() Result[T]` would create no TypeOf/Reference edges
 /// **After Fix**: Creates edges for both Result and T
 #[test]
 fn test_interface_method_generic_return_type() {
-    let source = r#"package main
+    let source = r"package main
 
 type Result[T any] struct {
     Value T
@@ -905,7 +903,7 @@ type Result[T any] struct {
 type Getter[T any] interface {
     Get() Result[T]
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.go");
     let ref_edges = collect_reference_edges(&staging);
@@ -933,19 +931,19 @@ type Getter[T any] interface {
     );
 }
 
-/// Test Fix 4: Type-set constraint qualification in negated_type/type_term
+/// Test Fix 4: Type-set constraint qualification in `negated_type/type_term`
 ///
 /// **Scenario**: Interface with type-set constraints using `~[]T` or `~T`
 /// **Before Fix**: Bare `T` references created instead of qualified `main.Constraint.T`
 /// **After Fix**: Type parameters in negated types properly qualified
 #[test]
 fn test_negated_type_constraint_qualification() {
-    let source = r#"package main
+    let source = r"package main
 
 type Constraint[T any] interface {
     ~[]T
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.go");
     let ref_edges = collect_reference_edges(&staging);
@@ -965,14 +963,14 @@ type Constraint[T any] interface {
     );
 }
 
-/// Test Fix 5: Interface literal generic_type return nodes
+/// Test Fix 5: Interface literal `generic_type` return nodes
 ///
 /// **Scenario**: Interface literal used in struct field with method returning generic type
 /// **Before Fix**: `generic_type` and `type_union` not recognized in interface literal method returns
 /// **After Fix**: Reference edges created for generic types in interface literal method signatures
 #[test]
 fn test_interface_literal_generic_type_returns() {
-    let source = r#"package main
+    let source = r"package main
 
 type Result[T any] struct {
     Value T
@@ -984,7 +982,7 @@ type Wrapper[T any] struct {
         Get() Result[T]
     }
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.go");
     let ref_edges = collect_reference_edges(&staging);
@@ -1020,10 +1018,10 @@ type Wrapper[T any] struct {
 /// **After Fix**: Creates qualified reference `main.Foo.U`
 #[test]
 fn test_cross_parameter_constraint_qualification() {
-    let source = r#"package main
+    let source = r"package main
 
 type Foo[U any, T ~[]U] struct {}
-"#;
+";
 
     let staging = build_test_graph(source, "test.go");
     let ref_edges = collect_reference_edges(&staging);

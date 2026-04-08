@@ -77,7 +77,7 @@ impl TestRepo {
             .args(["commit", "-m", message])
             .current_dir(&self.repo_path)
             .status()?;
-        assert!(status.success(), "Failed to commit: {}", message);
+        assert!(status.success(), "Failed to commit: {message}");
         Ok(())
     }
 
@@ -111,7 +111,7 @@ fn run_sqry_diff(
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("sqry diff failed: {}", stderr);
+        anyhow::bail!("sqry diff failed: {stderr}");
     }
 
     Ok(String::from_utf8(output.stdout)?)
@@ -282,7 +282,7 @@ fn test_diff_multiple_changes() -> Result<()> {
 
     // Verify
     let total = json["total"].as_u64().unwrap();
-    assert!(total >= 2, "Expected at least 2 changes, got {}", total);
+    assert!(total >= 2, "Expected at least 2 changes, got {total}");
 
     Ok(())
 }
@@ -490,6 +490,7 @@ fn test_diff_limit_results() -> Result<()> {
     // Commit 2: Add many functions
     let mut code = String::new();
     for i in 0..20 {
+        #[allow(clippy::format_push_string)] // Test output formatting
         code.push_str(&format!("fn func{i}() {{}}\n"));
     }
     repo.write_file("src/main.rs", &code)?;
@@ -553,8 +554,7 @@ fn test_diff_invalid_base_ref() -> Result<()> {
     let stderr = String::from_utf8_lossy(&result.stderr);
     assert!(
         stderr.contains("invalid") || stderr.contains("not exist") || stderr.contains("ref"),
-        "Expected error message about invalid ref, got: {}",
-        stderr
+        "Expected error message about invalid ref, got: {stderr}"
     );
 
     Ok(())
@@ -575,8 +575,7 @@ fn test_diff_not_a_repo() -> Result<()> {
     let stderr = String::from_utf8_lossy(&result.stderr);
     assert!(
         stderr.contains("Not a git repository") || stderr.contains("not.*git"),
-        "Expected 'Not a git repository' error, got: {}",
-        stderr
+        "Expected 'Not a git repository' error, got: {stderr}"
     );
 
     Ok(())
@@ -813,15 +812,13 @@ fn test_diff_csv_unsupported_columns_error() -> Result<()> {
     let stderr = String::from_utf8_lossy(&result.stderr);
     assert!(
         stderr.contains("No supported columns") || stderr.contains("Unsupported"),
-        "Expected error about unsupported columns, got: {}",
-        stderr
+        "Expected error about unsupported columns, got: {stderr}"
     );
 
     // Verify error lists supported columns
     assert!(
         stderr.contains("name") && stderr.contains("kind"),
-        "Error should list supported columns, got: {}",
-        stderr
+        "Error should list supported columns, got: {stderr}"
     );
 
     Ok(())
@@ -864,8 +861,7 @@ fn test_diff_csv_partial_unsupported_columns_warning() -> Result<()> {
     let stderr = String::from_utf8_lossy(&result.stderr);
     assert!(
         stderr.contains("Warning") && stderr.contains("not supported"),
-        "Expected warning about unsupported columns, got: {}",
-        stderr
+        "Expected warning about unsupported columns, got: {stderr}"
     );
 
     // Verify output only contains supported columns
@@ -913,9 +909,7 @@ fn test_diff_tsv_special_chars_replacement() -> Result<()> {
             // Skip header
             assert!(
                 line.contains('\t'),
-                "TSV line {} should contain tabs: {}",
-                i,
-                line
+                "TSV line {i} should contain tabs: {line}"
             );
             // But should NOT contain literal tabs within fields (they should be replaced)
             // This is verified by checking that split works correctly

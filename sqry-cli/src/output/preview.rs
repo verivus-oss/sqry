@@ -670,7 +670,7 @@ mod tests {
     fn test_preview_truncate_long_line() {
         let tmp = TempDir::new().unwrap();
         let long_line = "a".repeat(200);
-        let content = format!("short\n{}\nshort", long_line);
+        let content = format!("short\n{long_line}\nshort");
         let file = create_test_file(&tmp, "test.rs", &content);
 
         let mut config = PreviewConfig::new(1);
@@ -732,7 +732,7 @@ mod tests {
     fn test_preview_adjacent_matches_merged() {
         let tmp = TempDir::new().unwrap();
         let content = (1..=20)
-            .map(|i| format!("line {}", i))
+            .map(|i| format!("line {i}"))
             .collect::<Vec<_>>()
             .join("\n");
         let file = create_test_file(&tmp, "test.rs", &content);
@@ -761,7 +761,7 @@ mod tests {
     fn test_preview_non_adjacent_separate() {
         let tmp = TempDir::new().unwrap();
         let content = (1..=30)
-            .map(|i| format!("line {}", i))
+            .map(|i| format!("line {i}"))
             .collect::<Vec<_>>()
             .join("\n");
         let file = create_test_file(&tmp, "test.rs", &content);

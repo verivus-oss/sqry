@@ -977,7 +977,7 @@ mod tests {
         parser.parse(source.as_bytes(), None).unwrap()
     }
 
-    /// Helper to count TableRead edges in the staging graph
+    /// Helper to count `TableRead` edges in the staging graph
     fn count_table_read_edges(staging: &StagingGraph) -> usize {
         staging
             .operations()
@@ -994,7 +994,7 @@ mod tests {
             .count()
     }
 
-    /// Helper to count TableWrite edges in the staging graph
+    /// Helper to count `TableWrite` edges in the staging graph
     fn count_table_write_edges(staging: &StagingGraph) -> usize {
         staging
             .operations()
@@ -1011,7 +1011,7 @@ mod tests {
             .count()
     }
 
-    /// Helper to check if a TableWrite edge with a specific operation exists
+    /// Helper to check if a `TableWrite` edge with a specific operation exists
     fn has_table_write_edge_with_op(staging: &StagingGraph, expected_op: TableWriteOp) -> bool {
         staging.operations().iter().any(|op| {
             matches!(
@@ -1026,10 +1026,10 @@ mod tests {
 
     #[test]
     fn test_creates_module_node() {
-        let source = r#"
+        let source = r"
 var gr = new GlideRecord('incident');
 gr.query();
-"#;
+";
 
         let tree = parse_servicenow(source);
         let mut staging = StagingGraph::new();
@@ -1064,10 +1064,10 @@ gr.query();
 
     #[test]
     fn test_gliderecord_query_creates_table_read_edge() {
-        let source = r#"
+        let source = r"
 var gr = new GlideRecord('incident');
 gr.query();
-"#;
+";
 
         let tree = parse_servicenow(source);
         let mut staging = StagingGraph::new();
@@ -1086,10 +1086,10 @@ gr.query();
 
     #[test]
     fn test_gliderecord_get_creates_table_read_edge() {
-        let source = r#"
+        let source = r"
 var gr = new GlideRecord('incident');
 gr.get('sys_id_value');
-"#;
+";
 
         let tree = parse_servicenow(source);
         let mut staging = StagingGraph::new();
@@ -1108,12 +1108,12 @@ gr.get('sys_id_value');
 
     #[test]
     fn test_gliderecord_insert_creates_table_write_edge() {
-        let source = r#"
+        let source = r"
 var gr = new GlideRecord('incident');
 gr.initialize();
 gr.short_description = 'Test incident';
 gr.insert();
-"#;
+";
 
         let tree = parse_servicenow(source);
         let mut staging = StagingGraph::new();
@@ -1137,12 +1137,12 @@ gr.insert();
 
     #[test]
     fn test_gliderecord_update_creates_table_write_edge() {
-        let source = r#"
+        let source = r"
 var gr = new GlideRecord('incident');
 gr.get('sys_id_value');
 gr.short_description = 'Updated description';
 gr.update();
-"#;
+";
 
         let tree = parse_servicenow(source);
         let mut staging = StagingGraph::new();
@@ -1172,11 +1172,11 @@ gr.update();
 
     #[test]
     fn test_gliderecord_delete_record_creates_table_write_edge() {
-        let source = r#"
+        let source = r"
 var gr = new GlideRecord('incident');
 gr.get('sys_id_value');
 gr.deleteRecord();
-"#;
+";
 
         let tree = parse_servicenow(source);
         let mut staging = StagingGraph::new();
@@ -1206,7 +1206,7 @@ gr.deleteRecord();
 
     #[test]
     fn test_gliderecord_multiple_operations() {
-        let source = r#"
+        let source = r"
 var gr = new GlideRecord('incident');
 gr.addQuery('active', true);
 gr.query();
@@ -1218,7 +1218,7 @@ var gr2 = new GlideRecord('change_request');
 gr2.initialize();
 gr2.short_description = 'Test';
 gr2.insert();
-"#;
+";
 
         let tree = parse_servicenow(source);
         let mut staging = StagingGraph::new();
@@ -1248,10 +1248,10 @@ gr2.insert();
 
     #[test]
     fn test_gliderecord_secure_variant_creates_edges() {
-        let source = r#"
+        let source = r"
 var gr = new GlideRecordSecure('incident');
 gr.query();
-"#;
+";
 
         let tree = parse_servicenow(source);
         let mut staging = StagingGraph::new();
@@ -1272,11 +1272,11 @@ gr.query();
     fn test_gliderecord_set_value_does_not_create_table_edge() {
         // setValue only stages data in memory - it doesn't actually write to the database
         // until update() or insert() is called. So it should NOT create a TableWrite edge.
-        let source = r#"
+        let source = r"
 var gr = new GlideRecord('incident');
 gr.get('sys_id_value');
 gr.setValue('priority', 1);
-"#;
+";
 
         let tree = parse_servicenow(source);
         let mut staging = StagingGraph::new();
@@ -1301,11 +1301,11 @@ gr.setValue('priority', 1);
 
     #[test]
     fn test_gliderecord_get_value_creates_table_read_edge() {
-        let source = r#"
+        let source = r"
 var gr = new GlideRecord('incident');
 gr.get('sys_id_value');
 var priority = gr.getValue('priority');
-"#;
+";
 
         let tree = parse_servicenow(source);
         let mut staging = StagingGraph::new();
@@ -1325,13 +1325,13 @@ var priority = gr.getValue('priority');
 
     #[test]
     fn test_gliderecord_has_next_creates_table_read_edge() {
-        let source = r#"
+        let source = r"
 var gr = new GlideRecord('incident');
 gr.query();
 if (gr.hasNext()) {
     gs.info('Has records');
 }
-"#;
+";
 
         let tree = parse_servicenow(source);
         let mut staging = StagingGraph::new();
@@ -1352,11 +1352,11 @@ if (gr.hasNext()) {
     #[test]
     fn test_gliderecord_add_query_does_not_create_edge() {
         // addQuery is a preparatory method that doesn't actually access the table
-        let source = r#"
+        let source = r"
 var gr = new GlideRecord('incident');
 gr.addQuery('active', true);
 gr.addQuery('priority', 1);
-"#;
+";
 
         let tree = parse_servicenow(source);
         let mut staging = StagingGraph::new();
@@ -1380,7 +1380,7 @@ gr.addQuery('priority', 1);
 
     #[test]
     fn test_gliderecord_context_tracks_multiple_variables() {
-        let source = r#"
+        let source = r"
 var incidentGR = new GlideRecord('incident');
 var taskGR = new GlideRecord('sc_task');
 var changeGR = new GlideRecord('change_request');
@@ -1388,7 +1388,7 @@ var changeGR = new GlideRecord('change_request');
 incidentGR.query();
 taskGR.query();
 changeGR.insert();
-"#;
+";
 
         let tree = parse_servicenow(source);
         let mut staging = StagingGraph::new();
@@ -1456,7 +1456,7 @@ changeGR.insert();
         nodes
     }
 
-    /// Check if an Import edge exists from source_name to target_name
+    /// Check if an Import edge exists from `source_name` to `target_name`
     fn has_import_edge_unit(staging: &StagingGraph, from: &str, to: &str) -> bool {
         let nodes = build_node_lookup(staging);
         staging.operations().iter().any(|op| {
@@ -1473,7 +1473,7 @@ changeGR.insert();
         })
     }
 
-    /// Check if an Import node (NodeKind::Import) with a given name exists
+    /// Check if an Import node (`NodeKind::Import`) with a given name exists
     fn has_import_node(staging: &StagingGraph, name: &str) -> bool {
         let nodes = build_node_lookup(staging);
         nodes.values().any(|(n, kind)| {
@@ -1655,14 +1655,14 @@ changeGR.insert();
 
     #[test]
     fn test_top_level_import_with_functions() {
-        let source = r#"
+        let source = r"
 import { helper } from './helpers';
 
 function processRequest() {
     helper();
     return 42;
 }
-"#;
+";
         let staging = build_graph_unit(source);
 
         assert!(

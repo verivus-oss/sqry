@@ -9,19 +9,19 @@ rust-version.workspace = true
 description = "PHP language plugin for sqry"
 
 [dependencies]
-sqry-core = { version = "7.1.5", path = "../sqry-core" }
+sqry-core = { version = "7.2.0", path = "../sqry-core" }
 anyhow.workspace = true
 tree-sitter.workspace = true
 tree-sitter-php.workspace = true
 streaming-iterator.workspace = true
 once_cell.workspace = true
-sqry-lang-support = { version = "7.1.5", path = "../sqry-lang-support" }
+sqry-lang-support = { version = "7.2.0", path = "../sqry-lang-support" }
 
 [dev-dependencies]
 log.workspace = true
 sqry-core = { path = "../sqry-core", features = ["test-support"] }
 tempfile = "3.10"
-insta = { version = "1.34", features = ["yaml"] }
+insta = { version = "1.47", features = ["yaml"] }
 serial_test = "3.0"
 criterion = "0.8"
 

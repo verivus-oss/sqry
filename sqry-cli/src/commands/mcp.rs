@@ -1474,11 +1474,10 @@ mod tests {
         assert!(result.is_err());
 
         // The status resilience pattern wraps this in unwrap_or_else:
-        let fallback = result
-            .map(|_| serde_json::json!({"configured": true}))
-            .unwrap_or_else(
-                |e| serde_json::json!({"configured": false, "error": format!("{e:#}")}),
-            );
+        let fallback = result.map_or_else(
+            |e| serde_json::json!({"configured": false, "error": format!("{e:#}")}),
+            |_| serde_json::json!({"configured": true}),
+        );
         assert_eq!(fallback["configured"], false);
         assert!(fallback["error"].as_str().unwrap().contains("expected"));
     }

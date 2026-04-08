@@ -14,6 +14,9 @@
 //! `Nat` is a variable-length encoding where each byte contributes 7 bits and
 //! the high bit indicates continuation (similar to LEB128 unsigned).
 
+// Scala signature table indices fit in u32; casts are intentional
+#![allow(clippy::cast_possible_truncation)]
+
 use log::warn;
 
 // ---------------------------------------------------------------------------
@@ -79,7 +82,7 @@ pub struct SignatureEntry {
 // ScalaSymbolInfo
 // ---------------------------------------------------------------------------
 
-/// Decoded symbol info from a CLASSsym or MODULEsym entry.
+/// Decoded symbol info from a `CLASSsym` or `MODULEsym` entry.
 #[derive(Debug, Clone)]
 pub struct ScalaSymbolInfo {
     /// Index of the name entry in the entry table.
@@ -111,6 +114,7 @@ impl ScalaSignatureReader {
     ///
     /// Returns `None` if the bytes are too short, the version is unsupported,
     /// or the entry table is malformed.
+    #[must_use]
     pub fn parse(bytes: &[u8]) -> Option<Self> {
         // Need at least 2 bytes for the version header.
         if bytes.len() < 2 {
@@ -153,7 +157,7 @@ impl ScalaSignatureReader {
         self.entries.get(index)
     }
 
-    /// Read a name from a TERMname or TYPEname entry.
+    /// Read a name from a `TERMname` or `TYPEname` entry.
     ///
     /// Returns `None` if the index is out of bounds or the entry is not a name.
     #[must_use]
@@ -165,7 +169,7 @@ impl ScalaSignatureReader {
         String::from_utf8(entry.data.clone()).ok()
     }
 
-    /// Read symbol info from a CLASSsym or MODULEsym entry.
+    /// Read symbol info from a `CLASSsym` or `MODULEsym` entry.
     ///
     /// The symbol info format is:
     /// ```text
@@ -185,6 +189,9 @@ impl ScalaSignatureReader {
     ///
     /// Returns `None` if the chain cannot be resolved (e.g., missing entries).
     #[must_use]
+    #[allow(clippy::items_after_statements)] // Items near usage for clarity
+    #[allow(clippy::match_same_arms)] // Arms separated for documentation clarity
+    #[allow(clippy::manual_let_else)] // Match for error handling clarity
     pub fn resolve_qualified_name(&self, sym_index: usize) -> Option<String> {
         let entry = self.entry(sym_index)?;
         let info = self.read_symbol_info(entry)?;
@@ -233,7 +240,7 @@ impl ScalaSignatureReader {
         Some(segments.join("."))
     }
 
-    /// Read the name from an EXTref or EXTMODCLASSref entry.
+    /// Read the name from an `EXTref` or `EXTMODCLASSref` entry.
     ///
     /// Format: `name_ref (Nat) [owner_ref (Nat)]`
     #[must_use]
@@ -246,7 +253,7 @@ impl ScalaSignatureReader {
         self.read_name(name_index)
     }
 
-    /// Read the owner index from an EXTref or EXTMODCLASSref entry.
+    /// Read the owner index from an `EXTref` or `EXTMODCLASSref` entry.
     ///
     /// Returns `None` if there is no owner reference (only a name reference)
     /// or the entry is not an external reference.
@@ -265,7 +272,8 @@ impl ScalaSignatureReader {
         }
     }
 
-    /// Find all CLASSsym and MODULEsym entries and their indices.
+    /// Find all `CLASSsym` and `MODULEsym` entries and their indices.
+    #[must_use]
     pub fn class_and_module_symbols(&self) -> Vec<(usize, &SignatureEntry)> {
         self.entries
             .iter()
@@ -274,7 +282,8 @@ impl ScalaSignatureReader {
             .collect()
     }
 
-    /// Find all EXTref and EXTMODCLASSref entries and their indices.
+    /// Find all `EXTref` and `EXTMODCLASSref` entries and their indices.
+    #[must_use]
     pub fn ext_refs(&self) -> Vec<(usize, &SignatureEntry)> {
         self.entries
             .iter()

@@ -23,9 +23,10 @@ use sqry_core::graph::Language;
 // Unified graph types
 use sqry_core::graph::CodeGraph as UnifiedCodeGraph;
 use sqry_core::graph::unified::edge::EdgeKind as UnifiedEdgeKind;
+use sqry_core::graph::unified::materialize::find_nodes_by_name;
 use sqry_core::graph::unified::{
-    FileScope, MqProtocol, NodeEntry, NodeKind as UnifiedNodeKind, ResolutionMode, StringId,
-    SymbolCandidateOutcome, SymbolQuery,
+    EdgeFilter, MqProtocol, NodeEntry, NodeKind as UnifiedNodeKind, StringId, TraversalConfig,
+    TraversalDirection, TraversalLimits, traverse,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -720,81 +721,114 @@ fn write_trace_path_output_unified(
     }
 }
 
-/// BFS path finding on unified graph.
+/// BFS path finding on unified graph using the traversal kernel.
+///
+/// Uses standard BFS (`calls_only`, outgoing) and reconstructs the
+/// shortest path from the result. Language filtering is applied by
+/// pre-filtering start/target candidates before this function.
 fn find_path_unified_bfs(
     snapshot: &sqry_core::graph::unified::concurrent::GraphSnapshot,
     starts: &[UnifiedNodeId],
     targets: &HashSet<UnifiedNodeId>,
     language_filter: &HashSet<Language>,
 ) -> Option<Vec<UnifiedNodeId>> {
-    let mut queue = VecDeque::new();
-    let mut parents: HashMap<UnifiedNodeId, Option<UnifiedNodeId>> = HashMap::new();
-
-    // Initialize BFS from all start nodes
-    for &start in starts {
-        parents.insert(start, None);
-        queue.push_back(start);
-    }
-
-    while let Some(current) = queue.pop_front() {
-        // Check if we reached a target
-        if targets.contains(&current) {
-            return Some(reconstruct_path_unified(current, &parents));
-        }
-
-        // Get callees (neighbors)
-        for callee in snapshot.get_callees(current) {
-            // Skip if already visited
-            if parents.contains_key(&callee) {
-                continue;
-            }
-
-            if !callee_matches_language(snapshot, callee, language_filter) {
-                continue;
-            }
-
-            parents.insert(callee, Some(current));
-            queue.push_back(callee);
-        }
-    }
-
-    None
-}
-
-fn callee_matches_language(
-    snapshot: &sqry_core::graph::unified::concurrent::GraphSnapshot,
-    callee: UnifiedNodeId,
-    language_filter: &HashSet<Language>,
-) -> bool {
-    if language_filter.is_empty() {
-        return true;
-    }
-
-    let Some(entry) = snapshot.get_node(callee) else {
-        return false;
+    // Standard BFS approach: traverse outgoing call edges, global visited.
+    // We reconstruct the shortest path from the BFS parent map recorded in edges.
+    let config = TraversalConfig {
+        direction: TraversalDirection::Outgoing,
+        edge_filter: EdgeFilter::calls_only(),
+        limits: TraversalLimits {
+            max_depth: u32::MAX,
+            max_nodes: None,
+            max_edges: None,
+            max_paths: None,
+        },
     };
-    let lang = snapshot.files().language_for_file(entry.file);
-    lang.is_some_and(|l| language_filter.contains(&l))
-}
 
-/// Reconstruct path from BFS parent map.
-fn reconstruct_path_unified(
-    target: UnifiedNodeId,
-    parents: &HashMap<UnifiedNodeId, Option<UnifiedNodeId>>,
-) -> Vec<UnifiedNodeId> {
-    let mut path = Vec::new();
-    let mut current = target;
+    // Use a language-filtering strategy if language filter is non-empty.
+    let mut strategy = LanguageFilterStrategy {
+        snapshot,
+        language_filter,
+    };
 
-    loop {
-        path.push(current);
-        match parents.get(&current).and_then(|&p| p) {
-            Some(parent) => current = parent,
-            None => break,
-        }
+    let result = traverse(
+        snapshot,
+        starts,
+        &config,
+        if language_filter.is_empty() {
+            None
+        } else {
+            Some(&mut strategy)
+        },
+    );
+
+    // Find which target was reached
+    let target_idx = result
+        .nodes
+        .iter()
+        .enumerate()
+        .find(|(_, n)| targets.contains(&n.node_id))
+        .map(|(idx, _)| idx)?;
+
+    // Reconstruct shortest path via BFS parent edges
+    // Build parent map from edges: for each node, the first edge that discovered it
+    let mut parent_idx: HashMap<usize, usize> = HashMap::new();
+    for edge in &result.edges {
+        // In outgoing BFS, source is the parent, target is the child
+        parent_idx.entry(edge.target_idx).or_insert(edge.source_idx);
     }
 
-    path.reverse();
-    path
+    let mut path_indices = Vec::new();
+    let mut current = target_idx;
+    path_indices.push(current);
+
+    while let Some(&parent) = parent_idx.get(&current) {
+        path_indices.push(parent);
+        current = parent;
+    }
+
+    path_indices.reverse();
+
+    // Verify path starts from a seed
+    let first_node_id = result.nodes[path_indices[0]].node_id;
+    if !starts.contains(&first_node_id) {
+        return None;
+    }
+
+    // Convert indices back to NodeIds
+    Some(
+        path_indices
+            .iter()
+            .map(|&idx| result.nodes[idx].node_id)
+            .collect(),
+    )
+}
+
+/// Strategy that filters edges by language of the target node.
+struct LanguageFilterStrategy<'a> {
+    snapshot: &'a sqry_core::graph::unified::concurrent::GraphSnapshot,
+    language_filter: &'a HashSet<Language>,
+}
+
+impl sqry_core::graph::unified::TraversalStrategy for LanguageFilterStrategy<'_> {
+    fn should_enqueue(
+        &mut self,
+        node_id: UnifiedNodeId,
+        _from: UnifiedNodeId,
+        _edge: &sqry_core::graph::unified::edge::EdgeKind,
+        _depth: u32,
+    ) -> bool {
+        if self.language_filter.is_empty() {
+            return true;
+        }
+        let Some(entry) = self.snapshot.get_node(node_id) else {
+            return false;
+        };
+        self.snapshot
+            .files()
+            .language_for_file(entry.file)
+            .is_some_and(|l| self.language_filter.contains(&l))
+    }
 }
 
 /// Print trace path in text format using unified graph.
@@ -1230,40 +1264,43 @@ fn write_call_chain_depth_output(
 
 /// Calculate the maximum call chain depth from a starting node.
 ///
-/// Uses BFS to find the longest path through the call graph without cycles.
+/// Uses the traversal kernel with standard BFS (outgoing, `calls_only`) and
+/// derives the max depth from the deepest edge in the result.
 fn calculate_call_chain_depth_unified(
     snapshot: &sqry_core::graph::unified::concurrent::GraphSnapshot,
     start: UnifiedNodeId,
 ) -> usize {
-    let mut max_depth = 0;
-    let mut visited = HashSet::new();
-    let mut queue = VecDeque::new();
+    let config = TraversalConfig {
+        direction: TraversalDirection::Outgoing,
+        edge_filter: EdgeFilter::calls_only(),
+        limits: TraversalLimits {
+            max_depth: u32::MAX,
+            max_nodes: None,
+            max_edges: None,
+            max_paths: None,
+        },
+    };
 
-    queue.push_back((start, 0));
+    let result = traverse(snapshot, &[start], &config, None);
 
-    while let Some((current, depth)) = queue.pop_front() {
-        if !visited.insert(current) {
-            continue;
-        }
-
-        max_depth = max_depth.max(depth);
-
-        // Get callees
-        let callees = snapshot.get_callees(current);
-        for callee in callees {
-            if !visited.contains(&callee) {
-                queue.push_back((callee, depth + 1));
-            }
-        }
-    }
-
-    max_depth
+    // The max depth is the highest edge depth value, or 0 if no edges
+    result
+        .edges
+        .iter()
+        .map(|e| e.depth as usize)
+        .max()
+        .unwrap_or(0)
 }
 
 /// Build all call chains from a starting node using BFS.
 ///
 /// Returns a vector of paths, where each path is a vector of node IDs
 /// representing a complete call chain from start to a leaf node.
+///
+/// NOTE: Not migrated to kernel `traverse()` because the kernel's path
+/// enumeration requires a specific target node. This function enumerates
+/// paths to *all leaves* (nodes with no callees), which the kernel does
+/// not currently support without modification.
 fn build_call_chain_unified(
     snapshot: &sqry_core::graph::unified::concurrent::GraphSnapshot,
     start: UnifiedNodeId,
@@ -1577,6 +1614,11 @@ fn build_dependency_tree_unified(
     }
 }
 
+/// Collect all transitive dependency nodes and edges via BFS from roots.
+///
+/// Uses the traversal kernel with outgoing direction and all edge types.
+/// This replaces the previous O(E) per-node `iter_edges()` loop with the
+/// kernel's O(degree) `edges_from()`.
 fn collect_dependency_edges_unified(
     snapshot: &sqry_core::graph::unified::concurrent::GraphSnapshot,
     root_nodes: &[UnifiedNodeId],
@@ -1584,26 +1626,32 @@ fn collect_dependency_edges_unified(
     HashSet<UnifiedNodeId>,
     Vec<(UnifiedNodeId, UnifiedNodeId, UnifiedEdgeKind)>,
 ) {
-    let mut visited_nodes = HashSet::new();
-    let mut edges = Vec::new();
-    let mut queue = VecDeque::new();
+    let config = TraversalConfig {
+        direction: TraversalDirection::Outgoing,
+        edge_filter: EdgeFilter::all(),
+        limits: TraversalLimits {
+            max_depth: u32::MAX,
+            max_nodes: None,
+            max_edges: None,
+            max_paths: None,
+        },
+    };
 
-    // Initialize with root nodes
-    for &root in root_nodes {
-        visited_nodes.insert(root);
-        queue.push_back(root);
-    }
+    let result = traverse(snapshot, root_nodes, &config, None);
 
-    // BFS to collect all dependencies
-    while let Some(current) = queue.pop_front() {
-        // Get all outgoing edges from this node (calls, imports, etc.)
-        for (from, to, kind) in snapshot.iter_edges() {
-            if from == current && visited_nodes.insert(to) {
-                edges.push((from, to, kind));
-                queue.push_back(to);
-            }
-        }
-    }
+    let visited_nodes: HashSet<UnifiedNodeId> = result.nodes.iter().map(|n| n.node_id).collect();
+
+    let edges: Vec<(UnifiedNodeId, UnifiedNodeId, UnifiedEdgeKind)> = result
+        .edges
+        .iter()
+        .map(|e| {
+            (
+                result.nodes[e.source_idx].node_id,
+                result.nodes[e.target_idx].node_id,
+                e.raw_kind.clone(),
+            )
+        })
+        .collect();
 
     (visited_nodes, edges)
 }
@@ -1632,6 +1680,10 @@ fn edge_exists_unified(
 }
 
 /// Filter subgraph by maximum depth from root nodes.
+///
+/// NOTE: Not migrated to kernel `traverse()` — this is a post-processing
+/// step that filters an already-built `UnifiedSubGraph` by depth, not a
+/// raw graph BFS. It operates on the subgraph's own adjacency list.
 fn filter_by_depth_unified(
     _snapshot: &sqry_core::graph::unified::concurrent::GraphSnapshot,
     subgraph: &UnifiedSubGraph,
@@ -3988,21 +4040,6 @@ fn find_cycle_containing_node(
     None
 }
 
-/// Find nodes by name (simple or qualified).
-fn find_nodes_by_name(
-    snapshot: &UnifiedGraphSnapshot,
-    name: &str,
-) -> Vec<sqry_core::graph::unified::node::NodeId> {
-    match snapshot.find_symbol_candidates(&SymbolQuery {
-        symbol: name,
-        file_scope: FileScope::Any,
-        mode: ResolutionMode::AllowSuffixCandidates,
-    }) {
-        SymbolCandidateOutcome::Candidates(matches) => matches,
-        SymbolCandidateOutcome::NotFound | SymbolCandidateOutcome::FileNotIndexed => Vec::new(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4418,36 +4455,22 @@ mod tests {
     }
 
     // ==========================================================================
-    // reconstruct_path_unified tests
+    // find_path_unified_bfs tests (kernel-backed)
     // ==========================================================================
 
     #[test]
-    fn test_reconstruct_path_unified_single_node() {
+    fn test_find_path_no_graph_returns_none() {
+        use sqry_core::graph::unified::concurrent::CodeGraph;
         use sqry_core::graph::unified::node::NodeId;
 
-        let target = NodeId::new(0, 0);
-        let mut parents = HashMap::new();
-        parents.insert(target, None);
+        let graph = CodeGraph::new();
+        let snapshot = graph.snapshot();
+        let starts = vec![NodeId::new(0, 0)];
+        let targets: HashSet<NodeId> = [NodeId::new(1, 0)].into_iter().collect();
+        let filter: HashSet<Language> = HashSet::new();
 
-        let path = reconstruct_path_unified(target, &parents);
-        assert_eq!(path.len(), 1);
-        assert_eq!(path[0], target);
-    }
-
-    #[test]
-    fn test_reconstruct_path_unified_two_nodes() {
-        use sqry_core::graph::unified::node::NodeId;
-
-        let start = NodeId::new(0, 0);
-        let end = NodeId::new(1, 0);
-        let mut parents = HashMap::new();
-        parents.insert(start, None);
-        parents.insert(end, Some(start));
-
-        let path = reconstruct_path_unified(end, &parents);
-        assert_eq!(path.len(), 2);
-        assert_eq!(path[0], start);
-        assert_eq!(path[1], end);
+        let path = find_path_unified_bfs(&snapshot, &starts, &targets, &filter);
+        assert!(path.is_none(), "No path should exist in an empty graph");
     }
 
     // ==========================================================================
@@ -4500,45 +4523,35 @@ mod tests {
     }
 
     // ==========================================================================
-    // callee_matches_language tests
+    // LanguageFilterStrategy tests
     // ==========================================================================
 
     #[test]
-    fn test_callee_matches_language_empty_filter_is_vacuously_true() {
-        // An empty language filter must match every callee regardless of its
-        // language.  The early-return branch in callee_matches_language() does
-        // not dereference the snapshot, so we can use a trivially empty graph.
+    fn test_language_filter_strategy_empty_filter_allows_all() {
+        // An empty language filter must allow every node regardless of language.
+        use sqry_core::graph::unified::TraversalStrategy;
         use sqry_core::graph::unified::concurrent::CodeGraph;
+        use sqry_core::graph::unified::edge::EdgeKind;
         use sqry_core::graph::unified::node::NodeId;
 
         let graph = CodeGraph::new();
         let snapshot = graph.snapshot();
         let filter: HashSet<Language> = HashSet::new();
-        // Any NodeId will do — the function returns true before touching the
-        // snapshot when the filter is empty.
+
+        let mut strategy = LanguageFilterStrategy {
+            snapshot: &snapshot,
+            language_filter: &filter,
+        };
+
         let node = NodeId::new(0, 0);
+        let from = NodeId::new(1, 0);
+        let edge = EdgeKind::Calls {
+            argument_count: 0,
+            is_async: false,
+        };
         assert!(
-            callee_matches_language(&snapshot, node, &filter),
-            "Empty language filter must vacuously match any callee"
+            strategy.should_enqueue(node, from, &edge, 1),
+            "Empty language filter must vacuously match any node"
         );
-    }
-
-    #[test]
-    fn test_reconstruct_path_unified_three_nodes() {
-        use sqry_core::graph::unified::node::NodeId;
-
-        let a = NodeId::new(0, 0);
-        let b = NodeId::new(1, 0);
-        let c = NodeId::new(2, 0);
-        let mut parents = HashMap::new();
-        parents.insert(a, None);
-        parents.insert(b, Some(a));
-        parents.insert(c, Some(b));
-
-        let path = reconstruct_path_unified(c, &parents);
-        assert_eq!(path.len(), 3);
-        assert_eq!(path[0], a);
-        assert_eq!(path[1], b);
-        assert_eq!(path[2], c);
     }
 }

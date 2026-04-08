@@ -3,14 +3,13 @@ use std::path::Path;
 
 use sqry_core::graph::unified::NodeId;
 use sqry_core::graph::unified::concurrent::CodeGraph;
-use sqry_core::graph::unified::resolution::display_graph_qualified_name;
-use sqry_core::graph::unified::storage::StringInterner;
 use sqry_core::graph::unified::storage::arena::NodeEntry;
-use sqry_core::graph::unified::storage::registry::FileRegistry;
 use tower_lsp::lsp_types::{Location, Position, Range, Url};
 use tracing::debug;
 
 use crate::protocol::SqrySearchItem;
+
+pub(crate) use sqry_core::graph::unified::materialize::display_entry_qualified_name;
 
 /// Convert a graph node to LSP search item.
 ///
@@ -123,33 +122,6 @@ pub fn node_to_search_item(
         location,
         score: None,
     })
-}
-
-pub(crate) fn display_entry_qualified_name(
-    entry: &NodeEntry,
-    strings: &StringInterner,
-    files: &FileRegistry,
-    fallback_name: &str,
-) -> String {
-    entry
-        .qualified_name
-        .and_then(|qn_id| strings.resolve(qn_id))
-        .map_or_else(
-            || fallback_name.to_string(),
-            |qualified| {
-                files.language_for_file(entry.file).map_or_else(
-                    || qualified.to_string(),
-                    |language| {
-                        display_graph_qualified_name(
-                            language,
-                            qualified.as_ref(),
-                            entry.kind,
-                            entry.is_static,
-                        )
-                    },
-                )
-            },
-        )
 }
 
 #[cfg(test)]

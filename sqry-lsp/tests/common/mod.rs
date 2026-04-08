@@ -61,7 +61,7 @@ pub fn ensure_index(root: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Build CodeGraph for handlers that use execute_on_graph().
+/// Build `CodeGraph` for handlers that use `execute_on_graph()`.
 fn build_code_graph(root: &Path) -> Result<()> {
     use sqry_core::graph::unified::build::{BuildConfig, build_unified_graph};
     use sqry_core::graph::unified::persistence::{GraphStorage, save_to_path};
@@ -108,6 +108,7 @@ impl TestServer {
 /// (where it might not be set in workspace contexts).
 #[allow(dead_code)]
 pub fn sqry_bin() -> PathBuf {
+    #[allow(clippy::map_unwrap_or)] // Test helper uses map/unwrap_or pattern
     std::env::var("CARGO_BIN_EXE_sqry")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {

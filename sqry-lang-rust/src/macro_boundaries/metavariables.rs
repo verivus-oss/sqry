@@ -69,7 +69,7 @@ pub fn extract_metavariables(
     );
 
     if seen_metavars.is_empty() {
-        log::debug!("No metavariables found in macro '{}'", macro_qualified);
+        log::debug!("No metavariables found in macro '{macro_qualified}'");
     } else {
         log::debug!(
             "Extracted {} metavariables from macro '{}': {:?}",
@@ -102,9 +102,8 @@ fn extract_from_subtree(
 ) {
     if depth > MAX_RECURSION_DEPTH {
         log::warn!(
-            "Maximum recursion depth ({MAX_RECURSION_DEPTH}) exceeded in macro '{}'; \
-             skipping deeper nesting",
-            parent_qualified
+            "Maximum recursion depth ({MAX_RECURSION_DEPTH}) exceeded in macro '{parent_qualified}'; \
+             skipping deeper nesting"
         );
         return;
     }
@@ -213,12 +212,7 @@ fn extract_from_binding_pattern(
             let param_id = helper.add_node(&param_qualified, Some(span), NodeKind::Parameter);
             helper.add_contains_edge(parent_id, param_id);
 
-            log::debug!(
-                "Extracted metavariable ${}:{} in macro '{}'",
-                name,
-                fragment,
-                parent_qualified
-            );
+            log::debug!("Extracted metavariable ${name}:{fragment} in macro '{parent_qualified}'");
         }
     }
 }
@@ -335,11 +329,11 @@ mod tests {
 
     #[test]
     fn test_single_metavar() {
-        let source = r#"
+        let source = r"
 macro_rules! my_macro {
     ($x:expr) => { $x };
 }
-"#;
+";
         let (tree, mut staging) = setup_helper_with_macro(source);
         let file = Path::new("test.rs");
         let mut helper = GraphBuildHelper::new(&mut staging, file, Language::Rust);
@@ -365,11 +359,11 @@ macro_rules! my_macro {
 
     #[test]
     fn test_multiple_metavars() {
-        let source = r#"
+        let source = r"
 macro_rules! add {
     ($a:expr, $b:expr) => { $a + $b };
 }
-"#;
+";
         let (tree, mut staging) = setup_helper_with_macro(source);
         let file = Path::new("test.rs");
         let mut helper = GraphBuildHelper::new(&mut staging, file, Language::Rust);
@@ -392,12 +386,12 @@ macro_rules! add {
     #[test]
     fn test_repeated_metavar() {
         // Same metavar $x:expr in multiple arms should be deduplicated
-        let source = r#"
+        let source = r"
 macro_rules! multi {
     ($x:expr) => { $x };
     ($x:expr, $y:expr) => { $x + $y };
 }
-"#;
+";
         let (tree, mut staging) = setup_helper_with_macro(source);
         let file = Path::new("test.rs");
         let mut helper = GraphBuildHelper::new(&mut staging, file, Language::Rust);
@@ -426,12 +420,12 @@ macro_rules! multi {
 
     #[test]
     fn test_multiple_arms() {
-        let source = r#"
+        let source = r"
 macro_rules! vec_like {
     () => { Vec::new() };
     ($($x:expr),+) => { { let mut v = Vec::new(); $(v.push($x);)+ v } };
 }
-"#;
+";
         let (tree, mut staging) = setup_helper_with_macro(source);
         let file = Path::new("test.rs");
         let mut helper = GraphBuildHelper::new(&mut staging, file, Language::Rust);
@@ -459,11 +453,11 @@ macro_rules! vec_like {
 
     #[test]
     fn test_no_metavars() {
-        let source = r#"
+        let source = r"
 macro_rules! noop {
     () => {};
 }
-"#;
+";
         let (tree, mut staging) = setup_helper_with_macro(source);
         let file = Path::new("test.rs");
         let mut helper = GraphBuildHelper::new(&mut staging, file, Language::Rust);

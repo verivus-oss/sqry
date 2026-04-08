@@ -582,6 +582,7 @@ fn test_relation_callers_supports_fqn_and_simple_names() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // Regression test suite covers all boolean operators
 fn test_relation_returns_supports_fqn_and_simple_names() {
     init_logging();
     log::info!("REGRESSION TEST: Relation returns predicate supports FQN + simple names");

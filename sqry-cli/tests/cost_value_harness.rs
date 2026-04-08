@@ -11,6 +11,8 @@ use sqry_core::graph::unified::persistence::{GraphStorage, Manifest};
 use tempfile::TempDir;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)] // Test harness flags are independent booleans
+#[allow(clippy::struct_field_names)] // Count fields intentionally all suffixed with _count for clarity
 struct HarnessCounts {
     node_count: usize,
     edge_count: usize,
@@ -92,10 +94,9 @@ fn compute_delta(baseline: &HarnessRun, candidate: &HarnessRun) -> HarnessDelta 
     {
         let baseline_count = baseline.counts.file_count.get(key).copied().unwrap_or(0);
         let candidate_count = candidate.counts.file_count.get(key).copied().unwrap_or(0);
-        delta_file_count.insert(
-            key.clone(),
-            candidate_count as isize - baseline_count as isize,
-        );
+        let delta = isize::try_from(candidate_count).expect("count fits in isize")
+            - isize::try_from(baseline_count).expect("count fits in isize");
+        delta_file_count.insert(key.clone(), delta);
     }
 
     let added_plugins = candidate
@@ -106,9 +107,13 @@ fn compute_delta(baseline: &HarnessRun, candidate: &HarnessRun) -> HarnessDelta 
         .cloned()
         .collect();
 
+    let delta_nodes = isize::try_from(candidate.counts.node_count).expect("count fits in isize")
+        - isize::try_from(baseline.counts.node_count).expect("count fits in isize");
+    let delta_edges = isize::try_from(candidate.counts.edge_count).expect("count fits in isize")
+        - isize::try_from(baseline.counts.edge_count).expect("count fits in isize");
     HarnessDelta {
-        delta_nodes: candidate.counts.node_count as isize - baseline.counts.node_count as isize,
-        delta_edges: candidate.counts.edge_count as isize - baseline.counts.edge_count as isize,
+        delta_nodes,
+        delta_edges,
         delta_file_count,
         added_plugins,
     }

@@ -53,6 +53,7 @@ fn build_minimal_class(class_name: &str) -> Vec<u8> {
 
     // #1: CONSTANT_Utf8 <class_name>
     bytes.push(1);
+    #[allow(clippy::cast_possible_truncation)] // Test assertion values are small constants
     bytes.extend_from_slice(&(class_bytes.len() as u16).to_be_bytes());
     bytes.extend_from_slice(class_bytes);
 
@@ -62,6 +63,7 @@ fn build_minimal_class(class_name: &str) -> Vec<u8> {
 
     // #3: CONSTANT_Utf8 "java/lang/Object"
     bytes.push(1);
+    #[allow(clippy::cast_possible_truncation)] // Test assertion values are small constants
     bytes.extend_from_slice(&(object_bytes.len() as u16).to_be_bytes());
     bytes.extend_from_slice(object_bytes);
 

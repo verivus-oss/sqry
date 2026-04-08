@@ -1174,6 +1174,7 @@ mod tests {
     }
 
     /// Create a staging graph with OOP edge types (inherits, implements, exports).
+    #[allow(clippy::too_many_lines)] // Comprehensive OOP staging setup requires many node/edge declarations
     fn make_oop_staging() -> StagingGraph {
         let mut staging = StagingGraph::new();
 
@@ -1567,7 +1568,7 @@ mod tests {
         staging
     }
 
-    /// Create a staging graph with DbQuery that has a table name.
+    /// Create a staging graph with `DbQuery` that has a table name.
     fn make_db_with_table_staging() -> StagingGraph {
         let mut staging = StagingGraph::new();
 

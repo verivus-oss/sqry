@@ -7,8 +7,8 @@ use tower::ServiceExt;
 use tower::buffer::Buffer;
 use tower_lsp::jsonrpc::Request;
 use tower_lsp::lsp_types::{
-    HoverParams, InitializeParams, Position, TextDocumentIdentifier, TextDocumentPositionParams,
-    WorkspaceSymbolParams,
+    HoverParams, InitializeParams, PartialResultParams, Position, TextDocumentIdentifier,
+    TextDocumentPositionParams, WorkDoneProgressParams, WorkspaceSymbolParams,
 };
 
 mod common;
@@ -88,7 +88,7 @@ async fn lsp_handler_emits_completion_span_new() -> Result<()> {
             },
             position: Position::new(24, 13),
         },
-        work_done_progress_params: Default::default(),
+        work_done_progress_params: WorkDoneProgressParams::default(),
     };
 
     let hover_request = Request::build("textDocument/hover")
@@ -134,8 +134,8 @@ async fn cancellation_emits_warning_span_new() -> Result<()> {
 
     let params = WorkspaceSymbolParams {
         query: "lang:rust helper".into(),
-        work_done_progress_params: Default::default(),
-        partial_result_params: Default::default(),
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
     };
 
     let request = Request::build("workspace/symbol")

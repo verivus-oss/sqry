@@ -1,6 +1,6 @@
-//! ServiceNow XML record extraction with JS delegation for sqry.
+//! `ServiceNow` XML record extraction with JS delegation for sqry.
 //!
-//! Parses ServiceNow update set XML files, extracts embedded JavaScript
+//! Parses `ServiceNow` update set XML files, extracts embedded JavaScript
 //! from CDATA sections, and delegates to `ServiceNowGraphBuilder` for
 //! full code analysis. Also indexes table schema definitions.
 
@@ -18,7 +18,7 @@ use sqry_core::plugin::{LanguageMetadata, LanguagePlugin};
 use std::path::Path;
 use tree_sitter::{Parser, Tree};
 
-/// ServiceNow XML plugin for sqry.
+/// `ServiceNow` XML plugin for sqry.
 #[derive(Debug)]
 pub struct ServiceNowXmlPlugin {
     graph_builder: ServiceNowXmlGraphBuilder,

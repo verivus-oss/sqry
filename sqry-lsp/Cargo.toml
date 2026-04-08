@@ -32,9 +32,9 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sqry-core = { version = "7.1.5", path = "../sqry-core" }
-sqry-nl = { version = "7.1.5", path = "../sqry-nl" }
-sqry-plugin-registry = { version = "7.1.5", path = "../sqry-plugin-registry" }
+sqry-core = { version = "7.2.0", path = "../sqry-core" }
+sqry-nl = { version = "7.2.0", path = "../sqry-nl" }
+sqry-plugin-registry = { version = "7.2.0", path = "../sqry-plugin-registry" }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 parking_lot.workspace = true
 ropey = "1.6"
@@ -50,6 +50,6 @@ tikv-jemalloc-sys = { version = "0.6", features = ["unprefixed_malloc_on_support
 assert_cmd = "2.0"
 tempfile = "3.14"
 criterion = "0.8"
-tower = { version = "0.4", features = ["buffer"] }
+tower = { version = "0.4", features = ["buffer", "util"] }
 futures = "0.3"
 sqry-lang-rust = { path = "../sqry-lang-rust" }

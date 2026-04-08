@@ -39,11 +39,11 @@ fn count_ffi_edges(staging: &StagingGraph) -> usize {
 #[test]
 fn test_native_method_creates_ffi_edge() {
     // @native annotation should create an FfiCall edge
-    let source = r#"
+    let source = r"
 class NativeLib {
   @native def nativeMethod(): Unit
 }
-"#;
+";
 
     let staging = parse_and_build_graph(source);
     let ffi_count = count_ffi_edges(&staging);
@@ -57,13 +57,13 @@ class NativeLib {
 #[test]
 fn test_multiple_native_methods() {
     // Multiple @native methods should each create an FfiCall edge
-    let source = r#"
+    let source = r"
 class NativeLib {
   @native def method1(): Unit
   @native def method2(x: Int): String
   @native def method3(x: Int, y: String): Long
 }
-"#;
+";
 
     let staging = parse_and_build_graph(source);
     let ffi_count = count_ffi_edges(&staging);
@@ -78,7 +78,7 @@ class NativeLib {
 #[ignore = "Scala Native @extern support not yet implemented"]
 fn test_extern_object_scala_native() {
     // @extern object for Scala Native should create FFI edges for its methods
-    let source = r#"
+    let source = r"
 import scala.scalanative.unsafe._
 
 @extern
@@ -86,7 +86,7 @@ object CLib {
   def printf(format: CString): CInt = extern
   def malloc(size: CSize): Ptr[Byte] = extern
 }
-"#;
+";
 
     let staging = parse_and_build_graph(source);
     let ffi_count = count_ffi_edges(&staging);
@@ -101,14 +101,14 @@ object CLib {
 #[test]
 fn test_jna_trait_extending_library() {
     // Trait extending com.sun.jna.Library indicates JNA FFI
-    let source = r#"
+    let source = r"
 import com.sun.jna.Library
 
 trait MyLibrary extends Library {
   def someFunction(): Unit
   def anotherFunction(x: Int): String
 }
-"#;
+";
 
     let staging = parse_and_build_graph(source);
 
@@ -150,11 +150,11 @@ class RegularClass {
 #[test]
 fn test_native_method_with_parameters() {
     // @native method with various parameter types
-    let source = r#"
+    let source = r"
 class NativeLib {
   @native def process(x: Int, y: String, flag: Boolean): Long
 }
-"#;
+";
 
     let staging = parse_and_build_graph(source);
     let ffi_count = count_ffi_edges(&staging);
@@ -201,11 +201,11 @@ class NativeLib {
 #[test]
 fn test_private_native_method() {
     // private @native method should still create an FfiCall edge
-    let source = r#"
+    let source = r"
 class NativeLib {
   @native private def privateNative(): Unit
 }
-"#;
+";
 
     let staging = parse_and_build_graph(source);
     let ffi_count = count_ffi_edges(&staging);
@@ -219,11 +219,11 @@ class NativeLib {
 #[test]
 fn test_native_method_in_object() {
     // @native method inside object (singleton)
-    let source = r#"
+    let source = r"
 object NativeLib {
   @native def loadLibrary(name: String): Boolean
 }
-"#;
+";
 
     let staging = parse_and_build_graph(source);
     let ffi_count = count_ffi_edges(&staging);
@@ -237,13 +237,13 @@ object NativeLib {
 #[test]
 fn test_overloaded_native_methods() {
     // Overloaded @native methods should create distinct FFI targets
-    let source = r#"
+    let source = r"
 class NativeLib {
   @native def process(x: Int): String
   @native def process(s: String): String
   @native def process(x: Int, y: Int): String
 }
-"#;
+";
 
     let staging = parse_and_build_graph(source);
     let ffi_count = count_ffi_edges(&staging);
@@ -308,7 +308,7 @@ class NativeLib {
 fn test_qualified_scala_primitives() {
     // Test that scala.Int, scala.Array, etc. are handled correctly
     // Covers: primitive arrays, reference arrays, multiple primitive types
-    let source = r#"
+    let source = r"
 class NativeLib {
   @native def process(x: scala.Int): String
   @native def process(arr: scala.Array[scala.Int]): String
@@ -316,7 +316,7 @@ class NativeLib {
   @native def process(strArr: scala.Array[String]): String
   @native def process(longArr: scala.Array[scala.Long]): String
 }
-"#;
+";
 
     let staging = parse_and_build_graph(source);
     let ffi_count = count_ffi_edges(&staging);
@@ -351,22 +351,19 @@ class NativeLib {
     assert_eq!(
         unique_targets.len(),
         ffi_targets.len(),
-        "Expected all FFI targets to be distinct, but found duplicates: {:?}",
-        ffi_targets
+        "Expected all FFI targets to be distinct, but found duplicates: {ffi_targets:?}"
     );
 
     // Verify at least one target contains primitive descriptor (I for Int)
     assert!(
         ffi_targets.iter().any(|t| t.contains("__I")),
-        "Expected at least one FFI target to contain '__I' for scala.Int, got: {:?}",
-        ffi_targets
+        "Expected at least one FFI target to contain '__I' for scala.Int, got: {ffi_targets:?}"
     );
 
     // Verify array descriptor for scala.Array[scala.Int] → [I
     assert!(
         ffi_targets.iter().any(|t| t.contains("__[I")),
-        "Expected at least one FFI target to contain '__[I' for scala.Array[scala.Int], got: {:?}",
-        ffi_targets
+        "Expected at least one FFI target to contain '__[I' for scala.Array[scala.Int], got: {ffi_targets:?}"
     );
 
     // Verify reference array descriptor for scala.Array[String] → [Ljava/lang/String;
@@ -374,26 +371,24 @@ class NativeLib {
         ffi_targets
             .iter()
             .any(|t| t.contains("__[Ljava/lang/String") || t.contains("__[Ljava_lang_String")),
-        "Expected at least one FFI target to contain String array descriptor, got: {:?}",
-        ffi_targets
+        "Expected at least one FFI target to contain String array descriptor, got: {ffi_targets:?}"
     );
 
     // Verify Long array descriptor for scala.Array[scala.Long] → [J
     assert!(
         ffi_targets.iter().any(|t| t.contains("__[J")),
-        "Expected at least one FFI target to contain '__[J' for scala.Array[scala.Long], got: {:?}",
-        ffi_targets
+        "Expected at least one FFI target to contain '__[J' for scala.Array[scala.Long], got: {ffi_targets:?}"
     );
 }
 
 #[test]
 fn test_qualified_native_annotation() {
     // Test that @scala.native is recognized
-    let source = r#"
+    let source = r"
 class NativeLib {
   @scala.native def qualifiedNative(): Unit
 }
-"#;
+";
 
     let staging = parse_and_build_graph(source);
     let ffi_count = count_ffi_edges(&staging);
@@ -407,11 +402,11 @@ class NativeLib {
 #[test]
 fn test_curried_parameters() {
     // Test curried function parameters (multiple parameter lists)
-    let source = r#"
+    let source = r"
 class NativeLib {
   @native def curried(x: Int)(y: String): Long
 }
-"#;
+";
 
     let staging = parse_and_build_graph(source);
     let ffi_count = count_ffi_edges(&staging);
@@ -451,13 +446,13 @@ class NativeLib {
 fn test_anyval_anyref_normalization() {
     // Test that scala.AnyVal, scala.AnyRef, and scala.Any are normalized correctly
     // The normalization rule uses starts_with("Any"), so all three should be normalized
-    let source = r#"
+    let source = r"
 class NativeLib {
   @native def processAny(x: scala.Any): String
   @native def processAnyRef(x: scala.AnyRef): String
   @native def processAnyVal(x: scala.AnyVal): String
 }
-"#;
+";
 
     let staging = parse_and_build_graph(source);
     let ffi_count = count_ffi_edges(&staging);
@@ -492,8 +487,7 @@ class NativeLib {
     assert_eq!(
         unique_targets.len(),
         ffi_targets.len(),
-        "Expected all FFI targets to be distinct, but found duplicates: {:?}",
-        ffi_targets
+        "Expected all FFI targets to be distinct, but found duplicates: {ffi_targets:?}"
     );
 
     // Verify that Any types are normalized (not kept as scala.Any)

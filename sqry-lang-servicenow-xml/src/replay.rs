@@ -37,6 +37,10 @@ impl ReplayState {
     /// # Body hashes
     /// `attach_body_hashes()` must be called on the delegation staging with the
     /// delegated script bytes BEFORE calling this method.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `GraphResult` error if replaying any node or edge operation fails.
     pub fn replay(
         &mut self,
         main_staging: &mut StagingGraph,

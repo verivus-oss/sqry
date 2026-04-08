@@ -1,4 +1,4 @@
-//! Integration tests for TypeOf and Reference edge creation from YARD annotations
+//! Integration tests for `TypeOf` and Reference edge creation from YARD annotations
 //!
 //! Tests validate that edges are created for correct YARD patterns and include
 //! nested namespace tests to verify full qualified name handling (Issue #1 fix).
@@ -195,7 +195,7 @@ end
 
 #[test]
 fn test_method_param_multiple_params() {
-    let source = r#"
+    let source = r"
 class User
   # @param [String] first_name
   # @param [String] last_name
@@ -203,7 +203,7 @@ class User
   def create(first_name, last_name, age)
   end
 end
-"#;
+";
 
     let staging = build_graph_from_source(source);
 
@@ -217,13 +217,13 @@ end
 
 #[test]
 fn test_method_param_custom_type() {
-    let source = r#"
+    let source = r"
 class Service
   # @param [User] user The user object
   def process(user)
   end
 end
-"#;
+";
 
     let staging = build_graph_from_source(source);
 
@@ -237,13 +237,13 @@ end
 
 #[test]
 fn test_method_param_union_type() {
-    let source = r#"
+    let source = r"
 class Parser
   # @param [String, Integer] value
   def parse(value)
   end
 end
-"#;
+";
 
     let staging = build_graph_from_source(source);
 
@@ -257,13 +257,13 @@ end
 
 #[test]
 fn test_method_param_nullable_type() {
-    let source = r#"
+    let source = r"
 class Service
   # @param [String, nil] name
   def greet(name)
   end
 end
-"#;
+";
 
     let staging = build_graph_from_source(source);
 
@@ -281,14 +281,14 @@ end
 
 #[test]
 fn test_method_return_simple_type() {
-    let source = r#"
+    let source = r"
 class User
   # @return [String] The user's name
   def name
     @name
   end
 end
-"#;
+";
 
     let staging = build_graph_from_source(source);
 
@@ -302,14 +302,14 @@ end
 
 #[test]
 fn test_method_return_custom_type() {
-    let source = r#"
+    let source = r"
 class UserFactory
   # @return [User] The created user
   def create
     User.new
   end
 end
-"#;
+";
 
     let staging = build_graph_from_source(source);
 
@@ -323,14 +323,14 @@ end
 
 #[test]
 fn test_method_return_array_type() {
-    let source = r#"
+    let source = r"
 class Repository
   # @return [Array<User>] List of users
   def all
     User.all
   end
 end
-"#;
+";
 
     let staging = build_graph_from_source(source);
 
@@ -344,14 +344,14 @@ end
 
 #[test]
 fn test_method_return_hash_type() {
-    let source = r#"
+    let source = r"
 class Config
   # @return [Hash{String => Integer}] Configuration mapping
   def settings
     { timeout: 30, retries: 3 }
   end
 end
-"#;
+";
 
     let staging = build_graph_from_source(source);
 
@@ -365,13 +365,13 @@ end
 
 #[test]
 fn test_method_return_nullable_type() {
-    let source = r#"
+    let source = r"
 class Finder
   # @return [User, nil] User or nil if not found
   def find(id)
   end
 end
-"#;
+";
 
     let staging = build_graph_from_source(source);
 
@@ -389,7 +389,7 @@ end
 
 #[test]
 fn test_singleton_method_param() {
-    let source = r#"
+    let source = r"
 class User
   # @param [String] name
   # @return [User]
@@ -397,7 +397,7 @@ class User
     new(name)
   end
 end
-"#;
+";
 
     let staging = build_graph_from_source(source);
 
@@ -411,14 +411,14 @@ end
 
 #[test]
 fn test_singleton_method_return() {
-    let source = r#"
+    let source = r"
 class Config
   # @return [Hash{Symbol => String}]
   def self.defaults
     { timeout: '30s' }
   end
 end
-"#;
+";
 
     let staging = build_graph_from_source(source);
 
@@ -432,7 +432,7 @@ end
 
 #[test]
 fn test_singleton_method_multiple_params() {
-    let source = r#"
+    let source = r"
 class Builder
   # @param [String] name
   # @param [Integer] age
@@ -441,7 +441,7 @@ class Builder
   def self.build(name, age, active)
   end
 end
-"#;
+";
 
     let staging = build_graph_from_source(source);
 
@@ -459,12 +459,12 @@ end
 
 #[test]
 fn test_attr_reader_single() {
-    let source = r#"
+    let source = r"
 class User
   # @return [String]
   attr_reader :name
 end
-"#;
+";
 
     let staging = build_graph_from_source(source);
 
@@ -478,12 +478,12 @@ end
 
 #[test]
 fn test_attr_reader_multiple() {
-    let source = r#"
+    let source = r"
 class User
   # @return [String]
   attr_reader :first_name, :last_name
 end
-"#;
+";
 
     let staging = build_graph_from_source(source);
 
@@ -497,12 +497,12 @@ end
 
 #[test]
 fn test_attr_writer_custom_type() {
-    let source = r#"
+    let source = r"
 class Service
   # @return [Logger]
   attr_writer :logger
 end
-"#;
+";
 
     let staging = build_graph_from_source(source);
 
@@ -516,12 +516,12 @@ end
 
 #[test]
 fn test_attr_accessor_array_type() {
-    let source = r#"
+    let source = r"
 class Repository
   # @return [Array<User>]
   attr_accessor :users
 end
-"#;
+";
 
     let staging = build_graph_from_source(source);
 
@@ -535,12 +535,12 @@ end
 
 #[test]
 fn test_attr_accessor_hash_type() {
-    let source = r#"
+    let source = r"
 class Cache
   # @return [Hash{String => Object}]
   attr_accessor :data
 end
-"#;
+";
 
     let staging = build_graph_from_source(source);
 
@@ -573,13 +573,11 @@ end
     let display_attr = "User#username";
     assert!(
         assert_edge_from_node(&staging, "TypeOf", qualified_attr),
-        "TypeOf edge should originate from attr with string argument: {}",
-        qualified_attr
+        "TypeOf edge should originate from attr with string argument: {qualified_attr}"
     );
     assert!(
         assert_edge_from_node_display(&staging, "TypeOf", display_attr),
-        "TypeOf edge should display using native Ruby attr syntax: {}",
-        display_attr
+        "TypeOf edge should display using native Ruby attr syntax: {display_attr}"
     );
 
     let ref_edges = collect_edges_by_kind(&staging, "References");
@@ -591,12 +589,12 @@ end
 
 #[test]
 fn test_attr_accessor_command_call() {
-    let source = r#"
+    let source = r"
 class Service
   # @return [Logger]
   self.attr_accessor :logger
 end
-"#;
+";
 
     let staging = build_graph_from_source(source);
 
@@ -606,13 +604,11 @@ end
     let display_attr = "Service#logger";
     assert!(
         assert_edge_from_node(&staging, "TypeOf", qualified_attr),
-        "TypeOf edge should originate from attr with command_call form: {}",
-        qualified_attr
+        "TypeOf edge should originate from attr with command_call form: {qualified_attr}"
     );
     assert!(
         assert_edge_from_node_display(&staging, "TypeOf", display_attr),
-        "TypeOf edge should display using native Ruby attr syntax: {}",
-        display_attr
+        "TypeOf edge should display using native Ruby attr syntax: {display_attr}"
     );
 
     let ref_edges = collect_edges_by_kind(&staging, "References");
@@ -649,14 +645,14 @@ end
 
 #[test]
 fn test_instance_variable_custom_type() {
-    let source = r#"
+    let source = r"
 class Service
   def setup
     # @type [Logger]
     @logger = Logger.new
   end
 end
-"#;
+";
 
     let staging = build_graph_from_source(source);
 
@@ -670,14 +666,14 @@ end
 
 #[test]
 fn test_instance_variable_array_type() {
-    let source = r#"
+    let source = r"
 class Repository
   def initialize
     # @type [Array<User>]
     @users = []
   end
 end
-"#;
+";
 
     let staging = build_graph_from_source(source);
 
@@ -691,14 +687,14 @@ end
 
 #[test]
 fn test_instance_variable_hash_type() {
-    let source = r#"
+    let source = r"
 class Config
   def initialize
     # @type [Hash{Symbol => String}]
     @settings = {}
   end
 end
-"#;
+";
 
     let staging = build_graph_from_source(source);
 
@@ -712,14 +708,14 @@ end
 
 #[test]
 fn test_instance_variable_nullable_type() {
-    let source = r#"
+    let source = r"
 class Finder
   def initialize
     # @type [User, nil]
     @cached_user = nil
   end
 end
-"#;
+";
 
     let staging = build_graph_from_source(source);
 
@@ -737,13 +733,13 @@ end
 
 #[test]
 fn test_complex_generic_type() {
-    let source = r#"
+    let source = r"
 class Service
   # @param [Collection<Result<Data>>] results
   def process(results)
   end
 end
-"#;
+";
 
     let staging = build_graph_from_source(source);
 
@@ -757,13 +753,13 @@ end
 
 #[test]
 fn test_complex_union_with_generics() {
-    let source = r#"
+    let source = r"
 class Parser
   # @param [Array<String>, Hash{Symbol => Integer}] value
   def parse(value)
   end
 end
-"#;
+";
 
     let staging = build_graph_from_source(source);
 
@@ -777,14 +773,14 @@ end
 
 #[test]
 fn test_qualified_type_names() {
-    let source = r#"
+    let source = r"
 class Service
   # @param [App::Models::User] user
   # @return [App::Services::Logger]
   def log_action(user)
   end
 end
-"#;
+";
 
     let staging = build_graph_from_source(source);
 
@@ -798,7 +794,7 @@ end
 
 #[test]
 fn test_multiple_annotations_on_method() {
-    let source = r#"
+    let source = r"
 class UserService
   # @param [String] first_name
   # @param [String] last_name
@@ -808,7 +804,7 @@ class UserService
   def create_user(first_name, last_name, age, metadata)
   end
 end
-"#;
+";
 
     let staging = build_graph_from_source(source);
 
@@ -833,7 +829,7 @@ end
 
 #[test]
 fn test_nested_module_class_method() {
-    let source = r#"
+    let source = r"
 module MyModule
   class MyClass
     # @param [String] value
@@ -842,7 +838,7 @@ module MyModule
     end
   end
 end
-"#;
+";
 
     let staging = build_graph_from_source(source);
 
@@ -852,21 +848,18 @@ end
     let display_method = "MyModule::MyClass#process";
     assert!(
         assert_edge_from_node(&staging, "TypeOf", qualified_method),
-        "TypeOf edge should originate from fully-qualified method: {}",
-        qualified_method
+        "TypeOf edge should originate from fully-qualified method: {qualified_method}"
     );
     assert!(
         assert_edge_from_node_display(&staging, "TypeOf", display_method),
-        "TypeOf edge should display with native Ruby method syntax: {}",
-        display_method
+        "TypeOf edge should display with native Ruby method syntax: {display_method}"
     );
 
     // Validate edge count for the qualified method
     let typeof_count = count_edges_from_node(&staging, "TypeOf", qualified_method);
     assert!(
         typeof_count >= 2,
-        "Method should have 2+ TypeOf edges (param + return), found {}",
-        typeof_count
+        "Method should have 2+ TypeOf edges (param + return), found {typeof_count}"
     );
 
     // Validate References edges exist
@@ -879,7 +872,7 @@ end
 
 #[test]
 fn test_nested_module_singleton_method() {
-    let source = r#"
+    let source = r"
 module Outer
   module Inner
     class Service
@@ -890,7 +883,7 @@ module Outer
     end
   end
 end
-"#;
+";
 
     let staging = build_graph_from_source(source);
 
@@ -901,20 +894,17 @@ end
 
     assert!(
         assert_edge_from_node(&staging, "TypeOf", qualified_method),
-        "TypeOf edge should originate from fully-qualified singleton method: {}",
-        qualified_method
+        "TypeOf edge should originate from fully-qualified singleton method: {qualified_method}"
     );
     assert!(
         assert_edge_from_node_display(&staging, "TypeOf", display_method),
-        "TypeOf edge should display with native Ruby singleton syntax: {}",
-        display_method
+        "TypeOf edge should display with native Ruby singleton syntax: {display_method}"
     );
 
     let typeof_count = count_edges_from_node(&staging, "TypeOf", qualified_method);
     assert!(
         typeof_count >= 2,
-        "Singleton method should have 2+ TypeOf edges (param + return), found {}",
-        typeof_count
+        "Singleton method should have 2+ TypeOf edges (param + return), found {typeof_count}"
     );
 
     let ref_edges = collect_edges_by_kind(&staging, "References");
@@ -926,7 +916,7 @@ end
 
 #[test]
 fn test_nested_module_attr() {
-    let source = r#"
+    let source = r"
 module App
   module Models
     class User
@@ -935,7 +925,7 @@ module App
     end
   end
 end
-"#;
+";
 
     let staging = build_graph_from_source(source);
 
@@ -946,13 +936,11 @@ end
 
     assert!(
         assert_edge_from_node(&staging, "TypeOf", qualified_attr),
-        "TypeOf edge should originate from fully-qualified attr: {}",
-        qualified_attr
+        "TypeOf edge should originate from fully-qualified attr: {qualified_attr}"
     );
     assert!(
         assert_edge_from_node_display(&staging, "TypeOf", display_attr),
-        "TypeOf edge should display as fully-qualified Ruby attr: {}",
-        display_attr
+        "TypeOf edge should display as fully-qualified Ruby attr: {display_attr}"
     );
 
     let ref_edges = collect_edges_by_kind(&staging, "References");
@@ -964,7 +952,7 @@ end
 
 #[test]
 fn test_nested_module_instance_variable() {
-    let source = r#"
+    let source = r"
 module Services
   class Cache
     def initialize
@@ -973,7 +961,7 @@ module Services
     end
   end
 end
-"#;
+";
 
     let staging = build_graph_from_source(source);
 
@@ -984,13 +972,11 @@ end
 
     assert!(
         assert_edge_from_node(&staging, "TypeOf", qualified_var),
-        "TypeOf edge should originate from fully-qualified instance variable: {}",
-        qualified_var
+        "TypeOf edge should originate from fully-qualified instance variable: {qualified_var}"
     );
     assert!(
         assert_edge_from_node_display(&staging, "TypeOf", display_var),
-        "TypeOf edge should display as fully-qualified Ruby instance variable: {}",
-        display_var
+        "TypeOf edge should display as fully-qualified Ruby instance variable: {display_var}"
     );
 
     let ref_edges = collect_edges_by_kind(&staging, "References");
@@ -1002,7 +988,7 @@ end
 
 #[test]
 fn test_absolute_constant_namespace() {
-    let source = r#"
+    let source = r"
 module Outer
   class ::AbsoluteClass
     # @param [String] value
@@ -1010,7 +996,7 @@ module Outer
     end
   end
 end
-"#;
+";
 
     let staging = build_graph_from_source(source);
 
@@ -1022,13 +1008,11 @@ end
 
     assert!(
         assert_edge_from_node(&staging, "TypeOf", qualified_method),
-        "TypeOf edge should use absolute constant name (no Outer:: prefix): {}",
-        qualified_method
+        "TypeOf edge should use absolute constant name (no Outer:: prefix): {qualified_method}"
     );
     assert!(
         assert_edge_from_node_display(&staging, "TypeOf", display_method),
-        "TypeOf edge should display with native Ruby method syntax: {}",
-        display_method
+        "TypeOf edge should display with native Ruby method syntax: {display_method}"
     );
 }
 

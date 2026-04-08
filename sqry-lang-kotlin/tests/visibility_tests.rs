@@ -46,11 +46,11 @@ fn has_node_with_kind_and_name(
 
 #[test]
 fn test_val_property_creates_property_node() {
-    let source = r#"
+    let source = r"
 class User {
     val id: Int = 1
 }
-"#;
+";
     let tree = parse_kotlin(source);
     let mut staging = StagingGraph::new();
     let builder = KotlinGraphBuilder::new();
@@ -110,8 +110,7 @@ class User {
     let property_count = count_node_kind(&staging, NodeKind::Property);
     assert!(
         property_count >= 4,
-        "Expected at least 4 Property nodes (2 val + 2 var), got {}",
-        property_count
+        "Expected at least 4 Property nodes (2 val + 2 var), got {property_count}"
     );
 }
 
@@ -316,13 +315,13 @@ internal fun internalFunction() {
 
 #[test]
 fn test_function_visibility_mixed() {
-    let source = r#"
+    let source = r"
 public fun publicFunc() {}
 private fun privateFunc() {}
 protected fun protectedFunc() {}
 internal fun internalFunc() {}
 fun defaultPublic() {}
-"#;
+";
     let tree = parse_kotlin(source);
     let mut staging = StagingGraph::new();
     let builder = KotlinGraphBuilder::new();

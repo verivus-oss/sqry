@@ -14,13 +14,13 @@ fn parse_dart(source: &str) -> Tree {
 #[test]
 #[ignore = "Debug AST structure"]
 fn debug_dynamic_library_open() {
-    let source = r#"
+    let source = r"
 import 'dart:ffi' as ffi;
 
 void loadLib() {
   final dylib = ffi.DynamicLibrary.open('libhello.so');
 }
-"#;
+";
     let tree = parse_dart(source);
     println!("\n=== AST for DynamicLibrary.open ===");
     println!("{}", tree.root_node().to_sexp());
@@ -29,14 +29,14 @@ void loadLib() {
 #[test]
 #[ignore = "Debug AST structure"]
 fn debug_lookup_asfunction() {
-    let source = r#"
+    let source = r"
 import 'dart:ffi' as ffi;
 
 void callNative() {
   final dylib = ffi.DynamicLibrary.open('libhello.so');
   final hello = dylib.lookup('hello').asFunction();
 }
-"#;
+";
     let tree = parse_dart(source);
     println!("\n=== AST for lookup/asFunction ===");
     println!("{}", tree.root_node().to_sexp());
@@ -45,12 +45,12 @@ void callNative() {
 #[test]
 #[ignore = "Debug AST structure"]
 fn debug_native_annotation() {
-    let source = r#"
+    let source = r"
 import 'dart:ffi' as ffi;
 
 @ffi.Native(symbol: 'add')
 external int nativeAdd(int a, int b);
-"#;
+";
     let tree = parse_dart(source);
     println!("\n=== AST for @Native annotation ===");
     println!("{}", tree.root_node().to_sexp());
@@ -59,13 +59,13 @@ external int nativeAdd(int a, int b);
 #[test]
 #[ignore = "Debug - check if FFI edges are created"]
 fn debug_ffi_edge_creation() {
-    let source = r#"
+    let source = r"
 import 'dart:ffi' as ffi;
 
 void loadLib() {
   final dylib = ffi.DynamicLibrary.open('libhello.so');
 }
-"#;
+";
     let tree = parse_dart(source);
     let mut staging = StagingGraph::new();
     let builder = DartGraphBuilder::new();

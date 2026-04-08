@@ -2,8 +2,8 @@ use anyhow::Result;
 use serde_json::json;
 use std::path::Path;
 use tower_lsp::lsp_types::{
-    CodeActionContext, CodeActionParams, Position, Range, TextDocumentIdentifier, Url,
-    WorkspaceSymbolParams,
+    CodeActionContext, CodeActionParams, PartialResultParams, Position, Range,
+    TextDocumentIdentifier, Url, WorkDoneProgressParams, WorkspaceSymbolParams,
 };
 
 use super::common;
@@ -28,8 +28,8 @@ fn workspace_symbol_returns_results_new() -> Result<()> {
 
     let params = WorkspaceSymbolParams {
         query: "process_data".into(),
-        work_done_progress_params: Default::default(),
-        partial_result_params: Default::default(),
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
     };
 
     let result = sqry_lsp::handlers::workspace_symbol::handle(&session, &params)?;
@@ -50,8 +50,8 @@ fn workspace_symbol_respects_language_filter_new() -> Result<()> {
 
     let params = WorkspaceSymbolParams {
         query: "lang:typescript describe".into(),
-        work_done_progress_params: Default::default(),
-        partial_result_params: Default::default(),
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
     };
 
     let result = sqry_lsp::handlers::workspace_symbol::handle(&session, &params)?;
@@ -68,8 +68,8 @@ fn workspace_symbol_paginates_new() -> Result<()> {
 
     let params = WorkspaceSymbolParams {
         query: "lang:rust page_size:1 helper".into(),
-        work_done_progress_params: Default::default(),
-        partial_result_params: Default::default(),
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
     };
 
     let first_page = sqry_lsp::handlers::workspace_symbol::handle(&session, &params)?
@@ -115,18 +115,18 @@ fn code_action_offers_find_callers_new() -> Result<()> {
             only: None,
             trigger_kind: None,
         },
-        work_done_progress_params: Default::default(),
-        partial_result_params: Default::default(),
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
     };
 
     let response = sqry_lsp::handlers::code_action::handle(&session, &params)?;
     let actions = response.expect("code action response");
-    let has_callers = actions.iter().any(|action| match action {
-        tower_lsp::lsp_types::CodeActionOrCommand::CodeAction(action) => {
-            action.command.as_ref().map(|cmd| cmd.command.as_str())
+    let has_callers = actions.iter().any(|action| {
+        matches!(action,
+            tower_lsp::lsp_types::CodeActionOrCommand::CodeAction(action)
+            if action.command.as_ref().map(|cmd| cmd.command.as_str())
                 == Some(sqry_lsp::handlers::code_action::COMMAND_SHOW_CALLERS)
-        }
-        _ => false,
+        )
     });
     assert!(has_callers);
     Ok(())
@@ -184,8 +184,8 @@ fn code_action_handles_missing_symbol_new() -> Result<()> {
             only: None,
             trigger_kind: None,
         },
-        work_done_progress_params: Default::default(),
-        partial_result_params: Default::default(),
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
     };
     let response = sqry_lsp::handlers::code_action::handle(&session, &params)?;
     assert!(response.is_none());

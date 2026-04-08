@@ -95,6 +95,7 @@ pub(crate) fn build(root: Node, content: &[u8]) -> GraphResult<JavaScriptScopeTr
 // Phase 1: Build scopes
 // ============================================================================
 
+#[allow(clippy::too_many_lines)] // JS scope resolution covers all AST node types
 fn build_scopes_recursive(
     tree: &mut JavaScriptScopeTree,
     node: Node,
@@ -166,6 +167,8 @@ fn build_scopes_recursive(
             guard.exit();
             return Ok(());
         }
+        #[allow(clippy::match_same_arms)]
+        // for_in and for_of have same binding logic but distinct AST semantics
         "for_in_statement" => {
             if node.child_by_field_name("body").is_some()
                 && let Some(scope_id) = tree.add_scope(
@@ -386,7 +389,8 @@ fn bind_declarations_recursive(
                 bind_variable_declarators(tree, scope_id, node, content);
             }
         }
-
+        #[allow(clippy::match_same_arms)]
+        // Arms separated by AST node type for documentation clarity
         "function_declaration"
         | "function_expression"
         | "generator_function_declaration"
@@ -422,6 +426,8 @@ fn bind_declarations_recursive(
             }
         }
 
+        #[allow(clippy::match_same_arms)]
+        // for_in and for_of have same binding logic but distinct AST semantics
         "for_in_statement" => {
             if let Some(scope_id) = tree.innermost_scope_at(node.start_byte())
                 && let Some(left) = node.child_by_field_name("left")
@@ -507,6 +513,7 @@ fn bind_parameters(
 }
 
 /// Bind a pattern node such as `identifier`, `array_pattern`, or `object_pattern`.
+#[allow(clippy::too_many_lines)] // Pattern binding covers all JS destructuring forms
 fn bind_pattern(
     tree: &mut JavaScriptScopeTree,
     scope_id: ScopeId,
@@ -780,6 +787,7 @@ fn is_declaration_context(node: Node) -> bool {
         return false;
     };
 
+    #[allow(clippy::match_same_arms)] // Arms separated for documentation clarity
     match parent.kind() {
         "variable_declarator" => parent
             .child_by_field_name("name")

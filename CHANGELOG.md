@@ -13,6 +13,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+## [7.2.0] - 2026-04-06
+
+### Added
+- Unified graph traversal foundation across CLI, LSP, and MCP with shared traversal results, richer edge classification, and reusable binding/materialization helpers in `sqry-core`
+- `sqry-bind` facade support in the unified graph layer for declaration/reference/import classification workflows
+- MCP introspection tool `expand_cache_status` for Rust macro expansion cache visibility
+- MCP capability-map resource and dynamic tool-guide generation so assistant-facing docs reflect the live tool catalog
+
+### Changed
+- `trace-path`, `show_dependencies`, `dependency_impact`, `subgraph`, `graph_export`, and related CLI graph operations now run on the shared traversal kernel instead of separate BFS implementations
+- Path traversal enumeration now uses deterministic discovery order and reports truncation/leaf-path behavior consistently across interfaces
+- `MaterializedNode` now carries `node_id`, enabling identity-based linking between traversal nodes and edges in downstream consumers
+
+### Fixed
+- LSP workspace path resolution now rejects directory traversal escapes at the workspace boundary
+- Graph path-BFS now enforces node and edge limits atomically instead of returning partially truncated edge sets
+- Graph path enumeration now includes leaf-path reporting where no explicit target is provided
+- MCP graph/materialization flows now use the shared file registry path, removing stale hard-coded tool/resource counts from user-visible docs
+
 ## [7.1.0] - 2026-04-04
 
 ### Added

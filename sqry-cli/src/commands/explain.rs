@@ -58,7 +58,8 @@ fn resolve_symbol_by_file_and_name(
         mode: ResolutionMode::Strict,
     };
 
-    match snapshot.resolve_symbol(&query) {
+    let witness = snapshot.resolve_symbol_with_witness(&query);
+    match witness.outcome {
         SymbolResolutionOutcome::Resolved(node_id) => Ok(node_id),
         SymbolResolutionOutcome::NotFound => Err(anyhow!(
             "Symbol '{symbol_name}' not found in '{}'",

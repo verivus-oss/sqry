@@ -1490,7 +1490,7 @@ mod tests {
 
     #[test]
     fn test_sqry_list_duplicate_groups_params_deserialize_default() {
-        let json = r#"{}"#;
+        let json = r"{}";
         let params: SqryListDuplicateGroupsParams = serde_json::from_str(json).unwrap();
         assert!(params.path.is_none());
         assert_eq!(params.duplicate_type, "body");
@@ -1499,7 +1499,7 @@ mod tests {
 
     #[test]
     fn test_sqry_list_circular_deps_params_deserialize_default() {
-        let json = r#"{}"#;
+        let json = r"{}";
         let params: SqryListCircularDependenciesParams = serde_json::from_str(json).unwrap();
         assert!(params.path.is_none());
         assert_eq!(params.circular_type, "calls");
@@ -1509,7 +1509,7 @@ mod tests {
 
     #[test]
     fn test_sqry_list_unused_symbols_params_deserialize_default() {
-        let json = r#"{}"#;
+        let json = r"{}";
         let params: SqryListUnusedSymbolsParams = serde_json::from_str(json).unwrap();
         assert!(params.path.is_none());
         assert_eq!(params.scope, "all");

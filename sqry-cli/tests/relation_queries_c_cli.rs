@@ -88,7 +88,7 @@ const char* API_VERSION = "1.0.0";
 fn cli_c_exports_with_headers() {
     let project = TempDir::new().unwrap();
 
-    let header_code = r#"
+    let header_code = r"
 #ifndef USER_H
 #define USER_H
 
@@ -102,7 +102,7 @@ void destroy_user(User* user);
 int get_user_id(const User* user);
 
 #endif
-"#;
+";
     std::fs::write(project.path().join("user.h"), header_code).unwrap();
 
     let impl_code = r#"
@@ -367,7 +367,7 @@ int main() {
 fn cli_c_struct_function_pointers() {
     let project = TempDir::new().unwrap();
 
-    let c_code = r#"
+    let c_code = r"
 #include <stdlib.h>
 
 typedef int (*operation_fn)(int, int);
@@ -394,7 +394,7 @@ int main() {
     int result = execute_operation(&calc, 2, 3);
     return 0;
 }
-"#;
+";
     std::fs::write(project.path().join("calculator.c"), c_code).unwrap();
 
     Command::new(sqry_bin())
@@ -421,7 +421,7 @@ int main() {
 fn cli_c_static_functions() {
     let project = TempDir::new().unwrap();
 
-    let c_code = r#"
+    let c_code = r"
 int public_function() {
     return private_helper();
 }
@@ -429,7 +429,7 @@ int public_function() {
 static int private_helper() {
     return 42;
 }
-"#;
+";
     std::fs::write(project.path().join("api.c"), c_code).unwrap();
 
     Command::new(sqry_bin())
@@ -487,7 +487,7 @@ fn cli_c_static_inline_not_exported() {
     let project = TempDir::new().unwrap();
 
     // Common pattern in header files: static inline functions
-    let c_code = r#"
+    let c_code = r"
 // Public function with external linkage - should be exported
 int public_api() {
     return helper_fast() + helper_regular();
@@ -507,7 +507,7 @@ static int helper_regular() {
 inline int inline_only() {
     return 99;
 }
-"#;
+";
     std::fs::write(project.path().join("header_like.c"), c_code).unwrap();
 
     Command::new(sqry_bin())
@@ -558,7 +558,7 @@ fn cli_c_no_duplicate_exports() {
     let project = TempDir::new().unwrap();
 
     // File with both prototype and definition - should only export once
-    let c_code = r#"
+    let c_code = r"
 // Forward declaration (prototype)
 int calculate(int x, int y);
 
@@ -571,7 +571,7 @@ int wrapper(int a, int b) {
 int calculate(int x, int y) {
     return x + y;
 }
-"#;
+";
     std::fs::write(project.path().join("dedup_test.c"), c_code).unwrap();
 
     Command::new(sqry_bin())

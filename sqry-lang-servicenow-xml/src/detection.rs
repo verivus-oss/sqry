@@ -1,9 +1,9 @@
-//! ServiceNow XML record type detection and fast pre-check.
+//! `ServiceNow` XML record type detection and fast pre-check.
 
 /// Maximum bytes to scan for the `record_update` marker.
 const PRECHECK_WINDOW: usize = 512;
 
-/// Fast pre-check: scan first 512 bytes for "record_update" string.
+/// Fast pre-check: scan first 512 bytes for "`record_update`" string.
 ///
 /// Eliminates 99%+ of non-ServiceNow XML files in <1μs without
 /// an expensive roxmltree parse.
@@ -15,20 +15,20 @@ pub fn fast_precheck(content: &[u8]) -> bool {
         .any(|w| w == b"record_update")
 }
 
-/// ServiceNow record type classification.
+/// `ServiceNow` record type classification.
 #[derive(Debug, Clone)]
 pub enum RecordType {
     /// Script-bearing record (Business Rule, Script Include, etc.).
     /// Contains the list of XML element names that hold script content.
     Script(Vec<&'static str>),
-    /// Table schema record (sys_dictionary).
+    /// Table schema record (`sys_dictionary`).
     TableSchema,
-    /// Table definition record (sys_db_object).
+    /// Table definition record (`sys_db_object`).
     TableDefinition,
 }
 
 impl RecordType {
-    /// Map a ServiceNow table name to its record type.
+    /// Map a `ServiceNow` table name to its record type.
     #[must_use]
     pub fn from_table(table: &str) -> Option<Self> {
         match table {

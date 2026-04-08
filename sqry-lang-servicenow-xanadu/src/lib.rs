@@ -378,12 +378,12 @@ mod tests {
     #[test]
     fn test_extract_scopes_class_create_pattern() {
         let plugin = ServiceNowXanaduPlugin::new();
-        let source = br#"
+        let source = br"
 var MyScriptInclude = Class.create({
     initialize: function() {},
     doWork: function() { return 'work'; }
 });
-"#;
+";
         let tree = plugin.parse_ast(source).unwrap();
         let scopes = plugin
             .extract_scopes(&tree, source, Path::new("MyScriptInclude.js"))
@@ -411,12 +411,12 @@ var MyScriptInclude = Class.create({
     #[test]
     fn test_extract_scopes_object_method() {
         let plugin = ServiceNowXanaduPlugin::new();
-        let source = br#"
+        let source = br"
 var obj = {
     foo: function() { return 'foo'; },
     bar: function() { return 'bar'; }
 };
-"#;
+";
         let tree = plugin.parse_ast(source).unwrap();
         let scopes = plugin
             .extract_scopes(&tree, source, Path::new("script.js"))
@@ -504,13 +504,13 @@ var obj = {
     #[test]
     fn test_extract_scopes_nested() {
         let plugin = ServiceNowXanaduPlugin::new();
-        let source = br#"
+        let source = br"
 class Outer {
     inner() {
         function nested() {}
     }
 }
-"#;
+";
         let tree = plugin.parse_ast(source).unwrap();
         let scopes = plugin
             .extract_scopes(&tree, source, Path::new("script.js"))
@@ -529,12 +529,12 @@ class Outer {
     #[test]
     fn test_extract_scopes_boundaries() {
         let plugin = ServiceNowXanaduPlugin::new();
-        let source = br#"
+        let source = br"
 function myFunc() {
     var x = 1;
     return x;
 }
-"#;
+";
         let tree = plugin.parse_ast(source).unwrap();
         let scopes = plugin
             .extract_scopes(&tree, source, Path::new("script.js"))

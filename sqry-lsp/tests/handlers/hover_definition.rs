@@ -22,6 +22,7 @@ fn new_session(root: &Path) -> sqry_lsp::session::SessionManager {
 }
 
 #[test]
+#[allow(clippy::default_trait_access)] // Type inference handles default
 fn hover_returns_semantic_metadata_new() -> Result<()> {
     let root = common::fixture_path("sqry-lsp/tests/fixtures/mini-workspace");
     let session = new_session(&root);
@@ -56,6 +57,7 @@ fn hover_returns_semantic_metadata_new() -> Result<()> {
 }
 
 #[test]
+#[allow(clippy::default_trait_access)] // Type inference handles default
 fn definition_returns_function_location_new() -> Result<()> {
     let root = common::fixture_path("sqry-lsp/tests/fixtures/mini-workspace");
     let session = new_session(&root);

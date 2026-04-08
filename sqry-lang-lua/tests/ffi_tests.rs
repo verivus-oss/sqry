@@ -1,4 +1,4 @@
-//! Tests for LuaJIT FFI edge detection
+//! Tests for `LuaJIT` FFI edge detection
 
 use sqry_core::graph::GraphBuilder;
 use sqry_core::graph::unified::StagingGraph;
@@ -82,7 +82,7 @@ fn get_ffi_targets(staging: &StagingGraph) -> Vec<String> {
                 .nodes()
                 .find(|n| n.expected_id == Some(e.target))
                 .and_then(|n| staging.resolve_node_name(n.entry))
-                .map(|name| name.to_string())
+                .map(std::string::ToString::to_string)
         })
         .collect()
 }
@@ -135,8 +135,7 @@ ffi.C.printf("Hello")
     let targets = get_ffi_targets(&staging);
     assert!(
         targets.contains(&"native::printf".to_string()),
-        "Expected native::printf target, found: {:?}",
-        targets
+        "Expected native::printf target, found: {targets:?}"
     );
 }
 
@@ -180,8 +179,7 @@ mylib.my_func(42)
     let targets = get_ffi_targets(&staging);
     assert!(
         targets.contains(&"native::mylib::my_func".to_string()),
-        "Expected native::mylib::my_func, found: {:?}",
-        targets
+        "Expected native::mylib::my_func, found: {targets:?}"
     );
     assert!(
         targets.iter().any(|t| t.contains("mylib")),
@@ -222,8 +220,7 @@ m.cos(0)
     let targets = get_ffi_targets(&staging);
     assert!(
         targets.contains(&"native::m::cos".to_string()),
-        "Expected native::m::cos, found: {:?}",
-        targets
+        "Expected native::m::cos, found: {targets:?}"
     );
 }
 
@@ -308,8 +305,7 @@ end
     let caller_name = staging.resolve_node_name(caller.entry).unwrap();
     assert!(
         caller_name.contains("test_func"),
-        "Caller should be test_func, got: {}",
-        caller_name
+        "Caller should be test_func, got: {caller_name}"
     );
 }
 
@@ -381,11 +377,11 @@ C.printf("Hello")
 
 #[test]
 fn test_no_ffi_similar_names() {
-    let content = br#"
+    let content = br"
 local myC = {}
 myC.printf = function() end
 myC.printf()
-"#;
+";
 
     let staging = build_graph_from_lua(content);
     assert_eq!(
@@ -629,8 +625,7 @@ local lib = ffi.load("mylib"
     let edge_count = count_ffi_edges(&staging);
     assert!(
         edge_count <= 1,
-        "Malformed syntax should be handled gracefully, got {} edges",
-        edge_count
+        "Malformed syntax should be handled gracefully, got {edge_count} edges"
     );
 }
 
@@ -688,8 +683,7 @@ test_func()
     let ffi_count = count_ffi_edges(&staging);
     assert!(
         ffi_count >= 10,
-        "Expected at least 10 FFI edges from comprehensive example, got {}",
-        ffi_count
+        "Expected at least 10 FFI edges from comprehensive example, got {ffi_count}"
     );
 
     let targets = get_ffi_targets(&staging);
@@ -725,7 +719,6 @@ local mylib = ffi.load("mylib")
     let targets = get_ffi_targets(&staging);
     assert!(
         targets.contains(&"native::mylib".to_string()),
-        "ffi.load target should be exactly 'native::mylib' per spec, got: {:?}",
-        targets
+        "ffi.load target should be exactly 'native::mylib' per spec, got: {targets:?}"
     );
 }

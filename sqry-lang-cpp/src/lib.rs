@@ -479,7 +479,7 @@ mod tests {
     #[test]
     fn test_extract_scopes_functions() {
         let plugin = CppPlugin::new();
-        let source = br#"
+        let source = br"
 void foo() {
     int x = 1;
 }
@@ -488,7 +488,7 @@ int main(int argc, char** argv) {
     foo();
     return 0;
 }
-"#;
+";
         let path = std::path::Path::new("test.cpp");
         let tree = plugin.parse_ast(source).unwrap();
         let scopes = plugin.extract_scopes(&tree, source, path).unwrap();
@@ -515,7 +515,7 @@ int main(int argc, char** argv) {
     #[test]
     fn test_extract_scopes_class() {
         let plugin = CppPlugin::new();
-        let source = br#"
+        let source = br"
 class MyClass {
 public:
     void method();
@@ -525,7 +525,7 @@ public:
 void MyClass::method() {
     value = 42;
 }
-"#;
+";
         let path = std::path::Path::new("test.cpp");
         let tree = plugin.parse_ast(source).unwrap();
         let scopes = plugin.extract_scopes(&tree, source, path).unwrap();
@@ -546,13 +546,13 @@ void MyClass::method() {
     #[test]
     fn test_extract_scopes_namespace() {
         let plugin = CppPlugin::new();
-        let source = br#"
+        let source = br"
 namespace demo {
     void helper() {
         // helper implementation
     }
 }
-"#;
+";
         let path = std::path::Path::new("test.cpp");
         let tree = plugin.parse_ast(source).unwrap();
         let scopes = plugin.extract_scopes(&tree, source, path).unwrap();
@@ -585,12 +585,12 @@ namespace demo {
     #[test]
     fn test_extract_scopes_struct() {
         let plugin = CppPlugin::new();
-        let source = br#"
+        let source = br"
 struct Point {
     int x;
     int y;
 };
-"#;
+";
         let path = std::path::Path::new("test.cpp");
         let tree = plugin.parse_ast(source).unwrap();
         let scopes = plugin.extract_scopes(&tree, source, path).unwrap();
@@ -609,14 +609,14 @@ struct Point {
     #[test]
     fn test_extract_scopes_destructor() {
         let plugin = CppPlugin::new();
-        let source = br#"
+        let source = br"
 class Resource {
 public:
     ~Resource() {
         // cleanup
     }
 };
-"#;
+";
         let path = std::path::Path::new("test.cpp");
         let tree = plugin.parse_ast(source).unwrap();
         let scopes = plugin.extract_scopes(&tree, source, path).unwrap();
@@ -640,7 +640,7 @@ public:
     #[test]
     fn test_extract_scopes_enum() {
         let plugin = CppPlugin::new();
-        let source = br#"
+        let source = br"
 enum Color {
     Red,
     Green,
@@ -651,7 +651,7 @@ enum class Status {
     Active,
     Inactive
 };
-"#;
+";
         let path = std::path::Path::new("test.cpp");
         let tree = plugin.parse_ast(source).unwrap();
         let scopes = plugin.extract_scopes(&tree, source, path).unwrap();
@@ -677,13 +677,13 @@ enum class Status {
     #[test]
     fn test_extract_scopes_union() {
         let plugin = CppPlugin::new();
-        let source = br#"
+        let source = br"
 union Value {
     int i;
     float f;
     char c;
 };
-"#;
+";
         let path = std::path::Path::new("test.cpp");
         let tree = plugin.parse_ast(source).unwrap();
         let scopes = plugin.extract_scopes(&tree, source, path).unwrap();
@@ -702,13 +702,13 @@ union Value {
     #[test]
     fn test_extract_scopes_lambda() {
         let plugin = CppPlugin::new();
-        let source = br#"
+        let source = br"
 void process() {
     auto callback = [](int x) {
         return x * 2;
     };
 }
-"#;
+";
         let path = std::path::Path::new("test.cpp");
         let tree = plugin.parse_ast(source).unwrap();
         let scopes = plugin.extract_scopes(&tree, source, path).unwrap();
@@ -729,7 +729,7 @@ void process() {
     #[test]
     fn test_extract_scopes_inline_class_methods() {
         let plugin = CppPlugin::new();
-        let source = br#"
+        let source = br"
 class Foo {
     void bar() {
         // inline method defined inside class body
@@ -739,7 +739,7 @@ class Foo {
         return 42;
     }
 };
-"#;
+";
         let path = std::path::Path::new("test.cpp");
         let tree = plugin.parse_ast(source).unwrap();
         let scopes = plugin.extract_scopes(&tree, source, path).unwrap();
@@ -787,9 +787,10 @@ class Foo {
     }
 
     #[test]
+    #[allow(clippy::similar_names)] // Domain variable naming is intentional
     fn test_extract_scopes_defaulted_deleted_methods() {
         let plugin = CppPlugin::new();
-        let source = br#"
+        let source = br"
 class Resource {
     Resource() = default;
     ~Resource() = default;
@@ -797,7 +798,7 @@ class Resource {
     Resource& operator=(const Resource&) = delete;
     void process() {}
 };
-"#;
+";
         let path = std::path::Path::new("test.cpp");
         let tree = plugin.parse_ast(source).unwrap();
         let scopes = plugin.extract_scopes(&tree, source, path).unwrap();
@@ -823,6 +824,7 @@ class Resource {
         let default_ctor = scopes
             .iter()
             .find(|s| s.name == "Resource" && s.scope_type == "method");
+        #[allow(clippy::similar_names)] // Parser/parsed naming is intentional
         let default_dtor = scopes
             .iter()
             .find(|s| s.name.contains('~') && s.scope_type == "destructor");
@@ -899,9 +901,10 @@ class Resource {
     }
 
     #[test]
+    #[allow(clippy::similar_names)] // Domain naming is intentional
     fn test_extract_scopes_out_of_class_defaulted() {
         let plugin = CppPlugin::new();
-        let source = br#"
+        let source = br"
 class Foo {
     Foo();
     ~Foo();
@@ -910,7 +913,7 @@ class Foo {
 // Out-of-class defaulted special members
 Foo::Foo() = default;
 Foo::~Foo() = default;
-"#;
+";
         let path = std::path::Path::new("test.cpp");
         let tree = plugin.parse_ast(source).unwrap();
         let scopes = plugin.extract_scopes(&tree, source, path).unwrap();
@@ -971,7 +974,7 @@ Foo::~Foo() = default;
     #[test]
     fn test_extract_scopes_out_of_class_qualified_operators() {
         let plugin = CppPlugin::new();
-        let source = br#"
+        let source = br"
 class Foo {
     Foo& operator=(const Foo&);
     bool operator==(const Foo&) const;
@@ -980,7 +983,7 @@ class Foo {
 // Out-of-class qualified operators with = default/delete
 Foo& Foo::operator=(const Foo&) = default;
 bool Foo::operator==(const Foo&) const = delete;
-"#;
+";
         let path = std::path::Path::new("test.cpp");
         let tree = plugin.parse_ast(source).unwrap();
         let scopes = plugin.extract_scopes(&tree, source, path).unwrap();

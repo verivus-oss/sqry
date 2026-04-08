@@ -858,9 +858,8 @@ fn scala_type_to_jvm_descriptor(scala_type: &str) -> String {
         "Boolean" => "Z".to_string(),
         "Unit" => "Lscala/runtime/BoxedUnit;".to_string(),
         "String" => "Ljava/lang/String;".to_string(),
-        "Any" => "Ljava/lang/Object;".to_string(),
-        "AnyRef" => "Ljava/lang/Object;".to_string(),
-        "AnyVal" => "Ljava/lang/Object;".to_string(),
+        // Any, AnyRef, AnyVal all map to java.lang.Object in JVM bytecode
+        "Any" | "AnyRef" | "AnyVal" => "Ljava/lang/Object;".to_string(),
         // For other types, assume they're reference types
         _ => format!("L{};", trimmed.replace('.', "/")),
     }
@@ -965,6 +964,7 @@ fn generate_jvm_signature(func_node: Node, content: &[u8]) -> String {
 ///   def printf(format: CString): CInt = extern
 /// }
 /// ```
+#[allow(clippy::similar_names)] // `context` and `content` are intentionally distinct parameters
 fn build_native_method_ffi_edge(
     context: &CallContext,
     helper: &mut GraphBuildHelper,
@@ -1984,11 +1984,11 @@ mod tests {
     #[test]
     fn test_public_class_creates_export_edge() {
         // class User should be exported (public by default)
-        let source = r#"
+        let source = r"
             class User(val name: String, val age: Int) {
                 def getName: String = name
             }
-        "#;
+        ";
         let tree = parse_scala(source);
         let mut staging = StagingGraph::new();
         let builder = ScalaGraphBuilder::new();
@@ -2011,11 +2011,11 @@ mod tests {
     #[test]
     fn test_public_object_creates_export_edge() {
         // object UserService should be exported (public by default)
-        let source = r#"
+        let source = r"
             object UserService {
                 def createUser(name: String): String = name
             }
-        "#;
+        ";
         let tree = parse_scala(source);
         let mut staging = StagingGraph::new();
         let builder = ScalaGraphBuilder::new();
@@ -2038,11 +2038,11 @@ mod tests {
     #[test]
     fn test_public_trait_creates_export_edge() {
         // trait Repository should be exported (public by default)
-        let source = r#"
+        let source = r"
             trait Repository {
                 def save(item: String): Unit
             }
-        "#;
+        ";
         let tree = parse_scala(source);
         let mut staging = StagingGraph::new();
         let builder = ScalaGraphBuilder::new();
@@ -2065,11 +2065,11 @@ mod tests {
     #[test]
     fn test_private_class_does_not_export() {
         // private class Internal should NOT be exported
-        let source = r#"
+        let source = r"
             private class Internal {
                 def process(): Unit = {}
             }
-        "#;
+        ";
         let tree = parse_scala(source);
         let mut staging = StagingGraph::new();
         let builder = ScalaGraphBuilder::new();
@@ -2180,7 +2180,7 @@ mod tests {
     #[test]
     fn test_mixed_visibility_classes() {
         // Mix of public and private classes
-        let source = r#"
+        let source = r"
             class PublicClass {
                 def publicMethod(): Unit = {}
             }
@@ -2192,7 +2192,7 @@ mod tests {
             object PublicObject {
                 def run(): Unit = {}
             }
-        "#;
+        ";
         let tree = parse_scala(source);
         let mut staging = StagingGraph::new();
         let builder = ScalaGraphBuilder::new();
@@ -2217,9 +2217,9 @@ mod tests {
     #[test]
     fn test_case_class_exports() {
         // case class should be exported (public by default)
-        let source = r#"
+        let source = r"
             case class User(name: String, age: Int)
-        "#;
+        ";
         let tree = parse_scala(source);
         let mut staging = StagingGraph::new();
         let builder = ScalaGraphBuilder::new();
@@ -2242,13 +2242,13 @@ mod tests {
     #[test]
     fn test_trait_with_methods() {
         // Trait with public method declarations
-        let source = r#"
+        let source = r"
             trait Service {
                 def execute(): Unit
                 def validate(): Boolean
                 private def internal(): Int
             }
-        "#;
+        ";
         let tree = parse_scala(source);
         let mut staging = StagingGraph::new();
         let builder = ScalaGraphBuilder::new();

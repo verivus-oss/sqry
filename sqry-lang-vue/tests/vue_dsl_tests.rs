@@ -54,7 +54,7 @@ fn count_contains_edges(staging: &StagingGraph) -> usize {
 #[test]
 fn test_component_node_created() {
     // Test that a Component node is created for the Vue SFC
-    let source = r#"
+    let source = r"
 <script>
 export default {
   name: 'MyComponent'
@@ -64,7 +64,7 @@ export default {
 <template>
   <div>Hello</div>
 </template>
-"#;
+";
 
     let (tree, content) = parse_vue(source);
     let mut staging = StagingGraph::new();
@@ -84,7 +84,7 @@ export default {
 #[test]
 fn test_props_array_syntax() {
     // Test props defined as array: props: ['name', 'age']
-    let source = r#"
+    let source = r"
 <script>
 export default {
   props: ['name', 'age', 'email']
@@ -94,7 +94,7 @@ export default {
 <template>
   <div>{{ name }}</div>
 </template>
-"#;
+";
 
     let (tree, content) = parse_vue(source);
     let mut staging = StagingGraph::new();
@@ -122,7 +122,7 @@ export default {
 #[test]
 fn test_props_object_syntax() {
     // Test props defined as object: props: { name: String, age: Number }
-    let source = r#"
+    let source = r"
 <script>
 export default {
   props: {
@@ -142,7 +142,7 @@ export default {
 <template>
   <div>{{ name }} - {{ age }}</div>
 </template>
-"#;
+";
 
     let (tree, content) = parse_vue(source);
     let mut staging = StagingGraph::new();
@@ -163,7 +163,7 @@ export default {
 #[test]
 fn test_computed_properties() {
     // Test computed properties: computed: { fullName() { ... } }
-    let source = r#"
+    let source = r"
 <script>
 export default {
   data() {
@@ -193,7 +193,7 @@ export default {
 <template>
   <div>{{ fullName }}</div>
 </template>
-"#;
+";
 
     let (tree, content) = parse_vue(source);
     let mut staging = StagingGraph::new();
@@ -214,7 +214,7 @@ export default {
 #[test]
 fn test_watch_properties() {
     // Test watchers: watch: { count(newVal, oldVal) { ... } }
-    let source = r#"
+    let source = r"
 <script>
 export default {
   data() {
@@ -240,7 +240,7 @@ export default {
 <template>
   <div>{{ count }}</div>
 </template>
-"#;
+";
 
     let (tree, content) = parse_vue(source);
     let mut staging = StagingGraph::new();
@@ -261,7 +261,7 @@ export default {
 #[test]
 fn test_complete_component() {
     // Test a complete component with props, computed, watch, and methods
-    let source = r#"
+    let source = r"
 <script>
 export default {
   name: 'UserProfile',
@@ -305,7 +305,7 @@ export default {
 <template>
   <div>{{ displayName }}</div>
 </template>
-"#;
+";
 
     let (tree, content) = parse_vue(source);
     let mut staging = StagingGraph::new();

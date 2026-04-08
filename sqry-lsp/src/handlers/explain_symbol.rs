@@ -131,7 +131,8 @@ fn resolve_explain_symbol(
         mode: ResolutionMode::Strict,
     };
 
-    match snapshot.resolve_symbol(&query) {
+    let witness = snapshot.resolve_symbol_with_witness(&query);
+    match witness.outcome {
         SymbolResolutionOutcome::Resolved(node_id) => Ok(node_id),
         SymbolResolutionOutcome::NotFound => {
             anyhow::bail!(

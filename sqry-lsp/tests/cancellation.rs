@@ -8,7 +8,9 @@ use tower::Service;
 use tower::ServiceExt;
 use tower::buffer::Buffer;
 use tower_lsp::jsonrpc::{ErrorCode, Request};
-use tower_lsp::lsp_types::{InitializeParams, WorkspaceSymbolParams};
+use tower_lsp::lsp_types::{
+    InitializeParams, PartialResultParams, WorkDoneProgressParams, WorkspaceSymbolParams,
+};
 
 mod common;
 
@@ -31,10 +33,11 @@ async fn server_handles_cancellation_fast_new() -> Result<()> {
     let session = new_session(&root);
     let params = WorkspaceSymbolParams {
         query: "lang:rust page_size:1 helper".into(),
-        work_done_progress_params: Default::default(),
-        partial_result_params: Default::default(),
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
     };
 
+    #[allow(clippy::items_after_statements)] // Const defined near usage for clarity
     static DELAY_GUARD: OnceLock<Mutex<()>> = OnceLock::new();
     let _lock = DELAY_GUARD.get_or_init(|| Mutex::new(())).lock().await;
     sqry_lsp::handlers::configure_test_delay_ms(200);

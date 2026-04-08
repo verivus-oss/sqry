@@ -7,6 +7,9 @@
 //! trait / object), visibility, case/sealed/abstract modifiers, and basic
 //! superclass/trait hierarchy.
 
+// Scala signature indices fit in u32; casts are intentional
+#![allow(clippy::cast_possible_truncation)]
+
 use log::warn;
 
 use crate::stub::model::ScalaSignatureStub;
@@ -80,6 +83,7 @@ pub struct ScalaClassMetadata {
 ///
 /// This function never panics. All malformed data is handled gracefully by
 /// returning `None`.
+#[must_use]
 pub fn decode_scala_signature(stub: &ScalaSignatureStub) -> Option<ScalaClassMetadata> {
     // Only support major version 5 (Scala 2.10+).
     if stub.major_version != 5 {
@@ -197,8 +201,8 @@ fn determine_visibility(flags: u64) -> ScalaVisibility {
 
 /// Extract superclass and trait names from the signature.
 ///
-/// This is a heuristic approach for Tier 1: we look at EXTref and
-/// EXTMODCLASSref entries to find well-known JVM superclass and trait
+/// This is a heuristic approach for Tier 1: we look at `EXTref` and
+/// `EXTMODCLASSref` entries to find well-known JVM superclass and trait
 /// references. The actual parent type information is encoded in the type-info
 /// entry, but for Tier 1 we use the simpler approach of scanning external
 /// references.
@@ -209,11 +213,6 @@ fn extract_hierarchy(
     reader: &ScalaSignatureReader,
     _primary_index: usize,
 ) -> (Option<String>, Vec<String>) {
-    let ext_refs = reader.ext_refs();
-
-    let mut superclass: Option<String> = None;
-    let mut traits = Vec::new();
-
     // Known base types to skip.
     const SKIP_NAMES: &[&str] = &[
         "Object",
@@ -226,6 +225,10 @@ fn extract_hierarchy(
         "java.lang.Object",
         "scala.AnyRef",
     ];
+
+    let ext_refs = reader.ext_refs();
+    let mut superclass: Option<String> = None;
+    let mut traits = Vec::new();
 
     for &(_idx, entry) in &ext_refs {
         if entry.tag != TAG_EXT_REF && entry.tag != TAG_EXT_MOD_CLASS_REF {
@@ -339,7 +342,7 @@ mod tests {
         }
     }
 
-    /// Build a minimal stub with a single CLASSsym with the given name and flags.
+    /// Build a minimal stub with a single `CLASSsym` with the given name and flags.
     fn simple_class_stub(name: &str, flags: u64) -> ScalaSignatureStub {
         let name_entry = build_entry(TAG_TYPE_NAME, name.as_bytes());
         let owner = build_entry(TAG_NONE_SYM, &[]);
@@ -348,7 +351,7 @@ mod tests {
         stub_from_entries(vec![name_entry, owner, cls])
     }
 
-    /// Build a minimal stub with a single MODULEsym with the given name and flags.
+    /// Build a minimal stub with a single `MODULEsym` with the given name and flags.
     fn simple_module_stub(name: &str, flags: u64) -> ScalaSignatureStub {
         let name_entry = build_entry(TAG_TERM_NAME, name.as_bytes());
         let owner = build_entry(TAG_NONE_SYM, &[]);

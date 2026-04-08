@@ -39,9 +39,9 @@ const ALT_METAFACTORY_METHOD: &str = "altMetafactory";
 
 /// Index of the implementation method handle within the bootstrap arguments.
 /// For `LambdaMetafactory.metafactory`, the arguments are:
-///   0 — samMethodType  (MethodType)
-///   1 — implMethod     (MethodHandle) — **sometimes**
-///   2 — implMethod     (MethodHandle) — **standard position**
+///   0 — samMethodType  (`MethodType`)
+///   1 — implMethod     (`MethodHandle`) — **sometimes**
+///   2 — implMethod     (`MethodHandle`) — **standard position**
 ///
 /// Per the JVM spec and `LambdaMetafactory` javadoc, argument index 2 is the
 /// implementation `MethodHandle`.
@@ -67,6 +67,8 @@ const IMPL_METHOD_ARG_INDEX: usize = 2;
 /// Non-`LambdaMetafactory` bootstrap entries are silently skipped. Malformed
 /// entries (e.g., fewer than 3 arguments, wrong argument type at index 2) are
 /// logged as warnings and skipped.
+#[must_use]
+#[allow(clippy::needless_continue)] // Continue clarifies control flow
 pub fn extract_lambda_targets(class: &cafebabe::ClassFile<'_>) -> Vec<LambdaTargetStub> {
     let mut targets = Vec::new();
 
@@ -81,6 +83,7 @@ pub fn extract_lambda_targets(class: &cafebabe::ClassFile<'_>) -> Vec<LambdaTarg
                 // Extract the implementation MethodHandle from argument index 2.
                 match extract_impl_handle(idx, &entry.arguments) {
                     Some(stub) => targets.push(stub),
+                    #[allow(clippy::needless_continue)] // Continue at end of loop for clarity
                     None => continue,
                 }
             }
@@ -125,16 +128,16 @@ fn extract_impl_handle(
 
     match &arguments[IMPL_METHOD_ARG_INDEX] {
         BootstrapArgument::MethodHandle(handle) => {
-            let reference_kind = match convert_reference_kind(handle.kind) {
-                Some(kind) => kind,
-                None => {
-                    log::warn!(
-                        "BootstrapMethods entry {bootstrap_idx}: \
-                         unsupported reference kind {:?}; skipping",
-                        handle.kind,
-                    );
-                    return None;
-                }
+            #[allow(clippy::manual_let_else)] // Match-based error handling for clarity
+            let reference_kind = if let Some(kind) = convert_reference_kind(handle.kind) {
+                kind
+            } else {
+                log::warn!(
+                    "BootstrapMethods entry {bootstrap_idx}: \
+                     unsupported reference kind {:?}; skipping",
+                    handle.kind,
+                );
+                return None;
             };
 
             Some(LambdaTargetStub {
@@ -156,6 +159,7 @@ fn extract_impl_handle(
 }
 
 /// Convert a cafebabe [`CafeReferenceKind`] to our model [`ReferenceKind`].
+#[allow(clippy::unnecessary_wraps)] // Result for API consistency
 fn convert_reference_kind(kind: CafeReferenceKind) -> Option<ReferenceKind> {
     Some(match kind {
         CafeReferenceKind::GetField => ReferenceKind::GetField,
@@ -259,7 +263,7 @@ mod tests {
 
     /// Build the standard 3-argument list for a `LambdaMetafactory` entry.
     ///
-    /// Arguments: [MethodType(sam_descriptor), MethodType(instantiated),
+    /// Arguments: [`MethodType(sam_descriptor)`, MethodType(instantiated),
     /// MethodHandle(impl)].
     fn lambda_bootstrap_args<'a>(
         impl_kind: CafeReferenceKind,

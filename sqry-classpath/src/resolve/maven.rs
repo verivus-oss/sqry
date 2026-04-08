@@ -44,6 +44,7 @@ const CLASSPATH_SEPARATOR: char = ';';
 /// 3. On failure/timeout, fall back to pom.xml direct parsing (lossy)
 ///
 /// Multi-module: detects child POMs and resolves per-module.
+#[allow(clippy::missing_errors_doc)] // Internal helper
 pub fn resolve_maven_classpath(config: &ResolveConfig) -> ClasspathResult<Vec<ResolvedClasspath>> {
     let pom_path = config.project_root.join("pom.xml");
     if !pom_path.exists() {
@@ -274,6 +275,7 @@ fn run_command_with_timeout(
 }
 
 /// Collect stdout and stderr from a finished child process.
+#[allow(clippy::unnecessary_wraps)] // Result for API consistency
 fn collect_child_output(
     mut child: std::process::Child,
     status: std::process::ExitStatus,
@@ -298,6 +300,7 @@ fn collect_child_output(
 ///
 /// Extracts Maven coordinates from the local repository path structure and
 /// checks for corresponding source JARs.
+#[must_use]
 pub fn parse_classpath_string(classpath: &str, maven_repo: &Path) -> Vec<ClasspathEntry> {
     if classpath.is_empty() {
         return Vec::new();
@@ -329,6 +332,7 @@ pub fn parse_classpath_string(classpath: &str, maven_repo: &Path) -> Vec<Classpa
 /// Example:
 /// `~/.m2/repository/com/google/guava/guava/33.0.0/guava-33.0.0.jar`
 /// yields `com.google.guava:guava:33.0.0`.
+#[must_use]
 pub fn extract_coordinates_from_repo_path(jar_path: &Path, maven_repo: &Path) -> Option<String> {
     let jar_path_str = normalize_path(jar_path);
     let repo_str = normalize_path(maven_repo);
@@ -369,6 +373,7 @@ fn normalize_path(p: &Path) -> String {
 ///
 /// Maven source JARs use the pattern: `<artifact>-<version>-sources.jar`
 /// in the same directory as the binary JAR.
+#[allow(clippy::case_sensitive_file_extension_comparisons)] // Known file extensions in domain
 fn find_source_jar(jar_path: &Path) -> Option<PathBuf> {
     let file_name = jar_path.file_name()?.to_str()?;
     if !file_name.ends_with(".jar") {
@@ -408,6 +413,7 @@ pub struct PomDependency {
 /// This is intentionally lossy: it does not resolve properties (`${...}`),
 /// parent POMs, dependency management, or transitive dependencies. It exists
 /// only as a fallback when `mvn` is not available.
+#[must_use]
 pub fn parse_pom_dependencies(pom_content: &str) -> Vec<PomDependency> {
     let mut deps = Vec::new();
 
@@ -562,6 +568,7 @@ fn resolve_from_pom_fallback(
 /// Construct the expected JAR path in the Maven local repository.
 ///
 /// Format: `<repo>/<group-path>/<artifact>/<version>/<artifact>-<version>.jar`
+#[must_use]
 pub fn construct_maven_jar_path(
     maven_repo: &Path,
     group_id: &str,
@@ -583,6 +590,7 @@ pub fn construct_maven_jar_path(
 /// Detect child modules from a pom.xml's `<modules>` element.
 ///
 /// Returns a list of module directory names (relative to the POM's directory).
+#[must_use]
 pub fn detect_modules(pom_path: &Path) -> Vec<String> {
     let content = match std::fs::read_to_string(pom_path) {
         Ok(c) => c,
@@ -619,7 +627,7 @@ pub fn detect_modules(pom_path: &Path) -> Vec<String> {
         search_from = abs_start + end + "</module>".len();
     }
 
-    debug!("Detected Maven modules: {:?}", modules);
+    debug!("Detected Maven modules: {modules:?}");
     modules
 }
 
@@ -663,6 +671,7 @@ fn cache_dir(config: &ResolveConfig) -> PathBuf {
 }
 
 /// Try cache first, then POM fallback.
+#[allow(clippy::unnecessary_wraps)] // Result for API consistency
 fn try_cache_or_fallback(
     config: &ResolveConfig,
     module_infos: &[ModuleInfo],
@@ -901,14 +910,14 @@ mod tests {
     #[test]
     fn test_detect_modules_whitespace_handling() {
         let tmp = TempDir::new().unwrap();
-        let pom = r#"<project>
+        let pom = r"<project>
   <modules>
     <module>  core  </module>
     <module>
       api
     </module>
   </modules>
-</project>"#;
+</project>";
         let pom_path = tmp.path().join("pom.xml");
         std::fs::write(&pom_path, pom).unwrap();
 
@@ -948,7 +957,7 @@ mod tests {
 
     #[test]
     fn test_parse_pom_dependencies_basic() {
-        let pom = r#"<project>
+        let pom = r"<project>
   <dependencies>
     <dependency>
       <groupId>com.google.guava</groupId>
@@ -961,7 +970,7 @@ mod tests {
       <version>2.0.9</version>
     </dependency>
   </dependencies>
-</project>"#;
+</project>";
 
         let deps = parse_pom_dependencies(pom);
         assert_eq!(deps.len(), 2);
@@ -975,7 +984,7 @@ mod tests {
 
     #[test]
     fn test_parse_pom_dependencies_skips_test_scope() {
-        let pom = r#"<project>
+        let pom = r"<project>
   <dependencies>
     <dependency>
       <groupId>com.google.guava</groupId>
@@ -989,7 +998,7 @@ mod tests {
       <scope>test</scope>
     </dependency>
   </dependencies>
-</project>"#;
+</project>";
 
         let deps = parse_pom_dependencies(pom);
         assert_eq!(deps.len(), 1);
@@ -998,7 +1007,7 @@ mod tests {
 
     #[test]
     fn test_parse_pom_dependencies_skips_property_placeholders() {
-        let pom = r#"<project>
+        let pom = r"<project>
   <dependencies>
     <dependency>
       <groupId>${project.groupId}</groupId>
@@ -1011,7 +1020,7 @@ mod tests {
       <version>2.0.0</version>
     </dependency>
   </dependencies>
-</project>"#;
+</project>";
 
         let deps = parse_pom_dependencies(pom);
         assert_eq!(deps.len(), 1);
@@ -1020,14 +1029,14 @@ mod tests {
 
     #[test]
     fn test_parse_pom_dependencies_no_version() {
-        let pom = r#"<project>
+        let pom = r"<project>
   <dependencies>
     <dependency>
       <groupId>org.example</groupId>
       <artifactId>managed-dep</artifactId>
     </dependency>
   </dependencies>
-</project>"#;
+</project>";
 
         let deps = parse_pom_dependencies(pom);
         assert_eq!(deps.len(), 1);
@@ -1036,7 +1045,7 @@ mod tests {
 
     #[test]
     fn test_parse_pom_dependencies_with_compile_scope() {
-        let pom = r#"<project>
+        let pom = r"<project>
   <dependencies>
     <dependency>
       <groupId>org.example</groupId>
@@ -1045,7 +1054,7 @@ mod tests {
       <scope>compile</scope>
     </dependency>
   </dependencies>
-</project>"#;
+</project>";
 
         let deps = parse_pom_dependencies(pom);
         assert_eq!(deps.len(), 1);
@@ -1054,10 +1063,10 @@ mod tests {
 
     #[test]
     fn test_parse_pom_empty_dependencies() {
-        let pom = r#"<project>
+        let pom = r"<project>
   <dependencies>
   </dependencies>
-</project>"#;
+</project>";
 
         let deps = parse_pom_dependencies(pom);
         assert!(deps.is_empty());
@@ -1065,9 +1074,9 @@ mod tests {
 
     #[test]
     fn test_parse_pom_no_dependencies_element() {
-        let pom = r#"<project>
+        let pom = r"<project>
   <groupId>com.example</groupId>
-</project>"#;
+</project>";
 
         let deps = parse_pom_dependencies(pom);
         assert!(deps.is_empty());
@@ -1207,7 +1216,7 @@ mod tests {
         std::fs::write(jar_dir.join("mylib-1.0.0.jar"), b"fake jar").unwrap();
 
         // Create a pom.xml referencing the dependency.
-        let pom = r#"<project>
+        let pom = r"<project>
   <dependencies>
     <dependency>
       <groupId>com.example</groupId>
@@ -1220,7 +1229,7 @@ mod tests {
       <version>2.0.0</version>
     </dependency>
   </dependencies>
-</project>"#;
+</project>";
         std::fs::write(tmp.path().join("pom.xml"), pom).unwrap();
 
         let result = resolve_from_pom_fallback(tmp.path(), "", &repo).unwrap();
@@ -1254,7 +1263,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
 
         // Create a pom.xml with a dependency.
-        let pom = r#"<project>
+        let pom = r"<project>
   <dependencies>
     <dependency>
       <groupId>org.example</groupId>
@@ -1262,7 +1271,7 @@ mod tests {
       <version>1.0.0</version>
     </dependency>
   </dependencies>
-</project>"#;
+</project>";
         std::fs::write(tmp.path().join("pom.xml"), pom).unwrap();
 
         let config = ResolveConfig {
@@ -1283,12 +1292,12 @@ mod tests {
         let tmp = TempDir::new().unwrap();
 
         // Create root pom with modules.
-        let root_pom = r#"<project>
+        let root_pom = r"<project>
   <modules>
     <module>core</module>
     <module>web</module>
   </modules>
-</project>"#;
+</project>";
         std::fs::write(tmp.path().join("pom.xml"), root_pom).unwrap();
 
         // Create module directories with their own poms.
@@ -1296,7 +1305,7 @@ mod tests {
         std::fs::create_dir_all(&core_dir).unwrap();
         std::fs::write(
             core_dir.join("pom.xml"),
-            r#"<project>
+            r"<project>
   <dependencies>
     <dependency>
       <groupId>org.example</groupId>
@@ -1304,7 +1313,7 @@ mod tests {
       <version>1.0.0</version>
     </dependency>
   </dependencies>
-</project>"#,
+</project>",
         )
         .unwrap();
 
@@ -1312,7 +1321,7 @@ mod tests {
         std::fs::create_dir_all(&web_dir).unwrap();
         std::fs::write(
             web_dir.join("pom.xml"),
-            r#"<project>
+            r"<project>
   <dependencies>
     <dependency>
       <groupId>org.example</groupId>
@@ -1320,7 +1329,7 @@ mod tests {
       <version>2.0.0</version>
     </dependency>
   </dependencies>
-</project>"#,
+</project>",
         )
         .unwrap();
 
@@ -1369,7 +1378,7 @@ mod tests {
 
     #[test]
     fn test_parse_pom_dependencies_version_with_property() {
-        let pom = r#"<project>
+        let pom = r"<project>
   <dependencies>
     <dependency>
       <groupId>org.example</groupId>
@@ -1377,7 +1386,7 @@ mod tests {
       <version>${lib.version}</version>
     </dependency>
   </dependencies>
-</project>"#;
+</project>";
 
         let deps = parse_pom_dependencies(pom);
         // version contains ${...} but groupId/artifactId are clean,
@@ -1388,7 +1397,7 @@ mod tests {
 
     #[test]
     fn test_parse_pom_dependencies_multiple_scopes() {
-        let pom = r#"<project>
+        let pom = r"<project>
   <dependencies>
     <dependency>
       <groupId>a</groupId>
@@ -1415,7 +1424,7 @@ mod tests {
       <scope>test</scope>
     </dependency>
   </dependencies>
-</project>"#;
+</project>";
 
         let deps = parse_pom_dependencies(pom);
         // test scope is skipped, others are included.

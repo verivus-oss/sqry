@@ -157,7 +157,7 @@ const PrivateType = struct {
 fn cli_zig_exports_nested_pub_members() {
     let project = TempDir::new().unwrap();
 
-    let zig_code = r#"
+    let zig_code = r"
 const PrivateContainer = struct {
     pub fn publicMethod() i32 {
         return 42;
@@ -171,7 +171,7 @@ pub const PublicContainer = struct {
         return 42;
     }
 };
-"#;
+";
     std::fs::write(project.path().join("nested.zig"), zig_code).unwrap();
 
     Command::new(sqry_bin())
@@ -291,7 +291,7 @@ fn analyze(num: i32) bool {
 fn cli_zig_callers_method_calls() {
     let project = TempDir::new().unwrap();
 
-    let zig_code = r#"
+    let zig_code = r"
 const Point = struct {
     x: f32,
     y: f32,
@@ -308,7 +308,7 @@ const Point = struct {
         }
     }
 };
-"#;
+";
     std::fs::write(project.path().join("methods.zig"), zig_code).unwrap();
 
     Command::new(sqry_bin())
@@ -425,7 +425,7 @@ pub fn process(data: i32) void {
 fn cli_zig_callers_no_results() {
     let project = TempDir::new().unwrap();
 
-    let zig_code = r#"
+    let zig_code = r"
 fn unusedFunction() i32 {
     return 42;
 }
@@ -434,7 +434,7 @@ pub fn main() void {
     const value: i32 = 10;
     _ = value;
 }
-"#;
+";
     std::fs::write(project.path().join("unused.zig"), zig_code).unwrap();
 
     Command::new(sqry_bin())

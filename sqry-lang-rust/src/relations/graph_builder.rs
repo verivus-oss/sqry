@@ -503,7 +503,7 @@ impl GraphBuilder for RustGraphBuilder {
                 );
                 // Metadata store will be merged into the graph during commit
                 // via the staging graph's macro_metadata field
-                staging.merge_macro_metadata(metadata_store);
+                staging.merge_macro_metadata(&metadata_store);
             }
         }
 
@@ -4865,7 +4865,7 @@ fn simple_function() {
 
     #[test]
     fn test_extract_path_from_attr_text_no_match() {
-        let attr = r#"#[derive(Debug)]"#;
+        let attr = r"#[derive(Debug)]";
         let result = extract_path_from_attr_text(attr);
         assert_eq!(result, None);
     }
@@ -5006,7 +5006,7 @@ fn simple_function() {
         use serial_test::serial;
         use std::os::unix::fs::PermissionsExt;
 
-        /// PathGuard for PATH manipulation in tests.
+        /// `PathGuard` for PATH manipulation in tests.
         struct PathGuard {
             original: String,
         }
@@ -5068,6 +5068,8 @@ echo "rust-analyzer 1.85.0 (fake)"
             perms.set_mode(0o755);
             std::fs::set_permissions(&shim_path, perms).unwrap();
 
+            #[allow(clippy::used_underscore_binding)]
+            // Underscore prefix indicates partial use pattern
             _guard.prepend(&shim_dir);
 
             let builder = RustGraphBuilder::default();
@@ -5165,7 +5167,7 @@ echo "rust-analyzer 1.85.0 (fake)"
     }
 
     /// T10 Scenario 2: RA not found (unavailable)
-    /// Expected: Limitation message + type_inference unavailable
+    /// Expected: Limitation message + `type_inference` unavailable
     #[cfg(unix)]
     mod t10_ra_not_found_tests {
         use super::*;
@@ -5241,7 +5243,7 @@ echo "rust-analyzer 1.85.0 (fake)"
     }
 
     /// T10 Scenario 3: RA available but not used (R2) - DETERMINISTIC via shim
-    /// Expected: type_inference unavailable (no limitation message)
+    /// Expected: `type_inference` unavailable (no limitation message)
     #[cfg(unix)]
     mod t10_ra_available_tests {
         use super::*;
@@ -5278,6 +5280,7 @@ echo "rust-analyzer 1.85.0 (fake)"
 
         #[test]
         #[serial]
+        #[allow(clippy::used_underscore_binding)] // Underscore prefix pattern
         fn test_t10_ra_available_still_marks_type_inference_unavailable() {
             use tempfile::tempdir;
 
@@ -5341,9 +5344,10 @@ exit 0
         }
 
         /// T10 Scenario 4: RA available but version parse fails (R5 edge case)
-        /// Expected: available=true, limitation=None, version_warning=Some, type_inference unavailable
+        /// Expected: available=true, limitation=None, `version_warning=Some`, `type_inference` unavailable
         #[test]
         #[serial]
+        #[allow(clippy::used_underscore_binding)] // Underscore prefix pattern
         fn test_t10_version_parse_failure_still_available() {
             use tempfile::tempdir;
 

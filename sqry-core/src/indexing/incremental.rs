@@ -458,6 +458,9 @@ impl HashIndex {
     /// Returns an error only if the file exists but cannot be deserialized
     /// (indicating corruption).
     pub fn load(cache_dir: &Path) -> Result<Self> {
+        // Read file with size cap to prevent memory exhaustion from crafted files
+        const MAX_HASH_INDEX_BYTES: u64 = 256 * 1024 * 1024; // 256 MiB
+
         let hash_file = cache_dir.join("file_hashes.bin");
 
         // If file doesn't exist, return empty index
@@ -468,9 +471,6 @@ impl HashIndex {
             );
             return Ok(Self::new());
         }
-
-        // Read file with size cap to prevent memory exhaustion from crafted files
-        const MAX_HASH_INDEX_BYTES: u64 = 256 * 1024 * 1024; // 256 MiB
         let metadata = fs::metadata(&hash_file)
             .with_context(|| format!("Failed to stat hash index: {}", hash_file.display()))?;
         if metadata.len() > MAX_HASH_INDEX_BYTES {

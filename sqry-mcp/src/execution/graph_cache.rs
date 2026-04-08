@@ -986,6 +986,7 @@ mod tests {
         );
         clear_all_caches();
 
+        #[allow(clippy::items_after_statements)] // Const defined near usage for clarity
         static CALL_COUNT: AtomicUsize = AtomicUsize::new(0);
 
         let key = TracePathCacheKey::new(

@@ -42,7 +42,7 @@ sqry is useful when you need to search by code **structure**: finding all caller
 - **Graph analysis**: trace paths between symbols, find cycles, detect unused code
 - **Structured queries**: combine predicates with boolean logic (`kind:function AND lang:rust AND async:true`)
 - **Cross-language detection**: FFI linking (Rust<>C/C++), HTTP route matching (JS/TS<>Python/Java/Go)
-- **AI assistant integration**: MCP server with 33 tools, LSP server for editors
+- **AI assistant integration**: MCP server with 34 tools, LSP server for editors
 
 ### When NOT to use sqry
 
@@ -53,6 +53,13 @@ sqry is useful when you need to search by code **structure**: finding all caller
 - **Hosted code search**: Use Sourcegraph if you need a web UI and team features.
 
 sqry is focused on one thing: local semantic code search via AST analysis.
+
+## What's New In 7.2.0
+
+- Graph analysis commands now share one traversal engine across CLI, LSP, and MCP, which makes `trace-path`, `show_dependencies`, `dependency_impact`, `subgraph`, and graph export behave more consistently.
+- Path traversal results now preserve deterministic discovery order, enforce node/edge limits atomically, and enumerate leaf paths when no explicit target is supplied.
+- MCP gained `expand_cache_status`, a Rust macro-expansion cache introspection tool, and its tool/reference docs now reflect the live tool catalog instead of stale hard-coded counts.
+- LSP workspace path resolution was hardened to reject directory-traversal escapes outside the configured workspace root.
 
 ## Install
 
@@ -90,8 +97,12 @@ curl -fsSL https://raw.githubusercontent.com/verivus-oss/sqry/main/scripts/insta
 ```
 
 Installs `sqry`, `sqry-mcp`, and `sqry-lsp` into `~/.local/bin` (override with `--install-dir`).
-Add `--verify-signatures` to enforce Cosign bundle verification (requires `cosign`).
-Current published macOS binaries target Apple Silicon (`arm64`) only.
+Downloads individual binaries directly from GitHub releases with per-asset SHA256 checksum
+verification against `SHA256SUMS.txt`. Add `--verify-signatures` to enforce Cosign bundle
+verification (requires `cosign`). Current published macOS binaries target Apple Silicon (`arm64`) only.
+
+Options: `--component sqry|sqry-mcp|sqry-lsp|all`, `--version vX.Y.Z`, `--install-dir DIR`,
+`--repo OWNER/REPO`, `--no-checksum`.
 
 ### Build from source
 
@@ -105,7 +116,7 @@ cargo install --path sqry-lsp
 sqry --version
 ```
 
-**Requirements**: Rust 1.90+ (Edition 2024). About 20 GB disk for a full build (35 tree-sitter grammars are compiled from source).
+**Requirements**: Rust 1.94+ (Edition 2024). About 20 GB disk for a full build (37 tree-sitter grammars are compiled from source).
 
 ### Package managers
 
@@ -152,6 +163,33 @@ Currently, the default fast path excludes these high-cost plugins:
 The same plugin-selection flags also apply to `sqry update` and `sqry watch`.
 `--enable-language` and `--disable-language` remain accepted compatibility
 aliases for `--enable-plugin` and `--disable-plugin`.
+
+### Macro Expansion (Rust)
+
+```bash
+# Index with macro boundary analysis
+sqry index --enable-macro-expansion
+
+# Include cfg-gated items
+sqry index --enable-macro-expansion --cfg 'feature="serde"'
+
+# Search with macro filters
+sqry query "kind:function" --cfg-filter 'feature="serde"' --include-generated
+sqry query "kind:function" --macro-boundaries
+```
+
+### JVM Classpath Analysis
+
+```bash
+# Index with classpath resolution (Java, Kotlin, Scala)
+sqry index --classpath
+
+# Shallow resolution (direct dependencies only)
+sqry index --classpath --classpath-depth shallow
+
+# Use a specific classpath file
+sqry index --classpath-file classpath.txt
+```
 
 ### Search and Query
 
@@ -238,6 +276,8 @@ sqry cache stats                    # View cache statistics
 sqry cache prune --days 30          # Remove old entries
 sqry cache prune --size 1GB         # Cap cache size
 sqry cache clear --confirm          # Clear all cached ASTs
+sqry cache expand                   # Generate/refresh macro expansion cache (Rust)
+sqry cache expand --dry-run         # Preview without writing
 ```
 
 ### Other
@@ -266,17 +306,17 @@ sqry completions bash               # Shell completions
 
 ## Language Support
 
-sqry supports **35 languages** through tree-sitter-based plugins. 28 of these have full relation extraction (calls, imports, exports); the remaining 7 have symbol extraction with basic import tracking.
+sqry supports **37 languages** through tree-sitter-based plugins. 28 of these have full relation extraction (calls, imports, exports); the remaining 9 have symbol extraction with basic import tracking.
 
 **Full relation support (28)**: C, C++, C#, CSS, Dart, Elixir, Go, Groovy, Haskell, HTML, Java, JavaScript, Kotlin, Lua, Perl, PHP, Python, R, Ruby, Rust, Scala, Shell, SQL, Svelte, Swift, TypeScript, Vue, Zig
 
-**Symbol extraction + imports (7)**: Terraform, Puppet, Pulumi, Salesforce Apex, SAP ABAP, Oracle PL/SQL, ServiceNow Xanadu
+**Symbol extraction + imports (9)**: JSON, Oracle PL/SQL, Pulumi, Puppet, Salesforce Apex, SAP ABAP, ServiceNow Xanadu, ServiceNow XML, Terraform
 
 Each language plugin lives in its own crate (`sqry-lang-*`) and implements the `GraphBuilder` trait. See [CONTRIBUTING.md](CONTRIBUTING.md) for how to add a new language.
 
 ## MCP Server (AI Assistant Integration)
 
-sqry includes an MCP server with 33 JSON-RPC tools for AI assistants (Claude, Codex, Gemini, Cursor, Windsurf):
+sqry includes an MCP server with 34 JSON-RPC tools for AI assistants (Claude, Codex, Gemini, Cursor, Windsurf):
 
 ```bash
 # Start MCP server (stdio transport)
@@ -306,7 +346,7 @@ See `sqry-lsp/` for configuration details.
 
 ## VSCode Extension (Preview)
 
-The VS Code extension provides in-editor semantic queries, a "Semantic Results" panel, and CodeLens caller count annotations. Source is in `sqry-vscode/`.
+The VS Code extension provides in-editor semantic queries, a "Semantic Results" panel, and CodeLens caller count annotations. Multi-root workspaces are supported with per-folder index status and tree data. Source is in `sqry-vscode/`.
 
 ```bash
 cd sqry-vscode && npm install && npm run compile
@@ -379,10 +419,11 @@ sqry/
 ├── sqry-core/              # Core library (graph, symbols, search, plugin system)
 ├── sqry-cli/               # CLI binary
 ├── sqry-lsp/               # LSP server
-├── sqry-mcp/               # MCP server (33 tools for AI assistants)
+├── sqry-mcp/               # MCP server (34 tools for AI assistants)
+├── sqry-classpath/         # JVM classpath analysis (bytecode, Gradle/Maven/Bazel/sbt)
 ├── sqry-nl/                # Natural language query translation
 ├── sqry-plugin-registry/   # Plugin registration
-├── sqry-lang-*/            # 35 language plugins
+├── sqry-lang-*/            # 37 language plugins
 ├── sqry-lang-support/      # Plugin infrastructure
 ├── sqry-tree-sitter-support/ # Tree-sitter helpers
 ├── sqry-test-support/      # Test infrastructure
@@ -397,7 +438,7 @@ sqry/
 | AST awareness | Yes | No | Yes | Yes |
 | Relation queries | Yes (28 langs) | No | No | Yes |
 | Local/offline | Yes | Yes | Yes | No |
-| MCP server | Yes (33 tools) | No | No | No |
+| MCP server | Yes (34 tools) | No | No | No |
 | LSP server | Yes | No | No | Yes |
 | Cost | Free (MIT) | Free | Free | Paid |
 
@@ -438,7 +479,7 @@ sqry depends on excellent open-source projects:
 
 ## License
 
-MIT - see [LICENSE-MIT](LICENSE-MIT)
+MIT - see [LICENSE](LICENSE)
 
 ---
 

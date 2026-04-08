@@ -391,6 +391,7 @@ mod tests {
         let root = tree.root_node();
 
         // Try to find struct_specifier recursively
+        #[allow(clippy::items_after_statements)] // Const defined near usage for clarity
         fn find_struct_specifier(node: tree_sitter::Node) -> Option<tree_sitter::Node> {
             if node.kind() == "struct_specifier" {
                 return Some(node);

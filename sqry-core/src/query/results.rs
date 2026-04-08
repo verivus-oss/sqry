@@ -484,7 +484,7 @@ mod tests {
     fn test_query_results_debug() {
         let graph = Arc::new(CodeGraph::new());
         let results = QueryResults::new(graph, vec![]);
-        let debug_str = format!("{:?}", results);
+        let debug_str = format!("{results:?}");
         assert!(debug_str.contains("QueryResults"));
         assert!(debug_str.contains("match_count"));
     }

@@ -237,7 +237,7 @@ mod tests {
     #[test]
     fn test_extract_scopes_functions() {
         let plugin = CPlugin::default();
-        let source = br#"
+        let source = br"
 void foo(void) {
     int x = 1;
 }
@@ -246,7 +246,7 @@ int main(int argc, char **argv) {
     foo();
     return 0;
 }
-"#;
+";
         let path = std::path::Path::new("test.c");
         let tree = plugin.parse_ast(source).unwrap();
         let scopes = plugin.extract_scopes(&tree, source, path).unwrap();
@@ -270,7 +270,7 @@ int main(int argc, char **argv) {
     #[test]
     fn test_extract_scopes_struct() {
         let plugin = CPlugin::default();
-        let source = br#"
+        let source = br"
 struct Point {
     int x;
     int y;
@@ -280,7 +280,7 @@ void init_point(struct Point *p) {
     p->x = 0;
     p->y = 0;
 }
-"#;
+";
         let path = std::path::Path::new("test.c");
         let tree = plugin.parse_ast(source).unwrap();
         let scopes = plugin.extract_scopes(&tree, source, path).unwrap();
@@ -300,11 +300,11 @@ void init_point(struct Point *p) {
     #[test]
     fn test_extract_scopes_pointer_return() {
         let plugin = CPlugin::default();
-        let source = br#"
+        let source = br"
 int *get_value(int *ptr) {
     return ptr;
 }
-"#;
+";
         let path = std::path::Path::new("test.c");
         let tree = plugin.parse_ast(source).unwrap();
         let scopes = plugin.extract_scopes(&tree, source, path).unwrap();
@@ -322,13 +322,13 @@ int *get_value(int *ptr) {
     #[test]
     fn test_extract_scopes_enum() {
         let plugin = CPlugin::default();
-        let source = br#"
+        let source = br"
 enum Color {
     Red,
     Green,
     Blue
 };
-"#;
+";
         let path = std::path::Path::new("test.c");
         let tree = plugin.parse_ast(source).unwrap();
         let scopes = plugin.extract_scopes(&tree, source, path).unwrap();
@@ -346,13 +346,13 @@ enum Color {
     #[test]
     fn test_extract_scopes_union() {
         let plugin = CPlugin::default();
-        let source = br#"
+        let source = br"
 union Data {
     int i;
     float f;
     char str[20];
 };
-"#;
+";
         let path = std::path::Path::new("test.c");
         let tree = plugin.parse_ast(source).unwrap();
         let scopes = plugin.extract_scopes(&tree, source, path).unwrap();

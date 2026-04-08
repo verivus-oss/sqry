@@ -262,14 +262,14 @@ impl PersistManager {
     ///
     /// Returns [`anyhow::Error`] when the entry cannot be read or deserialized.
     pub fn read_entry(&self, key: &CacheKey) -> Result<Option<Vec<GraphNodeSummary>>> {
+        // Size cap to prevent memory exhaustion from crafted cache entries
+        const MAX_CACHE_ENTRY_BYTES: u64 = 64 * 1024 * 1024; // 64 MiB
+
         let entry_path = self.entry_path(key);
 
         if !entry_path.exists() {
             return Ok(None);
         }
-
-        // Size cap to prevent memory exhaustion from crafted cache entries
-        const MAX_CACHE_ENTRY_BYTES: u64 = 64 * 1024 * 1024; // 64 MiB
         let metadata = fs::metadata(&entry_path)
             .with_context(|| format!("Failed to stat cache entry: {}", entry_path.display()))?;
         if metadata.len() > MAX_CACHE_ENTRY_BYTES {

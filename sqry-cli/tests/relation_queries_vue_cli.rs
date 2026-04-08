@@ -241,7 +241,7 @@ export default {
 fn cli_vue_imports() {
     let project = TempDir::new().unwrap();
 
-    let vue_code = r#"
+    let vue_code = r"
 <template>
   <div>
     <p>{{ message }}</p>
@@ -266,7 +266,7 @@ export default {
     }
 };
 </script>
-"#;
+";
     std::fs::write(project.path().join("App.vue"), vue_code).unwrap();
 
     Command::new(sqry_bin())

@@ -277,7 +277,8 @@ fn run_evaluation(translator: &mut Translator, queries: &[GoldenQuery]) -> Evalu
 
         let is_intent_correct = actual_intent == expected_intent;
         let is_ambiguous = is_ambiguous_intent(&query.expected_intent);
-        let is_command_correct = compute_command_correct(query, &actual_command, is_ambiguous);
+        let is_command_correct =
+            compute_command_correct(query, actual_command.as_ref(), is_ambiguous);
 
         metrics.total_queries += 1;
         if is_intent_correct {
@@ -318,7 +319,7 @@ fn is_ambiguous_intent(expected_intent: &str) -> bool {
 
 fn compute_command_correct(
     query: &GoldenQuery,
-    actual_command: &Option<String>,
+    actual_command: Option<&String>,
     is_ambiguous: bool,
 ) -> bool {
     // Command accuracy only applies to non-ambiguous queries

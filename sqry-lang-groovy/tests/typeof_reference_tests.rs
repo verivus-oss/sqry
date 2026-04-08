@@ -1,6 +1,6 @@
-//! TypeOf and Reference edge tests for Groovy language plugin.
+//! `TypeOf` and Reference edge tests for Groovy language plugin.
 //!
-//! Tests TypeOf edges (full type signatures with context metadata) and
+//! Tests `TypeOf` edges (full type signatures with context metadata) and
 //! Reference edges (nested type names) across various Groovy type constructs.
 
 use sqry_core::graph::GraphBuilder;
@@ -37,7 +37,7 @@ fn build_test_graph(source: &str, filename: &str) -> StagingGraph {
     staging
 }
 
-/// Build a string lookup map from StagingGraph operations.
+/// Build a string lookup map from `StagingGraph` operations.
 fn build_string_lookup(staging: &StagingGraph) -> HashMap<u32, String> {
     let mut lookup = HashMap::new();
     for op in staging.operations() {
@@ -48,7 +48,7 @@ fn build_string_lookup(staging: &StagingGraph) -> HashMap<u32, String> {
     lookup
 }
 
-/// Collect all TypeOf edges from staging graph with source node names and context.
+/// Collect all `TypeOf` edges from staging graph with source node names and context.
 fn collect_typeof_edges(
     staging: &StagingGraph,
 ) -> Vec<(String, String, Option<TypeOfContext>, Option<u16>)> {
@@ -173,7 +173,7 @@ fn resolve_display_name(
         )
 }
 
-/// Find a TypeOf edge matching source name and context.
+/// Find a `TypeOf` edge matching source name and context.
 fn find_typeof_edge<'a>(
     edges: &'a [(String, String, Option<TypeOfContext>, Option<u16>)],
     source: &str,
@@ -190,11 +190,11 @@ fn find_typeof_edge<'a>(
 
 #[test]
 fn test_final_simple_type() {
-    let source = r#"
+    let source = r"
 class User {
     final String name
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.groovy");
     let typeof_edges = collect_typeof_edges(&staging);
@@ -211,11 +211,11 @@ class User {
 
 #[test]
 fn test_builtin_type() {
-    let source = r#"
+    let source = r"
 class Counter {
     int count
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.groovy");
     let typeof_edges = collect_typeof_edges(&staging);
@@ -251,12 +251,12 @@ String getName() {
 
 #[test]
 fn test_class_field_typeof() {
-    let source = r#"
+    let source = r"
 class Product {
     String title
     int quantity
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.groovy");
     let typeof_edges = collect_typeof_edges(&staging);
@@ -276,11 +276,11 @@ class Product {
 
 #[test]
 fn test_private_field_typeof() {
-    let source = r#"
+    let source = r"
 class Secret {
     private String password
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.groovy");
     let typeof_edges = collect_typeof_edges(&staging);
@@ -298,11 +298,11 @@ class Secret {
 
 #[test]
 fn test_function_parameter_simple() {
-    let source = r#"
+    let source = r"
 void greet(String name) {
     println name
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.groovy");
     let typeof_edges = collect_typeof_edges(&staging);
@@ -317,11 +317,11 @@ void greet(String name) {
 
 #[test]
 fn test_function_multiple_parameters() {
-    let source = r#"
+    let source = r"
 int add(int a, int b) {
     return a + b
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.groovy");
     let typeof_edges = collect_typeof_edges(&staging);
@@ -341,13 +341,13 @@ int add(int a, int b) {
 
 #[test]
 fn test_method_parameter() {
-    let source = r#"
+    let source = r"
 class Calculator {
     int multiply(int x, int y) {
         return x * y
     }
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.groovy");
     let typeof_edges = collect_typeof_edges(&staging);
@@ -364,11 +364,11 @@ class Calculator {
 
 #[test]
 fn test_mixed_parameter_types() {
-    let source = r#"
+    let source = r"
 void process(String input, int count, boolean flag) {
     println input
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.groovy");
     let typeof_edges = collect_typeof_edges(&staging);
@@ -429,11 +429,11 @@ void process() {
 
 #[test]
 fn test_function_return_builtin() {
-    let source = r#"
+    let source = r"
 int getCount() {
     return 42
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.groovy");
     let typeof_edges = collect_typeof_edges(&staging);
@@ -469,11 +469,11 @@ def dynamic() {
 
 #[test]
 fn test_generic_list_type() {
-    let source = r#"
+    let source = r"
 class Container {
     List<String> items
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.groovy");
     let typeof_edges = collect_typeof_edges(&staging);
@@ -498,11 +498,11 @@ class Container {
 
 #[test]
 fn test_generic_map_type() {
-    let source = r#"
+    let source = r"
 class Registry {
     Map<String, Integer> data
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.groovy");
     let ref_edges = collect_reference_edges(&staging);
@@ -520,11 +520,11 @@ class Registry {
 
 #[test]
 fn test_nested_generic() {
-    let source = r#"
+    let source = r"
 class Complex {
     List<Map<String, Integer>> nested
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.groovy");
     let ref_edges = collect_reference_edges(&staging);
@@ -543,11 +543,11 @@ class Complex {
 
 #[test]
 fn test_generic_closure_type() {
-    let source = r#"
+    let source = r"
 class Handler {
     Closure<Integer> processor
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.groovy");
     let ref_edges = collect_reference_edges(&staging);
@@ -568,11 +568,11 @@ class Handler {
 
 #[test]
 fn test_def_field_skipped() {
-    let source = r#"
+    let source = r"
 class Dynamic {
     def value
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.groovy");
     let typeof_edges = collect_typeof_edges(&staging);
@@ -586,11 +586,11 @@ class Dynamic {
 
 #[test]
 fn test_def_parameter_skipped() {
-    let source = r#"
+    let source = r"
 void process(def input) {
     println input
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.groovy");
     let typeof_edges = collect_typeof_edges(&staging);
@@ -651,13 +651,13 @@ class Service {
 
 #[test]
 fn test_multiple_type_references() {
-    let source = r#"
+    let source = r"
 class Manager {
     List<String> process(Map<String, Integer> input) {
         return []
     }
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.groovy");
     let ref_edges = collect_reference_edges(&staging);
@@ -686,7 +686,7 @@ fn test_constructor_is_method() {
     // Expected behavior (when parser is fixed):
     // Constructor parameters should have TypeOf edges like regular methods.
 
-    let source = r#"
+    let source = r"
 class Person {
     String name
 
@@ -694,7 +694,7 @@ class Person {
         this.name = initialName
     }
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.groovy");
     let typeof_edges = collect_typeof_edges(&staging);
@@ -748,11 +748,11 @@ String getValue() {
 
 #[test]
 fn test_array_type() {
-    let source = r#"
+    let source = r"
 class Data {
     String[] names
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.groovy");
     let typeof_edges = collect_typeof_edges(&staging);
@@ -763,13 +763,13 @@ class Data {
 
 #[test]
 fn test_mixed_types_in_class() {
-    let source = r#"
+    let source = r"
 class MixedTypes {
     String typed
     def dynamic
     List<Integer> generic
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.groovy");
     let typeof_edges = collect_typeof_edges(&staging);
@@ -790,21 +790,18 @@ class MixedTypes {
 #[test]
 #[ignore = "Debug typeof edges"]
 fn debug_all_typeof_edges() {
-    let source = r#"
+    let source = r"
 void greet(String name) {
     println name
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.groovy");
     let typeof_edges = collect_typeof_edges(&staging);
 
     println!("\n=== ALL TYPEOF EDGES ===");
     for (source, target, context, index) in &typeof_edges {
-        println!(
-            "  {} -> {} (context: {:?}, index: {:?})",
-            source, target, context, index
-        );
+        println!("  {source} -> {target} (context: {context:?}, index: {index:?})");
     }
     println!("Total: {} edges\n", typeof_edges.len());
 
@@ -816,7 +813,7 @@ void greet(String name) {
                 println!("  AddNode: {:?}", entry.name);
             }
             StagingOp::AddEdge { kind, .. } => {
-                println!("  AddEdge: {:?}", kind);
+                println!("  AddEdge: {kind:?}");
             }
             _ => {}
         }

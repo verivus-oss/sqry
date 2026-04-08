@@ -81,6 +81,7 @@ impl StubCache {
     /// Returns `None` on cache miss, corrupt cache, hash computation failure,
     /// or I/O error. Errors are logged as warnings but never propagated.
     #[must_use]
+    #[allow(clippy::manual_let_else)] // Match for error handling clarity
     pub fn get(&self, jar_path: &Path) -> Option<Vec<ClassStub>> {
         let key = match Self::cache_key(jar_path) {
             Ok(k) => k,
@@ -220,7 +221,7 @@ mod tests {
     use crate::stub::model::{AccessFlags, ClassKind};
     use tempfile::TempDir;
 
-    /// Create a minimal ClassStub for testing.
+    /// Create a minimal `ClassStub` for testing.
     fn make_stub(fqn: &str) -> ClassStub {
         ClassStub {
             fqn: fqn.to_owned(),

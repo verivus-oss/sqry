@@ -6,8 +6,8 @@ use serde::Deserialize;
 use serde_json::json;
 use tower_lsp::lsp_types::{
     CallHierarchyIncomingCallsParams, CallHierarchyItem, CallHierarchyOutgoingCallsParams,
-    CallHierarchyPrepareParams, Position, TextDocumentIdentifier, TextDocumentPositionParams, Url,
-    WorkDoneProgressParams,
+    CallHierarchyPrepareParams, PartialResultParams, Position, TextDocumentIdentifier,
+    TextDocumentPositionParams, Url, WorkDoneProgressParams,
 };
 
 use super::common;
@@ -74,6 +74,8 @@ fn prepare_returns_saved_item_new() -> Result<()> {
 }
 
 #[test]
+#[allow(clippy::match_same_arms)] // Arms separated for documentation clarity
+#[allow(clippy::match_wildcard_for_single_variants)] // Wildcard covers future variants
 fn incoming_calls_return_caller_ranges_new() -> Result<()> {
     let root = common::fixture_path("sqry-lsp/tests/fixtures/mini-workspace");
     let session = new_session(&root);
@@ -96,7 +98,7 @@ fn incoming_calls_return_caller_ranges_new() -> Result<()> {
     let incoming_params = CallHierarchyIncomingCallsParams {
         item: item.clone(),
         work_done_progress_params: WorkDoneProgressParams::default(),
-        partial_result_params: Default::default(),
+        partial_result_params: PartialResultParams::default(),
     };
 
     let response = sqry_lsp::handlers::call_hierarchy::incoming(&session, &incoming_params)?;
@@ -110,8 +112,10 @@ fn incoming_calls_return_caller_ranges_new() -> Result<()> {
         .contains(&caller.from.name.as_str())
     );
     assert!(!caller.from_ranges.is_empty());
+    #[allow(clippy::match_same_arms)] // Arms separated for documentation clarity
     match parse_item_data(&caller.from) {
         TestCallHierarchyData::Saved { file_path, .. } => assert_eq!(file_path, path),
+        #[allow(clippy::match_wildcard_for_single_variants)] // Test covers specific handler variant
         _ => bail!("expected saved data"),
     }
     Ok(())
@@ -132,6 +136,7 @@ fn incoming_calls_return_caller_ranges_new() -> Result<()> {
 /// find the real definition in a different file than the stub, creating the
 /// correct cross-file call edge.
 #[test]
+#[allow(clippy::match_wildcard_for_single_variants)] // Wildcard covers future variants
 fn incoming_calls_include_cross_file_new() -> Result<()> {
     let root = common::fixture_path("sqry-lsp/tests/fixtures/mini-workspace");
     let session = new_session(&root);
@@ -156,7 +161,7 @@ fn incoming_calls_include_cross_file_new() -> Result<()> {
     let params = CallHierarchyIncomingCallsParams {
         item,
         work_done_progress_params: WorkDoneProgressParams::default(),
-        partial_result_params: Default::default(),
+        partial_result_params: PartialResultParams::default(),
     };
     let response = sqry_lsp::handlers::call_hierarchy::incoming(&session, &params)?;
     let caller = response
@@ -196,7 +201,7 @@ fn incoming_calls_empty_returns_message_new() -> Result<()> {
     let params = CallHierarchyIncomingCallsParams {
         item,
         work_done_progress_params: WorkDoneProgressParams::default(),
-        partial_result_params: Default::default(),
+        partial_result_params: PartialResultParams::default(),
     };
 
     let response = sqry_lsp::handlers::call_hierarchy::incoming(&session, &params)?;
@@ -212,6 +217,7 @@ fn incoming_calls_unsaved_returns_error_new() -> Result<()> {
     let path = root.join("src/lib.rs");
     let mut text = fs::read_to_string(&path)?;
     text.push_str("\nfn temp_unsaved() { format_state(7); }\n");
+    #[allow(clippy::cast_possible_truncation)] // Test line numbers fit in u32
     let new_line = (text.lines().count() - 1) as u32;
 
     session
@@ -250,7 +256,7 @@ fn incoming_calls_unsaved_returns_error_new() -> Result<()> {
     let params = CallHierarchyIncomingCallsParams {
         item,
         work_done_progress_params: WorkDoneProgressParams::default(),
-        partial_result_params: Default::default(),
+        partial_result_params: PartialResultParams::default(),
     };
 
     let err = sqry_lsp::handlers::call_hierarchy::incoming(&session, &params)
@@ -263,6 +269,7 @@ fn incoming_calls_unsaved_returns_error_new() -> Result<()> {
 }
 
 #[test]
+#[allow(clippy::default_trait_access)] // Type inference handles default
 fn call_hierarchy_incoming_without_prepare_new() -> Result<()> {
     let root = common::fixture_path("sqry-lsp/tests/fixtures/mini-workspace");
     let session = new_session(&root);
@@ -273,6 +280,7 @@ fn call_hierarchy_incoming_without_prepare_new() -> Result<()> {
         kind: tower_lsp::lsp_types::SymbolKind::FUNCTION,
         tags: None,
         detail: None,
+        #[allow(clippy::default_trait_access)] // Type inference handles the default
         uri: Url::from_file_path(&path).unwrap(),
         range: Default::default(),
         selection_range: Default::default(),
@@ -282,7 +290,7 @@ fn call_hierarchy_incoming_without_prepare_new() -> Result<()> {
     let params = CallHierarchyIncomingCallsParams {
         item: bogus_item,
         work_done_progress_params: WorkDoneProgressParams::default(),
-        partial_result_params: Default::default(),
+        partial_result_params: PartialResultParams::default(),
     };
 
     let err = sqry_lsp::handlers::call_hierarchy::incoming(&session, &params)
@@ -318,7 +326,7 @@ fn outgoing_calls_return_callees_new() -> Result<()> {
     let params = CallHierarchyOutgoingCallsParams {
         item,
         work_done_progress_params: WorkDoneProgressParams::default(),
-        partial_result_params: Default::default(),
+        partial_result_params: PartialResultParams::default(),
     };
 
     let response = sqry_lsp::handlers::call_hierarchy::outgoing(&session, &params)?;
@@ -354,7 +362,7 @@ fn incoming_calls_respect_max_results_new() -> Result<()> {
     let params = CallHierarchyIncomingCallsParams {
         item,
         work_done_progress_params: WorkDoneProgressParams::default(),
-        partial_result_params: Default::default(),
+        partial_result_params: PartialResultParams::default(),
     };
     let response = sqry_lsp::handlers::call_hierarchy::incoming(&session, &params)?;
     assert_eq!(response.items.len(), 1);
@@ -363,6 +371,7 @@ fn incoming_calls_respect_max_results_new() -> Result<()> {
 }
 
 #[test]
+#[allow(clippy::match_wildcard_for_single_variants)] // Wildcard covers future variants
 fn multiple_calls_on_single_line_have_distinct_ranges_new() -> Result<()> {
     let root = common::fixture_path("sqry-lsp/tests/fixtures/mini-workspace");
     let session = new_session(&root);
@@ -387,7 +396,7 @@ fn multiple_calls_on_single_line_have_distinct_ranges_new() -> Result<()> {
     let params = CallHierarchyIncomingCallsParams {
         item,
         work_done_progress_params: WorkDoneProgressParams::default(),
-        partial_result_params: Default::default(),
+        partial_result_params: PartialResultParams::default(),
     };
 
     let response = sqry_lsp::handlers::call_hierarchy::incoming(&session, &params)?;
@@ -435,7 +444,7 @@ fn recursive_function_reports_self_call_new() -> Result<()> {
     let params = CallHierarchyOutgoingCallsParams {
         item,
         work_done_progress_params: WorkDoneProgressParams::default(),
-        partial_result_params: Default::default(),
+        partial_result_params: PartialResultParams::default(),
     };
 
     let response = sqry_lsp::handlers::call_hierarchy::outgoing(&session, &params)?;
@@ -471,7 +480,7 @@ fn emoji_call_site_has_precise_range_new() -> Result<()> {
     let params = CallHierarchyIncomingCallsParams {
         item,
         work_done_progress_params: WorkDoneProgressParams::default(),
-        partial_result_params: Default::default(),
+        partial_result_params: PartialResultParams::default(),
     };
 
     let response = sqry_lsp::handlers::call_hierarchy::incoming(&session, &params)?;

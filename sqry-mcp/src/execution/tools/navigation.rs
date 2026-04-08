@@ -92,10 +92,7 @@ pub fn execute_get_definition(
             .map(|s| s.to_string())
             .unwrap_or_default();
         let qualified_name = crate::execution::symbol_utils::display_entry_qualified_name(
-            entry,
-            strings,
-            files.language_for_file(entry.file),
-            &name,
+            entry, strings, files, &name,
         );
 
         let file_path = files
@@ -265,7 +262,33 @@ fn collect_caller_refs(
                 }
             };
 
-            if !edge_ref.spans.is_empty() {
+            if edge_ref.spans.is_empty() {
+                // Fallback: no edge spans — use source node location (existing behavior).
+                if let Some(entry) = graph.nodes().get(edge_ref.source) {
+                    let file_path = files
+                        .resolve(entry.file)
+                        .map(|p| {
+                            crate::execution::symbol_utils::relative_path_forward_slash(
+                                p.as_ref(),
+                                workspace_root,
+                            )
+                        })
+                        .unwrap_or_default();
+
+                    let loc_key = (file_path.clone(), entry.start_line, entry.start_column);
+                    if !seen.contains(&loc_key) {
+                        seen.insert(loc_key);
+                        references.push(ReferenceLocationData {
+                            file_path,
+                            line: entry.start_line,
+                            column: entry.start_column,
+                            preview: None,
+                            is_declaration: false,
+                            provenance: provenance.clone(),
+                        });
+                    }
+                }
+            } else {
                 // Resolve file path from the edge's FileId (preferred), falling back
                 // to the source node's file if edge file resolution fails.
                 let edge_file_path = files.resolve(edge_ref.file).map(|p| {
@@ -308,32 +331,6 @@ fn collect_caller_refs(
                             file_path: file_path.clone(),
                             line,
                             column,
-                            preview: None,
-                            is_declaration: false,
-                            provenance: provenance.clone(),
-                        });
-                    }
-                }
-            } else {
-                // Fallback: no edge spans — use source node location (existing behavior).
-                if let Some(entry) = graph.nodes().get(edge_ref.source) {
-                    let file_path = files
-                        .resolve(entry.file)
-                        .map(|p| {
-                            crate::execution::symbol_utils::relative_path_forward_slash(
-                                p.as_ref(),
-                                workspace_root,
-                            )
-                        })
-                        .unwrap_or_default();
-
-                    let loc_key = (file_path.clone(), entry.start_line, entry.start_column);
-                    if !seen.contains(&loc_key) {
-                        seen.insert(loc_key);
-                        references.push(ReferenceLocationData {
-                            file_path,
-                            line: entry.start_line,
-                            column: entry.start_column,
                             preview: None,
                             is_declaration: false,
                             provenance: provenance.clone(),
@@ -440,12 +437,8 @@ pub fn execute_get_hover_info(args: &GetHoverInfoArgs) -> Result<ToolExecution<H
         .resolve(entry.name)
         .map(|s| s.to_string())
         .unwrap_or_default();
-    let qualified_name = crate::execution::symbol_utils::display_entry_qualified_name(
-        entry,
-        strings,
-        files.language_for_file(entry.file),
-        &name,
-    );
+    let qualified_name =
+        crate::execution::symbol_utils::display_entry_qualified_name(entry, strings, files, &name);
     let file_path = files
         .resolve(entry.file)
         .map(|p| {
@@ -533,7 +526,7 @@ pub fn execute_get_document_symbols(
             let name = crate::execution::symbol_utils::display_entry_qualified_name(
                 entry,
                 strings,
-                files.language_for_file(entry.file),
+                files,
                 &fallback_name,
             );
 
@@ -611,7 +604,7 @@ pub fn execute_get_workspace_symbols(
         let display_name = crate::execution::symbol_utils::display_entry_qualified_name(
             entry,
             strings,
-            files.language_for_file(entry.file),
+            files,
             &fallback_name,
         );
         let qualified_name = display_name.clone();

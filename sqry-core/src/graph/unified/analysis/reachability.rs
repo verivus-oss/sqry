@@ -814,10 +814,10 @@ mod tests {
         let intervals = bitset.extract_intervals();
         assert_eq!(intervals.len(), 32);
         for (i, interval) in intervals.iter().enumerate().take(32) {
-            assert_eq!(
-                *interval,
-                Interval::new((i as u32 * 2) + 1, (i as u32 * 2) + 2)
-            );
+            #[allow(clippy::cast_possible_truncation)]
+            // Graph node/edge counts fit in u32 for graph storage
+            let expected = Interval::new((i as u32 * 2) + 1, (i as u32 * 2) + 2);
+            assert_eq!(*interval, expected);
         }
     }
 
@@ -926,6 +926,8 @@ mod tests {
             .map(|(i, target)| {
                 MergedEdge::new(
                     NodeId::new(0, 0),
+                    #[allow(clippy::cast_possible_truncation)]
+                    // Graph node/edge counts fit in u32 for graph storage
                     NodeId::new(target as u32, 0),
                     kind.clone(),
                     (i + 1) as u64,
@@ -1076,8 +1078,8 @@ mod tests {
         assert!(!dag.can_reach(scc_5, scc_0));
     }
 
-    /// Build a deep chain DAG: 0 → 1 → 2 → ... → n (max_level = n, scc_count = n+1).
-    /// When n > scc_count/4 (always true for chains), group_by_level returns None
+    /// Build a deep chain DAG: 0 → 1 → 2 → ... → n (`max_level` = n, `scc_count` = n+1).
+    /// When n > `scc_count/4` (always true for chains), `group_by_level` returns None
     /// and the wavefront falls back to fully sequential processing.
     fn deep_chain_snapshot(n: usize) -> CompactionSnapshot {
         let file = FileId::new(0);
@@ -1088,7 +1090,11 @@ mod tests {
         let edges: Vec<MergedEdge> = (0..n)
             .map(|i| {
                 MergedEdge::new(
+                    #[allow(clippy::cast_possible_truncation)]
+                    // Graph node/edge counts fit in u32 for graph storage
                     NodeId::new(i as u32, 0),
+                    #[allow(clippy::cast_possible_truncation)]
+                    // Graph node/edge counts fit in u32 for graph storage
                     NodeId::new((i + 1) as u32, 0),
                     kind.clone(),
                     (i + 1) as u64,
@@ -1105,6 +1111,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::similar_names)] // scc_0/scc_50/scc_99 are intentional numbered test variables
     fn test_deep_dag_falls_back_to_sequential() {
         // Chain of 100 nodes: max_level = 99, scc_count = 100.
         // 99 > 100/4 = 25, so group_by_level returns None → sequential fallback.

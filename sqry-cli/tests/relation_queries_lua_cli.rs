@@ -24,7 +24,7 @@ use tempfile::TempDir;
 fn cli_lua_callers_simple_function() {
     let project = TempDir::new().unwrap();
 
-    let lua_code = r#"
+    let lua_code = r"
 local function helper()
     return 42
 end
@@ -35,7 +35,7 @@ function main()
 end
 
 main()
-"#;
+";
     std::fs::write(project.path().join("script.lua"), lua_code).unwrap();
 
     Command::new(sqry_bin())
@@ -58,7 +58,7 @@ main()
 fn cli_lua_callers_module_function_dot_syntax() {
     let project = TempDir::new().unwrap();
 
-    let lua_code = r#"
+    let lua_code = r"
 local Module = {}
 
 function Module.init()
@@ -71,7 +71,7 @@ function Module.setup()
 end
 
 return Module
-"#;
+";
     std::fs::write(project.path().join("module.lua"), lua_code).unwrap();
 
     Command::new(sqry_bin())
@@ -269,7 +269,7 @@ run_query()
     for method in ["where", "orderBy", "execute"] {
         Command::new(sqry_bin())
             .arg("query")
-            .arg(format!("callers:Query::{}", method))
+            .arg(format!("callers:Query::{method}"))
             .arg(project.path())
             .assert()
             .success()
@@ -457,7 +457,7 @@ client:get("https://api.example.com/users")
 fn cli_lua_callees_nested_calls() {
     let project = TempDir::new().unwrap();
 
-    let lua_code = r#"
+    let lua_code = r"
 local vim = {
     api = {
         nvim_get_current_buf = function() return 0 end,
@@ -472,7 +472,7 @@ function get_buffer_content()
 end
 
 get_buffer_content()
-"#;
+";
     std::fs::write(project.path().join("buffer.lua"), lua_code).unwrap();
 
     Command::new(sqry_bin())
@@ -496,7 +496,7 @@ get_buffer_content()
 fn cli_lua_callees_with_receiver_metadata() {
     let project = TempDir::new().unwrap();
 
-    let lua_code = r#"
+    let lua_code = r"
 local Config = {}
 
 function Config.load()
@@ -516,7 +516,7 @@ function initialize()
 end
 
 initialize()
-"#;
+";
     std::fs::write(project.path().join("config.lua"), lua_code).unwrap();
 
     Command::new(sqry_bin())
@@ -551,7 +551,7 @@ initialize()
 fn cli_lua_exports_return_table() {
     let project = TempDir::new().unwrap();
 
-    let lua_code = r#"
+    let lua_code = r"
 local M = {}
 
 local function private_helper()
@@ -567,7 +567,7 @@ function M.another_function(y)
 end
 
 return M
-"#;
+";
     std::fs::write(project.path().join("module.lua"), lua_code).unwrap();
 
     Command::new(sqry_bin())
@@ -715,7 +715,7 @@ return Class
 fn cli_lua_exports_assignment_exports() {
     let project = TempDir::new().unwrap();
 
-    let lua_code = r#"
+    let lua_code = r"
 local API = {}
 
 API.fetch = function(url)
@@ -732,7 +732,7 @@ local private = function()
 end
 
 return API
-"#;
+";
     std::fs::write(project.path().join("api.lua"), lua_code).unwrap();
 
     Command::new(sqry_bin())
@@ -823,7 +823,7 @@ return Handlers
 fn cli_lua_exports_filtering_visibility() {
     let project = TempDir::new().unwrap();
 
-    let lua_code = r#"
+    let lua_code = r"
 -- All non-local declarations are public in Lua
 function public_one()
     return 1
@@ -844,7 +844,7 @@ M.public_three = function()
 end
 
 return M
-"#;
+";
     std::fs::write(project.path().join("visibility.lua"), lua_code).unwrap();
 
     Command::new(sqry_bin())
@@ -902,7 +902,7 @@ fn cli_lua_integration_neovim_plugin_exports() {
 
     if !fixture_path.exists() {
         // Skip test if fixture not available
-        eprintln!("Skipping test: fixture not found at {:?}", fixture_path);
+        eprintln!("Skipping test: fixture not found at {fixture_path:?}");
         return;
     }
 
@@ -933,7 +933,7 @@ fn cli_lua_integration_wow_addon_callers() {
         Path::new("../sqry-lang-lua/tests/fixtures/relations/lua/integration/wow_addon.lua");
 
     if !fixture_path.exists() {
-        eprintln!("Skipping test: fixture not found at {:?}", fixture_path);
+        eprintln!("Skipping test: fixture not found at {fixture_path:?}");
         return;
     }
 
@@ -963,7 +963,7 @@ fn cli_lua_integration_love2d_comprehensive() {
         Path::new("../sqry-lang-lua/tests/fixtures/relations/lua/integration/love2d_game.lua");
 
     if !fixture_path.exists() {
-        eprintln!("Skipping test: fixture not found at {:?}", fixture_path);
+        eprintln!("Skipping test: fixture not found at {fixture_path:?}");
         return;
     }
 

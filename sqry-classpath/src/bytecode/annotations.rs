@@ -198,6 +198,7 @@ pub fn convert_parameter_annotations(
 /// This handles:
 /// - `RuntimeVisibleAnnotations` → `is_runtime_visible = true`
 /// - `RuntimeInvisibleAnnotations` → `is_runtime_visible = false`
+#[allow(clippy::missing_errors_doc)] // Internal helper function
 pub fn extract_annotations_from_attribute(
     attr: &AttributeData<'_>,
 ) -> Result<Option<Vec<AnnotationStub>>, ClasspathError> {
@@ -220,6 +221,7 @@ pub fn extract_annotations_from_attribute(
 /// This handles:
 /// - `RuntimeVisibleParameterAnnotations` → `is_runtime_visible = true`
 /// - `RuntimeInvisibleParameterAnnotations` → `is_runtime_visible = false`
+#[allow(clippy::missing_errors_doc)] // Internal helper function
 pub fn extract_parameter_annotations_from_attribute(
     attr: &AttributeData<'_>,
 ) -> Result<Option<Vec<Vec<AnnotationStub>>>, ClasspathError> {

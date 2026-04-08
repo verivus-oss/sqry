@@ -198,8 +198,7 @@ fn caller() void {
     let call_count = count_call_edges(&staging);
     assert!(
         call_count >= 1,
-        "Expected at least 1 call edge, got {}",
-        call_count
+        "Expected at least 1 call edge, got {call_count}"
     );
 }
 
@@ -229,8 +228,7 @@ fn main() !void {
     let call_count = count_call_edges(&staging);
     assert!(
         call_count >= 1,
-        "Expected at least 1 call edge for qualified calls, got {}",
-        call_count
+        "Expected at least 1 call edge for qualified calls, got {call_count}"
     );
 }
 
@@ -265,8 +263,7 @@ fn level1() i32 {
     let call_count = count_call_edges(&staging);
     assert!(
         call_count >= 2,
-        "Expected at least 2 call edges, got {}",
-        call_count
+        "Expected at least 2 call edges, got {call_count}"
     );
 }
 
@@ -297,8 +294,7 @@ pub fn main() !void {
     let import_count = count_import_edges(&staging);
     assert!(
         import_count >= 1,
-        "Expected at least 1 import edge for @import, got {}",
-        import_count
+        "Expected at least 1 import edge for @import, got {import_count}"
     );
     assert!(
         has_interned_string_containing(&staging, "std"),
@@ -332,8 +328,7 @@ pub fn process(input: types.Input) types.Output {
     let import_count = count_import_edges(&staging);
     assert!(
         import_count >= 2,
-        "Expected at least 2 import edges, got {}",
-        import_count
+        "Expected at least 2 import edges, got {import_count}"
     );
 }
 
@@ -362,8 +357,7 @@ const config = @import("config.zig");
     let import_count = count_import_edges(&staging);
     assert!(
         import_count >= 2,
-        "Expected at least 2 import edges, got {}",
-        import_count
+        "Expected at least 2 import edges, got {import_count}"
     );
 }
 
@@ -391,8 +385,7 @@ fn internal() void {}
     let export_count = count_export_edges(&staging);
     assert!(
         export_count >= 1,
-        "Expected at least 1 export edge for pub functions, got {}",
-        export_count
+        "Expected at least 1 export edge for pub functions, got {export_count}"
     );
 }
 

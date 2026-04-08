@@ -181,14 +181,12 @@ fn test_missing_pager_fallback() {
     // Check for spec-compliant warning message format with actionable guidance
     assert!(
         stderr.contains("Warning: pager") && stderr.contains("not found"),
-        "Expected warning about pager not found, got: {}",
-        stderr
+        "Expected warning about pager not found, got: {stderr}"
     );
     // Verify actionable help text is included
     assert!(
         stderr.contains("SQRY_PAGER"),
-        "Expected warning to include actionable guidance about SQRY_PAGER, got: {}",
-        stderr
+        "Expected warning to include actionable guidance about SQRY_PAGER, got: {stderr}"
     );
 }
 
@@ -222,15 +220,13 @@ fn test_pager_spawn_error_exits_nonzero() {
         );
         assert!(
             stderr.contains("Warning:"),
-            "Expected warning message for not found case, got: {}",
-            stderr
+            "Expected warning message for not found case, got: {stderr}"
         );
     } else if stderr.contains("Error: Failed to start pager") {
         // Spawn error case - MUST fail with exit code 1 per spec §3.3
         assert!(
             !output.status.success(),
-            "Expected non-zero exit for spawn error, got success. stderr: {}",
-            stderr
+            "Expected non-zero exit for spawn error, got success. stderr: {stderr}"
         );
         // Per Codex review: explicitly assert exit code 1 to prevent regressions
         assert_eq!(
@@ -367,8 +363,7 @@ fn test_index_status_with_pager() {
     let exit_code = output.status.code().unwrap_or(-1);
     assert!(
         exit_code == 0 || exit_code == 1 || exit_code == 2,
-        "Unexpected exit code: {}",
-        exit_code
+        "Unexpected exit code: {exit_code}"
     );
 }
 

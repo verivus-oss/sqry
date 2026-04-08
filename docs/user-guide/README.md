@@ -33,6 +33,37 @@ sqry graph --path . --format json nodes --kind function
 sqry visualize "callers:main" --format mermaid --path .
 ```
 
+## Release Highlights (v7.2.0)
+
+The changes since `v7.1.5` are concentrated in graph analysis, MCP introspection,
+and workspace safety:
+
+- Graph analyses now share a single traversal engine across CLI, LSP, and MCP.
+  This affects `trace-path`, `show_dependencies`, `dependency_impact`,
+  `subgraph`, and graph export behavior.
+- Traversal output is now more consistent:
+  - node/edge truncation is applied atomically
+  - path enumeration uses stable discovery order
+  - leaf paths are reported when no explicit target symbol is provided
+- MCP now exposes `expand_cache_status`, which lets assistants inspect Rust
+  macro-expansion cache health without rebuilding or guessing.
+- LSP path resolution now fails closed when a requested path escapes the active
+  workspace root, including missing-path and symlink-parent escape cases.
+
+Example MCP introspection flow:
+
+```bash
+sqry-mcp --list-tools | rg expand_cache_status
+```
+
+Example graph-analysis flow:
+
+```bash
+sqry graph trace-path main handle_error --path .
+sqry graph dependency-tree module --path .
+sqry impact authenticate --depth 3 --path .
+```
+
 ## MCP Response Redaction
 
 For hosted/external LLM usage through MCP, apply redaction before sending
@@ -163,6 +194,14 @@ Note: Relation predicates in `sqry query` (`callers:`, `callees:`, `imports:`,
 `exports:`) are served from the symbol index RelationStore/ImportStore today.
 `sqry graph` and `sqry visualize` are backed by the unified graph snapshot.
 
+Traversal-specific notes for `7.2.0`:
+- traversal-backed commands now share one limit model (`max_depth`, node caps,
+  edge caps, and path caps)
+- truncation metadata is produced consistently across interfaces
+- path enumeration can now report root-to-leaf paths even when no target symbol
+  is specified
+- downstream consumers can correlate nodes and edges by stable `node_id`
+
 Common status commands:
 
 ```bash
@@ -234,6 +273,13 @@ sqry diff main HEAD --change-type signature_changed
 sqry hier "kind:function AND name:parse" --max-files 10 --context 5
 sqry export --format mermaid --filter-lang rust,go --output graph.mmd
 ```
+
+Behavior notes:
+- `sqry impact` defaults still matter: keep `--depth` small unless you want
+  transitive blast-radius analysis.
+- `sqry graph trace-path` and related consumers now share the same traversal
+  semantics as MCP/LSP, so truncation and path ordering should match across
+  interfaces more closely than in earlier releases.
 
 ## Semantic Diff (Git Refs)
 

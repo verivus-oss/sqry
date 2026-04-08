@@ -6,6 +6,9 @@
 //! This module is the single integration point called from the CLI when the
 //! `jvm-classpath` feature is enabled.
 
+// Classpath scan metrics fit in u32; casts are intentional
+#![allow(clippy::cast_possible_truncation)]
+
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
@@ -781,6 +784,8 @@ mod tests {
     // ── Parallel scan tests ────────────────────────────────────────────
 
     #[test]
+    #[allow(clippy::match_same_arms)] // Arms separated for documentation clarity
+    #[allow(clippy::match_wildcard_for_single_variants)] // Wildcard covers future variants
     fn test_scan_jars_parallel_multiple() {
         let tmp = TempDir::new().unwrap();
         let class_a = build_minimal_class("com/example/A");
@@ -796,6 +801,7 @@ mod tests {
         let total_stubs: usize = results
             .iter()
             .filter_map(|r| match r {
+                #[allow(clippy::match_same_arms)] // Pipeline stage arms separated for traceability
                 JarScanOutcome::Scanned { stubs, .. } | JarScanOutcome::Cached { stubs, .. } => {
                     Some(stubs.len())
                 }

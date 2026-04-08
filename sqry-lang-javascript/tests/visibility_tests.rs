@@ -15,7 +15,7 @@ fn parse_js(source: &str) -> tree_sitter::Tree {
     parser.parse(source.as_bytes(), None).unwrap()
 }
 
-/// Build a map from StringId to string value from staging operations
+/// Build a map from `StringId` to string value from staging operations
 fn build_string_map(staging: &StagingGraph) -> HashMap<StringId, String> {
     staging
         .operations()
@@ -68,11 +68,11 @@ fn has_display_name(
 
 #[test]
 fn test_public_function_convention() {
-    let source = r#"
+    let source = r"
 function publicFunction() {
     return 42;
 }
-"#;
+";
 
     let tree = parse_js(source);
     let mut staging = StagingGraph::new();
@@ -90,11 +90,11 @@ function publicFunction() {
 
 #[test]
 fn test_private_function_convention() {
-    let source = r#"
+    let source = r"
 function _privateFunction() {
     return 42;
 }
-"#;
+";
 
     let tree = parse_js(source);
     let mut staging = StagingGraph::new();
@@ -112,7 +112,7 @@ function _privateFunction() {
 
 #[test]
 fn test_class_method_visibility() {
-    let source = r#"
+    let source = r"
 class MyClass {
     publicMethod() {
         return this._privateMethod();
@@ -122,7 +122,7 @@ class MyClass {
         return 42;
     }
 }
-"#;
+";
 
     let tree = parse_js(source);
     let mut staging = StagingGraph::new();
@@ -158,7 +158,7 @@ class MyClass {
 
 #[test]
 fn test_async_function_visibility() {
-    let source = r#"
+    let source = r"
 async function publicAsync() {
     return await _privateAsync();
 }
@@ -166,7 +166,7 @@ async function publicAsync() {
 async function _privateAsync() {
     return 42;
 }
-"#;
+";
 
     let tree = parse_js(source);
     let mut staging = StagingGraph::new();
@@ -189,10 +189,10 @@ async function _privateAsync() {
 
 #[test]
 fn test_arrow_function_visibility() {
-    let source = r#"
+    let source = r"
 const publicArrow = () => 42;
 const _privateArrow = () => 42;
-"#;
+";
 
     let tree = parse_js(source);
     let mut staging = StagingGraph::new();

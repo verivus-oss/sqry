@@ -32,7 +32,7 @@ fn is_excluded(path: &Path) -> bool {
     let filename = path
         .file_name()
         .and_then(|n| n.to_str())
-        .map(|n| n.to_ascii_lowercase())
+        .map(str::to_ascii_lowercase)
         .unwrap_or_default();
 
     EXCLUDED_FILENAMES.contains(&filename.as_str()) || filename.ends_with(".min.json")
@@ -311,6 +311,9 @@ struct WalkFrame<'a> {
     value: &'a Value,
 }
 
+#[allow(clippy::too_many_lines)] // JSON graph builder handles all value types
+#[allow(clippy::match_same_arms)] // Arms separated for documentation clarity
+#[allow(clippy::match_wildcard_for_single_variants)] // Wildcard covers future variants
 fn walk_value(root: &Value, ctx: &mut WalkContext, helper: &mut GraphBuildHelper) {
     let mut stack: Vec<WalkFrame<'_>> = Vec::new();
 
@@ -367,6 +370,7 @@ fn walk_value(root: &Value, ctx: &mut WalkContext, helper: &mut GraphBuildHelper
                 }
             }
         }
+        #[allow(clippy::match_same_arms)] // Arms separated for documentation clarity
         _ => {}
     }
 

@@ -393,7 +393,7 @@ mod tests {
             byte_offset: 0,
         };
 
-        let debug = format!("{:?}", m);
+        let debug = format!("{m:?}");
         assert!(debug.contains("Match"));
         assert!(debug.contains("test.rs"));
     }
@@ -468,7 +468,7 @@ mod tests {
     #[test]
     fn test_search_config_debug() {
         let config = SearchConfig::default();
-        let debug = format!("{:?}", config);
+        let debug = format!("{config:?}");
         assert!(debug.contains("SearchConfig"));
         assert!(debug.contains("mode"));
     }

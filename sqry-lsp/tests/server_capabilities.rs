@@ -9,6 +9,8 @@ use tower_lsp::lsp_types::{
 mod common;
 
 #[tokio::test(flavor = "current_thread")]
+#[allow(clippy::match_same_arms)] // Arms separated for documentation clarity
+#[allow(clippy::match_wildcard_for_single_variants)] // Wildcard covers future variants
 async fn server_reports_phase2_capabilities_new() -> Result<()> {
     let root = common::fixture_path("sqry-lsp/tests/fixtures/mini-workspace");
     let mut server = common::TestServer::new(&root);
@@ -33,6 +35,7 @@ async fn server_reports_phase2_capabilities_new() -> Result<()> {
     let sync = capabilities
         .text_document_sync
         .expect("text document sync capability");
+    #[allow(clippy::match_same_arms)] // Arms separated for documentation clarity
     match sync {
         TextDocumentSyncCapability::Options(options) => {
             assert_eq!(
@@ -41,6 +44,8 @@ async fn server_reports_phase2_capabilities_new() -> Result<()> {
                 "server must advertise incremental sync"
             );
         }
+        #[allow(clippy::match_wildcard_for_single_variants)]
+        // Test covers specific capability variant
         other => panic!("expected sync options, got {other:?}"),
     }
 

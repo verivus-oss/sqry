@@ -1,7 +1,7 @@
-//! Test suite for TypeOf edges and Signature metadata in Python plugin
+//! Test suite for `TypeOf` edges and Signature metadata in Python plugin
 //!
 //! Validates that the Python plugin correctly creates:
-//! - TypeOf edges for type-hinted parameters and variables
+//! - `TypeOf` edges for type-hinted parameters and variables
 //! - Signature metadata for functions/methods with return type annotations
 
 use sqry_core::graph::GraphBuilder;
@@ -100,7 +100,7 @@ fn count_type_nodes(staging: &StagingGraph) -> usize {
         .count()
 }
 
-/// Verify that type-annotation Reference edges match TypeOf edges in count.
+/// Verify that type-annotation Reference edges match `TypeOf` edges in count.
 ///
 /// Local variable tracking also creates References edges (from usage to declaration),
 /// so we count only References edges where the target is a Type node.
@@ -157,10 +157,10 @@ fn count_type_reference_edges(staging: &StagingGraph) -> usize {
 
 #[test]
 fn test_typed_parameter_simple() {
-    let source = r#"
+    let source = r"
 def process(x: int, y: str):
     pass
-"#;
+";
 
     let staging = build_staging_graph(source, "test.py");
 
@@ -170,12 +170,12 @@ def process(x: int, y: str):
 
 #[test]
 fn test_typed_parameter_generic() {
-    let source = r#"
+    let source = r"
 from typing import List, Optional
 
 def process(items: List[str], user: Optional[User]):
     pass
-"#;
+";
 
     let staging = build_staging_graph(source, "test.py");
 
@@ -185,7 +185,7 @@ def process(items: List[str], user: Optional[User]):
 
 #[test]
 fn test_typed_parameter_skips_self_cls() {
-    let source = r#"
+    let source = r"
 class MyClass:
     def method(self, x: int):
         pass
@@ -193,7 +193,7 @@ class MyClass:
     @classmethod
     def class_method(cls, y: str):
         pass
-"#;
+";
 
     let staging = build_staging_graph(source, "test.py");
 
@@ -203,10 +203,10 @@ class MyClass:
 
 #[test]
 fn test_untyped_parameter_no_typeof() {
-    let source = r#"
+    let source = r"
 def process(x, y, z):
     pass
-"#;
+";
 
     let staging = build_staging_graph(source, "test.py");
 
@@ -220,10 +220,10 @@ def process(x, y, z):
 
 #[test]
 fn test_annotated_assignment_simple() {
-    let source = r#"
+    let source = r"
 user: User = get_user()
 count: int = 42
-"#;
+";
 
     let staging = build_staging_graph(source, "test.py");
 
@@ -233,13 +233,13 @@ count: int = 42
 
 #[test]
 fn test_annotated_assignment_generic() {
-    let source = r#"
+    let source = r"
 from typing import List, Dict, Optional
 
 items: List[str] = []
 mapping: Dict[str, int] = {}
 result: Optional[User] = None
-"#;
+";
 
     let staging = build_staging_graph(source, "test.py");
 
@@ -249,11 +249,11 @@ result: Optional[User] = None
 
 #[test]
 fn test_annotated_assignment_class_attribute() {
-    let source = r#"
+    let source = r"
 class Service:
     repository: UserRepository
     cache: Cache[str] = None
-"#;
+";
 
     let staging = build_staging_graph(source, "test.py");
 
@@ -263,11 +263,11 @@ class Service:
 
 #[test]
 fn test_unannotated_assignment_no_typeof() {
-    let source = r#"
+    let source = r"
 user = get_user()
 count = 42
 items = []
-"#;
+";
 
     let staging = build_staging_graph(source, "test.py");
 
@@ -281,13 +281,13 @@ items = []
 
 #[test]
 fn test_function_with_return_type() {
-    let source = r#"
+    let source = r"
 def find_user(id: int) -> User:
     pass
 
 async def fetch_data() -> List[str]:
     pass
-"#;
+";
 
     let staging = build_staging_graph(source, "test.py");
 
@@ -297,14 +297,14 @@ async def fetch_data() -> List[str]:
 
 #[test]
 fn test_method_with_return_type() {
-    let source = r#"
+    let source = r"
 class UserService:
     def find(self, id: int) -> Optional[User]:
         pass
 
     async def fetch_all(self) -> List[User]:
         pass
-"#;
+";
 
     let staging = build_staging_graph(source, "test.py");
 
@@ -317,10 +317,10 @@ class UserService:
 
 #[test]
 fn test_function_without_return_type() {
-    let source = r#"
+    let source = r"
 def process(x):
     pass
-"#;
+";
 
     let staging = build_staging_graph(source, "test.py");
 
@@ -336,7 +336,7 @@ def process(x):
 
 #[test]
 fn test_comprehensive_type_hints() {
-    let source = r#"
+    let source = r"
 from typing import List, Optional
 
 class UserService:
@@ -349,7 +349,7 @@ class UserService:
     async def find_all(self, limit: int) -> List[User]:
         results: List[User] = await self.repository.query(limit)
         return results
-"#;
+";
 
     let staging = build_staging_graph(source, "test.py");
 
@@ -371,11 +371,11 @@ class UserService:
 
 #[test]
 fn test_limitation_untyped_code() {
-    let source = r#"
+    let source = r"
 def process(data):
     result = transform(data)
     return result
-"#;
+";
 
     let staging = build_staging_graph(source, "test.py");
 
@@ -392,10 +392,10 @@ def process(data):
 
 #[test]
 fn test_reference_edges_created_with_typeof() {
-    let source = r#"
+    let source = r"
 def process(x: int):
     pass
-"#;
+";
 
     let staging = build_staging_graph(source, "test.py");
 
@@ -408,13 +408,13 @@ def process(x: int):
 
 #[test]
 fn test_scope_qualified_parameter_names() {
-    let source = r#"
+    let source = r"
 def func1(x: int):
     pass
 
 def func2(x: str):
     pass
-"#;
+";
 
     let staging = build_staging_graph(source, "test.py");
 
@@ -449,11 +449,11 @@ def func2():
 
 #[test]
 fn test_class_attribute_naming() {
-    let source = r#"
+    let source = r"
 class MyClass:
     repo: Repository
     cache: Cache
-"#;
+";
 
     let staging = build_staging_graph(source, "test.py");
 
@@ -490,10 +490,10 @@ def find(id: int) -> "User":
 
 #[test]
 fn test_pep604_union_normalization() {
-    let source = r#"
+    let source = r"
 def process(x: int | None, y: str | int):
     result: User | None = get_user()
-"#;
+";
 
     let staging = build_staging_graph(source, "test.py");
 
@@ -508,12 +508,12 @@ def process(x: int | None, y: str | int):
 
 #[test]
 fn test_generic_type_base_extraction() {
-    let source = r#"
+    let source = r"
 from typing import List, Dict, Optional
 
 def process(items: List[str], mapping: Dict[str, int], user: Optional[User]):
     pass
-"#;
+";
 
     let staging = build_staging_graph(source, "test.py");
 
@@ -564,14 +564,14 @@ def forward() -> "User":
 
 #[test]
 fn test_method_parameter_scope_qualification() {
-    let source = r#"
+    let source = r"
 class Service:
     def method1(self, x: int):
         pass
 
     def method2(self, x: str):
         pass
-"#;
+";
 
     let staging = build_staging_graph(source, "test.py");
 
@@ -610,7 +610,7 @@ def func2(x: float):
 
 #[test]
 fn test_comprehensive_reference_edge_coverage() {
-    let source = r#"
+    let source = r"
 def func(x: int, y: str) -> bool:
     result: bool = x > 0
     return result
@@ -620,7 +620,7 @@ class MyClass:
 
     def method(self, param: int):
         local: int = param
-"#;
+";
 
     let staging = build_staging_graph(source, "test.py");
 

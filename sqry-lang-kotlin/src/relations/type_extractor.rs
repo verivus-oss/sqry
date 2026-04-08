@@ -394,6 +394,7 @@ mod tests {
         let root = tree.root_node();
 
         // Helper to recursively find type_reference
+        #[allow(clippy::items_after_statements)] // Items near usage for clarity
         fn find_type_reference(node: tree_sitter::Node) -> Option<tree_sitter::Node> {
             if node.kind() == "type_reference" {
                 return Some(node);

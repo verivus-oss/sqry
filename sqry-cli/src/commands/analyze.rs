@@ -277,7 +277,7 @@ mod tests {
             edge_kind,
             node_count: 10,
             scc_count,
-            non_trivial_count: if scc_count > 1 { 1 } else { 0 },
+            non_trivial_count: u32::from(scc_count > 1),
             max_scc_size: if scc_count > 1 { 3 } else { 1 },
             node_to_scc: vec![0; 10],
             scc_offsets: vec![0, 10],

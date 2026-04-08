@@ -777,6 +777,7 @@ fn sort_files_deterministic(files: &mut [FileGroup]) {
 
 /// Estimate tokens for a code snippet
 /// Uses ~4 chars per token approximation with 1.2x code adjustment
+#[allow(clippy::float_cmp)] // Approximate threshold comparison
 pub fn estimate_tokens(content: &str) -> u64 {
     if content.is_empty() {
         return 0;
@@ -792,6 +793,7 @@ mod tests {
     use super::round_relevance_score;
 
     #[test]
+    #[allow(clippy::float_cmp)] // Rounding produces exact f64 values for these inputs
     fn round_relevance_score_stabilizes_serialized_output() {
         assert_eq!(round_relevance_score(0.923_076_923_076_923_2), 0.923);
         assert_eq!(round_relevance_score(0.980_769_230_769_230_8), 0.981);

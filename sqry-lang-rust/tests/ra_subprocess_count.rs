@@ -92,6 +92,7 @@ echo "rust-analyzer 1.85.0 (fake)"
         perms.set_mode(0o755);
         std::fs::set_permissions(&shim_path, perms).unwrap();
 
+        #[allow(clippy::used_underscore_binding)] // Underscore prefix in test variable
         _guard.prepend(&shim_dir);
 
         // Build graph for multiple files using SAME builder
@@ -137,6 +138,7 @@ echo "rust-analyzer 1.85.0 (fake)"
     /// trigger its own subprocess spawn (but still only once per builder).
     #[test]
     #[serial]
+    #[allow(clippy::used_underscore_binding)] // Underscore prefix pattern
     fn test_cloned_builders_separate_subprocess_calls() {
         use tempfile::tempdir;
 

@@ -12,9 +12,10 @@ use preprocess::preprocess_content;
 use sqry_core::ast::{Scope, ScopeId, link_nested_scopes};
 use sqry_core::plugin::LanguageMetadata;
 use sqry_core::plugin::LanguagePlugin;
-use sqry_core::plugin::error::{ParseError, ScopeError};
+use sqry_core::plugin::error::ScopeError;
+use std::borrow::Cow;
 use std::path::Path;
-use tree_sitter::{Language, Node, Parser, Tree};
+use tree_sitter::{Language, Node, Tree};
 
 const LANGUAGE_ID: &str = "haskell";
 const LANGUAGE_NAME: &str = "Haskell";
@@ -61,9 +62,8 @@ impl LanguagePlugin for HaskellPlugin {
         tree_sitter_haskell::LANGUAGE.into()
     }
 
-    fn parse_ast(&self, content: &[u8]) -> Result<Tree, ParseError> {
-        let processed = preprocess_content(content);
-        parse_processed(processed.as_ref())
+    fn preprocess<'a>(&self, content: &'a [u8]) -> Cow<'a, [u8]> {
+        preprocess_content(content)
     }
 
     fn extract_scopes(
@@ -72,7 +72,7 @@ impl LanguagePlugin for HaskellPlugin {
         content: &[u8],
         file_path: &Path,
     ) -> Result<Vec<Scope>, ScopeError> {
-        let processed = preprocess_content(content);
+        let processed = self.preprocess(content);
         Ok(extract_haskell_scopes(tree, processed.as_ref(), file_path))
     }
 
@@ -185,16 +185,6 @@ fn parse_module_name_from_text(text: &str) -> Option<String> {
         }
     }
     None
-}
-
-fn parse_processed(content: &[u8]) -> Result<Tree, ParseError> {
-    let mut parser = Parser::new();
-    parser
-        .set_language(&tree_sitter_haskell::LANGUAGE.into())
-        .map_err(|err| ParseError::LanguageSetFailed(err.to_string()))?;
-    parser
-        .parse(content, None)
-        .ok_or(ParseError::TreeSitterFailed)
 }
 
 #[cfg(test)]

@@ -290,11 +290,11 @@ mod tests {
 
     #[test]
     fn test_parse_jsdoc_tags() {
-        let jsdoc = r#"/**
+        let jsdoc = r"/**
          * @param {string} name
          * @param {number} age
          * @returns {User}
-         */"#;
+         */";
 
         let tags = parse_jsdoc_tags(jsdoc);
         assert_eq!(tags.params.len(), 2);

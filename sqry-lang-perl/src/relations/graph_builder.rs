@@ -9,7 +9,6 @@
 //!
 //! Design: -graph-language-expansion-phase5A (Section: Perl `GraphBuilder`)
 
-use crate::preprocess::preprocess_content;
 use sqry_core::graph::unified::StagingGraph;
 use sqry_core::graph::unified::build::GraphBuildHelper;
 use sqry_core::graph::unified::node::NodeId;
@@ -35,8 +34,6 @@ impl GraphBuilder for PerlGraphBuilder {
         file: &Path,
         staging: &mut StagingGraph,
     ) -> GraphResult<()> {
-        let processed = preprocess_content(content);
-        let content = processed.as_ref();
         let mut helper = GraphBuildHelper::new(staging, file, Language::Perl);
 
         // Pass 1: Extract package ranges
@@ -888,6 +885,7 @@ sub f2 {
         let source = r"my $anon = sub { return 42; };";
         let tree = parse_perl(source);
 
+        #[allow(clippy::items_after_statements)] // Const defined near usage for clarity
         fn print_tree(node: tree_sitter::Node, content: &[u8], indent: usize) {
             let kind = node.kind();
             let text = node.utf8_text(content).unwrap_or("<error>");
@@ -1187,11 +1185,11 @@ mod active_tests {
 
     #[test]
     fn test_extracts_use_statement() {
-        let source = r#"
+        let source = r"
 use strict;
 use warnings;
 use Data::Dumper;
-"#;
+";
 
         let tree = parse_perl(source);
         let mut staging = StagingGraph::new();
@@ -1232,10 +1230,10 @@ require "another_module.pl";
 
     #[test]
     fn test_extracts_require_module() {
-        let source = r#"
+        let source = r"
 require My::Module;
 require Another::Nested::Module;
-"#;
+";
 
         let tree = parse_perl(source);
         let mut staging = StagingGraph::new();
@@ -1256,10 +1254,10 @@ require Another::Nested::Module;
 
     #[test]
     fn test_extracts_use_with_import_list() {
-        let source = r#"
+        let source = r"
 use Module::Name qw(func1 func2);
 use Exporter qw(import);
-"#;
+";
 
         let tree = parse_perl(source);
         let mut staging = StagingGraph::new();
@@ -1280,13 +1278,13 @@ use Exporter qw(import);
 
     #[test]
     fn test_extracts_mixed_imports() {
-        let source = r#"
+        let source = r"
 use strict;
 use warnings;
 require 'utils.pm';
 use Data::Dumper;
 require Config;
-"#;
+";
 
         let tree = parse_perl(source);
         let mut staging = StagingGraph::new();
@@ -1307,7 +1305,7 @@ require Config;
 
     #[test]
     fn test_extracts_function_calls() {
-        let source = r#"
+        let source = r"
 package MyApp;
 
 sub caller_func {
@@ -1323,7 +1321,7 @@ sub another_func {
     my ($a, $b, $c) = @_;
     return $a + $b + $c;
 }
-"#;
+";
 
         let tree = parse_perl(source);
         let mut staging = StagingGraph::new();

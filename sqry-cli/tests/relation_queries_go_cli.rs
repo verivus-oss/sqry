@@ -11,7 +11,7 @@
 //!
 //! ## Known Issues
 //! - Function calls within anonymous functions/closures are not extracted
-//! - Affects: cli_go_goroutines (calls within go func() literals)
+//! - Affects: `cli_go_goroutines` (calls within go `func()` literals)
 
 mod common;
 use common::sqry_bin;
@@ -103,7 +103,7 @@ const APIVersion = "1.0.0"
 fn cli_go_exports_interfaces() {
     let project = TempDir::new().unwrap();
 
-    let go_code = r#"
+    let go_code = r"
 package main
 
 // Repository defines data access interface
@@ -122,7 +122,7 @@ func (r *UserRepository) Save(item interface{}) error {
 func (r *UserRepository) FindByID(id int) (interface{}, error) {
     return nil, nil
 }
-"#;
+";
     std::fs::write(project.path().join("repository.go"), go_code).unwrap();
 
     Command::new(sqry_bin())
@@ -198,7 +198,7 @@ func main() {
 fn cli_go_callers_method_calls() {
     let project = TempDir::new().unwrap();
 
-    let go_code = r#"
+    let go_code = r"
 package main
 
 type DataService struct{}
@@ -224,7 +224,7 @@ func main() {
     service := &DataService{}
     service.Process()
 }
-"#;
+";
     std::fs::write(project.path().join("service.go"), go_code).unwrap();
 
     Command::new(sqry_bin())

@@ -25,7 +25,11 @@ fn copy_fixture_dir(relative: &str) -> TempDir {
     let binding = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let root = binding.parent().expect("workspace root");
     let source = root.join(relative);
-    assert!(source.exists(), "fixture directory {source:?} not found");
+    assert!(
+        source.exists(),
+        "fixture directory {} not found",
+        source.display()
+    );
 
     let temp = TempDir::new().expect("create temp dir");
     copy_dir_all(&source, temp.path()).expect("copy fixture into temp dir");

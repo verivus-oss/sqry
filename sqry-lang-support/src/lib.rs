@@ -555,10 +555,12 @@ pub mod relations {
             use sqry_core::relations::{CallIdentityBuilder, CallIdentityKind};
 
             #[test]
+            #[allow(clippy::similar_names)] // Domain variable naming is intentional
             fn builder_sets_identity_and_reason() {
                 let caller = CallIdentityBuilder::new("handle", CallIdentityKind::Instance)
                     .with_namespace(["Controller"])
                     .build();
+                #[allow(clippy::similar_names)] // caller/callee naming is intentional
                 let callee = CallIdentityBuilder::new("find", CallIdentityKind::Instance)
                     .with_namespace(["Service"])
                     .build();

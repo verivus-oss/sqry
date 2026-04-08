@@ -171,7 +171,10 @@ impl IntentClassifier {
             .any(|input| input.name() == "token_type_ids");
         tracing::debug!(
             "Model inputs: {:?}, has_token_type_ids: {has_token_type_ids}",
-            model_inputs.iter().map(|i| i.name()).collect::<Vec<_>>()
+            model_inputs
+                .iter()
+                .map(ort::value::Outlet::name)
+                .collect::<Vec<_>>()
         );
 
         // Load tokenizer

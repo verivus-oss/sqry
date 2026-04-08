@@ -563,7 +563,7 @@ fn bar() {
                 assert!(!matches.is_empty());
                 assert_eq!(mode, SearchModeUsed::TextOnly);
             }
-            _ => panic!("Expected Text results"),
+            SearchResults::Semantic { .. } => panic!("Expected Text results"),
         }
     }
 

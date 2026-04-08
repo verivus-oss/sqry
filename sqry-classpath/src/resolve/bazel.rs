@@ -34,6 +34,7 @@ const COURSIER_CACHE_REL: &str = ".cache/coursier/v1";
 /// 2. Parse output for JAR paths in `bazel-out/` and external repository cache
 /// 3. Try `maven_install.json` for coordinates mapping
 /// 4. On failure, fall back to cache
+#[allow(clippy::missing_errors_doc)] // Internal helper
 pub fn resolve_bazel_classpath(config: &ResolveConfig) -> ClasspathResult<Vec<ResolvedClasspath>> {
     info!(
         "Resolving Bazel classpath in {}",
@@ -311,6 +312,7 @@ fn find_source_jar(jar_path: &Path) -> Option<PathBuf> {
 ///
 /// In Coursier cache, source JARs live at the same path but with `-sources`
 /// appended before `.jar`.
+#[allow(clippy::case_sensitive_file_extension_comparisons)] // Known file extensions
 fn find_coursier_source_jar(jar_path: &Path) -> Option<PathBuf> {
     let path_str = jar_path.to_str()?;
     if path_str.ends_with(".jar") && !path_str.ends_with("-sources.jar") {
@@ -417,8 +419,7 @@ fn run_command_with_timeout(
 fn infer_module_name(project_root: &Path) -> String {
     project_root
         .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "root".to_string())
+        .map_or_else(|| "root".to_string(), |n| n.to_string_lossy().to_string())
 }
 
 /// Return the default Coursier cache directory.

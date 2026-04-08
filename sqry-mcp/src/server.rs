@@ -71,6 +71,16 @@ impl SqryServer {
     /// Create a new `SqryServer` with the given feature flags and default timeout.
     pub fn new(feature_flags: FeatureFlags) -> Self {
         let tool_router = Self::filtered_tool_router(&feature_flags);
+        // Set manifest tool count and names from the filtered tool registry
+        let tool_list = tool_router.list_all();
+        #[allow(clippy::cast_possible_truncation)] // Server config values fit in target type
+        resources::set_tool_count(tool_list.len() as u32);
+        resources::set_tool_names(
+            tool_list
+                .iter()
+                .map(|t| t.name.as_ref().to_string())
+                .collect(),
+        );
         Self {
             feature_flags,
             timeout_ms: 60_000,
@@ -91,6 +101,16 @@ impl SqryServer {
         redactor: Option<Arc<Redactor>>,
     ) -> Self {
         let tool_router = Self::filtered_tool_router(&feature_flags);
+        // Set manifest tool count and names from the filtered tool registry
+        let tool_list = tool_router.list_all();
+        #[allow(clippy::cast_possible_truncation)] // Server config values fit in target type
+        resources::set_tool_count(tool_list.len() as u32);
+        resources::set_tool_names(
+            tool_list
+                .iter()
+                .map(|t| t.name.as_ref().to_string())
+                .collect(),
+        );
         Self {
             feature_flags,
             timeout_ms,
@@ -1131,6 +1151,9 @@ impl ServerHandler for SqryServer {
                  - Natural language: sqry_ask\n\
                  - Find similar: search_similar\n\
                  - Explain symbol context: explain_code\n\n\
+                 The `filters` parameter on semantic_search/hierarchical_search is a JSON object \
+                 (e.g., {\"language\":[\"rust\"]}), not a string. \
+                 For string-style predicates like `lang:rust`, use the `query` parameter.\n\n\
                  Detailed docs available as resources: \
                  sqry://docs/tool-guide, sqry://docs/query-syntax, \
                  sqry://docs/patterns, sqry://docs/architecture"

@@ -1,6 +1,6 @@
-//! TypeOf and Reference edge tests for Oracle PL/SQL plugin.
+//! `TypeOf` and Reference edge tests for Oracle PL/SQL plugin.
 //!
-//! Tests TypeOf edges (full type signatures) and Reference edges (nested type names)
+//! Tests `TypeOf` edges (full type signatures) and Reference edges (nested type names)
 //! for procedure parameters, function return types, variable declarations,
 //! `%TYPE`/`%ROWTYPE` references, and user-defined types.
 
@@ -121,7 +121,7 @@ fn collect_reference_edges(staging: &StagingGraph) -> Vec<(String, String)> {
     result
 }
 
-/// Count TypeOf edges in the staging graph.
+/// Count `TypeOf` edges in the staging graph.
 fn count_typeof_edges(staging: &StagingGraph) -> usize {
     staging
         .operations()
@@ -152,14 +152,14 @@ fn find_node(staging: &StagingGraph, name: &str, kind: NodeKind) -> bool {
 
 #[test]
 fn test_procedure_parameter_builtin_types() {
-    let source = br#"
+    let source = br"
 CREATE OR REPLACE PACKAGE BODY test_pkg AS
   PROCEDURE hire_employee(p_name VARCHAR2, p_salary NUMBER, p_hire_date DATE) IS
   BEGIN
     NULL;
   END hire_employee;
 END test_pkg;
-"#;
+";
 
     let staging = build_staging(source);
 
@@ -195,14 +195,14 @@ END test_pkg;
 
 #[test]
 fn test_procedure_parameter_in_out_modes() {
-    let source = br#"
+    let source = br"
 CREATE OR REPLACE PACKAGE BODY test_pkg AS
   PROCEDURE update_record(p_id IN NUMBER, p_name IN OUT VARCHAR2, p_result OUT BOOLEAN) IS
   BEGIN
     NULL;
   END update_record;
 END test_pkg;
-"#;
+";
 
     let staging = build_staging(source);
 
@@ -229,14 +229,14 @@ END test_pkg;
 
 #[test]
 fn test_function_return_type() {
-    let source = br#"
+    let source = br"
 CREATE OR REPLACE PACKAGE BODY test_pkg AS
   FUNCTION get_salary(p_emp_id NUMBER) RETURN NUMBER IS
   BEGIN
     RETURN 0;
   END get_salary;
 END test_pkg;
-"#;
+";
 
     let staging = build_staging(source);
 
@@ -256,14 +256,14 @@ END test_pkg;
 
 #[test]
 fn test_function_return_type_varchar2() {
-    let source = br#"
+    let source = br"
 CREATE OR REPLACE PACKAGE BODY test_pkg AS
   FUNCTION get_name(p_id NUMBER) RETURN VARCHAR2 IS
   BEGIN
     RETURN 'test';
   END get_name;
 END test_pkg;
-"#;
+";
 
     let staging = build_staging(source);
 
@@ -282,7 +282,7 @@ END test_pkg;
 
 #[test]
 fn test_variable_declarations_builtin_types() {
-    let source = br#"
+    let source = br"
 CREATE OR REPLACE PACKAGE BODY test_pkg AS
   PROCEDURE do_work IS
     v_name VARCHAR2(100);
@@ -292,7 +292,7 @@ CREATE OR REPLACE PACKAGE BODY test_pkg AS
     NULL;
   END do_work;
 END test_pkg;
-"#;
+";
 
     let staging = build_staging(source);
 
@@ -315,7 +315,7 @@ END test_pkg;
 
 #[test]
 fn test_variable_declaration_with_default() {
-    let source = br#"
+    let source = br"
 CREATE OR REPLACE PACKAGE BODY test_pkg AS
   PROCEDURE do_work IS
     v_count NUMBER := 0;
@@ -324,7 +324,7 @@ CREATE OR REPLACE PACKAGE BODY test_pkg AS
     NULL;
   END do_work;
 END test_pkg;
-"#;
+";
 
     let staging = build_staging(source);
 
@@ -344,7 +344,7 @@ END test_pkg;
 
 #[test]
 fn test_pct_type_variable_declaration() {
-    let source = br#"
+    let source = br"
 CREATE OR REPLACE PACKAGE BODY test_pkg AS
   PROCEDURE do_work IS
     v_name employees.name%TYPE;
@@ -352,7 +352,7 @@ CREATE OR REPLACE PACKAGE BODY test_pkg AS
     NULL;
   END do_work;
 END test_pkg;
-"#;
+";
 
     let staging = build_staging(source);
 
@@ -376,7 +376,7 @@ END test_pkg;
 
 #[test]
 fn test_pct_rowtype_variable_declaration() {
-    let source = br#"
+    let source = br"
 CREATE OR REPLACE PACKAGE BODY test_pkg AS
   PROCEDURE do_work IS
     v_emp employees%ROWTYPE;
@@ -384,7 +384,7 @@ CREATE OR REPLACE PACKAGE BODY test_pkg AS
     NULL;
   END do_work;
 END test_pkg;
-"#;
+";
 
     let staging = build_staging(source);
 
@@ -412,7 +412,7 @@ END test_pkg;
 
 #[test]
 fn test_user_defined_type_generates_references() {
-    let source = br#"
+    let source = br"
 CREATE OR REPLACE PACKAGE BODY test_pkg AS
   PROCEDURE do_work IS
     v_rec employee_record;
@@ -420,7 +420,7 @@ CREATE OR REPLACE PACKAGE BODY test_pkg AS
     NULL;
   END do_work;
 END test_pkg;
-"#;
+";
 
     let staging = build_staging(source);
 
@@ -444,14 +444,14 @@ END test_pkg;
 
 #[test]
 fn test_user_defined_type_in_parameter() {
-    let source = br#"
+    let source = br"
 CREATE OR REPLACE PACKAGE BODY test_pkg AS
   PROCEDURE do_work(p_rec IN employee_record) IS
   BEGIN
     NULL;
   END do_work;
 END test_pkg;
-"#;
+";
 
     let staging = build_staging(source);
 
@@ -479,14 +479,14 @@ END test_pkg;
 
 #[test]
 fn test_multiple_parameters() {
-    let source = br#"
+    let source = br"
 CREATE OR REPLACE PACKAGE BODY test_pkg AS
   PROCEDURE process(p_id NUMBER, p_name VARCHAR2, p_date DATE, p_active BOOLEAN) IS
   BEGIN
     NULL;
   END process;
 END test_pkg;
-"#;
+";
 
     let staging = build_staging(source);
 
@@ -506,7 +506,7 @@ END test_pkg;
 
 #[test]
 fn test_typeof_coexists_with_table_edges() {
-    let source = br#"
+    let source = br"
 CREATE OR REPLACE PACKAGE BODY test_pkg AS
   PROCEDURE process_employee(p_id NUMBER, p_name VARCHAR2) IS
     v_salary NUMBER;
@@ -515,7 +515,7 @@ CREATE OR REPLACE PACKAGE BODY test_pkg AS
     INSERT INTO audit_log VALUES (p_id, SYSDATE);
   END process_employee;
 END test_pkg;
-"#;
+";
 
     let staging = build_staging(source);
 
@@ -558,7 +558,7 @@ END test_pkg;
 
 #[test]
 fn test_typeof_coexists_with_call_edges() {
-    let source = br#"
+    let source = br"
 CREATE OR REPLACE PACKAGE BODY test_pkg AS
   FUNCTION get_count RETURN NUMBER IS
   BEGIN
@@ -570,7 +570,7 @@ CREATE OR REPLACE PACKAGE BODY test_pkg AS
     NULL;
   END do_work;
 END test_pkg;
-"#;
+";
 
     let staging = build_staging(source);
 
@@ -598,14 +598,14 @@ END test_pkg;
 
 #[test]
 fn test_pct_type_in_parameter() {
-    let source = br#"
+    let source = br"
 CREATE OR REPLACE PACKAGE BODY test_pkg AS
   PROCEDURE do_work(p_name IN employees.name%TYPE) IS
   BEGIN
     NULL;
   END do_work;
 END test_pkg;
-"#;
+";
 
     let staging = build_staging(source);
 
@@ -629,7 +629,7 @@ END test_pkg;
 
 #[test]
 fn test_constant_variable_declaration() {
-    let source = br#"
+    let source = br"
 CREATE OR REPLACE PACKAGE BODY test_pkg AS
   PROCEDURE do_work IS
     c_max CONSTANT NUMBER := 100;
@@ -637,7 +637,7 @@ CREATE OR REPLACE PACKAGE BODY test_pkg AS
     NULL;
   END do_work;
 END test_pkg;
-"#;
+";
 
     let staging = build_staging(source);
 
@@ -652,7 +652,7 @@ END test_pkg;
 
 #[test]
 fn test_multiline_parameter_list() {
-    let source = br#"
+    let source = br"
 CREATE OR REPLACE PACKAGE BODY test_pkg AS
   PROCEDURE hire_employee(
     p_name VARCHAR2,
@@ -663,7 +663,7 @@ CREATE OR REPLACE PACKAGE BODY test_pkg AS
     NULL;
   END hire_employee;
 END test_pkg;
-"#;
+";
 
     let staging = build_staging(source);
 
@@ -686,14 +686,14 @@ END test_pkg;
 
 #[test]
 fn test_empty_source_no_typeof_edges() {
-    let source = br#"
+    let source = br"
 CREATE OR REPLACE PACKAGE BODY test_pkg AS
   PROCEDURE do_nothing IS
   BEGIN
     NULL;
   END do_nothing;
 END test_pkg;
-"#;
+";
 
     let staging = build_staging(source);
 
@@ -772,14 +772,14 @@ END;
 fn test_plsql_reference_dedup_per_callable() {
     // Two parameters with the same user-defined type should produce only ONE References edge
     // per callable, not two.
-    let source = br#"
+    let source = br"
 CREATE OR REPLACE PACKAGE BODY test_pkg AS
   PROCEDURE process_pair(p_first employee_record, p_second employee_record) IS
   BEGIN
     NULL;
   END process_pair;
 END test_pkg;
-"#;
+";
     let staging = build_staging(source);
 
     // Should have 2 TypeOf(Parameter) edges (one per param)

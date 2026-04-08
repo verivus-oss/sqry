@@ -109,7 +109,7 @@ fn build_graph_from_source(source: &str) -> StagingGraph {
 #[test]
 fn test_simple_class() {
     let staging = build_graph_from_source(
-        r#"
+        r"
 class MyClass {
 public:
     void publicMethod() {}
@@ -118,7 +118,7 @@ private:
 protected:
     void protectedMethod() {}
 };
-"#,
+",
     );
 
     assert!(
@@ -130,7 +130,7 @@ protected:
 #[test]
 fn test_virtual_methods_and_inheritance() {
     let staging = build_graph_from_source(
-        r#"
+        r"
 class Base {
 public:
     virtual void process() {}
@@ -142,7 +142,7 @@ public:
     void process() override {}
     int compute() const override final { return 1; }
 };
-"#,
+",
     );
 
     assert!(
@@ -186,7 +186,7 @@ public:
 #[test]
 fn test_template_class() {
     let staging = build_graph_from_source(
-        r#"
+        r"
 template <typename T>
 class Container {
 public:
@@ -199,7 +199,7 @@ class Map {
 public:
     void insert(K key, V value) {}
 };
-"#,
+",
     );
 
     assert!(
@@ -215,7 +215,7 @@ public:
 #[test]
 fn test_template_function() {
     let staging = build_graph_from_source(
-        r#"
+        r"
 template <typename T>
 T max(T a, T b) {
     return a > b ? a : b;
@@ -227,7 +227,7 @@ void swap(T& a, T& b) {
     a = b;
     b = temp;
 }
-"#,
+",
     );
 
     assert!(
@@ -243,7 +243,7 @@ void swap(T& a, T& b) {
 #[test]
 fn test_namespace_qualified_names() {
     let staging = build_graph_from_source(
-        r#"
+        r"
 namespace utils {
     void helper() {}
 
@@ -258,7 +258,7 @@ namespace net {
         void open() {}
     };
 }
-"#,
+",
     );
 
     assert!(
@@ -278,13 +278,13 @@ namespace net {
 #[test]
 fn test_static_methods() {
     let staging = build_graph_from_source(
-        r#"
+        r"
 class Utility {
 public:
     static int getValue() { return 42; }
     static void setValue(int val) { (void)val; }
 };
-"#,
+",
     );
 
     let get_value = find_node_entry(&staging, "Utility::getValue", NodeKind::Method)
@@ -299,7 +299,7 @@ public:
 #[test]
 fn test_inline_functions() {
     let staging = build_graph_from_source(
-        r#"
+        r"
 inline int square(int x) {
     return x * x;
 }
@@ -314,7 +314,7 @@ public:
         return a + b;
     }
 };
-"#,
+",
     );
 
     assert!(
@@ -334,7 +334,7 @@ public:
 #[test]
 fn test_enum_types() {
     let staging = build_graph_from_source(
-        r#"
+        r"
 enum Color {
     RED,
     GREEN,
@@ -346,7 +346,7 @@ enum class Status {
     FAILURE,
     PENDING
 };
-"#,
+",
     );
 
     assert!(
@@ -362,13 +362,13 @@ enum class Status {
 #[test]
 fn test_enum_export_edge() {
     let staging = build_graph_from_source(
-        r#"
+        r"
 enum Color {
     RED,
     GREEN,
     BLUE
 };
-"#,
+",
     );
 
     let enum_id =
@@ -390,7 +390,7 @@ enum Color {
 #[test]
 fn test_struct_definition() {
     let staging = build_graph_from_source(
-        r#"
+        r"
 struct Point {
     int x;
     int y;
@@ -400,7 +400,7 @@ struct Node {
     int data;
     Node* next;
 };
-"#,
+",
     );
 
     assert!(
@@ -416,7 +416,7 @@ struct Node {
 #[test]
 fn test_constructor_destructor() {
     let staging = build_graph_from_source(
-        r#"
+        r"
 class Resource {
 public:
     Resource();
@@ -429,7 +429,7 @@ private:
 Resource::Resource() : id_(0) {}
 Resource::Resource(int id) : id_(id) {}
 Resource::~Resource() {}
-"#,
+",
     );
 
     assert!(
@@ -449,7 +449,7 @@ Resource::~Resource() {}
 #[test]
 fn test_complex_cpp_features() {
     let staging = build_graph_from_source(
-        r#"
+        r"
 namespace shapes {
     class Shape {
     public:
@@ -474,7 +474,7 @@ namespace shapes {
         T* data;
     };
 }
-"#,
+",
     );
 
     assert!(
@@ -523,7 +523,7 @@ fn debug_constructor() {
     use std::path::Path;
     use tree_sitter::Parser;
 
-    let source = r#"
+    let source = r"
 class Resource {
 public:
     Resource();
@@ -532,7 +532,7 @@ public:
 
 Resource::Resource() {}
 Resource::~Resource() {}
-"#;
+";
 
     let mut parser = Parser::new();
     parser

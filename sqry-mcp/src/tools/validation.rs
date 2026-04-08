@@ -92,7 +92,7 @@ pub struct ShowDependenciesArgs {
 pub struct ExportGraphArgs {
     pub file_path: Option<String>,
     pub symbol_name: Option<String>,
-    /// Multiple seed symbol names (alternative to symbol_name for multi-seed exports)
+    /// Multiple seed symbol names (alternative to `symbol_name` for multi-seed exports)
     pub symbols: Vec<String>,
     pub path: String,
     pub format: String,
@@ -366,7 +366,7 @@ pub fn validate_semantic_search_args(args: &Value) -> Result<SemanticSearchArgs>
 
     let include_classpath = args
         .get("include_classpath")
-        .and_then(|v| v.as_bool())
+        .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
 
     Ok(SemanticSearchArgs {
@@ -566,7 +566,7 @@ pub fn validate_export_graph_args(args: &Value) -> Result<ExportGraphArgs> {
         .and_then(|v| v.as_array())
         .map(|arr| {
             arr.iter()
-                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .filter_map(|v| v.as_str().map(std::string::ToString::to_string))
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
@@ -1074,7 +1074,11 @@ fn parse_semantic_diff_filters(value: Option<&Value>) -> Result<SemanticDiffFilt
     let Some(val) = value else {
         return Ok(SemanticDiffFilters::default());
     };
-    ensure!(val.is_object(), "filters must be an object");
+    ensure!(
+        val.is_object(),
+        "filters must be a JSON object, not a string. \
+         Pass a structured object like {{\"language\":[\"rust\"]}}."
+    );
     let mut filters = SemanticDiffFilters::default();
 
     if let Some(change_types_val) = val.get("change_types") {
@@ -1122,7 +1126,12 @@ fn parse_filters(value: Option<&Value>, root: &Value) -> Result<SearchFilters> {
     let Some(val) = value else {
         return Ok(SearchFilters::default());
     };
-    ensure!(val.is_object(), "filters must be an object");
+    ensure!(
+        val.is_object(),
+        "filters must be a JSON object (e.g., {{\"language\":[\"rust\"]}}), \
+         not a string. For string-style filtering, use query predicates \
+         like 'lang:rust' in the `query` parameter instead."
+    );
     let mut filters = SearchFilters::default();
 
     if let Some(lang_val) = val.get("language") {
@@ -2182,6 +2191,57 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("execute must be a boolean"),
+        );
+    }
+
+    // ========================================================================
+    // Filter error message tests (U08)
+    // ========================================================================
+
+    #[test]
+    fn string_filter_produces_helpful_error() {
+        let args = json!({
+            "query": "kind:function",
+            "filters": "lang:rust"
+        });
+        let result = validate_semantic_search_args(&args);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("JSON object"),
+            "Error should mention 'JSON object', got: {msg}"
+        );
+        assert!(
+            msg.contains("query"),
+            "Error should reference the `query` parameter, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn object_filter_with_query_predicate_works_together() {
+        let args = json!({
+            "query": "kind:function vis:public",
+            "filters": {
+                "language": ["rust"]
+            }
+        });
+        let parsed = validate_semantic_search_args(&args).unwrap();
+        assert_eq!(parsed.query, "kind:function vis:public");
+        assert_eq!(parsed.filters.languages, vec!["rust"]);
+    }
+
+    #[test]
+    fn hierarchical_string_filter_produces_helpful_error() {
+        let args = json!({
+            "query": "kind:class",
+            "filters": "lang:typescript"
+        });
+        let result = validate_hierarchical_search_args(&args);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("JSON object"),
+            "Error should mention 'JSON object', got: {msg}"
         );
     }
 }

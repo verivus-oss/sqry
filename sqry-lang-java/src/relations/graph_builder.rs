@@ -296,6 +296,8 @@ fn extract_java_contexts(
 
                     // Handle nested classes (recursively)
                     for i in 0..body_node.child_count() {
+                        #[allow(clippy::cast_possible_truncation)]
+                        // Graph storage: node/edge index counts fit in u32
                         if let Some(child) = body_node.child(i as u32) {
                             extract_java_contexts(
                                 child,
@@ -323,6 +325,8 @@ fn extract_java_contexts(
 
     // Continue traversing for top-level declarations
     for i in 0..node.child_count() {
+        #[allow(clippy::cast_possible_truncation)]
+        // Graph storage: node/edge index counts fit in u32
         if let Some(child) = node.child(i as u32) {
             extract_java_contexts(
                 child,
@@ -356,6 +360,8 @@ fn extract_methods_from_body(
     _guard: &mut sqry_core::query::security::RecursionGuard,
 ) -> Result<(), sqry_core::query::security::RecursionError> {
     for i in 0..body_node.child_count() {
+        #[allow(clippy::cast_possible_truncation)]
+        // Graph storage: node/edge index counts fit in u32
         if let Some(child) = body_node.child(i as u32) {
             match child.kind() {
                 "method_declaration" => {
@@ -544,6 +550,8 @@ fn walk_tree_for_edges(
 
     // Recurse to children
     for i in 0..node.child_count() {
+        #[allow(clippy::cast_possible_truncation)]
+        // Graph storage: node/edge index counts fit in u32
         if let Some(child) = node.child(i as u32) {
             walk_tree_for_edges(child, content, ast_graph, scope_tree, helper, tree)?;
         }
@@ -588,6 +596,8 @@ fn handle_type_declaration(
         process_class_member_exports(body_node, content, &qualified_name, helper, is_interface);
 
         for i in 0..body_node.child_count() {
+            #[allow(clippy::cast_possible_truncation)]
+            // Graph storage: node/edge index counts fit in u32
             if let Some(child) = body_node.child(i as u32) {
                 walk_tree_for_edges(child, content, ast_graph, scope_tree, helper, tree)?;
             }
@@ -2712,6 +2722,8 @@ fn process_class_member_exports(
     is_interface: bool,
 ) {
     for i in 0..body_node.child_count() {
+        #[allow(clippy::cast_possible_truncation)]
+        // Graph storage: node/edge index counts fit in u32
         if let Some(child) = body_node.child(i as u32) {
             match child.kind() {
                 "method_declaration" => {

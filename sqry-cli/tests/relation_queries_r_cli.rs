@@ -3,7 +3,7 @@
 //! Tests that relation queries work end-to-end through the CLI for R:
 //! - Callers queries (function calls, method calls)
 //! - Callees queries (what a function calls)
-//! - Imports queries (library(), require(), package::function)
+//! - Imports queries (`library()`, `require()`, `package::function`)
 //!
 //! Note: Exports in R are handled via NAMESPACE files which don't have file
 //! extensions and aren't currently indexed. Export tracking is a future enhancement.
@@ -23,7 +23,7 @@ use tempfile::TempDir;
 fn cli_r_imports() {
     let project = TempDir::new().unwrap();
 
-    let r_code = r#"
+    let r_code = r"
 library(dplyr)
 library(ggplot2)
 require(tidyr)
@@ -33,7 +33,7 @@ process_data <- function(df) {
     filter(value > 0) %>%
     select(id, value)
 }
-"#;
+";
     std::fs::write(project.path().join("analysis.R"), r_code).unwrap();
 
     Command::new(sqry_bin())
@@ -69,7 +69,7 @@ process_data <- function(df) {
 fn cli_r_callers_function_calls() {
     let project = TempDir::new().unwrap();
 
-    let r_code = r#"
+    let r_code = r"
 validate <- function(x) {
   !is.null(x) && length(x) > 0
 }
@@ -87,7 +87,7 @@ analyze <- function(values) {
   }
   return(0)
 }
-"#;
+";
     std::fs::write(project.path().join("functions.R"), r_code).unwrap();
 
     Command::new(sqry_bin())
@@ -111,7 +111,7 @@ analyze <- function(values) {
 fn cli_r_callers_with_namespace() {
     let project = TempDir::new().unwrap();
 
-    let r_code = r#"
+    let r_code = r"
 calculate <- function(x) {
   dplyr::mutate(x, new_col = value * 2)
 }
@@ -119,7 +119,7 @@ calculate <- function(x) {
 transform <- function(df) {
   dplyr::filter(df, value > 0)
 }
-"#;
+";
     std::fs::write(project.path().join("transform.R"), r_code).unwrap();
 
     Command::new(sqry_bin())

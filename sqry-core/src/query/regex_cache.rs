@@ -42,6 +42,11 @@ impl CompiledRegex {
     /// Returns `false` on standard-regex mismatches.  For `fancy_regex`
     /// patterns, a [`BacktrackLimitExceeded`] error is **propagated** so
     /// callers can distinguish "no match" from "aborted evaluation".
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RegexMatchError::Fancy`] if a `fancy_regex` pattern exceeds
+    /// the backtrack limit during matching.
     pub fn is_match(&self, text: &str) -> Result<bool, RegexMatchError> {
         match self {
             CompiledRegex::Standard(re) => Ok(re.is_match(text)),

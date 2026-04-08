@@ -5,11 +5,11 @@ use tree_sitter::Node;
 #[test]
 fn debug_arguments_structure() {
     let plugin = ElixirPlugin::default();
-    let content = br#"
+    let content = br"
 defmodule Demo do
   def my_func, do: :ok
 end
-"#;
+";
 
     let tree = plugin.parse_ast(content).expect("should parse");
     let root = tree.root_node();
@@ -31,7 +31,7 @@ fn debug_call_node(node: Node<'_>, content: &[u8]) {
         return;
     };
     let target_text = node_text(target, content);
-    eprintln!("\n=== Call to: {} ===", target_text);
+    eprintln!("\n=== Call to: {target_text} ===");
 
     if let Some(args) = node.child_by_field_name("arguments") {
         print_arguments(args, content);
@@ -74,10 +74,10 @@ fn print_do_block(do_block: Node<'_>, content: &[u8]) {
 }
 
 fn print_do_block_call(index: usize, node: Node<'_>, content: &[u8]) {
-    eprintln!("  Call [{}]:", index);
+    eprintln!("  Call [{index}]:");
     if let Some(def_target) = node.child_by_field_name("target") {
         let def_text = node_text(def_target, content);
-        eprintln!("    target: {}", def_text);
+        eprintln!("    target: {def_text}");
     }
     if let Some(def_args) = node.child_by_field_name("arguments") {
         eprintln!("    arguments kind: {}", def_args.kind());

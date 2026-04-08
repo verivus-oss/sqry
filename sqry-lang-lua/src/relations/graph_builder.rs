@@ -174,6 +174,7 @@ fn get_function_visibility(qualified_name: &str) -> Option<&'static str> {
 /// Find the index of a named child in its parent
 fn named_child_index(parent: Node<'_>, target: Node<'_>) -> Option<u32> {
     for i in 0..parent.named_child_count() {
+        #[allow(clippy::cast_possible_truncation)] // tree-sitter child count fits in u32
         if let Some(child) = parent.named_child(i as u32)
             && child.id() == target.id()
         {
@@ -1583,6 +1584,7 @@ fn handle_local_function(
     // Increment lexical depth for nested functions
     state.lexical_depth += 1;
 
+    #[allow(clippy::cast_possible_truncation)] // Graph storage: node/edge index counts fit in u32
     // Recurse into function body
     if let Some(body) = node.named_child(node.named_child_count().saturating_sub(1) as u32) {
         walk_ast(body, content, state)?;
@@ -1668,6 +1670,7 @@ fn handle_function_declaration(
     state.lexical_depth += 1;
 
     // Recurse into function body
+    #[allow(clippy::cast_possible_truncation)] // tree-sitter child count fits in u32
     if let Some(body) = node.named_child(node.named_child_count().saturating_sub(1) as u32) {
         walk_ast(body, content, state)?;
     }
@@ -1772,8 +1775,8 @@ fn handle_function_assignment(
 
     // CRITICAL FIX #5: Increment lexical depth for nested functions
     state.lexical_depth += 1;
-
     // Recurse into function body
+    #[allow(clippy::cast_possible_truncation)] // tree-sitter child count fits in u32
     if let Some(body) = func_def.named_child(func_def.named_child_count().saturating_sub(1) as u32)
     {
         walk_ast(body, content, state)?;

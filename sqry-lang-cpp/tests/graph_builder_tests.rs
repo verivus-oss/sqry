@@ -1,4 +1,4 @@
-//! C++ GraphBuilder tests for import, inheritance, and export edge extraction.
+//! C++ `GraphBuilder` tests for import, inheritance, and export edge extraction.
 //!
 //! Tests the unified graph builder implementation for:
 //! - Import edges (#include directives)
@@ -112,7 +112,7 @@ fn has_export_edge_for(staging: &StagingGraph, symbol_pattern: &str) -> bool {
     })
 }
 
-/// Build a map from StringId to string value from staging operations.
+/// Build a map from `StringId` to string value from staging operations.
 fn build_string_map(staging: &StagingGraph) -> HashMap<StringId, String> {
     staging
         .operations()
@@ -127,7 +127,7 @@ fn build_string_map(staging: &StagingGraph) -> HashMap<StringId, String> {
         .collect()
 }
 
-/// Get node name from NodeEntry using string map.
+/// Get node name from `NodeEntry` using string map.
 fn get_node_name(entry: &NodeEntry, string_map: &HashMap<StringId, String>) -> Option<String> {
     string_map.get(&entry.name).cloned()
 }
@@ -168,8 +168,7 @@ fn has_import_edge_to(staging: &StagingGraph, target_pattern: &str) -> bool {
         {
             node_names
                 .get(target)
-                .map(|name| name.contains(target_pattern))
-                .unwrap_or(false)
+                .is_some_and(|name| name.contains(target_pattern))
         } else {
             false
         }
@@ -360,10 +359,10 @@ void test() {}
 
 #[test]
 fn test_import_edge_structure() {
-    let content = r#"
+    let content = r"
 #include <iostream>
 void test() {}
-"#;
+";
     let tree = parse_cpp(content);
     let mut staging = StagingGraph::new();
     let builder = CppGraphBuilder::new();
@@ -456,7 +455,7 @@ void test() {}
 
 #[test]
 fn test_no_imports_code_only() {
-    let content = r#"
+    let content = r"
 class Foo {
 public:
     void bar() {}
@@ -467,7 +466,7 @@ int main() {
     f.bar();
     return 0;
 }
-"#;
+";
     let tree = parse_cpp(content);
     let mut staging = StagingGraph::new();
     let builder = CppGraphBuilder::new();
@@ -617,7 +616,7 @@ fn test_struct_inheritance() {
 
 #[test]
 fn test_simple_class_inheritance() {
-    let content = r#"
+    let content = r"
 class Parent {
 public:
     virtual void method() {}
@@ -627,7 +626,7 @@ class Child : public Parent {
 public:
     void method() override {}
 };
-"#;
+";
     let tree = parse_cpp(content);
     let mut staging = StagingGraph::new();
     let builder = CppGraphBuilder::new();
@@ -645,7 +644,7 @@ public:
 
 #[test]
 fn test_private_inheritance() {
-    let content = r#"
+    let content = r"
 class Base {
 public:
     void publicMethod() {}
@@ -658,7 +657,7 @@ class DerivedPrivate : private Base {
 class DerivedProtected : protected Base {
     // All public Base members become protected
 };
-"#;
+";
     let tree = parse_cpp(content);
     let mut staging = StagingGraph::new();
     let builder = CppGraphBuilder::new();
@@ -677,7 +676,7 @@ class DerivedProtected : protected Base {
 
 #[test]
 fn test_diamond_inheritance() {
-    let content = r#"
+    let content = r"
 class Base {
 public:
     virtual void method() {}
@@ -697,7 +696,7 @@ class Diamond : public Left, public Right {
 public:
     void diamondMethod() {}
 };
-"#;
+";
     let tree = parse_cpp(content);
     let mut staging = StagingGraph::new();
     let builder = CppGraphBuilder::new();
@@ -716,7 +715,7 @@ public:
 
 #[test]
 fn test_no_inheritance() {
-    let content = r#"
+    let content = r"
 class Standalone {
 public:
     void method() {}
@@ -725,7 +724,7 @@ public:
 struct PlainStruct {
     int value;
 };
-"#;
+";
     let tree = parse_cpp(content);
     let mut staging = StagingGraph::new();
     let builder = CppGraphBuilder::new();
@@ -794,7 +793,7 @@ public:
 
 #[test]
 fn test_namespace_with_inheritance() {
-    let content = r#"
+    let content = r"
 namespace shapes {
     class Shape {
     public:
@@ -811,7 +810,7 @@ namespace shapes {
         double area() override { return 0.0; }
     };
 }
-"#;
+";
     let tree = parse_cpp(content);
     let mut staging = StagingGraph::new();
     let builder = CppGraphBuilder::new();
@@ -831,7 +830,7 @@ namespace shapes {
 
 #[test]
 fn test_virtual_inheritance() {
-    let content = r#"
+    let content = r"
 class Base {
 public:
     int value;
@@ -853,7 +852,7 @@ public:
         value = 42; // Unambiguous due to virtual inheritance
     }
 };
-"#;
+";
     let tree = parse_cpp(content);
     let mut staging = StagingGraph::new();
     let builder = CppGraphBuilder::new();
@@ -872,10 +871,10 @@ public:
 
 #[test]
 fn test_class_nodes_created() {
-    let content = r#"
+    let content = r"
 class Base {};
 class Derived : public Base {};
-"#;
+";
     let tree = parse_cpp(content);
     let mut staging = StagingGraph::new();
     let builder = CppGraphBuilder::new();
@@ -901,7 +900,7 @@ class Derived : public Base {};
 
 // ==================== FFI Edge Tests ====================
 
-/// Helper to count FfiCall edges in staged operations
+/// Helper to count `FfiCall` edges in staged operations
 fn count_ffi_edges(staging: &StagingGraph) -> usize {
     staging
         .operations()
@@ -1093,7 +1092,7 @@ fn count_implements_edges(staging: &StagingGraph) -> usize {
 
 #[test]
 fn test_pure_virtual_interface_implements() {
-    let content = r#"
+    let content = r"
 class IShape {
 public:
     virtual double area() = 0;
@@ -1105,7 +1104,7 @@ public:
     double area() override { return 3.14; }
     double perimeter() override { return 6.28; }
 };
-"#;
+";
     let tree = parse_cpp(content);
     let mut staging = StagingGraph::new();
     let builder = CppGraphBuilder::new();
@@ -1127,7 +1126,7 @@ public:
 
 #[test]
 fn test_multiple_pure_virtual_interfaces() {
-    let content = r#"
+    let content = r"
 class IReadable {
 public:
     virtual void read() = 0;
@@ -1143,7 +1142,7 @@ public:
     void read() override {}
     void write() override {}
 };
-"#;
+";
     let tree = parse_cpp(content);
     let mut staging = StagingGraph::new();
     let builder = CppGraphBuilder::new();
@@ -1162,7 +1161,7 @@ public:
 
 #[test]
 fn test_mixed_inheritance_and_implements() {
-    let content = r#"
+    let content = r"
 class IPlugin {
 public:
     virtual void execute() = 0;
@@ -1177,7 +1176,7 @@ class MyPlugin : public BasePlugin, public IPlugin {
 public:
     void execute() override {}
 };
-"#;
+";
     let tree = parse_cpp(content);
     let mut staging = StagingGraph::new();
     let builder = CppGraphBuilder::new();
@@ -1204,7 +1203,7 @@ public:
 
 #[test]
 fn test_non_pure_virtual_not_interface() {
-    let content = r#"
+    let content = r"
 class Base {
 public:
     virtual void method() {}  // Virtual but NOT pure (has implementation)
@@ -1214,7 +1213,7 @@ class Derived : public Base {
 public:
     void method() override {}
 };
-"#;
+";
     let tree = parse_cpp(content);
     let mut staging = StagingGraph::new();
     let builder = CppGraphBuilder::new();
@@ -1240,7 +1239,7 @@ public:
 
 #[test]
 fn test_struct_implements_interface() {
-    let content = r#"
+    let content = r"
 class ISerializable {
 public:
     virtual void serialize() = 0;
@@ -1250,7 +1249,7 @@ struct Data : public ISerializable {
     int value;
     void serialize() override {}
 };
-"#;
+";
     let tree = parse_cpp(content);
     let mut staging = StagingGraph::new();
     let builder = CppGraphBuilder::new();
@@ -1312,7 +1311,7 @@ public:
 #[test]
 fn test_cpp_specific_headers() {
     // Test C++ standard library headers (no .h extension)
-    let content = r#"
+    let content = r"
 #include <iostream>
 #include <algorithm>
 #include <functional>
@@ -1320,7 +1319,7 @@ fn test_cpp_specific_headers() {
 #include <variant>
 
 void test() {}
-"#;
+";
     let tree = parse_cpp(content);
     let mut staging = StagingGraph::new();
     let builder = CppGraphBuilder::new();
@@ -1364,14 +1363,14 @@ void test() {}
 #[test]
 fn test_c_compat_headers() {
     // Test C compatibility headers (c-prefix versions)
-    let content = r#"
+    let content = r"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <cmath>
 
 void test() {}
-"#;
+";
     let tree = parse_cpp(content);
     let mut staging = StagingGraph::new();
     let builder = CppGraphBuilder::new();
@@ -1537,7 +1536,7 @@ void test() {}
 fn test_conditional_includes_all_extracted() {
     // Test that all includes are extracted regardless of preprocessor conditions
     // (We extract statically, not evaluating preprocessor)
-    let content = r#"
+    let content = r"
 #ifdef _WIN32
 #include <windows.h>
 #else
@@ -1552,7 +1551,7 @@ fn test_conditional_includes_all_extracted() {
 #include <iostream>
 
 void test() {}
-"#;
+";
     let tree = parse_cpp(content);
     let mut staging = StagingGraph::new();
     let builder = CppGraphBuilder::new();
@@ -1593,7 +1592,7 @@ void test() {}
 #[test]
 fn test_template_header_includes() {
     // Test includes typical for template-heavy code
-    let content = r#"
+    let content = r"
 #include <type_traits>
 #include <utility>
 #include <tuple>
@@ -1605,7 +1604,7 @@ class Container {
 };
 
 void test() {}
-"#;
+";
     let tree = parse_cpp(content);
     let mut staging = StagingGraph::new();
     let builder = CppGraphBuilder::new();
@@ -1686,7 +1685,7 @@ fn test_export_file_scope_function() {
 
 #[test]
 fn test_export_file_scope_class() {
-    let source = r#"
+    let source = r"
         class User {
         public:
             std::string getName() const {
@@ -1695,7 +1694,7 @@ fn test_export_file_scope_class() {
         private:
             std::string name;
         };
-    "#;
+    ";
     let tree = parse_cpp(source);
     let mut staging = StagingGraph::new();
     let builder = CppGraphBuilder::new();
@@ -1726,13 +1725,13 @@ fn test_export_file_scope_class() {
 
 #[test]
 fn test_export_namespace_function() {
-    let source = r#"
+    let source = r"
         namespace utils {
             std::string format(const std::string& str) {
                 return str;
             }
         }
-    "#;
+    ";
     let tree = parse_cpp(source);
     let mut staging = StagingGraph::new();
     let builder = CppGraphBuilder::new();
@@ -1763,14 +1762,14 @@ fn test_export_namespace_function() {
 
 #[test]
 fn test_export_namespace_class() {
-    let source = r#"
+    let source = r"
         namespace api {
             class Service {
             public:
                 void execute() {}
             };
         }
-    "#;
+    ";
     let tree = parse_cpp(source);
     let mut staging = StagingGraph::new();
     let builder = CppGraphBuilder::new();
@@ -1801,12 +1800,12 @@ fn test_export_namespace_class() {
 
 #[test]
 fn test_export_struct() {
-    let source = r#"
+    let source = r"
         struct Point {
             int x;
             int y;
         };
-    "#;
+    ";
     let tree = parse_cpp(source);
     let mut staging = StagingGraph::new();
     let builder = CppGraphBuilder::new();
@@ -1834,11 +1833,11 @@ fn test_export_struct() {
 
 #[test]
 fn test_no_export_for_static_function() {
-    let source = r#"
+    let source = r"
         static void helper() {
             // static function has internal linkage
         }
-    "#;
+    ";
     let tree = parse_cpp(source);
     let mut staging = StagingGraph::new();
     let builder = CppGraphBuilder::new();
@@ -1863,14 +1862,14 @@ fn test_no_export_for_static_function() {
 
 #[test]
 fn test_no_export_for_nested_class() {
-    let source = r#"
+    let source = r"
         class Outer {
         public:
             class Inner {
                 void method() {}
             };
         };
-    "#;
+    ";
     let tree = parse_cpp(source);
     let mut staging = StagingGraph::new();
     let builder = CppGraphBuilder::new();
@@ -1901,7 +1900,7 @@ fn test_no_export_for_nested_class() {
 
 #[test]
 fn test_export_multiple_symbols() {
-    let source = r#"
+    let source = r"
         class User {
             std::string name;
         };
@@ -1912,7 +1911,7 @@ fn test_export_multiple_symbols() {
 
         void processUser() {}
         void processProduct() {}
-    "#;
+    ";
     let tree = parse_cpp(source);
     let mut staging = StagingGraph::new();
     let builder = CppGraphBuilder::new();
@@ -1956,14 +1955,14 @@ fn test_export_multiple_symbols() {
 
 #[test]
 fn test_export_template_class() {
-    let source = r#"
+    let source = r"
         template<typename T>
         class Container {
         public:
             T data;
             T getData() { return data; }
         };
-    "#;
+    ";
     let tree = parse_cpp(source);
     let mut staging = StagingGraph::new();
     let builder = CppGraphBuilder::new();
@@ -2036,12 +2035,12 @@ fn find_class_visibility(staging: &StagingGraph, name: &str) -> Option<String> {
 
 #[test]
 fn test_function_visibility_public() {
-    let source = r#"
+    let source = r"
 // Public function (non-static, external linkage)
 int public_function() {
     return 42;
 }
-"#;
+";
     let tree = parse_cpp(source);
     let mut staging = StagingGraph::new();
     let builder = CppGraphBuilder;
@@ -2064,12 +2063,12 @@ int public_function() {
 
 #[test]
 fn test_function_visibility_private() {
-    let source = r#"
+    let source = r"
 // Private function (static, internal linkage)
 static int private_function() {
     return 42;
 }
-"#;
+";
     let tree = parse_cpp(source);
     let mut staging = StagingGraph::new();
     let builder = CppGraphBuilder;
@@ -2092,7 +2091,7 @@ static int private_function() {
 
 #[test]
 fn test_function_visibility_mixed() {
-    let source = r#"
+    let source = r"
 // Mix of public and private functions
 static int helper() {
     return 1;
@@ -2105,7 +2104,7 @@ int api_function() {
 static void internal_log() {
     // Private logging
 }
-"#;
+";
     let tree = parse_cpp(source);
     let mut staging = StagingGraph::new();
     let builder = CppGraphBuilder;
@@ -2138,12 +2137,12 @@ static void internal_log() {
 
 #[test]
 fn test_class_visibility() {
-    let source = r#"
+    let source = r"
 class MyClass {
 public:
     void method() {}
 };
-"#;
+";
     let tree = parse_cpp(source);
     let mut staging = StagingGraph::new();
     let builder = CppGraphBuilder;

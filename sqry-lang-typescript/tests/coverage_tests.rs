@@ -6,8 +6,8 @@
 //!   - import statements (named, default, namespace, side-effect)
 //!   - export statements (named, re-export, default, barrel)
 //!   - class inheritance and interface extension (OOP edges)
-//!   - class field TypeOf edges
-//!   - interface property TypeOf edges
+//!   - class field `TypeOf` edges
+//!   - interface property `TypeOf` edges
 //!   - type alias declarations
 //!   - enum declarations
 //!   - variable declarations (const/let/var)
@@ -16,16 +16,16 @@
 //!   - HTTP request patterns (fetch/axios)
 //!   - Express route endpoint registration
 //!   - FFI patterns (WebAssembly)
-//!   - constructor calls (new_expression)
+//!   - constructor calls (`new_expression`)
 //!   - async functions
 //! - `src/relations/local_scopes.rs`:
-//!   - all ScopeKind variants (Function, ArrowFunction, Method, Block,
-//!     IfBranch, ForLoop, ForInLoop, ForOfLoop, WhileLoop, DoWhileLoop,
-//!     TryBlock, CatchBlock, FinallyBlock, SwitchBlock, SwitchCase)
-//!   - bind_pattern arms (identifier, array_pattern, object_pattern,
-//!     assignment_pattern, rest_pattern, rest_element)
-//!   - bind_for_loop_variable arms
-//!   - bind_catch_parameter
+//!   - all `ScopeKind` variants (Function, `ArrowFunction`, Method, Block,
+//!     `IfBranch`, `ForLoop`, `ForInLoop`, `ForOfLoop`, `WhileLoop`, `DoWhileLoop`,
+//!     `TryBlock`, `CatchBlock`, `FinallyBlock`, `SwitchBlock`, `SwitchCase`)
+//!   - `bind_pattern` arms (identifier, `array_pattern`, `object_pattern`,
+//!     `assignment_pattern`, `rest_pattern`, `rest_element`)
+//!   - `bind_for_loop_variable` arms
+//!   - `bind_catch_parameter`
 
 use sqry_core::graph::GraphBuilder;
 use sqry_core::graph::unified::build::staging::StagingGraph;
@@ -82,7 +82,7 @@ fn all_edge_tags(staging: &StagingGraph) -> Vec<String> {
 // TypeScriptGraphBuilder constructors
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// `TypeScriptGraphBuilder::new(depth)` sets the max_scope_depth
+/// `TypeScriptGraphBuilder::new(depth)` sets the `max_scope_depth`
 #[test]
 fn builder_new_with_custom_depth() {
     let builder = TypeScriptGraphBuilder::new(8);
@@ -477,9 +477,9 @@ class Calc {
 // Return type edges
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Function with return type annotation — exercises the return_type code path.
+/// Function with return type annotation — exercises the `return_type` code path.
 /// The function is resolved as a callable context and the return type annotation
-/// may produce a type_of edge. We verify the build completes successfully and
+/// may produce a `type_of` edge. We verify the build completes successfully and
 /// produces at least one node for the function itself.
 #[test]
 fn function_return_type_edge() {
@@ -504,16 +504,16 @@ fn async_function_return_type_edge() {
 // HTTP request patterns
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// `fetch()` produces an http_request edge
+/// `fetch()` produces an `http_request` edge
 #[test]
 fn fetch_http_request() {
     let staging = build_graph(
-        r#"
+        r"
 async function loadData() {
     const res = await fetch('https://api.example.com/data');
     return res.json();
 }
-"#,
+",
     );
     assert!(
         has_edge_tag(&staging, "http_request"),
@@ -526,10 +526,10 @@ async function loadData() {
 #[test]
 fn express_route_registration() {
     let staging = build_graph(
-        r#"
+        r"
 const app = express();
 app.get('/users', (req, res) => { res.json([]); });
-"#,
+",
     );
     // May produce endpoint or http_request edges
     let _ = staging.stats();
@@ -746,7 +746,7 @@ function doWhile() {
     assert!(staging.stats().nodes_staged >= 1);
 }
 
-/// Try-catch-finally scope (TryBlock, CatchBlock, FinallyBlock)
+/// Try-catch-finally scope (`TryBlock`, `CatchBlock`, `FinallyBlock`)
 #[test]
 fn scope_try_catch_finally() {
     let staging = build_graph(
@@ -765,7 +765,7 @@ function safe() {
     assert!(staging.stats().nodes_staged >= 1);
 }
 
-/// Switch-case scope (SwitchBlock + SwitchCase)
+/// Switch-case scope (`SwitchBlock` + `SwitchCase`)
 #[test]
 fn scope_switch_case() {
     let staging = build_graph(

@@ -45,13 +45,13 @@ fn find_function_visibility(staging: &StagingGraph, name: &str) -> Option<String
 
 #[test]
 fn test_function_visibility_public() {
-    let source = r#"
+    let source = r"
 defmodule MyModule do
   def public_function do
     :ok
   end
 end
-"#;
+";
     let tree = parse_elixir(source);
     let mut staging = StagingGraph::new();
     let builder = ElixirGraphBuilder::default();
@@ -69,13 +69,13 @@ end
 
 #[test]
 fn test_function_visibility_private() {
-    let source = r#"
+    let source = r"
 defmodule MyModule do
   defp private_function do
     :ok
   end
 end
-"#;
+";
     let tree = parse_elixir(source);
     let mut staging = StagingGraph::new();
     let builder = ElixirGraphBuilder::default();
@@ -93,7 +93,7 @@ end
 
 #[test]
 fn test_function_visibility_mixed() {
-    let source = r#"
+    let source = r"
 defmodule MyModule do
   def public_api do
     private_helper()
@@ -103,7 +103,7 @@ defmodule MyModule do
     :ok
   end
 end
-"#;
+";
     let tree = parse_elixir(source);
     let mut staging = StagingGraph::new();
     let builder = ElixirGraphBuilder::default();

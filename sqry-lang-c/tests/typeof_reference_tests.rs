@@ -1,6 +1,6 @@
-//! Comprehensive tests for C TypeOf and Reference edge implementation.
+//! Comprehensive tests for C `TypeOf` and Reference edge implementation.
 //!
-//! This test suite verifies that TypeOf and Reference edges are correctly created
+//! This test suite verifies that `TypeOf` and Reference edges are correctly created
 //! for all C type constructs including variables, function parameters/returns,
 //! struct/union fields, and typedef declarations.
 
@@ -32,7 +32,7 @@ fn build_graph_from_c_code(code: &str) -> StagingGraph {
     staging
 }
 
-/// Build a string lookup map from staged InternString operations
+/// Build a string lookup map from staged `InternString` operations
 fn build_string_lookup(staging: &StagingGraph) -> HashMap<u32, String> {
     staging
         .operations()
@@ -47,7 +47,7 @@ fn build_string_lookup(staging: &StagingGraph) -> HashMap<u32, String> {
         .collect()
 }
 
-/// Build a node name lookup map from staged AddNode operations
+/// Build a node name lookup map from staged `AddNode` operations
 fn build_node_name_lookup(staging: &StagingGraph) -> HashMap<u32, String> {
     let strings = build_string_lookup(staging);
     staging
@@ -70,7 +70,7 @@ fn build_node_name_lookup(staging: &StagingGraph) -> HashMap<u32, String> {
         .collect()
 }
 
-/// Helper to check if a TypeOf edge exists
+/// Helper to check if a `TypeOf` edge exists
 fn assert_typeof_edge_exists(
     graph: &StagingGraph,
     source_name: &str,
@@ -89,12 +89,10 @@ fn assert_typeof_edge_exists(
         {
             let from_name = node_names
                 .get(&source.index())
-                .map(|s| s.as_str())
-                .unwrap_or("");
+                .map_or("", std::string::String::as_str);
             let to_name = node_names
                 .get(&target.index())
-                .map(|s| s.as_str())
-                .unwrap_or("");
+                .map_or("", std::string::String::as_str);
 
             from_name.contains(source_name)
                 && to_name.contains(target_type)
@@ -106,8 +104,7 @@ fn assert_typeof_edge_exists(
 
     assert!(
         found,
-        "Expected TypeOf edge from '{}' to '{}' with context {:?}",
-        source_name, target_type, context
+        "Expected TypeOf edge from '{source_name}' to '{target_type}' with context {context:?}"
     );
 }
 
@@ -125,12 +122,10 @@ fn assert_reference_edge_exists(graph: &StagingGraph, source_name: &str, target_
         {
             let from_name = node_names
                 .get(&source.index())
-                .map(|s| s.as_str())
-                .unwrap_or("");
+                .map_or("", std::string::String::as_str);
             let to_name = node_names
                 .get(&target.index())
-                .map(|s| s.as_str())
-                .unwrap_or("");
+                .map_or("", std::string::String::as_str);
 
             from_name.contains(source_name) && to_name.contains(target_type)
         } else {
@@ -140,8 +135,7 @@ fn assert_reference_edge_exists(graph: &StagingGraph, source_name: &str, target_
 
     assert!(
         found,
-        "Expected Reference edge from '{}' to '{}'",
-        source_name, target_type
+        "Expected Reference edge from '{source_name}' to '{target_type}'"
     );
 }
 
@@ -151,12 +145,12 @@ fn assert_reference_edge_exists(graph: &StagingGraph, source_name: &str, target_
 
 #[test]
 fn test_typeof_variable_primitive_types() {
-    let code = r#"
+    let code = r"
         int count;
         char letter;
         float price;
         double precision;
-    "#;
+    ";
 
     let graph = build_graph_from_c_code(code);
 
@@ -168,11 +162,11 @@ fn test_typeof_variable_primitive_types() {
 
 #[test]
 fn test_typeof_variable_pointer_types() {
-    let code = r#"
+    let code = r"
         int* ptr;
         char** argv;
         void* generic;
-    "#;
+    ";
 
     let graph = build_graph_from_c_code(code);
 
@@ -183,10 +177,10 @@ fn test_typeof_variable_pointer_types() {
 
 #[test]
 fn test_typeof_variable_array_types() {
-    let code = r#"
+    let code = r"
         int numbers[10];
         char buffer[256];
-    "#;
+    ";
 
     let graph = build_graph_from_c_code(code);
 
@@ -196,12 +190,12 @@ fn test_typeof_variable_array_types() {
 
 #[test]
 fn test_typeof_variable_struct_types() {
-    let code = r#"
+    let code = r"
         struct User {
             int id;
         };
         struct User user;
-    "#;
+    ";
 
     let graph = build_graph_from_c_code(code);
 
@@ -211,13 +205,13 @@ fn test_typeof_variable_struct_types() {
 
 #[test]
 fn test_typeof_variable_union_types() {
-    let code = r#"
+    let code = r"
         union Data {
             int i;
             float f;
         };
         union Data data;
-    "#;
+    ";
 
     let graph = build_graph_from_c_code(code);
 
@@ -227,10 +221,10 @@ fn test_typeof_variable_union_types() {
 
 #[test]
 fn test_typeof_variable_enum_types() {
-    let code = r#"
+    let code = r"
         enum Status { PENDING, ACTIVE };
         enum Status status;
-    "#;
+    ";
 
     let graph = build_graph_from_c_code(code);
 
@@ -240,10 +234,10 @@ fn test_typeof_variable_enum_types() {
 
 #[test]
 fn test_typeof_variable_typedef_types() {
-    let code = r#"
+    let code = r"
         typedef int MyInt;
         MyInt value;
-    "#;
+    ";
 
     let graph = build_graph_from_c_code(code);
 
@@ -253,10 +247,10 @@ fn test_typeof_variable_typedef_types() {
 
 #[test]
 fn test_typeof_variable_const_volatile() {
-    let code = r#"
+    let code = r"
         const int constant;
         volatile char flag;
-    "#;
+    ";
 
     let graph = build_graph_from_c_code(code);
 
@@ -270,10 +264,10 @@ fn test_typeof_variable_const_volatile() {
 
 #[test]
 fn test_typeof_function_parameter_primitives() {
-    let code = r#"
+    let code = r"
         void process(int x, char c, float f) {
         }
-    "#;
+    ";
 
     let graph = build_graph_from_c_code(code);
 
@@ -284,10 +278,10 @@ fn test_typeof_function_parameter_primitives() {
 
 #[test]
 fn test_typeof_function_parameter_pointers() {
-    let code = r#"
+    let code = r"
         void update(int* ptr, char** argv, void* data) {
         }
-    "#;
+    ";
 
     let graph = build_graph_from_c_code(code);
 
@@ -298,10 +292,10 @@ fn test_typeof_function_parameter_pointers() {
 
 #[test]
 fn test_typeof_function_parameter_arrays() {
-    let code = r#"
+    let code = r"
         void fill(int arr[], char buffer[256]) {
         }
-    "#;
+    ";
 
     let graph = build_graph_from_c_code(code);
 
@@ -311,13 +305,13 @@ fn test_typeof_function_parameter_arrays() {
 
 #[test]
 fn test_typeof_function_parameter_structs() {
-    let code = r#"
+    let code = r"
         struct User {
             int id;
         };
         void process_user(struct User user, struct User* ptr) {
         }
-    "#;
+    ";
 
     let graph = build_graph_from_c_code(code);
 
@@ -330,9 +324,9 @@ fn test_typeof_function_parameter_structs() {
 
 #[test]
 fn test_typeof_function_parameter_unnamed() {
-    let code = r#"
+    let code = r"
         void func(int, char*);
-    "#;
+    ";
 
     let graph = build_graph_from_c_code(code);
 
@@ -343,10 +337,10 @@ fn test_typeof_function_parameter_unnamed() {
 
 #[test]
 fn test_typeof_function_parameter_const_qualified() {
-    let code = r#"
+    let code = r"
         void process(const int x, const char* str) {
         }
-    "#;
+    ";
 
     let graph = build_graph_from_c_code(code);
 
@@ -356,10 +350,10 @@ fn test_typeof_function_parameter_const_qualified() {
 
 #[test]
 fn test_typeof_function_parameter_multiple_same_type() {
-    let code = r#"
+    let code = r"
         void compare(int a, int b, int c) {
         }
-    "#;
+    ";
 
     let graph = build_graph_from_c_code(code);
 
@@ -383,18 +377,17 @@ fn test_typeof_function_parameter_multiple_same_type() {
 
     assert!(
         count >= 3,
-        "Expected at least 3 parameter TypeOf edges, got {}",
-        count
+        "Expected at least 3 parameter TypeOf edges, got {count}"
     );
 }
 
 #[test]
 fn test_typeof_function_parameter_complex_types() {
-    let code = r#"
+    let code = r"
         struct Point { int x; int y; };
         void draw(struct Point* points[], int count) {
         }
-    "#;
+    ";
 
     let graph = build_graph_from_c_code(code);
 
@@ -409,11 +402,11 @@ fn test_typeof_function_parameter_complex_types() {
 
 #[test]
 fn test_typeof_function_return_primitive() {
-    let code = r#"
+    let code = r"
         int calculate(void) {
             return 42;
         }
-    "#;
+    ";
 
     let graph = build_graph_from_c_code(code);
 
@@ -422,11 +415,11 @@ fn test_typeof_function_return_primitive() {
 
 #[test]
 fn test_typeof_function_return_pointer() {
-    let code = r#"
+    let code = r"
         char* get_string(void) {
             return NULL;
         }
-    "#;
+    ";
 
     let graph = build_graph_from_c_code(code);
 
@@ -435,7 +428,7 @@ fn test_typeof_function_return_pointer() {
 
 #[test]
 fn test_typeof_function_return_struct() {
-    let code = r#"
+    let code = r"
         struct User {
             int id;
         };
@@ -443,7 +436,7 @@ fn test_typeof_function_return_struct() {
             struct User u;
             return u;
         }
-    "#;
+    ";
 
     let graph = build_graph_from_c_code(code);
 
@@ -453,14 +446,14 @@ fn test_typeof_function_return_struct() {
 
 #[test]
 fn test_typeof_function_return_struct_pointer() {
-    let code = r#"
+    let code = r"
         struct User {
             int id;
         };
         struct User* find_user(int id) {
             return NULL;
         }
-    "#;
+    ";
 
     let graph = build_graph_from_c_code(code);
 
@@ -470,12 +463,12 @@ fn test_typeof_function_return_struct_pointer() {
 
 #[test]
 fn test_typeof_function_return_typedef() {
-    let code = r#"
+    let code = r"
         typedef int Status;
         Status check_status(void) {
             return 0;
         }
-    "#;
+    ";
 
     let graph = build_graph_from_c_code(code);
 
@@ -501,11 +494,11 @@ fn test_typeof_function_return_const_pointer() {
 
 #[test]
 fn test_typeof_void_return_no_edge() {
-    let code = r#"
+    let code = r"
         void process(int x) {
             // Pure void return - should NOT create TypeOf edge
         }
-    "#;
+    ";
 
     let graph = build_graph_from_c_code(code);
 
@@ -530,11 +523,11 @@ fn test_typeof_void_return_no_edge() {
 
 #[test]
 fn test_typeof_void_param_no_edge() {
-    let code = r#"
+    let code = r"
         int calculate(void) {
             return 42;
         }
-    "#;
+    ";
 
     let graph = build_graph_from_c_code(code);
 
@@ -559,11 +552,11 @@ fn test_typeof_void_param_no_edge() {
 
 #[test]
 fn test_typeof_void_pointer_return() {
-    let code = r#"
+    let code = r"
         void* allocate(size_t size) {
             return 0;
         }
-    "#;
+    ";
 
     let graph = build_graph_from_c_code(code);
 
@@ -577,13 +570,13 @@ fn test_typeof_void_pointer_return() {
 
 #[test]
 fn test_typeof_struct_field_primitives() {
-    let code = r#"
+    let code = r"
         struct Point {
             int x;
             int y;
             float z;
         };
-    "#;
+    ";
 
     let graph = build_graph_from_c_code(code);
 
@@ -593,12 +586,12 @@ fn test_typeof_struct_field_primitives() {
 
 #[test]
 fn test_typeof_struct_field_pointers() {
-    let code = r#"
+    let code = r"
         struct User {
             char* name;
             int* scores;
         };
-    "#;
+    ";
 
     let graph = build_graph_from_c_code(code);
 
@@ -608,12 +601,12 @@ fn test_typeof_struct_field_pointers() {
 
 #[test]
 fn test_typeof_struct_field_arrays() {
-    let code = r#"
+    let code = r"
         struct Buffer {
             char data[256];
             int numbers[10];
         };
-    "#;
+    ";
 
     let graph = build_graph_from_c_code(code);
 
@@ -623,7 +616,7 @@ fn test_typeof_struct_field_arrays() {
 
 #[test]
 fn test_typeof_struct_field_nested_struct() {
-    let code = r#"
+    let code = r"
         struct Address {
             int zip;
         };
@@ -631,7 +624,7 @@ fn test_typeof_struct_field_nested_struct() {
             struct Address addr;
             struct Address* addr_ptr;
         };
-    "#;
+    ";
 
     let graph = build_graph_from_c_code(code);
 
@@ -641,14 +634,14 @@ fn test_typeof_struct_field_nested_struct() {
 
 #[test]
 fn test_typeof_struct_field_mixed_types() {
-    let code = r#"
+    let code = r"
         struct Record {
             int id;
             char* name;
             float value;
             double precision;
         };
-    "#;
+    ";
 
     let graph = build_graph_from_c_code(code);
 
@@ -660,13 +653,13 @@ fn test_typeof_struct_field_mixed_types() {
 
 #[test]
 fn test_typeof_struct_field_typedef() {
-    let code = r#"
+    let code = r"
         typedef int UserId;
         struct User {
             UserId id;
             char* name;
         };
-    "#;
+    ";
 
     let graph = build_graph_from_c_code(code);
 
@@ -680,13 +673,13 @@ fn test_typeof_struct_field_typedef() {
 
 #[test]
 fn test_typeof_union_field_primitives() {
-    let code = r#"
+    let code = r"
         union Data {
             int i;
             float f;
             char c;
         };
-    "#;
+    ";
 
     let graph = build_graph_from_c_code(code);
 
@@ -697,13 +690,13 @@ fn test_typeof_union_field_primitives() {
 
 #[test]
 fn test_typeof_union_field_pointers() {
-    let code = r#"
+    let code = r"
         union Pointer {
             int* int_ptr;
             char* char_ptr;
             void* generic_ptr;
         };
-    "#;
+    ";
 
     let graph = build_graph_from_c_code(code);
 
@@ -714,14 +707,14 @@ fn test_typeof_union_field_pointers() {
 
 #[test]
 fn test_typeof_union_field_structs() {
-    let code = r#"
+    let code = r"
         struct A { int x; };
         struct B { float y; };
         union Either {
             struct A a;
             struct B b;
         };
-    "#;
+    ";
 
     let graph = build_graph_from_c_code(code);
 
@@ -733,13 +726,13 @@ fn test_typeof_union_field_structs() {
 
 #[test]
 fn test_typeof_union_field_mixed() {
-    let code = r#"
+    let code = r"
         union Value {
             int integer;
             float floating;
             char* string;
         };
-    "#;
+    ";
 
     let graph = build_graph_from_c_code(code);
 
@@ -754,10 +747,10 @@ fn test_typeof_union_field_mixed() {
 
 #[test]
 fn test_typeof_typedef_simple() {
-    let code = r#"
+    let code = r"
         typedef int MyInt;
         typedef char* String;
-    "#;
+    ";
 
     let graph = build_graph_from_c_code(code);
 
@@ -767,11 +760,11 @@ fn test_typeof_typedef_simple() {
 
 #[test]
 fn test_typeof_typedef_struct() {
-    let code = r#"
+    let code = r"
         typedef struct User {
             int id;
         } User;
-    "#;
+    ";
 
     let graph = build_graph_from_c_code(code);
 
@@ -780,10 +773,10 @@ fn test_typeof_typedef_struct() {
 
 #[test]
 fn test_typeof_typedef_pointer() {
-    let code = r#"
+    let code = r"
         typedef int* IntPtr;
         typedef char** StringArray;
-    "#;
+    ";
 
     let graph = build_graph_from_c_code(code);
 
@@ -793,10 +786,10 @@ fn test_typeof_typedef_pointer() {
 
 #[test]
 fn test_typeof_typedef_array() {
-    let code = r#"
+    let code = r"
         typedef int IntArray[10];
         typedef char CharBuffer[256];
-    "#;
+    ";
 
     let graph = build_graph_from_c_code(code);
 
@@ -810,9 +803,9 @@ fn test_typeof_typedef_array() {
 
 #[test]
 fn test_typeof_complex_multidimensional_array() {
-    let code = r#"
+    let code = r"
         int matrix[5][10];
-    "#;
+    ";
 
     let graph = build_graph_from_c_code(code);
 
@@ -821,10 +814,10 @@ fn test_typeof_complex_multidimensional_array() {
 
 #[test]
 fn test_typeof_complex_array_of_pointers() {
-    let code = r#"
+    let code = r"
         int* array_of_ptrs[10];
         char** argv;
-    "#;
+    ";
 
     let graph = build_graph_from_c_code(code);
 
@@ -834,9 +827,9 @@ fn test_typeof_complex_array_of_pointers() {
 
 #[test]
 fn test_typeof_complex_pointer_to_array() {
-    let code = r#"
+    let code = r"
         int (*ptr_to_array)[10];
-    "#;
+    ";
 
     let graph = build_graph_from_c_code(code);
 
@@ -845,11 +838,11 @@ fn test_typeof_complex_pointer_to_array() {
 
 #[test]
 fn test_typeof_complex_function_returning_pointer() {
-    let code = r#"
+    let code = r"
         int* get_number(void);
         struct User { int id; };
         struct User* find_user(int id);
-    "#;
+    ";
 
     let graph = build_graph_from_c_code(code);
 
@@ -859,10 +852,10 @@ fn test_typeof_complex_function_returning_pointer() {
 
 #[test]
 fn test_typeof_complex_const_pointer_combinations() {
-    let code = r#"
+    let code = r"
         const int* ptr1;
         int* const ptr2;
-    "#;
+    ";
 
     let graph = build_graph_from_c_code(code);
 
@@ -872,7 +865,7 @@ fn test_typeof_complex_const_pointer_combinations() {
 
 #[test]
 fn test_typeof_reference_edges_struct_usage() {
-    let code = r#"
+    let code = r"
         struct User {
             int id;
         };
@@ -880,7 +873,7 @@ fn test_typeof_reference_edges_struct_usage() {
             struct User* author;
             struct User* reviewer;
         };
-    "#;
+    ";
 
     let graph = build_graph_from_c_code(code);
 
@@ -890,10 +883,10 @@ fn test_typeof_reference_edges_struct_usage() {
 
 #[test]
 fn test_typeof_reference_edges_typedef_usage() {
-    let code = r#"
+    let code = r"
         typedef int MyInt;
         typedef MyInt MySpecialInt;
-    "#;
+    ";
 
     let graph = build_graph_from_c_code(code);
 
@@ -903,7 +896,7 @@ fn test_typeof_reference_edges_typedef_usage() {
 
 #[test]
 fn test_typeof_complex_nested_structs() {
-    let code = r#"
+    let code = r"
         struct Inner {
             int value;
         };
@@ -911,7 +904,7 @@ fn test_typeof_complex_nested_structs() {
             struct Inner inner;
             struct Inner* ptr;
         };
-    "#;
+    ";
 
     let graph = build_graph_from_c_code(code);
 
@@ -921,13 +914,13 @@ fn test_typeof_complex_nested_structs() {
 
 #[test]
 fn test_typeof_complex_function_with_struct_params_and_return() {
-    let code = r#"
+    let code = r"
         struct Point { int x; int y; };
         struct Point add_points(struct Point p1, struct Point p2) {
             struct Point result;
             return result;
         }
-    "#;
+    ";
 
     let graph = build_graph_from_c_code(code);
 
@@ -938,14 +931,14 @@ fn test_typeof_complex_function_with_struct_params_and_return() {
 
 #[test]
 fn test_typeof_complex_mixed_declarations() {
-    let code = r#"
+    let code = r"
         typedef int UserId;
         struct User {
             UserId id;
             char* name;
         };
         struct User create_user(UserId id, const char* name);
-    "#;
+    ";
 
     let graph = build_graph_from_c_code(code);
 
@@ -968,12 +961,12 @@ fn test_typeof_complex_mixed_declarations() {
 
 #[test]
 fn test_typeof_complex_function_pointers_in_struct() {
-    let code = r#"
+    let code = r"
         struct Callbacks {
             int (*on_init)(void);
             void (*on_update)(int);
         };
-    "#;
+    ";
 
     let graph = build_graph_from_c_code(code);
 
@@ -984,7 +977,7 @@ fn test_typeof_complex_function_pointers_in_struct() {
 
 #[test]
 fn test_typeof_comprehensive_coverage() {
-    let code = r#"
+    let code = r"
         // Primitive types
         int global_int;
 
@@ -1008,7 +1001,7 @@ fn test_typeof_comprehensive_coverage() {
         struct Data* process(int id, const char* name, struct Data* input) {
             return NULL;
         }
-    "#;
+    ";
 
     let graph = build_graph_from_c_code(code);
 

@@ -21,7 +21,7 @@ use tempfile::TempDir;
 fn cli_java_exports_classes_and_methods() {
     let project = TempDir::new().unwrap();
 
-    let java_code = r#"
+    let java_code = r"
 public class User {
     private String name;
 
@@ -37,7 +37,7 @@ public class User {
         // private method
     }
 }
-"#;
+";
     std::fs::write(project.path().join("User.java"), java_code).unwrap();
 
     Command::new(sqry_bin())
@@ -78,7 +78,7 @@ public class User {
 fn cli_java_exports_interfaces() {
     let project = TempDir::new().unwrap();
 
-    let java_code = r#"
+    let java_code = r"
 public interface Repository<T> {
     void save(T item);
     T findById(int id);
@@ -102,7 +102,7 @@ public class UserRepository implements Repository<User> {
 class User {
     String name;
 }
-"#;
+";
     std::fs::write(project.path().join("Repository.java"), java_code).unwrap();
 
     Command::new(sqry_bin())
@@ -188,7 +188,7 @@ public class Processor {
 fn cli_java_callers_static_method_calls() {
     let project = TempDir::new().unwrap();
 
-    let java_code = r#"
+    let java_code = r"
 public class MathUtils {
     public static int add(int a, int b) {
         return a + b;
@@ -209,7 +209,7 @@ public class MathUtils {
         System.out.println(result);
     }
 }
-"#;
+";
     std::fs::write(project.path().join("MathUtils.java"), java_code).unwrap();
 
     Command::new(sqry_bin())
@@ -417,7 +417,7 @@ class User {
 fn cli_java_imports() {
     let project = TempDir::new().unwrap();
 
-    let java_code = r#"
+    let java_code = r"
 import java.util.List;
 import java.util.ArrayList;
 import java.io.File;
@@ -435,7 +435,7 @@ public class FileProcessor {
         // process file
     }
 }
-"#;
+";
     std::fs::write(project.path().join("FileProcessor.java"), java_code).unwrap();
 
     Command::new(sqry_bin())
@@ -470,7 +470,7 @@ public class FileProcessor {
 fn cli_java_generics() {
     let project = TempDir::new().unwrap();
 
-    let java_code = r#"
+    let java_code = r"
 public class DataService<T> {
     private T data;
 
@@ -495,7 +495,7 @@ public class DataService<T> {
         return input;
     }
 }
-"#;
+";
     std::fs::write(project.path().join("DataService.java"), java_code).unwrap();
 
     Command::new(sqry_bin())
@@ -523,7 +523,7 @@ public class DataService<T> {
 fn cli_java_private_methods() {
     let project = TempDir::new().unwrap();
 
-    let java_code = r#"
+    let java_code = r"
 public class Service {
     public void execute() {
         validate();
@@ -533,7 +533,7 @@ public class Service {
         // private method
     }
 }
-"#;
+";
     std::fs::write(project.path().join("Service.java"), java_code).unwrap();
 
     Command::new(sqry_bin())

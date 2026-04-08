@@ -377,6 +377,7 @@ fn test_max_depth_truncation() {
     let depth = 12_usize;
     let mut json = String::new();
     for i in 0..depth {
+        #[allow(clippy::format_push_string)] // Test output formatting
         json.push_str(&format!("{{\"d{i}\": "));
     }
     json.push('1');
@@ -412,6 +413,7 @@ fn test_max_depth_truncation() {
 
 #[test]
 #[serial]
+#[allow(clippy::format_push_string)] // String building in test/doc
 fn test_max_nodes_limit() {
     // Use SQRY_JSON_MAX_NODES env var to set a low limit for testing.
     // Build 200 top-level keys × 200 sub-keys = 40,200 potential nodes.
@@ -425,6 +427,7 @@ fn test_max_nodes_limit() {
         if i > 0 {
             json.push(',');
         }
+        #[allow(clippy::format_push_string)] // String formatting in test/doc builder
         json.push_str(&format!("\"g{i}\": {{"));
         for j in 0..200 {
             if j > 0 {

@@ -227,6 +227,7 @@ impl Default for ResultRanker {
 }
 
 #[cfg(test)]
+#[allow(clippy::similar_names)] // Test variables: ranker/ranked, custom_ranker/custom_ranked are intentional
 mod tests {
     use super::*;
     use std::path::PathBuf;

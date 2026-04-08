@@ -16,7 +16,7 @@ fn test_no_parallel_flag_works() {
     // Create a test Rust file with multiple symbol types
     std::fs::write(
         &test_file,
-        r#"
+        r"
 fn function_one() {}
 fn function_two() {}
 fn function_three() {}
@@ -28,7 +28,7 @@ enum EnumOne { A, B }
 enum EnumTwo { X, Y }
 
 trait TraitOne {}
-        "#,
+        ",
     )
     .expect("failed to write test file");
 
@@ -90,8 +90,7 @@ trait TraitOne {}
 
     assert_eq!(
         parallel_count, sequential_count,
-        "Parallel and sequential modes should return same number of results. Parallel: {}, Sequential: {}",
-        parallel_count, sequential_count
+        "Parallel and sequential modes should return same number of results. Parallel: {parallel_count}, Sequential: {sequential_count}"
     );
 }
 
@@ -104,10 +103,10 @@ fn test_no_parallel_and_session_are_mutually_exclusive() {
 
     std::fs::write(
         &test_file,
-        r#"
+        r"
 fn test_fn() {}
 struct TestStruct;
-        "#,
+        ",
     )
     .expect("failed to write test file");
 
@@ -132,7 +131,6 @@ struct TestStruct;
     let stderr = String::from_utf8_lossy(&output.get_output().stderr);
     assert!(
         stderr.contains("mutually exclusive"),
-        "Expected error message about mutual exclusivity, got: {}",
-        stderr
+        "Expected error message about mutual exclusivity, got: {stderr}"
     );
 }

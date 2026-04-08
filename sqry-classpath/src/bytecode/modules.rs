@@ -8,6 +8,9 @@
 //! The `Module` attribute is only present on `module-info.class` files produced
 //! by `javac` for Java 9+ `module-info.java` source files.
 
+// JVM module_info attributes are spec-bounded to u16; casts are intentional
+#![allow(clippy::cast_possible_truncation)]
+
 use cafebabe::attributes::AttributeData;
 
 use crate::ClasspathResult;
@@ -31,6 +34,7 @@ use super::constants::class_name_to_fqn;
 /// Returns `Ok(None)` if the class file does not contain a `Module` attribute
 /// (i.e., it is not a `module-info.class`). Returns an error if the `Module`
 /// attribute is present but cannot be converted.
+#[allow(clippy::missing_errors_doc)] // Internal helper function
 pub fn extract_module(class: &cafebabe::ClassFile<'_>) -> ClasspathResult<Option<ModuleStub>> {
     let module_data = class.attributes.iter().find_map(|attr| match &attr.data {
         AttributeData::Module(data) => Some(data),
@@ -53,7 +57,7 @@ pub fn extract_module(class: &cafebabe::ClassFile<'_>) -> ClasspathResult<Option
 fn convert_module_data(data: &cafebabe::attributes::ModuleData<'_>) -> ClasspathResult<ModuleStub> {
     let name = class_name_to_fqn(&data.name);
     let access = AccessFlags::new(data.access_flags.bits());
-    let version = data.version.as_ref().map(|v| v.to_string());
+    let version = data.version.as_ref().map(std::string::ToString::to_string);
 
     let requires = data
         .requires
@@ -98,17 +102,19 @@ fn convert_module_data(data: &cafebabe::attributes::ModuleData<'_>) -> Classpath
 }
 
 /// Convert a cafebabe `ModuleRequireEntry` to our `ModuleRequires`.
+#[allow(clippy::unnecessary_wraps)] // Result for API consistency
 fn convert_requires_entry(
     entry: &cafebabe::attributes::ModuleRequireEntry<'_>,
 ) -> ClasspathResult<ModuleRequires> {
     Ok(ModuleRequires {
         module_name: class_name_to_fqn(&entry.name),
         access: AccessFlags::new(entry.flags.bits()),
-        version: entry.version.as_ref().map(|v| v.to_string()),
+        version: entry.version.as_ref().map(std::string::ToString::to_string),
     })
 }
 
 /// Convert a cafebabe `ModuleExportsEntry` to our `ModuleExports`.
+#[allow(clippy::unnecessary_wraps)] // Result for API consistency
 fn convert_exports_entry(
     entry: &cafebabe::attributes::ModuleExportsEntry<'_>,
 ) -> ClasspathResult<ModuleExports> {
@@ -126,6 +132,7 @@ fn convert_exports_entry(
 }
 
 /// Convert a cafebabe `ModuleOpensEntry` to our `ModuleOpens`.
+#[allow(clippy::unnecessary_wraps)] // Result for API consistency
 fn convert_opens_entry(
     entry: &cafebabe::attributes::ModuleOpensEntry<'_>,
 ) -> ClasspathResult<ModuleOpens> {
@@ -143,6 +150,7 @@ fn convert_opens_entry(
 }
 
 /// Convert a cafebabe `ModuleProvidesEntry` to our `ModuleProvides`.
+#[allow(clippy::unnecessary_wraps)] // Result for API consistency
 fn convert_provides_entry(
     entry: &cafebabe::attributes::ModuleProvidesEntry<'_>,
 ) -> ClasspathResult<ModuleProvides> {
@@ -180,21 +188,21 @@ mod tests {
     struct ModuleBuilder {
         /// Raw constant pool entries (each entry is tag + data bytes).
         cp_entries: Vec<Vec<u8>>,
-        /// Constant pool index of the CONSTANT_Module_info for this module.
+        /// Constant pool index of the `CONSTANT_Module_info` for this module.
         module_name_idx: u16,
-        /// Module-level access flags (ACC_OPEN, ACC_SYNTHETIC, ACC_MANDATED).
+        /// Module-level access flags (`ACC_OPEN`, `ACC_SYNTHETIC`, `ACC_MANDATED`).
         module_flags: u16,
         /// Constant pool index for the module version UTF-8 string (0 = none).
         module_version_idx: u16,
-        /// Pending requires directives: (module_cp_idx, flags, version_cp_idx).
+        /// Pending requires directives: (`module_cp_idx`, flags, `version_cp_idx`).
         requires: Vec<(u16, u16, u16)>,
-        /// Pending exports directives: (package_cp_idx, flags, to_module_cp_indices).
+        /// Pending exports directives: (`package_cp_idx`, flags, `to_module_cp_indices`).
         exports: Vec<(u16, u16, Vec<u16>)>,
-        /// Pending opens directives: (package_cp_idx, flags, to_module_cp_indices).
+        /// Pending opens directives: (`package_cp_idx`, flags, `to_module_cp_indices`).
         opens: Vec<(u16, u16, Vec<u16>)>,
-        /// Pending uses directives: class_cp_indices.
+        /// Pending uses directives: `class_cp_indices`.
         uses: Vec<u16>,
-        /// Pending provides directives: (service_class_cp_idx, impl_class_cp_indices).
+        /// Pending provides directives: (`service_class_cp_idx`, `impl_class_cp_indices`).
         provides: Vec<(u16, Vec<u16>)>,
     }
 
@@ -202,7 +210,7 @@ mod tests {
         /// Create a builder for a module with the given name.
         ///
         /// Pre-populates the constant pool with entries needed for the class
-        /// file structure (this_class, super_class) and the Module attribute
+        /// file structure (`this_class`, `super_class`) and the Module attribute
         /// name and module name.
         fn new(module_name: &str) -> Self {
             let mut builder = Self {
@@ -235,8 +243,8 @@ mod tests {
             builder
         }
 
-        /// Set module access flags (ACC_OPEN=0x0020, ACC_SYNTHETIC=0x1000,
-        /// ACC_MANDATED=0x8000).
+        /// Set module access flags (`ACC_OPEN=0x0020`, `ACC_SYNTHETIC=0x1000`,
+        /// `ACC_MANDATED=0x8000`).
         fn module_flags(mut self, flags: u16) -> Self {
             self.module_flags = flags;
             self
@@ -248,7 +256,7 @@ mod tests {
             self
         }
 
-        /// Add a CONSTANT_Utf8 entry. Returns 1-based constant pool index.
+        /// Add a `CONSTANT_Utf8` entry. Returns 1-based constant pool index.
         fn add_utf8(&mut self, s: &str) -> u16 {
             let mut entry = vec![1u8]; // tag
             let bytes = s.as_bytes();
@@ -258,7 +266,7 @@ mod tests {
             self.cp_entries.len() as u16
         }
 
-        /// Add a CONSTANT_Class entry. Returns 1-based constant pool index.
+        /// Add a `CONSTANT_Class` entry. Returns 1-based constant pool index.
         fn add_class(&mut self, name_idx: u16) -> u16 {
             let mut entry = vec![7u8]; // tag
             entry.extend_from_slice(&name_idx.to_be_bytes());
@@ -266,7 +274,7 @@ mod tests {
             self.cp_entries.len() as u16
         }
 
-        /// Add a CONSTANT_Module_info entry (tag 19). Returns 1-based index.
+        /// Add a `CONSTANT_Module_info` entry (tag 19). Returns 1-based index.
         fn add_module(&mut self, name_idx: u16) -> u16 {
             let mut entry = vec![19u8]; // tag
             entry.extend_from_slice(&name_idx.to_be_bytes());
@@ -274,7 +282,7 @@ mod tests {
             self.cp_entries.len() as u16
         }
 
-        /// Add a CONSTANT_Package_info entry (tag 20). Returns 1-based index.
+        /// Add a `CONSTANT_Package_info` entry (tag 20). Returns 1-based index.
         fn add_package(&mut self, name_idx: u16) -> u16 {
             let mut entry = vec![20u8]; // tag
             entry.extend_from_slice(&name_idx.to_be_bytes());

@@ -24,7 +24,7 @@
 //!
 //! # Graceful degradation
 //!
-//! When the signature format is unsupported (e.g., Scala 3 TASTy) or the data
+//! When the signature format is unsupported (e.g., Scala 3 `TASTy`) or the data
 //! is malformed, [`decode_scala_signature`] returns `None` and the caller falls
 //! back to bytecode-only analysis.
 

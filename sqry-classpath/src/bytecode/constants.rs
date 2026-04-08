@@ -132,7 +132,7 @@ pub(crate) fn extract_method_parameter_names(attrs: &[AttributeInfo<'_>]) -> Vec
         if let AttributeData::MethodParameters(params) = &attr.data {
             return params
                 .iter()
-                .filter_map(|p| p.name.as_ref().map(|n| n.to_string()))
+                .filter_map(|p| p.name.as_ref().map(std::string::ToString::to_string))
                 .collect();
         }
     }
@@ -226,7 +226,7 @@ fn parse_field_type_from_str(desc: &str) -> Option<(TypeSignature, &str)> {
         b'L' => {
             // Find the terminating `;`
             let semi_pos = desc[1..].find(';')?;
-            let class_name = &desc[1..1 + semi_pos];
+            let class_name = &desc[1..=semi_pos];
             let fqn = class_name.replace('/', ".");
             let sig = TypeSignature::Class {
                 fqn,

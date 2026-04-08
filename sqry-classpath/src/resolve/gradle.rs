@@ -67,6 +67,7 @@ const CACHE_FILENAME: &str = "resolved-classpath.json";
 /// timeout, falls back to a previously cached classpath if available.
 ///
 /// Only the project-local `gradlew` wrapper is used — never system `gradle`.
+#[allow(clippy::missing_errors_doc)] // Internal helper
 pub fn resolve_gradle_classpath(config: &ResolveConfig) -> ClasspathResult<Vec<ResolvedClasspath>> {
     let wrapper = find_gradle_wrapper(&config.project_root)?;
     info!("Found Gradle wrapper at {}", wrapper.display());
@@ -464,15 +465,13 @@ impl WaitTimeout for std::process::Child {
         let poll_interval = Duration::from_millis(100);
 
         loop {
-            match self.try_wait()? {
-                Some(status) => return Ok(Some(status)),
-                None => {
-                    if start.elapsed() >= timeout {
-                        return Ok(None);
-                    }
-                    std::thread::sleep(poll_interval);
-                }
+            if let Some(status) = self.try_wait()? {
+                return Ok(Some(status));
             }
+            if start.elapsed() >= timeout {
+                return Ok(None);
+            }
+            std::thread::sleep(poll_interval);
         }
     }
 }

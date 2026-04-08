@@ -278,7 +278,7 @@ mod tests {
     use crate::stub::model::{AccessFlags, AnnotationStub, ClassKind};
     use tempfile::TempDir;
 
-    /// Create a minimal ClassStub for testing.
+    /// Create a minimal `ClassStub` for testing.
     fn make_stub(fqn: &str) -> ClassStub {
         ClassStub {
             fqn: fqn.to_owned(),
@@ -303,7 +303,7 @@ mod tests {
         }
     }
 
-    /// Create a ClassStub with annotations for testing.
+    /// Create a `ClassStub` with annotations for testing.
     fn make_annotated_stub(fqn: &str, annotation_fqns: &[&str]) -> ClassStub {
         let mut stub = make_stub(fqn);
         stub.annotations = annotation_fqns

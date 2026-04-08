@@ -1,5 +1,5 @@
 use anyhow::Result;
-use tower_lsp::lsp_types::WorkspaceSymbolParams;
+use tower_lsp::lsp_types::{PartialResultParams, WorkDoneProgressParams, WorkspaceSymbolParams};
 
 mod common;
 
@@ -16,8 +16,8 @@ fn workspace_symbol_filter_only_query_new() -> Result<()> {
     // Filter-only query: "lang:rust" with no search terms
     let params = WorkspaceSymbolParams {
         query: "lang:rust".into(),
-        work_done_progress_params: Default::default(),
-        partial_result_params: Default::default(),
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
     };
 
     let result = sqry_lsp::handlers::workspace_symbol::handle(&session, &params)?;
@@ -49,8 +49,8 @@ fn workspace_symbol_combined_filter_and_search_new() -> Result<()> {
     // Combined query: search term + filter
     let params = WorkspaceSymbolParams {
         query: "process lang:rust".into(),
-        work_done_progress_params: Default::default(),
-        partial_result_params: Default::default(),
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
     };
 
     let result = sqry_lsp::handlers::workspace_symbol::handle(&session, &params)?;

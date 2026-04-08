@@ -140,10 +140,10 @@ mod tests {
     }
 
     /// Verify that the sorted Vec<(key, value)> wire format is compatible with
-    /// postcard's default HashMap serialization. In postcard, both maps and
+    /// postcard's default `HashMap` serialization. In postcard, both maps and
     /// sequences of tuples use the same length-prefixed encoding, so our
     /// sorted adapter produces bytes that can round-trip through the default
-    /// HashMap deserializer and vice versa.
+    /// `HashMap` deserializer and vice versa.
     #[test]
     fn test_wire_format_compatible_with_default_hashmap_serde() {
         // Struct using our sorted adapter

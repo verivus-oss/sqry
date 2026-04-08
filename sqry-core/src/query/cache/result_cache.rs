@@ -376,6 +376,7 @@ mod tests {
                 root_path_hash: 0,
                 repo_filter_hash: 0,
             };
+            #[allow(clippy::cast_possible_truncation)] // Cache entry counts and sizes fit in u32
             cache.insert(key, vec![create_test_node_id(i as u32)]);
         }
 
@@ -409,6 +410,7 @@ mod tests {
                 root_path_hash: 0,
                 repo_filter_hash: 0,
             };
+            #[allow(clippy::cast_possible_truncation)] // Cache entry counts and sizes fit in u32
             cache.insert(key, vec![create_test_node_id(i as u32)]);
         }
 
@@ -437,6 +439,7 @@ mod tests {
                 root_path_hash: 0,
                 repo_filter_hash: 0,
             };
+            #[allow(clippy::cast_possible_truncation)] // Cache entry counts and sizes fit in u32
             cache.insert(key, vec![create_test_node_id(i as u32)]);
         }
 
@@ -469,6 +472,7 @@ mod tests {
                 root_path_hash: 0,
                 repo_filter_hash: 0,
             };
+            #[allow(clippy::cast_possible_truncation)] // Cache entry counts and sizes fit in u32
             cache.insert(key, vec![create_test_node_id(100 + i as u32)]);
         }
 

@@ -212,7 +212,7 @@ mod tests {
             },
         );
 
-        let debug_str = format!("{:?}", plan);
+        let debug_str = format!("{plan:?}");
         assert!(debug_str.contains("QueryPlan"));
         assert!(debug_str.contains("schema_version"));
     }
@@ -288,7 +288,7 @@ mod tests {
             time_ms: 0,
         };
 
-        let debug_str = format!("{:?}", step);
+        let debug_str = format!("{step:?}");
         assert!(debug_str.contains("ExecutionStep"));
         assert!(debug_str.contains("step_num"));
         assert!(debug_str.contains("operation"));
@@ -362,7 +362,7 @@ mod tests {
             result_cache_hit: true,
         };
 
-        let debug_str = format!("{:?}", status);
+        let debug_str = format!("{status:?}");
         assert!(debug_str.contains("CacheStatus"));
         assert!(debug_str.contains("parse_cache_hit"));
         assert!(debug_str.contains("result_cache_hit"));

@@ -2,10 +2,13 @@
 //!
 //! Analyzes what symbols would be affected if a given symbol changes.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::HashSet;
 
 use anyhow::Result;
-use sqry_core::graph::unified::{FileScope, ResolutionMode, SymbolQuery, SymbolResolutionOutcome};
+use sqry_core::graph::unified::{
+    EdgeFilter, FileScope, ResolutionMode, SymbolQuery, SymbolResolutionOutcome, TraversalConfig,
+    TraversalDirection, TraversalLimits, traverse,
+};
 
 use crate::protocol::{SqryAffectedSymbol, SqryDependencyImpactParams, SqryDependencyImpactResult};
 use crate::session::SessionManager;
@@ -53,11 +56,12 @@ pub fn execute(
     let snapshot = graph.snapshot();
 
     // Find the target symbol
-    let target_node_id = match snapshot.resolve_symbol(&SymbolQuery {
+    let witness = snapshot.resolve_symbol_with_witness(&SymbolQuery {
         symbol,
         file_scope: FileScope::Any,
         mode: ResolutionMode::Strict,
-    }) {
+    });
+    let target_node_id = match witness.outcome {
         SymbolResolutionOutcome::Resolved(node_id) => node_id,
         SymbolResolutionOutcome::NotFound | SymbolResolutionOutcome::FileNotIndexed => {
             anyhow::bail!("Symbol '{symbol}' not found in graph.")
@@ -97,7 +101,7 @@ pub fn execute(
     })
 }
 
-/// Collect callers via BFS traversal.
+/// Collect callers via BFS traversal using the kernel.
 ///
 /// Returns a tuple of (`affected_symbols`, `affected_file_paths`).
 fn collect_callers_bfs(
@@ -107,44 +111,56 @@ fn collect_callers_bfs(
     include_indirect: bool,
     max_results: usize,
 ) -> (Vec<SqryAffectedSymbol>, HashSet<String>) {
+    let effective_max_depth = if include_indirect {
+        max_depth
+    } else {
+        max_depth.min(1)
+    };
+    let config = TraversalConfig {
+        direction: TraversalDirection::Incoming,
+        edge_filter: EdgeFilter::calls_only(),
+        limits: TraversalLimits {
+            max_depth: u32::try_from(effective_max_depth).unwrap_or(u32::MAX),
+            max_nodes: Some(max_results),
+            max_edges: None,
+            max_paths: None,
+        },
+    };
+
+    let result = traverse(snapshot, &[target], &config, None);
+
     let mut affected: Vec<SqryAffectedSymbol> = Vec::new();
     let mut affected_files: HashSet<String> = HashSet::new();
-    let mut queue: VecDeque<(sqry_core::graph::unified::node::NodeId, usize)> = VecDeque::new();
-    let mut visited: HashSet<sqry_core::graph::unified::node::NodeId> = HashSet::new();
 
-    queue.push_back((target, 0));
-    visited.insert(target);
-
-    while let Some((current_id, depth)) = queue.pop_front() {
-        if depth >= max_depth {
+    // Skip the seed node (index 0 = target). All other nodes are callers.
+    for (idx, mat_node) in result.nodes.iter().enumerate() {
+        if mat_node.node_id == target {
             continue;
         }
 
-        // Get callers (incoming call edges) - these are the symbols that depend on this one
-        let callers = snapshot.get_callers(current_id);
-        for caller_id in callers {
-            if visited.contains(&caller_id) {
-                continue;
-            }
-            visited.insert(caller_id);
+        // Determine depth: find the minimum depth edge leading to this node
+        let depth = result
+            .edges
+            .iter()
+            .filter(|e| e.target_idx == idx || e.source_idx == idx)
+            .map(|e| e.depth)
+            .min()
+            .unwrap_or(1);
 
-            let Some(symbol) = build_affected_symbol(snapshot, caller_id, depth) else {
-                continue;
-            };
+        let is_direct = depth <= 1;
 
-            collect_affected_file(&symbol, &mut affected_files);
-            affected.push(symbol);
+        let symbol = SqryAffectedSymbol {
+            name: mat_node.name.clone(),
+            qualified_name: mat_node.qualified_name.clone(),
+            kind: mat_node.kind.clone(),
+            file_path: mat_node.file_path.clone(),
+            line: mat_node.start_line,
+            is_direct,
+            depth,
+        };
 
-            // Continue traversal if including indirect dependencies
-            if include_indirect && affected.len() < max_results {
-                queue.push_back((caller_id, depth + 1));
-            }
-        }
-
-        // Early exit if we have enough results
-        if affected.len() >= max_results {
-            break;
-        }
+        collect_affected_file(&symbol, &mut affected_files);
+        affected.push(symbol);
     }
 
     (affected, affected_files)
@@ -157,49 +173,80 @@ fn collect_affected_file(symbol: &SqryAffectedSymbol, affected_files: &mut HashS
     }
 }
 
-/// Build an `SqryAffectedSymbol` from a node ID at a given traversal depth.
-fn build_affected_symbol(
-    snapshot: &sqry_core::graph::unified::concurrent::GraphSnapshot,
-    node_id: sqry_core::graph::unified::node::NodeId,
-    depth: usize,
-) -> Option<SqryAffectedSymbol> {
-    let strings = snapshot.strings();
-    let files = snapshot.files();
-
-    let node = snapshot.get_node(node_id)?;
-
-    let name = strings
-        .resolve(node.name)
-        .map(|s| s.to_string())
-        .unwrap_or_default();
-
-    let qualified_name =
-        crate::conversion::display_entry_qualified_name(node, strings, files, &name);
-
-    let kind = format!("{:?}", node.kind).to_lowercase();
-
-    let file_path = files
-        .resolve(node.file)
-        .map(|p| p.display().to_string())
-        .unwrap_or_default();
-
-    let is_direct = depth == 0;
-    let current_depth = u32::try_from(depth + 1).unwrap_or(u32::MAX);
-
-    Some(SqryAffectedSymbol {
-        name,
-        qualified_name,
-        kind,
-        file_path,
-        line: node.start_line,
-        is_direct,
-        depth: current_depth,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sqry_core::graph::Language;
+    use sqry_core::graph::unified::concurrent::{CodeGraph, GraphSnapshot};
+    use sqry_core::graph::unified::{EdgeKind, FileId, NodeEntry, NodeId, NodeKind};
+
+    struct TestGraph {
+        graph: CodeGraph,
+        file_id: Option<FileId>,
+    }
+
+    impl TestGraph {
+        fn new() -> Self {
+            Self {
+                graph: CodeGraph::new(),
+                file_id: None,
+            }
+        }
+
+        fn ensure_file_id(&mut self) -> FileId {
+            if let Some(file_id) = self.file_id {
+                return file_id;
+            }
+
+            let file_path = std::path::PathBuf::from("/dependency-impact-tests/test.rs");
+            let file_id = self
+                .graph
+                .files_mut()
+                .register_with_language(&file_path, Some(Language::Rust))
+                .expect("register test file");
+            self.file_id = Some(file_id);
+            file_id
+        }
+
+        fn add_node(&mut self, name: &str) -> NodeId {
+            let file_id = self.ensure_file_id();
+            let name_id = self.graph.strings_mut().intern(name).expect("intern name");
+            let qualified_name_id = self
+                .graph
+                .strings_mut()
+                .intern(&format!("test::{name}"))
+                .expect("intern qualified name");
+            let entry = NodeEntry::new(NodeKind::Function, name_id, file_id)
+                .with_qualified_name(qualified_name_id)
+                .with_location(1, 0, 10, 0);
+            let node_id = self.graph.nodes_mut().alloc(entry).expect("alloc node");
+            self.graph.indices_mut().add(
+                node_id,
+                NodeKind::Function,
+                name_id,
+                Some(qualified_name_id),
+                file_id,
+            );
+            node_id
+        }
+
+        fn add_call_edge(&mut self, source: NodeId, target: NodeId) {
+            let file_id = self.ensure_file_id();
+            self.graph.edges_mut().add_edge(
+                source,
+                target,
+                EdgeKind::Calls {
+                    argument_count: 0,
+                    is_async: false,
+                },
+                file_id,
+            );
+        }
+
+        fn snapshot(&self) -> GraphSnapshot {
+            self.graph.snapshot()
+        }
+    }
 
     fn make_affected(file_path: &str) -> SqryAffectedSymbol {
         SqryAffectedSymbol {
@@ -249,5 +296,50 @@ mod tests {
     #[test]
     fn default_max_results_is_500() {
         assert_eq!(DEFAULT_MAX_RESULTS, 500);
+    }
+
+    #[test]
+    fn direct_only_dependency_impact_reports_immediate_callers() {
+        let mut graph = TestGraph::new();
+        let target = graph.add_node("target");
+        let direct = graph.add_node("direct");
+        let indirect = graph.add_node("indirect");
+        graph.add_call_edge(direct, target);
+        graph.add_call_edge(indirect, direct);
+
+        let snapshot = graph.snapshot();
+        let (affected, affected_files) = collect_callers_bfs(&snapshot, target, 3, false, 10);
+
+        assert_eq!(affected.len(), 1);
+        assert_eq!(affected[0].qualified_name, "test::direct");
+        assert!(affected[0].is_direct);
+        assert_eq!(affected[0].depth, 1);
+        assert_eq!(affected_files.len(), 1);
+    }
+
+    #[test]
+    fn indirect_dependency_impact_reports_transitive_callers() {
+        let mut graph = TestGraph::new();
+        let target = graph.add_node("target");
+        let direct = graph.add_node("direct");
+        let indirect = graph.add_node("indirect");
+        graph.add_call_edge(direct, target);
+        graph.add_call_edge(indirect, direct);
+
+        let snapshot = graph.snapshot();
+        let (mut affected, _) = collect_callers_bfs(&snapshot, target, 3, true, 10);
+        affected.sort_by(|left, right| {
+            left.depth
+                .cmp(&right.depth)
+                .then(left.name.cmp(&right.name))
+        });
+
+        assert_eq!(affected.len(), 2);
+        assert_eq!(affected[0].qualified_name, "test::direct");
+        assert_eq!(affected[0].depth, 1);
+        assert!(affected[0].is_direct);
+        assert_eq!(affected[1].qualified_name, "test::indirect");
+        assert_eq!(affected[1].depth, 2);
+        assert!(!affected[1].is_direct);
     }
 }

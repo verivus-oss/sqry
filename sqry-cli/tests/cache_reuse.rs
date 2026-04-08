@@ -7,9 +7,9 @@ use serde_json::Value;
 use std::fs;
 use tempfile::TempDir;
 
-/// Test that index command emits thread pool metrics when SQRY_EMIT_THREAD_POOL_METRICS=1
+/// Test that index command emits thread pool metrics when `SQRY_EMIT_THREAD_POOL_METRICS=1`
 ///
-/// Test that thread_pool_metrics are emitted when SQRY_EMIT_THREAD_POOL_METRICS=1
+/// Test that `thread_pool_metrics` are emitted when `SQRY_EMIT_THREAD_POOL_METRICS=1`
 #[test]
 fn index_emits_thread_pool_metrics() {
     let tmp_test_workspace = TempDir::new().unwrap();

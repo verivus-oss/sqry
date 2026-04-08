@@ -159,8 +159,7 @@ class myapp::app {
     let call_count = count_call_edges(&staging);
     assert!(
         call_count >= 1,
-        "Expected include edges to produce call edges, got {}",
-        call_count
+        "Expected include edges to produce call edges, got {call_count}"
     );
 }
 

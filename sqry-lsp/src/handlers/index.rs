@@ -1112,6 +1112,11 @@ pub fn list_duplicate_groups(
 ///
 /// Returns an error when the session cannot resolve the path or when loading
 /// the index fails.
+#[allow(clippy::too_many_lines)] // Index handler covers all query parameter combinations
+#[allow(
+    clippy::too_many_lines,
+    reason = "cycle detection logic with SCC formatting is inherently verbose"
+)]
 pub fn list_circular_dependencies(
     session: &SessionManager,
     params: &SqryListCircularDependenciesParams,
@@ -1366,7 +1371,7 @@ mod tests {
 
     #[test]
     fn test_sort_order_default() {
-        let order: SortOrder = Default::default();
+        let order = SortOrder::default();
         assert_eq!(order, SortOrder::Alphabetical);
     }
 

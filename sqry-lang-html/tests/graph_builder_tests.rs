@@ -134,8 +134,7 @@ fn test_script_src_import() {
     let import_count = count_import_edges(&staging);
     assert!(
         import_count >= 2,
-        "Expected at least 2 import edges for script src, got {}",
-        import_count
+        "Expected at least 2 import edges for script src, got {import_count}"
     );
     assert!(
         has_interned_string_containing(&staging, "main.js"),
@@ -166,8 +165,7 @@ fn test_script_src_single() {
     let import_count = count_import_edges(&staging);
     assert!(
         import_count >= 1,
-        "Expected at least 1 import edge for script src, got {}",
-        import_count
+        "Expected at least 1 import edge for script src, got {import_count}"
     );
 }
 
@@ -201,8 +199,7 @@ fn test_link_stylesheet_import() {
     let import_count = count_import_edges(&staging);
     assert!(
         import_count >= 2,
-        "Expected at least 2 import edges for stylesheets, got {}",
-        import_count
+        "Expected at least 2 import edges for stylesheets, got {import_count}"
     );
     assert!(
         has_interned_string_containing(&staging, "style.css"),
@@ -357,8 +354,7 @@ fn test_all_resource_types_combined() {
     let import_count = count_import_edges(&staging);
     assert!(
         import_count >= 2,
-        "Expected at least 2 import edges (css + js), got {}",
-        import_count
+        "Expected at least 2 import edges (css + js), got {import_count}"
     );
 }
 
@@ -453,7 +449,6 @@ fn test_self_closing_tags() {
     let import_count = count_import_edges(&staging);
     assert!(
         import_count >= 1,
-        "Expected at least 1 import edge from self-closing link, got {}",
-        import_count
+        "Expected at least 1 import edge from self-closing link, got {import_count}"
     );
 }

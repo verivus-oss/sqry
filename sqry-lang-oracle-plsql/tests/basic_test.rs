@@ -124,14 +124,14 @@ fn count_table_writes(staging: &StagingGraph, table: &str, op: TableWriteOp) -> 
 
 #[test]
 fn test_package_and_procedure_nodes() {
-    let source = br#"
+    let source = br"
 CREATE OR REPLACE PACKAGE BODY test_pkg AS
   PROCEDURE do_work IS
   BEGIN
     NULL;
   END do_work;
 END test_pkg;
-"#;
+";
 
     let staging = build_staging(source);
 
@@ -144,7 +144,7 @@ END test_pkg;
 
 #[test]
 fn test_table_edges_from_procedure() {
-    let source = br#"
+    let source = br"
 CREATE OR REPLACE PACKAGE BODY test_pkg AS
   PROCEDURE do_work IS
   BEGIN
@@ -152,7 +152,7 @@ CREATE OR REPLACE PACKAGE BODY test_pkg AS
     INSERT INTO audit_log VALUES (1);
   END do_work;
 END test_pkg;
-"#;
+";
 
     let staging = build_staging(source);
 

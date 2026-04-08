@@ -15,8 +15,9 @@ use sqry_core::query::QueryExecutor;
 use sqry_plugin_registry::create_plugin_manager;
 use std::collections::HashMap;
 use std::env;
+use std::ffi::OsString;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use tower_lsp::lsp_types::{Position, Url};
 
@@ -72,6 +73,64 @@ impl NodeMatch {
     }
 }
 
+fn normalize_path_lexically(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    normalized.push(component.as_os_str());
+                }
+            }
+            Component::Normal(part) => normalized.push(part),
+        }
+    }
+
+    normalized
+}
+
+fn canonicalize_with_missing_tail(path: &Path) -> Result<PathBuf> {
+    let normalized_path = normalize_path_lexically(path);
+    let mut missing_suffix: Vec<OsString> = Vec::new();
+    let mut current = normalized_path.as_path();
+
+    loop {
+        match current.canonicalize() {
+            Ok(canonical) => {
+                let mut resolved = canonical;
+                for component in missing_suffix.iter().rev() {
+                    resolved.push(component);
+                }
+                return Ok(resolved);
+            }
+            Err(error) => {
+                let Some(file_name) = current.file_name() else {
+                    return Err(error).with_context(|| {
+                        format!(
+                            "failed to canonicalize any existing path prefix for {}",
+                            path.display()
+                        )
+                    });
+                };
+                let Some(parent) = current.parent() else {
+                    return Err(error).with_context(|| {
+                        format!(
+                            "failed to canonicalize any existing path prefix for {}",
+                            path.display()
+                        )
+                    });
+                };
+                missing_suffix.push(file_name.to_os_string());
+                current = parent;
+            }
+        }
+    }
+}
+
 impl SessionManager {
     #[must_use]
     pub fn new(options: LspOptions) -> Self {
@@ -115,28 +174,41 @@ impl SessionManager {
 
     /// Resolve the workspace-relative path requested by the client.
     ///
+    /// The resolved path is validated to be within the workspace root
+    /// (or `index_root` override) to prevent directory traversal.
+    ///
     /// # Errors
     ///
-    /// Returns an error when the path cannot be canonicalized.
+    /// Returns an error when the workspace root cannot be resolved or when the
+    /// requested path escapes the workspace boundary.
     pub fn resolve_path(&self, input: Option<&str>) -> Result<PathBuf> {
         let base_override = self.config.read().index_root.clone();
         let base = base_override.as_deref().unwrap_or_else(|| self.root_path());
+        let canonical_base = canonicalize_with_missing_tail(base)
+            .with_context(|| format!("failed to resolve workspace root {}", base.display()))?;
         let path = match input {
             Some(p) => {
                 let candidate = PathBuf::from(p);
                 if candidate.is_absolute() {
                     candidate
                 } else {
-                    base.join(candidate)
+                    canonical_base.join(candidate)
                 }
             }
-            None => base.to_path_buf(),
+            None => canonical_base.clone(),
         };
+        let resolved = canonicalize_with_missing_tail(&path)
+            .with_context(|| format!("failed to resolve requested path {}", path.display()))?;
 
-        match path.canonicalize() {
-            Ok(canonical) => Ok(canonical),
-            Err(_) => Ok(path),
+        if !resolved.starts_with(&canonical_base) {
+            anyhow::bail!(
+                "resolved path {} is outside workspace root {}",
+                resolved.display(),
+                canonical_base.display()
+            );
         }
+
+        Ok(resolved)
     }
 
     #[must_use]
@@ -498,9 +570,10 @@ impl SessionManager {
             return Ok(Vec::new());
         };
 
-        let tree = plugin
-            .parse_ast(content)
+        let (prepared_content, tree) = plugin
+            .prepare_ast(content)
             .map_err(|err| anyhow!("failed to parse AST for '{}': {:?}", path.display(), err))?;
+        let parse_content = prepared_content.as_ref();
 
         let builder = plugin
             .graph_builder()
@@ -508,7 +581,7 @@ impl SessionManager {
 
         let mut staging = StagingGraph::new();
         builder
-            .build_graph(&tree, content, path, &mut staging)
+            .build_graph(&tree, parse_content, path, &mut staging)
             .map_err(|err| anyhow!("failed to build graph for '{}': {:?}", path.display(), err))?;
         staging.attach_body_hashes(content);
 
@@ -738,6 +811,7 @@ fn build_plugin_manager() -> PluginManager {
 mod tests {
     use super::*;
     use sqry_core::graph::unified::NodeKind;
+    use tempfile::tempdir;
 
     fn make_node(
         name: &str,
@@ -760,6 +834,17 @@ mod tests {
             documentation: None,
             language: language.map(str::to_string),
         }
+    }
+
+    fn make_session(index_root: PathBuf) -> SessionManager {
+        SessionManager::new(LspOptions {
+            stdio: false,
+            socket: None,
+            index_root: Some(index_root),
+            log_level: "warn".into(),
+            config: None,
+            allow_public_bind: false,
+        })
     }
 
     // ── NodeMatch::qualified_name_or_name ────────────────────────────────────
@@ -838,5 +923,46 @@ mod tests {
     fn document_matches_disk_returns_true_when_no_snapshot() {
         // No snapshot → always matches (nothing to compare)
         assert!(document_matches_disk(None, Path::new("/nonexistent/path")));
+    }
+
+    #[test]
+    fn resolve_path_allows_missing_path_within_workspace() {
+        let workspace = tempdir().expect("workspace tempdir");
+        let session = make_session(workspace.path().to_path_buf());
+
+        let resolved = session
+            .resolve_path(Some("missing/file.rs"))
+            .expect("missing in-workspace path should resolve");
+
+        assert_eq!(resolved, workspace.path().join("missing/file.rs"));
+    }
+
+    #[test]
+    fn resolve_path_rejects_nonexistent_parent_escape() {
+        let workspace = tempdir().expect("workspace tempdir");
+        let session = make_session(workspace.path().to_path_buf());
+
+        let error = session
+            .resolve_path(Some("../escape/file.rs"))
+            .expect_err("path escape should be rejected");
+
+        assert!(error.to_string().contains("outside workspace root"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_path_rejects_missing_leaf_under_symlinked_parent() {
+        use std::os::unix::fs::symlink;
+
+        let workspace = tempdir().expect("workspace tempdir");
+        let outside = tempdir().expect("outside tempdir");
+        symlink(outside.path(), workspace.path().join("linked")).expect("create symlink");
+
+        let session = make_session(workspace.path().to_path_buf());
+        let error = session
+            .resolve_path(Some("linked/missing/file.rs"))
+            .expect_err("symlink escape should be rejected");
+
+        assert!(error.to_string().contains("outside workspace root"));
     }
 }

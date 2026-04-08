@@ -45,11 +45,10 @@ fn normalized_edge_digests(snapshot: &GraphSnapshot, root: &Path) -> Vec<EdgeDig
         for edge in snapshot.edges().edges_from(node_id) {
             let source_key = node_sort_key(snapshot, edge.source);
             let target_key = node_sort_key(snapshot, edge.target);
-            let file_path = snapshot
-                .files()
-                .resolve(edge.file)
-                .map(|path| normalize_path_for_snapshot(root, path.as_ref()))
-                .unwrap_or_else(|| "<missing>".to_string());
+            let file_path = snapshot.files().resolve(edge.file).map_or_else(
+                || "<missing>".to_string(),
+                |path| normalize_path_for_snapshot(root, path.as_ref()),
+            );
             let metadata = edge_metadata_summary(snapshot, &edge.kind);
 
             digests.push(EdgeDigest {
@@ -84,21 +83,21 @@ fn node_sort_key(snapshot: &GraphSnapshot, node_id: NodeId) -> String {
     snapshot
         .strings()
         .resolve(entry.name)
-        .map(|name| name.as_ref().to_string())
-        .unwrap_or_else(|| "<missing>".to_string())
+        .map_or_else(|| "<missing>".to_string(), |name| name.as_ref().to_string())
 }
 
 fn resolve_string(snapshot: &GraphSnapshot, id: StringId) -> String {
-    snapshot
-        .strings()
-        .resolve(id)
-        .map(|value| value.as_ref().to_string())
-        .unwrap_or_else(|| "<missing>".to_string())
+    snapshot.strings().resolve(id).map_or_else(
+        || "<missing>".to_string(),
+        |value| value.as_ref().to_string(),
+    )
 }
 
 fn resolve_optional_string(snapshot: &GraphSnapshot, id: Option<StringId>) -> String {
-    id.map(|value| resolve_string(snapshot, value))
-        .unwrap_or_else(|| "<none>".to_string())
+    id.map_or_else(
+        || "<none>".to_string(),
+        |value| resolve_string(snapshot, value),
+    )
 }
 
 fn normalize_path_for_snapshot(root: &Path, path: &Path) -> String {
@@ -106,6 +105,7 @@ fn normalize_path_for_snapshot(root: &Path, path: &Path) -> String {
     relative.to_string_lossy().replace('\\', "/")
 }
 
+#[allow(clippy::too_many_lines)] // Edge metadata match covers all 38 EdgeKind variants exhaustively
 fn edge_metadata_summary(snapshot: &GraphSnapshot, kind: &EdgeKind) -> String {
     match kind {
         EdgeKind::Defines => "defines".to_string(),

@@ -1775,11 +1775,11 @@ fn loadModule() void {
     #[test]
     fn test_builtin_non_import_still_creates_call() {
         // Non-import builtins like @memcpy should still create call edges
-        let source = r#"
+        let source = r"
 fn copyMemory(dest: []u8, src: []const u8) void {
     @memcpy(dest.ptr, src.ptr, src.len);
 }
-        "#;
+        ";
 
         let (tree, content) = parse_zig(source);
         let mut staging = StagingGraph::new();

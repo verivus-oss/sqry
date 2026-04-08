@@ -8,6 +8,7 @@
 //!
 //! Also validates database lineage tracking with edges.
 
+use sqry_core::graph::unified::StringId;
 use sqry_core::graph::unified::build::staging::{StagingGraph, StagingOp};
 use sqry_core::graph::unified::edge::EdgeKind;
 use sqry_core::graph::unified::node::NodeKind;
@@ -84,14 +85,14 @@ fn build_graph(source: &[u8]) -> StagingGraph {
 
 #[test]
 fn test_create_table_uses_table_node_kind() {
-    let source = br#"
+    let source = br"
 CREATE TABLE customers (
     id INT PRIMARY KEY,
     name VARCHAR(100) NOT NULL,
     email VARCHAR(255) UNIQUE,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
-"#;
+";
     let staging = build_graph(source);
 
     let entry = find_node_entry(&staging, "customers", NodeKind::Variable);
@@ -103,12 +104,12 @@ CREATE TABLE customers (
 
 #[test]
 fn test_create_view_uses_view_node_kind() {
-    let source = br#"
+    let source = br"
 CREATE TABLE users (id INT, status VARCHAR(20));
 
 CREATE VIEW active_users AS
 SELECT id FROM users WHERE status = 'active';
-"#;
+";
     let staging = build_graph(source);
 
     let table_entry = find_node_entry(&staging, "users", NodeKind::Variable);
@@ -126,12 +127,12 @@ SELECT id FROM users WHERE status = 'active';
 
 #[test]
 fn test_create_materialized_view_uses_view_node_kind() {
-    let source = br#"
+    let source = br"
 CREATE TABLE logs (id INT, message TEXT);
 
 CREATE MATERIALIZED VIEW log_summary AS
 SELECT COUNT(*) as total FROM logs;
-"#;
+";
     let staging = build_graph(source);
 
     let view_entry = find_node_entry(&staging, "log_summary", NodeKind::Variable);
@@ -143,14 +144,14 @@ SELECT COUNT(*) as total FROM logs;
 
 #[test]
 fn test_create_function_uses_procedure_node_kind() {
-    let source = br#"
+    let source = br"
 CREATE FUNCTION calculate_discount(price DECIMAL, rate DECIMAL)
 RETURNS DECIMAL AS $$
 BEGIN
     RETURN price * rate;
 END;
 $$ LANGUAGE plpgsql;
-"#;
+";
     let staging = build_graph(source);
 
     let entry = find_node_entry(&staging, "calculate_discount", NodeKind::Function);
@@ -163,13 +164,13 @@ $$ LANGUAGE plpgsql;
 #[test]
 fn test_create_procedure_uses_procedure_node_kind() {
     // Note: tree-sitter-sequel treats CREATE PROCEDURE as CREATE FUNCTION
-    let source = br#"
+    let source = br"
 CREATE FUNCTION archive_old_records(cutoff_date DATE) RETURNS VOID AS $$
 BEGIN
     DELETE FROM records WHERE created_at < cutoff_date;
 END;
 $$ LANGUAGE plpgsql;
-"#;
+";
     let staging = build_graph(source);
 
     let entry = find_node_entry(&staging, "archive_old_records", NodeKind::Function);
@@ -181,7 +182,7 @@ $$ LANGUAGE plpgsql;
 
 #[test]
 fn test_create_trigger_uses_trigger_node_kind() {
-    let source = br#"
+    let source = br"
 CREATE FUNCTION notify_change() RETURNS TRIGGER AS $$
 BEGIN
     RETURN NEW;
@@ -192,7 +193,7 @@ CREATE TRIGGER user_update_trigger
 AFTER UPDATE ON users
 FOR EACH ROW
 EXECUTE FUNCTION notify_change();
-"#;
+";
     let staging = build_graph(source);
 
     let trigger_entry = find_node_entry(&staging, "user_update_trigger", NodeKind::Function);
@@ -206,12 +207,12 @@ EXECUTE FUNCTION notify_change();
 
 #[test]
 fn test_view_creates_table_read_edge() {
-    let source = br#"
+    let source = br"
 CREATE TABLE products (id INT, name VARCHAR(100), price DECIMAL);
 
 CREATE VIEW expensive_products AS
 SELECT * FROM products WHERE price > 1000;
-"#;
+";
     let staging = build_graph(source);
 
     // Verify both nodes exist
@@ -231,13 +232,13 @@ SELECT * FROM products WHERE price > 1000;
 
 #[test]
 fn test_procedure_creates_table_read_edge() {
-    let source = br#"
+    let source = br"
 CREATE TABLE accounts (id INT, balance DECIMAL);
 
 CREATE FUNCTION get_total_balance() RETURNS DECIMAL AS $$
     SELECT SUM(balance) FROM accounts;
 $$ LANGUAGE sql;
-"#;
+";
     let staging = build_graph(source);
 
     // Verify nodes exist
@@ -254,7 +255,7 @@ $$ LANGUAGE sql;
     let table_read_count = count_edges_of_kind(
         &staging,
         &EdgeKind::TableRead {
-            table_name: Default::default(),
+            table_name: StringId::default(),
             schema: None,
         },
     );
@@ -266,7 +267,7 @@ $$ LANGUAGE sql;
 
 #[test]
 fn test_procedure_creates_table_write_edge() {
-    let source = br#"
+    let source = br"
 CREATE TABLE audit_log (id INT, message TEXT);
 
 CREATE FUNCTION log_event(msg TEXT) RETURNS VOID AS $$
@@ -274,7 +275,7 @@ BEGIN
     INSERT INTO audit_log (message) VALUES (msg);
 END;
 $$ LANGUAGE plpgsql;
-"#;
+";
     let staging = build_graph(source);
 
     // Verify nodes exist
@@ -291,7 +292,7 @@ $$ LANGUAGE plpgsql;
     let table_write_count = count_edges_of_kind(
         &staging,
         &EdgeKind::TableWrite {
-            table_name: Default::default(),
+            table_name: StringId::default(),
             schema: None,
             operation: sqry_core::graph::unified::edge::TableWriteOp::Insert,
         },
@@ -304,7 +305,7 @@ $$ LANGUAGE plpgsql;
 
 #[test]
 fn test_trigger_creates_triggered_by_edge() {
-    let source = br#"
+    let source = br"
 CREATE TABLE orders (id INT, status VARCHAR(20));
 
 CREATE FUNCTION update_timestamp() RETURNS TRIGGER AS $$
@@ -318,7 +319,7 @@ CREATE TRIGGER orders_update_trigger
 BEFORE UPDATE ON orders
 FOR EACH ROW
 EXECUTE FUNCTION update_timestamp();
-"#;
+";
     let staging = build_graph(source);
 
     // Verify nodes exist
@@ -335,7 +336,7 @@ EXECUTE FUNCTION update_timestamp();
     let triggered_by_count = count_edges_of_kind(
         &staging,
         &EdgeKind::TriggeredBy {
-            trigger_name: Default::default(),
+            trigger_name: StringId::default(),
             schema: None,
         },
     );
@@ -349,7 +350,7 @@ EXECUTE FUNCTION update_timestamp();
 
 #[test]
 fn test_all_four_database_node_kinds_together() {
-    let source = br#"
+    let source = br"
 CREATE TABLE inventory (
     id INT PRIMARY KEY,
     product_name VARCHAR(100),
@@ -370,7 +371,7 @@ CREATE TRIGGER track_inventory_changes
 AFTER UPDATE ON inventory
 FOR EACH ROW
 EXECUTE FUNCTION log_inventory_change();
-"#;
+";
     let staging = build_graph(source);
 
     // Verify all 4 database node types exist
@@ -394,12 +395,12 @@ EXECUTE FUNCTION log_inventory_change();
 
 #[test]
 fn test_schema_qualified_table_uses_table_node_kind() {
-    let source = br#"
+    let source = br"
 CREATE TABLE public.employees (
     id INT PRIMARY KEY,
     name VARCHAR(100)
 );
-"#;
+";
     let staging = build_graph(source);
 
     // Schema prefix should be stripped, node name = "employees"
@@ -412,11 +413,11 @@ CREATE TABLE public.employees (
 
 #[test]
 fn test_multiple_tables_all_use_table_node_kind() {
-    let source = br#"
+    let source = br"
 CREATE TABLE users (id INT, name VARCHAR(100));
 CREATE TABLE posts (id INT, user_id INT, title VARCHAR(200));
 CREATE TABLE comments (id INT, post_id INT, content TEXT);
-"#;
+";
     let staging = build_graph(source);
 
     assert!(
@@ -435,7 +436,7 @@ CREATE TABLE comments (id INT, post_id INT, content TEXT);
 
 #[test]
 fn test_database_lineage_chain() {
-    let source = br#"
+    let source = br"
 CREATE TABLE raw_data (id INT, value INT);
 
 CREATE VIEW processed_data AS
@@ -449,7 +450,7 @@ CREATE TRIGGER validate_raw_data
 BEFORE INSERT ON raw_data
 FOR EACH ROW
 EXECUTE FUNCTION validate_value();
-"#;
+";
     let staging = build_graph(source);
 
     // Verify complete lineage chain exists
@@ -474,7 +475,7 @@ EXECUTE FUNCTION validate_value();
     let table_read_count = count_edges_of_kind(
         &staging,
         &EdgeKind::TableRead {
-            table_name: Default::default(),
+            table_name: StringId::default(),
             schema: None,
         },
     );
@@ -486,7 +487,7 @@ EXECUTE FUNCTION validate_value();
     let triggered_by_count = count_edges_of_kind(
         &staging,
         &EdgeKind::TriggeredBy {
-            trigger_name: Default::default(),
+            trigger_name: StringId::default(),
             schema: None,
         },
     );

@@ -844,7 +844,7 @@ fn explore_groovy_type_annotations() {
         } else {
             ""
         };
-        println!("{}{} '{}'", indent, kind, text);
+        println!("{indent}{kind} '{text}'");
         let mut cursor = node.walk();
         for child in node.named_children(&mut cursor) {
             print_ast(child, content, depth + 1);
@@ -885,7 +885,7 @@ fn explore_def_keyword() {
         } else {
             ""
         };
-        println!("{}{} '{}'", indent, kind, text);
+        println!("{indent}{kind} '{text}'");
         let mut cursor = node.walk();
         for child in node.named_children(&mut cursor) {
             print_ast(child, content, depth + 1);
@@ -911,18 +911,18 @@ fn explore_parameter_ast() {
         } else {
             ""
         };
-        println!("{}{} '{}'", indent, kind, text);
+        println!("{indent}{kind} '{text}'");
         let mut cursor = node.walk();
         for child in node.named_children(&mut cursor) {
             print_ast(child, content, depth + 1);
         }
     }
 
-    let source = r#"
+    let source = r"
 void greet(String name) {
     println name
 }
-"#;
+";
 
     let tree = parse_groovy(source);
     println!("\n=== PARAMETER AST ===\n");
@@ -942,18 +942,18 @@ fn explore_def_parameter() {
         } else {
             ""
         };
-        println!("{}{} '{}'", indent, kind, text);
+        println!("{indent}{kind} '{text}'");
         let mut cursor = node.walk();
         for child in node.named_children(&mut cursor) {
             print_ast(child, content, depth + 1);
         }
     }
 
-    let source = r#"
+    let source = r"
 void process(def input) {
     println input
 }
-"#;
+";
 
     let tree = parse_groovy(source);
     println!("\n=== DEF PARAMETER AST ===\n");
@@ -973,14 +973,14 @@ fn explore_constructor() {
         } else {
             ""
         };
-        println!("{}{} '{}'", indent, kind, text);
+        println!("{indent}{kind} '{text}'");
         let mut cursor = node.walk();
         for child in node.named_children(&mut cursor) {
             print_ast(child, content, depth + 1);
         }
     }
 
-    let source = r#"
+    let source = r"
 class Person {
     String name
 
@@ -988,7 +988,7 @@ class Person {
         this.name = initialName
     }
 }
-"#;
+";
 
     let tree = parse_groovy(source);
     println!("\n=== CONSTRUCTOR AST ===\n");
@@ -1008,7 +1008,7 @@ fn explore_native_method() {
         } else {
             ""
         };
-        println!("{}{} '{}'", indent, kind, text);
+        println!("{indent}{kind} '{text}'");
         let mut cursor = node.walk();
         for child in node.named_children(&mut cursor) {
             print_ast(child, content, depth + 1);
@@ -1035,7 +1035,7 @@ fn explore_native_load_ast() {
         } else {
             ""
         };
-        println!("{}{} '{}'", indent, kind, text);
+        println!("{indent}{kind} '{text}'");
         let mut cursor = node.walk();
         for child in node.named_children(&mut cursor) {
             print_ast(child, content, depth + 1);
@@ -1064,7 +1064,7 @@ fn explore_static_native_method() {
         } else {
             ""
         };
-        println!("{}{} '{}'", indent, kind, text);
+        println!("{indent}{kind} '{text}'");
         let mut cursor = node.walk();
         for child in node.named_children(&mut cursor) {
             print_ast(child, content, depth + 1);
@@ -1091,7 +1091,7 @@ fn explore_private_native_method() {
         } else {
             ""
         };
-        println!("{}{} '{}'", indent, kind, text);
+        println!("{indent}{kind} '{text}'");
         let mut cursor = node.walk();
         for child in node.named_children(&mut cursor) {
             print_ast(child, content, depth + 1);
@@ -1118,7 +1118,7 @@ fn explore_jna_qualified_annotation() {
         } else {
             ""
         };
-        println!("{}{} '{}'", indent, kind, text);
+        println!("{indent}{kind} '{text}'");
         let mut cursor = node.walk();
         for child in node.named_children(&mut cursor) {
             print_ast(child, content, depth + 1);
@@ -1184,11 +1184,11 @@ fn test_native_method_creates_ffi_edge() {
 #[test]
 fn test_native_method_in_class_creates_ffi_edge() {
     // native method inside a class should create an FfiCall edge from a Method node
-    let source = r#"
+    let source = r"
 class NativeLib {
     native String nativeMethod()
 }
-"#;
+";
     let tree = parse_groovy(source);
     let mut staging = StagingGraph::new();
     let builder = GroovyGraphBuilder;
@@ -1228,11 +1228,11 @@ class NativeLib {
 #[test]
 fn test_multiple_native_methods() {
     // Multiple native methods should each create an FfiCall edge
-    let source = r#"
+    let source = r"
 native boolean loadLibrary(String path)
 native void unloadLibrary()
 native int getVersion()
-"#;
+";
     let tree = parse_groovy(source);
     let mut staging = StagingGraph::new();
     let builder = GroovyGraphBuilder;
@@ -1369,11 +1369,11 @@ interface MyLib extends Library {
 #[test]
 fn test_interface_without_native_library_annotation_no_ffi() {
     // Regular interface (without @NativeLibrary) should NOT create FFI edges
-    let source = r#"
+    let source = r"
 interface MyInterface {
     void doWork()
 }
-"#;
+";
     let tree = parse_groovy(source);
     let mut staging = StagingGraph::new();
     let builder = GroovyGraphBuilder;
@@ -1459,12 +1459,12 @@ fn test_overloaded_native_methods_collision() {
     // Overloaded native methods with same name but different signatures
     // Currently collapse into a single FFI node (name-only, no JVM signature mangling)
     // This test documents the limitation - future work could add signature disambiguation
-    let source = r#"
+    let source = r"
 class NativeLib {
     native void process(int x)
     native void process(String s)
 }
-"#;
+";
     let tree = parse_groovy(source);
     let mut staging = StagingGraph::new();
     let builder = GroovyGraphBuilder;
@@ -1700,8 +1700,7 @@ class Test {
         .collect();
     assert!(
         !ffi_nodes.iter().any(|name| name.contains("MyLibHelper")),
-        "Should NOT create FFI edges for MyLibHelper (prefix collision), got FFI nodes: {:?}",
-        ffi_nodes
+        "Should NOT create FFI edges for MyLibHelper (prefix collision), got FFI nodes: {ffi_nodes:?}"
     );
 }
 
@@ -1915,7 +1914,7 @@ interface MyLib extends Library {
     );
 }
 
-/// Helper to count FfiCall edges in staging graph
+/// Helper to count `FfiCall` edges in staging graph
 fn count_ffi_call_edges(staging: &StagingGraph) -> usize {
     use sqry_core::graph::unified::edge::kind::EdgeKind;
 
@@ -1930,16 +1929,17 @@ fn count_ffi_call_edges(staging: &StagingGraph) -> usize {
 fn explore_fully_qualified_class_literal() {
     let source1 = "x = MyLib.class";
     let tree1 = parse_groovy(source1);
-    println!("\n=== AST for: {} ===", source1);
+    println!("\n=== AST for: {source1} ===");
     println!("{}", tree1.root_node().to_sexp());
     find_dotted(tree1.root_node(), source1.as_bytes(), 0);
 
     let source = "x = com.example.MyLib.class";
     let tree = parse_groovy(source);
-    println!("\n=== AST for: {} ===", source);
+    println!("\n=== AST for: {source} ===");
     println!("{}", tree.root_node().to_sexp());
 
     // Find the dotted_identifier node
+    #[allow(clippy::items_after_statements)] // Const defined near usage for clarity
     fn find_dotted(node: tree_sitter::Node, content: &[u8], depth: usize) {
         let indent = "  ".repeat(depth);
         if node.kind() == "dotted_identifier" {

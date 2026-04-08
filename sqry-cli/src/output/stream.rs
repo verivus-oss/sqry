@@ -139,6 +139,7 @@ pub struct TestOutputStreams {
 
 #[cfg(test)]
 impl TestOutputStreams {
+    #[must_use]
     pub fn new() -> (Self, OutputStreams) {
         let stdout = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let stderr = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -156,11 +157,23 @@ impl TestOutputStreams {
         (test, streams)
     }
 
+    /// Returns the captured stdout as a string.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal stdout mutex has been poisoned.
+    #[must_use]
     pub fn stdout_string(&self) -> String {
         let guard = self.stdout.lock().unwrap();
         String::from_utf8_lossy(&guard).to_string()
     }
 
+    /// Returns the captured stderr as a string.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal stderr mutex has been poisoned.
+    #[must_use]
     pub fn stderr_string(&self) -> String {
         let guard = self.stderr.lock().unwrap();
         String::from_utf8_lossy(&guard).to_string()

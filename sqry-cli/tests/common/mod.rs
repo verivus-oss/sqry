@@ -17,6 +17,7 @@ pub fn sqry_bin() -> PathBuf {
         }
     };
 
+    #[allow(clippy::map_unwrap_or)] // Test helper uses map/unwrap_or pattern
     std::env::var("CARGO_BIN_EXE_sqry")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {

@@ -32,7 +32,7 @@ fn build_test_graph(source: &str, filename: &str) -> StagingGraph {
     staging
 }
 
-/// Build a string lookup map from staged InternString operations
+/// Build a string lookup map from staged `InternString` operations
 fn build_string_lookup(staging: &StagingGraph) -> HashMap<u32, String> {
     staging
         .operations()
@@ -47,7 +47,7 @@ fn build_string_lookup(staging: &StagingGraph) -> HashMap<u32, String> {
         .collect()
 }
 
-/// Build a node name lookup map from staged AddNode operations
+/// Build a node name lookup map from staged `AddNode` operations
 fn build_node_name_lookup(staging: &StagingGraph) -> HashMap<u32, String> {
     let strings = build_string_lookup(staging);
     staging
@@ -91,7 +91,7 @@ fn resolve_display_name(
         )
 }
 
-/// Helper to collect all edges of a specific kind and return (from_name, to_name) pairs
+/// Helper to collect all edges of a specific kind and return (`from_name`, `to_name`) pairs
 fn collect_edges_by_kind<F>(staging: &StagingGraph, predicate: F) -> Vec<(String, String)>
 where
     F: Fn(&EdgeKind) -> bool,
@@ -125,7 +125,7 @@ where
     edges
 }
 
-/// Helper to collect TypeOf edges filtered by context (Parameter, Return, Variable, etc.)
+/// Helper to collect `TypeOf` edges filtered by context (Parameter, Return, Variable, etc.)
 fn collect_typeof_edges_by_context(
     staging: &StagingGraph,
     context: TypeOfContext,
@@ -161,22 +161,19 @@ var active bool
         typeof_edges
             .iter()
             .any(|(var, typ)| var == "main.count" && typ == "int"),
-        "Expected TypeOf edge from main.count to int, got: {:?}",
-        typeof_edges
+        "Expected TypeOf edge from main.count to int, got: {typeof_edges:?}"
     );
     assert!(
         typeof_edges
             .iter()
             .any(|(var, typ)| var == "main.name" && typ == "string"),
-        "Expected TypeOf edge from main.name to string, got: {:?}",
-        typeof_edges
+        "Expected TypeOf edge from main.name to string, got: {typeof_edges:?}"
     );
     assert!(
         typeof_edges
             .iter()
             .any(|(var, typ)| var == "main.active" && typ == "bool"),
-        "Expected TypeOf edge from main.active to bool, got: {:?}",
-        typeof_edges
+        "Expected TypeOf edge from main.active to bool, got: {typeof_edges:?}"
     );
 }
 
@@ -207,8 +204,7 @@ var ptr *int
         typeof_edges
             .iter()
             .any(|(var, typ)| var == "main.user" && typ == "*User"),
-        "Expected TypeOf edge from main.user to *User, got: {:?}",
-        typeof_edges
+        "Expected TypeOf edge from main.user to *User, got: {typeof_edges:?}"
     );
 
     // Check Reference edges (should point to the underlying type)
@@ -216,15 +212,13 @@ var ptr *int
         reference_edges
             .iter()
             .any(|(var, typ)| var == "main.user" && typ == "User"),
-        "Expected Reference edge from main.user to User, got: {:?}",
-        reference_edges
+        "Expected Reference edge from main.user to User, got: {reference_edges:?}"
     );
     assert!(
         reference_edges
             .iter()
             .any(|(var, typ)| var == "main.ptr" && typ == "int"),
-        "Expected Reference edge from main.ptr to int, got: {:?}",
-        reference_edges
+        "Expected Reference edge from main.ptr to int, got: {reference_edges:?}"
     );
 }
 
@@ -247,15 +241,13 @@ var numbers []int
         reference_edges
             .iter()
             .any(|(var, typ)| var == "main.items" && typ == "string"),
-        "Expected Reference edge from main.items to string, got: {:?}",
-        reference_edges
+        "Expected Reference edge from main.items to string, got: {reference_edges:?}"
     );
     assert!(
         reference_edges
             .iter()
             .any(|(var, typ)| var == "main.numbers" && typ == "int"),
-        "Expected Reference edge from main.numbers to int, got: {:?}",
-        reference_edges
+        "Expected Reference edge from main.numbers to int, got: {reference_edges:?}"
     );
 }
 
@@ -282,22 +274,19 @@ var lookup map[int]string
         reference_edges
             .iter()
             .any(|(var, typ)| var == "main.cache" && typ == "string"),
-        "Expected Reference edge from main.cache to string (key type), got: {:?}",
-        reference_edges
+        "Expected Reference edge from main.cache to string (key type), got: {reference_edges:?}"
     );
     assert!(
         reference_edges
             .iter()
             .any(|(var, typ)| var == "main.cache" && typ == "User"),
-        "Expected Reference edge from main.cache to User (value type), got: {:?}",
-        reference_edges
+        "Expected Reference edge from main.cache to User (value type), got: {reference_edges:?}"
     );
     assert!(
         reference_edges
             .iter()
             .any(|(var, typ)| var == "main.lookup" && typ == "int"),
-        "Expected Reference edge from main.lookup to int (key type), got: {:?}",
-        reference_edges
+        "Expected Reference edge from main.lookup to int (key type), got: {reference_edges:?}"
     );
 }
 
@@ -325,22 +314,19 @@ var outChan chan<- int
         reference_edges
             .iter()
             .any(|(var, typ)| var == "main.ch" && typ == "Request"),
-        "Expected Reference edge from main.ch to Request, got: {:?}",
-        reference_edges
+        "Expected Reference edge from main.ch to Request, got: {reference_edges:?}"
     );
     assert!(
         reference_edges
             .iter()
             .any(|(var, typ)| var == "main.inChan" && typ == "string"),
-        "Expected Reference edge from main.inChan to string, got: {:?}",
-        reference_edges
+        "Expected Reference edge from main.inChan to string, got: {reference_edges:?}"
     );
     assert!(
         reference_edges
             .iter()
             .any(|(var, typ)| var == "main.outChan" && typ == "int"),
-        "Expected Reference edge from main.outChan to int, got: {:?}",
-        reference_edges
+        "Expected Reference edge from main.outChan to int, got: {reference_edges:?}"
     );
 }
 
@@ -363,15 +349,13 @@ const Timeout int64 = 30
         typeof_edges
             .iter()
             .any(|(var, typ)| var == "main.MaxSize" && typ == "int"),
-        "Expected TypeOf edge from main.MaxSize to int, got: {:?}",
-        typeof_edges
+        "Expected TypeOf edge from main.MaxSize to int, got: {typeof_edges:?}"
     );
     assert!(
         typeof_edges
             .iter()
             .any(|(var, typ)| var == "main.Timeout" && typ == "int64"),
-        "Expected TypeOf edge from main.Timeout to int64, got: {:?}",
-        typeof_edges
+        "Expected TypeOf edge from main.Timeout to int64, got: {typeof_edges:?}"
     );
 }
 
@@ -394,15 +378,13 @@ var grid [5][5]float64
         reference_edges
             .iter()
             .any(|(var, typ)| var == "main.matrix" && typ == "int"),
-        "Expected Reference edge from main.matrix to int, got: {:?}",
-        reference_edges
+        "Expected Reference edge from main.matrix to int, got: {reference_edges:?}"
     );
     assert!(
         reference_edges
             .iter()
             .any(|(var, typ)| var == "main.grid" && typ == "float64"),
-        "Expected Reference edge from main.grid to float64, got: {:?}",
-        reference_edges
+        "Expected Reference edge from main.grid to float64, got: {reference_edges:?}"
     );
 }
 
@@ -450,22 +432,19 @@ var (
         typeof_edges
             .iter()
             .any(|(var, typ)| var == "main.x" && typ == "int"),
-        "Expected TypeOf edge from main.x to int in grouped declaration, got: {:?}",
-        typeof_edges
+        "Expected TypeOf edge from main.x to int in grouped declaration, got: {typeof_edges:?}"
     );
     assert!(
         typeof_edges
             .iter()
             .any(|(var, typ)| var == "main.y" && typ == "string"),
-        "Expected TypeOf edge from main.y to string in grouped declaration, got: {:?}",
-        typeof_edges
+        "Expected TypeOf edge from main.y to string in grouped declaration, got: {typeof_edges:?}"
     );
     assert!(
         typeof_edges
             .iter()
             .any(|(var, typ)| var == "main.z" && typ == "bool"),
-        "Expected TypeOf edge from main.z to bool in grouped declaration, got: {:?}",
-        typeof_edges
+        "Expected TypeOf edge from main.z to bool in grouped declaration, got: {typeof_edges:?}"
     );
 }
 
@@ -484,22 +463,19 @@ var a, b, c int
         typeof_edges
             .iter()
             .any(|(var, typ)| var == "main.a" && typ == "int"),
-        "Expected TypeOf edge from main.a to int in multi-name declaration, got: {:?}",
-        typeof_edges
+        "Expected TypeOf edge from main.a to int in multi-name declaration, got: {typeof_edges:?}"
     );
     assert!(
         typeof_edges
             .iter()
             .any(|(var, typ)| var == "main.b" && typ == "int"),
-        "Expected TypeOf edge from main.b to int in multi-name declaration, got: {:?}",
-        typeof_edges
+        "Expected TypeOf edge from main.b to int in multi-name declaration, got: {typeof_edges:?}"
     );
     assert!(
         typeof_edges
             .iter()
             .any(|(var, typ)| var == "main.c" && typ == "int"),
-        "Expected TypeOf edge from main.c to int in multi-name declaration, got: {:?}",
-        typeof_edges
+        "Expected TypeOf edge from main.c to int in multi-name declaration, got: {typeof_edges:?}"
     );
 }
 
@@ -521,15 +497,13 @@ const (
         typeof_edges
             .iter()
             .any(|(var, typ)| var == "main.MaxRetries" && typ == "int"),
-        "Expected TypeOf edge from main.MaxRetries to int in grouped const, got: {:?}",
-        typeof_edges
+        "Expected TypeOf edge from main.MaxRetries to int in grouped const, got: {typeof_edges:?}"
     );
     assert!(
         typeof_edges
             .iter()
             .any(|(var, typ)| var == "main.Timeout" && typ == "int64"),
-        "Expected TypeOf edge from main.Timeout to int64 in grouped const, got: {:?}",
-        typeof_edges
+        "Expected TypeOf edge from main.Timeout to int64 in grouped const, got: {typeof_edges:?}"
     );
 }
 
@@ -552,13 +526,11 @@ func doWork() {
     // Local variables should NOT have TypeOf edges (only package-level vars)
     assert!(
         !typeof_edges.iter().any(|(var, _)| var.contains("local")),
-        "Should NOT have TypeOf edge for function-local var 'local', got: {:?}",
-        typeof_edges
+        "Should NOT have TypeOf edge for function-local var 'local', got: {typeof_edges:?}"
     );
     assert!(
         !typeof_edges.iter().any(|(var, _)| var.contains("data")),
-        "Should NOT have TypeOf edge for function-local var 'data', got: {:?}",
-        typeof_edges
+        "Should NOT have TypeOf edge for function-local var 'data', got: {typeof_edges:?}"
     );
 }
 
@@ -593,22 +565,19 @@ var rw interface {
         reference_edges
             .iter()
             .any(|(var, typ)| var == "main.rw" && typ == "Reader"),
-        "Expected Reference edge from main.rw to Reader (embedded interface), got: {:?}",
-        reference_edges
+        "Expected Reference edge from main.rw to Reader (embedded interface), got: {reference_edges:?}"
     );
     assert!(
         reference_edges
             .iter()
             .any(|(var, typ)| var == "main.rw" && typ == "Writer"),
-        "Expected Reference edge from main.rw to Writer (embedded interface), got: {:?}",
-        reference_edges
+        "Expected Reference edge from main.rw to Writer (embedded interface), got: {reference_edges:?}"
     );
     assert!(
         reference_edges
             .iter()
             .any(|(var, typ)| var == "main.rw" && typ == "error"),
-        "Expected Reference edge from main.rw to error (Close method return), got: {:?}",
-        reference_edges
+        "Expected Reference edge from main.rw to error (Close method return), got: {reference_edges:?}"
     );
 }
 
@@ -631,22 +600,19 @@ var numeric interface {
         reference_edges
             .iter()
             .any(|(var, typ)| var == "main.numeric" && typ == "int"),
-        "Expected Reference edge from main.numeric to int (type set), got: {:?}",
-        reference_edges
+        "Expected Reference edge from main.numeric to int (type set), got: {reference_edges:?}"
     );
     assert!(
         reference_edges
             .iter()
             .any(|(var, typ)| var == "main.numeric" && typ == "int64"),
-        "Expected Reference edge from main.numeric to int64 (type set), got: {:?}",
-        reference_edges
+        "Expected Reference edge from main.numeric to int64 (type set), got: {reference_edges:?}"
     );
     assert!(
         reference_edges
             .iter()
             .any(|(var, typ)| var == "main.numeric" && typ == "float64"),
-        "Expected Reference edge from main.numeric to float64 (type set), got: {:?}",
-        reference_edges
+        "Expected Reference edge from main.numeric to float64 (type set), got: {reference_edges:?}"
     );
 }
 
@@ -672,15 +638,13 @@ var rw interface {
         reference_edges
             .iter()
             .any(|(var, typ)| var == "main.rw" && typ == "io.Reader"),
-        "Expected Reference edge from main.rw to io.Reader (qualified embedded), got: {:?}",
-        reference_edges
+        "Expected Reference edge from main.rw to io.Reader (qualified embedded), got: {reference_edges:?}"
     );
     assert!(
         reference_edges
             .iter()
             .any(|(var, typ)| var == "main.rw" && typ == "io.Writer"),
-        "Expected Reference edge from main.rw to io.Writer (qualified embedded), got: {:?}",
-        reference_edges
+        "Expected Reference edge from main.rw to io.Writer (qualified embedded), got: {reference_edges:?}"
     );
 }
 
@@ -711,15 +675,13 @@ var processor func(int, string) (bool, error)
         reference_edges
             .iter()
             .any(|(var, typ)| var == "main.handler" && typ == "Request"),
-        "Expected Reference edge from main.handler to Request, got: {:?}",
-        reference_edges
+        "Expected Reference edge from main.handler to Request, got: {reference_edges:?}"
     );
     assert!(
         reference_edges
             .iter()
             .any(|(var, typ)| var == "main.handler" && typ == "Response"),
-        "Expected Reference edge from main.handler to Response, got: {:?}",
-        reference_edges
+        "Expected Reference edge from main.handler to Response, got: {reference_edges:?}"
     );
 
     // processor should reference int, string, bool, error
@@ -727,29 +689,25 @@ var processor func(int, string) (bool, error)
         reference_edges
             .iter()
             .any(|(var, typ)| var == "main.processor" && typ == "int"),
-        "Expected Reference edge from main.processor to int, got: {:?}",
-        reference_edges
+        "Expected Reference edge from main.processor to int, got: {reference_edges:?}"
     );
     assert!(
         reference_edges
             .iter()
             .any(|(var, typ)| var == "main.processor" && typ == "string"),
-        "Expected Reference edge from main.processor to string, got: {:?}",
-        reference_edges
+        "Expected Reference edge from main.processor to string, got: {reference_edges:?}"
     );
     assert!(
         reference_edges
             .iter()
             .any(|(var, typ)| var == "main.processor" && typ == "bool"),
-        "Expected Reference edge from main.processor to bool, got: {:?}",
-        reference_edges
+        "Expected Reference edge from main.processor to bool, got: {reference_edges:?}"
     );
     assert!(
         reference_edges
             .iter()
             .any(|(var, typ)| var == "main.processor" && typ == "error"),
-        "Expected Reference edge from main.processor to error, got: {:?}",
-        reference_edges
+        "Expected Reference edge from main.processor to error, got: {reference_edges:?}"
     );
 }
 
@@ -777,15 +735,13 @@ var cfg struct {
         reference_edges
             .iter()
             .any(|(var, typ)| var == "main.cfg" && typ == "Database"),
-        "Expected Reference edge from main.cfg to Database (struct field type), got: {:?}",
-        reference_edges
+        "Expected Reference edge from main.cfg to Database (struct field type), got: {reference_edges:?}"
     );
     assert!(
         reference_edges
             .iter()
             .any(|(var, typ)| var == "main.cfg" && typ == "string"),
-        "Expected Reference edge from main.cfg to string (struct field type), got: {:?}",
-        reference_edges
+        "Expected Reference edge from main.cfg to string (struct field type), got: {reference_edges:?}"
     );
 }
 
@@ -808,22 +764,19 @@ var reader interface {
         reference_edges
             .iter()
             .any(|(var, typ)| var == "main.reader" && typ == "byte"),
-        "Expected Reference edge from main.reader to byte (method param type), got: {:?}",
-        reference_edges
+        "Expected Reference edge from main.reader to byte (method param type), got: {reference_edges:?}"
     );
     assert!(
         reference_edges
             .iter()
             .any(|(var, typ)| var == "main.reader" && typ == "int"),
-        "Expected Reference edge from main.reader to int (method return type), got: {:?}",
-        reference_edges
+        "Expected Reference edge from main.reader to int (method return type), got: {reference_edges:?}"
     );
     assert!(
         reference_edges
             .iter()
             .any(|(var, typ)| var == "main.reader" && typ == "error"),
-        "Expected Reference edge from main.reader to error (method return type), got: {:?}",
-        reference_edges
+        "Expected Reference edge from main.reader to error (method return type), got: {reference_edges:?}"
     );
 }
 
@@ -864,61 +817,51 @@ const ConfigA, ConfigB = "foo", "bar"
     // Verify all exported names from grouped var declarations
     assert!(
         exported_names.contains(&"main.PublicA"),
-        "Expected main.PublicA to be exported, got: {:?}",
-        exported_names
+        "Expected main.PublicA to be exported, got: {exported_names:?}"
     );
     assert!(
         exported_names.contains(&"main.PublicB"),
-        "Expected main.PublicB to be exported, got: {:?}",
-        exported_names
+        "Expected main.PublicB to be exported, got: {exported_names:?}"
     );
 
     // Verify private names are NOT exported
     assert!(
         !exported_names.contains(&"main.privateC"),
-        "main.privateC should not be exported (lowercase), got: {:?}",
-        exported_names
+        "main.privateC should not be exported (lowercase), got: {exported_names:?}"
     );
 
     // Verify multi-name var exports
     assert!(
         exported_names.contains(&"main.PublicX"),
-        "Expected main.PublicX to be exported, got: {:?}",
-        exported_names
+        "Expected main.PublicX to be exported, got: {exported_names:?}"
     );
     assert!(
         exported_names.contains(&"main.PublicY"),
-        "Expected main.PublicY to be exported, got: {:?}",
-        exported_names
+        "Expected main.PublicY to be exported, got: {exported_names:?}"
     );
     assert!(
         !exported_names.contains(&"main.privateZ"),
-        "main.privateZ should not be exported (lowercase), got: {:?}",
-        exported_names
+        "main.privateZ should not be exported (lowercase), got: {exported_names:?}"
     );
 
     // Verify grouped const exports
     assert!(
         exported_names.contains(&"main.MaxRetries"),
-        "Expected main.MaxRetries to be exported, got: {:?}",
-        exported_names
+        "Expected main.MaxRetries to be exported, got: {exported_names:?}"
     );
     assert!(
         exported_names.contains(&"main.MinDelay"),
-        "Expected main.MinDelay to be exported, got: {:?}",
-        exported_names
+        "Expected main.MinDelay to be exported, got: {exported_names:?}"
     );
 
     // Verify multi-name const exports
     assert!(
         exported_names.contains(&"main.ConfigA"),
-        "Expected main.ConfigA to be exported, got: {:?}",
-        exported_names
+        "Expected main.ConfigA to be exported, got: {exported_names:?}"
     );
     assert!(
         exported_names.contains(&"main.ConfigB"),
-        "Expected main.ConfigB to be exported, got: {:?}",
-        exported_names
+        "Expected main.ConfigB to be exported, got: {exported_names:?}"
     );
 }
 
@@ -956,52 +899,44 @@ func process() {
     // GlobalPublic should be exported (package-level)
     assert!(
         exported_names.contains(&"main.GlobalPublic"),
-        "Expected main.GlobalPublic to be exported, got: {:?}",
-        exported_names
+        "Expected main.GlobalPublic to be exported, got: {exported_names:?}"
     );
 
     // All local uppercase variables should NOT be exported
     assert!(
         !exported_names.contains(&"main.LocalPublic"),
-        "LocalPublic should not be exported (function-local), got: {:?}",
-        exported_names
+        "LocalPublic should not be exported (function-local), got: {exported_names:?}"
     );
     assert!(
         !exported_names.contains(&"main.LocalConst"),
-        "LocalConst should not be exported (function-local), got: {:?}",
-        exported_names
+        "LocalConst should not be exported (function-local), got: {exported_names:?}"
     );
     assert!(
         !exported_names.contains(&"main.GroupedLocal"),
-        "GroupedLocal should not be exported (function-local), got: {:?}",
-        exported_names
+        "GroupedLocal should not be exported (function-local), got: {exported_names:?}"
     );
     assert!(
         !exported_names.contains(&"main.AnotherLocal"),
-        "AnotherLocal should not be exported (function-local), got: {:?}",
-        exported_names
+        "AnotherLocal should not be exported (function-local), got: {exported_names:?}"
     );
     assert!(
         !exported_names.contains(&"main.MultiA"),
-        "MultiA should not be exported (function-local), got: {:?}",
-        exported_names
+        "MultiA should not be exported (function-local), got: {exported_names:?}"
     );
     assert!(
         !exported_names.contains(&"main.MultiB"),
-        "MultiB should not be exported (function-local), got: {:?}",
-        exported_names
+        "MultiB should not be exported (function-local), got: {exported_names:?}"
     );
     assert!(
         !exported_names.contains(&"main.ConfigLocal"),
-        "ConfigLocal should not be exported (function-local), got: {:?}",
-        exported_names
+        "ConfigLocal should not be exported (function-local), got: {exported_names:?}"
     );
 }
 
 #[test]
 fn test_interface_type_set_complex_types() {
     // Test type set with complex type terms (slices, maps, etc.)
-    let source = r#"package main
+    let source = r"package main
 
 type Foo struct {
     value int
@@ -1010,7 +945,7 @@ type Foo struct {
 var data interface {
     ~[]byte | ~map[string]Foo
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.go");
     let reference_edges =
@@ -1021,22 +956,19 @@ var data interface {
         reference_edges
             .iter()
             .any(|(var, typ)| var == "main.data" && typ == "byte"),
-        "Expected Reference edge from main.data to byte (slice element), got: {:?}",
-        reference_edges
+        "Expected Reference edge from main.data to byte (slice element), got: {reference_edges:?}"
     );
     assert!(
         reference_edges
             .iter()
             .any(|(var, typ)| var == "main.data" && typ == "string"),
-        "Expected Reference edge from main.data to string (map key), got: {:?}",
-        reference_edges
+        "Expected Reference edge from main.data to string (map key), got: {reference_edges:?}"
     );
     assert!(
         reference_edges
             .iter()
             .any(|(var, typ)| var == "main.data" && typ == "Foo"),
-        "Expected Reference edge from main.data to Foo (map value), got: {:?}",
-        reference_edges
+        "Expected Reference edge from main.data to Foo (map value), got: {reference_edges:?}"
     );
 }
 
@@ -1046,11 +978,11 @@ var data interface {
 
 #[test]
 fn test_function_simple_parameters() {
-    let source = r#"package main
+    let source = r"package main
 
 func Add(x int, y int) {
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.go");
     let typeof_edges =
@@ -1061,14 +993,13 @@ func Add(x int, y int) {
         typeof_edges
             .iter()
             .any(|(func, typ)| func == "main.Add" && typ == "int"),
-        "Expected TypeOf edge from main.Add to int (parameter type), got: {:?}",
-        typeof_edges
+        "Expected TypeOf edge from main.Add to int (parameter type), got: {typeof_edges:?}"
     );
 }
 
 #[test]
 fn test_function_complex_parameters() {
-    let source = r#"package main
+    let source = r"package main
 
 type User struct {
     name string
@@ -1076,7 +1007,7 @@ type User struct {
 
 func ProcessUser(user *User, ids []int, metadata map[string]interface{}) {
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.go");
     let typeof_edges =
@@ -1089,22 +1020,19 @@ func ProcessUser(user *User, ids []int, metadata map[string]interface{}) {
         typeof_edges
             .iter()
             .any(|(func, typ)| func == "main.ProcessUser" && typ == "*User"),
-        "Expected TypeOf edge from main.ProcessUser to *User, got: {:?}",
-        typeof_edges
+        "Expected TypeOf edge from main.ProcessUser to *User, got: {typeof_edges:?}"
     );
     assert!(
         typeof_edges
             .iter()
             .any(|(func, typ)| func == "main.ProcessUser" && typ == "[]int"),
-        "Expected TypeOf edge from main.ProcessUser to []int, got: {:?}",
-        typeof_edges
+        "Expected TypeOf edge from main.ProcessUser to []int, got: {typeof_edges:?}"
     );
     assert!(
         typeof_edges
             .iter()
             .any(|(func, typ)| func == "main.ProcessUser" && typ == "map[string]interface{}"),
-        "Expected TypeOf edge from main.ProcessUser to map[string]interface{{}}, got: {:?}",
-        typeof_edges
+        "Expected TypeOf edge from main.ProcessUser to map[string]interface{{}}, got: {typeof_edges:?}"
     );
 
     // Reference edges to nested types
@@ -1112,33 +1040,30 @@ func ProcessUser(user *User, ids []int, metadata map[string]interface{}) {
         reference_edges
             .iter()
             .any(|(func, typ)| func == "main.ProcessUser" && typ == "User"),
-        "Expected Reference edge from main.ProcessUser to User, got: {:?}",
-        reference_edges
+        "Expected Reference edge from main.ProcessUser to User, got: {reference_edges:?}"
     );
     assert!(
         reference_edges
             .iter()
             .any(|(func, typ)| func == "main.ProcessUser" && typ == "int"),
-        "Expected Reference edge from main.ProcessUser to int, got: {:?}",
-        reference_edges
+        "Expected Reference edge from main.ProcessUser to int, got: {reference_edges:?}"
     );
     assert!(
         reference_edges
             .iter()
             .any(|(func, typ)| func == "main.ProcessUser" && typ == "string"),
-        "Expected Reference edge from main.ProcessUser to string, got: {:?}",
-        reference_edges
+        "Expected Reference edge from main.ProcessUser to string, got: {reference_edges:?}"
     );
 }
 
 #[test]
 fn test_function_single_return() {
-    let source = r#"package main
+    let source = r"package main
 
 func GetValue() int {
     return 42
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.go");
     let typeof_edges =
@@ -1149,19 +1074,18 @@ func GetValue() int {
         typeof_edges
             .iter()
             .any(|(func, typ)| func == "main.GetValue" && typ == "int"),
-        "Expected TypeOf edge from main.GetValue to int (return type), got: {:?}",
-        typeof_edges
+        "Expected TypeOf edge from main.GetValue to int (return type), got: {typeof_edges:?}"
     );
 }
 
 #[test]
 fn test_function_multiple_returns() {
-    let source = r#"package main
+    let source = r"package main
 
 func Divide(a, b int) (int, error) {
     return 0, nil
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.go");
     let typeof_edges =
@@ -1174,26 +1098,24 @@ func Divide(a, b int) (int, error) {
             .filter(|(func, typ)| func == "main.Divide" && typ == "int")
             .count()
             >= 2,
-        "Expected TypeOf edges from main.Divide to int (params + return), got: {:?}",
-        typeof_edges
+        "Expected TypeOf edges from main.Divide to int (params + return), got: {typeof_edges:?}"
     );
     assert!(
         typeof_edges
             .iter()
             .any(|(func, typ)| func == "main.Divide" && typ == "error"),
-        "Expected TypeOf edge from main.Divide to error (return type), got: {:?}",
-        typeof_edges
+        "Expected TypeOf edge from main.Divide to error (return type), got: {typeof_edges:?}"
     );
 }
 
 #[test]
 fn test_function_named_returns() {
-    let source = r#"package main
+    let source = r"package main
 
 func Calculate(x int) (result int, err error) {
     return x * 2, nil
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.go");
     let typeof_edges =
@@ -1206,21 +1128,19 @@ func Calculate(x int) (result int, err error) {
             .filter(|(func, typ)| func == "main.Calculate" && typ == "int")
             .count()
             >= 2,
-        "Expected TypeOf edges from main.Calculate to int (param + return), got: {:?}",
-        typeof_edges
+        "Expected TypeOf edges from main.Calculate to int (param + return), got: {typeof_edges:?}"
     );
     assert!(
         typeof_edges
             .iter()
             .any(|(func, typ)| func == "main.Calculate" && typ == "error"),
-        "Expected TypeOf edge from main.Calculate to error, got: {:?}",
-        typeof_edges
+        "Expected TypeOf edge from main.Calculate to error, got: {typeof_edges:?}"
     );
 }
 
 #[test]
 fn test_method_parameters_returns() {
-    let source = r#"package main
+    let source = r"package main
 
 type Calculator struct {
     value int
@@ -1229,7 +1149,7 @@ type Calculator struct {
 func (c *Calculator) Add(x int) int {
     return c.value + x
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.go");
     let typeof_edges =
@@ -1242,19 +1162,18 @@ func (c *Calculator) Add(x int) int {
             .filter(|(method, typ)| method == "main.Calculator.Add" && typ == "int")
             .count()
             >= 2,
-        "Expected TypeOf edges from main.Calculator.Add to int (param + return), got: {:?}",
-        typeof_edges
+        "Expected TypeOf edges from main.Calculator.Add to int (param + return), got: {typeof_edges:?}"
     );
 }
 
 #[test]
 fn test_variadic_parameters() {
-    let source = r#"package main
+    let source = r"package main
 
 func Sum(numbers ...int) int {
     return 0
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.go");
     let typeof_edges =
@@ -1267,8 +1186,7 @@ func Sum(numbers ...int) int {
         typeof_edges
             .iter()
             .any(|(func, typ)| func == "main.Sum" && typ == "[]int"),
-        "Expected TypeOf edge from main.Sum to []int (variadic param), got: {:?}",
-        typeof_edges
+        "Expected TypeOf edge from main.Sum to []int (variadic param), got: {typeof_edges:?}"
     );
 
     // Should also have Reference edge to int (element type)
@@ -1276,19 +1194,18 @@ func Sum(numbers ...int) int {
         reference_edges
             .iter()
             .any(|(func, typ)| func == "main.Sum" && typ == "int"),
-        "Expected Reference edge from main.Sum to int, got: {:?}",
-        reference_edges
+        "Expected Reference edge from main.Sum to int, got: {reference_edges:?}"
     );
 }
 
 #[test]
 fn test_anonymous_parameters() {
-    let source = r#"package main
+    let source = r"package main
 
 func Process(int, string) error {
     return nil
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.go");
     let typeof_edges =
@@ -1299,32 +1216,29 @@ func Process(int, string) error {
         typeof_edges
             .iter()
             .any(|(func, typ)| func == "main.Process" && typ == "int"),
-        "Expected TypeOf edge from main.Process to int (anonymous param), got: {:?}",
-        typeof_edges
+        "Expected TypeOf edge from main.Process to int (anonymous param), got: {typeof_edges:?}"
     );
     assert!(
         typeof_edges
             .iter()
             .any(|(func, typ)| func == "main.Process" && typ == "string"),
-        "Expected TypeOf edge from main.Process to string (anonymous param), got: {:?}",
-        typeof_edges
+        "Expected TypeOf edge from main.Process to string (anonymous param), got: {typeof_edges:?}"
     );
     assert!(
         typeof_edges
             .iter()
             .any(|(func, typ)| func == "main.Process" && typ == "error"),
-        "Expected TypeOf edge from main.Process to error (return), got: {:?}",
-        typeof_edges
+        "Expected TypeOf edge from main.Process to error (return), got: {typeof_edges:?}"
     );
 }
 
 #[test]
 fn test_multi_name_parameters() {
-    let source = r#"package main
+    let source = r"package main
 
 func Coordinate(x, y, z float64) {
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.go");
     let typeof_edges =
@@ -1338,8 +1252,7 @@ func Coordinate(x, y, z float64) {
 
     assert_eq!(
         float64_count, 3,
-        "Expected 3 TypeOf edges from main.Coordinate to float64 (one per parameter name), got: {}",
-        float64_count
+        "Expected 3 TypeOf edges from main.Coordinate to float64 (one per parameter name), got: {float64_count}"
     );
 }
 
@@ -1376,43 +1289,37 @@ func ComplexFunction(
         typeof_edges
             .iter()
             .any(|(func, typ)| func == "main.ComplexFunction" && typ == "context.Context"),
-        "Expected TypeOf edge to context.Context, got: {:?}",
-        typeof_edges
+        "Expected TypeOf edge to context.Context, got: {typeof_edges:?}"
     );
     assert!(
         typeof_edges
             .iter()
             .any(|(func, typ)| func == "main.ComplexFunction" && typ == "*User"),
-        "Expected TypeOf edge to *User, got: {:?}",
-        typeof_edges
+        "Expected TypeOf edge to *User, got: {typeof_edges:?}"
     );
     assert!(
         typeof_edges
             .iter()
             .any(|(func, typ)| func == "main.ComplexFunction" && typ == "[]int"),
-        "Expected TypeOf edge to []int, got: {:?}",
-        typeof_edges
+        "Expected TypeOf edge to []int, got: {typeof_edges:?}"
     );
     assert!(
         typeof_edges
             .iter()
             .any(|(func, typ)| func == "main.ComplexFunction" && typ == "[3]int"),
-        "Expected TypeOf edge to [3]int, got: {:?}",
-        typeof_edges
+        "Expected TypeOf edge to [3]int, got: {typeof_edges:?}"
     );
     assert!(
         typeof_edges
             .iter()
             .any(|(func, typ)| func == "main.ComplexFunction" && typ == "map[string]interface{}"),
-        "Expected TypeOf edge to map[string]interface{{}}, got: {:?}",
-        typeof_edges
+        "Expected TypeOf edge to map[string]interface{{}}, got: {typeof_edges:?}"
     );
     assert!(
         typeof_edges
             .iter()
             .any(|(func, typ)| func == "main.ComplexFunction" && typ == "chan string"),
-        "Expected TypeOf edge to chan string, got: {:?}",
-        typeof_edges
+        "Expected TypeOf edge to chan string, got: {typeof_edges:?}"
     );
 
     // Reference edges to nested types
@@ -1420,35 +1327,31 @@ func ComplexFunction(
         reference_edges
             .iter()
             .any(|(func, typ)| func == "main.ComplexFunction" && typ == "context.Context"),
-        "Expected Reference edge to context.Context, got: {:?}",
-        reference_edges
+        "Expected Reference edge to context.Context, got: {reference_edges:?}"
     );
     assert!(
         reference_edges
             .iter()
             .any(|(func, typ)| func == "main.ComplexFunction" && typ == "User"),
-        "Expected Reference edge to User, got: {:?}",
-        reference_edges
+        "Expected Reference edge to User, got: {reference_edges:?}"
     );
     assert!(
         reference_edges
             .iter()
             .any(|(func, typ)| func == "main.ComplexFunction" && typ == "int"),
-        "Expected Reference edge to int, got: {:?}",
-        reference_edges
+        "Expected Reference edge to int, got: {reference_edges:?}"
     );
     assert!(
         reference_edges
             .iter()
             .any(|(func, typ)| func == "main.ComplexFunction" && typ == "string"),
-        "Expected Reference edge to string, got: {:?}",
-        reference_edges
+        "Expected Reference edge to string, got: {reference_edges:?}"
     );
 }
 
 #[test]
 fn test_function_returns_all_type_constructs() {
-    let source = r#"package main
+    let source = r"package main
 
 type Result struct {
     value int
@@ -1473,7 +1376,7 @@ func MapReturn() map[string]int {
 func ChannelReturn() chan error {
     return nil
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.go");
     let typeof_edges =
@@ -1486,36 +1389,31 @@ func ChannelReturn() chan error {
         typeof_edges
             .iter()
             .any(|(func, typ)| func == "main.SimpleReturn" && typ == "int"),
-        "Expected TypeOf edge from SimpleReturn to int, got: {:?}",
-        typeof_edges
+        "Expected TypeOf edge from SimpleReturn to int, got: {typeof_edges:?}"
     );
     assert!(
         typeof_edges
             .iter()
             .any(|(func, typ)| func == "main.PointerReturn" && typ == "*Result"),
-        "Expected TypeOf edge from PointerReturn to *Result, got: {:?}",
-        typeof_edges
+        "Expected TypeOf edge from PointerReturn to *Result, got: {typeof_edges:?}"
     );
     assert!(
         typeof_edges
             .iter()
             .any(|(func, typ)| func == "main.SliceReturn" && typ == "[]string"),
-        "Expected TypeOf edge from SliceReturn to []string, got: {:?}",
-        typeof_edges
+        "Expected TypeOf edge from SliceReturn to []string, got: {typeof_edges:?}"
     );
     assert!(
         typeof_edges
             .iter()
             .any(|(func, typ)| func == "main.MapReturn" && typ == "map[string]int"),
-        "Expected TypeOf edge from MapReturn to map[string]int, got: {:?}",
-        typeof_edges
+        "Expected TypeOf edge from MapReturn to map[string]int, got: {typeof_edges:?}"
     );
     assert!(
         typeof_edges
             .iter()
             .any(|(func, typ)| func == "main.ChannelReturn" && typ == "chan error"),
-        "Expected TypeOf edge from ChannelReturn to chan error, got: {:?}",
-        typeof_edges
+        "Expected TypeOf edge from ChannelReturn to chan error, got: {typeof_edges:?}"
     );
 
     // Reference edges to nested types
@@ -1523,22 +1421,19 @@ func ChannelReturn() chan error {
         reference_edges
             .iter()
             .any(|(func, typ)| func == "main.PointerReturn" && typ == "Result"),
-        "Expected Reference edge from PointerReturn to Result, got: {:?}",
-        reference_edges
+        "Expected Reference edge from PointerReturn to Result, got: {reference_edges:?}"
     );
     assert!(
         reference_edges
             .iter()
             .any(|(func, typ)| func == "main.SliceReturn" && typ == "string"),
-        "Expected Reference edge from SliceReturn to string, got: {:?}",
-        reference_edges
+        "Expected Reference edge from SliceReturn to string, got: {reference_edges:?}"
     );
     assert!(
         reference_edges
             .iter()
             .any(|(func, typ)| func == "main.MapReturn" && typ == "string"),
-        "Expected Reference edge from MapReturn to string, got: {:?}",
-        reference_edges
+        "Expected Reference edge from MapReturn to string, got: {reference_edges:?}"
     );
 }
 
@@ -1565,22 +1460,20 @@ func DoWork(ctx context.Context, data string) error {
         typeof_edges
             .iter()
             .any(|(func, typ)| func == "main.DoWork" && typ == "context.Context"),
-        "Expected TypeOf edge from DoWork to context.Context, got: {:?}",
-        typeof_edges
+        "Expected TypeOf edge from DoWork to context.Context, got: {typeof_edges:?}"
     );
     assert!(
         reference_edges
             .iter()
             .any(|(func, typ)| func == "main.DoWork" && typ == "context.Context"),
-        "Expected Reference edge from DoWork to context.Context, got: {:?}",
-        reference_edges
+        "Expected Reference edge from DoWork to context.Context, got: {reference_edges:?}"
     );
 }
 
 #[test]
 fn test_error_return_pattern() {
     // Real-world pattern: functions returning error
-    let source = r#"package main
+    let source = r"package main
 
 func Validate(input string) error {
     return nil
@@ -1589,7 +1482,7 @@ func Validate(input string) error {
 func Process(data []byte) (int, error) {
     return 0, nil
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.go");
     let typeof_edges =
@@ -1600,22 +1493,20 @@ func Process(data []byte) (int, error) {
         typeof_edges
             .iter()
             .any(|(func, typ)| func == "main.Validate" && typ == "error"),
-        "Expected TypeOf edge from Validate to error, got: {:?}",
-        typeof_edges
+        "Expected TypeOf edge from Validate to error, got: {typeof_edges:?}"
     );
     assert!(
         typeof_edges
             .iter()
             .any(|(func, typ)| func == "main.Process" && typ == "error"),
-        "Expected TypeOf edge from Process to error, got: {:?}",
-        typeof_edges
+        "Expected TypeOf edge from Process to error, got: {typeof_edges:?}"
     );
 }
 
 #[test]
 fn test_pointer_return_pattern() {
     // Real-world pattern: functions returning pointers and errors
-    let source = r#"package main
+    let source = r"package main
 
 type User struct {
     id int
@@ -1624,7 +1515,7 @@ type User struct {
 func GetUser(id int) (*User, error) {
     return nil, nil
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.go");
     let typeof_edges =
@@ -1637,33 +1528,30 @@ func GetUser(id int) (*User, error) {
         typeof_edges
             .iter()
             .any(|(func, typ)| func == "main.GetUser" && typ == "*User"),
-        "Expected TypeOf edge from GetUser to *User, got: {:?}",
-        typeof_edges
+        "Expected TypeOf edge from GetUser to *User, got: {typeof_edges:?}"
     );
     assert!(
         typeof_edges
             .iter()
             .any(|(func, typ)| func == "main.GetUser" && typ == "error"),
-        "Expected TypeOf edge from GetUser to error, got: {:?}",
-        typeof_edges
+        "Expected TypeOf edge from GetUser to error, got: {typeof_edges:?}"
     );
     assert!(
         reference_edges
             .iter()
             .any(|(func, typ)| func == "main.GetUser" && typ == "User"),
-        "Expected Reference edge from GetUser to User, got: {:?}",
-        reference_edges
+        "Expected Reference edge from GetUser to User, got: {reference_edges:?}"
     );
 }
 
 #[test]
 fn test_function_no_params_no_returns() {
     // Edge case: function with no parameters or returns
-    let source = r#"package main
+    let source = r"package main
 
 func DoNothing() {
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.go");
     let typeof_edges =
@@ -1677,8 +1565,7 @@ func DoNothing() {
 
     assert_eq!(
         do_nothing_typeof_count, 0,
-        "Expected no TypeOf edges for function with no params/returns, got: {:?}",
-        typeof_edges
+        "Expected no TypeOf edges for function with no params/returns, got: {typeof_edges:?}"
     );
 }
 // Add these tests at the end of typeof_reference_tests.rs
@@ -1686,7 +1573,7 @@ func DoNothing() {
 #[test]
 fn test_parameter_vs_return_discrimination() {
     // Test that we can distinguish functions taking error from functions returning error
-    let source = r#"package main
+    let source = r"package main
 
 // Takes error as parameter
 func LogError(err error) {
@@ -1701,7 +1588,7 @@ func GetError() error {
 func TransformError(input error) error {
     return input
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.go");
 
@@ -1716,13 +1603,11 @@ func TransformError(input error) error {
         param_edges
             .iter()
             .any(|(func, typ)| func == "main.LogError" && typ == "error"),
-        "Expected LogError to have error as parameter, got: {:?}",
-        param_edges
+        "Expected LogError to have error as parameter, got: {param_edges:?}"
     );
     assert!(
         !return_edges.iter().any(|(func, _)| func == "main.LogError"),
-        "LogError should NOT have error as return type, got: {:?}",
-        return_edges
+        "LogError should NOT have error as return type, got: {return_edges:?}"
     );
 
     // GetError should have error as RETURN only
@@ -1730,13 +1615,11 @@ func TransformError(input error) error {
         return_edges
             .iter()
             .any(|(func, typ)| func == "main.GetError" && typ == "error"),
-        "Expected GetError to have error as return, got: {:?}",
-        return_edges
+        "Expected GetError to have error as return, got: {return_edges:?}"
     );
     assert!(
         !param_edges.iter().any(|(func, _)| func == "main.GetError"),
-        "GetError should NOT have error as parameter, got: {:?}",
-        param_edges
+        "GetError should NOT have error as parameter, got: {param_edges:?}"
     );
 
     // TransformError should have error as BOTH parameter AND return
@@ -1744,28 +1627,26 @@ func TransformError(input error) error {
         param_edges
             .iter()
             .any(|(func, typ)| func == "main.TransformError" && typ == "error"),
-        "Expected TransformError to have error as parameter, got: {:?}",
-        param_edges
+        "Expected TransformError to have error as parameter, got: {param_edges:?}"
     );
     assert!(
         return_edges
             .iter()
             .any(|(func, typ)| func == "main.TransformError" && typ == "error"),
-        "Expected TransformError to have error as return, got: {:?}",
-        return_edges
+        "Expected TransformError to have error as return, got: {return_edges:?}"
     );
 }
 
 #[test]
 fn test_variable_vs_parameter_discrimination() {
     // Test that variable TypeOf edges are distinct from parameter TypeOf edges
-    let source = r#"package main
+    let source = r"package main
 
 var globalError error
 
 func ProcessError(err error) {
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.go");
 
@@ -1780,8 +1661,7 @@ func ProcessError(err error) {
         var_edges
             .iter()
             .any(|(var, typ)| var == "main.globalError" && typ == "error"),
-        "Expected globalError to have error as variable type, got: {:?}",
-        var_edges
+        "Expected globalError to have error as variable type, got: {var_edges:?}"
     );
 
     // Parameter edge
@@ -1789,8 +1669,7 @@ func ProcessError(err error) {
         param_edges
             .iter()
             .any(|(func, typ)| func == "main.ProcessError" && typ == "error"),
-        "Expected ProcessError to have error as parameter type, got: {:?}",
-        param_edges
+        "Expected ProcessError to have error as parameter type, got: {param_edges:?}"
     );
 
     // Verify they're distinct
@@ -1811,14 +1690,14 @@ func ProcessError(err error) {
 #[test]
 fn test_typeof_context_metadata_presence() {
     // Verify that TypeOf edges actually have context metadata
-    let source = r#"package main
+    let source = r"package main
 
 var x int
 
 func foo(y int) int {
     return y
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.go");
 
@@ -1852,14 +1731,14 @@ func foo(y int) int {
 
 #[test]
 fn test_struct_basic_fields() {
-    let source = r#"package main
+    let source = r"package main
 
 type Config struct {
     Port int
     Host string
     Debug bool
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.go");
     let field_edges = collect_typeof_edges_by_context(&staging, TypeOfContext::Field);
@@ -1887,14 +1766,13 @@ type Config struct {
     assert_eq!(
         field_edges.len(),
         3,
-        "Expected 3 field TypeOf edges, got: {:?}",
-        field_edges
+        "Expected 3 field TypeOf edges, got: {field_edges:?}"
     );
 }
 
 #[test]
 fn test_struct_pointer_fields() {
-    let source = r#"package main
+    let source = r"package main
 
 type Database struct{}
 
@@ -1902,7 +1780,7 @@ type Service struct {
     DB *Database
     Cache *Cache
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.go");
     let field_edges = collect_typeof_edges_by_context(&staging, TypeOfContext::Field);
@@ -1939,7 +1817,7 @@ type Service struct {
 
 #[test]
 fn test_struct_complex_field_types() {
-    let source = r#"package main
+    let source = r"package main
 
 type User struct{}
 
@@ -1949,7 +1827,7 @@ type Service struct {
     Results chan Result
     Callback func(Request) Response
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.go");
     let field_edges = collect_typeof_edges_by_context(&staging, TypeOfContext::Field);
@@ -2004,12 +1882,12 @@ type Service struct {
 
 #[test]
 fn test_struct_multi_name_fields() {
-    let source = r#"package main
+    let source = r"package main
 
 type Point struct {
     X, Y, Z float64
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.go");
     let field_edges = collect_typeof_edges_by_context(&staging, TypeOfContext::Field);
@@ -2029,7 +1907,7 @@ type Point struct {
 
 #[test]
 fn test_struct_embedded_types() {
-    let source = r#"package main
+    let source = r"package main
 
 type Base struct {
     ID int
@@ -2044,7 +1922,7 @@ type Server struct {
     *Logger        // Embedded pointer
     Port int       // Regular field
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.go");
     let field_edges = collect_typeof_edges_by_context(&staging, TypeOfContext::Field);
@@ -2082,13 +1960,13 @@ type Server struct {
 
 #[test]
 fn test_interface_method_parameters() {
-    let source = r#"package main
+    let source = r"package main
 
 type Reader interface {
     Read(p []byte) (int, error)
     Close() error
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.go");
     let param_edges = collect_typeof_edges_by_context(&staging, TypeOfContext::Parameter);
@@ -2099,8 +1977,7 @@ type Reader interface {
         param_edges
             .iter()
             .any(|(s, t)| s == "main.Reader.Read" && t == "[]byte"),
-        "Expected Reader.Read.p → []byte parameter TypeOf edge, got: {:?}",
-        param_edges
+        "Expected Reader.Read.p → []byte parameter TypeOf edge, got: {param_edges:?}"
     );
 
     // Read method returns
@@ -2128,7 +2005,7 @@ type Reader interface {
 
 #[test]
 fn test_interface_embedded_interfaces() {
-    let source = r#"package main
+    let source = r"package main
 
 type Reader interface {
     Read() error
@@ -2143,7 +2020,7 @@ type ReadWriter interface {
     Writer
     Close() error
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.go");
     let return_edges = collect_typeof_edges_by_context(&staging, TypeOfContext::Return);
@@ -2166,13 +2043,13 @@ type ReadWriter interface {
 
 #[test]
 fn test_interface_complex_method_signatures() {
-    let source = r#"package main
+    let source = r"package main
 
 type Processor interface {
     Transform(items []string, fn func(string) int) ([]int, error)
     Process(ctx context.Context, req *Request) (*Response, error)
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.go");
     let param_edges = collect_typeof_edges_by_context(&staging, TypeOfContext::Parameter);
@@ -2238,13 +2115,13 @@ type Processor interface {
 
 #[test]
 fn test_unexported_struct_fields() {
-    let source = r#"package main
+    let source = r"package main
 
 type config struct {
     port int
     Host string
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.go");
     let field_edges = collect_typeof_edges_by_context(&staging, TypeOfContext::Field);
@@ -2267,7 +2144,7 @@ type config struct {
 #[test]
 fn test_struct_all_type_constructs() {
     // Test all 13 type constructs from Phase 1 as struct fields
-    let source = r#"package main
+    let source = r"package main
 
 type AllTypes struct {
     BasicInt int
@@ -2283,7 +2160,7 @@ type AllTypes struct {
     StructType struct { X int }
     InterfaceType interface { Method() }
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.go");
     let field_edges = collect_typeof_edges_by_context(&staging, TypeOfContext::Field);
@@ -2332,7 +2209,7 @@ type AllTypes struct {
 #[test]
 fn test_no_field_edges_for_embedded() {
     // Verify embedded fields don't create Field-context TypeOf edges
-    let source = r#"package main
+    let source = r"package main
 
 type Base struct {
     ID int
@@ -2342,7 +2219,7 @@ type Child struct {
     Base
     Name string
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.go");
     let field_edges = collect_typeof_edges_by_context(&staging, TypeOfContext::Field);
@@ -2367,14 +2244,14 @@ type Child struct {
 #[test]
 fn test_struct_and_function_param_discrimination() {
     // Ensure struct fields and function parameters are properly discriminated
-    let source = r#"package main
+    let source = r"package main
 
 type Config struct {
     Port int
 }
 
 func Process(port int) {}
-"#;
+";
 
     let staging = build_test_graph(source, "test.go");
     let field_edges = collect_typeof_edges_by_context(&staging, TypeOfContext::Field);
@@ -2410,7 +2287,7 @@ func Process(port int) {}
 #[test]
 fn test_interface_method_and_function_discrimination() {
     // Ensure interface methods and top-level functions are properly handled
-    let source = r#"package main
+    let source = r"package main
 
 type Reader interface {
     Read(p []byte) error
@@ -2419,7 +2296,7 @@ type Reader interface {
 func Read(p []byte) error {
     return nil
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.go");
     let param_edges = collect_typeof_edges_by_context(&staging, TypeOfContext::Parameter);
@@ -2449,7 +2326,7 @@ func Read(p []byte) error {
 #[test]
 fn test_phase3_comprehensive_integration() {
     // Comprehensive test with structs, interfaces, functions, and variables
-    let source = r#"package main
+    let source = r"package main
 
 type User struct {
     ID int
@@ -2470,7 +2347,7 @@ var globalService *Service
 func NewService() *Service {
     return &Service{}
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.go");
 
@@ -2564,7 +2441,7 @@ func NewService() *Service {
 #[test]
 fn test_anonymous_interface_field_with_methods() {
     // Test MEDIUM-1: Anonymous interface types with method signatures
-    let source = r#"package main
+    let source = r"package main
 
 type Handler struct {
     Callback interface {
@@ -2572,7 +2449,7 @@ type Handler struct {
         Close() error
     }
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.go");
     let field_edges = collect_typeof_edges_by_context(&staging, TypeOfContext::Field);
@@ -2610,12 +2487,12 @@ type Handler struct {
 #[test]
 fn test_interface_unnamed_parameters() {
     // Test LOW-1: Unnamed interface parameters (common in Go)
-    let source = r#"package main
+    let source = r"package main
 
 type Reader interface {
     Read([]byte) (int, error)
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.go");
     let param_edges = collect_typeof_edges_by_context(&staging, TypeOfContext::Parameter);
@@ -2647,12 +2524,12 @@ type Reader interface {
 #[test]
 fn test_interface_named_returns() {
     // Test LOW-1: Named returns in interface methods
-    let source = r#"package main
+    let source = r"package main
 
 type Calculator interface {
     Divide(a, b int) (result float64, err error)
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.go");
     let param_edges = collect_typeof_edges_by_context(&staging, TypeOfContext::Parameter);
@@ -2684,12 +2561,12 @@ type Calculator interface {
 #[test]
 fn test_interface_variadic_methods() {
     // Test LOW-1: Variadic interface methods
-    let source = r#"package main
+    let source = r"package main
 
 type Writer interface {
     Write(p ...byte) (n int, err error)
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.go");
     let param_edges = collect_typeof_edges_by_context(&staging, TypeOfContext::Parameter);
@@ -2723,14 +2600,14 @@ fn test_field_typeof_metadata_correctness() {
     // Test LOW-1: Field TypeOf metadata (name + index) correctness
     // This test verifies the metadata exists, even though we can't easily inspect it
     // in the current test helpers (they only return source/target names)
-    let source = r#"package main
+    let source = r"package main
 
 type Point struct {
     X float64
     Y float64
     Z float64
 }
-"#;
+";
 
     let staging = build_test_graph(source, "test.go");
     let field_edges = collect_typeof_edges_by_context(&staging, TypeOfContext::Field);

@@ -37,8 +37,7 @@ fn default_repo_path() -> PathBuf {
 
 fn repo_path() -> PathBuf {
     let base = env::var("SQRY_PARALLEL_BENCH_REPO")
-        .map(|path| expand_tilde(&path))
-        .unwrap_or_else(|_| default_repo_path());
+        .map_or_else(|_| default_repo_path(), |path| expand_tilde(&path));
     assert!(
         base.join(".sqry-index").exists(),
         "repo {} must contain a prebuilt .sqry-index before running the benchmark",

@@ -92,7 +92,7 @@ public let API_VERSION = "1.0.0"
 fn cli_swift_exports_protocols_and_structs() {
     let project = TempDir::new().unwrap();
 
-    let swift_code = r#"
+    let swift_code = r"
 import Foundation
 
 public protocol Repository {
@@ -119,7 +119,7 @@ public class UserRepository: Repository {
         return nil
     }
 }
-"#;
+";
     std::fs::write(project.path().join("Repository.swift"), swift_code).unwrap();
 
     Command::new(sqry_bin())
@@ -191,7 +191,7 @@ process(data: "test")
 fn cli_swift_callers_method_calls() {
     let project = TempDir::new().unwrap();
 
-    let swift_code = r#"
+    let swift_code = r"
 class DataService {
     private func fetchData() -> [Int] {
         return [1, 2, 3]
@@ -209,7 +209,7 @@ class DataService {
 
 let service = DataService()
 service.process()
-"#;
+";
     std::fs::write(project.path().join("Service.swift"), swift_code).unwrap();
 
     Command::new(sqry_bin())
@@ -439,7 +439,7 @@ Task {
 fn cli_swift_private_functions() {
     let project = TempDir::new().unwrap();
 
-    let swift_code = r#"
+    let swift_code = r"
 class Service {
     func execute() {
         validate()
@@ -449,7 +449,7 @@ class Service {
         // private function
     }
 }
-"#;
+";
     std::fs::write(project.path().join("Service.swift"), swift_code).unwrap();
 
     Command::new(sqry_bin())

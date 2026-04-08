@@ -1,14 +1,14 @@
-//! Tests for TypeOf and Reference edges in Elixir language plugin.
+//! Tests for `TypeOf` and Reference edges in Elixir language plugin.
 //!
 //! This test suite validates that the Elixir graph builder correctly extracts:
-//! - TypeOf edges: Full type signatures from @spec annotations
+//! - `TypeOf` edges: Full type signatures from @spec annotations
 //! - Reference edges: Individual type names from nested type expressions
 //!
 //! Test organization:
 //! 1. Simple Types (5 tests) - basic type annotations
 //! 2. Parameters (4 tests) - function parameter types
 //! 3. Return Types (4 tests) - function return type annotations
-//! 4. Module-Qualified Types (4 tests) - String.t(), Enum.t(), etc.
+//! 4. Module-Qualified Types (4 tests) - `String.t()`, `Enum.t()`, etc.
 //! 5. Complex Types (3 tests) - tuples, unions, nested types
 //! 6. Integration (3 tests) - multiple specs, mixed types
 //! 7. Edge Cases (2 tests) - missing specs, malformed types
@@ -158,12 +158,12 @@ fn collect_reference_edges(staging: &StagingGraph) -> Vec<(String, String)> {
 
 #[test]
 fn test_simple_builtin_type() {
-    let source = r#"
+    let source = r"
 defmodule Test do
   @spec get_count() :: integer()
   def get_count, do: 42
 end
-"#;
+";
     let staging = build_test_graph(source, "test.ex");
 
     // Should have TypeOf edge from get_count to integer()
@@ -172,8 +172,7 @@ end
         return_edges
             .iter()
             .any(|(from, to)| from == "get_count" && to == "integer()"),
-        "Expected TypeOf edge from get_count to integer(), got: {:?}",
-        return_edges
+        "Expected TypeOf edge from get_count to integer(), got: {return_edges:?}"
     );
 
     // Should have Reference edge to integer
@@ -182,19 +181,18 @@ end
         ref_edges
             .iter()
             .any(|(from, to)| from == "get_count" && to == "integer"),
-        "Expected Reference edge to integer, got: {:?}",
-        ref_edges
+        "Expected Reference edge to integer, got: {ref_edges:?}"
     );
 }
 
 #[test]
 fn test_atom_type() {
-    let source = r#"
+    let source = r"
 defmodule Test do
   @spec get_status() :: atom()
   def get_status, do: :ok
 end
-"#;
+";
     let staging = build_test_graph(source, "test.ex");
 
     let return_edges = collect_typeof_edges_by_context(&staging, TypeOfContext::Return);
@@ -208,12 +206,12 @@ end
 
 #[test]
 fn test_boolean_type() {
-    let source = r#"
+    let source = r"
 defmodule Test do
   @spec is_valid() :: boolean()
   def is_valid, do: true
 end
-"#;
+";
     let staging = build_test_graph(source, "test.ex");
 
     let return_edges = collect_typeof_edges_by_context(&staging, TypeOfContext::Return);
@@ -227,12 +225,12 @@ end
 
 #[test]
 fn test_binary_type() {
-    let source = r#"
+    let source = r"
 defmodule Test do
   @spec get_data() :: binary()
   def get_data, do: <<1, 2, 3>>
 end
-"#;
+";
     let staging = build_test_graph(source, "test.ex");
 
     let return_edges = collect_typeof_edges_by_context(&staging, TypeOfContext::Return);
@@ -246,12 +244,12 @@ end
 
 #[test]
 fn test_any_type() {
-    let source = r#"
+    let source = r"
 defmodule Test do
   @spec get_value() :: any()
   def get_value, do: nil
 end
-"#;
+";
     let staging = build_test_graph(source, "test.ex");
 
     let return_edges = collect_typeof_edges_by_context(&staging, TypeOfContext::Return);
@@ -283,8 +281,7 @@ end
         param_edges
             .iter()
             .any(|(from, to)| from == "greet" && to == "String.t()"),
-        "Expected TypeOf edge for parameter, got: {:?}",
-        param_edges
+        "Expected TypeOf edge for parameter, got: {param_edges:?}"
     );
 
     // Check Reference edge to String
@@ -299,12 +296,12 @@ end
 
 #[test]
 fn test_multiple_parameters() {
-    let source = r#"
+    let source = r"
 defmodule Test do
   @spec add(integer(), integer()) :: integer()
   def add(a, b), do: a + b
 end
-"#;
+";
     let staging = build_test_graph(source, "test.ex");
 
     let param_edges = collect_typeof_edges_by_context(&staging, TypeOfContext::Parameter);
@@ -316,19 +313,18 @@ end
     assert_eq!(
         add_params.len(),
         2,
-        "Expected 2 parameter TypeOf edges, got: {:?}",
-        add_params
+        "Expected 2 parameter TypeOf edges, got: {add_params:?}"
     );
 }
 
 #[test]
 fn test_mixed_parameter_types() {
-    let source = r#"
+    let source = r"
 defmodule Test do
   @spec process(String.t(), integer(), atom()) :: any()
   def process(name, count, status), do: {name, count, status}
 end
-"#;
+";
     let staging = build_test_graph(source, "test.ex");
 
     let param_edges = collect_typeof_edges_by_context(&staging, TypeOfContext::Parameter);
@@ -363,12 +359,12 @@ end
 
 #[test]
 fn test_no_parameters() {
-    let source = r#"
+    let source = r"
 defmodule Test do
   @spec get_value() :: integer()
   def get_value(), do: 42
 end
-"#;
+";
     let staging = build_test_graph(source, "test.ex");
 
     let param_edges = collect_typeof_edges_by_context(&staging, TypeOfContext::Parameter);
@@ -524,12 +520,12 @@ end
 
 #[test]
 fn test_enum_t_type() {
-    let source = r#"
+    let source = r"
 defmodule Test do
   @spec get_items() :: Enum.t()
   def get_items, do: [1, 2, 3]
 end
-"#;
+";
     let staging = build_test_graph(source, "test.ex");
 
     let return_edges = collect_typeof_edges_by_context(&staging, TypeOfContext::Return);
@@ -551,12 +547,12 @@ end
 
 #[test]
 fn test_custom_module_type() {
-    let source = r#"
+    let source = r"
 defmodule Test do
   @spec create_user() :: User.t()
   def create_user, do: %User{}
 end
-"#;
+";
     let staging = build_test_graph(source, "test.ex");
 
     let return_edges = collect_typeof_edges_by_context(&staging, TypeOfContext::Return);
@@ -578,12 +574,12 @@ end
 
 #[test]
 fn test_nested_module_type() {
-    let source = r#"
+    let source = r"
 defmodule Test do
   @spec get_config() :: App.Config.t()
   def get_config, do: %App.Config{}
 end
-"#;
+";
     let staging = build_test_graph(source, "test.ex");
 
     let return_edges = collect_typeof_edges_by_context(&staging, TypeOfContext::Return);
@@ -599,8 +595,7 @@ end
         ref_edges
             .iter()
             .any(|(from, to)| from == "get_config" && to.contains("Config")),
-        "Expected Reference edge containing Config module, got: {:?}",
-        ref_edges
+        "Expected Reference edge containing Config module, got: {ref_edges:?}"
     );
 }
 
@@ -672,12 +667,12 @@ end
 
 #[test]
 fn test_multiple_union_types() {
-    let source = r#"
+    let source = r"
 defmodule Test do
   @spec get_value() :: String.t() | integer() | atom()
   def get_value, do: :ok
 end
-"#;
+";
     let staging = build_test_graph(source, "test.ex");
 
     let return_edges = collect_typeof_edges_by_context(&staging, TypeOfContext::Return);
@@ -741,12 +736,12 @@ end
 
 #[test]
 fn test_spec_with_params_and_return() {
-    let source = r#"
+    let source = r"
 defmodule Test do
   @spec create_user(String.t(), integer()) :: User.t()
   def create_user(name, age), do: %User{name: name, age: age}
 end
-"#;
+";
     let staging = build_test_graph(source, "test.ex");
 
     // Check parameter TypeOf edges
@@ -822,11 +817,11 @@ end
 
 #[test]
 fn test_function_without_spec() {
-    let source = r#"
+    let source = r"
 defmodule Test do
   def no_spec(), do: 42
 end
-"#;
+";
     let staging = build_test_graph(source, "test.ex");
 
     let return_edges = collect_typeof_edges_by_context(&staging, TypeOfContext::Return);
@@ -844,12 +839,12 @@ end
 
 #[test]
 fn test_spec_for_nonexistent_function() {
-    let source = r#"
+    let source = r"
 defmodule Test do
   @spec ghost_func() :: String.t()
   # Function definition is missing
 end
-"#;
+";
     let staging = build_test_graph(source, "test.ex");
 
     // Should still create TypeOf edge even if function def is missing

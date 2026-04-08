@@ -117,7 +117,7 @@ fn parse_json(text: &str) -> Result<Value> {
 // get_definition(first result symbol) → response includes location data
 // ============================================================================
 
-/// Scenario 1a: `semantic_search` for "process_data" returns at least one function-kind result.
+/// Scenario 1a: `semantic_search` for "`process_data`" returns at least one function-kind result.
 #[test]
 fn test_scenario1a_semantic_search_main_returns_functions() -> Result<()> {
     require_sqry_index!();

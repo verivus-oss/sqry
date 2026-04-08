@@ -355,13 +355,13 @@ fn count_edges_by_kind(staging: &StagingGraph, kind_check: impl Fn(&EdgeKind) ->
 
 #[test]
 fn test_simple_using_directive() {
-    let content = r#"
+    let content = r"
 using System;
 
 namespace Test {
     public class MyClass { }
 }
-"#;
+";
     let tree = parse_csharp_file(content);
     let mut staging = StagingGraph::new();
     let builder = CSharpGraphBuilder::default();
@@ -374,14 +374,13 @@ namespace Test {
     let import_count = count_edges_by_kind(&staging, |k| matches!(k, EdgeKind::Imports { .. }));
     assert!(
         import_count >= 1,
-        "Should have at least 1 import edge for 'using System;', found {}",
-        import_count
+        "Should have at least 1 import edge for 'using System;', found {import_count}"
     );
 }
 
 #[test]
 fn test_qualified_using_directive() {
-    let content = r#"
+    let content = r"
 using System.Collections.Generic;
 using System.Linq;
 using System.IO;
@@ -389,7 +388,7 @@ using System.IO;
 namespace Test {
     public class MyClass { }
 }
-"#;
+";
     let tree = parse_csharp_file(content);
     let mut staging = StagingGraph::new();
     let builder = CSharpGraphBuilder::default();
@@ -402,14 +401,13 @@ namespace Test {
     let import_count = count_edges_by_kind(&staging, |k| matches!(k, EdgeKind::Imports { .. }));
     assert!(
         import_count >= 3,
-        "Should have at least 3 import edges for qualified using directives, found {}",
-        import_count
+        "Should have at least 3 import edges for qualified using directives, found {import_count}"
     );
 }
 
 #[test]
 fn test_static_using_directive() {
-    let content = r#"
+    let content = r"
 using static System.Math;
 using static System.Console;
 
@@ -420,7 +418,7 @@ namespace Test {
         }
     }
 }
-"#;
+";
     let tree = parse_csharp_file(content);
     let mut staging = StagingGraph::new();
     let builder = CSharpGraphBuilder::default();
@@ -436,21 +434,20 @@ namespace Test {
     let import_count = count_edges_by_kind(&staging, |k| matches!(k, EdgeKind::Imports { .. }));
     assert!(
         import_count >= 2,
-        "Should have at least 2 import edges for static using, found {}",
-        import_count
+        "Should have at least 2 import edges for static using, found {import_count}"
     );
 }
 
 #[test]
 fn test_aliased_using_directive() {
-    let content = r#"
+    let content = r"
 using IO = System.IO;
 using Console = System.Console;
 
 namespace Test {
     public class FileHandler { }
 }
-"#;
+";
     let tree = parse_csharp_file(content);
     let mut staging = StagingGraph::new();
     let builder = CSharpGraphBuilder::default();
@@ -466,14 +463,13 @@ namespace Test {
     let import_count = count_edges_by_kind(&staging, |k| matches!(k, EdgeKind::Imports { .. }));
     assert!(
         import_count >= 2,
-        "Should have at least 2 import edges for aliased using, found {}",
-        import_count
+        "Should have at least 2 import edges for aliased using, found {import_count}"
     );
 }
 
 #[test]
 fn test_multiple_using_directives() {
-    let content = r#"
+    let content = r"
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -483,7 +479,7 @@ using System.Threading.Tasks;
 namespace Test {
     public class MyClass { }
 }
-"#;
+";
     let tree = parse_csharp_file(content);
     let mut staging = StagingGraph::new();
     let builder = CSharpGraphBuilder::default();
@@ -496,8 +492,7 @@ namespace Test {
     let import_count = count_edges_by_kind(&staging, |k| matches!(k, EdgeKind::Imports { .. }));
     assert!(
         import_count >= 5,
-        "Should have at least 5 import edges, found {}",
-        import_count
+        "Should have at least 5 import edges, found {import_count}"
     );
 }
 
@@ -507,10 +502,10 @@ namespace Test {
 
 #[test]
 fn test_simple_class_inheritance() {
-    let content = r#"
+    let content = r"
 public class Animal { }
 public class Dog : Animal { }
-"#;
+";
     let tree = parse_csharp_file(content);
     let mut staging = StagingGraph::new();
     let builder = CSharpGraphBuilder::default();
@@ -523,18 +518,17 @@ public class Dog : Animal { }
     let inherits_count = count_edges_by_kind(&staging, |k| matches!(k, EdgeKind::Inherits));
     assert!(
         inherits_count >= 1,
-        "Should have at least 1 Inherits edge for Dog : Animal, found {}",
-        inherits_count
+        "Should have at least 1 Inherits edge for Dog : Animal, found {inherits_count}"
     );
 }
 
 #[test]
 fn test_inheritance_chain() {
-    let content = r#"
+    let content = r"
 public class GrandParent { }
 public class Parent : GrandParent { }
 public class Child : Parent { }
-"#;
+";
     let tree = parse_csharp_file(content);
     let mut staging = StagingGraph::new();
     let builder = CSharpGraphBuilder::default();
@@ -547,18 +541,17 @@ public class Child : Parent { }
     let inherits_count = count_edges_by_kind(&staging, |k| matches!(k, EdgeKind::Inherits));
     assert!(
         inherits_count >= 2,
-        "Should have at least 2 Inherits edges for inheritance chain, found {}",
-        inherits_count
+        "Should have at least 2 Inherits edges for inheritance chain, found {inherits_count}"
     );
 }
 
 #[test]
 fn test_class_with_generic_base() {
-    let content = r#"
+    let content = r"
 using System.Collections.Generic;
 
 public class MyList : List<string> { }
-"#;
+";
     let tree = parse_csharp_file(content);
     let mut staging = StagingGraph::new();
     let builder = CSharpGraphBuilder::default();
@@ -574,8 +567,7 @@ public class MyList : List<string> { }
     let inherits_count = count_edges_by_kind(&staging, |k| matches!(k, EdgeKind::Inherits));
     assert!(
         inherits_count >= 1,
-        "Should have at least 1 Inherits edge for generic base, found {}",
-        inherits_count
+        "Should have at least 1 Inherits edge for generic base, found {inherits_count}"
     );
 }
 
@@ -585,7 +577,7 @@ public class MyList : List<string> { }
 
 #[test]
 fn test_single_interface_implementation() {
-    let content = r#"
+    let content = r"
 public interface IDisposable {
     void Dispose();
 }
@@ -593,7 +585,7 @@ public interface IDisposable {
 public class Resource : IDisposable {
     public void Dispose() { }
 }
-"#;
+";
     let tree = parse_csharp_file(content);
     let mut staging = StagingGraph::new();
     let builder = CSharpGraphBuilder::default();
@@ -606,14 +598,13 @@ public class Resource : IDisposable {
     let implements_count = count_edges_by_kind(&staging, |k| matches!(k, EdgeKind::Implements));
     assert!(
         implements_count >= 1,
-        "Should have at least 1 Implements edge for Resource : IDisposable, found {}",
-        implements_count
+        "Should have at least 1 Implements edge for Resource : IDisposable, found {implements_count}"
     );
 }
 
 #[test]
 fn test_multiple_interface_implementation() {
-    let content = r#"
+    let content = r"
 public interface IReadable { void Read(); }
 public interface IWritable { void Write(); }
 public interface IDisposable { void Dispose(); }
@@ -623,7 +614,7 @@ public class Stream : IReadable, IWritable, IDisposable {
     public void Write() { }
     public void Dispose() { }
 }
-"#;
+";
     let tree = parse_csharp_file(content);
     let mut staging = StagingGraph::new();
     let builder = CSharpGraphBuilder::default();
@@ -636,20 +627,19 @@ public class Stream : IReadable, IWritable, IDisposable {
     let implements_count = count_edges_by_kind(&staging, |k| matches!(k, EdgeKind::Implements));
     assert!(
         implements_count >= 3,
-        "Should have at least 3 Implements edges for Stream : IReadable, IWritable, IDisposable, found {}",
-        implements_count
+        "Should have at least 3 Implements edges for Stream : IReadable, IWritable, IDisposable, found {implements_count}"
     );
 }
 
 #[test]
 fn test_class_with_base_and_interfaces() {
-    let content = r#"
+    let content = r"
 public class BaseService { }
 public interface IRepository { }
 public interface ILogger { }
 
 public class Service : BaseService, IRepository, ILogger { }
-"#;
+";
     let tree = parse_csharp_file(content);
     let mut staging = StagingGraph::new();
     let builder = CSharpGraphBuilder::default();
@@ -662,25 +652,23 @@ public class Service : BaseService, IRepository, ILogger { }
     let inherits_count = count_edges_by_kind(&staging, |k| matches!(k, EdgeKind::Inherits));
     assert!(
         inherits_count >= 1,
-        "Should have at least 1 Inherits edge for Service : BaseService, found {}",
-        inherits_count
+        "Should have at least 1 Inherits edge for Service : BaseService, found {inherits_count}"
     );
 
     // Count implements edges
     let implements_count = count_edges_by_kind(&staging, |k| matches!(k, EdgeKind::Implements));
     assert!(
         implements_count >= 2,
-        "Should have at least 2 Implements edges for Service : IRepository, ILogger, found {}",
-        implements_count
+        "Should have at least 2 Implements edges for Service : IRepository, ILogger, found {implements_count}"
     );
 }
 
 #[test]
 fn test_interface_extends_interface() {
-    let content = r#"
+    let content = r"
 public interface IBase { }
 public interface IChild : IBase { }
-"#;
+";
     let tree = parse_csharp_file(content);
     let mut staging = StagingGraph::new();
     let builder = CSharpGraphBuilder::default();
@@ -693,18 +681,17 @@ public interface IChild : IBase { }
     let inherits_count = count_edges_by_kind(&staging, |k| matches!(k, EdgeKind::Inherits));
     assert!(
         inherits_count >= 1,
-        "Should have at least 1 Inherits edge for IChild : IBase, found {}",
-        inherits_count
+        "Should have at least 1 Inherits edge for IChild : IBase, found {inherits_count}"
     );
 }
 
 #[test]
 fn test_interface_extends_multiple_interfaces() {
-    let content = r#"
+    let content = r"
 public interface IReadable { }
 public interface IWritable { }
 public interface IStream : IReadable, IWritable { }
-"#;
+";
     let tree = parse_csharp_file(content);
     let mut staging = StagingGraph::new();
     let builder = CSharpGraphBuilder::default();
@@ -717,8 +704,7 @@ public interface IStream : IReadable, IWritable { }
     let inherits_count = count_edges_by_kind(&staging, |k| matches!(k, EdgeKind::Inherits));
     assert!(
         inherits_count >= 2,
-        "Should have at least 2 Inherits edges for IStream : IReadable, IWritable, found {}",
-        inherits_count
+        "Should have at least 2 Inherits edges for IStream : IReadable, IWritable, found {inherits_count}"
     );
 }
 
@@ -772,24 +758,21 @@ namespace MyApp.Services {
     let import_count = count_edges_by_kind(&staging, |k| matches!(k, EdgeKind::Imports { .. }));
     assert!(
         import_count >= 3,
-        "Should have at least 3 import edges, found {}",
-        import_count
+        "Should have at least 3 import edges, found {import_count}"
     );
 
     // Should have inherits for UserService : BaseService
     let inherits_count = count_edges_by_kind(&staging, |k| matches!(k, EdgeKind::Inherits));
     assert!(
         inherits_count >= 1,
-        "Should have at least 1 Inherits edge, found {}",
-        inherits_count
+        "Should have at least 1 Inherits edge, found {inherits_count}"
     );
 
     // Should have implements for UserService : IService, ILoggable
     let implements_count = count_edges_by_kind(&staging, |k| matches!(k, EdgeKind::Implements));
     assert!(
         implements_count >= 2,
-        "Should have at least 2 Implements edges, found {}",
-        implements_count
+        "Should have at least 2 Implements edges, found {implements_count}"
     );
 
     // Should have nodes for classes, interfaces, and methods
@@ -822,18 +805,17 @@ fn test_interfaces_fixture_with_oop() {
     let implements_count = count_edges_by_kind(&staging, |k| matches!(k, EdgeKind::Implements));
     assert!(
         implements_count >= 2,
-        "Should have at least 2 Implements edges for Repository : IRepository, ILogger, found {}",
-        implements_count
+        "Should have at least 2 Implements edges for Repository : IRepository, ILogger, found {implements_count}"
     );
 }
 
 #[test]
 fn test_no_false_interface_detection() {
     // Test that class names like "Item", "Int32", "Image" are NOT detected as interfaces
-    let content = r#"
+    let content = r"
 public class Item { }
 public class ImageProcessor : Item { }
-"#;
+";
     let tree = parse_csharp_file(content);
     let mut staging = StagingGraph::new();
     let builder = CSharpGraphBuilder::default();
@@ -848,13 +830,11 @@ public class ImageProcessor : Item { }
 
     assert!(
         inherits_count >= 1,
-        "Should have at least 1 Inherits edge for ImageProcessor : Item, found {}",
-        inherits_count
+        "Should have at least 1 Inherits edge for ImageProcessor : Item, found {inherits_count}"
     );
     assert_eq!(
         implements_count, 0,
-        "Should have 0 Implements edges (Item is not an interface), found {}",
-        implements_count
+        "Should have 0 Implements edges (Item is not an interface), found {implements_count}"
     );
 }
 
@@ -862,7 +842,7 @@ public class ImageProcessor : Item { }
 // Comprehensive Import Edge Tests (10+ tests required)
 // ============================================================================
 
-/// Helper to check if any import edge has is_wildcard set to true
+/// Helper to check if any import edge has `is_wildcard` set to true
 fn has_wildcard_import(staging: &StagingGraph) -> bool {
     staging.operations().iter().any(|op| {
         matches!(
@@ -949,8 +929,7 @@ fn test_import_simple_namespace() {
     let simple_count = count_simple_imports(&staging);
     assert_eq!(
         simple_count, 1,
-        "Should have 1 simple import edge for 'using System;', found {}",
-        simple_count
+        "Should have 1 simple import edge for 'using System;', found {simple_count}"
     );
 
     // Verify no wildcard imports for simple using
@@ -974,8 +953,7 @@ fn test_import_deeply_qualified_namespace() {
     let import_count = count_edges_by_kind(&staging, |k| matches!(k, EdgeKind::Imports { .. }));
     assert_eq!(
         import_count, 1,
-        "Should have 1 import edge for deeply qualified namespace, found {}",
-        import_count
+        "Should have 1 import edge for deeply qualified namespace, found {import_count}"
     );
 }
 
@@ -994,18 +972,17 @@ fn test_import_static_is_wildcard() {
     let wildcard_count = count_wildcard_imports(&staging);
     assert_eq!(
         wildcard_count, 1,
-        "Static using should have is_wildcard=true, found {} wildcard imports",
-        wildcard_count
+        "Static using should have is_wildcard=true, found {wildcard_count} wildcard imports"
     );
 }
 
 #[test]
 fn test_import_static_multiple() {
-    let content = r#"
+    let content = r"
 using static System.Math;
 using static System.Console;
 using static System.String;
-"#;
+";
     let tree = parse_csharp_file(content);
     let mut staging = StagingGraph::new();
     let builder = CSharpGraphBuilder::default();
@@ -1017,8 +994,7 @@ using static System.String;
     let wildcard_count = count_wildcard_imports(&staging);
     assert_eq!(
         wildcard_count, 3,
-        "Should have 3 wildcard imports for static usings, found {}",
-        wildcard_count
+        "Should have 3 wildcard imports for static usings, found {wildcard_count}"
     );
 }
 
@@ -1037,8 +1013,7 @@ fn test_import_alias_has_alias_field() {
     let aliased_count = count_aliased_imports(&staging);
     assert_eq!(
         aliased_count, 1,
-        "Aliased using should have alias field set, found {} aliased imports",
-        aliased_count
+        "Aliased using should have alias field set, found {aliased_count} aliased imports"
     );
 
     // Aliased imports should not be wildcard
@@ -1050,12 +1025,12 @@ fn test_import_alias_has_alias_field() {
 
 #[test]
 fn test_import_alias_multiple() {
-    let content = r#"
+    let content = r"
 using IO = System.IO;
 using Console = System.Console;
 using Text = System.Text;
 using Collections = System.Collections;
-"#;
+";
     let tree = parse_csharp_file(content);
     let mut staging = StagingGraph::new();
     let builder = CSharpGraphBuilder::default();
@@ -1067,22 +1042,21 @@ using Collections = System.Collections;
     let aliased_count = count_aliased_imports(&staging);
     assert_eq!(
         aliased_count, 4,
-        "Should have 4 aliased imports, found {}",
-        aliased_count
+        "Should have 4 aliased imports, found {aliased_count}"
     );
 }
 
 #[test]
 fn test_import_mixed_types() {
     // Mix of simple, static, and aliased usings
-    let content = r#"
+    let content = r"
 using System;
 using System.Collections.Generic;
 using static System.Math;
 using static System.Console;
 using IO = System.IO;
 using Text = System.Text;
-"#;
+";
     let tree = parse_csharp_file(content);
     let mut staging = StagingGraph::new();
     let builder = CSharpGraphBuilder::default();
@@ -1098,23 +1072,19 @@ using Text = System.Text;
 
     assert_eq!(
         simple_count, 2,
-        "Should have 2 simple imports (System, System.Collections.Generic), found {}",
-        simple_count
+        "Should have 2 simple imports (System, System.Collections.Generic), found {simple_count}"
     );
     assert_eq!(
         wildcard_count, 2,
-        "Should have 2 wildcard imports (static Math, static Console), found {}",
-        wildcard_count
+        "Should have 2 wildcard imports (static Math, static Console), found {wildcard_count}"
     );
     assert_eq!(
         aliased_count, 2,
-        "Should have 2 aliased imports (IO, Text), found {}",
-        aliased_count
+        "Should have 2 aliased imports (IO, Text), found {aliased_count}"
     );
     assert_eq!(
         total_count, 6,
-        "Should have 6 total import edges, found {}",
-        total_count
+        "Should have 6 total import edges, found {total_count}"
     );
 }
 
@@ -1139,11 +1109,11 @@ fn test_import_global_using() {
 #[test]
 fn test_import_no_using() {
     // File with no using directives
-    let content = r#"
+    let content = r"
 public class MyClass {
     public void Method() { }
 }
-"#;
+";
     let tree = parse_csharp_file(content);
     let mut staging = StagingGraph::new();
     let builder = CSharpGraphBuilder::default();
@@ -1155,22 +1125,21 @@ public class MyClass {
     let import_count = count_edges_by_kind(&staging, |k| matches!(k, EdgeKind::Imports { .. }));
     assert_eq!(
         import_count, 0,
-        "Should have 0 import edges when no using directives, found {}",
-        import_count
+        "Should have 0 import edges when no using directives, found {import_count}"
     );
 }
 
 #[test]
 fn test_import_inside_namespace() {
     // Using directives inside namespace declaration
-    let content = r#"
+    let content = r"
 namespace MyApp {
     using System;
     using System.Text;
 
     public class MyClass { }
 }
-"#;
+";
     let tree = parse_csharp_file(content);
     let mut staging = StagingGraph::new();
     let builder = CSharpGraphBuilder::default();
@@ -1182,8 +1151,7 @@ namespace MyApp {
     let import_count = count_edges_by_kind(&staging, |k| matches!(k, EdgeKind::Imports { .. }));
     assert!(
         import_count >= 2,
-        "Should have at least 2 import edges for usings inside namespace, found {}",
-        import_count
+        "Should have at least 2 import edges for usings inside namespace, found {import_count}"
     );
 }
 
@@ -1207,14 +1175,14 @@ fn test_import_alias_with_generic_type() {
 #[test]
 fn test_import_file_scoped_namespace() {
     // Using directives with file-scoped namespace (C# 10+)
-    let content = r#"
+    let content = r"
 using System;
 using System.IO;
 
 namespace MyApp.Services;
 
 public class Service { }
-"#;
+";
     let tree = parse_csharp_file(content);
     let mut staging = StagingGraph::new();
     let builder = CSharpGraphBuilder::default();
@@ -1226,19 +1194,18 @@ public class Service { }
     let import_count = count_edges_by_kind(&staging, |k| matches!(k, EdgeKind::Imports { .. }));
     assert_eq!(
         import_count, 2,
-        "Should have 2 import edges with file-scoped namespace, found {}",
-        import_count
+        "Should have 2 import edges with file-scoped namespace, found {import_count}"
     );
 }
 
 #[test]
 fn test_import_edge_metadata_correctness() {
     // Comprehensive test verifying edge metadata is correctly set
-    let content = r#"
+    let content = r"
 using System;                      // Simple: alias=None, is_wildcard=false
 using static System.Math;          // Static: alias=None, is_wildcard=true
 using IO = System.IO;              // Aliased: alias=Some, is_wildcard=false
-"#;
+";
     let tree = parse_csharp_file(content);
     let mut staging = StagingGraph::new();
     let builder = CSharpGraphBuilder::default();
@@ -1301,31 +1268,28 @@ using IO = System.IO;              // Aliased: alias=Some, is_wildcard=false
 
     assert_eq!(
         simple, 1,
-        "Should have 1 simple import (System), found {}",
-        simple
+        "Should have 1 simple import (System), found {simple}"
     );
     assert_eq!(
         wildcard, 1,
-        "Should have 1 wildcard import (static Math), found {}",
-        wildcard
+        "Should have 1 wildcard import (static Math), found {wildcard}"
     );
     assert_eq!(
         aliased, 1,
-        "Should have 1 aliased import (IO), found {}",
-        aliased
+        "Should have 1 aliased import (IO), found {aliased}"
     );
 }
 
 #[test]
 fn test_import_with_comments() {
     // Using directives with comments
-    let content = r#"
+    let content = r"
 // System namespace for basic types
 using System;
 /* Multi-line
    comment */
 using System.Text; // Inline comment
-"#;
+";
     let tree = parse_csharp_file(content);
     let mut staging = StagingGraph::new();
     let builder = CSharpGraphBuilder::default();
@@ -1337,8 +1301,7 @@ using System.Text; // Inline comment
     let import_count = count_edges_by_kind(&staging, |k| matches!(k, EdgeKind::Imports { .. }));
     assert_eq!(
         import_count, 2,
-        "Should have 2 import edges despite comments, found {}",
-        import_count
+        "Should have 2 import edges despite comments, found {import_count}"
     );
 }
 
@@ -1348,11 +1311,11 @@ using System.Text; // Inline comment
 
 #[test]
 fn test_export_public_class() {
-    let content = r#"
+    let content = r"
 public class PublicClass {
     public void PublicMethod() { }
 }
-"#;
+";
     let tree = parse_csharp_file(content);
     let mut staging = StagingGraph::new();
     let builder = CSharpGraphBuilder::default();
@@ -1365,19 +1328,18 @@ public class PublicClass {
     let export_count = count_edges_by_kind(&staging, |k| matches!(k, EdgeKind::Exports { .. }));
     assert!(
         export_count >= 2,
-        "Should have at least 2 export edges (public class + public method), found {}",
-        export_count
+        "Should have at least 2 export edges (public class + public method), found {export_count}"
     );
 }
 
 #[test]
 fn test_export_public_interface() {
-    let content = r#"
+    let content = r"
 public interface IRepository {
     void Save();
     void Delete();
 }
-"#;
+";
     let tree = parse_csharp_file(content);
     let mut staging = StagingGraph::new();
     let builder = CSharpGraphBuilder::default();
@@ -1390,18 +1352,17 @@ public interface IRepository {
     let export_count = count_edges_by_kind(&staging, |k| matches!(k, EdgeKind::Exports { .. }));
     assert!(
         export_count >= 3,
-        "Should have at least 3 export edges (interface + 2 methods), found {}",
-        export_count
+        "Should have at least 3 export edges (interface + 2 methods), found {export_count}"
     );
 }
 
 #[test]
 fn test_export_internal_class() {
-    let content = r#"
+    let content = r"
 internal class InternalClass {
     internal void InternalMethod() { }
 }
-"#;
+";
     let tree = parse_csharp_file(content);
     let mut staging = StagingGraph::new();
     let builder = CSharpGraphBuilder::default();
@@ -1414,18 +1375,17 @@ internal class InternalClass {
     let export_count = count_edges_by_kind(&staging, |k| matches!(k, EdgeKind::Exports { .. }));
     assert!(
         export_count >= 2,
-        "Should have at least 2 export edges (internal class + internal method), found {}",
-        export_count
+        "Should have at least 2 export edges (internal class + internal method), found {export_count}"
     );
 }
 
 #[test]
 fn test_no_export_private_class() {
-    let content = r#"
+    let content = r"
 private class PrivateClass {
     private void PrivateMethod() { }
 }
-"#;
+";
     let tree = parse_csharp_file(content);
     let mut staging = StagingGraph::new();
     let builder = CSharpGraphBuilder::default();
@@ -1438,21 +1398,20 @@ private class PrivateClass {
     let export_count = count_edges_by_kind(&staging, |k| matches!(k, EdgeKind::Exports { .. }));
     assert_eq!(
         export_count, 0,
-        "Should have 0 export edges for private class, found {}",
-        export_count
+        "Should have 0 export edges for private class, found {export_count}"
     );
 }
 
 #[test]
 fn test_export_mixed_visibility_members() {
-    let content = r#"
+    let content = r"
 public class MixedClass {
     public void PublicMethod() { }
     private void PrivateMethod() { }
     protected void ProtectedMethod() { }
     internal void InternalMethod() { }
 }
-"#;
+";
     let tree = parse_csharp_file(content);
     let mut staging = StagingGraph::new();
     let builder = CSharpGraphBuilder::default();
@@ -1466,20 +1425,19 @@ public class MixedClass {
     let export_count = count_edges_by_kind(&staging, |k| matches!(k, EdgeKind::Exports { .. }));
     assert!(
         export_count >= 3,
-        "Should have at least 3 export edges (class + public method + internal method), found {}",
-        export_count
+        "Should have at least 3 export edges (class + public method + internal method), found {export_count}"
     );
 }
 
 #[test]
 fn test_export_public_properties() {
-    let content = r#"
+    let content = r"
 public class UserModel {
     public int Id { get; set; }
     public string Name { get; set; }
     private string password;
 }
-"#;
+";
     let tree = parse_csharp_file(content);
     let mut staging = StagingGraph::new();
     let builder = CSharpGraphBuilder::default();
@@ -1493,19 +1451,18 @@ public class UserModel {
     let export_count = count_edges_by_kind(&staging, |k| matches!(k, EdgeKind::Exports { .. }));
     assert!(
         export_count >= 3,
-        "Should have at least 3 export edges (class + 2 properties), found {}",
-        export_count
+        "Should have at least 3 export edges (class + 2 properties), found {export_count}"
     );
 }
 
 #[test]
 fn test_export_public_constructor() {
-    let content = r#"
+    let content = r"
 public class Service {
     public Service() { }
     private Service(int id) { }
 }
-"#;
+";
     let tree = parse_csharp_file(content);
     let mut staging = StagingGraph::new();
     let builder = CSharpGraphBuilder::default();
@@ -1519,8 +1476,7 @@ public class Service {
     let export_count = count_edges_by_kind(&staging, |k| matches!(k, EdgeKind::Exports { .. }));
     assert!(
         export_count >= 2,
-        "Should have at least 2 export edges (class + public constructor), found {}",
-        export_count
+        "Should have at least 2 export edges (class + public constructor), found {export_count}"
     );
 }
 
@@ -1547,14 +1503,13 @@ public static class Utils {
     let export_count = count_edges_by_kind(&staging, |k| matches!(k, EdgeKind::Exports { .. }));
     assert!(
         export_count >= 2,
-        "Should have at least 2 export edges (static class + static method), found {}",
-        export_count
+        "Should have at least 2 export edges (static class + static method), found {export_count}"
     );
 }
 
 #[test]
 fn test_export_namespaced_types() {
-    let content = r#"
+    let content = r"
 namespace MyApp.Services {
     public class UserService {
         public void Execute() { }
@@ -1564,7 +1519,7 @@ namespace MyApp.Services {
         internal void Process() { }
     }
 }
-"#;
+";
     let tree = parse_csharp_file(content);
     let mut staging = StagingGraph::new();
     let builder = CSharpGraphBuilder::default();
@@ -1577,20 +1532,19 @@ namespace MyApp.Services {
     let export_count = count_edges_by_kind(&staging, |k| matches!(k, EdgeKind::Exports { .. }));
     assert!(
         export_count >= 4,
-        "Should have at least 4 export edges for namespaced types, found {}",
-        export_count
+        "Should have at least 4 export edges for namespaced types, found {export_count}"
     );
 }
 
 #[test]
 fn test_export_nested_public_class() {
-    let content = r#"
+    let content = r"
 public class OuterClass {
     public class InnerClass {
         public void Method() { }
     }
 }
-"#;
+";
     let tree = parse_csharp_file(content);
     let mut staging = StagingGraph::new();
     let builder = CSharpGraphBuilder::default();
@@ -1603,20 +1557,19 @@ public class OuterClass {
     let export_count = count_edges_by_kind(&staging, |k| matches!(k, EdgeKind::Exports { .. }));
     assert!(
         export_count >= 3,
-        "Should have at least 3 export edges for nested classes, found {}",
-        export_count
+        "Should have at least 3 export edges for nested classes, found {export_count}"
     );
 }
 
 #[test]
 fn test_export_interface_methods() {
-    let content = r#"
+    let content = r"
 public interface IService {
     void Execute();
     void Process();
     private void Helper() { }  // C# 8.0+ private interface methods
 }
-"#;
+";
     let tree = parse_csharp_file(content);
     let mut staging = StagingGraph::new();
     let builder = CSharpGraphBuilder::default();
@@ -1630,14 +1583,13 @@ public interface IService {
     let export_count = count_edges_by_kind(&staging, |k| matches!(k, EdgeKind::Exports { .. }));
     assert!(
         export_count >= 3,
-        "Should have at least 3 export edges (interface + 2 public methods), found {}",
-        export_count
+        "Should have at least 3 export edges (interface + 2 public methods), found {export_count}"
     );
 }
 
 #[test]
 fn test_export_complete_program() {
-    let content = r#"
+    let content = r"
 using System;
 
 namespace MyApp {
@@ -1665,7 +1617,7 @@ namespace MyApp {
         internal void Process() { }
     }
 }
-"#;
+";
     let tree = parse_csharp_file(content);
     let mut staging = StagingGraph::new();
     let builder = CSharpGraphBuilder::default();
@@ -1688,7 +1640,6 @@ namespace MyApp {
     let export_count = count_edges_by_kind(&staging, |k| matches!(k, EdgeKind::Exports { .. }));
     assert!(
         export_count >= 9,
-        "Should have at least 9 export edges for complete program, found {}",
-        export_count
+        "Should have at least 9 export edges for complete program, found {export_count}"
     );
 }

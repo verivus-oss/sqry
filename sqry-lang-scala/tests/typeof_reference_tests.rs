@@ -1,4 +1,4 @@
-//! TypeOf and Reference edge tests for Scala language plugin.
+//! `TypeOf` and Reference edge tests for Scala language plugin.
 //!
 //! Tests comprehensive coverage of:
 //! - Variables and fields (val/var)
@@ -101,8 +101,8 @@ fn build_node_display_name_lookup(staging: &StagingGraph) -> HashMap<u32, String
         .collect()
 }
 
-/// Collect TypeOf edges with a specific context.
-/// Returns vec of (source_name, target_name) pairs.
+/// Collect `TypeOf` edges with a specific context.
+/// Returns vec of (`source_name`, `target_name`) pairs.
 fn collect_typeof_edges_by_context(
     staging: &StagingGraph,
     context: TypeOfContext,
@@ -140,7 +140,7 @@ fn collect_typeof_edges_by_context(
 }
 
 /// Collect all Reference edges.
-/// Returns vec of (source_name, target_name) pairs.
+/// Returns vec of (`source_name`, `target_name`) pairs.
 fn collect_reference_edges(staging: &StagingGraph) -> Vec<(String, String)> {
     let node_names = build_node_name_lookup(staging);
 
@@ -210,6 +210,7 @@ fn collect_typeof_edges_by_context_for_display(
 // ============================================================================
 
 #[test]
+#[allow(clippy::case_sensitive_file_extension_comparisons)] // Known file extensions
 fn test_val_simple_type() {
     let source = r#"
 class User {
@@ -246,11 +247,11 @@ class User {
 
 #[test]
 fn test_var_simple_type() {
-    let source = r#"
+    let source = r"
 class Counter {
   var count: Int = 0
 }
-"#;
+";
     let staging = build_test_graph(source, "Counter.scala");
 
     let typeof_edges = collect_typeof_edges_by_context(&staging, TypeOfContext::Field);
@@ -295,9 +296,9 @@ class Service {
 
 #[test]
 fn test_function_parameter_simple() {
-    let source = r#"
+    let source = r"
 def greet(name: String): Unit = println(name)
-"#;
+";
     let staging = build_test_graph(source, "Test.scala");
 
     let typeof_edges = collect_typeof_edges_by_context(&staging, TypeOfContext::Parameter);
@@ -319,9 +320,9 @@ def greet(name: String): Unit = println(name)
 
 #[test]
 fn test_function_multiple_parameters() {
-    let source = r#"
+    let source = r"
 def add(x: Int, y: Int): Int = x + y
-"#;
+";
     let staging = build_test_graph(source, "Test.scala");
 
     let typeof_edges = collect_typeof_edges_by_context(&staging, TypeOfContext::Parameter);
@@ -339,11 +340,11 @@ def add(x: Int, y: Int): Int = x + y
 
 #[test]
 fn test_method_parameter() {
-    let source = r#"
+    let source = r"
 class Calculator {
   def multiply(a: Int, b: Int): Int = a * b
 }
-"#;
+";
     let staging = build_test_graph(source, "Calculator.scala");
 
     let typeof_edges = collect_typeof_edges_by_context(&staging, TypeOfContext::Parameter);
@@ -357,9 +358,9 @@ class Calculator {
 
 #[test]
 fn test_implicit_parameter() {
-    let source = r#"
+    let source = r"
 def execute(implicit ctx: Context): Unit = ()
-"#;
+";
     let staging = build_test_graph(source, "Test.scala");
 
     let typeof_edges = collect_typeof_edges_by_context(&staging, TypeOfContext::Parameter);
@@ -377,9 +378,9 @@ def execute(implicit ctx: Context): Unit = ()
 
 #[test]
 fn test_function_return_simple() {
-    let source = r#"
+    let source = r"
 def getCount(): Int = 42
-"#;
+";
     let staging = build_test_graph(source, "Test.scala");
 
     let typeof_edges = collect_typeof_edges_by_context(&staging, TypeOfContext::Return);
@@ -401,9 +402,9 @@ def getCount(): Int = 42
 
 #[test]
 fn test_function_return_unit() {
-    let source = r#"
+    let source = r"
 def doSomething(): Unit = ()
-"#;
+";
     let staging = build_test_graph(source, "Test.scala");
 
     let typeof_edges = collect_typeof_edges_by_context(&staging, TypeOfContext::Return);
@@ -417,9 +418,9 @@ def doSomething(): Unit = ()
 
 #[test]
 fn test_inferred_return_type() {
-    let source = r#"
+    let source = r"
 def getValue() = 42
-"#;
+";
     let staging = build_test_graph(source, "Test.scala");
 
     // Type inference - no explicit return type, so no TypeOf edge expected
@@ -436,11 +437,11 @@ def getValue() = 42
 
 #[test]
 fn test_generic_list_type() {
-    let source = r#"
+    let source = r"
 class Container {
   val items: List[String] = List.empty
 }
-"#;
+";
     let staging = build_test_graph(source, "Container.scala");
 
     let typeof_edges = collect_typeof_edges_by_context(&staging, TypeOfContext::Field);
@@ -469,11 +470,11 @@ class Container {
 
 #[test]
 fn test_nested_generic() {
-    let source = r#"
+    let source = r"
 class Store {
   val cache: Map[String, List[User]] = Map.empty
 }
-"#;
+";
     let staging = build_test_graph(source, "Store.scala");
 
     let ref_edges = collect_reference_edges(&staging);
@@ -504,11 +505,11 @@ class Store {
 
 #[test]
 fn test_tuple_type() {
-    let source = r#"
+    let source = r"
 class Pair {
   val coords: (Int, Int) = (0, 0)
 }
-"#;
+";
     let staging = build_test_graph(source, "Pair.scala");
 
     let ref_edges = collect_reference_edges(&staging);
@@ -523,11 +524,11 @@ class Pair {
 
 #[test]
 fn test_function_type() {
-    let source = r#"
+    let source = r"
 class Handler {
   val callback: (String, Int) => Boolean = null
 }
-"#;
+";
     let staging = build_test_graph(source, "Handler.scala");
 
     let ref_edges = collect_reference_edges(&staging);
@@ -554,11 +555,11 @@ class Handler {
 
 #[test]
 fn test_compound_type() {
-    let source = r#"
+    let source = r"
 class Mixed {
   val obj: Serializable with Cloneable = null
 }
-"#;
+";
     let staging = build_test_graph(source, "Mixed.scala");
 
     let ref_edges = collect_reference_edges(&staging);
@@ -585,14 +586,14 @@ class Mixed {
 
 #[test]
 fn test_class_with_mixed_members() {
-    let source = r#"
+    let source = r"
 class UserService {
   val users: List[User] = List.empty
   var count: Int = 0
 
   def findUser(id: Long): Option[User] = None
 }
-"#;
+";
     let staging = build_test_graph(source, "UserService.scala");
 
     // Check field TypeOf edges
@@ -623,9 +624,9 @@ class UserService {
 
 #[test]
 fn test_multiple_type_references() {
-    let source = r#"
+    let source = r"
 def process(data: Map[String, Result[User, Error]]): Boolean = true
-"#;
+";
     let staging = build_test_graph(source, "Test.scala");
 
     let ref_edges = collect_reference_edges(&staging);
@@ -646,9 +647,9 @@ def process(data: Map[String, Result[User, Error]]): Boolean = true
 
 #[test]
 fn test_constructor_parameters() {
-    let source = r#"
+    let source = r"
 case class User(name: String, age: Int, email: String)
-"#;
+";
     let staging = build_test_graph(source, "User.scala");
 
     let typeof_edges = collect_typeof_edges_by_context(&staging, TypeOfContext::Parameter);
@@ -665,12 +666,12 @@ case class User(name: String, age: Int, email: String)
 
 #[test]
 fn test_type_alias() {
-    let source = r#"
+    let source = r"
 class Handler {
   type UserMap = Map[String, User]
   val cache: UserMap = Map.empty
 }
-"#;
+";
     let staging = build_test_graph(source, "Handler.scala");
 
     let typeof_edges = collect_typeof_edges_by_context(&staging, TypeOfContext::Field);
@@ -685,11 +686,11 @@ class Handler {
 
 #[test]
 fn test_existential_type() {
-    let source = r#"
+    let source = r"
 class Wildcards {
   val anyList: List[_] = List.empty
 }
-"#;
+";
     let staging = build_test_graph(source, "Wildcards.scala");
 
     let ref_edges = collect_reference_edges(&staging);
@@ -709,12 +710,13 @@ class Wildcards {
 }
 
 #[test]
+#[allow(clippy::case_sensitive_file_extension_comparisons)] // Known file extensions in domain
 fn test_missing_type_annotation() {
-    let source = r#"
+    let source = r"
 class Inferred {
   val value = 42
 }
-"#;
+";
     let staging = build_test_graph(source, "Inferred.scala");
 
     let typeof_edges = collect_typeof_edges_by_context(&staging, TypeOfContext::Field);

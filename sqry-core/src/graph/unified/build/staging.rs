@@ -546,9 +546,10 @@ impl StagingGraph {
     /// metadata (cfg conditions, proc-macro classifications, etc.) to nodes.
     pub fn merge_macro_metadata(
         &mut self,
-        metadata: crate::graph::unified::storage::metadata::NodeMetadataStore,
+        #[allow(clippy::needless_continue)] // Continue at end of loop for clarity
+        metadata: &crate::graph::unified::storage::metadata::NodeMetadataStore,
     ) {
-        self.macro_metadata.merge(&metadata);
+        self.macro_metadata.merge(metadata);
     }
 
     /// Take macro metadata, consuming it from the staging graph.

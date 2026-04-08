@@ -65,7 +65,7 @@ fn validate_and_extract_response(response: &Value) -> Result<String> {
             .as_str()
             .unwrap_or("unknown error");
         // For E2E tests, some queries may legitimately return errors (e.g., symbol not found)
-        return Ok(format!("[Error response: {}]", error_msg));
+        return Ok(format!("[Error response: {error_msg}]"));
     }
 
     // Validate success response structure
@@ -83,7 +83,7 @@ fn validate_and_extract_response(response: &Value) -> Result<String> {
     Ok(text.to_string())
 }
 
-/// Test 1: Semantic search for GraphBuilder implementations
+/// Test 1: Semantic search for `GraphBuilder` implementations
 #[test]
 fn test_e2e_semantic_search_graph_builders() -> Result<()> {
     require_sqry_index!();
@@ -202,18 +202,15 @@ fn test_e2e_graph_statistics() -> Result<()> {
     // Verify it contains expected statistics fields (JSON format)
     assert!(
         text.contains("totalNodes"),
-        "Should show node count. Got: {}",
-        text
+        "Should show node count. Got: {text}"
     );
     assert!(
         text.contains("totalEdges"),
-        "Should show edge count. Got: {}",
-        text
+        "Should show edge count. Got: {text}"
     );
     assert!(
         text.contains("totalFiles"),
-        "Should show file count. Got: {}",
-        text
+        "Should show file count. Got: {text}"
     );
 
     Ok(())
@@ -481,6 +478,7 @@ fn test_e2e_dependency_analysis() -> Result<()> {
 
 /// Test 16: Validate filesIndexed accuracy (regression test for filesIndexed=0 bug)
 #[test]
+#[allow(clippy::similar_names)] // Domain variable naming is intentional
 fn test_e2e_index_status_file_count_accuracy() -> Result<()> {
     require_sqry_index!();
     let mut client = shared_initialized_client();
@@ -498,6 +496,7 @@ fn test_e2e_index_status_file_count_accuracy() -> Result<()> {
     let status_text = validate_and_extract_response(&status_response)?;
 
     // Get graph stats (source of truth for file count)
+    #[allow(clippy::similar_names)] // Test fixture variables
     let stats_response = client.call(
         "tools/call",
         json!({
@@ -511,9 +510,9 @@ fn test_e2e_index_status_file_count_accuracy() -> Result<()> {
 
     // Parse JSON responses
     let status_json: Value = serde_json::from_str(&status_text)
-        .map_err(|e| anyhow::anyhow!("Failed to parse index status JSON: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to parse index status JSON: {e}"))?;
     let stats_json: Value = serde_json::from_str(&stats_text)
-        .map_err(|e| anyhow::anyhow!("Failed to parse graph stats JSON: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to parse graph stats JSON: {e}"))?;
 
     // Extract file counts
     let files_indexed = status_json["data"]["filesIndexed"]
@@ -527,21 +526,19 @@ fn test_e2e_index_status_file_count_accuracy() -> Result<()> {
     // Verify file counts match
     assert_eq!(
         files_indexed, total_files,
-        "Index status filesIndexed ({}) should match graph stats totalFiles ({})",
-        files_indexed, total_files
+        "Index status filesIndexed ({files_indexed}) should match graph stats totalFiles ({total_files})"
     );
 
     // Sanity check: file count should be greater than 0 for sqry codebase
     assert!(
         files_indexed > 0,
-        "File count should be greater than 0, got {}",
-        files_indexed
+        "File count should be greater than 0, got {files_indexed}"
     );
 
     Ok(())
 }
 
-/// Test 17: Validate rebuild_index returns accurate file count
+/// Test 17: Validate `rebuild_index` returns accurate file count
 #[test]
 #[ignore = "Expensive rebuild test - enable for validation testing"]
 fn test_e2e_rebuild_index_file_count_accuracy() -> Result<()> {
@@ -564,7 +561,7 @@ fn test_e2e_rebuild_index_file_count_accuracy() -> Result<()> {
 
     // Parse rebuild response
     let rebuild_json: Value = serde_json::from_str(&rebuild_text)
-        .map_err(|e| anyhow::anyhow!("Failed to parse rebuild response JSON: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to parse rebuild response JSON: {e}"))?;
 
     // Extract file count from rebuild response
     let files_indexed = rebuild_json["data"]["filesIndexed"]
@@ -583,7 +580,7 @@ fn test_e2e_rebuild_index_file_count_accuracy() -> Result<()> {
 
     let stats_text = validate_and_extract_response(&stats_response)?;
     let stats_json: Value = serde_json::from_str(&stats_text)
-        .map_err(|e| anyhow::anyhow!("Failed to parse graph stats JSON: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to parse graph stats JSON: {e}"))?;
 
     let total_files = stats_json["data"]["totalFiles"]
         .as_u64()
@@ -592,21 +589,19 @@ fn test_e2e_rebuild_index_file_count_accuracy() -> Result<()> {
     // Verify rebuild response file count matches graph stats
     assert_eq!(
         files_indexed, total_files,
-        "Rebuild response filesIndexed ({}) should match graph stats totalFiles ({})",
-        files_indexed, total_files
+        "Rebuild response filesIndexed ({files_indexed}) should match graph stats totalFiles ({total_files})"
     );
 
     // Sanity check: file count should be greater than 0
     assert!(
         files_indexed > 0,
-        "Rebuild file count should be greater than 0, got {}",
-        files_indexed
+        "Rebuild file count should be greater than 0, got {files_indexed}"
     );
 
     Ok(())
 }
 
-/// Test 18: Validate rebuild_index without force returns existing index file count
+/// Test 18: Validate `rebuild_index` without force returns existing index file count
 #[test]
 fn test_e2e_rebuild_index_existing_index_file_count() -> Result<()> {
     require_sqry_index!();
@@ -628,11 +623,7 @@ fn test_e2e_rebuild_index_existing_index_file_count() -> Result<()> {
 
     // Parse rebuild response
     let rebuild_json: Value = serde_json::from_str(&rebuild_text).map_err(|e| {
-        anyhow::anyhow!(
-            "Failed to parse rebuild response JSON: {} | Text was: {}",
-            e,
-            rebuild_text
-        )
+        anyhow::anyhow!("Failed to parse rebuild response JSON: {e} | Text was: {rebuild_text}")
     })?;
 
     // Extract file count from rebuild response
@@ -652,7 +643,7 @@ fn test_e2e_rebuild_index_existing_index_file_count() -> Result<()> {
 
     let stats_text = validate_and_extract_response(&stats_response)?;
     let stats_json: Value = serde_json::from_str(&stats_text)
-        .map_err(|e| anyhow::anyhow!("Failed to parse graph stats JSON: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to parse graph stats JSON: {e}"))?;
 
     let total_files = stats_json["data"]["totalFiles"]
         .as_u64()
@@ -661,8 +652,7 @@ fn test_e2e_rebuild_index_existing_index_file_count() -> Result<()> {
     // Verify rebuild response file count matches graph stats
     assert_eq!(
         files_indexed, total_files,
-        "Rebuild (no force) filesIndexed ({}) should match graph stats totalFiles ({})",
-        files_indexed, total_files
+        "Rebuild (no force) filesIndexed ({files_indexed}) should match graph stats totalFiles ({total_files})"
     );
 
     // Verify success flag
@@ -676,6 +666,7 @@ fn test_e2e_rebuild_index_existing_index_file_count() -> Result<()> {
 
 /// Test 19: Validate manifest-only fallback when snapshot header is unreadable
 #[test]
+#[allow(clippy::items_after_statements)] // Items near usage for clarity
 fn test_e2e_index_status_manifest_only_fallback() -> Result<()> {
     require_sqry_index!();
     use sqry_core::graph::unified::persistence::{
@@ -718,7 +709,7 @@ fn test_e2e_index_status_manifest_only_fallback() -> Result<()> {
             "javascript".to_string(),
         ],
         config: HashMap::new(),
-        confidence: Default::default(),
+        confidence: HashMap::new(),
         last_indexed_commit: None,
         plugin_selection: None,
     };
@@ -749,7 +740,7 @@ fn test_e2e_index_status_manifest_only_fallback() -> Result<()> {
 
     // Parse response
     let status_json: Value = serde_json::from_str(&text)
-        .map_err(|e| anyhow::anyhow!("Failed to parse index status JSON: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to parse index status JSON: {e}"))?;
 
     // Verify filesIndexed equals the sum of manifest.file_count
     let files_indexed = status_json["data"]["filesIndexed"]
@@ -770,11 +761,11 @@ fn test_e2e_index_status_manifest_only_fallback() -> Result<()> {
     Ok(())
 }
 
-/// Test suffix matching: direct_callers with partially-qualified name.
+/// Test suffix matching: `direct_callers` with partially-qualified name.
 ///
-/// Uses "CondensationDag::build_with_budget" which is NOT in the string interner
-/// as-is (the interner has "build_with_budget" and the full module-qualified name).
-/// This forces find_node_flexible() through the suffix-matching branch.
+/// Uses "`CondensationDag::build_with_budget`" which is NOT in the string interner
+/// as-is (the interner has "`build_with_budget`" and the full module-qualified name).
+/// This forces `find_node_flexible()` through the suffix-matching branch.
 #[test]
 fn test_e2e_direct_callers_suffix_match() -> Result<()> {
     require_sqry_index!();
@@ -800,7 +791,7 @@ fn test_e2e_direct_callers_suffix_match() -> Result<()> {
     Ok(())
 }
 
-/// Test suffix matching: direct_callees with partially-qualified name.
+/// Test suffix matching: `direct_callees` with partially-qualified name.
 #[test]
 fn test_e2e_direct_callees_suffix_match() -> Result<()> {
     require_sqry_index!();
@@ -826,7 +817,7 @@ fn test_e2e_direct_callees_suffix_match() -> Result<()> {
     Ok(())
 }
 
-/// Test suffix matching: get_hover_info with partially-qualified name.
+/// Test suffix matching: `get_hover_info` with partially-qualified name.
 #[test]
 fn test_e2e_get_hover_info_suffix_match() -> Result<()> {
     require_sqry_index!();
@@ -852,7 +843,7 @@ fn test_e2e_get_hover_info_suffix_match() -> Result<()> {
     Ok(())
 }
 
-/// Test suffix matching: get_references with partially-qualified name.
+/// Test suffix matching: `get_references` with partially-qualified name.
 #[test]
 fn test_e2e_get_references_suffix_match() -> Result<()> {
     require_sqry_index!();

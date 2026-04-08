@@ -29,6 +29,7 @@ fn write_file(dir: &Path, name: &str, content: &str) {
 /// This guards against regressions where the `lang` field validation or
 /// workspace query path rejects certain language IDs.
 #[test]
+#[allow(clippy::too_many_lines)] // Tests all 37 language plugins end-to-end
 fn workspace_lang_filter_smoke_for_all_languages() {
     let workspace_dir = TempDir::new().unwrap();
     let workspace_path = workspace_dir.path();

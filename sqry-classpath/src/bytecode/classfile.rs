@@ -9,6 +9,9 @@
 //! Generics (U05), annotations (U06), lambdas (U07a), and modules (U07b) are
 //! handled by separate enrichment parsers that post-process the stub.
 
+// JVM classfile spec guarantees values fit in u16/u32; casts are intentional
+#![allow(clippy::cast_possible_truncation)]
+
 use cafebabe::attributes::AttributeData;
 use cafebabe::{ClassAccessFlags, FieldAccessFlags, MethodAccessFlags, ParseOptions};
 
@@ -26,9 +29,9 @@ use super::constants::{
 // Access flag constants for filtering
 // ---------------------------------------------------------------------------
 
-/// ACC_BRIDGE for methods (0x0040).
+/// `ACC_BRIDGE` for methods (0x0040).
 const METHOD_ACC_BRIDGE: u16 = 0x0040;
-/// ACC_SYNTHETIC for methods (0x1000).
+/// `ACC_SYNTHETIC` for methods (0x1000).
 const METHOD_ACC_SYNTHETIC: u16 = 0x1000;
 
 // ---------------------------------------------------------------------------
@@ -225,6 +228,8 @@ fn parse_methods(methods: &[cafebabe::MethodInfo<'_>], class_fqn: &str) -> Vec<M
 }
 
 /// Parse a single method into a [`MethodStub`].
+#[allow(clippy::unnecessary_debug_formatting)] // Debug format in error context
+#[allow(clippy::unnecessary_wraps)] // Result for API consistency
 fn parse_single_method(method: &cafebabe::MethodInfo<'_>) -> ClasspathResult<MethodStub> {
     let name = method.name.to_string();
     let access = convert_method_access_flags(method.access_flags);
@@ -272,6 +277,7 @@ fn parse_fields(fields: &[cafebabe::FieldInfo<'_>], class_fqn: &str) -> Vec<Fiel
 }
 
 /// Parse a single field into a [`FieldStub`].
+#[allow(clippy::unnecessary_wraps)] // Result for API consistency
 fn parse_single_field(field: &cafebabe::FieldInfo<'_>) -> ClasspathResult<FieldStub> {
     let name = field.name.to_string();
     let access = convert_field_access_flags(field.access_flags);
@@ -339,7 +345,10 @@ fn extract_inner_classes(
                         .outer_class_info
                         .as_ref()
                         .map(|o| class_name_to_fqn(o)),
-                    inner_name: entry.inner_name.as_ref().map(|n| n.to_string()),
+                    inner_name: entry
+                        .inner_name
+                        .as_ref()
+                        .map(std::string::ToString::to_string),
                     access: AccessFlags::new(entry.access_flags.bits()),
                 });
             }
@@ -541,7 +550,7 @@ mod tests {
             self
         }
 
-        /// Add a method with MethodParameters attribute.
+        /// Add a method with `MethodParameters` attribute.
         fn add_method_with_params(
             &mut self,
             name: &str,
@@ -578,7 +587,7 @@ mod tests {
             self
         }
 
-        /// Add an InnerClasses attribute.
+        /// Add an `InnerClasses` attribute.
         fn add_inner_classes_attribute(
             &mut self,
             entries: &[(&str, Option<&str>, Option<&str>, u16)],
@@ -620,7 +629,7 @@ mod tests {
             self
         }
 
-        /// Add a SourceFile attribute.
+        /// Add a `SourceFile` attribute.
         fn add_source_file_attribute(&mut self, source_file: &str) -> &mut Self {
             let attr_name_idx = self.add_utf8("SourceFile");
             let source_idx = self.add_utf8(source_file);

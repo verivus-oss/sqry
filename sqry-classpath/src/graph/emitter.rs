@@ -20,7 +20,7 @@
 //!    module).
 //!
 //! After emission, the returned `FQN→NodeId` mapping is used by
-//! [`register_classpath_exports`] and [`create_classpath_edges`] for ExportMap
+//! [`register_classpath_exports`] and [`create_classpath_edges`] for `ExportMap`
 //! registration and cross-reference edge creation.
 
 use std::collections::HashMap;
@@ -88,6 +88,7 @@ impl<'a> InternHelper<'a> {
 // ---------------------------------------------------------------------------
 
 /// Map JVM access flags to a visibility string for the graph.
+#[allow(clippy::trivially_copy_pass_by_ref)] // API consistency with other methods
 fn access_to_visibility(access: &crate::stub::model::AccessFlags) -> &'static str {
     if access.is_public() {
         "public"
@@ -142,7 +143,7 @@ fn register_synthetic_file(
 
 /// Emit all classpath nodes and edges into a staging graph.
 ///
-/// Returns the mapping of FQN to `NodeId` for ExportMap registration and
+/// Returns the mapping of FQN to `NodeId` for `ExportMap` registration and
 /// cross-reference edge creation.
 ///
 /// # Arguments
@@ -199,14 +200,15 @@ pub fn emit_classpath_nodes(
 /// Result of classpath node emission.
 #[derive(Debug)]
 pub struct EmissionResult {
-    /// Mapping from fully qualified class name to its graph NodeId.
+    /// Mapping from fully qualified class name to its graph `NodeId`.
     pub fqn_to_node: HashMap<String, NodeId>,
-    /// Mapping from fully qualified class name to its synthetic FileId.
+    /// Mapping from fully qualified class name to its synthetic `FileId`.
     pub file_id_map: HashMap<String, FileId>,
 }
 
 /// Emit a single class stub and all its members into the staging graph.
 #[allow(clippy::too_many_lines)]
+#[allow(clippy::similar_names)] // Domain variable naming is intentional
 fn emit_class_stub(
     stub: &ClassStub,
     staging: &mut StagingGraph,
@@ -260,6 +262,7 @@ fn emit_class_stub(
         // Include the descriptor in the key to disambiguate overloaded methods.
         // JVM methods are uniquely identified by (name, descriptor).
         let method_fqn = format!("{}.{}{}", stub.fqn, method.name, method.descriptor);
+        #[allow(clippy::similar_names)] // Domain terminology: source/target node pairs
         let method_qname_id = helper.intern(&method_fqn)?;
         let method_vis_id = helper.intern(access_to_visibility(&method.access))?;
 
@@ -400,7 +403,7 @@ fn find_provenance_for_jar<'a>(
 // ExportMap registration (U15b)
 // ---------------------------------------------------------------------------
 
-/// Register classpath nodes in the ExportMap for cross-file resolution.
+/// Register classpath nodes in the `ExportMap` for cross-file resolution.
 ///
 /// FQN precedence: workspace > direct dep > transitive dep.
 /// Direct dependencies are registered before transitive dependencies so that
@@ -408,6 +411,7 @@ fn find_provenance_for_jar<'a>(
 ///
 /// Only class-level nodes (not methods/fields) are registered, matching the
 /// Java import resolution model where imports resolve to types.
+#[allow(clippy::implicit_hasher)] // Standard HashMap is intentional for classpath emitter
 pub fn register_classpath_exports(
     fqn_to_node: &HashMap<String, NodeId>,
     export_map: &mut ExportMap,
@@ -480,7 +484,9 @@ fn register_exports_for_jars(
 /// Missing targets are silently skipped (they may be from JARs not on the
 /// classpath).
 #[allow(clippy::too_many_lines)]
+#[allow(clippy::implicit_hasher)] // Standard HashMap intentional
 pub fn create_classpath_edges(
+    #[allow(clippy::implicit_hasher)] // Standard HashMap is intentional
     index: &ClasspathIndex,
     fqn_to_node: &HashMap<String, NodeId>,
     staging: &mut StagingGraph,

@@ -14,12 +14,12 @@ fn parse_dart(source: &str) -> Tree {
 #[test]
 #[ignore = "Debug annotation edge"]
 fn debug_annotation_ffi_edge() {
-    let source = r#"
+    let source = r"
 import 'dart:ffi' as ffi;
 
 @ffi.Native<ffi.Int32 Function(ffi.Int32)>(symbol: 'add')
 external int nativeAdd(int a, int b);
-"#;
+";
     let tree = parse_dart(source);
     let mut staging = StagingGraph::new();
     let builder = DartGraphBuilder::new();

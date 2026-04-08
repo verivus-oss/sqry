@@ -634,6 +634,7 @@ fn handle_class_declaration(
 }
 
 /// Dispatch on Kotlin AST node kind to build scope tree entries.
+#[allow(clippy::too_many_lines)] // Kotlin scope resolution covers all AST node types
 fn build_scopes_dispatch(
     tree: &mut KotlinScopeTree,
     node: Node,

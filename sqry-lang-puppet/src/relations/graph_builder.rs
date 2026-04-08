@@ -480,11 +480,11 @@ mod tests {
 
     #[test]
     fn test_extracts_include() {
-        let source = r#"
+        let source = r"
 class myclass {
   include other_class
 }
-"#;
+";
 
         let tree = parse_puppet(source);
         let mut staging = StagingGraph::new();
@@ -507,11 +507,11 @@ class myclass {
 
     #[test]
     fn test_extracts_require() {
-        let source = r#"
+        let source = r"
 class myclass {
   require base_class
 }
-"#;
+";
 
         let tree = parse_puppet(source);
         let mut staging = StagingGraph::new();
@@ -534,9 +534,9 @@ class myclass {
 
     #[test]
     fn test_extracts_string_class_name() {
-        let source = r#"
+        let source = r"
 include 'mymodule::myclass'
-"#;
+";
 
         let tree = parse_puppet(source);
         let mut staging = StagingGraph::new();
@@ -559,13 +559,13 @@ include 'mymodule::myclass'
 
     #[test]
     fn test_multiple_includes() {
-        let source = r#"
+        let source = r"
 class myclass {
   include base
   include networking
   require security
 }
-"#;
+";
 
         let tree = parse_puppet(source);
         let mut staging = StagingGraph::new();
@@ -590,9 +590,9 @@ class myclass {
 
     #[test]
     fn test_qualified_class_name() {
-        let source = r#"
+        let source = r"
 include mymodule::submodule::myclass
-"#;
+";
 
         let tree = parse_puppet(source);
         let mut staging = StagingGraph::new();
@@ -615,11 +615,11 @@ include mymodule::submodule::myclass
         // NOTE: tree-sitter-puppet grammar does not have contain_statement node type.
         // `contain contained_class` is parsed as bare identifiers, not as a statement.
         // This test documents the grammar limitation.
-        let source = r#"
+        let source = r"
 class myclass {
   contain contained_class
 }
-"#;
+";
 
         let tree = parse_puppet(source);
         let mut staging = StagingGraph::new();
@@ -641,11 +641,11 @@ class myclass {
 
     #[test]
     fn test_extracts_class_inheritance() {
-        let source = r#"
+        let source = r"
 class myclass inherits parent_class {
   # class body
 }
-"#;
+";
 
         let tree = parse_puppet(source);
         let mut staging = StagingGraph::new();
@@ -673,11 +673,11 @@ class myclass inherits parent_class {
 
     #[test]
     fn test_class_without_inheritance() {
-        let source = r#"
+        let source = r"
 class myclass {
   # class body without inheritance
 }
-"#;
+";
 
         let tree = parse_puppet(source);
         let mut staging = StagingGraph::new();
@@ -726,12 +726,12 @@ class myclass {
     #[test]
     fn test_mixed_statements() {
         // Note: contain is not supported by the grammar, so we only test include/require
-        let source = r#"
+        let source = r"
 class myclass inherits base_class {
   include helper
   require dependency
 }
-"#;
+";
 
         let tree = parse_puppet(source);
         let mut staging = StagingGraph::new();
@@ -766,14 +766,14 @@ class myclass inherits base_class {
 
     #[test]
     fn test_nested_class_include() {
-        let source = r#"
+        let source = r"
 class outer {
   class { 'inner':
     # nested resource-style class
   }
   include nested_include
 }
-"#;
+";
 
         let tree = parse_puppet(source);
         let mut staging = StagingGraph::new();
@@ -868,7 +868,7 @@ mod active_tests {
 
     #[test]
     fn test_extracts_resource_declaration_calls() {
-        let source = r#"
+        let source = r"
 class myapp {
   package { 'nginx':
     ensure => installed,
@@ -882,7 +882,7 @@ class myapp {
     ensure => present,
   }
 }
-"#;
+";
 
         let tree = parse_puppet(source);
         let mut staging = StagingGraph::new();
@@ -930,11 +930,11 @@ define myapp::config($port = 80) {
 
     #[test]
     fn test_extracts_include_import_edge() {
-        let source = r#"
+        let source = r"
 class webserver {
   include myapp
 }
-"#;
+";
 
         let tree = parse_puppet(source);
         let mut staging = StagingGraph::new();
@@ -955,11 +955,11 @@ class webserver {
 
     #[test]
     fn test_extracts_require_import_edge() {
-        let source = r#"
+        let source = r"
 class webserver {
   require myapp::prereqs
 }
-"#;
+";
 
         let tree = parse_puppet(source);
         let mut staging = StagingGraph::new();
@@ -980,11 +980,11 @@ class webserver {
 
     #[test]
     fn test_extracts_inheritance_edge() {
-        let source = r#"
+        let source = r"
 class child inherits parent {
   # child class body
 }
-"#;
+";
 
         let tree = parse_puppet(source);
         let mut staging = StagingGraph::new();
@@ -1031,7 +1031,7 @@ class child inherits parent {
 
     #[test]
     fn test_mixed_statements() {
-        let source = r#"
+        let source = r"
 class myapp inherits base {
   include helper
   require prereqs
@@ -1042,7 +1042,7 @@ class myapp inherits base {
 
   $config = lookup('app::config')
 }
-"#;
+";
 
         let tree = parse_puppet(source);
         let mut staging = StagingGraph::new();
@@ -1075,13 +1075,13 @@ class myapp inherits base {
 
     #[test]
     fn test_node_definition_with_resources() {
-        let source = r#"
+        let source = r"
 node 'web01.example.com' {
   package { 'nginx':
     ensure => installed,
   }
 }
-"#;
+";
 
         let tree = parse_puppet(source);
         let mut staging = StagingGraph::new();
@@ -1100,7 +1100,7 @@ node 'web01.example.com' {
         );
     }
 
-    /// Helper to extract TypeOf edges from staging operations
+    /// Helper to extract `TypeOf` edges from staging operations
     fn extract_typeof_edges(staging: &StagingGraph) -> Vec<&UnifiedEdgeKind> {
         staging
             .operations()
@@ -1118,14 +1118,14 @@ node 'web01.example.com' {
 
     #[test]
     fn test_class_typed_params_create_typeof_edges() {
-        let source = r#"
+        let source = r"
 class myapp (
   String $pkg,
   Integer $port = 80,
 ) {
   # class body
 }
-"#;
+";
 
         let tree = parse_puppet(source);
         let mut staging = StagingGraph::new();
@@ -1146,14 +1146,14 @@ class myapp (
 
     #[test]
     fn test_define_typed_params_create_typeof_edges() {
-        let source = r#"
+        let source = r"
 define myapp::config (
   String $name,
   Boolean $ssl = false,
 ) {
   # define body
 }
-"#;
+";
 
         let tree = parse_puppet(source);
         let mut staging = StagingGraph::new();
@@ -1174,14 +1174,14 @@ define myapp::config (
 
     #[test]
     fn test_class_untyped_params_no_typeof_edges() {
-        let source = r#"
+        let source = r"
 class myapp (
   $pkg = 'nginx',
   $port = 80,
 ) {
   # class body
 }
-"#;
+";
 
         let tree = parse_puppet(source);
         let mut staging = StagingGraph::new();
@@ -1201,14 +1201,14 @@ class myapp (
 
     #[test]
     fn test_complex_puppet_types_create_typeof_edges() {
-        let source = r#"
+        let source = r"
 class myapp (
   Array[String] $pkgs,
   Hash $config = {},
 ) {
   # class body
 }
-"#;
+";
 
         let tree = parse_puppet(source);
         let mut staging = StagingGraph::new();
@@ -1229,7 +1229,7 @@ class myapp (
 
     #[test]
     fn test_mixed_typed_untyped_params() {
-        let source = r#"
+        let source = r"
 class myapp (
   String $name,
   $untyped_param,
@@ -1237,7 +1237,7 @@ class myapp (
 ) {
   # class body
 }
-"#;
+";
 
         let tree = parse_puppet(source);
         let mut staging = StagingGraph::new();
@@ -1258,13 +1258,13 @@ class myapp (
 
     #[test]
     fn test_class_without_params_no_typeof_edges() {
-        let source = r#"
+        let source = r"
 class myapp {
   package { 'nginx':
     ensure => installed,
   }
 }
-"#;
+";
 
         let tree = parse_puppet(source);
         let mut staging = StagingGraph::new();
@@ -1283,10 +1283,11 @@ class myapp {
     }
 
     #[test]
+    #[allow(clippy::items_after_statements)] // Items near usage for clarity
     fn test_same_param_name_different_classes_distinct_nodes() {
         // Two classes with same parameter name should produce distinct Variable nodes
         // thanks to scope-qualified naming: foo::name vs bar::name
-        let source = r#"
+        let source = r"
 class foo (
   String $name = 'a',
 ) { }
@@ -1294,7 +1295,7 @@ class foo (
 class bar (
   Integer $name = 1,
 ) { }
-"#;
+";
 
         let tree = parse_puppet(source);
         let mut staging = StagingGraph::new();
@@ -1324,17 +1325,18 @@ class bar (
     }
 
     #[test]
+    #[allow(clippy::items_after_statements)] // Items near usage for clarity
     fn test_custom_namespaced_type_extracts_correctly() {
         // Validates that class_identifier types (e.g., Stdlib::Absolutepath)
         // are correctly extracted as type text
-        let source = r#"
+        let source = r"
 class myapp (
   String $name,
   Stdlib::Absolutepath $config_dir = '/etc/myapp',
 ) {
   # class body
 }
-"#;
+";
 
         let tree = parse_puppet(source);
         let mut staging = StagingGraph::new();

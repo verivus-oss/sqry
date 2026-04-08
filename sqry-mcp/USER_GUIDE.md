@@ -1,7 +1,7 @@
 # sqry MCP Server - User Guide - by Verivus
 
-**Version**: 7.1.5
-**Last Updated**: 2026-04-05
+**Version**: 7.2.0
+**Last Updated**: 2026-04-08
 
 Integrate sqry's semantic code search with AI assistants (Codex, Claude Desktop, Windsurf, Cursor, and others) via the Model Context Protocol (MCP).
 
@@ -289,7 +289,7 @@ Create or edit `~/.cursor/mcp_settings.json`:
 
 ## Available Tools
 
-sqry MCP provides **33 tools** for semantic code analysis. The authoritative schema for each tool is returned by `tools/list` or `sqry-mcp --list-tools`.
+sqry MCP provides **34 tools** for semantic code analysis. The authoritative schema for each tool is returned by `tools/list` or `sqry-mcp --list-tools`.
 
 ### Tool Catalog
 
@@ -327,6 +327,7 @@ sqry MCP provides **33 tools** for semantic code analysis. The authoritative sch
 | Navigation | `get_hover_info` | Hover info (signature/docs/type) |
 | Navigation | `get_document_symbols` | Symbols in a specific file |
 | Navigation | `get_workspace_symbols` | Workspace-wide symbol search |
+| Introspection | `expand_cache_status` | Macro expansion cache status (Rust) |
 | Natural Language | `sqry_ask` | Translate natural language into sqry commands |
 
 ## MCP Prompts (Claude Code)
@@ -372,6 +373,9 @@ Codex and Gemini usually invoke tools directly rather than slash prompt aliases.
 | `SQRY_MCP_WORKSPACE_ROOT` | Root directory for searches | Current directory | `/home/user/myproject` |
 | `SQRY_MCP_MAX_OUTPUT_BYTES` | Max output size per response | 50000 | `100000` |
 | `SQRY_MCP_TIMEOUT_MS` | Timeout per request | 60000 (60s) | `60000` |
+| `SQRY_MCP_INDEX_TIMEOUT_MS` | Index rebuild timeout | 600000 (10min) | `600000` |
+| `SQRY_REDACTION_PRESET` | Response redaction level | `minimal` | `none` |
+| `SQRY_INCLUDE_HIGH_COST` | Include high-cost plugins | `0` | `1` |
 | `SQRY_MCP_ENGINE_CACHE_CAPACITY` | Max cached workspace engines | 5 | `10` |
 | `SQRY_MCP_DISCOVERY_CACHE_CAPACITY` | Max cached workspace paths | 100 | `200` |
 | `SQRY_MCP_TRACE_PATH_CACHE_CAPACITY` | Max cached trace path results | 256 | `512` |
@@ -696,7 +700,9 @@ kind:class NOT abstract:true
 kind:class AND (visibility:public OR visibility:protected)
 ```
 
-### Advanced Filters
+### Query Predicates
+
+These string predicates go in the `query` parameter:
 
 **File-based**:
 ```
@@ -718,6 +724,34 @@ lang:typescript
 lang:python
 lang:rust
 ```
+
+### Structured Filters Parameter
+
+For simple constraints, you can also use the `filters` parameter with a JSON object instead of (or in addition to) query predicates:
+
+```json
+{
+  "language": ["rust", "typescript"],
+  "symbol_kind": ["function", "method"],
+  "visibility": "public",
+  "score_min": 0.5
+}
+```
+
+All fields are optional. Filters are applied server-side before query evaluation.
+
+**Comparison: Query Predicates vs Filters Parameter**
+
+| Feature | Query Predicates (`query`) | Structured Filters (`filters`) |
+|---------|---------------------------|-------------------------------|
+| Syntax | String: `lang:rust kind:function` | JSON object: `{"language":["rust"]}` |
+| Boolean logic | AND, OR, NOT, grouping | Implicit AND only |
+| Regex | `name~=/pattern/` | Not supported |
+| Globs | `name:parse*`, `file:src/**` | Not supported |
+| Numeric | `lines>100` | `score_min` only |
+| Best for | Complex, expressive queries | Simple pre-filtering |
+
+You can combine both: use `query` for complex expressions and `filters` for structured constraints.
 
 ---
 
@@ -847,7 +881,7 @@ ls -la .sqry-index
 **3. Test binary**:
 ```bash
 sqry --version
-# Should output: sqry 7.1.5+
+# Should output: sqry 7.2.0+
 ```
 
 **4. Check logs** (AI assistant specific):
@@ -933,7 +967,7 @@ sqry MCP is production-ready but evolving. Your feedback helps!
 
 ---
 
-**Last Updated**: 2026-04-05
-**MCP Server Version**: 7.1.5
+**Last Updated**: 2026-04-08
+**MCP Server Version**: 7.2.0
 **Protocol**: MCP 2024-11-05 (JSON-RPC 2.0)
-**sqry CLI Required**: 7.1.5+
+**sqry CLI Required**: 7.2.0+

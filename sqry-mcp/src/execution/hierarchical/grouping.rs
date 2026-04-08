@@ -410,7 +410,7 @@ fn create_container_group(node_id: NodeId, snapshot: &GraphSnapshot) -> Containe
             let qualified_name = crate::execution::symbol_utils::display_entry_qualified_name(
                 entry,
                 strings,
-                snapshot.files().language_for_file(entry.file),
+                snapshot.files(),
                 &fallback_name,
             );
             let name = qualified_name.clone();
@@ -504,7 +504,7 @@ fn build_hierarchical_symbol(
     let qualified_name = crate::execution::symbol_utils::display_entry_qualified_name(
         entry,
         strings,
-        snapshot.files().language_for_file(entry.file),
+        snapshot.files(),
         &name,
     );
     let display_name = qualified_name.clone();

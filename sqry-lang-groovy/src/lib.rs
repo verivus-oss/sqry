@@ -286,7 +286,7 @@ mod tests {
                 );
                 return;
             }
-            Err(e) => panic!("Unexpected error: {:?}", e),
+            Err(e) => panic!("Unexpected error: {e:?}"),
         };
         let scopes = plugin.extract_scopes(&tree, content, &file).unwrap();
 
@@ -332,7 +332,7 @@ mod tests {
                 );
                 return;
             }
-            Err(e) => panic!("Unexpected error: {:?}", e),
+            Err(e) => panic!("Unexpected error: {e:?}"),
         };
         let scopes = plugin.extract_scopes(&tree, content, &file).unwrap();
 

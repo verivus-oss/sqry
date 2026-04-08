@@ -26,7 +26,9 @@ fn test_reachability_density_performance_regression() {
     for i in 0..n {
         for j in (i + 1..n).step_by(2) {
             edges.push(MergedEdge::new(
+                #[allow(clippy::cast_possible_truncation)] // Test graph sizes are small constants
                 NodeId::new(i as u32, 0),
+                #[allow(clippy::cast_possible_truncation)] // Test graph sizes are small constants
                 NodeId::new(j as u32, 0),
                 kind.clone(),
                 1,
@@ -56,13 +58,14 @@ fn test_reachability_density_performance_regression() {
     let dag = CondensationDag::build_with_budget(&scc, &csr, &budget_config).unwrap();
     let duration = start.elapsed();
 
-    println!("Density test completed in {:?}", duration);
+    println!("Density test completed in {duration:?}");
     println!("SCC count: {}", dag.scc_count);
     println!("Edge count: {}", dag.edge_count);
 
     // Check some intervals
     let scc_0 = scc.scc_of(NodeId::new(0, 0)).unwrap();
     let scc_1 = scc.scc_of(NodeId::new(1, 0)).unwrap();
+    #[allow(clippy::cast_possible_truncation)] // Test graph sizes are small constants
     let scc_last = scc.scc_of(NodeId::new((n - 1) as u32, 0)).unwrap();
 
     // Check if can_reach works for direct edge
@@ -83,7 +86,6 @@ fn test_reachability_density_performance_regression() {
     // Before FastBitSet, this would involve millions of interval copies and sorts.
     assert!(
         duration.as_secs() < 5,
-        "Reachability computation took too long: {:?}",
-        duration
+        "Reachability computation took too long: {duration:?}"
     );
 }

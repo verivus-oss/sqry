@@ -18,7 +18,7 @@
 //! - `#[derive()]` — already handled in existing Pass 2
 //! - Built-in compiler attributes — not proc-macros
 //! - Inner attributes (`#![...]`) — not item-level
-//! - `#[cfg()]` / `#[cfg_attr()]` — handled by cfg_analysis (4.5e)
+//! - `#[cfg()]` / `#[cfg_attr()]` — handled by `cfg_analysis` (4.5e)
 //! - `#[test]`, `#[bench]`, etc. — built-in compiler attributes
 
 use sqry_core::graph::Span;
@@ -291,13 +291,19 @@ fn extract_path_from_attribute(attr: Node, content: &[u8]) -> Option<String> {
         match child.kind() {
             // Simple identifier or path
             "identifier" | "scoped_identifier" | "crate" => {
-                return child.utf8_text(content).ok().map(|s| s.to_string());
+                return child
+                    .utf8_text(content)
+                    .ok()
+                    .map(std::string::ToString::to_string);
             }
             // Meta item with nested content
             "meta_item" => {
                 // First child of meta_item is typically the path
                 if let Some(path_child) = child.child(0) {
-                    return path_child.utf8_text(content).ok().map(|s| s.to_string());
+                    return path_child
+                        .utf8_text(content)
+                        .ok()
+                        .map(std::string::ToString::to_string);
                 }
             }
             _ => {}
@@ -358,11 +364,7 @@ fn process_attribute(
     if !meta.unresolved_attributes.contains(&attr_path.to_string()) {
         meta.unresolved_attributes.push(attr_path.to_string());
     }
-    log::debug!(
-        "Unresolved attribute '{}' on '{}' — recorded in metadata",
-        attr_path,
-        item_qualified
-    );
+    log::debug!("Unresolved attribute '{attr_path}' on '{item_qualified}' — recorded in metadata");
 }
 
 /// Look up an attribute path in the well-known proc-macro registry.
@@ -501,11 +503,11 @@ async fn main() {
 
     #[test]
     fn test_builtin_attrs_skipped() {
-        let source = r#"
+        let source = r"
 #[inline]
 #[must_use]
 pub fn fast() -> u32 { 42 }
-"#;
+";
         let tree = parse_rust(source);
         let mut staging = StagingGraph::new();
         let file = Path::new("test.rs");
@@ -541,10 +543,10 @@ pub fn fast() -> u32 { 42 }
 
     #[test]
     fn test_derive_not_duplicated() {
-        let source = r#"
+        let source = r"
 #[derive(Debug, Clone)]
 struct Foo { x: u32 }
-"#;
+";
         let tree = parse_rust(source);
         let mut staging = StagingGraph::new();
         let file = Path::new("test.rs");
@@ -576,10 +578,10 @@ struct Foo { x: u32 }
 
     #[test]
     fn test_unknown_attr_recorded() {
-        let source = r#"
+        let source = r"
 #[my_custom_attr]
 fn decorated() {}
-"#;
+";
         let tree = parse_rust(source);
         let mut staging = StagingGraph::new();
         let file = Path::new("test.rs");
@@ -616,10 +618,10 @@ fn decorated() {}
     #[test]
     fn test_inner_attr_skipped() {
         // Inner attributes are not item-level attributes
-        let source = r#"
+        let source = r"
 #![allow(unused)]
 fn main() {}
-"#;
+";
         let tree = parse_rust(source);
         let mut staging = StagingGraph::new();
         let file = Path::new("test.rs");
@@ -647,11 +649,11 @@ fn main() {}
 
     #[test]
     fn test_multiple_attrs_on_item() {
-        let source = r#"
+        let source = r"
 #[tokio::main]
 #[tracing::instrument]
 async fn serve() {}
-"#;
+";
         let tree = parse_rust(source);
         let mut staging = StagingGraph::new();
         let file = Path::new("test.rs");

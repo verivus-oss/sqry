@@ -81,7 +81,7 @@ impl BuildBudget {
         Self {
             file: file.to_path_buf(),
             phase_timeout: Duration::from_secs(1),
-            started_at: Instant::now() - Duration::from_secs(60),
+            started_at: Instant::now().checked_sub(Duration::from_secs(60)).unwrap(),
             checkpoints: BUDGET_CHECK_INTERVAL - 1,
         }
     }
@@ -94,6 +94,7 @@ impl BuildBudget {
             return Err(GraphBuilderError::BuildTimedOut {
                 file: self.file.clone(),
                 phase,
+                #[allow(clippy::cast_possible_truncation)] // Graph storage: node/edge index counts fit in u32
                 timeout_ms: self.phase_timeout.as_millis() as u64,
             });
         }
@@ -276,7 +277,10 @@ impl CppGraphBuilder {
         Self
     }
 
+    #[allow(clippy::unused_self)] // Method uses self for API consistency
+    #[allow(clippy::trivially_copy_pass_by_ref)] // Intentional
     fn build_graph_with_budget(
+        #[allow(clippy::trivially_copy_pass_by_ref)] // API consistency with other methods
         &self,
         tree: &Tree,
         content: &[u8],

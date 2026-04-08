@@ -23,11 +23,13 @@ fn copy_fixture_dir(relative: &str) -> TempDir {
     temp
 }
 
+#[allow(clippy::similar_names)] // Domain variable naming is intentional
 fn copy_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
     fs::create_dir_all(dst)?;
     for entry in fs::read_dir(src)? {
         let entry = entry?;
         let ty = entry.file_type()?;
+        #[allow(clippy::similar_names)] // Test fixture variables
         let dest = dst.join(entry.file_name());
         if ty.is_dir() {
             copy_dir(&entry.path(), &dest)?;
@@ -145,7 +147,7 @@ fn index_status_returns_stats() {
         status
             .relation_counts_by_pair
             .as_ref()
-            .is_none_or(|m| m.is_empty()),
+            .is_none_or(std::collections::HashMap::is_empty),
         "single-language fixture should have no relation counts by pair"
     );
 }

@@ -4,7 +4,7 @@
 //! - Class/method/field declarations with visibility and modifiers
 //! - Generic type signatures (JVMS 4.7.9)
 //! - Annotations (runtime visible and invisible)
-//! - Lambda targets (BootstrapMethods attribute)
+//! - Lambda targets (`BootstrapMethods` attribute)
 //! - Java 9+ module declarations
 //!
 //! ## JAR scanning
@@ -12,6 +12,9 @@
 //! The [`scan_jar`] function reads a JAR (ZIP archive), parses all `.class`
 //! entries into enriched [`ClassStub`] records, and returns them. It applies
 //! security limits to prevent JAR-bomb denial-of-service attacks.
+
+// JVM bytecode values are spec-bounded; casts to u32 are intentional
+#![allow(clippy::cast_possible_truncation)]
 
 pub mod annotations;
 pub mod classfile;
@@ -122,9 +125,13 @@ pub fn scan_jar(jar_path: &Path) -> ClasspathResult<Vec<ClassStub>> {
             }
         };
 
+        #[allow(clippy::case_sensitive_file_extension_comparisons)]
+        // JVM classfiles always use .class extension
         let entry_name = entry.name().to_owned();
 
         // Only process .class files.
+        #[allow(clippy::case_sensitive_file_extension_comparisons)]
+        // Known file extensions in domain
         if !entry_name.ends_with(".class") {
             continue;
         }

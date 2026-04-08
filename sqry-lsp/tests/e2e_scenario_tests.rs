@@ -12,9 +12,9 @@ use std::path::Path;
 use tower_lsp::lsp_types::{
     CallHierarchyIncomingCallsParams, CallHierarchyOutgoingCallsParams, CallHierarchyPrepareParams,
     DocumentSymbolParams, DocumentSymbolResponse, GotoDefinitionParams, GotoDefinitionResponse,
-    HoverContents, HoverParams, MarkupKind, Position, ReferenceContext, ReferenceParams,
-    TextDocumentIdentifier, TextDocumentPositionParams, Url, WorkDoneProgressParams,
-    WorkspaceSymbolParams,
+    HoverContents, HoverParams, MarkupKind, PartialResultParams, Position, ReferenceContext,
+    ReferenceParams, TextDocumentIdentifier, TextDocumentPositionParams, Url,
+    WorkDoneProgressParams, WorkspaceSymbolParams,
 };
 
 // ── session helpers ──────────────────────────────────────────────────────────
@@ -57,7 +57,7 @@ fn scenario_hover_then_definition_then_references() -> Result<()> {
             text_document: TextDocumentIdentifier { uri: uri.clone() },
             position,
         },
-        work_done_progress_params: Default::default(),
+        work_done_progress_params: WorkDoneProgressParams::default(),
     };
     let hover = sqry_lsp::handlers::hover::handle(&session, &hover_params)?.expect("hover result");
     let hover_text = match hover.contents {
@@ -80,8 +80,8 @@ fn scenario_hover_then_definition_then_references() -> Result<()> {
             text_document: TextDocumentIdentifier { uri: uri.clone() },
             position,
         },
-        work_done_progress_params: Default::default(),
-        partial_result_params: Default::default(),
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
     };
     let def_response = sqry_lsp::handlers::definition::handle(&session, &def_params)?
         .expect("definition response");
@@ -112,8 +112,8 @@ fn scenario_hover_then_definition_then_references() -> Result<()> {
             text_document: TextDocumentIdentifier { uri: uri.clone() },
             position,
         },
-        work_done_progress_params: Default::default(),
-        partial_result_params: Default::default(),
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
         context: ReferenceContext {
             include_declaration: true,
         },
@@ -144,8 +144,8 @@ fn scenario_workspace_symbol_search() -> Result<()> {
     // Specific query: "process" — fixture has `process_data`
     let params = WorkspaceSymbolParams {
         query: "process".into(),
-        work_done_progress_params: Default::default(),
-        partial_result_params: Default::default(),
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
     };
     let page = sqry_lsp::handlers::workspace_symbol::handle(&session, &params)?
         .expect("workspace symbol response for 'process'");
@@ -166,8 +166,8 @@ fn scenario_workspace_symbol_search() -> Result<()> {
     // avoid dumping thousands of symbols into the picker unsolicited).
     let empty_params = WorkspaceSymbolParams {
         query: String::new(),
-        work_done_progress_params: Default::default(),
-        partial_result_params: Default::default(),
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
     };
     let empty_result = sqry_lsp::handlers::workspace_symbol::handle(&session, &empty_params)?;
     // The handler short-circuits on empty query and returns Some(empty page).
@@ -207,6 +207,8 @@ fn collect_flat<'a>(
 }
 
 #[test]
+#[allow(clippy::match_same_arms)] // Arms separated for documentation clarity
+#[allow(clippy::match_wildcard_for_single_variants)] // Wildcard covers future variants
 fn scenario_document_symbols_hierarchy() -> Result<()> {
     let root = common::fixture_path("sqry-lsp/tests/fixtures/mini-workspace");
     let session = new_session(&root);
@@ -227,14 +229,16 @@ fn scenario_document_symbols_hierarchy() -> Result<()> {
     let uri = Url::from_file_path(&lib_path).unwrap();
     let params = DocumentSymbolParams {
         text_document: TextDocumentIdentifier { uri },
-        work_done_progress_params: Default::default(),
-        partial_result_params: Default::default(),
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
     };
 
     let response = sqry_lsp::handlers::document_symbol::handle(&session, &params)?
         .expect("document symbol response");
     let top_level = match response {
         DocumentSymbolResponse::Nested(list) => list,
+        #[allow(clippy::match_wildcard_for_single_variants)]
+        // Test covers specific scenario variant
         other => panic!("expected nested document symbols, got {other:?}"),
     };
 
@@ -418,7 +422,7 @@ fn scenario_call_hierarchy_incoming_and_outgoing() -> Result<()> {
     let incoming_params = CallHierarchyIncomingCallsParams {
         item: item.clone(),
         work_done_progress_params: WorkDoneProgressParams::default(),
-        partial_result_params: Default::default(),
+        partial_result_params: PartialResultParams::default(),
     };
     let incoming = sqry_lsp::handlers::call_hierarchy::incoming(&session, &incoming_params)?;
     assert!(
@@ -433,8 +437,7 @@ fn scenario_call_hierarchy_incoming_and_outgoing() -> Result<()> {
     let known_callers = ["orchestrate", "alternate"];
     assert!(
         caller_names.iter().any(|name| known_callers.contains(name)),
-        "at least one of {:?} must appear as a caller; got: {caller_names:?}",
-        known_callers
+        "at least one of {known_callers:?} must appear as a caller; got: {caller_names:?}"
     );
     // Verify from_ranges are present (LSP call-site highlighting)
     for entry in &incoming.items {
@@ -448,7 +451,7 @@ fn scenario_call_hierarchy_incoming_and_outgoing() -> Result<()> {
     let outgoing_params = CallHierarchyOutgoingCallsParams {
         item,
         work_done_progress_params: WorkDoneProgressParams::default(),
-        partial_result_params: Default::default(),
+        partial_result_params: PartialResultParams::default(),
     };
     let outgoing = sqry_lsp::handlers::call_hierarchy::outgoing(&session, &outgoing_params)?;
     assert!(
@@ -495,8 +498,8 @@ fn scenario_error_recovery_unknown_method() -> Result<()> {
 
     let params = WorkspaceSymbolParams {
         query: "unknownmethod://this-does-not-exist".into(),
-        work_done_progress_params: Default::default(),
-        partial_result_params: Default::default(),
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
     };
     let result = sqry_lsp::handlers::workspace_symbol::handle(&session, &params)?;
     // A garbage query must produce zero results — either None or Some(empty page).
@@ -580,8 +583,8 @@ fn scenario_error_recovery_nonexistent_workspace_symbol() -> Result<()> {
 
     let params = WorkspaceSymbolParams {
         query: "zzz_this_symbol_definitely_does_not_exist_xyzzy".into(),
-        work_done_progress_params: Default::default(),
-        partial_result_params: Default::default(),
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
     };
     let result = sqry_lsp::handlers::workspace_symbol::handle(&session, &params)?;
     match result {

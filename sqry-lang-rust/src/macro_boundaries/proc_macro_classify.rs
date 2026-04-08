@@ -221,12 +221,12 @@ mod tests {
 
     #[test]
     fn test_derive_macro_classified() {
-        let source = r#"
+        let source = r"
 #[proc_macro_derive(MyDerive)]
 pub fn my_derive(input: TokenStream) -> TokenStream {
     input
 }
-"#;
+";
         let tree = parse_rust(source);
         let func = find_function_item(&tree).unwrap();
         let func_id = NodeId::new(1, 0);
@@ -241,12 +241,12 @@ pub fn my_derive(input: TokenStream) -> TokenStream {
 
     #[test]
     fn test_attribute_macro_classified() {
-        let source = r#"
+        let source = r"
 #[proc_macro_attribute]
 pub fn my_attr(attr: TokenStream, item: TokenStream) -> TokenStream {
     item
 }
-"#;
+";
         let tree = parse_rust(source);
         let func = find_function_item(&tree).unwrap();
         let func_id = NodeId::new(2, 0);
@@ -260,12 +260,12 @@ pub fn my_attr(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     #[test]
     fn test_function_macro_classified() {
-        let source = r#"
+        let source = r"
 #[proc_macro]
 pub fn my_macro(input: TokenStream) -> TokenStream {
     input
 }
-"#;
+";
         let tree = parse_rust(source);
         let func = find_function_item(&tree).unwrap();
         let func_id = NodeId::new(3, 0);
@@ -289,11 +289,11 @@ pub fn my_macro(input: TokenStream) -> TokenStream {
 
     #[test]
     fn test_non_proc_macro_fn_ignored() {
-        let source = r#"
+        let source = r"
 pub fn regular_function() -> u32 {
     42
 }
-"#;
+";
         let tree = parse_rust(source);
         let func = find_function_item(&tree).unwrap();
         let func_id = NodeId::new(4, 0);

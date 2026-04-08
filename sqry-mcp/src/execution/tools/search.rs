@@ -108,12 +108,8 @@ fn semantic_sort_key(
         .resolve(entry.name)
         .map(|s| s.to_string())
         .unwrap_or_default();
-    let display_name = crate::execution::symbol_utils::display_entry_qualified_name(
-        entry,
-        strings,
-        files.language_for_file(entry.file),
-        &name,
-    );
+    let display_name =
+        crate::execution::symbol_utils::display_entry_qualified_name(entry, strings, files, &name);
     let relative_path = files.resolve(entry.file).map_or_else(String::new, |path| {
         crate::execution::symbol_utils::relative_path_forward_slash(
             workspace_root.join(path.as_ref()),
@@ -390,7 +386,7 @@ pub fn execute_find_similar(args: &SearchSimilarArgs) -> Result<ToolExecution<Fi
         let candidate_display_name = crate::execution::symbol_utils::display_entry_qualified_name(
             entry,
             strings,
-            candidate_language_enum,
+            files,
             &candidate_name,
         );
 
@@ -479,12 +475,8 @@ fn build_node_ref_from_node(
         .resolve(entry.name)
         .map(|s| s.to_string())
         .unwrap_or_default();
-    let qualified_name = crate::execution::symbol_utils::display_entry_qualified_name(
-        entry,
-        strings,
-        files.language_for_file(entry.file),
-        &name,
-    );
+    let qualified_name =
+        crate::execution::symbol_utils::display_entry_qualified_name(entry, strings, files, &name);
 
     let file_path = files
         .resolve(entry.file)

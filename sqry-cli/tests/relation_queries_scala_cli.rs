@@ -21,7 +21,7 @@ use tempfile::TempDir;
 fn cli_scala_exports_classes_and_objects() {
     let project = TempDir::new().unwrap();
 
-    let scala_code = r#"
+    let scala_code = r"
 package com.example
 
 class User(val name: String, val age: Int) {
@@ -35,7 +35,7 @@ object UserService {
 trait Repository {
   def save(item: String): Unit
 }
-"#;
+";
     std::fs::write(project.path().join("User.scala"), scala_code).unwrap();
 
     Command::new(sqry_bin())
@@ -76,7 +76,7 @@ trait Repository {
 fn cli_scala_exports_hide_private_members() {
     let project = TempDir::new().unwrap();
 
-    let scala_code = r#"
+    let scala_code = r"
 package com.example
 
 class PublicClass {
@@ -95,7 +95,7 @@ object PublicObject {
 private object PrivateObject {
   def hiddenFunction(): Unit = {}
 }
-"#;
+";
     std::fs::write(project.path().join("Visibility.scala"), scala_code).unwrap();
 
     Command::new(sqry_bin())
@@ -149,7 +149,7 @@ private object PrivateObject {
 fn cli_scala_imports() {
     let project = TempDir::new().unwrap();
 
-    let scala_code = r#"
+    let scala_code = r"
 import scala.collection.mutable
 import scala.collection.mutable.{Buffer, ListBuffer}
 import java.util.{List => JavaList}
@@ -159,7 +159,7 @@ object DataProcessor {
     println(data)
   }
 }
-"#;
+";
     std::fs::write(project.path().join("Processor.scala"), scala_code).unwrap();
 
     Command::new(sqry_bin())
@@ -239,7 +239,7 @@ object Calculator {
 fn cli_scala_callers_method_calls() {
     let project = TempDir::new().unwrap();
 
-    let scala_code = r#"
+    let scala_code = r"
 class DataService {
   private def fetchData(): List[Int] = List(1, 2, 3)
 
@@ -252,7 +252,7 @@ class DataService {
     transformData(data)
   }
 }
-"#;
+";
     std::fs::write(project.path().join("Service.scala"), scala_code).unwrap();
 
     Command::new(sqry_bin())
@@ -373,11 +373,11 @@ object ResultHandler {
 fn cli_scala_callers_no_results() {
     let project = TempDir::new().unwrap();
 
-    let scala_code = r#"
+    let scala_code = r"
 object Unused {
   def unusedFunction(): Int = 42
 }
-"#;
+";
     std::fs::write(project.path().join("Unused.scala"), scala_code).unwrap();
 
     Command::new(sqry_bin())

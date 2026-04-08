@@ -254,8 +254,7 @@ fn assert_node_visibility(graph: &CodeGraph, name: &str, expected_visibility: Op
     assert_eq!(
         visibility.as_deref(),
         expected_visibility,
-        "Expected '{name}' to have visibility {:?}",
-        expected_visibility
+        "Expected '{name}' to have visibility {expected_visibility:?}"
     );
 }
 
@@ -309,11 +308,11 @@ fn indices_persist_through_save_load_cycle() {
 
     // Save graph
     save_to_path(&graph, &snapshot_path).expect("Failed to save graph");
-    log::info!("Graph saved to {:?}", snapshot_path);
+    log::info!("Graph saved to {snapshot_path:?}");
 
     // Load graph
     let loaded_graph = load_from_path(&snapshot_path, None).expect("Failed to load graph");
-    log::info!("Graph loaded from {:?}", snapshot_path);
+    log::info!("Graph loaded from {snapshot_path:?}");
 
     // Verify nodes are still in the arena
     assert_eq!(
@@ -517,10 +516,7 @@ fn visibility_metadata_persists_through_save_load() {
 
     // Save graph
     save_to_path(&graph, &snapshot_path).expect("Failed to save graph");
-    log::info!(
-        "Graph with visibility metadata saved to {:?}",
-        snapshot_path
-    );
+    log::info!("Graph with visibility metadata saved to {snapshot_path:?}");
 
     // Load graph
     let loaded_graph = load_from_path(&snapshot_path, None).expect("Failed to load graph");

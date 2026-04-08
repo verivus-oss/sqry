@@ -30,6 +30,7 @@ const COURSIER_CACHE_REL: &str = ".cache/coursier/v1";
 /// 1. Execute `sbt -no-colors "print dependencyClasspath"`
 /// 2. Parse output for JAR paths
 /// 3. On failure, fall back to Coursier cache scanning
+#[allow(clippy::missing_errors_doc)] // Internal helper
 pub fn resolve_sbt_classpath(config: &ResolveConfig) -> ClasspathResult<Vec<ResolvedClasspath>> {
     info!(
         "Resolving sbt classpath in {}",
@@ -113,6 +114,7 @@ fn find_sbt_binary() -> ClasspathResult<PathBuf> {
 /// ```
 ///
 /// We handle all three formats, filtering to `.jar` files only.
+#[allow(clippy::manual_let_else)] // Match for error handling clarity
 fn parse_sbt_output(stdout: &[u8]) -> Vec<PathBuf> {
     let mut jars = Vec::new();
 
@@ -287,6 +289,7 @@ fn find_source_jar(jar_path: &Path) -> Option<PathBuf> {
 }
 
 /// Derive the Coursier cache path for a source JAR given the main JAR path.
+#[allow(clippy::case_sensitive_file_extension_comparisons)] // Known file extensions
 fn derive_coursier_source_jar(jar_path: &Path) -> Option<PathBuf> {
     let path_str = jar_path.to_str()?;
     if path_str.ends_with(".jar") && !path_str.ends_with("-sources.jar") {
@@ -389,8 +392,7 @@ fn run_command_with_timeout(
 fn infer_module_name(project_root: &Path) -> String {
     project_root
         .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "root".to_string())
+        .map_or_else(|| "root".to_string(), |n| n.to_string_lossy().to_string())
 }
 
 /// Return the default Coursier cache directory.

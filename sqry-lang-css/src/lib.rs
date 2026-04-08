@@ -537,14 +537,14 @@ mod tests {
     #[test]
     fn test_extract_scopes_nested_media() {
         let plugin = CssPlugin::default();
-        let source = br#"
+        let source = br"
 @media screen {
     .container { width: 100%; }
     @media (min-width: 768px) {
         .container { width: 750px; }
     }
 }
-"#;
+";
         let tree = plugin.parse_ast(source).unwrap();
         let scopes = plugin
             .extract_scopes(&tree, source, Path::new("test.css"))
@@ -566,12 +566,12 @@ mod tests {
     #[test]
     fn test_extract_scopes_boundaries() {
         let plugin = CssPlugin::default();
-        let source = br#"
+        let source = br"
 .my-selector {
     color: red;
     font-size: 14px;
 }
-"#;
+";
         let tree = plugin.parse_ast(source).unwrap();
         let scopes = plugin
             .extract_scopes(&tree, source, Path::new("test.css"))

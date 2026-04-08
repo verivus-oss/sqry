@@ -1,4 +1,4 @@
-//! Tests for ServiceNow Xanadu edge creation (calls, imports, exports, inherits).
+//! Tests for `ServiceNow` Xanadu edge creation (calls, imports, exports, inherits).
 
 use sqry_core::graph::Language;
 use sqry_core::graph::unified::NodeId;

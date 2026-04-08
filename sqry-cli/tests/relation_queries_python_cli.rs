@@ -163,7 +163,7 @@ process("test")
 fn cli_python_callers_method_calls() {
     let project = TempDir::new().unwrap();
 
-    let py_code = r#"
+    let py_code = r"
 class DataService:
     def fetch_data(self):
         return []
@@ -177,7 +177,7 @@ class DataService:
 
 service = DataService()
 service.process()
-"#;
+";
     std::fs::write(project.path().join("service.py"), py_code).unwrap();
 
     Command::new(sqry_bin())
@@ -209,7 +209,7 @@ service.process()
 fn cli_python_callers_chained_method_calls() {
     let project = TempDir::new().unwrap();
 
-    let py_code = r#"
+    let py_code = r"
 class QueryBuilder:
     def where(self, condition):
         return self
@@ -231,7 +231,7 @@ def run_query():
         .execute())
 
 run_query()
-"#;
+";
     std::fs::write(project.path().join("query.py"), py_code).unwrap();
 
     Command::new(sqry_bin())
@@ -303,7 +303,7 @@ handle_error(Exception('Test'))
 fn cli_python_callees_method() {
     let project = TempDir::new().unwrap();
 
-    let py_code = r#"
+    let py_code = r"
 class UserService:
     def find_user(self, user_id):
         return {'id': user_id, 'name': 'Test'}
@@ -319,7 +319,7 @@ class UserService:
 
 service = UserService()
 service.get_user(1)
-"#;
+";
     std::fs::write(project.path().join("user_service.py"), py_code).unwrap();
 
     Command::new(sqry_bin())
@@ -347,7 +347,7 @@ service.get_user(1)
 fn cli_python_imports_from_import() {
     let project = TempDir::new().unwrap();
 
-    let py_code = r#"
+    let py_code = r"
 from utils import greet, farewell
 from user import User
 from helpers import *
@@ -357,7 +357,7 @@ def main():
     greet(user.get_name())
 
 main()
-"#;
+";
     std::fs::write(project.path().join("main.py"), py_code).unwrap();
 
     Command::new(sqry_bin())
@@ -389,7 +389,7 @@ main()
 fn cli_python_imports_import_statement() {
     let project = TempDir::new().unwrap();
 
-    let py_code = r#"
+    let py_code = r"
 import os
 import sys
 import json
@@ -400,7 +400,7 @@ def read_config():
         return json.load(f)
 
 read_config()
-"#;
+";
     std::fs::write(project.path().join("config.py"), py_code).unwrap();
 
     Command::new(sqry_bin())
@@ -475,7 +475,7 @@ service.create_user("Alice")
 fn cli_python_async_await() {
     let project = TempDir::new().unwrap();
 
-    let py_code = r#"
+    let py_code = r"
 async def fetch_user(user_id):
     return {'id': user_id, 'name': 'Test'}
 
@@ -489,7 +489,7 @@ async def get_user_data(user_id):
 
 import asyncio
 asyncio.run(get_user_data(1))
-"#;
+";
     std::fs::write(project.path().join("async_code.py"), py_code).unwrap();
 
     Command::new(sqry_bin())
@@ -513,7 +513,7 @@ asyncio.run(get_user_data(1))
 fn cli_python_class_methods_and_static_methods() {
     let project = TempDir::new().unwrap();
 
-    let py_code = r#"
+    let py_code = r"
 class MathUtils:
     @staticmethod
     def add(a, b):
@@ -534,7 +534,7 @@ def calculate():
     return result1 + result2 + result3
 
 calculate()
-"#;
+";
     std::fs::write(project.path().join("math_utils.py"), py_code).unwrap();
 
     Command::new(sqry_bin())
@@ -570,7 +570,7 @@ calculate()
 fn cli_python_private_methods() {
     let project = TempDir::new().unwrap();
 
-    let py_code = r#"
+    let py_code = r"
 class Service:
     def execute(self):
         self._validate()
@@ -578,7 +578,7 @@ class Service:
     def _validate(self):
         # private method (by convention)
         pass
-"#;
+";
     std::fs::write(project.path().join("service.py"), py_code).unwrap();
 
     Command::new(sqry_bin())
@@ -601,7 +601,7 @@ class Service:
 fn cli_python_callers_no_results() {
     let project = TempDir::new().unwrap();
 
-    let py_code = r#"
+    let py_code = r"
 def unused_function():
     return 42
 
@@ -609,7 +609,7 @@ def main():
     print('Hello')
 
 main()
-"#;
+";
     std::fs::write(project.path().join("unused.py"), py_code).unwrap();
 
     Command::new(sqry_bin())

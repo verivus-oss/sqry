@@ -10,7 +10,7 @@
 //!   - switch expressions (Java 14+) and switch labels
 //!   - try-with-resources
 //!   - enhanced for loop
-//!   - constructor calls (object_creation_expression)
+//!   - constructor calls (`object_creation_expression`)
 //!   - instanceof pattern matching
 //!   - JNI native methods
 //!   - Spring MVC route annotations
@@ -18,8 +18,8 @@
 //!   - nested classes (inner, static, anonymous)
 //!   - synchronized methods
 //! - `src/relations/local_scopes.rs`:
-//!   - all scope kinds (Method, Constructor, StaticBlock, InstanceBlock,
-//!     Lambda, TryBlock, CatchClause, SwitchBlock)
+//!   - all scope kinds (Method, Constructor, `StaticBlock`, `InstanceBlock`,
+//!     Lambda, `TryBlock`, `CatchClause`, `SwitchBlock`)
 //! - `src/relations/java_common.rs`:
 //!   - `build_symbol`, `build_member_symbol` with package, class stack
 
@@ -86,7 +86,7 @@ fn all_edge_tags(staging: &StagingGraph) -> Vec<String> {
 /// Generic class with type parameters
 #[test]
 fn generic_class() {
-    let source = r#"
+    let source = r"
 package com.example;
 
 public class Box<T> {
@@ -104,7 +104,7 @@ public class Box<T> {
         return new Box<>(mapper.apply(value));
     }
 }
-"#;
+";
     let staging = build_graph(source);
     assert!(staging.stats().nodes_staged >= 2);
 }
@@ -112,7 +112,7 @@ public class Box<T> {
 /// Generic method with bounded type parameter
 #[test]
 fn generic_method_bounded() {
-    let source = r#"
+    let source = r"
 package com.example;
 
 public class Utils {
@@ -126,7 +126,7 @@ public class Utils {
         return list;
     }
 }
-"#;
+";
     let staging = build_graph(source);
     assert!(staging.stats().nodes_staged >= 2);
 }
@@ -175,10 +175,10 @@ public class Controller {
 // Lambda expressions
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Lambda expression creates lambda node with TypeOf edges
+/// Lambda expression creates lambda node with `TypeOf` edges
 #[test]
 fn lambda_expression() {
-    let source = r#"
+    let source = r"
 package com.example;
 
 import java.util.Arrays;
@@ -192,7 +192,7 @@ public class LambdaTest {
             .collect(java.util.stream.Collectors.toList());
     }
 }
-"#;
+";
     let staging = build_graph(source);
     assert!(staging.stats().nodes_staged >= 1);
 }
@@ -223,7 +223,7 @@ public class Transform {
 /// Method reference
 #[test]
 fn method_reference() {
-    let source = r#"
+    let source = r"
 package com.example;
 
 import java.util.List;
@@ -235,7 +235,7 @@ public class Printer {
         items.forEach(printer);
     }
 }
-"#;
+";
     let staging = build_graph(source);
     assert!(staging.stats().nodes_staged >= 1);
 }
@@ -244,12 +244,12 @@ public class Printer {
 // Records (Java 16+)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Record type — exercises the record component path in local_scopes even if the
+/// Record type — exercises the record component path in `local_scopes` even if the
 /// grammar version does not generate a top-level Class node for the record.
 /// We verify the build at least completes without error and may produce nodes.
 #[test]
 fn record_type() {
-    let source = r#"
+    let source = r"
 package com.example;
 
 public record Point(int x, int y) {
@@ -257,7 +257,7 @@ public record Point(int x, int y) {
         return Math.sqrt(x * x + y * y);
     }
 }
-"#;
+";
     // Build must not panic; whether it produces nodes depends on tree-sitter grammar
     // version support for record_declaration. We don't assert a minimum count.
     let _staging = build_graph(source);
@@ -270,7 +270,7 @@ public record Point(int x, int y) {
 /// Enum with abstract method and constant-specific implementations
 #[test]
 fn enum_with_methods() {
-    let source = r#"
+    let source = r"
 package com.example;
 
 public enum Planet {
@@ -295,7 +295,7 @@ public enum Planet {
         return otherMass * surfaceGravity();
     }
 }
-"#;
+";
     let staging = build_graph(source);
     assert!(staging.stats().nodes_staged >= 2);
 }
@@ -307,7 +307,7 @@ public enum Planet {
 /// Static nested class
 #[test]
 fn static_nested_class() {
-    let source = r#"
+    let source = r"
 package com.example;
 
 public class Outer {
@@ -326,7 +326,7 @@ public class Outer {
         return x + inner.getValue();
     }
 }
-"#;
+";
     let staging = build_graph(source);
     assert!(staging.stats().nodes_staged >= 3);
 }
@@ -385,7 +385,7 @@ public class NativeLib {
 // Spring MVC route annotations
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Spring @GetMapping creates http_request edge/endpoint
+/// Spring @`GetMapping` creates `http_request` edge/endpoint
 #[test]
 fn spring_get_mapping() {
     let source = r#"
@@ -418,7 +418,7 @@ public class UserController {
 /// `try (Resource r = new Resource()) { }` creates a local variable scope
 #[test]
 fn try_with_resources() {
-    let source = r#"
+    let source = r"
 package com.example;
 
 import java.io.*;
@@ -435,7 +435,7 @@ public class FileReader {
         }
     }
 }
-"#;
+";
     let staging = build_graph(source);
     assert!(staging.stats().nodes_staged >= 1);
 }
@@ -447,7 +447,7 @@ public class FileReader {
 /// Enhanced for loop creates variable binding
 #[test]
 fn enhanced_for_loop() {
-    let source = r#"
+    let source = r"
 package com.example;
 
 import java.util.List;
@@ -461,7 +461,7 @@ public class Processor {
         return total;
     }
 }
-"#;
+";
     let staging = build_graph(source);
     assert!(staging.stats().nodes_staged >= 1);
 }
@@ -569,7 +569,7 @@ public interface Greeter {
 /// Interface extending multiple interfaces
 #[test]
 fn interface_multiple_extension() {
-    let source = r#"
+    let source = r"
 package com.example;
 
 public interface Readable {
@@ -587,7 +587,7 @@ public interface ReadWrite extends Readable, Writable {
         return data;
     }
 }
-"#;
+";
     let staging = build_graph(source);
     assert!(staging.stats().nodes_staged >= 3);
 }
@@ -650,7 +650,7 @@ public class Constants {
 /// Instance initializer block
 #[test]
 fn instance_initializer_block() {
-    let source = r#"
+    let source = r"
 package com.example;
 
 public class Counter {
@@ -666,7 +666,7 @@ public class Counter {
         return count;
     }
 }
-"#;
+";
     let staging = build_graph(source);
     assert!(staging.stats().nodes_staged >= 1);
 }
@@ -678,7 +678,7 @@ public class Counter {
 /// Synchronized method
 #[test]
 fn synchronized_method() {
-    let source = r#"
+    let source = r"
 package com.example;
 
 public class ThreadSafeCounter {
@@ -692,7 +692,7 @@ public class ThreadSafeCounter {
         return count;
     }
 }
-"#;
+";
     let staging = build_graph(source);
     assert!(staging.stats().nodes_staged >= 2);
 }
@@ -704,7 +704,7 @@ public class ThreadSafeCounter {
 /// Single import
 #[test]
 fn single_import() {
-    let source = r#"
+    let source = r"
 package com.example;
 
 import java.util.List;
@@ -715,7 +715,7 @@ public class Container {
         return new ArrayList<>();
     }
 }
-"#;
+";
     let staging = build_graph(source);
     assert!(
         has_edge_tag(&staging, "imports"),
@@ -727,7 +727,7 @@ public class Container {
 /// Wildcard import
 #[test]
 fn wildcard_import() {
-    let source = r#"
+    let source = r"
 package com.example;
 
 import java.util.*;
@@ -738,7 +738,7 @@ public class All {
         return new ArrayList<>();
     }
 }
-"#;
+";
     let staging = build_graph(source);
     assert!(staging.stats().nodes_staged >= 1);
 }
@@ -746,7 +746,7 @@ public class All {
 /// Static import
 #[test]
 fn static_import() {
-    let source = r#"
+    let source = r"
 package com.example;
 
 import static java.lang.Math.*;
@@ -757,7 +757,7 @@ public class MathHelper {
         return PI * pow(r, 2);
     }
 }
-"#;
+";
     let staging = build_graph(source);
     assert!(staging.stats().nodes_staged >= 1);
 }
@@ -839,10 +839,10 @@ public class Circle extends Shape implements Drawable {
 // Field type declarations and TypeOf edges
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Class fields with various types create TypeOf edges
+/// Class fields with various types create `TypeOf` edges
 #[test]
 fn class_fields_typeof_edges() {
-    let source = r#"
+    let source = r"
 package com.example;
 
 import java.util.List;
@@ -863,7 +863,7 @@ public class DataStore {
     public String getName() { return name; }
     public List<Integer> getItems() { return items; }
 }
-"#;
+";
     let staging = build_graph(source);
     assert!(staging.stats().nodes_staged >= 3);
 }

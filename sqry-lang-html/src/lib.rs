@@ -532,11 +532,11 @@ mod tests {
     #[test]
     fn test_extract_scopes_boundaries() {
         let plugin = HtmlPlugin::default();
-        let source = br#"
+        let source = br"
 <article>
     <p>Paragraph content</p>
 </article>
-"#;
+";
         let tree = plugin.parse_ast(source).unwrap();
         let scopes = plugin
             .extract_scopes(&tree, source, Path::new("test.html"))

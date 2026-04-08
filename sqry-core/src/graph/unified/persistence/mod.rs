@@ -356,7 +356,7 @@ mod tests {
         );
     }
 
-    /// Regression test (Step 10, #11): Manifest without snapshot → exists() true, load fails gracefully.
+    /// Regression test (Step 10, #11): Manifest without snapshot → `exists()` true, load fails gracefully.
     ///
     /// Manifest present but snapshot missing indicates corruption. `storage.exists()`
     /// returns true (manifest present), but `load_from_path()` must fail gracefully

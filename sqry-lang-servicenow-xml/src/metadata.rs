@@ -2,12 +2,12 @@
 
 use std::path::{Path, PathBuf};
 
-/// Metadata extracted from a ServiceNow XML record element.
+/// Metadata extracted from a `ServiceNow` XML record element.
 #[derive(Debug, Clone)]
 pub struct RecordMetadata {
     /// Record name (from `<name>` element).
     pub name: String,
-    /// ServiceNow table type (from `<record_update table="...">` attribute).
+    /// `ServiceNow` table type (from `<record_update table="...">` attribute).
     pub table: String,
     /// Scope display value (from `<sys_scope display_value="...">` attribute).
     pub scope: String,
@@ -46,7 +46,7 @@ pub fn child_text<'a>(parent: &'a roxmltree::Node<'_, '_>, name: &str) -> Option
         .and_then(|n| n.text())
 }
 
-/// Sanitize a ServiceNow record name for use in synthetic file paths.
+/// Sanitize a `ServiceNow` record name for use in synthetic file paths.
 ///
 /// Replaces unsafe characters (slashes, dots, spaces, special chars) with
 /// underscores. Strips leading underscores/dashes, truncates to 200 chars,

@@ -222,7 +222,7 @@ mod tests {
     fn test_call_site_debug() {
         let edge = make_test_edge();
         let call_site = CallSite::from_edge(&edge, CallSiteExtras::None);
-        let debug_str = format!("{:?}", call_site);
+        let debug_str = format!("{call_site:?}");
 
         assert!(debug_str.contains("CallSite"));
         assert!(debug_str.contains("caller"));

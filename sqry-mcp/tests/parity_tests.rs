@@ -87,6 +87,7 @@ fn load_expected(name: &str, workspace_root: &str) -> Result<Value> {
     Ok(payload)
 }
 
+#[allow(clippy::needless_pass_by_value)] // Convenience for callers
 fn run_tool_call(name: &str, arguments: Value, workspace_root: &Path) -> Result<Value> {
     ensure_graph_snapshot(workspace_root)?;
 

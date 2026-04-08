@@ -128,8 +128,7 @@ module "subnets" {
     let import_count = count_import_edges(&staging);
     assert!(
         import_count >= 1,
-        "Expected at least 1 import edge for local module, got {}",
-        import_count
+        "Expected at least 1 import edge for local module, got {import_count}"
     );
 }
 
@@ -154,8 +153,7 @@ module "eks" {
     let import_count = count_import_edges(&staging);
     assert!(
         import_count >= 1,
-        "Expected at least 1 import edge for registry module, got {}",
-        import_count
+        "Expected at least 1 import edge for registry module, got {import_count}"
     );
     assert!(
         has_interned_string_containing(&staging, "terraform-aws-modules")
@@ -189,8 +187,7 @@ module "security" {
     let import_count = count_import_edges(&staging);
     assert!(
         import_count >= 1,
-        "Expected at least 1 import edge for git module, got {}",
-        import_count
+        "Expected at least 1 import edge for git module, got {import_count}"
     );
 }
 

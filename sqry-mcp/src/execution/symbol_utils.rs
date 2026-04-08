@@ -11,13 +11,10 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow};
-use sqry_core::graph::Language;
 use sqry_core::graph::unified::MacroNodeMetadata;
 use sqry_core::graph::unified::concurrent::GraphSnapshot;
+pub(crate) use sqry_core::graph::unified::materialize::display_entry_qualified_name;
 use sqry_core::graph::unified::node::{NodeId, NodeKind};
-use sqry_core::graph::unified::resolution::display_graph_qualified_name;
-use sqry_core::graph::unified::storage::StringInterner;
-use sqry_core::graph::unified::storage::arena::NodeEntry;
 use url::Url;
 
 use crate::tools::{SearchFilters, Visibility};
@@ -386,8 +383,8 @@ pub(crate) fn node_to_ref(
         .resolve(entry.name)
         .map(|s| s.to_string())
         .unwrap_or_default();
+    let display_name = display_entry_qualified_name(entry, strings, files, &name);
     let language = files.language_for_file(entry.file);
-    let display_name = display_entry_qualified_name(entry, strings, language, &name);
 
     let file_path = files
         .resolve(entry.file)
@@ -421,33 +418,6 @@ pub(crate) fn node_to_ref(
         range,
         metadata: None,
     })
-}
-
-pub(crate) fn display_entry_qualified_name(
-    entry: &NodeEntry,
-    strings: &StringInterner,
-    language: Option<Language>,
-    fallback_name: &str,
-) -> String {
-    entry
-        .qualified_name
-        .and_then(|sid| strings.resolve(sid))
-        .map_or_else(
-            || fallback_name.to_string(),
-            |qualified| {
-                language.map_or_else(
-                    || qualified.to_string(),
-                    |language| {
-                        display_graph_qualified_name(
-                            language,
-                            qualified.as_ref(),
-                            entry.kind,
-                            entry.is_static,
-                        )
-                    },
-                )
-            },
-        )
 }
 
 /// Convert `NodeKind` to lowercase string for output.
@@ -493,6 +463,7 @@ fn node_kind_to_string(kind: NodeKind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sqry_core::graph::Language;
     use sqry_core::graph::unified::storage::arena::NodeEntry;
     use sqry_core::graph::unified::storage::interner::StringInterner;
     use std::path::PathBuf;
@@ -501,19 +472,27 @@ mod tests {
     // path_to_forward_slash / relative_path_forward_slash tests
     // ==========================================================================
 
-    fn build_display_entry(name: &str, qualified_name: &str) -> (NodeEntry, StringInterner) {
+    fn build_display_entry(
+        name: &str,
+        qualified_name: &str,
+        language: Language,
+    ) -> (
+        NodeEntry,
+        StringInterner,
+        sqry_core::graph::unified::storage::registry::FileRegistry,
+    ) {
         let mut strings = StringInterner::new();
+        let mut files = sqry_core::graph::unified::storage::registry::FileRegistry::new();
         let name_id = strings.intern(name).expect("intern name");
         let qualified_name_id = strings
             .intern(qualified_name)
             .expect("intern qualified name");
-        let entry = NodeEntry::new(
-            NodeKind::Function,
-            name_id,
-            sqry_core::graph::unified::FileId::new(0),
-        )
-        .with_qualified_name(qualified_name_id);
-        (entry, strings)
+        let file_id = files
+            .register_with_language(std::path::Path::new("test.hs"), Some(language))
+            .expect("register file");
+        let entry = NodeEntry::new(NodeKind::Function, name_id, file_id)
+            .with_qualified_name(qualified_name_id);
+        (entry, strings, files)
     }
 
     #[test]
@@ -607,20 +586,22 @@ mod tests {
 
     #[test]
     fn test_display_entry_qualified_name_uses_native_haskell_display() {
-        let (entry, strings) = build_display_entry("c_sin", "Math::FFI::c_sin");
+        let (entry, strings, files) =
+            build_display_entry("c_sin", "Math::FFI::c_sin", Language::Haskell);
 
         assert_eq!(
-            display_entry_qualified_name(&entry, &strings, Some(Language::Haskell), "c_sin"),
+            display_entry_qualified_name(&entry, &strings, &files, "c_sin"),
             "Math.FFI.c_sin"
         );
     }
 
     #[test]
     fn test_display_entry_qualified_name_preserves_haskell_ffi_identity() {
-        let (entry, strings) = build_display_entry("sin", "ffi::stdcall::MessageBoxA");
+        let (entry, strings, files) =
+            build_display_entry("sin", "ffi::stdcall::MessageBoxA", Language::Haskell);
 
         assert_eq!(
-            display_entry_qualified_name(&entry, &strings, Some(Language::Haskell), "sin"),
+            display_entry_qualified_name(&entry, &strings, &files, "sin"),
             "ffi::stdcall::MessageBoxA"
         );
     }

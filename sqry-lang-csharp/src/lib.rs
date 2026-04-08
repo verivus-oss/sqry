@@ -349,7 +349,7 @@ mod tests {
     #[test]
     fn test_extract_scopes_class() {
         let plugin = CSharpPlugin::default();
-        let source = br#"
+        let source = br"
 public class MyClass
 {
     public void Method()
@@ -357,7 +357,7 @@ public class MyClass
         // method body
     }
 }
-"#;
+";
         let path = std::path::Path::new("test.cs");
         let tree = plugin.parse_ast(source).unwrap();
         let scopes = plugin.extract_scopes(&tree, source, path).unwrap();
@@ -378,14 +378,14 @@ public class MyClass
     #[test]
     fn test_extract_scopes_namespace() {
         let plugin = CSharpPlugin::default();
-        let source = br#"
+        let source = br"
 namespace MyApp
 {
     public class Service
     {
     }
 }
-"#;
+";
         let path = std::path::Path::new("test.cs");
         let tree = plugin.parse_ast(source).unwrap();
         let scopes = plugin.extract_scopes(&tree, source, path).unwrap();
@@ -418,12 +418,12 @@ namespace MyApp
     #[test]
     fn test_extract_scopes_interface() {
         let plugin = CSharpPlugin::default();
-        let source = br#"
+        let source = br"
 public interface IService
 {
     void Execute();
 }
-"#;
+";
         let path = std::path::Path::new("test.cs");
         let tree = plugin.parse_ast(source).unwrap();
         let scopes = plugin.extract_scopes(&tree, source, path).unwrap();
@@ -444,13 +444,13 @@ public interface IService
     #[test]
     fn test_extract_scopes_struct() {
         let plugin = CSharpPlugin::default();
-        let source = br#"
+        let source = br"
 public struct Point
 {
     public int X;
     public int Y;
 }
-"#;
+";
         let path = std::path::Path::new("test.cs");
         let tree = plugin.parse_ast(source).unwrap();
         let scopes = plugin.extract_scopes(&tree, source, path).unwrap();
@@ -469,7 +469,7 @@ public struct Point
     #[test]
     fn test_extract_scopes_file_scoped_namespace() {
         let plugin = CSharpPlugin::default();
-        let source = br#"
+        let source = br"
 namespace MyApp.Services;
 
 public class UserService
@@ -478,7 +478,7 @@ public class UserService
     {
     }
 }
-"#;
+";
         let path = std::path::Path::new("test.cs");
         let tree = plugin.parse_ast(source).unwrap();
         let scopes = plugin.extract_scopes(&tree, source, path).unwrap();
@@ -503,7 +503,7 @@ public class UserService
     #[test]
     fn test_extract_scopes_constructor() {
         let plugin = CSharpPlugin::default();
-        let source = br#"
+        let source = br"
 public class Person
 {
     public Person(string name)
@@ -513,7 +513,7 @@ public class Person
 
     public string Name { get; }
 }
-"#;
+";
         let path = std::path::Path::new("test.cs");
         let tree = plugin.parse_ast(source).unwrap();
         let scopes = plugin.extract_scopes(&tree, source, path).unwrap();
@@ -562,14 +562,14 @@ public record Person(string FirstName, string LastName)
     #[test]
     fn test_extract_scopes_enum() {
         let plugin = CSharpPlugin::default();
-        let source = br#"
+        let source = br"
 public enum Status
 {
     Active,
     Inactive,
     Pending
 }
-"#;
+";
         let path = std::path::Path::new("test.cs");
         let tree = plugin.parse_ast(source).unwrap();
         let scopes = plugin.extract_scopes(&tree, source, path).unwrap();
@@ -582,7 +582,7 @@ public enum Status
     #[test]
     fn test_extract_scopes_expression_bodied() {
         let plugin = CSharpPlugin::default();
-        let source = br#"
+        let source = br"
 public class Calculator
 {
     public int Add(int a, int b) => a + b;
@@ -592,7 +592,7 @@ public class Calculator
         return a * b;
     }
 }
-"#;
+";
         let path = std::path::Path::new("test.cs");
         let tree = plugin.parse_ast(source).unwrap();
         let scopes = plugin.extract_scopes(&tree, source, path).unwrap();
@@ -618,7 +618,7 @@ public class Calculator
     #[test]
     fn test_extract_scopes_local_function() {
         let plugin = CSharpPlugin::default();
-        let source = br#"
+        let source = br"
 public class Example
 {
     public void Outer()
@@ -630,7 +630,7 @@ public class Example
         Inner();
     }
 }
-"#;
+";
         let path = std::path::Path::new("test.cs");
         let tree = plugin.parse_ast(source).unwrap();
         let scopes = plugin.extract_scopes(&tree, source, path).unwrap();
@@ -650,7 +650,7 @@ public class Example
     #[test]
     fn test_extract_scopes_abstract_interface_methods() {
         let plugin = CSharpPlugin::default();
-        let source = br#"
+        let source = br"
 public interface IService
 {
     void Execute();
@@ -662,7 +662,7 @@ public abstract class BaseService
     public abstract void Initialize();
     public abstract int GetPriority();
 }
-"#;
+";
         let path = std::path::Path::new("test.cs");
         let tree = plugin.parse_ast(source).unwrap();
         let scopes = plugin.extract_scopes(&tree, source, path).unwrap();
@@ -772,7 +772,7 @@ public abstract class BaseService
         use std::path::PathBuf;
 
         let plugin = CSharpPlugin::default();
-        let source = br#"
+        let source = br"
 namespace MyApp
 {
     public class User
@@ -780,7 +780,7 @@ namespace MyApp
         private string name;
     }
 }
-"#;
+";
         let path = PathBuf::from("User.cs");
         let tree = plugin.parse_ast(source).unwrap();
         let mut staging = StagingGraph::new();
@@ -810,7 +810,7 @@ namespace MyApp
         use std::path::PathBuf;
 
         let plugin = CSharpPlugin::default();
-        let source = br#"
+        let source = br"
 namespace MyApp
 {
     public class Service
@@ -819,7 +819,7 @@ namespace MyApp
         private void Internal() { }
     }
 }
-"#;
+";
         let path = PathBuf::from("Service.cs");
         let tree = plugin.parse_ast(source).unwrap();
         let mut staging = StagingGraph::new();
@@ -850,7 +850,7 @@ namespace MyApp
         use std::path::PathBuf;
 
         let plugin = CSharpPlugin::default();
-        let source = br#"
+        let source = br"
 namespace MyApp
 {
     public interface IRepository
@@ -859,7 +859,7 @@ namespace MyApp
         void Delete();
     }
 }
-"#;
+";
         let path = PathBuf::from("IRepository.cs");
         let tree = plugin.parse_ast(source).unwrap();
         let mut staging = StagingGraph::new();
@@ -890,7 +890,7 @@ namespace MyApp
         use std::path::PathBuf;
 
         let plugin = CSharpPlugin::default();
-        let source = br#"
+        let source = br"
 namespace MyApp
 {
     internal class InternalClass
@@ -898,7 +898,7 @@ namespace MyApp
         internal void InternalMethod() { }
     }
 }
-"#;
+";
         let path = PathBuf::from("Internal.cs");
         let tree = plugin.parse_ast(source).unwrap();
         let mut staging = StagingGraph::new();

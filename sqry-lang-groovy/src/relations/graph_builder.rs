@@ -1190,6 +1190,10 @@ fn extract_last_identifier_from_dotted(node: Node, content: &[u8]) -> Option<Str
             // Recursive case: get the last child (which is the rightmost identifier)
             // For "com.example.MyLib", the last child is "MyLib"
             let child_count = node.named_child_count();
+            #[allow(
+                clippy::cast_possible_truncation,
+                reason = "tree-sitter node child counts fit in u32"
+            )]
             if child_count > 0
                 && let Some(last_child) = node.named_child((child_count - 1) as u32)
             {
@@ -2768,8 +2772,7 @@ class User {
 
         assert_eq!(
             export_edges, 2,
-            "Expected exactly 2 export edges (class + public method), got {}. Private validate should not be exported!",
-            export_edges
+            "Expected exactly 2 export edges (class + public method), got {export_edges}. Private validate should not be exported!"
         );
     }
 

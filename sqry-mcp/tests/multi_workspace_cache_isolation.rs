@@ -41,7 +41,7 @@ fn create_test_workspace(sha: &str) -> Result<TempDir> {
     Ok(temp_dir)
 }
 
-/// Test that GraphIdentity correctly distinguishes workspaces
+/// Test that `GraphIdentity` correctly distinguishes workspaces
 #[test]
 fn test_graph_identity_isolation() -> Result<()> {
     let workspace_a = create_test_workspace("aaaa")?;
@@ -85,7 +85,7 @@ fn test_atomic_identity_metadata_read() -> Result<()> {
     Ok(())
 }
 
-/// Test that manifest updates change GraphIdentity
+/// Test that manifest updates change `GraphIdentity`
 #[test]
 fn test_graph_identity_change_detection() -> Result<()> {
     let workspace = create_test_workspace("initial_sha")?;
@@ -162,8 +162,7 @@ fn test_workspace_root_mismatch_detection() -> Result<()> {
     let err = result.unwrap_err();
     assert!(
         err.to_string().contains("root_path mismatch"),
-        "Expected 'root_path mismatch' error, got: {}",
-        err
+        "Expected 'root_path mismatch' error, got: {err}"
     );
 
     Ok(())

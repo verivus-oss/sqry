@@ -26,7 +26,7 @@ use tempfile::TempDir;
 fn cli_php_callers_instance_methods() {
     let project = TempDir::new().unwrap();
 
-    let php_code = r#"<?php
+    let php_code = r"<?php
 class UserService {
     public function authenticate($username, $password) {
         $user = $this->findUser($username);
@@ -50,7 +50,7 @@ class Database {
         return null;
     }
 }
-"#;
+";
     std::fs::write(project.path().join("UserService.php"), php_code).unwrap();
 
     Command::new(sqry_bin())
@@ -145,7 +145,7 @@ class Application {
 fn cli_php_callers_global_functions() {
     let project = TempDir::new().unwrap();
 
-    let php_code = r#"<?php
+    let php_code = r"<?php
 function validateEmail($email) {
     return filter_var($email, FILTER_VALIDATE_EMAIL) !== false;
 }
@@ -159,7 +159,7 @@ function processUserInput($username, $email) {
     $valid = validateEmail($email);
     return $valid;
 }
-"#;
+";
     std::fs::write(project.path().join("helpers.php"), php_code).unwrap();
 
     Command::new(sqry_bin())
@@ -191,7 +191,7 @@ function processUserInput($username, $email) {
 fn cli_php_callers_namespaced_functions() {
     let project = TempDir::new().unwrap();
 
-    let php_code = r#"<?php
+    let php_code = r"<?php
 namespace App\Helpers;
 
 function slugify($text) {
@@ -211,7 +211,7 @@ class PostService {
         return slugify($title);
     }
 }
-"#;
+";
     std::fs::write(project.path().join("services.php"), php_code).unwrap();
 
     Command::new(sqry_bin())
@@ -234,7 +234,7 @@ class PostService {
 fn cli_php_callers_null_safe_operator() {
     let project = TempDir::new().unwrap();
 
-    let php_code = r#"<?php
+    let php_code = r"<?php
 class User {
     private $profile;
 
@@ -256,7 +256,7 @@ class UserService {
         return $user?->getProfile()?->getName();
     }
 }
-"#;
+";
     std::fs::write(project.path().join("user.php"), php_code).unwrap();
 
     Command::new(sqry_bin())
@@ -292,7 +292,7 @@ class UserService {
 fn cli_php_exports_classes_and_interfaces() {
     let project = TempDir::new().unwrap();
 
-    let php_code = r#"<?php
+    let php_code = r"<?php
 class User {
     public function getId() {
         return $this->id;
@@ -319,7 +319,7 @@ trait Timestampable {
         return $this->created_at;
     }
 }
-"#;
+";
     std::fs::write(project.path().join("models.php"), php_code).unwrap();
 
     Command::new(sqry_bin())
@@ -361,7 +361,7 @@ trait Timestampable {
 fn cli_php_exports_visibility_filtering() {
     let project = TempDir::new().unwrap();
 
-    let php_code = r#"<?php
+    let php_code = r"<?php
 class UserService {
     public function createUser($username, $password) {
         $this->validateInput($username, $password);
@@ -381,7 +381,7 @@ class UserService {
         return password_hash($password, PASSWORD_DEFAULT);
     }
 }
-"#;
+";
     std::fs::write(project.path().join("UserService.php"), php_code).unwrap();
 
     Command::new(sqry_bin())
@@ -431,7 +431,7 @@ class UserService {
 fn cli_php_exports_namespaced_classes() {
     let project = TempDir::new().unwrap();
 
-    let php_code = r#"<?php
+    let php_code = r"<?php
 namespace App\Services;
 
 class UserService {
@@ -447,7 +447,7 @@ class UserRepository {
         return [];
     }
 }
-"#;
+";
     std::fs::write(project.path().join("app.php"), php_code).unwrap();
 
     Command::new(sqry_bin())
@@ -479,7 +479,7 @@ class UserRepository {
 fn cli_php_exports_global_functions() {
     let project = TempDir::new().unwrap();
 
-    let php_code = r#"<?php
+    let php_code = r"<?php
 function globalHelper() {
     return true;
 }
@@ -489,7 +489,7 @@ namespace App\Helpers;
 function namespacedHelper() {
     return true;
 }
-"#;
+";
     std::fs::write(project.path().join("functions.php"), php_code).unwrap();
 
     Command::new(sqry_bin())
@@ -525,7 +525,7 @@ function namespacedHelper() {
 fn cli_php_imports_use_statements() {
     let project = TempDir::new().unwrap();
 
-    let php_code = r#"<?php
+    let php_code = r"<?php
 namespace App\Controllers;
 
 use App\Services\UserService;
@@ -542,7 +542,7 @@ class UserController {
         return $this->userService->getUsers();
     }
 }
-"#;
+";
     std::fs::write(project.path().join("UserController.php"), php_code).unwrap();
 
     Command::new(sqry_bin())
@@ -574,7 +574,7 @@ class UserController {
 fn cli_php_imports_require_statements() {
     let project = TempDir::new().unwrap();
 
-    let php_code = r#"<?php
+    let php_code = r"<?php
 require_once 'config.php';
 require_once __DIR__ . '/helpers.php';
 include 'optional.php';
@@ -584,7 +584,7 @@ class Application {
         return true;
     }
 }
-"#;
+";
     std::fs::write(project.path().join("app.php"), php_code).unwrap();
 
     Command::new(sqry_bin())
@@ -670,7 +670,7 @@ class UserService {
 fn cli_php_callers_method_chaining() {
     let project = TempDir::new().unwrap();
 
-    let php_code = r#"<?php
+    let php_code = r"<?php
 class QueryBuilder {
     public function table($table) {
         return $this;
@@ -704,7 +704,7 @@ class UserQuery {
             ->get();
     }
 }
-"#;
+";
     std::fs::write(project.path().join("QueryBuilder.php"), php_code).unwrap();
 
     Command::new(sqry_bin())
@@ -748,7 +748,7 @@ fn cli_php_json_exports_with_methods() {
     // Test that exports: query correctly finds class and methods
     // Note: exports:ClassName finds the class; exports:methodName finds methods
     let project = TempDir::new().unwrap();
-    let php_code = r#"<?php
+    let php_code = r"<?php
 namespace App\Services;
 
 class UserService {
@@ -764,7 +764,7 @@ class UserService {
         return strlen($password) >= 8;
     }
 }
-"#;
+";
     std::fs::write(project.path().join("UserService.php"), php_code).unwrap();
 
     Command::new(sqry_bin())
@@ -800,8 +800,7 @@ class UserService {
         .find(|r| {
             r["name"]
                 .as_str()
-                .map(|n| n.contains("UserService"))
-                .unwrap_or(false)
+                .is_some_and(|n| n.contains("UserService"))
         })
         .expect("Should find UserService class");
 
@@ -838,8 +837,7 @@ class UserService {
         .find(|r| {
             r["qualified_name"]
                 .as_str()
-                .map(|n| n.contains("authenticate"))
-                .unwrap_or(false)
+                .is_some_and(|n| n.contains("authenticate"))
         })
         .expect("Should find authenticate method");
 
@@ -924,13 +922,13 @@ class EventDispatcher {
 #[test]
 fn cli_php_callers_query_no_results() {
     let project = TempDir::new().unwrap();
-    let php_code = r#"<?php
+    let php_code = r"<?php
 class Foo {
     public function bar() {
         return 42;
     }
 }
-"#;
+";
     std::fs::write(project.path().join("Foo.php"), php_code).unwrap();
 
     Command::new(sqry_bin())
@@ -958,11 +956,11 @@ class Foo {
 #[test]
 fn cli_php_exports_empty_class() {
     let project = TempDir::new().unwrap();
-    let php_code = r#"<?php
+    let php_code = r"<?php
 class EmptyClass {
     // No methods
 }
-"#;
+";
     std::fs::write(project.path().join("Empty.php"), php_code).unwrap();
 
     Command::new(sqry_bin())
@@ -986,23 +984,23 @@ fn cli_php_callers_syntax_error_file() {
     let project = TempDir::new().unwrap();
 
     // Create a valid PHP file first
-    let valid_php = r#"<?php
+    let valid_php = r"<?php
 class Valid {
     public function test() {
         return 1;
     }
 }
-"#;
+";
     std::fs::write(project.path().join("Valid.php"), valid_php).unwrap();
 
     // Create a file with syntax error
-    let invalid_php = r#"<?php
+    let invalid_php = r"<?php
 class Invalid {
     public function broken( {  // Syntax error
         return 1;
     }
 }
-"#;
+";
     std::fs::write(project.path().join("Invalid.php"), invalid_php).unwrap();
 
     // Index should succeed but skip invalid file
@@ -1065,7 +1063,7 @@ fn cli_php_fixture_symfony_exports_recall() {
     for method in &expected_methods {
         let output = Command::new(sqry_bin())
             .arg("query")
-            .arg(format!("exports:{}", method))
+            .arg(format!("exports:{method}"))
             .arg(&fixture_path)
             .output()
             .expect("command should run");
@@ -1079,9 +1077,7 @@ fn cli_php_fixture_symfony_exports_recall() {
     // Recall test: Should find at least 5 out of 6 key method exports (>80% recall)
     assert!(
         found_count >= 5,
-        "Expected to find at least 5/6 exported methods, found {}. Expected: {:?}",
-        found_count,
-        expected_methods
+        "Expected to find at least 5/6 exported methods, found {found_count}. Expected: {expected_methods:?}"
     );
 }
 
@@ -1132,8 +1128,7 @@ fn cli_php_fixture_symfony_callers_recall() {
     // Recall test: Should find at least 3 out of 4 callers (75% recall minimum)
     assert!(
         found_count >= 3,
-        "Expected to find at least 3/4 callers of render, found {}",
-        found_count
+        "Expected to find at least 3/4 callers of render, found {found_count}"
     );
 }
 

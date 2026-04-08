@@ -28,7 +28,7 @@ fn build_indexed_workspace() -> tempfile::TempDir {
     dir
 }
 
-/// Parse NDJSON output into a vec of serde_json::Value.
+/// Parse NDJSON output into a vec of `serde_json::Value`.
 fn parse_ndjson(output: &str) -> Vec<serde_json::Value> {
     output
         .lines()

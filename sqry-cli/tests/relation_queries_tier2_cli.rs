@@ -3,7 +3,7 @@
 //! Tests that relation queries work end-to-end through the CLI for Tier-2 languages:
 //! - Rust, C++, C#, Kotlin, Groovy, Svelte, Vue, Ruby
 //!
-//! These languages have complete relation extraction via their GraphBuilder
+//! These languages have complete relation extraction via their `GraphBuilder`
 //! implementations but lack dedicated CLI test coverage.
 //!
 //! See docs/internal/LANGUAGE_SUPPORT_AUDIT_2025-11-10.md for methodology.
@@ -23,7 +23,7 @@ use tempfile::TempDir;
 fn cli_rust_callers_query() {
     let project = TempDir::new().unwrap();
 
-    let rust_code = r#"
+    let rust_code = r"
 fn helper() -> i32 {
     42
 }
@@ -35,7 +35,7 @@ fn fetch() -> i32 {
 fn process() {
     let _ = helper();
 }
-"#;
+";
     std::fs::write(project.path().join("test.rs"), rust_code).unwrap();
 
     Command::new(sqry_bin())
@@ -92,7 +92,7 @@ fn main() {
 fn cli_cpp_callers_query() {
     let project = TempDir::new().unwrap();
 
-    let cpp_code = r#"
+    let cpp_code = r"
 int helper() {
     return 42;
 }
@@ -104,7 +104,7 @@ int fetch() {
 void process() {
     helper();
 }
-"#;
+";
     std::fs::write(project.path().join("test.cpp"), cpp_code).unwrap();
 
     Command::new(sqry_bin())
@@ -131,7 +131,7 @@ void process() {
 fn cli_csharp_callers_query() {
     let project = TempDir::new().unwrap();
 
-    let csharp_code = r#"
+    let csharp_code = r"
 using System;
 
 class Test {
@@ -147,7 +147,7 @@ class Test {
         Helper();
     }
 }
-"#;
+";
     std::fs::write(project.path().join("Test.cs"), csharp_code).unwrap();
 
     Command::new(sqry_bin())
@@ -174,7 +174,7 @@ class Test {
 fn cli_kotlin_callers_query() {
     let project = TempDir::new().unwrap();
 
-    let kotlin_code = r#"
+    let kotlin_code = r"
 fun helper(): Int {
     return 42
 }
@@ -186,7 +186,7 @@ fun fetch(): Int {
 fun process() {
     helper()
 }
-"#;
+";
     std::fs::write(project.path().join("test.kt"), kotlin_code).unwrap();
 
     Command::new(sqry_bin())
@@ -213,7 +213,7 @@ fun process() {
 fn cli_groovy_callers_query() {
     let project = TempDir::new().unwrap();
 
-    let groovy_code = r#"
+    let groovy_code = r"
 def helper() {
     return 42
 }
@@ -225,7 +225,7 @@ def fetch() {
 def process() {
     helper()
 }
-"#;
+";
     std::fs::write(project.path().join("test.groovy"), groovy_code).unwrap();
 
     Command::new(sqry_bin())
@@ -252,7 +252,7 @@ def process() {
 fn cli_svelte_callers_query() {
     let project = TempDir::new().unwrap();
 
-    let svelte_code = r#"
+    let svelte_code = r"
 <script>
 function helper() {
     return 42;
@@ -268,7 +268,7 @@ function process() {
 </script>
 
 <div>Test</div>
-"#;
+";
     std::fs::write(project.path().join("Test.svelte"), svelte_code).unwrap();
 
     Command::new(sqry_bin())
@@ -295,7 +295,7 @@ function process() {
 fn cli_vue_callers_query() {
     let project = TempDir::new().unwrap();
 
-    let vue_code = r#"
+    let vue_code = r"
 <script>
 function helper() {
     return 42;
@@ -313,7 +313,7 @@ function process() {
 <template>
   <div>Test</div>
 </template>
-"#;
+";
     std::fs::write(project.path().join("Test.vue"), vue_code).unwrap();
 
     Command::new(sqry_bin())
@@ -340,7 +340,7 @@ function process() {
 fn cli_ruby_callers_query() {
     let project = TempDir::new().unwrap();
 
-    let ruby_code = r#"
+    let ruby_code = r"
 class Calculator
   def add(a, b)
     sum(a, b)
@@ -365,7 +365,7 @@ class Calculator
     x * y
   end
 end
-"#;
+";
     std::fs::write(project.path().join("calculator.rb"), ruby_code).unwrap();
 
     Command::new(sqry_bin())
@@ -438,7 +438,7 @@ end
 fn cli_ruby_imports_query() {
     let project = TempDir::new().unwrap();
 
-    let ruby_code = r#"
+    let ruby_code = r"
 require 'json'
 require_relative 'helpers'
 
@@ -449,7 +449,7 @@ class Parser
     JSON.parse(data)
   end
 end
-"#;
+";
     std::fs::write(project.path().join("parser.rb"), ruby_code).unwrap();
 
     Command::new(sqry_bin())

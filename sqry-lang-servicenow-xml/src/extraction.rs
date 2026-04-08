@@ -1,4 +1,4 @@
-//! Script and table schema extraction from ServiceNow XML records.
+//! Script and table schema extraction from `ServiceNow` XML records.
 
 use std::path::Path;
 
@@ -26,6 +26,7 @@ const MIN_MAX_SCHEMA_NAME_LEN: usize = 64;
 const MAX_MAX_SCHEMA_NAME_LEN: usize = 1_024;
 
 /// Get the max script size, respecting environment variable override.
+#[must_use]
 pub fn max_script_size() -> usize {
     std::env::var("SQRY_SN_XML_MAX_SCRIPT_SIZE")
         .ok()
@@ -42,7 +43,7 @@ fn max_schema_name_len() -> usize {
         .clamp(MIN_MAX_SCHEMA_NAME_LEN, MAX_MAX_SCHEMA_NAME_LEN)
 }
 
-/// Extract scripts from a record element and delegate to ServiceNow JS builder.
+/// Extract scripts from a record element and delegate to `ServiceNow` JS builder.
 ///
 /// Each script field delegation creates a fresh `StagingGraph` and replays it
 /// into the main staging with remapped `StringId`s/`NodeId`s. This prevents
@@ -50,6 +51,11 @@ fn max_schema_name_len() -> usize {
 /// `script` + `client_script`) exist in the same record — each inner
 /// `GraphBuildHelper` starts its local counter at 0, so without separate
 /// staging the second field would re-emit `StringId(local:0)`.
+///
+/// # Errors
+///
+/// Returns a `GraphResult` error if the `ServiceNow` graph builder fails to
+/// process a script field or if replay of staging operations fails.
 #[allow(clippy::too_many_arguments)]
 pub fn extract_scripts(
     record: &roxmltree::Node<'_, '_>,
@@ -107,7 +113,8 @@ pub fn extract_scripts(
     Ok(())
 }
 
-/// Extract table schema from a sys_dictionary record.
+/// Extract table schema from a `sys_dictionary` record.
+#[allow(clippy::similar_names)] // `table_name` and `table_qname` are intentionally distinct
 pub fn extract_table_schema(
     record: &roxmltree::Node<'_, '_>,
     module_id: NodeId,
@@ -142,7 +149,8 @@ pub fn extract_table_schema(
     }
 }
 
-/// Extract table definition from a sys_db_object record.
+/// Extract table definition from a `sys_db_object` record.
+#[allow(clippy::similar_names)] // `table_name` and `table_qname` are intentionally distinct
 pub fn extract_table_definition(
     record: &roxmltree::Node<'_, '_>,
     module_id: NodeId,

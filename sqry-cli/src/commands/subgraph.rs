@@ -8,9 +8,11 @@ use crate::index_discovery::find_nearest_index;
 use crate::output::OutputStreams;
 use anyhow::{Context, Result, anyhow};
 use serde::Serialize;
-use sqry_core::graph::unified::edge::EdgeKind;
 use sqry_core::graph::unified::node::NodeId;
-use std::collections::{HashSet, VecDeque};
+use sqry_core::graph::unified::{
+    EdgeFilter, TraversalConfig, TraversalDirection, TraversalLimits, traverse,
+};
+use std::collections::HashSet;
 
 /// Subgraph output
 #[derive(Debug, Serialize)]
@@ -96,62 +98,11 @@ struct SubgraphBfsResult {
     max_depth_reached: usize,
 }
 
-/// Process outgoing edges (callees) from a node during BFS traversal.
-#[allow(clippy::too_many_arguments)]
-fn process_callee_edges(
-    graph: &sqry_core::graph::unified::concurrent::CodeGraph,
-    node_id: NodeId,
-    include_imports: bool,
-    collected_edges: &mut Vec<(NodeId, NodeId, String)>,
-    visited: &mut HashSet<NodeId>,
-    node_depths: &mut std::collections::HashMap<NodeId, usize>,
-    queue: &mut VecDeque<(NodeId, usize)>,
-    depth: usize,
-    max_nodes: usize,
-) {
-    for edge_ref in graph.edges().edges_from(node_id) {
-        let is_call = matches!(edge_ref.kind, EdgeKind::Calls { .. });
-        let is_import = matches!(edge_ref.kind, EdgeKind::Imports { .. });
-
-        if is_call || (include_imports && is_import) {
-            let kind_str = format!("{:?}", edge_ref.kind);
-            collected_edges.push((node_id, edge_ref.target, kind_str));
-
-            if !visited.contains(&edge_ref.target) && visited.len() < max_nodes {
-                visited.insert(edge_ref.target);
-                node_depths.insert(edge_ref.target, depth + 1);
-                queue.push_back((edge_ref.target, depth + 1));
-            }
-        }
-    }
-}
-
-/// Process incoming edges (callers) to a node during BFS traversal.
-fn process_caller_edges(
-    graph: &sqry_core::graph::unified::concurrent::CodeGraph,
-    node_id: NodeId,
-    collected_edges: &mut Vec<(NodeId, NodeId, String)>,
-    visited: &mut HashSet<NodeId>,
-    node_depths: &mut std::collections::HashMap<NodeId, usize>,
-    queue: &mut VecDeque<(NodeId, usize)>,
-    depth: usize,
-    max_nodes: usize,
-) {
-    for edge_ref in graph.edges().edges_to(node_id) {
-        if matches!(edge_ref.kind, EdgeKind::Calls { .. }) {
-            let kind_str = format!("{:?}", edge_ref.kind);
-            collected_edges.push((edge_ref.source, node_id, kind_str));
-
-            if !visited.contains(&edge_ref.source) && visited.len() < max_nodes {
-                visited.insert(edge_ref.source);
-                node_depths.insert(edge_ref.source, depth + 1);
-                queue.push_back((edge_ref.source, depth + 1));
-            }
-        }
-    }
-}
-
 /// Collect a subgraph via BFS from seed nodes, following callers and/or callees.
+///
+/// Uses the traversal kernel with configurable direction and edge filter.
+/// Converts the kernel's `TraversalResult` into the `SubgraphBfsResult`
+/// expected by downstream code.
 #[allow(clippy::similar_names)]
 fn collect_subgraph_bfs(
     graph: &sqry_core::graph::unified::concurrent::CodeGraph,
@@ -162,59 +113,69 @@ fn collect_subgraph_bfs(
     include_callees: bool,
     include_imports: bool,
 ) -> SubgraphBfsResult {
+    let snapshot = graph.snapshot();
+
+    let direction = match (include_callers, include_callees) {
+        (true, true) => TraversalDirection::Both,
+        (true, false) => TraversalDirection::Incoming,
+        #[allow(clippy::match_same_arms)] // Subgraph mode arms intentionally separate
+        (false, true) => TraversalDirection::Outgoing,
+        // If neither is selected, default to outgoing (no edges will match anyway)
+        (false, false) => TraversalDirection::Outgoing,
+    };
+
+    let edge_filter = if include_imports {
+        EdgeFilter::calls_and_imports()
+    } else {
+        EdgeFilter::calls_only()
+    };
+
+    let config = TraversalConfig {
+        direction,
+        edge_filter,
+        limits: TraversalLimits {
+            max_depth: u32::try_from(max_depth).unwrap_or(u32::MAX),
+            max_nodes: Some(max_nodes),
+            max_edges: None,
+            max_paths: None,
+        },
+    };
+
+    let result = traverse(&snapshot, seed_nodes, &config, None);
+
     let mut visited: HashSet<NodeId> = HashSet::new();
     let mut node_depths: std::collections::HashMap<NodeId, usize> =
         std::collections::HashMap::new();
-    let mut queue: VecDeque<(NodeId, usize)> = VecDeque::new();
     let mut collected_edges: Vec<(NodeId, NodeId, String)> = Vec::new();
+    let mut max_depth_reached: usize = 0;
 
-    // Initialize with seeds
-    for &seed in seed_nodes {
-        visited.insert(seed);
-        node_depths.insert(seed, 0);
-        queue.push_back((seed, 0));
+    // Populate visited set and node depths from traversal result
+    for (idx, mat_node) in result.nodes.iter().enumerate() {
+        visited.insert(mat_node.node_id);
+
+        // Seed nodes have depth 0; others get depth from the first edge
+        let depth = if seed_nodes.contains(&mat_node.node_id) {
+            0
+        } else {
+            result
+                .edges
+                .iter()
+                .filter(|e| e.source_idx == idx || e.target_idx == idx)
+                .map(|e| e.depth as usize)
+                .min()
+                .unwrap_or(0)
+        };
+
+        node_depths.insert(mat_node.node_id, depth);
+        max_depth_reached = max_depth_reached.max(depth);
     }
 
-    let mut max_depth_reached = 0;
-
-    while let Some((node_id, depth)) = queue.pop_front() {
-        if visited.len() >= max_nodes {
-            break;
-        }
-        if depth >= max_depth {
-            continue;
-        }
-
-        max_depth_reached = max_depth_reached.max(depth);
-
-        // Process outgoing edges (callees)
-        if include_callees {
-            process_callee_edges(
-                graph,
-                node_id,
-                include_imports,
-                &mut collected_edges,
-                &mut visited,
-                &mut node_depths,
-                &mut queue,
-                depth,
-                max_nodes,
-            );
-        }
-
-        // Process incoming edges (callers)
-        if include_callers {
-            process_caller_edges(
-                graph,
-                node_id,
-                &mut collected_edges,
-                &mut visited,
-                &mut node_depths,
-                &mut queue,
-                depth,
-                max_nodes,
-            );
-        }
+    // Convert edges to (source_id, target_id, kind_str) tuples
+    for edge in &result.edges {
+        let source_id = result.nodes[edge.source_idx].node_id;
+        let target_id = result.nodes[edge.target_idx].node_id;
+        let kind_str = format!("{:?}", edge.raw_kind);
+        collected_edges.push((source_id, target_id, kind_str));
     }
 
     SubgraphBfsResult {

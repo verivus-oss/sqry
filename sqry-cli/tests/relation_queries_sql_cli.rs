@@ -21,7 +21,7 @@ use tempfile::TempDir;
 fn cli_sql_exports_tables_and_views() {
     let project = TempDir::new().unwrap();
 
-    let sql_code = r#"
+    let sql_code = r"
 CREATE TABLE users (
     id SERIAL PRIMARY KEY,
     name TEXT NOT NULL,
@@ -41,7 +41,7 @@ CREATE MATERIALIZED VIEW user_stats AS
 SELECT user_id, COUNT(*) as order_count
 FROM orders
 GROUP BY user_id;
-"#;
+";
     std::fs::write(project.path().join("schema.sql"), sql_code).unwrap();
 
     Command::new(sqry_bin())
@@ -91,7 +91,7 @@ GROUP BY user_id;
 fn cli_sql_exports_functions_and_triggers() {
     let project = TempDir::new().unwrap();
 
-    let sql_code = r#"
+    let sql_code = r"
 CREATE TABLE accounts (
     id SERIAL PRIMARY KEY,
     balance_cents BIGINT NOT NULL
@@ -114,7 +114,7 @@ CREATE TRIGGER balance_updated
 BEFORE UPDATE ON accounts
 FOR EACH ROW
 EXECUTE FUNCTION update_balance();
-"#;
+";
     std::fs::write(project.path().join("banking.sql"), sql_code).unwrap();
 
     Command::new(sqry_bin())
@@ -155,7 +155,7 @@ EXECUTE FUNCTION update_balance();
 fn cli_sql_exports_schema_qualified_names() {
     let project = TempDir::new().unwrap();
 
-    let sql_code = r#"
+    let sql_code = r"
 CREATE TABLE public.customers (
     id SERIAL PRIMARY KEY,
     name TEXT NOT NULL
@@ -166,7 +166,7 @@ BEGIN
     RETURN (SELECT name FROM public.customers WHERE id = cust_id);
 END;
 $$ LANGUAGE plpgsql;
-"#;
+";
     std::fs::write(project.path().join("public_schema.sql"), sql_code).unwrap();
 
     Command::new(sqry_bin())
@@ -202,14 +202,14 @@ $$ LANGUAGE plpgsql;
 fn cli_sql_imports_empty_for_standard_sql() {
     let project = TempDir::new().unwrap();
 
-    let sql_code = r#"
+    let sql_code = r"
 CREATE TABLE products (
     id SERIAL PRIMARY KEY,
     name TEXT NOT NULL
 );
 
 SELECT * FROM public.products;
-"#;
+";
     std::fs::write(project.path().join("query.sql"), sql_code).unwrap();
 
     Command::new(sqry_bin())
@@ -237,7 +237,7 @@ SELECT * FROM public.products;
 fn cli_sql_callers_function_calls() {
     let project = TempDir::new().unwrap();
 
-    let sql_code = r#"
+    let sql_code = r"
 CREATE FUNCTION calculate_total(price INT, qty INT) RETURNS INT AS $$
 BEGIN
     RETURN price * qty;
@@ -252,7 +252,7 @@ BEGIN
     RETURN calculate_total(price, quantity);
 END;
 $$ LANGUAGE plpgsql;
-"#;
+";
     std::fs::write(project.path().join("functions.sql"), sql_code).unwrap();
 
     Command::new(sqry_bin())
@@ -275,7 +275,7 @@ $$ LANGUAGE plpgsql;
 fn cli_sql_callers_trigger_execute_function() {
     let project = TempDir::new().unwrap();
 
-    let sql_code = r#"
+    let sql_code = r"
 CREATE TABLE audit_log (
     id SERIAL PRIMARY KEY,
     action TEXT NOT NULL,
@@ -293,7 +293,7 @@ CREATE TRIGGER audit_trigger
 AFTER UPDATE ON audit_log
 FOR EACH ROW
 EXECUTE FUNCTION log_change();
-"#;
+";
     std::fs::write(project.path().join("audit.sql"), sql_code).unwrap();
 
     Command::new(sqry_bin())
@@ -316,7 +316,7 @@ EXECUTE FUNCTION log_change();
 fn cli_sql_callers_nested_function_calls() {
     let project = TempDir::new().unwrap();
 
-    let sql_code = r#"
+    let sql_code = r"
 CREATE FUNCTION add(a INT, b INT) RETURNS INT AS $$
 BEGIN
     RETURN a + b;
@@ -337,7 +337,7 @@ BEGIN
     RETURN multiply(sum_val, z);
 END;
 $$ LANGUAGE plpgsql;
-"#;
+";
     std::fs::write(project.path().join("math.sql"), sql_code).unwrap();
 
     Command::new(sqry_bin())
@@ -373,7 +373,7 @@ $$ LANGUAGE plpgsql;
 fn cli_sql_callees_function_dependencies() {
     let project = TempDir::new().unwrap();
 
-    let sql_code = r#"
+    let sql_code = r"
 CREATE FUNCTION helper_one() RETURNS INT AS $$
 BEGIN
     RETURN 42;
@@ -396,7 +396,7 @@ BEGIN
     RETURN val1 + val2;
 END;
 $$ LANGUAGE plpgsql;
-"#;
+";
     std::fs::write(project.path().join("deps.sql"), sql_code).unwrap();
 
     Command::new(sqry_bin())

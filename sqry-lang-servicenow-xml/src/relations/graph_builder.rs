@@ -1,4 +1,4 @@
-//! Graph builder for ServiceNow XML record extraction.
+//! Graph builder for `ServiceNow` XML record extraction.
 
 use std::path::Path;
 
@@ -43,7 +43,7 @@ fn max_records_per_file() -> usize {
         .clamp(MIN_MAX_RECORDS_PER_FILE, MAX_MAX_RECORDS_PER_FILE)
 }
 
-/// Graph builder for ServiceNow XML update set files.
+/// Graph builder for `ServiceNow` XML update set files.
 #[derive(Debug, Default)]
 pub struct ServiceNowXmlGraphBuilder;
 
@@ -87,7 +87,10 @@ impl GraphBuilder for ServiceNowXmlGraphBuilder {
         };
 
         // Collect record elements (with budget to prevent resource exhaustion)
-        let record_elems: Vec<_> = root.children().filter(|n| n.is_element()).collect();
+        let record_elems: Vec<_> = root
+            .children()
+            .filter(roxmltree::Node::is_element)
+            .collect();
         if record_elems.len() > max_records_per_file() {
             return Ok(());
         }
@@ -125,6 +128,7 @@ impl GraphBuilder for ServiceNowXmlGraphBuilder {
 impl ServiceNowXmlGraphBuilder {
     /// Handle script-bearing records: single-record delegates directly,
     /// multi-record uses separate staging per delegation with replay.
+    #[allow(clippy::unused_self)] // Method uses `self` for trait implementation consistency
     fn build_script_graph(
         &self,
         record_elems: &[roxmltree::Node<'_, '_>],

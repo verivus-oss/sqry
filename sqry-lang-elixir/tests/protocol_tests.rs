@@ -86,11 +86,11 @@ fn extract_implements_edges(staging: &StagingGraph) -> Vec<(NodeId, NodeId)> {
 
 #[test]
 fn test_simple_protocol_definition() {
-    let source = r#"
+    let source = r"
         defprotocol Stringify do
           def to_string(data)
         end
-    "#;
+    ";
 
     let (tree, content) = parse_elixir(source);
     let mut staging = StagingGraph::new();
@@ -109,7 +109,7 @@ fn test_simple_protocol_definition() {
 
 #[test]
 fn test_protocol_implementation() {
-    let source = r#"
+    let source = r"
         defprotocol Stringify do
           def to_string(data)
         end
@@ -119,7 +119,7 @@ fn test_protocol_implementation() {
             Integer.to_string(data)
           end
         end
-    "#;
+    ";
 
     let (tree, content) = parse_elixir(source);
     let mut staging = StagingGraph::new();
@@ -158,7 +158,7 @@ fn test_protocol_implementation() {
 
 #[test]
 fn test_multiple_protocol_implementations() {
-    let source = r#"
+    let source = r"
         defprotocol Stringify do
           def to_string(data)
         end
@@ -174,7 +174,7 @@ fn test_multiple_protocol_implementations() {
         defimpl Stringify, for: Map do
           def to_string(data), do: inspect(data)
         end
-    "#;
+    ";
 
     let (tree, content) = parse_elixir(source);
     let mut staging = StagingGraph::new();
@@ -213,7 +213,7 @@ fn test_multiple_protocol_implementations() {
 
 #[test]
 fn test_multiple_protocols() {
-    let source = r#"
+    let source = r"
         defprotocol Stringify do
           def to_string(data)
         end
@@ -231,7 +231,7 @@ fn test_multiple_protocols() {
           def count(list), do: length(list)
           def member?(list, value), do: value in list
         end
-    "#;
+    ";
 
     let (tree, content) = parse_elixir(source);
     let mut staging = StagingGraph::new();

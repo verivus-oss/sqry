@@ -74,7 +74,7 @@ fn handle_semantic_search<S>(context: &PromptContext<'_, S>) -> GetPromptResult 
 Note: sqry provides deterministic results via AST analysis (not probabilistic embedding similarity).
 Same query → same results. You get the COMPLETE list - critical for refactoring, security audits, and impact analysis.
 
-Translate the user's query into sqry predicates:
+Translate the user's query into sqry predicates in the `query` parameter:
 - For symbol names: use `name:` predicate (e.g., `name:login`, `name~=/.*Handler/`)
 - For symbol types: use `kind:` predicate (e.g., `kind:function`, `kind:class`, `kind:method`)
 - For visibility: use `visibility:` predicate (e.g., `visibility:public`, `visibility:private`)
@@ -84,6 +84,14 @@ Example queries:
 - "authentication functions" → semantic_search with query="name~=/^auth/ AND kind:function"
 - "public classes" → semantic_search with query="visibility:public AND kind:class"
 - "all methods in User class" → semantic_search with query="name~=/^User::/ AND kind:method"
+
+Alternatively, use the `filters` parameter for simple structured constraints:
+  filters={{"language":["rust"],"symbol_kind":["function"]}}
+
+Use `query` for complex boolean expressions with AND/OR/NOT/regex.
+Use `filters` for simple pre-filtering by language, kind, or visibility.
+Both can be combined:
+  query="name~=/^auth/" filters={{"language":["typescript"],"visibility":"public"}}
 
 Use hierarchical_search for RAG-optimized results with file/container grouping."#
     );

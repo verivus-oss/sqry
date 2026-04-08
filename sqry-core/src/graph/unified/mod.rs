@@ -79,6 +79,18 @@ pub mod compaction;
 // Concurrency wrappers (Step 18)
 pub mod concurrent;
 
+// Core node materialization and seed lookup
+pub mod materialize;
+
+// Shared traversal result types and EdgeClassification
+pub mod traversal;
+
+// Generic BFS kernel
+pub mod kernel;
+
+// Binding query facade
+pub mod bind;
+
 // Shared symbol resolution
 pub mod resolution;
 
@@ -106,6 +118,7 @@ pub use admission::{
     AdmissionController, AdmissionControllerStats, AdmissionError, BufferStateSnapshot,
     CommitError, Reservation, ReservationGuard, SharedBufferState,
 };
+pub use bind::{BindingQuery, BindingResult, ResolvedBinding, SymbolClassification};
 pub use build::{
     ExportMap, GraphBuildHelper, HelperStats, IdentityIndex, IdentityKey, IncrementalStats,
     IntraFileReference, Pass3Stats, Pass4Stats, PendingEdge, StagingGraph, StagingOp,
@@ -128,11 +141,21 @@ pub use edge::{
     MacroExpansionKind, MqProtocol, StoreEdgeRef, TableWriteOp,
 };
 pub use file::FileId;
+pub use kernel::{
+    EdgeFilter, FrontierMode, SccPathStrategy, SimplePathStrategy, TraversalConfig,
+    TraversalDirection, TraversalLimits, TraversalStrategy, VisitedPolicy, is_followable_edge,
+    traverse,
+};
+pub use materialize::{
+    MaterializedNode, collect_symbol_seeds, display_entry_qualified_name, find_nodes_by_name,
+    materialize_node, qualified_node_name,
+};
 pub use node::{GenerationOverflowError, NodeId, NodeKind};
 pub use query_adapter::GraphQueryAdapter;
 pub use resolution::{
     FileScope, FileScopeError, NormalizedSymbolQuery, ResolutionMode, ResolvedFileScope,
-    SymbolCandidateOutcome, SymbolQuery, SymbolResolutionOutcome,
+    SymbolCandidateBucket, SymbolCandidateOutcome, SymbolCandidateSearchWitness,
+    SymbolCandidateWitness, SymbolQuery, SymbolResolutionOutcome, SymbolResolutionWitness,
 };
 pub use storage::{
     AuxiliaryIndices, ClasspathNodeMetadata, CsrBuilder, CsrError, CsrGraph, CsrStats, EdgeRef,
@@ -141,4 +164,7 @@ pub use storage::{
     ResolveError, Slot, SlotState, StringInterner,
 };
 pub use string::StringId;
+pub use traversal::{
+    EdgeClassification, MaterializedEdge, TraversalMetadata, TraversalResult, TruncationReason,
+};
 pub use txn::GraphWriteTxn;

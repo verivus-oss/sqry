@@ -62,6 +62,8 @@ impl SourceJarProvider {
     /// Scans entries for `source_jar` paths and builds the mapping from
     /// binary JAR path to source JAR path.
     #[must_use]
+    #[allow(clippy::missing_errors_doc)] // Internal helper function
+    #[allow(clippy::missing_panics_doc)] // Panic condition documented in body
     pub fn new(entries: &[ClasspathEntry], cache_size: usize) -> Self {
         let size = if cache_size == 0 {
             DEFAULT_CACHE_SIZE
@@ -94,6 +96,7 @@ impl SourceJarProvider {
     /// - No source JAR is available for the given binary JAR
     /// - The class source file is not found in the source JAR
     /// - The source file has no doc comment before the class declaration
+    #[allow(clippy::missing_panics_doc)] // Panic condition documented in body
     pub fn get_docs(&self, fqn: &str, jar_path: &Path) -> Option<String> {
         let cache_key = format!("{}::{fqn}", jar_path.display());
 
@@ -120,6 +123,7 @@ impl SourceJarProvider {
     ///
     /// Searches the source file for a doc comment immediately preceding a
     /// declaration that matches `member_name`.
+    #[allow(clippy::missing_panics_doc)] // Panic documented in body
     pub fn get_member_docs(&self, fqn: &str, member_name: &str, jar_path: &Path) -> Option<String> {
         let cache_key = format!("{}::{fqn}::{member_name}", jar_path.display());
 
@@ -815,7 +819,7 @@ mod tests {
     #[test]
     fn test_extract_javadoc_from_simple_class() {
         let dir = tempfile::tempdir().unwrap();
-        let source = r#"package com.example;
+        let source = r"package com.example;
 
 /**
  * A simple utility class for string operations.
@@ -827,7 +831,7 @@ public class StringUtils {
         return s.trim();
     }
 }
-"#;
+";
         let (provider, jar_path) =
             setup_provider(&dir, &[("com/example/StringUtils.java", source)]);
 
@@ -841,7 +845,7 @@ public class StringUtils {
     #[test]
     fn test_extract_method_level_javadoc() {
         let dir = tempfile::tempdir().unwrap();
-        let source = r#"package com.example;
+        let source = r"package com.example;
 
 /**
  * String utilities.
@@ -857,7 +861,7 @@ public class StringUtils {
         return s.trim();
     }
 }
-"#;
+";
         let (provider, jar_path) =
             setup_provider(&dir, &[("com/example/StringUtils.java", source)]);
 
@@ -921,13 +925,13 @@ public class StringUtils {
     #[test]
     fn test_cache_hit_returns_same_result() {
         let dir = tempfile::tempdir().unwrap();
-        let source = r#"package com.example;
+        let source = r"package com.example;
 /**
  * Cached class docs.
  */
 public class Cached {
 }
-"#;
+";
         let (provider, jar_path) = setup_provider(&dir, &[("com/example/Cached.java", source)]);
 
         let first = provider.get_docs("com.example.Cached", &jar_path);
@@ -991,13 +995,13 @@ public class Cached {
     #[test]
     fn test_kotlin_extension_fallback() {
         let dir = tempfile::tempdir().unwrap();
-        let source = r#"package com.example
+        let source = r"package com.example
 
 /**
  * A Kotlin data class.
  */
 data class UserProfile(val name: String, val age: Int)
-"#;
+";
         let (provider, jar_path) = setup_provider(&dir, &[("com/example/UserProfile.kt", source)]);
 
         let docs = provider
@@ -1009,13 +1013,13 @@ data class UserProfile(val name: String, val age: Int)
     #[test]
     fn test_scala_extension_fallback() {
         let dir = tempfile::tempdir().unwrap();
-        let source = r#"package com.example
+        let source = r"package com.example
 
 /**
  * A Scala case class for configuration.
  */
 case class AppConfig(host: String, port: Int)
-"#;
+";
         // Scala uses the same /** */ doc comments.
         let (provider, jar_path) = setup_provider(&dir, &[("com/example/AppConfig.scala", source)]);
 
@@ -1188,7 +1192,7 @@ public final class OldUtils {
     #[test]
     fn test_interface_doc_extraction() {
         let dir = tempfile::tempdir().unwrap();
-        let source = r#"package com.example;
+        let source = r"package com.example;
 
 /**
  * A service interface for user management.
@@ -1196,7 +1200,7 @@ public final class OldUtils {
 public interface UserService {
     void createUser(String name);
 }
-"#;
+";
         let (provider, jar_path) =
             setup_provider(&dir, &[("com/example/UserService.java", source)]);
 
@@ -1209,7 +1213,7 @@ public interface UserService {
     #[test]
     fn test_enum_doc_extraction() {
         let dir = tempfile::tempdir().unwrap();
-        let source = r#"package com.example;
+        let source = r"package com.example;
 
 /**
  * Represents the status of an order.
@@ -1217,7 +1221,7 @@ public interface UserService {
 public enum OrderStatus {
     PENDING, SHIPPED, DELIVERED
 }
-"#;
+";
         let (provider, jar_path) =
             setup_provider(&dir, &[("com/example/OrderStatus.java", source)]);
 
@@ -1230,11 +1234,11 @@ public enum OrderStatus {
     #[test]
     fn test_no_doc_comment_returns_none() {
         let dir = tempfile::tempdir().unwrap();
-        let source = r#"package com.example;
+        let source = r"package com.example;
 
 public class NoDoc {
 }
-"#;
+";
         let (provider, jar_path) = setup_provider(&dir, &[("com/example/NoDoc.java", source)]);
 
         let result = provider.get_docs("com.example.NoDoc", &jar_path);
@@ -1244,7 +1248,7 @@ public class NoDoc {
     #[test]
     fn test_member_not_found_returns_none() {
         let dir = tempfile::tempdir().unwrap();
-        let source = r#"package com.example;
+        let source = r"package com.example;
 
 /**
  * A class.
@@ -1252,7 +1256,7 @@ public class NoDoc {
 public class MyClass {
     public void existingMethod() {}
 }
-"#;
+";
         let (provider, jar_path) = setup_provider(&dir, &[("com/example/MyClass.java", source)]);
 
         let result = provider.get_member_docs("com.example.MyClass", "nonExistent", &jar_path);
@@ -1288,6 +1292,7 @@ public class MyClass {
     }
 
     #[test]
+    #[allow(clippy::similar_names)] // Domain naming is intentional
     fn test_multiple_jars_mapping() {
         let dir = tempfile::tempdir().unwrap();
 
@@ -1335,7 +1340,7 @@ public class MyClass {
     #[test]
     fn test_field_member_docs() {
         let dir = tempfile::tempdir().unwrap();
-        let source = r#"package com.example;
+        let source = r"package com.example;
 
 public class Config {
     /**
@@ -1348,7 +1353,7 @@ public class Config {
      */
     private long timeout = 5000;
 }
-"#;
+";
         let (provider, jar_path) = setup_provider(&dir, &[("com/example/Config.java", source)]);
 
         let docs = provider

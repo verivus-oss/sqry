@@ -25,7 +25,7 @@ impl Profile {
         let filename = path
             .file_name()
             .and_then(|n| n.to_str())
-            .map(|n| n.to_ascii_lowercase())
+            .map(str::to_ascii_lowercase)
             .unwrap_or_default();
 
         match filename.as_str() {
@@ -39,6 +39,7 @@ impl Profile {
     ///
     /// `parent_key` is the immediate parent key name (if any).
     /// `depth` is the nesting level (0 = top-level, 1 = one level deep, etc.).
+    #[allow(clippy::trivially_copy_pass_by_ref)] // API consistency with profile interface
     pub(crate) fn node_kind_for(&self, parent_key: Option<&str>, depth: u32) -> NodeKind {
         match self {
             Self::NowUi => {
@@ -60,6 +61,7 @@ impl Profile {
     }
 
     /// Whether this node should get an `Imports` edge from the module.
+    #[allow(clippy::trivially_copy_pass_by_ref)] // API consistency with other methods
     pub(crate) fn needs_import_edge(&self, parent_key: Option<&str>, depth: u32) -> bool {
         matches!(self, Self::PackageJson)
             && depth == 1

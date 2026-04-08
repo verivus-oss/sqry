@@ -2,16 +2,19 @@
 //!
 //! Finds K shortest call paths between two symbols using BFS traversal.
 
-use std::collections::VecDeque;
 use std::path::Path;
 
 use anyhow::Result;
 use sqry_core::graph::unified::concurrent::GraphSnapshot;
 use sqry_core::graph::unified::edge::EdgeKind;
 use sqry_core::graph::unified::node::NodeId;
-use sqry_core::graph::unified::{FileScope, ResolutionMode, SymbolCandidateOutcome, SymbolQuery};
+use sqry_core::graph::unified::{
+    EdgeFilter, SccPathStrategy, SimplePathStrategy, TraversalConfig, TraversalDirection,
+    TraversalLimits, traverse,
+};
 use tower_lsp::lsp_types::{Location, Position, Range, Url};
 
+use crate::handlers::graph_common::find_nodes_by_name;
 use crate::protocol::{
     SqryCallPath, SqryPathStep, SqrySearchItem, SqryTracePathParams, SqryTracePathResult,
 };
@@ -140,19 +143,7 @@ pub fn execute(
     })
 }
 
-/// Find nodes by name (simple or qualified) in the graph.
-fn find_nodes_by_name(snapshot: &GraphSnapshot, name: &str) -> Vec<NodeId> {
-    match snapshot.find_symbol_candidates(&SymbolQuery {
-        symbol: name,
-        file_scope: FileScope::Any,
-        mode: ResolutionMode::AllowSuffixCandidates,
-    }) {
-        SymbolCandidateOutcome::Candidates(matches) => matches,
-        SymbolCandidateOutcome::NotFound | SymbolCandidateOutcome::FileNotIndexed => Vec::new(),
-    }
-}
-
-/// Find K shortest paths using BFS with path enumeration.
+/// Find K shortest paths using the kernel with `SimplePathStrategy`.
 fn find_k_shortest_paths(
     snapshot: &GraphSnapshot,
     from: NodeId,
@@ -162,78 +153,38 @@ fn find_k_shortest_paths(
     min_confidence: f64,
     allow_cross_language: bool,
 ) -> Option<Vec<Vec<NodeId>>> {
-    let mut paths = Vec::new();
-    let mut queue: VecDeque<(NodeId, Vec<NodeId>, usize)> = VecDeque::new();
-    queue.push_back((from, vec![from], 0));
+    let mut strategy = SimplePathStrategy::new(to, min_confidence, allow_cross_language);
 
-    while let Some((current, path, depth)) = queue.pop_front() {
-        if depth > max_hops {
-            continue;
-        }
+    let config = TraversalConfig {
+        direction: TraversalDirection::Outgoing,
+        edge_filter: EdgeFilter::calls_only(),
+        limits: TraversalLimits {
+            max_depth: u32::try_from(max_hops).unwrap_or(u32::MAX),
+            max_nodes: None,
+            max_edges: None,
+            max_paths: Some(max_paths),
+        },
+    };
 
-        if current == to {
-            paths.push(path.clone());
-            if paths.len() >= max_paths {
-                break;
-            }
-            continue;
-        }
+    let result = traverse(snapshot, &[from], &config, Some(&mut strategy));
 
-        // Explore outgoing call edges
-        let new_paths = explore_outgoing_edges(
-            snapshot,
-            current,
-            &path,
-            min_confidence,
-            allow_cross_language,
-        );
-        for (next, new_path) in new_paths {
-            queue.push_back((next, new_path, depth + 1));
-        }
-    }
+    // Convert index-based paths to NodeId-based paths
+    let paths: Vec<Vec<NodeId>> = result
+        .paths
+        .unwrap_or_default()
+        .into_iter()
+        .map(|index_path| {
+            index_path
+                .iter()
+                .map(|&idx| result.nodes[idx].node_id)
+                .collect()
+        })
+        .collect();
 
     if paths.is_empty() { None } else { Some(paths) }
 }
 
-/// Explore outgoing edges from a node and return valid next steps.
-///
-/// Returns a vector of (`next_node`, `extended_path`) pairs for edges that pass
-/// the confidence and cross-language filters.
-fn explore_outgoing_edges(
-    snapshot: &GraphSnapshot,
-    current: NodeId,
-    path: &[NodeId],
-    min_confidence: f64,
-    allow_cross_language: bool,
-) -> Vec<(NodeId, Vec<NodeId>)> {
-    let mut results = Vec::new();
-
-    for edge in snapshot.edges().edges_from(current) {
-        if !is_followable_edge(&edge.kind, min_confidence) {
-            continue;
-        }
-
-        let next = edge.target;
-
-        // Check cross-language constraint
-        if !allow_cross_language && !is_same_language(snapshot, current, next) {
-            continue;
-        }
-
-        // Avoid cycles
-        if path.contains(&next) {
-            continue;
-        }
-
-        let mut new_path = path.to_vec();
-        new_path.push(next);
-        results.push((next, new_path));
-    }
-
-    results
-}
-
-/// Parameters for path finding
+/// Parameters for path finding.
 struct PathFindParams<'a> {
     snapshot: &'a GraphSnapshot,
     scc_data: &'a sqry_core::graph::unified::analysis::SccData,
@@ -246,7 +197,7 @@ struct PathFindParams<'a> {
     allow_cross_language: bool,
 }
 
-/// Find `K` shortest paths with Pass 5 optimization.
+/// Find `K` shortest paths with SCC-pruned kernel strategy.
 ///
 /// Uses condensation DAG for pruning: skips branches that can't reach target.
 fn find_k_shortest_paths_optimized(params: &PathFindParams<'_>) -> Option<Vec<Vec<NodeId>>> {
@@ -261,99 +212,37 @@ fn find_k_shortest_paths_optimized(params: &PathFindParams<'_>) -> Option<Vec<Ve
         min_confidence,
         allow_cross_language,
     } = *params;
-    // Get SCCs for start and end nodes
-    let to_scc = scc_data.scc_of(to)?;
 
-    let mut paths = Vec::new();
-    let mut queue: VecDeque<(NodeId, Vec<NodeId>, usize)> = VecDeque::new();
-    queue.push_back((from, vec![from], 0));
+    let mut strategy =
+        SccPathStrategy::new(scc_data, cond_dag, to, min_confidence, allow_cross_language);
 
-    while let Some((current, path, depth)) = queue.pop_front() {
-        if depth > max_hops {
-            continue;
-        }
+    let config = TraversalConfig {
+        direction: TraversalDirection::Outgoing,
+        edge_filter: EdgeFilter::calls_only(),
+        limits: TraversalLimits {
+            max_depth: u32::try_from(max_hops).unwrap_or(u32::MAX),
+            max_nodes: None,
+            max_edges: None,
+            max_paths: Some(max_paths),
+        },
+    };
 
-        if current == to {
-            paths.push(path.clone());
-            if paths.len() >= max_paths {
-                break;
-            }
-            continue;
-        }
+    let result = traverse(snapshot, &[from], &config, Some(&mut strategy));
 
-        // Explore outgoing call edges with SCC pruning
-        let new_paths = explore_outgoing_edges_pruned(
-            snapshot,
-            current,
-            &path,
-            scc_data,
-            cond_dag,
-            to_scc,
-            min_confidence,
-            allow_cross_language,
-        );
-        for (next, new_path) in new_paths {
-            queue.push_back((next, new_path, depth + 1));
-        }
-    }
+    // Convert index-based paths to NodeId-based paths
+    let paths: Vec<Vec<NodeId>> = result
+        .paths
+        .unwrap_or_default()
+        .into_iter()
+        .map(|index_path| {
+            index_path
+                .iter()
+                .map(|&idx| result.nodes[idx].node_id)
+                .collect()
+        })
+        .collect();
 
     if paths.is_empty() { None } else { Some(paths) }
-}
-
-/// Explore outgoing edges with SCC-based pruning.
-///
-/// Returns a vector of (`next_node`, `extended_path`) pairs for edges that pass
-/// all filters including SCC reachability check.
-fn explore_outgoing_edges_pruned(
-    snapshot: &GraphSnapshot,
-    current: NodeId,
-    path: &[NodeId],
-    scc_data: &sqry_core::graph::unified::analysis::SccData,
-    cond_dag: &sqry_core::graph::unified::analysis::CondensationDag,
-    to_scc: u32,
-    min_confidence: f64,
-    allow_cross_language: bool,
-) -> Vec<(NodeId, Vec<NodeId>)> {
-    let mut results = Vec::new();
-
-    for edge in snapshot.edges().edges_from(current) {
-        if !is_followable_edge(&edge.kind, min_confidence) {
-            continue;
-        }
-
-        let next = edge.target;
-
-        // Pass 5 pruning: Skip if next can't reach target SCC
-        if let Some(next_scc) = scc_data.scc_of(next)
-            && !cond_dag.can_reach(next_scc, to_scc)
-        {
-            continue; // Prune this branch
-        }
-
-        // Check cross-language constraint
-        if !allow_cross_language && !is_same_language(snapshot, current, next) {
-            continue;
-        }
-
-        // Avoid cycles
-        if path.contains(&next) {
-            continue;
-        }
-
-        let mut new_path = path.to_vec();
-        new_path.push(next);
-        results.push((next, new_path));
-    }
-
-    results
-}
-
-/// Check if an edge is followable (is a call edge with sufficient confidence).
-fn is_followable_edge(kind: &EdgeKind, min_confidence: f64) -> bool {
-    if !matches!(kind, EdgeKind::Calls { .. }) {
-        return false;
-    }
-    edge_confidence(kind) >= min_confidence
 }
 
 /// Compute confidence score for an edge.
@@ -376,25 +265,6 @@ fn edge_confidence(kind: &EdgeKind) -> f64 {
         EdgeKind::References => 0.8,
         EdgeKind::Inherits | EdgeKind::Implements => 0.95,
         _ => 1.0,
-    }
-}
-
-/// Check if two nodes are in the same language.
-fn is_same_language(snapshot: &GraphSnapshot, a: NodeId, b: NodeId) -> bool {
-    let files = snapshot.files();
-    let a_entry = snapshot.get_node(a);
-    let b_entry = snapshot.get_node(b);
-
-    match (a_entry, b_entry) {
-        (Some(ae), Some(be)) => {
-            let a_lang = files.language_for_file(ae.file);
-            let b_lang = files.language_for_file(be.file);
-            match (a_lang, b_lang) {
-                (Some(al), Some(bl)) => al == bl,
-                _ => true, // Allow if language unknown
-            }
-        }
-        _ => true, // Allow if nodes not found
     }
 }
 
@@ -656,10 +526,11 @@ mod tests {
         assert!((c - 1.0).abs() < f64::EPSILON, "expected 1.0, got {c}");
     }
 
-    // ── is_followable_edge ───────────────────────────────────────────────────
+    // ── kernel is_followable_edge (re-exported) ────────────────────────────
 
     #[test]
-    fn is_followable_edge_sync_call_above_threshold() {
+    fn kernel_followable_sync_call_above_threshold() {
+        use sqry_core::graph::unified::is_followable_edge;
         let kind = EdgeKind::Calls {
             argument_count: 0,
             is_async: false,
@@ -669,22 +540,32 @@ mod tests {
     }
 
     #[test]
-    fn is_followable_edge_async_call_below_threshold() {
+    fn kernel_followable_async_call_below_threshold() {
+        use sqry_core::graph::unified::is_followable_edge;
         let kind = EdgeKind::Calls {
             argument_count: 0,
             is_async: true,
         };
-        // async confidence = 0.9; threshold 0.95 → not followable
-        assert!(!is_followable_edge(&kind, 0.95));
-        // threshold 0.9 → exactly followable
-        assert!(is_followable_edge(&kind, 0.9));
+        // Kernel assigns confidence 1.0 to all Calls (sync and async)
+        // so threshold 0.95 is still followable in the kernel model
+        assert!(is_followable_edge(&kind, 0.95));
+        assert!(is_followable_edge(&kind, 1.0));
     }
 
     #[test]
-    fn is_followable_edge_non_call_edge_not_followable() {
-        // References, Defines etc. are not Calls → not followable
-        assert!(!is_followable_edge(&EdgeKind::References, 0.0));
-        assert!(!is_followable_edge(&EdgeKind::Defines, 0.0));
+    fn kernel_followable_references_at_low_confidence() {
+        use sqry_core::graph::unified::is_followable_edge;
+        // References have confidence 0.7 in the kernel
+        assert!(is_followable_edge(&EdgeKind::References, 0.5));
+        assert!(!is_followable_edge(&EdgeKind::References, 0.8));
+    }
+
+    #[test]
+    fn kernel_followable_defines_at_low_confidence() {
+        use sqry_core::graph::unified::is_followable_edge;
+        // Defines falls into the "everything else: 0.3" bucket
+        assert!(is_followable_edge(&EdgeKind::Defines, 0.3));
+        assert!(!is_followable_edge(&EdgeKind::Defines, 0.5));
     }
 
     // ── calculate_path_score ─────────────────────────────────────────────────

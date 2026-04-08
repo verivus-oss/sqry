@@ -10,10 +10,11 @@ pub use relations::PerlGraphBuilder;
 
 use preprocess::preprocess_content;
 use sqry_core::ast::{Scope, ScopeId, link_nested_scopes};
-use sqry_core::plugin::error::{ParseError, ScopeError};
+use sqry_core::plugin::error::ScopeError;
 use sqry_core::plugin::{LanguageMetadata, LanguagePlugin};
+use std::borrow::Cow;
 use std::path::Path;
-use tree_sitter::{Language, Parser, Query, QueryCursor, StreamingIterator, Tree};
+use tree_sitter::{Language, Query, QueryCursor, StreamingIterator, Tree};
 
 const LANGUAGE_ID: &str = "perl";
 const LANGUAGE_NAME: &str = "Perl";
@@ -60,9 +61,8 @@ impl LanguagePlugin for PerlPlugin {
         tree_sitter_perl_sqry::language()
     }
 
-    fn parse_ast(&self, content: &[u8]) -> Result<Tree, ParseError> {
-        let processed = preprocess_content(content);
-        parse_processed(processed.as_ref())
+    fn preprocess<'a>(&self, content: &'a [u8]) -> Cow<'a, [u8]> {
+        preprocess_content(content)
     }
 
     fn extract_scopes(
@@ -71,7 +71,7 @@ impl LanguagePlugin for PerlPlugin {
         content: &[u8],
         file_path: &Path,
     ) -> Result<Vec<Scope>, ScopeError> {
-        let processed = preprocess_content(content);
+        let processed = self.preprocess(content);
         extract_perl_scopes(tree, processed.as_ref(), file_path)
     }
 
@@ -177,16 +177,6 @@ fn extract_perl_scopes(
     scopes.sort_by_key(|s| (s.start_line, s.start_column));
     link_nested_scopes(&mut scopes);
     Ok(scopes)
-}
-
-fn parse_processed(content: &[u8]) -> Result<Tree, ParseError> {
-    let mut parser = Parser::new();
-    parser
-        .set_language(&tree_sitter_perl_sqry::language())
-        .map_err(|err| ParseError::LanguageSetFailed(err.to_string()))?;
-    parser
-        .parse(content, None)
-        .ok_or(ParseError::TreeSitterFailed)
 }
 
 fn clean_identifier(raw: &str) -> String {

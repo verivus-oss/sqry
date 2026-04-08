@@ -1,7 +1,7 @@
-//! Tests for TypeOf and Reference edge creation from PHPDoc annotations
+//! Tests for `TypeOf` and Reference edge creation from `PHPDoc` annotations
 //!
-//! This test suite validates that TypeOf and Reference edges are correctly
-//! created from PHPDoc @param, @return, and @var annotations in PHP code.
+//! This test suite validates that `TypeOf` and Reference edges are correctly
+//! created from `PHPDoc` @param, @return, and @var annotations in PHP code.
 
 #[path = "support/mod.rs"]
 mod support;
@@ -28,14 +28,14 @@ fn parse_php(source: &str) -> tree_sitter::Tree {
 
 #[test]
 fn test_function_phpdoc_param_simple_type() {
-    let source = r#"<?php
+    let source = r"<?php
 /**
  * @param {string} $name
  */
 function greet($name) {
     echo $name;
 }
-"#;
+";
 
     let tree = parse_php(source);
     let file = unique_php_path("test");
@@ -56,14 +56,14 @@ function greet($name) {
 
 #[test]
 fn test_function_phpdoc_param_custom_type() {
-    let source = r#"<?php
+    let source = r"<?php
 /**
  * @param {User} $user
  */
 function processUser($user) {
     return $user->name;
 }
-"#;
+";
 
     let tree = parse_php(source);
     let file = unique_php_path("test");
@@ -84,14 +84,14 @@ function processUser($user) {
 
 #[test]
 fn test_function_phpdoc_param_union_type() {
-    let source = r#"<?php
+    let source = r"<?php
 /**
  * @param {string|int} $value
  */
 function processValue($value) {
     return $value;
 }
-"#;
+";
 
     let tree = parse_php(source);
     let file = unique_php_path("test");
@@ -112,7 +112,7 @@ function processValue($value) {
 
 #[test]
 fn test_function_phpdoc_param_array_type() {
-    let source = r#"<?php
+    let source = r"<?php
 /**
  * @param {User[]} $users
  */
@@ -121,7 +121,7 @@ function processUsers($users) {
         echo $user->name;
     }
 }
-"#;
+";
 
     let tree = parse_php(source);
     let file = unique_php_path("test");
@@ -142,7 +142,7 @@ function processUsers($users) {
 
 #[test]
 fn test_function_phpdoc_multiple_params() {
-    let source = r#"<?php
+    let source = r"<?php
 /**
  * @param {string} $firstName
  * @param {string} $lastName
@@ -151,7 +151,7 @@ fn test_function_phpdoc_multiple_params() {
 function createPerson($firstName, $lastName, $age) {
     return ['first' => $firstName, 'last' => $lastName, 'age' => $age];
 }
-"#;
+";
 
     let tree = parse_php(source);
     let file = unique_php_path("test");
@@ -204,14 +204,14 @@ function getName() {
 
 #[test]
 fn test_function_phpdoc_return_custom_type() {
-    let source = r#"<?php
+    let source = r"<?php
 /**
  * @return {User}
  */
 function getUser() {
     return new User();
 }
-"#;
+";
 
     let tree = parse_php(source);
     let file = unique_php_path("test");
@@ -232,14 +232,14 @@ function getUser() {
 
 #[test]
 fn test_function_phpdoc_return_union_type() {
-    let source = r#"<?php
+    let source = r"<?php
 /**
  * @return {User|Admin|Guest}
  */
 function getUser() {
     return null;
 }
-"#;
+";
 
     let tree = parse_php(source);
     let file = unique_php_path("test");
@@ -264,14 +264,14 @@ function getUser() {
 
 #[test]
 fn test_property_phpdoc_var_type() {
-    let source = r#"<?php
+    let source = r"<?php
 class User {
     /**
      * @var {string}
      */
     private $name;
 }
-"#;
+";
 
     let tree = parse_php(source);
     let file = unique_php_path("test");
@@ -291,14 +291,14 @@ class User {
 
 #[test]
 fn test_property_phpdoc_var_custom_type() {
-    let source = r#"<?php
+    let source = r"<?php
 class Repository {
     /**
      * @var {UserService}
      */
     private $userService;
 }
-"#;
+";
 
     let tree = parse_php(source);
     let file = unique_php_path("test");
@@ -319,14 +319,14 @@ class Repository {
 
 #[test]
 fn test_property_phpdoc_var_array_type() {
-    let source = r#"<?php
+    let source = r"<?php
 class Database {
     /**
      * @var {Connection[]}
      */
     private $connections = [];
 }
-"#;
+";
 
     let tree = parse_php(source);
     let file = unique_php_path("test");
@@ -351,7 +351,7 @@ class Database {
 
 #[test]
 fn test_method_phpdoc_param() {
-    let source = r#"<?php
+    let source = r"<?php
 class UserService {
     /**
      * @param {User} $user
@@ -360,7 +360,7 @@ class UserService {
         return $user->id;
     }
 }
-"#;
+";
 
     let tree = parse_php(source);
     let file = unique_php_path("test");
@@ -381,7 +381,7 @@ class UserService {
 
 #[test]
 fn test_method_phpdoc_return() {
-    let source = r#"<?php
+    let source = r"<?php
 class UserService {
     /**
      * @return {User}
@@ -390,7 +390,7 @@ class UserService {
         return new User();
     }
 }
-"#;
+";
 
     let tree = parse_php(source);
     let file = unique_php_path("test");
@@ -411,7 +411,7 @@ class UserService {
 
 #[test]
 fn test_method_phpdoc_param_and_return() {
-    let source = r#"<?php
+    let source = r"<?php
 class Mapper {
     /**
      * @param {Data} $data
@@ -421,7 +421,7 @@ class Mapper {
         return new Model($data);
     }
 }
-"#;
+";
 
     let tree = parse_php(source);
     let file = unique_php_path("test");
@@ -446,11 +446,11 @@ class Mapper {
 
 #[test]
 fn test_no_phpdoc_no_typeof_edges() {
-    let source = r#"<?php
+    let source = r"<?php
 function noDocumentation($param) {
     return $param;
 }
-"#;
+";
 
     let tree = parse_php(source);
     let file = unique_php_path("test");
@@ -469,7 +469,7 @@ function noDocumentation($param) {
 
 #[test]
 fn test_malformed_phpdoc_no_crash() {
-    let source = r#"<?php
+    let source = r"<?php
 /**
  * This is a malformed comment
  * (no @param or @return tags)
@@ -477,7 +477,7 @@ fn test_malformed_phpdoc_no_crash() {
 function test($param) {
     return $param;
 }
-"#;
+";
 
     let tree = parse_php(source);
     let file = unique_php_path("test");
@@ -501,7 +501,7 @@ function test($param) {
 
 #[test]
 fn test_complex_class_with_phpdoc_edges() {
-    let source = r#"<?php
+    let source = r"<?php
 class UserRepository {
     /**
      * @param {User} $user
@@ -524,7 +524,7 @@ class UserRepository {
      */
     private $connection;
 }
-"#;
+";
 
     let tree = parse_php(source);
     let file = unique_php_path("test");
@@ -551,7 +551,7 @@ class UserRepository {
 
 #[test]
 fn test_phpdoc_with_namespaced_types() {
-    let source = r#"<?php
+    let source = r"<?php
 namespace App\Services;
 
 /**
@@ -561,7 +561,7 @@ namespace App\Services;
 function processUser($user) {
     return new Result();
 }
-"#;
+";
 
     let tree = parse_php(source);
     let file = unique_php_path("test");
@@ -588,7 +588,7 @@ function processUser($user) {
 
 #[test]
 fn test_phpdoc_nullable_types() {
-    let source = r#"<?php
+    let source = r"<?php
 /**
  * @param {?User} $user
  * @return {?string}
@@ -596,7 +596,7 @@ fn test_phpdoc_nullable_types() {
 function process($user) {
     return null;
 }
-"#;
+";
 
     let tree = parse_php(source);
     let file = unique_php_path("test");

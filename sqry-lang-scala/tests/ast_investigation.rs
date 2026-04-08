@@ -31,9 +31,9 @@ fn print_ast(node: tree_sitter::Node, content: &[u8], indent: usize) {
 #[test]
 #[ignore = "AST investigation - run manually"]
 fn investigate_case_class_constructor() {
-    let source = r#"
+    let source = r"
 case class User(name: String, age: Int, email: String)
-"#;
+";
 
     let tree = parse_scala(source);
     println!("\n=== CASE CLASS CONSTRUCTOR AST ===");
@@ -43,11 +43,11 @@ case class User(name: String, age: Int, email: String)
 #[test]
 #[ignore = "AST investigation - run manually"]
 fn investigate_function_type() {
-    let source = r#"
+    let source = r"
 class Handler {
   val callback: (String, Int) => Boolean = null
 }
-"#;
+";
 
     let tree = parse_scala(source);
     println!("\n=== FUNCTION TYPE AST ===");
@@ -57,9 +57,9 @@ class Handler {
 #[test]
 #[ignore = "AST investigation - run manually"]
 fn investigate_simple_function_params() {
-    let source = r#"
+    let source = r"
 def greet(name: String): Unit = println(name)
-"#;
+";
 
     let tree = parse_scala(source);
     println!("\n=== SIMPLE FUNCTION PARAMS AST ===");

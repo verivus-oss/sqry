@@ -60,13 +60,13 @@ fn debug_function_name_query() {
     use streaming_iterator::StreamingIterator;
     use tree_sitter::{Query, QueryCursor};
 
-    let sql = r#"
+    let sql = r"
         CREATE FUNCTION public.calculate_total(order_id INT)
         RETURNS DECIMAL(10,2)
         AS $$
             SELECT SUM(amount) FROM order_items WHERE order_id = $1;
         $$ LANGUAGE sql;
-    "#;
+    ";
 
     let tree = parse_sql(sql);
 
@@ -86,7 +86,7 @@ fn debug_function_name_query() {
     let mut matches = cursor.matches(&query, tree.root_node(), sql.as_bytes());
 
     eprintln!("AST: {}", tree.root_node().to_sexp());
-    eprintln!("\nCapture names: {:?}", capture_names);
+    eprintln!("\nCapture names: {capture_names:?}");
     eprintln!("\nMatches:");
 
     let mut match_count = 0;
@@ -99,7 +99,7 @@ fn debug_function_name_query() {
                 .node
                 .utf8_text(sql.as_bytes())
                 .unwrap_or("<invalid>");
-            eprintln!("    {}: '{}'", name, text);
+            eprintln!("    {name}: '{text}'");
         }
     }
 
@@ -111,12 +111,12 @@ fn debug_graph_builder_staging() {
     use sqry_core::graph::{GraphBuilder, unified::StagingGraph};
     use sqry_lang_sql::relations::SqlGraphBuilder;
 
-    let sql = r#"
+    let sql = r"
         CREATE FUNCTION calculate_total()
         RETURNS INT AS $$
             SELECT SUM(amount) FROM orders;
         $$ LANGUAGE sql;
-    "#;
+    ";
 
     let tree = parse_sql(sql);
     let mut staging = StagingGraph::new();
@@ -134,7 +134,7 @@ fn debug_graph_builder_staging() {
     // Check what operations were staged
     eprintln!("Staging operations: {}", staging.operations().len());
     for (i, op) in staging.operations().iter().enumerate() {
-        eprintln!("  Op {}: {:?}", i, op);
+        eprintln!("  Op {i}: {op:?}");
     }
 
     assert!(

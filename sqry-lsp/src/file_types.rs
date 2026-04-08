@@ -393,6 +393,8 @@ mod tests {
         for name in binaries {
             let category = classify_file(Path::new(name));
             // SVG is an exception - it's text-based XML
+            #[allow(clippy::case_sensitive_file_extension_comparisons)]
+            // File type detection handles case in logic
             if name.ends_with(".svg") {
                 assert_eq!(
                     category,

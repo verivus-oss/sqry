@@ -1062,7 +1062,7 @@ module {
     use sqry_core::graph::unified::edge::kind::TypeOfContext;
     use sqry_core::graph::unified::node::NodeKind;
 
-    /// Helper to extract TypeOf edges from staging operations
+    /// Helper to extract `TypeOf` edges from staging operations
     fn extract_typeof_edges(staging: &StagingGraph) -> Vec<&UnifiedEdgeKind> {
         staging
             .operations()
@@ -1078,7 +1078,7 @@ module {
             .collect()
     }
 
-    /// Helper to extract TypeOf edge details: (source_name, target_name, context)
+    /// Helper to extract `TypeOf` edge details: (`source_name`, `target_name`, context)
     fn extract_typeof_edge_details(
         staging: &StagingGraph,
     ) -> Vec<(String, String, Option<TypeOfContext>)> {
@@ -1246,6 +1246,7 @@ resource "aws_instance" "web" {
     }
 
     #[test]
+    #[allow(clippy::items_after_statements)] // Items near usage for clarity
     fn test_data_source_creates_typeof_edge() {
         let source = r#"
 data "aws_ami" "ubuntu" {

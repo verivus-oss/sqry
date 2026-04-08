@@ -84,7 +84,7 @@ const val API_VERSION = "1.0.0"
 fn cli_kotlin_exports_objects_and_interfaces() {
     let project = TempDir::new().unwrap();
 
-    let kotlin_code = r#"
+    let kotlin_code = r"
 package com.example.data
 
 interface Repository<T> {
@@ -110,7 +110,7 @@ class UserRepository : Repository<User> {
 
 data class User(val id: Int, val name: String)
 class Connection
-"#;
+";
     std::fs::write(project.path().join("Repository.kt"), kotlin_code).unwrap();
 
     Command::new(sqry_bin())
@@ -369,7 +369,7 @@ fun main() = runBlocking {
 fn cli_kotlin_private_functions() {
     let project = TempDir::new().unwrap();
 
-    let kotlin_code = r#"
+    let kotlin_code = r"
 class Service {
     fun execute() {
         validate()
@@ -379,7 +379,7 @@ class Service {
         // private function
     }
 }
-"#;
+";
     std::fs::write(project.path().join("Service.kt"), kotlin_code).unwrap();
 
     Command::new(sqry_bin())

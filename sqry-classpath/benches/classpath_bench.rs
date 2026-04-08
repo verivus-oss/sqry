@@ -172,7 +172,7 @@ fn bench_class_parsing(c: &mut Criterion) {
     let class_bytes = generate_test_class("com/example/BenchClass");
 
     c.bench_function("parse_single_class", |b| {
-        b.iter(|| parse_class(std::hint::black_box(&class_bytes)))
+        b.iter(|| parse_class(std::hint::black_box(&class_bytes)));
     });
 }
 
@@ -186,13 +186,13 @@ fn bench_generic_signatures(c: &mut Criterion) {
     // Simple non-generic class: just `Ljava/lang/Object;`
     let simple = "Ljava/lang/Object;";
     group.bench_with_input(BenchmarkId::new("class", "simple"), &simple, |b, sig| {
-        b.iter(|| parse_class_signature(std::hint::black_box(sig)))
+        b.iter(|| parse_class_signature(std::hint::black_box(sig)));
     });
 
     // HashMap-style: two type parameters, parameterized superclass + interface
     let hashmap = "<K:Ljava/lang/Object;V:Ljava/lang/Object;>Ljava/util/AbstractMap<TK;TV;>;Ljava/util/Map<TK;TV;>;";
     group.bench_with_input(BenchmarkId::new("class", "hashmap"), &hashmap, |b, sig| {
-        b.iter(|| parse_class_signature(std::hint::black_box(sig)))
+        b.iter(|| parse_class_signature(std::hint::black_box(sig)));
     });
 
     // Recursive bound: `<T extends Comparable<T>>`
@@ -236,7 +236,7 @@ fn bench_jar_scanning(c: &mut Criterion) {
     for &count in &[10, 50, 100, 500] {
         let (_dir, jar_path) = generate_test_jar(count);
         group.bench_with_input(BenchmarkId::new("classes", count), &jar_path, |b, path| {
-            b.iter(|| scan_jar(std::hint::black_box(path)))
+            b.iter(|| scan_jar(std::hint::black_box(path)));
         });
     }
 
@@ -253,7 +253,7 @@ fn bench_index_build(c: &mut Criterion) {
     for &count in &[100, 1_000, 5_000] {
         let stubs = generate_test_stubs(count);
         group.bench_with_input(BenchmarkId::new("stubs", count), &stubs, |b, input| {
-            b.iter(|| ClasspathIndex::build(std::hint::black_box(input.clone())))
+            b.iter(|| ClasspathIndex::build(std::hint::black_box(input.clone())));
         });
     }
 
@@ -273,17 +273,17 @@ fn bench_index_lookup(c: &mut Criterion) {
     // FQN lookup (binary search) — hit
     let target_fqn = class_fqn(5, 2_500);
     group.bench_function("fqn_hit", |b| {
-        b.iter(|| index.lookup_fqn(std::hint::black_box(&target_fqn)))
+        b.iter(|| index.lookup_fqn(std::hint::black_box(&target_fqn)));
     });
 
     // FQN lookup — miss
     group.bench_function("fqn_miss", |b| {
-        b.iter(|| index.lookup_fqn(std::hint::black_box("com.nonexistent.Missing")))
+        b.iter(|| index.lookup_fqn(std::hint::black_box("com.nonexistent.Missing")));
     });
 
     // Package lookup
     group.bench_function("package", |b| {
-        b.iter(|| index.lookup_package(std::hint::black_box("com.example.pkg3")))
+        b.iter(|| index.lookup_package(std::hint::black_box("com.example.pkg3")));
     });
 
     group.finish();
@@ -339,7 +339,7 @@ fn bench_stub_cache_write(c: &mut Criterion) {
             BenchmarkId::new("cache_write", count),
             &(&cache, &jar_path, &stubs),
             |b, (cache, path, stubs)| {
-                b.iter(|| cache.put(std::hint::black_box(path), std::hint::black_box(stubs)))
+                b.iter(|| cache.put(std::hint::black_box(path), std::hint::black_box(stubs)));
             },
         );
     }
@@ -363,7 +363,7 @@ fn bench_index_persistence(c: &mut Criterion) {
 
     // Save benchmark.
     group.bench_function("save_5000", |b| {
-        b.iter(|| index.save(std::hint::black_box(&index_path)))
+        b.iter(|| index.save(std::hint::black_box(&index_path)));
     });
 
     // Save once so we can benchmark load.
@@ -371,7 +371,7 @@ fn bench_index_persistence(c: &mut Criterion) {
 
     // Load benchmark.
     group.bench_function("load_5000", |b| {
-        b.iter(|| ClasspathIndex::load(std::hint::black_box(&index_path)))
+        b.iter(|| ClasspathIndex::load(std::hint::black_box(&index_path)));
     });
 
     group.finish();

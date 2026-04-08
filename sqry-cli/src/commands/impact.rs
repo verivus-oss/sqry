@@ -8,9 +8,12 @@ use crate::index_discovery::find_nearest_index;
 use crate::output::OutputStreams;
 use anyhow::{Context, Result, anyhow};
 use serde::Serialize;
-use sqry_core::graph::unified::edge::EdgeKind;
 use sqry_core::graph::unified::node::NodeId;
-use std::collections::{HashMap, HashSet, VecDeque};
+use sqry_core::graph::unified::traversal::EdgeClassification;
+use sqry_core::graph::unified::{
+    EdgeFilter, TraversalConfig, TraversalDirection, TraversalLimits, traverse,
+};
+use std::collections::{HashMap, HashSet};
 
 /// Impact analysis output
 #[derive(Debug, Serialize)]
@@ -61,59 +64,88 @@ struct BfsResult {
 
 /// Perform BFS to collect all reverse dependents of a target node.
 ///
-/// Traverses incoming edges (callers, importers, references, inheritors, implementors)
-/// up to `effective_max_depth` levels deep.
+/// Uses the traversal kernel with incoming direction and dependency edges
+/// (calls, imports, references, inheritance). Converts the kernel's
+/// `TraversalResult` into the `BfsResult` expected by downstream code.
 fn collect_dependents_bfs(
     graph: &sqry_core::graph::unified::concurrent::CodeGraph,
     target_node_id: NodeId,
     effective_max_depth: usize,
 ) -> BfsResult {
+    let snapshot = graph.snapshot();
+
+    let config = TraversalConfig {
+        direction: TraversalDirection::Incoming,
+        edge_filter: EdgeFilter::dependency_edges(),
+        limits: TraversalLimits {
+            max_depth: u32::try_from(effective_max_depth).unwrap_or(u32::MAX),
+            max_nodes: None,
+            max_edges: None,
+            max_paths: None,
+        },
+    };
+
+    let result = traverse(&snapshot, &[target_node_id], &config, None);
+
     let mut visited: HashSet<NodeId> = HashSet::new();
     let mut node_depths: HashMap<NodeId, usize> = HashMap::new();
     let mut node_relations: HashMap<NodeId, String> = HashMap::new();
-    let mut queue: VecDeque<(NodeId, usize)> = VecDeque::new();
+    let mut actual_max_depth: usize = 0;
 
-    visited.insert(target_node_id);
-    node_depths.insert(target_node_id, 0);
-    queue.push_back((target_node_id, 0));
-
-    let mut actual_max_depth = 0;
-
-    while let Some((node_id, depth)) = queue.pop_front() {
-        if depth >= effective_max_depth {
+    for (idx, mat_node) in result.nodes.iter().enumerate() {
+        // Skip the target node itself — we only want dependents
+        if mat_node.node_id == target_node_id {
             continue;
         }
 
+        visited.insert(mat_node.node_id);
+
+        // Find the minimum depth edge leading to this node to determine its depth
+        let depth = result
+            .edges
+            .iter()
+            .filter(|e| e.source_idx == idx || e.target_idx == idx)
+            .map(|e| e.depth as usize)
+            .min()
+            .unwrap_or(1);
+
+        node_depths.insert(mat_node.node_id, depth);
         actual_max_depth = actual_max_depth.max(depth);
 
-        // Find all nodes that depend on this node (incoming edges = callers/importers)
-        for edge_ref in graph.edges().edges_to(node_id) {
-            let relation = match &edge_ref.kind {
-                EdgeKind::Calls { .. } => "calls",
-                EdgeKind::Imports { .. } => "imports",
-                EdgeKind::References => "references",
-                EdgeKind::Inherits => "inherits",
-                EdgeKind::Implements => "implements",
-                _ => continue, // Skip non-dependency edges
-            };
+        // Determine relation type from the first edge classification reaching this node
+        let relation = result
+            .edges
+            .iter()
+            .find(|e| e.source_idx == idx || e.target_idx == idx)
+            .map(|e| classify_relation(&e.classification))
+            .unwrap_or_default();
 
-            if !visited.contains(&edge_ref.source) {
-                visited.insert(edge_ref.source);
-                node_depths.insert(edge_ref.source, depth + 1);
-                node_relations.insert(edge_ref.source, relation.to_string());
-                queue.push_back((edge_ref.source, depth + 1));
-            }
-        }
+        node_relations.insert(mat_node.node_id, relation);
     }
-
-    // Remove target from visited (we only want dependents)
-    visited.remove(&target_node_id);
 
     BfsResult {
         visited,
         node_depths,
         node_relations,
         max_depth_reached: actual_max_depth,
+    }
+}
+
+/// Map an `EdgeClassification` to a human-readable relation label.
+#[allow(clippy::trivially_copy_pass_by_ref)] // API consistency with other command handlers
+fn classify_relation(classification: &EdgeClassification) -> String {
+    match classification {
+        EdgeClassification::Call { .. } => "calls".to_string(),
+        EdgeClassification::Import { .. } => "imports".to_string(),
+        EdgeClassification::Reference => "references".to_string(),
+        EdgeClassification::Inherits => "inherits".to_string(),
+        EdgeClassification::Implements => "implements".to_string(),
+        EdgeClassification::Export { .. } => "exports".to_string(),
+        EdgeClassification::Contains => "contains".to_string(),
+        EdgeClassification::Defines => "defines".to_string(),
+        EdgeClassification::TypeOf => "type_of".to_string(),
+        EdgeClassification::DatabaseAccess => "database_access".to_string(),
+        EdgeClassification::ServiceInteraction => "service_interaction".to_string(),
     }
 }
 

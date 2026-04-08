@@ -17,6 +17,9 @@
 //! We only read the specific field numbers defined in `kotlin.metadata.jvm.proto`
 //! and skip everything else, making this forward-compatible with new fields.
 
+// Kotlin protobuf metadata indices fit in u32; casts are intentional
+#![allow(clippy::cast_possible_truncation)]
+
 use crate::stub::model::KotlinMetadataStub;
 
 // ---------------------------------------------------------------------------
@@ -132,7 +135,9 @@ const TYPE_CLASS_NAME: u32 = 6;
 
 /// Extract visibility from a flags varint (bits 3-5, zero-indexed).
 fn extract_visibility(flags: u64) -> KotlinVisibility {
+    #[allow(clippy::match_same_arms)] // Arms separated for documentation clarity
     match (flags >> 3) & 0x7 {
+        #[allow(clippy::match_same_arms)] // Kotlin metadata flag arms separated by semantic meaning
         0 => KotlinVisibility::Internal,
         1 => KotlinVisibility::Private,
         2 => KotlinVisibility::Protected,
@@ -149,6 +154,7 @@ fn extract_modality(flags: u64) -> u8 {
 }
 
 /// Extract class kind from a flags varint (bits 9-11, zero-indexed).
+#[allow(clippy::match_same_arms)] // Arms separated for documentation clarity
 fn extract_class_kind(flags: u64) -> KotlinClassKind {
     match (flags >> 9) & 0x7 {
         0 => KotlinClassKind::Class,
@@ -524,6 +530,7 @@ fn decode_class_message(data: &[u8], string_table: &[String]) -> Option<KotlinCl
 ///
 /// This function never panics. Malformed protobuf data, unsupported metadata
 /// versions, and out-of-bounds string table references all result in `None`.
+#[must_use]
 pub fn decode_kotlin_metadata(stub: &KotlinMetadataStub) -> Option<KotlinClassMetadata> {
     // Only kind=1 (Class) is supported in Tier 1.
     if stub.kind != 1 {
@@ -679,10 +686,12 @@ mod tests {
         buf
     }
 
+    #[allow(clippy::needless_continue)] // Continue at end of loop for clarity
     /// Create a `KotlinMetadataStub` from raw d1 bytes and a string table.
     ///
     /// Uses Latin-1 encoding (byte → char code point) to match how Kotlin
     /// stores protobuf bytes in JVM string constants.
+    #[allow(clippy::needless_pass_by_value)] // Convenience for callers
     fn make_stub(d1_bytes: Vec<u8>, string_table: Vec<&str>) -> KotlinMetadataStub {
         let d1_string: String = d1_bytes.iter().map(|&b| b as char).collect();
         KotlinMetadataStub {

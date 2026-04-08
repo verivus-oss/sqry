@@ -183,6 +183,10 @@ impl ExpandCache {
     /// Returns `true` if the cache entry exists and its source hash matches
     /// the provided current hash. Returns `false` if the entry is stale or
     /// does not exist.
+    ///
+    /// # Errors
+    ///
+    /// Returns an `io::Error` if reading the cache file fails.
     pub fn is_fresh(&self, crate_hash: &str, current_source_hash: &str) -> io::Result<bool> {
         match self.read(crate_hash)? {
             Some(entry) => Ok(entry.source_hash == current_source_hash),
@@ -275,10 +279,8 @@ fn validate_and_warn(name: &str, file_path: &str) -> bool {
         true
     } else {
         log::warn!(
-            "Rejecting invalid symbol name '{}' from expand cache for '{}' \
-             (possible cache poisoning)",
-            name,
-            file_path
+            "Rejecting invalid symbol name '{name}' from expand cache for '{file_path}' \
+             (possible cache poisoning)"
         );
         false
     }

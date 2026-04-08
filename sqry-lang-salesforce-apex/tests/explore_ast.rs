@@ -2,7 +2,7 @@
 
 #[test]
 fn explore_interface_enum_ast() {
-    let code = r#"
+    let code = r"
 public interface Payable {
     Decimal calculatePayment();
 }
@@ -17,13 +17,14 @@ public class Invoice extends BaseInvoice implements Payable {
         return 100.0;
     }
 }
-"#;
+";
 
     let mut parser = tree_sitter::Parser::new();
     let language: tree_sitter::Language = tree_sitter_sfapex::apex::LANGUAGE.into();
     parser.set_language(&language).unwrap();
     let tree = parser.parse(code.as_bytes(), None).unwrap();
 
+    #[allow(clippy::items_after_statements)] // Const defined near usage for clarity
     fn print_node(node: tree_sitter::Node, content: &[u8], indent: usize) {
         let text = node.utf8_text(content).unwrap_or("");
         let preview = if text.len() > 60 {

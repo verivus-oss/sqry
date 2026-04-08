@@ -215,8 +215,7 @@ export default {
     let import_count = count_import_edges(&staging);
     assert!(
         import_count >= 1,
-        "Expected at least 1 import edge for vue, got {}",
-        import_count
+        "Expected at least 1 import edge for vue, got {import_count}"
     );
 }
 
@@ -293,8 +292,7 @@ export default {
     let import_count = count_import_edges(&staging);
     assert!(
         import_count >= 1,
-        "Expected at least 1 import edge, got {}",
-        import_count
+        "Expected at least 1 import edge, got {import_count}"
     );
 }
 

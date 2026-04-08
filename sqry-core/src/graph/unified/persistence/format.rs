@@ -17,7 +17,7 @@ use super::manifest::ConfigProvenance;
 /// - V4: Migrated to postcard serialization with length-prefixed framing
 /// - V5: Added `HttpMethod::All` variant for wildcard endpoint matching
 /// - V6: Added `NodeMetadataStore` for macro boundary analysis + `CfgGate` edge kind
-/// - V7: Added classpath NodeKind/EdgeKind variants, NodeMetadata enum, FileEntry.is_external
+/// - V7: Added classpath NodeKind/EdgeKind variants, `NodeMetadata` enum, `FileEntry.is_external`
 pub const MAGIC_BYTES: &[u8; 13] = b"SQRY_GRAPH_V7";
 
 /// Current format version
@@ -254,7 +254,7 @@ mod tests {
     #[test]
     fn test_graph_header_debug() {
         let header = GraphHeader::new(100, 50, 200, 10);
-        let debug_str = format!("{:?}", header);
+        let debug_str = format!("{header:?}");
 
         assert!(debug_str.contains("GraphHeader"));
         assert!(debug_str.contains("version"));

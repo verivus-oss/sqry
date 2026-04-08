@@ -24,6 +24,7 @@ pub mod document_symbol;
 pub mod execute_command;
 pub mod explain_symbol;
 pub mod get_insights;
+pub mod graph_common;
 pub mod graph_export;
 pub mod graph_stats;
 pub mod hierarchical_search;

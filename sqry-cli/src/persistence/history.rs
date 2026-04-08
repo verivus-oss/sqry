@@ -736,7 +736,7 @@ mod tests {
         assert_eq!(parse_duration("5m").unwrap(), Duration::from_secs(300));
         assert_eq!(parse_duration("2h").unwrap(), Duration::from_secs(7200));
         assert_eq!(parse_duration("1d").unwrap(), Duration::from_secs(86400));
-        assert_eq!(parse_duration("1w").unwrap(), Duration::from_secs(604800));
+        assert_eq!(parse_duration("1w").unwrap(), Duration::from_secs(604_800));
 
         assert!(parse_duration("").is_err());
         assert!(parse_duration("abc").is_err());

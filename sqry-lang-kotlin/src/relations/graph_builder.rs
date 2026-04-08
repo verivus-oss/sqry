@@ -1952,8 +1952,11 @@ fn kotlin_type_to_jvm_descriptor(kotlin_type: &str) -> String {
     }
 
     // Handle non-nullable primitives
+    #[allow(clippy::match_same_arms)] // Arms separated for documentation clarity
     match base_type {
         // Signed primitives - map to JVM primitive descriptors
+        #[allow(clippy::match_same_arms)]
+        // Arms separated by AST node type for documentation clarity
         "Int" => "I".to_string(),
         "Double" => "D".to_string(),
         "Float" => "F".to_string(),
@@ -2016,7 +2019,7 @@ fn kotlin_type_to_jvm_descriptor(kotlin_type: &str) -> String {
             } else {
                 // Unqualified reference type - could be kotlin.* or user type
                 // For safety, use kotlin package as default
-                format!("Lkotlin/{};", base_type)
+                format!("Lkotlin/{base_type};")
             }
         }
     }
@@ -2134,10 +2137,13 @@ fn generate_jvm_signature(func_node: Node, content: &[u8]) -> String {
 /// @CName("c_function")
 /// external fun cFunction(x: Int): Int
 /// ```
+#[allow(clippy::similar_names)] // Domain variable naming is intentional
 fn build_jni_external_function_edge(
     context: &CallContext,
     helper: &mut GraphBuildHelper,
     func_node: Node,
+    #[allow(clippy::similar_names)] // Domain variable naming is intentional
+    #[allow(clippy::similar_names)] // AST node variables
     content: &[u8],
 ) {
     use sqry_core::graph::unified::edge::FfiConvention;
@@ -2292,6 +2298,7 @@ fn handle_identifier_for_reference(
 }
 
 /// Check if the identifier node is in a declaration context (not a usage).
+#[allow(clippy::match_same_arms)] // Arms separated for documentation clarity
 fn is_declaration_context(node: Node) -> bool {
     let Some(parent) = node.parent() else {
         return false;
@@ -2345,7 +2352,7 @@ fn is_declaration_context(node: Node) -> bool {
                     return child.id() == node.id();
                 }
                 if child.kind() == "modifiers" || child.kind() == "val" || child.kind() == "var" {
-                    continue;
+                    // Skip modifier keywords in property declarations
                 }
             }
             false
@@ -2801,7 +2808,7 @@ mod tests {
     #[test]
     fn test_class_with_multiple_supertypes() {
         // class Foo : Parent(), IClickable, Runnable should create 1 Inherits + 2 Implements
-        let source = r#"
+        let source = r"
             open class Parent
             interface IClickable { fun click() }
             interface Runnable { fun run() }
@@ -2810,7 +2817,7 @@ mod tests {
                 override fun click() { }
                 override fun run() { }
             }
-        "#;
+        ";
         let tree = parse_kotlin(source);
         let mut staging = StagingGraph::new();
         let builder = KotlinGraphBuilder::new();
@@ -2983,11 +2990,11 @@ mod tests {
     #[test]
     fn test_multiple_imports_create_multiple_edges() {
         // Multiple imports should create multiple Import edges
-        let source = r#"
+        let source = r"
 import kotlin.collections.List
 import java.util.HashMap
 import javax.swing.*
-"#;
+";
         let tree = parse_kotlin(source);
         let mut staging = StagingGraph::new();
         let builder = KotlinGraphBuilder::new();
@@ -3077,12 +3084,12 @@ class UserController {
     #[test]
     fn test_kotlin_standard_library_imports() {
         // Test common Kotlin standard library import patterns
-        let source = r#"
+        let source = r"
 import kotlin.collections.mutableListOf
 import kotlin.text.StringBuilder
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.*
-"#;
+";
         let tree = parse_kotlin(source);
         let mut staging = StagingGraph::new();
         let builder = KotlinGraphBuilder::new();
@@ -3104,12 +3111,12 @@ import kotlinx.coroutines.flow.*
     #[test]
     fn test_android_imports() {
         // Test Android-specific import patterns
-        let source = r#"
+        let source = r"
 import android.app.Activity
 import android.os.Bundle
 import android.view.View as V
 import android.widget.*
-"#;
+";
         let tree = parse_kotlin(source);
         let mut staging = StagingGraph::new();
         let builder = KotlinGraphBuilder::new();
@@ -3186,12 +3193,12 @@ import android.widget.*
     #[test]
     fn test_import_does_not_affect_class_processing() {
         // Verify that import processing doesn't interfere with class/OOP processing
-        let source = r#"
+        let source = r"
 import com.example.BaseClass
 
 open class Parent
 class Child : Parent()
-"#;
+";
         let tree = parse_kotlin(source);
         let mut staging = StagingGraph::new();
         let builder = KotlinGraphBuilder::new();
@@ -3242,13 +3249,13 @@ class Child : Parent()
     #[test]
     fn test_mixed_import_styles() {
         // Test file with all import styles together
-        let source = r#"
+        let source = r"
 import kotlin.io.path.Path
 import kotlin.io.path.pathString as ps
 import kotlin.collections.*
 import kotlinx.coroutines.flow.Flow as F
 import java.util.*
-"#;
+";
         let tree = parse_kotlin(source);
         let mut staging = StagingGraph::new();
         let builder = KotlinGraphBuilder::new();
@@ -3427,7 +3434,7 @@ import java.util.*
     #[test]
     fn test_mixed_visibility_exports() {
         // Test file with mixed visibility modifiers
-        let source = r#"
+        let source = r"
 class PublicClass { }
 private class PrivateClass { }
 internal class InternalClass { }
@@ -3437,7 +3444,7 @@ private fun privateFunction() { }
 internal fun internalFunction() { }
 
 object Singleton { }
-"#;
+";
         let tree = parse_kotlin(source);
         let mut staging = StagingGraph::new();
         let builder = KotlinGraphBuilder::new();
@@ -3461,6 +3468,7 @@ object Singleton { }
         let source = "interface Repository { fun save() }";
         let tree = parse_kotlin(source);
 
+        #[allow(clippy::items_after_statements)] // Const defined near usage for clarity
         // Walk the tree to find what node kind is used for interface
         fn find_node_kinds(node: tree_sitter::Node) -> Vec<String> {
             let mut kinds = vec![node.kind().to_string()];
@@ -3479,8 +3487,7 @@ object Singleton { }
         // with "interface" as a modifier keyword
         assert!(
             kinds.contains(&"class_declaration".to_string()),
-            "Expected interface to be parsed as class_declaration, found: {:?}",
-            kinds
+            "Expected interface to be parsed as class_declaration, found: {kinds:?}"
         );
     }
 
@@ -3575,11 +3582,11 @@ object Singleton { }
     #[test]
     fn test_external_method_in_class_creates_ffi_edge() {
         // external fun inside a class should create an FfiCall edge from a Method node
-        let source = r#"
+        let source = r"
 class NativeLib {
     external fun nativeMethod(): String
 }
-"#;
+";
         let tree = parse_kotlin(source);
         let mut staging = StagingGraph::new();
         let builder = KotlinGraphBuilder::new();
@@ -3630,11 +3637,11 @@ class NativeLib {
     #[test]
     fn test_multiple_external_functions() {
         // Multiple external functions should each create an FfiCall edge
-        let source = r#"
+        let source = r"
 external fun loadLibrary(path: String): Boolean
 external fun unloadLibrary(): Unit
 external fun getVersion(): Int
-"#;
+";
         let tree = parse_kotlin(source);
         let mut staging = StagingGraph::new();
         let builder = KotlinGraphBuilder::new();
@@ -3708,13 +3715,13 @@ external fun getVersion(): Int
     #[test]
     fn test_external_function_in_companion_object() {
         // external fun inside companion object should create an FfiCall edge
-        let source = r#"
+        let source = r"
 class NativeLib {
     companion object {
         external fun loadLibrary(name: String): Boolean
     }
 }
-"#;
+";
         let tree = parse_kotlin(source);
         let mut staging = StagingGraph::new();
         let builder = KotlinGraphBuilder::new();
@@ -3760,7 +3767,7 @@ class NativeLib {
     #[test]
     fn test_overloaded_external_methods_create_distinct_ffi_targets() {
         // Overloaded external methods should create distinct FFI targets with signature mangling
-        let source = r#"
+        let source = r"
 class NativeLib {
     external fun process(x: Int): String
     external fun process(s: String): String
@@ -3771,7 +3778,7 @@ class NativeLib {
 
 external fun topLevel(n: Int): String
 external fun topLevel(s: String): String
-"#;
+";
         let tree = parse_kotlin(source);
         let mut staging = StagingGraph::new();
         let builder = KotlinGraphBuilder::new();
@@ -3865,14 +3872,14 @@ external fun topLevel(s: String): String
     fn test_nullable_primitive_overloads_create_distinct_ffi_targets() {
         // Nullable primitives should map to boxed types (Ljava/lang/Integer;)
         // Non-nullable primitives should map to primitive descriptors (I)
-        let source = r#"
+        let source = r"
 class NativeLib {
     external fun process(x: Int): String
     external fun process(x: Int?): String
     external fun process(flag: Boolean): String
     external fun process(flag: Boolean?): String
 }
-"#;
+";
         let tree = parse_kotlin(source);
         let mut staging = StagingGraph::new();
         let builder = KotlinGraphBuilder::new();
@@ -3941,14 +3948,14 @@ class NativeLib {
     fn test_array_type_overloads_create_distinct_ffi_targets() {
         // Array<T> should generate array descriptors [Ljava/lang/String;
         // Primitive arrays (IntArray) should generate primitive array descriptors [I
-        let source = r#"
+        let source = r"
 class NativeLib {
     external fun process(arr: Array<String>): String
     external fun process(arr: Array<Int>): String
     external fun process(nums: IntArray): String
     external fun process(values: DoubleArray): String
 }
-"#;
+";
         let tree = parse_kotlin(source);
         let mut staging = StagingGraph::new();
         let builder = KotlinGraphBuilder::new();
@@ -4019,13 +4026,13 @@ class NativeLib {
     #[test]
     fn test_kotlin_stdlib_type_overloads_create_distinct_ffi_targets() {
         // Kotlin stdlib collection types should map to java.util
-        let source = r#"
+        let source = r"
 class NativeLib {
     external fun process(items: List<String>): String
     external fun process(items: Set<String>): String
     external fun process(data: Map<String, Int>): String
 }
-"#;
+";
         let tree = parse_kotlin(source);
         let mut staging = StagingGraph::new();
         let builder = KotlinGraphBuilder::new();
@@ -4088,12 +4095,12 @@ class NativeLib {
     #[test]
     fn test_unit_parameter_type_mapping() {
         // Unit as a parameter should map to Lkotlin/Unit; (not V which is for return types)
-        let source = r#"
+        let source = r"
 class NativeLib {
     external fun process(callback: Unit): String
     external fun process(value: Int): String
 }
-"#;
+";
         let tree = parse_kotlin(source);
         let mut staging = StagingGraph::new();
         let builder = KotlinGraphBuilder::new();
@@ -4134,14 +4141,14 @@ class NativeLib {
     #[test]
     fn test_fully_qualified_kotlin_types_create_correct_descriptors() {
         // Fully qualified Kotlin stdlib types should be normalized and mapped correctly
-        let source = r#"
+        let source = r"
 class NativeLib {
     external fun process(x: kotlin.Int): String
     external fun process(s: kotlin.String): String
     external fun process(items: kotlin.collections.List<String>): String
     external fun process(arr: kotlin.Array<String>): String
 }
-"#;
+";
         let tree = parse_kotlin(source);
         let mut staging = StagingGraph::new();
         let builder = KotlinGraphBuilder::new();
@@ -4212,14 +4219,14 @@ class NativeLib {
     #[test]
     fn test_array_type_projections_create_correct_descriptors() {
         // Array type projections (out, in, *) should be normalized to valid descriptors
-        let source = r#"
+        let source = r"
 class NativeLib {
     external fun process(arr: Array<out String>): String
     external fun process(arr: Array<in Any>): String
     external fun process(arr: Array<*>): String
     external fun process(nums: IntArray): String
 }
-"#;
+";
         let tree = parse_kotlin(source);
         let mut staging = StagingGraph::new();
         let builder = KotlinGraphBuilder::new();
@@ -4292,14 +4299,14 @@ class NativeLib {
     #[test]
     fn test_qualified_primitive_array_types_create_correct_descriptors() {
         // Array<kotlin.Int>, Array<out Int>, Array<in Int> should normalize and box to Integer
-        let source = r#"
+        let source = r"
 class NativeLib {
     external fun process(arr: Array<kotlin.Int>): String
     external fun process(arr: Array<out Int>): String
     external fun process(arr: Array<in Int>): String
     external fun process(nums: IntArray): String
 }
-"#;
+";
         let tree = parse_kotlin(source);
         let mut staging = StagingGraph::new();
         let builder = KotlinGraphBuilder::new();
@@ -4372,14 +4379,14 @@ class NativeLib {
     #[test]
     fn test_mutable_collection_types_create_correct_descriptors() {
         // MutableCollection and MutableIterable should map to java.util.Collection and java.lang.Iterable
-        let source = r#"
+        let source = r"
 class NativeLib {
     external fun process(items: kotlin.collections.MutableCollection<String>): String
     external fun process(items: kotlin.collections.MutableIterable<String>): String
     external fun process(items: Collection<String>): String
     external fun process(items: Iterable<String>): String
 }
-"#;
+";
         let tree = parse_kotlin(source);
         let mut staging = StagingGraph::new();
         let builder = KotlinGraphBuilder::new();
@@ -4452,7 +4459,7 @@ class NativeLib {
     #[test]
     fn test_unsigned_type_overloads_create_correct_descriptors() {
         // Unsigned types should map correctly: UInt→I, UInt?→Lkotlin/UInt;, etc.
-        let source = r#"
+        let source = r"
 class NativeLib {
     external fun process(x: UInt): String
     external fun process(x: UInt?): String
@@ -4463,7 +4470,7 @@ class NativeLib {
     external fun process(nums: UIntArray): String
     external fun process(nums: ULongArray): String
 }
-"#;
+";
         let tree = parse_kotlin(source);
         let mut staging = StagingGraph::new();
         let builder = KotlinGraphBuilder::new();
@@ -4568,14 +4575,14 @@ class NativeLib {
     #[test]
     fn test_signed_vs_unsigned_overloads_have_distinct_ffi_targets() {
         // Inline-class mangling ensures Int and UInt don't collide despite same JVM descriptor
-        let source = r#"
+        let source = r"
 class NativeLib {
     external fun process(x: Int): String
     external fun process(x: UInt): String
     external fun process(x: Long): String
     external fun process(x: ULong): String
 }
-"#;
+";
         let tree = parse_kotlin(source);
         let mut staging = StagingGraph::new();
         let builder = KotlinGraphBuilder::new();
@@ -4642,14 +4649,14 @@ class NativeLib {
     #[test]
     fn test_signed_vs_unsigned_array_overloads_have_distinct_ffi_targets() {
         // Inline-class mangling ensures IntArray and UIntArray don't collide despite same JVM descriptor
-        let source = r#"
+        let source = r"
 class NativeLib {
     external fun process(nums: IntArray): String
     external fun process(nums: UIntArray): String
     external fun process(nums: LongArray): String
     external fun process(nums: ULongArray): String
 }
-"#;
+";
         let tree = parse_kotlin(source);
         let mut staging = StagingGraph::new();
         let builder = KotlinGraphBuilder::new();
@@ -4716,7 +4723,7 @@ class NativeLib {
     #[test]
     fn test_ubyte_and_ushort_type_variants_create_correct_descriptors() {
         // Complete test coverage for UByte and UShort (addressing Codex LOW finding)
-        let source = r#"
+        let source = r"
 class NativeLib {
     external fun process(x: UByte): String
     external fun process(x: UByte?): String
@@ -4727,7 +4734,7 @@ class NativeLib {
     external fun process(nums: UByteArray): String
     external fun process(nums: UShortArray): String
 }
-"#;
+";
         let tree = parse_kotlin(source);
         let mut staging = StagingGraph::new();
         let builder = KotlinGraphBuilder::new();
@@ -4821,7 +4828,7 @@ class NativeLib {
         );
     }
 
-    /// Helper to count FfiCall edges in staging graph
+    /// Helper to count `FfiCall` edges in staging graph
     fn count_ffi_call_edges(staging: &StagingGraph) -> usize {
         staging
             .operations()

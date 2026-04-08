@@ -1,6 +1,6 @@
 //! Query Execution Benchmarks on Real Repositories
 //!
-//! This benchmark measures query execution performance using the unified CodeGraph
+//! This benchmark measures query execution performance using the unified `CodeGraph`
 //! on real repositories. It tests various query patterns including simple predicates,
 //! OR expressions, AND combinations, and regex patterns.
 //!
@@ -67,11 +67,17 @@ fn bench_query_execution(c: &mut Criterion) {
         .filter(|(name, path)| {
             let path = Path::new(path);
             if !path.exists() {
-                eprintln!("⚠️  Skipping {name}: repository not found at {path:?}");
+                eprintln!(
+                    "⚠️  Skipping {name}: repository not found at {}",
+                    path.display()
+                );
                 return false;
             }
             if !has_graph(path) {
-                eprintln!("⚠️  Skipping {name}: no graph found. Run `sqry index {path:?}` first.");
+                eprintln!(
+                    "⚠️  Skipping {name}: no graph found. Run `sqry index {}` first.",
+                    path.display()
+                );
                 return false;
             }
             true

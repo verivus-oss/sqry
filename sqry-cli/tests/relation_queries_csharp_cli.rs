@@ -118,7 +118,7 @@ namespace MyApp
 fn cli_csharp_exports_interfaces() {
     let project = TempDir::new().unwrap();
 
-    let cs_code = r#"
+    let cs_code = r"
 using System;
 
 namespace MyApp.Data
@@ -154,7 +154,7 @@ namespace MyApp.Data
         public string Name { get; set; }
     }
 }
-"#;
+";
     std::fs::write(project.path().join("Repository.cs"), cs_code).unwrap();
 
     Command::new(sqry_bin())
@@ -394,7 +394,7 @@ namespace MyApp
 fn cli_csharp_imports() {
     let project = TempDir::new().unwrap();
 
-    let cs_code = r#"
+    let cs_code = r"
 using System;
 using System.IO;
 using System.Collections.Generic;
@@ -418,7 +418,7 @@ namespace MyApp
         }
     }
 }
-"#;
+";
     std::fs::write(project.path().join("FileProcessor.cs"), cs_code).unwrap();
 
     Command::new(sqry_bin())
@@ -453,7 +453,7 @@ namespace MyApp
 fn cli_csharp_linq() {
     let project = TempDir::new().unwrap();
 
-    let cs_code = r#"
+    let cs_code = r"
 using System;
 using System.Linq;
 using System.Collections.Generic;
@@ -480,7 +480,7 @@ namespace MyApp
         }
     }
 }
-"#;
+";
     std::fs::write(project.path().join("DataProcessor.cs"), cs_code).unwrap();
 
     Command::new(sqry_bin())
@@ -581,7 +581,7 @@ namespace MyApp
 fn cli_csharp_private_methods() {
     let project = TempDir::new().unwrap();
 
-    let cs_code = r#"
+    let cs_code = r"
 public class Service
 {
     public void Execute()
@@ -594,7 +594,7 @@ public class Service
         // private method
     }
 }
-"#;
+";
     std::fs::write(project.path().join("Service.cs"), cs_code).unwrap();
 
     Command::new(sqry_bin())

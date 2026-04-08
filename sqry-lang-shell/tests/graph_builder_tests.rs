@@ -201,8 +201,7 @@ main
     let call_count = count_call_edges(&staging);
     assert!(
         call_count >= 1,
-        "Expected at least 1 call edge, got {}",
-        call_count
+        "Expected at least 1 call edge, got {call_count}"
     );
 }
 
@@ -241,8 +240,7 @@ level1() {
     let call_count = count_call_edges(&staging);
     assert!(
         call_count >= 2,
-        "Expected at least 2 call edges, got {}",
-        call_count
+        "Expected at least 2 call edges, got {call_count}"
     );
 }
 
@@ -271,8 +269,7 @@ main() {
     let import_count = count_import_edges(&staging);
     assert!(
         import_count >= 1,
-        "Expected at least 1 import edge for source, got {}",
-        import_count
+        "Expected at least 1 import edge for source, got {import_count}"
     );
 }
 
@@ -300,8 +297,7 @@ run() {
     let import_count = count_import_edges(&staging);
     assert!(
         import_count >= 1,
-        "Expected at least 1 import edge for . sourcing, got {}",
-        import_count
+        "Expected at least 1 import edge for . sourcing, got {import_count}"
     );
 }
 

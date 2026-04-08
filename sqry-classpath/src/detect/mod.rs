@@ -93,30 +93,29 @@ pub struct DetectionResult {
 ///
 /// This priority reflects that Bazel projects often also contain `pom.xml` or
 /// `build.gradle` for IDE compatibility, so the Bazel marker should win.
+#[must_use]
 pub fn detect_build_system(
     project_root: &Path,
     override_build_system: Option<&str>,
 ) -> DetectionResult {
     // Handle override case first.
     if let Some(override_value) = override_build_system {
-        let result = match BuildSystem::from_str_loose(override_value) {
-            Some(bs) => DetectionResult {
+        let result = if let Some(bs) = BuildSystem::from_str_loose(override_value) {
+            DetectionResult {
                 build_system: Some(bs),
                 project_root: project_root.to_path_buf(),
                 markers_found: Vec::new(),
                 override_source: Some(override_value.to_string()),
-            },
-            None => {
-                warn!(
-                    "Invalid build system override '{}'. Valid values: gradle, maven, bazel, sbt",
-                    override_value
-                );
-                DetectionResult {
-                    build_system: None,
-                    project_root: project_root.to_path_buf(),
-                    markers_found: Vec::new(),
-                    override_source: Some(override_value.to_string()),
-                }
+            }
+        } else {
+            warn!(
+                "Invalid build system override '{override_value}'. Valid values: gradle, maven, bazel, sbt"
+            );
+            DetectionResult {
+                build_system: None,
+                project_root: project_root.to_path_buf(),
+                markers_found: Vec::new(),
+                override_source: Some(override_value.to_string()),
             }
         };
         write_diagnostics(project_root, &result);
@@ -131,7 +130,7 @@ pub fn detect_build_system(
         for marker in build_system.markers() {
             let marker_path = project_root.join(marker);
             if marker_path.exists() {
-                markers_found.push(marker.to_string());
+                markers_found.push((*marker).to_string());
 
                 match best_system {
                     Some(current) if current.priority() >= build_system.priority() => {
@@ -183,7 +182,7 @@ fn write_diagnostics(project_root: &Path, result: &DetectionResult) {
             }
         }
         Err(e) => {
-            warn!("Could not serialize detection result: {}", e);
+            warn!("Could not serialize detection result: {e}");
         }
     }
 }

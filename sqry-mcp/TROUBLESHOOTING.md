@@ -1,7 +1,7 @@
 # sqry MCP Server - Troubleshooting Guide - by Verivus
 
-**Version**: 7.1.5
-**Last Updated**: 2026-04-05
+**Version**: 7.2.0
+**Last Updated**: 2026-04-08
 
 Quick solutions to common issues with the sqry MCP server.
 
@@ -14,7 +14,7 @@ Quick solutions to common issues with the sqry MCP server.
 1. **Check sqry CLI**:
    ```bash
    sqry --version
-   # Should output: sqry 7.1.5 or later
+   # Should output: sqry 7.2.0 or later
    ```
 
 2. **Check MCP server binary**:
@@ -26,7 +26,7 @@ Quick solutions to common issues with the sqry MCP server.
 3. **Test server directly**:
    ```bash
    /path/to/sqry-mcp --list-tools
-   # Should list 33 tools
+   # Should list 34 tools
    ```
 
 4. **Check index**:
@@ -218,7 +218,7 @@ Quick solutions to common issues with the sqry MCP server.
 1. **Test server directly**:
    ```bash
    /path/to/sqry-mcp --list-tools
-   # Should return 33 tools
+   # Should return 34 tools
    ```
 
 2. **Check server version**:
@@ -317,6 +317,12 @@ Quick solutions to common issues with the sqry MCP server.
    ```bash
    sqry index --status .
    # Shows when index was built
+   ```
+
+4. **Snapshot version mismatch**: The current snapshot format is V7. After upgrading sqry across major versions, you must rebuild the index:
+   ```bash
+   rm -rf .sqry/graph
+   sqry index .
    ```
 
 ---
@@ -494,6 +500,34 @@ Quick solutions to common issues with the sqry MCP server.
 ---
 
 ## Performance Issues
+
+### Expensive Operations
+
+Some MCP tools are significantly more expensive than others. If your AI assistant seems to hang or timeout, it may be using one of these:
+
+| Tool | Risk | Why | Mitigation |
+|------|------|-----|------------|
+| `rebuild_index` | HIGH | Full graph rebuild | Only when index stale; uses 10min timeout (`SQRY_MCP_INDEX_TIMEOUT_MS`) |
+| `semantic_diff` | HIGH | Creates 2 git worktrees + builds 2 indexes | Use `filters.change_types` and `filters.symbol_kinds` to narrow scope |
+| `find_cycles` | HIGH | Known timeouts on large graphs (238K+ nodes) | Use `max_results`, scope to specific files |
+| `complexity_metrics` | HIGH | Can hang on large graphs with cycles | Always provide `file_path` to scope |
+| `find_duplicates` | MEDIUM | Pairwise comparison, quadratic scaling | Filter by `language`, `symbol_kind`, or `file_path` |
+| `find_unused` | MEDIUM | Full graph reachability scan | Filter by `scope` and `language` |
+| `call_hierarchy` depth>2 | MEDIUM | Exponential expansion | Keep `max_depth` <= 2 |
+| `dependency_impact` depth>3 | MEDIUM | Exponential expansion | Keep `max_depth` <= 3 |
+| `trace_path` | MEDIUM | Combinatorial path finding | Keep `max_hops` <= 5 |
+
+**Best practice**: Always provide scope constraints (`file_path`, `symbol_name`, language filters) for analysis tools.
+
+### Plugin Cost Tiering
+
+Some language plugins are classified as `HighWallClock` and excluded from the default index for performance:
+- `json` — JSON config files
+- `servicenow-xml` — ServiceNow XML records
+
+If symbols from these languages are missing, either:
+- Rebuild with `SQRY_INCLUDE_HIGH_COST=1`
+- Enable specific plugins: `sqry index --enable-plugin json`
 
 ### Slow Queries
 
@@ -986,6 +1020,15 @@ When reporting issues, include:
    - Large results truncated
    - Increase SQRY_MCP_MAX_OUTPUT_BYTES if needed
 
+5. **Default redaction**
+   - MCP responses are redacted by default (`SQRY_REDACTION_PRESET=minimal`)
+   - If content appears missing from responses, set `SQRY_REDACTION_PRESET=none` to disable
+   - Available presets: `none`, `minimal`, `standard`, `strict`
+
+6. **Snapshot format version**
+   - Current format is V7 (`SQRY_GRAPH_V7`)
+   - Indexes from older sqry versions are not compatible; rebuild with `sqry index --force .`
+
 ---
 
 ## Best Practices to Avoid Issues
@@ -1013,6 +1056,6 @@ When reporting issues, include:
 
 ---
 
-**Last Updated**: 2026-04-05
-**MCP Server Version**: 7.1.5
+**Last Updated**: 2026-04-08
+**MCP Server Version**: 7.2.0
 **Protocol**: MCP 2024-11-05

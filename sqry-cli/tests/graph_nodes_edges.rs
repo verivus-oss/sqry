@@ -38,7 +38,7 @@ edition = "2024"
     write_file(
         project.path(),
         "src/lib.rs",
-        r#"
+        r"
 #[derive(Debug, Clone)]
 pub struct RefHolder<'a> {
     data: &'a str,
@@ -51,7 +51,7 @@ where
     let _ = y;
     x
 }
-"#,
+",
     );
     project
 }
@@ -159,6 +159,7 @@ fn graph_nodes_edges_rust_lifetime_and_macro() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // Integration test verifying all node/edge types
 fn graph_nodes_edges_json_fields_and_paging() {
     let project = build_rust_fixture();
 

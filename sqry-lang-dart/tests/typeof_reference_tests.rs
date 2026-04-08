@@ -1,6 +1,6 @@
-//! TypeOf and Reference edge tests for Dart language plugin.
+//! `TypeOf` and Reference edge tests for Dart language plugin.
 //!
-//! Tests TypeOf edges (full type signatures) and Reference edges (nested type names)
+//! Tests `TypeOf` edges (full type signatures) and Reference edges (nested type names)
 //! for variables, fields, parameters, and return types.
 
 use sqry_core::graph::Language;
@@ -29,9 +29,9 @@ fn build_test_graph(source: &str, filename: &str) -> StagingGraph {
     staging
 }
 
-/// Collect TypeOf edges by checking which edges exist for nodes with given names.
+/// Collect `TypeOf` edges by checking which edges exist for nodes with given names.
 ///
-/// Returns Vec<(source_name, type_name, context)>
+/// Returns Vec<(`source_name`, `type_name`, context)>
 fn collect_typeof_edges(staging: &StagingGraph) -> Vec<(String, String, Option<TypeOfContext>)> {
     let mut result = Vec::new();
 
@@ -81,7 +81,7 @@ fn collect_typeof_edges(staging: &StagingGraph) -> Vec<(String, String, Option<T
     result
 }
 
-/// Collect TypeOf edges by specific context.
+/// Collect `TypeOf` edges by specific context.
 fn collect_typeof_edges_by_context(
     staging: &StagingGraph,
     context: TypeOfContext,
@@ -100,7 +100,7 @@ fn collect_typeof_edges_by_context(
 
 /// Collect Reference edges.
 ///
-/// Returns Vec<(source_name, target_name)>
+/// Returns Vec<(`source_name`, `target_name`)>
 fn collect_reference_edges(staging: &StagingGraph) -> Vec<(String, String)> {
     let mut result = Vec::new();
 
@@ -150,7 +150,7 @@ fn collect_reference_edges(staging: &StagingGraph) -> Vec<(String, String)> {
     result
 }
 
-/// Find a specific TypeOf edge by source name and context.
+/// Find a specific `TypeOf` edge by source name and context.
 fn find_typeof_edge(
     staging: &StagingGraph,
     source_name: &str,
@@ -182,16 +182,15 @@ final String name = "John";
     let refs = collect_reference_edges(&staging);
     assert!(
         refs.contains(&("name".to_string(), "String".to_string())),
-        "Expected Reference edge from name to String, found: {:?}",
-        refs
+        "Expected Reference edge from name to String, found: {refs:?}"
     );
 }
 
 #[test]
 fn test_var_with_explicit_type() {
-    let source = r#"
+    let source = r"
 int count = 0;
-"#;
+";
     let staging = build_test_graph(source, "test.dart");
 
     // Check TypeOf edge
@@ -205,9 +204,9 @@ int count = 0;
 
 #[test]
 fn test_top_level_var() {
-    let source = r#"
+    let source = r"
 final List<String> items = [];
-"#;
+";
     let staging = build_test_graph(source, "test.dart");
 
     // Check TypeOf edge (should have full type)
@@ -216,7 +215,7 @@ final List<String> items = [];
 
     // Check Reference edges (should have both List and String)
     let refs = collect_reference_edges(&staging);
-    eprintln!("Reference edges: {:?}", refs);
+    eprintln!("Reference edges: {refs:?}");
     assert!(
         refs.contains(&("items".to_string(), "List".to_string())),
         "Missing List reference"
@@ -229,11 +228,11 @@ final List<String> items = [];
 
 #[test]
 fn test_class_field_typeof() {
-    let source = r#"
+    let source = r"
 class User {
   final int age;
 }
-"#;
+";
     let staging = build_test_graph(source, "test.dart");
 
     // Check TypeOf edge for field (qualified name: User.age)
@@ -247,11 +246,11 @@ class User {
 
 #[test]
 fn test_private_field_typeof() {
-    let source = r#"
+    let source = r"
 class Account {
   final String _privateField;
 }
-"#;
+";
     let staging = build_test_graph(source, "test.dart");
 
     // Check TypeOf edge for private field
@@ -269,11 +268,11 @@ class Account {
 
 #[test]
 fn test_function_parameter_simple() {
-    let source = r#"
+    let source = r"
 void greet(String name) {
   print(name);
 }
-"#;
+";
     let staging = build_test_graph(source, "test.dart");
 
     // Check TypeOf edge for parameter
@@ -292,11 +291,11 @@ void greet(String name) {
 
 #[test]
 fn test_function_multiple_parameters() {
-    let source = r#"
+    let source = r"
 void process(String name, int age, bool active) {
   // implementation
 }
-"#;
+";
     let staging = build_test_graph(source, "test.dart");
 
     // Check TypeOf edges for all parameters
@@ -317,13 +316,13 @@ void process(String name, int age, bool active) {
 
 #[test]
 fn test_method_parameter() {
-    let source = r#"
+    let source = r"
 class Calculator {
   void add(int a, int b) {
     // implementation
   }
 }
-"#;
+";
     let staging = build_test_graph(source, "test.dart");
 
     // Check TypeOf edges for method parameters
@@ -338,11 +337,11 @@ class Calculator {
 
 #[test]
 fn test_optional_parameter() {
-    let source = r#"
+    let source = r"
 void configure(String host, [int? port]) {
   // implementation
 }
-"#;
+";
     let staging = build_test_graph(source, "test.dart");
 
     // Check TypeOf edges (should have at least the required parameter)
@@ -415,11 +414,11 @@ Future<String> fetchData() async {
 
 #[test]
 fn test_inferred_return_type() {
-    let source = r#"
+    let source = r"
 getData() {
   return 42;
 }
-"#;
+";
     let staging = build_test_graph(source, "test.dart");
 
     // Check that no TypeOf edge is created for inferred return type
@@ -437,9 +436,9 @@ getData() {
 
 #[test]
 fn test_generic_list_type() {
-    let source = r#"
+    let source = r"
 final List<String> names = [];
-"#;
+";
     let staging = build_test_graph(source, "test.dart");
 
     // Check TypeOf edge with full generic type
@@ -454,9 +453,9 @@ final List<String> names = [];
 
 #[test]
 fn test_generic_map_type() {
-    let source = r#"
+    let source = r"
 final Map<String, int> userAges = {};
-"#;
+";
     let staging = build_test_graph(source, "test.dart");
 
     // Check TypeOf edge with full Map type
@@ -472,9 +471,9 @@ final Map<String, int> userAges = {};
 
 #[test]
 fn test_nested_generic() {
-    let source = r#"
+    let source = r"
 final List<Map<String, User>> data = [];
-"#;
+";
     let staging = build_test_graph(source, "test.dart");
 
     // Check TypeOf edge with full nested generic type
@@ -495,11 +494,11 @@ final List<Map<String, User>> data = [];
 
 #[test]
 fn test_generic_future() {
-    let source = r#"
+    let source = r"
 Future<List<User>> fetchUsers() async {
   return Future.value([]);
 }
-"#;
+";
     let staging = build_test_graph(source, "test.dart");
 
     // Check TypeOf edge for return type with nested generics
@@ -519,9 +518,9 @@ Future<List<User>> fetchUsers() async {
 
 #[test]
 fn test_nullable_simple() {
-    let source = r#"
+    let source = r"
 String? maybeName;
-"#;
+";
     let staging = build_test_graph(source, "test.dart");
 
     // Check TypeOf edge includes nullable marker
@@ -535,9 +534,9 @@ String? maybeName;
 
 #[test]
 fn test_nullable_generic() {
-    let source = r#"
+    let source = r"
 List<String>? maybeList;
-"#;
+";
     let staging = build_test_graph(source, "test.dart");
 
     // Check TypeOf edge includes nullable marker on generic
@@ -556,9 +555,9 @@ List<String>? maybeList;
 
 #[test]
 fn test_function_type_simple() {
-    let source = r#"
+    let source = r"
 Function callback;
-"#;
+";
     let staging = build_test_graph(source, "test.dart");
 
     // Check TypeOf edge for Function type
@@ -568,9 +567,9 @@ Function callback;
 
 #[test]
 fn test_function_type_typed() {
-    let source = r#"
+    let source = r"
 void Function(int) handler;
-"#;
+";
     let staging = build_test_graph(source, "test.dart");
 
     // Check TypeOf edge for typed function
@@ -592,9 +591,9 @@ void Function(int) handler;
 
 #[test]
 fn test_function_type_returns() {
-    let source = r#"
+    let source = r"
 String Function(int, bool) transformer;
-"#;
+";
     let staging = build_test_graph(source, "test.dart");
 
     // Check TypeOf edge for function with return type
@@ -618,7 +617,7 @@ String Function(int, bool) transformer;
 
 #[test]
 fn test_class_with_mixed_members() {
-    let source = r#"
+    let source = r"
 class User {
   final String name;
   final int age;
@@ -631,7 +630,7 @@ class User {
     // implementation
   }
 }
-"#;
+";
     let staging = build_test_graph(source, "test.dart");
 
     // Check field TypeOf edges (may not work yet, but test the integration)
@@ -654,11 +653,11 @@ class User {
 
 #[test]
 fn test_multiple_type_references() {
-    let source = r#"
+    let source = r"
 Map<String, List<User>> processUsers(List<User> users, String filter) {
   return {};
 }
-"#;
+";
     let staging = build_test_graph(source, "test.dart");
 
     // Check return type
@@ -679,13 +678,13 @@ Map<String, List<User>> processUsers(List<User> users, String filter) {
 
 #[test]
 fn test_constructor_parameters() {
-    let source = r#"
+    let source = r"
 class Point {
   Point(double x, double y) {
     // implementation
   }
 }
-"#;
+";
     let staging = build_test_graph(source, "test.dart");
 
     // Constructor parameters may not be fully implemented

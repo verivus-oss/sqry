@@ -1182,7 +1182,7 @@ mod tests {
                 assert_eq!(operands.len(), 2);
                 match &operands[0] {
                     Expr::Condition(c) => {
-                        assert_eq!(c.value, Value::String("function".to_string()))
+                        assert_eq!(c.value, Value::String("function".to_string()));
                     }
                     _ => panic!("expected Condition"),
                 }
