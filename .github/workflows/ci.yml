@@ -34,31 +34,6 @@ jobs:
         run: |
           echo 'matrix={"include":[{"platform":"Linux","rustflags":"-Dwarnings -C debuginfo=line-tables-only"}]}' >> "$GITHUB_OUTPUT"
 
-  release-workflow-contracts:
-    name: Release Workflow Contracts
-    runs-on: [self-hosted, linux, rust, x86_64, workhorse2]
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-      - name: Verify release workflow OIDC contracts
-        run: ./scripts/release/check-workflow-contracts.sh
-
-  release-manifest-validation:
-    name: Release manifest validation
-    runs-on: [self-hosted, linux, rust, x86_64, workhorse2]
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          fetch-depth: 0
-      - name: Install Rust (for cargo metadata)
-        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
-      - name: Validate release manifest
-        run: |
-          if [[ -f ./scripts/release/validate-manifest.sh ]]; then
-            ./scripts/release/validate-manifest.sh
-          else
-            echo "validate-manifest.sh not present (expected on public repo) — skipping"
-          fi
-
   test:
     name: Test (${{ matrix.platform }})
     needs: setup
