@@ -230,6 +230,9 @@ jobs:
         run: |
           echo "Verifying required tools are installed on self-hosted runner..."
           zig version
+          if ! command -v cargo-zigbuild >/dev/null 2>&1; then
+            cargo install cargo-zigbuild --locked
+          fi
           cargo-zigbuild --version
           x86_64-w64-mingw32-gcc --version | head -1 || {
             echo "Installing gcc-mingw-w64-x86-64..."

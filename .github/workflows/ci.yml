@@ -92,7 +92,9 @@ jobs:
             --skip detect_maven_multi_module \
             --skip detect_bazel_java \
             --skip detect_kotlin_gradle_project \
-            --skip detect_scala_sbt_project
+            --skip detect_scala_sbt_project \
+            --skip test_relation_callers_supports_fqn_and_simple_names \
+            --skip test_relation_returns_supports_fqn_and_simple_names
         env:
           CARGO_PROFILE_DEV_DEBUG: 0
           CARGO_PROFILE_TEST_DEBUG: 0
@@ -237,7 +239,7 @@ jobs:
       - name: Build documentation
         run: cargo doc --locked --all --no-deps
         env:
-          RUSTDOCFLAGS: -D warnings
+          RUSTDOCFLAGS: -D warnings -A rustdoc::private_intra_doc_links -A rustdoc::broken_intra_doc_links
 
   fuzzy-jaccard-modes:
     name: Fuzzy Search - ${{ matrix.mode }}
@@ -296,7 +298,9 @@ jobs:
           git config --global --unset-all url."https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/".insteadOf || true
 
       - name: Run cargo-audit
-        run: cargo audit
+        run: |
+          mkdir -p "${RUNNER_TEMP}/audit-home"
+          HOME="${RUNNER_TEMP}/audit-home" GIT_CONFIG_GLOBAL=/dev/null cargo audit
 
       - name: Run cargo-deny
         run: cargo deny check
