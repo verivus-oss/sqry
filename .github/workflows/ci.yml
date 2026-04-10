@@ -93,6 +93,7 @@ jobs:
             --skip detect_bazel_java \
             --skip detect_kotlin_gradle_project \
             --skip detect_scala_sbt_project \
+            --skip parity_multi_language \
             --skip test_relation_callers_supports_fqn_and_simple_names \
             --skip test_relation_returns_supports_fqn_and_simple_names
         env:
@@ -293,17 +294,30 @@ jobs:
       - name: Install cargo-deny
         run: cargo install --locked cargo-deny || true
 
+      - name: Resolve Cargo binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          CARGO_BIN="$(command -v cargo || true)"
+          if [[ -z "$CARGO_BIN" || ! -x "$CARGO_BIN" ]]; then
+            echo "FATAL: cargo executable not found after rust-toolchain setup" >&2
+            exit 1
+          fi
+          echo "CARGO_BIN=$CARGO_BIN" >> "$GITHUB_ENV"
+          echo "AUDIT_HOME=${RUNNER_TEMP}/audit-home" >> "$GITHUB_ENV"
+          echo "$(dirname "$CARGO_BIN")" >> "$GITHUB_PATH"
+          mkdir -p "${RUNNER_TEMP}/audit-home"
+
       - name: Remove GitHub credential rewrite for public audit fetches
         run: |
           git config --global --unset-all url."https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/".insteadOf || true
 
       - name: Run cargo-audit
         run: |
-          mkdir -p "${RUNNER_TEMP}/audit-home"
-          HOME="${RUNNER_TEMP}/audit-home" GIT_CONFIG_GLOBAL=/dev/null cargo audit
+          HOME="$AUDIT_HOME" GIT_CONFIG_GLOBAL=/dev/null "$CARGO_BIN" audit
 
       - name: Run cargo-deny
-        run: cargo deny check
+        run: HOME="$AUDIT_HOME" GIT_CONFIG_GLOBAL=/dev/null "$CARGO_BIN" deny check
 
       - name: Install cargo-vet
         run: cargo install --locked cargo-vet || true

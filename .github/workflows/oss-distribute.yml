@@ -228,10 +228,17 @@ jobs:
       # Verify self-hosted runner toolchain (installed by setup-runner.sh)
       - name: Verify cross-compilation toolchain
         run: |
+          set -euo pipefail
           echo "Verifying required tools are installed on self-hosted runner..."
+          CARGO_BIN="$(command -v cargo || true)"
+          if [[ -z "$CARGO_BIN" || ! -x "$CARGO_BIN" ]]; then
+            echo "FATAL: cargo executable not found after rust-toolchain setup" >&2
+            exit 1
+          fi
+          echo "$(dirname "$CARGO_BIN")" >> "$GITHUB_PATH"
           zig version
           if ! command -v cargo-zigbuild >/dev/null 2>&1; then
-            cargo install cargo-zigbuild --locked
+            "$CARGO_BIN" install cargo-zigbuild --locked
           fi
           cargo-zigbuild --version
           x86_64-w64-mingw32-gcc --version | head -1 || {
@@ -246,6 +253,7 @@ jobs:
       # Phase 6.1: Cross-compile binaries
       - name: Build binaries
         run: |
+          set -euo pipefail
           mkdir -p dist/
           PUBLIC_REPO_ROOT="/workspace/sqry"
           export RUSTFLAGS="--remap-path-prefix=$(pwd)=${PUBLIC_REPO_ROOT} --remap-path-prefix=/io=${PUBLIC_REPO_ROOT}"
@@ -255,6 +263,9 @@ jobs:
             exit 1
           fi
           export PATH="$(dirname "$CARGO_BIN"):$PATH"
+          export XDG_CACHE_HOME="${RUNNER_TEMP}/xdg-cache"
+          rm -rf "${XDG_CACHE_HOME}/cargo-zigbuild"
+          mkdir -p "${XDG_CACHE_HOME}"
           TARGETS=(
             "x86_64-unknown-linux-gnu"
             "aarch64-unknown-linux-gnu"
