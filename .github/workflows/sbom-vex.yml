@@ -12,7 +12,7 @@ permissions:
 jobs:
   sbom:
     name: Generate SBOM + VEX
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, rust, x86_64, workhorse2]
 
     steps:
       - name: Checkout code
