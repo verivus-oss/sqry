@@ -27,6 +27,10 @@ pub struct WalkerContext<'a> {
     pub preview_targets: Vec<RedactionTarget>,
     /// Preserved field paths (for dry-run mode).
     pub preserved_paths: Vec<String>,
+    /// Current recursion depth.
+    depth: usize,
+    /// Maximum allowed recursion depth.
+    max_depth: usize,
 }
 
 impl<'a> WalkerContext<'a> {
@@ -44,6 +48,8 @@ impl<'a> WalkerContext<'a> {
             result: RedactionResult::default(),
             preview_targets: Vec::new(),
             preserved_paths: Vec::new(),
+            depth: 0,
+            max_depth: config.max_depth,
         }
     }
 
@@ -86,7 +92,33 @@ impl<'a> WalkerContext<'a> {
 /// Walk a JSON value and apply redaction.
 ///
 /// This is the main entry point for JSON traversal.
+///
+/// Recursion is bounded by [`redaction_max_depth`](crate::config::redaction_max_depth)
+/// (default 128, configurable via `SQRY_REDACTION_MAX_DEPTH`). Values nested beyond
+/// the limit are redacted (fail-closed) to prevent both stack overflow and data leakage.
 pub fn walk_and_redact(value: &mut Value, ctx: &mut WalkerContext<'_>) {
+    if ctx.depth >= ctx.max_depth {
+        ctx.result.depth_limit_reached = true;
+
+        // Fail closed: redact the current node instead of leaving it unmodified.
+        // We deliberately avoid `value.to_string()` here because serializing a
+        // deeply nested subtree would recurse just as deeply as the walker itself.
+        if !value.is_string() || value.as_str() != Some(&ctx.config.redacted_placeholder) {
+            if ctx.config.dry_run {
+                ctx.record_preview(
+                    "[depth limit exceeded]",
+                    &ctx.config.redacted_placeholder,
+                    RedactionReason::DepthLimitExceeded,
+                );
+            } else {
+                *value = Value::String(ctx.config.redacted_placeholder.clone());
+            }
+            ctx.result.depth_limit_redacted += 1;
+        }
+
+        return;
+    }
+    ctx.depth += 1;
     match value {
         Value::Object(map) => walk_object(map, ctx),
         Value::Array(arr) => walk_array(arr, ctx),
@@ -94,6 +126,7 @@ pub fn walk_and_redact(value: &mut Value, ctx: &mut WalkerContext<'_>) {
         // Primitives don't need traversal
         Value::Null | Value::Bool(_) | Value::Number(_) => {}
     }
+    ctx.depth -= 1;
 }
 
 fn walk_object(map: &mut Map<String, Value>, ctx: &mut WalkerContext<'_>) {
@@ -233,7 +266,12 @@ fn redact_value(field_name: &str, value: &mut Value, ctx: &mut WalkerContext<'_>
             redact_object_value(field_name, value, ctx);
         }
         Value::Array(arr) => {
-            walk_array(arr, ctx);
+            // Route through walk_and_redact to ensure the depth guard is applied.
+            for (i, item) in arr.iter_mut().enumerate() {
+                ctx.push_index(i);
+                walk_and_redact(item, ctx);
+                ctx.pop();
+            }
         }
         // Null, bool, number - replace with placeholder string
         _ => {
@@ -265,10 +303,8 @@ fn redact_object_value(field_name: &str, value: &mut Value, ctx: &mut WalkerCont
         }
         ctx.result.code_contexts_redacted += 1;
     } else {
-        let Value::Object(map) = value else {
-            return;
-        };
-        walk_object(map, ctx);
+        // Route through walk_and_redact to ensure the depth guard is applied.
+        walk_and_redact(value, ctx);
     }
 }
 
@@ -392,7 +428,9 @@ fn update_stats(reason: &RedactionReason, ctx: &mut WalkerContext<'_>) {
         RedactionReason::CodeContext => ctx.result.code_contexts_redacted += 1,
         RedactionReason::Documentation => ctx.result.docs_redacted += 1,
         RedactionReason::CustomField => ctx.result.custom_fields_redacted += 1,
-        RedactionReason::PatternMatch => {} // Handled separately
+        // PatternMatch is counted in handle_string_patterns; DepthLimitExceeded
+        // is counted directly in the walk_and_redact depth guard.
+        RedactionReason::PatternMatch | RedactionReason::DepthLimitExceeded => {}
         RedactionReason::UnknownField => ctx.result.unknown_fields_redacted += 1,
     }
 }
@@ -409,6 +447,7 @@ fn truncate_preview(s: &str, max_len: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::DEFAULT_REDACTION_MAX_DEPTH;
     use serde_json::json;
 
     #[test]
@@ -650,6 +689,248 @@ mod tests {
         assert_ne!(
             value["unprotected"]["workspace_path"], "/home/user/other",
             "Non-preserved nested field should still be redacted"
+        );
+    }
+
+    // --- Depth limit tests (stack overflow prevention) ---
+
+    /// Build a deeply nested JSON object: `{"a": {"a": {"a": ... {"workspace_path": "/secret"}}}}`.
+    fn build_nested_object(depth: usize) -> Value {
+        let mut value = json!({"workspace_path": "/home/user/project"});
+        for _ in 0..depth {
+            value = json!({"a": value});
+        }
+        value
+    }
+
+    /// Build a deeply nested JSON array: `[[[ ... [{"workspace_path": "/secret"}] ... ]]]`.
+    fn build_nested_array(depth: usize) -> Value {
+        let mut value: Value = json!([{"workspace_path": "/home/user/project"}]);
+        for _ in 0..depth {
+            value = Value::Array(vec![value]);
+        }
+        value
+    }
+
+    #[test]
+    fn test_depth_limit_stops_recursion_objects() {
+        let config = RedactionConfig::standard();
+
+        // Nest deeper than the default limit
+        let depth = DEFAULT_REDACTION_MAX_DEPTH + 10;
+        let mut value = build_nested_object(depth);
+
+        let mut ctx = WalkerContext::new(&config, &[], &[]);
+        walk_and_redact(&mut value, &mut ctx);
+
+        assert!(
+            ctx.result.depth_limit_reached,
+            "Walker should report depth limit reached for nesting depth {}",
+            depth
+        );
+    }
+
+    #[test]
+    fn test_depth_limit_stops_recursion_arrays() {
+        let config = RedactionConfig::standard();
+
+        let depth = DEFAULT_REDACTION_MAX_DEPTH + 10;
+        let mut value = build_nested_array(depth);
+
+        let mut ctx = WalkerContext::new(&config, &[], &[]);
+        walk_and_redact(&mut value, &mut ctx);
+
+        assert!(
+            ctx.result.depth_limit_reached,
+            "Walker should report depth limit reached for array nesting depth {}",
+            depth
+        );
+    }
+
+    #[test]
+    fn test_within_depth_limit_processes_normally() {
+        let config = RedactionConfig::standard();
+
+        // 10 levels is well within the 128 default
+        let mut value = build_nested_object(10);
+
+        let mut ctx = WalkerContext::new(&config, &[], &[]);
+        walk_and_redact(&mut value, &mut ctx);
+
+        assert!(
+            !ctx.result.depth_limit_reached,
+            "Walker should not hit depth limit for nesting depth 10"
+        );
+        // The deeply nested workspace_path should be redacted
+        assert!(
+            ctx.result.workspace_path_redacted,
+            "workspace_path should be redacted within depth limit"
+        );
+    }
+
+    #[test]
+    fn test_depth_limit_exact_boundary() {
+        let config = RedactionConfig::standard();
+
+        // At exactly max_depth-1 nesting, the innermost value is at depth max_depth.
+        // The guard fires when depth >= max_depth, so the last object won't be entered.
+        let depth = DEFAULT_REDACTION_MAX_DEPTH;
+        let mut value = build_nested_object(depth);
+
+        let mut ctx = WalkerContext::new(&config, &[], &[]);
+        walk_and_redact(&mut value, &mut ctx);
+
+        // At exactly the limit, the guard should fire
+        assert!(
+            ctx.result.depth_limit_reached,
+            "Walker should hit depth limit at exactly max_depth nesting"
+        );
+    }
+
+    #[test]
+    fn test_depth_limit_one_below_boundary_succeeds() {
+        let config = RedactionConfig::standard();
+
+        // One below the limit: depth goes up to max_depth-1, which passes the guard
+        let depth = DEFAULT_REDACTION_MAX_DEPTH - 2;
+        let mut value = build_nested_object(depth);
+
+        let mut ctx = WalkerContext::new(&config, &[], &[]);
+        walk_and_redact(&mut value, &mut ctx);
+
+        assert!(
+            !ctx.result.depth_limit_reached,
+            "Walker should not hit depth limit at max_depth-2 nesting"
+        );
+        assert!(
+            ctx.result.workspace_path_redacted,
+            "workspace_path should be redacted just under the limit"
+        );
+    }
+
+    #[test]
+    fn test_custom_max_depth_via_context() {
+        let config = RedactionConfig::standard();
+
+        // Use a very small max_depth to verify it works
+        let mut ctx = WalkerContext::new(&config, &[], &[]);
+        ctx.max_depth = 3;
+
+        let mut value = build_nested_object(5);
+        walk_and_redact(&mut value, &mut ctx);
+
+        assert!(
+            ctx.result.depth_limit_reached,
+            "Walker should hit custom depth limit of 3 at nesting depth 5"
+        );
+    }
+
+    #[test]
+    fn test_mixed_object_array_nesting_depth_limit() {
+        let config = RedactionConfig::standard();
+
+        // Build alternating object/array nesting
+        let mut value = json!({"workspace_path": "/home/user/project"});
+        for i in 0..DEFAULT_REDACTION_MAX_DEPTH + 5 {
+            if i % 2 == 0 {
+                value = json!({"nested": value});
+            } else {
+                value = Value::Array(vec![value]);
+            }
+        }
+
+        let mut ctx = WalkerContext::new(&config, &[], &[]);
+        walk_and_redact(&mut value, &mut ctx);
+
+        assert!(
+            ctx.result.depth_limit_reached,
+            "Walker should hit depth limit on mixed object/array nesting"
+        );
+    }
+
+    #[test]
+    fn test_depth_limit_redacts_deeply_nested_values() {
+        let config = RedactionConfig::standard();
+        let depth = DEFAULT_REDACTION_MAX_DEPTH + 10; // Nest deeper than the limit
+
+        let mut value = build_nested_object(depth);
+
+        let mut ctx = WalkerContext::new(&config, &[], &[]);
+        walk_and_redact(&mut value, &mut ctx);
+
+        assert!(
+            ctx.result.depth_limit_reached,
+            "Walker should report depth limit reached"
+        );
+
+        // Traverse down the 'a' fields to the point where redaction should occur
+        let mut current_value = &mut value;
+        for _ in 0..(DEFAULT_REDACTION_MAX_DEPTH - 1) {
+            // Go to one level above the limit
+            current_value = current_value.as_object_mut().unwrap().get_mut("a").unwrap();
+        }
+
+        // The value at the depth limit should now be redacted.
+        // `current_value` is now the object `{"a": <redacted_value>}`
+        // We need to get the actual value of 'a' to assert it's the redacted string.
+        let final_redacted_value = current_value.as_object().unwrap().get("a").unwrap();
+
+        assert_eq!(
+            final_redacted_value,
+            &Value::String(config.redacted_placeholder.clone()),
+            "The deeply nested value at the depth limit should be replaced by the placeholder"
+        );
+        assert_eq!(
+            ctx.result.depth_limit_redacted, 1,
+            "One depth-limited value should have been redacted"
+        );
+    }
+
+    #[test]
+    fn test_depth_limit_bypass_via_custom_redact_fields() {
+        let mut config = RedactionConfig::standard();
+        config.custom_redact_fields.push("a".to_string());
+        config.max_depth = 10;
+
+        let mut value = build_nested_object(100);
+
+        let mut ctx = WalkerContext::new(&config, &[], &[]);
+        walk_and_redact(&mut value, &mut ctx);
+
+        // This SHOULD hit the depth limit, but if it doesn't, we found a bypass.
+        assert!(
+            ctx.result.depth_limit_reached,
+            "Walker should hit depth limit even with custom_redact_fields"
+        );
+    }
+
+    #[test]
+    fn test_depth_limit_dry_run_records_preview() {
+        let mut config = RedactionConfig::standard();
+        config.dry_run = true;
+        config.max_depth = 5;
+
+        let mut value = build_nested_object(10);
+
+        let mut ctx = WalkerContext::new(&config, &[], &[]);
+        walk_and_redact(&mut value, &mut ctx);
+
+        assert!(ctx.result.depth_limit_reached);
+        assert!(ctx.result.depth_limit_redacted > 0);
+
+        // In dry-run mode, the preview should use a constant string, not serialize the subtree
+        let depth_previews: Vec<_> = ctx
+            .preview_targets
+            .iter()
+            .filter(|t| t.reason == RedactionReason::DepthLimitExceeded)
+            .collect();
+        assert!(
+            !depth_previews.is_empty(),
+            "Dry-run should record depth-limit preview targets"
+        );
+        assert_eq!(
+            depth_previews[0].original_preview, "[depth limit exceeded]",
+            "Preview should use constant string, not serialize the nested value"
         );
     }
 }

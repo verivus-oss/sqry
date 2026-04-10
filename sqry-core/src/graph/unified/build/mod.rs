@@ -111,7 +111,7 @@ pub const SAVE_COMPONENT_GRAPH: &str = "unified graph";
 pub use entrypoint::{
     AnalysisStrategySummary, BuildConfig, BuildResult, GRAPH_FILE_PROCESSING_PHASE,
     build_and_persist_graph, build_and_persist_graph_with_progress, build_unified_graph,
-    build_unified_graph_with_progress,
+    build_unified_graph_with_progress, persist_and_analyze_graph,
 };
 pub use helper::{GraphBuildHelper, HelperStats};
 pub use identity::{IdentityIndex, IdentityKey};

@@ -31,6 +31,7 @@ mod resources;
 mod server;
 #[allow(dead_code)]
 mod tools;
+mod workspace_session;
 
 pub use pagination::{decode_cursor, encode_cursor};
 

@@ -7,6 +7,31 @@ use crate::whitelist::{WHITELIST_MINIMAL, WHITELIST_STANDARD, WHITELIST_STRICT};
 /// Maximum allowed salt length in characters.
 pub const MAX_SALT_LENGTH: usize = 256;
 
+/// Default maximum nesting depth for the redaction walker.
+///
+/// Prevents stack overflow from deeply nested JSON structures.
+/// Matches `serde_json`'s default deserialization recursion limit.
+///
+/// Override via `SQRY_REDACTION_MAX_DEPTH` environment variable.
+pub const DEFAULT_REDACTION_MAX_DEPTH: usize = 128;
+
+// Safety bounds for max depth
+const MIN_REDACTION_MAX_DEPTH: usize = 8;
+const MAX_REDACTION_MAX_DEPTH: usize = 512;
+
+/// Get the configured maximum redaction walker depth.
+///
+/// Reads `SQRY_REDACTION_MAX_DEPTH` from environment, falls back to
+/// [`DEFAULT_REDACTION_MAX_DEPTH`], and clamps to `[8, 512]`.
+#[must_use]
+pub fn redaction_max_depth() -> usize {
+    std::env::var("SQRY_REDACTION_MAX_DEPTH")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_REDACTION_MAX_DEPTH)
+        .clamp(MIN_REDACTION_MAX_DEPTH, MAX_REDACTION_MAX_DEPTH)
+}
+
 /// Security mode for redaction.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum SecurityMode {
@@ -106,6 +131,13 @@ pub struct RedactionConfig {
 
     /// Enable dry-run mode (report what would be redacted without modifying).
     pub dry_run: bool,
+
+    /// Maximum nesting depth for the redaction walker.
+    ///
+    /// Prevents stack overflow from deeply nested JSON structures.
+    /// Default: [`DEFAULT_REDACTION_MAX_DEPTH`] (128).
+    /// Override via `SQRY_REDACTION_MAX_DEPTH` environment variable.
+    pub max_depth: usize,
 }
 
 impl RedactionConfig {
@@ -141,6 +173,7 @@ impl RedactionConfig {
             whitelist_fields: Vec::new(), // Ignored in Passthrough mode
             preserve_paths: Vec::new(),
             dry_run: false,
+            max_depth: redaction_max_depth(),
         }
     }
 
@@ -171,6 +204,7 @@ impl RedactionConfig {
             whitelist_fields: WHITELIST_MINIMAL.iter().map(|&s| s.to_string()).collect(),
             preserve_paths: Vec::new(),
             dry_run: false,
+            max_depth: redaction_max_depth(),
         }
     }
 
@@ -202,6 +236,7 @@ impl RedactionConfig {
             whitelist_fields: WHITELIST_STANDARD.iter().map(|&s| s.to_string()).collect(),
             preserve_paths: Vec::new(),
             dry_run: false,
+            max_depth: redaction_max_depth(),
         }
     }
 
@@ -233,6 +268,7 @@ impl RedactionConfig {
             whitelist_fields: WHITELIST_STRICT.iter().map(|&s| s.to_string()).collect(),
             preserve_paths: Vec::new(),
             dry_run: false,
+            max_depth: redaction_max_depth(),
         }
     }
 
@@ -252,6 +288,7 @@ impl RedactionConfig {
     /// | `SQRY_HASH_FILENAMES` | `0`, `1` | per preset | Enable filename hashing |
     /// | `SQRY_HASH_SALT` | string | none | Optional salt for hashing |
     /// | `SQRY_WORKSPACE_ROOT` | path | none | Workspace root path |
+    /// | `SQRY_REDACTION_MAX_DEPTH` | `8`-`512` | `128` | Max walker recursion depth |
     #[must_use]
     pub fn from_env() -> Self {
         let preset = std::env::var("SQRY_REDACTION_PRESET")
@@ -523,6 +560,17 @@ mod tests {
         assert!(config.is_whitelisted("name"));
         assert!(config.is_whitelisted("kind"));
         assert!(!config.is_whitelisted("some_unknown_field"));
+    }
+
+    #[test]
+    fn test_redaction_max_depth_default() {
+        // Without env var set, should return DEFAULT_REDACTION_MAX_DEPTH
+        let depth = super::redaction_max_depth();
+        assert!(
+            (super::MIN_REDACTION_MAX_DEPTH..=super::MAX_REDACTION_MAX_DEPTH).contains(&depth),
+            "Default depth {} should be within bounds",
+            depth
+        );
     }
 
     #[test]

@@ -75,10 +75,10 @@ fn resolve_single_project(
         }
         Err(e) => {
             warn!("Maven subprocess resolution failed: {e}");
-            try_cache_or_fallback(
+            try_cache_or_error(
                 config,
                 &[ModuleInfo::root(&config.project_root)],
-                maven_repo,
+                &e.to_string(),
             )
         }
     }
@@ -99,7 +99,7 @@ fn resolve_multi_module(
         .collect();
 
     let mut results = Vec::new();
-    let mut any_failed = false;
+    let mut failed_modules = 0usize;
 
     for info in &module_infos {
         if !info.root.join("pom.xml").exists() {
@@ -110,13 +110,24 @@ fn resolve_multi_module(
             Ok(resolved) => results.push(resolved),
             Err(e) => {
                 warn!("Maven resolution failed for module '{}': {e}", info.name);
-                any_failed = true;
+                failed_modules += 1;
             }
         }
     }
 
-    if any_failed && results.is_empty() {
-        return try_cache_or_fallback(config, &module_infos, maven_repo);
+    if failed_modules > 0 && results.is_empty() {
+        return try_cache_or_error(
+            config,
+            &module_infos,
+            "All Maven module subprocess resolutions failed",
+        );
+    }
+
+    if failed_modules > 0 {
+        warn!(
+            "Maven resolution incomplete: {failed_modules}/{} modules failed; using partial classpath result",
+            module_infos.len()
+        );
     }
 
     if !results.is_empty() {
@@ -151,6 +162,7 @@ fn resolve_via_subprocess(
 
     Ok(ResolvedClasspath {
         module_name: String::new(),
+        module_root: module_root.to_path_buf(),
         entries,
     })
 }
@@ -166,6 +178,7 @@ fn resolve_module_via_subprocess(
 
     Ok(ResolvedClasspath {
         module_name: info.name.clone(),
+        module_root: info.root.clone(),
         entries,
     })
 }
@@ -178,7 +191,9 @@ fn run_maven_build_classpath(working_dir: &Path, timeout_secs: u64) -> Classpath
         .map_err(|e| ClasspathError::ResolutionFailed(format!("tempdir: {e}")))?;
     let output_file = temp_dir.path().join("classpath.txt");
 
-    let mvn_cmd = find_mvn_command(working_dir);
+    let mvn_cmd = find_mvn_command(working_dir).ok_or_else(|| {
+        ClasspathError::ResolutionFailed("No Maven wrapper or installed mvn found".to_string())
+    })?;
 
     let mut command = Command::new(&mvn_cmd);
     command
@@ -191,7 +206,7 @@ fn run_maven_build_classpath(working_dir: &Path, timeout_secs: u64) -> Classpath
 
     debug!(
         "Running Maven: {} dependency:build-classpath in {}",
-        mvn_cmd,
+        mvn_cmd.display(),
         working_dir.display()
     );
 
@@ -220,16 +235,16 @@ fn run_maven_build_classpath(working_dir: &Path, timeout_secs: u64) -> Classpath
 /// Find the Maven command to use.
 ///
 /// Prefers `./mvnw` (Maven wrapper) if present, otherwise falls back to `mvn`.
-fn find_mvn_command(working_dir: &Path) -> String {
+fn find_mvn_command(working_dir: &Path) -> Option<PathBuf> {
     #[cfg(unix)]
     let wrapper = working_dir.join("mvnw");
     #[cfg(windows)]
     let wrapper = working_dir.join("mvnw.cmd");
 
     if wrapper.exists() {
-        wrapper.display().to_string()
+        Some(wrapper)
     } else {
-        "mvn".to_string()
+        which_binary(if cfg!(windows) { "mvn.cmd" } else { "mvn" })
     }
 }
 
@@ -489,6 +504,7 @@ fn extract_xml_element(xml: &str, tag: &str) -> Option<String> {
 /// - Property placeholders (`${...}`)
 /// - Parent POM inheritance
 /// - Dependency management version overrides
+#[cfg(test)]
 fn resolve_from_pom_fallback(
     module_root: &Path,
     module_name: &str,
@@ -561,6 +577,7 @@ fn resolve_from_pom_fallback(
 
     Ok(ResolvedClasspath {
         module_name: module_name.to_string(),
+        module_root: module_root.to_path_buf(),
         entries,
     })
 }
@@ -672,38 +689,33 @@ fn cache_dir(config: &ResolveConfig) -> PathBuf {
 
 /// Try cache first, then POM fallback.
 #[allow(clippy::unnecessary_wraps)] // Result for API consistency
-fn try_cache_or_fallback(
+fn try_cache_or_error(
     config: &ResolveConfig,
     module_infos: &[ModuleInfo],
-    maven_repo: &Path,
+    live_error: &str,
 ) -> ClasspathResult<Vec<ResolvedClasspath>> {
     // Try cache.
     if let Some(cached) = read_maven_cache(config) {
         info!("Using cached Maven classpath ({} modules)", cached.len());
+        warn_if_cache_stale(config, &cached);
         return Ok(cached);
     }
 
-    // Fall back to POM parsing (lossy).
-    info!("Falling back to pom.xml parsing (lossy, no transitive deps)");
-    let mut results = Vec::new();
-    for info in module_infos {
-        let pom_path = info.root.join("pom.xml");
-        if !pom_path.exists() {
-            continue;
-        }
-        match resolve_from_pom_fallback(&info.root, &info.name, maven_repo) {
-            Ok(resolved) => results.push(resolved),
-            Err(e) => {
-                warn!("POM fallback failed for '{}': {e}", info.name);
+    let module_summary = module_infos
+        .iter()
+        .map(|info| {
+            if info.name.is_empty() {
+                info.root.display().to_string()
+            } else {
+                format!("{} ({})", info.name, info.root.display())
             }
-        }
-    }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
 
-    if results.is_empty() {
-        warn!("All Maven resolution strategies exhausted; returning empty classpath");
-    }
-
-    Ok(results)
+    Err(ClasspathError::ResolutionFailed(format!(
+        "{live_error}. No Maven cache available for [{module_summary}]. Provide mvnw, install mvn, or use --classpath-file."
+    )))
 }
 
 /// Get the default Maven local repository path.
@@ -719,6 +731,48 @@ fn default_maven_repo() -> PathBuf {
         || PathBuf::from(".m2").join("repository"),
         |h| h.join(".m2").join("repository"),
     )
+}
+
+fn warn_if_cache_stale(config: &ResolveConfig, classpaths: &[ResolvedClasspath]) {
+    if classpaths.is_empty() {
+        return;
+    }
+    let cache_path = cache_dir(config).join(MAVEN_CACHE_FILE);
+    let Ok(cache_meta) = std::fs::metadata(&cache_path) else {
+        return;
+    };
+    let Ok(cache_mtime) = cache_meta.modified() else {
+        return;
+    };
+
+    for cp in classpaths {
+        let pom_path = cp.module_root.join("pom.xml");
+        let Ok(meta) = std::fs::metadata(&pom_path) else {
+            continue;
+        };
+        let Ok(modified) = meta.modified() else {
+            continue;
+        };
+        if modified > cache_mtime {
+            warn!(
+                "Using cached Maven classpath from {} even though {} is newer; cache may be stale",
+                cache_path.display(),
+                pom_path.display()
+            );
+            return;
+        }
+    }
+}
+
+fn which_binary(name: &str) -> Option<PathBuf> {
+    let path_var = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path_var) {
+        let candidate = dir.join(name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------
@@ -1137,6 +1191,7 @@ mod tests {
 
         let entries = vec![ResolvedClasspath {
             module_name: "core".to_string(),
+            module_root: tmp.path().join("core"),
             entries: vec![ClasspathEntry {
                 jar_path: PathBuf::from("/repo/guava/guava/33.0.0/guava-33.0.0.jar"),
                 coordinates: Some("com.google.guava:guava:33.0.0".to_string()),
@@ -1259,7 +1314,7 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_maven_classpath_falls_back_to_pom_when_mvn_missing() {
+    fn test_resolve_maven_classpath_errors_when_mvn_missing_and_no_cache() {
         let tmp = TempDir::new().unwrap();
 
         // Create a pom.xml with a dependency.
@@ -1280,15 +1335,12 @@ mod tests {
             cache_path: None,
         };
 
-        // mvn is not available in the test environment, so this falls back
-        // to POM parsing. The JAR will not exist in the local repo, so we get
-        // Ok with an empty classpath.
         let result = resolve_maven_classpath(&config);
-        assert!(result.is_ok());
+        assert!(result.is_err());
     }
 
     #[test]
-    fn test_resolve_maven_classpath_multimodule_falls_back() {
+    fn test_resolve_maven_classpath_multimodule_errors_without_tooling() {
         let tmp = TempDir::new().unwrap();
 
         // Create root pom with modules.
@@ -1339,13 +1391,8 @@ mod tests {
             cache_path: None,
         };
 
-        // Without mvn, falls back to POM parsing for each module.
         let result = resolve_maven_classpath(&config);
-        assert!(result.is_ok());
-        let resolved = result.unwrap();
-        // Both modules should be resolved (even if entries are empty due to
-        // JARs not existing in the local repo).
-        assert_eq!(resolved.len(), 2);
+        assert!(result.is_err());
     }
 
     // -----------------------------------------------------------------------
@@ -1356,7 +1403,10 @@ mod tests {
     fn test_find_mvn_command_no_wrapper() {
         let tmp = TempDir::new().unwrap();
         let cmd = find_mvn_command(tmp.path());
-        assert_eq!(cmd, "mvn");
+        assert!(
+            cmd.is_none() || cmd.as_ref().is_some_and(|path| path.ends_with("mvn")),
+            "expected no wrapper or mvn path, got: {cmd:?}"
+        );
     }
 
     #[test]
@@ -1369,7 +1419,11 @@ mod tests {
         std::fs::write(tmp.path().join(wrapper_name), b"#!/bin/sh\nexec mvn \"$@\"").unwrap();
 
         let cmd = find_mvn_command(tmp.path());
-        assert!(cmd.contains("mvnw"), "Expected wrapper path, got: {cmd}");
+        assert!(
+            cmd.as_ref()
+                .is_some_and(|path| path.ends_with(wrapper_name)),
+            "Expected wrapper path, got: {cmd:?}"
+        );
     }
 
     // -----------------------------------------------------------------------

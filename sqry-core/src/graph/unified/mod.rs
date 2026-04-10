@@ -91,6 +91,9 @@ pub mod kernel;
 // Binding query facade
 pub mod bind;
 
+// Heap memory size reporting
+pub mod memory;
+
 // Shared symbol resolution
 pub mod resolution;
 
@@ -150,6 +153,7 @@ pub use materialize::{
     MaterializedNode, collect_symbol_seeds, display_entry_qualified_name, find_nodes_by_name,
     materialize_node, qualified_node_name,
 };
+pub use memory::{BTREEMAP_ENTRY_OVERHEAD, GraphMemorySize, HASHMAP_ENTRY_OVERHEAD};
 pub use node::{GenerationOverflowError, NodeId, NodeKind};
 pub use query_adapter::GraphQueryAdapter;
 pub use resolution::{

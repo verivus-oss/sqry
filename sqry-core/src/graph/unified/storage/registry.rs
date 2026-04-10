@@ -22,6 +22,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use super::super::file::id::FileId;
+use super::super::string::id::StringId;
 use crate::graph::node::Language;
 
 /// Error returned when a file path cannot be registered.
@@ -58,7 +59,12 @@ impl fmt::Display for RegistryError {
 
 impl std::error::Error for RegistryError {}
 
-/// File entry storing path and language information.
+/// File entry storing path, language, and Phase 1 provenance.
+///
+/// This struct is **module-private**. External code reads provenance via
+/// [`FileRegistry::file_provenance`], which returns a borrowed
+/// [`FileProvenanceView`]. Phase 1 growth of this struct is an
+/// implementation detail and does not affect the public API.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct FileEntry {
     /// The canonical file path.
@@ -68,6 +74,56 @@ struct FileEntry {
     /// Whether this file originates from an external source (e.g., classpath JAR).
     #[serde(default)]
     is_external: bool,
+    /// SHA-256 of the on-disk file bytes at the most recent indexing pass.
+    ///
+    /// Populated by the build pipeline (P1U08) via
+    /// [`FileRegistry::set_content_hash`]. Defaulted to all-zero bytes for
+    /// legacy V7 snapshots loaded through the backwards-read path, and for
+    /// entries inserted before the hash is known.
+    #[serde(default = "default_content_hash")]
+    content_hash: [u8; 32],
+    /// Unix-epoch seconds at which this file was registered in the most
+    /// recent build. Equal to the snapshot's `fact_epoch` across every
+    /// `FileEntry` in a single build.
+    #[serde(default)]
+    indexed_at: u64,
+    /// Interned physical origin URI for external or synthetic files —
+    /// e.g. `jar:file:///…/rt.jar!/java/lang/Object.class` for classpath
+    /// entries. `Some` iff the physical path alone is insufficient to
+    /// identify the origin.
+    ///
+    /// Invariant (eventual): once external registration is complete,
+    /// `is_external == true` implies `source_uri.is_some()`. The
+    /// two-phase path (`register_external` followed by `set_source_uri`)
+    /// may temporarily leave `source_uri` unset until the URI is stamped.
+    #[serde(default)]
+    source_uri: Option<StringId>,
+}
+
+/// Default content hash for `FileEntry` fields deserialized from legacy
+/// snapshots that predate Phase 1 or for entries inserted before the build
+/// pipeline stamps a real hash.
+#[inline]
+fn default_content_hash() -> [u8; 32] {
+    [0u8; 32]
+}
+
+/// Borrowed view of per-file provenance, returned by
+/// [`FileRegistry::file_provenance`].
+///
+/// This is the stable public surface the Phase 1 accessor exposes. The
+/// underlying [`FileEntry`] remains module-private; growing it is an
+/// implementation detail of the registry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileProvenanceView<'a> {
+    /// Borrowed SHA-256 of the on-disk file bytes.
+    pub content_hash: &'a [u8; 32],
+    /// Unix-epoch seconds at which this file was registered.
+    pub indexed_at: u64,
+    /// Optional interned physical origin URI (see [`FileEntry::source_uri`]).
+    pub source_uri: Option<StringId>,
+    /// Whether this file originates from an external source.
+    pub is_external: bool,
 }
 
 /// File registry for path deduplication.
@@ -152,6 +208,17 @@ impl FileRegistry {
         self.lookup.is_empty()
     }
 
+    /// Returns the total number of allocated slots (including vacant/recycled
+    /// ones and the sentinel at index 0).
+    ///
+    /// This is the length of the underlying `entries` vector, not the count of
+    /// live files. Use this to iterate every possible `FileId` index.
+    #[inline]
+    #[must_use]
+    pub fn slot_count(&self) -> usize {
+        self.entries.len()
+    }
+
     /// Registers a file path and returns its `FileId`.
     ///
     /// The path is normalized using best-effort canonicalization before registration.
@@ -215,6 +282,9 @@ impl FileRegistry {
             path: Arc::clone(&arc_path),
             language,
             is_external: false,
+            content_hash: default_content_hash(),
+            indexed_at: 0,
+            source_uri: None,
         };
 
         // Allocate new slot
@@ -270,6 +340,9 @@ impl FileRegistry {
             path: Arc::clone(&arc_path),
             language: None,
             is_external: false,
+            content_hash: default_content_hash(),
+            indexed_at: 0,
+            source_uri: None,
         };
 
         // Allocate new slot
@@ -329,6 +402,9 @@ impl FileRegistry {
             path: Arc::clone(&arc_path),
             language,
             is_external: false,
+            content_hash: default_content_hash(),
+            indexed_at: 0,
+            source_uri: None,
         };
 
         // Allocate new slot
@@ -432,16 +508,48 @@ impl FileRegistry {
         path: impl AsRef<Path>,
         language: Option<Language>,
     ) -> Result<FileId, RegistryError> {
+        self.register_external_with_uri(path, language, None)
+    }
+
+    /// Registers an external file path with an associated language and source URI.
+    ///
+    /// Like [`register_external`], but also stamps the interned source URI at
+    /// registration time when one is available. For classpath entries,
+    /// `source_uri` should carry the JAR origin (e.g.
+    /// `jar:file:///…/rt.jar!/java/lang/Object.class`).
+    ///
+    /// # Invariant
+    ///
+    /// Callers that cannot provide a URI yet should use [`register_external`]
+    /// and stamp via [`set_source_uri`] later. This method does not assert on
+    /// `source_uri` and accepts `None` for the two-phase registration flow.
+    ///
+    /// # Errors
+    ///
+    /// Returns `RegistryError::CapacityExhausted` if the registry has
+    /// exhausted all available IDs.
+    ///
+    /// [`register_external`]: Self::register_external
+    /// [`set_source_uri`]: Self::set_source_uri
+    pub fn register_external_with_uri(
+        &mut self,
+        path: impl AsRef<Path>,
+        language: Option<Language>,
+        source_uri: Option<StringId>,
+    ) -> Result<FileId, RegistryError> {
         let path = path.as_ref();
         let arc_path: Arc<Path> = Arc::from(path);
 
         // Check if already registered
         if let Some(&index) = self.lookup.get(&arc_path) {
-            // Update external flag and language if entry exists
+            // Update external flag, language, and source_uri if entry exists
             if let Some(Some(entry)) = self.entries.get_mut(index as usize) {
                 entry.is_external = true;
                 if let Some(lang) = language {
                     entry.language = Some(lang);
+                }
+                if source_uri.is_some() {
+                    entry.source_uri = source_uri;
                 }
             }
             return Ok(FileId::new(index));
@@ -452,6 +560,9 @@ impl FileRegistry {
             path: Arc::clone(&arc_path),
             language,
             is_external: true,
+            content_hash: default_content_hash(),
+            indexed_at: 0,
+            source_uri,
         };
 
         // Allocate new slot
@@ -622,6 +733,93 @@ impl FileRegistry {
         self.lookup.reserve(additional);
     }
 
+    // ------------------------------------------------------------------
+    // Phase 1 fact-layer provenance accessors and setters (P1U05).
+    // ------------------------------------------------------------------
+
+    /// Returns a borrowed provenance view for `id`.
+    ///
+    /// Returns `None` for the invalid sentinel, unregistered IDs, and
+    /// recycled (vacant) slots.
+    #[must_use]
+    pub fn file_provenance(&self, id: FileId) -> Option<FileProvenanceView<'_>> {
+        if id.is_invalid() {
+            return None;
+        }
+        let entry = self.entries.get(id.index() as usize)?.as_ref()?;
+        Some(FileProvenanceView {
+            content_hash: &entry.content_hash,
+            indexed_at: entry.indexed_at,
+            source_uri: entry.source_uri,
+            is_external: entry.is_external,
+        })
+    }
+
+    /// Stamps the content hash on a registered file entry.
+    ///
+    /// Intended for use by the build pipeline (P1U08) after the file bytes
+    /// have been read for tree-sitter but before the extraction pass starts.
+    /// Returns `false` if the ID is invalid or the slot is vacant.
+    pub fn set_content_hash(&mut self, id: FileId, hash: [u8; 32]) -> bool {
+        if id.is_invalid() {
+            return false;
+        }
+        if let Some(Some(entry)) = self.entries.get_mut(id.index() as usize) {
+            entry.content_hash = hash;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Stamps the indexed-at epoch on a registered file entry.
+    ///
+    /// In Phase 1, every `FileEntry` in a single build shares the same
+    /// `indexed_at` value, equal to the snapshot's `fact_epoch`.
+    /// Returns `false` if the ID is invalid or the slot is vacant.
+    pub fn set_indexed_at(&mut self, id: FileId, epoch: u64) -> bool {
+        if id.is_invalid() {
+            return false;
+        }
+        if let Some(Some(entry)) = self.entries.get_mut(id.index() as usize) {
+            entry.indexed_at = epoch;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Stamps the interned source URI on a registered file entry.
+    ///
+    /// Should only be called for external or synthetic files. The caller is
+    /// responsible for interning the URI through the `StringInterner` before
+    /// passing the resulting `StringId` here.
+    ///
+    /// # Debug assertion
+    ///
+    /// In debug builds, asserts that if `is_external` is `true` on this
+    /// entry and `source_uri` is `Some`, the invariant `is_external ⇒
+    /// source_uri.is_some()` was already met or is met by this call. This
+    /// catches the converse case: calling `set_source_uri(None)` on an
+    /// external entry would violate the invariant.
+    ///
+    /// Returns `false` if the ID is invalid or the slot is vacant.
+    pub fn set_source_uri(&mut self, id: FileId, uri: Option<StringId>) -> bool {
+        if id.is_invalid() {
+            return false;
+        }
+        if let Some(Some(entry)) = self.entries.get_mut(id.index() as usize) {
+            debug_assert!(
+                !(entry.is_external && uri.is_none()),
+                "set_source_uri(None) on an external file violates is_external => source_uri.is_some()"
+            );
+            entry.source_uri = uri;
+            true
+        } else {
+            false
+        }
+    }
+
     /// Returns statistics about the registry.
     #[must_use]
     pub fn stats(&self) -> RegistryStats {
@@ -682,6 +880,20 @@ pub struct RegistryStats {
     pub free_slots: usize,
     /// Allocated capacity.
     pub capacity: usize,
+}
+
+impl crate::graph::unified::memory::GraphMemorySize for FileRegistry {
+    fn heap_bytes(&self) -> usize {
+        use crate::graph::unified::memory::HASHMAP_ENTRY_OVERHEAD;
+
+        let entries_vec = self.entries.capacity() * std::mem::size_of::<Option<FileEntry>>();
+        let lookup = self.lookup.capacity()
+            * (std::mem::size_of::<Arc<Path>>()
+                + std::mem::size_of::<u32>()
+                + HASHMAP_ENTRY_OVERHEAD);
+        let free_list = self.free_list.capacity() * std::mem::size_of::<u32>();
+        entries_vec + lookup + free_list
+    }
 }
 
 #[cfg(test)]
@@ -1328,5 +1540,151 @@ mod tests {
 
         // Last language wins (matches register_with_language dedup behavior)
         assert_eq!(registry.language_for_file(ids[0]), Some(Language::Python));
+    }
+
+    // ------------------------------------------------------------------
+    // Phase 1 P1U05: file provenance accessors
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn phase1_file_provenance_defaults_to_zero_hash_and_zero_epoch() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("test.rs");
+        fs::write(&path, "fn main() {}").unwrap();
+
+        let mut reg = FileRegistry::new();
+        let id = reg.register(&path).unwrap();
+
+        let view = reg.file_provenance(id).expect("provenance present");
+        assert_eq!(view.content_hash, &[0u8; 32]);
+        assert_eq!(view.indexed_at, 0);
+        assert_eq!(view.source_uri, None);
+        assert!(!view.is_external);
+    }
+
+    #[test]
+    fn phase1_set_content_hash_round_trip() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("test.rs");
+        fs::write(&path, "fn main() {}").unwrap();
+
+        let mut reg = FileRegistry::new();
+        let id = reg.register(&path).unwrap();
+
+        let hash = [0xAB; 32];
+        assert!(reg.set_content_hash(id, hash));
+
+        let view = reg.file_provenance(id).unwrap();
+        assert_eq!(view.content_hash, &hash);
+    }
+
+    #[test]
+    fn phase1_set_indexed_at_round_trip() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("test.rs");
+        fs::write(&path, "fn main() {}").unwrap();
+
+        let mut reg = FileRegistry::new();
+        let id = reg.register(&path).unwrap();
+        assert!(reg.set_indexed_at(id, 42_000));
+
+        let view = reg.file_provenance(id).unwrap();
+        assert_eq!(view.indexed_at, 42_000);
+    }
+
+    #[test]
+    fn phase1_set_source_uri_round_trip() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("test.rs");
+        fs::write(&path, "fn main() {}").unwrap();
+
+        let mut reg = FileRegistry::new();
+        let id = reg.register(&path).unwrap();
+        let uri = StringId::new(7);
+        assert!(reg.set_source_uri(id, Some(uri)));
+
+        let view = reg.file_provenance(id).unwrap();
+        assert_eq!(view.source_uri, Some(uri));
+    }
+
+    #[test]
+    fn phase1_file_provenance_invalid_sentinel_returns_none() {
+        let reg = FileRegistry::new();
+        assert!(reg.file_provenance(FileId::INVALID).is_none());
+    }
+
+    #[test]
+    fn phase1_file_provenance_survives_postcard_round_trip() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("test.rs");
+        fs::write(&path, "fn main() {}").unwrap();
+
+        let mut reg = FileRegistry::new();
+        let id = reg.register(&path).unwrap();
+        reg.set_content_hash(id, [0xCD; 32]);
+        reg.set_indexed_at(id, 12_345);
+        reg.set_source_uri(id, Some(StringId::new(99)));
+
+        let encoded = postcard::to_allocvec(&reg).expect("encode");
+        let decoded: FileRegistry = postcard::from_bytes(&encoded).expect("decode");
+
+        let view = decoded
+            .file_provenance(id)
+            .expect("provenance after decode");
+        assert_eq!(view.content_hash, &[0xCD; 32]);
+        assert_eq!(view.indexed_at, 12_345);
+        assert_eq!(view.source_uri, Some(StringId::new(99)));
+    }
+
+    #[test]
+    fn phase1_external_entry_exposes_is_external_true() {
+        let mut reg = FileRegistry::new();
+        let uri = StringId::new(42);
+        let id = reg
+            .register_external_with_uri("/virtual/path/Foo.class", Some(Language::Java), Some(uri))
+            .unwrap();
+
+        let view = reg.file_provenance(id).unwrap();
+        assert!(view.is_external);
+        assert_eq!(view.source_uri, Some(uri));
+    }
+
+    #[test]
+    fn phase1_register_external_then_set_source_uri_round_trip() {
+        let mut reg = FileRegistry::new();
+        let id = reg
+            .register_external("/virtual/path/Foo.class", Some(Language::Java))
+            .unwrap();
+
+        let initial_view = reg.file_provenance(id).unwrap();
+        assert!(initial_view.is_external);
+        assert_eq!(initial_view.source_uri, None);
+
+        let uri = StringId::new(84);
+        assert!(reg.set_source_uri(id, Some(uri)));
+
+        let updated_view = reg.file_provenance(id).unwrap();
+        assert!(updated_view.is_external);
+        assert_eq!(updated_view.source_uri, Some(uri));
+    }
+
+    #[test]
+    fn phase1_register_external_with_uri_accepts_none_and_records_externality() {
+        let mut reg = FileRegistry::new();
+        let id = reg
+            .register_external_with_uri("/virtual/path/Foo.class", Some(Language::Java), None)
+            .unwrap();
+
+        let view = reg.file_provenance(id).unwrap();
+        assert!(view.is_external);
+        assert_eq!(view.source_uri, None);
+    }
+
+    #[test]
+    fn phase1_setters_return_false_for_invalid_id() {
+        let mut reg = FileRegistry::new();
+        assert!(!reg.set_content_hash(FileId::INVALID, [0; 32]));
+        assert!(!reg.set_indexed_at(FileId::INVALID, 1));
+        assert!(!reg.set_source_uri(FileId::INVALID, None));
     }
 }

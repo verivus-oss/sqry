@@ -11,8 +11,9 @@ Gemini can load sqry through MCP server config in `settings.json` under `mcpServ
 
 For sqry's auto-setup:
 - `sqry mcp setup --tool gemini` writes Gemini MCP config
-- Gemini workspace selection is CWD-based by default for sqry integration
-- Launch Gemini from the repository you want to analyze
+- sqry resolves workspace per MCP session using explicit `path`, file-bearing
+  args, Gemini MCP roots, and only then legacy env/CWD fallback
+- The common single-repository session does not require `path` on every call
 
 ## Quick Setup
 
@@ -55,7 +56,8 @@ Expected entry:
 Notes:
 - Gemini config is global unless you maintain a project-level `.gemini/settings.json`.
 - sqry setup does not pin `SQRY_MCP_WORKSPACE_ROOT` for Gemini by default.
-- Start Gemini from the target repository directory.
+- Starting Gemini from the target repository directory still works, but roots-first
+  session resolution is preferred whenever Gemini exposes MCP roots.
 
 ## Manual Configuration
 
@@ -114,9 +116,9 @@ sqry mcp setup --tool gemini --force
 
 ### Wrong repository results
 
-Launch Gemini from the intended project root and confirm:
+If Gemini exposes multiple roots and sqry cannot infer the workspace from the
+request, pass explicit `path` for that tool call:
 
 ```bash
-pwd
 sqry index --status .
 ```

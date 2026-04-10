@@ -31,6 +31,8 @@ pub struct ClasspathEntry {
 pub struct ResolvedClasspath {
     /// Module name (e.g., `app`, `lib`, or project root name).
     pub module_name: String,
+    /// Concrete module root used to scope importer -> classpath resolution.
+    pub module_root: PathBuf,
     /// Classpath entries.
     pub entries: Vec<ClasspathEntry>,
 }
@@ -41,7 +43,7 @@ pub struct ResolveConfig {
     pub project_root: PathBuf,
     /// Timeout for subprocess execution in seconds.
     pub timeout_secs: u64,
-    /// Path to cached classpath file (for fallback).
+    /// Path to cached classpath directory (for fallback).
     pub cache_path: Option<PathBuf>,
 }
 

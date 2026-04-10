@@ -1,9 +1,55 @@
 mod common;
 
 use anyhow::Result;
-use common::McpTestClient;
+use common::{McpTestClient, StderrMode, unwrap_mcp_content};
 use serde_json::json;
 use std::io::Write;
+use std::time::{Duration, Instant};
+use tempfile::TempDir;
+
+fn create_temp_workspace() -> Result<TempDir> {
+    let workspace = TempDir::new()?;
+    std::fs::create_dir_all(workspace.path().join("src"))?;
+    std::fs::write(workspace.path().join("src/lib.rs"), "fn sample() {}\n")?;
+    Ok(workspace)
+}
+
+fn forward_slash_path(path: &std::path::Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
+fn wait_for_workspace_path(
+    client: &mut McpTestClient,
+    expected: &str,
+    request_id_start: i64,
+) -> Result<serde_json::Value> {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut request_id = request_id_start;
+    loop {
+        let response = client.call(
+            "tools/call",
+            json!({
+                "name": "get_index_status",
+                "arguments": {}
+            }),
+            request_id,
+        )?;
+        let payload = unwrap_mcp_content(&response)?;
+        if payload["workspace_path"] == expected {
+            return Ok(payload);
+        }
+
+        if Instant::now() >= deadline {
+            anyhow::bail!(
+                "workspace roots did not refresh in time; expected {expected}, got {}",
+                payload["workspace_path"]
+            );
+        }
+
+        request_id += 1;
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
 
 #[test]
 fn test_initialize() -> Result<()> {
@@ -364,6 +410,140 @@ fn test_multi_request_session() -> Result<()> {
     // 5. Verify server is still alive after the error.
     let resp4 = client.call("tools/list", json!({}), 5)?;
     assert_eq!(resp4["id"], 5);
+
+    Ok(())
+}
+
+#[test]
+fn test_roots_supported_session_resolves_workspace_without_path() -> Result<()> {
+    let workspace = create_temp_workspace()?;
+    let mut client =
+        McpTestClient::new_without_workspace_env_and_stderr_mode(&[], StderrMode::Null)?;
+    let _ = client.initialize_with_roots(&[workspace.path().to_path_buf()])?;
+
+    let response = client.call(
+        "tools/call",
+        json!({
+            "name": "get_index_status",
+            "arguments": {}
+        }),
+        401,
+    )?;
+    let payload = unwrap_mcp_content(&response)?;
+
+    assert_eq!(
+        payload["workspace_path"],
+        forward_slash_path(&workspace.path().canonicalize()?)
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_roots_list_changed_refreshes_cached_workspace_roots() -> Result<()> {
+    let workspace_a = create_temp_workspace()?;
+    let workspace_b = create_temp_workspace()?;
+    let mut client =
+        McpTestClient::new_without_workspace_env_and_stderr_mode(&[], StderrMode::Null)?;
+    let _ = client.initialize_with_roots(&[workspace_a.path().to_path_buf()])?;
+
+    let first = unwrap_mcp_content(&client.call(
+        "tools/call",
+        json!({
+            "name": "get_index_status",
+            "arguments": {}
+        }),
+        402,
+    )?)?;
+    assert_eq!(
+        first["workspace_path"],
+        forward_slash_path(&workspace_a.path().canonicalize()?)
+    );
+
+    client.set_roots(&[workspace_b.path().to_path_buf()]);
+    client.notify_roots_list_changed()?;
+
+    let second = wait_for_workspace_path(
+        &mut client,
+        &forward_slash_path(&workspace_b.path().canonicalize()?),
+        403,
+    )?;
+    assert_eq!(
+        second["workspace_path"],
+        forward_slash_path(&workspace_b.path().canonicalize()?)
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_multiple_roots_require_explicit_path_when_no_other_hint_exists() -> Result<()> {
+    let workspace_a = create_temp_workspace()?;
+    let workspace_b = create_temp_workspace()?;
+    let mut client =
+        McpTestClient::new_without_workspace_env_and_stderr_mode(&[], StderrMode::Null)?;
+    let _ = client.initialize_with_roots(&[
+        workspace_a.path().to_path_buf(),
+        workspace_b.path().to_path_buf(),
+    ])?;
+
+    let response = client.call(
+        "tools/call",
+        json!({
+            "name": "get_index_status",
+            "arguments": {}
+        }),
+        404,
+    )?;
+
+    let message = response["error"]["message"].as_str().unwrap_or("");
+    assert!(
+        message.contains("Multiple workspace roots are active"),
+        "unexpected error message: {message}"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_last_resolved_workspace_breaks_multi_root_tie_for_followup_requests() -> Result<()> {
+    let workspace_a = create_temp_workspace()?;
+    let workspace_b = create_temp_workspace()?;
+    let workspace_a_canonical = workspace_a.path().canonicalize()?;
+    let mut client =
+        McpTestClient::new_without_workspace_env_and_stderr_mode(&[], StderrMode::Null)?;
+    let _ = client.initialize_with_roots(&[
+        workspace_a.path().to_path_buf(),
+        workspace_b.path().to_path_buf(),
+    ])?;
+
+    let seeded = unwrap_mcp_content(&client.call(
+        "tools/call",
+        json!({
+            "name": "get_index_status",
+            "arguments": {
+                "path": workspace_a_canonical
+            }
+        }),
+        405,
+    )?)?;
+    assert_eq!(
+        seeded["workspace_path"],
+        forward_slash_path(&workspace_a_canonical)
+    );
+
+    let followup = unwrap_mcp_content(&client.call(
+        "tools/call",
+        json!({
+            "name": "get_index_status",
+            "arguments": {}
+        }),
+        406,
+    )?)?;
+    assert_eq!(
+        followup["workspace_path"],
+        forward_slash_path(&workspace_a_canonical)
+    );
 
     Ok(())
 }

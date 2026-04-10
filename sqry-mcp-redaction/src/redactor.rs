@@ -237,6 +237,15 @@ pub struct RedactionResult {
 
     /// Number of unknown fields redacted (whitelist mode).
     pub unknown_fields_redacted: usize,
+
+    /// Number of values redacted because they exceeded the maximum nesting depth.
+    ///
+    /// These values were replaced with the redaction placeholder to prevent
+    /// stack overflow from deeply nested JSON structures.
+    pub depth_limit_redacted: usize,
+
+    /// Whether the walker hit the maximum depth limit at least once.
+    pub depth_limit_reached: bool,
 }
 
 impl RedactionResult {
@@ -251,6 +260,7 @@ impl RedactionResult {
             || self.pattern_paths_redacted > 0
             || self.workspace_path_redacted
             || self.unknown_fields_redacted > 0
+            || self.depth_limit_redacted > 0
     }
 
     /// Get the total count of redacted items.
@@ -264,6 +274,7 @@ impl RedactionResult {
             + self.pattern_paths_redacted
             + usize::from(self.workspace_path_redacted)
             + self.unknown_fields_redacted
+            + self.depth_limit_redacted
     }
 }
 
@@ -473,6 +484,8 @@ mod tests {
             pattern_paths_redacted: 0,
             workspace_path_redacted: true,
             unknown_fields_redacted: 0,
+            depth_limit_redacted: 0,
+            depth_limit_reached: false,
         };
 
         assert!(result.any_redacted());

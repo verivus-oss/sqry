@@ -285,9 +285,8 @@ pub fn build_unified_graph_with_progress(
     plugins: &PluginManager,
     config: &BuildConfig,
     progress: SharedReporter,
-) -> Result<CodeGraph> {
-    let (graph, _effective_threads) = build_unified_graph_inner(root, plugins, config, progress)?;
-    Ok(graph)
+) -> Result<(CodeGraph, usize)> {
+    build_unified_graph_inner(root, plugins, config, progress)
 }
 
 /// Internal implementation that returns the effective thread count alongside the graph.
@@ -618,37 +617,25 @@ fn inferred_plugin_selection_manifest(
     )
 }
 
-/// Build unified graph with progress, persist snapshot + manifest, and run analysis.
+/// Persist a pre-built graph and run the analysis pipeline.
 ///
-/// This is the single entry point for building a complete graph index. It combines:
-/// 1. Graph building from source files (with progress reporting)
-/// 2. Snapshot persistence (binary format)
-/// 3. Analysis pipeline (CSR + SCC + Condensation DAG + labels/fallback) — strict, fails on error
-/// 4. Manifest creation with deduplicated edge count (JSON metadata, written LAST)
-///
-/// The manifest is the "commit point" — written last, only after all other artifacts
-/// succeed. Consumers check `storage.exists()` (manifest-based) for index readiness.
-///
-/// # Arguments
-///
-/// * `root` - Root directory to scan for source files
-/// * `plugins` - Plugin manager for language-specific extraction
-/// * `config` - Build configuration
-/// * `build_command` - Provenance string (e.g., `"cli:index"`, `"mcp:rebuild_index"`)
-/// * `progress` - Progress reporter for build status updates
+/// This is the persist+analysis portion of
+/// [`build_and_persist_graph_with_progress`], extracted so callers can enrich
+/// the graph between build and persist.
 ///
 /// # Errors
 ///
-/// Returns an error if graph building, persistence, or analysis fails.
-/// Analysis failure is strict — no fallback to raw edge counts.
+/// Returns an error if persistence or analysis fails.
 #[allow(clippy::too_many_lines, clippy::needless_pass_by_value)]
-pub fn build_and_persist_graph_with_progress(
+pub fn persist_and_analyze_graph(
+    graph: CodeGraph,
     root: &Path,
     plugins: &PluginManager,
     config: &BuildConfig,
     build_command: &str,
     plugin_selection: Option<crate::graph::unified::persistence::PluginSelectionManifest>,
     progress: SharedReporter,
+    effective_threads: usize,
 ) -> Result<(CodeGraph, BuildResult)> {
     use crate::graph::unified::analysis::csr::CsrAdjacency;
     use crate::graph::unified::analysis::{AnalysisIdentity, GraphAnalyses, compute_node_id_hash};
@@ -662,11 +649,7 @@ pub fn build_and_persist_graph_with_progress(
     use chrono::Utc;
     use sha2::{Digest, Sha256};
 
-    // Step 1: Build the unified graph
-    let (graph, effective_threads) =
-        build_unified_graph_inner(root, plugins, config, progress.clone())?;
-
-    // Step 2: Ensure storage directories exist and remove old manifest
+    // Step 1: Ensure storage directories exist and remove old manifest
     // Removing the manifest BEFORE writing the new snapshot ensures that
     // readers see `storage.exists() == false` during the rebuild window.
     // Without this, an interrupted rebuild (crash after snapshot write but
@@ -697,11 +680,11 @@ pub fn build_and_persist_graph_with_progress(
         }
     }
 
-    // Step 3: Capture raw edge count before compaction changes it
+    // Step 2: Capture raw edge count before compaction changes it
     let raw_edge_count = graph.edge_count();
     let node_count = graph.node_count();
 
-    // Step 4: Compact edge stores into CSR before persistence
+    // Step 3: Compact edge stores into CSR before persistence
     //
     // The build pipeline inserts all edges into the DeltaBuffer (write-optimized).
     // Without compaction, the persisted snapshot stores edges in delta, causing
@@ -751,7 +734,7 @@ pub fn build_and_persist_graph_with_progress(
         stage_duration: compaction_start.elapsed(),
     });
 
-    // Step 5: Save CSR-backed binary snapshot
+    // Step 4: Save CSR-backed binary snapshot
     progress.report(IndexProgress::SavingStarted {
         component_name: "unified graph",
     });
@@ -769,12 +752,12 @@ pub fn build_and_persist_graph_with_progress(
         save_duration: save_start.elapsed(),
     });
 
-    // Step 6: Compute snapshot checksum
+    // Step 5: Compute snapshot checksum
     let snapshot_content =
         fs::read(storage.snapshot_path()).context("Failed to read snapshot for checksum")?;
     let snapshot_sha256 = hex::encode(Sha256::digest(&snapshot_content));
 
-    // Step 7: Build full analyses from the prebuilt adjacency.
+    // Step 6: Build full analyses from the prebuilt adjacency.
     // CsrAdjacency was already derived from the forward CsrGraph in Step 4,
     // eliminating the expensive re-merge from CompactionSnapshot.
     progress.report(IndexProgress::StageStarted {
@@ -821,10 +804,13 @@ pub fn build_and_persist_graph_with_progress(
         },
     ];
 
-    // Step 7: Count files by language using plugin detection
+    // Step 7: Count workspace files by language using plugin detection
     let mut file_counts: std::collections::HashMap<String, usize> =
         std::collections::HashMap::new();
-    for (_file_id, file_path) in graph.indexed_files() {
+    for (file_id, file_path) in graph.indexed_files() {
+        if graph.files().is_external(file_id) {
+            continue;
+        }
         let language = plugins
             .plugin_for_path(file_path)
             .map_or_else(|| "unknown".to_string(), |p| p.metadata().id.to_string());
@@ -928,6 +914,52 @@ pub fn build_and_persist_graph_with_progress(
     };
 
     Ok((graph, build_result))
+}
+
+/// Build unified graph with progress, persist snapshot + manifest, and run analysis.
+///
+/// This is the single entry point for building a complete graph index. It combines:
+/// 1. Graph building from source files (with progress reporting)
+/// 2. Snapshot persistence (binary format)
+/// 3. Analysis pipeline (CSR + SCC + Condensation DAG + labels/fallback) — strict, fails on error
+/// 4. Manifest creation with deduplicated edge count (JSON metadata, written LAST)
+///
+/// The manifest is the "commit point" — written last, only after all other artifacts
+/// succeed. Consumers check `storage.exists()` (manifest-based) for index readiness.
+///
+/// # Arguments
+///
+/// * `root` - Root directory to scan for source files
+/// * `plugins` - Plugin manager for language-specific extraction
+/// * `config` - Build configuration
+/// * `build_command` - Provenance string (e.g., `"cli:index"`, `"mcp:rebuild_index"`)
+/// * `progress` - Progress reporter for build status updates
+///
+/// # Errors
+///
+/// Returns an error if graph building, persistence, or analysis fails.
+/// Analysis failure is strict — no fallback to raw edge counts.
+#[allow(clippy::too_many_lines, clippy::needless_pass_by_value)]
+pub fn build_and_persist_graph_with_progress(
+    root: &Path,
+    plugins: &PluginManager,
+    config: &BuildConfig,
+    build_command: &str,
+    plugin_selection: Option<crate::graph::unified::persistence::PluginSelectionManifest>,
+    progress: SharedReporter,
+) -> Result<(CodeGraph, BuildResult)> {
+    let (graph, effective_threads) =
+        build_unified_graph_inner(root, plugins, config, progress.clone())?;
+    persist_and_analyze_graph(
+        graph,
+        root,
+        plugins,
+        config,
+        build_command,
+        plugin_selection,
+        progress,
+        effective_threads,
+    )
 }
 
 /// Get the current HEAD commit SHA from a git repository.

@@ -485,6 +485,30 @@ pub struct IndicesStats {
     pub file_count: usize,
 }
 
+impl crate::graph::unified::memory::GraphMemorySize for AuxiliaryIndices {
+    fn heap_bytes(&self) -> usize {
+        use crate::graph::unified::memory::BTREEMAP_ENTRY_OVERHEAD;
+        use crate::graph::unified::node::NodeId;
+
+        fn btree_vec_bytes<K: Sized>(map: &std::collections::BTreeMap<K, Vec<NodeId>>) -> usize {
+            let entry_overhead = map.len()
+                * (std::mem::size_of::<K>()
+                    + std::mem::size_of::<Vec<NodeId>>()
+                    + BTREEMAP_ENTRY_OVERHEAD);
+            let vec_payloads: usize = map
+                .values()
+                .map(|v| v.capacity() * std::mem::size_of::<NodeId>())
+                .sum();
+            entry_overhead + vec_payloads
+        }
+
+        btree_vec_bytes(&self.kind_index)
+            + btree_vec_bytes(&self.name_index)
+            + btree_vec_bytes(&self.qualified_name_index)
+            + btree_vec_bytes(&self.file_index)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

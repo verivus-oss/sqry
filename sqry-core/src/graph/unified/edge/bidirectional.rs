@@ -369,6 +369,14 @@ pub struct BidirectionalEdgeStoreStats {
     pub reverse: EdgeStoreStats,
 }
 
+impl crate::graph::unified::memory::GraphMemorySize for BidirectionalEdgeStore {
+    fn heap_bytes(&self) -> usize {
+        let fwd = crate::graph::unified::memory::GraphMemorySize::heap_bytes(&*self.forward.read());
+        let rev = crate::graph::unified::memory::GraphMemorySize::heap_bytes(&*self.reverse.read());
+        fwd + rev
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::delta::DeltaOp;

@@ -15,11 +15,15 @@ use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use crate::confidence::ConfidenceMetadata;
 use crate::graph::unified::edge::bidirectional::BidirectionalEdgeStore;
+use crate::graph::unified::memory::{GraphMemorySize, HASHMAP_ENTRY_OVERHEAD};
 use crate::graph::unified::storage::arena::NodeArena;
+use crate::graph::unified::storage::edge_provenance::{EdgeProvenance, EdgeProvenanceStore};
 use crate::graph::unified::storage::indices::AuxiliaryIndices;
 use crate::graph::unified::storage::interner::StringInterner;
 use crate::graph::unified::storage::metadata::NodeMetadataStore;
-use crate::graph::unified::storage::registry::FileRegistry;
+use crate::graph::unified::storage::node_provenance::{NodeProvenance, NodeProvenanceStore};
+use crate::graph::unified::storage::registry::{FileProvenanceView, FileRegistry};
+use crate::graph::unified::string::id::StringId;
 
 /// Core graph with Arc-wrapped internals for O(1) `CoW` snapshots.
 ///
@@ -54,6 +58,12 @@ pub struct CodeGraph {
     indices: Arc<AuxiliaryIndices>,
     /// Sparse macro boundary metadata (keyed by full `NodeId`).
     macro_metadata: Arc<NodeMetadataStore>,
+    /// Dense node provenance (Phase 1 fact layer).
+    node_provenance: Arc<NodeProvenanceStore>,
+    /// Dense edge provenance (Phase 1 fact layer).
+    edge_provenance: Arc<EdgeProvenanceStore>,
+    /// Monotonic fact-layer epoch (0 until set by the V8 persistence path).
+    fact_epoch: u64,
     /// Epoch for version tracking.
     epoch: u64,
     /// Per-language confidence metadata collected during build.
@@ -81,6 +91,9 @@ impl CodeGraph {
             files: Arc::new(FileRegistry::new()),
             indices: Arc::new(AuxiliaryIndices::new()),
             macro_metadata: Arc::new(NodeMetadataStore::new()),
+            node_provenance: Arc::new(NodeProvenanceStore::new()),
+            edge_provenance: Arc::new(EdgeProvenanceStore::new()),
+            fact_epoch: 0,
             epoch: 0,
             confidence: HashMap::new(),
         }
@@ -106,6 +119,9 @@ impl CodeGraph {
             files: Arc::new(files),
             indices: Arc::new(indices),
             macro_metadata: Arc::new(macro_metadata),
+            node_provenance: Arc::new(NodeProvenanceStore::new()),
+            edge_provenance: Arc::new(EdgeProvenanceStore::new()),
+            fact_epoch: 0,
             epoch: 0,
             confidence: HashMap::new(),
         }
@@ -134,6 +150,9 @@ impl CodeGraph {
             files: Arc::clone(&self.files),
             indices: Arc::clone(&self.indices),
             macro_metadata: Arc::clone(&self.macro_metadata),
+            node_provenance: Arc::clone(&self.node_provenance),
+            edge_provenance: Arc::clone(&self.edge_provenance),
+            fact_epoch: self.fact_epoch,
             epoch: self.epoch,
         }
     }
@@ -178,6 +197,70 @@ impl CodeGraph {
     #[must_use]
     pub fn macro_metadata(&self) -> &NodeMetadataStore {
         &self.macro_metadata
+    }
+
+    // ------------------------------------------------------------------
+    // Phase 1 fact-layer provenance accessors (P1U09).
+    // ------------------------------------------------------------------
+
+    /// Returns the monotonic fact-layer epoch stamped on the most recently
+    /// saved or loaded snapshot. Returns `0` for graphs that have not been
+    /// persisted yet or were loaded from V7 snapshots.
+    #[inline]
+    #[must_use]
+    pub fn fact_epoch(&self) -> u64 {
+        self.fact_epoch
+    }
+
+    /// Looks up node provenance by `NodeId`.
+    ///
+    /// Returns `None` if the `NodeId` is out of range, the slot is vacant,
+    /// or the stored generation does not match (stale handle).
+    #[inline]
+    #[must_use]
+    pub fn node_provenance(
+        &self,
+        id: crate::graph::unified::node::id::NodeId,
+    ) -> Option<&NodeProvenance> {
+        self.node_provenance.lookup(id)
+    }
+
+    /// Looks up edge provenance by `EdgeId`.
+    ///
+    /// Returns `None` if the `EdgeId` is out of range, the slot is vacant,
+    /// or the edge is the invalid sentinel.
+    #[inline]
+    #[must_use]
+    pub fn edge_provenance(
+        &self,
+        id: crate::graph::unified::edge::id::EdgeId,
+    ) -> Option<&EdgeProvenance> {
+        self.edge_provenance.lookup(id)
+    }
+
+    /// Returns a borrowed provenance view for a file.
+    ///
+    /// Returns `None` for invalid/unregistered `FileId`s.
+    #[inline]
+    #[must_use]
+    pub fn file_provenance(
+        &self,
+        id: crate::graph::unified::file::id::FileId,
+    ) -> Option<FileProvenanceView<'_>> {
+        self.files.file_provenance(id)
+    }
+
+    /// Sets the provenance stores and fact epoch, typically called by the
+    /// persistence loader after deserializing a V8 snapshot.
+    pub(crate) fn set_provenance(
+        &mut self,
+        node_provenance: NodeProvenanceStore,
+        edge_provenance: EdgeProvenanceStore,
+        fact_epoch: u64,
+    ) {
+        self.node_provenance = Arc::new(node_provenance);
+        self.edge_provenance = Arc::new(edge_provenance);
+        self.fact_epoch = fact_epoch;
     }
 
     /// Returns the current epoch.
@@ -431,6 +514,47 @@ impl fmt::Debug for CodeGraph {
     }
 }
 
+impl GraphMemorySize for CodeGraph {
+    /// Estimates the total heap bytes owned by this `CodeGraph`.
+    ///
+    /// Sums heap usage across every component the graph owns: node arena,
+    /// bidirectional edge store (forward + reverse CSR + tombstones + delta
+    /// buffer), string interner, file registry, auxiliary indices, sparse
+    /// macro/classpath metadata, provenance stores, and the per-language
+    /// confidence map. Used by the `sqryd` daemon's admission controller
+    /// and workspace retention reaper to enforce memory budgets.
+    fn heap_bytes(&self) -> usize {
+        let mut confidence_bytes = self.confidence.capacity()
+            * (std::mem::size_of::<String>()
+                + std::mem::size_of::<ConfidenceMetadata>()
+                + HASHMAP_ENTRY_OVERHEAD);
+        for (key, meta) in &self.confidence {
+            confidence_bytes += key.capacity();
+            // `ConfidenceMetadata.limitations` / `unavailable_features` are
+            // `Vec<String>`; charge their spill and inner String payloads.
+            confidence_bytes += meta.limitations.capacity() * std::mem::size_of::<String>();
+            for s in &meta.limitations {
+                confidence_bytes += s.capacity();
+            }
+            confidence_bytes +=
+                meta.unavailable_features.capacity() * std::mem::size_of::<String>();
+            for s in &meta.unavailable_features {
+                confidence_bytes += s.capacity();
+            }
+        }
+
+        self.nodes.heap_bytes()
+            + self.edges.heap_bytes()
+            + self.strings.heap_bytes()
+            + self.files.heap_bytes()
+            + self.indices.heap_bytes()
+            + self.macro_metadata.heap_bytes()
+            + self.node_provenance.heap_bytes()
+            + self.edge_provenance.heap_bytes()
+            + confidence_bytes
+    }
+}
+
 /// Thread-safe wrapper for `CodeGraph` with epoch versioning.
 ///
 /// `ConcurrentCodeGraph` provides MVCC-style concurrency:
@@ -536,6 +660,52 @@ impl ConcurrentCodeGraph {
         self.inner.read().snapshot()
     }
 
+    // ------------------------------------------------------------------
+    // Phase 1 fact-layer provenance convenience accessors.
+    // These acquire a brief read lock, matching the snapshot() pattern.
+    // ------------------------------------------------------------------
+
+    /// Returns the monotonic fact-layer epoch from the underlying graph.
+    #[must_use]
+    pub fn fact_epoch(&self) -> u64 {
+        self.inner.read().fact_epoch()
+    }
+
+    /// Looks up node provenance by `NodeId` (acquires a brief read lock).
+    #[must_use]
+    pub fn node_provenance(
+        &self,
+        id: crate::graph::unified::node::id::NodeId,
+    ) -> Option<NodeProvenance> {
+        self.inner.read().node_provenance(id).copied()
+    }
+
+    /// Looks up edge provenance by `EdgeId` (acquires a brief read lock).
+    #[must_use]
+    pub fn edge_provenance(
+        &self,
+        id: crate::graph::unified::edge::id::EdgeId,
+    ) -> Option<EdgeProvenance> {
+        self.inner.read().edge_provenance(id).copied()
+    }
+
+    /// Returns a file provenance view (acquires a brief read lock).
+    ///
+    /// Returns an owned copy since the borrow cannot outlive the lock guard.
+    #[must_use]
+    pub fn file_provenance(
+        &self,
+        id: crate::graph::unified::file::id::FileId,
+    ) -> Option<OwnedFileProvenanceView> {
+        let guard = self.inner.read();
+        guard.file_provenance(id).map(|v| OwnedFileProvenanceView {
+            content_hash: *v.content_hash,
+            indexed_at: v.indexed_at,
+            source_uri: v.source_uri,
+            is_external: v.is_external,
+        })
+    }
+
     /// Attempts to acquire a read lock without blocking.
     ///
     /// Returns `None` if the lock is currently held exclusively.
@@ -571,6 +741,20 @@ impl fmt::Debug for ConcurrentCodeGraph {
             .field("epoch", &self.epoch.load(Ordering::SeqCst))
             .finish_non_exhaustive()
     }
+}
+
+/// Owned copy of file provenance, returned by [`ConcurrentCodeGraph::file_provenance`]
+/// because the borrowed [`FileProvenanceView`] cannot outlive the read-lock guard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OwnedFileProvenanceView {
+    /// SHA-256 of the on-disk file bytes (owned copy).
+    pub content_hash: [u8; 32],
+    /// Unix-epoch seconds at which this file was registered.
+    pub indexed_at: u64,
+    /// Optional interned physical origin URI.
+    pub source_uri: Option<StringId>,
+    /// Whether this file originates from an external source.
+    pub is_external: bool,
 }
 
 /// Immutable snapshot of a `CodeGraph` for long-running queries.
@@ -615,6 +799,12 @@ pub struct GraphSnapshot {
     indices: Arc<AuxiliaryIndices>,
     /// Sparse macro boundary metadata snapshot.
     macro_metadata: Arc<NodeMetadataStore>,
+    /// Dense node provenance snapshot (Phase 1).
+    node_provenance: Arc<NodeProvenanceStore>,
+    /// Dense edge provenance snapshot (Phase 1).
+    edge_provenance: Arc<EdgeProvenanceStore>,
+    /// Monotonic fact-layer epoch at snapshot time.
+    fact_epoch: u64,
     /// Epoch at snapshot time (for cursor validation).
     epoch: u64,
 }
@@ -660,6 +850,47 @@ impl GraphSnapshot {
     #[must_use]
     pub fn macro_metadata(&self) -> &NodeMetadataStore {
         &self.macro_metadata
+    }
+
+    // ------------------------------------------------------------------
+    // Phase 1 fact-layer provenance accessors (P1U09).
+    // ------------------------------------------------------------------
+
+    /// Returns the monotonic fact-layer epoch.
+    #[inline]
+    #[must_use]
+    pub fn fact_epoch(&self) -> u64 {
+        self.fact_epoch
+    }
+
+    /// Looks up node provenance by `NodeId`.
+    #[inline]
+    #[must_use]
+    pub fn node_provenance(
+        &self,
+        id: crate::graph::unified::node::id::NodeId,
+    ) -> Option<&NodeProvenance> {
+        self.node_provenance.lookup(id)
+    }
+
+    /// Looks up edge provenance by `EdgeId`.
+    #[inline]
+    #[must_use]
+    pub fn edge_provenance(
+        &self,
+        id: crate::graph::unified::edge::id::EdgeId,
+    ) -> Option<&EdgeProvenance> {
+        self.edge_provenance.lookup(id)
+    }
+
+    /// Returns a borrowed provenance view for a file.
+    #[inline]
+    #[must_use]
+    pub fn file_provenance(
+        &self,
+        id: crate::graph::unified::file::id::FileId,
+    ) -> Option<FileProvenanceView<'_>> {
+        self.files.file_provenance(id)
     }
 
     /// Returns the epoch at which this snapshot was taken.
@@ -969,6 +1200,115 @@ mod tests {
         let debug_str = format!("{graph:?}");
         assert!(debug_str.contains("CodeGraph"));
         assert!(debug_str.contains("epoch"));
+    }
+
+    /// Exact-byte regression for the iter2 fix of CodeGraph.confidence
+    /// accounting: adding a ConfidenceMetadata entry with known inner
+    /// Vec<String> capacities must increase heap_bytes() by exactly the sum
+    /// of those capacities plus Vec<String> slot overhead.
+    #[test]
+    fn test_codegraph_heap_bytes_counts_confidence_inner_strings() {
+        let mut graph = CodeGraph::new();
+        // Seed one confidence entry so the HashMap has non-zero capacity;
+        // reserve slack so the next insert cannot rehash.
+        graph.set_confidence({
+            let mut m = HashMap::with_capacity(8);
+            m.insert("seed".to_string(), ConfidenceMetadata::default());
+            m
+        });
+        let before = graph.heap_bytes();
+        let before_cap = graph.confidence.capacity();
+
+        let lim1 = String::from("no type inference");
+        let lim2 = String::from("no generic specialization");
+        let feat1 = String::from("rust-analyzer");
+        let l1 = lim1.capacity();
+        let l2 = lim2.capacity();
+        let f1 = feat1.capacity();
+
+        let limitations = vec![lim1, lim2];
+        let lim_vec_cap = limitations.capacity();
+
+        let unavailable_features = vec![feat1];
+        let feat_vec_cap = unavailable_features.capacity();
+
+        let key = String::from("rust");
+        let key_cap = key.capacity();
+        graph.confidence.insert(
+            key,
+            ConfidenceMetadata {
+                limitations,
+                unavailable_features,
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            graph.confidence.capacity(),
+            before_cap,
+            "prerequisite: confidence HashMap must not rehash during the test insert",
+        );
+
+        let after = graph.heap_bytes();
+        let expected_inner = key_cap
+            + lim_vec_cap * std::mem::size_of::<String>()
+            + l1
+            + l2
+            + feat_vec_cap * std::mem::size_of::<String>()
+            + f1;
+        assert_eq!(
+            after - before,
+            expected_inner,
+            "CodeGraph::heap_bytes must count ConfidenceMetadata inner Vec<String> capacity exactly",
+        );
+    }
+
+    #[test]
+    fn test_codegraph_heap_bytes_grows_with_content() {
+        use crate::graph::unified::node::NodeKind;
+        use crate::graph::unified::storage::arena::NodeEntry;
+        use std::path::Path;
+
+        // An empty graph reports some heap bytes (FileRegistry seeds index 0
+        // with `vec![None]`, HashMaps have non-zero base capacity once touched,
+        // etc.) but the value must be finite and well under the 100 MB cap.
+        let empty = CodeGraph::new();
+        let empty_bytes = empty.heap_bytes();
+        assert!(
+            empty_bytes < 100 * 1024 * 1024,
+            "empty graph heap_bytes should be <100 MiB, got {empty_bytes}"
+        );
+
+        let mut graph = CodeGraph::new();
+        for i in 0..32u32 {
+            let name = format!("sym_{i}");
+            let qual = format!("module::sym_{i}");
+            let file = format!("file_{i}.rs");
+
+            let name_id = graph.strings_mut().intern(&name).unwrap();
+            let qual_id = graph.strings_mut().intern(&qual).unwrap();
+            let file_id = graph.files_mut().register(Path::new(&file)).unwrap();
+
+            let entry =
+                NodeEntry::new(NodeKind::Function, name_id, file_id).with_qualified_name(qual_id);
+            let node_id = graph.nodes_mut().alloc(entry).unwrap();
+            graph
+                .indices_mut()
+                .add(node_id, NodeKind::Function, name_id, Some(qual_id), file_id);
+        }
+
+        let populated_bytes = graph.heap_bytes();
+        assert!(
+            populated_bytes > 0,
+            "populated graph should report nonzero heap bytes"
+        );
+        assert!(
+            populated_bytes > empty_bytes,
+            "populated graph ({populated_bytes}) should exceed empty graph ({empty_bytes})"
+        );
+        assert!(
+            populated_bytes < 100 * 1024 * 1024,
+            "test graph heap_bytes should be <100 MiB, got {populated_bytes}"
+        );
     }
 
     #[test]

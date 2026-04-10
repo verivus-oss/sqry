@@ -26,6 +26,7 @@ pub struct McpTestClient {
     pub stderr: Option<BufReader<ChildStderr>>,
     /// Client-side read timeout in milliseconds.
     read_timeout_ms: i32,
+    roots: Vec<Value>,
 }
 
 static GRAPH_BUILD_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -110,6 +111,7 @@ impl McpTestClient {
             stdout,
             stderr: None,
             read_timeout_ms: 30_000,
+            roots: Vec::new(),
         })
     }
 
@@ -205,6 +207,23 @@ impl McpTestClient {
         #[allow(clippy::needless_pass_by_value)] // Test helper takes owned value for convenience
         stderr_mode: StderrMode,
     ) -> Result<Self> {
+        Self::new_with_env_and_stderr_mode_internal(envs, stderr_mode, true)
+    }
+
+    /// Spawn a new MCP server process without injecting the default workspace env var.
+    #[allow(dead_code)]
+    pub fn new_without_workspace_env_and_stderr_mode(
+        envs: &[(String, String)],
+        stderr_mode: StderrMode,
+    ) -> Result<Self> {
+        Self::new_with_env_and_stderr_mode_internal(envs, stderr_mode, false)
+    }
+
+    fn new_with_env_and_stderr_mode_internal(
+        envs: &[(String, String)],
+        stderr_mode: StderrMode,
+        inject_default_workspace_root: bool,
+    ) -> Result<Self> {
         // Use the pre-built binary directly instead of cargo run.
         // This avoids cargo lock contention when many tests spawn concurrently.
         let (program, args): (std::ffi::OsString, &[&str]) =
@@ -224,7 +243,7 @@ impl McpTestClient {
         let has_workspace_override = envs
             .iter()
             .any(|(k, _)| k == "SQRY_MCP_WORKSPACE_ROOT" || k == "SQRY_WORKSPACE_ROOT");
-        if !has_workspace_override {
+        if inject_default_workspace_root && !has_workspace_override {
             command.env("SQRY_MCP_WORKSPACE_ROOT", workspace_root());
         }
 
@@ -232,6 +251,11 @@ impl McpTestClient {
         let has_timeout_override = envs.iter().any(|(k, _)| k == "SQRY_MCP_TIMEOUT_MS");
         if !has_timeout_override {
             command.env("SQRY_MCP_TIMEOUT_MS", "600000"); // 10 min for e2e tests
+        }
+
+        let has_redaction_override = envs.iter().any(|(k, _)| k == "SQRY_REDACTION_PRESET");
+        if !has_redaction_override {
+            command.env("SQRY_REDACTION_PRESET", "none");
         }
 
         let capture_stderr = match stderr_mode {
@@ -268,7 +292,56 @@ impl McpTestClient {
             stdout,
             stderr,
             read_timeout_ms: 30_000,
+            roots: Vec::new(),
         })
+    }
+
+    #[allow(dead_code)]
+    pub fn set_roots(&mut self, root_paths: &[std::path::PathBuf]) {
+        self.roots = root_paths.iter().map(|path| root_entry(path)).collect();
+    }
+
+    #[allow(dead_code)]
+    pub fn initialize_with_capabilities(&mut self, capabilities: Value) -> Result<Value> {
+        let response = self.call(
+            "initialize",
+            json!({
+                "protocolVersion": "2024-11-05",
+                "capabilities": capabilities,
+                "clientInfo": { "name": "sqry-mcp-tests", "version": "0.0" }
+            }),
+            0,
+        )?;
+        let notification = json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+            "params": {}
+        });
+        writeln!(self.stdin, "{notification}")?;
+        self.stdin.flush()?;
+        Ok(response)
+    }
+
+    #[allow(dead_code)]
+    pub fn initialize_with_roots(&mut self, root_paths: &[std::path::PathBuf]) -> Result<Value> {
+        self.set_roots(root_paths);
+        self.initialize_with_capabilities(json!({
+            "roots": {
+                "listChanged": true
+            }
+        }))
+    }
+
+    #[allow(dead_code)]
+    pub fn notify_roots_list_changed(&mut self) -> Result<()> {
+        let notification = json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/roots/list_changed",
+            "params": {}
+        });
+        writeln!(self.stdin, "{notification}")?;
+        self.stdin.flush()?;
+        Ok(())
     }
 
     /// Read all available stderr output (for debugging).
@@ -307,10 +380,16 @@ impl McpTestClient {
     /// blocks (e.g., building an index for a workspace without a pre-built graph).
     /// Default is 30 s; workspace clients use 120 s for the initial graph load.
     pub fn read_response(&mut self) -> Result<Value> {
-        self.read_response_with_timeout()?;
-        let mut line = String::new();
-        self.stdout.read_line(&mut line)?;
-        Ok(serde_json::from_str(&line)?)
+        loop {
+            self.read_response_with_timeout()?;
+            let mut line = String::new();
+            self.stdout.read_line(&mut line)?;
+            let message: Value = serde_json::from_str(&line)?;
+            if self.handle_server_request(&message)? {
+                continue;
+            }
+            return Ok(message);
+        }
     }
 
     /// Platform-specific timeout: poll(2) on Unix, no-op on Windows.
@@ -355,6 +434,28 @@ impl McpTestClient {
     pub fn call(&mut self, method: &str, params: Value, id: i64) -> Result<Value> {
         self.send_request(method, params, id)?;
         self.read_response()
+    }
+
+    fn handle_server_request(&mut self, message: &Value) -> Result<bool> {
+        let Some(method) = message.get("method").and_then(Value::as_str) else {
+            return Ok(false);
+        };
+
+        if method == "roots/list" {
+            let request_id = message["id"].clone();
+            let response = json!({
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "result": {
+                    "roots": self.roots
+                }
+            });
+            writeln!(self.stdin, "{response}")?;
+            self.stdin.flush()?;
+            return Ok(true);
+        }
+
+        Ok(false)
     }
 }
 
@@ -435,5 +536,20 @@ fn default_initialize_params() -> Value {
         "protocolVersion": "2024-11-05",
         "capabilities": {},
         "clientInfo": { "name": "sqry-mcp-tests", "version": "0.0" }
+    })
+}
+
+fn root_entry(path: &std::path::Path) -> Value {
+    let canonical = path.canonicalize().expect("canonical root path");
+    let uri = url::Url::from_file_path(&canonical)
+        .expect("file URI")
+        .to_string();
+    let name = canonical
+        .file_name()
+        .map(|value| value.to_string_lossy().into_owned());
+
+    json!({
+        "uri": uri,
+        "name": name
     })
 }

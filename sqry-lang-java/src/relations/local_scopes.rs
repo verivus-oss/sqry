@@ -8,8 +8,11 @@
 //! with Java-specific scope kinds and AST patterns.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
 
+use sqry_classpath::stub::index::ClasspathIndex;
+use sqry_classpath::stub::model::ClassStub;
 use sqry_core::graph::local_scopes::{
     ClassInfo, ClassInfoIndex, ClassMemberInfo, DebugEvent, MemberSource, ScopeKindTrait,
     ScopeTree, StringInterner, first_child_of_kind, load_recursion_guard, resolve_class_info,
@@ -44,6 +47,7 @@ pub(crate) enum ScopeKind {
     SwitchRule,
     SwitchGroup,
     SwitchGuard,
+    StatementFlow,
     TernaryTrue,
     AndRhs,
     Lambda,
@@ -92,14 +96,19 @@ impl ScopeKindTrait for ScopeKind {
 /// Java-specific scope tree type.
 pub(crate) type JavaScopeTree = ScopeTree<ScopeKind>;
 
+static CLASSPATH_INDEX_CACHE: OnceLock<Mutex<HashMap<PathBuf, Option<Arc<ClasspathIndex>>>>> =
+    OnceLock::new();
+
 // ============================================================================
 // Build entry point
 // ============================================================================
 
 /// Build a Java scope tree from the given AST root node.
-pub(crate) fn build(root: Node, content: &[u8]) -> GraphResult<JavaScopeTree> {
+pub(crate) fn build(root: Node, content: &[u8], file: Option<&Path>) -> GraphResult<JavaScopeTree> {
     let mut scope_tree = ScopeTree::new(content.len());
-    scope_tree.class_infos = build_class_info_index(&mut scope_tree, root, content);
+    let classpath_index = file.and_then(load_classpath_index_for_file);
+    scope_tree.class_infos =
+        build_class_info_index(&mut scope_tree, root, content, classpath_index.as_deref());
     build_scopes_internal(&mut scope_tree, root, content)?;
     scope_tree.rebuild_index();
     bind_declarations_internal(&mut scope_tree, root, content)?;
@@ -112,7 +121,12 @@ pub(crate) fn build(root: Node, content: &[u8]) -> GraphResult<JavaScopeTree> {
 // Build phase wrappers
 // ============================================================================
 
-fn build_class_info_index(tree: &mut JavaScopeTree, root: Node, content: &[u8]) -> ClassInfoIndex {
+fn build_class_info_index(
+    tree: &mut JavaScopeTree,
+    root: Node,
+    content: &[u8],
+    classpath_index: Option<&ClasspathIndex>,
+) -> ClassInfoIndex {
     let mut index = ClassInfoIndex::default();
     let mut class_stack = Vec::new();
     let mut guard = load_recursion_guard();
@@ -124,7 +138,281 @@ fn build_class_info_index(tree: &mut JavaScopeTree, root: Node, content: &[u8]) 
         &mut tree.interner,
         &mut guard,
     );
+    let import_map = collect_import_type_map(root, content);
+    if let Some(classpath_index) = classpath_index {
+        hydrate_classpath_infos(
+            root,
+            content,
+            &import_map,
+            &mut index,
+            &mut tree.interner,
+            classpath_index,
+        );
+    } else {
+        seed_well_known_java_types(&mut index);
+    }
     index
+}
+
+fn seed_well_known_java_types(index: &mut ClassInfoIndex) {
+    const WELL_KNOWN_TYPES: &[(&str, &str)] = &[
+        ("Object", "java.lang.Object"),
+        ("Runnable", "java.lang.Runnable"),
+        ("AutoCloseable", "java.lang.AutoCloseable"),
+        ("Comparable", "java.lang.Comparable"),
+        ("CharSequence", "java.lang.CharSequence"),
+        ("Iterable", "java.lang.Iterable"),
+        ("Cloneable", "java.lang.Cloneable"),
+        ("String", "java.lang.String"),
+        ("Number", "java.lang.Number"),
+        ("Enum", "java.lang.Enum"),
+        ("Record", "java.lang.Record"),
+        ("Serializable", "java.io.Serializable"),
+        ("Collection", "java.util.Collection"),
+        ("List", "java.util.List"),
+        ("Set", "java.util.Set"),
+        ("Map", "java.util.Map"),
+        ("Callable", "java.util.concurrent.Callable"),
+    ];
+
+    for (simple_name, qualifier) in WELL_KNOWN_TYPES {
+        index.insert(
+            ClassInfo {
+                qualifier: (*qualifier).to_string(),
+                declared_members: HashSet::new(),
+            },
+            &[(*simple_name).to_string(), (*qualifier).to_string()],
+        );
+    }
+}
+
+fn load_classpath_index_for_file(file: &Path) -> Option<Arc<ClasspathIndex>> {
+    let mut current_dir = file.parent();
+    while let Some(dir) = current_dir {
+        let index_path = dir.join(".sqry/classpath/index.sqry");
+        if index_path.exists() {
+            let cache = CLASSPATH_INDEX_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+            let mut cache = cache.lock().ok()?;
+            if let Some(cached) = cache.get(&index_path) {
+                return cached.clone();
+            }
+
+            let loaded = ClasspathIndex::load(&index_path).ok().map(Arc::new);
+            cache.insert(index_path, loaded.clone());
+            return loaded;
+        }
+        current_dir = dir.parent();
+    }
+    None
+}
+
+fn collect_import_type_map(root: Node, content: &[u8]) -> HashMap<String, String> {
+    let mut import_map = HashMap::new();
+    collect_import_type_map_recursive(root, content, &mut import_map);
+    import_map
+}
+
+fn collect_import_type_map_recursive(
+    node: Node,
+    content: &[u8],
+    import_map: &mut HashMap<String, String>,
+) {
+    if node.kind() == "import_declaration" {
+        let import_name = extract_import_name(node, content);
+        if !import_name.is_empty()
+            && !import_name.ends_with(".*")
+            && let Some(simple_name) = import_name.rsplit('.').next()
+        {
+            import_map
+                .entry(simple_name.to_string())
+                .or_insert(import_name);
+        }
+    }
+
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        collect_import_type_map_recursive(child, content, import_map);
+    }
+}
+
+fn extract_import_name(node: Node, content: &[u8]) -> String {
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if matches!(child.kind(), "scoped_identifier" | "identifier") {
+            return child.utf8_text(content).unwrap_or("").to_string();
+        }
+    }
+    String::new()
+}
+
+fn hydrate_classpath_infos(
+    root: Node,
+    content: &[u8],
+    import_map: &HashMap<String, String>,
+    index: &mut ClassInfoIndex,
+    interner: &mut StringInterner,
+    classpath_index: &ClasspathIndex,
+) {
+    let mut referenced_bases = HashSet::new();
+    collect_referenced_base_types(root, content, &mut referenced_bases);
+
+    let mut visiting = HashSet::new();
+    for base in referenced_bases {
+        ensure_classpath_info(
+            &base,
+            import_map,
+            index,
+            interner,
+            classpath_index,
+            &mut visiting,
+        );
+    }
+}
+
+fn collect_referenced_base_types(node: Node, content: &[u8], output: &mut HashSet<String>) {
+    match node.kind() {
+        "class_declaration" | "record_declaration" | "interface_declaration" => {
+            for base in extract_base_types(node, content) {
+                if !base.is_empty() {
+                    output.insert(base);
+                }
+            }
+        }
+        "object_creation_expression" => {
+            if first_child_of_kind(node, "class_body").is_some()
+                && let Some(type_node) = node.child_by_field_name("type")
+            {
+                let base_name = normalize_type_key(type_node.utf8_text(content).unwrap_or(""));
+                if !base_name.is_empty() {
+                    output.insert(base_name);
+                }
+            }
+        }
+        _ => {}
+    }
+
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        collect_referenced_base_types(child, content, output);
+    }
+}
+
+fn ensure_classpath_info(
+    base: &str,
+    import_map: &HashMap<String, String>,
+    index: &mut ClassInfoIndex,
+    interner: &mut StringInterner,
+    classpath_index: &ClasspathIndex,
+    visiting: &mut HashSet<String>,
+) {
+    let Some(fqn) = lookup_classpath_fqn(base, import_map, classpath_index) else {
+        return;
+    };
+    if resolve_class_info(index, &fqn).is_some() {
+        return;
+    }
+    if !visiting.insert(fqn.clone()) {
+        return;
+    }
+
+    let Some(stub) = classpath_index.lookup_fqn(&fqn) else {
+        visiting.remove(&fqn);
+        return;
+    };
+
+    let declared_members =
+        collect_classpath_members(stub, import_map, index, interner, classpath_index, visiting);
+    let keys = vec![stub.name.clone(), stub.fqn.clone()];
+    index.insert(
+        ClassInfo {
+            qualifier: stub.fqn.clone(),
+            declared_members,
+        },
+        &keys,
+    );
+
+    visiting.remove(&fqn);
+}
+
+fn collect_classpath_members(
+    stub: &ClassStub,
+    import_map: &HashMap<String, String>,
+    index: &mut ClassInfoIndex,
+    interner: &mut StringInterner,
+    classpath_index: &ClasspathIndex,
+    visiting: &mut HashSet<String>,
+) -> HashSet<Arc<str>> {
+    let mut members = HashSet::new();
+
+    for field in &stub.fields {
+        members.insert(interner.intern(&field.name));
+    }
+    for enum_constant in &stub.enum_constants {
+        members.insert(interner.intern(enum_constant));
+    }
+    for component in &stub.record_components {
+        members.insert(interner.intern(&component.name));
+    }
+
+    if let Some(superclass) = &stub.superclass {
+        ensure_classpath_info(
+            superclass,
+            import_map,
+            index,
+            interner,
+            classpath_index,
+            visiting,
+        );
+        if let Some(parent_info) = resolve_class_info(index, superclass) {
+            members.extend(parent_info.declared_members.iter().cloned());
+        }
+    }
+
+    for interface_name in &stub.interfaces {
+        ensure_classpath_info(
+            interface_name,
+            import_map,
+            index,
+            interner,
+            classpath_index,
+            visiting,
+        );
+        if let Some(interface_info) = resolve_class_info(index, interface_name) {
+            members.extend(interface_info.declared_members.iter().cloned());
+        }
+    }
+
+    members
+}
+
+fn lookup_classpath_fqn(
+    base: &str,
+    import_map: &HashMap<String, String>,
+    classpath_index: &ClasspathIndex,
+) -> Option<String> {
+    let normalized = base.replace("::", ".");
+    if classpath_index.lookup_fqn(&normalized).is_some() {
+        return Some(normalized);
+    }
+
+    if let Some(imported) = import_map.get(base)
+        && classpath_index.lookup_fqn(imported).is_some()
+    {
+        return Some(imported.clone());
+    }
+
+    let simple_name = normalized.rsplit('.').next().unwrap_or(&normalized);
+    let mut matches = classpath_index
+        .classes
+        .iter()
+        .filter(|stub| stub.name == simple_name)
+        .map(|stub| stub.fqn.clone());
+    let first_match = matches.next()?;
+    if matches.next().is_none() {
+        return Some(first_match);
+    }
+
+    None
 }
 
 fn build_scopes_internal(tree: &mut JavaScopeTree, root: Node, content: &[u8]) -> GraphResult<()> {
@@ -384,8 +672,9 @@ fn build_scopes_dispatch(
             }
         }
         "static_initializer" => {
-            // Strict let-chain: only recurse if both body and scope exist
-            if let Some(body) = node.child_by_field_name("body")
+            // tree-sitter-java exposes the initializer body as a block child, not
+            // a named field.
+            if let Some(body) = first_child_of_kind(node, "block")
                 && let Some(scope_id) = tree.add_scope(
                     ScopeKind::StaticInitializer,
                     body.start_byte(),
@@ -791,8 +1080,9 @@ fn build_object_creation_scopes(
     guard: &mut sqry_core::query::security::RecursionGuard,
     class_stack: &mut Vec<String>,
 ) -> GraphResult<()> {
-    // Strict: only recurse body if scope is created
-    if let Some(body) = node.child_by_field_name("class_body")
+    // tree-sitter-java exposes anonymous class bodies as `class_body` children,
+    // not a named field.
+    if let Some(body) = first_child_of_kind(node, "class_body")
         && let Some(scope_id) = tree.add_scope(
             ScopeKind::AnonymousClass,
             body.start_byte(),
@@ -923,15 +1213,16 @@ fn record_anonymous_class_members(
     content: &[u8],
     scope_id: ScopeId,
 ) {
+    let synthetic_qualifier = format!("<anonymous@{}>", node.start_byte());
     let mut info = ClassMemberInfo {
-        qualifier: None,
+        qualifier: Some(synthetic_qualifier),
         declared_members: HashSet::new(),
         inherited_members: HashMap::new(),
         unresolved_base_count: 0,
         explicit_base_count: 0,
     };
 
-    if let Some(body) = node.child_by_field_name("class_body") {
+    if let Some(body) = first_child_of_kind(node, "class_body") {
         let mut cursor = body.walk();
         for child in body.children(&mut cursor) {
             match child.kind() {
@@ -1189,6 +1480,13 @@ fn bind_pattern_scopes_recursive(
         bind_switch_label_patterns(tree, node, content);
     }
 
+    if matches!(
+        node.kind(),
+        "if_statement" | "while_statement" | "do_statement" | "for_statement"
+    ) {
+        bind_statement_flow_patterns(tree, node, content);
+    }
+
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         bind_pattern_scopes_recursive(tree, child, content, guard)?;
@@ -1411,12 +1709,21 @@ fn bind_compact_constructor_parameters(
 }
 
 fn collect_record_components<'a>(record_node: Node<'a>, components: &mut Vec<Node<'a>>) {
+    if let Some(parameters) = record_node.child_by_field_name("parameters") {
+        let mut cursor = parameters.walk();
+        for child in parameters.children(&mut cursor) {
+            if matches!(child.kind(), "formal_parameter" | "record_component") {
+                components.push(child);
+            }
+        }
+        return;
+    }
+
     let mut cursor = record_node.walk();
     for child in record_node.children(&mut cursor) {
         if child.kind() == "record_component" {
             components.push(child);
         }
-        collect_record_components(child, components);
     }
 }
 
@@ -1649,6 +1956,142 @@ fn bind_switch_label_patterns(tree: &mut JavaScopeTree, node: Node, content: &[u
     }
 }
 
+fn bind_statement_flow_patterns(tree: &mut JavaScopeTree, node: Node, content: &[u8]) {
+    match node.kind() {
+        "if_statement" => bind_if_statement_flow_patterns(tree, node, content),
+        "while_statement" | "do_statement" | "for_statement" => {
+            bind_loop_exit_patterns(tree, node, content);
+        }
+        _ => {}
+    }
+}
+
+fn bind_if_statement_flow_patterns(tree: &mut JavaScopeTree, node: Node, content: &[u8]) {
+    let Some(condition) = node.child_by_field_name("condition") else {
+        return;
+    };
+    let Some(consequence) = node.child_by_field_name("consequence") else {
+        return;
+    };
+
+    let alternative = node.child_by_field_name("alternative");
+    let mut flow_bindings = Vec::new();
+    collect_statement_flow_bindings(
+        condition,
+        content,
+        |name_node| is_definitely_false_global(name_node, condition, content),
+        &mut flow_bindings,
+    );
+
+    if alternative.is_none() {
+        if statement_can_complete_normally(consequence) {
+            return;
+        }
+        add_post_statement_flow_scope(tree, node, &flow_bindings);
+        return;
+    }
+
+    let Some(alternative) = alternative else {
+        return;
+    };
+
+    let mut merged = Vec::new();
+    if !statement_can_complete_normally(consequence) {
+        merged.extend(flow_bindings);
+    }
+
+    if !statement_can_complete_normally(alternative) {
+        collect_statement_flow_bindings(
+            condition,
+            content,
+            |name_node| is_definitely_true_global(name_node, condition, content),
+            &mut merged,
+        );
+    }
+
+    add_post_statement_flow_scope(tree, node, &merged);
+}
+
+fn bind_loop_exit_patterns(tree: &mut JavaScopeTree, node: Node, content: &[u8]) {
+    let Some(condition) = node.child_by_field_name("condition") else {
+        return;
+    };
+    let Some(body) = node.child_by_field_name("body") else {
+        return;
+    };
+
+    if contains_reachable_break(body, content) {
+        return;
+    }
+
+    let mut flow_bindings = Vec::new();
+    collect_statement_flow_bindings(
+        condition,
+        content,
+        |name_node| is_definitely_false_global(name_node, condition, content),
+        &mut flow_bindings,
+    );
+    add_post_statement_flow_scope(tree, node, &flow_bindings);
+}
+
+fn add_post_statement_flow_scope(
+    tree: &mut JavaScopeTree,
+    statement_node: Node,
+    bindings: &[(String, usize, usize)],
+) {
+    if bindings.is_empty() {
+        return;
+    }
+
+    let (statement_node, parent_sequence) = statement_flow_anchor(statement_node);
+    let scope_start = statement_node.end_byte();
+    if scope_start >= parent_sequence.end_byte() {
+        return;
+    }
+
+    let parent_scope = tree.innermost_scope_at(scope_start);
+    if let Some(scope_id) = tree.add_scope(
+        ScopeKind::StatementFlow,
+        scope_start,
+        parent_sequence.end_byte(),
+        parent_scope,
+    ) {
+        for (name, decl_start, decl_end) in bindings {
+            tree.add_binding(scope_id, name, *decl_start, *decl_end, *decl_end, None);
+        }
+    }
+}
+
+fn statement_flow_anchor(statement_node: Node) -> (Node, Node) {
+    let mut anchor = statement_node;
+    while let Some(parent) = anchor.parent() {
+        if parent.kind() == "labeled_statement" {
+            anchor = parent;
+            continue;
+        }
+        if matches!(parent.kind(), "block" | "switch_block_statement_group") {
+            return (anchor, parent);
+        }
+        break;
+    }
+    (anchor, anchor.parent().unwrap_or(anchor))
+}
+
+fn collect_statement_flow_bindings(
+    condition: Node,
+    content: &[u8],
+    predicate: impl Fn(Node) -> bool,
+    output: &mut Vec<(String, usize, usize)>,
+) {
+    let mut patterns = Vec::new();
+    collect_pattern_identifiers(condition, content, &mut patterns);
+    for (name, name_node) in patterns {
+        if predicate(name_node) {
+            output.push((name, name_node.start_byte(), name_node.end_byte()));
+        }
+    }
+}
+
 fn collect_pattern_identifiers<'a>(
     node: Node<'a>,
     content: &[u8],
@@ -1666,23 +2109,10 @@ fn collect_pattern_identifiers<'a>(
             }
         }
     }
-    if node.kind() == "type_pattern"
-        && let Some(name_node) = node.child_by_field_name("name")
-    {
+    if let Some((name_node, _type_node)) = typed_pattern_parts(node) {
         let name = name_node.utf8_text(content).unwrap_or("").to_string();
         if !name.is_empty() {
             output.push((name, name_node));
-        }
-    }
-    if node.kind() == "record_pattern_component" {
-        let mut cursor = node.walk();
-        for child in node.children(&mut cursor) {
-            if child.kind() == "identifier" {
-                let name = child.utf8_text(content).unwrap_or("").to_string();
-                if !name.is_empty() {
-                    output.push((name, child));
-                }
-            }
         }
     }
 
@@ -1724,16 +2154,16 @@ fn pattern_sets_uniform(pattern_sets: &[Vec<(String, Node)>]) -> bool {
 }
 
 fn is_definitely_true_global(instanceof_node: Node, condition: Node, content: &[u8]) -> bool {
-    let mut current = instanceof_node.parent();
+    let mut current = Some(instanceof_node);
     while let Some(node) = current {
-        if node.id() == condition.id() {
-            return true;
-        }
         if node.kind() == "unary_expression" && unary_has_negation(node, content) {
             return false;
         }
         if node.kind() == "binary_expression" && binary_operator(node, content) == Some("||") {
             return false;
+        }
+        if node.id() == condition.id() {
+            return true;
         }
         current = node.parent();
     }
@@ -1741,20 +2171,188 @@ fn is_definitely_true_global(instanceof_node: Node, condition: Node, content: &[
 }
 
 fn is_definitely_true_local(instanceof_node: Node, left_operand: Node, content: &[u8]) -> bool {
-    let mut current = instanceof_node.parent();
+    let mut current = Some(instanceof_node);
     while let Some(node) = current {
-        if node.id() == left_operand.id() {
-            return true;
-        }
         if node.kind() == "unary_expression" && unary_has_negation(node, content) {
             return false;
         }
         if node.kind() == "binary_expression" && binary_operator(node, content) == Some("||") {
             return false;
         }
+        if node.id() == left_operand.id() {
+            return true;
+        }
         current = node.parent();
     }
     false
+}
+
+fn is_definitely_false_global(pattern_node: Node, condition: Node, content: &[u8]) -> bool {
+    let mut current = Some(pattern_node);
+    let mut truthiness_flipped = false;
+    while let Some(node) = current {
+        if node.kind() == "unary_expression" && unary_has_negation(node, content) {
+            truthiness_flipped = !truthiness_flipped;
+        }
+        if node.kind() == "binary_expression" {
+            return false;
+        }
+        if node.id() == condition.id() {
+            return truthiness_flipped;
+        }
+        current = node.parent();
+    }
+    false
+}
+
+fn typed_pattern_parts(node: Node) -> Option<(Node, Option<Node>)> {
+    match node.kind() {
+        "type_pattern" | "record_pattern_component" => {
+            let mut name_node = None;
+            let mut type_node = None;
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if matches!(child.kind(), "identifier" | "_reserved_identifier") {
+                    name_node = Some(child);
+                } else if matches!(
+                    child.kind(),
+                    "type_identifier" | "scoped_type_identifier" | "generic_type"
+                ) {
+                    type_node = Some(child);
+                }
+            }
+            name_node.map(|name| (name, type_node))
+        }
+        _ => None,
+    }
+}
+
+fn statement_can_complete_normally(node: Node) -> bool {
+    match node.kind() {
+        "return_statement" | "throw_statement" | "break_statement" | "continue_statement"
+        | "yield_statement" => false,
+        "block" => {
+            let mut last_statement = None;
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if child.is_named() {
+                    last_statement = Some(child);
+                }
+            }
+            last_statement.is_none_or(statement_can_complete_normally)
+        }
+        "if_statement" => {
+            let Some(consequence) = node.child_by_field_name("consequence") else {
+                return true;
+            };
+            let Some(alternative) = node.child_by_field_name("alternative") else {
+                return true;
+            };
+            statement_can_complete_normally(consequence)
+                || statement_can_complete_normally(alternative)
+        }
+        _ => true,
+    }
+}
+
+fn contains_reachable_break(node: Node, content: &[u8]) -> bool {
+    let mut local_labels: Vec<&str> = Vec::new();
+    contains_reachable_break_inner(node, content, false, &mut local_labels)
+}
+
+fn contains_reachable_break_inner<'a>(
+    node: Node,
+    content: &'a [u8],
+    inside_switch: bool,
+    local_labels: &mut Vec<&'a str>,
+) -> bool {
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        match child.kind() {
+            "break_statement" => {
+                match break_target_label(child, content) {
+                    Some(label) => {
+                        // Labeled break exits the current loop unless its target
+                        // is a `labeled_statement` declared *inside* the body we
+                        // are scanning (e.g. a nested labeled block). Nested
+                        // labeled loops are pruned below, so any label we encounter
+                        // here that is not in `local_labels` must refer to the
+                        // current loop or something enclosing it — either way it
+                        // exits the loop.
+                        if !local_labels.contains(&label) {
+                            return true;
+                        }
+                    }
+                    None => {
+                        if !inside_switch {
+                            return true;
+                        }
+                        // Unlabeled break inside a switch targets the switch,
+                        // not the enclosing loop — ignore.
+                    }
+                }
+            }
+            "switch_expression" => {
+                if contains_reachable_break_inner(child, content, true, local_labels) {
+                    return true;
+                }
+            }
+            "while_statement"
+            | "do_statement"
+            | "for_statement"
+            | "enhanced_for_statement"
+            | "lambda_expression"
+            | "class_declaration"
+            | "record_declaration"
+            | "enum_declaration"
+            | "interface_declaration"
+            | "object_creation_expression" => {}
+            "labeled_statement" => {
+                // Track the label as locally declared while traversing this
+                // subtree so that `break LABEL;` targeting it is not treated
+                // as a loop-exiting break. Nested labeled loops are pruned
+                // via the match arms above and never descended into.
+                let pushed = labeled_statement_label(child, content);
+                if let Some(label) = pushed {
+                    local_labels.push(label);
+                }
+                let hit =
+                    contains_reachable_break_inner(child, content, inside_switch, local_labels);
+                if pushed.is_some() {
+                    local_labels.pop();
+                }
+                if hit {
+                    return true;
+                }
+            }
+            _ => {
+                if contains_reachable_break_inner(child, content, inside_switch, local_labels) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+fn break_target_label<'a>(break_node: Node, content: &'a [u8]) -> Option<&'a str> {
+    let mut cursor = break_node.walk();
+    for child in break_node.children(&mut cursor) {
+        if child.kind() == "identifier" {
+            return child.utf8_text(content).ok();
+        }
+    }
+    None
+}
+
+fn labeled_statement_label<'a>(node: Node, content: &'a [u8]) -> Option<&'a str> {
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if child.kind() == "identifier" {
+            return child.utf8_text(content).ok();
+        }
+    }
+    None
 }
 
 fn unary_has_negation(node: Node, _content: &[u8]) -> bool {
@@ -1827,7 +2425,7 @@ mod tests {
 
     fn build_scope_tree(content: &str) -> JavaScopeTree {
         let tree = parse_java(content);
-        build(tree.root_node(), content.as_bytes()).unwrap()
+        build(tree.root_node(), content.as_bytes(), None).unwrap()
     }
 
     /// Find the Nth occurrence (0-indexed) of an identifier node with the given text.
@@ -1847,6 +2445,7 @@ mod tests {
                 queue.push_back(child);
             }
         }
+        matches.sort_by_key(Node::start_byte);
         matches
             .into_iter()
             .nth(nth)
@@ -2110,6 +2709,35 @@ class C {
     // ---- Pattern Variables ----
 
     #[test]
+    fn test_compact_constructor_bindings() {
+        let content = r"
+record Point(int x, int y) {
+    Point {
+        if (x < 0) throw new IllegalArgumentException();
+        System.out.println(y);
+    }
+}
+";
+        let mut scope_tree = build_scope_tree(content);
+        let tree = parse_java(content);
+        let root = tree.root_node();
+
+        let x_usage = find_identifier(root, content.as_bytes(), "x", 1);
+        let x_result = scope_tree.resolve_identifier(x_usage.start_byte(), "x");
+        assert!(
+            matches!(x_result, ResolutionOutcome::Local(_)),
+            "Expected compact constructor binding for x: {x_result:?}"
+        );
+
+        let y_usage = find_identifier(root, content.as_bytes(), "y", 1);
+        let y_result = scope_tree.resolve_identifier(y_usage.start_byte(), "y");
+        assert!(
+            matches!(y_result, ResolutionOutcome::Local(_)),
+            "Expected compact constructor binding for y: {y_result:?}"
+        );
+    }
+
+    #[test]
     fn test_pattern_if_branch() {
         let content = r"
 class C {
@@ -2152,6 +2780,143 @@ class C {
         assert!(
             !has_s,
             "Do-while condition pattern var s should not be bound"
+        );
+    }
+
+    #[test]
+    fn test_statement_flow_after_if_do_and_for() {
+        let content = r#"
+class C {
+    void test(Object obj) {
+        if (!(obj instanceof String ifString)) {
+            return;
+        }
+        System.out.println(ifString);
+
+        do {
+            obj = "ready";
+        } while (!(obj instanceof String doString));
+        System.out.println(doString);
+
+        for (; !(obj instanceof String forString); obj = "ready") {
+            obj = "ready";
+        }
+        System.out.println(forString);
+    }
+}
+"#;
+        let mut scope_tree = build_scope_tree(content);
+        let tree = parse_java(content);
+        let root = tree.root_node();
+
+        let if_usage = find_identifier(root, content.as_bytes(), "ifString", 1);
+        let if_result = scope_tree.resolve_identifier(if_usage.start_byte(), "ifString");
+        assert!(
+            matches!(if_result, ResolutionOutcome::Local(_)),
+            "Expected statement-flow binding after if for ifString: {if_result:?}"
+        );
+
+        let do_usage = find_identifier(root, content.as_bytes(), "doString", 1);
+        let do_result = scope_tree.resolve_identifier(do_usage.start_byte(), "doString");
+        assert!(
+            matches!(do_result, ResolutionOutcome::Local(_)),
+            "Expected statement-flow binding after do-while for doString: {do_result:?}"
+        );
+
+        let for_usage = find_identifier(root, content.as_bytes(), "forString", 1);
+        let for_result = scope_tree.resolve_identifier(for_usage.start_byte(), "forString");
+        assert!(
+            matches!(for_result, ResolutionOutcome::Local(_)),
+            "Expected statement-flow binding after for for forString: {for_result:?}"
+        );
+    }
+
+    #[test]
+    fn test_statement_flow_ignores_switch_breaks() {
+        let content = r#"
+class C {
+    void test(Object obj, int value) {
+        while (!(obj instanceof String loopString)) {
+            switch (value) {
+                case 1:
+                    break;
+                default:
+                    value = 1;
+            }
+            obj = "ready";
+        }
+        System.out.println(loopString);
+    }
+}
+"#;
+        let mut scope_tree = build_scope_tree(content);
+        let tree = parse_java(content);
+        let root = tree.root_node();
+
+        let usage = find_identifier(root, content.as_bytes(), "loopString", 1);
+        let result = scope_tree.resolve_identifier(usage.start_byte(), "loopString");
+        assert!(
+            matches!(result, ResolutionOutcome::Local(_)),
+            "Expected statement-flow binding after loop with inner switch break: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_statement_flow_ignores_local_labeled_block_break() {
+        let content = r#"
+class C {
+    void test(Object obj) {
+        while (!(obj instanceof String loopString)) {
+            INNER: {
+                if (obj == null) {
+                    break INNER;
+                }
+            }
+            obj = "ready";
+        }
+        System.out.println(loopString);
+    }
+}
+"#;
+        let mut scope_tree = build_scope_tree(content);
+        let tree = parse_java(content);
+        let root = tree.root_node();
+
+        let usage = find_identifier(root, content.as_bytes(), "loopString", 1);
+        let result = scope_tree.resolve_identifier(usage.start_byte(), "loopString");
+        assert!(
+            matches!(result, ResolutionOutcome::Local(_)),
+            "Expected statement-flow binding when inner labeled-block break does not exit loop: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_statement_flow_suppressed_by_labeled_loop_break() {
+        let content = r#"
+class C {
+    void test(Object obj) {
+        OUTER:
+        while (!(obj instanceof String loopString)) {
+            switch (obj.hashCode()) {
+                case 0:
+                    break OUTER;
+                default:
+                    obj = "ready";
+            }
+        }
+        System.out.println(loopString);
+    }
+}
+"#;
+        let mut scope_tree = build_scope_tree(content);
+        let tree = parse_java(content);
+        let root = tree.root_node();
+
+        let usage = find_identifier(root, content.as_bytes(), "loopString", 1);
+        let result = scope_tree.resolve_identifier(usage.start_byte(), "loopString");
+        assert!(
+            !matches!(result, ResolutionOutcome::Local(_)),
+            "Expected NO statement-flow binding when labeled break exits the loop: {result:?}"
         );
     }
 
@@ -2304,12 +3069,14 @@ class C {
 
         let usage = find_identifier(root, content.as_bytes(), "x", 2);
         let result = scope_tree.resolve_identifier(usage.start_byte(), "x");
-        // Current behavior: resolves to outer local x=1.
-        // Anonymous class scope boundary detection for inline member declarations
-        // is a known gap in the standalone scope tree.
         assert!(
-            matches!(result, ResolutionOutcome::Local(_)),
-            "Expected local resolution for x: {result:?}"
+            matches!(
+                result,
+                ResolutionOutcome::Member {
+                    qualified_name: Some(_)
+                }
+            ),
+            "Expected anonymous-class member resolution for x: {result:?}"
         );
     }
 
@@ -2364,12 +3131,14 @@ class C {
 
         let usage = find_identifier(root, content.as_bytes(), "value", 2);
         let result = scope_tree.resolve_identifier(usage.start_byte(), "value");
-        // Current behavior: resolves to outer local value=1.
-        // Inherited member resolution for anonymous class bases is a known gap
-        // in the standalone scope tree when the class boundary isn't detected.
         assert!(
-            matches!(result, ResolutionOutcome::Local(_)),
-            "Expected local resolution for value: {result:?}"
+            matches!(
+                result,
+                ResolutionOutcome::Member {
+                    qualified_name: Some(ref qualified_name)
+                } if qualified_name == "Base::value"
+            ),
+            "Expected inherited member resolution for value: {result:?}"
         );
     }
 

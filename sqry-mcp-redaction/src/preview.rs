@@ -98,6 +98,9 @@ pub enum RedactionReason {
 
     /// Unknown field (whitelist mode).
     UnknownField,
+
+    /// Value exceeded the maximum nesting depth limit.
+    DepthLimitExceeded,
 }
 
 impl RedactionReason {
@@ -113,6 +116,7 @@ impl RedactionReason {
             Self::CustomField => "Custom field",
             Self::PatternMatch => "Pattern-detected path",
             Self::UnknownField => "Unknown field (not in whitelist)",
+            Self::DepthLimitExceeded => "Depth limit exceeded",
         }
     }
 }

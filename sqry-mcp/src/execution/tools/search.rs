@@ -62,6 +62,10 @@ fn resolve_workspace_path(path: &str) -> Option<PathBuf> {
 fn resolve_workspace_root_for_security() -> Result<PathBuf> {
     use std::env;
 
+    if let Some(workspace_root) = crate::workspace_session::current_workspace_override() {
+        return Ok(workspace_root);
+    }
+
     // Check SQRY_MCP_WORKSPACE_ROOT first (primary)
     if let Ok(root) = env::var("SQRY_MCP_WORKSPACE_ROOT") {
         let path = PathBuf::from(root);

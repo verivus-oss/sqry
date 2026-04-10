@@ -15,6 +15,7 @@
 //! Legacy graph code has been removed.
 
 pub mod loader;
+pub mod provenance;
 
 use crate::args::{Cli, GraphOperation};
 use anyhow::{Context, Result, bail};
@@ -267,6 +268,10 @@ pub fn run_graph(
             format,
             verbose,
         ),
+        GraphOperation::Provenance { symbol, json } => {
+            let snapshot = unified_graph.snapshot();
+            provenance::run(&snapshot, symbol, *json)
+        }
         GraphOperation::Status => {
             unreachable!("Status is handled before loading the unified graph in run_graph")
         }

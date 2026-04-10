@@ -11,13 +11,14 @@ use serde::{Deserialize, Serialize};
 
 use std::collections::HashMap;
 
-use super::format::{GraphHeader, MAGIC_BYTES, VERSION};
+use super::format::{FormatVersion, GraphHeader, MAGIC_BYTES_V8, VERSION};
 use super::manifest::ConfigProvenance;
 use crate::graph::unified::BidirectionalEdgeStore;
 use crate::graph::unified::concurrent::CodeGraph;
 use crate::graph::unified::resolution::is_canonical_graph_qualified_name;
 use crate::graph::unified::storage::{
-    AuxiliaryIndices, FileRegistry, NodeArena, NodeMetadataStore, StringInterner,
+    AuxiliaryIndices, EdgeProvenanceStore, FileRegistry, NodeArena, NodeMetadataStore,
+    NodeProvenanceStore, StringInterner,
 };
 use crate::plugin::PluginManager;
 
@@ -128,7 +129,7 @@ impl From<postcard::Error> for PersistenceError {
     }
 }
 
-/// Serializable snapshot of the graph state.
+/// Serializable snapshot of the graph state (V8+).
 ///
 /// This is the complete graph state that gets persisted to disk.
 #[derive(Debug, Serialize, Deserialize)]
@@ -144,6 +145,25 @@ struct GraphSnapshotData {
     /// Auxiliary indices
     indices: AuxiliaryIndices,
     /// Sparse macro boundary metadata (keyed by full `NodeId`)
+    macro_metadata: NodeMetadataStore,
+    /// Dense node provenance (Phase 1 fact layer).
+    node_provenance: NodeProvenanceStore,
+    /// Dense edge provenance (Phase 1 fact layer).
+    edge_provenance: EdgeProvenanceStore,
+}
+
+/// V7-shaped snapshot data (pre-Phase-1, no provenance fields).
+///
+/// Used only by the V7 legacy read path to deserialize old blobs.
+/// After deserialization, the loader converts to [`GraphSnapshotData`]
+/// with empty provenance stores sized to the arena/CSR slot counts.
+#[derive(Debug, Deserialize)]
+struct GraphSnapshotDataV7 {
+    nodes: NodeArena,
+    edges: BidirectionalEdgeStore,
+    strings: StringInterner,
+    files: FileRegistry,
+    indices: AuxiliaryIndices,
     macro_metadata: NodeMetadataStore,
 }
 
@@ -276,6 +296,78 @@ fn validate_snapshot_semantics(snapshot_data: &GraphSnapshotData) -> Result<(), 
     Ok(())
 }
 
+/// Computes the next monotonic fact-layer epoch for a save operation.
+///
+/// If `snapshot_path` exists and contains a valid V7 or V8 header, reads
+/// the previous `fact_epoch` and returns `max(prev + 1, now_secs)`. If the
+/// file does not exist or the header cannot be read, falls back to
+/// `now_secs` (which is correct for a fresh build).
+///
+/// This function only reads the magic bytes + fixed-length header prefix —
+/// it does **not** load the data section, so the cost is negligible.
+fn next_fact_epoch(snapshot_path: &Path) -> u64 {
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let prev_epoch = read_prev_fact_epoch(snapshot_path).unwrap_or(0);
+    std::cmp::max(prev_epoch + 1, now_secs)
+}
+
+/// Reads only the `fact_epoch` from an existing snapshot file's header.
+///
+/// Returns `None` on any I/O or parse error (file missing, corrupt magic,
+/// truncated header, etc.). Callers treat `None` as `prev_epoch = 0`.
+fn read_prev_fact_epoch(path: &Path) -> Option<u64> {
+    let file = File::open(path).ok()?;
+    let mut reader = BufReader::new(file);
+
+    // Read magic — accept both V7 and V8
+    let mut magic = [0u8; 13];
+    reader.read_exact(&mut magic).ok()?;
+    FormatVersion::from_magic(&magic)?; // reject unknown magic
+
+    // Read header length
+    let header_len = read_u32_le(&mut reader).ok()? as usize;
+    if header_len > MAX_HEADER_BYTES {
+        return None;
+    }
+
+    // Read and deserialize header
+    let mut header_buf = vec![0u8; header_len];
+    reader.read_exact(&mut header_buf).ok()?;
+    let header: GraphHeader = postcard::from_bytes(&header_buf).ok()?;
+    Some(header.fact_epoch())
+}
+
+/// Converts a deserialized V7 snapshot into the V8 shape by attaching
+/// empty provenance stores sized to the arena/CSR slot counts.
+fn upconvert_v7_to_v8(v7: GraphSnapshotDataV7) -> GraphSnapshotData {
+    let node_slot_count = v7.nodes.slot_count();
+    let edge_count = {
+        let stats = v7.edges.stats().forward;
+        stats.csr_edge_count + stats.delta_edge_count
+    };
+
+    let mut node_provenance = NodeProvenanceStore::new();
+    node_provenance.resize_to(node_slot_count);
+
+    let mut edge_provenance = EdgeProvenanceStore::new();
+    edge_provenance.resize_to(edge_count);
+
+    GraphSnapshotData {
+        nodes: v7.nodes,
+        edges: v7.edges,
+        strings: v7.strings,
+        files: v7.files,
+        indices: v7.indices,
+        macro_metadata: v7.macro_metadata,
+        node_provenance,
+        edge_provenance,
+    }
+}
+
 /// Read a little-endian u32 from a reader.
 fn read_u32_le(reader: &mut impl Read) -> Result<u32, std::io::Error> {
     let mut buf = [0u8; 4];
@@ -299,24 +391,208 @@ fn read_u64_le(reader: &mut impl Read) -> Result<u64, std::io::Error> {
 /// 4. Data length (LE u64)
 /// 5. Snapshot data (postcard-encoded `GraphSnapshotData`)
 ///
+/// Builds populated provenance stores by iterating a graph snapshot (P1U08).
+///
+/// Every live node gets `first_seen_epoch == last_seen_epoch == epoch` with a
+/// content hash derived from its `body_hash` field (zero-padded from 16 to 32
+/// bytes; the SHA-256-shaped field is reserved for when the build pipeline
+/// stamps it directly from file bytes in a future unit). Every live edge gets
+/// `first_seen_epoch == last_seen_epoch == epoch`.
+///
+/// Warm-start preservation (carrying `first_seen_epoch` from a prior snapshot)
+/// is deferred to when `CodeGraph` holds the stores and the build pipeline can
+/// call `NodeProvenance::touch()` on surviving nodes during rebuild.
+/// Builds fresh provenance stores from scratch for a snapshot that has no
+/// prior provenance (first save or V7 upconvert).
+fn build_provenance_from_snapshot(
+    snapshot: &crate::graph::unified::concurrent::GraphSnapshot,
+    epoch: u64,
+) -> (NodeProvenanceStore, EdgeProvenanceStore) {
+    use crate::graph::unified::edge::id::EdgeId;
+    use crate::graph::unified::storage::edge_provenance::EdgeProvenance;
+    use crate::graph::unified::storage::node_provenance::NodeProvenance;
+
+    // Node provenance: iterate live arena nodes
+    let nodes = snapshot.nodes();
+    let mut node_prov = NodeProvenanceStore::new();
+    node_prov.resize_to(nodes.slot_count());
+    for (node_id, entry) in nodes.iter() {
+        let content_hash = node_content_hash(entry);
+        node_prov.insert(node_id, NodeProvenance::fresh(epoch, content_hash));
+    }
+
+    // Edge provenance: stamp every edge slot in the forward store
+    let edge_stats = snapshot.edges().stats().forward;
+    let total_edges = edge_stats.csr_edge_count + edge_stats.delta_edge_count;
+    let mut edge_prov = EdgeProvenanceStore::new();
+    edge_prov.resize_to(total_edges);
+    for edge_idx in 0..total_edges {
+        if let Ok(idx) = u32::try_from(edge_idx) {
+            let eid = EdgeId::new(idx);
+            if eid.is_valid() {
+                edge_prov.insert(eid, EdgeProvenance::fresh(epoch));
+            }
+        }
+    }
+
+    (node_prov, edge_prov)
+}
+
+/// Extracts a 32-byte content hash from a node entry's `body_hash`.
+fn node_content_hash(entry: &crate::graph::unified::storage::NodeEntry) -> [u8; 32] {
+    match entry.body_hash {
+        Some(bh) => {
+            let mut hash = [0u8; 32];
+            let bh_bytes = bh.as_u128().to_le_bytes();
+            hash[..16].copy_from_slice(&bh_bytes);
+            hash
+        }
+        None => [0u8; 32],
+    }
+}
+
+/// Merges existing provenance with the current snapshot state instead of
+/// rebuilding from scratch.
+///
+/// For each live node/edge:
+/// - If prior provenance exists: preserves `first_seen_epoch`, advances
+///   `last_seen_epoch` to `epoch`, and refreshes `content_hash` from the
+///   current node body.
+/// - If no prior provenance: seeds a fresh record with `first_seen == epoch`.
+///
+/// For node provenance, preservation respects generational indices: the prior
+/// record is carried forward only if the stored generation matches the current
+/// `NodeId::generation()`. Stale-generation slots receive fresh provenance.
+///
+/// For edge provenance, preservation is limited to load/save round-trips where
+/// slot identity is unchanged: edges carry no generation field, so slot reuse
+/// across rebuilds cannot be detected. This is safe because save/load
+/// round-trips preserve CSR slot layout.
+fn merge_provenance_from_snapshot(
+    snapshot: &crate::graph::unified::concurrent::GraphSnapshot,
+    epoch: u64,
+) -> (NodeProvenanceStore, EdgeProvenanceStore) {
+    use crate::graph::unified::edge::id::EdgeId;
+    use crate::graph::unified::storage::edge_provenance::EdgeProvenance;
+    use crate::graph::unified::storage::node_provenance::NodeProvenance;
+
+    // --- Node provenance ---
+    let nodes = snapshot.nodes();
+    let mut node_prov = NodeProvenanceStore::new();
+    node_prov.resize_to(nodes.slot_count());
+
+    for (node_id, entry) in nodes.iter() {
+        let content_hash = node_content_hash(entry);
+        let provenance = match snapshot.node_provenance(node_id) {
+            Some(existing) => {
+                // Preserve first_seen, advance last_seen, refresh hash.
+                NodeProvenance {
+                    first_seen_epoch: existing.first_seen_epoch,
+                    last_seen_epoch: epoch,
+                    content_hash,
+                }
+            }
+            None => NodeProvenance::fresh(epoch, content_hash),
+        };
+        node_prov.insert(node_id, provenance);
+    }
+
+    // --- Edge provenance ---
+    let edge_stats = snapshot.edges().stats().forward;
+    let total_edges = edge_stats.csr_edge_count + edge_stats.delta_edge_count;
+    let mut edge_prov = EdgeProvenanceStore::new();
+    edge_prov.resize_to(total_edges);
+
+    for edge_idx in 0..total_edges {
+        if let Ok(idx) = u32::try_from(edge_idx) {
+            let eid = EdgeId::new(idx);
+            if eid.is_valid() {
+                let provenance = match snapshot.edge_provenance(eid) {
+                    Some(existing) => {
+                        // Preserve first_seen, advance last_seen.
+                        EdgeProvenance {
+                            first_seen_epoch: existing.first_seen_epoch,
+                            last_seen_epoch: epoch,
+                        }
+                    }
+                    None => EdgeProvenance::fresh(epoch),
+                };
+                edge_prov.insert(eid, provenance);
+            }
+        }
+    }
+
+    (node_prov, edge_prov)
+}
+
+/// Returns merged provenance stores when the snapshot already carries
+/// provenance (loaded from a prior save), or fresh stores when it does not.
+fn resolve_provenance(
+    snapshot: &crate::graph::unified::concurrent::GraphSnapshot,
+    epoch: u64,
+) -> (NodeProvenanceStore, EdgeProvenanceStore) {
+    if snapshot.fact_epoch() > 0 {
+        // The graph was loaded from a persisted snapshot and carries prior
+        // provenance. Merge rather than rebuild to preserve first_seen_epoch.
+        merge_provenance_from_snapshot(snapshot, epoch)
+    } else {
+        // First save or V7 upconvert — no prior provenance exists.
+        build_provenance_from_snapshot(snapshot, epoch)
+    }
+}
+
+/// Stamps `indexed_at` on every registered file entry in the registry.
+///
+/// Called at save time so that every `FileEntry` in a single build carries the
+/// same `indexed_at` value (equal to the snapshot's `fact_epoch`). Content hash
+/// and source URI remain at their current values (defaulted to zero / None for
+/// fresh builds until the build pipeline stamps them from file bytes).
+fn stamp_file_indexed_at(files: &mut FileRegistry, epoch: u64) {
+    use crate::graph::unified::file::id::FileId;
+
+    // FileRegistry entries are 1-indexed (slot 0 is the INVALID sentinel).
+    // Use slot_count() to cover every allocated slot, including vacant/recycled
+    // ones whose indices exceed len(). The setter is a no-op for
+    // invalid/vacant slots.
+    let slot_count = files.slot_count();
+    for idx in 1..slot_count {
+        if let Ok(i) = u32::try_from(idx) {
+            let fid = FileId::new(i);
+            files.set_indexed_at(fid, epoch);
+        }
+    }
+}
+
 /// # Errors
 ///
 /// Returns an error if the file cannot be created or serialization fails.
 pub fn save_to_path(graph: &CodeGraph, path: impl AsRef<Path>) -> Result<(), PersistenceError> {
     let path = path.as_ref();
+
+    // Stamp a monotonic fact epoch BEFORE creating the file (which truncates
+    // the existing snapshot and would lose the previous header).
+    let fact_epoch = next_fact_epoch(path);
+
     let file = File::create(path)?;
     let mut writer = BufWriter::new(file);
 
     // Get a snapshot of the graph
     let snapshot = graph.snapshot();
 
+    // Preserve existing provenance when the graph already carries it (from a
+    // prior load), or build fresh provenance for first-time saves.
+    let (node_provenance, edge_provenance) = resolve_provenance(&snapshot, fact_epoch);
+
     // Extract components from snapshot
     let nodes = snapshot.nodes().clone();
     let edges = snapshot.edges().clone();
     let strings = snapshot.strings().clone();
-    let files = snapshot.files().clone();
+    let mut files = snapshot.files().clone();
     let indices = snapshot.indices().clone();
     let macro_metadata = snapshot.macro_metadata().clone();
+
+    // Stamp file-level provenance: indexed_at = fact_epoch for every entry
+    stamp_file_indexed_at(&mut files, fact_epoch);
 
     let snapshot_data = GraphSnapshotData {
         nodes,
@@ -325,6 +601,8 @@ pub fn save_to_path(graph: &CodeGraph, path: impl AsRef<Path>) -> Result<(), Per
         files,
         indices,
         macro_metadata,
+        node_provenance,
+        edge_provenance,
     };
 
     validate_snapshot_semantics(&snapshot_data)?;
@@ -339,15 +617,17 @@ pub fn save_to_path(graph: &CodeGraph, path: impl AsRef<Path>) -> Result<(), Per
          call build_dedup_table() before saving"
     );
 
-    // Create header
+    // Create header — V8 with stamped fact_epoch and correct version tag
     let forward_stats = snapshot_data.edges.stats().forward;
     let total_edges = forward_stats.csr_edge_count + forward_stats.delta_edge_count;
-    let header = GraphHeader::new(
+    let mut header = GraphHeader::new(
         snapshot_data.nodes.len(),
         total_edges,
         snapshot_data.strings.len(),
         snapshot_data.files.len(),
     );
+    header.version = FormatVersion::V8.as_u32();
+    header.set_fact_epoch(fact_epoch);
 
     // Serialize header and data to buffers
     let header_bytes = postcard::to_allocvec(&header)?;
@@ -365,8 +645,8 @@ pub fn save_to_path(graph: &CodeGraph, path: impl AsRef<Path>) -> Result<(), Per
         ));
     }
 
-    // Write framed format
-    writer.write_all(MAGIC_BYTES)?;
+    // Write V8 framed format
+    writer.write_all(MAGIC_BYTES_V8)?;
     writer.write_all(
         &u32::try_from(header_bytes.len())
             .map_err(|_| {
@@ -399,19 +679,30 @@ pub fn save_to_path_with_provenance(
     plugins: &PluginManager,
 ) -> Result<(), PersistenceError> {
     let path = path.as_ref();
+
+    // Stamp a monotonic fact epoch BEFORE creating the file.
+    let fact_epoch = next_fact_epoch(path);
+
     let file = File::create(path)?;
     let mut writer = BufWriter::new(file);
 
     // Get a snapshot of the graph
     let snapshot = graph.snapshot();
 
+    // Preserve existing provenance when the graph already carries it (from a
+    // prior load), or build fresh provenance for first-time saves.
+    let (node_provenance, edge_provenance) = resolve_provenance(&snapshot, fact_epoch);
+
     // Extract components from snapshot
     let nodes = snapshot.nodes().clone();
     let edges = snapshot.edges().clone();
     let strings = snapshot.strings().clone();
-    let files = snapshot.files().clone();
+    let mut files = snapshot.files().clone();
     let indices = snapshot.indices().clone();
     let macro_metadata = snapshot.macro_metadata().clone();
+
+    // Stamp file-level provenance: indexed_at = fact_epoch for every entry
+    stamp_file_indexed_at(&mut files, fact_epoch);
 
     // Collect plugin versions
     let plugin_versions: HashMap<String, String> = plugins
@@ -430,6 +721,8 @@ pub fn save_to_path_with_provenance(
         files,
         indices,
         macro_metadata,
+        node_provenance,
+        edge_provenance,
     };
 
     validate_snapshot_semantics(&snapshot_data)?;
@@ -441,10 +734,10 @@ pub fn save_to_path_with_provenance(
          call build_dedup_table() before saving"
     );
 
-    // Create header with provenance and plugin versions
+    // Create header with provenance, plugin versions, V8 version tag, and fact epoch
     let forward_stats = snapshot_data.edges.stats().forward;
     let total_edges = forward_stats.csr_edge_count + forward_stats.delta_edge_count;
-    let header = GraphHeader::with_provenance_and_plugins(
+    let mut header = GraphHeader::with_provenance_and_plugins(
         snapshot_data.nodes.len(),
         total_edges,
         snapshot_data.strings.len(),
@@ -452,6 +745,8 @@ pub fn save_to_path_with_provenance(
         provenance,
         plugin_versions,
     );
+    header.version = FormatVersion::V8.as_u32();
+    header.set_fact_epoch(fact_epoch);
 
     // Serialize header and data to buffers
     let header_bytes = postcard::to_allocvec(&header)?;
@@ -469,8 +764,8 @@ pub fn save_to_path_with_provenance(
         ));
     }
 
-    // Write framed format
-    writer.write_all(MAGIC_BYTES)?;
+    // Write V8 framed format
+    writer.write_all(MAGIC_BYTES_V8)?;
     writer.write_all(
         &u32::try_from(header_bytes.len())
             .map_err(|_| {
@@ -573,16 +868,15 @@ pub fn load_from_bytes(
     let mut reader = Cursor::new(bytes);
     let mut bytes_consumed: u64 = 0;
 
-    // Read and validate magic bytes
+    // Read and validate magic bytes — accept V7 and V8
     let mut magic = [0u8; 13];
     reader.read_exact(&mut magic)?;
     bytes_consumed += 13;
-    if &magic != MAGIC_BYTES {
-        return Err(PersistenceError::InvalidMagic {
-            expected: MAGIC_BYTES.to_vec(),
+    let format_version =
+        FormatVersion::from_magic(&magic).ok_or_else(|| PersistenceError::InvalidMagic {
+            expected: MAGIC_BYTES_V8.to_vec(),
             found: magic.to_vec(),
-        });
-    }
+        })?;
 
     // Read header length and validate before allocation
     let header_len = read_u32_le(&mut reader)? as usize;
@@ -605,10 +899,10 @@ pub fn load_from_bytes(
     bytes_consumed += header_len as u64;
     let header: GraphHeader = postcard::from_bytes(&header_buf)?;
 
-    // Validate version
-    if header.version != VERSION {
+    // Validate version — accept V7 (legacy) and V8 (current)
+    if header.version != VERSION && header.version != FormatVersion::V8.as_u32() {
         return Err(PersistenceError::IncompatibleVersion {
-            expected: VERSION,
+            expected: FormatVersion::V8.as_u32(),
             found: header.version,
         });
     }
@@ -636,10 +930,17 @@ pub fn load_from_bytes(
         ));
     }
 
-    // Read and deserialize data
+    // Read and deserialize data. The GraphSnapshotData fields
+    // `node_provenance` and `edge_provenance` are #[serde(default)], so
+    // V7 blobs that lack these fields deserialize cleanly as empty stores.
     let mut data_buf = vec![0u8; data_len as usize];
     reader.read_exact(&mut data_buf)?;
-    let snapshot_data: GraphSnapshotData = postcard::from_bytes(&data_buf)?;
+    let snapshot_data = if format_version == FormatVersion::V7 {
+        let v7: GraphSnapshotDataV7 = postcard::from_bytes(&data_buf)?;
+        upconvert_v7_to_v8(v7)
+    } else {
+        postcard::from_bytes(&data_buf)?
+    };
 
     // Reject trailing bytes
     let mut trailing = [0u8; 1];
@@ -651,20 +952,26 @@ pub fn load_from_bytes(
 
     validate_loaded_snapshot(&header, &snapshot_data)?;
 
-    Ok(CodeGraph::from_components(
+    let mut graph = CodeGraph::from_components(
         snapshot_data.nodes,
         snapshot_data.edges,
         snapshot_data.strings,
         snapshot_data.files,
         snapshot_data.indices,
         snapshot_data.macro_metadata,
-    ))
+    );
+    graph.set_provenance(
+        snapshot_data.node_provenance,
+        snapshot_data.edge_provenance,
+        header.fact_epoch(),
+    );
+    Ok(graph)
 }
 
 /// Loads a graph from the specified path.
 ///
-/// Reads the V4 framed format with length-prefixed sections and pre-allocation
-/// validation. Rejects V3 and earlier snapshots with a clear error message.
+/// Reads the framed format (V7 or V8) with length-prefixed sections and
+/// pre-allocation validation. Rejects formats older than V7.
 ///
 /// # Errors
 ///
@@ -680,16 +987,15 @@ pub fn load_from_path(
     let mut reader = BufReader::new(file);
     let mut bytes_consumed: u64 = 0;
 
-    // Read and validate magic bytes
+    // Read and validate magic bytes — accept V7 and V8
     let mut magic = [0u8; 13];
     reader.read_exact(&mut magic)?;
     bytes_consumed += 13;
-    if &magic != MAGIC_BYTES {
-        return Err(PersistenceError::InvalidMagic {
-            expected: MAGIC_BYTES.to_vec(),
+    let format_version =
+        FormatVersion::from_magic(&magic).ok_or_else(|| PersistenceError::InvalidMagic {
+            expected: MAGIC_BYTES_V8.to_vec(),
             found: magic.to_vec(),
-        });
-    }
+        })?;
 
     // Read header length and validate before allocation
     let header_len = read_u32_le(&mut reader)? as usize;
@@ -712,10 +1018,10 @@ pub fn load_from_path(
     bytes_consumed += header_len as u64;
     let header: GraphHeader = postcard::from_bytes(&header_buf)?;
 
-    // Validate version
-    if header.version != VERSION {
+    // Validate version — accept V7 (legacy) and V8 (current)
+    if header.version != VERSION && header.version != FormatVersion::V8.as_u32() {
         return Err(PersistenceError::IncompatibleVersion {
-            expected: VERSION,
+            expected: FormatVersion::V8.as_u32(),
             found: header.version,
         });
     }
@@ -743,10 +1049,15 @@ pub fn load_from_path(
         ));
     }
 
-    // Read and deserialize data
+    // Read and deserialize data — dispatch on format version.
     let mut data_buf = vec![0u8; data_len as usize];
     reader.read_exact(&mut data_buf)?;
-    let snapshot_data: GraphSnapshotData = postcard::from_bytes(&data_buf)?;
+    let snapshot_data = if format_version == FormatVersion::V7 {
+        let v7: GraphSnapshotDataV7 = postcard::from_bytes(&data_buf)?;
+        upconvert_v7_to_v8(v7)
+    } else {
+        postcard::from_bytes(&data_buf)?
+    };
 
     // Reject trailing bytes
     let mut trailing = [0u8; 1];
@@ -758,14 +1069,20 @@ pub fn load_from_path(
 
     validate_loaded_snapshot(&header, &snapshot_data)?;
 
-    Ok(CodeGraph::from_components(
+    let mut graph = CodeGraph::from_components(
         snapshot_data.nodes,
         snapshot_data.edges,
         snapshot_data.strings,
         snapshot_data.files,
         snapshot_data.indices,
         snapshot_data.macro_metadata,
-    ))
+    );
+    graph.set_provenance(
+        snapshot_data.node_provenance,
+        snapshot_data.edge_provenance,
+        header.fact_epoch(),
+    );
+    Ok(graph)
 }
 
 /// Validates a graph snapshot file without fully loading it.
@@ -782,16 +1099,15 @@ pub fn validate_snapshot(path: impl AsRef<Path>) -> Result<bool, PersistenceErro
     let mut reader = BufReader::new(file);
     let mut bytes_consumed: u64 = 0;
 
-    // Read and validate magic bytes
+    // Read and validate magic bytes — accept V7 and V8
     let mut magic = [0u8; 13];
     reader.read_exact(&mut magic)?;
     bytes_consumed += 13;
-    if &magic != MAGIC_BYTES {
-        return Err(PersistenceError::InvalidMagic {
-            expected: MAGIC_BYTES.to_vec(),
+    let _format_version =
+        FormatVersion::from_magic(&magic).ok_or_else(|| PersistenceError::InvalidMagic {
+            expected: MAGIC_BYTES_V8.to_vec(),
             found: magic.to_vec(),
-        });
-    }
+        })?;
 
     // Read header length
     let header_len = read_u32_le(&mut reader)? as usize;
@@ -813,10 +1129,10 @@ pub fn validate_snapshot(path: impl AsRef<Path>) -> Result<bool, PersistenceErro
     reader.read_exact(&mut header_buf)?;
     let header: GraphHeader = postcard::from_bytes(&header_buf)?;
 
-    // Validate version
-    if header.version != VERSION {
+    // Validate version — accept V7 (legacy) and V8 (current)
+    if header.version != VERSION && header.version != FormatVersion::V8.as_u32() {
         return Err(PersistenceError::IncompatibleVersion {
-            expected: VERSION,
+            expected: FormatVersion::V8.as_u32(),
             found: header.version,
         });
     }
@@ -837,16 +1153,15 @@ pub fn load_header_from_path(path: impl AsRef<Path>) -> Result<GraphHeader, Pers
     let mut reader = BufReader::new(file);
     let mut bytes_consumed: u64 = 0;
 
-    // Read and validate magic bytes
+    // Read and validate magic bytes — accept V7 and V8
     let mut magic = [0u8; 13];
     reader.read_exact(&mut magic)?;
     bytes_consumed += 13;
-    if &magic != MAGIC_BYTES {
-        return Err(PersistenceError::InvalidMagic {
-            expected: MAGIC_BYTES.to_vec(),
+    let _format_version =
+        FormatVersion::from_magic(&magic).ok_or_else(|| PersistenceError::InvalidMagic {
+            expected: MAGIC_BYTES_V8.to_vec(),
             found: magic.to_vec(),
-        });
-    }
+        })?;
 
     // Read header length
     let header_len = read_u32_le(&mut reader)? as usize;
@@ -868,10 +1183,10 @@ pub fn load_header_from_path(path: impl AsRef<Path>) -> Result<GraphHeader, Pers
     reader.read_exact(&mut header_buf)?;
     let header: GraphHeader = postcard::from_bytes(&header_buf)?;
 
-    // Validate version
-    if header.version != VERSION {
+    // Validate version — accept V7 (legacy) and V8 (current)
+    if header.version != VERSION && header.version != FormatVersion::V8.as_u32() {
         return Err(PersistenceError::IncompatibleVersion {
-            expected: VERSION,
+            expected: FormatVersion::V8.as_u32(),
             found: header.version,
         });
     }
@@ -900,6 +1215,7 @@ pub fn check_config_drift(
 
 #[cfg(test)]
 mod tests {
+    use super::super::format::MAGIC_BYTES;
     use super::super::manifest::{OverrideEntry, OverrideSource};
     use super::*;
     use crate::graph::node::Language;
@@ -929,8 +1245,8 @@ mod tests {
         let data_bytes = postcard::to_allocvec(snapshot_data)?;
 
         let mut file = File::create(path)?;
-        // Header and data bytes sizes validated < MAX_SNAPSHOT_BYTES (2 GB)
-        file.write_all(MAGIC_BYTES)?;
+        // Phase 1: write V8 magic so round-trip tests pass through the V8 reader.
+        file.write_all(MAGIC_BYTES_V8)?;
         file.write_all(
             &u32::try_from(header_bytes.len())
                 .expect("header fits in u32")
@@ -1276,6 +1592,8 @@ mod tests {
             files: snapshot.files().clone(),
             indices: snapshot.indices().clone(),
             macro_metadata: snapshot.macro_metadata().clone(),
+            node_provenance: NodeProvenanceStore::new(),
+            edge_provenance: EdgeProvenanceStore::new(),
         };
         let temp_file = NamedTempFile::new().unwrap();
         let plugins = create_test_plugin_manager();
@@ -1339,6 +1657,8 @@ mod tests {
             files: snapshot.files().clone(),
             indices: snapshot.indices().clone(),
             macro_metadata: snapshot.macro_metadata().clone(),
+            node_provenance: NodeProvenanceStore::new(),
+            edge_provenance: EdgeProvenanceStore::new(),
         };
         let temp_file = NamedTempFile::new().unwrap();
         let plugins = create_test_plugin_manager();
@@ -1592,5 +1912,443 @@ mod tests {
         // Both should produce graphs with the same node/edge counts
         assert_eq!(path_graph.node_count(), bytes_graph.node_count());
         assert_eq!(path_graph.edge_count(), bytes_graph.edge_count());
+    }
+
+    // ------------------------------------------------------------------
+    // Phase 1 P1U07: V7 legacy read path with upconvert
+    // ------------------------------------------------------------------
+
+    /// Helper: writes a V7-format blob programmatically (no provenance fields
+    /// in the data section, MAGIC_BYTES V7 in the header). This is the
+    /// "frozen V7 writer shim" described in the Phase 1 test plan; it lives
+    /// in test code only, not in the production writer path.
+    fn write_v7_fixture(path: &Path, graph: &CodeGraph) -> Result<(), PersistenceError> {
+        let snapshot = graph.snapshot();
+        let forward_stats = snapshot.edges().stats().forward;
+        let total_edges = forward_stats.csr_edge_count + forward_stats.delta_edge_count;
+        let header = GraphHeader::new(
+            snapshot.nodes().len(),
+            total_edges,
+            snapshot.strings().len(),
+            snapshot.files().len(),
+        );
+
+        // Serialize a V7-shaped data blob WITHOUT the provenance fields.
+        // We use a local struct that exactly matches pre-Phase-1 GraphSnapshotData.
+        #[derive(Serialize)]
+        struct V7SnapshotData {
+            nodes: NodeArena,
+            edges: BidirectionalEdgeStore,
+            strings: StringInterner,
+            files: FileRegistry,
+            indices: AuxiliaryIndices,
+            macro_metadata: NodeMetadataStore,
+        }
+        let v7_data = V7SnapshotData {
+            nodes: snapshot.nodes().clone(),
+            edges: snapshot.edges().clone(),
+            strings: snapshot.strings().clone(),
+            files: snapshot.files().clone(),
+            indices: snapshot.indices().clone(),
+            macro_metadata: snapshot.macro_metadata().clone(),
+        };
+
+        let header_bytes = postcard::to_allocvec(&header)?;
+        let data_bytes = postcard::to_allocvec(&v7_data)?;
+
+        let mut file = File::create(path)?;
+        file.write_all(MAGIC_BYTES)?; // V7 magic
+        file.write_all(
+            &u32::try_from(header_bytes.len())
+                .expect("header fits in u32")
+                .to_le_bytes(),
+        )?;
+        file.write_all(&header_bytes)?;
+        file.write_all(&(data_bytes.len() as u64).to_le_bytes())?;
+        file.write_all(&data_bytes)?;
+        file.flush()?;
+        Ok(())
+    }
+
+    #[test]
+    fn phase1_v7_legacy_loads_with_defaulted_provenance() {
+        let graph = CodeGraph::new();
+        let temp_file = NamedTempFile::new().unwrap();
+
+        write_v7_fixture(temp_file.path(), &graph).unwrap();
+
+        // Load via load_from_path (V7 dispatch + upconvert)
+        let loaded = load_from_path(temp_file.path(), None).unwrap();
+
+        // Topology is preserved
+        assert_eq!(loaded.node_count(), graph.node_count());
+        assert_eq!(loaded.edge_count(), graph.edge_count());
+    }
+
+    #[test]
+    fn phase1_v7_legacy_loads_via_bytes() {
+        let graph = CodeGraph::new();
+        let temp_file = NamedTempFile::new().unwrap();
+
+        write_v7_fixture(temp_file.path(), &graph).unwrap();
+
+        let bytes = std::fs::read(temp_file.path()).unwrap();
+        let loaded = load_from_bytes(&bytes, None).unwrap();
+
+        assert_eq!(loaded.node_count(), graph.node_count());
+        assert_eq!(loaded.edge_count(), graph.edge_count());
+    }
+
+    #[test]
+    fn phase1_v7_validate_snapshot_accepts_legacy() {
+        let graph = CodeGraph::new();
+        let temp_file = NamedTempFile::new().unwrap();
+
+        write_v7_fixture(temp_file.path(), &graph).unwrap();
+
+        assert!(validate_snapshot(temp_file.path()).unwrap());
+    }
+
+    #[test]
+    fn phase1_v8_round_trip_preserves_fact_epoch() {
+        let graph = CodeGraph::new();
+        let temp_file = NamedTempFile::new().unwrap();
+
+        // Save V8 — stamps a fact_epoch
+        save_to_path(&graph, temp_file.path()).unwrap();
+
+        // Load header — fact_epoch should be > 0
+        let header = load_header_from_path(temp_file.path()).unwrap();
+        assert!(
+            header.fact_epoch() > 0,
+            "V8 save should stamp a non-zero fact_epoch"
+        );
+    }
+
+    #[test]
+    fn phase1_repeated_saves_produce_increasing_epochs() {
+        let graph = CodeGraph::new();
+        let temp_file = NamedTempFile::new().unwrap();
+
+        save_to_path(&graph, temp_file.path()).unwrap();
+        let epoch1 = load_header_from_path(temp_file.path())
+            .unwrap()
+            .fact_epoch();
+
+        save_to_path(&graph, temp_file.path()).unwrap();
+        let epoch2 = load_header_from_path(temp_file.path())
+            .unwrap()
+            .fact_epoch();
+
+        assert!(
+            epoch2 > epoch1,
+            "second save epoch ({epoch2}) must exceed first ({epoch1})"
+        );
+    }
+
+    #[test]
+    fn stamp_file_indexed_at_covers_sparse_registry() {
+        // Register 5 files at slots 1..=5, then unregister slots 2 and 3
+        // to create sparsity. stamp_file_indexed_at must still reach slot 4
+        // and 5 even though len() == 3 after unregistration.
+        let mut reg = FileRegistry::new();
+
+        let id1 = reg.register(Path::new("/a.rs")).unwrap();
+        let id2 = reg.register(Path::new("/b.rs")).unwrap();
+        let id3 = reg.register(Path::new("/c.rs")).unwrap();
+        let id4 = reg.register(Path::new("/d.rs")).unwrap();
+        let id5 = reg.register(Path::new("/e.rs")).unwrap();
+
+        // Unregister low slots to create sparsity
+        reg.unregister(id2);
+        reg.unregister(id3);
+
+        // len() is now 3, but slot_count() should be 6 (sentinel + 5 slots)
+        assert_eq!(reg.len(), 3);
+        assert_eq!(reg.slot_count(), 6);
+
+        // Stamp all live files
+        stamp_file_indexed_at(&mut reg, 42_000);
+
+        // Every live file must have the epoch, including high-slot files
+        assert_eq!(reg.file_provenance(id1).unwrap().indexed_at, 42_000);
+        assert_eq!(reg.file_provenance(id4).unwrap().indexed_at, 42_000);
+        assert_eq!(reg.file_provenance(id5).unwrap().indexed_at, 42_000);
+
+        // Vacant slots must return None (no provenance view)
+        assert!(reg.file_provenance(id2).is_none());
+        assert!(reg.file_provenance(id3).is_none());
+    }
+
+    #[test]
+    fn stamp_file_indexed_at_covers_reused_slots() {
+        // After unregistering and re-registering, free-list reuse should
+        // not break stamping for any live slot.
+        let mut reg = FileRegistry::new();
+
+        let id1 = reg.register(Path::new("/first.rs")).unwrap();
+        let id2 = reg.register(Path::new("/second.rs")).unwrap();
+        let id3 = reg.register(Path::new("/third.rs")).unwrap();
+
+        // Unregister slot 2, then register a new file that reuses the slot
+        reg.unregister(id2);
+        let id_reused = reg.register(Path::new("/reused.rs")).unwrap();
+
+        // The reused slot should recycle the old index
+        assert_eq!(id_reused.index(), id2.index());
+
+        // Stamp all
+        stamp_file_indexed_at(&mut reg, 99_000);
+
+        // All live files (including the one in the reused slot) must be stamped
+        assert_eq!(reg.file_provenance(id1).unwrap().indexed_at, 99_000);
+        assert_eq!(reg.file_provenance(id_reused).unwrap().indexed_at, 99_000);
+        assert_eq!(reg.file_provenance(id3).unwrap().indexed_at, 99_000);
+    }
+
+    #[test]
+    fn provenance_first_seen_survives_save_load_save_round_trip() {
+        // save → load → save → reload: first_seen_epoch from the first save
+        // must survive the second save.
+        let graph = graph_with_one_node("my_module::my_fn", Language::Rust, Path::new("/test.rs"));
+        let temp_file = NamedTempFile::new().unwrap();
+        let path = temp_file.path();
+        let plugins = create_test_plugin_manager();
+
+        // First save
+        save_to_path(&graph, path).unwrap();
+        let header1 = load_header_from_path(path).unwrap();
+        let epoch1 = header1.fact_epoch();
+        assert!(epoch1 > 0, "first save must stamp a non-zero epoch");
+
+        // Load: graph now carries provenance with first_seen == epoch1
+        let loaded = load_from_path(path, Some(&plugins)).unwrap();
+
+        // Verify node provenance was loaded
+        let snap1 = loaded.snapshot();
+        let node_id = snap1.nodes().iter().next().unwrap().0;
+        let prov1 = snap1.node_provenance(node_id).unwrap();
+        assert_eq!(prov1.first_seen_epoch, epoch1);
+        assert_eq!(prov1.last_seen_epoch, epoch1);
+
+        // Second save: must preserve first_seen_epoch
+        save_to_path(&loaded, path).unwrap();
+        let header2 = load_header_from_path(path).unwrap();
+        let epoch2 = header2.fact_epoch();
+        assert!(epoch2 > epoch1, "second epoch must exceed first");
+
+        // Reload and verify first_seen survived
+        let reloaded = load_from_path(path, Some(&plugins)).unwrap();
+        let snap2 = reloaded.snapshot();
+        let node_id2 = snap2.nodes().iter().next().unwrap().0;
+        let prov2 = snap2.node_provenance(node_id2).unwrap();
+        assert_eq!(
+            prov2.first_seen_epoch, epoch1,
+            "first_seen_epoch must survive save/load/save round-trip"
+        );
+        assert_eq!(
+            prov2.last_seen_epoch, epoch2,
+            "last_seen_epoch must advance to the second save epoch"
+        );
+    }
+
+    #[test]
+    fn provenance_content_hash_refreshed_on_resave() {
+        // Preserved provenance must still update content_hash to the current
+        // node body hash, not carry a stale hash from the prior save.
+        let graph = graph_with_one_node(
+            "my_module::hash_fn",
+            Language::Rust,
+            Path::new("/hash_test.rs"),
+        );
+        let temp_file = NamedTempFile::new().unwrap();
+        let path = temp_file.path();
+        let plugins = create_test_plugin_manager();
+
+        // First save
+        save_to_path(&graph, path).unwrap();
+
+        // Load
+        let loaded = load_from_path(path, Some(&plugins)).unwrap();
+        let snap1 = loaded.snapshot();
+        let node_id = snap1.nodes().iter().next().unwrap().0;
+        let hash1 = snap1.node_provenance(node_id).unwrap().content_hash;
+
+        // Second save
+        save_to_path(&loaded, path).unwrap();
+
+        // Reload and verify the content hash is still present (not zeroed)
+        let reloaded = load_from_path(path, Some(&plugins)).unwrap();
+        let snap2 = reloaded.snapshot();
+        let node_id2 = snap2.nodes().iter().next().unwrap().0;
+        let hash2 = snap2.node_provenance(node_id2).unwrap().content_hash;
+        assert_eq!(
+            hash1, hash2,
+            "content_hash must be refreshed from current node body on resave"
+        );
+    }
+
+    #[test]
+    fn edge_provenance_first_seen_survives_round_trip() {
+        // Edge provenance must also preserve first_seen_epoch across
+        // load/save round-trips where edge slot identity is unchanged.
+        use crate::graph::unified::edge::EdgeKind;
+
+        let mut graph = graph_with_one_node(
+            "my_module::caller",
+            Language::Rust,
+            Path::new("/edge_test.rs"),
+        );
+
+        // Add a second node and an edge between them
+        let file_id = graph.files().get(Path::new("/edge_test.rs")).unwrap();
+        let name2 = graph.strings_mut().intern("callee").unwrap();
+        let qname2 = graph.strings_mut().intern("my_module::callee").unwrap();
+        let entry2 = NodeEntry::new(NodeKind::Function, name2, file_id)
+            .with_location(5, 0, 5, 10)
+            .with_qualified_name(qname2);
+        let node2 = graph.nodes_mut().alloc(entry2).unwrap();
+
+        let node1 = graph.nodes().iter().next().unwrap().0;
+        let _edge = graph.edges().add_edge(
+            node1,
+            node2,
+            EdgeKind::Calls {
+                argument_count: 0,
+                is_async: false,
+            },
+            file_id,
+        );
+
+        let temp_file = NamedTempFile::new().unwrap();
+        let path = temp_file.path();
+        let plugins = create_test_plugin_manager();
+
+        // First save
+        save_to_path(&graph, path).unwrap();
+        let epoch1 = load_header_from_path(path).unwrap().fact_epoch();
+
+        // Load → resave
+        let loaded = load_from_path(path, Some(&plugins)).unwrap();
+        save_to_path(&loaded, path).unwrap();
+        let epoch2 = load_header_from_path(path).unwrap().fact_epoch();
+        assert!(epoch2 > epoch1);
+
+        // Reload and check edge provenance
+        let reloaded = load_from_path(path, Some(&plugins)).unwrap();
+        let snap = reloaded.snapshot();
+
+        // Find an edge and check its provenance
+        let n1 = snap.nodes().iter().next().unwrap().0;
+        let edges = snap.edges().edges_from(n1);
+        assert!(!edges.is_empty(), "graph must have at least one edge");
+        drop(edges);
+
+        // Scan all edge slots to find one with provenance and verify it
+        // preserves first_seen_epoch. We iterate all slots rather than
+        // guessing slot 0, because CSR layout may assign any index.
+        let forward_stats = snap.edges().stats().forward;
+        let total_edges = forward_stats.csr_edge_count + forward_stats.delta_edge_count;
+        let mut found_preserved = false;
+        for idx in 0..total_edges {
+            if let Ok(i) = u32::try_from(idx) {
+                let eid = crate::graph::unified::edge::id::EdgeId::new(i);
+                if let Some(eprov) = snap.edge_provenance(eid) {
+                    assert_eq!(
+                        eprov.first_seen_epoch, epoch1,
+                        "edge slot {idx}: first_seen_epoch must survive round-trip"
+                    );
+                    assert_eq!(
+                        eprov.last_seen_epoch, epoch2,
+                        "edge slot {idx}: last_seen_epoch must advance to second epoch"
+                    );
+                    found_preserved = true;
+                }
+            }
+        }
+        assert!(
+            found_preserved,
+            "must find at least one edge with preserved provenance"
+        );
+    }
+
+    #[test]
+    fn provenance_reused_node_slot_gets_fresh_first_seen() {
+        // Load a graph that carries provenance (first_seen == epoch1),
+        // remove a node to free its slot, allocate a new node in the same
+        // slot (bumped generation), then save. The new occupant must get
+        // first_seen == epoch2, not carry over epoch1 from the old tenant.
+        let graph = graph_with_one_node(
+            "my_module::original",
+            Language::Rust,
+            Path::new("/reuse_test.rs"),
+        );
+        let temp_file = NamedTempFile::new().unwrap();
+        let path = temp_file.path();
+        let plugins = create_test_plugin_manager();
+
+        // First save
+        save_to_path(&graph, path).unwrap();
+        let epoch1 = load_header_from_path(path).unwrap().fact_epoch();
+
+        // Load — graph now carries provenance with first_seen == epoch1
+        let mut loaded = load_from_path(path, Some(&plugins)).unwrap();
+
+        // Find the existing node and its slot index
+        let (old_node_id, _) = loaded.nodes().iter().next().unwrap();
+        let old_index = old_node_id.index();
+        let old_generation = old_node_id.generation();
+
+        // Verify provenance exists for the old node
+        assert!(
+            loaded.node_provenance(old_node_id).is_some(),
+            "loaded graph must carry provenance for the original node"
+        );
+
+        // Remove the old node to free the slot
+        let file_id = loaded.files().get(Path::new("/reuse_test.rs")).unwrap();
+        loaded.nodes_mut().remove(old_node_id);
+
+        // Allocate a new node — should reuse the same slot with bumped generation
+        let name2 = loaded.strings_mut().intern("replacement").unwrap();
+        let qname2 = loaded
+            .strings_mut()
+            .intern("my_module::replacement")
+            .unwrap();
+        let entry2 = NodeEntry::new(NodeKind::Function, name2, file_id)
+            .with_location(10, 0, 10, 20)
+            .with_qualified_name(qname2);
+        let new_node_id = loaded.nodes_mut().alloc(entry2).unwrap();
+
+        // Confirm slot reuse with bumped generation
+        assert_eq!(
+            new_node_id.index(),
+            old_index,
+            "new node must reuse the freed slot"
+        );
+        assert!(
+            new_node_id.generation() > old_generation,
+            "reused slot must have a bumped generation"
+        );
+
+        // Second save
+        save_to_path(&loaded, path).unwrap();
+        let epoch2 = load_header_from_path(path).unwrap().fact_epoch();
+        assert!(epoch2 > epoch1);
+
+        // Reload and verify the new occupant has fresh provenance
+        let reloaded = load_from_path(path, Some(&plugins)).unwrap();
+        let snap = reloaded.snapshot();
+        let (reloaded_id, _) = snap.nodes().iter().next().unwrap();
+
+        let prov = snap
+            .node_provenance(reloaded_id)
+            .expect("new occupant must have provenance");
+        assert_eq!(
+            prov.first_seen_epoch, epoch2,
+            "reused slot with bumped generation must get fresh first_seen_epoch, \
+             not carry over from the old tenant"
+        );
+        assert_eq!(prov.last_seen_epoch, epoch2);
     }
 }

@@ -6,7 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
-## [7.2.0](https://github.com/verivus-oss/sqry/compare/v7.1.4...v7.2.0) - 2026-04-06
+## [8.0.0](https://github.com/verivus-oss/sqry/compare/v7.2.0...v8.0.0) - 2026-04-10
+
+### Added
+- *(graph)* land curated provenance and staged-release updates- *(core)* add GraphMemorySize trait for heap memory tracking
+### Fixed
+- *(core)* count inner heap for DeltaEdge spans, node metadata, confidence, Arc headers- *(classpath)* integrate pre-pass graph enrichment## [7.2.0](https://github.com/verivus-oss/sqry/compare/v7.1.4...v7.2.0) - 2026-04-06
 
 ### Added
 - *(graph)* add sqry-bind facade with SymbolClassification and BindingQuery- *(graph)* add path enumeration mode with SCC pruning strategy to BFS kernel

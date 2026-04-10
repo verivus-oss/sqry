@@ -7,23 +7,27 @@
 //! ## Strategy
 //!
 //! 1. Write a temporary init script that adds a `sqryListClasspath` task to all projects.
-//! 2. Locate `gradlew` (or `gradlew.bat` on Windows) in the project root.
-//! 3. Execute the wrapper with the init script. Timeout defaults to 60 seconds.
+//! 2. Locate `gradlew` (or `gradlew.bat` on Windows) in the project root, or
+//!    fall back to installed `gradle`.
+//! 3. Execute the selected Gradle command with the init script. Timeout defaults
+//!    to 60 seconds.
 //! 4. Parse `SQRY_CP:<module>:<group>:<name>:<version>:<path>` lines.
 //! 5. On failure or timeout, fall back to a cached `resolved-classpath.json`.
 //!
 //! ## Security
 //!
-//! Only the project's own Gradle wrapper is executed — never a system-wide `gradle`
-//! binary. This prevents supply-chain attacks via a rogue global installation.
+//! Prefer the project's own Gradle wrapper. If the wrapper is absent, sqry can
+//! fall back to installed `gradle`; that path should be treated as less
+//! reproducible and is logged explicitly.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
 use log::{debug, info, warn};
+use serde::Deserialize;
 
 use crate::{ClasspathError, ClasspathResult};
 
@@ -33,14 +37,23 @@ use super::{ClasspathEntry, ResolveConfig, ResolvedClasspath};
 ///
 /// Adds a `sqryListClasspath` task to every project that iterates resolved
 /// artifacts from `compileClasspath` and prints structured lines.
-const INIT_SCRIPT: &str = r#"allprojects {
+const INIT_SCRIPT: &str = r#"import groovy.json.JsonOutput
+
+allprojects {
     task sqryListClasspath {
         doLast {
             configurations.findAll { it.name == 'compileClasspath' || it.name == 'implementation' }
                 .each { config ->
                     try {
                         config.resolvedConfiguration.resolvedArtifacts.each { artifact ->
-                            println "SQRY_CP:${project.name}:${artifact.moduleVersion.id.group}:${artifact.moduleVersion.id.name}:${artifact.moduleVersion.id.version}:${artifact.file}"
+                            println "SQRY_CP_JSON:" + JsonOutput.toJson([
+                                module_name: project.name,
+                                module_root: project.projectDir.absolutePath,
+                                group: artifact.moduleVersion.id.group,
+                                name: artifact.moduleVersion.id.name,
+                                version: artifact.moduleVersion.id.version,
+                                path: artifact.file.absolutePath,
+                            ])
                         }
                     } catch (Exception e) {
                         println "SQRY_CP_ERR:${project.name}:${e.message}"
@@ -52,7 +65,7 @@ const INIT_SCRIPT: &str = r#"allprojects {
 "#;
 
 /// Output line prefix for successful classpath entries.
-const CP_PREFIX: &str = "SQRY_CP:";
+const CP_JSON_PREFIX: &str = "SQRY_CP_JSON:";
 
 /// Output line prefix for per-module resolution errors.
 const CP_ERR_PREFIX: &str = "SQRY_CP_ERR:";
@@ -66,11 +79,27 @@ const CACHE_FILENAME: &str = "resolved-classpath.json";
 /// sqryListClasspath`, and parses the output for JAR paths. On failure or
 /// timeout, falls back to a previously cached classpath if available.
 ///
-/// Only the project-local `gradlew` wrapper is used — never system `gradle`.
+/// Prefer the project-local `gradlew` wrapper and fall back to installed
+/// `gradle` only when the wrapper is absent.
 #[allow(clippy::missing_errors_doc)] // Internal helper
 pub fn resolve_gradle_classpath(config: &ResolveConfig) -> ClasspathResult<Vec<ResolvedClasspath>> {
-    let wrapper = find_gradle_wrapper(&config.project_root)?;
-    info!("Found Gradle wrapper at {}", wrapper.display());
+    let cache_dir = resolve_cache_dir(config);
+    let gradle_command = find_gradle_command(&config.project_root);
+    let Some(gradle_command) = gradle_command else {
+        warn!(
+            "No Gradle wrapper or installed gradle found for {}",
+            config.project_root.display()
+        );
+        return read_cache_or_error(&cache_dir, "No Gradle wrapper or installed gradle found");
+    };
+    if !is_project_local_gradle_wrapper(&config.project_root, &gradle_command) {
+        warn!(
+            "Gradle wrapper missing in {}; falling back to installed Gradle at {}. This may be less reproducible if the installed version differs from the project's expected wrapper version.",
+            config.project_root.display(),
+            gradle_command.display()
+        );
+    }
+    info!("Using Gradle command {}", gradle_command.display());
 
     // Write the init script to a temp file that will be cleaned up on drop.
     let init_script_file = write_init_script()?;
@@ -80,7 +109,7 @@ pub fn resolve_gradle_classpath(config: &ResolveConfig) -> ClasspathResult<Vec<R
 
     // Build and execute the Gradle command.
     let output = execute_gradle(
-        &wrapper,
+        &gradle_command,
         init_script_path,
         &config.project_root,
         config.timeout_secs,
@@ -93,7 +122,6 @@ pub fn resolve_gradle_classpath(config: &ResolveConfig) -> ClasspathResult<Vec<R
             let classpaths = enrich_source_jars(classpaths);
 
             // Cache the result for future fallback.
-            let cache_dir = resolve_cache_dir(config);
             if let Err(e) = write_cache(&cache_dir, &classpaths) {
                 warn!("Failed to write classpath cache: {e}");
             }
@@ -103,16 +131,15 @@ pub fn resolve_gradle_classpath(config: &ResolveConfig) -> ClasspathResult<Vec<R
         Err(e) => {
             warn!("Gradle resolution failed: {e}");
             warn!("Attempting to fall back to cached classpath");
-            let cache_dir = resolve_cache_dir(config);
-            read_cache(&cache_dir)
+            read_cache_or_error(&cache_dir, &e.to_string())
         }
     }
 }
 
-/// Locate the Gradle wrapper script in the project root.
+/// Locate the Gradle command to use.
 ///
-/// On Windows, looks for `gradlew.bat`; on Unix, `gradlew`.
-fn find_gradle_wrapper(project_root: &Path) -> ClasspathResult<PathBuf> {
+/// Prefers the project-local wrapper and falls back to installed `gradle`.
+fn find_gradle_command(project_root: &Path) -> Option<PathBuf> {
     let wrapper_name = if cfg!(windows) {
         "gradlew.bat"
     } else {
@@ -121,14 +148,23 @@ fn find_gradle_wrapper(project_root: &Path) -> ClasspathResult<PathBuf> {
 
     let wrapper_path = project_root.join(wrapper_name);
     if wrapper_path.exists() {
-        Ok(wrapper_path)
+        Some(wrapper_path)
     } else {
-        Err(ClasspathError::ResolutionFailed(format!(
-            "Gradle wrapper '{}' not found in {}",
-            wrapper_name,
-            project_root.display()
-        )))
+        which_binary(if cfg!(windows) {
+            "gradle.bat"
+        } else {
+            "gradle"
+        })
     }
+}
+
+fn is_project_local_gradle_wrapper(project_root: &Path, command: &Path) -> bool {
+    let wrapper_name = if cfg!(windows) {
+        "gradlew.bat"
+    } else {
+        "gradlew"
+    };
+    command == project_root.join(wrapper_name)
 }
 
 /// Write the init script to a temporary file.
@@ -229,12 +265,13 @@ fn execute_gradle(
 
 /// Parse structured output lines from the Gradle init script.
 ///
-/// Expected format: `SQRY_CP:<module>:<group>:<name>:<version>:<path>`
+/// Preferred format: `SQRY_CP_JSON:{...json...}`
+/// Legacy format: `SQRY_CP:<module>:<group>:<name>:<version>:<path>`
 ///
 /// Lines that do not match this format are silently skipped. Error lines
 /// (`SQRY_CP_ERR:`) are logged as warnings.
 pub(crate) fn parse_gradle_output(output: &str) -> Vec<ResolvedClasspath> {
-    let mut modules: HashMap<String, Vec<ClasspathEntry>> = HashMap::new();
+    let mut modules: HashMap<(String, PathBuf), Vec<ClasspathEntry>> = HashMap::new();
 
     for line in output.lines() {
         let trimmed = line.trim();
@@ -245,18 +282,32 @@ pub(crate) fn parse_gradle_output(output: &str) -> Vec<ResolvedClasspath> {
             continue;
         }
 
-        if let Some(payload) = trimmed.strip_prefix(CP_PREFIX)
+        if let Some(payload) = trimmed.strip_prefix(CP_JSON_PREFIX)
+            && let Some(entry) = parse_cp_json_line(payload)
+        {
+            modules
+                .entry((entry.module_name, entry.module_root))
+                .or_default()
+                .push(entry.entry);
+            continue;
+        }
+
+        if let Some(payload) = trimmed.strip_prefix("SQRY_CP:")
             && let Some(entry) = parse_cp_line(payload)
         {
-            modules.entry(entry.0).or_default().push(entry.1);
+            modules
+                .entry((entry.module_name, entry.module_root))
+                .or_default()
+                .push(entry.entry);
         }
         // All other lines are silently ignored (Gradle progress, warnings, etc.).
     }
 
     let mut result: Vec<ResolvedClasspath> = modules
         .into_iter()
-        .map(|(module_name, entries)| ResolvedClasspath {
+        .map(|((module_name, module_root), entries)| ResolvedClasspath {
             module_name,
+            module_root,
             entries,
         })
         .collect();
@@ -266,14 +317,58 @@ pub(crate) fn parse_gradle_output(output: &str) -> Vec<ResolvedClasspath> {
     result
 }
 
-/// Parse a single classpath payload after stripping the `SQRY_CP:` prefix.
+#[derive(Deserialize)]
+struct GradleClasspathJsonRecord {
+    module_name: String,
+    module_root: String,
+    group: String,
+    name: String,
+    version: String,
+    path: String,
+}
+
+struct ParsedGradleEntry {
+    module_name: String,
+    module_root: PathBuf,
+    entry: ClasspathEntry,
+}
+
+/// Parse a single JSON classpath payload.
+fn parse_cp_json_line(payload: &str) -> Option<ParsedGradleEntry> {
+    let record: GradleClasspathJsonRecord = serde_json::from_str(payload).ok()?;
+    if record.module_name.is_empty()
+        || record.module_root.is_empty()
+        || record.group.is_empty()
+        || record.name.is_empty()
+        || record.version.is_empty()
+        || record.path.is_empty()
+    {
+        return None;
+    }
+
+    Some(ParsedGradleEntry {
+        module_name: record.module_name,
+        module_root: PathBuf::from(record.module_root),
+        entry: ClasspathEntry {
+            jar_path: PathBuf::from(record.path),
+            coordinates: Some(format!(
+                "{}:{}:{}",
+                record.group, record.name, record.version
+            )),
+            is_direct: true,
+            source_jar: None,
+        },
+    })
+}
+
+/// Parse a single classpath payload after stripping the legacy `SQRY_CP:` prefix.
 ///
 /// Expected: `<module>:<group>:<name>:<version>:<path>`
 ///
 /// The path itself may contain colons (e.g., Windows drive letters like `C:\...`),
 /// so we split into exactly 5 parts, where the last part captures everything
 /// after the 4th colon.
-fn parse_cp_line(payload: &str) -> Option<(String, ClasspathEntry)> {
+fn parse_cp_line(payload: &str) -> Option<ParsedGradleEntry> {
     let mut parts = payload.splitn(5, ':');
 
     let module = parts.next()?;
@@ -295,15 +390,16 @@ fn parse_cp_line(payload: &str) -> Option<(String, ClasspathEntry)> {
     let coordinates = format!("{group}:{name}:{version}");
     let jar_path = PathBuf::from(path_str);
 
-    Some((
-        module.to_string(),
-        ClasspathEntry {
+    Some(ParsedGradleEntry {
+        module_name: module.to_string(),
+        module_root: PathBuf::from(module),
+        entry: ClasspathEntry {
             jar_path,
             coordinates: Some(coordinates),
             is_direct: true,
             source_jar: None,
         },
-    ))
+    })
 }
 
 /// Enrich classpath entries with source JAR paths by probing the Gradle cache.
@@ -441,6 +537,77 @@ fn read_cache(cache_dir: &Path) -> ClasspathResult<Vec<ResolvedClasspath>> {
     );
 
     Ok(classpaths)
+}
+
+fn read_cache_or_error(
+    cache_dir: &Path,
+    live_error: &str,
+) -> ClasspathResult<Vec<ResolvedClasspath>> {
+    let cache_path = cache_dir.join(CACHE_FILENAME);
+    let classpaths = read_cache(cache_dir)?;
+    if classpaths.is_empty() {
+        return Err(ClasspathError::ResolutionFailed(format!(
+            "{live_error}. No cached classpath available at {}. Add a project wrapper, install Gradle, or use --classpath-file.",
+            cache_path.display()
+        )));
+    }
+    warn_if_cache_stale(cache_dir, &classpaths);
+    Ok(classpaths)
+}
+
+fn warn_if_cache_stale(cache_dir: &Path, classpaths: &[ResolvedClasspath]) {
+    if classpaths.is_empty() {
+        return;
+    }
+    let cache_path = cache_dir.join(CACHE_FILENAME);
+    let Ok(cache_meta) = std::fs::metadata(&cache_path) else {
+        return;
+    };
+    let Ok(cache_mtime) = cache_meta.modified() else {
+        return;
+    };
+
+    let mut roots = HashSet::new();
+    for cp in classpaths {
+        roots.insert(cp.module_root.as_path());
+    }
+
+    for root in roots {
+        for marker in [
+            "build.gradle",
+            "build.gradle.kts",
+            "settings.gradle",
+            "settings.gradle.kts",
+            "gradle.properties",
+        ] {
+            let marker_path = root.join(marker);
+            let Ok(meta) = std::fs::metadata(&marker_path) else {
+                continue;
+            };
+            let Ok(modified) = meta.modified() else {
+                continue;
+            };
+            if modified > cache_mtime {
+                warn!(
+                    "Using cached Gradle classpath from {} even though {} is newer; cache may be stale",
+                    cache_path.display(),
+                    marker_path.display()
+                );
+                return;
+            }
+        }
+    }
+}
+
+fn which_binary(name: &str) -> Option<PathBuf> {
+    let path_var = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path_var) {
+        let candidate = dir.join(name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 /// Extension trait for [`std::process::Child`] providing timeout-aware waiting.
@@ -677,6 +844,7 @@ SQRY_CP:app:org.slf4j:slf4j-api:2.0.9:/path/to/slf4j-api.jar";
         let classpaths = vec![
             ResolvedClasspath {
                 module_name: "app".to_string(),
+                module_root: PathBuf::from("/repo/app"),
                 entries: vec![ClasspathEntry {
                     jar_path: PathBuf::from("/path/to/guava.jar"),
                     coordinates: Some("com.google.guava:guava:33.0.0".to_string()),
@@ -686,6 +854,7 @@ SQRY_CP:app:org.slf4j:slf4j-api:2.0.9:/path/to/slf4j-api.jar";
             },
             ResolvedClasspath {
                 module_name: "lib".to_string(),
+                module_root: PathBuf::from("/repo/lib"),
                 entries: vec![ClasspathEntry {
                     jar_path: PathBuf::from("/path/to/commons.jar"),
                     coordinates: Some("org.apache.commons:commons-lang3:3.14.0".to_string()),
@@ -724,25 +893,18 @@ SQRY_CP:app:org.slf4j:slf4j-api:2.0.9:/path/to/slf4j-api.jar";
     }
 
     // -----------------------------------------------------------------------
-    // gradlew detection tests
+    // gradle command detection tests
     // -----------------------------------------------------------------------
 
     #[test]
-    fn test_missing_gradlew_error() {
+    fn test_missing_gradle_command_returns_none() {
         let tmp = TempDir::new().unwrap();
-        let result = find_gradle_wrapper(tmp.path());
-        assert!(result.is_err());
-
-        let err = result.unwrap_err();
-        let msg = err.to_string();
-        assert!(
-            msg.contains("not found"),
-            "Error message should mention 'not found': {msg}"
-        );
+        let result = find_gradle_command(tmp.path());
+        assert!(result.is_none());
     }
 
     #[test]
-    fn test_gradlew_found() {
+    fn test_gradle_wrapper_found() {
         let tmp = TempDir::new().unwrap();
         let wrapper_name = if cfg!(windows) {
             "gradlew.bat"
@@ -751,9 +913,8 @@ SQRY_CP:app:org.slf4j:slf4j-api:2.0.9:/path/to/slf4j-api.jar";
         };
         std::fs::write(tmp.path().join(wrapper_name), "#!/bin/sh\n").unwrap();
 
-        let result = find_gradle_wrapper(tmp.path());
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), tmp.path().join(wrapper_name));
+        let result = find_gradle_command(tmp.path());
+        assert_eq!(result, Some(tmp.path().join(wrapper_name)));
     }
 
     // -----------------------------------------------------------------------
@@ -765,7 +926,7 @@ SQRY_CP:app:org.slf4j:slf4j-api:2.0.9:/path/to/slf4j-api.jar";
         let file = write_init_script().expect("should create init script");
         let content = std::fs::read_to_string(file.path()).unwrap();
         assert!(content.contains("sqryListClasspath"));
-        assert!(content.contains("SQRY_CP:"));
+        assert!(content.contains("SQRY_CP_JSON:"));
         assert!(content.contains("compileClasspath"));
         assert!(content.contains("resolvedConfiguration"));
     }
@@ -804,15 +965,15 @@ SQRY_CP:app:org.slf4j:slf4j-api:2.0.9:/path/to/slf4j-api.jar";
     fn test_parse_cp_line_valid() {
         let result = parse_cp_line("app:com.google.guava:guava:33.0.0:/path/to/guava.jar");
         assert!(result.is_some());
-        let (module, entry) = result.unwrap();
-        assert_eq!(module, "app");
+        let parsed = result.unwrap();
+        assert_eq!(parsed.module_name, "app");
         assert_eq!(
-            entry.coordinates.as_deref(),
+            parsed.entry.coordinates.as_deref(),
             Some("com.google.guava:guava:33.0.0")
         );
-        assert_eq!(entry.jar_path, PathBuf::from("/path/to/guava.jar"));
-        assert!(entry.is_direct);
-        assert!(entry.source_jar.is_none());
+        assert_eq!(parsed.entry.jar_path, PathBuf::from("/path/to/guava.jar"));
+        assert!(parsed.entry.is_direct);
+        assert!(parsed.entry.source_jar.is_none());
     }
 
     #[test]

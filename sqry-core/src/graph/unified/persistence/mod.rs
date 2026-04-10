@@ -58,7 +58,9 @@ pub mod snapshot;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-pub use format::{GraphHeader, MAGIC_BYTES, VERSION};
+pub use format::{
+    FormatVersion, GraphHeader, MAGIC_BYTES, MAGIC_BYTES_V7, MAGIC_BYTES_V8, VERSION,
+};
 pub use manifest::{
     BuildProvenance, ConfigProvenance, ConfigProvenanceBuilder, MANIFEST_SCHEMA_VERSION, Manifest,
     OverrideEntry, OverrideSource, PluginSelectionManifest, SNAPSHOT_FORMAT_VERSION,

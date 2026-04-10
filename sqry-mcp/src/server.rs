@@ -22,6 +22,7 @@ use crate::tools::params::{
     SearchSimilarParams, SemanticDiffParams, SemanticSearchParams, ShowDependenciesParams,
     SqryAskParams, SubgraphParams, TracePathParams, UnusedScopeParam, VisibilityParam,
 };
+use crate::workspace_session::{self, WorkspaceSessionRegistry};
 use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler,
     handler::server::prompt::PromptContext,
@@ -65,6 +66,8 @@ pub struct SqryServer {
     prompt_router: PromptRouter<Self>,
     /// Optional response redactor (None = passthrough, no redaction)
     redactor: Option<Arc<Redactor>>,
+    /// Session-scoped workspace selection state.
+    workspace_sessions: Arc<WorkspaceSessionRegistry>,
 }
 
 impl SqryServer {
@@ -89,6 +92,7 @@ impl SqryServer {
             tool_router,
             prompt_router: create_prompt_router(),
             redactor: None,
+            workspace_sessions: Arc::new(WorkspaceSessionRegistry::default()),
         }
     }
 
@@ -119,6 +123,7 @@ impl SqryServer {
             tool_router,
             prompt_router: create_prompt_router(),
             redactor,
+            workspace_sessions: Arc::new(WorkspaceSessionRegistry::default()),
         }
     }
 
@@ -199,6 +204,71 @@ impl SqryServer {
     {
         self.execute_tool_with_timeout(tool_name, self.timeout_ms, f)
             .await
+    }
+
+    /// Resolve request workspace before entering `spawn_blocking`.
+    async fn execute_tool_for_request<P, F, T>(
+        &self,
+        tool_name: &str,
+        params: &P,
+        context: &RequestContext<RoleServer>,
+        f: F,
+    ) -> Result<serde_json::Value, McpError>
+    where
+        P: Serialize,
+        F: FnOnce() -> anyhow::Result<ToolExecution<T>> + Send + 'static,
+        T: Serialize + Send + 'static,
+    {
+        let resolved_workspace = self
+            .workspace_sessions
+            .resolve_for_request(params, context)
+            .await
+            .map_err(|error| McpError::invalid_request(error.to_string(), None))?;
+
+        tracing::debug!(
+            tool = tool_name,
+            workspace = %resolved_workspace.workspace_root().display(),
+            source = resolved_workspace.resolution_source().as_str(),
+            "Resolved session-scoped workspace"
+        );
+
+        self.execute_tool(tool_name, move || {
+            workspace_session::with_workspace_override(Some(resolved_workspace.workspace_root()), f)
+        })
+        .await
+    }
+
+    /// Resolve request workspace before entering `spawn_blocking` for long-running tools.
+    async fn execute_tool_with_timeout_for_request<P, F, T>(
+        &self,
+        tool_name: &str,
+        timeout_ms: u64,
+        params: &P,
+        context: &RequestContext<RoleServer>,
+        f: F,
+    ) -> Result<serde_json::Value, McpError>
+    where
+        P: Serialize,
+        F: FnOnce() -> anyhow::Result<ToolExecution<T>> + Send + 'static,
+        T: Serialize + Send + 'static,
+    {
+        let resolved_workspace = self
+            .workspace_sessions
+            .resolve_for_request(params, context)
+            .await
+            .map_err(|error| McpError::invalid_request(error.to_string(), None))?;
+
+        tracing::debug!(
+            tool = tool_name,
+            workspace = %resolved_workspace.workspace_root().display(),
+            source = resolved_workspace.resolution_source().as_str(),
+            "Resolved session-scoped workspace"
+        );
+
+        self.execute_tool_with_timeout(tool_name, timeout_ms, move || {
+            workspace_session::with_workspace_override(Some(resolved_workspace.workspace_root()), f)
+        })
+        .await
     }
 
     /// Execute a tool function with a custom timeout.
@@ -350,6 +420,7 @@ impl SqryServer {
     async fn semantic_search(
         &self,
         Parameters(params): Parameters<SemanticSearchParams>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         // Feature flag guard (explicit, defense in depth)
         self.ensure_tool_enabled("semantic_search")?;
@@ -362,9 +433,9 @@ impl SqryServer {
             )));
         }
 
-        let args = convert_semantic_search_params(params).map_err(rpc_error_to_mcp)?;
+        let args = convert_semantic_search_params(params.clone()).map_err(rpc_error_to_mcp)?;
         let result = self
-            .execute_tool("semantic_search", move || {
+            .execute_tool_for_request("semantic_search", &params, &context, move || {
                 execution::execute_semantic_search(&args)
             })
             .await?;
@@ -380,15 +451,16 @@ impl SqryServer {
     async fn hierarchical_search(
         &self,
         Parameters(params): Parameters<HierarchicalSearchParams>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_tool_enabled("hierarchical_search")?;
 
         // Custom validation
         params.validate().map_err(rpc_error_to_mcp)?;
 
-        let args = convert_hierarchical_search_params(params).map_err(rpc_error_to_mcp)?;
+        let args = convert_hierarchical_search_params(params.clone()).map_err(rpc_error_to_mcp)?;
         let result = self
-            .execute_tool("hierarchical_search", move || {
+            .execute_tool_for_request("hierarchical_search", &params, &context, move || {
                 execution::execute_hierarchical_search(&args)
             })
             .await?;
@@ -404,12 +476,13 @@ impl SqryServer {
     async fn relation_query(
         &self,
         Parameters(params): Parameters<RelationQueryParams>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_tool_enabled("relation_query")?;
 
-        let args = convert_relation_query_params(params).map_err(rpc_error_to_mcp)?;
+        let args = convert_relation_query_params(params.clone()).map_err(rpc_error_to_mcp)?;
         let result = self
-            .execute_tool("relation_query", move || {
+            .execute_tool_for_request("relation_query", &params, &context, move || {
                 execution::execute_relation_query(&args)
             })
             .await?;
@@ -425,12 +498,13 @@ impl SqryServer {
     async fn call_hierarchy(
         &self,
         Parameters(params): Parameters<CallHierarchyParams>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_tool_enabled("call_hierarchy")?;
 
-        let args = convert_call_hierarchy_params(params).map_err(rpc_error_to_mcp)?;
+        let args = convert_call_hierarchy_params(params.clone()).map_err(rpc_error_to_mcp)?;
         let result = self
-            .execute_tool("call_hierarchy", move || {
+            .execute_tool_for_request("call_hierarchy", &params, &context, move || {
                 execution::execute_call_hierarchy(&args)
             })
             .await?;
@@ -446,12 +520,13 @@ impl SqryServer {
     async fn explain_code(
         &self,
         Parameters(params): Parameters<ExplainCodeParams>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_tool_enabled("explain_code")?;
 
-        let args = convert_explain_code_params(params);
+        let args = convert_explain_code_params(params.clone());
         let result = self
-            .execute_tool("explain_code", move || {
+            .execute_tool_for_request("explain_code", &params, &context, move || {
                 execution::execute_explain_code(&args)
             })
             .await?;
@@ -467,12 +542,13 @@ impl SqryServer {
     async fn search_similar(
         &self,
         Parameters(params): Parameters<SearchSimilarParams>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_tool_enabled("search_similar")?;
 
-        let args = convert_search_similar_params(params).map_err(rpc_error_to_mcp)?;
+        let args = convert_search_similar_params(params.clone()).map_err(rpc_error_to_mcp)?;
         let result = self
-            .execute_tool("search_similar", move || {
+            .execute_tool_for_request("search_similar", &params, &context, move || {
                 execution::execute_find_similar(&args)
             })
             .await?;
@@ -488,15 +564,16 @@ impl SqryServer {
     async fn show_dependencies(
         &self,
         Parameters(params): Parameters<ShowDependenciesParams>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_tool_enabled("show_dependencies")?;
 
         // Custom XOR validation
         params.validate().map_err(rpc_error_to_mcp)?;
 
-        let args = convert_show_dependencies_params(params).map_err(rpc_error_to_mcp)?;
+        let args = convert_show_dependencies_params(params.clone()).map_err(rpc_error_to_mcp)?;
         let result = self
-            .execute_tool("show_dependencies", move || {
+            .execute_tool_for_request("show_dependencies", &params, &context, move || {
                 execution::execute_get_dependencies(&args)
             })
             .await?;
@@ -512,12 +589,13 @@ impl SqryServer {
     async fn get_index_status(
         &self,
         Parameters(params): Parameters<GetIndexStatusParams>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_tool_enabled("get_index_status")?;
 
-        let args = convert_get_index_status_params(params);
+        let args = convert_get_index_status_params(params.clone());
         let result = self
-            .execute_tool("get_index_status", move || {
+            .execute_tool_for_request("get_index_status", &params, &context, move || {
                 execution::execute_index_status(&args)
             })
             .await?;
@@ -538,14 +616,19 @@ impl SqryServer {
     async fn rebuild_index(
         &self,
         Parameters(params): Parameters<RebuildIndexParams>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_tool_enabled("rebuild_index")?;
 
-        let args = convert_rebuild_index_params(params);
+        let args = convert_rebuild_index_params(params.clone());
         let result = self
-            .execute_tool_with_timeout("rebuild_index", self.index_timeout_ms, move || {
-                execution::execute_rebuild_index(&args)
-            })
+            .execute_tool_with_timeout_for_request(
+                "rebuild_index",
+                self.index_timeout_ms,
+                &params,
+                &context,
+                move || execution::execute_rebuild_index(&args),
+            )
             .await?;
 
         Ok(Self::success_result(&result))
@@ -559,15 +642,16 @@ impl SqryServer {
     async fn export_graph(
         &self,
         Parameters(params): Parameters<ExportGraphParams>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_tool_enabled("export_graph")?;
 
         // Custom XOR validation
         params.validate().map_err(rpc_error_to_mcp)?;
 
-        let args = convert_export_graph_params(params).map_err(rpc_error_to_mcp)?;
+        let args = convert_export_graph_params(params.clone()).map_err(rpc_error_to_mcp)?;
         let result = self
-            .execute_tool("export_graph", move || {
+            .execute_tool_for_request("export_graph", &params, &context, move || {
                 execution::execute_export_graph(&args)
             })
             .await?;
@@ -583,12 +667,13 @@ impl SqryServer {
     async fn cross_language_edges(
         &self,
         Parameters(params): Parameters<CrossLanguageEdgesParams>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_tool_enabled("cross_language_edges")?;
 
-        let args = convert_cross_language_edges_params(params).map_err(rpc_error_to_mcp)?;
+        let args = convert_cross_language_edges_params(params.clone()).map_err(rpc_error_to_mcp)?;
         let result = self
-            .execute_tool("cross_language_edges", move || {
+            .execute_tool_for_request("cross_language_edges", &params, &context, move || {
                 execution::execute_cross_language_edges(&args)
             })
             .await?;
@@ -604,12 +689,15 @@ impl SqryServer {
     async fn trace_path(
         &self,
         Parameters(params): Parameters<TracePathParams>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_tool_enabled("trace_path")?;
 
-        let args = convert_trace_path_params(params).map_err(rpc_error_to_mcp)?;
+        let args = convert_trace_path_params(params.clone()).map_err(rpc_error_to_mcp)?;
         let result = self
-            .execute_tool("trace_path", move || execution::execute_trace_path(&args))
+            .execute_tool_for_request("trace_path", &params, &context, move || {
+                execution::execute_trace_path(&args)
+            })
             .await?;
 
         Ok(Self::success_result(&result))
@@ -623,15 +711,18 @@ impl SqryServer {
     async fn subgraph(
         &self,
         Parameters(params): Parameters<SubgraphParams>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_tool_enabled("subgraph")?;
 
         // Custom non-empty validation
         params.validate().map_err(rpc_error_to_mcp)?;
 
-        let args = convert_subgraph_params(params).map_err(rpc_error_to_mcp)?;
+        let args = convert_subgraph_params(params.clone()).map_err(rpc_error_to_mcp)?;
         let result = self
-            .execute_tool("subgraph", move || execution::execute_subgraph(&args))
+            .execute_tool_for_request("subgraph", &params, &context, move || {
+                execution::execute_subgraph(&args)
+            })
             .await?;
 
         Ok(Self::success_result(&result))
@@ -645,12 +736,13 @@ impl SqryServer {
     async fn dependency_impact(
         &self,
         Parameters(params): Parameters<DependencyImpactParams>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_tool_enabled("dependency_impact")?;
 
-        let args = convert_dependency_impact_params(params).map_err(rpc_error_to_mcp)?;
+        let args = convert_dependency_impact_params(params.clone()).map_err(rpc_error_to_mcp)?;
         let result = self
-            .execute_tool("dependency_impact", move || {
+            .execute_tool_for_request("dependency_impact", &params, &context, move || {
                 execution::execute_dependency_impact(&args)
             })
             .await?;
@@ -666,12 +758,13 @@ impl SqryServer {
     async fn semantic_diff(
         &self,
         Parameters(params): Parameters<SemanticDiffParams>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_tool_enabled("semantic_diff")?;
 
-        let args = convert_semantic_diff_params(params).map_err(rpc_error_to_mcp)?;
+        let args = convert_semantic_diff_params(params.clone()).map_err(rpc_error_to_mcp)?;
         let result = self
-            .execute_tool("semantic_diff", move || {
+            .execute_tool_for_request("semantic_diff", &params, &context, move || {
                 execution::execute_semantic_diff(&args)
             })
             .await?;
@@ -687,12 +780,13 @@ impl SqryServer {
     async fn find_duplicates(
         &self,
         Parameters(params): Parameters<FindDuplicatesParams>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_tool_enabled("find_duplicates")?;
 
-        let args = convert_find_duplicates_params(params).map_err(rpc_error_to_mcp)?;
+        let args = convert_find_duplicates_params(params.clone()).map_err(rpc_error_to_mcp)?;
         let result = self
-            .execute_tool("find_duplicates", move || {
+            .execute_tool_for_request("find_duplicates", &params, &context, move || {
                 execution::execute_find_duplicates(&args)
             })
             .await?;
@@ -708,12 +802,15 @@ impl SqryServer {
     async fn find_cycles(
         &self,
         Parameters(params): Parameters<FindCyclesParams>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_tool_enabled("find_cycles")?;
 
-        let args = convert_find_cycles_params(params).map_err(rpc_error_to_mcp)?;
+        let args = convert_find_cycles_params(params.clone()).map_err(rpc_error_to_mcp)?;
         let result = self
-            .execute_tool("find_cycles", move || execution::execute_find_cycles(&args))
+            .execute_tool_for_request("find_cycles", &params, &context, move || {
+                execution::execute_find_cycles(&args)
+            })
             .await?;
 
         Ok(Self::success_result(&result))
@@ -727,12 +824,15 @@ impl SqryServer {
     async fn find_unused(
         &self,
         Parameters(params): Parameters<FindUnusedParams>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_tool_enabled("find_unused")?;
 
-        let args = convert_find_unused_params(params).map_err(rpc_error_to_mcp)?;
+        let args = convert_find_unused_params(params.clone()).map_err(rpc_error_to_mcp)?;
         let result = self
-            .execute_tool("find_unused", move || execution::execute_find_unused(&args))
+            .execute_tool_for_request("find_unused", &params, &context, move || {
+                execution::execute_find_unused(&args)
+            })
             .await?;
 
         Ok(Self::success_result(&result))
@@ -746,12 +846,16 @@ impl SqryServer {
     async fn sqry_ask(
         &self,
         Parameters(params): Parameters<SqryAskParams>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_tool_enabled("sqry_ask")?;
 
         // SqryAskParams maps directly to the execution args
+        let args = params.clone();
         let result = self
-            .execute_tool("sqry_ask", move || execution::execute_sqry_ask(&params))
+            .execute_tool_for_request("sqry_ask", &params, &context, move || {
+                execution::execute_sqry_ask(&args)
+            })
             .await?;
 
         Ok(Self::success_result(&result))
@@ -769,15 +873,16 @@ impl SqryServer {
     async fn is_node_in_cycle(
         &self,
         Parameters(params): Parameters<IsNodeInCycleParams>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_tool_enabled("is_node_in_cycle")?;
 
         // Custom validation
         params.validate().map_err(rpc_error_to_mcp)?;
 
-        let args = convert_is_node_in_cycle_params(params);
+        let args = convert_is_node_in_cycle_params(params.clone());
         let result = self
-            .execute_tool("is_node_in_cycle", move || {
+            .execute_tool_for_request("is_node_in_cycle", &params, &context, move || {
                 execution::execute_is_node_in_cycle(&args)
             })
             .await?;
@@ -793,15 +898,16 @@ impl SqryServer {
     async fn pattern_search(
         &self,
         Parameters(params): Parameters<PatternSearchParams>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_tool_enabled("pattern_search")?;
 
         // Custom validation
         params.validate().map_err(rpc_error_to_mcp)?;
 
-        let args = convert_pattern_search_params(params).map_err(rpc_error_to_mcp)?;
+        let args = convert_pattern_search_params(params.clone()).map_err(rpc_error_to_mcp)?;
         let result = self
-            .execute_tool("pattern_search", move || {
+            .execute_tool_for_request("pattern_search", &params, &context, move || {
                 execution::execute_pattern_search(&args)
             })
             .await?;
@@ -817,15 +923,16 @@ impl SqryServer {
     async fn direct_callers(
         &self,
         Parameters(params): Parameters<DirectCallersParams>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_tool_enabled("direct_callers")?;
 
         // Custom validation
         params.validate().map_err(rpc_error_to_mcp)?;
 
-        let args = convert_direct_callers_params(params).map_err(rpc_error_to_mcp)?;
+        let args = convert_direct_callers_params(params.clone()).map_err(rpc_error_to_mcp)?;
         let result = self
-            .execute_tool("direct_callers", move || {
+            .execute_tool_for_request("direct_callers", &params, &context, move || {
                 execution::execute_direct_callers(&args)
             })
             .await?;
@@ -841,15 +948,16 @@ impl SqryServer {
     async fn direct_callees(
         &self,
         Parameters(params): Parameters<DirectCalleesParams>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_tool_enabled("direct_callees")?;
 
         // Custom validation
         params.validate().map_err(rpc_error_to_mcp)?;
 
-        let args = convert_direct_callees_params(params).map_err(rpc_error_to_mcp)?;
+        let args = convert_direct_callees_params(params.clone()).map_err(rpc_error_to_mcp)?;
         let result = self
-            .execute_tool("direct_callees", move || {
+            .execute_tool_for_request("direct_callees", &params, &context, move || {
                 execution::execute_direct_callees(&args)
             })
             .await?;
@@ -869,12 +977,15 @@ impl SqryServer {
     async fn list_files(
         &self,
         Parameters(params): Parameters<ListFilesParams>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_tool_enabled("list_files")?;
 
-        let args = convert_list_files_params(params).map_err(rpc_error_to_mcp)?;
+        let args = convert_list_files_params(params.clone()).map_err(rpc_error_to_mcp)?;
         let result = self
-            .execute_tool("list_files", move || execution::execute_list_files(&args))
+            .execute_tool_for_request("list_files", &params, &context, move || {
+                execution::execute_list_files(&args)
+            })
             .await?;
 
         Ok(Self::success_result(&result))
@@ -888,12 +999,13 @@ impl SqryServer {
     async fn list_symbols(
         &self,
         Parameters(params): Parameters<ListSymbolsParams>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_tool_enabled("list_symbols")?;
 
-        let args = convert_list_symbols_params(params).map_err(rpc_error_to_mcp)?;
+        let args = convert_list_symbols_params(params.clone()).map_err(rpc_error_to_mcp)?;
         let result = self
-            .execute_tool("list_symbols", move || {
+            .execute_tool_for_request("list_symbols", &params, &context, move || {
                 execution::execute_list_symbols(&args)
             })
             .await?;
@@ -909,12 +1021,13 @@ impl SqryServer {
     async fn get_graph_stats(
         &self,
         Parameters(params): Parameters<GetGraphStatsParams>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_tool_enabled("get_graph_stats")?;
 
-        let args = convert_get_graph_stats_params(params);
+        let args = convert_get_graph_stats_params(params.clone());
         let result = self
-            .execute_tool("get_graph_stats", move || {
+            .execute_tool_for_request("get_graph_stats", &params, &context, move || {
                 execution::execute_get_graph_stats(&args)
             })
             .await?;
@@ -930,12 +1043,13 @@ impl SqryServer {
     async fn get_insights(
         &self,
         Parameters(params): Parameters<GetInsightsParams>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_tool_enabled("get_insights")?;
 
-        let args = convert_get_insights_params(params);
+        let args = convert_get_insights_params(params.clone());
         let result = self
-            .execute_tool("get_insights", move || {
+            .execute_tool_for_request("get_insights", &params, &context, move || {
                 execution::execute_get_insights(&args)
             })
             .await?;
@@ -951,12 +1065,13 @@ impl SqryServer {
     async fn complexity_metrics(
         &self,
         Parameters(params): Parameters<ComplexityMetricsParams>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_tool_enabled("complexity_metrics")?;
 
-        let args = convert_complexity_metrics_params(params).map_err(rpc_error_to_mcp)?;
+        let args = convert_complexity_metrics_params(params.clone()).map_err(rpc_error_to_mcp)?;
         let result = self
-            .execute_tool("complexity_metrics", move || {
+            .execute_tool_for_request("complexity_metrics", &params, &context, move || {
                 execution::execute_complexity_metrics(&args)
             })
             .await?;
@@ -972,12 +1087,13 @@ impl SqryServer {
     async fn expand_cache_status(
         &self,
         Parameters(params): Parameters<ExpandCacheStatusParams>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_tool_enabled("expand_cache_status")?;
 
-        let args = convert_expand_cache_status_params(params);
+        let args = convert_expand_cache_status_params(params.clone());
         let result = self
-            .execute_tool("expand_cache_status", move || {
+            .execute_tool_for_request("expand_cache_status", &params, &context, move || {
                 execution::execute_expand_cache_status(&args)
             })
             .await?;
@@ -997,15 +1113,16 @@ impl SqryServer {
     async fn get_definition(
         &self,
         Parameters(params): Parameters<GetDefinitionParams>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_tool_enabled("get_definition")?;
 
         // Custom validation
         params.validate().map_err(rpc_error_to_mcp)?;
 
-        let args = convert_get_definition_params(params);
+        let args = convert_get_definition_params(params.clone());
         let result = self
-            .execute_tool("get_definition", move || {
+            .execute_tool_for_request("get_definition", &params, &context, move || {
                 execution::execute_get_definition(&args)
             })
             .await?;
@@ -1021,15 +1138,16 @@ impl SqryServer {
     async fn get_references(
         &self,
         Parameters(params): Parameters<GetReferencesParams>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_tool_enabled("get_references")?;
 
         // Custom validation
         params.validate().map_err(rpc_error_to_mcp)?;
 
-        let args = convert_get_references_params(params).map_err(rpc_error_to_mcp)?;
+        let args = convert_get_references_params(params.clone()).map_err(rpc_error_to_mcp)?;
         let result = self
-            .execute_tool("get_references", move || {
+            .execute_tool_for_request("get_references", &params, &context, move || {
                 execution::execute_get_references(&args)
             })
             .await?;
@@ -1045,15 +1163,16 @@ impl SqryServer {
     async fn get_hover_info(
         &self,
         Parameters(params): Parameters<GetHoverInfoParams>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_tool_enabled("get_hover_info")?;
 
         // Custom validation
         params.validate().map_err(rpc_error_to_mcp)?;
 
-        let args = convert_get_hover_info_params(params);
+        let args = convert_get_hover_info_params(params.clone());
         let result = self
-            .execute_tool("get_hover_info", move || {
+            .execute_tool_for_request("get_hover_info", &params, &context, move || {
                 execution::execute_get_hover_info(&args)
             })
             .await?;
@@ -1069,15 +1188,16 @@ impl SqryServer {
     async fn get_document_symbols(
         &self,
         Parameters(params): Parameters<GetDocumentSymbolsParams>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_tool_enabled("get_document_symbols")?;
 
         // Custom validation
         params.validate().map_err(rpc_error_to_mcp)?;
 
-        let args = convert_get_document_symbols_params(params);
+        let args = convert_get_document_symbols_params(params.clone());
         let result = self
-            .execute_tool("get_document_symbols", move || {
+            .execute_tool_for_request("get_document_symbols", &params, &context, move || {
                 execution::execute_get_document_symbols(&args)
             })
             .await?;
@@ -1093,15 +1213,17 @@ impl SqryServer {
     async fn get_workspace_symbols(
         &self,
         Parameters(params): Parameters<GetWorkspaceSymbolsParams>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_tool_enabled("get_workspace_symbols")?;
 
         // Custom validation
         params.validate().map_err(rpc_error_to_mcp)?;
 
-        let args = convert_get_workspace_symbols_params(params).map_err(rpc_error_to_mcp)?;
+        let args =
+            convert_get_workspace_symbols_params(params.clone()).map_err(rpc_error_to_mcp)?;
         let result = self
-            .execute_tool("get_workspace_symbols", move || {
+            .execute_tool_for_request("get_workspace_symbols", &params, &context, move || {
                 execution::execute_get_workspace_symbols(&args)
             })
             .await?;
@@ -1212,6 +1334,18 @@ impl ServerHandler for SqryServer {
                 None,
             )),
         }
+    }
+
+    async fn on_initialized(&self, context: rmcp::service::NotificationContext<RoleServer>) {
+        self.workspace_sessions
+            .record_client_info(context.peer.peer_info());
+    }
+
+    async fn on_roots_list_changed(
+        &self,
+        _context: rmcp::service::NotificationContext<RoleServer>,
+    ) {
+        self.workspace_sessions.invalidate_roots();
     }
 }
 

@@ -13,6 +13,7 @@ mod prompts;
 mod resources;
 mod server;
 mod tools;
+mod workspace_session;
 
 use anyhow::Result;
 use rmcp::ServiceExt;

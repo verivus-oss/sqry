@@ -1,7 +1,7 @@
 # sqry MCP Server - User Guide - by Verivus
 
-**Version**: 7.2.0
-**Last Updated**: 2026-04-08
+**Version**: 8.0.0
+**Last Updated**: 2026-04-10
 
 Integrate sqry's semantic code search with AI assistants (Codex, Claude Desktop, Windsurf, Cursor, and others) via the Model Context Protocol (MCP).
 
@@ -124,7 +124,7 @@ sqry mcp status
 The `sqry mcp setup` command automatically detects installed tools and writes
 the correct configuration:
 - **Claude Code**: per-project entry with pinned workspace root
-- **Codex/Gemini**: global entry using CWD-based workspace discovery
+- **Codex/Gemini**: global entry using session-scoped workspace resolution
 
 For more options: `sqry mcp setup --help`
 
@@ -158,8 +158,10 @@ command = "/absolute/path/to/sqry-mcp"
 ```
 
 **Important**:
-- Codex uses CWD-based workspace discovery by default.
-- Start Codex from the project root you want sqry to analyze.
+- `sqry-mcp` resolves Codex requests in this order: explicit `path`,
+  file-bearing args, MCP roots for the current session, last-resolved workspace,
+  then legacy env/CWD fallback.
+- The common single-repository session does not require `path` on every tool call.
 - `--workspace-root` is intentionally rejected for Codex to avoid pinning one repository globally.
 
 ### Gemini CLI Setup
@@ -188,8 +190,8 @@ sqry mcp status
 
 **Important**:
 - Gemini also supports project settings at `.gemini/settings.json`.
-- sqry setup keeps Gemini on CWD-based workspace discovery by default.
-- Start Gemini from the project root you want sqry to analyze.
+- `sqry-mcp` uses the same session-scoped resolution order as Codex.
+- Explicit `path` is mainly needed only when a multi-root Gemini session is ambiguous.
 
 ### Claude Desktop Setup
 
@@ -217,7 +219,7 @@ sqry mcp status
 
 **Important**:
 - Use **absolute paths** (not `~` or relative paths)
-- `SQRY_MCP_WORKSPACE_ROOT` is optional but recommended for security
+- `SQRY_MCP_WORKSPACE_ROOT` is optional legacy fallback for clients that do not expose MCP roots
 - Replace `/path/to/your/project` with your actual project path
 
 **3. Restart Claude Desktop**
@@ -881,7 +883,7 @@ ls -la .sqry-index
 **3. Test binary**:
 ```bash
 sqry --version
-# Should output: sqry 7.2.0+
+# Should output: sqry 8.0.0+
 ```
 
 **4. Check logs** (AI assistant specific):
@@ -967,7 +969,7 @@ sqry MCP is production-ready but evolving. Your feedback helps!
 
 ---
 
-**Last Updated**: 2026-04-08
-**MCP Server Version**: 7.2.0
+**Last Updated**: 2026-04-10
+**MCP Server Version**: 8.0.0
 **Protocol**: MCP 2024-11-05 (JSON-RPC 2.0)
-**sqry CLI Required**: 7.2.0+
+**sqry CLI Required**: 8.0.0+

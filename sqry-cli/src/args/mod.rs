@@ -930,6 +930,30 @@ pub enum Command {
         #[arg(long, help_heading = headings::OUTPUT_CONTROL, display_order = 10)]
         stats: bool,
 
+        /// Enable JVM classpath analysis.
+        #[arg(long, help_heading = headings::ADVANCED_CONFIGURATION, display_order = 40)]
+        classpath: bool,
+
+        /// Disable classpath analysis (overrides config defaults).
+        #[arg(long, conflicts_with = "classpath", help_heading = headings::ADVANCED_CONFIGURATION, display_order = 41)]
+        no_classpath: bool,
+
+        /// Classpath analysis depth.
+        #[arg(long, value_enum, default_value = "full", help_heading = headings::ADVANCED_CONFIGURATION, display_order = 42)]
+        classpath_depth: ClasspathDepthArg,
+
+        /// Manual classpath file (one JAR path per line).
+        #[arg(long, value_name = "FILE", help_heading = headings::ADVANCED_CONFIGURATION, display_order = 43)]
+        classpath_file: Option<PathBuf>,
+
+        /// Override build system detection for classpath analysis.
+        #[arg(long, value_name = "SYSTEM", help_heading = headings::ADVANCED_CONFIGURATION, display_order = 44)]
+        build_system: Option<String>,
+
+        /// Force classpath re-resolution (ignore cached classpath).
+        #[arg(long, help_heading = headings::ADVANCED_CONFIGURATION, display_order = 45)]
+        force_classpath: bool,
+
         #[command(flatten)]
         plugin_selection: PluginSelectionArgs,
     },
@@ -971,6 +995,30 @@ pub enum Command {
         /// Show detailed statistics for each update.
         #[arg(long, short = 's', help_heading = headings::OUTPUT_CONTROL, display_order = 10)]
         stats: bool,
+
+        /// Enable JVM classpath analysis.
+        #[arg(long, help_heading = headings::ADVANCED_CONFIGURATION, display_order = 40)]
+        classpath: bool,
+
+        /// Disable classpath analysis (overrides config defaults).
+        #[arg(long, conflicts_with = "classpath", help_heading = headings::ADVANCED_CONFIGURATION, display_order = 41)]
+        no_classpath: bool,
+
+        /// Classpath analysis depth.
+        #[arg(long, value_enum, default_value = "full", help_heading = headings::ADVANCED_CONFIGURATION, display_order = 42)]
+        classpath_depth: ClasspathDepthArg,
+
+        /// Manual classpath file (one JAR path per line).
+        #[arg(long, value_name = "FILE", help_heading = headings::ADVANCED_CONFIGURATION, display_order = 43)]
+        classpath_file: Option<PathBuf>,
+
+        /// Override build system detection for classpath analysis.
+        #[arg(long, value_name = "SYSTEM", help_heading = headings::ADVANCED_CONFIGURATION, display_order = 44)]
+        build_system: Option<String>,
+
+        /// Force classpath re-resolution (ignore cached classpath).
+        #[arg(long, help_heading = headings::ADVANCED_CONFIGURATION, display_order = 45)]
+        force_classpath: bool,
 
         #[command(flatten)]
         plugin_selection: PluginSelectionArgs,
@@ -1952,6 +2000,25 @@ pub enum GraphOperation {
     ///
     /// Example: sqry graph status
     Status,
+
+    /// Show Phase 1 fact-layer provenance for a symbol
+    ///
+    /// Prints the snapshot's fact epoch, node provenance (first/last seen
+    /// epoch, content hash), file provenance, and an edge-provenance summary
+    /// for the matched symbol. This is the end-to-end proof that the V8
+    /// save → load → accessor → CLI path is wired.
+    ///
+    /// Example: sqry graph provenance `my_function`
+    #[command(alias = "prov")]
+    Provenance {
+        /// Symbol name to inspect (qualified or unqualified).
+        #[arg(help_heading = headings::GRAPH_ANALYSIS_INPUT, display_order = 10)]
+        symbol: String,
+
+        /// Output as JSON.
+        #[arg(long, help_heading = headings::GRAPH_OUTPUT_OPTIONS, display_order = 10)]
+        json: bool,
+    },
 
     /// Detect circular dependencies in the codebase
     ///

@@ -16,8 +16,8 @@ use log::{debug, info, warn};
 use rayon::prelude::*;
 
 use crate::bytecode::scan_jar;
-use crate::detect::{BuildSystem, detect_build_system};
-use crate::graph::provenance::ClasspathProvenance;
+use crate::detect::{BuildSystem, discover_build_roots};
+use crate::graph::provenance::{ClasspathProvenance, ClasspathScope};
 use crate::resolve::{ClasspathEntry, ResolveConfig, ResolvedClasspath};
 use crate::stub::cache::StubCache;
 use crate::stub::index::ClasspathIndex;
@@ -81,6 +81,8 @@ pub struct ClasspathPipelineResult {
     pub index: ClasspathIndex,
     /// Provenance information for each JAR.
     pub provenance: Vec<ClasspathProvenance>,
+    /// Resolved classpaths grouped by module/root scope.
+    pub resolved_classpaths: Vec<ResolvedClasspath>,
     /// Number of JARs scanned.
     pub jars_scanned: usize,
     /// Number of classes parsed.
@@ -121,7 +123,7 @@ pub fn run_classpath_pipeline(
 
     // ── Step 1: Resolve classpath entries ───────────────────────────────
     let resolved_classpaths = if let Some(ref classpath_file) = config.classpath_file {
-        resolve_from_manual_file(classpath_file)?
+        resolve_from_manual_file(project_root, classpath_file)?
     } else {
         resolve_from_build_system(project_root, config)?
     };
@@ -201,7 +203,7 @@ pub fn run_classpath_pipeline(
     );
 
     // ── Step 3: Build provenance ───────────────────────────────────────
-    let provenance = build_provenance(&entries_to_scan);
+    let provenance = build_provenance(&resolved_classpaths, config.depth);
 
     // ── Step 4: Build index ────────────────────────────────────────────
     let index = ClasspathIndex::build(all_stubs);
@@ -218,6 +220,7 @@ pub fn run_classpath_pipeline(
     Ok(ClasspathPipelineResult {
         index,
         provenance,
+        resolved_classpaths,
         jars_scanned: jars_scanned + jars_from_cache,
         classes_parsed,
         from_cache: jars_from_cache > 0 && jars_scanned == 0,
@@ -231,7 +234,10 @@ pub fn run_classpath_pipeline(
 /// Read a manual classpath file (one JAR path per line).
 ///
 /// Lines that are empty or start with `#` are skipped (comments).
-fn resolve_from_manual_file(classpath_file: &Path) -> ClasspathResult<Vec<ResolvedClasspath>> {
+fn resolve_from_manual_file(
+    project_root: &Path,
+    classpath_file: &Path,
+) -> ClasspathResult<Vec<ResolvedClasspath>> {
     info!("Reading manual classpath from {}", classpath_file.display());
 
     let file = std::fs::File::open(classpath_file).map_err(|e| {
@@ -279,6 +285,7 @@ fn resolve_from_manual_file(classpath_file: &Path) -> ClasspathResult<Vec<Resolv
 
     Ok(vec![ResolvedClasspath {
         module_name: "manual".to_string(),
+        module_root: project_root.to_path_buf(),
         entries,
     }])
 }
@@ -288,35 +295,51 @@ fn resolve_from_build_system(
     project_root: &Path,
     config: &ClasspathConfig,
 ) -> ClasspathResult<Vec<ResolvedClasspath>> {
-    let detection = detect_build_system(project_root, config.build_system_override.as_deref());
-
-    let build_system = detection.build_system.ok_or_else(|| {
-        ClasspathError::DetectionFailed(
+    let detected_roots =
+        discover_build_roots(project_root, config.build_system_override.as_deref());
+    if detected_roots.is_empty() {
+        return Err(ClasspathError::DetectionFailed(
             "No JVM build system detected. Use --build-system to specify one, \
              or --classpath-file to provide a manual classpath."
                 .to_string(),
-        )
-    })?;
-
-    info!("Detected build system: {build_system:?}");
-
-    let resolve_config = ResolveConfig {
-        project_root: project_root.to_path_buf(),
-        timeout_secs: config.timeout_secs,
-        cache_path: Some(
-            project_root
-                .join(".sqry")
-                .join("classpath")
-                .join("resolved-classpath.json"),
-        ),
-    };
-
-    match build_system {
-        BuildSystem::Gradle => crate::resolve::gradle::resolve_gradle_classpath(&resolve_config),
-        BuildSystem::Maven => crate::resolve::maven::resolve_maven_classpath(&resolve_config),
-        BuildSystem::Bazel => crate::resolve::bazel::resolve_bazel_classpath(&resolve_config),
-        BuildSystem::Sbt => crate::resolve::sbt::resolve_sbt_classpath(&resolve_config),
+        ));
     }
+
+    info!("Discovered {} JVM build roots", detected_roots.len());
+    let mut resolved = Vec::new();
+    for detection in detected_roots {
+        let Some(build_system) = detection.build_system else {
+            continue;
+        };
+        info!(
+            "Resolving {:?} classpath in {}",
+            build_system,
+            detection.project_root.display()
+        );
+
+        let resolve_config = ResolveConfig {
+            project_root: detection.project_root.clone(),
+            timeout_secs: config.timeout_secs,
+            cache_path: Some(detection.project_root.join(".sqry").join("classpath")),
+        };
+
+        let mut root_resolved = match build_system {
+            BuildSystem::Gradle => {
+                crate::resolve::gradle::resolve_gradle_classpath(&resolve_config)
+            }
+            BuildSystem::Maven => crate::resolve::maven::resolve_maven_classpath(&resolve_config),
+            BuildSystem::Bazel => crate::resolve::bazel::resolve_bazel_classpath(&resolve_config),
+            BuildSystem::Sbt => crate::resolve::sbt::resolve_sbt_classpath(&resolve_config),
+        }?;
+        resolved.append(&mut root_resolved);
+    }
+
+    resolved.sort_by(|a, b| {
+        a.module_root
+            .cmp(&b.module_root)
+            .then_with(|| a.module_name.cmp(&b.module_name))
+    });
+    Ok(resolved)
 }
 
 // ---------------------------------------------------------------------------
@@ -413,15 +436,48 @@ fn scan_single_jar(jar_path: &Path, stub_cache: &StubCache, force: bool) -> JarS
 // ---------------------------------------------------------------------------
 
 /// Build provenance records from classpath entries.
-fn build_provenance(entries: &[&ClasspathEntry]) -> Vec<ClasspathProvenance> {
-    entries
-        .iter()
-        .map(|entry| ClasspathProvenance {
-            jar_path: entry.jar_path.clone(),
-            coordinates: entry.coordinates.clone(),
-            is_direct: entry.is_direct,
-        })
-        .collect()
+fn build_provenance(
+    resolved_classpaths: &[ResolvedClasspath],
+    depth: ClasspathDepth,
+) -> Vec<ClasspathProvenance> {
+    let mut by_jar: std::collections::HashMap<PathBuf, ClasspathProvenance> =
+        std::collections::HashMap::new();
+
+    for classpath in resolved_classpaths {
+        for entry in &classpath.entries {
+            if matches!(depth, ClasspathDepth::Shallow) && !entry.is_direct {
+                continue;
+            }
+
+            let provenance =
+                by_jar
+                    .entry(entry.jar_path.clone())
+                    .or_insert_with(|| ClasspathProvenance {
+                        jar_path: entry.jar_path.clone(),
+                        coordinates: entry.coordinates.clone(),
+                        is_direct: entry.is_direct,
+                        scopes: Vec::new(),
+                    });
+
+            if provenance.coordinates.is_none() {
+                provenance.coordinates.clone_from(&entry.coordinates);
+            }
+            provenance.is_direct &= entry.is_direct;
+
+            let scope = ClasspathScope {
+                module_name: classpath.module_name.clone(),
+                module_root: classpath.module_root.clone(),
+                is_direct: entry.is_direct,
+            };
+            if !provenance.scopes.iter().any(|existing| existing == &scope) {
+                provenance.scopes.push(scope);
+            }
+        }
+    }
+
+    let mut result: Vec<_> = by_jar.into_values().collect();
+    result.sort_by(|a, b| a.jar_path.cmp(&b.jar_path));
+    result
 }
 
 // ---------------------------------------------------------------------------
@@ -583,9 +639,10 @@ mod tests {
         )
         .unwrap();
 
-        let result = resolve_from_manual_file(&cp_file).unwrap();
+        let result = resolve_from_manual_file(tmp.path(), &cp_file).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].module_name, "manual");
+        assert_eq!(result[0].module_root, tmp.path());
         assert_eq!(result[0].entries.len(), 2);
         assert!(result[0].entries[0].is_direct);
         assert!(result[0].entries[1].is_direct);
@@ -607,13 +664,14 @@ mod tests {
         )
         .unwrap();
 
-        let result = resolve_from_manual_file(&cp_file).unwrap();
+        let result = resolve_from_manual_file(tmp.path(), &cp_file).unwrap();
         assert_eq!(result[0].entries.len(), 1);
     }
 
     #[test]
     fn test_resolve_from_manual_file_nonexistent_file() {
-        let result = resolve_from_manual_file(Path::new("/nonexistent/classpath.txt"));
+        let result =
+            resolve_from_manual_file(Path::new("/tmp"), Path::new("/nonexistent/classpath.txt"));
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("Cannot open classpath file"));
@@ -625,7 +683,7 @@ mod tests {
         let cp_file = tmp.path().join("classpath.txt");
         std::fs::write(&cp_file, "/nonexistent/jar.jar\n").unwrap();
 
-        let result = resolve_from_manual_file(&cp_file).unwrap();
+        let result = resolve_from_manual_file(tmp.path(), &cp_file).unwrap();
         assert_eq!(result[0].entries.len(), 1);
         assert_eq!(
             result[0].entries[0].jar_path,
@@ -668,32 +726,76 @@ mod tests {
 
     #[test]
     fn test_build_provenance() {
-        let entries = [
-            ClasspathEntry {
-                jar_path: PathBuf::from("/guava.jar"),
-                coordinates: Some("com.google.guava:guava:33.0.0".to_string()),
-                is_direct: true,
-                source_jar: None,
-            },
-            ClasspathEntry {
-                jar_path: PathBuf::from("/commons.jar"),
-                coordinates: None,
-                is_direct: false,
-                source_jar: None,
-            },
-        ];
-        let refs: Vec<&ClasspathEntry> = entries.iter().collect();
-        let prov = build_provenance(&refs);
+        let classpaths = vec![ResolvedClasspath {
+            module_name: "app".to_string(),
+            module_root: PathBuf::from("/repo/app"),
+            entries: vec![
+                ClasspathEntry {
+                    jar_path: PathBuf::from("/guava.jar"),
+                    coordinates: Some("com.google.guava:guava:33.0.0".to_string()),
+                    is_direct: true,
+                    source_jar: None,
+                },
+                ClasspathEntry {
+                    jar_path: PathBuf::from("/commons.jar"),
+                    coordinates: None,
+                    is_direct: false,
+                    source_jar: None,
+                },
+            ],
+        }];
+        let prov = build_provenance(&classpaths, ClasspathDepth::Full);
 
         assert_eq!(prov.len(), 2);
-        assert_eq!(prov[0].jar_path, PathBuf::from("/guava.jar"));
+        assert_eq!(prov[0].jar_path, PathBuf::from("/commons.jar"));
         assert_eq!(
-            prov[0].coordinates,
+            prov[1].coordinates,
             Some("com.google.guava:guava:33.0.0".to_string())
         );
-        assert!(prov[0].is_direct);
-        assert!(!prov[1].is_direct);
-        assert!(prov[1].coordinates.is_none());
+        assert!(!prov[0].is_direct);
+        assert!(prov[1].is_direct);
+        assert!(prov[0].coordinates.is_none());
+        assert_eq!(prov[1].scopes[0].module_root, PathBuf::from("/repo/app"));
+    }
+
+    #[test]
+    fn test_build_provenance_mixed_directness_same_jar_is_conservative() {
+        let shared_jar = PathBuf::from("/shared.jar");
+        let classpaths = vec![
+            ResolvedClasspath {
+                module_name: "app".to_string(),
+                module_root: PathBuf::from("/repo/app"),
+                entries: vec![ClasspathEntry {
+                    jar_path: shared_jar.clone(),
+                    coordinates: Some("com.example:shared:1.0.0".to_string()),
+                    is_direct: true,
+                    source_jar: None,
+                }],
+            },
+            ResolvedClasspath {
+                module_name: "worker".to_string(),
+                module_root: PathBuf::from("/repo/worker"),
+                entries: vec![ClasspathEntry {
+                    jar_path: shared_jar.clone(),
+                    coordinates: Some("com.example:shared:1.0.0".to_string()),
+                    is_direct: false,
+                    source_jar: None,
+                }],
+            },
+        ];
+        let prov = build_provenance(&classpaths, ClasspathDepth::Full);
+
+        assert_eq!(prov.len(), 1);
+        assert_eq!(prov[0].jar_path, shared_jar);
+        assert!(
+            !prov[0].is_direct,
+            "aggregate directness should be conservative when scopes disagree"
+        );
+        assert!(
+            prov[0].has_direct_scope(),
+            "per-scope metadata should retain the direct scope"
+        );
+        assert_eq!(prov[0].scopes.len(), 2);
     }
 
     // ── Scan + cache integration tests ─────────────────────────────────
@@ -823,6 +925,11 @@ mod tests {
             jar_path: PathBuf::from("/test.jar"),
             coordinates: Some("test:test:1.0".to_string()),
             is_direct: true,
+            scopes: vec![ClasspathScope {
+                module_name: "manual".to_string(),
+                module_root: tmp.path().to_path_buf(),
+                is_direct: true,
+            }],
         }];
 
         persist_artifacts(&classpath_dir, &index, &provenance).unwrap();

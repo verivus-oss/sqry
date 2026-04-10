@@ -43,6 +43,7 @@ pub fn resolve_sbt_classpath(config: &ResolveConfig) -> ClasspathResult<Vec<Reso
             let entries = build_entries(&jar_paths);
             let resolved = ResolvedClasspath {
                 module_name: infer_module_name(&config.project_root),
+                module_root: config.project_root.clone(),
                 entries,
             };
             Ok(vec![resolved])
@@ -604,6 +605,7 @@ List(Attributed(/home/user/.cache/coursier/v1/https/repo1.maven.org/maven2/com/g
 
         let cached = vec![ResolvedClasspath {
             module_name: "cached-scala-project".to_string(),
+            module_root: tmp.path().to_path_buf(),
             entries: vec![ClasspathEntry {
                 jar_path: PathBuf::from("/cached/scala-library.jar"),
                 coordinates: Some("org.scala-lang:scala-library:2.13.12".to_string()),

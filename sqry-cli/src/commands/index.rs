@@ -13,6 +13,8 @@ use sqry_core::progress::{SharedReporter, no_op_reporter};
 use std::fs;
 use std::io::{BufRead, BufReader, IsTerminal, Write};
 use std::path::Path;
+#[cfg(feature = "jvm-classpath")]
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -23,6 +25,421 @@ use std::time::Instant;
 #[derive(serde::Serialize)]
 struct ThreadPoolMetrics {
     thread_pool_creations: u64,
+}
+
+#[cfg_attr(not(feature = "jvm-classpath"), allow(dead_code))]
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ClasspathCliOptions<'a> {
+    pub enabled: bool,
+    pub depth: crate::args::ClasspathDepthArg,
+    pub classpath_file: Option<&'a Path>,
+    pub build_system: Option<&'a str>,
+    pub force_classpath: bool,
+}
+
+#[cfg(feature = "jvm-classpath")]
+pub(crate) fn run_classpath_pipeline_only(
+    root_path: &Path,
+    classpath_opts: &ClasspathCliOptions<'_>,
+) -> Result<sqry_classpath::pipeline::ClasspathPipelineResult> {
+    use sqry_classpath::pipeline::{ClasspathConfig, ClasspathDepth};
+
+    let depth = match classpath_opts.depth {
+        crate::args::ClasspathDepthArg::Full => ClasspathDepth::Full,
+        crate::args::ClasspathDepthArg::Shallow => ClasspathDepth::Shallow,
+    };
+    let config = ClasspathConfig {
+        enabled: true,
+        depth,
+        build_system_override: classpath_opts.build_system.map(str::to_owned),
+        classpath_file: classpath_opts.classpath_file.map(Path::to_path_buf),
+        force: classpath_opts.force_classpath,
+        timeout_secs: 60,
+    };
+
+    println!("Running JVM classpath analysis...");
+    let result = sqry_classpath::pipeline::run_classpath_pipeline(root_path, &config)
+        .context("Classpath pipeline failed")?;
+    println!(
+        "  Classpath: {} JARs scanned, {} classes parsed",
+        result.jars_scanned, result.classes_parsed
+    );
+    Ok(result)
+}
+
+#[cfg(feature = "jvm-classpath")]
+fn create_workspace_classpath_import_edges(
+    graph: &mut sqry_core::graph::unified::concurrent::CodeGraph,
+    classpath_result: &sqry_classpath::pipeline::ClasspathPipelineResult,
+    fqn_to_nodes: &std::collections::HashMap<
+        String,
+        Vec<sqry_classpath::graph::emitter::ClasspathNodeRef>,
+    >,
+) -> (usize, usize, usize, usize) {
+    use sqry_core::graph::unified::edge::EdgeKind;
+    use sqry_core::graph::unified::node::NodeKind;
+
+    let class_fqns: std::collections::HashSet<&str> = classpath_result
+        .index
+        .classes
+        .iter()
+        .map(|class_stub| class_stub.fqn.as_str())
+        .collect();
+    let mut package_index: std::collections::HashMap<
+        String,
+        Vec<&sqry_classpath::graph::emitter::ClasspathNodeRef>,
+    > = std::collections::HashMap::new();
+    for fqn in class_fqns {
+        if let Some(node_refs) = fqn_to_nodes.get(fqn)
+            && let Some((package_name, _)) = fqn.rsplit_once('.')
+        {
+            package_index
+                .entry(package_name.to_owned())
+                .or_default()
+                .extend(node_refs.iter());
+        }
+    }
+
+    let scoped_jars = build_scope_jar_sets(&classpath_result.provenance);
+    let provenance_lookup = build_provenance_lookup(&classpath_result.provenance);
+    let mut existing_imports = Vec::new();
+    for (source_id, _source_entry) in graph.nodes().iter() {
+        for edge in graph.edges().edges_from(source_id) {
+            let EdgeKind::Imports { alias, is_wildcard } = edge.kind.clone() else {
+                continue;
+            };
+            let Some(import_entry) = graph.nodes().get(edge.target) else {
+                continue;
+            };
+            if import_entry.kind != NodeKind::Import || graph.files().is_external(import_entry.file)
+            {
+                continue;
+            }
+            let importer_path = graph
+                .files()
+                .resolve(edge.file)
+                .map(|path| canonicalish_path(path.as_ref()));
+            let import_name = import_entry
+                .qualified_name
+                .and_then(|id| graph.strings().resolve(id))
+                .or_else(|| graph.strings().resolve(import_entry.name))
+                .map(|value| value.to_string());
+            existing_imports.push((
+                source_id,
+                edge.file,
+                alias,
+                is_wildcard,
+                import_name,
+                importer_path,
+            ));
+        }
+    }
+
+    let mut created_edges = 0usize;
+    let mut skipped_member_imports = 0usize;
+    let mut skipped_unscoped_imports = 0usize;
+    let mut skipped_ambiguous_imports = 0usize;
+
+    for (importer_id, file_id, alias, is_wildcard, import_name, importer_path) in existing_imports {
+        let Some(import_name) = import_name else {
+            continue;
+        };
+        if import_name.starts_with("static ") {
+            skipped_member_imports += 1;
+            continue;
+        }
+
+        let Some(resolved) = resolve_allowed_jars(importer_path.as_deref(), &scoped_jars) else {
+            skipped_unscoped_imports += 1;
+            continue;
+        };
+
+        if is_wildcard || import_name.ends_with(".*") || import_name.ends_with("._") {
+            let package_name = import_name
+                .strip_suffix(".*")
+                .or_else(|| import_name.strip_suffix("._"))
+                .unwrap_or(import_name.as_str());
+            if let Some(targets) = package_index.get(package_name) {
+                let filtered_targets =
+                    filter_scope_targets(targets.iter().copied().collect(), &resolved.allowed_jars);
+                let grouped_targets = group_targets_by_fqn(filtered_targets);
+                for target_group in grouped_targets.into_values() {
+                    let reduced = prefer_direct_targets(
+                        target_group,
+                        resolved.matched_root.as_deref(),
+                        &provenance_lookup,
+                    );
+                    if reduced.len() > 1 {
+                        skipped_ambiguous_imports += 1;
+                        continue;
+                    }
+                    let target_id = reduced[0].node_id;
+                    let _delta = graph.edges().add_edge(
+                        importer_id,
+                        target_id,
+                        EdgeKind::Imports { alias, is_wildcard },
+                        file_id,
+                    );
+                    created_edges += 1;
+                }
+            }
+            continue;
+        }
+
+        if let Some(targets) = fqn_to_nodes.get(import_name.as_str()) {
+            let filtered_targets =
+                filter_scope_targets(targets.iter().collect(), &resolved.allowed_jars);
+            let reduced = prefer_direct_targets(
+                filtered_targets,
+                resolved.matched_root.as_deref(),
+                &provenance_lookup,
+            );
+            if reduced.len() > 1 {
+                skipped_ambiguous_imports += 1;
+                continue;
+            }
+            if let Some(target_ref) = reduced.first() {
+                let _delta = graph.edges().add_edge(
+                    importer_id,
+                    target_ref.node_id,
+                    EdgeKind::Imports { alias, is_wildcard },
+                    file_id,
+                );
+                created_edges += 1;
+            }
+        }
+    }
+
+    (
+        created_edges,
+        skipped_member_imports,
+        skipped_unscoped_imports,
+        skipped_ambiguous_imports,
+    )
+}
+
+#[cfg(feature = "jvm-classpath")]
+pub(crate) fn inject_classpath_into_graph(
+    graph: &mut sqry_core::graph::unified::concurrent::CodeGraph,
+    classpath_result: &sqry_classpath::pipeline::ClasspathPipelineResult,
+) -> Result<()> {
+    let emission_result = sqry_classpath::graph::emitter::emit_into_code_graph(
+        &classpath_result.index,
+        graph,
+        &classpath_result.provenance,
+    )
+    .map_err(|e| anyhow::anyhow!("Classpath emission error: {e}"))?;
+
+    let (
+        import_edges_created,
+        skipped_member_imports,
+        skipped_unscoped_imports,
+        skipped_ambiguous_imports,
+    ) = create_workspace_classpath_import_edges(
+        graph,
+        classpath_result,
+        &emission_result.fqn_to_nodes,
+    );
+
+    graph.rebuild_indices();
+    println!(
+        "  Graph enriched with {} classpath types, {} import edges ({} member/static, {} unscoped, {} ambiguous imports skipped)",
+        classpath_result.index.classes.len(),
+        import_edges_created,
+        skipped_member_imports,
+        skipped_unscoped_imports,
+        skipped_ambiguous_imports,
+    );
+    Ok(())
+}
+
+#[cfg(feature = "jvm-classpath")]
+fn build_scope_jar_sets(
+    provenance: &[sqry_classpath::graph::provenance::ClasspathProvenance],
+) -> Vec<(PathBuf, std::collections::HashSet<PathBuf>)> {
+    let mut by_root: std::collections::HashMap<PathBuf, std::collections::HashSet<PathBuf>> =
+        std::collections::HashMap::new();
+    for entry in provenance {
+        for scope in &entry.scopes {
+            by_root
+                .entry(canonicalish_path(&scope.module_root))
+                .or_default()
+                .insert(entry.jar_path.clone());
+        }
+    }
+
+    let mut scopes: Vec<_> = by_root.into_iter().collect();
+    scopes.sort_by(|a, b| {
+        b.0.components()
+            .count()
+            .cmp(&a.0.components().count())
+            .then_with(|| a.0.cmp(&b.0))
+    });
+    scopes
+}
+
+/// Result of scope resolution for an importer path.
+#[cfg(feature = "jvm-classpath")]
+struct ResolvedScope {
+    allowed_jars: std::collections::HashSet<PathBuf>,
+    matched_root: Option<PathBuf>,
+}
+
+#[cfg(feature = "jvm-classpath")]
+fn resolve_allowed_jars(
+    importer_path: Option<&Path>,
+    scopes: &[(PathBuf, std::collections::HashSet<PathBuf>)],
+) -> Option<ResolvedScope> {
+    let importer_path = importer_path?;
+    for (root, jars) in scopes {
+        if importer_path.starts_with(root) {
+            return Some(ResolvedScope {
+                allowed_jars: jars.clone(),
+                matched_root: Some(root.clone()),
+            });
+        }
+    }
+    if scopes.len() == 1 {
+        return Some(ResolvedScope {
+            allowed_jars: scopes[0].1.clone(),
+            matched_root: Some(scopes[0].0.clone()),
+        });
+    }
+    None
+}
+
+/// Builds a lookup from JAR path to its provenance entry for O(1) directness
+/// checks during import resolution.
+#[cfg(feature = "jvm-classpath")]
+fn build_provenance_lookup(
+    provenance: &[sqry_classpath::graph::provenance::ClasspathProvenance],
+) -> std::collections::HashMap<PathBuf, &sqry_classpath::graph::provenance::ClasspathProvenance> {
+    provenance
+        .iter()
+        .map(|entry| (entry.jar_path.clone(), entry))
+        .collect()
+}
+
+/// Reduces candidates by preferring direct dependencies over transitive ones
+/// within the matched scope. Returns the full set unchanged if all candidates
+/// share the same directness or if no provenance/scope information is available.
+#[cfg(feature = "jvm-classpath")]
+fn prefer_direct_targets<'a>(
+    targets: Vec<&'a sqry_classpath::graph::emitter::ClasspathNodeRef>,
+    matched_root: Option<&Path>,
+    provenance_lookup: &std::collections::HashMap<
+        PathBuf,
+        &sqry_classpath::graph::provenance::ClasspathProvenance,
+    >,
+) -> Vec<&'a sqry_classpath::graph::emitter::ClasspathNodeRef> {
+    if targets.len() <= 1 {
+        return targets;
+    }
+
+    let Some(root) = matched_root else {
+        return targets;
+    };
+
+    let direct: Vec<_> = targets
+        .iter()
+        .copied()
+        .filter(|target| {
+            provenance_lookup.get(&target.jar_path).is_some_and(|prov| {
+                prov.scopes
+                    .iter()
+                    .any(|scope| scope.module_root == root && scope.is_direct)
+            })
+        })
+        .collect();
+
+    if direct.is_empty() || direct.len() == targets.len() {
+        // No differentiation possible — return the original set
+        targets
+    } else {
+        direct
+    }
+}
+
+#[cfg(feature = "jvm-classpath")]
+fn filter_scope_targets<'a>(
+    targets: Vec<&'a sqry_classpath::graph::emitter::ClasspathNodeRef>,
+    allowed_jars: &std::collections::HashSet<PathBuf>,
+) -> Vec<&'a sqry_classpath::graph::emitter::ClasspathNodeRef> {
+    targets
+        .into_iter()
+        .filter(|target| allowed_jars.contains(&target.jar_path))
+        .collect()
+}
+
+#[cfg(feature = "jvm-classpath")]
+fn group_targets_by_fqn<'a>(
+    targets: Vec<&'a sqry_classpath::graph::emitter::ClasspathNodeRef>,
+) -> std::collections::HashMap<String, Vec<&'a sqry_classpath::graph::emitter::ClasspathNodeRef>> {
+    let mut grouped = std::collections::HashMap::new();
+    for target in targets {
+        grouped
+            .entry(target.fqn.clone())
+            .or_insert_with(Vec::new)
+            .push(target);
+    }
+    grouped
+}
+
+#[cfg(feature = "jvm-classpath")]
+fn canonicalish_path(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+#[allow(unused_variables, unused_mut)]
+pub(crate) fn build_and_persist_with_optional_classpath(
+    root_path: &Path,
+    resolved_plugins: &plugin_defaults::ResolvedPluginManager,
+    build_config: &sqry_core::graph::unified::build::BuildConfig,
+    build_command: &str,
+    progress: SharedReporter,
+    classpath_opts: Option<&ClasspathCliOptions<'_>>,
+) -> Result<BuildResult> {
+    #[cfg(feature = "jvm-classpath")]
+    let classpath_result = if let Some(classpath_opts) = classpath_opts.filter(|opts| opts.enabled)
+    {
+        Some(run_classpath_pipeline_only(root_path, classpath_opts)?)
+    } else {
+        None
+    };
+
+    #[cfg(not(feature = "jvm-classpath"))]
+    if classpath_opts.is_some_and(|opts| opts.enabled) {
+        eprintln!(
+            "WARNING: --classpath flag requires the 'jvm-classpath' feature. \
+             Rebuild sqry-cli with: cargo build --features jvm-classpath"
+        );
+    }
+
+    let (mut graph, effective_threads) =
+        sqry_core::graph::unified::build::build_unified_graph_with_progress(
+            root_path,
+            &resolved_plugins.plugin_manager,
+            build_config,
+            progress.clone(),
+        )?;
+
+    #[cfg(feature = "jvm-classpath")]
+    if let Some(classpath_result) = &classpath_result {
+        inject_classpath_into_graph(&mut graph, classpath_result)?;
+    }
+
+    let (_graph, build_result) = sqry_core::graph::unified::build::persist_and_analyze_graph(
+        graph,
+        root_path,
+        &resolved_plugins.plugin_manager,
+        build_config,
+        build_command,
+        resolved_plugins.persisted_selection.clone(),
+        progress,
+        effective_threads,
+    )?;
+
+    Ok(build_result)
 }
 
 // format_validation_prometheus removed
@@ -59,6 +476,12 @@ pub fn run_index(
     enable_macro_expansion: bool,
     cfg_flags: &[String],
     expand_cache: Option<&std::path::Path>,
+    classpath: bool,
+    _no_classpath: bool,
+    classpath_depth: crate::args::ClasspathDepthArg,
+    classpath_file: Option<&Path>,
+    build_system: Option<&str>,
+    force_classpath: bool,
 ) -> Result<()> {
     if let Some(0) = threads {
         anyhow::bail!("--threads must be >= 1");
@@ -94,17 +517,22 @@ pub fn run_index(
     let build_config = create_build_config(cli, root_path, threads)?;
     let resolved_plugins =
         plugin_defaults::resolve_plugin_selection(cli, root_path, PluginSelectionMode::FreshWrite)?;
+    let classpath_opts = ClasspathCliOptions {
+        enabled: classpath,
+        depth: classpath_depth,
+        classpath_file,
+        build_system,
+        force_classpath,
+    };
     let build_result = step_runner.step("Build unified graph", || -> Result<_> {
-        let (_graph, build_result) =
-            sqry_core::graph::unified::build::build_and_persist_graph_with_progress(
-                root_path,
-                &resolved_plugins.plugin_manager,
-                &build_config,
-                "cli:index",
-                resolved_plugins.persisted_selection.clone(),
-                progress.clone(),
-            )?;
-        Ok(build_result)
+        build_and_persist_with_optional_classpath(
+            root_path,
+            &resolved_plugins,
+            &build_config,
+            "cli:index",
+            progress.clone(),
+            Some(&classpath_opts),
+        )
     })?;
 
     finish_progress_bar(progress_bar.as_ref());
@@ -412,6 +840,8 @@ pub(crate) fn create_build_config(
 ///
 /// # Errors
 /// Returns an error if the index cannot be loaded, updated, or validated.
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::fn_params_excessive_bools)] // CLI flags map directly to booleans.
 pub fn run_update(
     cli: &Cli,
     path: &str,
@@ -419,6 +849,12 @@ pub fn run_update(
     show_stats: bool,
     _no_incremental: bool,
     _cache_dir: Option<&str>,
+    classpath: bool,
+    _no_classpath: bool,
+    classpath_depth: crate::args::ClasspathDepthArg,
+    classpath_file: Option<&Path>,
+    build_system: Option<&str>,
+    force_classpath: bool,
 ) -> Result<()> {
     let root_path = Path::new(path);
     let mut step_runner = StepRunner::new(!std::io::stderr().is_terminal() && !cli.json);
@@ -458,17 +894,22 @@ pub fn run_update(
         root_path,
         PluginSelectionMode::ExistingWrite,
     )?;
+    let classpath_opts = ClasspathCliOptions {
+        enabled: classpath,
+        depth: classpath_depth,
+        classpath_file,
+        build_system,
+        force_classpath,
+    };
     let build_result = step_runner.step("Update unified graph", || -> Result<_> {
-        let (_graph, build_result) =
-            sqry_core::graph::unified::build::build_and_persist_graph_with_progress(
-                root_path,
-                &resolved_plugins.plugin_manager,
-                &build_config,
-                "cli:update",
-                resolved_plugins.persisted_selection.clone(),
-                progress.clone(),
-            )?;
-        Ok(build_result)
+        build_and_persist_with_optional_classpath(
+            root_path,
+            &resolved_plugins,
+            &build_config,
+            "cli:update",
+            progress.clone(),
+            Some(&classpath_opts),
+        )
     })?;
 
     finish_progress_bar(progress_bar.as_ref());
@@ -637,7 +1078,13 @@ mod tests {
             false, // no_compress
             false, // enable_macro_expansion
             &[],  // cfg_flags
-            None,  // expand_cache
+            None, // expand_cache
+            false,
+            false,
+            crate::args::ClasspathDepthArg::Full,
+            None,
+            None,
+            false,
         );
         assert!(result.is_ok());
 
@@ -672,6 +1119,12 @@ mod tests {
             false, // enable_macro_expansion
             &[],   // cfg_flags
             None,  // expand_cache
+            false,
+            false,
+            crate::args::ClasspathDepthArg::Full,
+            None,
+            None,
+            false,
         )
         .unwrap();
 
@@ -686,8 +1139,14 @@ mod tests {
             None,
             false, // no_compress
             false, // enable_macro_expansion
-            &[],  // cfg_flags
+            &[],   // cfg_flags
             None,  // expand_cache
+            false,
+            false,
+            crate::args::ClasspathDepthArg::Full,
+            None,
+            None,
+            false,
         );
         assert!(result.is_ok());
 
@@ -702,8 +1161,14 @@ mod tests {
             None,
             false, // no_compress
             false, // enable_macro_expansion
-            &[],  // cfg_flags
+            &[],   // cfg_flags
             None,  // expand_cache
+            false,
+            false,
+            crate::args::ClasspathDepthArg::Full,
+            None,
+            None,
+            false,
         );
         assert!(result.is_ok());
     }
@@ -725,6 +1190,12 @@ mod tests {
             false,
             false,
             None,
+            false,
+            false,
+            crate::args::ClasspathDepthArg::Full,
+            None,
+            None,
+            false,
         );
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("No index found"));
@@ -783,6 +1254,12 @@ mod tests {
             false, // enable_macro_expansion
             &[],   // cfg_flags
             None,  // expand_cache
+            false,
+            false,
+            crate::args::ClasspathDepthArg::Full,
+            None,
+            None,
+            false,
         )
         .unwrap();
 
@@ -833,6 +1310,12 @@ mod tests {
             false, // enable_macro_expansion
             &[],   // cfg_flags
             None,  // expand_cache
+            false,
+            false,
+            crate::args::ClasspathDepthArg::Full,
+            None,
+            None,
+            false,
         )
         .unwrap();
 
@@ -844,6 +1327,12 @@ mod tests {
             true,
             false,
             None,
+            false,
+            false,
+            crate::args::ClasspathDepthArg::Full,
+            None,
+            None,
+            false,
         );
         assert!(result.is_ok());
     }
@@ -898,6 +1387,233 @@ mod tests {
         assert_eq!(
             format_analysis_strategy_highlights(&strategies),
             "interval_labels(calls,inherits) | dag_bfs(imports,references)"
+        );
+    }
+
+    #[cfg(feature = "jvm-classpath")]
+    #[test]
+    fn test_resolve_allowed_jars_prefers_nearest_scope() {
+        let scopes = vec![
+            (
+                PathBuf::from("/repo/services/app"),
+                std::collections::HashSet::from([PathBuf::from("/jars/app.jar")]),
+            ),
+            (
+                PathBuf::from("/repo"),
+                std::collections::HashSet::from([PathBuf::from("/jars/root.jar")]),
+            ),
+        ];
+
+        let resolved =
+            resolve_allowed_jars(Some(Path::new("/repo/services/app/src/Main.java")), &scopes)
+                .expect("nearest scope should resolve");
+        assert!(
+            resolved
+                .allowed_jars
+                .contains(&PathBuf::from("/jars/app.jar"))
+        );
+        assert!(
+            !resolved
+                .allowed_jars
+                .contains(&PathBuf::from("/jars/root.jar"))
+        );
+        assert_eq!(
+            resolved.matched_root.as_deref(),
+            Some(Path::new("/repo/services/app"))
+        );
+    }
+
+    #[cfg(feature = "jvm-classpath")]
+    #[test]
+    fn test_filter_scope_targets_excludes_out_of_scope_jars() {
+        let targets = vec![
+            sqry_classpath::graph::emitter::ClasspathNodeRef {
+                node_id: sqry_core::graph::unified::node::NodeId::new(1, 0),
+                fqn: "com.example.Foo".to_string(),
+                jar_path: PathBuf::from("/jars/app.jar"),
+                file_id: sqry_core::graph::unified::FileId::new(1),
+            },
+            sqry_classpath::graph::emitter::ClasspathNodeRef {
+                node_id: sqry_core::graph::unified::node::NodeId::new(2, 0),
+                fqn: "com.example.Foo".to_string(),
+                jar_path: PathBuf::from("/jars/other.jar"),
+                file_id: sqry_core::graph::unified::FileId::new(2),
+            },
+        ];
+        let allowed = std::collections::HashSet::from([PathBuf::from("/jars/app.jar")]);
+
+        let filtered = filter_scope_targets(targets.iter().collect(), &allowed);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].jar_path, PathBuf::from("/jars/app.jar"));
+    }
+
+    #[cfg(feature = "jvm-classpath")]
+    #[test]
+    fn test_prefer_direct_targets_exact_import_direct_wins() {
+        use sqry_classpath::graph::provenance::{ClasspathProvenance, ClasspathScope};
+
+        let targets = vec![
+            sqry_classpath::graph::emitter::ClasspathNodeRef {
+                node_id: sqry_core::graph::unified::node::NodeId::new(1, 0),
+                fqn: "com.example.Foo".to_string(),
+                jar_path: PathBuf::from("/jars/direct.jar"),
+                file_id: sqry_core::graph::unified::FileId::new(1),
+            },
+            sqry_classpath::graph::emitter::ClasspathNodeRef {
+                node_id: sqry_core::graph::unified::node::NodeId::new(2, 0),
+                fqn: "com.example.Foo".to_string(),
+                jar_path: PathBuf::from("/jars/transitive.jar"),
+                file_id: sqry_core::graph::unified::FileId::new(2),
+            },
+        ];
+
+        let provenance = vec![
+            ClasspathProvenance {
+                jar_path: PathBuf::from("/jars/direct.jar"),
+                coordinates: None,
+                is_direct: true,
+                scopes: vec![ClasspathScope {
+                    module_name: "app".to_owned(),
+                    module_root: PathBuf::from("/repo/app"),
+                    is_direct: true,
+                }],
+            },
+            ClasspathProvenance {
+                jar_path: PathBuf::from("/jars/transitive.jar"),
+                coordinates: None,
+                is_direct: false,
+                scopes: vec![ClasspathScope {
+                    module_name: "app".to_owned(),
+                    module_root: PathBuf::from("/repo/app"),
+                    is_direct: false,
+                }],
+            },
+        ];
+        let lookup = build_provenance_lookup(&provenance);
+
+        let result = prefer_direct_targets(
+            targets.iter().collect(),
+            Some(Path::new("/repo/app")),
+            &lookup,
+        );
+        assert_eq!(result.len(), 1, "direct jar should win over transitive");
+        assert_eq!(result[0].jar_path, PathBuf::from("/jars/direct.jar"));
+    }
+
+    #[cfg(feature = "jvm-classpath")]
+    #[test]
+    fn test_prefer_direct_targets_wildcard_same_shape() {
+        use sqry_classpath::graph::provenance::{ClasspathProvenance, ClasspathScope};
+
+        // Wildcard imports group by FQN first, then each group goes through
+        // prefer_direct_targets. Simulate one FQN group with two candidates.
+        let targets = vec![
+            sqry_classpath::graph::emitter::ClasspathNodeRef {
+                node_id: sqry_core::graph::unified::node::NodeId::new(10, 0),
+                fqn: "com.example.Bar".to_string(),
+                jar_path: PathBuf::from("/jars/direct.jar"),
+                file_id: sqry_core::graph::unified::FileId::new(10),
+            },
+            sqry_classpath::graph::emitter::ClasspathNodeRef {
+                node_id: sqry_core::graph::unified::node::NodeId::new(11, 0),
+                fqn: "com.example.Bar".to_string(),
+                jar_path: PathBuf::from("/jars/transitive.jar"),
+                file_id: sqry_core::graph::unified::FileId::new(11),
+            },
+        ];
+
+        let provenance = vec![
+            ClasspathProvenance {
+                jar_path: PathBuf::from("/jars/direct.jar"),
+                coordinates: None,
+                is_direct: true,
+                scopes: vec![ClasspathScope {
+                    module_name: "app".to_owned(),
+                    module_root: PathBuf::from("/repo/app"),
+                    is_direct: true,
+                }],
+            },
+            ClasspathProvenance {
+                jar_path: PathBuf::from("/jars/transitive.jar"),
+                coordinates: None,
+                is_direct: false,
+                scopes: vec![ClasspathScope {
+                    module_name: "app".to_owned(),
+                    module_root: PathBuf::from("/repo/app"),
+                    is_direct: false,
+                }],
+            },
+        ];
+        let lookup = build_provenance_lookup(&provenance);
+
+        let result = prefer_direct_targets(
+            targets.iter().collect(),
+            Some(Path::new("/repo/app")),
+            &lookup,
+        );
+        assert_eq!(
+            result.len(),
+            1,
+            "wildcard: direct jar should win over transitive"
+        );
+        assert_eq!(result[0].jar_path, PathBuf::from("/jars/direct.jar"));
+    }
+
+    #[cfg(feature = "jvm-classpath")]
+    #[test]
+    fn test_prefer_direct_targets_true_ambiguity_two_direct_jars() {
+        use sqry_classpath::graph::provenance::{ClasspathProvenance, ClasspathScope};
+
+        // Two direct jars with the same FQN: true ambiguity, should remain
+        // ambiguous (both returned).
+        let targets = vec![
+            sqry_classpath::graph::emitter::ClasspathNodeRef {
+                node_id: sqry_core::graph::unified::node::NodeId::new(20, 0),
+                fqn: "com.example.Baz".to_string(),
+                jar_path: PathBuf::from("/jars/direct-a.jar"),
+                file_id: sqry_core::graph::unified::FileId::new(20),
+            },
+            sqry_classpath::graph::emitter::ClasspathNodeRef {
+                node_id: sqry_core::graph::unified::node::NodeId::new(21, 0),
+                fqn: "com.example.Baz".to_string(),
+                jar_path: PathBuf::from("/jars/direct-b.jar"),
+                file_id: sqry_core::graph::unified::FileId::new(21),
+            },
+        ];
+
+        let provenance = vec![
+            ClasspathProvenance {
+                jar_path: PathBuf::from("/jars/direct-a.jar"),
+                coordinates: None,
+                is_direct: true,
+                scopes: vec![ClasspathScope {
+                    module_name: "app".to_owned(),
+                    module_root: PathBuf::from("/repo/app"),
+                    is_direct: true,
+                }],
+            },
+            ClasspathProvenance {
+                jar_path: PathBuf::from("/jars/direct-b.jar"),
+                coordinates: None,
+                is_direct: true,
+                scopes: vec![ClasspathScope {
+                    module_name: "app".to_owned(),
+                    module_root: PathBuf::from("/repo/app"),
+                    is_direct: true,
+                }],
+            },
+        ];
+        let lookup = build_provenance_lookup(&provenance);
+
+        let result = prefer_direct_targets(
+            targets.iter().collect(),
+            Some(Path::new("/repo/app")),
+            &lookup,
+        );
+        assert_eq!(
+            result.len(),
+            2,
+            "two direct jars = true ambiguity, both should remain"
         );
     }
 }

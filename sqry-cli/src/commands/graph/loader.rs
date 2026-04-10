@@ -179,8 +179,9 @@ fn load_unified_graph_with_progress_and_plugins(
         ..BuildConfig::default()
     };
 
-    let graph = build_unified_graph_with_progress(root, plugins, &build_config, progress)
-        .context("Failed to build unified graph")?;
+    let (graph, _effective_threads) =
+        build_unified_graph_with_progress(root, plugins, &build_config, progress)
+            .context("Failed to build unified graph")?;
 
     log::info!("Built unified graph with {} nodes", graph.node_count());
     Ok(graph)

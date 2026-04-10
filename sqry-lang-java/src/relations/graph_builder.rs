@@ -66,7 +66,7 @@ impl GraphBuilder for JavaGraphBuilder {
 
         // Build AST context for O(1) method lookups
         let ast_graph = ASTGraph::from_tree(tree, content, self.max_scope_depth);
-        let mut scope_tree = local_scopes::build(tree.root_node(), content)?;
+        let mut scope_tree = local_scopes::build(tree.root_node(), content, Some(file))?;
 
         // Phase 1: Create method/constructor nodes and JNI FFI edges for native methods
         for context in ast_graph.contexts() {
@@ -273,7 +273,10 @@ fn extract_java_contexts(
     }
 
     match node.kind() {
-        "class_declaration" | "interface_declaration" | "enum_declaration" => {
+        "class_declaration"
+        | "interface_declaration"
+        | "enum_declaration"
+        | "record_declaration" => {
             // Extract class/interface name
             if let Some(name_node) = node.child_by_field_name("name") {
                 let class_name = extract_identifier(name_node, content);
@@ -371,7 +374,7 @@ fn extract_methods_from_body(
                         contexts.push(method_context);
                     }
                 }
-                "constructor_declaration" => {
+                "constructor_declaration" | "compact_constructor_declaration" => {
                     let constructor_context = extract_constructor_context(
                         child,
                         content,
@@ -467,7 +470,10 @@ fn walk_tree_for_edges(
     tree: &Tree,
 ) -> GraphResult<()> {
     match node.kind() {
-        "class_declaration" | "interface_declaration" | "enum_declaration" => {
+        "class_declaration"
+        | "interface_declaration"
+        | "enum_declaration"
+        | "record_declaration" => {
             // handle_type_declaration already walks the body children, so return early
             return handle_type_declaration(node, content, ast_graph, scope_tree, helper, tree);
         }
@@ -614,7 +620,10 @@ fn extract_declaration_class_stack(node: Node, content: &[u8]) -> Vec<String> {
     while let Some(current) = current_node {
         if matches!(
             current.kind(),
-            "class_declaration" | "interface_declaration" | "enum_declaration"
+            "class_declaration"
+                | "interface_declaration"
+                | "enum_declaration"
+                | "record_declaration"
         ) && let Some(name_node) = current.child_by_field_name("name")
         {
             class_stack.push(extract_identifier(name_node, content));
@@ -1128,10 +1137,8 @@ fn is_declaration_context(node: Node) -> bool {
     // Type pattern: case String s -> ...; if (obj instanceof String s)
     // The 'name' field is the pattern variable declaration
     if parent.kind() == "type_pattern" {
-        if let Some(name_node) = parent.child_by_field_name("name")
-            && name_node.id() == node.id()
-        {
-            return true;
+        if let Some((name_node, _type_node)) = typed_pattern_parts(parent) {
+            return name_node.id() == node.id();
         }
         return false;
     }
@@ -1867,48 +1874,65 @@ fn collect_pattern_declarations<'a>(
     node: Node<'a>,
     output: &mut Vec<(Node<'a>, Option<Node<'a>>)>,
 ) {
-    if node.kind() == "type_pattern" {
-        let name_node = node.child_by_field_name("name");
-        let type_node = node.child_by_field_name("type").or_else(|| {
-            let mut cursor = node.walk();
-            for child in node.children(&mut cursor) {
-                if matches!(
-                    child.kind(),
-                    "type_identifier" | "scoped_type_identifier" | "generic_type"
-                ) {
-                    return Some(child);
-                }
-            }
-            None
-        });
-        if let Some(name_node) = name_node {
-            output.push((name_node, type_node));
-        }
+    if node.kind() == "instanceof_expression"
+        && !node_has_direct_child_kind(node, "type_pattern")
+        && let Some(name_node) = node.child_by_field_name("name")
+    {
+        let type_node = first_type_like_child(node);
+        output.push((name_node, type_node));
     }
 
-    if node.kind() == "record_pattern_component" {
-        let mut name_node = None;
-        let mut type_node = None;
-        let mut cursor = node.walk();
-        for child in node.children(&mut cursor) {
-            if child.kind() == "identifier" {
-                name_node = Some(child);
-            } else if matches!(
-                child.kind(),
-                "type_identifier" | "scoped_type_identifier" | "generic_type"
-            ) {
-                type_node = Some(child);
-            }
-        }
-        if let Some(name_node) = name_node {
-            output.push((name_node, type_node));
-        }
+    if node.kind() == "type_pattern"
+        && let Some((name_node, type_node)) = typed_pattern_parts(node)
+    {
+        output.push((name_node, type_node));
+    }
+
+    if node.kind() == "record_pattern_component"
+        && let Some((name_node, type_node)) = typed_pattern_parts(node)
+    {
+        output.push((name_node, type_node));
     }
 
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         collect_pattern_declarations(child, output);
     }
+}
+
+fn node_has_direct_child_kind(node: Node, kind: &str) -> bool {
+    let mut cursor = node.walk();
+    node.children(&mut cursor).any(|child| child.kind() == kind)
+}
+
+fn typed_pattern_parts(node: Node) -> Option<(Node, Option<Node>)> {
+    let mut name_node = None;
+    let mut type_node = None;
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if matches!(child.kind(), "identifier" | "_reserved_identifier") {
+            name_node = Some(child);
+        } else if matches!(
+            child.kind(),
+            "type_identifier" | "scoped_type_identifier" | "generic_type"
+        ) {
+            type_node = Some(child);
+        }
+    }
+    name_node.map(|name| (name, type_node))
+}
+
+fn first_type_like_child(node: Node) -> Option<Node> {
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if matches!(
+            child.kind(),
+            "type_identifier" | "scoped_type_identifier" | "generic_type"
+        ) {
+            return Some(child);
+        }
+    }
+    None
 }
 
 fn find_record_declaration(node: Node) -> Option<Node> {
@@ -1919,12 +1943,21 @@ fn find_record_declaration(node: Node) -> Option<Node> {
 }
 
 fn collect_record_components_nodes<'a>(node: Node<'a>, output: &mut Vec<Node<'a>>) {
+    if let Some(parameters) = node.child_by_field_name("parameters") {
+        let mut cursor = parameters.walk();
+        for child in parameters.children(&mut cursor) {
+            if matches!(child.kind(), "formal_parameter" | "record_component") {
+                output.push(child);
+            }
+        }
+        return;
+    }
+
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         if child.kind() == "record_component" {
             output.push(child);
         }
-        collect_record_components_nodes(child, output);
     }
 }
 
@@ -2485,7 +2518,7 @@ fn extract_field_types_recursive(
     // Handle class/interface/enum declarations - push onto stack
     if matches!(
         node.kind(),
-        "class_declaration" | "interface_declaration" | "enum_declaration"
+        "class_declaration" | "interface_declaration" | "enum_declaration" | "record_declaration"
     ) && let Some(name_node) = node.child_by_field_name("name")
     {
         let class_name = extract_identifier(name_node, content);

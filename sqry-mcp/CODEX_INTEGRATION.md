@@ -8,12 +8,19 @@ For shared context/skill definitions across Codex, Claude, and Gemini, see [../d
 
 ## Overview
 
-Codex is configured as a global MCP client entry, and sqry workspace selection is done via current working directory (CWD) discovery.
+Codex is configured as a global MCP client entry, and sqry now resolves the
+workspace per MCP session using this order:
+
+1. Explicit tool `path` when you provide one
+2. File-bearing tool arguments such as `file_path` or `expand_files`
+3. MCP client roots (`roots/list`) cached for the current session
+4. Last resolved workspace for the same session when still valid
+5. Legacy env/CWD fallback for clients without roots support
 
 This means:
 - `sqry mcp setup --tool codex` writes config once
-- You start Codex from the project directory you want to analyze
-- sqry resolves the workspace from CWD (or parent directories)
+- The common single-repository session does not require `path` on every tool call
+- Explicit `path` is only needed to break ambiguity in multi-root sessions
 
 ## Quick Setup
 
@@ -49,7 +56,8 @@ command = "/absolute/path/to/sqry-mcp"
 Notes:
 - Codex config is global.
 - The default setup intentionally avoids pinning `SQRY_MCP_WORKSPACE_ROOT`.
-- Start Codex from the target repository directory.
+- Starting Codex from the target repository directory still works, but it is no
+  longer the primary workspace-selection mechanism when Codex exposes MCP roots.
 
 ## Manual Configuration
 
@@ -68,19 +76,17 @@ sqry mcp status
 
 ## Workspace Behavior
 
-Codex uses CWD-based workspace discovery by default.
+Codex works best with session-scoped MCP roots.
 
 Recommended workflow for multiple repositories:
 
 ```bash
-cd /repo-a
-codex
-
-cd /repo-b
-codex
+codex   # open in /repo-a
+codex   # open in /repo-b
 ```
 
-If Codex is launched outside a project directory, sqry may fail to resolve `.sqry/graph` and return workspace resolution errors.
+If Codex exposes multiple active roots and a request does not uniquely identify
+one workspace, sqry returns a clear error asking for explicit `path`.
 
 ## Troubleshooting (Codex)
 
@@ -102,9 +108,9 @@ sqry mcp setup --tool codex --force
 
 ### Wrong repository results
 
-Launch Codex from the correct project root and confirm:
+Check which workspace Codex exposed to the current MCP session. If needed, pass
+explicit `path` on the ambiguous request:
 
 ```bash
-pwd
 sqry index --status .
 ```

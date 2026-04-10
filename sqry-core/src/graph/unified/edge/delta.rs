@@ -450,6 +450,31 @@ pub struct DeltaBufferStats {
     pub current_seq: u64,
 }
 
+impl crate::graph::unified::memory::GraphMemorySize for DeltaBuffer {
+    fn heap_bytes(&self) -> usize {
+        use crate::graph::unified::memory::HASHMAP_ENTRY_OVERHEAD;
+
+        let map_overhead = self.edges.capacity()
+            * (std::mem::size_of::<crate::graph::unified::file::FileId>()
+                + std::mem::size_of::<Vec<DeltaEdge>>()
+                + HASHMAP_ENTRY_OVERHEAD);
+        let vec_payloads: usize = self
+            .edges
+            .values()
+            .map(|v| {
+                let vec_cap = v.capacity() * std::mem::size_of::<DeltaEdge>();
+                // Each DeltaEdge owns a Vec<Span>.
+                let span_payloads: usize = v
+                    .iter()
+                    .map(|e| e.spans.capacity() * std::mem::size_of::<crate::graph::node::Span>())
+                    .sum();
+                vec_cap + span_payloads
+            })
+            .sum();
+        map_overhead + vec_payloads
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::kind::EdgeKind;

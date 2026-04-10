@@ -93,7 +93,20 @@ fn test_watch_requires_index() {
     let cli = Cli::parse_from(["sqry", "watch", &path_str]);
 
     // Watch without index should fail
-    let err = watch::execute(&cli, Some(path_str), None, None, false, false)
+    let err = watch::execute(
+        &cli,
+        Some(path_str),
+        None,
+        None,
+        false,
+        false,
+        false,
+        false,
+        sqry_cli::args::ClasspathDepthArg::Full,
+        None,
+        None,
+        false,
+    )
         .expect_err("watch should fail when index is missing");
     let msg = err.to_string();
     assert!(
@@ -120,6 +133,12 @@ fn test_watch_nonexistent_directory() {
         None,
         None,
         false,
+        false,
+        false,
+        false,
+        sqry_cli::args::ClasspathDepthArg::Full,
+        None,
+        None,
         false,
     )
     .expect_err("watch should fail for nonexistent directory");

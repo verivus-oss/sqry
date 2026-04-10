@@ -753,6 +753,31 @@ pub struct InternerStats {
     pub capacity: usize,
 }
 
+impl crate::graph::unified::memory::GraphMemorySize for StringInterner {
+    fn heap_bytes(&self) -> usize {
+        use crate::graph::unified::memory::HASHMAP_ENTRY_OVERHEAD;
+
+        let strings_vec =
+            self.strings.capacity() * std::mem::size_of::<Option<std::sync::Arc<str>>>();
+        // Each Arc<str> owns a heap allocation: control block + string bytes.
+        // We approximate the string payload only (control block overhead is
+        // excluded per the trait contract).
+        let string_payloads: usize = self
+            .strings
+            .iter()
+            .filter_map(|opt| opt.as_ref())
+            .map(|s| s.len())
+            .sum();
+        let lookup = self.lookup.capacity()
+            * (std::mem::size_of::<std::sync::Arc<str>>()
+                + std::mem::size_of::<u32>()
+                + HASHMAP_ENTRY_OVERHEAD);
+        let ref_counts = self.ref_counts.capacity() * std::mem::size_of::<u32>();
+        let free_list = self.free_list.capacity() * std::mem::size_of::<u32>();
+        strings_vec + string_payloads + lookup + ref_counts + free_list
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

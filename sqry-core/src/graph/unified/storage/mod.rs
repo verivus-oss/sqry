@@ -17,18 +17,22 @@
 
 pub mod arena;
 pub mod csr;
+pub mod edge_provenance;
 pub mod indices;
 pub mod interner;
 pub mod metadata;
+pub mod node_provenance;
 pub mod registry;
 pub mod serde_helpers;
 
 pub use arena::{ArenaError, NodeArena, NodeEntry, Slot, SlotState};
 pub use csr::{CsrBuilder, CsrError, CsrGraph, CsrStats, EdgeRef};
+pub use edge_provenance::{EdgeProvenance, EdgeProvenanceStore};
 pub use indices::{AuxiliaryIndices, IndicesStats};
 pub use interner::{InternError, InternerStats, ResolveError, StringInterner};
 pub use metadata::{
     ClasspathNodeMetadata, MacroNodeMetadata, NodeMetadata, NodeMetadataStore,
     ProcMacroFunctionKind,
 };
+pub use node_provenance::{NodeProvenance, NodeProvenanceStore};
 pub use registry::{FileRegistry, RegistryError, RegistryStats};

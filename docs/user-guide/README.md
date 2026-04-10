@@ -213,11 +213,11 @@ sqry config show --path .
 
 ### Java Local Variable References
 
-- Planned (pre-implementation): Java plugin will emit Reference edges for local variables + method parameters.
-- Planned: unresolved explicit base types in anonymous/local classes are treated as ambiguous; local capture skipped unless base resolves to `Object` or no explicit base.
-- Pattern variables supported in enumerated contexts only: if/while/for/ternary/`&&` RHS/switch guards.
+- Java plugin emits `Reference` edges for local variables and parameter bindings, including constructor, lambda, resource, catch, and compact-constructor parameters.
+- Anonymous/local class resolution prefers declared and inherited members before capture; in-file bases, classpath-index bases, and seeded well-known JDK bases resolve before capture, while truly unknown external bases remain ambiguous.
+- Pattern variables supported in enumerated contexts: if/while/for/ternary/`&&` RHS/switch guards.
 - Pattern variable syntax: `instanceof` patterns (Java 16+), `switch` patterns/guards (Java 21+).
-- No statement-level flow analysis; do-while pattern variables do not bind.
+- Statement-level flow is supported after `if`, `while`, `do`, and `for` when Java's definite-match rules guarantee continuation implies a successful pattern match; do-while pattern variables still do not bind inside the loop body.
 
 ## Core CLI Entry Points
 

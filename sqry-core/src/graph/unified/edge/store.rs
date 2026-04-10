@@ -736,6 +736,17 @@ pub struct EdgeStoreStats {
     pub delta_file_count: usize,
 }
 
+impl crate::graph::unified::memory::GraphMemorySize for EdgeStore {
+    fn heap_bytes(&self) -> usize {
+        use crate::graph::unified::memory::GraphMemorySize;
+
+        let csr_bytes = self.csr.as_ref().map_or(0, GraphMemorySize::heap_bytes);
+        let tombstones = self.csr_tombstones.capacity() * std::mem::size_of::<bool>();
+        let delta = self.delta.heap_bytes();
+        csr_bytes + tombstones + delta
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::super::storage::CsrBuilder;

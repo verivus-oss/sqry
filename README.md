@@ -181,7 +181,7 @@ sqry query "kind:function" --macro-boundaries
 ### JVM Classpath Analysis
 
 ```bash
-# Index with classpath resolution (Java, Kotlin, Scala)
+# Index with automatic wrapper/tool resolution (Gradle: gradlew -> gradle, Maven: mvnw -> mvn)
 sqry index --classpath
 
 # Shallow resolution (direct dependencies only)
@@ -189,7 +189,13 @@ sqry index --classpath --classpath-depth shallow
 
 # Use a specific classpath file
 sqry index --classpath-file classpath.txt
+
+# Restrict discovery to a specific JVM build system in a larger monorepo
+sqry index --classpath --build-system gradle
 ```
+
+- Missing JVM tooling with no cache is treated as an error, not a successful empty external graph.
+- Nested JVM build roots are discovered from the repo root, and workspace import edges are scoped to the nearest containing module/root.
 
 ### Search and Query
 

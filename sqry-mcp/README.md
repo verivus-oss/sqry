@@ -63,7 +63,10 @@ sqry mcp status
 command = "/absolute/path/to/sqry-mcp"
 ```
 
-Codex uses CWD-based workspace discovery, so start Codex from the project directory you want to analyze.
+Codex now uses session-scoped workspace resolution in `sqry-mcp`: explicit
+`path` first, then file-bearing args, then MCP roots cached for the current
+session, then last-resolved workspace, then legacy env/CWD fallback. In the
+common single-repository session you do not need `path` on every call.
 
 ### Gemini CLI Notes
 
@@ -81,7 +84,9 @@ Codex uses CWD-based workspace discovery, so start Codex from the project direct
 }
 ```
 
-Gemini can use user-level and project-level settings files. For sqry integration, start Gemini from the target project directory for CWD-based workspace discovery.
+Gemini can use user-level and project-level settings files. `sqry-mcp` uses the
+same session-scoped workspace resolution flow as Codex, so explicit `path` is
+mainly needed only for ambiguous multi-root sessions.
 
 ### Manual Configuration
 
@@ -108,6 +113,9 @@ For AI tools not supported by `sqry mcp setup` (Claude Desktop, Windsurf, Cursor
 - **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
 
 **Windsurf / Cursor**: See [User Guide](USER_GUIDE.md#getting-started)
+
+Manual per-project `SQRY_MCP_WORKSPACE_ROOT` pinning still works, but it is now
+legacy behavior for clients that do not expose MCP roots.
 
 ### 4. Index Your Project
 
@@ -472,6 +480,6 @@ MIT - See root LICENSE file
 
 ---
 
-**Last Updated**: 2026-04-08
-**Version**: 7.2.0
+**Last Updated**: 2026-04-10
+**Version**: 8.0.0
 **Tested With**: sqry v4.8.2, Claude Desktop, Windsurf, Claude Code, Codex, Gemini CLI

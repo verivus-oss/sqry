@@ -324,6 +324,39 @@ impl PartialEq for NodeMetadataStore {
 
 impl Eq for NodeMetadataStore {}
 
+impl crate::graph::unified::memory::GraphMemorySize for NodeMetadataStore {
+    fn heap_bytes(&self) -> usize {
+        use crate::graph::unified::memory::HASHMAP_ENTRY_OVERHEAD;
+
+        let base = self.entries.capacity()
+            * (std::mem::size_of::<(u32, u64)>()
+                + std::mem::size_of::<NodeMetadata>()
+                + HASHMAP_ENTRY_OVERHEAD);
+        // Account for heap Strings inside each metadata variant.
+        let inner: usize = self
+            .entries
+            .values()
+            .map(|meta| match meta {
+                NodeMetadata::Macro(m) => {
+                    m.macro_source.as_ref().map_or(0, String::capacity)
+                        + m.cfg_condition.as_ref().map_or(0, String::capacity)
+                        + m.unresolved_attributes
+                            .iter()
+                            .map(String::capacity)
+                            .sum::<usize>()
+                        + m.unresolved_attributes.capacity() * std::mem::size_of::<String>()
+                }
+                NodeMetadata::Classpath(c) => {
+                    c.coordinates.as_ref().map_or(0, String::capacity)
+                        + c.jar_path.capacity()
+                        + c.fqn.capacity()
+                }
+            })
+            .sum();
+        base + inner
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,5 +1,7 @@
 //! Integration tests for Java local variable reference tracking.
 
+use sqry_classpath::stub::index::ClasspathIndex;
+use sqry_classpath::stub::model::{AccessFlags, ClassKind, ClassStub, FieldStub};
 use sqry_core::graph::GraphBuilder;
 use sqry_core::graph::unified::StagingGraph;
 use sqry_core::graph::unified::build::staging::StagingOp;
@@ -35,10 +37,14 @@ fn parse_java(content: &str) -> Tree {
 }
 
 fn build_staging_graph(content: &str, filename: &str) -> StagingGraph {
+    let file_path = Path::new(filename);
+    build_staging_graph_at_path(content, file_path)
+}
+
+fn build_staging_graph_at_path(content: &str, file_path: &Path) -> StagingGraph {
     let tree = parse_java(content);
     let mut staging = StagingGraph::new();
     let builder = JavaGraphBuilder::default();
-    let file_path = Path::new(filename);
 
     builder
         .build_graph(&tree, content.as_bytes(), file_path, &mut staging)
@@ -279,12 +285,16 @@ fn test_varargs_params() {
 fn test_compact_constructor() {
     let content = load_fixture("com/example/constructors/CompactConstructor.java");
     let staging = build_staging_graph(&content, "CompactConstructor.java");
-    let _edges = collect_reference_edges(&staging);
+    let edges = collect_reference_edges(&staging);
 
-    // record CompactConstructor(int x, int y) { CompactConstructor { ... x ... y ... } }
-    // Compact constructor implicit params: graph builds without panic.
-    // Note: compact constructor body reference edges are a known gap in scope discovery;
-    // record-level walk_tree_for_edges does not currently descend into compact constructor bodies.
+    assert!(
+        has_qualified_ref(&edges, "x"),
+        "Expected compact constructor param reference to x: {edges:?}"
+    );
+    assert!(
+        has_qualified_ref(&edges, "y"),
+        "Expected compact constructor param reference to y: {edges:?}"
+    );
 }
 
 // ============================================================
@@ -295,12 +305,12 @@ fn test_compact_constructor() {
 fn test_static_initializer() {
     let content = load_fixture("com/example/initializers/StaticInitializer.java");
     let staging = build_staging_graph(&content, "StaticInitializer.java");
-    let _edges = collect_reference_edges(&staging);
+    let edges = collect_reference_edges(&staging);
 
-    // static { int x=1; value=x; println(x); }
-    // Graph builds without panic. Reference edges inside static initializer blocks
-    // are a known gap: walk_tree_for_edges does not currently produce reference edges
-    // from static initializer bodies.
+    assert!(
+        has_local_ref(&edges, "x"),
+        "Expected local reference to x in static initializer: {edges:?}"
+    );
 }
 
 #[test]
@@ -430,8 +440,10 @@ fn test_pattern_and_or() {
         has_qualified_ref(&edges, "obj"),
         "Expected parameter reference to obj: {edges:?}"
     );
-    // Note: pattern var s in && inside || is a known scope gap;
-    // flow-sensitive && scope creation inside || is not yet implemented.
+    assert!(
+        has_local_ref(&edges, "s"),
+        "Expected pattern var s references through local && flow: {edges:?}"
+    );
 }
 
 #[test]
@@ -463,8 +475,10 @@ fn test_for_pattern_scopes() {
         has_local_ref(&edges, "i"),
         "Expected reference to for loop var i: {edges:?}"
     );
-    // Note: pattern var s from for-condition instanceof is a known scope gap;
-    // flow-sensitive pattern binding in for-condition is not yet implemented.
+    assert!(
+        has_local_ref(&edges, "s"),
+        "Expected reference to for-condition pattern var s in loop body: {edges:?}"
+    );
 }
 
 #[test]
@@ -481,6 +495,42 @@ fn test_do_while_pattern_negative() {
     );
 }
 
+#[test]
+fn test_statement_flow_patterns() {
+    let content = load_fixture("com/example/patterns/StatementFlow.java");
+    let staging = build_staging_graph(&content, "StatementFlow.java");
+    let edges = collect_reference_edges(&staging);
+
+    assert!(
+        has_local_ref(&edges, "ifString"),
+        "Expected statement-flow reference for ifString: {edges:?}"
+    );
+    assert!(
+        has_local_ref(&edges, "whileString"),
+        "Expected statement-flow reference for whileString: {edges:?}"
+    );
+    assert!(
+        has_local_ref(&edges, "doString"),
+        "Expected statement-flow reference for doString: {edges:?}"
+    );
+    assert!(
+        has_local_ref(&edges, "forString"),
+        "Expected statement-flow reference for forString: {edges:?}"
+    );
+    assert!(
+        has_local_ref(&edges, "switchString"),
+        "Expected statement-flow reference for switchString after inner switch break: {edges:?}"
+    );
+    assert!(
+        has_local_ref(&edges, "labeledBlockString"),
+        "Expected statement-flow reference for labeledBlockString after loop with inner labeled block break: {edges:?}"
+    );
+    assert!(
+        !has_local_ref(&edges, "outerLabeledString"),
+        "Expected NO statement-flow reference for outerLabeledString — labeled break exits the loop: {edges:?}"
+    );
+}
+
 // ============================================================
 // Switch Statements
 // ============================================================
@@ -491,14 +541,18 @@ fn test_switch_guards() {
     let staging = build_staging_graph(&content, "SwitchGuards.java");
     let edges = collect_reference_edges(&staging);
 
-    // guardTest: case String s when s.length() > 0 -> s.hashCode()
-    // obj param resolves
     assert!(
         has_qualified_ref(&edges, "obj"),
         "Expected parameter reference to obj: {edges:?}"
     );
-    // Note: switch arrow pattern vars (s, i) are a known scope gap;
-    // switch pattern variable binding does not yet produce reference edges.
+    assert!(
+        has_local_ref(&edges, "s"),
+        "Expected switch guard pattern ref for s: {edges:?}"
+    );
+    assert!(
+        has_local_ref(&edges, "i"),
+        "Expected switch arrow pattern ref for i: {edges:?}"
+    );
 }
 
 #[test]
@@ -520,13 +574,18 @@ fn test_switch_colon_pattern() {
     let staging = build_staging_graph(&content, "SwitchColonPattern.java");
     let edges = collect_reference_edges(&staging);
 
-    // case String s: println(s); → obj param resolves
     assert!(
         has_qualified_ref(&edges, "obj"),
         "Expected parameter reference to obj: {edges:?}"
     );
-    // Note: colon-syntax switch pattern vars (s, i) are a known scope gap;
-    // switch pattern variable binding does not yet produce reference edges.
+    assert!(
+        has_local_ref(&edges, "s"),
+        "Expected colon-syntax switch pattern ref for s: {edges:?}"
+    );
+    assert!(
+        has_local_ref(&edges, "i"),
+        "Expected colon-syntax switch pattern ref for i: {edges:?}"
+    );
 }
 
 #[test]
@@ -672,13 +731,16 @@ fn test_multi_catch_union() {
 fn test_anon_class_member_beats_capture() {
     let content = load_fixture("com/example/classes/AnonLocalClass.java");
     let staging = build_staging_graph(&content, "AnonLocalClass.java");
-    let _edges = collect_reference_edges(&staging);
+    let edges = collect_reference_edges(&staging);
 
-    // memberBeatsCapture(): int x=1; new Runnable(){ int x=2; run(){ println(x) } }
-    // The x in run() should resolve to the member x, not captured local
-    // Member resolution produces a Reference edge to a qualified name (not x@*)
-    // Known gap: anonymous class scope boundary not fully detected in graph builder,
-    // so member x=2 isn't distinguished from captured local x=1.
+    assert!(
+        has_qualified_ref(&edges, "x"),
+        "Expected anonymous-class member reference for x: {edges:?}"
+    );
+    assert!(
+        !has_local_ref(&edges, "x"),
+        "Did not expect captured-local reference for x: {edges:?}"
+    );
 }
 
 #[test]
@@ -846,21 +908,32 @@ fn test_enclosing_field_capture_wins() {
 fn test_inherited_field_precedence() {
     let content = load_fixture("com/example/inheritance/InheritedFieldPrecedence.java");
     let staging = build_staging_graph(&content, "InheritedFieldPrecedence.java");
-    let _edges = collect_reference_edges(&staging);
+    let edges = collect_reference_edges(&staging);
 
-    // class InheritedBase { int x=10 }; new InheritedBase(){ void use(){ println(x) } }
-    // Known gap: inherited member detection requires ClassInfoIndex which is not
-    // available in single-file graph building. The reference resolves to local capture.
+    assert!(
+        has_qualified_ref(&edges, "x"),
+        "Expected inherited member reference for x: {edges:?}"
+    );
+    assert!(
+        !has_local_ref(&edges, "x"),
+        "Did not expect captured-local reference for x: {edges:?}"
+    );
 }
 
 #[test]
 fn test_inherited_resolved() {
     let content = load_fixture("com/example/inheritance/InheritedResolved.java");
     let staging = build_staging_graph(&content, "InheritedResolved.java");
-    let _edges = collect_reference_edges(&staging);
+    let edges = collect_reference_edges(&staging);
 
-    // class ResolvedBase { int value=10 }; new ResolvedBase(){ void use(){ println(value) } }
-    // Known gap: inherited member detection requires ClassInfoIndex. Resolves to local capture.
+    assert!(
+        has_qualified_ref(&edges, "value"),
+        "Expected inherited member reference for value: {edges:?}"
+    );
+    assert!(
+        !has_local_ref(&edges, "value"),
+        "Did not expect captured-local reference for value: {edges:?}"
+    );
 }
 
 #[test]
@@ -893,14 +966,82 @@ fn test_inherited_explicit_unresolved() {
     let staging = build_staging_graph(&content, "InheritedExplicitUnresolved.java");
     let edges = collect_reference_edges(&staging);
 
-    // new UnknownBase(){ void use(){ println(x) } }
-    // UnknownBase is not defined in this file.
-    // Current behavior: local capture proceeds (x resolves to outer int x=1).
-    // The scope builder captures locals when the anonymous class base resolution
-    // doesn't trigger the ambiguity guard.
     assert!(
-        has_local_ref(&edges, "x"),
-        "Expected local capture of x: {edges:?}"
+        !has_local_ref(&edges, "x"),
+        "Did not expect local capture for unresolved explicit base: {edges:?}"
+    );
+}
+
+#[test]
+fn test_external_classpath_base_resolution() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let project_root = temp_dir.path();
+    let source_dir = project_root.join("com/example/inheritance");
+    std::fs::create_dir_all(&source_dir).expect("create source dir");
+
+    let source_path = source_dir.join("ExternalClasspathResolved.java");
+    let content = r"
+package com.example.inheritance;
+
+import com.external.ExternalBase;
+
+class ExternalClasspathResolved {
+    void test() {
+        int value = 1;
+        Object obj = new ExternalBase() {
+            void use() {
+                System.out.println(value);
+            }
+        };
+    }
+}
+";
+    std::fs::write(&source_path, content).expect("write source");
+
+    let classpath_dir = project_root.join(".sqry/classpath");
+    std::fs::create_dir_all(&classpath_dir).expect("create classpath dir");
+    let classpath_index = ClasspathIndex::build(vec![ClassStub {
+        fqn: "com.external.ExternalBase".to_string(),
+        name: "ExternalBase".to_string(),
+        kind: ClassKind::Class,
+        access: AccessFlags::new(AccessFlags::ACC_PUBLIC),
+        superclass: Some("java.lang.Object".to_string()),
+        interfaces: Vec::new(),
+        methods: Vec::new(),
+        fields: vec![FieldStub {
+            name: "value".to_string(),
+            access: AccessFlags::new(AccessFlags::ACC_PUBLIC),
+            descriptor: "I".to_string(),
+            generic_signature: None,
+            annotations: Vec::new(),
+            constant_value: None,
+        }],
+        annotations: Vec::new(),
+        generic_signature: None,
+        inner_classes: Vec::new(),
+        lambda_targets: Vec::new(),
+        module: None,
+        record_components: Vec::new(),
+        enum_constants: Vec::new(),
+        source_file: None,
+        source_jar: None,
+        kotlin_metadata: None,
+        scala_signature: None,
+    }]);
+    classpath_index
+        .save(&classpath_dir.join("index.sqry"))
+        .expect("save classpath index");
+
+    let staging = build_staging_graph_at_path(content, &source_path);
+    let edges = collect_reference_edges(&staging);
+
+    assert!(
+        has_qualified_ref(&edges, "value"),
+        "Expected external classpath member reference for value: {edges:?}"
+    );
+    assert!(
+        !has_local_ref(&edges, "value"),
+        "Did not expect local capture for classpath-resolved external base: {edges:?}"
     );
 }
 
@@ -983,24 +1124,22 @@ fn test_pattern_decl_not_referenced() {
     let staging = build_staging_graph(&content, "PatternDeclFilter.java");
     let edges = collect_reference_edges(&staging);
 
-    // instanceof: `if (obj instanceof String s) { println(s); }`
-    // The pattern variable `s` in instanceof should produce exactly 1 reference
-    // edge (the usage in println), NOT 2 (which would mean the declaration site
-    // leaked as a spurious self-referencing edge).
+    // Pattern variable `s` is used twice in the fixture:
+    // - instanceof branch: println(s)
+    // - switch branch: s.length()
+    // Declaration sites must not leak as spurious self-references.
     let s_refs = count_local_refs(&edges, "s");
     assert_eq!(
-        s_refs, 1,
-        "Expected exactly 1 reference to pattern var s (usage only, not declaration): {edges:?}"
+        s_refs, 2,
+        "Expected exactly 2 usage references to pattern var s (no declaration-site refs): {edges:?}"
     );
 
-    // Switch pattern vars (case Integer i -> i + 1) are a known scope gap;
-    // arrow-syntax switch pattern variable binding does not yet produce
-    // reference edges. Verify no spurious declaration-site references exist.
+    // Switch pattern variable `i` is used once (`i + 1`), and its declaration
+    // site must not leak as a self-reference.
     let i_refs = count_local_refs(&edges, "i");
     assert_eq!(
-        i_refs, 0,
-        "Switch pattern var i should have 0 refs (known scope gap), \
-         but not spurious self-refs: {edges:?}"
+        i_refs, 1,
+        "Expected exactly 1 usage reference to switch pattern var i: {edges:?}"
     );
 }
 

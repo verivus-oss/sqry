@@ -676,6 +676,24 @@ impl CsrGraph {
     }
 }
 
+impl crate::graph::unified::memory::GraphMemorySize for CsrGraph {
+    fn heap_bytes(&self) -> usize {
+        let row_ptr = self.row_ptr.capacity() * std::mem::size_of::<u32>();
+        let col_idx = self.col_idx.capacity() * std::mem::size_of::<NodeId>();
+        let edge_kind = self.edge_kind.capacity() * std::mem::size_of::<EdgeKind>();
+        let edge_seq = self.edge_seq.capacity() * std::mem::size_of::<u64>();
+        // Outer vec capacity + each inner Vec<Span> heap allocation.
+        let spans_outer =
+            self.edge_spans.capacity() * std::mem::size_of::<Vec<crate::graph::node::Span>>();
+        let spans_inner: usize = self
+            .edge_spans
+            .iter()
+            .map(|v| v.capacity() * std::mem::size_of::<crate::graph::node::Span>())
+            .sum();
+        row_ptr + col_idx + edge_kind + edge_seq + spans_outer + spans_inner
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

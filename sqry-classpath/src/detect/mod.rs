@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 use log::warn;
 use serde::{Deserialize, Serialize};
+use walkdir::WalkDir;
 
 /// JVM build system type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -70,6 +71,9 @@ impl BuildSystem {
     const ALL: [Self; 4] = [Self::Gradle, Self::Maven, Self::Bazel, Self::Sbt];
 }
 
+/// Directories skipped during recursive JVM build-root discovery.
+const IGNORED_DIR_NAMES: &[&str] = &[".git", ".sqry", "target", "build", "node_modules", "vendor"];
+
 /// Result of build system detection.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DetectionResult {
@@ -98,9 +102,18 @@ pub fn detect_build_system(
     project_root: &Path,
     override_build_system: Option<&str>,
 ) -> DetectionResult {
+    let result = detect_build_system_inner(project_root, override_build_system);
+    write_diagnostics(project_root, &result);
+    result
+}
+
+fn detect_build_system_inner(
+    project_root: &Path,
+    override_build_system: Option<&str>,
+) -> DetectionResult {
     // Handle override case first.
     if let Some(override_value) = override_build_system {
-        let result = if let Some(bs) = BuildSystem::from_str_loose(override_value) {
+        return if let Some(bs) = BuildSystem::from_str_loose(override_value) {
             DetectionResult {
                 build_system: Some(bs),
                 project_root: project_root.to_path_buf(),
@@ -118,11 +131,19 @@ pub fn detect_build_system(
                 override_source: Some(override_value.to_string()),
             }
         };
-        write_diagnostics(project_root, &result);
-        return result;
     }
 
-    // Auto-detect by scanning for marker files.
+    let (markers_found, best_system) = scan_markers(project_root);
+
+    DetectionResult {
+        build_system: best_system,
+        project_root: project_root.to_path_buf(),
+        markers_found,
+        override_source: None,
+    }
+}
+
+fn scan_markers(project_root: &Path) -> (Vec<String>, Option<BuildSystem>) {
     let mut markers_found = Vec::new();
     let mut best_system: Option<BuildSystem> = None;
 
@@ -133,9 +154,7 @@ pub fn detect_build_system(
                 markers_found.push((*marker).to_string());
 
                 match best_system {
-                    Some(current) if current.priority() >= build_system.priority() => {
-                        // Current winner has equal or higher priority; keep it.
-                    }
+                    Some(current) if current.priority() >= build_system.priority() => {}
                     _ => {
                         best_system = Some(build_system);
                     }
@@ -144,15 +163,158 @@ pub fn detect_build_system(
         }
     }
 
-    let result = DetectionResult {
-        build_system: best_system,
-        project_root: project_root.to_path_buf(),
-        markers_found,
-        override_source: None,
-    };
+    (markers_found, best_system)
+}
 
-    write_diagnostics(project_root, &result);
-    result
+/// Discover JVM build roots recursively under a repository root.
+///
+/// Child roots that are already modeled by an ancestor Gradle settings file or
+/// Maven reactor are pruned to avoid duplicate resolution.
+#[must_use]
+pub fn discover_build_roots(
+    project_root: &Path,
+    override_build_system: Option<&str>,
+) -> Vec<DetectionResult> {
+    if let Some(override_value) = override_build_system {
+        let Some(build_system) = BuildSystem::from_str_loose(override_value) else {
+            return vec![detect_build_system(project_root, Some(override_value))];
+        };
+        let mut roots = discover_build_roots_for_system(project_root, build_system);
+        if roots.is_empty() {
+            roots.push(DetectionResult {
+                build_system: Some(build_system),
+                project_root: project_root.to_path_buf(),
+                markers_found: Vec::new(),
+                override_source: Some(override_value.to_string()),
+            });
+        } else {
+            for root in &mut roots {
+                root.override_source = Some(override_value.to_string());
+            }
+        }
+        return roots;
+    }
+
+    let mut candidates = Vec::new();
+    for entry in WalkDir::new(project_root)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|entry| should_descend(entry.path()))
+        .filter_map(Result::ok)
+    {
+        if !entry.file_type().is_dir() {
+            continue;
+        }
+
+        let detection = detect_build_system_inner(entry.path(), None);
+        if detection.build_system.is_some() {
+            candidates.push(detection);
+        }
+    }
+
+    prune_discovered_roots(candidates)
+}
+
+fn discover_build_roots_for_system(
+    project_root: &Path,
+    build_system: BuildSystem,
+) -> Vec<DetectionResult> {
+    let mut candidates = Vec::new();
+    for entry in WalkDir::new(project_root)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|entry| should_descend(entry.path()))
+        .filter_map(Result::ok)
+    {
+        if !entry.file_type().is_dir() {
+            continue;
+        }
+
+        let (markers_found, detected) = scan_markers(entry.path());
+        if detected == Some(build_system) {
+            candidates.push(DetectionResult {
+                build_system: Some(build_system),
+                project_root: entry.path().to_path_buf(),
+                markers_found,
+                override_source: None,
+            });
+        }
+    }
+
+    prune_discovered_roots(candidates)
+}
+
+fn should_descend(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_none_or(|name| !IGNORED_DIR_NAMES.contains(&name))
+}
+
+fn prune_discovered_roots(mut candidates: Vec<DetectionResult>) -> Vec<DetectionResult> {
+    candidates.sort_by(|a, b| {
+        let depth_a = a.project_root.components().count();
+        let depth_b = b.project_root.components().count();
+        depth_a
+            .cmp(&depth_b)
+            .then_with(|| a.project_root.cmp(&b.project_root))
+    });
+
+    let mut accepted = Vec::new();
+    'candidate: for candidate in candidates {
+        for ancestor in &accepted {
+            if should_prune_under_ancestor(&candidate, ancestor) {
+                continue 'candidate;
+            }
+        }
+        accepted.push(candidate);
+    }
+
+    accepted
+}
+
+fn should_prune_under_ancestor(candidate: &DetectionResult, ancestor: &DetectionResult) -> bool {
+    let Some(candidate_system) = candidate.build_system else {
+        return false;
+    };
+    let Some(ancestor_system) = ancestor.build_system else {
+        return false;
+    };
+    if candidate_system != ancestor_system || candidate.project_root == ancestor.project_root {
+        return false;
+    }
+
+    match candidate_system {
+        BuildSystem::Gradle => {
+            candidate.project_root.starts_with(&ancestor.project_root)
+                && ancestor
+                    .markers_found
+                    .iter()
+                    .any(|marker| marker == "settings.gradle" || marker == "settings.gradle.kts")
+        }
+        BuildSystem::Maven => {
+            maven_reactor_contains(&ancestor.project_root, &candidate.project_root)
+        }
+        BuildSystem::Bazel | BuildSystem::Sbt => {
+            candidate.project_root.starts_with(&ancestor.project_root)
+        }
+    }
+}
+
+fn maven_reactor_contains(ancestor_root: &Path, candidate_root: &Path) -> bool {
+    let pom_path = ancestor_root.join("pom.xml");
+    if !pom_path.exists() {
+        return false;
+    }
+
+    let candidate_root = canonicalish(candidate_root);
+    crate::resolve::maven::detect_modules(&pom_path)
+        .into_iter()
+        .map(|module| canonicalish(&ancestor_root.join(module)))
+        .any(|module_root| module_root == candidate_root)
+}
+
+fn canonicalish(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// Write the detection result as JSON to `.sqry/classpath/build-system.json`
@@ -456,5 +618,32 @@ mod tests {
         let result = detect_build_system(tmp.path(), None);
         assert_eq!(result.build_system, Some(BuildSystem::Bazel));
         assert_eq!(result.markers_found.len(), 4);
+    }
+
+    #[test]
+    fn test_discover_build_roots_mixed_nested_repo() {
+        let tmp = TempDir::new().unwrap();
+        create_markers(tmp.path().join("services/app").as_path(), &["build.gradle"]);
+        create_markers(tmp.path().join("libs/shared").as_path(), &["pom.xml"]);
+        create_markers(tmp.path().join("target/generated").as_path(), &["pom.xml"]);
+
+        let roots = discover_build_roots(tmp.path(), None);
+        let root_paths: Vec<_> = roots.iter().map(|root| root.project_root.clone()).collect();
+
+        assert!(root_paths.contains(&tmp.path().join("services/app")));
+        assert!(root_paths.contains(&tmp.path().join("libs/shared")));
+        assert!(!root_paths.contains(&tmp.path().join("target/generated")));
+    }
+
+    #[test]
+    fn test_discover_build_roots_prunes_gradle_children_under_settings_root() {
+        let tmp = TempDir::new().unwrap();
+        create_markers(tmp.path(), &["settings.gradle", "build.gradle"]);
+        create_markers(tmp.path().join("app").as_path(), &["build.gradle"]);
+
+        let roots = discover_build_roots(tmp.path(), None);
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0].project_root, tmp.path());
+        assert_eq!(roots[0].build_system, Some(BuildSystem::Gradle));
     }
 }

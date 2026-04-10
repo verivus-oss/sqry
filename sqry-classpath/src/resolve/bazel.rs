@@ -49,6 +49,7 @@ pub fn resolve_bazel_classpath(config: &ResolveConfig) -> ClasspathResult<Vec<Re
             let entries = build_entries(&jar_paths, &coordinates_map);
             let resolved = ResolvedClasspath {
                 module_name: infer_module_name(&config.project_root),
+                module_root: config.project_root.clone(),
                 entries,
             };
             Ok(vec![resolved])
@@ -665,6 +666,7 @@ another/path/to/data.proto
         // Write a cached classpath.
         let cached = vec![ResolvedClasspath {
             module_name: "cached-project".to_string(),
+            module_root: tmp.path().to_path_buf(),
             entries: vec![ClasspathEntry {
                 jar_path: PathBuf::from("/cached/guava.jar"),
                 coordinates: Some("com.google.guava:guava:33.0.0".to_string()),

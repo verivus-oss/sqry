@@ -342,6 +342,13 @@ pub fn engine() -> Result<Arc<Engine>> {
 /// - Manifest is missing or corrupt
 /// - `GraphIdentity` validation fails (`root_path` mismatch)
 pub fn engine_for_workspace(explicit_path: Option<&PathBuf>) -> Result<Arc<Engine>> {
+    // Request-scoped resolution in `server.rs` is authoritative once the
+    // blocking closure starts. In that case the override intentionally shadows
+    // any explicit path passed by legacy tool code.
+    if let Some(workspace_root) = crate::workspace_session::current_workspace_override() {
+        return engine_for_workspace_root(&workspace_root);
+    }
+
     // Use discovery cache if path is provided, otherwise fall back to direct resolution
     let workspace_root = if let Some(path) = explicit_path {
         // Use cached discovery for performance and platform-specific normalization
@@ -351,7 +358,10 @@ pub fn engine_for_workspace(explicit_path: Option<&PathBuf>) -> Result<Arc<Engin
         let resolver = WorkspaceResolver::new(None);
         resolver.resolve()?
     };
+    engine_for_workspace_root(&workspace_root)
+}
 
+fn engine_for_workspace_root(workspace_root: &Path) -> Result<Arc<Engine>> {
     // Canonicalization guarantee: workspace_root is always canonical
     // (WorkspaceResolver already canonicalizes)
     if !workspace_root.is_absolute() {
@@ -362,7 +372,7 @@ pub fn engine_for_workspace(explicit_path: Option<&PathBuf>) -> Result<Arc<Engin
     }
 
     // Check cache first
-    if let Some(engine) = get_cached_engine(&workspace_root)? {
+    if let Some(engine) = get_cached_engine(workspace_root)? {
         tracing::debug!(
             workspace = %workspace_root.display(),
             "Using cached engine"
@@ -376,12 +386,12 @@ pub fn engine_for_workspace(explicit_path: Option<&PathBuf>) -> Result<Arc<Engin
         "Loading fresh engine (cache miss or stale)"
     );
 
-    let engine = Arc::new(Engine::for_workspace(workspace_root.clone())?);
+    let engine = Arc::new(Engine::for_workspace(workspace_root.to_path_buf())?);
 
     // Read GraphIdentity and metadata atomically for cache insertion.
     // If manifest doesn't exist yet (pre auto-index), skip caching —
     // ensure_graph() will build it and the next call will cache properly.
-    match read_graph_identity_with_metadata(&workspace_root) {
+    match read_graph_identity_with_metadata(workspace_root) {
         Ok((identity, metadata)) => {
             let mut cache = ENGINE_CACHE.lock();
             let lru = cache
@@ -389,7 +399,7 @@ pub fn engine_for_workspace(explicit_path: Option<&PathBuf>) -> Result<Arc<Engin
                 .context("Engine cache not initialized - call init_engine_cache() first")?;
 
             lru.put(
-                workspace_root.clone(),
+                workspace_root.to_path_buf(),
                 CachedEngine {
                     engine: Arc::clone(&engine),
                     identity,

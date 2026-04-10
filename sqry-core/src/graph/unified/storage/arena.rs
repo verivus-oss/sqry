@@ -761,6 +761,12 @@ impl fmt::Display for NodeArena {
     }
 }
 
+impl crate::graph::unified::memory::GraphMemorySize for NodeArena {
+    fn heap_bytes(&self) -> usize {
+        self.slots.capacity() * std::mem::size_of::<Slot<NodeEntry>>()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
