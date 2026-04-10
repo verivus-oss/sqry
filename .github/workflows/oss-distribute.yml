@@ -58,7 +58,10 @@ jobs:
 
           LEDGER_DIR="$RUNNER_TEMP/dispatch-ledger"
           mkdir -p "$LEDGER_DIR"
-          gh release download "$TAG" --dir "$LEDGER_DIR" --pattern "release-ledger-*.json"
+          gh release download "$TAG" \
+            --repo "verivus-oss/sqry" \
+            --dir "$LEDGER_DIR" \
+            --pattern "release-ledger-*.json"
           LEDGER_FILE=$(find "$LEDGER_DIR" -name 'release-ledger-*.json' -type f | head -1)
           if [[ -z "$LEDGER_FILE" || ! -f "$LEDGER_FILE" ]]; then
             echo "FATAL: no release ledger found for tag $TAG" >&2
