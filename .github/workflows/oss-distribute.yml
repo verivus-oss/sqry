@@ -243,6 +243,12 @@ jobs:
           mkdir -p dist/
           PUBLIC_REPO_ROOT="/workspace/sqry"
           export RUSTFLAGS="--remap-path-prefix=$(pwd)=${PUBLIC_REPO_ROOT} --remap-path-prefix=/io=${PUBLIC_REPO_ROOT}"
+          CARGO_BIN="$(command -v cargo || true)"
+          if [[ -z "$CARGO_BIN" || ! -x "$CARGO_BIN" ]]; then
+            echo "FATAL: cargo executable not found after rust-toolchain setup" >&2
+            exit 1
+          fi
+          export PATH="$(dirname "$CARGO_BIN"):$PATH"
           TARGETS=(
             "x86_64-unknown-linux-gnu"
             "aarch64-unknown-linux-gnu"
@@ -256,12 +262,12 @@ jobs:
           for target in "${TARGETS[@]}"; do
             echo "=== Building for $target ==="
             if [[ "$target" == "x86_64-unknown-linux-gnu" ]]; then
-              cargo build --release --target "$target" -p sqry-cli -p sqry-lsp -p sqry-mcp
+              "$CARGO_BIN" build --release --target "$target" -p sqry-cli -p sqry-lsp -p sqry-mcp
             elif [[ "$target" == "x86_64-pc-windows-gnu" ]]; then
               printf '#!/bin/bash\nargs=()\nfor arg in "$@"; do\n  if [[ "$arg" =~ ^/STACK:([0-9]+)$ ]]; then\n    args+=("-Wl,--stack,${BASH_REMATCH[1]}")\n  else\n    args+=("$arg")\n  fi\ndone\nexec x86_64-w64-mingw32-gcc "${args[@]}"\n' > /tmp/mingw-linker-wrapper.sh
               chmod +x /tmp/mingw-linker-wrapper.sh
               CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=/tmp/mingw-linker-wrapper.sh \
-                cargo build --release --target "$target" -p sqry-cli -p sqry-lsp -p sqry-mcp
+                "$CARGO_BIN" build --release --target "$target" -p sqry-cli -p sqry-lsp -p sqry-mcp
             elif [[ "$target" == *"apple-darwin"* ]]; then
               docker run --rm --user "$(id -u):$(id -g)" \
                 -v "$(pwd):/io" -w /io \
@@ -272,7 +278,7 @@ jobs:
                 "$CARGO_ZIGBUILD_IMAGE" \
                 bash -c "rustup target add $target && cargo zigbuild --release --target $target -p sqry-cli -p sqry-lsp -p sqry-mcp"
             else
-              cargo zigbuild --release --target "$target" -p sqry-cli -p sqry-lsp -p sqry-mcp
+              "$CARGO_BIN" zigbuild --release --target "$target" -p sqry-cli -p sqry-lsp -p sqry-mcp
             fi
 
             EXT=""
