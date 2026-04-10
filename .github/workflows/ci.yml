@@ -248,7 +248,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
         with:
           toolchain: "1.90"
-      - uses: Swatinem/rust-cache@v2
       - name: Test fuzzy search with ${{ matrix.mode }}
         run: cargo test --locked -p sqry-core search::fuzzy::tests
         env:
