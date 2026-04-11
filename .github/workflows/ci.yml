@@ -93,9 +93,6 @@ jobs:
             --skip detect_bazel_java \
             --skip detect_kotlin_gradle_project \
             --skip detect_scala_sbt_project \
-            --skip dart_graph_builder_extracts_widget_classes_and_functions \
-            --skip dart_widget_hierarchy_includes_inherited_widget_access \
-            --skip parity_multi_language \
             --skip test_relation_callers_supports_fqn_and_simple_names \
             --skip test_relation_returns_supports_fqn_and_simple_names
         env:
