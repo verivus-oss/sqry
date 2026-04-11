@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [8.0.3] - 2026-04-11
+
+### Fixed
+- VS Code extension autodownload now accepts the exact public Sigstore identities emitted by the current `oss-distribute.yml` workflow, so valid public release binaries no longer fail provenance verification during install.
+
 ### Added
 - `SQRY_MAX_SNAPSHOT_BYTES` environment variable to override the graph snapshot data section size limit. Values are clamped between 1 GB and 64 GB. The documentation previously referenced this variable but it was not wired to any runtime code path.
 

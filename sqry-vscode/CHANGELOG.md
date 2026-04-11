@@ -19,6 +19,11 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 
 ## [Unreleased]
 
+## [8.0.3] - 2026-04-11
+
+### Fixed
+- Accept the exact public Sigstore workflow identities currently emitted by `verivus-oss/sqry` so binary autodownload no longer rejects valid public releases with a provenance verification error.
+
 ## [6.0.24] - 2026-04-03
 
 ### Fixed

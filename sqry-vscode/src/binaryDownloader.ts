@@ -7,7 +7,8 @@ import * as vscode from "vscode";
 
 const GITHUB_RELEASE_BASE = "https://github.com/verivus-oss/sqry/releases/download";
 const OIDC_ISSUER = "https://token.actions.githubusercontent.com";
-const CERT_IDENTITY_PATTERN = "https://github.com/verivus-oss/sqry/.github/workflows/oss-distribute.yml@refs/tags/v";
+const CERT_IDENTITY_TAG_PREFIX = "https://github.com/verivus-oss/sqry/.github/workflows/oss-distribute.yml@refs/tags/v";
+const CERT_IDENTITY_MAIN = "https://github.com/verivus-oss/sqry/.github/workflows/oss-distribute.yml@refs/heads/main";
 const MAX_DOWNLOAD_SIZE = 200 * 1024 * 1024; // 200 MB
 const LOCK_STALE_MS = 10 * 60 * 1000; // 10 minutes
 const KEEP_VERSIONS = 2;
@@ -321,14 +322,18 @@ export async function verifyCosignBundle(
     const sigstore = await import("sigstore");
     const bundleContent = JSON.parse(fs.readFileSync(bundlePath, "utf-8"));
     const binaryData = fs.readFileSync(binaryPath);
-    const certIdentity = `${CERT_IDENTITY_PATTERN}${version}`;
+    const identityCandidates = getCertificateIdentityCandidates(version);
 
-    outputChannel.appendLine(`[sqry] Verifying Cosign bundle (issuer: ${OIDC_ISSUER}, identity: ${certIdentity})`);
-
-    await sigstore.verify(bundleContent, binaryData, {
-      certificateIssuer: OIDC_ISSUER,
-      certificateIdentityURI: certIdentity,
-    });
+    await verifyCosignBundleWithIdentities(
+      identityCandidates,
+      outputChannel,
+      async (certIdentity) => {
+        await sigstore.verify(bundleContent, binaryData, {
+          certificateIssuer: OIDC_ISSUER,
+          certificateIdentityURI: certIdentity,
+        });
+      },
+    );
 
     outputChannel.appendLine("[sqry] Cosign signature verification succeeded - binary provenance confirmed");
   } catch (error) {
@@ -338,6 +343,38 @@ export async function verifyCosignBundle(
       `Cosign verification failed: ${message}`
     );
   }
+}
+
+export function getCertificateIdentityCandidates(version: string): readonly string[] {
+  return [
+    `${CERT_IDENTITY_TAG_PREFIX}${version}`,
+    CERT_IDENTITY_MAIN,
+  ];
+}
+
+export async function verifyCosignBundleWithIdentities(
+  identityCandidates: readonly string[],
+  outputChannel: vscode.OutputChannel,
+  verifier: (certificateIdentity: string) => Promise<void>,
+): Promise<void> {
+  const failures: string[] = [];
+
+  for (const certIdentity of identityCandidates) {
+    outputChannel.appendLine(
+      `[sqry] Verifying Cosign bundle (issuer: ${OIDC_ISSUER}, identity: ${certIdentity})`,
+    );
+    try {
+      await verifier(certIdentity);
+      return;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      failures.push(`${certIdentity}: ${message}`);
+    }
+  }
+
+  throw new Error(
+    `Cosign verification failed for all allowlisted identities. Tried: ${failures.join(" | ")}`,
+  );
 }
 
 async function downloadReleaseAsset(

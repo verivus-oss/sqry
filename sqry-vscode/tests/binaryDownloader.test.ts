@@ -208,6 +208,91 @@ describe("binaryDownloader", () => {
     });
   });
 
+  describe("certificate identity candidates", () => {
+    it("includes both tag-scoped and main-branch workflow identities", () => {
+      const mod = loadModule();
+      expect(mod.getCertificateIdentityCandidates("8.0.2")).to.deep.equal([
+        "https://github.com/verivus-oss/sqry/.github/workflows/oss-distribute.yml@refs/tags/v8.0.2",
+        "https://github.com/verivus-oss/sqry/.github/workflows/oss-distribute.yml@refs/heads/main",
+      ]);
+    });
+  });
+
+  describe("verifyCosignBundleWithIdentities()", () => {
+    function createOutputChannel() {
+      const lines: string[] = [];
+      return {
+        channel: {
+          appendLine: (line: string) => {
+            lines.push(line);
+          },
+        },
+        lines,
+      };
+    }
+
+    it("falls back from tag identity to main identity", async () => {
+      const mod = loadModule();
+      const { channel } = createOutputChannel();
+      const attempted: string[] = [];
+
+      await mod.verifyCosignBundleWithIdentities(
+        mod.getCertificateIdentityCandidates("8.0.2"),
+        channel,
+        async (identity: string) => {
+          attempted.push(identity);
+          if (identity.endsWith("@refs/heads/main")) {
+            return;
+          }
+          throw new Error(`certificate identity error - expected main, got ${identity}`);
+        },
+      );
+
+      expect(attempted).to.deep.equal([
+        "https://github.com/verivus-oss/sqry/.github/workflows/oss-distribute.yml@refs/tags/v8.0.2",
+        "https://github.com/verivus-oss/sqry/.github/workflows/oss-distribute.yml@refs/heads/main",
+      ]);
+    });
+
+    it("succeeds immediately when the first identity matches", async () => {
+      const mod = loadModule();
+      const { channel } = createOutputChannel();
+      const attempted: string[] = [];
+
+      await mod.verifyCosignBundleWithIdentities(
+        ["https://github.com/verivus-oss/sqry/.github/workflows/oss-distribute.yml@refs/heads/main"],
+        channel,
+        async (identity: string) => {
+          attempted.push(identity);
+        },
+      );
+
+      expect(attempted).to.deep.equal([
+        "https://github.com/verivus-oss/sqry/.github/workflows/oss-distribute.yml@refs/heads/main",
+      ]);
+    });
+
+    it("fails closed when no allowlisted identity verifies", async () => {
+      const mod = loadModule();
+      const { channel } = createOutputChannel();
+
+      try {
+        await mod.verifyCosignBundleWithIdentities(
+          mod.getCertificateIdentityCandidates("8.0.2"),
+          channel,
+          async (identity: string) => {
+            throw new Error(`certificate identity error for ${identity}`);
+          },
+        );
+        expect.fail("Expected verification failure");
+      } catch (error) {
+        expect((error as Error).message).to.contain("Cosign verification failed for all allowlisted identities");
+        expect((error as Error).message).to.contain("@refs/tags/v8.0.2");
+        expect((error as Error).message).to.contain("@refs/heads/main");
+      }
+    });
+  });
+
   describe("verifySha256()", () => {
     let tmpDir: string;
 
@@ -397,6 +482,29 @@ describe("binaryDownloader", () => {
       const version = mod.getBinaryVersion();
       expect(version).to.be.a("string");
       expect(version).to.match(/^\d+\.\d+\.\d+/);
+    });
+  });
+
+  describe("verifyCosignBundle()", () => {
+    it("fails closed when the attestation bundle file is missing", async () => {
+      const mod = loadModule();
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "sqry-bundle-missing-"));
+      const binaryPath = path.join(tmpDir, "sqry");
+      fs.writeFileSync(binaryPath, "binary");
+      const missingBundlePath = path.join(tmpDir, "release-artifacts.attestation.json");
+
+      try {
+        await mod.verifyCosignBundle(binaryPath, missingBundlePath, "8.0.2", {
+          appendLine: () => {},
+        });
+        expect.fail("Expected missing bundle failure");
+      } catch (error) {
+        expect((error as Error).message).to.equal(
+          "Cosign signature bundle file is missing. Binary provenance cannot be verified.",
+        );
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
     });
   });
 
