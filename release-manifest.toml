@@ -9,6 +9,7 @@ default = "deny"
 
 [selection.crates]
 public = [
+    "sqry-classpath/",
     "sqry-cli/",
     "sqry-core/",
     "sqry-lsp/",
@@ -84,7 +85,6 @@ public = [
     "deny.toml",
     "ERRATA.md",
     "LICENSE",
-    "LICENSE-MIT",
     "QUICKSTART.md",
     "README.md",
     "release-manifest.toml",
@@ -152,10 +152,21 @@ path_patterns = [
 [packaging]
 allowed_extensions = [
     ".rs", ".toml", ".lock", ".md", ".txt", ".yml", ".yaml",
-    ".json", ".js", ".ts", ".css", ".html", ".sh", ".ps1",
+    ".json", ".js", ".ts", ".py", ".dart", ".sql", ".css", ".html", ".sh", ".ps1",
     ".c", ".h", ".cc", ".hh", ".scm",
 ]
-allowed_dotfiles = [".gitignore", ".gitattributes", ".cargo"]
+allowed_dotfiles = [".gitignore", ".gitattributes", ".cargo", ".editorconfig"]
+allowed_basenames = [
+    "LICENSE",
+    "LICENSE-*",
+    "COPYING",
+    "COPYING.*",
+    "NOTICE",
+    "NOTICE.*",
+    "AUTHORS",
+    "AUTHORS.*",
+    "VERSION",
+]
 binary_assets = [
     "assets/*.png",
     "assets/*.svg",
@@ -169,6 +180,7 @@ binary_assets = [
 publish_order = [
     # Phase 1: Foundations
     "sqry-core",
+    "sqry-classpath",
     "sqry-mcp-redaction",
     "sqry-nl",
     # Phase 2: Support libraries
