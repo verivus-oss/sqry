@@ -13,6 +13,7 @@ use std::collections::HashMap;
 
 use super::format::{FormatVersion, GraphHeader, MAGIC_BYTES_V8, VERSION};
 use super::manifest::ConfigProvenance;
+use crate::config::buffers::max_snapshot_bytes;
 use crate::graph::unified::BidirectionalEdgeStore;
 use crate::graph::unified::concurrent::CodeGraph;
 use crate::graph::unified::resolution::is_canonical_graph_qualified_name;
@@ -22,15 +23,16 @@ use crate::graph::unified::storage::{
 };
 use crate::plugin::PluginManager;
 
-/// Maximum snapshot data size (2 GB).
-///
-/// This limit is consistent with the full-buffer deserialization architecture
-/// where both header and data buffers must fit in process memory simultaneously.
-/// The largest known sqry snapshot is ~167 MB, well within this bound.
-///
-/// If snapshots grow beyond 2 GB, a streaming deserialization approach can replace
-/// the buffer-based approach without a wire format change.
-const MAX_SNAPSHOT_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+// Maximum snapshot data section size is resolved at runtime from
+// `crate::config::buffers::max_snapshot_bytes()`, which honors the
+// `SQRY_MAX_SNAPSHOT_BYTES` environment variable. The default is large enough
+// to hold the serialized graph of very large codebases such as the Linux
+// kernel (~7–8 GB). See `config::buffers` for the full contract.
+//
+// Historical note: prior to v8.0.x this file hardcoded a 2 GB constant which
+// caused `sqry index` to fail on mega-repos like the Linux kernel. The limit
+// now lives in the shared buffers-config module alongside the other
+// `SQRY_*`-configurable limits, with a 1 GB–64 GB clamp range.
 
 /// Maximum header size (1 MB).
 const MAX_HEADER_BYTES: usize = 1_048_576;
@@ -635,14 +637,20 @@ pub fn save_to_path(graph: &CodeGraph, path: impl AsRef<Path>) -> Result<(), Per
 
     // Validate sizes match load-time limits (symmetry: reject on save what load would reject)
     if header_bytes.len() > MAX_HEADER_BYTES {
-        return Err(PersistenceError::ValidationFailed(
-            "header too large to save".to_string(),
-        ));
+        return Err(PersistenceError::ValidationFailed(format!(
+            "header too large to save: {} bytes exceeds MAX_HEADER_BYTES ({} bytes)",
+            header_bytes.len(),
+            MAX_HEADER_BYTES,
+        )));
     }
-    if data_bytes.len() as u64 > MAX_SNAPSHOT_BYTES {
-        return Err(PersistenceError::ValidationFailed(
-            "data section too large to save".to_string(),
-        ));
+    let max_data_bytes = max_snapshot_bytes();
+    if data_bytes.len() as u64 > max_data_bytes {
+        return Err(PersistenceError::ValidationFailed(format!(
+            "data section too large to save: {} bytes exceeds limit ({} bytes); \
+             increase SQRY_MAX_SNAPSHOT_BYTES if the codebase legitimately requires a larger snapshot",
+            data_bytes.len(),
+            max_data_bytes,
+        )));
     }
 
     // Write V8 framed format
@@ -754,14 +762,20 @@ pub fn save_to_path_with_provenance(
 
     // Validate sizes match load-time limits (symmetry: reject on save what load would reject)
     if header_bytes.len() > MAX_HEADER_BYTES {
-        return Err(PersistenceError::ValidationFailed(
-            "header too large to save".to_string(),
-        ));
+        return Err(PersistenceError::ValidationFailed(format!(
+            "header too large to save: {} bytes exceeds MAX_HEADER_BYTES ({} bytes)",
+            header_bytes.len(),
+            MAX_HEADER_BYTES,
+        )));
     }
-    if data_bytes.len() as u64 > MAX_SNAPSHOT_BYTES {
-        return Err(PersistenceError::ValidationFailed(
-            "data section too large to save".to_string(),
-        ));
+    let max_data_bytes = max_snapshot_bytes();
+    if data_bytes.len() as u64 > max_data_bytes {
+        return Err(PersistenceError::ValidationFailed(format!(
+            "data section too large to save: {} bytes exceeds limit ({} bytes); \
+             increase SQRY_MAX_SNAPSHOT_BYTES if the codebase legitimately requires a larger snapshot",
+            data_bytes.len(),
+            max_data_bytes,
+        )));
     }
 
     // Write V8 framed format
@@ -859,7 +873,7 @@ pub fn verify_snapshot_bytes(data: &[u8], expected_sha256: &str) -> anyhow::Resu
 /// # Errors
 ///
 /// Returns an error if the bytes are invalid, corrupt, or incompatible.
-#[allow(clippy::cast_possible_truncation)] // data_len validated < MAX_SNAPSHOT_BYTES (2 GB)
+#[allow(clippy::cast_possible_truncation)] // data_len validated < max_snapshot_bytes()
 pub fn load_from_bytes(
     bytes: &[u8],
     plugins: Option<&PluginManager>,
@@ -918,10 +932,12 @@ pub fn load_from_bytes(
     // Read data length and validate before allocation
     let data_len = read_u64_le(&mut reader)?;
     bytes_consumed += 8;
-    if data_len > MAX_SNAPSHOT_BYTES {
-        return Err(PersistenceError::ValidationFailed(
-            "data section too large".to_string(),
-        ));
+    let max_data_bytes = max_snapshot_bytes();
+    if data_len > max_data_bytes {
+        return Err(PersistenceError::ValidationFailed(format!(
+            "data section too large: {data_len} bytes exceeds limit ({max_data_bytes} bytes); \
+             increase SQRY_MAX_SNAPSHOT_BYTES to load this snapshot",
+        )));
     }
     let remaining = total_len.saturating_sub(bytes_consumed);
     if data_len > remaining {
@@ -976,7 +992,7 @@ pub fn load_from_bytes(
 /// # Errors
 ///
 /// Returns an error if the file is invalid, corrupt, or incompatible.
-#[allow(clippy::cast_possible_truncation)] // data_len validated < MAX_SNAPSHOT_BYTES (2 GB)
+#[allow(clippy::cast_possible_truncation)] // data_len validated < max_snapshot_bytes()
 pub fn load_from_path(
     path: impl AsRef<Path>,
     plugins: Option<&PluginManager>,
@@ -1037,10 +1053,12 @@ pub fn load_from_path(
     // Read data length and validate before allocation
     let data_len = read_u64_le(&mut reader)?;
     bytes_consumed += 8;
-    if data_len > MAX_SNAPSHOT_BYTES {
-        return Err(PersistenceError::ValidationFailed(
-            "data section too large".to_string(),
-        ));
+    let max_data_bytes = max_snapshot_bytes();
+    if data_len > max_data_bytes {
+        return Err(PersistenceError::ValidationFailed(format!(
+            "data section too large: {data_len} bytes exceeds limit ({max_data_bytes} bytes); \
+             increase SQRY_MAX_SNAPSHOT_BYTES to load this snapshot",
+        )));
     }
     let remaining = file_len.saturating_sub(bytes_consumed);
     if data_len > remaining {
@@ -1811,7 +1829,7 @@ mod tests {
         let path = temp_file.path();
 
         #[allow(clippy::cast_possible_truncation)]
-        // Snapshot data lengths validated < MAX_SNAPSHOT_BYTES (2 GB)
+        // Snapshot data lengths validated < max_snapshot_bytes()
         // Write magic, then a header_len that exceeds MAX_HEADER_BYTES (1 MB)
         let declared_header_len: u32 = (MAX_HEADER_BYTES as u32) + 1;
         let mut file = File::create(path).unwrap();
@@ -1846,8 +1864,10 @@ mod tests {
         let header = GraphHeader::new(0, 0, 0, 0);
         let header_bytes = postcard::to_allocvec(&header).unwrap();
 
-        // Write the framed format with a data_len exceeding MAX_SNAPSHOT_BYTES (2 GB)
-        let declared_data_len: u64 = MAX_SNAPSHOT_BYTES + 1;
+        // Write the framed format with a data_len exceeding the active
+        // snapshot byte limit. Adding 1 is safe because the runtime clamp
+        // guarantees `max_snapshot_bytes() <= MAX_MAX_SNAPSHOT_BYTES < u64::MAX`.
+        let declared_data_len: u64 = max_snapshot_bytes() + 1;
         let mut file = File::create(path).unwrap();
         file.write_all(MAGIC_BYTES).unwrap();
         file.write_all(
@@ -1872,6 +1892,26 @@ mod tests {
             }
             other => panic!("Expected ValidationFailed, got: {other:?}"),
         }
+    }
+
+    /// Regression guard for the v8.0.0 Linux-kernel indexing failure:
+    /// `sqry index` on the Linux kernel raised "data section too large to
+    /// save" because the default limit had been reduced to 2 GB in the
+    /// bincode → postcard migration. This test pins the active default to
+    /// at least 8 GB (the pre-regression bincode-era value) so any future
+    /// reduction below that threshold fails loudly.
+    #[test]
+    #[serial_test::serial]
+    fn test_default_max_snapshot_bytes_supports_linux_kernel() {
+        unsafe {
+            std::env::remove_var("SQRY_MAX_SNAPSHOT_BYTES");
+        }
+        assert!(
+            max_snapshot_bytes() >= 8 * 1024 * 1024 * 1024,
+            "default snapshot limit must be >= 8 GB to support Linux-kernel-class repos; \
+             got {} bytes",
+            max_snapshot_bytes()
+        );
     }
 
     #[test]

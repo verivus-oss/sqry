@@ -455,6 +455,73 @@ pub fn json_max_nodes() -> u32 {
     count.clamp(MIN_JSON_MAX_NODES, MAX_JSON_MAX_NODES)
 }
 
+// ─── Graph Snapshot Size Limit ───────────────────────────────────────────────
+
+/// Default maximum graph snapshot data section size (16 GB).
+///
+/// Sized to comfortably hold the serialized graph for the largest realistic
+/// codebases — including the Linux kernel (~30M LoC / ~80K files, ~7–8 GB of
+/// serialized graph data) and similar mega-repos such as Chromium and AOSP —
+/// with significant headroom for future growth.
+///
+/// Override via the `SQRY_MAX_SNAPSHOT_BYTES` environment variable. Values are
+/// clamped between 1 GB and 64 GB for safety.
+///
+/// # History
+///
+/// This limit was 8 GB in the bincode era. The bincode → postcard migration
+/// (`f7ddb4704`) temporarily lowered it to 2 GB under the mistaken assumption
+/// that no production snapshot would exceed that bound. The Linux kernel
+/// indexing regression that followed is tracked in the
+/// [Unreleased] CHANGELOG entry that restored this constant to 16 GB.
+pub const DEFAULT_MAX_SNAPSHOT_BYTES: u64 = 16 * 1024 * 1024 * 1024;
+
+// Safety bounds for snapshot size (DoS prevention + practical load capacity)
+const MIN_MAX_SNAPSHOT_BYTES: u64 = 1024 * 1024 * 1024; // 1 GB minimum
+const MAX_MAX_SNAPSHOT_BYTES: u64 = 64 * 1024 * 1024 * 1024; // 64 GB maximum
+
+/// Get the maximum graph snapshot data section size, respecting environment
+/// variable overrides.
+///
+/// # Environment
+///
+/// Reads from `SQRY_MAX_SNAPSHOT_BYTES` environment variable.
+/// If not set or invalid, returns [`DEFAULT_MAX_SNAPSHOT_BYTES`].
+/// Values are clamped between 1 GB and 64 GB for safety.
+///
+/// # Use Cases
+///
+/// - **Default (16 GB)**: handles the Linux kernel, Chromium, AOSP, and
+///   similar mega-repositories.
+/// - **Lower (1–8 GB)**: memory-constrained environments such as CI runners
+///   or containers where large snapshots should be rejected pre-allocation.
+/// - **Higher (up to 64 GB)**: extraordinarily large monorepos.
+///
+/// # `DoS` Prevention
+///
+/// This bound guards the allocation of the buffer that holds a loaded
+/// snapshot's serialized data. It is symmetrically enforced on save to
+/// avoid producing files that cannot subsequently be loaded on the same
+/// configuration.
+///
+/// # Examples
+///
+/// ```
+/// use sqry_core::config::buffers::max_snapshot_bytes;
+///
+/// let max = max_snapshot_bytes();
+/// assert!(max >= 1024 * 1024 * 1024); // At least 1 GB
+/// assert!(max <= 64 * 1024 * 1024 * 1024); // At most 64 GB
+/// ```
+#[must_use]
+pub fn max_snapshot_bytes() -> u64 {
+    let size = std::env::var("SQRY_MAX_SNAPSHOT_BYTES")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_MAX_SNAPSHOT_BYTES);
+    size.clamp(MIN_MAX_SNAPSHOT_BYTES, MAX_MAX_SNAPSHOT_BYTES)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1065,4 +1132,74 @@ mod tests {
             std::env::remove_var("SQRY_JSON_MAX_NODES");
         }
     }
+
+    // ─── max_snapshot_bytes tests ─────────────────────────────────────────
+
+    #[test]
+    #[serial]
+    fn test_default_max_snapshot_bytes() {
+        unsafe {
+            std::env::remove_var("SQRY_MAX_SNAPSHOT_BYTES");
+        }
+        assert_eq!(max_snapshot_bytes(), DEFAULT_MAX_SNAPSHOT_BYTES);
+    }
+
+    #[test]
+    #[serial]
+    fn test_env_override_max_snapshot_bytes() {
+        let eight_gb: u64 = 8 * 1024 * 1024 * 1024;
+        unsafe {
+            std::env::set_var("SQRY_MAX_SNAPSHOT_BYTES", eight_gb.to_string());
+        }
+        assert_eq!(max_snapshot_bytes(), eight_gb);
+        unsafe {
+            std::env::remove_var("SQRY_MAX_SNAPSHOT_BYTES");
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_max_snapshot_bytes_clamping() {
+        // Below minimum (256 MB) → clamped up to 1 GB
+        unsafe {
+            std::env::set_var("SQRY_MAX_SNAPSHOT_BYTES", "268435456");
+        }
+        assert_eq!(max_snapshot_bytes(), MIN_MAX_SNAPSHOT_BYTES);
+
+        // Above maximum (128 GB) → clamped down to 64 GB
+        let huge: u64 = 128 * 1024 * 1024 * 1024;
+        unsafe {
+            std::env::set_var("SQRY_MAX_SNAPSHOT_BYTES", huge.to_string());
+        }
+        assert_eq!(max_snapshot_bytes(), MAX_MAX_SNAPSHOT_BYTES);
+
+        unsafe {
+            std::env::remove_var("SQRY_MAX_SNAPSHOT_BYTES");
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_max_snapshot_bytes_invalid_env() {
+        unsafe {
+            std::env::set_var("SQRY_MAX_SNAPSHOT_BYTES", "not_a_number");
+        }
+        assert_eq!(max_snapshot_bytes(), DEFAULT_MAX_SNAPSHOT_BYTES);
+        unsafe {
+            std::env::remove_var("SQRY_MAX_SNAPSHOT_BYTES");
+        }
+    }
+
+    // Regression guard (compile-time): the default must be large enough to
+    // hold the serialized Linux kernel graph (~7–8 GB) with headroom.
+    // Reducing this default would re-introduce the v8.0.0 Linux-kernel
+    // regression fixed by restoring the limit above the bincode-era 8 GB.
+    const _: () = assert!(
+        DEFAULT_MAX_SNAPSHOT_BYTES == 16 * 1024 * 1024 * 1024,
+        "DEFAULT_MAX_SNAPSHOT_BYTES must be 16 GB"
+    );
+    const _: () = assert!(
+        DEFAULT_MAX_SNAPSHOT_BYTES >= 8 * 1024 * 1024 * 1024,
+        "DEFAULT_MAX_SNAPSHOT_BYTES must be at least 8 GB to index Linux-kernel-class repos"
+    );
 }

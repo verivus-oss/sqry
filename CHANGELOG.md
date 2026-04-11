@@ -8,10 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `SQRY_MAX_SNAPSHOT_BYTES` environment variable to override the graph snapshot data section size limit. Values are clamped between 1 GB and 64 GB. The documentation previously referenced this variable but it was not wired to any runtime code path.
 
 ### Changed
+- Default maximum graph snapshot data section size raised from 2 GB to 16 GB in `sqry-core/src/config/buffers.rs` so `sqry index` can persist Linux-kernel-class mega-repos without hitting the save-time size guard. A compile-time assertion now pins this default at ≥ 8 GB so future reductions below the bincode-era floor fail loudly.
+- Snapshot size-guard error messages now include the actual serialized size, the active limit, and a hint to raise `SQRY_MAX_SNAPSHOT_BYTES` on both the save and load paths.
 
 ### Fixed
+- `sqry index --force .` on the Linux kernel (and other ≥ 2 GB graphs) no longer fails with `Failed to save snapshot to ./.sqry/graph/snapshot.sqry: Validation failed: data section too large to save`. Root cause: the bincode → postcard migration (commit `f7ddb4704`) lowered `MAX_SNAPSHOT_BYTES` from 8 GB to 2 GB under the assumption that no production snapshot would exceed that bound, and the subsequent post-implementation review (commit `1b62bc12a`) added a symmetrical save-side guard that rejected any graph whose postcard-serialized form exceeded 2 GB. Moving the limit into `config::buffers::max_snapshot_bytes()` with a 16 GB default and env-var override restores and extends the pre-regression behavior.
 
 ## [7.2.0] - 2026-04-06
 
