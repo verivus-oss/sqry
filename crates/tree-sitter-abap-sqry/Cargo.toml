@@ -9,7 +9,7 @@ include = ["src/", "grammar-src/", "build.rs", "Cargo.toml"]
 
 [dependencies]
 tree-sitter.workspace = true
-sqry-tree-sitter-support = { version = "8.0.5", path = "../../sqry-tree-sitter-support" }
+sqry-tree-sitter-support = { version = "8.0.6", path = "../../sqry-tree-sitter-support" }
 
 [build-dependencies]
 cc = "1"
