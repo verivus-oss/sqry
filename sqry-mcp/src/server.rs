@@ -40,6 +40,7 @@ use rmcp::{
 use serde::Serialize;
 use serde_json::json;
 use sqry_mcp_redaction::{RedactionConfig, Redactor};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::task::spawn_blocking;
@@ -154,6 +155,17 @@ impl SqryServer {
         }
     }
 
+    fn redactor_for_workspace(
+        redactor: &Arc<Redactor>,
+        workspace_root: Option<&Path>,
+    ) -> Option<Redactor> {
+        let mut config = redactor.config().clone();
+        if let Some(workspace_root) = workspace_root {
+            config.workspace_root = Some(workspace_root.to_path_buf());
+        }
+        Redactor::new(config).ok()
+    }
+
     /// Build a tool router filtered by the active feature flags.
     fn filtered_tool_router(feature_flags: &FeatureFlags) -> ToolRouter<Self> {
         let mut router = Self::tool_router();
@@ -197,15 +209,6 @@ impl SqryServer {
 
     /// Execute a tool function with the default timeout and tracing.
     /// Returns the full `ToolExecution` response including metadata (`execution_ms`, pagination, etc.)
-    async fn execute_tool<F, T>(&self, tool_name: &str, f: F) -> Result<serde_json::Value, McpError>
-    where
-        F: FnOnce() -> anyhow::Result<ToolExecution<T>> + Send + 'static,
-        T: Serialize + Send + 'static,
-    {
-        self.execute_tool_with_timeout(tool_name, self.timeout_ms, f)
-            .await
-    }
-
     /// Resolve request workspace before entering `spawn_blocking`.
     async fn execute_tool_for_request<P, F, T>(
         &self,
@@ -232,9 +235,18 @@ impl SqryServer {
             "Resolved session-scoped workspace"
         );
 
-        self.execute_tool(tool_name, move || {
-            workspace_session::with_workspace_override(Some(resolved_workspace.workspace_root()), f)
-        })
+        let workspace_root = resolved_workspace.workspace_root().to_path_buf();
+        self.execute_tool_with_timeout(
+            tool_name,
+            self.timeout_ms,
+            Some(workspace_root),
+            move || {
+                workspace_session::with_workspace_override(
+                    Some(resolved_workspace.workspace_root()),
+                    f,
+                )
+            },
+        )
         .await
     }
 
@@ -265,7 +277,8 @@ impl SqryServer {
             "Resolved session-scoped workspace"
         );
 
-        self.execute_tool_with_timeout(tool_name, timeout_ms, move || {
+        let workspace_root = resolved_workspace.workspace_root().to_path_buf();
+        self.execute_tool_with_timeout(tool_name, timeout_ms, Some(workspace_root), move || {
             workspace_session::with_workspace_override(Some(resolved_workspace.workspace_root()), f)
         })
         .await
@@ -279,6 +292,7 @@ impl SqryServer {
         &self,
         tool_name: &str,
         timeout_ms: u64,
+        redaction_workspace_root: Option<PathBuf>,
         f: F,
     ) -> Result<serde_json::Value, McpError>
     where
@@ -290,13 +304,17 @@ impl SqryServer {
         let tool_name_owned = tool_name.to_string();
         let retry_delay_ms = self.retry_delay_ms;
         let redactor_clone = self.redactor.clone();
+        let redaction_workspace_root = redaction_workspace_root.clone();
 
         async move {
             let result = timeout(timeout_duration, spawn_blocking(f)).await;
+            let workspace_scoped_redactor = redactor_clone.as_ref().and_then(|redactor| {
+                Self::redactor_for_workspace(redactor, redaction_workspace_root.as_deref())
+            });
 
             // Helper: redact an error message string if redactor is active
             let redact_error = |msg: String| -> String {
-                if let Some(ref redactor) = redactor_clone {
+                if let Some(ref redactor) = workspace_scoped_redactor {
                     let mut val = serde_json::Value::String(msg);
                     redactor.redact(&mut val);
                     match val {
@@ -315,7 +333,7 @@ impl SqryServer {
                     let mut response = Self::build_response(execution)?;
 
                     // Apply redaction if configured (none preset = no redactor = skip)
-                    if let Some(ref redactor) = redactor_clone {
+                    if let Some(ref redactor) = workspace_scoped_redactor {
                         redactor.redact(&mut response);
                     }
 

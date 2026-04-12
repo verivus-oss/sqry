@@ -160,6 +160,43 @@ pub fn orchestrate(value: i32) -> internal::Widget {
     Ok((temp_dir, client))
 }
 
+fn create_suffix_fixture_client_with_redaction(
+    redaction_preset: &str,
+) -> Result<(TempDir, McpTestClient)> {
+    let temp_dir = TempDir::new()?;
+    let src_dir = temp_dir.path().join("src");
+    std::fs::create_dir_all(&src_dir)?;
+    std::fs::write(
+        src_dir.join("lib.rs"),
+        r#"
+pub fn orchestrate(value: i32) -> i32 {
+    value + 1
+}
+"#,
+    )?;
+
+    let plugins = sqry_plugin_registry::create_plugin_manager();
+    let config = sqry_core::graph::unified::build::BuildConfig::default();
+    let (_graph, _build_result) = sqry_core::graph::unified::build::build_and_persist_graph(
+        temp_dir.path(),
+        &plugins,
+        &config,
+        "test:redaction-fixture",
+    )?;
+
+    let client = McpTestClient::new_with_env_initialized(&[
+        (
+            "SQRY_MCP_WORKSPACE_ROOT".to_string(),
+            temp_dir.path().to_string_lossy().into_owned(),
+        ),
+        (
+            "SQRY_REDACTION_PRESET".to_string(),
+            redaction_preset.to_string(),
+        ),
+    ])?;
+    Ok((temp_dir, client))
+}
+
 /// Test 1: Semantic search for `GraphBuilder` implementations
 #[test]
 fn test_e2e_semantic_search_graph_builders() -> Result<()> {
@@ -242,6 +279,45 @@ fn test_e2e_document_symbols() -> Result<()> {
         return Ok(());
     };
     assert!(!text.is_empty(), "Should return symbol list content");
+
+    Ok(())
+}
+
+/// Test: minimal redaction keeps workspace-relative file paths usable for MCP clients.
+#[test]
+fn test_e2e_minimal_redaction_preserves_workspace_relative_list_files_paths() -> Result<()> {
+    let (_temp_dir, mut client) = create_suffix_fixture_client_with_redaction("minimal")?;
+
+    let response = client.call(
+        "tools/call",
+        json!({
+            "name": "list_files",
+            "arguments": {
+                "max_results": 10
+            }
+        }),
+        1021,
+    )?;
+
+    let text = require_successful_text(validate_and_extract_response(&response)?, "list_files")?;
+    let json: Value = serde_json::from_str(&text)?;
+    let files = json["data"]["files"]
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("Expected files array in response: {json}"))?;
+
+    assert!(
+        !files.is_empty(),
+        "Expected at least one file in list_files response: {json}"
+    );
+
+    let file_path = files[0]["path"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("Expected string path in first file entry: {json}"))?;
+
+    assert_eq!(
+        file_path, "src/lib.rs",
+        "Minimal redaction should preserve workspace-relative file paths for MCP clients"
+    );
 
     Ok(())
 }

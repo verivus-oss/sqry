@@ -1,6 +1,6 @@
 # sqry VS Code Extension - User Guide
 
-**Version**: 8.0.6
+**Version**: 8.0.7
 **Last Updated**: 2026-04-12
 
 ---
@@ -56,7 +56,7 @@ cargo install --path sqry-cli
 
 # Verify installation
 sqry --version
-# Should output: sqry 8.0.6 (or later)
+# Should output: sqry 8.0.7 (or later)
 ```
 
 ### Option 1: Install from VSIX
@@ -111,6 +111,26 @@ code .
 
 # Press F5 to launch Extension Development Host
 ```
+
+### Auto-Download Release Contract
+
+The extension's auto-download path is intentionally strict in normal
+production use:
+
+- it downloads only from `https://github.com/verivus-oss/sqry/releases`
+- it verifies the published checksum
+- it verifies the Sigstore/Cosign attestation bundle and workflow identity
+
+For marketplace/Open VSX installs, the requested `binaryVersion` must already
+exist as a public GitHub release. If the exact release has not been published
+yet, auto-download will fail closed rather than silently pulling an arbitrary
+binary.
+
+For Extension Development Host / test runs launched from source, the downloader
+may fall back to the latest published patch release in the same `major.minor`
+line when the exact requested patch version is not yet public. This is only a
+development convenience so local extension testing can continue while the public
+release is still catching up.
 
 ---
 
@@ -814,5 +834,5 @@ This build installs locally via VSIX while we prepare the Marketplace release—
 ---
 
 **Last Updated**: 2026-04-12
-**Extension Version**: 8.0.6
-**sqry Version**: 8.0.6+
+**Extension Version**: 8.0.7
+**sqry Version**: 8.0.7+

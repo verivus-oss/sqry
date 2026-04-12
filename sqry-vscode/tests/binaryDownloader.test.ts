@@ -10,6 +10,11 @@ const proxyquire = require("proxyquire").noCallThru();
 // Minimal vscode stub for modules that import vscode
 const vscodeStub = {
   __esModule: true,
+  ExtensionMode: {
+    Production: 1,
+    Development: 2,
+    Test: 3,
+  },
   workspace: {
     getConfiguration: (section: string) => ({
       get: (_key: string, fallback: unknown) => fallback,
@@ -50,6 +55,91 @@ describe("binaryDownloader", () => {
         "release-artifacts.attestation.json",
         "sqry-linux-x86_64.bundle",
       ]);
+    });
+  });
+
+  describe("download version candidates", () => {
+    it("keeps production exact-match behavior", () => {
+      const mod = loadModule();
+      expect(mod.getDownloadVersionCandidates("8.0.6", vscodeStub.ExtensionMode.Production)).to.deep.equal([
+        "8.0.6",
+      ]);
+    });
+
+    it("falls back through lower patch versions in development mode", () => {
+      const mod = loadModule();
+      expect(mod.getDownloadVersionCandidates("8.0.2", vscodeStub.ExtensionMode.Development)).to.deep.equal([
+        "8.0.2",
+        "8.0.1",
+        "8.0.0",
+      ]);
+    });
+
+    it("keeps the raw version when it cannot derive patch fallbacks", () => {
+      const mod = loadModule();
+      expect(mod.getDownloadVersionCandidates("8.0.6-dev", vscodeStub.ExtensionMode.Development)).to.deep.equal([
+        "8.0.6-dev",
+      ]);
+    });
+  });
+
+  describe("sigstore verifier options", () => {
+    it("builds a persistent tuf cache path and raised timeout", () => {
+      const mod = loadModule();
+      expect(mod.buildSigstoreVerifyOptions({ fsPath: "/tmp/sqry-storage" })).to.deep.equal({
+        timeout: 30000,
+        tufCachePath: "/tmp/sqry-storage/sigstore-tuf-cache",
+      });
+    });
+  });
+
+  describe("withTemporarySigstoreProxyEnv()", () => {
+    const proxyEnvKeys = ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"] as const;
+    const originalProxyEnv = new Map<string, string | undefined>();
+
+    beforeEach(() => {
+      for (const proxyEnvKey of proxyEnvKeys) {
+        originalProxyEnv.set(proxyEnvKey, process.env[proxyEnvKey]);
+        delete process.env[proxyEnvKey];
+      }
+    });
+
+    afterEach(() => {
+      for (const proxyEnvKey of proxyEnvKeys) {
+        const originalValue = originalProxyEnv.get(proxyEnvKey);
+        if (originalValue === undefined) {
+          delete process.env[proxyEnvKey];
+        } else {
+          process.env[proxyEnvKey] = originalValue;
+        }
+      }
+      originalProxyEnv.clear();
+    });
+
+    it("temporarily seeds proxy env vars when only the VS Code proxy is configured", async () => {
+      const mod = loadModule();
+      await mod.withTemporarySigstoreProxyEnv("http://proxy.internal:3128", async () => {
+        for (const proxyEnvKey of proxyEnvKeys) {
+          expect(process.env[proxyEnvKey]).to.equal("http://proxy.internal:3128");
+        }
+      });
+
+      for (const proxyEnvKey of proxyEnvKeys) {
+        expect(process.env[proxyEnvKey]).to.equal(undefined);
+      }
+    });
+
+    it("does not override an existing proxy env var", async () => {
+      const mod = loadModule();
+      process.env.HTTPS_PROXY = "http://existing.proxy:8080";
+
+      await mod.withTemporarySigstoreProxyEnv("http://proxy.internal:3128", async () => {
+        expect(process.env.HTTPS_PROXY).to.equal("http://existing.proxy:8080");
+        expect(process.env.HTTP_PROXY).to.equal("http://proxy.internal:3128");
+      });
+
+      expect(process.env.HTTPS_PROXY).to.equal("http://existing.proxy:8080");
+      expect(process.env.HTTP_PROXY).to.equal(undefined);
     });
   });
 
@@ -496,7 +586,7 @@ describe("binaryDownloader", () => {
       try {
         await mod.verifyCosignBundle(binaryPath, missingBundlePath, "8.0.2", {
           appendLine: () => {},
-        });
+        }, { fsPath: tmpDir });
         expect.fail("Expected missing bundle failure");
       } catch (error) {
         expect((error as Error).message).to.equal(

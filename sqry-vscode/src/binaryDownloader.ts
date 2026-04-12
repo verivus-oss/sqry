@@ -12,8 +12,12 @@ const CERT_IDENTITY_MAIN = "https://github.com/verivus-oss/sqry/.github/workflow
 const MAX_DOWNLOAD_SIZE = 200 * 1024 * 1024; // 200 MB
 const LOCK_STALE_MS = 10 * 60 * 1000; // 10 minutes
 const KEEP_VERSIONS = 2;
+const SIGSTORE_VERIFY_TIMEOUT_MS = 30_000;
+const SIGSTORE_TUF_CACHE_DIR = "sigstore-tuf-cache";
 const CHECKSUM_ASSET_NAMES = ["SHA256SUMS.txt", "CHECKSUMS.sha256"] as const;
 const ATTESTATION_BUNDLE_NAMES = ["release-artifacts.attestation.json"] as const;
+
+class ReleaseAssetUnavailableError extends Error {}
 
 export interface PlatformInfo {
   asset: string;
@@ -25,6 +29,7 @@ export interface VersionInfo {
   downloadedAt: string;
   platform: string;
   sha256: string;
+  requestedVersion?: string;
 }
 
 export function getChecksumAssetCandidates(): readonly string[] {
@@ -33,6 +38,75 @@ export function getChecksumAssetCandidates(): readonly string[] {
 
 export function getBundleAssetCandidates(assetName: string): string[] {
   return [...ATTESTATION_BUNDLE_NAMES, `${assetName}.bundle`];
+}
+
+function isDevelopmentLikeMode(extensionMode: vscode.ExtensionMode): boolean {
+  return extensionMode === vscode.ExtensionMode.Development || extensionMode === vscode.ExtensionMode.Test;
+}
+
+export function getDownloadVersionCandidates(
+  version: string,
+  extensionMode: vscode.ExtensionMode,
+): readonly string[] {
+  if (!isDevelopmentLikeMode(extensionMode)) {
+    return [version];
+  }
+
+  const versionMatch = /^(\d+)\.(\d+)\.(\d+)$/.exec(version);
+  if (!versionMatch) {
+    return [version];
+  }
+
+  const [, major, minor, patch] = versionMatch;
+  const maxPatch = Number.parseInt(patch, 10);
+  const candidates: string[] = [];
+  for (let currentPatch = maxPatch; currentPatch >= 0; currentPatch -= 1) {
+    candidates.push(`${major}.${minor}.${currentPatch}`);
+  }
+  return candidates;
+}
+
+function getConfiguredProxyUrl(): string | undefined {
+  const proxyUrl = vscode.workspace.getConfiguration("http").get<string>("proxy");
+  const trimmedProxyUrl = proxyUrl?.trim();
+  return trimmedProxyUrl ? trimmedProxyUrl : undefined;
+}
+
+export function buildSigstoreVerifyOptions(storageUri: vscode.Uri): {
+  timeout: number;
+  tufCachePath: string;
+} {
+  return {
+    timeout: SIGSTORE_VERIFY_TIMEOUT_MS,
+    tufCachePath: path.join(storageUri.fsPath, SIGSTORE_TUF_CACHE_DIR),
+  };
+}
+
+export async function withTemporarySigstoreProxyEnv<T>(
+  proxyUrl: string | undefined,
+  operation: () => Promise<T>,
+): Promise<T> {
+  if (!proxyUrl) {
+    return operation();
+  }
+
+  const proxyEnvKeys = ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"] as const;
+  const updatedKeys: Array<(typeof proxyEnvKeys)[number]> = [];
+
+  for (const proxyEnvKey of proxyEnvKeys) {
+    if (!process.env[proxyEnvKey]) {
+      process.env[proxyEnvKey] = proxyUrl;
+      updatedKeys.push(proxyEnvKey);
+    }
+  }
+
+  try {
+    return await operation();
+  } finally {
+    for (const proxyEnvKey of updatedKeys) {
+      delete process.env[proxyEnvKey];
+    }
+  }
 }
 
 /**
@@ -124,7 +198,7 @@ export async function downloadWithProgress(
       return;
     }
 
-    const proxyUrl = vscode.workspace.getConfiguration("http").get<string>("proxy");
+    const proxyUrl = getConfiguredProxyUrl();
 
     let requestOptions: https.RequestOptions = {
       hostname: parsed.hostname,
@@ -174,7 +248,7 @@ export async function downloadWithProgress(
 
       if (res.statusCode === 404) {
         res.resume();
-        reject(new Error("HTTP 404: Release asset not found"));
+        reject(new ReleaseAssetUnavailableError("HTTP 404: Release asset not found"));
         return;
       }
 
@@ -301,6 +375,7 @@ export async function verifyCosignBundle(
   bundlePath: string,
   version: string,
   outputChannel: vscode.OutputChannel,
+  storageUri: vscode.Uri,
 ): Promise<void> {
   // Check if insecure download is allowed (hidden setting)
   const allowInsecure = vscode.workspace.getConfiguration("sqry").get<boolean>("allowInsecureDownload", false);
@@ -323,14 +398,26 @@ export async function verifyCosignBundle(
     const bundleContent = JSON.parse(fs.readFileSync(bundlePath, "utf-8"));
     const binaryData = fs.readFileSync(binaryPath);
     const identityCandidates = getCertificateIdentityCandidates(version);
+    const proxyUrl = getConfiguredProxyUrl();
+    const verifyOptions = buildSigstoreVerifyOptions(storageUri);
+
+    fs.mkdirSync(verifyOptions.tufCachePath, { recursive: true });
+    outputChannel.appendLine(`[sqry] Using Sigstore TUF cache: ${verifyOptions.tufCachePath}`);
+    outputChannel.appendLine(`[sqry] Sigstore verification timeout: ${verifyOptions.timeout}ms`);
+    if (proxyUrl) {
+      outputChannel.appendLine("[sqry] Reusing VS Code http.proxy setting for Sigstore TUF fetches");
+    }
 
     await verifyCosignBundleWithIdentities(
       identityCandidates,
       outputChannel,
       async (certIdentity) => {
-        await sigstore.verify(bundleContent, binaryData, {
-          certificateIssuer: OIDC_ISSUER,
-          certificateIdentityURI: certIdentity,
+        await withTemporarySigstoreProxyEnv(proxyUrl, async () => {
+          await sigstore.verify(bundleContent, binaryData, {
+            ...verifyOptions,
+            certificateIssuer: OIDC_ISSUER,
+            certificateIdentityURI: certIdentity,
+          });
         });
       },
     );
@@ -386,6 +473,7 @@ async function downloadReleaseAsset(
   cancellationToken?: vscode.CancellationToken,
 ): Promise<string> {
   const failures: string[] = [];
+  let sawOnlyMissingAssets = true;
 
   for (const assetName of assetNames) {
     outputChannel.appendLine(`[sqry] Downloading ${description}: ${releaseBase}/${assetName}`);
@@ -401,13 +489,21 @@ async function downloadReleaseAsset(
       cleanupFile(destPath);
       const message = error instanceof Error ? error.message : String(error);
       failures.push(`${assetName}: ${message}`);
+      if (!(error instanceof ReleaseAssetUnavailableError)) {
+        sawOnlyMissingAssets = false;
+      }
     }
   }
 
-  throw new Error(
+  const errorMessage =
     `None of the expected ${description} assets were available. Tried: ${assetNames.join(", ")}. ` +
-    `Errors: ${failures.join(" | ")}`
-  );
+    `Errors: ${failures.join(" | ")}`;
+
+  if (sawOnlyMissingAssets) {
+    throw new ReleaseAssetUnavailableError(errorMessage);
+  }
+
+  throw new Error(errorMessage);
 }
 
 /**
@@ -417,23 +513,30 @@ async function downloadReleaseAsset(
 export async function findExistingBinary(
   storageUri: vscode.Uri,
   version: string,
+  extensionMode = vscode.ExtensionMode.Production,
 ): Promise<string | null> {
   const platformInfo = detectPlatform();
-  const binDir = path.join(storageUri.fsPath, "bin", `v${version}`);
-  const binaryPath = path.join(binDir, platformInfo.binaryName);
+  const versionCandidates = getDownloadVersionCandidates(version, extensionMode);
 
-  if (!fs.existsSync(binaryPath)) {
-    return null;
+  for (const candidateVersion of versionCandidates) {
+    const binDir = path.join(storageUri.fsPath, "bin", `v${candidateVersion}`);
+    const binaryPath = path.join(binDir, platformInfo.binaryName);
+
+    if (!fs.existsSync(binaryPath)) {
+      continue;
+    }
+
+    // Verify it's executable via preflight check
+    try {
+      const { execFileSync } = await import("node:child_process");
+      execFileSync(binaryPath, ["--version"], { timeout: 10000 });
+      return binaryPath;
+    } catch {
+      // Continue searching lower patch versions in development mode.
+    }
   }
 
-  // Verify it's executable via preflight check
-  try {
-    const { execFileSync } = await import("node:child_process");
-    execFileSync(binaryPath, ["--version"], { timeout: 10000 });
-    return binaryPath;
-  } catch {
-    return null;
-  }
+  return null;
 }
 
 /**
@@ -553,140 +656,174 @@ export async function downloadBinary(
   cancellationToken?: vscode.CancellationToken,
 ): Promise<string> {
   const storageUri = context.globalStorageUri;
-  const version = getBinaryVersion();
+  const requestedVersion = getBinaryVersion();
   const platformInfo = detectPlatform();
+  const versionCandidates = getDownloadVersionCandidates(requestedVersion, context.extensionMode);
 
   // Acquire lock
   if (!acquireLock(storageUri)) {
     throw new Error("Another VS Code window is already downloading sqry. Please wait.");
   }
 
-  const versionDir = path.join(storageUri.fsPath, "bin", `v${version}`);
-  const finalBinaryPath = path.join(versionDir, platformInfo.binaryName);
-  const tmpBinaryPath = `${finalBinaryPath}.tmp`;
-  const tmpBundlePath = path.join(versionDir, "attestation.tmp");
-  const tmpChecksumPath = path.join(versionDir, "checksums.tmp");
-
   try {
-    // Ensure directories exist
-    fs.mkdirSync(versionDir, { recursive: true });
+    let lastMissingAssetError: ReleaseAssetUnavailableError | null = null;
 
-    const releaseBase = `${GITHUB_RELEASE_BASE}/v${version}`;
+    for (const effectiveVersion of versionCandidates) {
+      const versionDir = path.join(storageUri.fsPath, "bin", `v${effectiveVersion}`);
+      const finalBinaryPath = path.join(versionDir, platformInfo.binaryName);
+      const tmpBinaryPath = `${finalBinaryPath}.tmp`;
+      const tmpBundlePath = path.join(versionDir, "attestation.tmp");
+      const tmpChecksumPath = path.join(versionDir, "checksums.tmp");
 
-    // Step 1: Download checksum manifest
-    const checksumAssetName = await downloadReleaseAsset(
-      releaseBase,
-      getChecksumAssetCandidates(),
-      tmpChecksumPath,
-      outputChannel,
-      "checksum manifest",
-      cancellationToken,
-    );
-    const checksumContent = fs.readFileSync(tmpChecksumPath, "utf-8");
-    cleanupFile(tmpChecksumPath);
-    outputChannel.appendLine(`[sqry] Parsed checksums from ${checksumAssetName}`);
+      try {
+        if (effectiveVersion !== requestedVersion) {
+          outputChannel.appendLine(
+            `[sqry] Requested binary v${requestedVersion} is not public yet; trying compatible dev fallback v${effectiveVersion}`,
+          );
+        }
 
-    // Step 2: Parse expected hash
-    const expectedHash = parseChecksumForAsset(checksumContent, platformInfo.asset);
-    outputChannel.appendLine(`[sqry] Expected SHA256 for ${platformInfo.asset}: ${expectedHash}`);
+        // Ensure directories exist
+        fs.mkdirSync(versionDir, { recursive: true });
 
-    // Step 3: Download binary with progress
-    outputChannel.appendLine(`[sqry] Downloading binary: ${platformInfo.asset}`);
-    await downloadWithProgress(
-      `${releaseBase}/${platformInfo.asset}`,
-      tmpBinaryPath,
-      (downloaded, total) => {
-        const pct = Math.round((downloaded / total) * 100);
-        outputChannel.appendLine(`[sqry] Download progress: ${pct}%`);
-      },
-      cancellationToken,
-    );
+        const releaseBase = `${GITHUB_RELEASE_BASE}/v${effectiveVersion}`;
 
-    // Step 4: Verify SHA256
-    outputChannel.appendLine("[sqry] Verifying SHA256 checksum...");
-    try {
-      await verifySha256(tmpBinaryPath, expectedHash);
-    } catch (err) {
-      cleanupFile(tmpBinaryPath);
-      throw err;
-    }
-    outputChannel.appendLine("[sqry] SHA256 checksum verified");
+        // Step 1: Download checksum manifest
+        const checksumAssetName = await downloadReleaseAsset(
+          releaseBase,
+          getChecksumAssetCandidates(),
+          tmpChecksumPath,
+          outputChannel,
+          "checksum manifest",
+          cancellationToken,
+        );
+        const checksumContent = fs.readFileSync(tmpChecksumPath, "utf-8");
+        cleanupFile(tmpChecksumPath);
+        outputChannel.appendLine(`[sqry] Parsed checksums from ${checksumAssetName}`);
 
-    // Step 5: Download attestation bundle
-    const bundleAssetName = await downloadReleaseAsset(
-      releaseBase,
-      getBundleAssetCandidates(platformInfo.asset),
-      tmpBundlePath,
-      outputChannel,
-      "attestation bundle",
-      cancellationToken,
-    );
-    const finalBundlePath = path.join(versionDir, bundleAssetName);
-    outputChannel.appendLine(`[sqry] Downloaded attestation bundle: ${bundleAssetName}`);
+        // Step 2: Parse expected hash
+        const expectedHash = parseChecksumForAsset(checksumContent, platformInfo.asset);
+        outputChannel.appendLine(`[sqry] Expected SHA256 for ${platformInfo.asset}: ${expectedHash}`);
 
-    // Step 6: Verify Cosign bundle (MANDATORY)
-    outputChannel.appendLine("[sqry] Verifying Cosign signature bundle...");
-    try {
-      await verifyCosignBundle(tmpBinaryPath, tmpBundlePath, version, outputChannel);
-    } catch (err) {
-      cleanupFile(tmpBinaryPath);
-      cleanupFile(tmpBundlePath);
-      throw err;
-    }
+        // Step 3: Download binary with progress
+        outputChannel.appendLine(`[sqry] Downloading binary: ${platformInfo.asset}`);
+        await downloadWithProgress(
+          `${releaseBase}/${platformInfo.asset}`,
+          tmpBinaryPath,
+          (downloaded, total) => {
+            const pct = Math.round((downloaded / total) * 100);
+            outputChannel.appendLine(`[sqry] Download progress: ${pct}%`);
+          },
+          cancellationToken,
+        );
 
-    // Step 7: Atomic rename to final paths
-    fs.renameSync(tmpBinaryPath, finalBinaryPath);
-    fs.renameSync(tmpBundlePath, finalBundlePath);
+        // Step 4: Verify SHA256
+        outputChannel.appendLine("[sqry] Verifying SHA256 checksum...");
+        try {
+          await verifySha256(tmpBinaryPath, expectedHash);
+        } catch (err) {
+          cleanupFile(tmpBinaryPath);
+          throw err;
+        }
+        outputChannel.appendLine("[sqry] SHA256 checksum verified");
 
-    // Step 8: Set executable permissions on unix
-    applyBinaryPermissions(finalBinaryPath);
+        // Step 5: Download attestation bundle
+        const bundleAssetName = await downloadReleaseAsset(
+          releaseBase,
+          getBundleAssetCandidates(platformInfo.asset),
+          tmpBundlePath,
+          outputChannel,
+          "attestation bundle",
+          cancellationToken,
+        );
+        const finalBundlePath = path.join(versionDir, bundleAssetName);
+        outputChannel.appendLine(`[sqry] Downloaded attestation bundle: ${bundleAssetName}`);
 
-    // Step 9: Preflight check
-    outputChannel.appendLine("[sqry] Running preflight check (sqry --version)...");
-    try {
-      const { execFileSync } = await import("node:child_process");
-      const versionOutput = execFileSync(finalBinaryPath, ["--version"], {
-        timeout: 10000,
-        encoding: "utf-8",
-      });
-      outputChannel.appendLine(`[sqry] Preflight OK: ${versionOutput.trim()}`);
-    } catch (preflightError) {
-      const preflightMessage = describePreflightError(preflightError);
-      outputChannel.appendLine(`[sqry] Preflight check failed (${preflightMessage}), attempting rollback...`);
+        // Step 6: Verify Cosign bundle (MANDATORY)
+        outputChannel.appendLine("[sqry] Verifying Cosign signature bundle...");
+        try {
+          await verifyCosignBundle(tmpBinaryPath, tmpBundlePath, effectiveVersion, outputChannel, storageUri);
+        } catch (err) {
+          cleanupFile(tmpBinaryPath);
+          cleanupFile(tmpBundlePath);
+          throw err;
+        }
 
-      const rollbackPath = await findRollbackBinary(storageUri, version);
-      if (rollbackPath) {
-        outputChannel.appendLine(`[sqry] Rolling back to: ${rollbackPath}`);
-        return rollbackPath;
+        // Step 7: Atomic rename to final paths
+        fs.renameSync(tmpBinaryPath, finalBinaryPath);
+        fs.renameSync(tmpBundlePath, finalBundlePath);
+
+        // Step 8: Set executable permissions on unix
+        applyBinaryPermissions(finalBinaryPath);
+
+        // Step 9: Preflight check
+        outputChannel.appendLine("[sqry] Running preflight check (sqry --version)...");
+        try {
+          const { execFileSync } = await import("node:child_process");
+          const versionOutput = execFileSync(finalBinaryPath, ["--version"], {
+            timeout: 10000,
+            encoding: "utf-8",
+          });
+          outputChannel.appendLine(`[sqry] Preflight OK: ${versionOutput.trim()}`);
+        } catch (preflightError) {
+          const preflightMessage = describePreflightError(preflightError);
+          outputChannel.appendLine(`[sqry] Preflight check failed (${preflightMessage}), attempting rollback...`);
+
+          const rollbackPath = await findRollbackBinary(storageUri, effectiveVersion);
+          if (rollbackPath) {
+            outputChannel.appendLine(`[sqry] Rolling back to: ${rollbackPath}`);
+            return rollbackPath;
+          }
+
+          throw new Error(
+            "Downloaded binary failed preflight check (sqry --version) and no previous version is available for rollback."
+          );
+        }
+
+        // Step 10: Write version.json
+        const versionInfo: VersionInfo = {
+          version: effectiveVersion,
+          downloadedAt: new Date().toISOString(),
+          platform: `${process.platform}-${process.arch}`,
+          sha256: expectedHash,
+          ...(effectiveVersion === requestedVersion ? {} : { requestedVersion }),
+        };
+        fs.writeFileSync(
+          path.join(storageUri.fsPath, "bin", "version.json"),
+          JSON.stringify(versionInfo, null, 2),
+        );
+
+        // Step 11: Cleanup old versions
+        cleanupOldVersions(storageUri, effectiveVersion);
+
+        outputChannel.appendLine(`[sqry] Binary installed successfully at ${finalBinaryPath}`);
+        return finalBinaryPath;
+      } catch (error) {
+        cleanupFile(tmpBinaryPath);
+        cleanupFile(tmpBundlePath);
+        cleanupFile(tmpChecksumPath);
+
+        if (error instanceof ReleaseAssetUnavailableError && effectiveVersion !== versionCandidates[versionCandidates.length - 1]) {
+          lastMissingAssetError = error;
+          outputChannel.appendLine(`[sqry] Release assets for v${effectiveVersion} are unavailable: ${error.message}`);
+          continue;
+        }
+
+        throw error;
       }
+    }
 
+    if (isDevelopmentLikeMode(context.extensionMode)) {
       throw new Error(
-        "Downloaded binary failed preflight check (sqry --version) and no previous version is available for rollback."
+        `No published sqry patch release is available for requested development version v${requestedVersion} in the same major.minor line. ` +
+        (lastMissingAssetError ? `Last error: ${lastMissingAssetError.message}` : "")
       );
     }
 
-    // Step 10: Write version.json
-    const versionInfo: VersionInfo = {
-      version,
-      downloadedAt: new Date().toISOString(),
-      platform: `${process.platform}-${process.arch}`,
-      sha256: expectedHash,
-    };
-    fs.writeFileSync(
-      path.join(storageUri.fsPath, "bin", "version.json"),
-      JSON.stringify(versionInfo, null, 2),
+    throw new Error(
+      `Public release assets for sqry v${requestedVersion} are not available. ` +
+      "Auto-download requires an exact published binaryVersion."
     );
-
-    // Step 11: Cleanup old versions
-    cleanupOldVersions(storageUri, version);
-
-    outputChannel.appendLine(`[sqry] Binary installed successfully at ${finalBinaryPath}`);
-    return finalBinaryPath;
   } catch (error) {
-    // Cleanup temp files on any failure
-    cleanupFile(tmpBinaryPath);
-    cleanupFile(tmpBundlePath);
-    cleanupFile(tmpChecksumPath);
     throw error;
   } finally {
     releaseLock(storageUri);

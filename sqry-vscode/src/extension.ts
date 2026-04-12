@@ -852,7 +852,7 @@ async function tryExistingDownload(
 ): Promise<boolean> {
   try {
     const version = getBinaryVersion();
-    const existing = await findExistingBinary(context.globalStorageUri, version);
+    const existing = await findExistingBinary(context.globalStorageUri, version, context.extensionMode);
     if (existing) {
       channel.appendLine(`[sqry] Found previously downloaded binary: ${existing}`);
       sqryClient.setDownloadedBinaryPath(existing);
