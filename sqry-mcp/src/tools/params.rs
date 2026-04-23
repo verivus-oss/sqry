@@ -747,6 +747,11 @@ pub struct DependencyImpactParams {
     #[serde(default = "default_path")]
     pub path: String,
 
+    /// Optional file path to disambiguate the symbol when multiple
+    /// definitions share the same name. Relative to workspace root.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_path: Option<String>,
+
     /// Maximum depth of transitive dependencies
     #[serde(default = "default_max_depth_3")]
     #[schemars(range(min = 1, max = 10))]
@@ -830,6 +835,38 @@ pub struct SqryAskParams {
 // NOTE: Validation is performed in validation.rs via validate_sqry_ask_args().
 // The SqryAskParams struct is kept for schema generation via schemars and
 // potential future rmcp SDK migration.
+
+// ============================================================================
+// Structural Query Tool (DB13 — planner)
+// ============================================================================
+
+/// `sqry_query` params.
+///
+/// Executes a structural query through the `sqry-db` planner (parse →
+/// compile → fuse → execute). The text syntax is documented in
+/// `docs/superpowers/specs/2026-04-12-derived-analysis-db-query-planner-design.md`
+/// (§3 — Text Syntax Frontend).
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[schemars(example = "json!({
+    \"query\": \"kind:function has:caller\",
+    \"path\": \".\",
+    \"limit\": 100
+})")]
+pub struct SqryQueryParams {
+    /// Text query in the planner syntax (e.g.
+    /// `"kind:function callers:main in:src/api/**"`).
+    pub query: String,
+
+    /// Workspace path. Defaults to the current directory if omitted.
+    #[serde(default = "default_path")]
+    pub path: String,
+
+    /// Maximum number of matching nodes to include in the response.
+    /// Defaults to 1000; larger values widen the response payload but do
+    /// not change execution cost on the server side.
+    #[serde(default)]
+    pub limit: Option<u64>,
+}
 
 // ============================================================================
 // Analysis Tool Parameter Types
@@ -956,6 +993,16 @@ pub struct FindDuplicatesParams {
     #[serde(default = "default_max_results_100")]
     #[schemars(range(min = 1, max = 1000))]
     pub max_results: i64,
+
+    /// Maximum number of member symbols to return per duplicate group (default 10).
+    ///
+    /// Groups with more members than this cap will have their `members_truncated`
+    /// field set to `true` and `total_members` will reflect the full pre-truncation
+    /// count. Set to `0` to return all members with no cap (pre-v9.1 behavior).
+    /// Valid range: `[0, 10000]`.
+    #[serde(default = "default_max_members_per_group")]
+    #[schemars(range(min = 0, max = 10000))]
+    pub max_members_per_group: i64,
 
     #[serde(default)]
     pub pagination: Option<PaginationParams>,
@@ -1142,6 +1189,10 @@ fn default_max_results_100() -> i64 {
     100
 }
 
+fn default_max_members_per_group() -> i64 {
+    10
+}
+
 fn default_min_depth() -> i64 {
     2
 }
@@ -1158,6 +1209,11 @@ pub struct IsNodeInCycleParams {
 
     #[serde(default = "default_path")]
     pub path: String,
+
+    /// Optional file path to disambiguate the symbol when multiple
+    /// definitions share the same name. Relative to workspace root.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_path: Option<String>,
 
     /// Type of cycles to check for
     #[serde(default)]
@@ -1772,6 +1828,7 @@ mod tests {
             min_depth: 2,
             max_depth: None,
             include_self_loops: false,
+            file_path: None,
         };
         assert!(params.validate().is_ok());
     }
@@ -1785,6 +1842,7 @@ mod tests {
             min_depth: 2,
             max_depth: None,
             include_self_loops: false,
+            file_path: None,
         };
         assert!(params.validate().is_err());
     }
@@ -1798,6 +1856,7 @@ mod tests {
             min_depth: 2,
             max_depth: None,
             include_self_loops: false,
+            file_path: None,
         };
         assert!(params.validate().is_err());
     }
@@ -1811,6 +1870,7 @@ mod tests {
             min_depth: 0,
             max_depth: None,
             include_self_loops: false,
+            file_path: None,
         };
         let err = params.validate().unwrap_err();
         assert!(err.message.contains("min_depth must be at least 1"));
@@ -1825,6 +1885,7 @@ mod tests {
             min_depth: 1,
             max_depth: Some(0),
             include_self_loops: false,
+            file_path: None,
         };
         let err = params.validate().unwrap_err();
         assert!(err.message.contains("max_depth must be at least 1"));
@@ -1839,6 +1900,7 @@ mod tests {
             min_depth: 5,
             max_depth: Some(3),
             include_self_loops: false,
+            file_path: None,
         };
         let err = params.validate().unwrap_err();
         assert!(err.message.contains("max_depth must be >= min_depth"));
@@ -1854,6 +1916,7 @@ mod tests {
             min_depth: 1,
             max_depth: None,
             include_self_loops: true,
+            file_path: None,
         };
         assert!(params.validate().is_ok());
 
@@ -1865,6 +1928,7 @@ mod tests {
             min_depth: 3,
             max_depth: Some(3),
             include_self_loops: false,
+            file_path: None,
         };
         assert!(params.validate().is_ok());
 
@@ -1876,6 +1940,7 @@ mod tests {
             min_depth: 2,
             max_depth: Some(10),
             include_self_loops: false,
+            file_path: None,
         };
         assert!(params.validate().is_ok());
     }

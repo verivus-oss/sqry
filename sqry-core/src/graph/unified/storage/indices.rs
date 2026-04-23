@@ -189,6 +189,149 @@ impl AuxiliaryIndices {
         index.retain(|_, v| !v.is_empty());
     }
 
+    /// Iterate every `NodeId` stored in any inner index.
+    ///
+    /// Used by the Gate 0b [`NodeIdBearing`] impl (A2 §K, rows
+    /// K.A4–K.A7) to audit for tombstone residue. A single `NodeId`
+    /// typically appears up to four times — once per inner index —
+    /// which is fine for the residue check's set-membership contract.
+    ///
+    /// Exposed at `pub(crate)` scope because only the rebuild pipeline
+    /// needs this cross-index enumeration; external callers use the
+    /// per-index `by_kind` / `by_name` / `by_qualified_name` /
+    /// `by_file` accessors.
+    ///
+    /// `#[allow(dead_code)]` is present because Gate 0b delivers only
+    /// scaffolding; the call site in `RebuildGraph::finalize()` lands
+    /// with Gate 0c. Unit coverage lives in
+    /// `sqry-core/src/graph/unified/rebuild/coverage.rs::tests`.
+    ///
+    /// [`NodeIdBearing`]: crate::graph::unified::rebuild::coverage::NodeIdBearing
+    #[allow(dead_code)]
+    pub(crate) fn iter_all_node_ids(&self) -> impl Iterator<Item = NodeId> + '_ {
+        self.kind_index
+            .values()
+            .flat_map(|v| v.iter().copied())
+            .chain(self.name_index.values().flat_map(|v| v.iter().copied()))
+            .chain(
+                self.qualified_name_index
+                    .values()
+                    .flat_map(|v| v.iter().copied()),
+            )
+            .chain(self.file_index.values().flat_map(|v| v.iter().copied()))
+    }
+
+    /// Rewrite every `StringId` that appears as a key in `name_index` or
+    /// `qualified_name_index` through `remap`, collapsing buckets whose
+    /// key canonicalises onto the same target. When two keys collide on
+    /// a single canonical target, their `Vec<NodeId>` values are merged
+    /// (concatenated), and the resulting vector is deduplicated (a
+    /// `NodeId` must not appear twice under the same key, since the
+    /// aggregate represents "nodes whose name is canonical-X"). The
+    /// `kind_index` and `file_index` are not keyed by `StringId` and are
+    /// untouched.
+    ///
+    /// Used by Gate 0c's `RebuildGraph::finalize()` step 1 after the
+    /// interner has been canonicalised. Without this pass, a bucket key
+    /// could reference a `StringId` slot that `recycle_unreferenced` is
+    /// about to free (§H line 735 / iter-2 B1).
+    ///
+    /// Empty `remap` is a no-op.
+    #[allow(dead_code)]
+    pub(crate) fn rewrite_string_ids_through_remap(
+        &mut self,
+        remap: &std::collections::HashMap<StringId, StringId>,
+    ) {
+        if remap.is_empty() {
+            return;
+        }
+        Self::remap_string_keyed_index(&mut self.name_index, remap);
+        Self::remap_string_keyed_index(&mut self.qualified_name_index, remap);
+    }
+
+    /// Helper: collapse a `BTreeMap<StringId, Vec<NodeId>>` through `remap`.
+    ///
+    /// Every key that appears in `remap` is rewritten to its canonical
+    /// form; if that canonical form already had a bucket, the two
+    /// `Vec<NodeId>`s are concatenated and deduplicated (preserving first
+    /// occurrence). The output preserves BTreeMap ordering.
+    fn remap_string_keyed_index(
+        index: &mut BTreeMap<StringId, Vec<NodeId>>,
+        remap: &std::collections::HashMap<StringId, StringId>,
+    ) {
+        // Collect keys that will move. We cannot mutate during iteration.
+        let movers: Vec<StringId> = index
+            .keys()
+            .copied()
+            .filter(|k| remap.contains_key(k))
+            .collect();
+        if movers.is_empty() {
+            return;
+        }
+        for old_key in movers {
+            let canon_key = *remap.get(&old_key).expect("key present in remap");
+            // Remove the old bucket entirely.
+            let Some(old_bucket) = index.remove(&old_key) else {
+                continue;
+            };
+            // Merge into the canonical bucket (creating if absent), then
+            // deduplicate while preserving first-seen order.
+            let canon_bucket = index.entry(canon_key).or_default();
+            canon_bucket.extend(old_bucket);
+            // Dedup in-place: HashSet-backed linear scan keeps stable order.
+            let mut seen: std::collections::HashSet<NodeId> =
+                std::collections::HashSet::with_capacity(canon_bucket.len());
+            canon_bucket.retain(|id| seen.insert(*id));
+        }
+        // Drop any buckets that collapsed to empty (shouldn't happen, but
+        // keep the serialization-stable empty-bucket invariant).
+        Self::retain_non_empty(index);
+    }
+
+    /// Remove every `NodeId` failing `keep` from every inner index, and
+    /// drop the `node_count` bookkeeping down to the number of
+    /// survivors in the kind index (the canonical per-node tally).
+    ///
+    /// Used by the Gate 0b [`NodeIdBearing`] impl to drop tombstoned
+    /// NodeIds uniformly across all four inner indices during
+    /// `RebuildGraph::finalize()`.
+    ///
+    /// `#[allow(dead_code)]` is present because Gate 0b delivers only
+    /// scaffolding; the call site lands with Gate 0c.
+    ///
+    /// [`NodeIdBearing`]: crate::graph::unified::rebuild::coverage::NodeIdBearing
+    #[allow(dead_code)]
+    pub(crate) fn retain_node_ids<F>(&mut self, keep: &F)
+    where
+        F: Fn(NodeId) -> bool + ?Sized,
+    {
+        for v in self.kind_index.values_mut() {
+            v.retain(|&id| keep(id));
+        }
+        Self::retain_non_empty(&mut self.kind_index);
+
+        for v in self.name_index.values_mut() {
+            v.retain(|&id| keep(id));
+        }
+        Self::retain_non_empty(&mut self.name_index);
+
+        for v in self.qualified_name_index.values_mut() {
+            v.retain(|&id| keep(id));
+        }
+        Self::retain_non_empty(&mut self.qualified_name_index);
+
+        for v in self.file_index.values_mut() {
+            v.retain(|&id| keep(id));
+        }
+        Self::retain_non_empty(&mut self.file_index);
+
+        // `node_count` is the canonical count-of-distinct-NodeIds, which
+        // equals the total size of the kind index (a node is registered
+        // in exactly one kind bucket). Recompute from that single source
+        // of truth rather than trying to track increments inline.
+        self.node_count = self.kind_index.values().map(Vec::len).sum();
+    }
+
     /// Removes a node from all indices.
     ///
     /// # Arguments
@@ -412,6 +555,24 @@ impl AuxiliaryIndices {
     /// keys are sorted by their `Ord` implementation. This guarantees bit-for-bit
     /// deterministic serialization.
     ///
+    /// # Unified-away losers
+    ///
+    /// Cross-file node unification (Phase 4c-prime) merges duplicate nodes
+    /// that share a qualified name; the loser keeps its arena slot
+    /// `Occupied` (so `NodeArena::slot_count()` stays stable for CSR
+    /// persistence) but its metadata is folded into the winner and its
+    /// `name` / `qualified_name` are cleared to `StringId::INVALID` / `None`
+    /// by [`crate::graph::unified::build::unification::merge_node_into`].
+    /// This routine treats a slot whose `name == StringId::INVALID` as
+    /// inert for **every** `AuxiliaryIndices` bucket (name, qualified
+    /// name, kind, and file) — publish-visible name resolution through
+    /// `by_name` / `by_qualified_name` and kind / file enumeration via
+    /// `by_kind` / `by_file` must not surface unified-away duplicates
+    /// (see Gate 0d iter-1 blocker: "Merged losers can still surface as
+    /// duplicate/ambiguous published symbol results after cross-file
+    /// unification"). The per-file bucket in `FileRegistry` still
+    /// references the loser so the §F.1 bucket bijection holds.
+    ///
     /// # Arguments
     ///
     /// * `arena` - The node arena to rebuild indices from.
@@ -419,6 +580,14 @@ impl AuxiliaryIndices {
         self.clear();
 
         for (id, entry) in arena.iter() {
+            if entry.name == StringId::INVALID {
+                // Unified-away loser (Phase 4c-prime). The slot is kept
+                // occupied for CSR row_ptr sizing, but it contributes to
+                // no publish-visible auxiliary lookups. `FileRegistry`
+                // continues to reference the slot so the §F.1 bucket
+                // bijection holds.
+                continue;
+            }
             self.kind_index.entry(entry.kind).or_default().push(id);
             self.name_index.entry(entry.name).or_default().push(id);
             if let Some(qn) = entry.qualified_name {

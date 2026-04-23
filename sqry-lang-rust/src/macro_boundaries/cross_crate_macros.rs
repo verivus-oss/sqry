@@ -69,6 +69,11 @@ pub fn resolve_cross_crate_macros(
     let rust_file_set: std::collections::HashSet<FileId> = rust_file_ids.iter().copied().collect();
 
     for (node_id, entry) in snapshot.nodes().iter() {
+        // Gate 0d iter-2 fix: skip unified losers from cross-crate
+        // macro resolution. See `NodeEntry::is_unified_loser`.
+        if entry.is_unified_loser() {
+            continue;
+        }
         // Only process CallSite nodes in Rust files.
         if entry.kind != NodeKind::CallSite {
             continue;

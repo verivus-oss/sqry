@@ -25,6 +25,7 @@ use crate::tools::TracePathArgs;
 
 use crate::execution::graph_builders::build_graph_metadata;
 use crate::execution::graph_cache::{self, CacheOutcome};
+use crate::execution::location::node_location_for_reporting_snapshot;
 use crate::execution::types::{
     CacheRequestContext, CallPath, NodeRefData, PathStep, PositionData, RangeData, ToolExecution,
     TracePathData,
@@ -43,7 +44,54 @@ fn resolve_workspace_path(path: &str) -> Option<PathBuf> {
         Some(PathBuf::from(path))
     }
 }
+
+/// Execute the `trace_path` MCP tool (`direction` NodeId-anchored).
+///
+/// # Dispatch path (DB17)
+///
+/// `trace_path` is classified as **NodeId-anchored** under the Phase 3C
+/// dispatch taxonomy (`ART:mcp-dispatch-taxonomy`): the user supplies
+/// `from_symbol` + `to_symbol`, both resolved up front via
+/// [`sqry_core::graph::unified::materialize::find_nodes_by_name`] in
+/// [`resolve_trace_nodes`], and the subsequent K-shortest-paths search
+/// enumerates concrete `NodeId` endpoints — it does not re-dispatch by
+/// name. No sqry-db routing: this is a two-endpoint graph-primitive walk,
+/// not a predicate.
+///
+/// # Frontier invariant
+///
+/// Paths are enumerated in [`find_k_shortest_paths_unified`] from a single
+/// `from` seed at a time (one call per `(from_node, to_node)` cross
+/// product entry). Expansion uses only `snapshot.edges().edges_from(current)`
+/// via [`explore_edges`], and the visited-path dedup (`path.contains(&next)`)
+/// is keyed on `NodeId` — there is no simple-name broadening step that
+/// could pull unrelated same-named helpers into the frontier. Two
+/// unrelated `foo` helpers will each produce their own independent
+/// K-shortest-paths set; `trace_path` from `bar::foo` to `baz` will never
+/// cut through `other::foo`. The DB15 follow-up multi-hop frontier bug
+/// (where a stripped-name dispatch leaked unrelated same-named chains
+/// into the BFS) cannot manifest here.
+///
+/// # Condensation fast-path
+///
+/// [`find_paths_with_condensation`] optionally uses a cached
+/// [`sqry_core::graph::unified::analysis::SccData`] + `CondensationDag`
+/// loaded from disk via `try_load_scc_and_condensation`. That load path
+/// is independent of sqry-db today; a future DB20/DB21 pass may flip it
+/// to `SccQuery` dispatch for parity with `find_cycles`. Node-level path
+/// reconstruction after the SCC-DAG hop is still NodeId-anchored via
+/// [`find_connecting_edge`].
+///
+/// # Caching
+///
+/// The payload cache in [`graph_cache::get_or_compute_trace_path`] is
+/// retained — it is a per-request MCP materialization LRU keyed on the
+/// full `TracePathCacheKey` (including `GraphIdentity`), not a planner
+/// query. DB19 / DB21 own the question of whether to retire it in favour
+/// of sqry-db's per-query caches.
 pub fn execute_trace_path(args: &TracePathArgs) -> Result<ToolExecution<TracePathData>> {
+    // Pre-refactor timing started here — before engine resolution. Preserve
+    // by capturing `start` in the wrapper and threading it into `inner::`.
     let start = Instant::now();
     let workspace_path = resolve_workspace_path(&args.path);
     let engine = engine_for_workspace(workspace_path.as_ref())?;
@@ -53,69 +101,97 @@ pub fn execute_trace_path(args: &TracePathArgs) -> Result<ToolExecution<TracePat
     // Require unified graph for path tracing
     let graph = engine.ensure_graph()?;
 
-    let snapshot = graph.snapshot();
+    let ctx = crate::daemon_adapter::WorkspaceContext {
+        workspace_root,
+        graph,
+        executor: engine.executor_arc(),
+    };
+    inner::execute_trace_path(&ctx, args, start)
+}
 
-    // Get GraphIdentity for cache isolation
-    let identity = get_graph_identity(&workspace_root)?;
+pub(crate) mod inner {
+    use super::{
+        CacheOutcome, CacheRequestContext, Result, ToolExecution, TracePathArgs, TracePathData,
+        build_graph_metadata, compute_trace_path_unified, duration_to_ms, get_graph_identity,
+        graph_cache,
+    };
+    use crate::daemon_adapter::WorkspaceContext;
+    use std::time::Instant;
 
-    // Create cache key with full GraphIdentity for workspace isolation
-    let cache_key = graph_cache::TracePathCacheKey::new(
-        args.from_symbol.clone(),
-        args.to_symbol.clone(),
-        args.max_hops,
-        args.max_paths,
-        args.cross_language,
-        args.min_confidence,
-    )
-    .with_graph_identity(&identity);
+    /// Daemon/SqryServer-shared body for `trace_path`. `start` is supplied
+    /// by the caller so timing matches the pre-refactor behaviour (the
+    /// timer started before engine resolution).
+    pub(crate) fn execute_trace_path(
+        ctx: &WorkspaceContext,
+        args: &TracePathArgs,
+        start: Instant,
+    ) -> Result<ToolExecution<TracePathData>> {
+        let snapshot = ctx.graph.snapshot();
 
-    // Try cache first, fall back to computation
-    let CacheOutcome {
-        data: trace_data,
-        state: cache_state,
-        latency_ms: cache_latency_ms,
-    } = graph_cache::get_or_compute_trace_path(cache_key, || {
-        compute_trace_path_unified(args, &snapshot, &workspace_root).unwrap_or_else(|e| {
-            tracing::error!(error = %e, "trace_path computation failed, returning empty paths");
-            TracePathData {
-                paths: vec![],
-                from_symbol: args.from_symbol.clone(),
-                to_symbol: args.to_symbol.clone(),
-            }
-        })
-    });
+        // Get GraphIdentity for cache isolation
+        let identity = get_graph_identity(&ctx.workspace_root)?;
 
-    tracing::debug!(
-        cache_state = ?cache_state,
-        cache_latency_ms,
-        "trace_path cache outcome"
-    );
+        // Create cache key with full GraphIdentity for workspace isolation
+        let cache_key = graph_cache::TracePathCacheKey::new(
+            args.from_symbol.clone(),
+            args.to_symbol.clone(),
+            args.max_hops,
+            args.max_paths,
+            args.cross_language,
+            args.min_confidence,
+        )
+        .with_graph_identity(&identity);
 
-    let graph_metadata = build_graph_metadata(
-        Some(&workspace_root),
-        Some(&snapshot),
-        Some(CacheRequestContext {
-            tool: "trace_path",
+        // Try cache first, fall back to computation
+        let CacheOutcome {
+            data: trace_data,
             state: cache_state,
             latency_ms: cache_latency_ms,
-        }),
-    );
+        } = graph_cache::get_or_compute_trace_path(cache_key, || {
+            compute_trace_path_unified(args, &snapshot, &ctx.workspace_root).unwrap_or_else(|e| {
+                tracing::error!(error = %e, "trace_path computation failed, returning empty paths");
+                TracePathData {
+                    paths: vec![],
+                    from_symbol: args.from_symbol.clone(),
+                    to_symbol: args.to_symbol.clone(),
+                }
+            })
+        });
 
-    let execution_ms = duration_to_ms(start.elapsed());
-    let total_paths = trace_data.paths.len() as u64;
+        tracing::debug!(
+            cache_state = ?cache_state,
+            cache_latency_ms,
+            "trace_path cache outcome"
+        );
 
-    Ok(ToolExecution {
-        data: trace_data,
-        used_index: false,
-        used_graph: true,
-        graph_metadata: Some(graph_metadata),
-        execution_ms,
-        next_page_token: None,
-        total: Some(total_paths),
-        truncated: None,
-        candidates_scanned: None,
-        workspace_path: crate::execution::symbol_utils::path_to_forward_slash(workspace_root),
-    })
+        let graph_metadata = build_graph_metadata(
+            Some(&ctx.workspace_root),
+            Some(&snapshot),
+            Some(CacheRequestContext {
+                tool: "trace_path",
+                state: cache_state,
+                latency_ms: cache_latency_ms,
+            }),
+        );
+
+        let execution_ms = duration_to_ms(start.elapsed());
+        let total_paths = trace_data.paths.len() as u64;
+
+        Ok(ToolExecution {
+            data: trace_data,
+            used_index: false,
+            used_graph: true,
+            graph_metadata: Some(graph_metadata),
+            execution_ms,
+            next_page_token: None,
+            total: Some(total_paths),
+            truncated: None,
+            candidates_scanned: None,
+            workspace_path: crate::execution::symbol_utils::path_to_forward_slash(
+                &ctx.workspace_root,
+            ),
+        })
+    }
 }
 
 /// Inner computation logic for `trace_path` using unified graph.
@@ -265,7 +341,7 @@ fn build_path_steps(
             continue;
         };
 
-        let sym_ref = build_node_ref_from_node(entry, snapshot, workspace_root);
+        let sym_ref = build_node_ref_from_node(entry, node_id, snapshot, workspace_root);
         let lang = files.language_for_file(entry.file);
 
         if let (Some(prev), Some(current)) = (prev_lang, lang)
@@ -468,6 +544,7 @@ fn get_edge_info_between(
 /// Build `NodeRefData` from a unified graph `NodeEntry`.
 fn build_node_ref_from_node(
     node: &sqry_core::graph::unified::storage::arena::NodeEntry,
+    node_id: NodeId,
     snapshot: &GraphSnapshot,
     workspace_root: &std::path::Path,
 ) -> NodeRefData {
@@ -512,6 +589,9 @@ fn build_node_ref_from_node(
         Into::into,
     );
 
+    let loc = node_location_for_reporting_snapshot(snapshot, node_id, workspace_root);
+    let resolution_source = loc.as_ref().map(|l| format!("{:?}", l.resolution_source));
+
     NodeRefData {
         name,
         qualified_name,
@@ -522,15 +602,16 @@ fn build_node_ref_from_node(
         file_uri,
         range: RangeData {
             start: PositionData {
-                line: node.start_line,
-                character: node.start_column,
+                line: loc.as_ref().map_or(node.start_line, |l| l.line),
+                character: loc.as_ref().map_or(node.start_column, |l| l.column),
             },
             end: PositionData {
-                line: node.end_line,
-                character: node.end_column,
+                line: loc.as_ref().map_or(node.end_line, |l| l.end_line),
+                character: loc.as_ref().map_or(node.end_column, |l| l.end_column),
             },
         },
         metadata: None,
+        resolution_source,
     }
 }
 

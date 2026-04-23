@@ -305,12 +305,32 @@ impl Parser {
     }
 
     /// Parse AND expression (medium precedence)
-    /// `and_expr` ::= `not_expr` (AND `not_expr`)*
+    ///
+    /// `and_expr` ::= `not_expr` ((AND | /* implicit */) `not_expr`)*
+    ///
+    /// Implicit AND fires when the next token is not `OR`, `)`, `|`, EOF, or a
+    /// join keyword (`CALLS`/`IMPORTS`/`INHERITS`/`IMPLEMENTS`).  The `NOT`
+    /// token is intentionally *not* in the stop set — `kind:function NOT name:test`
+    /// produces `And([kind=function, Not(name=test)])`.
     fn parse_and(&mut self) -> Result<Expr, ParseError> {
         let mut operands = vec![self.parse_not()?];
 
-        while self.match_token(&TokenType::And) {
-            operands.push(self.parse_not()?);
+        loop {
+            if self.match_token(&TokenType::And) {
+                // Explicit AND — consume the keyword and parse the next operand.
+                operands.push(self.parse_not()?);
+            } else if !self.is_at_end()
+                && !matches!(
+                    self.peek().token_type,
+                    TokenType::Or | TokenType::RParen | TokenType::Pipe
+                )
+                && !self.is_join_keyword()
+            {
+                // Implicit AND: the next token starts a new predicate.
+                operands.push(self.parse_not()?);
+            } else {
+                break;
+            }
         }
 
         if operands.len() == 1 {
@@ -325,6 +345,23 @@ impl Parser {
         } else {
             Ok(Expr::And(operands))
         }
+    }
+
+    /// Return `true` when the current token is a join-expression keyword
+    /// (`CALLS`, `IMPORTS`, `INHERITS`, or `IMPLEMENTS`).
+    ///
+    /// These keywords are tokenized as [`TokenType::Word`] rather than dedicated
+    /// token variants, so the implicit-AND loop must check for them explicitly to
+    /// avoid consuming a join operator as if it were an ordinary predicate.
+    fn is_join_keyword(&self) -> bool {
+        matches!(
+            &self.peek().token_type,
+            TokenType::Word(w)
+                if w.eq_ignore_ascii_case("CALLS")
+                    || w.eq_ignore_ascii_case("IMPORTS")
+                    || w.eq_ignore_ascii_case("INHERITS")
+                    || w.eq_ignore_ascii_case("IMPLEMENTS")
+        )
     }
 
     /// Parse NOT expression (highest precedence)
@@ -972,11 +1009,40 @@ mod tests {
     }
 
     #[test]
-    fn test_error_missing_operator() {
-        // Legacy syntax without an explicit operator should still fail,
-        // leaving the trailing token unconsumed and triggering an error.
-        let result = parse("kind function");
-        assert!(matches!(result, Err(ParseError::UnexpectedToken { .. })));
+    fn test_bare_word_implicit_and_two_words() {
+        // Two bare words now succeed via implicit AND.
+        // `kind function` → And([name~=/kind/, name~=/function/])
+        let query = parse("kind function").unwrap();
+        match query.root {
+            Expr::And(operands) => {
+                assert_eq!(operands.len(), 2);
+                match &operands[0] {
+                    Expr::Condition(cond) => {
+                        assert_eq!(cond.field.as_str(), "name");
+                        assert_eq!(cond.operator, Operator::Regex);
+                        assert!(
+                            matches!(&cond.value, Value::Regex(r) if r.pattern == "kind"),
+                            "Expected regex pattern 'kind', got {:?}",
+                            cond.value
+                        );
+                    }
+                    other => panic!("Expected Condition for first bare word, got {other:?}"),
+                }
+                match &operands[1] {
+                    Expr::Condition(cond) => {
+                        assert_eq!(cond.field.as_str(), "name");
+                        assert_eq!(cond.operator, Operator::Regex);
+                        assert!(
+                            matches!(&cond.value, Value::Regex(r) if r.pattern == "function"),
+                            "Expected regex pattern 'function', got {:?}",
+                            cond.value
+                        );
+                    }
+                    other => panic!("Expected Condition for second bare word, got {other:?}"),
+                }
+            }
+            other => panic!("Expected And from two bare words, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1503,5 +1569,324 @@ mod tests {
             .expect("Expected Some(PipelineQuery)");
         assert_eq!(pipeline.stages.len(), 1);
         assert!(matches!(pipeline.stages[0], PipelineStage::Stats));
+    }
+
+    // ── PARSE_1: implicit AND tests ───────────────────────────────────────────
+
+    #[test]
+    fn test_implicit_and_three_conditions() {
+        // `kind:function name~=/smb2_/ lang:c` → And([kind=function, name~=/smb2_/, lang=c])
+        let query = parse("kind:function name~=/smb2_/ lang:c").unwrap();
+        match query.root {
+            Expr::And(ref operands) => assert_eq!(operands.len(), 3),
+            other => panic!("Expected And with 3 operands, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_implicit_and_bare_word() {
+        // `kind:function smb2_open` → And([kind=function, name~=/smb2_open/])
+        let query = parse("kind:function smb2_open").unwrap();
+        match query.root {
+            Expr::And(ref operands) => {
+                assert_eq!(operands.len(), 2);
+                match &operands[0] {
+                    Expr::Condition(c) => assert_eq!(c.field.as_str(), "kind"),
+                    other => panic!("Expected kind condition, got {other:?}"),
+                }
+                match &operands[1] {
+                    Expr::Condition(c) => {
+                        assert_eq!(c.field.as_str(), "name");
+                        assert_eq!(c.operator, Operator::Regex);
+                        assert!(
+                            matches!(&c.value, Value::Regex(r) if r.pattern == "smb2_open"),
+                            "Expected bare word promoted to name regex"
+                        );
+                    }
+                    other => panic!("Expected bare-word condition, got {other:?}"),
+                }
+            }
+            other => panic!("Expected And, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_implicit_and_or_precedence() {
+        // `kind:function OR lang:c name:main`
+        // Precedence: AND binds tighter than OR → Or([kind=function, And([lang=c, name=main])])
+        let query = parse("kind:function OR lang:c name:main").unwrap();
+        match query.root {
+            Expr::Or(ref operands) => {
+                assert_eq!(operands.len(), 2, "Expected 2 OR operands");
+                match &operands[1] {
+                    Expr::And(and_ops) => assert_eq!(and_ops.len(), 2),
+                    other => panic!("Expected And on right side of OR, got {other:?}"),
+                }
+            }
+            other => panic!("Expected Or expression, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_implicit_and_before_not() {
+        // `kind:function NOT name:test` → And([kind=function, Not(name=test)])
+        // NOT is intentionally NOT in the implicit-AND stop set.
+        let query = parse("kind:function NOT name:test").unwrap();
+        match query.root {
+            Expr::And(ref operands) => {
+                assert_eq!(operands.len(), 2);
+                assert!(
+                    matches!(&operands[1], Expr::Not(_)),
+                    "Expected Not as second operand"
+                );
+            }
+            other => panic!("Expected And expression, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_implicit_and_before_paren_group() {
+        // `lang:rust (kind:function OR kind:method)` → And([lang=rust, Or([kind=fn, kind=method])])
+        let query = parse("lang:rust (kind:function OR kind:method)").unwrap();
+        match query.root {
+            Expr::And(ref operands) => {
+                assert_eq!(operands.len(), 2);
+                assert!(
+                    matches!(&operands[1], Expr::Or(_)),
+                    "Expected Or as second operand"
+                );
+            }
+            other => panic!("Expected And expression, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_implicit_and_stops_at_rparen() {
+        // `(a:1 b:2) OR c:3` — the implicit AND inside parens stops at `)`.
+        let query = parse("(kind:function lang:c) OR kind:method").unwrap();
+        match query.root {
+            Expr::Or(ref operands) => {
+                assert_eq!(operands.len(), 2);
+                match &operands[0] {
+                    Expr::And(and_ops) => assert_eq!(and_ops.len(), 2),
+                    other => panic!("Expected And inside parens, got {other:?}"),
+                }
+            }
+            other => panic!("Expected Or expression, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_implicit_and_stops_at_pipe() {
+        // `kind:function lang:c | count` — implicit AND stops at `|`.
+        let pipeline = Parser::parse_pipeline_query("kind:function lang:c | count")
+            .unwrap()
+            .expect("Expected Some(PipelineQuery)");
+        // Filter should be And([kind=function, lang=c]).
+        match &pipeline.query.root {
+            Expr::And(ops) => assert_eq!(ops.len(), 2),
+            other => panic!("Expected And filter, got {other:?}"),
+        }
+        assert_eq!(pipeline.stages.len(), 1);
+        assert!(matches!(pipeline.stages[0], PipelineStage::Count));
+    }
+
+    #[test]
+    fn test_implicit_and_within_pipe_stage() {
+        // Two conditions before the pipe are combined as implicit AND in the filter.
+        let pipeline = Parser::parse_pipeline_query("kind:function lang:c | count")
+            .unwrap()
+            .expect("Expected Some(PipelineQuery)");
+        assert!(matches!(pipeline.stages[0], PipelineStage::Count));
+        match &pipeline.query.root {
+            Expr::And(ops) => assert_eq!(ops.len(), 2),
+            other => panic!("Expected And, got {other:?}"),
+        }
+        // Also verify a standalone multi-predicate query inside a subquery parses correctly.
+        let inner = parse("kind:method lang:rust").unwrap();
+        assert!(matches!(inner.root, Expr::And(_)));
+    }
+
+    #[test]
+    fn test_implicit_and_after_relation_subquery() {
+        // `callers:(kind:function name:main) lang:rust`
+        // → And([JoinExpr(callers, And([...])), lang=rust])
+        let query = parse("callers:(kind:function name:main) lang:rust").unwrap();
+        match query.root {
+            Expr::And(ref ops) => {
+                assert_eq!(ops.len(), 2, "Expected And with 2 operands");
+            }
+            other => panic!("Expected And, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_error_and_and() {
+        // `kind:function AND AND name:test` — double AND is a syntax error.
+        let result = parse("kind:function AND AND name:test");
+        assert!(
+            result.is_err(),
+            "Expected parse error for consecutive AND keywords"
+        );
+    }
+
+    #[test]
+    fn test_error_trailing_and() {
+        // `kind:function AND` — trailing AND with no right operand is an error.
+        let result = parse("kind:function AND");
+        assert!(
+            result.is_err(),
+            "Expected parse error for trailing AND keyword"
+        );
+    }
+
+    #[test]
+    fn test_error_colon_colon() {
+        // `::` — double colon has no valid interpretation.
+        let result = parse(": :");
+        assert!(result.is_err(), "Expected parse error for ':: '");
+    }
+
+    #[test]
+    fn test_implicit_and_regex_bare_token() {
+        // `/test_/` as a bare token should promote to name~=/test_/
+        let query = parse("kind:function /test_/").unwrap();
+        match query.root {
+            Expr::And(ref ops) => {
+                assert_eq!(ops.len(), 2);
+                match &ops[1] {
+                    Expr::Condition(c) => {
+                        assert_eq!(c.field.as_str(), "name");
+                        assert_eq!(c.operator, Operator::Regex);
+                    }
+                    other => panic!("Expected Condition for regex bare token, got {other:?}"),
+                }
+            }
+            other => panic!("Expected And, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_implicit_and_string_literal_bare_token() {
+        // `"my_func"` as a bare token should promote to name="my_func"
+        let query = parse(r#"kind:function "my_func""#).unwrap();
+        match query.root {
+            Expr::And(ref ops) => {
+                assert_eq!(ops.len(), 2);
+                match &ops[1] {
+                    Expr::Condition(c) => {
+                        assert_eq!(c.field.as_str(), "name");
+                    }
+                    other => panic!("Expected Condition for string literal, got {other:?}"),
+                }
+            }
+            other => panic!("Expected And, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_implicit_and_multiple_bare_words() {
+        // `foo bar baz` → And([name~=/foo/, name~=/bar/, name~=/baz/])
+        let query = parse("foo bar baz").unwrap();
+        match query.root {
+            Expr::And(ref ops) => assert_eq!(ops.len(), 3),
+            other => panic!("Expected And with 3 operands, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_implicit_and_does_not_affect_explicit_or() {
+        // Regression: `kind:function OR kind:method` must remain a flat Or, not And.
+        let query = parse("kind:function OR kind:method").unwrap();
+        assert!(
+            matches!(query.root, Expr::Or(_)),
+            "Expected Or, implicit AND must not absorb OR"
+        );
+    }
+
+    #[test]
+    fn test_implicit_and_same_ast_as_explicit_and() {
+        // `kind:function lang:rust` and `kind:function AND lang:rust` must yield
+        // structurally equivalent ASTs (same fields, operators, and values).
+        let implicit = parse("kind:function lang:rust").unwrap();
+        let explicit = parse("kind:function AND lang:rust").unwrap();
+
+        // Helper: assert a condition has the expected field and string value.
+        fn assert_string_cond(expr: &Expr, expected_field: &str, expected_value: &str) {
+            match expr {
+                Expr::Condition(c) => {
+                    assert_eq!(
+                        c.field.as_str(),
+                        expected_field,
+                        "Expected field '{expected_field}'"
+                    );
+                    assert_eq!(c.operator, Operator::Equal, "Expected Equals operator");
+                    assert!(
+                        matches!(&c.value, Value::String(s) if s == expected_value),
+                        "Expected value '{expected_value}', got {:?}",
+                        c.value
+                    );
+                }
+                other => panic!("Expected Condition, got {other:?}"),
+            }
+        }
+
+        match (&implicit.root, &explicit.root) {
+            (Expr::And(imp_ops), Expr::And(exp_ops)) => {
+                assert_eq!(imp_ops.len(), 2, "Expected 2 implicit AND operands");
+                assert_eq!(exp_ops.len(), 2, "Expected 2 explicit AND operands");
+                // First operand: kind:function
+                assert_string_cond(&imp_ops[0], "kind", "function");
+                assert_string_cond(&exp_ops[0], "kind", "function");
+                // Second operand: lang:rust
+                assert_string_cond(&imp_ops[1], "lang", "rust");
+                assert_string_cond(&exp_ops[1], "lang", "rust");
+            }
+            _ => panic!("Both queries must parse to And with 2 operands"),
+        }
+    }
+
+    #[test]
+    fn test_implicit_and_with_leading_not() {
+        // `NOT kind:function lang:rust` → And([Not(kind=function), lang=rust])
+        // NOT has highest precedence, so it only negates the immediately following predicate.
+        let query = parse("NOT kind:function lang:rust").unwrap();
+        match query.root {
+            Expr::And(ref ops) => {
+                assert_eq!(ops.len(), 2);
+                assert!(
+                    matches!(&ops[0], Expr::Not(_)),
+                    "First operand should be Not"
+                );
+            }
+            other => panic!("Expected And, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_join_keyword_stops_implicit_and() {
+        // `(kind:function) CALLS (kind:function)` — CALLS must be treated as a join
+        // operator, not an implicit-AND operand.
+        let query = parse("(kind:function) CALLS (kind:function)").unwrap();
+        // The result must be a Join with edge=Calls, not an And that consumed CALLS
+        // as a bare-word name~=/CALLS/ condition.
+        match query.root {
+            Expr::Join(join) => {
+                assert_eq!(
+                    join.edge,
+                    JoinEdgeKind::Calls,
+                    "Expected JoinEdgeKind::Calls"
+                );
+                match *join.left {
+                    Expr::Condition(ref c) => assert_eq!(c.field.as_str(), "kind"),
+                    other => panic!("Expected kind Condition on left, got {other:?}"),
+                }
+                match *join.right {
+                    Expr::Condition(ref c) => assert_eq!(c.field.as_str(), "kind"),
+                    other => panic!("Expected kind Condition on right, got {other:?}"),
+                }
+            }
+            other => panic!("Expected Join expression, got {other:?}"),
+        }
     }
 }

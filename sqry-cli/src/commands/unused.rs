@@ -1,6 +1,17 @@
 //! Unused command implementation
 //!
 //! Provides CLI interface for finding unused/dead code in the codebase.
+//!
+//! # Dispatch path (DB18)
+//!
+//! `unused` is a **name-keyed predicate** under the Phase 3C dispatch
+//! taxonomy: the question is "which nodes match this scope AND are not
+//! reachable from any entry point", which is exactly the planner-canonical
+//! contract that sqry-db's [`sqry_db::queries::UnusedQuery`] caches, keyed
+//! on [`sqry_db::queries::UnusedKey`]. See also
+//! [`sqry_mcp::execution::tools::analysis::execute_find_unused`] — this
+//! CLI handler mirrors the same MCP-style superset-key + post-filter
+//! pattern so CLI and MCP share one cache behavior.
 
 use crate::args::Cli;
 use crate::commands::graph::loader::{GraphLoadConfig, load_unified_graph_for_cli};
@@ -8,7 +19,7 @@ use crate::index_discovery::find_nearest_index;
 use crate::output::OutputStreams;
 use anyhow::{Context, Result};
 use serde::Serialize;
-use sqry_core::query::{UnusedScope, compute_reachable_set_graph, is_node_unused};
+use sqry_core::query::UnusedScope;
 use std::collections::HashMap;
 
 /// Unused symbol for output
@@ -32,6 +43,32 @@ struct UnusedByFile {
 }
 
 /// Run the unused command.
+///
+/// # Dispatch path (DB18)
+///
+/// The handler acquires a per-call [`sqry_db::QueryDb`] via
+/// [`sqry_db::queries::dispatch::make_query_db`], dispatches
+/// [`sqry_db::queries::UnusedQuery`] keyed on
+/// [`sqry_db::queries::UnusedKey`], and applies the CLI's free-form
+/// `--lang` / `--kind` substring filters as a post-filter (they are
+/// user-supplied free-form substrings, not the structured filter lists
+/// sqry-db consumes — sqry-db must see the full candidate set so
+/// filtered-out prefixes cannot push valid later matches out of the
+/// window).
+///
+/// When the user supplies a `--lang` or `--kind` filter, the handler
+/// asks sqry-db for `node_count` rows (an upper bound — `UnusedQuery`
+/// early-breaks once the underlying graph is exhausted) so the
+/// post-filter is the single authoritative gate on what reaches the
+/// user. When neither filter is set, the handler asks for only
+/// `max_results` rows — strictly cheaper. This mirrors the MCP pattern
+/// in [`sqry_mcp::execution::tools::analysis::execute_find_unused`].
+///
+/// The `--scope` argument maps one-to-one onto
+/// [`sqry_core::query::UnusedScope`] (the same enum sqry-db consumes),
+/// so no scope-superset widening is needed here — unlike MCP's
+/// `UnusedScope::Struct` which is strictly broader than sqry-db's
+/// (MCP's `Struct` includes `Interface | Trait`).
 ///
 /// # Errors
 /// Returns an error if the graph cannot be loaded.
@@ -68,34 +105,56 @@ pub fn run_unused(
     let graph = load_unified_graph_for_cli(&loc.index_root, &config, cli)
         .context("Failed to load graph. Run 'sqry index' to build the graph.")?;
 
-    // Compute reachable set once for performance
-    let reachable = compute_reachable_set_graph(&graph);
+    // Route through sqry-db: `UnusedQuery` is a name-keyed predicate in
+    // the planner taxonomy, cached per-snapshot. The CLI's `--lang` and
+    // `--kind` are free-form substrings, so we ask sqry-db for the full
+    // candidate pool whenever either is set (sqry-db scope still does
+    // the heavy lifting; the post-filter just narrows), and otherwise
+    // ask for just `max_results` rows.
+    let snapshot = std::sync::Arc::new(graph.snapshot());
+    // PN3 CLIENT_LOAD: opportunistic cold-load from workspace companion file.
+    let db = sqry_db::queries::dispatch::make_query_db_cold(
+        std::sync::Arc::clone(&snapshot),
+        &loc.index_root,
+    );
+    let node_count = snapshot.nodes().len();
+    let cli_may_narrow_further = lang_filter.is_some() || kind_filter.is_some();
+    let candidate_cap = if cli_may_narrow_further {
+        node_count.max(max_results)
+    } else {
+        max_results
+    };
+    let key = sqry_db::queries::UnusedKey {
+        scope: unused_scope,
+        max_results: candidate_cap,
+    };
+    let unused_ids = db.get::<sqry_db::queries::UnusedQuery>(&key);
 
-    let strings = graph.strings();
-    let files = graph.files();
+    let strings = snapshot.strings();
+    let files = snapshot.files();
 
-    // Find unused symbols
+    // Post-filter: apply --lang and --kind substring filters + truncate
+    // at max_results.
     let mut unused_symbols: Vec<UnusedSymbol> = Vec::new();
-    let mut count = 0;
-
-    for (node_id, entry) in graph.nodes().iter() {
-        if count >= max_results {
+    for &node_id in unused_ids.iter() {
+        if unused_symbols.len() >= max_results {
             break;
         }
 
-        // Get language
+        let Some(entry) = snapshot.nodes().get(node_id) else {
+            continue;
+        };
+
         let language = files
             .language_for_file(entry.file)
             .map_or_else(|| "Unknown".to_string(), |l| l.to_string());
 
-        // Apply language filter
         if let Some(lang) = lang_filter
             && !language.to_lowercase().contains(&lang.to_lowercase())
         {
             continue;
         }
 
-        // Apply kind filter
         if let Some(kind) = kind_filter {
             let kind_str = format!("{:?}", entry.kind).to_lowercase();
             if !kind_str.contains(&kind.to_lowercase()) {
@@ -103,39 +162,35 @@ pub fn run_unused(
             }
         }
 
-        // Check if unused
-        if is_node_unused(node_id, unused_scope, &graph, Some(&reachable)) {
-            let name = strings
-                .resolve(entry.name)
-                .map(|s| s.to_string())
-                .unwrap_or_default();
+        let name = strings
+            .resolve(entry.name)
+            .map(|s| s.to_string())
+            .unwrap_or_default();
 
-            let qualified_name = entry
-                .qualified_name
-                .and_then(|id| strings.resolve(id))
-                .map_or_else(|| name.clone(), |s| s.to_string());
+        let qualified_name = entry
+            .qualified_name
+            .and_then(|id| strings.resolve(id))
+            .map_or_else(|| name.clone(), |s| s.to_string());
 
-            let file_path = files
-                .resolve(entry.file)
-                .map(|p| p.display().to_string())
-                .unwrap_or_default();
+        let file_path = files
+            .resolve(entry.file)
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
 
-            let visibility = entry
-                .visibility
-                .and_then(|id| strings.resolve(id))
-                .map_or_else(|| "unknown".to_string(), |s| s.to_string());
+        let visibility = entry
+            .visibility
+            .and_then(|id| strings.resolve(id))
+            .map_or_else(|| "unknown".to_string(), |s| s.to_string());
 
-            unused_symbols.push(UnusedSymbol {
-                name,
-                qualified_name,
-                kind: format!("{:?}", entry.kind),
-                file: file_path,
-                line: entry.start_line,
-                language,
-                visibility,
-            });
-            count += 1;
-        }
+        unused_symbols.push(UnusedSymbol {
+            name,
+            qualified_name,
+            kind: format!("{:?}", entry.kind),
+            file: file_path,
+            line: entry.start_line,
+            language,
+            visibility,
+        });
     }
 
     // Group by file for text output

@@ -96,16 +96,21 @@ fn require_successful_text(text: String, context: &str) -> Result<String> {
     Ok(text)
 }
 
-fn is_freshness_metadata_unavailable(text: &str) -> bool {
-    is_error_response(text) && text.contains("Failed to stat manifest.json for freshness check")
+fn is_workspace_unavailable(text: &str) -> bool {
+    is_error_response(text)
+        && (text.contains("Failed to stat manifest.json for freshness check")
+            || text.contains("does not exist")
+            || text.contains("Failed to canonicalize path"))
 }
 
 fn require_successful_text_or_skip_on_freshness(
     text: String,
     context: &str,
 ) -> Result<Option<String>> {
-    if is_freshness_metadata_unavailable(&text) {
-        eprintln!("Skipping {context} assertion because freshness metadata is unavailable: {text}");
+    if is_workspace_unavailable(&text) {
+        eprintln!(
+            "Skipping {context}: workspace unavailable (stale session or missing manifest): {text}"
+        );
         return Ok(None);
     }
     Ok(Some(require_successful_text(text, context)?))

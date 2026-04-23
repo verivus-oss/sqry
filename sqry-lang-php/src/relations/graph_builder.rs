@@ -33,6 +33,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use sqry_core::graph::unified::build::helper::CalleeKindHint;
 use sqry_core::graph::unified::edge::kind::{FfiConvention, TypeOfContext};
 use sqry_core::graph::unified::{GraphBuildHelper, NodeId, StagingGraph};
 use sqry_core::graph::{
@@ -617,12 +618,12 @@ fn process_function_call(
         .or_insert_with(|| helper.add_function(&call_context.qualified_name, None, false, false));
 
     // Get or create callee node
+    let call_span = span_from_node(node);
     let target_id = *node_map
         .entry(callee_name.to_string())
-        .or_insert_with(|| helper.add_function(callee_name, None, false, false));
+        .or_insert_with(|| helper.ensure_callee(callee_name, call_span, CalleeKindHint::Function));
 
     let argument_count = count_call_arguments(node);
-    let call_span = span_from_node(node);
     helper.add_call_edge_full_with_span(
         source_id,
         target_id,
@@ -673,12 +674,12 @@ fn process_member_call(
         .or_insert_with(|| helper.add_function(&call_context.qualified_name, None, false, false));
 
     // Get or create callee node
-    let target_id = *node_map
-        .entry(callee_qualified.clone())
-        .or_insert_with(|| helper.add_method(&callee_qualified, None, false, false));
+    let call_span = span_from_node(node);
+    let target_id = *node_map.entry(callee_qualified.clone()).or_insert_with(|| {
+        helper.ensure_callee(&callee_qualified, call_span, CalleeKindHint::Method)
+    });
 
     let argument_count = count_call_arguments(node);
-    let call_span = span_from_node(node);
     helper.add_call_edge_full_with_span(
         source_id,
         target_id,
@@ -729,12 +730,12 @@ fn process_static_call(
         .or_insert_with(|| helper.add_function(&call_context.qualified_name, None, false, false));
 
     // Get or create callee node
+    let call_span = span_from_node(node);
     let target_id = *node_map.entry(callee_qualified.clone()).or_insert_with(|| {
-        helper.add_method(&callee_qualified, None, false, true) // static method
+        helper.ensure_callee(&callee_qualified, call_span, CalleeKindHint::Method)
     });
 
     let argument_count = count_call_arguments(node);
-    let call_span = span_from_node(node);
     helper.add_call_edge_full_with_span(
         source_id,
         target_id,
@@ -1796,7 +1797,11 @@ fn process_function_phpdoc(
     }
 
     // Get or create function node
-    let func_node_id = helper.ensure_function(&function_name, None, false, false);
+    let func_node_id = helper.ensure_callee(
+        &function_name,
+        span_from_node(func_node),
+        CalleeKindHint::Function,
+    );
 
     // Extract AST parameter list with indices for context (not used in Phase 1)
     let _ast_params = extract_ast_parameters(func_node, content);

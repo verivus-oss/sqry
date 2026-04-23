@@ -154,6 +154,11 @@ pub struct FindDuplicatesArgs {
     pub threshold: u32,
     pub exact: bool,
     pub max_results: usize,
+    /// Maximum number of member symbols to return per duplicate group.
+    ///
+    /// `0` means unlimited (pre-v9.1 behavior). Valid range: `[0, 10000]`.
+    /// Default is `10` when not specified by the caller.
+    pub max_members_per_group: usize,
     pub pagination: PaginationArgs,
 }
 
@@ -229,6 +234,7 @@ pub struct DependencyImpactArgs {
     pub include_indirect: bool,
     pub max_results: usize,
     pub pagination: PaginationArgs,
+    pub file_path: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -970,6 +976,11 @@ pub fn validate_dependency_impact_args(args: &Value) -> Result<DependencyImpactA
 
     let pagination = parse_pagination(args, 100, 500)?;
 
+    let file_path = args
+        .get("file_path")
+        .and_then(|v| v.as_str())
+        .map(|s| std::path::PathBuf::from(s.replace('\\', "/")));
+
     Ok(DependencyImpactArgs {
         symbol: symbol.to_string(),
         path: path.to_string(),
@@ -983,6 +994,7 @@ pub fn validate_dependency_impact_args(args: &Value) -> Result<DependencyImpactA
             .try_into()
             .map_err(|_| anyhow::anyhow!("max_results out of range"))?,
         pagination,
+        file_path,
     })
 }
 
@@ -1542,6 +1554,15 @@ pub fn validate_find_duplicates_args(args: &Value) -> Result<FindDuplicatesArgs>
         "max_results must be between 1 and 1000"
     );
 
+    let max_members_per_group = args
+        .get("max_members_per_group")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(10);
+    ensure!(
+        (0..=10000).contains(&max_members_per_group),
+        "max_members_per_group must be between 0 and 10000"
+    );
+
     let pagination = parse_pagination(args, 50, 500)?;
 
     Ok(FindDuplicatesArgs {
@@ -1554,6 +1575,9 @@ pub fn validate_find_duplicates_args(args: &Value) -> Result<FindDuplicatesArgs>
         max_results: max_results
             .try_into()
             .map_err(|_| anyhow::anyhow!("max_results out of range"))?,
+        max_members_per_group: max_members_per_group
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("max_members_per_group out of range"))?,
         pagination,
     })
 }
@@ -1708,6 +1732,8 @@ pub struct IsNodeInCycleArgs {
     pub max_depth: Option<usize>,
     /// Whether to include self-loops as cycles
     pub include_self_loops: bool,
+    /// Optional file path to disambiguate the symbol
+    pub file_path: Option<std::path::PathBuf>,
 }
 
 /// Arguments for `pattern_search` tool.

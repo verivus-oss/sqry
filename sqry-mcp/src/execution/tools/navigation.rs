@@ -10,6 +10,9 @@ use anyhow::{Result, anyhow};
 use sqry_core::graph::unified::{FileScope, ResolutionMode, SymbolCandidateOutcome, SymbolQuery};
 
 use crate::engine::engine_for_workspace;
+use crate::execution::location::{
+    node_location_for_reporting, node_location_for_reporting_snapshot,
+};
 use crate::execution::symbol_utils::{
     get_classpath_provenance_for_node, get_macro_metadata_for_node,
 };
@@ -112,13 +115,15 @@ pub fn execute_get_definition(
         let macro_metadata = get_macro_metadata_for_node(&snapshot, node_id);
         let provenance = get_classpath_provenance_for_node(&snapshot, node_id);
 
+        let loc = node_location_for_reporting_snapshot(&snapshot, node_id, &workspace_root);
+
         definitions.push(DefinitionData {
             name,
             qualified_name,
             kind: format!("{:?}", entry.kind),
             file_path,
-            line: entry.start_line,
-            column: entry.start_column,
+            line: loc.as_ref().map_or(entry.start_line, |l| l.line),
+            column: loc.as_ref().map_or(entry.start_column, |l| l.column),
             language,
             preview: None, // Would need file content to provide preview
             macro_metadata,
@@ -459,12 +464,14 @@ pub fn execute_get_hover_info(args: &GetHoverInfoArgs) -> Result<ToolExecution<H
 
     let provenance = get_classpath_provenance_for_node(&snapshot, node_id);
 
+    let loc = node_location_for_reporting_snapshot(&snapshot, node_id, &workspace_root);
+
     let data = HoverInfoData {
         name,
         qualified_name,
         kind: format!("{:?}", entry.kind),
         file_path,
-        line: entry.start_line,
+        line: loc.as_ref().map_or(entry.start_line, |l| l.line),
         language,
         signature,
         documentation,
@@ -519,6 +526,13 @@ pub fn execute_get_document_symbols(
 
     for (node_id, entry) in graph.nodes().iter() {
         if entry.file == file_id {
+            // Phase 4c-prime unified-away losers stay in the arena as
+            // inert duplicates so CSR sizing is preserved, but they
+            // must not surface to publish-visible consumers — see
+            // `NodeEntry::is_unified_loser` for the full contract.
+            if entry.is_unified_loser() {
+                continue;
+            }
             let fallback_name = strings
                 .resolve(entry.name)
                 .map(|s| s.to_string())
@@ -534,11 +548,13 @@ pub fn execute_get_document_symbols(
                 .get(node_id)
                 .and_then(crate::execution::symbol_utils::macro_metadata_to_response);
 
+            let loc = node_location_for_reporting(&graph, node_id, &workspace_root);
+
             symbols.push(DocumentSymbolData {
                 name,
                 kind: format!("{:?}", entry.kind),
-                line: entry.start_line,
-                end_line: Some(entry.end_line),
+                line: loc.as_ref().map_or(entry.start_line, |l| l.line),
+                end_line: Some(loc.as_ref().map_or(entry.end_line, |l| l.end_line)),
                 children: vec![], // Flat list for now, could build hierarchy later
                 macro_metadata,
             });
@@ -592,9 +608,14 @@ pub fn execute_get_workspace_symbols(
     // Search for matching symbols
     let mut symbols: Vec<WorkspaceSymbolData> = Vec::new();
 
-    for (_node_id, entry) in graph.nodes().iter() {
+    for (node_id, entry) in graph.nodes().iter() {
         if symbols.len() >= args.max_results {
             break;
+        }
+
+        // Phase 4c-prime unified-away losers are publish-invisible.
+        if entry.is_unified_loser() {
+            continue;
         }
 
         let fallback_name = strings
@@ -639,12 +660,14 @@ pub fn execute_get_workspace_symbols(
                 0.5
             };
 
+            let loc = node_location_for_reporting(&graph, node_id, &workspace_root);
+
             symbols.push(WorkspaceSymbolData {
                 name: display_name,
                 qualified_name,
                 kind: format!("{:?}", entry.kind),
                 file_path,
-                line: entry.start_line,
+                line: loc.as_ref().map_or(entry.start_line, |l| l.line),
                 language,
                 score,
             });

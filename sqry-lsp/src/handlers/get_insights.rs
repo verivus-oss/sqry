@@ -106,6 +106,12 @@ fn count_language_and_kind_stats(
     let mut seen_files = std::collections::HashSet::new();
 
     for (_node_id, entry) in snapshot.iter_nodes() {
+        // Gate 0d iter-2 fix: skip unified losers from LSP
+        // `get_insights` symbol counts.
+        // See `NodeEntry::is_unified_loser`.
+        if entry.is_unified_loser() {
+            continue;
+        }
         total_symbols += 1;
 
         let kind = format!("{:?}", entry.kind).to_lowercase();
@@ -143,11 +149,17 @@ fn count_edge_stats(
     let mut cross_language_edges = 0usize;
 
     for (source_id, target_id, _edge_kind) in snapshot.iter_edges() {
-        total_edges += 1;
-
         if let (Some(from_entry), Some(to_entry)) =
             (snapshot.get_node(source_id), snapshot.get_node(target_id))
         {
+            // Gate 0d iter-2 fix: skip edges whose endpoints are
+            // unified losers. See `NodeEntry::is_unified_loser`.
+            if from_entry.is_unified_loser() || to_entry.is_unified_loser() {
+                continue;
+            }
+
+            total_edges += 1;
+
             let from_lang = files.language_for_file(from_entry.file);
             let to_lang = files.language_for_file(to_entry.file);
 
@@ -156,6 +168,8 @@ fn count_edge_stats(
             {
                 cross_language_edges += 1;
             }
+        } else {
+            total_edges += 1;
         }
     }
 
@@ -165,7 +179,12 @@ fn count_edge_stats(
 /// Estimate the number of mutual-call cycles (simplified heuristic).
 fn estimate_cycles(snapshot: &sqry_core::graph::unified::concurrent::GraphSnapshot) -> usize {
     let mut cycles = 0usize;
-    for (node_id, _entry) in snapshot.iter_nodes() {
+    for (node_id, entry) in snapshot.iter_nodes() {
+        // Gate 0d iter-2 fix: skip unified losers. See
+        // `NodeEntry::is_unified_loser`.
+        if entry.is_unified_loser() {
+            continue;
+        }
         let callees = snapshot.get_callees(node_id);
         for callee in callees {
             let callee_callees = snapshot.get_callees(callee);
@@ -180,7 +199,12 @@ fn estimate_cycles(snapshot: &sqry_core::graph::unified::concurrent::GraphSnapsh
 /// Estimate the number of potentially unused symbols (no callers but has callees).
 fn estimate_unused(snapshot: &sqry_core::graph::unified::concurrent::GraphSnapshot) -> usize {
     let mut unused_symbols = 0usize;
-    for (node_id, _entry) in snapshot.iter_nodes() {
+    for (node_id, entry) in snapshot.iter_nodes() {
+        // Gate 0d iter-2 fix: skip unified losers. See
+        // `NodeEntry::is_unified_loser`.
+        if entry.is_unified_loser() {
+            continue;
+        }
         let callers = snapshot.get_callers(node_id);
         if callers.is_empty() {
             let has_outgoing = !snapshot.get_callees(node_id).is_empty();
@@ -199,6 +223,11 @@ fn count_duplicate_groups(
     let strings = snapshot.strings();
     let mut name_counts: HashMap<String, usize> = HashMap::new();
     for (_node_id, entry) in snapshot.iter_nodes() {
+        // Gate 0d iter-2 fix: skip unified losers. See
+        // `NodeEntry::is_unified_loser`.
+        if entry.is_unified_loser() {
+            continue;
+        }
         if let Some(name) = strings.resolve(entry.name) {
             *name_counts.entry(name.to_string()).or_insert(0) += 1;
         }

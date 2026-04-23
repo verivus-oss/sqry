@@ -198,12 +198,19 @@ class SqryDuplicateGroupItem extends vscode.TreeItem {
  * Root item for circular dependencies
  */
 class SqryCircularItem extends vscode.TreeItem {
-  constructor(cycleCount: number | null, public readonly rootPath?: string) {
+  constructor(
+    result: SqryListCircularDependenciesResult | null,
+    public readonly rootPath?: string,
+  ) {
     super("Circular Dependencies", vscode.TreeItemCollapsibleState.Collapsed);
-    if (cycleCount === null) {
+    if (result === null) {
       this.description = "expand to check";
+    } else if (result.total_cycles === 0) {
+      this.description = "none";
     } else {
-      this.description = cycleCount > 0 ? `${cycleCount} cycles` : "none";
+      this.description = result.truncated
+        ? `${result.cycles.length}+ cycles`
+        : `${result.total_cycles} cycles`;
     }
     this.iconPath = new vscode.ThemeIcon("sync");
     this.contextValue = "sqry.circular";
@@ -231,14 +238,14 @@ class SqryCycleItem extends vscode.TreeItem {
  * Root item for unused symbols
  */
 class SqryUnusedItem extends vscode.TreeItem {
-  constructor(count: number | null, truncated?: boolean, public readonly rootPath?: string) {
+  constructor(count: number | null, public readonly rootPath?: string) {
     super("Unused Code", vscode.TreeItemCollapsibleState.Collapsed);
     if (count === null) {
       this.description = "expand to check";
     } else if (count === 0) {
       this.description = "none";
     } else {
-      this.description = truncated ? `${count}+ symbols` : `${count} symbols`;
+      this.description = `${count} symbols`;
     }
     this.iconPath = new vscode.ThemeIcon("trash");
     this.contextValue = "sqry.unused";
@@ -1556,7 +1563,7 @@ class SqryTreeDataProvider
     // Add truncation info if results were limited
     if (result.truncated) {
       const truncationItem = new vscode.TreeItem(
-        `Showing ${result.symbols.length}+ (results truncated)`,
+        `Showing ${result.symbols.length} of ${result.total} (results truncated)`,
         vscode.TreeItemCollapsibleState.None,
       );
       truncationItem.iconPath = new vscode.ThemeIcon("info");
@@ -1629,12 +1636,11 @@ class SqryTreeDataProvider
     const symbolsCount = this.cachedDuplicatesResult.get(rootKey)?.total_symbols ?? null;
     items.push(new SqryDuplicatesItem(duplicatesCount, symbolsCount, rootPath));
 
-    const cyclesCount = this.cachedCircularResult.get(rootKey)?.total_cycles ?? null;
-    items.push(new SqryCircularItem(cyclesCount, rootPath));
+    const circularResult = this.cachedCircularResult.get(rootKey) ?? null;
+    items.push(new SqryCircularItem(circularResult, rootPath));
 
     const unusedCount = this.cachedUnusedResult.get(rootKey)?.total ?? null;
-    const unusedTruncated = this.cachedUnusedResult.get(rootKey)?.truncated ?? false;
-    items.push(new SqryUnusedItem(unusedCount, unusedTruncated, rootPath));
+    items.push(new SqryUnusedItem(unusedCount, rootPath));
   }
 
   /** Add status indicators (index age, stale warning, building). */

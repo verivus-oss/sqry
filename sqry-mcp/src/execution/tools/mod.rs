@@ -10,6 +10,7 @@ mod graph;
 mod index;
 mod introspection;
 mod navigation;
+mod planner_query;
 mod relations;
 mod search;
 mod trace;
@@ -39,6 +40,22 @@ pub use navigation::{
     execute_get_definition, execute_get_document_symbols, execute_get_hover_info,
     execute_get_references, execute_get_workspace_symbols,
 };
+pub use planner_query::execute_sqry_query;
 pub use relations::{execute_call_hierarchy, execute_relation_query};
 pub use search::{execute_find_similar, execute_semantic_search};
 pub use trace::execute_trace_path;
+
+// Phase 8b Task 3: inner:: submodules used by daemon_adapter for
+// cross-transport dispatch. The `_for_daemon` wrappers land in Task 4.
+#[allow(unused_imports)]
+pub(crate) use analysis::inner as analysis_inner;
+#[allow(unused_imports)]
+pub(crate) use graph::inner as graph_inner;
+#[allow(unused_imports)]
+pub(crate) use introspection::inner as introspection_inner;
+#[allow(unused_imports)]
+pub(crate) use relations::inner as relations_inner;
+#[allow(unused_imports)]
+pub(crate) use search::inner as search_inner;
+#[allow(unused_imports)]
+pub(crate) use trace::inner as trace_inner;

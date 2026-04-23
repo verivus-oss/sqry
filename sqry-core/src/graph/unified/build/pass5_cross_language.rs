@@ -38,6 +38,7 @@ use crate::graph::unified::concurrent::CodeGraph;
 use crate::graph::unified::edge::EdgeKind;
 use crate::graph::unified::edge::kind::{FfiConvention, HttpMethod};
 use crate::graph::unified::file::FileId;
+use crate::graph::unified::mutation_target::GraphMutationTarget;
 use crate::graph::unified::node::{NodeId, NodeKind};
 use crate::graph::unified::storage::NodeEntry;
 
@@ -82,7 +83,26 @@ struct PendingCrossLanguageEdge {
 /// # Returns
 ///
 /// Statistics about the linking operation.
+///
+/// # Public shim
+///
+/// This is the `&mut CodeGraph` entry point external callers (tests,
+/// snapshot loaders) rely on. Delegates to [`link_cross_language_edges_generic`]
+/// which carries the `G: GraphMutationTarget` bound. The shim keeps the
+/// trait `pub(crate)` so the incremental rebuild plane remains
+/// daemon-internal.
 pub fn link_cross_language_edges(graph: &mut CodeGraph) -> Pass5Stats {
+    link_cross_language_edges_generic(graph)
+}
+
+/// Generic implementation used by both the public [`link_cross_language_edges`]
+/// shim (full build path) and the intra-crate incremental rebuild
+/// dispatcher (Task 4 Step 4 Phase 3, operating on a [`RebuildGraph`]).
+///
+/// [`RebuildGraph`]: crate::graph::unified::rebuild::rebuild_graph::RebuildGraph
+pub(crate) fn link_cross_language_edges_generic<G: GraphMutationTarget>(
+    graph: &mut G,
+) -> Pass5Stats {
     let mut stats = Pass5Stats::default();
     let mut pending_edges: Vec<PendingCrossLanguageEdge> = Vec::new();
 
@@ -222,8 +242,8 @@ fn java_method_name(java_name: &str) -> Option<&str> {
 }
 
 /// Collect FFI declarations from the graph and match them to C/C++ implementations.
-fn link_ffi_edges(
-    graph: &CodeGraph,
+fn link_ffi_edges<G: GraphMutationTarget>(
+    graph: &G,
     stats: &mut Pass5Stats,
     pending: &mut Vec<PendingCrossLanguageEdge>,
 ) {
@@ -306,7 +326,10 @@ fn try_ffi_match(
 /// Cross-language linking operates on canonical graph names when available,
 /// because semantic display names may intentionally collapse qualified markers
 /// such as `extern::C::` or `native::jni::`.
-fn entry_structural_name(graph: &CodeGraph, entry: &NodeEntry) -> Option<std::sync::Arc<str>> {
+fn entry_structural_name<G: GraphMutationTarget>(
+    graph: &G,
+    entry: &NodeEntry,
+) -> Option<std::sync::Arc<str>> {
     entry
         .qualified_name
         .and_then(|qualified_name_id| graph.strings().resolve(qualified_name_id))
@@ -314,7 +337,10 @@ fn entry_structural_name(graph: &CodeGraph, entry: &NodeEntry) -> Option<std::sy
 }
 
 /// Collect FFI declaration nodes from the graph.
-fn collect_ffi_declarations(graph: &CodeGraph, stats: &mut Pass5Stats) -> Vec<FfiDeclaration> {
+fn collect_ffi_declarations<G: GraphMutationTarget>(
+    graph: &G,
+    stats: &mut Pass5Stats,
+) -> Vec<FfiDeclaration> {
     let mut declarations = Vec::new();
     let function_nodes = graph.indices().by_kind(NodeKind::Function);
 
@@ -342,7 +368,9 @@ fn collect_ffi_declarations(graph: &CodeGraph, stats: &mut Pass5Stats) -> Vec<Ff
 }
 
 /// Build a lookup map of C/C++ function names to their node IDs and file IDs.
-fn build_c_function_map(graph: &CodeGraph) -> HashMap<String, Vec<(NodeId, FileId)>> {
+fn build_c_function_map<G: GraphMutationTarget>(
+    graph: &G,
+) -> HashMap<String, Vec<(NodeId, FileId)>> {
     let mut map: HashMap<String, Vec<(NodeId, FileId)>> = HashMap::new();
 
     for lang in &[Language::C, Language::Cpp] {
@@ -476,8 +504,8 @@ pub fn normalize_url_path(path: &str) -> String {
 }
 
 /// Collect endpoints and HTTP requests, then match them.
-fn link_http_edges(
-    graph: &CodeGraph,
+fn link_http_edges<G: GraphMutationTarget>(
+    graph: &G,
     stats: &mut Pass5Stats,
     pending: &mut Vec<PendingCrossLanguageEdge>,
 ) {
@@ -574,7 +602,7 @@ fn try_http_match(
 }
 
 /// Collect all Endpoint nodes from the graph.
-fn collect_endpoints(graph: &CodeGraph) -> Vec<EndpointInfo> {
+fn collect_endpoints<G: GraphMutationTarget>(graph: &G) -> Vec<EndpointInfo> {
     let mut endpoints = Vec::new();
     let endpoint_nodes = graph.indices().by_kind(NodeKind::Endpoint);
 
@@ -600,37 +628,78 @@ fn collect_endpoints(graph: &CodeGraph) -> Vec<EndpointInfo> {
     endpoints
 }
 
-/// Collect all HTTP request edges from the graph.
+/// Collect all HTTP request edges from the graph — across CSR **and** delta.
 ///
-/// Scans the edge delta buffer directly (O(E)) instead of iterating all nodes
-/// and calling `edges_from()` on each (which would be O(N * E) due to per-node
-/// delta scans — catastrophic on large graphs).
-fn collect_http_requests(graph: &CodeGraph, stats: &mut Pass5Stats) -> Vec<HttpRequestInfo> {
+/// Before Phase 3e's §E-harness CSR normalisation, incremental rebuilds were
+/// compared to uncompacted delta-only full rebuilds, so scanning the delta
+/// buffer alone happened to cover every `HttpRequest` edge in both sides of
+/// the comparison. That invariant broke the moment Phase 3e + the harness
+/// changes began comparing CSR-compacted graphs — unchanged `HttpRequest`
+/// edges live in the CSR tier after `RebuildGraph::finalize()` (or after
+/// `persist_and_analyze_graph`'s compaction for the daemon's load path), so
+/// a delta-only scan silently dropped them and Pass 5 stopped relinking
+/// valid cross-file HTTP requests. The §E harness surfaces this as e.g.
+/// `client.ts -> route::POST::/api/users` missing in the candidate on the
+/// `ts_http_routes / AddHttpRoute{server.ts}` shrink.
+///
+/// # Why a single-pass edge-store iterator
+///
+/// An earlier iteration of this function walked every live node and called
+/// `graph.edges().edges_from(source_node)` per node. That is O(N + E) on
+/// a CSR-backed graph but `O(N * |delta|)` on a delta-only graph because
+/// `edges_from` rebuilds its per-source LWW map from the entire delta
+/// buffer on every invocation. Pass 5 runs in both the full-build pipeline
+/// (delta-only — CSR compaction happens later in `persist_and_analyze_graph`
+/// or `RebuildGraph::finalize` step 9) and the incremental pipeline
+/// (mixed CSR + delta), so the per-node loop is a full-build quadratic
+/// regression.
+///
+/// The fix: drive this scan through
+/// [`BidirectionalEdgeStore::all_live_forward_edges`], which builds the
+/// delta LWW map **once** and walks CSR once, giving `O(|csr| + |delta|)`
+/// total work on every graph shape. Asymptotic parity with the old
+/// delta-only `forward.delta().iter()` scan is restored for full builds
+/// while CSR-backed edges remain visible for incremental rebuilds.
+///
+/// # Filter + payload resolution semantics
+///
+/// For every live forward edge we check the `EdgeKind::HttpRequest`
+/// discriminant, resolve the URL payload through the string interner,
+/// and resolve the edge source's owning file via the node arena. Edges
+/// whose source slot has been tombstoned (e.g. `remove_file` during the
+/// rebuild plane) are filtered out of the arena by `NodeArena::get`.
+///
+/// Determinism: CSR edges are yielded in `(source_index, row_ptr)`
+/// order (dense, stable); delta Adds in `HashMap` iteration order
+/// (unordered). Pass 5's downstream linker builds a lookup table keyed
+/// by `(method, normalized_path)` so the intra-tier iteration order is
+/// immaterial to the linker's output.
+fn collect_http_requests<G: GraphMutationTarget>(
+    graph: &G,
+    stats: &mut Pass5Stats,
+) -> Vec<HttpRequestInfo> {
     let mut requests = Vec::new();
 
-    let forward = graph.edges().forward();
-    let delta = forward.delta();
-
-    for edge in delta.iter() {
-        if !edge.is_add() {
+    for edge_ref in graph.edges().all_live_forward_edges() {
+        let EdgeKind::HttpRequest { method, url } = &edge_ref.kind else {
             continue;
-        }
-        if let EdgeKind::HttpRequest { method, url } = &edge.kind {
-            stats.http_requests_scanned += 1;
-            if let Some(url_id) = url
-                && let Some(url_str) = graph.strings().resolve(*url_id)
-            {
-                let Some(source_entry) = graph.nodes().get(edge.source) else {
-                    continue;
-                };
-                requests.push(HttpRequestInfo {
-                    source_node: edge.source,
-                    method: *method,
-                    url_path: url_str.to_string(),
-                    file_id: source_entry.file,
-                });
-            }
-        }
+        };
+        stats.http_requests_scanned += 1;
+        let Some(url_id) = url else {
+            continue;
+        };
+        let Some(url_str) = graph.strings().resolve(*url_id) else {
+            continue;
+        };
+        let Some(source_entry) = graph.nodes().get(edge_ref.source) else {
+            continue;
+        };
+        requests.push(HttpRequestInfo {
+            source_node: edge_ref.source,
+            method: *method,
+            url_path: url_str.to_string(),
+            file_id: source_entry.file,
+        });
     }
 
     requests
@@ -1123,5 +1192,114 @@ mod tests {
         );
         // Regular angle bracket params still work
         assert_eq!(normalize_url_path("/api/users/<id>"), "api/users/:id");
+    }
+
+    // ==================================================================
+    // Task 4 Step 4 Phase 2: rebuild-plane coverage.
+    //
+    // `link_cross_language_edges_generic` is the single generic
+    // implementation behind the public `link_cross_language_edges`
+    // shim. The test seeds an equivalent two-file FFI shape on a
+    // `CodeGraph` and a `RebuildGraph`, runs the generic function
+    // against each, and asserts the resulting edge counts match —
+    // proving the trait-dispatched reads (`indices`, `nodes`,
+    // `strings`, `files`, `edges`) and writes (`edges_mut`) all
+    // route through `GraphMutationTarget` correctly on both
+    // implementors.
+    // ==================================================================
+
+    #[test]
+    #[cfg(feature = "rebuild-internals")]
+    fn link_cross_language_edges_runs_against_rebuild_graph() {
+        use super::link_cross_language_edges_generic;
+        use crate::graph::unified::mutation_target::GraphMutationTarget;
+        use crate::graph::unified::node::NodeKind;
+        use crate::graph::unified::storage::NodeEntry;
+        use std::path::Path;
+
+        /// Seed: two files, one declares `extern::C::calc_sum` as a
+        /// Rust-side FFI declaration, the other implements `calc_sum`
+        /// as a C function. Pass 5 should link declaration → C impl
+        /// with a cross-file `FfiCall` edge.
+        fn seed<G: GraphMutationTarget>(graph: &mut G) -> (FileId, FileId) {
+            let rust_file = graph
+                .files_mut()
+                .register_with_language(
+                    Path::new("/virtual/ffi.rs"),
+                    Some(crate::graph::node::Language::Rust),
+                )
+                .expect("register rust file");
+            let c_file = graph
+                .files_mut()
+                .register_with_language(
+                    Path::new("/virtual/ffi.c"),
+                    Some(crate::graph::node::Language::C),
+                )
+                .expect("register c file");
+
+            let decl_name = graph.strings_mut().intern("extern::C::calc_sum").unwrap();
+            let impl_name = graph.strings_mut().intern("calc_sum").unwrap();
+
+            let mut decl_entry = NodeEntry::new(NodeKind::Function, decl_name, rust_file);
+            decl_entry.qualified_name = Some(decl_name);
+            let _decl_id = graph.nodes_mut().alloc(decl_entry).unwrap();
+
+            let mut impl_entry = NodeEntry::new(NodeKind::Function, impl_name, c_file);
+            impl_entry.qualified_name = Some(impl_name);
+            let _impl_id = graph.nodes_mut().alloc(impl_entry).unwrap();
+
+            // Populate indices.by_kind(Function) and files bucket so
+            // `collect_ffi_declarations` + `build_c_function_map` can
+            // walk both sides.
+            crate::graph::unified::build::parallel_commit::rebuild_indices(graph);
+
+            (rust_file, c_file)
+        }
+
+        // Baseline: CodeGraph.
+        let mut cg = CodeGraph::new();
+        let (_cg_rust, _cg_c) = seed(&mut cg);
+        let cg_stats = link_cross_language_edges_generic(&mut cg);
+
+        // RebuildGraph path.
+        let mut rebuild = {
+            let graph = CodeGraph::new();
+            graph.clone_for_rebuild()
+        };
+        let (_rb_rust, _rb_c) = seed(&mut rebuild);
+
+        // Capture the rebuild-local forward edge count before Pass 5.
+        let pre_counter = GraphMutationTarget::edges(&rebuild).forward().seq_counter();
+
+        let rb_stats = link_cross_language_edges_generic(&mut rebuild);
+
+        // === Stats parity ===
+        assert_eq!(
+            cg_stats.ffi_declarations_scanned,
+            rb_stats.ffi_declarations_scanned
+        );
+        assert_eq!(cg_stats.ffi_edges_created, rb_stats.ffi_edges_created);
+        assert_eq!(cg_stats.total_edges_created, rb_stats.total_edges_created);
+        assert!(rb_stats.ffi_edges_created >= 1, "expected ≥1 FFI link");
+
+        // === Invariant: the pending edges landed on the
+        // rebuild-local forward store (not a CodeGraph). ===
+        let forward = GraphMutationTarget::edges(&rebuild).forward();
+        let after_counter = forward.seq_counter();
+        assert!(
+            after_counter > pre_counter,
+            "rebuild-local forward store seq counter must advance \
+             (pre={pre_counter} after={after_counter})",
+        );
+        let ffi_call_count = forward
+            .delta()
+            .iter()
+            .filter(|e| e.is_add())
+            .filter(|e| matches!(&e.kind, EdgeKind::FfiCall { .. }))
+            .count();
+        assert!(
+            ffi_call_count >= 1,
+            "rebuild-local forward delta must carry the FfiCall edge"
+        );
     }
 }

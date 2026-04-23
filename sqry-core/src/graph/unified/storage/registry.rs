@@ -22,6 +22,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use super::super::file::id::FileId;
+use super::super::node::id::NodeId;
 use super::super::string::id::StringId;
 use crate::graph::node::Language;
 
@@ -167,6 +168,21 @@ pub struct FileRegistry {
     lookup: HashMap<Arc<Path>, u32>,
     /// Free list of recycled slot indices.
     free_list: Vec<u32>,
+    /// Per-file node buckets — every `NodeId` committed into the arena for
+    /// a given `FileId` is appended here during parallel-parse commit.
+    ///
+    /// This is the live source of truth for the Gate 0c `NodeIdBearing`
+    /// impl (A2 §K row K.B1), the Gate 0c finalize step 6 compaction, and
+    /// the Gate 0c / 0d bucket-bijection debug invariant on
+    /// [`super::super::concurrent::CodeGraph::assert_bucket_bijection`].
+    ///
+    /// Serialization: the map **is** persisted so V7+ snapshots carry the
+    /// bucket data directly; an empty map on load (legacy V7 snapshots
+    /// that predate the field) is indistinguishable from a graph that
+    /// happens to contain no nodes yet, so the bijection check's
+    /// "non-empty → strict" behaviour handles both transparently.
+    #[serde(default)]
+    per_file_nodes: HashMap<FileId, Vec<NodeId>>,
 }
 
 impl FileRegistry {
@@ -178,6 +194,7 @@ impl FileRegistry {
             entries: vec![None],
             lookup: HashMap::new(),
             free_list: Vec::new(),
+            per_file_nodes: HashMap::new(),
         }
     }
 
@@ -191,6 +208,7 @@ impl FileRegistry {
             entries,
             lookup: HashMap::with_capacity(capacity),
             free_list: Vec::new(),
+            per_file_nodes: HashMap::with_capacity(capacity),
         }
     }
 
@@ -206,6 +224,139 @@ impl FileRegistry {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.lookup.is_empty()
+    }
+
+    /// Returns an iterator over the per-file node buckets used by the
+    /// Gate 0c/0d bucket-bijection check (A2 §F.1).
+    ///
+    /// Yields `(FileId, Vec<NodeId>)` tuples, one per file that has at
+    /// least one recorded NodeId. Each returned `Vec<NodeId>` is a
+    /// **clone** of the internal bucket; the registry continues to own
+    /// the canonical storage, so callers must not assume identity
+    /// between repeated invocations. The iterator's ordering is whatever
+    /// `HashMap::iter` produces — stable per single call, but not across
+    /// calls.
+    ///
+    /// The Gate 0c `RebuildGraph::finalize()` contract calls the
+    /// bijection check unconditionally in debug builds. When no nodes
+    /// have been recorded yet (e.g. an empty graph, or a legacy V7
+    /// snapshot whose per-file buckets have not been rebuilt), this
+    /// iterator is empty and the check's "non-empty → strict" guard
+    /// makes it vacuous — exactly the behaviour every harness requires.
+    pub fn per_file_nodes_for_gate0d(
+        &self,
+    ) -> impl Iterator<
+        Item = (
+            crate::graph::unified::file::FileId,
+            Vec<crate::graph::unified::node::NodeId>,
+        ),
+    > + '_ {
+        self.per_file_nodes
+            .iter()
+            .map(|(&fid, nodes)| (fid, nodes.clone()))
+    }
+
+    /// Append `node` to the bucket for `file`.
+    ///
+    /// Called by `phase3_parallel_commit` immediately after a node is
+    /// written into the arena. Duplicates are not dedup'd here — the
+    /// caller guarantees each `NodeId` is unique per commit. Gate 0c's
+    /// finalize step 6 dedups defensively as part of bucket compaction.
+    ///
+    /// Accepting the bucketing at commit-site keeps the code path
+    /// `O(1)` amortised per node.
+    pub fn record_node(&mut self, file: FileId, node: NodeId) {
+        self.per_file_nodes.entry(file).or_default().push(node);
+    }
+
+    /// Remove `file`'s bucket and return its `NodeId`s, or an empty
+    /// `Vec` if no bucket was present.
+    ///
+    /// Used by `RebuildGraph::remove_file` (Task 4 Step 2, scheduled
+    /// after Gate 0c) to populate the tombstone set when a file is
+    /// deleted from the workspace. The bucket is removed, not cleared,
+    /// so the map shape matches the set of currently-live files.
+    pub fn take_nodes(&mut self, file: FileId) -> Vec<NodeId> {
+        self.per_file_nodes.remove(&file).unwrap_or_default()
+    }
+
+    /// Borrow `file`'s node bucket without removing it. Returns an
+    /// empty slice when no bucket is present.
+    #[must_use]
+    pub fn nodes_for_file(&self, file: FileId) -> &[NodeId] {
+        self.per_file_nodes
+            .get(&file)
+            .map_or(&[] as &[NodeId], Vec::as_slice)
+    }
+
+    /// Number of per-file buckets currently tracked.
+    #[must_use]
+    pub fn per_file_bucket_count(&self) -> usize {
+        self.per_file_nodes.len()
+    }
+
+    /// Total number of `NodeId`s summed across every per-file bucket.
+    ///
+    /// Used by Gate 0c tests and the bucket-bijection assertion to
+    /// sanity-check totals against the live arena count.
+    #[must_use]
+    pub fn total_recorded_nodes(&self) -> usize {
+        self.per_file_nodes.values().map(Vec::len).sum()
+    }
+
+    /// Rewrite every `Option<StringId>` stored in `FileEntry::source_uri`
+    /// through `remap`. Used by Gate 0c finalize step 1 after the
+    /// interner's dedup pass.
+    ///
+    /// Empty `remap` is a no-op; entries whose `source_uri` is `None`
+    /// are left alone.
+    #[allow(dead_code)]
+    pub(crate) fn rewrite_string_ids_through_remap(&mut self, remap: &HashMap<StringId, StringId>) {
+        if remap.is_empty() {
+            return;
+        }
+        for slot in self.entries.iter_mut().flatten() {
+            if let Some(uri) = slot.source_uri
+                && let Some(&canon) = remap.get(&uri)
+            {
+                slot.source_uri = Some(canon);
+            }
+        }
+    }
+
+    /// Apply `keep` to every `NodeId` in every per-file bucket, drop
+    /// rejected IDs, dedup each bucket (preserving first-occurrence
+    /// order), and drop any buckets that collapse to empty.
+    ///
+    /// This is the real impl behind the Gate 0c finalize step 6
+    /// compaction. It runs *after* the arena's tombstone predicate has
+    /// been fixed (step 2), so `keep` is backed by "arena has this
+    /// NodeId live" semantics.
+    #[allow(dead_code)]
+    pub(crate) fn retain_nodes_in_buckets<F>(&mut self, keep: &F)
+    where
+        F: Fn(NodeId) -> bool + ?Sized,
+    {
+        self.per_file_nodes.retain(|_file, bucket| {
+            bucket.retain(|id| keep(*id));
+            // Dedup (stable) while preserving insertion order.
+            let mut seen: std::collections::HashSet<NodeId> =
+                std::collections::HashSet::with_capacity(bucket.len());
+            bucket.retain(|id| seen.insert(*id));
+            !bucket.is_empty()
+        });
+    }
+
+    /// Iterate every `NodeId` across every bucket. Used by the Gate 0b
+    /// / 0c [`NodeIdBearing`] impl to audit tombstone residue.
+    ///
+    /// Duplicates across buckets are emitted as-is; the residue check
+    /// uses set membership.
+    ///
+    /// [`NodeIdBearing`]: crate::graph::unified::rebuild::coverage::NodeIdBearing
+    #[allow(dead_code)]
+    pub(crate) fn iter_all_bucket_node_ids(&self) -> impl Iterator<Item = NodeId> + '_ {
+        self.per_file_nodes.values().flat_map(|v| v.iter().copied())
     }
 
     /// Returns the total number of allocated slots (including vacant/recycled
@@ -622,6 +773,7 @@ impl FileRegistry {
             self.lookup.remove(&entry.path);
             if let Ok(index_u32) = u32::try_from(index) {
                 self.free_list.push(index_u32);
+                self.per_file_nodes.remove(&FileId::new(index_u32));
             } else {
                 log::warn!("File registry index overflow when recycling slot {index}");
             }
@@ -725,6 +877,7 @@ impl FileRegistry {
         self.entries[0] = None;
         self.lookup.clear();
         self.free_list.clear();
+        self.per_file_nodes.clear();
     }
 
     /// Reserves capacity for at least `additional` more files.
@@ -892,7 +1045,16 @@ impl crate::graph::unified::memory::GraphMemorySize for FileRegistry {
                 + std::mem::size_of::<u32>()
                 + HASHMAP_ENTRY_OVERHEAD);
         let free_list = self.free_list.capacity() * std::mem::size_of::<u32>();
-        entries_vec + lookup + free_list
+        let per_file_map = self.per_file_nodes.capacity()
+            * (std::mem::size_of::<FileId>()
+                + std::mem::size_of::<Vec<NodeId>>()
+                + HASHMAP_ENTRY_OVERHEAD);
+        let per_file_buckets: usize = self
+            .per_file_nodes
+            .values()
+            .map(|v| v.capacity() * std::mem::size_of::<NodeId>())
+            .sum();
+        entries_vec + lookup + free_list + per_file_map + per_file_buckets
     }
 }
 
@@ -1686,5 +1848,157 @@ mod tests {
         assert!(!reg.set_content_hash(FileId::INVALID, [0; 32]));
         assert!(!reg.set_indexed_at(FileId::INVALID, 1));
         assert!(!reg.set_source_uri(FileId::INVALID, None));
+    }
+
+    // ------------------------------------------------------------------
+    // Per-file node buckets (K.B1 — Task 4 Step 1 pulled into Gate 0c).
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn file_registry_record_node_tracks_per_file_buckets() {
+        let mut reg = FileRegistry::new();
+        let file_a = FileId::new(1);
+        let file_b = FileId::new(2);
+        let n1 = NodeId::new(10, 1);
+        let n2 = NodeId::new(11, 1);
+        let n3 = NodeId::new(12, 1);
+
+        reg.record_node(file_a, n1);
+        reg.record_node(file_a, n2);
+        reg.record_node(file_b, n3);
+
+        assert_eq!(reg.per_file_bucket_count(), 2);
+        assert_eq!(reg.total_recorded_nodes(), 3);
+        assert_eq!(reg.nodes_for_file(file_a), &[n1, n2]);
+        assert_eq!(reg.nodes_for_file(file_b), &[n3]);
+        assert!(reg.nodes_for_file(FileId::new(99)).is_empty());
+    }
+
+    #[test]
+    fn file_registry_take_nodes_drains_and_empties() {
+        let mut reg = FileRegistry::new();
+        let file = FileId::new(1);
+        let n1 = NodeId::new(10, 1);
+        let n2 = NodeId::new(11, 1);
+
+        reg.record_node(file, n1);
+        reg.record_node(file, n2);
+        let drained = reg.take_nodes(file);
+        assert_eq!(drained, vec![n1, n2]);
+        assert!(reg.nodes_for_file(file).is_empty());
+        assert_eq!(reg.per_file_bucket_count(), 0);
+        // take from an empty bucket is well-defined.
+        assert!(reg.take_nodes(file).is_empty());
+    }
+
+    #[test]
+    fn file_registry_retain_nodes_in_buckets_drops_and_empties() {
+        let mut reg = FileRegistry::new();
+        let file_a = FileId::new(1);
+        let file_b = FileId::new(2);
+        let keep = NodeId::new(10, 1);
+        let drop1 = NodeId::new(11, 1);
+        let drop2 = NodeId::new(12, 1);
+        reg.record_node(file_a, keep);
+        reg.record_node(file_a, drop1);
+        reg.record_node(file_b, drop2);
+
+        reg.retain_nodes_in_buckets(&|id| id == keep);
+
+        assert_eq!(reg.nodes_for_file(file_a), &[keep]);
+        assert!(reg.nodes_for_file(file_b).is_empty());
+        assert_eq!(reg.per_file_bucket_count(), 1, "empty bucket must drop");
+        assert_eq!(reg.total_recorded_nodes(), 1);
+    }
+
+    #[test]
+    fn file_registry_retain_nodes_dedups_within_bucket() {
+        let mut reg = FileRegistry::new();
+        let file = FileId::new(1);
+        let n = NodeId::new(10, 1);
+        // Intentionally record the same NodeId twice (simulating a
+        // finalize scenario where parallel commit wrote the same id
+        // into two chunks — defense-in-depth, not expected).
+        reg.record_node(file, n);
+        reg.record_node(file, n);
+        reg.retain_nodes_in_buckets(&|_| true);
+        assert_eq!(reg.nodes_for_file(file), &[n]);
+    }
+
+    #[test]
+    fn file_registry_unregister_drops_bucket() {
+        let mut reg = FileRegistry::new();
+        let id = reg.register_canonical(Path::new("/a.rs")).unwrap();
+        reg.record_node(id, NodeId::new(10, 1));
+        reg.record_node(id, NodeId::new(11, 1));
+        assert_eq!(reg.nodes_for_file(id).len(), 2);
+
+        reg.unregister(id);
+        assert!(reg.nodes_for_file(id).is_empty());
+        assert_eq!(reg.per_file_bucket_count(), 0);
+    }
+
+    #[test]
+    fn file_registry_clear_drops_buckets() {
+        let mut reg = FileRegistry::new();
+        let id = reg.register_canonical(Path::new("/a.rs")).unwrap();
+        reg.record_node(id, NodeId::new(10, 1));
+        reg.clear();
+        assert_eq!(reg.per_file_bucket_count(), 0);
+    }
+
+    #[test]
+    fn file_registry_rewrite_string_ids_updates_source_uri() {
+        let mut reg = FileRegistry::new();
+        let old_uri = StringId::new(7);
+        let canon_uri = StringId::new(3);
+        let id = reg
+            .register_external_with_uri(
+                "/virtual/path/Foo.class",
+                Some(Language::Java),
+                Some(old_uri),
+            )
+            .unwrap();
+        let mut remap = HashMap::new();
+        remap.insert(old_uri, canon_uri);
+        reg.rewrite_string_ids_through_remap(&remap);
+        let view = reg.file_provenance(id).unwrap();
+        assert_eq!(view.source_uri, Some(canon_uri));
+    }
+
+    #[test]
+    fn file_registry_rewrite_string_ids_is_noop_on_empty_remap() {
+        let mut reg = FileRegistry::new();
+        let uri = StringId::new(42);
+        let id = reg
+            .register_external_with_uri("/x.class", Some(Language::Java), Some(uri))
+            .unwrap();
+        reg.rewrite_string_ids_through_remap(&HashMap::new());
+        assert_eq!(reg.file_provenance(id).unwrap().source_uri, Some(uri));
+    }
+
+    #[test]
+    fn file_registry_per_file_nodes_for_gate0d_yields_all_buckets() {
+        let mut reg = FileRegistry::new();
+        let file_a = FileId::new(1);
+        let file_b = FileId::new(2);
+        let n1 = NodeId::new(10, 1);
+        let n2 = NodeId::new(11, 1);
+        let n3 = NodeId::new(12, 1);
+        reg.record_node(file_a, n1);
+        reg.record_node(file_a, n2);
+        reg.record_node(file_b, n3);
+
+        let collected: std::collections::BTreeMap<FileId, Vec<NodeId>> =
+            reg.per_file_nodes_for_gate0d().collect();
+        assert_eq!(collected.len(), 2);
+        assert_eq!(
+            collected.get(&file_a).cloned().unwrap_or_default(),
+            vec![n1, n2]
+        );
+        assert_eq!(
+            collected.get(&file_b).cloned().unwrap_or_default(),
+            vec![n3]
+        );
     }
 }

@@ -292,9 +292,14 @@ Disable specific tool groups via environment variables:
 | `SQRY_INCLUDE_HIGH_COST` | Include high-cost plugins | `0` (disabled) |
 | `SQRY_MCP_ENGINE_CACHE_CAPACITY` | Max cached workspace engines | `5` |
 | `SQRY_MCP_DISCOVERY_CACHE_CAPACITY` | Max cached workspace paths | `100` |
-| `SQRY_MCP_TRACE_PATH_CACHE_CAPACITY` | Max cached trace path results | `256` |
-| `SQRY_MCP_SUBGRAPH_CACHE_CAPACITY` | Max cached subgraph results | `128` |
-| `SQRY_MCP_QUERY_CACHE_TTL_SECS` | Query cache TTL in seconds | `300` (5 min) |
+| `SQRY_MCP_TRACE_CACHE_SIZE` | Max cached trace path results | `256` |
+| `SQRY_MCP_SUBGRAPH_CACHE_SIZE` | Max cached subgraph results | `128` |
+
+> Phase 3C DB21: the duplicated `SQRY_MCP_TRACE_PATH_CACHE_CAPACITY` /
+> `SQRY_MCP_SUBGRAPH_CACHE_CAPACITY` / `SQRY_MCP_QUERY_CACHE_TTL_SECS`
+> environment variables were retired. Use `SQRY_MCP_TRACE_CACHE_SIZE` /
+> `SQRY_MCP_SUBGRAPH_CACHE_SIZE` instead; the payload-cache TTL is now
+> fixed at 300 seconds.
 
 ### Cache Configuration (Optional)
 
@@ -323,8 +328,8 @@ The MCP server caches workspace engines, discovery results, and query results to
       "command": "/path/to/sqry-mcp",
       "env": {
         "SQRY_MCP_ENGINE_CACHE_CAPACITY": "2",
-        "SQRY_MCP_TRACE_PATH_CACHE_CAPACITY": "64",
-        "SQRY_MCP_SUBGRAPH_CACHE_CAPACITY": "32"
+        "SQRY_MCP_TRACE_CACHE_SIZE": "64",
+        "SQRY_MCP_SUBGRAPH_CACHE_SIZE": "32"
       }
     }
   }
@@ -480,6 +485,6 @@ MIT - See root LICENSE file
 
 ---
 
-**Last Updated**: 2026-04-12
-**Version**: 8.0.7
+**Last Updated**: 2026-04-23
+**Version**: 9.0.0
 **Tested With**: sqry v4.8.2, Claude Desktop, Windsurf, Claude Code, Codex, Gemini CLI

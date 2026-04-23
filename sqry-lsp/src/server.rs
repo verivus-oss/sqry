@@ -1,5 +1,6 @@
 use crate::cancel;
 use crate::config::ConfigDiff;
+use crate::handlers::LspHandlerError;
 use crate::handlers::{
     ask, batch_counts, call_hierarchy, code_action, complexity_metrics, definition,
     dependency_impact, direct_relations, document_symbol, execute_command, explain_symbol,
@@ -1834,10 +1835,17 @@ impl Drop for HandlerGuard {
 fn map_error(err: anyhow::Error) -> RpcError {
     match err.downcast::<QueryError>() {
         Ok(query_err) => RpcError::invalid_params(query_err.to_string()),
-        Err(other) => RpcError {
-            code: ErrorCode::InternalError,
-            message: other.to_string().into(),
-            data: None,
+        Err(other) => match other.downcast::<LspHandlerError>() {
+            Ok(handler_err @ LspHandlerError::InvalidParams(_)) => RpcError {
+                code: ErrorCode::InvalidParams,
+                message: handler_err.to_string().into(),
+                data: None,
+            },
+            Err(other) => RpcError {
+                code: ErrorCode::InternalError,
+                message: other.to_string().into(),
+                data: None,
+            },
         },
     }
 }

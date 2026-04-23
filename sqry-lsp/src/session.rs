@@ -167,6 +167,17 @@ impl SessionManager {
         &self.root_path
     }
 
+    /// Returns the workspace root path suitable for PN3 cold-load lookups.
+    ///
+    /// Returns the configured `index_root` if set (overrides the root path via
+    /// the LSP config), otherwise falls back to the session root path.
+    /// This is the directory under which `.sqry/graph/derived.sqry` is expected
+    /// to exist.
+    #[must_use]
+    pub fn index_root_for_cold_load(&self) -> PathBuf {
+        self.current_index_root()
+    }
+
     #[must_use]
     pub fn executor(&self) -> Arc<QueryExecutor> {
         Arc::clone(&self.executor)
@@ -844,6 +855,8 @@ mod tests {
             log_level: "warn".into(),
             config: None,
             allow_public_bind: false,
+            daemon: false,
+            daemon_socket: None,
         })
     }
 

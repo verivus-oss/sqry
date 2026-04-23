@@ -1,0 +1,39 @@
+{
+  "query": {
+    "symbol": "x",
+    "file_scope": "Any",
+    "mode": "AllowSuffixCandidates"
+  },
+  "bindings": [
+    {
+      "node_id": {
+        "index": 2,
+        "generation": 1
+      },
+      "classification": "Declaration",
+      "bucket": "ExactSimple",
+      "kind": "variable"
+    },
+    {
+      "node_id": {
+        "index": 3,
+        "generation": 1
+      },
+      "classification": "Declaration",
+      "bucket": "ExactSimple",
+      "kind": "variable"
+    }
+  ],
+  "outcome": {
+    "Ambiguous": [
+      {
+        "index": 2,
+        "generation": 1
+      },
+      {
+        "index": 3,
+        "generation": 1
+      }
+    ]
+  }
+}

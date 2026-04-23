@@ -19,6 +19,8 @@ fn options_with_socket(addr: &str) -> LspOptions {
         log_level: "warn".to_string(),
         config: None,
         allow_public_bind: false,
+        daemon: false,
+        daemon_socket: None,
     }
 }
 
@@ -31,6 +33,8 @@ fn options_with_socket_and_suppression(addr: &str, allow_suppress: bool) -> LspO
         log_level: "warn".to_string(),
         config: None,
         allow_public_bind: allow_suppress,
+        daemon: false,
+        daemon_socket: None,
     }
 }
 
@@ -81,6 +85,8 @@ fn default_uses_stdio() {
         log_level: "warn".to_string(),
         config: None,
         allow_public_bind: false,
+        daemon: false,
+        daemon_socket: None,
     };
     assert!(opts.use_stdio());
     assert!(opts.socket.is_none());
@@ -95,6 +101,8 @@ fn explicit_stdio_flag() {
         log_level: "warn".to_string(),
         config: None,
         allow_public_bind: false,
+        daemon: false,
+        daemon_socket: None,
     };
     assert!(opts.use_stdio());
 }
@@ -109,6 +117,8 @@ fn recommended_secure_configuration() {
         log_level: "info".to_string(),
         config: None,
         allow_public_bind: false,
+        daemon: false,
+        daemon_socket: None,
     };
 
     assert!(!opts.use_stdio());

@@ -97,6 +97,11 @@ fn collect_complexity_metrics(
     let mut metrics: Vec<crate::protocol::SqryComplexityMetric> = Vec::new();
 
     for (node_id, entry) in snapshot.iter_nodes() {
+        // Gate 0d iter-2 fix: skip unified losers from LSP
+        // complexity metrics. See `NodeEntry::is_unified_loser`.
+        if entry.is_unified_loser() {
+            continue;
+        }
         // Only analyze functions and methods
         if !matches!(entry.kind, NodeKind::Function | NodeKind::Method) {
             continue;

@@ -27,14 +27,31 @@ clap.workspace = true
 env_logger.workspace = true
 log.workspace = true
 tokio.workspace = true
+# Phase 8c U9 — `daemon_host::host_on_streams` accepts a
+# `tokio_util::sync::CancellationToken` so sqry-daemon's shim
+# router can drive shutdown of a daemon-hosted LSP session. Match
+# the version + feature-set used by sqry-daemon to keep the two
+# crates resolving to the same `CancellationToken` type.
+tokio-util = { version = "0.7", default-features = false, features = ["rt"] }
 tower-lsp.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sqry-core = { version = "8.0.7", path = "../sqry-core" }
-sqry-nl = { version = "8.0.7", path = "../sqry-nl" }
-sqry-plugin-registry = { version = "8.0.7", path = "../sqry-plugin-registry" }
+thiserror.workspace = true
+sqry-core = { version = "9.0.0", path = "../sqry-core" }
+sqry-db = { version = "9.0.0", path = "../sqry-db" }
+sqry-nl = { version = "9.0.0", path = "../sqry-nl" }
+sqry-plugin-registry = { version = "9.0.0", path = "../sqry-plugin-registry" }
+# Phase 8c U11 — `sqry-lsp --daemon` shim client transport. Provides
+# `connect_shim` + `pump_stdio` so this binary can run as a byte-pump
+# shim against a long-lived sqryd daemon. Leaf crate on our dep graph
+# (only pulls in `sqry-daemon-protocol` + `tokio`); no cycle.
+sqry-daemon-client = { version = "9.0.0", path = "../sqry-daemon-client" }
+# Task 11 U1 — `resolve_sqryd_binary` PATH lookup (used by daemon auto-start in
+# `run_daemon_client_mode`). Version matches the `sqry-cli` dependency so both
+# crates resolve to the same version in the workspace lock-file.
+which = "8"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 parking_lot.workspace = true
 ropey = "1.6"
@@ -46,6 +63,15 @@ uuid = { version = "1.11", features = ["v4"] }
 tikv-jemallocator = "0.6"
 tikv-jemalloc-sys = { version = "0.6", features = ["unprefixed_malloc_on_supported_platforms"] }
 
+# Phase 8c U11 — `libc::getuid()` backs the UID-scoped `/tmp/sqry-<uid>/sqryd.sock`
+# fallback in `resolve_daemon_socket`, matching the daemon's own
+# `sqry-daemon/src/config.rs::user_scoped_dir_name` logic exactly so
+# default-configured client + default-configured daemon meet without
+# coordination. unix-only; windows uses the named-pipe path which
+# needs no UID scoping (the pipe namespace is already per-session).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 assert_cmd = "2.0"
 tempfile = "3.14"
@@ -53,3 +79,8 @@ criterion = "0.8"
 tower = { version = "0.4", features = ["buffer", "util"] }
 futures = "0.3"
 sqry-lang-rust = { path = "../sqry-lang-rust" }
+# Task 11 U1 — serialise async tests that mutate process-global env vars.
+# Dropping ENV_LOCK before `.await` (required by clippy::await_holding_lock)
+# opens a window where parallel tests can mutate the env. `serial` macro pins
+# each such test to a single-threaded, serialised execution context.
+serial_test = "3"

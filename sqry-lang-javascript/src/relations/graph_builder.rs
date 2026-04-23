@@ -1,5 +1,6 @@
 use std::{collections::HashMap, path::Path, sync::Arc};
 
+use sqry_core::graph::unified::build::helper::CalleeKindHint;
 use sqry_core::graph::unified::edge::kind::TypeOfContext;
 use sqry_core::graph::unified::edge::{ExportKind, FfiConvention, HttpMethod};
 use sqry_core::graph::unified::{GraphBuildHelper, NodeId, StagingGraph};
@@ -282,9 +283,10 @@ fn build_call_edge_with_helper(
 
     // Ensure nodes exist using helper
     let source_id = ensure_caller_node(helper, call_context);
-    let target_id = helper.ensure_function(&target_qname, None, false, false);
+    let call_site_span = span_from_node(call_node);
+    let target_id = helper.ensure_callee(&target_qname, call_site_span, CalleeKindHint::Function);
 
-    let span = Some(span_from_node(call_node));
+    let span = Some(call_site_span);
     let argument_count = u8::try_from(count_arguments(call_node)).unwrap_or(u8::MAX);
     let is_async = check_uses_await(call_node);
 
@@ -406,7 +408,11 @@ fn detect_route_endpoint(
         if !handler_name.is_empty()
             && matches!(handler_node.kind(), "identifier" | "member_expression")
         {
-            let handler_id = helper.ensure_function(handler_name, None, false, false);
+            let handler_id = helper.ensure_callee(
+                handler_name,
+                span_from_node(handler_node),
+                CalleeKindHint::Function,
+            );
             helper.add_contains_edge(endpoint_id, handler_id);
         }
     }
@@ -604,9 +610,11 @@ fn build_constructor_edge_with_helper(
 
     let constructor_simple = simple_name(&constructor_text);
     let source_id = ensure_caller_node(helper, call_context);
-    let target_id = helper.ensure_function(constructor_simple, None, false, false);
+    let new_site_span = span_from_node(new_node);
+    let target_id =
+        helper.ensure_callee(constructor_simple, new_site_span, CalleeKindHint::Function);
 
-    let span = Some(span_from_node(new_node));
+    let span = Some(new_site_span);
     let argument_count = u8::try_from(count_arguments(new_node)).unwrap_or(u8::MAX);
 
     Ok(Some((source_id, target_id, argument_count, span)))
@@ -1462,7 +1470,11 @@ fn process_function_jsdoc(
     }
 
     // Get or create function node
-    let func_node_id = helper.ensure_function(&function_name, None, false, false);
+    let func_node_id = helper.ensure_callee(
+        &function_name,
+        span_from_node(func_node),
+        CalleeKindHint::Function,
+    );
 
     // ISSUE 1 FIX: Extract AST parameter list with indices
     // Map JSDoc tags to AST parameters by name, use AST index (not JSDoc order)

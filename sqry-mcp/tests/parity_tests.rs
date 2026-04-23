@@ -69,6 +69,7 @@ fn normalize_value_inner(value: &mut Value, workspace_root: &str, ws_forward: &s
             } else if s.contains(workspace_root) {
                 *s = s.replace(workspace_root, "<WORKSPACE_ROOT>");
             }
+            normalize_known_fixture_root(s);
             // Normalize any CRLF artifacts that may leak into symbol names
             // when tree-sitter parses files with Windows line endings.
             if s.contains("\r\n") {
@@ -76,6 +77,25 @@ fn normalize_value_inner(value: &mut Value, workspace_root: &str, ws_forward: &s
             }
         }
         _ => {}
+    }
+}
+
+fn normalize_known_fixture_root(s: &mut String) {
+    const MARKERS: [&str; 2] = [
+        "/sqry-lsp/tests/fixtures/mini-workspace",
+        "\\sqry-lsp\\tests\\fixtures\\mini-workspace",
+    ];
+
+    for marker in MARKERS {
+        if let Some(marker_pos) = s.find(marker) {
+            let suffix = s[marker_pos + marker.len()..].to_string();
+            *s = if s.starts_with("file://") {
+                format!("file://<WORKSPACE_ROOT>{suffix}")
+            } else {
+                format!("<WORKSPACE_ROOT>{suffix}")
+            };
+            return;
+        }
     }
 }
 

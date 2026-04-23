@@ -273,6 +273,31 @@ impl NodeEntry {
         self
     }
 
+    /// Whether this arena entry is a Phase 4c-prime cross-file
+    /// unification loser (an "inert" merged duplicate).
+    ///
+    /// Phase 4c-prime merges cross-file stubs that share a qualified
+    /// name and a call-compatible kind into a single canonical winner,
+    /// folding metadata + flags into the winner and calling
+    /// [`crate::graph::unified::build::unification::merge_node_into`] on
+    /// the loser. The loser's arena slot stays `Occupied` (so
+    /// `NodeArena::slot_count()` stays stable for CSR row_ptr sizing),
+    /// but its `name` is cleared to [`StringId::INVALID`] and its
+    /// `qualified_name` to `None`. That sentinel is what this method
+    /// detects.
+    ///
+    /// Callers that iterate `NodeArena::iter()` for publish-visible
+    /// purposes (symbol listings, document-symbol enumeration,
+    /// find_by_pattern-style fanout) MUST skip entries where
+    /// `is_unified_loser()` returns `true`. Callers working on rebuild
+    /// internals (Gate 0d residue checks, CSR compaction) must continue
+    /// to include them.
+    #[inline]
+    #[must_use]
+    pub fn is_unified_loser(&self) -> bool {
+        self.name == StringId::INVALID
+    }
+
     /// Sets the signature for this node.
     #[must_use]
     pub fn with_signature(mut self, signature: StringId) -> Self {

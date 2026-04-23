@@ -25,6 +25,7 @@ use std::{
 };
 
 use sqry_core::graph::unified::NodeId as UnifiedNodeId;
+use sqry_core::graph::unified::build::helper::CalleeKindHint;
 use sqry_core::graph::unified::build::helper::GraphBuildHelper;
 use sqry_core::graph::unified::build::staging::StagingGraph;
 use sqry_core::graph::unified::edge::FfiConvention;
@@ -931,11 +932,11 @@ fn process_call_expression_unified(
 
     // Ensure both caller and callee nodes exist
     let source_id = ensure_caller_node(helper, caller_context);
-    let target_id = helper.add_function(&callee_qualified, None, false, false);
+    let call_span = Span::from_bytes(node.start_byte(), node.end_byte());
+    let target_id = helper.ensure_callee(&callee_qualified, call_span, CalleeKindHint::Function);
 
     // Add call edge
     let argument_count = call_argument_count(node);
-    let call_span = Span::from_bytes(node.start_byte(), node.end_byte());
     add_call_edge(
         helper,
         source_id,
@@ -2772,7 +2773,11 @@ fn build_route_endpoint(
         if !handler_name.is_empty()
             && matches!(handler_node.kind(), "identifier" | "selector_expression")
         {
-            let handler_id = helper.ensure_function(handler_name, None, false, false);
+            let handler_id = helper.ensure_callee(
+                handler_name,
+                Span::from_bytes(handler_node.start_byte(), handler_node.end_byte()),
+                CalleeKindHint::Function,
+            );
             helper.add_contains_edge(endpoint_id, handler_id);
         }
     }

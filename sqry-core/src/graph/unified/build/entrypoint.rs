@@ -12,12 +12,14 @@ use ignore::WalkBuilder;
 use rayon::prelude::*;
 
 use crate::graph::GraphBuilderError;
+use crate::graph::error::GraphResult;
 use crate::graph::unified::analysis::LabelBudgetConfig;
 use crate::graph::unified::analysis::ReachabilityStrategy;
 use crate::graph::unified::build::StagingGraph;
+use crate::graph::unified::build::cancellation::CancellationToken;
 use crate::graph::unified::build::parallel_commit::{
-    GlobalOffsets, pending_edges_to_delta, phase2_assign_ranges, phase3_parallel_commit,
-    phase4_apply_global_remap,
+    GlobalOffsets, phase2_assign_ranges, phase3_parallel_commit, phase4_apply_global_remap,
+    phase4c_prime_unify_cross_file_nodes, phase4d_bulk_insert_edges,
 };
 use crate::graph::unified::build::pass3_intra::PendingEdge;
 use crate::graph::unified::build::progress::GraphBuildProgressTracker;
@@ -255,9 +257,8 @@ pub fn build_unified_graph(
     plugins: &PluginManager,
     config: &BuildConfig,
 ) -> Result<CodeGraph> {
-    let (graph, _effective_threads) =
-        build_unified_graph_inner(root, plugins, config, no_op_reporter())?;
-    Ok(graph)
+    build_unified_graph_cancellable(root, plugins, config, &CancellationToken::default())
+        .map_err(anyhow::Error::from)
 }
 
 /// Build a unified graph from source files with progress reporting.
@@ -286,22 +287,83 @@ pub fn build_unified_graph_with_progress(
     config: &BuildConfig,
     progress: SharedReporter,
 ) -> Result<(CodeGraph, usize)> {
-    build_unified_graph_inner(root, plugins, config, progress)
+    build_unified_graph_with_progress_cancellable(
+        root,
+        plugins,
+        config,
+        progress,
+        &CancellationToken::default(),
+    )
+    .map_err(anyhow::Error::from)
+}
+
+/// Build a unified graph with cooperative cancellation.
+///
+/// Behaves identically to [`build_unified_graph`] except that the
+/// `cancellation` token is polled at every pass boundary. A cancelled
+/// token causes the pipeline to return [`GraphBuilderError::Cancelled`]
+/// at the next boundary.
+///
+/// Used by the sqryd daemon's rebuild dispatcher to abort in-flight
+/// full rebuilds when a workspace is evicted mid-build.
+///
+/// # Errors
+///
+/// Returns [`GraphBuilderError::Cancelled`] if the token is cancelled
+/// at any pass boundary; otherwise the same error modes as
+/// [`build_unified_graph`] (lifted from `anyhow::Error` into
+/// [`GraphBuilderError::Internal`]).
+pub fn build_unified_graph_cancellable(
+    root: &Path,
+    plugins: &PluginManager,
+    config: &BuildConfig,
+    cancellation: &CancellationToken,
+) -> GraphResult<CodeGraph> {
+    let (graph, _effective_threads) =
+        build_unified_graph_inner(root, plugins, config, no_op_reporter(), cancellation)?;
+    Ok(graph)
+}
+
+/// Build a unified graph with cooperative cancellation AND a progress
+/// reporter.
+///
+/// Combines [`build_unified_graph_cancellable`] + the progress
+/// reporter variant.
+///
+/// # Errors
+///
+/// Same as [`build_unified_graph_cancellable`].
+pub fn build_unified_graph_with_progress_cancellable(
+    root: &Path,
+    plugins: &PluginManager,
+    config: &BuildConfig,
+    progress: SharedReporter,
+    cancellation: &CancellationToken,
+) -> GraphResult<(CodeGraph, usize)> {
+    build_unified_graph_inner(root, plugins, config, progress, cancellation)
 }
 
 /// Internal implementation that returns the effective thread count alongside the graph.
 ///
 /// Used by [`build_and_persist_graph_with_progress`] to propagate the thread count
 /// into `BuildResult` without exposing it in the public API.
+///
+/// Accepts a [`CancellationToken`] which is polled at every pass
+/// boundary. Callers that do not need cancellation pass
+/// `&CancellationToken::default()` (via the `build_unified_graph` +
+/// `build_unified_graph_with_progress` wrappers).
 #[allow(clippy::too_many_lines)] // Complex 5-pass build pipeline requires sequential flow
 fn build_unified_graph_inner(
     root: &Path,
     plugins: &PluginManager,
     config: &BuildConfig,
     progress: SharedReporter,
-) -> Result<(CodeGraph, usize)> {
+    cancellation: &CancellationToken,
+) -> GraphResult<(CodeGraph, usize)> {
     if !root.exists() {
-        anyhow::bail!("Path {} does not exist", root.display());
+        return Err(GraphBuilderError::Internal {
+            reason: format!("Path {} does not exist", root.display()),
+        });
     }
 
     log::info!(
@@ -309,12 +371,17 @@ fn build_unified_graph_inner(
         root.display()
     );
 
+    // 7c cancellation boundary 1: pre-build, after arg validation.
+    cancellation.check()?;
+
     let has_graph_builders = plugins
         .plugins()
         .iter()
         .any(|plugin| plugin.graph_builder().is_some());
     if !has_graph_builders {
-        anyhow::bail!("No graph builders registered – cannot build code graph");
+        return Err(GraphBuilderError::Internal {
+            reason: "No graph builders registered – cannot build code graph".to_string(),
+        });
     }
 
     // Create progress tracker for this build
@@ -324,11 +391,17 @@ fn build_unified_graph_inner(
     let mut files = find_source_files(root, config);
     sort_files_for_build(root, &mut files);
 
+    // 7c cancellation boundary 2: after file discovery, before thread
+    // pool creation + graph allocation.
+    cancellation.check()?;
+
     // 2. Create the unified graph
     let mut graph = CodeGraph::new();
 
     // 3. Create scoped thread pool for parallel parse
-    let pool = create_thread_pool(config)?;
+    let pool = create_thread_pool(config).map_err(|e| GraphBuilderError::Internal {
+        reason: format!("thread pool: {e}"),
+    })?;
     let effective_threads = pool.current_num_threads();
     log::info!("Parallel indexing: using {effective_threads} threads");
 
@@ -370,7 +443,17 @@ fn build_unified_graph_inner(
 
     let chunks = compute_parse_chunks(&files, &pool, plugins, config.staging_memory_limit);
     for chunk_range in chunks {
+        // 7c cancellation boundary 3: top of each chunk iteration.
+        cancellation.check()?;
+
         let chunk_files = &files[chunk_range];
+
+        // 7c test hook: observation point fired at the top of each
+        // chunk. Tests that need to flip the cancellation token
+        // between chunks register a callback here. Production builds
+        // compile this call out entirely.
+        #[cfg(any(test, feature = "rebuild-internals"))]
+        testing::fire_after_chunk_hook(cancellation);
 
         // Phase 1: Parallel parse this chunk
         let staged_results: Vec<(PathBuf, Result<ParsedFileOutcome>)> = pool.install(|| {
@@ -431,10 +514,11 @@ fn build_unified_graph_inner(
             .iter()
             .map(|(path, parsed)| (path.clone(), Some(parsed.language)))
             .collect();
-        let file_ids = graph
-            .files_mut()
-            .register_batch(&file_info)
-            .map_err(|e| anyhow::anyhow!("Failed to register files: {e}"))?;
+        let file_ids = graph.files_mut().register_batch(&file_info).map_err(|e| {
+            GraphBuilderError::Internal {
+                reason: format!("Failed to register files: {e}"),
+            }
+        })?;
 
         // Phase 2: Count + range assignment (fast, no progress needed)
         let staging_refs: Vec<_> = chunk_parsed.iter().map(|(_, p)| &p.staging).collect();
@@ -449,16 +533,25 @@ fn build_unified_graph_inner(
         graph
             .nodes_mut()
             .alloc_range(plan.total_nodes, &placeholder)
-            .map_err(|e| anyhow::anyhow!("Failed to alloc node range: {e:?}"))?;
+            .map_err(|e| GraphBuilderError::Internal {
+                reason: format!("Failed to alloc node range: {e:?}"),
+            })?;
         graph
             .strings_mut()
             .alloc_range(plan.total_strings)
-            .map_err(|e| anyhow::anyhow!("Failed to alloc string range: {e}"))?;
+            .map_err(|e| GraphBuilderError::Internal {
+                reason: format!("Failed to alloc string range: {e}"),
+            })?;
 
         // Phase 3: Parallel commit into disjoint pre-allocated ranges.
         // Use pool.install to respect BuildConfig::num_threads for rayon par_iter.
-        let (arena, interner) = graph.nodes_and_strings_mut();
-        let phase3 = pool.install(|| phase3_parallel_commit(&plan, &staging_refs, arena, interner));
+        //
+        // `phase3_parallel_commit` is generic over
+        // `G: GraphMutationTarget` as of Task 4 Step 4 Phase 1; here
+        // the inferred `G` is `CodeGraph`, and the helper reaches the
+        // arena + interner via `graph.nodes_and_strings_mut()`
+        // internally.
+        let phase3 = pool.install(|| phase3_parallel_commit(&plan, &staging_refs, &mut graph));
 
         // Validate written counts match plan. A mismatch indicates a bug in
         // StagingGraph counting — abort the build to prevent phantom entries
@@ -471,13 +564,46 @@ fn build_unified_graph_inner(
             || phase3.total_strings_written != expected_strings
             || phase3.total_edges_collected != expected_edges
         {
-            anyhow::bail!(
-                "Phase 3 count mismatch: nodes {}/{expected_nodes}, strings {}/{expected_strings}, \
-                 edges {}/{expected_edges}. This indicates a bug in StagingGraph counting.",
-                phase3.total_nodes_written,
-                phase3.total_strings_written,
-                phase3.total_edges_collected,
-            );
+            return Err(GraphBuilderError::Internal {
+                reason: format!(
+                    "Phase 3 count mismatch: nodes {}/{expected_nodes}, strings {}/{expected_strings}, edges {}/{expected_edges}. This indicates a bug in StagingGraph counting.",
+                    phase3.total_nodes_written,
+                    phase3.total_strings_written,
+                    phase3.total_edges_collected,
+                ),
+            });
+        }
+
+        // Populate FileSegmentTable from the chunk's file plans.
+        for fp in &plan.file_plans {
+            let start = fp.node_range.start;
+            let count = fp.node_range.end.saturating_sub(start);
+            graph
+                .file_segments_mut()
+                .record_range(fp.file_id, start, count);
+        }
+
+        // Populate FileRegistry::per_file_nodes from Phase 3's
+        // committed-NodeId vectors. This is the Gate 0c iter-2 B2 fix
+        // (pulled base-plan Step 1 forward): each NodeId committed by
+        // parallel-parse is bucketed by its owning FileId so the
+        // bucket-bijection debug invariant at publish time can verify
+        // arena ↔ bucket consistency against real data instead of a
+        // vacuously-empty map.
+        //
+        // Iteration order matches `plan.file_plans`, which is
+        // deterministic across runs. `per_file_node_ids[i]` is the
+        // set of NodeIds committed for `plan.file_plans[i]`; the
+        // registry's `record_node` is O(1) amortised per call.
+        debug_assert_eq!(
+            phase3.per_file_node_ids.len(),
+            plan.file_plans.len(),
+            "phase3 per-file node ID vector length must match plan length"
+        );
+        for (fp, node_ids) in plan.file_plans.iter().zip(phase3.per_file_node_ids.iter()) {
+            for nid in node_ids {
+                graph.files_mut().record_node(fp.file_id, *nid);
+            }
         }
 
         succeeded += chunk_parsed.len();
@@ -494,13 +620,26 @@ fn build_unified_graph_inner(
         offsets.node_offset += plan.total_nodes;
         offsets.string_offset += plan.total_strings;
 
+        // 7c cancellation boundary 4: after chunk commit, before
+        // accumulating edges for Phase 4.
+        cancellation.check()?;
+
         // Accumulate edges for Phase 4
         all_edges.extend(phase3.per_file_edges);
     }
     tracker.complete_phase();
 
+    // 7c test hook: observation point fired after the chunk loop exits
+    // and before Phase 4 finalization. Tests that need to flip the
+    // cancellation token at this boundary register a callback here.
+    #[cfg(any(test, feature = "rebuild-internals"))]
+    testing::fire_before_phase4_hook(cancellation);
+
     // Phase 4: Post-chunk finalization
-    tracker.start_phase(4, "Finalizing graph", 4);
+    tracker.start_phase(4, "Finalizing graph", 5);
+
+    // 7c cancellation boundary 5: pre-Phase-4a.
+    cancellation.check()?;
 
     // Phase 4a: Global string dedup
     let string_remap = graph.strings_mut().build_dedup_table();
@@ -515,21 +654,53 @@ fn build_unified_graph_inner(
     }
     tracker.increment_progress(); // 4a+4b done
 
+    // 7c cancellation boundary 6: pre-Phase-4c (rebuild_indices).
+    cancellation.check()?;
+
     // Phase 4c: Build indices from finalized arena.
     // Uses build_from_arena() which is O(n log n) — no per-element duplicate check.
     graph.rebuild_indices();
     tracker.increment_progress(); // 4c done
 
-    // Phase 4d: Bulk insert edges via deterministic DeltaEdge conversion.
-    // Start seq numbering from the edge store's current counter to support non-empty graphs.
-    let edge_seq_start = graph.edges().forward().seq_counter();
-    let (delta_edge_vecs, _final_seq) = pending_edges_to_delta(&all_edges, edge_seq_start);
-    let total_edge_count: u64 = delta_edge_vecs.iter().map(|v| v.len() as u64).sum();
-    if total_edge_count > 0 {
-        graph
-            .edges()
-            .add_edges_bulk_ordered(&delta_edge_vecs, total_edge_count);
+    // 7c cancellation boundary 7: pre-Phase-4c-prime
+    // (phase4c_prime_unify_cross_file_nodes).
+    cancellation.check()?;
+
+    // Phase 4c-prime: Cross-file node unification.
+    // Walk the arena for nodes sharing a qualified name and a call-compatible kind,
+    // merge duplicates into a single canonical node, and rewrite PendingEdge targets.
+    // Must run AFTER rebuild_indices (uses by_qualified_name) and BEFORE Phase 4d
+    // (operates on PendingEdge, not committed DeltaEdge).
+    let unification_stats = phase4c_prime_unify_cross_file_nodes(&mut graph, &mut all_edges);
+    if unification_stats.nodes_merged > 0 {
+        log::info!(
+            "Phase 4c-prime: unified {} duplicate nodes ({} candidate groups examined, \
+             {} edges rewritten, {} ms)",
+            unification_stats.nodes_merged,
+            unification_stats.candidate_pairs_examined,
+            unification_stats.edges_rewritten,
+            unification_stats.elapsed_ms,
+        );
+        // 7c cancellation boundary 7b: post-4c-prime, before the
+        // optional second rebuild_indices. Codex iter-0 MAJOR: without
+        // this check, a cancellation observed after the unification
+        // walk still pays another O(n log n) index rebuild.
+        cancellation.check()?;
+        // Rebuild indices after tombstoning loser nodes
+        graph.rebuild_indices();
     }
+    tracker.increment_progress(); // 4c-prime done
+
+    // 7c cancellation boundary 8: pre-Phase-4d (bulk edge insert).
+    cancellation.check()?;
+
+    // Phase 4d: Bulk insert edges via deterministic DeltaEdge conversion.
+    // Wraps the pure pending_edges_to_delta + add_edges_bulk_ordered pair
+    // behind phase4d_bulk_insert_edges so the incremental rebuild path
+    // (Task 4 Step 4 Phase 3) can reuse the same helper against a
+    // RebuildGraph. The helper carries forward the edge store's current
+    // seq counter so non-empty graphs advance deterministically.
+    let _final_edge_seq = phase4d_bulk_insert_edges(&mut graph, &all_edges);
     tracker.increment_progress(); // 4d done
     tracker.complete_phase();
 
@@ -552,11 +723,47 @@ fn build_unified_graph_inner(
     }
 
     if attempted > 0 && succeeded == 0 {
-        anyhow::bail!("All graph builds failed");
+        return Err(GraphBuilderError::Internal {
+            reason: "All graph builds failed".to_string(),
+        });
     }
 
+    // 7c cancellation boundary 9: pre-Phase-4e (binding plane).
+    cancellation.check()?;
+
+    // ------------------------------------------------------------------
+    // Phase 4e — Binding plane derivation.
+    //
+    // Runs between Phase 4d (bulk edge insert) and Pass 5 (cross-language
+    // linking). Consumes only the language-local edge kinds Contains,
+    // Defines, Imports, Exports. Populates CodeGraph::scope_arena (P2U03),
+    // CodeGraph::alias_table (P2U04), CodeGraph::shadow_table (P2U05), and
+    // CodeGraph::scope_provenance_store (P2U11) in one pass.
+    // ------------------------------------------------------------------
+    tracker.start_phase(5, "Binding plane derivation", 1);
+    let binding_stats = super::phase4e_binding::derive_binding_plane(&mut graph);
+    log::info!(
+        target: "sqry_core::build",
+        "Phase 4e: {} scopes, {} aliases, {} shadows derived",
+        binding_stats.scopes,
+        binding_stats.aliases,
+        binding_stats.shadows,
+    );
+    tracker.increment_progress();
+    tracker.complete_phase();
+
+    // 7c test hook: observation point fired before Pass 5. Tests that
+    // need to flip the cancellation token at this boundary register a
+    // callback here (fires BEFORE the check below so a hook that flips
+    // the token is observed by the subsequent check).
+    #[cfg(any(test, feature = "rebuild-internals"))]
+    testing::fire_before_pass5_hook(cancellation);
+
+    // 7c cancellation boundary 10: pre-Pass-5 (cross-language linking).
+    cancellation.check()?;
+
     // Pass 5: Cross-language linking (FFI declarations → C/C++ functions, HTTP requests → endpoints)
-    tracker.start_phase(5, "Cross-language linking", 1);
+    tracker.start_phase(6, "Cross-language linking", 1);
     let pass5_stats = super::pass5_cross_language::link_cross_language_edges(&mut graph);
     if pass5_stats.total_edges_created > 0 {
         log::info!(
@@ -570,6 +777,23 @@ fn build_unified_graph_inner(
     tracker.complete_phase();
 
     log::info!("Built unified graph with {} nodes", graph.node_count());
+
+    // Publish-boundary invariants (A2 §F / Task 4 Gate 0d).
+    //
+    // This is the canonical "full rebuild end" call site named in plan
+    // §F.3. Full rebuilds have no tombstoned NodeIds to carry forward,
+    // so the §F.2 residue check does not run here — per plan §H step
+    // 14, the residue check has EXACTLY ONE call site
+    // (`RebuildGraph::finalize` step 14) against the drained tombstone
+    // set. Full rebuilds run the §F.1 bucket bijection only, via
+    // [`crate::graph::unified::publish::assert_publish_bijection`]:
+    // every parallel-commit chunk populates per-file buckets via
+    // `FileRegistry::record_node`, and the bijection proves no file
+    // ended up with a dead / duplicate / misfiled / missing node.
+    //
+    // In release builds the helper is a no-op; see `publish.rs`.
+    super::super::publish::assert_publish_bijection(&graph);
+
     Ok((graph, effective_threads))
 }
 
@@ -948,8 +1172,14 @@ pub fn build_and_persist_graph_with_progress(
     plugin_selection: Option<crate::graph::unified::persistence::PluginSelectionManifest>,
     progress: SharedReporter,
 ) -> Result<(CodeGraph, BuildResult)> {
-    let (graph, effective_threads) =
-        build_unified_graph_inner(root, plugins, config, progress.clone())?;
+    let (graph, effective_threads) = build_unified_graph_inner(
+        root,
+        plugins,
+        config,
+        progress.clone(),
+        &CancellationToken::default(),
+    )
+    .map_err(anyhow::Error::from)?;
     persist_and_analyze_graph(
         graph,
         root,
@@ -1043,16 +1273,26 @@ fn file_sort_key(root: &Path, path: &Path) -> String {
 }
 
 /// Result of successfully parsing a single file (parallel-safe, no shared state).
+///
+/// `pub(super)` so sibling modules in `crate::graph::unified::build`
+/// (specifically [`super::incremental`] from Task 4 Step 4 Phase 3c onward)
+/// can construct and consume `ParsedFile` values when driving the
+/// parse → commit pipeline against a `RebuildGraph`. The type stays
+/// crate-private: external callers still route through the higher-level
+/// `build_unified_graph` / `incremental_rebuild` entrypoints.
 #[derive(Debug)]
-struct ParsedFile {
+pub(super) struct ParsedFile {
     /// Language identifier for file counting and confidence merging.
-    language: crate::graph::Language,
+    pub(super) language: crate::graph::Language,
     /// Staged graph operations ready for serial commit.
-    staging: StagingGraph,
+    pub(super) staging: StagingGraph,
 }
 
+/// Outcome of [`parse_file`]. `pub(super)` for the same reason as
+/// [`ParsedFile`] — shared with [`super::incremental`]'s re-parse closure
+/// driver in Phase 3c+. Still crate-private.
 #[derive(Debug)]
-enum ParsedFileOutcome {
+pub(super) enum ParsedFileOutcome {
     Parsed(ParsedFile),
     Skipped,
     TimedOut {
@@ -1068,7 +1308,11 @@ enum ParsedFileOutcome {
 /// parser, reads the file, and builds a self-contained staging graph.
 ///
 /// Returns [`ParsedFileOutcome::Skipped`] if the file has no matching plugin or graph builder.
-fn parse_file(path: &Path, plugins: &PluginManager) -> Result<ParsedFileOutcome> {
+///
+/// `pub(super)` as of Task 4 Step 4 Phase 3c so the sibling
+/// [`super::incremental`] module can re-parse closure files against the
+/// rebuild-local `GraphMutationTarget` plane during `incremental_rebuild`.
+pub(super) fn parse_file(path: &Path, plugins: &PluginManager) -> Result<ParsedFileOutcome> {
     let plugin = plugins.plugin_for_path(path);
     let Some(plugin) = plugin else {
         return Ok(ParsedFileOutcome::Skipped);
@@ -1157,6 +1401,195 @@ fn map_parse_error(path: &Path, err: ParseError) -> anyhow::Error {
 
 fn map_builder_error(path: &Path, err: &GraphBuilderError) -> anyhow::Error {
     anyhow::anyhow!("graph builder error in {}: {}", path.display(), err)
+}
+
+// ---------------------------------------------------------------------------
+// Test-only hooks (Task 7 Phase 7c)
+// ---------------------------------------------------------------------------
+//
+// Thread-local callbacks fired at pass boundaries inside
+// `build_unified_graph_inner`. Tests that need to flip the
+// `CancellationToken` between chunks / before Phase 4 / before Pass 5
+// install a hook, trigger a rebuild, and observe the pipeline
+// short-circuit.
+//
+// Follows the same pattern as [`incremental::testing`] (see
+// `incremental.rs:1605`): the module is gated on
+// `any(test, feature = "rebuild-internals")` and production builds
+// compile every call site into `let _ = ...;` no-ops.
+/// Test-only hooks exposed so `sqry-daemon` integration tests can
+/// drive cancellation-boundary scenarios in `build_unified_graph_inner`
+/// without reaching into private module state.
+///
+/// Gated on `any(test, feature = "rebuild-internals")`; production
+/// builds compile the module out.
+#[cfg(any(test, feature = "rebuild-internals"))]
+pub mod testing {
+    use super::CancellationToken;
+    use std::cell::RefCell;
+
+    /// Callback invoked at the top of each chunk iteration in
+    /// `build_unified_graph_inner`, receiving the current cancellation
+    /// token. Tests typically call `token.cancel()` after N chunks to
+    /// assert the pipeline short-circuits at the next boundary.
+    pub type AfterChunkHook = Box<dyn FnMut(&CancellationToken)>;
+    /// Callback invoked once after the chunk loop exits and before
+    /// Phase 4 finalization.
+    pub type BeforePhase4Hook = Box<dyn FnMut(&CancellationToken)>;
+    /// Callback invoked once before Pass 5 cross-language linking.
+    pub type BeforePass5Hook = Box<dyn FnMut(&CancellationToken)>;
+
+    thread_local! {
+        static AFTER_CHUNK_HOOK: RefCell<Option<AfterChunkHook>> = const { RefCell::new(None) };
+        static BEFORE_PHASE4_HOOK: RefCell<Option<BeforePhase4Hook>> = const { RefCell::new(None) };
+        static BEFORE_PASS5_HOOK: RefCell<Option<BeforePass5Hook>> = const { RefCell::new(None) };
+    }
+
+    /// Install a callback that runs at the top of each chunk iteration.
+    /// Replaces any previously-installed hook on the current thread.
+    pub fn set_after_chunk_hook<F>(hook: F) -> Option<AfterChunkHook>
+    where
+        F: FnMut(&CancellationToken) + 'static,
+    {
+        AFTER_CHUNK_HOOK.with(|cell| cell.replace(Some(Box::new(hook))))
+    }
+
+    /// Remove the currently-installed after-chunk hook. Idempotent.
+    pub fn clear_after_chunk_hook() {
+        AFTER_CHUNK_HOOK.with(|cell| {
+            let _ = cell.replace(None);
+        });
+    }
+
+    /// Install a callback that runs after the chunk loop exits, before
+    /// Phase 4 finalization. Replaces any previously-installed hook.
+    pub fn set_before_phase4_hook<F>(hook: F) -> Option<BeforePhase4Hook>
+    where
+        F: FnMut(&CancellationToken) + 'static,
+    {
+        BEFORE_PHASE4_HOOK.with(|cell| cell.replace(Some(Box::new(hook))))
+    }
+
+    /// Remove the currently-installed before-Phase-4 hook. Idempotent.
+    pub fn clear_before_phase4_hook() {
+        BEFORE_PHASE4_HOOK.with(|cell| {
+            let _ = cell.replace(None);
+        });
+    }
+
+    /// Install a callback that runs before Pass 5 cross-language linking.
+    /// Replaces any previously-installed hook.
+    pub fn set_before_pass5_hook<F>(hook: F) -> Option<BeforePass5Hook>
+    where
+        F: FnMut(&CancellationToken) + 'static,
+    {
+        BEFORE_PASS5_HOOK.with(|cell| cell.replace(Some(Box::new(hook))))
+    }
+
+    /// Remove the currently-installed before-Pass-5 hook. Idempotent.
+    pub fn clear_before_pass5_hook() {
+        BEFORE_PASS5_HOOK.with(|cell| {
+            let _ = cell.replace(None);
+        });
+    }
+
+    /// Fire the installed after-chunk hook (if any). Called from
+    /// `build_unified_graph_inner` at the top of every chunk iteration.
+    pub(super) fn fire_after_chunk_hook(cancellation: &CancellationToken) {
+        AFTER_CHUNK_HOOK.with(|cell| {
+            if let Some(hook) = cell.borrow_mut().as_mut() {
+                hook(cancellation);
+            }
+        });
+    }
+
+    /// Fire the installed before-Phase-4 hook (if any).
+    pub(super) fn fire_before_phase4_hook(cancellation: &CancellationToken) {
+        BEFORE_PHASE4_HOOK.with(|cell| {
+            if let Some(hook) = cell.borrow_mut().as_mut() {
+                hook(cancellation);
+            }
+        });
+    }
+
+    /// Fire the installed before-Pass-5 hook (if any).
+    pub(super) fn fire_before_pass5_hook(cancellation: &CancellationToken) {
+        BEFORE_PASS5_HOOK.with(|cell| {
+            if let Some(hook) = cell.borrow_mut().as_mut() {
+                hook(cancellation);
+            }
+        });
+    }
+
+    /// RAII guard that installs an after-chunk hook on construction
+    /// and clears it on drop. Prevents a panic mid-test from leaking
+    /// a hook into a sibling test on the same thread.
+    pub struct AfterChunkHookGuard {
+        _sealed: (),
+    }
+
+    impl AfterChunkHookGuard {
+        /// Install `hook` as the thread-local after-chunk callback.
+        pub fn install<F>(hook: F) -> Self
+        where
+            F: FnMut(&CancellationToken) + 'static,
+        {
+            let _previous = set_after_chunk_hook(hook);
+            Self { _sealed: () }
+        }
+    }
+
+    impl Drop for AfterChunkHookGuard {
+        fn drop(&mut self) {
+            clear_after_chunk_hook();
+        }
+    }
+
+    /// RAII guard that installs a before-Phase-4 hook on construction
+    /// and clears it on drop.
+    pub struct BeforePhase4HookGuard {
+        _sealed: (),
+    }
+
+    impl BeforePhase4HookGuard {
+        /// Install `hook` as the thread-local before-Phase-4 callback.
+        pub fn install<F>(hook: F) -> Self
+        where
+            F: FnMut(&CancellationToken) + 'static,
+        {
+            let _previous = set_before_phase4_hook(hook);
+            Self { _sealed: () }
+        }
+    }
+
+    impl Drop for BeforePhase4HookGuard {
+        fn drop(&mut self) {
+            clear_before_phase4_hook();
+        }
+    }
+
+    /// RAII guard that installs a before-Pass-5 hook on construction
+    /// and clears it on drop.
+    pub struct BeforePass5HookGuard {
+        _sealed: (),
+    }
+
+    impl BeforePass5HookGuard {
+        /// Install `hook` as the thread-local before-Pass-5 callback.
+        pub fn install<F>(hook: F) -> Self
+        where
+            F: FnMut(&CancellationToken) + 'static,
+        {
+            let _previous = set_before_pass5_hook(hook);
+            Self { _sealed: () }
+        }
+    }
+
+    impl Drop for BeforePass5HookGuard {
+        fn drop(&mut self) {
+            clear_before_pass5_hook();
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1403,10 +1836,16 @@ mod tests {
         let root = std::path::Path::new(".");
 
         let result = build_unified_graph(root, &plugins, &config);
-        assert!(result.is_err());
+        let err = result.expect_err("empty registry must error");
+        // Task 7 Phase 7c: the internal pipeline now returns
+        // `GraphBuilderError::Internal { reason }` instead of a bare
+        // `anyhow::bail!`. The legacy `build_unified_graph` wrapper
+        // lifts through `anyhow::Error::from`, which prefixes the
+        // reason with the `GraphBuilderError::Internal` `Display`
+        // string (`Internal graph builder error: ...`).
         assert_eq!(
-            result.unwrap_err().to_string(),
-            "No graph builders registered – cannot build code graph"
+            err.to_string(),
+            "Internal graph builder error: No graph builders registered – cannot build code graph"
         );
     }
 
@@ -1422,10 +1861,10 @@ mod tests {
         let root = std::path::Path::new(".");
 
         let result = build_unified_graph(root, &plugins, &config);
-        assert!(result.is_err());
+        let err = result.expect_err("no graph builders must error");
         assert_eq!(
-            result.unwrap_err().to_string(),
-            "No graph builders registered – cannot build code graph"
+            err.to_string(),
+            "Internal graph builder error: No graph builders registered – cannot build code graph"
         );
     }
 
@@ -1444,8 +1883,11 @@ mod tests {
         let config = BuildConfig::default();
 
         let result = build_unified_graph(temp_dir.path(), &plugins, &config);
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err().to_string(), "All graph builds failed");
+        let err = result.expect_err("all-failures must error");
+        assert_eq!(
+            err.to_string(),
+            "Internal graph builder error: All graph builds failed"
+        );
     }
 
     #[test]
@@ -2234,5 +2676,153 @@ mod tests {
             .iter()
             .any(|e| e.source == main_id && matches!(e.kind, EdgeKind::Calls { .. }));
         assert!(has_rev_call, "edges_to(helper) must include caller main");
+    }
+
+    // -----------------------------------------------------------------
+    // Phase 7c cancellation wire-through tests (task 7 phase 7c)
+    // -----------------------------------------------------------------
+    //
+    // The four cancellation-boundary tests below exercise the pipeline
+    // at distinct points in `build_unified_graph_inner`:
+    //
+    //   1. preflight — token cancelled before the first boundary; no
+    //      FS walk, no parse, no Phase 4 work.
+    //   2. mid-chunk — token flipped after the first chunk commits via
+    //      the AfterChunkHookGuard; second chunk never parses.
+    //   3. pre-Phase-4 — token flipped after the chunk loop exits via
+    //      the BeforePhase4HookGuard; Phase 4a+ never runs.
+    //   4. pre-Pass-5 — token flipped before cross-language linking
+    //      via the BeforePass5HookGuard; Pass 5 never runs.
+    //
+    // A fifth test confirms the backwards-compatible default path
+    // (no cancellation arg) still returns a fully-built graph.
+
+    fn build_rust_test_fixture(dir: &Path, file_count: usize) {
+        for i in 0..file_count {
+            let path = dir.join(format!("fixture_{i}.rs"));
+            fs::write(&path, format!("pub fn fn_{i}() {{ let _ = {i}; }}")).expect("write fixture");
+        }
+    }
+
+    fn make_rust_test_plugins() -> PluginManager {
+        let mut plugins = PluginManager::new();
+        plugins.register_builtin(Box::new(TestPlugin::new(
+            "rust-noop-for-cancellation-tests",
+            RUST_TEST_EXTENSIONS,
+            Some(Box::new(NoopGraphBuilder)),
+        )));
+        plugins
+    }
+
+    #[test]
+    fn build_unified_graph_cancellable_preflight_cancellation_returns_cancelled() {
+        let tmp = TempDir::new().expect("tmp");
+        build_rust_test_fixture(tmp.path(), 4);
+        let plugins = make_rust_test_plugins();
+        let config = BuildConfig::default();
+
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        let result = build_unified_graph_cancellable(tmp.path(), &plugins, &config, &cancel);
+        let err = result.expect_err("pre-cancelled token must short-circuit");
+        assert!(
+            matches!(err, GraphBuilderError::Cancelled),
+            "expected Cancelled, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn build_unified_graph_cancellable_mid_chunk_cancellation_returns_cancelled() {
+        let tmp = TempDir::new().expect("tmp");
+        // Force multiple chunks by setting a tiny staging_memory_limit.
+        build_rust_test_fixture(tmp.path(), 8);
+        let plugins = make_rust_test_plugins();
+        // A very small memory limit forces ~1 file per chunk.
+        let config = BuildConfig {
+            staging_memory_limit: 1,
+            ..BuildConfig::default()
+        };
+
+        let cancel = CancellationToken::new();
+
+        // Install a hook that cancels after the FIRST chunk. The hook
+        // fires at the TOP of every chunk iteration (including chunk 0
+        // before cancelling). We cancel on the first call; the next
+        // iteration's top-of-loop `cancellation.check()` short-circuits.
+        let cancel_for_hook = cancel.clone();
+        let mut call_count = 0u32;
+        let _guard = testing::AfterChunkHookGuard::install(move |tok| {
+            call_count += 1;
+            if call_count >= 2 {
+                cancel_for_hook.cancel();
+                // `tok` is the same shared Arc under the hood.
+                assert!(tok.is_cancelled());
+            }
+        });
+
+        let result = build_unified_graph_cancellable(tmp.path(), &plugins, &config, &cancel);
+        let err = result.expect_err("mid-chunk cancellation must short-circuit");
+        assert!(
+            matches!(err, GraphBuilderError::Cancelled),
+            "expected Cancelled, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn build_unified_graph_cancellable_pre_phase4_cancellation_short_circuits() {
+        let tmp = TempDir::new().expect("tmp");
+        build_rust_test_fixture(tmp.path(), 4);
+        let plugins = make_rust_test_plugins();
+        let config = BuildConfig::default();
+
+        let cancel = CancellationToken::new();
+        let cancel_for_hook = cancel.clone();
+        let _guard = testing::BeforePhase4HookGuard::install(move |_tok| {
+            cancel_for_hook.cancel();
+        });
+
+        let result = build_unified_graph_cancellable(tmp.path(), &plugins, &config, &cancel);
+        let err = result.expect_err("pre-Phase-4 cancellation must short-circuit");
+        assert!(
+            matches!(err, GraphBuilderError::Cancelled),
+            "expected Cancelled, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn build_unified_graph_cancellable_pre_pass5_cancellation_short_circuits() {
+        let tmp = TempDir::new().expect("tmp");
+        build_rust_test_fixture(tmp.path(), 4);
+        let plugins = make_rust_test_plugins();
+        let config = BuildConfig::default();
+
+        let cancel = CancellationToken::new();
+        let cancel_for_hook = cancel.clone();
+        let _guard = testing::BeforePass5HookGuard::install(move |_tok| {
+            cancel_for_hook.cancel();
+        });
+
+        let result = build_unified_graph_cancellable(tmp.path(), &plugins, &config, &cancel);
+        let err = result.expect_err("pre-Pass-5 cancellation must short-circuit");
+        assert!(
+            matches!(err, GraphBuilderError::Cancelled),
+            "expected Cancelled, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn build_unified_graph_default_path_is_backwards_compatible() {
+        let tmp = TempDir::new().expect("tmp");
+        build_rust_test_fixture(tmp.path(), 3);
+        let plugins = make_rust_test_plugins();
+        let config = BuildConfig::default();
+
+        // Legacy API: no cancellation parameter. Must return a
+        // built graph without triggering cancellation short-circuits.
+        // (The test plugin is a NoopGraphBuilder that produces zero
+        // nodes; we only assert the success path returns Ok.)
+        let _graph = build_unified_graph(tmp.path(), &plugins, &config)
+            .expect("legacy path must still build successfully");
     }
 }

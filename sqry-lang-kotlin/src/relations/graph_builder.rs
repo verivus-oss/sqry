@@ -11,6 +11,7 @@
 //! 2. **Pass 2**: Extract function/property definitions → Create Function nodes
 //! 3. **Pass 3**: Extract call expressions → Create Call edges
 
+use sqry_core::graph::unified::build::helper::CalleeKindHint;
 use sqry_core::graph::unified::edge::kind::TypeOfContext;
 use sqry_core::graph::unified::{GraphBuildHelper, StagingGraph};
 use sqry_core::graph::{GraphBuilder, GraphBuilderError, GraphResult, Language, Position, Span};
@@ -1131,10 +1132,11 @@ fn process_parameter_typeof(
 
     // Get the function or method node ID (should already exist from walk_tree_for_graph)
     // func_name is already qualified (e.g., "ClassName.methodName" for methods)
+    let param_span = Span::from_node(&param_node);
     let func_id = if class_name.is_some() {
         helper.ensure_method(func_name, None, false, false)
     } else {
-        helper.ensure_function(func_name, None, false, false)
+        helper.ensure_callee(func_name, param_span, CalleeKindHint::Function)
     };
 
     // Create TypeOf edge
@@ -1202,7 +1204,11 @@ fn process_function_return_typeof(
             let func_id = if class_name.is_some() {
                 helper.ensure_method(func_name, None, false, false)
             } else {
-                helper.ensure_function(func_name, None, false, false)
+                helper.ensure_callee(
+                    func_name,
+                    Span::from_node(&func_node),
+                    CalleeKindHint::Function,
+                )
             };
 
             // Create TypeOf edge
@@ -1567,15 +1573,16 @@ fn walk_tree_for_graph_with_context(
             {
                 // Ensure both nodes exist
                 let call_context = ast_graph.get_enclosing_callable_context(node);
-                let is_async = call_context.is_some_and(|c| c.is_async);
+                let _is_async = call_context.is_some_and(|c| c.is_async);
 
+                let call_span = Span::from_node(&node);
                 let caller_function_id =
-                    helper.ensure_function(&caller_qname, None, is_async, false);
-                let target_function_id = helper.ensure_function(&callee_qname, None, false, false);
+                    helper.ensure_callee(&caller_qname, call_span, CalleeKindHint::Function);
+                let target_function_id =
+                    helper.ensure_callee(&callee_qname, call_span, CalleeKindHint::Function);
 
                 // Add call edge
                 let argument_count = count_call_arguments(node);
-                let call_span = Span::from_node(&node);
                 helper.add_call_edge_full_with_span(
                     caller_function_id,
                     target_function_id,
@@ -2286,8 +2293,11 @@ fn handle_identifier_for_reference(
 
             // Create Reference edge from enclosing callable to the variable
             if let Some(context) = ast_graph.get_enclosing_callable_context(node) {
-                let caller_id =
-                    helper.ensure_function(context.qualified_name(), None, context.is_async, false);
+                let caller_id = helper.ensure_callee(
+                    context.qualified_name(),
+                    Span::from_node(&node),
+                    CalleeKindHint::Function,
+                );
                 helper.add_reference_edge(caller_id, target_id);
             }
         }

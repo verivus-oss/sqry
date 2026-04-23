@@ -116,6 +116,11 @@ pub fn execute(
     let mut similar: Vec<(NodeId, f64)> = Vec::new();
 
     for (node_id, entry) in snapshot.iter_nodes() {
+        // Gate 0d iter-2 fix: skip unified losers. See
+        // `NodeEntry::is_unified_loser`.
+        if entry.is_unified_loser() {
+            continue;
+        }
         if node_id == ref_node_id {
             continue;
         }

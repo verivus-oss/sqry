@@ -54,8 +54,9 @@ sqry is useful when you need to search by code **structure**: finding all caller
 
 sqry is focused on one thing: local semantic code search via AST analysis.
 
-## What's New In 7.2.0
+## What's New In 8.0.6
 
+- **Daemon mode**: run `sqryd` in the background to keep indexes hot across CLI, LSP, and MCP sessions. `sqry daemon start/stop/status/logs` subcommands, per-workspace memory telemetry with high-water mark, and `--daemon` shim flag on `sqry-mcp` and `sqry lsp`. See [Daemon Mode](#daemon-mode) below.
 - Graph analysis commands now share one traversal engine across CLI, LSP, and MCP, which makes `trace-path`, `show_dependencies`, `dependency_impact`, `subgraph`, and graph export behave more consistently.
 - Path traversal results now preserve deterministic discovery order, enforce node/edge limits atomically, and enumerate leaf paths when no explicit target is supplied.
 - MCP gained `expand_cache_status`, a Rust macro-expansion cache introspection tool, and its tool/reference docs now reflect the live tool catalog instead of stale hard-coded counts.
@@ -66,28 +67,36 @@ sqry is focused on one thing: local semantic code search via AST analysis.
 ### Windows (recommended)
 
 ```powershell
-irm https://raw.githubusercontent.com/verivus-oss/sqry/main/scripts/install.ps1 | iex
-```
-
-This installs `sqry.exe`, `sqry-mcp.exe`, and `sqry-lsp.exe` into `%LOCALAPPDATA%\Programs\sqry\bin` and adds that directory to the user `PATH`.
-By default the installer resolves the latest GitHub release; use `.\install.ps1 -Version vX.Y.Z` to pin a specific release tag.
-Review-first/signed variant:
-
-```powershell
 Invoke-WebRequest https://raw.githubusercontent.com/verivus-oss/sqry/main/scripts/install.ps1 -OutFile install.ps1
 Get-Content .\install.ps1
-.\install.ps1 -VerifySignatures
+.\install.ps1 -Component all -VerifySignatures
+```
+
+This installs `sqry.exe`, `sqry-mcp.exe`, `sqry-lsp.exe`, and `sqryd.exe` into `%LOCALAPPDATA%\Programs\sqry\bin` and adds that directory to the user `PATH`. `-Component all` (the default) installs all four binaries from the Windows release ZIP.
+By default the installer resolves the latest GitHub release; use `.\install.ps1 -Version vX.Y.Z` to pin a specific release tag.
+
+`-VerifySignatures` uses Cosign to verify that the downloaded release zip was produced by the official `oss-distribute.yml` GitHub Actions workflow for this repository. Install `cosign` and ensure it is on `PATH` before using this mode. SHA256 verification remains enabled by default and protects against download corruption; use `-NoChecksum` only for diagnostics.
+
+> **Note**: Windows Defender and enterprise EDR products commonly flag the `irm ... | iex` pattern heuristically, even when the installer script is benign. If you are on a managed machine, use the download-review-run path above or install from release assets/package-manager manifests instead of piping the script directly into `iex`.
+>
+> If PowerShell execution policy blocks `.\install.ps1` after download, prefer release assets or package-manager manifests rather than weakening machine-wide policy settings.
+
+Convenience shortcut for personal or non-managed machines (installs all four binaries):
+
+```powershell
+$script = irm https://raw.githubusercontent.com/verivus-oss/sqry/main/scripts/install.ps1
+& ([scriptblock]::Create($script)) -Component all
 ```
 
 Pinned-release example:
 
 ```powershell
-.\install.ps1 -Version v4.8.16 -VerifySignatures
+.\install.ps1 -Component all -Version v4.8.16 -VerifySignatures
 ```
 
 Manual fallback:
-- download `sqry-windows-x86_64.zip`
-- extract `sqry.exe`, `sqry-mcp.exe`, `sqry-lsp.exe`
+- download the Windows ZIP release asset (`sqry-<version>-windows-x86_64.zip`)
+- extract all contents, including the bundled `.dll` runtime files
 - place them in a directory on `PATH`
 
 ### macOS and Linux (recommended)
@@ -96,12 +105,12 @@ Manual fallback:
 curl -fsSL https://raw.githubusercontent.com/verivus-oss/sqry/main/scripts/install.sh | bash -s -- --component all
 ```
 
-Installs `sqry`, `sqry-mcp`, and `sqry-lsp` into `~/.local/bin` (override with `--install-dir`).
+Installs `sqry`, `sqry-mcp`, `sqry-lsp`, and `sqryd` into `~/.local/bin` (override with `--install-dir`).
 Downloads individual binaries directly from GitHub releases with per-asset SHA256 checksum
 verification against `SHA256SUMS.txt`. Add `--verify-signatures` to enforce Cosign bundle
 verification (requires `cosign`). Current published macOS binaries target Apple Silicon (`arm64`) only.
 
-Options: `--component sqry|sqry-mcp|sqry-lsp|all`, `--version vX.Y.Z`, `--install-dir DIR`,
+Options: `--component sqry|sqry-mcp|sqry-lsp|sqryd|all`, `--version vX.Y.Z`, `--install-dir DIR`,
 `--repo OWNER/REPO`, `--no-checksum`.
 
 ### Build from source
@@ -112,11 +121,13 @@ cd sqry
 cargo install --path sqry-cli
 cargo install --path sqry-mcp
 cargo install --path sqry-lsp
+cargo install --path sqry-daemon   # installs sqryd
 
 sqry --version
+sqryd --version
 ```
 
-**Requirements**: Rust 1.94+ (Edition 2024). About 20 GB disk for a full build (37 tree-sitter grammars are compiled from source).
+**Requirements**: Rust 1.90+ (Edition 2024). About 20 GB disk for a full build (37 tree-sitter grammars are compiled from source).
 
 ### Package managers
 
@@ -129,7 +140,7 @@ Release packaging configs are generated from signed release checksums for:
 - Snap
 
 Look for these files in release assets (`homebrew-sqry.rb`, `scoop-sqry.json`, `winget-*.yaml`, `aur-PKGBUILD`, `nix-*.nix`, `snap-snapcraft.yaml`).
-Primary install methods should provide `sqry`, `sqry-mcp`, and `sqry-lsp`; raw binaries and `.bundle` files are advanced/manual verification assets.
+Primary install methods provide `sqry`, `sqry-mcp`, `sqry-lsp`, and `sqryd`. The shell installer and the Windows ZIP both support `sqryd` as a component. Package manager manifests (Homebrew, Scoop, Winget, AUR, Nix, Snap) will include `sqryd` in future releases. Raw binaries and `.bundle` files are advanced/manual verification assets.
 
 ## Commands
 
@@ -393,6 +404,75 @@ echo "target/" >> .sqryignore
 sqry index
 ```
 
+## Daemon Mode
+
+`sqryd` is a background daemon that keeps your code graph in memory across multiple CLI, LSP, and MCP invocations. Instead of parsing and indexing from scratch on every `sqry query` or AI assistant request, `sqryd` keeps the graph hot and rebuilds it incrementally when source files change.
+
+```bash
+# Start the daemon (background process, keeps graph in memory)
+sqry daemon start
+
+# Check status — shows version, uptime, memory, workspaces
+sqry daemon status
+
+# Stop the daemon
+sqry daemon stop
+
+# Tail the daemon log (requires log_file set via daemon.toml or SQRY_DAEMON_LOG_FILE)
+sqry daemon logs --follow
+```
+
+Example `sqry daemon status` output:
+
+```
+sqryd v8.0.6 -- uptime 2h 14m
+
+Memory: 391 MB / 2048 MB  (peak: 418 MB)
+
+Workspaces (2 loaded):
+  ~/projects/sqry      304 MB  (peak: 318 MB)  [Loaded]
+  ~/projects/myapp      87 MB  (peak:  91 MB)  [Loaded]
+```
+
+The `peak` value per workspace shows the high-water mark: the maximum resident memory since that workspace was loaded or last evicted. It persists across incremental rebuilds but resets when the workspace is unloaded or evicted. The aggregate `Memory` peak shows the highest total across all workspaces. A peak close to the memory limit signals you are near the LRU eviction threshold.
+
+### Daemon-backed LSP and MCP
+
+Pass `--daemon` to `sqry-mcp` or `sqry lsp` to route all tool calls through the running daemon instead of loading the graph in-process:
+
+```bash
+sqry-mcp --daemon                          # connect to default socket
+sqry-mcp --daemon --daemon-socket /tmp/sqryd.sock  # custom socket path
+sqry lsp --daemon                          # LSP backed by daemon
+```
+
+If no daemon is running when `--daemon` is specified, `sqry-mcp` and `sqry lsp` will auto-start one. Binary resolution order: `SQRYD_PATH` env var, then a `sqryd` sibling next to the running binary, then `sqryd` on `PATH`.
+
+### Configuration
+
+The daemon reads `~/.config/sqry/daemon.toml` at startup (XDG; on macOS: `~/Library/Application Support/sqry/daemon.toml`). Key fields:
+
+```toml
+memory_limit_mb       = 2048   # evict LRU workspaces above this threshold (MB)
+idle_timeout_minutes  = 30     # unload workspace after N minutes of inactivity
+log_max_size_mb       = 50     # rotate log file at this size (MB)
+log_keep_rotations    = 5      # number of rotated log files to retain
+
+[socket]
+path      = ""    # Unix socket path (default: $XDG_RUNTIME_DIR/sqry/sqryd.sock,
+                  #   fallback: $TMPDIR/sqry-<uid>/sqryd.sock, then /tmp/sqry-<uid>/sqryd.sock)
+pipe_name = ""    # Windows named pipe name (default: sqry → \\.\pipe\sqry)
+```
+
+Selected environment-variable overrides:
+- `SQRY_DAEMON_MEMORY_MB` — override `memory_limit_mb`
+- `SQRY_DAEMON_SOCKET` — override `socket.path`
+- `SQRY_DAEMON_LOG_LEVEL` — override log level (`info`, `debug`, `warn`, `error`)
+
+A daemon restart is required for any configuration change to take effect, whether editing `daemon.toml` or changing environment variables.
+
+See [docs/cli/daemon.md](docs/cli/daemon.md) for the full CLI reference, all flags, exit codes, and tuning guidance.
+
 ## How It Works
 
 sqry builds a code graph in 5 passes:
@@ -409,6 +489,8 @@ The resulting graph is persisted to `.sqry/graph/snapshot.sqry` and loaded for q
 
 sqry uses arena-based storage with CSR (Compressed Sparse Row) adjacency for cache-friendly O(1) traversal, generational indices for safety, MVCC for concurrent reads, and string interning to reduce memory. Parallelism uses [rayon](https://github.com/rayon-rs/rayon); locks use [parking_lot](https://github.com/Amanieu/parking-lot).
 
+The **binding plane** is a first-class derived layer (Phase 4e, V9 snapshot) that computes scope/alias/shadow tables from the structural edges emitted by language plugins, then exposes witness-bearing resolution via `BindingPlane<'g>`. The `sqry graph resolve <symbol> [--explain]` command is the CLI proof point for this layer.
+
 ### Performance Notes
 
 These numbers are from sqry's own codebase (~384K nodes, ~1.3M edges). Your results will vary depending on codebase size, language mix, and hardware.
@@ -423,12 +505,17 @@ These numbers are from sqry's own codebase (~384K nodes, ~1.3M edges). Your resu
 ```
 sqry/
 ├── sqry-core/              # Core library (graph, symbols, search, plugin system)
-├── sqry-cli/               # CLI binary
+├── sqry-cli/               # CLI binary ('sqry')
 ├── sqry-lsp/               # LSP server
 ├── sqry-mcp/               # MCP server (34 tools for AI assistants)
+├── sqry-daemon/            # Daemon binary + library (sqryd)
+├── sqry-daemon-protocol/   # Wire types and framing (free functions, envelope types)
+├── sqry-daemon-client/     # Client library (shim mode, management API)
+├── sqry-db/                # Derived analysis DB + query planner (Phase 3)
 ├── sqry-classpath/         # JVM classpath analysis (bytecode, Gradle/Maven/Bazel/sbt)
 ├── sqry-nl/                # Natural language query translation
 ├── sqry-plugin-registry/   # Plugin registration
+├── sqry-mcp-redaction/     # MCP response redaction
 ├── sqry-lang-*/            # 37 language plugins
 ├── sqry-lang-support/      # Plugin infrastructure
 ├── sqry-tree-sitter-support/ # Tree-sitter helpers
@@ -469,6 +556,7 @@ cargo clippy --all-targets --workspace -- -D warnings  # Lint
 - [Schema Reference](docs/SCHEMA.md) - Query syntax and metadata keys
 - [Performance Tuning](docs/PERFORMANCE_TUNING.md) - Optimization guide
 - [CLI Documentation](sqry-cli/README.md) - Full CLI reference
+- [Daemon CLI Reference](docs/cli/daemon.md) - `sqry daemon` subcommands, flags, exit codes, and memory tuning
 - [MCP Server](sqry-mcp/README.md) - AI assistant integration
 - [Troubleshooting](docs/TROUBLESHOOTING.md) - Common issues and solutions
 

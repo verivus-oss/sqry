@@ -58,6 +58,8 @@ fn session_for(path: &Path) -> SessionManager {
         log_level: "warn".into(),
         config: None,
         allow_public_bind: false,
+        daemon: false,
+        daemon_socket: None,
     };
     SessionManager::new(options)
 }

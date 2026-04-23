@@ -84,6 +84,18 @@ impl QueryResults {
         &self.graph
     }
 
+    /// Test-only accessor for the underlying `Arc<CodeGraph>`.
+    ///
+    /// Used by unit tests that need to compare graph identity via
+    /// [`Arc::ptr_eq`] (e.g., verifying that the preloaded-graph execution
+    /// path threads the caller-supplied `Arc` through to the results without
+    /// cloning the underlying graph data).
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn graph_arc_for_test(&self) -> &Arc<CodeGraph> {
+        &self.graph
+    }
+
     /// Returns the workspace root, if set.
     #[must_use]
     pub fn workspace_root(&self) -> Option<&Path> {

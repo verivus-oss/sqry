@@ -23,6 +23,7 @@ pub mod interner;
 pub mod metadata;
 pub mod node_provenance;
 pub mod registry;
+pub mod segment;
 pub mod serde_helpers;
 
 pub use arena::{ArenaError, NodeArena, NodeEntry, Slot, SlotState};
@@ -36,3 +37,4 @@ pub use metadata::{
 };
 pub use node_provenance::{NodeProvenance, NodeProvenanceStore};
 pub use registry::{FileRegistry, RegistryError, RegistryStats};
+pub use segment::{FileSegment, FileSegmentTable};

@@ -106,7 +106,9 @@ impl FeatureFlags {
             | "get_references"
             | "get_hover_info"
             | "get_document_symbols"
-            | "get_workspace_symbols" => true,
+            | "get_workspace_symbols"
+            // Structural planner tool (DB13, always enabled — requires unified graph)
+            | "sqry_query" => true,
             _ => false,
         }
     }

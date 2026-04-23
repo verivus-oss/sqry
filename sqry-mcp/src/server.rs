@@ -20,7 +20,8 @@ use crate::tools::params::{
     IsNodeInCycleParams, ListFilesParams, ListSymbolsParams, PaginationParams, PatternSearchParams,
     RebuildIndexParams, RelationQueryParams, RelationTypeParam, SearchFiltersParams,
     SearchSimilarParams, SemanticDiffParams, SemanticSearchParams, ShowDependenciesParams,
-    SqryAskParams, SubgraphParams, TracePathParams, UnusedScopeParam, VisibilityParam,
+    SqryAskParams, SqryQueryParams, SubgraphParams, TracePathParams, UnusedScopeParam,
+    VisibilityParam,
 };
 use crate::workspace_session::{self, WorkspaceSessionRegistry};
 use rmcp::{
@@ -359,64 +360,14 @@ impl SqryServer {
     }
 
     /// Build a response JSON object from `ToolExecution`, preserving all metadata.
+    ///
+    /// Delegates to [`crate::response::build_tool_response`] with
+    /// `include_version = true` (the rmcp transport carries the MCP
+    /// protocol version as a field in the response object).
     fn build_response<T: Serialize>(
         execution: ToolExecution<T>,
     ) -> Result<serde_json::Value, McpError> {
-        let mut response = serde_json::Map::new();
-
-        // Protocol version
-        response.insert("version".to_string(), json!("2024-11-05"));
-
-        // Serialize the main data
-        let data = serde_json::to_value(&execution.data).map_err(|e| {
-            McpError::internal_error(format!("Failed to serialize result: {e}"), None)
-        })?;
-        response.insert("data".to_string(), data);
-
-        // Execution metadata
-        response.insert("execution_ms".to_string(), json!(execution.execution_ms));
-
-        if execution.used_index {
-            response.insert("used_index".to_string(), json!(true));
-        }
-
-        if execution.used_graph {
-            response.insert("used_graph".to_string(), json!(true));
-        }
-
-        if let Some(metadata) = execution.graph_metadata {
-            let metadata_value = serde_json::to_value(&metadata).map_err(|e| {
-                McpError::internal_error(format!("Failed to serialize graph_metadata: {e}"), None)
-            })?;
-            response.insert("graph_metadata".to_string(), metadata_value);
-        }
-
-        // Pagination metadata
-        if let Some(token) = execution.next_page_token {
-            response.insert("next_page_token".to_string(), json!(token));
-        }
-
-        if let Some(total) = execution.total {
-            response.insert("total".to_string(), json!(total));
-        }
-
-        if let Some(truncated) = execution.truncated {
-            response.insert("truncated".to_string(), json!(truncated));
-        }
-
-        if let Some(scanned) = execution.candidates_scanned {
-            response.insert("candidates_scanned".to_string(), json!(scanned));
-        }
-
-        // Workspace path
-        if !execution.workspace_path.is_empty() {
-            response.insert(
-                "workspace_path".to_string(),
-                json!(execution.workspace_path),
-            );
-        }
-
-        Ok(serde_json::Value::Object(response))
+        crate::response::build_tool_response(execution, true)
     }
 
     /// Build a successful `CallToolResult` from JSON value.
@@ -873,6 +824,28 @@ impl SqryServer {
         let result = self
             .execute_tool_for_request("sqry_ask", &params, &context, move || {
                 execution::execute_sqry_ask(&args)
+            })
+            .await?;
+
+        Ok(Self::success_result(&result))
+    }
+
+    /// Execute a structural query through the sqry-db planner (DB13).
+    #[tool(
+        description = "Execute a structural query via the sqry-db planner: parses a predicate-chain text syntax (kind:function has:caller ...), runs it against the unified graph, and returns matching nodes with file+line metadata",
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
+    async fn sqry_query(
+        &self,
+        Parameters(params): Parameters<SqryQueryParams>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        self.ensure_tool_enabled("sqry_query")?;
+
+        let args = params.clone();
+        let result = self
+            .execute_tool_for_request("sqry_query", &params, &context, move || {
+                execution::execute_sqry_query(&args)
             })
             .await?;
 
@@ -1815,6 +1788,10 @@ fn convert_dependency_impact_params(
     let max_depth = validate_max_depth(params.max_depth, 10)?;
     let max_results = validate_max_results(params.max_results, 5_000)?;
 
+    let file_path = params
+        .file_path
+        .map(|s| std::path::PathBuf::from(s.replace('\\', "/")));
+
     Ok(DependencyImpactArgs {
         symbol: params.symbol,
         path: params.path,
@@ -1823,6 +1800,7 @@ fn convert_dependency_impact_params(
         include_indirect: params.include_indirect,
         max_results,
         pagination,
+        file_path,
     })
 }
 
@@ -1880,6 +1858,12 @@ fn convert_find_duplicates_params(
     let threshold = u32::try_from(validate_usize(params.threshold, "threshold", 0, 100)?)
         .map_err(|_| RpcError::validation("threshold must fit in u32"))?;
     let max_results = validate_max_results(params.max_results, 1_000)?;
+    let max_members_per_group = validate_usize(
+        params.max_members_per_group,
+        "max_members_per_group",
+        0,
+        10_000,
+    )?;
 
     let duplicate_type = match params.duplicate_type {
         DuplicateTypeParam::Body => DuplicateType::Body,
@@ -1893,6 +1877,7 @@ fn convert_find_duplicates_params(
         threshold,
         exact: params.exact,
         max_results,
+        max_members_per_group,
         pagination,
     })
 }
@@ -1968,6 +1953,10 @@ fn convert_is_node_in_cycle_params(params: IsNodeInCycleParams) -> IsNodeInCycle
         CycleTypeParam::Modules => CycleType::Modules,
     };
 
+    let file_path = params
+        .file_path
+        .map(|s| std::path::PathBuf::from(s.replace('\\', "/")));
+
     IsNodeInCycleArgs {
         symbol: params.symbol,
         path: params.path,
@@ -1975,6 +1964,7 @@ fn convert_is_node_in_cycle_params(params: IsNodeInCycleParams) -> IsNodeInCycle
         min_depth: params.min_depth,
         max_depth: params.max_depth,
         include_self_loops: params.include_self_loops,
+        file_path,
     }
 }
 

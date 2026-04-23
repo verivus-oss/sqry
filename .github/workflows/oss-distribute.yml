@@ -273,18 +273,18 @@ jobs:
             "aarch64-apple-darwin"
             "x86_64-pc-windows-gnu"
           )
-          BINS=("sqry-cli" "sqry-lsp" "sqry-mcp")
-          BIN_NAMES=("sqry" "sqry-lsp" "sqry-mcp")
+          BINS=("sqry-cli" "sqry-lsp" "sqry-mcp" "sqry-daemon")
+          BIN_NAMES=("sqry" "sqry-lsp" "sqry-mcp" "sqryd")
 
           for target in "${TARGETS[@]}"; do
             echo "=== Building for $target ==="
             if [[ "$target" == "x86_64-unknown-linux-gnu" ]]; then
-              "$CARGO_BIN" build --release --target "$target" -p sqry-cli -p sqry-lsp -p sqry-mcp
+              "$CARGO_BIN" build --release --target "$target" -p sqry-cli -p sqry-lsp -p sqry-mcp -p sqry-daemon
             elif [[ "$target" == "x86_64-pc-windows-gnu" ]]; then
               printf '#!/bin/bash\nargs=()\nfor arg in "$@"; do\n  if [[ "$arg" =~ ^/STACK:([0-9]+)$ ]]; then\n    args+=("-Wl,--stack,${BASH_REMATCH[1]}")\n  else\n    args+=("$arg")\n  fi\ndone\nexec x86_64-w64-mingw32-gcc "${args[@]}"\n' > /tmp/mingw-linker-wrapper.sh
               chmod +x /tmp/mingw-linker-wrapper.sh
               CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=/tmp/mingw-linker-wrapper.sh \
-                "$CARGO_BIN" build --release --target "$target" -p sqry-cli -p sqry-lsp -p sqry-mcp
+                "$CARGO_BIN" build --release --target "$target" -p sqry-cli -p sqry-lsp -p sqry-mcp -p sqry-daemon
             elif [[ "$target" == *"apple-darwin"* ]]; then
               docker run --rm --user "$(id -u):$(id -g)" \
                 -v "$(pwd):/io" -w /io \
@@ -293,9 +293,9 @@ jobs:
                 -e XDG_CACHE_HOME=/io/.docker-cache \
                 -e RUSTFLAGS="$RUSTFLAGS" \
                 "$CARGO_ZIGBUILD_IMAGE" \
-                bash -c "rustup target add $target && cargo zigbuild --release --target $target -p sqry-cli -p sqry-lsp -p sqry-mcp"
+                bash -c "rustup target add $target && cargo zigbuild --release --target $target -p sqry-cli -p sqry-lsp -p sqry-mcp -p sqry-daemon"
             else
-              "$CARGO_BIN" zigbuild --release --target "$target" -p sqry-cli -p sqry-lsp -p sqry-mcp
+              "$CARGO_BIN" zigbuild --release --target "$target" -p sqry-cli -p sqry-lsp -p sqry-mcp -p sqry-daemon
             fi
 
             EXT=""
@@ -314,6 +314,59 @@ jobs:
               dst="dist/${BIN_NAMES[$i]}-${SUFFIX}${EXT}"
               cp "$src" "$dst"
             done
+
+            if [[ "$target" == "x86_64-pc-windows-gnu" ]]; then
+              package_dir="dist/sqry-${VERSION}-windows-x86_64"
+              rm -rf "$package_dir"
+              mkdir -p "$package_dir"
+              cp "dist/sqry-${SUFFIX}.exe" "$package_dir/sqry.exe"
+              cp "dist/sqry-lsp-${SUFFIX}.exe" "$package_dir/sqry-lsp.exe"
+              cp "dist/sqry-mcp-${SUFFIX}.exe" "$package_dir/sqry-mcp.exe"
+              cp "dist/sqryd-${SUFFIX}.exe" "$package_dir/sqryd.exe"
+
+              objdump_bin="$(x86_64-w64-mingw32-gcc -print-prog-name=objdump)"
+              if [[ -z "$objdump_bin" || ! -x "$objdump_bin" ]]; then
+                echo "FATAL: could not resolve MinGW objdump via x86_64-w64-mingw32-gcc" >&2
+                exit 1
+              fi
+
+              mapfile -t imported_dlls < <(
+                "$objdump_bin" -p "$package_dir"/*.exe \
+                  | awk '/DLL Name:/ { print $3 }' \
+                  | sort -u
+              )
+              for dll_name in "${imported_dlls[@]}"; do
+                dll_path="$(x86_64-w64-mingw32-gcc -print-file-name="${dll_name}")"
+                if [[ -n "$dll_path" && "$dll_path" != "$dll_name" && -f "$dll_path" ]]; then
+                  cp "$dll_path" "$package_dir/$dll_name"
+                fi
+              done
+
+              required_runtime_dlls=(
+                "libstdc++-6.dll"
+                "libgcc_s_seh-1.dll"
+                "libwinpthread-1.dll"
+              )
+              for dll_name in "${required_runtime_dlls[@]}"; do
+                if [[ ! -f "$package_dir/$dll_name" ]]; then
+                  echo "FATAL: Windows package is missing required runtime DLL ${dll_name}" >&2
+                  exit 1
+                fi
+              done
+
+              python3 - <<'PY'
+import os
+import pathlib
+import zipfile
+
+version = os.environ["VERSION"]
+package_dir = pathlib.Path(f"dist/sqry-{version}-windows-x86_64")
+archive_path = pathlib.Path(f"dist/sqry-{version}-windows-x86_64.zip")
+with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+    for path in sorted(package_dir.iterdir()):
+        archive.write(path, arcname=path.name)
+PY
+            fi
           done
 
       # Phase 6.2: Smoke tests
@@ -329,10 +382,24 @@ jobs:
           chmod +x dist/sqry-linux-arm64
           qemu-aarch64-static dist/sqry-linux-arm64 --version
 
-      - name: Smoke test Windows (Wine)
+      - name: Smoke test Windows package (Wine)
         continue-on-error: true
         run: |
-          wine64 dist/sqry-windows-x86_64.exe --version
+          package_dir="${RUNNER_TEMP}/sqry-windows-package"
+          rm -rf "$package_dir"
+          mkdir -p "$package_dir"
+          python3 - <<'PY'
+import os
+import pathlib
+import zipfile
+
+version = os.environ["VERSION"]
+archive_path = pathlib.Path(f"dist/sqry-{version}-windows-x86_64.zip")
+extract_dir = pathlib.Path(os.environ["RUNNER_TEMP"]) / "sqry-windows-package"
+with zipfile.ZipFile(archive_path) as archive:
+    archive.extractall(extract_dir)
+PY
+          wine64 "${package_dir}/sqry.exe" --version
 
       # Phase 6.5: VS Code extension
       - name: Verify VS Code extension assets

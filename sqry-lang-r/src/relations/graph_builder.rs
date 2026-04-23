@@ -20,6 +20,7 @@ use std::path::Path;
 
 use sqry_core::graph::unified::StagingGraph;
 use sqry_core::graph::unified::build::GraphBuildHelper;
+use sqry_core::graph::unified::build::helper::CalleeKindHint;
 use sqry_core::graph::unified::edge::FfiConvention;
 use sqry_core::graph::unified::node::NodeId;
 use sqry_core::graph::{GraphBuilder, GraphBuilderError, GraphResult, Language, Position, Span};
@@ -149,14 +150,9 @@ fn visit_node_for_calls(
             };
 
             // Create or get callee node
-            let visibility = extract_visibility(&actual_callee);
-            let callee_id = helper.add_function_with_visibility(
-                &actual_callee,
-                None,
-                false,
-                false,
-                Some(visibility),
-            );
+            let call_span = span_from_node(node);
+            let callee_id =
+                helper.ensure_callee(&actual_callee, call_span, CalleeKindHint::Function);
 
             // Create appropriate edge type
             if is_ffi {
@@ -165,7 +161,6 @@ fn visit_node_for_calls(
             } else {
                 // Regular calls get Calls edges with span and argument count
                 let argument_count = count_arguments(node, content);
-                let call_span = span_from_node(node);
                 let argument_count = u8::try_from(argument_count).unwrap_or(u8::MAX);
                 helper.add_call_edge_full_with_span(
                     caller_id,

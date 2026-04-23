@@ -103,7 +103,14 @@ fn create_workspace_classpath_import_edges(
     let scoped_jars = build_scope_jar_sets(&classpath_result.provenance);
     let provenance_lookup = build_provenance_lookup(&classpath_result.provenance);
     let mut existing_imports = Vec::new();
-    for (source_id, _source_entry) in graph.nodes().iter() {
+    for (source_id, source_entry) in graph.nodes().iter() {
+        // Gate 0d iter-2 fix: skip unified losers. Edges from losers
+        // are remapped to winners via `NodeRemapTable`, so iterating
+        // them would be a no-op, but the explicit guard makes the
+        // contract explicit. See `NodeEntry::is_unified_loser`.
+        if source_entry.is_unified_loser() {
+            continue;
+        }
         for edge in graph.edges().edges_from(source_id) {
             let EdgeKind::Imports { alias, is_wildcard } = edge.kind.clone() else {
                 continue;

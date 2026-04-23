@@ -17,7 +17,8 @@
 use sqry_core::graph::{
     GraphBuilder, GraphBuilderError, GraphResult, Language, Span,
     unified::{
-        ExportKind, GraphBuildHelper, StagingGraph, edge::kind::TypeOfContext, node::NodeId,
+        ExportKind, GraphBuildHelper, StagingGraph, build::helper::CalleeKindHint,
+        edge::kind::TypeOfContext, node::NodeId,
     },
 };
 use std::{collections::HashMap, path::Path};
@@ -404,14 +405,16 @@ fn walk_tree_for_graph(
             {
                 // Ensure both nodes exist
                 let call_context = ast_graph.get_callable_context(node.id());
-                let is_async = call_context.is_some_and(|c| c.is_async);
+                let _is_async = call_context.is_some_and(|c| c.is_async);
 
-                let source_id = helper.ensure_function(&caller_qname, None, is_async, false);
-                let target_id = helper.ensure_function(&callee_qname, None, false, false);
+                let call_span = span_from_node(node);
+                let source_id =
+                    helper.ensure_callee(&caller_qname, call_span, CalleeKindHint::Function);
+                let target_id =
+                    helper.ensure_callee(&callee_qname, call_span, CalleeKindHint::Function);
 
                 // Add call edge
                 let argument_count = count_call_arguments(node);
-                let call_span = span_from_node(node);
                 helper.add_call_edge_full_with_span(
                     source_id,
                     target_id,

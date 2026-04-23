@@ -12,6 +12,10 @@ public = [
     "sqry-classpath/",
     "sqry-cli/",
     "sqry-core/",
+    "sqry-daemon/",
+    "sqry-daemon-client/",
+    "sqry-daemon-protocol/",
+    "sqry-db/",
     "sqry-lsp/",
     "sqry-mcp/",
     "sqry-mcp-redaction/",
@@ -181,6 +185,9 @@ publish_order = [
     # Phase 1: Foundations
     "sqry-core",
     "sqry-classpath",
+    "sqry-db",
+    "sqry-daemon-protocol",
+    "sqry-daemon-client",
     "sqry-mcp-redaction",
     "sqry-nl",
     # Phase 2: Support libraries
@@ -235,6 +242,7 @@ publish_order = [
     "sqry-lang-zig",
     # Phase 5: Registry & servers
     "sqry-plugin-registry",
+    "sqry-daemon",
     "sqry-lsp",
     "sqry-mcp",
     "sqry-cli",

@@ -178,9 +178,16 @@ impl ContextExtractor {
         let content_str = String::from_utf8_lossy(&raw_content);
         let root_node = tree.root_node();
 
-        // Extract context for each node using our tree
+        // Extract context for each node using our tree.
+        // Gate 0d iter-2 fix: skip unified losers (should not be
+        // present on a freshly committed graph, but the explicit
+        // guard keeps the invariant honest). See
+        // `NodeEntry::is_unified_loser`.
         let mut contextual_matches = Vec::new();
         for (_, entry) in graph.nodes().iter() {
+            if entry.is_unified_loser() {
+                continue;
+            }
             if ContextKind::from_node_kind(entry.kind).is_none() {
                 continue;
             }

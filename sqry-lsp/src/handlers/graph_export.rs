@@ -114,6 +114,11 @@ fn collect_seeds(
             .unwrap_or(&target_path);
 
         for (node_id, entry) in snapshot.iter_nodes() {
+            // Gate 0d iter-2 fix: skip unified losers. See
+            // `NodeEntry::is_unified_loser`.
+            if entry.is_unified_loser() {
+                continue;
+            }
             if let Some(node_file) = files.resolve(entry.file)
                 && node_file.as_ref() == relative_path
             {

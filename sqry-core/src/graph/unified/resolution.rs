@@ -5,6 +5,10 @@
 
 use std::path::Path;
 
+use serde::{Deserialize, Serialize};
+
+use crate::graph::unified::string::id::StringId;
+
 use crate::graph::node::Language;
 use crate::graph::unified::concurrent::GraphSnapshot;
 use crate::graph::unified::file::id::FileId;
@@ -23,7 +27,7 @@ pub enum FileScope<'a> {
 }
 
 /// Resolution mode for a symbol query.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ResolutionMode {
     /// Only exact qualified-name and exact simple-name buckets are eligible.
     Strict,
@@ -43,7 +47,7 @@ pub struct SymbolQuery<'a> {
 }
 
 /// Resolved file scope once path normalization has completed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ResolvedFileScope {
     /// No file restriction.
     Any,
@@ -59,7 +63,7 @@ pub enum FileScopeError {
 }
 
 /// Normalized symbol query used internally by the resolver.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NormalizedSymbolQuery {
     /// Canonical graph symbol text.
     pub symbol: String,
@@ -76,7 +80,7 @@ pub struct NormalizedSymbolQuery {
 /// API ([`GraphSnapshot::find_symbol_candidates_with_witness`],
 /// [`GraphSnapshot::resolve_symbol_with_witness`]) to preserve bucket
 /// provenance.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SymbolCandidateBucket {
     /// Exact qualified-name bucket.
     ExactQualified,
@@ -96,7 +100,7 @@ pub struct SymbolCandidateWitness {
 }
 
 /// Single-node resolution outcome.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SymbolResolutionOutcome {
     /// Exactly one node matched.
     Resolved(NodeId),
@@ -134,6 +138,25 @@ pub struct SymbolResolutionWitness {
     pub selected_bucket: Option<SymbolCandidateBucket>,
     /// Ordered candidate witnesses from the first non-empty bucket.
     pub candidates: Vec<SymbolCandidateWitness>,
+    /// Interned `StringId` of the normalized query symbol.
+    ///
+    /// Populated by `find_symbol_candidates_with_witness` via a read-only
+    /// interner lookup (`snapshot.strings().get(normalized_symbol)`).
+    /// `None` when the symbol text is not present in the interner (i.e.,
+    /// the symbol has never been indexed). This is used by
+    /// `BindingPlane::resolve_shared`'s post-hoc step reconstruction to
+    /// emit a meaningful `StringId` in `Unresolved` steps instead of the
+    /// `StringId(0)` sentinel.
+    pub symbol: Option<StringId>,
+    /// Ordered step trace from the resolver.
+    ///
+    /// Empty by default; populated by the `resolve_shared()` helper
+    /// extracted in P2U07. Consumers that only care about the outcome
+    /// can ignore this field — it exists so P2U07 can emit the full
+    /// step vocabulary without changing the return type.
+    ///
+    /// See [`crate::graph::unified::bind::witness::step::ResolutionStep`].
+    pub steps: Vec<crate::graph::unified::bind::witness::step::ResolutionStep>,
 }
 
 impl GraphSnapshot {
@@ -209,11 +232,19 @@ impl GraphSnapshot {
             SymbolCandidateOutcome::FileNotIndexed => SymbolResolutionOutcome::FileNotIndexed,
         };
 
+        // Read-only interner lookup: does NOT intern at query time.
+        let symbol = candidate_witness
+            .normalized_query
+            .as_ref()
+            .and_then(|nq| self.strings().get(&nq.symbol));
+
         SymbolResolutionWitness {
             normalized_query: candidate_witness.normalized_query,
             outcome,
             selected_bucket: candidate_witness.selected_bucket,
             candidates: candidate_witness.candidates,
+            symbol,
+            steps: Vec::new(),
         }
     }
 
@@ -454,7 +485,7 @@ impl CandidateSortKey {
 
 /// Canonicalize a language-native qualified name into graph-internal `::` form.
 #[must_use]
-pub(crate) fn canonicalize_graph_qualified_name(language: Language, symbol: &str) -> String {
+pub fn canonicalize_graph_qualified_name(language: Language, symbol: &str) -> String {
     if should_skip_qualified_name_normalization(symbol) {
         return symbol.to_string();
     }
@@ -1652,5 +1683,96 @@ mod tests {
             canonicalize_graph_qualified_name(Language::TypeScript, "Foo.bar"),
             "Foo::bar"
         );
+    }
+
+    // ── P2U06 tests ──────────────────────────────────────────────────────────
+
+    /// `SymbolResolutionWitness` constructed by `resolve_symbol_with_witness`
+    /// must carry an empty `steps` field (P2U07 is the emission point).
+    #[test]
+    fn p2u06_witness_steps_field_defaults_to_empty() {
+        let mut graph = CodeGraph::new();
+        let file_path = abs_path("src/lib.rs");
+
+        let symbol = add_node(
+            &mut graph,
+            NodeKind::Function,
+            "my_fn",
+            Some("pkg::my_fn"),
+            &file_path,
+            Some(Language::Rust),
+            1,
+            0,
+        );
+
+        let snapshot = graph.snapshot();
+        let query = SymbolQuery {
+            symbol: "pkg::my_fn",
+            file_scope: FileScope::Any,
+            mode: ResolutionMode::Strict,
+        };
+
+        let witness = snapshot.resolve_symbol_with_witness(&query);
+        assert_eq!(
+            witness.outcome,
+            SymbolResolutionOutcome::Resolved(symbol.node_id)
+        );
+        assert!(
+            witness.steps.is_empty(),
+            "P2U06 initialises steps to Vec::new(); emission is deferred to P2U07"
+        );
+    }
+
+    /// `steps` field is assignable and holds `ResolutionStep` values; `Eq` is
+    /// preserved on the struct even after the new field is added.
+    #[test]
+    fn p2u06_witness_steps_field_is_eq_compatible() {
+        use crate::graph::unified::bind::witness::step::ResolutionStep;
+        use crate::graph::unified::file::id::FileId;
+
+        let step = ResolutionStep::EnterFileScope {
+            file: FileId::new(0),
+        };
+
+        let witness = super::SymbolResolutionWitness {
+            normalized_query: None,
+            outcome: super::SymbolResolutionOutcome::NotFound,
+            selected_bucket: None,
+            candidates: Vec::new(),
+            symbol: None,
+            steps: vec![step.clone()],
+        };
+        let expected = super::SymbolResolutionWitness {
+            normalized_query: None,
+            outcome: super::SymbolResolutionOutcome::NotFound,
+            selected_bucket: None,
+            candidates: Vec::new(),
+            symbol: None,
+            steps: vec![step],
+        };
+        assert_eq!(witness, expected);
+    }
+
+    /// `steps` field survives a `Clone`.
+    #[test]
+    fn p2u06_witness_steps_field_clones_correctly() {
+        use crate::graph::unified::bind::witness::step::ResolutionStep;
+        use crate::graph::unified::node::id::NodeId;
+
+        let step = ResolutionStep::Chose {
+            node: NodeId::new(99, 2),
+        };
+        let witness = super::SymbolResolutionWitness {
+            normalized_query: None,
+            outcome: super::SymbolResolutionOutcome::NotFound,
+            selected_bucket: None,
+            candidates: Vec::new(),
+            symbol: None,
+            steps: vec![step],
+        };
+        let cloned = witness.clone();
+        assert_eq!(witness.steps.len(), 1);
+        assert_eq!(cloned.steps.len(), 1);
+        assert_eq!(witness, cloned);
     }
 }

@@ -33,7 +33,6 @@ use crate::graph::unified::file::FileId;
 use crate::graph::unified::node::NodeId;
 use crate::graph::unified::storage::NodeArena;
 use crate::graph::unified::storage::arena::{NodeEntry, Slot};
-use crate::graph::unified::storage::interner::StringInterner;
 use crate::graph::unified::string::StringId;
 
 use super::pass3_intra::PendingEdge;
@@ -178,10 +177,20 @@ pub fn phase2_assign_ranges(
     )
 }
 
-/// Phase 3 result: per-file edges and total written counts for validation.
+/// Phase 3 result: per-file edges, per-file node IDs, and total written
+/// counts for validation.
 pub struct Phase3Result {
     /// Per-file edge collections for Phase 4 bulk insert.
     pub per_file_edges: Vec<Vec<PendingEdge>>,
+    /// Per-file node IDs actually committed. Indexed identically to
+    /// `per_file_edges` — element `i` is the Vec of NodeIds committed
+    /// for `plan.file_plans[i]`. Empty Vec when that file wrote no
+    /// nodes (slot overflow skip, or a staging graph with only strings).
+    ///
+    /// Used by the caller to populate
+    /// [`crate::graph::unified::storage::registry::FileRegistry::record_node`],
+    /// which feeds the Gate 0c bucket-bijection debug invariant.
+    pub per_file_node_ids: Vec<Vec<NodeId>>,
     /// Total nodes actually written (for validation against planned totals).
     pub total_nodes_written: usize,
     /// Total strings actually written (for validation against planned totals).
@@ -200,20 +209,41 @@ pub struct Phase3Result {
 /// caller can validate against plan totals and truncate allocations on
 /// mismatch.
 ///
+/// # Parameterisation over the mutation target
+///
+/// As of Task 4 Step 4 Phase 1, this function is generic over
+/// `G: GraphMutationTarget`. At the full-build call site in
+/// `build_unified_graph_inner` the target is `CodeGraph`; at the
+/// Task 4 Step 4 Phase 2+ incremental rebuild call site the target
+/// will be `RebuildGraph`. Both impls live in
+/// [`crate::graph::unified::mutation_target`]; see that module's
+/// docs for the field-coverage contract.
+///
+/// The function accesses exactly two fields via the trait —
+/// [`GraphMutationTarget::nodes_and_strings_mut`] — and pre-splits
+/// those two slices for the per-file parallel commit. Every other
+/// piece of the pipeline (the CSR/delta edge store, auxiliary
+/// indices, file registry, etc.) is untouched by this helper: the
+/// `PendingEdge` vectors in the returned [`Phase3Result`] are
+/// threaded through to Phase 4d (`pending_edges_to_delta` +
+/// `BidirectionalEdgeStore::add_edges_bulk_ordered`) by the caller.
+///
 /// # Panics
 ///
 /// Panics if `plan.total_nodes` or `plan.total_strings` exceeds the
 /// pre-allocated range in the arena or interner.
 #[must_use]
-pub fn phase3_parallel_commit(
+pub(crate) fn phase3_parallel_commit<
+    G: crate::graph::unified::mutation_target::GraphMutationTarget,
+>(
     plan: &ChunkCommitPlan,
     staging_graphs: &[&StagingGraph],
-    arena: &mut NodeArena,
-    interner: &mut StringInterner,
+    graph: &mut G,
 ) -> Phase3Result {
     if plan.file_plans.is_empty() {
         return Phase3Result {
             per_file_edges: Vec::new(),
+            per_file_node_ids: Vec::new(),
             total_nodes_written: 0,
             total_strings_written: 0,
             total_edges_collected: 0,
@@ -223,6 +253,12 @@ pub fn phase3_parallel_commit(
     // Determine the start of the pre-allocated ranges.
     let node_start = plan.file_plans[0].node_range.start;
     let string_start = plan.file_plans[0].string_range.start;
+
+    // Borrow the arena and interner disjointly via the mutation-plane
+    // trait. This is the one-and-only field access this helper makes
+    // on the graph; every downstream step operates on the resulting
+    // slices without revisiting `graph`.
+    let (arena, interner) = graph.nodes_and_strings_mut();
 
     // Get mutable slices covering the entire pre-allocated region.
     let node_slice = arena.bulk_slice_mut(node_start, plan.total_nodes);
@@ -273,10 +309,16 @@ pub fn phase3_parallel_commit(
     let total_nodes_written: usize = results.iter().map(|r| r.nodes_written).sum();
     let total_strings_written: usize = results.iter().map(|r| r.strings_written).sum();
     let total_edges_collected: usize = results.iter().map(|r| r.edges.len()).sum();
-    let per_file_edges = results.into_iter().map(|r| r.edges).collect();
+    let mut per_file_edges = Vec::with_capacity(results.len());
+    let mut per_file_node_ids = Vec::with_capacity(results.len());
+    for r in results {
+        per_file_edges.push(r.edges);
+        per_file_node_ids.push(r.node_ids);
+    }
 
     Phase3Result {
         per_file_edges,
+        per_file_node_ids,
         total_nodes_written,
         total_strings_written,
         total_edges_collected,
@@ -297,9 +339,13 @@ pub fn phase3_parallel_commit(
 ///    `NodeId` remap.
 /// 3. **Edges**: Extract `AddEdge` ops, apply node ID remap to source/target,
 ///    assign pre-computed sequence numbers, return as `PendingEdge` vec.
-// Result of committing a single file: edges + actual written counts.
+// Result of committing a single file: edges + committed NodeIds + actual written counts.
 struct FileCommitResult {
     edges: Vec<PendingEdge>,
+    /// Every `NodeId` committed into the arena for this file, in
+    /// commit order. Used by the sequential post-commit step that
+    /// populates `FileRegistry::per_file_nodes`.
+    node_ids: Vec<NodeId>,
     nodes_written: usize,
     strings_written: usize,
 }
@@ -317,13 +363,14 @@ fn commit_single_file(
     let (string_remap, strings_written) = write_strings(ops, plan, str_slots, rc_slots);
 
     // --- Step 2: Write nodes, build expected→actual node ID remap ---
-    let (node_remap, nodes_written) = write_nodes(ops, plan, node_slots, &string_remap);
+    let (node_remap, nodes_written, node_ids) = write_nodes(ops, plan, node_slots, &string_remap);
 
     // --- Step 3: Collect remapped edges with pre-assigned sequence numbers ---
     let edges = collect_edges(ops, plan, &node_remap, &string_remap);
 
     FileCommitResult {
         edges,
+        node_ids,
         nodes_written,
         strings_written,
     }
@@ -507,15 +554,18 @@ fn remap_option_local(opt: &mut Option<StringId>, remap: &HashMap<StringId, Stri
 
 /// Write staged nodes into pre-allocated arena slots.
 ///
-/// Returns `(remap, nodes_written)`.
+/// Returns `(remap, nodes_written, node_ids)`. `node_ids` is the Vec of
+/// every `NodeId` committed for this file, in commit order, for use by
+/// the sequential bucket-population post-step.
 fn write_nodes(
     ops: &[StagingOp],
     plan: &FilePlan,
     node_slots: &mut [Slot<NodeEntry>],
     string_remap: &HashMap<StringId, StringId>,
-) -> (HashMap<NodeId, NodeId>, usize) {
+) -> (HashMap<NodeId, NodeId>, usize, Vec<NodeId>) {
     let mut node_remap = HashMap::new();
     let mut node_cursor = 0usize;
+    let mut node_ids: Vec<NodeId> = Vec::with_capacity(node_slots.len());
 
     for op in ops {
         if let StagingOp::AddNode {
@@ -551,11 +601,12 @@ fn write_nodes(
                 node_remap.insert(*expected, actual_id);
             }
 
+            node_ids.push(actual_id);
             node_cursor += 1;
         }
     }
 
-    (node_remap, node_cursor)
+    (node_remap, node_cursor, node_ids)
 }
 
 /// Collect staged edges with remapped node IDs, string IDs, and pre-assigned
@@ -742,6 +793,276 @@ pub fn phase4_apply_global_remap(
     }
 }
 
+/// Statistics from Phase 4c-prime cross-file node unification.
+#[derive(Debug, Default)]
+pub struct UnificationStats {
+    /// Total (qualified_name, kind) groups of size >= 2 examined.
+    pub candidate_pairs_examined: usize,
+    /// Number of loser nodes merged into winners.
+    pub nodes_merged: usize,
+    /// Number of PendingEdge fields rewritten.
+    pub edges_rewritten: usize,
+    /// Number of loser nodes (metadata merged into winners, slot kept inert).
+    pub nodes_inert: usize,
+    /// Time spent in the unification pass (milliseconds).
+    pub elapsed_ms: u64,
+}
+
+/// Phase 4c-prime: Unify cross-file duplicate nodes sharing the same
+/// canonical qualified name and a call-compatible kind.
+///
+/// Runs after `rebuild_indices` (Phase 4c) which populates `by_qualified_name`,
+/// and before `pending_edges_to_delta` (Phase 4d) so the remap operates on
+/// `PendingEdge` targets, not committed `DeltaEdge`s.
+///
+/// **Winner selection**: Among nodes sharing a qualified name and call-compatible
+/// kinds, the node with `start_line > 0` wins. Tie-break in order:
+///   1. Wider `end_line - start_line` span.
+///   2. **Lexicographically smallest file path** (resolved via the rebuild
+///      plane's [`FileRegistry`]). Phase 3e correctness requires the
+///      path-based tie-break rather than the previous `FileId` comparison,
+///      because `FileId` slot assignment differs between a fresh full
+///      rebuild and an incremental rebuild — the incremental path clones
+///      the existing `FileRegistry` and appends new paths, while the full
+///      path assigns FileIds in filesystem-walk order from an empty
+///      registry. Two builds of the same logical workspace therefore
+///      disagree on which `FileId` is smaller when duplicate definitions
+///      tie on span width, flipping the unification winner and stranding
+///      `qualified_name` on the wrong side of the merge. Tie-breaking on
+///      the (stable-across-builds) path makes winner selection
+///      representation-independent.
+///   3. Final fallback: smaller `NodeId::index()` when paths also tie
+///      (e.g. two definitions in the same file — rare but possible via
+///      duplicate declarations). `NodeId` is deterministic within a
+///      single build so this keeps the fallback stable for any individual
+///      build even if it isn't invariant across representations.
+///
+/// **Safety**: Caller must hold an exclusive write lock on the graph.
+pub(crate) fn phase4c_prime_unify_cross_file_nodes<
+    G: crate::graph::unified::mutation_target::GraphMutationTarget,
+>(
+    graph: &mut G,
+    all_edges: &mut [Vec<PendingEdge>],
+) -> UnificationStats {
+    use crate::graph::unified::mutation_target::GraphMutationTarget;
+
+    use super::helper::CALL_COMPATIBLE_KINDS;
+    use super::unification::{NodeRemapTable, merge_node_into};
+    use std::time::Instant;
+
+    let start = Instant::now();
+    let mut stats = UnificationStats::default();
+
+    // Collect candidates: walk arena, group by qualified_name for nodes
+    // with call-compatible kinds. Only groups of size >= 2 need unification.
+    let mut qn_groups: HashMap<crate::graph::unified::string::StringId, Vec<NodeId>> =
+        HashMap::new();
+
+    for (node_id, entry) in GraphMutationTarget::nodes(graph).iter() {
+        if !CALL_COMPATIBLE_KINDS.contains(&entry.kind) {
+            continue;
+        }
+        if let Some(qn_id) = entry.qualified_name {
+            qn_groups.entry(qn_id).or_default().push(node_id);
+        }
+    }
+
+    // Filter to groups with 2+ members
+    let groups_to_unify: Vec<Vec<NodeId>> = qn_groups
+        .into_values()
+        .filter(|group| {
+            if group.len() >= 2 {
+                stats.candidate_pairs_examined += 1;
+                true
+            } else {
+                false
+            }
+        })
+        .collect();
+
+    // Now perform merges
+    let mut remap = NodeRemapTable::with_capacity(groups_to_unify.len());
+
+    // Pre-resolve every candidate node's canonical path-based tie-break
+    // key into an owned `String` keyed by `NodeId`. Lifting the resolution
+    // here instead of inside the `max_by` comparator avoids re-borrowing
+    // `graph` immutably from a closure that lives across the
+    // `merge_node_into(&mut graph, …)` call below. Without this
+    // precomputation the borrow checker rejects the mutation loop because
+    // the comparator closure captures the immutable borrow of `graph`
+    // required by `path_key`.
+    //
+    // Path conversion goes through `Arc<Path>::to_string_lossy()` because
+    // `Path` does not implement `Ord` lexicographically across platforms
+    // consistently; forcing a canonical string form keeps the tie-break
+    // deterministic on any host filesystem. When the registry can't
+    // resolve a `FileId` (shouldn't happen in practice — every live
+    // node's `FileId` was registered before the node was allocated) we
+    // fall back to an empty string so the comparison still produces a
+    // total order. Empty resolves tie-break each other stably (then fall
+    // through to the `NodeId` index tie-break).
+    let path_keys: HashMap<NodeId, String> = {
+        let arena = GraphMutationTarget::nodes(graph);
+        let files = GraphMutationTarget::files(graph);
+        let mut out: HashMap<NodeId, String> =
+            HashMap::with_capacity(groups_to_unify.iter().map(Vec::len).sum());
+        for group in &groups_to_unify {
+            for &nid in group {
+                if out.contains_key(&nid) {
+                    continue;
+                }
+                let key = arena
+                    .get(nid)
+                    .and_then(|entry| files.resolve(entry.file))
+                    .map_or_else(String::new, |path| path.to_string_lossy().into_owned());
+                out.insert(nid, key);
+            }
+        }
+        out
+    };
+    let empty_path_key = String::new();
+
+    for group in &groups_to_unify {
+        // Pick winner: prefer start_line > 0, tie-break by wider span,
+        // then smaller path (stable across rebuild representations),
+        // then smaller NodeId index.
+        let winner_id = *group
+            .iter()
+            .max_by(|&&a, &&b| {
+                let ea = GraphMutationTarget::nodes(graph).get(a);
+                let eb = GraphMutationTarget::nodes(graph).get(b);
+                match (ea, eb) {
+                    (Some(ea), Some(eb)) => {
+                        // Primary: prefer non-zero start_line
+                        let a_real = ea.start_line > 0;
+                        let b_real = eb.start_line > 0;
+                        match (a_real, b_real) {
+                            (true, false) => std::cmp::Ordering::Greater,
+                            (false, true) => std::cmp::Ordering::Less,
+                            _ => {
+                                // Tie-break 1: prefer wider span
+                                let a_range = ea.end_line.saturating_sub(ea.start_line);
+                                let b_range = eb.end_line.saturating_sub(eb.start_line);
+                                a_range
+                                    .cmp(&b_range)
+                                    .then_with(|| {
+                                        // Tie-break 2: prefer smaller path
+                                        // (reversed because `max_by` picks the
+                                        // greater side — we want smaller path
+                                        // to win, so invert the direct compare).
+                                        let pa = path_keys.get(&a).unwrap_or(&empty_path_key);
+                                        let pb = path_keys.get(&b).unwrap_or(&empty_path_key);
+                                        pb.cmp(pa)
+                                    })
+                                    .then_with(|| {
+                                        // Tie-break 3: smaller NodeId index
+                                        // (stable within a single build;
+                                        // deterministic fallback for co-located
+                                        // duplicate definitions).
+                                        b.index().cmp(&a.index())
+                                    })
+                            }
+                        }
+                    }
+                    (Some(_), None) => std::cmp::Ordering::Greater,
+                    (None, Some(_)) => std::cmp::Ordering::Less,
+                    (None, None) => std::cmp::Ordering::Equal,
+                }
+            })
+            .expect("group is non-empty");
+
+        // Merge all losers into winner
+        for &node_id in group {
+            if node_id == winner_id {
+                continue;
+            }
+            match merge_node_into(GraphMutationTarget::nodes_mut(graph), node_id, winner_id) {
+                Ok(()) => {
+                    remap.insert(node_id, winner_id);
+                    stats.nodes_merged += 1;
+                    stats.nodes_inert += 1;
+                }
+                Err(e) => {
+                    log::debug!("Phase 4c-prime: skipping merge ({e})");
+                }
+            }
+        }
+    }
+
+    // Apply remap table to all pending edges AND to every committed
+    // edge already in the graph's edge store.
+    //
+    // The `apply_to_edges` call keeps PendingEdges (the output of this
+    // chunk's parallel commit) pointing at canonical winners before
+    // Phase 4d converts them into `DeltaEdge`s. On a full build that is
+    // sufficient — no committed edges exist yet.
+    //
+    // The `apply_to_committed_edges` call closes the Phase 3e incremental
+    // gap: the rebuild plane clones the pre-edit graph's committed edges
+    // via `clone_for_rebuild`, so a newly-reparsed file whose definition
+    // becomes the unification winner can leave surviving cross-file
+    // edges pointing at what is now an inert loser slot. Retargeting the
+    // committed edges through `remap` is the only way those edges
+    // observe the canonical winner after finalize. On a full build the
+    // second call is a no-op (edge store is empty).
+    if !remap.is_empty() {
+        let pre_count: usize = all_edges.iter().map(|v| v.len()).sum();
+        remap.apply_to_edges(all_edges);
+        remap.apply_to_committed_edges(GraphMutationTarget::edges(graph));
+        stats.edges_rewritten = pre_count; // conservative: all edges walked
+
+        // Keep FileRegistry::per_file_nodes consistent with the arena.
+        //
+        // [`merge_node_into`] (see `unification.rs`) intentionally does
+        // **not** vacate the loser slot — the slot stays `Occupied` but
+        // inert so `NodeArena::slot_count()` (which CSR row_ptr sizing
+        // depends on) is preserved. Because the slot is still live per
+        // `NodeArena::iter()`, the §F.1 bucket bijection would panic
+        // with "live node absent from all buckets" if we purged losers
+        // from their home bucket.
+        //
+        // Therefore: losers stay in whichever per-file bucket Phase 3
+        // first committed them to. That bucket's `FileId` matches the
+        // loser's `NodeEntry.file`, so (c) passes. Each loser is in
+        // exactly one bucket, so (b) passes. Every live arena slot is
+        // accounted for by some bucket, so (d) passes. The §K master
+        // matrix already admits this semantics — inert merged-losers
+        // are semantically equivalent to any other live `NodeArena`
+        // entry for bucket-membership purposes.
+        //
+        // Name-resolution containment (Gate 0d iter-1 blocker).
+        //
+        // `merge_node_into` now ALSO clears the loser's `name` and
+        // `qualified_name` fields (to `StringId::INVALID` / `None`), and
+        // `AuxiliaryIndices::build_from_arena` skips any arena entry
+        // whose `name == StringId::INVALID` when rebuilding the name,
+        // qualified-name, kind, and file buckets. The second
+        // `rebuild_indices()` call in `build_unified_graph_inner`
+        // (entrypoint.rs:571, right below this function) runs AFTER
+        // unification, so the buckets surfaced by `indices.by_name` /
+        // `by_qualified_name` / `by_kind` / `by_file` contain only
+        // winners — every public name-resolution surface
+        // (`resolution::exact_qualified_bucket`,
+        // `graph::find_by_pattern`, etc.) is therefore free of
+        // unified-away duplicates. The only publish-visible bucket that
+        // still references losers is `FileRegistry::per_file_nodes`,
+        // which preserves the §F.1 bucket bijection without surfacing
+        // them through name resolution.
+        //
+        // Historical note: an earlier iteration of this pass called
+        // `retain_nodes_in_buckets` to purge losers; that matched a
+        // stale understanding where `merge_node_into` was expected to
+        // vacate the slot. Gate 0d's bucket-bijection invariant
+        // surfaced the mismatch (every full rebuild produced a live
+        // slot with no bucket entry). The fix is to align with the
+        // unification contract: inert slots remain in their home
+        // bucket, but `AuxiliaryIndices` treats them as name-invisible.
+    }
+
+    stats.elapsed_ms = start.elapsed().as_millis() as u64;
+    stats
+}
+
 /// Convert per-file `PendingEdge` collections to per-file `DeltaEdge` collections
 /// with monotonically increasing sequence numbers.
 ///
@@ -774,6 +1095,79 @@ pub fn pending_edges_to_delta(
     }
 
     (result, seq)
+}
+
+/// Rebuild the auxiliary indices on `graph` from its current node arena.
+///
+/// Generic counterpart to the inherent [`CodeGraph::rebuild_indices`].
+/// Takes a [`GraphMutationTarget`] so both the full-build
+/// (`build_unified_graph_inner`) and incremental-rebuild
+/// (`incremental_rebuild` on `RebuildGraph`) pipelines can share the
+/// same helper. The inherent method now delegates here so the
+/// implementation lives in exactly one place.
+///
+/// Internally uses [`GraphMutationTarget::nodes_and_indices_mut`] to
+/// acquire a disjoint `(&NodeArena, &mut AuxiliaryIndices)` pair, then
+/// hands them to [`AuxiliaryIndices::build_from_arena`] which clears
+/// the existing indices and rebuilds in a single pass without
+/// per-element duplicate checking.
+///
+/// [`CodeGraph::rebuild_indices`]: crate::graph::unified::concurrent::CodeGraph::rebuild_indices
+/// [`AuxiliaryIndices::build_from_arena`]: crate::graph::unified::storage::indices::AuxiliaryIndices::build_from_arena
+pub(crate) fn rebuild_indices<G: crate::graph::unified::mutation_target::GraphMutationTarget>(
+    graph: &mut G,
+) {
+    let (nodes, indices) = graph.nodes_and_indices_mut();
+    indices.build_from_arena(nodes);
+}
+
+/// Phase 4d — bulk-insert every pending edge into the graph via the
+/// deterministic `DeltaEdge` conversion path.
+///
+/// Wraps the pure [`pending_edges_to_delta`] conversion + the
+/// [`BidirectionalEdgeStore::add_edges_bulk_ordered`] call that
+/// `build_unified_graph_inner` ran inline between Phase 4c-prime and
+/// Phase 4e. The wrapper is generic over [`GraphMutationTarget`] so
+/// the Task 4 Step 4 Phase 3 `incremental_rebuild` body can call it
+/// against a [`RebuildGraph`] without duplicating the seq-counter +
+/// flatten logic.
+///
+/// Returns the final edge sequence counter (for callers that need to
+/// continue allocating deterministic sequence numbers downstream).
+/// The counter flows from
+/// [`BidirectionalEdgeStore::forward().seq_counter()`] on the way in
+/// and advances by one per inserted edge.
+///
+/// # Semantics
+///
+/// * `per_file_edges` is consumed by-reference; the function does not
+///   mutate the caller's buffer. Callers who no longer need the
+///   vectors may drop them after the call.
+/// * If `per_file_edges` is empty (or every inner vector is empty),
+///   the edge store is left untouched.
+/// * The helper does not `bump_epoch()` on the graph — Phase 4d is
+///   edge-level only; the full pipeline bumps epoch separately.
+///
+/// [`BidirectionalEdgeStore::add_edges_bulk_ordered`]: crate::graph::unified::edge::bidirectional::BidirectionalEdgeStore::add_edges_bulk_ordered
+/// [`RebuildGraph`]: crate::graph::unified::rebuild::rebuild_graph::RebuildGraph
+pub(crate) fn phase4d_bulk_insert_edges<
+    G: crate::graph::unified::mutation_target::GraphMutationTarget,
+>(
+    graph: &mut G,
+    per_file_edges: &[Vec<PendingEdge>],
+) -> u64 {
+    // Start seq numbering from the edge store's current counter to
+    // support non-empty graphs (incremental rebuild carries forward
+    // the prior build's counter).
+    let edge_seq_start = graph.edges().forward().seq_counter();
+    let (delta_edge_vecs, final_seq) = pending_edges_to_delta(per_file_edges, edge_seq_start);
+    let total_edge_count: u64 = delta_edge_vecs.iter().map(|v| v.len() as u64).sum();
+    if total_edge_count > 0 {
+        graph
+            .edges_mut()
+            .add_edges_bulk_ordered(&delta_edge_vecs, total_edge_count);
+    }
+    final_seq
 }
 
 #[cfg(test)]
@@ -979,9 +1373,14 @@ mod tests {
     #[test]
     fn test_phase3_parallel_commit_basic() {
         use super::super::staging::StagingGraph;
+        use crate::graph::unified::concurrent::CodeGraph;
         use crate::graph::unified::node::NodeKind;
-        use crate::graph::unified::storage::NodeArena;
-        use crate::graph::unified::storage::interner::StringInterner;
+        // The `nodes_mut` / `strings_mut` method calls below resolve
+        // to inherent methods on `CodeGraph`; the `GraphMutationTarget`
+        // trait impl provides the same surface for `RebuildGraph`
+        // (see `phase3_parallel_commit_runs_against_rebuild_graph`).
+        // No trait import is needed here because inherent-method
+        // resolution wins for `CodeGraph`.
 
         // Create a staging graph with 2 nodes, 1 string, 1 edge
         let mut sg = StagingGraph::new();
@@ -1006,13 +1405,15 @@ mod tests {
 
         let file_ids = vec![FileId::new(5)];
 
-        // Pre-allocate with non-zero offsets to verify remap works.
-        let mut arena = NodeArena::new();
-        let mut interner = StringInterner::new();
-
-        // Pre-fill some slots so our file starts at a non-zero offset.
-        arena.alloc_range(10, &placeholder_entry()).unwrap();
-        let string_start = interner.alloc_range(1).unwrap();
+        // Pre-allocate with non-zero offsets to verify remap works,
+        // against a full `CodeGraph` so the new generic signature is
+        // exercised end-to-end via `GraphMutationTarget`.
+        let mut graph = CodeGraph::new();
+        graph
+            .nodes_mut()
+            .alloc_range(10, &placeholder_entry())
+            .unwrap();
+        let string_start = graph.strings_mut().alloc_range(1).unwrap();
         assert_eq!(string_start, 1); // past sentinel
 
         let offsets = GlobalOffsets {
@@ -1023,13 +1424,15 @@ mod tests {
         assert_eq!(plan.file_plans[0].node_range, 10..12);
 
         // Pre-allocate the actual ranges for Phase 3.
-        arena
+        graph
+            .nodes_mut()
             .alloc_range(plan.total_nodes, &placeholder_entry())
             .unwrap();
-        interner.alloc_range(plan.total_strings).unwrap();
+        graph.strings_mut().alloc_range(plan.total_strings).unwrap();
 
-        // Phase 3
-        let result = phase3_parallel_commit(&plan, &[&sg], &mut arena, &mut interner);
+        // Phase 3 — generic over `G: GraphMutationTarget`. Passing
+        // `&mut graph` infers `G = CodeGraph`.
+        let result = phase3_parallel_commit(&plan, &[&sg], &mut graph);
 
         // Verify written counts
         assert_eq!(result.total_nodes_written, 2);
@@ -1037,7 +1440,7 @@ mod tests {
 
         // Verify strings were written
         let global_name = StringId::new(string_start);
-        assert_eq!(&*interner.resolve(global_name).unwrap(), "my_func");
+        assert_eq!(&*graph.strings().resolve(global_name).unwrap(), "my_func");
 
         // Verify 1 file, 1 edge
         assert_eq!(result.per_file_edges.len(), 1);
@@ -1048,15 +1451,22 @@ mod tests {
         assert_eq!(edge.file, FileId::new(5));
         assert_eq!(edge.source, NodeId::new(10, 1)); // first node at slot 10
         assert_eq!(edge.target, NodeId::new(11, 1)); // second node at slot 11
+
+        // Gate 0c (iter-2 B2): per-file node IDs must be recorded in
+        // commit order, one Vec per FilePlan, so the caller can
+        // populate FileRegistry::per_file_nodes deterministically.
+        assert_eq!(result.per_file_node_ids.len(), 1);
+        assert_eq!(
+            result.per_file_node_ids[0],
+            vec![NodeId::new(10, 1), NodeId::new(11, 1)]
+        );
     }
 
     #[test]
     fn test_phase3_parallel_commit_empty() {
-        use crate::graph::unified::storage::NodeArena;
-        use crate::graph::unified::storage::interner::StringInterner;
+        use crate::graph::unified::concurrent::CodeGraph;
 
-        let mut arena = NodeArena::new();
-        let mut interner = StringInterner::new();
+        let mut graph = CodeGraph::new();
 
         let plan = ChunkCommitPlan {
             file_plans: vec![],
@@ -1065,10 +1475,135 @@ mod tests {
             total_edges: 0,
         };
 
-        let result = phase3_parallel_commit(&plan, &[], &mut arena, &mut interner);
+        let result = phase3_parallel_commit(&plan, &[], &mut graph);
         assert!(result.per_file_edges.is_empty());
+        assert!(result.per_file_node_ids.is_empty());
         assert_eq!(result.total_nodes_written, 0);
         assert_eq!(result.total_strings_written, 0);
+    }
+
+    /// Task 4 Step 4 Phase 1 — exercise the `GraphMutationTarget`
+    /// trait's second implementor.
+    ///
+    /// Builds a tiny staging graph, hosts it in a fresh `RebuildGraph`,
+    /// and asserts the committed nodes land in the **rebuild-local**
+    /// arena — not in a `CodeGraph`. The test also confirms the
+    /// per-file edges / node-id vectors the helper returns agree with
+    /// the `CodeGraph` call-path result shape.
+    ///
+    /// If a future refactor accidentally routed Phase 3 back to a
+    /// `CodeGraph` (e.g. through a hidden static `Arc::make_mut`), this
+    /// test would observe an empty rebuild arena and fail.
+    #[test]
+    #[cfg(feature = "rebuild-internals")]
+    fn phase3_parallel_commit_runs_against_rebuild_graph() {
+        use super::super::staging::StagingGraph;
+        use crate::graph::unified::concurrent::CodeGraph;
+        use crate::graph::unified::mutation_target::GraphMutationTarget;
+        use crate::graph::unified::node::NodeKind;
+
+        // Staging graph: 2 nodes + 1 string + 1 Calls edge (identical
+        // shape to the CodeGraph test above, so any behavioural drift
+        // between the two paths surfaces as different assertions).
+        let mut sg = StagingGraph::new();
+        let local_name = StringId::new_local(0);
+        sg.intern_string(local_name, "rebuild_target".into());
+        let entry = NodeEntry::new(NodeKind::Function, local_name, FileId::new(0));
+        let n0 = sg.add_node(entry.clone());
+        let entry2 = NodeEntry::new(NodeKind::Variable, local_name, FileId::new(0));
+        let n1 = sg.add_node(entry2);
+        sg.add_edge(
+            n0,
+            n1,
+            EdgeKind::Calls {
+                argument_count: 0,
+                is_async: false,
+            },
+            FileId::new(0),
+        );
+
+        // Produce a RebuildGraph from an empty CodeGraph; drop the
+        // CodeGraph immediately so any subsequent mutation observed in
+        // the rebuild cannot possibly be leaking back to a shared Arc.
+        let mut rebuild = {
+            let graph = CodeGraph::new();
+            graph.clone_for_rebuild()
+        };
+
+        // Pre-allocate leading slots on the rebuild-local arena +
+        // interner so the file's ranges begin at a non-zero offset —
+        // this is the same pattern the CodeGraph test uses, verifying
+        // the trait's disjoint-borrow combinator threads through
+        // identically.
+        rebuild
+            .nodes_mut()
+            .alloc_range(10, &placeholder_entry())
+            .unwrap();
+        let string_start = rebuild.strings_mut().alloc_range(1).unwrap();
+        assert_eq!(string_start, 1);
+
+        let file_ids = vec![FileId::new(5)];
+        let offsets = GlobalOffsets {
+            node_offset: 10,
+            string_offset: string_start,
+        };
+        let plan = phase2_assign_ranges(&[&sg], &file_ids, &offsets);
+
+        rebuild
+            .nodes_mut()
+            .alloc_range(plan.total_nodes, &placeholder_entry())
+            .unwrap();
+        rebuild
+            .strings_mut()
+            .alloc_range(plan.total_strings)
+            .unwrap();
+
+        // Phase 3 against the RebuildGraph. Inferred `G = RebuildGraph`.
+        let result = phase3_parallel_commit(&plan, &[&sg], &mut rebuild);
+
+        // === Invariant: the written data lives in the rebuild-local
+        // arena, not in any CodeGraph field. ===
+        //
+        // Two slot ranges exist on the rebuild's arena now:
+        //   * slots 0..10 = pre-fill placeholders (each `Function` /
+        //     `StringId::new(0)` — note every alloc_range writes a
+        //     clone of the template entry).
+        //   * slots 10..12 = the two committed nodes from `sg`.
+        //
+        // Fetch the two committed NodeIds and resolve their names
+        // through the rebuild-local interner; the string must match
+        // the staged value "rebuild_target", proving the commit ran
+        // on the rebuild's own fields.
+        let committed_ids = &result.per_file_node_ids[0];
+        assert_eq!(
+            committed_ids,
+            &vec![NodeId::new(10, 1), NodeId::new(11, 1)],
+            "Phase 3 must commit into slots 10..12 on the rebuild-local arena"
+        );
+
+        let resolved_name = rebuild
+            .nodes_mut()
+            .get(NodeId::new(10, 1))
+            .map(|entry| entry.name)
+            .expect("committed node must exist in rebuild arena");
+        // The name StringId on the committed node is a global ID
+        // (Phase 3 remaps local → global); resolving it through the
+        // rebuild-local interner must produce the staged value.
+        let resolved_str = rebuild
+            .strings_mut()
+            .resolve(resolved_name)
+            .expect("name must resolve in rebuild-local interner");
+        assert_eq!(&*resolved_str, "rebuild_target");
+
+        // === Shape invariants match the CodeGraph path ===
+        assert_eq!(result.total_nodes_written, 2);
+        assert_eq!(result.total_strings_written, 1);
+        assert_eq!(result.per_file_edges.len(), 1);
+        assert_eq!(result.per_file_edges[0].len(), 1);
+        let edge = &result.per_file_edges[0][0];
+        assert_eq!(edge.file, FileId::new(5));
+        assert_eq!(edge.source, NodeId::new(10, 1));
+        assert_eq!(edge.target, NodeId::new(11, 1));
     }
 
     #[test]
@@ -1115,6 +1650,9 @@ mod tests {
             panic!("Expected occupied slot");
         }
         assert_eq!(result.nodes_written, 1);
+
+        // Per-file node IDs are recorded in commit order (Gate 0c bucket contract).
+        assert_eq!(result.node_ids, vec![NodeId::new(10, 1)]);
 
         // No edges
         assert!(result.edges.is_empty());
@@ -1255,5 +1793,388 @@ mod tests {
         let (deltas, final_seq) = pending_edges_to_delta(&edges, 0);
         assert!(deltas.is_empty());
         assert_eq!(final_seq, 0);
+    }
+
+    // ==================================================================
+    // Task 4 Step 4 Phase 2: rebuild-plane coverage for migrated helpers.
+    //
+    // Each test below proves that the migrated helper runs against a
+    // `RebuildGraph` (not just a `CodeGraph`) and that the mutation
+    // lands on the rebuild-local state. Together with the CodeGraph
+    // tests that still exercise the same helpers on the full-build
+    // path, they form the "runs on both implementors" coverage
+    // contract for `GraphMutationTarget` consumers.
+    // ==================================================================
+
+    /// Seed two call-compatible nodes (both `NodeKind::Function`) under
+    /// the same qualified-name StringId across two distinct files, then
+    /// run [`phase4c_prime_unify_cross_file_nodes`] against a
+    /// [`RebuildGraph`]. Verify the loser node is tombstoned
+    /// (name + qualified_name cleared per `merge_node_into`'s contract)
+    /// and that pending edges pointing at the loser are rewritten to
+    /// the winner.
+    #[test]
+    #[cfg(feature = "rebuild-internals")]
+    fn phase4c_prime_unify_cross_file_nodes_runs_against_rebuild_graph() {
+        use crate::graph::unified::concurrent::CodeGraph;
+        use crate::graph::unified::mutation_target::GraphMutationTarget;
+        use crate::graph::unified::node::NodeKind;
+
+        let mut rebuild = {
+            let graph = CodeGraph::new();
+            graph.clone_for_rebuild()
+        };
+
+        // Intern a shared qualified name. On the rebuild-local
+        // interner; strings() resolves it for later assertions.
+        let qname_sid = rebuild.strings_mut().intern("my_mod::my_func").unwrap();
+
+        // Register two files that host the duplicate Function nodes.
+        let file_a = FileId::new(7);
+        let file_b = FileId::new(8);
+
+        // Build two `NodeKind::Function` entries sharing the same
+        // qualified_name. Winner has a wider span (start_line > 0 and
+        // end_line > start_line) to exercise the winner-selection
+        // tie-break.
+        let mut winner_entry = NodeEntry::new(NodeKind::Function, qname_sid, file_a);
+        winner_entry.qualified_name = Some(qname_sid);
+        winner_entry.start_line = 10;
+        winner_entry.end_line = 30;
+
+        let mut loser_entry = NodeEntry::new(NodeKind::Function, qname_sid, file_b);
+        loser_entry.qualified_name = Some(qname_sid);
+        // Narrower span → loses the tie-break.
+        loser_entry.start_line = 5;
+        loser_entry.end_line = 6;
+
+        let winner_id = rebuild.nodes_mut().alloc(winner_entry).unwrap();
+        let loser_id = rebuild.nodes_mut().alloc(loser_entry).unwrap();
+
+        // A pending edge whose target is the loser — the remap table
+        // should rewrite it to point at the winner.
+        let mut all_edges = vec![vec![PendingEdge {
+            source: winner_id, // any valid source — the helper only rewrites targets here
+            target: loser_id,
+            kind: EdgeKind::Calls {
+                argument_count: 0,
+                is_async: false,
+            },
+            file: file_b,
+            spans: vec![],
+        }]];
+
+        let stats = phase4c_prime_unify_cross_file_nodes(&mut rebuild, &mut all_edges);
+
+        // Stats shape
+        assert_eq!(stats.nodes_merged, 1, "exactly one loser was tombstoned");
+        assert_eq!(stats.candidate_pairs_examined, 1);
+        assert_eq!(stats.edges_rewritten, 1);
+
+        // Winner node survived with qualified_name intact.
+        let winner_entry_after = GraphMutationTarget::nodes(&rebuild)
+            .get(winner_id)
+            .expect("winner must remain live");
+        assert_eq!(
+            winner_entry_after.qualified_name,
+            Some(qname_sid),
+            "winner keeps its qualified_name"
+        );
+
+        // Loser entry was merged via `merge_node_into`, which clears
+        // `name` and `qualified_name` to make the slot name-invisible.
+        let loser_entry_after = GraphMutationTarget::nodes(&rebuild)
+            .get(loser_id)
+            .expect("loser slot remains live (inert) per §F.1 bijection");
+        assert_eq!(
+            loser_entry_after.qualified_name, None,
+            "loser qualified_name cleared by merge_node_into"
+        );
+
+        // Pending edge target rewritten winner-ward.
+        assert_eq!(
+            all_edges[0][0].target, winner_id,
+            "PendingEdge.target rewritten from loser → winner"
+        );
+    }
+
+    /// Lock in the Phase 4c-prime tie-break ordering Codex blessed in iter-1:
+    /// primary = `start_line > 0`, tie-break 1 = wider span, tie-break 2 =
+    /// lexicographically smaller **file path** (stable across rebuild
+    /// representations), final fallback = smaller `NodeId::index()`.
+    ///
+    /// This test exercises the tie-break 2 path: two candidates with real
+    /// spans of identical width, hosted in two different files that differ
+    /// only in filename ordering. The winner must be the node whose file
+    /// path sorts earlier, regardless of NodeId allocation order.
+    #[test]
+    #[cfg(feature = "rebuild-internals")]
+    fn phase4c_prime_tie_break_prefers_lex_smaller_path_over_node_id() {
+        use crate::graph::unified::concurrent::CodeGraph;
+        use crate::graph::unified::node::NodeKind;
+        use std::path::Path;
+
+        let mut graph = CodeGraph::new();
+        let qname = graph.strings_mut().intern("shared_qname").unwrap();
+        // Register two paths whose lexical ordering is the reverse of
+        // the registration (and hence NodeId) order. This isolates the
+        // path-based tie-break from any accidental NodeId-ordering
+        // coincidence: if the helper fell back to NodeId the "wrong"
+        // node would win.
+        let high_path_file = graph
+            .files_mut()
+            .register(Path::new("zzz_late.rs"))
+            .unwrap();
+        let low_path_file = graph
+            .files_mut()
+            .register(Path::new("aaa_early.rs"))
+            .unwrap();
+
+        // Allocate the `zzz_late.rs` node first so its NodeId::index() is
+        // numerically smaller than the `aaa_early.rs` node's. With
+        // identical spans, NodeId-only tie-break would incorrectly pick
+        // the `zzz_late.rs` node. The correct behaviour is that the
+        // path-based tie-break picks the `aaa_early.rs` node.
+        let mut high_entry = NodeEntry::new(NodeKind::Function, qname, high_path_file);
+        high_entry.qualified_name = Some(qname);
+        high_entry.start_line = 10;
+        high_entry.end_line = 20;
+        let high_node = graph.nodes_mut().alloc(high_entry).unwrap();
+
+        let mut low_entry = NodeEntry::new(NodeKind::Function, qname, low_path_file);
+        low_entry.qualified_name = Some(qname);
+        // Identical span width — forces the tie-break to ignore primary
+        // + tie-break 1 (span width) and reach tie-break 2 (path).
+        low_entry.start_line = 10;
+        low_entry.end_line = 20;
+        let low_node = graph.nodes_mut().alloc(low_entry).unwrap();
+
+        graph.rebuild_indices();
+
+        let mut all_edges: Vec<Vec<PendingEdge>> = Vec::new();
+        let stats = phase4c_prime_unify_cross_file_nodes(&mut graph, &mut all_edges);
+
+        assert_eq!(
+            stats.nodes_merged, 1,
+            "one of the duplicate nodes must be merged into the other"
+        );
+
+        // The `aaa_early.rs` node wins because its path sorts lexically
+        // smaller. Verify its qualified_name is intact.
+        let low_after = graph
+            .nodes()
+            .get(low_node)
+            .expect("winner slot remains live");
+        assert_eq!(
+            low_after.qualified_name,
+            Some(qname),
+            "path-earlier node keeps qualified_name as the unification winner"
+        );
+
+        // And the `zzz_late.rs` node — despite a numerically smaller
+        // NodeId::index() — was merged away.
+        let high_after = graph
+            .nodes()
+            .get(high_node)
+            .expect("loser slot remains inert (Gate 0d bijection contract)");
+        assert_eq!(
+            high_after.qualified_name, None,
+            "path-later node loses even when its NodeId::index() is smaller"
+        );
+    }
+
+    /// When the path-based tie-break ALSO ties (two duplicate nodes in the
+    /// same file — rare but possible via duplicate definitions), the
+    /// deterministic fallback is `b.index().cmp(&a.index())` which picks
+    /// the node with the **smaller** NodeId index. Lock that in so future
+    /// refactors of the tie-break don't accidentally flip the fallback
+    /// direction.
+    #[test]
+    #[cfg(feature = "rebuild-internals")]
+    fn phase4c_prime_tie_break_falls_back_to_smaller_node_id_on_identical_path() {
+        use crate::graph::unified::concurrent::CodeGraph;
+        use crate::graph::unified::node::NodeKind;
+        use std::path::Path;
+
+        let mut graph = CodeGraph::new();
+        let qname = graph.strings_mut().intern("shared_qname").unwrap();
+        let file = graph.files_mut().register(Path::new("shared.rs")).unwrap();
+
+        // Allocate two duplicate nodes in the SAME file with identical
+        // spans. The only thing that differs between them is their
+        // NodeId index (allocation order). Tie-breaks 1 (span width)
+        // and 2 (path) both return Equal; the final `b.index().cmp(&a.index())`
+        // fallback picks the smaller index as the winner.
+        let mut first_entry = NodeEntry::new(NodeKind::Function, qname, file);
+        first_entry.qualified_name = Some(qname);
+        first_entry.start_line = 1;
+        first_entry.end_line = 5;
+        let first_node = graph.nodes_mut().alloc(first_entry).unwrap();
+
+        let mut second_entry = NodeEntry::new(NodeKind::Function, qname, file);
+        second_entry.qualified_name = Some(qname);
+        second_entry.start_line = 1;
+        second_entry.end_line = 5;
+        let second_node = graph.nodes_mut().alloc(second_entry).unwrap();
+
+        assert!(
+            first_node.index() < second_node.index(),
+            "precondition: first_node's arena slot precedes second_node's"
+        );
+
+        graph.rebuild_indices();
+
+        let mut all_edges: Vec<Vec<PendingEdge>> = Vec::new();
+        let stats = phase4c_prime_unify_cross_file_nodes(&mut graph, &mut all_edges);
+
+        assert_eq!(stats.nodes_merged, 1);
+
+        // Smaller NodeId::index() wins.
+        let winner_after = graph.nodes().get(first_node).expect("winner live");
+        assert_eq!(
+            winner_after.qualified_name,
+            Some(qname),
+            "smaller-index node wins the same-path / same-span tie-break"
+        );
+        let loser_after = graph.nodes().get(second_node).expect("loser inert");
+        assert_eq!(
+            loser_after.qualified_name, None,
+            "larger-index node loses the same-path / same-span tie-break"
+        );
+    }
+
+    /// Drive the free [`rebuild_indices`] function against both a
+    /// `RebuildGraph` and a `CodeGraph` seeded with identical data,
+    /// and verify the resulting `AuxiliaryIndices` are structurally
+    /// equivalent (same name buckets, same kind buckets).
+    #[test]
+    #[cfg(feature = "rebuild-internals")]
+    fn rebuild_indices_runs_against_rebuild_graph() {
+        use crate::graph::unified::concurrent::CodeGraph;
+        use crate::graph::unified::mutation_target::GraphMutationTarget;
+        use crate::graph::unified::node::NodeKind;
+
+        // === CodeGraph baseline ===
+        let mut code_graph = CodeGraph::new();
+        let alpha_id_code = code_graph.strings_mut().intern("alpha").unwrap();
+        let mut code_entry = NodeEntry::new(NodeKind::Function, alpha_id_code, FileId::new(1));
+        code_entry.qualified_name = Some(alpha_id_code);
+        let code_node_id = code_graph.nodes_mut().alloc(code_entry).unwrap();
+        rebuild_indices(&mut code_graph);
+        let code_buckets_function: Vec<NodeId> =
+            code_graph.indices().by_kind(NodeKind::Function).to_vec();
+
+        // === RebuildGraph path ===
+        let mut rebuild = {
+            let graph = CodeGraph::new();
+            graph.clone_for_rebuild()
+        };
+        let alpha_id_rebuild = rebuild.strings_mut().intern("alpha").unwrap();
+        let mut rebuild_entry =
+            NodeEntry::new(NodeKind::Function, alpha_id_rebuild, FileId::new(1));
+        rebuild_entry.qualified_name = Some(alpha_id_rebuild);
+        let rebuild_node_id = rebuild.nodes_mut().alloc(rebuild_entry).unwrap();
+        rebuild_indices(&mut rebuild);
+
+        // The node ids are both the first allocation on their
+        // respective arenas, so they share slot indices and
+        // generations.
+        assert_eq!(code_node_id, rebuild_node_id);
+
+        // The trait-method accessor routes through the impl on
+        // `RebuildGraph`; the returned indices came from the
+        // rebuild-local `AuxiliaryIndices` (not a CodeGraph's).
+        let rebuild_buckets_function: Vec<NodeId> = GraphMutationTarget::indices(&rebuild)
+            .by_kind(NodeKind::Function)
+            .to_vec();
+
+        assert_eq!(
+            code_buckets_function, rebuild_buckets_function,
+            "rebuild_indices must produce equivalent Function buckets on both paths"
+        );
+        // Name bucket also present on the rebuild side.
+        let by_name: Vec<NodeId> = GraphMutationTarget::indices(&rebuild)
+            .by_name(alpha_id_rebuild)
+            .to_vec();
+        assert_eq!(by_name, vec![rebuild_node_id]);
+    }
+
+    /// Drive [`phase4d_bulk_insert_edges`] against a `RebuildGraph`.
+    /// Seed two nodes, construct a per-file `PendingEdge` vector, and
+    /// prove the edges land on the rebuild-local edge store with the
+    /// expected monotonically-advancing sequence counter.
+    #[test]
+    #[cfg(feature = "rebuild-internals")]
+    fn phase4d_bulk_insert_edges_runs_against_rebuild_graph() {
+        use crate::graph::unified::concurrent::CodeGraph;
+        use crate::graph::unified::mutation_target::GraphMutationTarget;
+        use crate::graph::unified::node::NodeKind;
+
+        let mut rebuild = {
+            let graph = CodeGraph::new();
+            graph.clone_for_rebuild()
+        };
+
+        let name_sid = rebuild.strings_mut().intern("edge_target").unwrap();
+        let file = FileId::new(3);
+
+        let n_source = rebuild
+            .nodes_mut()
+            .alloc(NodeEntry::new(NodeKind::Function, name_sid, file))
+            .unwrap();
+        let n_target = rebuild
+            .nodes_mut()
+            .alloc(NodeEntry::new(NodeKind::Variable, name_sid, file))
+            .unwrap();
+
+        // Pre-condition: no edges in the rebuild-local forward store.
+        let pre_counter = GraphMutationTarget::edges(&rebuild).forward().seq_counter();
+
+        let per_file_edges = vec![vec![
+            PendingEdge {
+                source: n_source,
+                target: n_target,
+                kind: EdgeKind::Calls {
+                    argument_count: 0,
+                    is_async: false,
+                },
+                file,
+                spans: vec![],
+            },
+            PendingEdge {
+                source: n_source,
+                target: n_target,
+                kind: EdgeKind::Calls {
+                    argument_count: 1,
+                    is_async: false,
+                },
+                file,
+                spans: vec![],
+            },
+        ]];
+
+        let final_seq = phase4d_bulk_insert_edges(&mut rebuild, &per_file_edges);
+
+        // Seq counter advanced by exactly two edges.
+        assert_eq!(
+            final_seq,
+            pre_counter + 2,
+            "phase4d_bulk_insert_edges must advance seq by edge count"
+        );
+
+        // Rebuild-local forward store now contains both edges.
+        let forward = GraphMutationTarget::edges(&rebuild).forward();
+        let after_counter = forward.seq_counter();
+        assert_eq!(after_counter, pre_counter + 2);
+        // Forward delta must carry the two new edges.
+        assert!(
+            forward.delta().iter().filter(|e| e.is_add()).count() >= 2,
+            "expected at least two Add edges in the rebuild-local forward delta"
+        );
+        drop(forward);
+
+        // Empty input is a no-op on the edge store.
+        let empty_final = phase4d_bulk_insert_edges(&mut rebuild, &[]);
+        assert_eq!(empty_final, pre_counter + 2, "empty input is a no-op");
     }
 }

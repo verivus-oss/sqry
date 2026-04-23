@@ -1,0 +1,138 @@
+[package]
+name = "sqry-daemon"
+description = "sqry daemon (sqryd) — persistent code-graph service"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(disabled)', 'cfg(fuzzing)'] }
+
+[lib]
+name = "sqry_daemon"
+path = "src/lib.rs"
+
+[[bin]]
+name = "sqryd"
+path = "src/main.rs"
+
+# Phase 8c U16 — test-helper binary for end-to-end shim-client integration
+# tests in sqry-lsp and sqry-mcp. Starts a fully-functional IpcServer bound
+# to the socket path in SQRYD_TEST_SOCKET, writes READY\n to stdout, then runs
+# until stdin closes. Not part of the production distribution.
+[[bin]]
+name = "sqryd-test-server"
+path = "src/bin/sqryd-test-server.rs"
+
+[features]
+default = []
+
+# Task 7 Phase 7c: exposes test-only helpers on LoadedWorkspace +
+# RebuildDispatcher (e.g., set_last_good_at_for_test, post-reservation
+# TestCapture hooks). Automatically enabled by sqry-daemon's own
+# `[dev-dependencies]` / `#[cfg(test)]` paths; external consumers should
+# NOT enable this in production.
+rebuild-internals = []
+
+[dependencies]
+# sqry workspace crates
+sqry-core = { version = "9.0.0", path = "../sqry-core", features = ["rebuild-internals"] }
+sqry-plugin-registry = { version = "9.0.0", path = "../sqry-plugin-registry" }
+# Phase 8c U1: wire types + framing codec extracted into the
+# `sqry-daemon-protocol` leaf crate so shim clients can depend on
+# the wire format without pulling in the full daemon (and creating
+# a `sqry-daemon → sqry-lsp → sqry-daemon` cycle).
+sqry-daemon-protocol = { version = "9.0.0", path = "../sqry-daemon-protocol" }
+# Phase 8b Task 7 — the daemon routes 14 MCP tool methods through
+# sqry-mcp's `daemon_adapter::execute_*_for_daemon` wrappers and the
+# shared `build_tool_response` renderer (via `tool_response_json`).
+# sqry-mcp depends only on sqry-core / sqry-db / sqry-nl /
+# sqry-mcp-redaction / sqry-plugin-registry — none of which depend on
+# sqry-daemon, so this edge does not create a cycle (verified via
+# `cargo tree -p sqry-daemon`).
+sqry-mcp = { version = "9.0.0", path = "../sqry-mcp" }
+
+# Phase 8c U10 — the daemon hosts an in-process tower_lsp server on
+# each LSP shim byte-pump connection via
+# `sqry_lsp::daemon_host::host_on_streams`. Verified acyclic: sqry-lsp
+# depends only on sqry-core / sqry-db / sqry-nl /
+# sqry-plugin-registry — none of which depend on sqry-daemon.
+# Confirmed via `cargo tree -p sqry-daemon` post-commit.
+sqry-lsp = { version = "9.0.0", path = "../sqry-lsp" }
+
+# Phase 8c U8 — the daemon hosts an in-process rmcp `ServerHandler`
+# (`mcp_host::DaemonMcpHandler`) on each MCP shim byte-pump connection
+# so every `tools/call` is bit-identical with direct sqryd JSON-RPC
+# dispatch. Version/feature set MUST match sqry-mcp's rmcp dep so the
+# two crates agree on `ErrorData`, `CallToolRequestParams`, etc.
+rmcp = { version = "0.16", features = ["server", "transport-io"] }
+
+# Core utilities
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+parking_lot = { workspace = true }
+arc-swap = "1"
+tracing = { workspace = true }
+# Task 9 U5 — override workspace tracing-subscriber to add `json` feature
+# required by install_tracing's JSON fmt layer for structured log files.
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter", "json"] }
+# Task 9 U5 — tracing-appender: non_blocking writer + WorkerGuard used by
+# RollingSizeAppender in lifecycle/log_rotate.rs. The non_blocking wrapper
+# decouples the caller's hot path from filesystem I/O.
+tracing-appender = "0.2"
+
+# Serialization / config
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+toml = { workspace = true }
+
+# Async IPC
+tokio = { workspace = true, features = ["full"] }
+tokio-util = { version = "0.7", default-features = false, features = ["rt"] }
+
+# Filesystem / locking
+dirs = "6"
+fs2 = "0.4"
+chrono = { workspace = true }
+
+# Task 9 U15a — clap CLI for sqryd subcommands (Start, Foreground, Stop,
+# Status, InstallSystemdUser, InstallSystemdSystem, InstallLaunchd,
+# InstallWindows, PrintConfig). The `derive` + `env` features are present in
+# the workspace pin. Workspace already has clap = "4.5" with derive+env.
+clap = { workspace = true }
+
+# Unix-only: `getuid()` for the per-user runtime-dir fallback so sqryd
+# paths never collide across users when USER/USERNAME are unset (e.g.
+# systemd units, containers). Already a transitive workspace dep.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# Task 9 U15a — sd-notify: Linux-only. Sends READY=1 + STATUS= notifications to
+# systemd on Type=notify units. Guarded by target_os="linux" because systemd is
+# Linux-specific; macOS (launchd) and Windows (SCM) have no equivalent protocol
+# and the wrapper module provides no-op stubs for those platforms.
+[target.'cfg(target_os = "linux")'.dependencies]
+sd-notify = { workspace = true }
+# Task 9 U15a — users: Linux-only. Provides `get_user_by_name` to validate the
+# %i instance specifier in the systemd system-unit generator (U6). Gated to
+# Linux because InstallSystemdSystem is a #[cfg(target_os="linux")] subcommand.
+users = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3.10"
+# Phase 8c U15 — MCP host integration tests drive `tools/call` and
+# `tools/list` through an rmcp client (`serve_client` + `Peer` methods).
+# The client feature is NOT needed by the production daemon code (which
+# only uses the server feature); it is a dev-only dependency.
+rmcp = { version = "0.16", features = ["client", "transport-io"] }
+# Task 9 U14 — e2e smoke tests use `connect_shim_with_timeouts` to perform
+# the shim handshake and assert `daemon_version` against the live sqryd binary.
+sqry-daemon-client = { version = "9.0.0", path = "../sqry-daemon-client" }
+# Codex gpt-5.4 iter-1 MINOR fix — integration tests that mutate
+# process-global state (current working directory) must run
+# serialised; `serial_test` mirrors sqry-mcp's existing usage
+# (sqry-mcp/Cargo.toml: serial_test = "3.0").
+serial_test = "3.0"

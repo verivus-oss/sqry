@@ -179,13 +179,25 @@ fn test_exit_code_0_unknown_field_fallback() {
 fn test_exit_code_2_invalid_operator_parse_error() {
     let tmp_cli_workspace = setup_indexed_repo();
 
-    // Invalid operators are treated as parse errors in the unified boolean parser.
+    // With the implicit-AND parser (PARSE_1), bare words like "INVALID" are now
+    // promoted to `name~=/INVALID/` predicates rather than rejected as parse errors.
+    // `kind:function INVALID name:test` now parses as:
+    //   And([Condition(kind=function), Condition(name~=/INVALID/), Condition(name=test)])
+    // which is a valid query that returns 0 results (exit code 0, not 2).
+    //
+    // Genuine parse errors still produce exit code 2 — e.g. `kind: :`.
     Command::new(sqry_path())
         .current_dir(&tmp_cli_workspace)
-        .args(["query", "kind:function INVALID name:test"]) // Invalid operator
+        .args(["query", "kind:function INVALID name:test"]) // Bare word — valid with implicit AND
         .assert()
-        .code(2)
-        .stderr(predicate::str::contains("Parse error"));
+        .success(); // exit code 0 (valid query, 0 results)
+
+    // Genuinely invalid syntax still produces exit code 2.
+    Command::new(sqry_path())
+        .current_dir(&tmp_cli_workspace)
+        .args(["query", "kind: :"])
+        .assert()
+        .code(2);
 }
 
 #[test]

@@ -390,6 +390,30 @@ impl CsrGraph {
         &self.edge_kind
     }
 
+    /// Returns a mutable reference to the edge kinds array.
+    ///
+    /// Used exclusively by [`RebuildGraph::finalize`] step 1 to rewrite
+    /// `StringId` payloads inside each committed `EdgeKind` through the
+    /// canonical-StringId remap produced by `StringInterner::build_dedup_table`.
+    ///
+    /// This is the write-path counterpart to [`Self::edge_kind`]. All
+    /// non-rebuild consumers must go through the read-only accessor.
+    /// Mutating `EdgeKind`s in-place is safe because the CSR's structural
+    /// invariants (`row_ptr`, `col_idx`, `edge_seq`) are not touched.
+    ///
+    /// `pub(crate)` because the only legitimate caller is
+    /// [`BidirectionalEdgeStore::rewrite_edge_kind_string_ids_through_remap`]
+    /// inside `sqry-core`. External crates (including `sqry-daemon` with
+    /// `rebuild-internals` enabled) must never reach into the edge
+    /// storage directly — they go through `RebuildGraph::finalize()`,
+    /// which calls the `BidirectionalEdgeStore` helper internally. See
+    /// Gate 0c plan §H "Type-enforced publish path" and iter-4 blocker.
+    #[allow(dead_code)] // Only reachable through the rebuild-internals-gated path.
+    #[must_use]
+    pub(crate) fn edge_kind_mut(&mut self) -> &mut [EdgeKind] {
+        &mut self.edge_kind
+    }
+
     /// Returns a reference to the sequence numbers array.
     #[must_use]
     pub fn edge_seq(&self) -> &[u64] {

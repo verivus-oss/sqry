@@ -1,0 +1,49 @@
+error[E0624]: method `edge_kind_mut` is private
+  --> tests/rebuild_internals_compile_fail/edge_store_mut_unreachable_without_feature.rs:42:17
+   |
+42 |     let _ = csr.edge_kind_mut();
+   |                 ^^^^^^^^^^^^^ private method
+   |
+  ::: src/graph/unified/storage/csr.rs
+   |
+   |     pub(crate) fn edge_kind_mut(&mut self) -> &mut [EdgeKind] {
+   |     --------------------------------------------------------- private method defined here
+
+error[E0624]: method `csr_mut` is private
+  --> tests/rebuild_internals_compile_fail/edge_store_mut_unreachable_without_feature.rs:47:19
+   |
+47 |     let _ = store.csr_mut();
+   |                   ^^^^^^^ private method
+   |
+  ::: src/graph/unified/edge/store.rs
+   |
+   |     pub(crate) fn csr_mut(&mut self) -> Option<&mut CsrGraph> {
+   |     --------------------------------------------------------- private method defined here
+
+error[E0624]: method `iter_mut` is private
+  --> tests/rebuild_internals_compile_fail/edge_store_mut_unreachable_without_feature.rs:52:19
+   |
+52 |     let _ = delta.iter_mut();
+   |                   ^^^^^^^^ private method
+   |
+  ::: src/graph/unified/edge/delta.rs
+   |
+   |     pub(crate) fn iter_mut(&mut self) -> impl Iterator<Item = &mut DeltaEdge> {
+   |     ------------------------------------------------------------------------- private method defined here
+
+error[E0624]: method `rewrite_edge_kind_string_ids_through_remap` is private
+  --> tests/rebuild_internals_compile_fail/edge_store_mut_unreachable_without_feature.rs:59:11
+   |
+59 |       edges.rewrite_edge_kind_string_ids_through_remap(&remap);
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ private method
+   |
+  ::: src/graph/unified/edge/bidirectional.rs
+   |
+   | /     pub(crate) fn rewrite_edge_kind_string_ids_through_remap(
+   | |         &mut self,
+   | |         remap: &std::collections::HashMap<
+   | |             crate::graph::unified::string::id::StringId,
+   | |             crate::graph::unified::string::id::StringId,
+   | |         >,
+   | |     ) {
+   | |_____- private method defined here

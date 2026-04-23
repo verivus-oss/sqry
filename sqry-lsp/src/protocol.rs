@@ -292,10 +292,12 @@ pub struct CycleMemberLocation {
     /// File path (URI)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file: Option<String>,
-    /// Line number (0-based)
+    /// 0-based line offset within the source file.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub line: Option<u32>,
-    /// Column number (0-based)
+    /// 0-based UTF-16 column offset within the source line, per LSP spec.
+    /// `None` if the source text cannot be loaded (file deleted, unreadable,
+    /// or offset invalid).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub column: Option<u32>,
 }
@@ -319,6 +321,10 @@ pub struct SqryCycle {
 #[derive(Debug, Serialize, Clone)]
 pub struct SqryListCircularDependenciesResult {
     pub cycles: Vec<SqryCycle>,
+    /// Total number of cycles available before truncation.
+    /// When `truncated` is true, this value equals `limit + 1` as a lower-bound
+    /// sentinel because the handler did not enumerate beyond `limit + 1` for
+    /// performance. When `truncated` is false, this is the exact cycle count.
     pub total_cycles: usize,
     /// Whether results were truncated due to limit
     pub truncated: bool,
@@ -344,9 +350,10 @@ fn default_unused_scope() -> String {
 #[derive(Debug, Serialize, Clone)]
 pub struct SqryListUnusedSymbolsResult {
     pub symbols: Vec<SqrySearchItem>,
-    /// Number of unused symbols returned (not total in codebase).
-    /// Due to performance optimization with early exit, this represents
-    /// returned count. When `truncated=true`, more unused symbols exist.
+    /// Total matching unused symbols before limit applied.
+    /// When `truncated` is true, this value equals `limit + 1` as a lower-bound
+    /// sentinel because the handler did not enumerate further for performance.
+    /// When `truncated` is false, this is the exact count of unused symbols.
     pub total: usize,
     /// Whether results were truncated due to limit
     pub truncated: bool,

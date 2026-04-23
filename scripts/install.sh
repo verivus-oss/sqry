@@ -16,7 +16,7 @@ Usage: $(basename "$0") [options]
 
 Options:
   --version TAG         Release tag to install (default: latest)
-  --component NAME      One of: sqry, sqry-mcp, sqry-lsp, all (default: sqry)
+  --component NAME      One of: sqry, sqry-mcp, sqry-lsp, sqryd, all (default: sqry)
   --install-dir DIR     Install destination (default: ~/.local/bin)
   --repo OWNER/REPO     GitHub repository (default: verivus-oss/sqry)
   --no-checksum         Skip checksum verification (not recommended)
@@ -113,10 +113,10 @@ case "$os" in
 esac
 
 case "$COMPONENT" in
-  sqry|sqry-mcp|sqry-lsp|all)
+  sqry|sqry-mcp|sqry-lsp|sqryd|all)
     ;;
   *)
-    echo "error: invalid component '$COMPONENT' (expected sqry, sqry-mcp, sqry-lsp, all)" >&2
+    echo "error: invalid component '$COMPONENT' (expected sqry, sqry-mcp, sqry-lsp, sqryd, all)" >&2
     exit 1
     ;;
 esac
@@ -221,6 +221,7 @@ if [[ "$COMPONENT" == "all" ]]; then
   download_and_install "sqry"
   download_and_install "sqry-mcp"
   download_and_install "sqry-lsp"
+  download_and_install "sqryd"
 else
   download_and_install "$COMPONENT"
 fi

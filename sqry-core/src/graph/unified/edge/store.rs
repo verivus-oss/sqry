@@ -187,6 +187,26 @@ impl EdgeStore {
         self.csr.as_ref()
     }
 
+    /// Returns a mutable reference to the CSR graph, if any.
+    ///
+    /// Used exclusively by
+    /// [`BidirectionalEdgeStore::rewrite_edge_kind_string_ids_through_remap`]
+    /// so [`RebuildGraph::finalize`] step 1 can rewrite `StringId`
+    /// payloads inside the CSR's `edge_kind` array in place without
+    /// going through `swap_csr`. The CSR's structural invariants
+    /// (`row_ptr`, `col_idx`, `edge_seq`) are not touched.
+    ///
+    /// `pub(crate)` because only the finalize-step-1 helper in
+    /// `BidirectionalEdgeStore` (same crate) has a legitimate reason
+    /// to mutate the committed CSR in place. External crates must go
+    /// through `RebuildGraph::finalize()` or the regular `swap_csr`
+    /// write path. See Gate 0c plan §H and iter-4 blocker.
+    #[allow(dead_code)] // Only reachable through the rebuild-internals-gated path.
+    #[must_use]
+    pub(crate) fn csr_mut(&mut self) -> Option<&mut CsrGraph> {
+        self.csr.as_mut()
+    }
+
     /// Returns the delta buffer reference.
     #[must_use]
     pub fn delta(&self) -> &DeltaBuffer {
@@ -297,6 +317,113 @@ impl EdgeStore {
                 break;
             }
         }
+    }
+
+    /// Tombstone every CSR edge whose source **or** target `NodeId` is in
+    /// `dead`, and drop every delta-buffer edge (of any op) whose source
+    /// or target is in `dead`.
+    ///
+    /// Called by [`super::super::concurrent::CodeGraph::remove_file`] and
+    /// [`super::super::rebuild::rebuild_graph::RebuildGraph::remove_file`]
+    /// when a file is deleted from the workspace. The caller has already
+    /// tombstoned the relevant arena slots; this helper surgically marks
+    /// edges that referenced any of those slots, preventing dangling
+    /// references across both tiers.
+    ///
+    /// # Semantics
+    ///
+    /// * **CSR tier**: walks every row and every column entry in a single
+    ///   `O(node_count + edge_count)` pass, setting
+    ///   `csr_tombstones[idx] = true` whenever the edge at `idx` has
+    ///   either endpoint in `dead`. We walk by source-row so that source
+    ///   hits are `O(1)` per row (skip rows whose source NodeId is in
+    ///   `dead` after setting all their edges), and target hits are
+    ///   `O(edges)` scan.
+    /// * **Delta tier**: [`DeltaBuffer::retain_if`] drops every edge (Add
+    ///   or Remove) whose source or target is in `dead`. Remove deltas
+    ///   against already-dead endpoints are moot — the CSR edge they
+    ///   would have targeted is now tombstoned, and the Remove itself
+    ///   would silently match against a freed slot.
+    /// * `csr_version` is bumped once, regardless of how many edges were
+    ///   tombstoned, so readers holding stale `csr_version()` markers
+    ///   observe the change via the MVCC invalidation path.
+    ///
+    /// Returns the number of CSR edges newly tombstoned by this call.
+    /// Delta-buffer drops are not counted — the caller tracks those via
+    /// `stats()` if needed.
+    ///
+    /// Note: CSR tombstoning uses the slot *index* field of NodeId (not
+    /// the full `(index, generation)` pair) because CSR column entries
+    /// store the full NodeId — the generation stored in the CSR was
+    /// captured at the most recent full rebuild and may not match the
+    /// current arena's generation for a re-allocated slot. Set membership
+    /// is performed against `dead`, which contains the NodeIds as they
+    /// were *at the moment of tombstoning*; callers pass the NodeIds
+    /// they drained from `FileRegistry::take_nodes` or the arena's live
+    /// enumeration before calling `NodeArena::remove`.
+    #[allow(dead_code)] // Consumer is
+    // `BidirectionalEdgeStore::tombstone_edges_for_nodes` (Task 4
+    // Steps 2–3) and the unit tests below.
+    pub(crate) fn tombstone_edges_for_nodes(
+        &mut self,
+        dead: &std::collections::HashSet<NodeId>,
+    ) -> usize {
+        if dead.is_empty() {
+            return 0;
+        }
+        // Pre-compute a dense set of the *slot indices* we need to kill.
+        // CSR stores `NodeId` values in `col_idx` but the source axis is
+        // the row index, which is a bare `u32` slot index without a
+        // generation. Both axes collapse onto slot-index set membership
+        // so each CSR edge check is O(1) amortised rather than
+        // O(|dead|) per edge.
+        let dead_slot_indices: std::collections::HashSet<u32> =
+            dead.iter().map(|nid| nid.index()).collect();
+        let mut newly_tombstoned: usize = 0;
+        if let Some(ref csr) = self.csr {
+            let node_count = csr.node_count();
+            for slot_index in 0..node_count {
+                let slot_u32 = match u32::try_from(slot_index) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                let source_slot_dead = dead_slot_indices.contains(&slot_u32);
+                for edge_ref in csr.edges_of(slot_u32) {
+                    if edge_ref.index >= self.csr_tombstones.len() {
+                        continue;
+                    }
+                    if self.csr_tombstones[edge_ref.index] {
+                        continue; // already tombstoned
+                    }
+                    // The semantic rule matches plan A2 §F.2: no live
+                    // edge may reference any NodeId in the drained
+                    // tombstone set after file removal. We kill on
+                    // slot-index membership (not full NodeId) because
+                    // the arena's slot generation advances on remove;
+                    // any CSR column whose slot is being tombstoned is
+                    // semantically dead regardless of the captured
+                    // generation in col_idx.
+                    let target_slot_dead = dead_slot_indices.contains(&edge_ref.target.index());
+                    if source_slot_dead || target_slot_dead {
+                        self.csr_tombstones[edge_ref.index] = true;
+                        newly_tombstoned += 1;
+                    }
+                }
+            }
+        }
+        // Delta tier: drop every edge with a dead endpoint. We match on
+        // *slot index* (not full NodeId) for symmetry with the CSR pass
+        // above, which matters because a node removed mid-build can
+        // still have Add/Remove deltas queued against its pre-remove
+        // generation — those deltas must die alongside the node.
+        self.delta.retain_if(|edge| {
+            !dead_slot_indices.contains(&edge.source.index())
+                && !dead_slot_indices.contains(&edge.target.index())
+        });
+        if newly_tombstoned > 0 {
+            self.csr_version = self.csr_version.wrapping_add(1);
+        }
+        newly_tombstoned
     }
 
     /// Pushes committed edges with size validation.
@@ -526,6 +653,209 @@ impl EdgeStore {
         result
     }
 
+    /// Returns every live forward edge in the store in a **single pass**,
+    /// applying LWW across CSR and delta globally.
+    ///
+    /// Equivalent in output to concatenating [`edges_from`](Self::edges_from)
+    /// over every source node, but strictly more efficient: `edges_from`
+    /// rebuilds a per-source delta LWW map by scanning the full delta on
+    /// every invocation, so calling it in a loop across N nodes is
+    /// `O(N * |delta|)`. This helper scans the delta **once** AND folds
+    /// the delta-Add ⇄ CSR suppression check into a `HashMap` lookup
+    /// keyed on `(source_idx, target, kind)` populated during the CSR
+    /// walk. The combined cost is:
+    ///
+    /// * Delta LWW build: `O(|delta|)`.
+    /// * CSR walk: `O(|csr|)` — emits surviving edges and records them
+    ///   in the suppression map in the same iteration.
+    /// * Delta-Add emission: `O(|delta|)` — each delta key pays an
+    ///   `O(1)` hash-map lookup against the suppression map.
+    ///
+    /// Total: `O(|csr| + |delta|)` — the same asymptotic cost as the
+    /// legacy delta-only `forward.delta().iter()` scan in the full-build
+    /// case, strictly correct for CSR-backed (post-compaction) graphs,
+    /// and **no longer subject to the star-graph degeneracy** where a
+    /// high-degree source shared by many delta keys used to produce
+    /// `O(|csr| * |delta|)` work via per-key `csr.edges_of(source_idx)`
+    /// scans (iter-2 Codex blocker — addressed here).
+    ///
+    /// # When to use this over [`edges_from`](Self::edges_from)
+    ///
+    /// Use this whenever you need a graph-wide view of forward edges
+    /// filtered by [`EdgeKind`] (e.g. Pass 5's HTTP-request collection or
+    /// FFI-declaration scan). `edges_from` remains the right surface for
+    /// per-source queries where each source is visited at most a small,
+    /// bounded number of times.
+    ///
+    /// # Correctness
+    ///
+    /// Every (source, target, kind) triple that appears in the emitted
+    /// vector is a live edge — either a CSR entry not shadowed by a
+    /// higher-seq delta op, or a delta Add whose key does not appear in
+    /// CSR with a greater-or-equal seq. Tombstoned CSR edges and
+    /// Add-followed-by-Remove delta sequences are filtered. The
+    /// filtering logic mirrors `edges_from` exactly — the map-based
+    /// suppression step produces the same decision as
+    /// [`csr_has_edge_with_seq_at_least`](Self::csr_has_edge_with_seq_at_least)
+    /// would, using the same generation-agnostic source-idx +
+    /// target + kind triple as its equality relation.
+    ///
+    /// # Determinism
+    ///
+    /// Emission order is:
+    /// 1. CSR edges in `(source_index, row_ptr)` order (dense, stable).
+    /// 2. Delta Adds in `HashMap` iteration order (unordered), which is
+    ///    non-deterministic across runs inside the delta-only segment.
+    ///
+    /// Consumers that need deterministic iteration (e.g. persistence
+    /// encoders) must sort the result themselves. Pass 5's HTTP /
+    /// FFI linkers already build lookup tables keyed by
+    /// `(method, normalized_path)` / qualified name, so the emission
+    /// order inside each tier is immaterial to their output.
+    pub fn all_live_forward_edges(&self) -> Vec<StoreEdgeRef> {
+        // Build a GLOBAL delta LWW map keyed by (source, target, kind).
+        // One pass over the delta buffer — shared across every source,
+        // instead of `edges_from`'s per-source rebuild.
+        let mut delta_lww: HashMap<EdgeKey, DeltaFromEntry> = HashMap::new();
+        for edge in self.delta.iter() {
+            Self::update_delta_lww_from_edge(&mut delta_lww, edge);
+        }
+
+        let mut result: Vec<StoreEdgeRef> = Vec::new();
+
+        // Build a flat CSR-adjacency membership map during the single
+        // CSR walk below, so the subsequent delta-Add suppression phase
+        // can do an O(1) lookup per delta key instead of
+        // `csr.edges_of(idx)` + linear scan per key.
+        //
+        // **Semantic equivalence with
+        // [`csr_has_edge_with_seq_at_least`](Self::csr_has_edge_with_seq_at_least)
+        // (iter-3 Codex blocker — addressed here).** The legacy
+        // suppression check scans `csr.edges_of(source_idx)` *without*
+        // filtering by tombstone or delta-shadow. We therefore populate
+        // this map from **every** CSR adjacency entry — including ones
+        // we will not emit because they are tombstoned or shadowed. Any
+        // other choice (e.g. populating only from emitted edges) causes
+        // `all_live_forward_edges` to diverge from `edges_from` on
+        // shapes where a tombstoned CSR entry collides by
+        // `(source_idx, target, kind)` with a delta Add, which the
+        // iter-3 Codex repro demonstrates:
+        //
+        //   1. Seed CSR with `(0, 1, K, seq=S)`.
+        //   2. `remove_edge(0, 1, K)` — tombstones the CSR entry and
+        //      appends a `DeltaOp::Remove` at delta seq `R`.
+        //   3. `add_edge(0, 1, K)` — appends `DeltaOp::Add` at delta
+        //      seq `A`.
+        //
+        //   `edges_from(0)` on this state emits nothing: the CSR edge
+        //   is tombstoned, but its raw adjacency still satisfies
+        //   `seq >= A` (because CSR seqs and delta seqs live in
+        //   overlapping integer space — a fresh `EdgeStore::with_csr`
+        //   resets the delta seq counter to 0, so CSR seq 1 >= delta
+        //   seq 1 is a real collision). Populating the map from the
+        //   raw CSR adjacency reproduces this suppression exactly,
+        //   which is what the equivalence claim in the helper's
+        //   contract requires.
+        //
+        // The map key is `(source_idx: u32, target: NodeId, kind:
+        // EdgeKind)` — generation-agnostic on the source side so it
+        // matches `csr_has_edge_with_seq_at_least`, which takes a bare
+        // `source_idx` and ignores the delta key's generation.
+        //
+        // Complexity: `O(|csr|)` time and `O(|csr_adjacency_keys|)`
+        // space. Without this map, the delta-Add suppression step
+        // would call `csr_has_edge_with_seq_at_least` per delta key,
+        // which is `O(out_degree(source))` per call — degenerate on
+        // star-shaped sources where one node has many outgoing CSR
+        // edges AND many delta keys share that source, blowing total
+        // work up to `O(|csr| * |delta|)`. The map flattens that to
+        // `O(|csr| + |delta|)` overall.
+        let mut csr_max_seq_by_key: HashMap<(u32, NodeId, EdgeKind), u64> = HashMap::new();
+
+        // CSR edges: walk every node's adjacency slice once. Populate
+        // the suppression map from EVERY raw adjacency entry (matching
+        // `csr_has_edge_with_seq_at_least`'s unfiltered semantics) and,
+        // in the same iteration, emit only the edges that survive the
+        // tombstone + delta-shadow filters.
+        if let Some(ref csr) = self.csr {
+            let node_count = csr.node_count();
+            for node_idx in 0..node_count {
+                let node_idx_u32 = u32::try_from(node_idx)
+                    .expect("CSR node index exceeds u32::MAX — invariant violated by builder");
+                // CSR does not track generation; use generation 0 matching
+                // the `append_csr_edges_from` convention in `edges_from`.
+                let source = NodeId::new(node_idx_u32, 0);
+                for edge_ref in csr.edges_of(node_idx_u32) {
+                    // ALWAYS record the raw CSR adjacency so the
+                    // delta-Add suppression phase sees what
+                    // `csr_has_edge_with_seq_at_least` would see.
+                    // `entry.and_modify` keeps the max seq if duplicate
+                    // keys ever surface (post-compaction CSRs dedupe to
+                    // one entry per EdgeKey, but `.max()` is a cheap
+                    // and defensive merge for hand-built CSRs, snapshot
+                    // reloads, and any future pre-compaction CSR shape).
+                    csr_max_seq_by_key
+                        .entry((node_idx_u32, edge_ref.target, edge_ref.kind.clone()))
+                        .and_modify(|s| {
+                            if edge_ref.seq > *s {
+                                *s = edge_ref.seq;
+                            }
+                        })
+                        .or_insert(edge_ref.seq);
+
+                    // Separately, decide whether to emit this CSR edge.
+                    // Tombstoned or shadow-by-delta entries are
+                    // suppressed from the emission stream but remain
+                    // recorded in `csr_max_seq_by_key` above.
+                    if self.is_edge_tombstoned(edge_ref.index) {
+                        continue;
+                    }
+                    if Self::csr_edge_shadowed_by_delta(source, &edge_ref, &delta_lww) {
+                        continue;
+                    }
+                    result.push(StoreEdgeRef {
+                        source,
+                        target: edge_ref.target,
+                        kind: edge_ref.kind,
+                        seq: edge_ref.seq,
+                        file: FileId::INVALID,
+                        spans: edge_ref.spans,
+                    });
+                }
+            }
+        }
+
+        // Delta Adds: yield every entry where the latest op is Add, and
+        // no CSR edge with a higher-or-equal seq already satisfied it.
+        // Suppression is an O(1) `HashMap::get` against the **raw**
+        // `csr_max_seq_by_key` populated above, matching
+        // `csr_has_edge_with_seq_at_least`'s exact semantics (compare
+        // on `source_idx` + target + kind, ignoring source generation,
+        // without pre-filtering CSR by tombstone or shadow).
+        for (key, (seq, is_add, target, kind, file, spans)) in delta_lww {
+            if !is_add {
+                continue;
+            }
+            let suppression_key = (key.source.index(), target, kind.clone());
+            if csr_max_seq_by_key
+                .get(&suppression_key)
+                .is_some_and(|csr_seq| *csr_seq >= seq)
+            {
+                continue;
+            }
+            result.push(StoreEdgeRef {
+                source: key.source,
+                target,
+                kind,
+                seq,
+                file,
+                spans,
+            });
+        }
+
+        result
+    }
+
     /// Returns edges to a target node (from delta only).
     ///
     /// Note: Without a reverse CSR, this only scans delta edges.
@@ -710,6 +1040,21 @@ impl EdgeStore {
     /// Takes all delta edges for compaction.
     pub fn take_delta(&mut self) -> HashMap<FileId, Vec<DeltaEdge>> {
         self.delta.take_all()
+    }
+
+    /// Drops the CSR cache so the next read path rebuilds it from the
+    /// (now compacted) delta.
+    ///
+    /// Used by `RebuildGraph::finalize()` step 9 (A2 §H): the CSR is
+    /// **derived** state — after a rebuild compacts tombstoned edges out
+    /// of the delta tier, the prior CSR can still reference compacted
+    /// arena slots via stale column-indices, so the correct operation is
+    /// to drop it rather than mutate it in place. The CSR version is bumped
+    /// so any readers holding `csr_version()` markers observe the change.
+    pub fn reset_csr(&mut self) {
+        self.csr = None;
+        self.csr_tombstones.clear();
+        self.csr_version = self.csr_version.wrapping_add(1);
     }
 }
 
@@ -1508,6 +1853,361 @@ mod tests {
             store.delta().current_seq(),
             2,
             "empty push should not change counter"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Task 4 Step 2 — EdgeStore::tombstone_edges_for_nodes (CSR path)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn tombstone_edges_for_nodes_empty_dead_set_is_a_noop() {
+        let mut store = EdgeStore::with_csr(make_csr());
+        let prior_version = store.csr_version();
+        let prior_tombstones = store.stats().tombstone_count;
+
+        let newly = store.tombstone_edges_for_nodes(&std::collections::HashSet::new());
+        assert_eq!(newly, 0);
+        assert_eq!(store.csr_version(), prior_version);
+        assert_eq!(store.stats().tombstone_count, prior_tombstones);
+    }
+
+    #[test]
+    fn tombstone_edges_for_nodes_kills_csr_edges_with_dead_source() {
+        // CSR: 0 -> 1, 0 -> 2, 1 -> 2. Mark node 0 dead → edges 0->1
+        // and 0->2 must be tombstoned, but 1->2 must remain live.
+        let mut store = EdgeStore::with_csr(make_csr());
+        let dead: std::collections::HashSet<NodeId> = [NodeId::new(0, 0)].into_iter().collect();
+
+        let newly = store.tombstone_edges_for_nodes(&dead);
+        assert_eq!(newly, 2, "both 0->1 and 0->2 must tombstone");
+        assert_eq!(store.stats().tombstone_count, 2);
+        // Confirm the surviving edge 1->2 is still live.
+        assert!(
+            store.edges_from(NodeId::new(1, 0)).iter().any(|e| {
+                e.target == NodeId::new(2, 0)
+                    && matches!(
+                        e.kind,
+                        EdgeKind::Calls {
+                            argument_count: 0,
+                            is_async: false
+                        }
+                    )
+            }),
+            "edge 1->2 must survive when only node 0 is tombstoned"
+        );
+    }
+
+    #[test]
+    fn tombstone_edges_for_nodes_kills_csr_edges_with_dead_target() {
+        // CSR: 0 -> 1, 0 -> 2, 1 -> 2. Mark node 2 dead → edges 0->2
+        // and 1->2 must be tombstoned; 0->1 survives.
+        let mut store = EdgeStore::with_csr(make_csr());
+        let dead: std::collections::HashSet<NodeId> = [NodeId::new(2, 0)].into_iter().collect();
+
+        let newly = store.tombstone_edges_for_nodes(&dead);
+        assert_eq!(newly, 2, "both 0->2 and 1->2 must tombstone");
+        assert_eq!(store.stats().tombstone_count, 2);
+        // Confirm 0->1 survives.
+        assert!(
+            store.edges_from(NodeId::new(0, 0)).iter().any(|e| {
+                e.target == NodeId::new(1, 0)
+                    && matches!(
+                        e.kind,
+                        EdgeKind::Calls {
+                            argument_count: 0,
+                            is_async: false
+                        }
+                    )
+            }),
+            "edge 0->1 must survive when only node 2 is tombstoned"
+        );
+    }
+
+    #[test]
+    fn tombstone_edges_for_nodes_bumps_csr_version_when_work_done() {
+        let mut store = EdgeStore::with_csr(make_csr());
+        let prior = store.csr_version();
+        let dead: std::collections::HashSet<NodeId> = [NodeId::new(0, 0)].into_iter().collect();
+
+        let newly = store.tombstone_edges_for_nodes(&dead);
+        assert!(newly > 0);
+        assert_eq!(
+            store.csr_version(),
+            prior.wrapping_add(1),
+            "csr_version must bump when any edge was tombstoned"
+        );
+    }
+
+    #[test]
+    fn tombstone_edges_for_nodes_does_not_bump_version_when_no_work() {
+        // A dead node that does not appear as any endpoint — no edge
+        // should tombstone, csr_version stays put.
+        let mut store = EdgeStore::with_csr(make_csr());
+        let prior = store.csr_version();
+        let dead: std::collections::HashSet<NodeId> = [NodeId::new(9999, 0)].into_iter().collect();
+
+        let newly = store.tombstone_edges_for_nodes(&dead);
+        assert_eq!(newly, 0);
+        assert_eq!(store.csr_version(), prior);
+    }
+
+    #[test]
+    fn tombstone_edges_for_nodes_drops_delta_buffer_entries() {
+        // Delta-only edges: ensure both source-dead and target-dead
+        // delta entries are dropped, and an untouched entry survives.
+        let mut store = EdgeStore::new();
+        let alive = NodeId::new(100, 0);
+        let dead_nid = NodeId::new(7, 0);
+        store.add_edge(
+            alive,
+            dead_nid,
+            EdgeKind::Calls {
+                argument_count: 0,
+                is_async: false,
+            },
+            FileId::new(1),
+        );
+        store.add_edge(dead_nid, alive, EdgeKind::References, FileId::new(1));
+        store.add_edge(
+            alive,
+            NodeId::new(200, 0),
+            EdgeKind::References,
+            FileId::new(1),
+        );
+        assert_eq!(store.delta_count(), 3);
+
+        let dead: std::collections::HashSet<NodeId> = [dead_nid].into_iter().collect();
+        let newly_csr = store.tombstone_edges_for_nodes(&dead);
+        assert_eq!(newly_csr, 0, "no CSR edges means no new CSR tombstones");
+        assert_eq!(
+            store.delta_count(),
+            1,
+            "both delta edges touching dead_nid must be gone, the third survives"
+        );
+    }
+
+    // -------- all_live_forward_edges tests (Codex iter-2 blocker fix) --
+
+    fn make_calls(arg_count: u8) -> EdgeKind {
+        EdgeKind::Calls {
+            argument_count: arg_count,
+            is_async: false,
+        }
+    }
+
+    #[test]
+    fn all_live_forward_edges_csr_only_emits_every_live_edge() {
+        // A CSR-backed store with no delta entries must emit every
+        // non-tombstoned CSR edge exactly once, in `(source_index,
+        // row_ptr)` order. This is the "post-compaction published
+        // graph" shape Pass 5 sees on warm daemons.
+        let csr = make_csr();
+        let store = EdgeStore::with_csr(csr);
+
+        let all = store.all_live_forward_edges();
+        // CSR seeded by `make_csr()`: node 0 → {1, 2}, node 1 → {2}.
+        assert_eq!(all.len(), 3, "three live CSR edges expected");
+        // `edges_from` on every source must observe the same set.
+        let via_edges_from: Vec<_> = (0u32..3)
+            .flat_map(|idx| store.edges_from(NodeId::new(idx, 0)))
+            .collect();
+        assert_eq!(
+            via_edges_from.len(),
+            all.len(),
+            "single-pass helper must agree with per-source edges_from aggregate"
+        );
+    }
+
+    #[test]
+    fn all_live_forward_edges_delta_only_emits_adds_and_skips_removes() {
+        // A delta-only store (no CSR — matches the full-build state
+        // when Pass 5 runs before `persist_and_analyze_graph`'s CSR
+        // compaction). Two adds plus one remove; the remove must be
+        // suppressed, both adds survive.
+        let mut store = EdgeStore::new();
+        let src = NodeId::new(1, 0);
+        let t1 = NodeId::new(2, 0);
+        let t2 = NodeId::new(3, 0);
+        let file = FileId::new(7);
+        store.add_edge(src, t1, make_calls(1), file);
+        store.add_edge(src, t2, make_calls(2), file);
+        // Remove only the first edge — the LWW state for (src,t1,kind)
+        // is `Remove` at the highest seq.
+        store.remove_edge(src, t1, make_calls(1), file);
+
+        let all = store.all_live_forward_edges();
+        assert_eq!(
+            all.len(),
+            1,
+            "one surviving delta Add must be emitted; removed edge must be suppressed"
+        );
+        assert_eq!(all[0].target, t2);
+    }
+
+    #[test]
+    fn all_live_forward_edges_suppresses_csr_shadow_by_newer_delta() {
+        // CSR has (0,1,kind,seq=1). Delta adds a NEWER op for the
+        // same key. Depending on the delta op, the CSR edge is either
+        // shadowed (Remove) or redundant (Add with higher seq). In
+        // either case each logical edge key surfaces at most once.
+        let csr = make_csr();
+        let mut store = EdgeStore::with_csr(csr);
+
+        // Delta Remove with seq > CSR's seq — shadows the CSR entry.
+        let src = NodeId::new(0, 0);
+        let tgt = NodeId::new(1, 0);
+        store.remove_edge(src, tgt, make_calls(0), FileId::new(1));
+
+        let all = store.all_live_forward_edges();
+        // `make_csr()` seeds three edges; one is now shadowed.
+        assert_eq!(
+            all.len(),
+            2,
+            "shadowed CSR edge must not be emitted when delta removed it"
+        );
+        // The surviving edges must NOT include (0 → 1) — that's the
+        // shadowed pair.
+        assert!(
+            !all.iter().any(|e| e.source.index() == 0 && e.target == tgt),
+            "shadowed CSR edge (0 → 1) must be absent"
+        );
+    }
+
+    #[test]
+    fn all_live_forward_edges_star_source_no_quadratic_duplicate_suppression() {
+        // The Codex iter-2 star-source scenario: a single source with
+        // many outgoing CSR edges AND a delta Add for (almost) every
+        // same-key in CSR. Before the `csr_max_seq_by_key` optimisation
+        // this was `O(|csr| * |delta|)` because every delta-Add
+        // emission called `csr.edges_of(source_idx).any(...)`; now the
+        // suppression is an O(1) lookup against the map built during
+        // the CSR walk.
+        //
+        // We seed 5 CSR edges out of node 0 (seq 1..=5) and 5 delta
+        // Add ops that RE-ADD each of those same (0, target, kind)
+        // triples but with a LOWER seq than the CSR entry. Every
+        // delta Add should be suppressed because CSR already emits
+        // the edge at a higher seq. Result: exactly the 5 CSR edges,
+        // no duplicates.
+        let mut builder = CsrBuilder::new(6);
+        for t in 1u32..=5 {
+            builder
+                .add_edge(
+                    0,
+                    NodeId::new(t, 0),
+                    make_calls(t as u8),
+                    u64::from(t),
+                    vec![],
+                )
+                .unwrap();
+        }
+        let csr = builder.build().unwrap();
+        let mut store = EdgeStore::with_csr(csr);
+
+        // Reset seq counter low so our delta Adds land BELOW the CSR
+        // seqs and must be suppressed.
+        let src = NodeId::new(0, 0);
+        for t in 1u32..=5 {
+            store.add_edge(src, NodeId::new(t, 0), make_calls(t as u8), FileId::new(1));
+        }
+
+        let all = store.all_live_forward_edges();
+
+        // No duplicate emission from delta + CSR for the same key.
+        assert_eq!(
+            all.len(),
+            5,
+            "suppression must yield exactly the 5 CSR edges, not 10"
+        );
+        for t in 1u32..=5 {
+            let hits = all
+                .iter()
+                .filter(|e| e.source.index() == 0 && e.target == NodeId::new(t, 0))
+                .count();
+            assert_eq!(
+                hits, 1,
+                "every (0 → {t}, kind) must appear exactly once across CSR + delta"
+            );
+        }
+    }
+
+    #[test]
+    fn all_live_forward_edges_matches_edges_from_on_tombstoned_csr_plus_delta_add() {
+        // Codex iter-3 semantic-equivalence regression. The shrunk
+        // repro Codex built against the iter-3 diff:
+        //   1. Seed CSR with (0, 1, Calls{0,false}, seq=1).
+        //   2. `remove_edge(...)` — tombstones the CSR entry and
+        //      appends DeltaOp::Remove (delta seq 0).
+        //   3. `add_edge(...)` — appends DeltaOp::Add (delta seq 1).
+        //
+        // `edges_from(0)` emits nothing on this state: the CSR entry
+        // is tombstoned AND `csr_has_edge_with_seq_at_least(0, 1,
+        // Calls, 1)` returns true (raw CSR adjacency has seq 1 >= 1),
+        // suppressing the delta Add. Before the iter-3 map fix,
+        // `all_live_forward_edges` diverged (emitted the delta Add
+        // because the suppression map was only populated from
+        // post-filter emissions). Lock the correct behaviour in so
+        // any future refactor that re-opens the gap fails CI.
+        let mut builder = CsrBuilder::new(2);
+        builder
+            .add_edge(0, NodeId::new(1, 0), make_calls(0), 1, vec![])
+            .unwrap();
+        let csr = builder.build().unwrap();
+        let mut store = EdgeStore::with_csr(csr);
+
+        let src = NodeId::new(0, 0);
+        let tgt = NodeId::new(1, 0);
+        store.remove_edge(src, tgt, make_calls(0), FileId::new(1));
+        store.add_edge(src, tgt, make_calls(0), FileId::new(1));
+
+        let via_edges_from = store.edges_from(src);
+        let via_all = store.all_live_forward_edges();
+
+        assert_eq!(
+            via_edges_from.len(),
+            via_all.len(),
+            "edges_from and all_live_forward_edges must agree on tombstoned-CSR + delta-Add shapes"
+        );
+        // Both should be zero for this specific shape: delta seq counter
+        // resets to 0 on `EdgeStore::with_csr`, so the delta Add's seq
+        // collides with the CSR seq, triggering suppression.
+        assert_eq!(
+            via_all.len(),
+            0,
+            "tombstoned CSR entry + delta Add with colliding seq must suppress both emissions"
+        );
+    }
+
+    #[test]
+    fn all_live_forward_edges_delta_add_with_higher_seq_wins_over_csr() {
+        // Inverse of the previous test: the delta Add carries a seq
+        // STRICTLY higher than the CSR entry. That means the delta
+        // wins (shadows CSR). The CSR entry must be suppressed via
+        // `csr_edge_shadowed_by_delta`, and the delta Add must be
+        // emitted. Each key surfaces exactly once.
+        let mut builder = CsrBuilder::new(2);
+        builder
+            .add_edge(0, NodeId::new(1, 0), make_calls(0), 10, vec![])
+            .unwrap();
+        let csr = builder.build().unwrap();
+        let mut store = EdgeStore::with_csr(csr);
+
+        let src = NodeId::new(0, 0);
+        let tgt = NodeId::new(1, 0);
+        // Advance the delta seq counter so our Add lands at seq > 10.
+        for _ in 0..20 {
+            store.add_edge(src, tgt, make_calls(0), FileId::new(1));
+            store.remove_edge(src, tgt, make_calls(0), FileId::new(1));
+        }
+        // One final Add that ends the LWW state on Add with seq > 10.
+        store.add_edge(src, tgt, make_calls(0), FileId::new(1));
+
+        let all = store.all_live_forward_edges();
+        assert_eq!(
+            all.len(),
+            1,
+            "delta winning over CSR must yield exactly one emission, not two"
         );
     }
 }

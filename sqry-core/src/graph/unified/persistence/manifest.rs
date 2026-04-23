@@ -532,6 +532,106 @@ impl Manifest {
 }
 
 // ============================================================================
+// ManifestCheck — first-class missing/corrupt result type
+// ============================================================================
+
+/// Result of attempting to load a manifest from disk.
+///
+/// Distinguishes three outcomes so callers can apply policy explicitly:
+///
+/// - [`ManifestCheck::Present`] — manifest loaded and parsed successfully.
+/// - [`ManifestCheck::Missing`] — the manifest file does not exist (e.g.
+///   during a rebuild window). Callers should treat this as stale or trigger
+///   a rebuild, depending on context. **No snapshot should be served without
+///   a valid manifest** — the SHA-256 integrity contract requires the manifest
+///   to verify the snapshot.
+/// - [`ManifestCheck::Corrupt`] — the manifest file exists but cannot be read
+///   or parsed. The enclosed [`std::io::Error`] carries the underlying I/O or
+///   deserialization error.
+///
+/// # Policy guidance
+///
+/// | Caller context | `Missing` policy | `Corrupt` policy |
+/// |---------------|-----------------|-----------------|
+/// | Daemon serve path | Return `Stale` (in-memory graph keeps serving) | Return `Stale` |
+/// | Standalone cold start | Trigger rebuild | Trigger rebuild |
+/// | CLI freshness check | Report stale, skip analysis | Report stale, skip analysis |
+// `Manifest` is inherently large — boxing it would add indirection to every
+// `Present(m)` read path without a meaningful memory benefit (the enum is
+// short-lived: callers immediately pattern-match and move the inner value).
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug)]
+pub enum ManifestCheck {
+    /// Manifest loaded successfully; contains the parsed [`Manifest`].
+    Present(Manifest),
+    /// Manifest file does not exist (e.g. during rebuild window).
+    Missing,
+    /// Manifest file exists but cannot be read or parsed.
+    Corrupt(std::io::Error),
+}
+
+impl ManifestCheck {
+    /// Returns `true` if the manifest is present and valid.
+    #[must_use]
+    pub fn is_present(&self) -> bool {
+        matches!(self, Self::Present(_))
+    }
+
+    /// Returns `true` if the manifest is missing.
+    #[must_use]
+    pub fn is_missing(&self) -> bool {
+        matches!(self, Self::Missing)
+    }
+
+    /// Returns `true` if the manifest is present but corrupt.
+    #[must_use]
+    pub fn is_corrupt(&self) -> bool {
+        matches!(self, Self::Corrupt(_))
+    }
+
+    /// Converts to `Option<Manifest>`, discarding error information.
+    ///
+    /// Returns `None` for both `Missing` and `Corrupt` variants.
+    #[must_use]
+    pub fn into_manifest(self) -> Option<Manifest> {
+        match self {
+            Self::Present(m) => Some(m),
+            Self::Missing | Self::Corrupt(_) => None,
+        }
+    }
+}
+
+/// Load a manifest from disk, mapping `ENOENT` to [`ManifestCheck::Missing`] and
+/// all other errors to [`ManifestCheck::Corrupt`].
+///
+/// This is the non-panicking variant of [`Manifest::load`]. Callers that
+/// previously propagated `std::io::Error` on a missing manifest should use
+/// this function instead and pattern-match the result.
+///
+/// # Examples
+///
+/// ```ignore
+/// match try_load_manifest(path) {
+///     ManifestCheck::Present(m) => { /* use manifest */ }
+///     ManifestCheck::Missing    => { /* trigger rebuild or report stale */ }
+///     ManifestCheck::Corrupt(e) => { /* log and trigger rebuild */ }
+/// }
+/// ```
+#[must_use]
+pub fn try_load_manifest(path: &Path) -> ManifestCheck {
+    match std::fs::read_to_string(path) {
+        Ok(content) => match serde_json::from_str::<Manifest>(&content) {
+            Ok(manifest) => ManifestCheck::Present(manifest),
+            Err(e) => {
+                ManifestCheck::Corrupt(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => ManifestCheck::Missing,
+        Err(e) => ManifestCheck::Corrupt(e),
+    }
+}
+
+// ============================================================================
 // Atomic Manifest Writes
 // ============================================================================
 

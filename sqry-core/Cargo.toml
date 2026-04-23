@@ -24,6 +24,13 @@ dhat-heap = ["dep:dhat"]
 # Enable loom for formal concurrency verification (Steps 28-30)
 loom = ["dep:loom"]
 
+# Enable Gate 0c `RebuildGraph` + `clone_for_rebuild` + `finalize()` surface
+# (sqryd daemon, Task 4). This feature MUST remain gated to `sqry-daemon`
+# only — see `sqry-core/tests/rebuild_internals_whitelist.rs` for the CI
+# enforcement. External crates (including `sqry-cli`, `sqry-mcp`,
+# `sqry-lsp`, and all `sqry-lang-*` plugins) MUST NOT enable it.
+rebuild-internals = []
+
 # Enable JVM classpath analysis (Track C)
 # When enabled, the build pipeline runs a classpath pre-pass that parses JVM
 # bytecode from dependency JARs and registers classpath nodes in the ExportMap.
@@ -92,6 +99,8 @@ sha2.workspace = true
 xxhash-rust = { version = "0.8", features = ["xxh64"] }
 notify = { version = "8.2", default-features = false, features = ["macos_fsevent"] }
 similar = "2.6"  # Fast text diffing for content-based incremental indexing
+smallvec = { version = "1.15", features = ["serde"] }  # Inline-allocation for ResolutionStep::Ambiguous candidates
+static_assertions = "1.1"  # Compile-time trait impl assertions for Gate 0b NodeIdBearing coverage matrix (Task 4)
 dhat = { version = "0.3", optional = true }
 loom = { version = "0.7", optional = true }  # Concurrency verification (Steps 28-30)
 hostname = "0.4"  # For lock file hostname field
@@ -152,6 +161,8 @@ sqry-lang-groovy = { path = "../sqry-lang-groovy" }
 sqry-lang-svelte = { path = "../sqry-lang-svelte" }
 proptest = "1.5"
 httpmock = "0.8"  # Updated to remove async-std (RUSTSEC-2025-0052)
+trybuild = "1.0"  # Gate 0c compile-fail fixtures (Task 4, A2 §H)
+syn = { version = "2", features = ["full", "visit"] }  # Gate 0d iter-2 residue-helper drift guard
 # Tree-sitter grammars for OOM regression tests (BUG-2025-001, BUG-2025-002)
 tree-sitter-groovy-sqry = { path = "../crates/tree-sitter-groovy-sqry" }
 tree-sitter-svelte-sqry = { path = "../crates/tree-sitter-svelte-sqry" }

@@ -25,6 +25,7 @@
 //! - Bridging headers enable C FFI call detection and cross-language edges.
 
 use crate::relations::{BridgingHeaderLocator, SwiftBridgingIndex};
+use sqry_core::graph::unified::build::helper::CalleeKindHint;
 use sqry_core::graph::unified::edge::FfiConvention;
 use sqry_core::graph::unified::edge::kind::TypeOfContext;
 use sqry_core::graph::unified::node::NodeId as UnifiedNodeId;
@@ -672,10 +673,15 @@ fn process_call_expression(
         (*id, name.clone())
     } else if let Some(ctx) = ast_context.find_enclosing(node.start_byte()) {
         // Use ensure_method or ensure_function based on the context's is_method flag
+        let call_site_span = node_to_span(node);
         let id = if ctx.is_method {
             helper.ensure_method(&ctx.qualified_name, None, ctx.is_async, false)
         } else {
-            helper.ensure_function(&ctx.qualified_name, None, ctx.is_async, false)
+            helper.ensure_callee(
+                &ctx.qualified_name,
+                call_site_span,
+                CalleeKindHint::Function,
+            )
         };
         (id, ctx.qualified_name.clone())
     } else {
@@ -747,12 +753,13 @@ fn process_call_expression(
 
         // Create callee node and add edge
         // Use ensure_method for method calls, ensure_function otherwise
+        let call_span = node_to_span(node);
         let target_id = if is_method_call {
             helper.ensure_method(&target_qualified, None, false, false)
         } else {
-            helper.ensure_function(&target_qualified, None, false, false)
+            helper.ensure_callee(&target_qualified, call_span, CalleeKindHint::Function)
         };
-        let span = Some(node_to_span(node));
+        let span = Some(call_span);
 
         helper.add_call_edge_full_with_span(
             source_id,
@@ -1701,7 +1708,11 @@ fn process_single_parameter_typeof(
     let func_id = if is_method {
         helper.ensure_method(func_name, None, false, false)
     } else {
-        helper.ensure_function(func_name, None, false, false)
+        helper.ensure_callee(
+            func_name,
+            node_to_span(&param_node),
+            CalleeKindHint::Function,
+        )
     };
 
     // Create TypeOf edge with Parameter context
@@ -1785,7 +1796,11 @@ fn process_function_return_typeof(
     let func_id = if is_method {
         helper.ensure_method(func_name, None, false, false)
     } else {
-        helper.ensure_function(func_name, None, false, false)
+        helper.ensure_callee(
+            func_name,
+            node_to_span(&func_node),
+            CalleeKindHint::Function,
+        )
     };
 
     // Create TypeOf edge with Return context

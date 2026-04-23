@@ -460,7 +460,14 @@ impl<'a> UnifiedDotExporter<'a> {
         let mut visible = HashSet::new();
 
         let starting_nodes: Vec<NodeId> = if self.config.root_nodes.is_empty() {
-            self.graph.iter_nodes().map(|(id, _)| id).collect()
+            // Gate 0d iter-2 fix: skip unified losers from the
+            // visualization starting set. See
+            // `NodeEntry::is_unified_loser`.
+            self.graph
+                .iter_nodes()
+                .filter(|(_, entry)| !entry.is_unified_loser())
+                .map(|(id, _)| id)
+                .collect()
         } else {
             self.config.root_nodes.iter().copied().collect()
         };
@@ -477,6 +484,11 @@ impl<'a> UnifiedDotExporter<'a> {
 
     /// Check if a node should be included.
     fn should_include_node(&self, _node_id: NodeId, entry: &NodeEntry) -> bool {
+        // Gate 0d iter-2 fix: never include unified losers in
+        // visualization output. See `NodeEntry::is_unified_loser`.
+        if entry.is_unified_loser() {
+            return false;
+        }
         // Language filter
         if !self.config.filter_languages.is_empty() {
             if let Some(lang) = self.graph.files().language_for_file(entry.file) {
@@ -788,6 +800,11 @@ impl<'a> UnifiedD2Exporter<'a> {
 
     /// Check if a node should be included.
     fn should_include_node(&self, _node_id: NodeId, entry: &NodeEntry) -> bool {
+        // Gate 0d iter-2 fix: never include unified losers in D2
+        // visualization. See `NodeEntry::is_unified_loser`.
+        if entry.is_unified_loser() {
+            return false;
+        }
         if !self.config.filter_languages.is_empty() {
             if let Some(lang) = self.graph.files().language_for_file(entry.file) {
                 if !self.config.filter_languages.contains(&lang) {
@@ -1029,6 +1046,11 @@ impl<'a> UnifiedMermaidExporter<'a> {
 
     /// Check if a node should be included.
     fn should_include_node(&self, _node_id: NodeId, entry: &NodeEntry) -> bool {
+        // Gate 0d iter-2 fix: never include unified losers in
+        // Mermaid visualization. See `NodeEntry::is_unified_loser`.
+        if entry.is_unified_loser() {
+            return false;
+        }
         if !self.config.filter_languages.is_empty() {
             if let Some(lang) = self.graph.files().language_for_file(entry.file) {
                 if !self.config.filter_languages.contains(&lang) {
@@ -1179,8 +1201,11 @@ impl<'a> UnifiedJsonExporter<'a> {
     }
 
     fn export_nodes(&self) -> Vec<serde_json::Value> {
+        // Gate 0d iter-2 fix: skip unified losers from JSON
+        // visualization export. See `NodeEntry::is_unified_loser`.
         self.graph
             .iter_nodes()
+            .filter(|(_, entry)| !entry.is_unified_loser())
             .map(|(node_id, entry)| self.export_node(node_id, entry))
             .collect()
     }

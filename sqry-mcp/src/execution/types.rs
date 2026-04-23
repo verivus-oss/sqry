@@ -152,6 +152,12 @@ pub struct NodeRefData {
     pub range: RangeData,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<Value>,
+    /// How the location range was resolved. Populated for stub-aware
+    /// resolution (DB15+): one of `"OwnSpan"`, `"CanonicalSibling"`,
+    /// `"IncomingEdgeSpan"`, `"ExternSymbol"`, `"Fallback"`. Absent for
+    /// node refs that bypass `node_location_for_reporting`.
+    #[serde(rename = "resolutionSource", skip_serializing_if = "Option::is_none")]
+    pub resolution_source: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -197,6 +203,45 @@ pub struct SemanticSearchData {
     pub results: Vec<SearchHit>,
     pub total: u64,
     pub truncated: bool,
+}
+
+/// Response data for the `sqry_query` MCP tool (DB13).
+///
+/// The tool runs a text query through the sqry-db planner pipeline and
+/// returns the matched nodes with minimal location metadata so callers can
+/// render links or follow-up queries without fetching the graph snapshot
+/// themselves.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SqryQueryData {
+    /// The query string as submitted by the client (echoed back for
+    /// logging / conversation history).
+    pub query: String,
+    /// Total number of nodes that matched (before `limit` truncation).
+    pub total_matches: u64,
+    /// Whether `hits` was truncated below `total_matches`.
+    pub truncated: bool,
+    /// Matched nodes with file + line metadata.
+    pub hits: Vec<SqryQueryHit>,
+}
+
+/// One matched node's metadata for the `sqry_query` tool response.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SqryQueryHit {
+    /// Symbol's short name as interned in the graph.
+    pub name: String,
+    /// Fully qualified name if the graph recorded one; else equals `name`.
+    pub qualified_name: String,
+    /// `NodeKind` in lowercase `snake_case` form.
+    pub kind: String,
+    /// Filesystem path of the file containing this symbol.
+    pub file: String,
+    /// 1-based line number of the symbol's starting location.
+    pub line: u32,
+    /// Visibility modifier if recorded on the node.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub visibility: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -516,8 +561,25 @@ pub struct DuplicateGroupData {
     /// lowercase hexadecimal string (e.g., "000000000000000012345678abcdef01").
     /// For signature/struct duplicates, this is a 16-character hex string.
     pub group_id: String,
-    /// Number of duplicates in this group
+    /// Number of symbols displayed in this group (`symbols.len()`).
+    ///
+    /// This is the displayed (possibly truncated) count, not the total pre-truncation
+    /// count. Preserved as the displayed count for backward compatibility.
+    /// See `total_members` for the full pre-truncation count.
     pub count: usize,
+    /// Total number of members in this group before any per-group cap was applied.
+    ///
+    /// When `members_truncated` is `false` this equals `count`.  When
+    /// `members_truncated` is `true` this is larger than `count` and reflects
+    /// the actual number of duplicates found before the
+    /// `max_members_per_group` limit was applied.
+    pub total_members: usize,
+    /// `true` when the `symbols` list was capped by `max_members_per_group`.
+    ///
+    /// When `true`, `total_members > count` and the caller may request more
+    /// members by increasing `max_members_per_group` or setting it to `0`
+    /// for unlimited.
+    pub members_truncated: bool,
     /// Symbols in this group
     pub symbols: Vec<DuplicateSymbolData>,
 }
@@ -1442,6 +1504,7 @@ mod tests {
                     },
                 },
                 metadata: None,
+                resolution_source: None,
             },
             depth: 2,
             impact_type: "caller".to_string(),

@@ -313,6 +313,30 @@ impl DeltaBuffer {
         self.edges.values().flatten()
     }
 
+    /// Returns a mutable iterator over all delta edges.
+    ///
+    /// Used by [`RebuildGraph::finalize`] step 1 to rewrite `StringId`
+    /// payloads inside each committed delta `EdgeKind` through the
+    /// canonical-StringId remap produced by
+    /// `StringInterner::build_dedup_table`. Intentionally does not allow
+    /// the caller to mutate `source`, `target`, `seq`, `op`, or `file` —
+    /// only the `kind` field requires rewriting. The mutable-reference
+    /// borrow is scoped to the iterator's lifetime and does not bypass
+    /// `DeltaBuffer`'s invariants: `edge_count`, `byte_size`, and
+    /// `seq_counter` remain untouched because `EdgeKind`'s in-place
+    /// remap preserves every edge's byte size.
+    ///
+    /// `pub(crate)` because the only legitimate caller is
+    /// [`BidirectionalEdgeStore::rewrite_edge_kind_string_ids_through_remap`]
+    /// inside `sqry-core`. External crates must not mutate the delta
+    /// buffer's edge payloads — they go through `RebuildGraph::finalize()`
+    /// which invokes the remap helper internally. See Gate 0c plan §H
+    /// and iter-4 blocker.
+    #[allow(dead_code)] // Only reachable through the rebuild-internals-gated path.
+    pub(crate) fn iter_mut(&mut self) -> impl Iterator<Item = &mut DeltaEdge> {
+        self.edges.values_mut().flatten()
+    }
+
     /// Returns an iterator over delta edges for a specific file.
     pub fn iter_file(&self, file: FileId) -> impl Iterator<Item = &DeltaEdge> {
         self.edges.get(&file).into_iter().flat_map(|v| v.iter())
@@ -384,6 +408,55 @@ impl DeltaBuffer {
                 return min_value;
             }
         }
+    }
+
+    /// Retain only delta edges for which `keep` returns `true`, updating
+    /// `edge_count` and `byte_size` accordingly. Files whose bucket
+    /// becomes empty are garbage-collected from the inner map so the
+    /// `files()` iterator only surfaces populated files.
+    ///
+    /// Used by the Gate 0b [`NodeIdBearing`] impl on
+    /// [`super::BidirectionalEdgeStore`] to drop delta edges whose
+    /// source or target has been tombstoned
+    /// (`sqry-core/src/graph/unified/rebuild/coverage.rs`). Exposed at
+    /// `pub(crate)` scope because only the rebuild pipeline needs
+    /// predicate-based filtering; external callers use the targeted
+    /// [`EdgeStore::remove_edge`](super::store::EdgeStore::remove_edge)
+    /// entry point.
+    ///
+    /// The sequence counter is preserved — surviving edges keep their
+    /// original seq values so merge ordering stays correct after
+    /// tombstone compaction.
+    ///
+    /// `#[allow(dead_code)]` is present because Gate 0b delivers only
+    /// scaffolding; the call site in the Gate 0c `RebuildGraph::finalize()`
+    /// step 3 lands in a follow-up commit. Unit coverage in
+    /// `sqry-core/src/graph/unified/rebuild/coverage.rs::tests` already
+    /// exercises this helper through the [`NodeIdBearing::retain_nodes`]
+    /// impl on `BidirectionalEdgeStore`.
+    ///
+    /// [`NodeIdBearing`]: crate::graph::unified::rebuild::coverage::NodeIdBearing
+    /// [`NodeIdBearing::retain_nodes`]: crate::graph::unified::rebuild::coverage::NodeIdBearing::retain_nodes
+    #[allow(dead_code)]
+    pub(crate) fn retain_if<F>(&mut self, mut keep: F)
+    where
+        F: FnMut(&DeltaEdge) -> bool,
+    {
+        let mut dropped_count: usize = 0;
+        let mut dropped_bytes: usize = 0;
+        self.edges.retain(|_file, bucket| {
+            bucket.retain(|edge| {
+                let retain = keep(edge);
+                if !retain {
+                    dropped_count += 1;
+                    dropped_bytes += edge.byte_size();
+                }
+                retain
+            });
+            !bucket.is_empty()
+        });
+        self.edge_count -= dropped_count;
+        self.byte_size -= dropped_bytes;
     }
 
     /// Takes all edges from the buffer, leaving it empty.

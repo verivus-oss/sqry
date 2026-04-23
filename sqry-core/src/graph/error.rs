@@ -70,6 +70,37 @@ pub enum GraphBuilderError {
         /// Timeout budget in milliseconds.
         timeout_ms: u64,
     },
+
+    /// Internal invariant violation or propagated error from a subsystem that
+    /// does not fit one of the more specific variants above.
+    ///
+    /// Used when bridging between error models — e.g., when the incremental
+    /// rebuild engine surfaces a failure from the full-build pipeline
+    /// (`anyhow::Result<CodeGraph>` → `GraphResult<CodeGraph>`) or when an
+    /// internal precondition is violated.
+    #[error("Internal graph builder error: {reason}")]
+    Internal {
+        /// Human-readable description of the failure.
+        reason: String,
+    },
+
+    /// Graph build was cancelled cooperatively via a
+    /// [`CancellationToken`][token].
+    ///
+    /// The incremental rebuild engine polls the shared cancellation flag at
+    /// every pass boundary. When the flag is set, the pass returns this
+    /// variant immediately — the partially-built graph is discarded and no
+    /// `publish_graph` boundary is crossed.
+    ///
+    /// This variant is a **cooperative signal**, not a fault: the daemon's
+    /// rebuild dispatcher treats `Cancelled` as a normal outcome whenever a
+    /// later rebuild supersedes an in-flight one. Callers that expect
+    /// side-effect-free cancellation should special-case this variant and
+    /// skip error logging.
+    ///
+    /// [token]: crate::graph::unified::build::CancellationToken
+    #[error("graph build cancelled")]
+    Cancelled,
 }
 
 #[cfg(test)]
@@ -291,6 +322,10 @@ mod tests {
                 phase: "test-phase",
                 timeout_ms: 1_000,
             },
+            GraphBuilderError::Internal {
+                reason: "test".to_string(),
+            },
+            GraphBuilderError::Cancelled,
         ];
 
         for err in errors {
@@ -299,5 +334,20 @@ mod tests {
             // All variants should have a non-empty Display
             assert!(!format!("{err}").is_empty());
         }
+    }
+
+    // Cancelled variant tests
+    #[test]
+    fn test_cancelled_display() {
+        let err = GraphBuilderError::Cancelled;
+        let msg = format!("{err}");
+        assert_eq!(msg, "graph build cancelled");
+    }
+
+    #[test]
+    fn test_cancelled_debug() {
+        let err = GraphBuilderError::Cancelled;
+        let debug = format!("{err:?}");
+        assert_eq!(debug, "Cancelled");
     }
 }

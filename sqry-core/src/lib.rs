@@ -96,6 +96,9 @@ pub mod visualization;
 /// Output formatting (text, JSON, diagrams)
 pub mod output;
 
+/// On-disk persistence helpers (atomic-write, snapshot I/O primitives)
+pub mod persistence;
+
 /// Unified graph architecture for cross-language code analysis
 pub mod graph;
 

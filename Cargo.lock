@@ -136,6 +136,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "arc-swap"
+version = "1.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a3a1fd6f75306b68087b831f025c712524bcb19aad54e557b1129cfa0a2b207"
+dependencies = [
+ "rustversion",
+]
+
+[[package]]
 name = "arrayref"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -159,9 +168,9 @@ dependencies = [
 
 [[package]]
 name = "assert_cmd"
-version = "2.2.0"
+version = "2.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9a686bbee5efb88a82df0621b236e74d925f470e5445d3220a5648b892ec99c9"
+checksum = "39bae1d3fa576f7c6519514180a72559268dd7d1fe104070956cb687bc6673bd"
 dependencies = [
  "anstyle",
  "bstr",
@@ -312,9 +321,9 @@ checksum = "bef38d45163c2f1dde094a7dfd33ccf595c92905c8f8f4fdc18d06fb1037718a"
 
 [[package]]
 name = "bitflags"
-version = "2.11.0"
+version = "2.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "843867be96c8daad0d758b57df9392b6d8d271134fce549de6ce169ff98a92af"
+checksum = "c4512299f36f043ab09a583e57bceb5a5aab7a73db1805848e8fef3c9e8c78b3"
 
 [[package]]
 name = "blake3"
@@ -496,9 +505,9 @@ dependencies = [
 
 [[package]]
 name = "clap"
-version = "4.6.0"
+version = "4.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b193af5b67834b676abd72466a96c1024e6a6ad978a1f484bd90b85c94041351"
+checksum = "1ddb117e43bbf7dacf0a4190fef4d345b9bad68dfc649cb349e7d17d28428e51"
 dependencies = [
  "clap_builder",
  "clap_derive",
@@ -518,18 +527,18 @@ dependencies = [
 
 [[package]]
 name = "clap_complete"
-version = "4.6.1"
+version = "4.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "406e68b4de5c59cfb8f750a7cbd4d31ae153788b8352167c1e5f4fc26e8c91e9"
+checksum = "3ff7a1dccbdd8b078c2bdebff47e404615151534d5043da397ec50286816f9cb"
 dependencies = [
  "clap",
 ]
 
 [[package]]
 name = "clap_derive"
-version = "4.6.0"
+version = "4.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1110bd8a634a1ab8cb04345d8d878267d57c3cf1b38d91b71af6686408bbca6a"
+checksum = "f2ce8604710f6733aa641a2b3731eaa1e8b3d9973d5e3565da11800813f997a9"
 dependencies = [
  "heck",
  "proc-macro2",
@@ -676,6 +685,32 @@ dependencies = [
 
 [[package]]
 name = "criterion"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f2b12d017a929603d80db1831cd3a24082f8137ce19c69e6447f54f5fc8d692f"
+dependencies = [
+ "anes",
+ "cast",
+ "ciborium",
+ "clap",
+ "criterion-plot 0.5.0",
+ "is-terminal",
+ "itertools 0.10.5",
+ "num-traits",
+ "once_cell",
+ "oorandom",
+ "plotters",
+ "rayon",
+ "regex",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "tinytemplate",
+ "walkdir",
+]
+
+[[package]]
+name = "criterion"
 version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "950046b2aa2492f9a536f5f4f9a3de7b9e2476e575e05bd6c333371add4d98f3"
@@ -685,7 +720,7 @@ dependencies = [
  "cast",
  "ciborium",
  "clap",
- "criterion-plot",
+ "criterion-plot 0.8.2",
  "itertools 0.13.0",
  "num-traits",
  "oorandom",
@@ -697,6 +732,16 @@ dependencies = [
  "serde_json",
  "tinytemplate",
  "walkdir",
+]
+
+[[package]]
+name = "criterion-plot"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6b50826342786a51a89e2da3a28f1c32b06e387201bc2d19791f622c673706b1"
+dependencies = [
+ "cast",
+ "itertools 0.10.5",
 ]
 
 [[package]]
@@ -839,9 +884,9 @@ dependencies = [
 
 [[package]]
 name = "dary_heap"
-version = "0.3.8"
+version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "06d2e3287df1c007e74221c49ca10a95d557349e54b3a75dc2fb14712c751f04"
+checksum = "8b1e3a325bc115f096c8b77bbf027a7c2592230e70be2d985be950d3d5e60ebe"
 dependencies = [
  "serde",
 ]
@@ -858,6 +903,15 @@ dependencies = [
  "lock_api",
  "once_cell",
  "parking_lot_core",
+]
+
+[[package]]
+name = "deranged"
+version = "0.5.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7cd812cc2bc1d69d4764bd80df88b4317eaef9e773c75226407d9bc0876b211c"
+dependencies = [
+ "powerfmt",
 ]
 
 [[package]]
@@ -1921,7 +1975,7 @@ version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bd5b3eaf1a28b758ac0faa5a4254e8ab2705605496f1b1f3fbbc3988ad73d199"
 dependencies = [
- "bitflags 2.11.0",
+ "bitflags 2.11.1",
  "inotify-sys",
  "libc",
 ]
@@ -1970,6 +2024,15 @@ name = "is_terminal_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a6cb138bb79a146c1bd460005623e142ef0181e3d0219cb493e02f7d08a35695"
+
+[[package]]
+name = "itertools"
+version = "0.10.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b0fd2260e829bddf4cb6ea802289de2f86d6a7a690192fbe91b3f46e0f2c8473"
+dependencies = [
+ "either",
+]
 
 [[package]]
 name = "itertools"
@@ -2027,7 +2090,7 @@ dependencies = [
 name = "kqueue-sys"
 version = "1.0.4"
 dependencies = [
- "bitflags 2.11.0",
+ "bitflags 2.11.1",
  "libc",
 ]
 
@@ -2045,9 +2108,9 @@ checksum = "09edd9e8b54e49e587e4f6295a7d29c3ea94d469cb40ab8ca70b288248a81db2"
 
 [[package]]
 name = "libc"
-version = "0.2.184"
+version = "0.2.185"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "48f5d2a454e16a5ea0f4ced81bd44e4cfc7bd3a507b61887c99fd3538b28e4af"
+checksum = "52ff2c0fe9bc6cb6b14a0592c2ff4fa9ceb83eea9db979b0487cd054946a2b8f"
 
 [[package]]
 name = "libloading"
@@ -2065,7 +2128,7 @@ version = "0.1.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e02f3bb43d335493c96bf3fd3a321600bf6bd07ed34bc64118e9293bdffea46c"
 dependencies = [
- "bitflags 2.11.0",
+ "bitflags 2.11.1",
  "libc",
  "plain",
  "redox_syscall 0.7.4",
@@ -2113,9 +2176,9 @@ dependencies = [
 
 [[package]]
 name = "lru"
-version = "0.16.3"
+version = "0.16.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a1dc47f592c06f33f8e3aea9591776ec7c9f9e4124778ff8a3c3b87159f7e593"
+checksum = "7f66e8d5d03f609abc3a39e6f08e4164ebf1447a732906d39eb9b99b7919ef39"
 dependencies = [
  "hashbrown 0.16.1",
 ]
@@ -2124,7 +2187,7 @@ dependencies = [
 name = "lsp-types"
 version = "0.94.1"
 dependencies = [
- "bitflags 2.11.0",
+ "bitflags 2.11.1",
  "serde",
  "serde_json",
  "serde_repr",
@@ -2365,7 +2428,7 @@ version = "0.30.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "74523f3a35e05aba87a1d978330aef40f67b0304ac79c1c00b294c9830543db6"
 dependencies = [
- "bitflags 2.11.0",
+ "bitflags 2.11.1",
  "cfg-if",
  "cfg_aliases",
  "libc",
@@ -2377,7 +2440,7 @@ version = "0.31.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5d6d0705320c1e6ba1d912b5e37cf18071b6c2e9b7fa8215a1e8a7651966f5d3"
 dependencies = [
- "bitflags 2.11.0",
+ "bitflags 2.11.1",
  "cfg-if",
  "cfg_aliases",
  "libc",
@@ -2405,7 +2468,7 @@ version = "8.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4d3d07927151ff8575b7087f245456e549fea62edf0ec4e565a5ee50c8402bc3"
 dependencies = [
- "bitflags 2.11.0",
+ "bitflags 2.11.1",
  "fsevent-sys",
  "inotify",
  "kqueue",
@@ -2423,7 +2486,7 @@ version = "2.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "42b8cfee0e339a0337359f3c88165702ac6e600dc01c0cc9579a92d62b08477a"
 dependencies = [
- "bitflags 2.11.0",
+ "bitflags 2.11.1",
 ]
 
 [[package]]
@@ -2443,6 +2506,12 @@ checksum = "73f88a1307638156682bada9d7604135552957b7818057dcef22705b4d509495"
 dependencies = [
  "num-traits",
 ]
+
+[[package]]
+name = "num-conv"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c6673768db2d862beb9b39a78fdcb1a69439615d5794a1be50caa9bc92c81967"
 
 [[package]]
 name = "num-integer"
@@ -2495,7 +2564,7 @@ version = "6.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "336b9c63443aceef14bea841b899035ae3abe89b7c486aaf4c5bd8aafedac3f0"
 dependencies = [
- "bitflags 2.11.0",
+ "bitflags 2.11.1",
  "libc",
  "once_cell",
  "onig_sys",
@@ -2605,9 +2674,9 @@ checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
 
 [[package]]
 name = "pastey"
-version = "0.2.1"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b867cad97c0791bbd3aaa6472142568c6c9e8f71937e98379f584cfb0cf35bec"
+checksum = "c5a797f0e07bdf071d15742978fc3128ec6c22891c31a3a931513263904c982a"
 
 [[package]]
 name = "path-tree"
@@ -2698,9 +2767,9 @@ checksum = "c33a9471896f1c69cecef8d20cbe2f7accd12527ce60845ff44c153bb2a21b49"
 
 [[package]]
 name = "portable-atomic-util"
-version = "0.2.6"
+version = "0.2.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "091397be61a01d4be58e7841595bd4bfedb15f1cd54977d79b8271e94ed799a3"
+checksum = "c2a106d1259c23fac8e543272398ae0e3c0b8d33c88ed73d0cc71b0f1d902618"
 dependencies = [
  "portable-atomic",
 ]
@@ -2725,6 +2794,12 @@ checksum = "0103b1cef7ec0cf76490e969665504990193874ea05c85ff9bab8b911d0a0564"
 dependencies = [
  "zerovec",
 ]
+
+[[package]]
+name = "powerfmt"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "439ee305def115ba05938db6eb1644ff94165c5ab5e9420d1c1bcedbba909391"
 
 [[package]]
 name = "ppv-lite86"
@@ -2792,7 +2867,7 @@ checksum = "4b45fcc2344c680f5025fe57779faef368840d0bd1f42f216291f0dc4ace4744"
 dependencies = [
  "bit-set 0.8.0",
  "bit-vec 0.8.0",
- "bitflags 2.11.0",
+ "bitflags 2.11.1",
  "num-traits",
  "rand",
  "rand_chacha",
@@ -2842,9 +2917,9 @@ dependencies = [
 
 [[package]]
 name = "rand"
-version = "0.9.3"
+version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7ec095654a25171c2124e9e3393a930bddbffdc939556c914957a4c3e0a87166"
+checksum = "44c5af06bb1b7d3216d91932aed5265164bf384dc89cd6ba05cf59a35f5f76ea"
 dependencies = [
  "rand_chacha",
  "rand_core",
@@ -2892,9 +2967,9 @@ checksum = "60a357793950651c4ed0f3f52338f53b2f809f32d83a07f72909fa13e4c6c1e3"
 
 [[package]]
 name = "rayon"
-version = "1.11.0"
+version = "1.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "368f01d005bf8fd9b1206fb6fa653e6c4a81ceb1466406b81792d87c5677a58f"
+checksum = "fb39b166781f92d482534ef4b4b1b2568f42613b53e5b6c160e24cfbfa30926d"
 dependencies = [
  "either",
  "rayon-core",
@@ -2927,7 +3002,7 @@ version = "0.5.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed2bf2547551a7053d6fdfafda3f938979645c44812fbfcda098faae3f1a362d"
 dependencies = [
- "bitflags 2.11.0",
+ "bitflags 2.11.1",
 ]
 
 [[package]]
@@ -2936,7 +3011,7 @@ version = "0.7.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f450ad9c3b1da563fb6948a8e0fb0fb9269711c9c73d9ea1de5058c79c8d643a"
 dependencies = [
- "bitflags 2.11.0",
+ "bitflags 2.11.1",
 ]
 
 [[package]]
@@ -3029,6 +3104,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-stream",
  "tokio-util",
  "tracing",
 ]
@@ -3083,7 +3159,7 @@ version = "1.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6fe4565b9518b83ef4f91bb47ce29620ca828bd32cb7e408f0062e9930ba190"
 dependencies = [
- "bitflags 2.11.0",
+ "bitflags 2.11.1",
  "errno",
  "libc",
  "linux-raw-sys",
@@ -3114,7 +3190,7 @@ version = "18.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4a990b25f351b25139ddc7f21ee3f6f56f86d6846b74ac8fad3a719a287cd4a0"
 dependencies = [
- "bitflags 2.11.0",
+ "bitflags 2.11.1",
  "cfg-if",
  "clipboard-win",
  "home",
@@ -3190,6 +3266,15 @@ name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
+
+[[package]]
+name = "sd-notify"
+version = "0.4.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b943eadf71d8b69e661330cb0e2656e31040acf21ee7708e2c238a0ec6af2bf4"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "sdd"
@@ -3405,6 +3490,9 @@ name = "smallvec"
 version = "1.15.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "snapbox"
@@ -3461,11 +3549,11 @@ dependencies = [
 
 [[package]]
 name = "sqry-classpath"
-version = "8.0.7"
+version = "9.0.0"
 dependencies = [
  "anyhow",
  "cafebabe",
- "criterion",
+ "criterion 0.8.2",
  "env_logger",
  "hex",
  "log",
@@ -3484,7 +3572,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-cli"
-version = "8.0.7"
+version = "9.0.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -3517,6 +3605,9 @@ dependencies = [
  "shlex",
  "sqry-classpath",
  "sqry-core",
+ "sqry-daemon",
+ "sqry-daemon-client",
+ "sqry-db",
  "sqry-lang-rust",
  "sqry-lsp",
  "sqry-nl",
@@ -3525,6 +3616,7 @@ dependencies = [
  "terminal_size",
  "tikv-jemalloc-sys",
  "tikv-jemallocator",
+ "tokio",
  "toml",
  "toml_edit 0.22.27",
  "tree-sitter",
@@ -3537,7 +3629,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-core"
-version = "8.0.7"
+version = "9.0.0"
 dependencies = [
  "anyhow",
  "approx",
@@ -3545,7 +3637,7 @@ dependencies = [
  "blake3",
  "cacache",
  "chrono",
- "criterion",
+ "criterion 0.8.2",
  "crossbeam-channel",
  "crossbeam-queue",
  "dashmap",
@@ -3586,6 +3678,7 @@ dependencies = [
  "serial_test",
  "sha2",
  "similar",
+ "smallvec",
  "sqry-core",
  "sqry-lang-c",
  "sqry-lang-cpp",
@@ -3605,7 +3698,9 @@ dependencies = [
  "sqry-lang-svelte",
  "sqry-lang-swift",
  "sqry-lang-typescript",
+ "static_assertions",
  "streaming-iterator",
+ "syn",
  "tempfile",
  "thiserror 2.0.18",
  "toml",
@@ -3619,6 +3714,7 @@ dependencies = [
  "tree-sitter-rust",
  "tree-sitter-svelte-sqry",
  "tree-sitter-typescript",
+ "trybuild",
  "uuid",
  "walkdir",
  "windows-sys 0.61.2",
@@ -3627,8 +3723,86 @@ dependencies = [
 ]
 
 [[package]]
+name = "sqry-daemon"
+version = "9.0.0"
+dependencies = [
+ "anyhow",
+ "arc-swap",
+ "chrono",
+ "clap",
+ "dirs",
+ "fs2",
+ "libc",
+ "parking_lot",
+ "rmcp",
+ "sd-notify",
+ "serde",
+ "serde_json",
+ "serial_test",
+ "sqry-core",
+ "sqry-daemon-client",
+ "sqry-daemon-protocol",
+ "sqry-lsp",
+ "sqry-mcp",
+ "sqry-plugin-registry",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
+ "users",
+]
+
+[[package]]
+name = "sqry-daemon-client"
+version = "9.0.0"
+dependencies = [
+ "anyhow",
+ "serde_json",
+ "sqry-daemon-protocol",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
+name = "sqry-daemon-protocol"
+version = "9.0.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
+name = "sqry-db"
+version = "9.0.0"
+dependencies = [
+ "anyhow",
+ "criterion 0.5.1",
+ "env_logger",
+ "globset",
+ "log",
+ "parking_lot",
+ "postcard",
+ "regex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smallvec",
+ "sqry-core",
+ "strsim",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "sqry-lang-c"
-version = "8.0.7"
+version = "9.0.0"
 dependencies = [
  "anyhow",
  "log",
@@ -3642,7 +3816,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-cpp"
-version = "8.0.7"
+version = "9.0.0"
 dependencies = [
  "anyhow",
  "log",
@@ -3656,7 +3830,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-csharp"
-version = "8.0.7"
+version = "9.0.0"
 dependencies = [
  "anyhow",
  "log",
@@ -3670,7 +3844,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-css"
-version = "8.0.7"
+version = "9.0.0"
 dependencies = [
  "anyhow",
  "log",
@@ -3682,7 +3856,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-dart"
-version = "8.0.7"
+version = "9.0.0"
 dependencies = [
  "anyhow",
  "env_logger",
@@ -3696,7 +3870,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-elixir"
-version = "8.0.7"
+version = "9.0.0"
 dependencies = [
  "anyhow",
  "insta",
@@ -3710,10 +3884,10 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-go"
-version = "8.0.7"
+version = "9.0.0"
 dependencies = [
  "anyhow",
- "criterion",
+ "criterion 0.8.2",
  "log",
  "sqry-core",
  "sqry-lang-support",
@@ -3724,7 +3898,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-groovy"
-version = "8.0.7"
+version = "9.0.0"
 dependencies = [
  "anyhow",
  "insta",
@@ -3740,7 +3914,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-haskell"
-version = "8.0.7"
+version = "9.0.0"
 dependencies = [
  "anyhow",
  "log",
@@ -3753,7 +3927,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-html"
-version = "8.0.7"
+version = "9.0.0"
 dependencies = [
  "anyhow",
  "log",
@@ -3765,10 +3939,10 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-java"
-version = "8.0.7"
+version = "9.0.0"
 dependencies = [
  "anyhow",
- "criterion",
+ "criterion 0.8.2",
  "log",
  "serde",
  "serde_json",
@@ -3784,7 +3958,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-javascript"
-version = "8.0.7"
+version = "9.0.0"
 dependencies = [
  "anyhow",
  "approx",
@@ -3801,7 +3975,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-json"
-version = "8.0.7"
+version = "9.0.0"
 dependencies = [
  "serial_test",
  "sqry-core",
@@ -3811,7 +3985,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-kotlin"
-version = "8.0.7"
+version = "9.0.0"
 dependencies = [
  "anyhow",
  "env_logger",
@@ -3826,10 +4000,10 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-lua"
-version = "8.0.7"
+version = "9.0.0"
 dependencies = [
  "anyhow",
- "criterion",
+ "criterion 0.8.2",
  "log",
  "serial_test",
  "sqry-core",
@@ -3840,7 +4014,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-oracle-plsql"
-version = "8.0.7"
+version = "9.0.0"
 dependencies = [
  "sqry-core",
  "streaming-iterator",
@@ -3850,7 +4024,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-perl"
-version = "8.0.7"
+version = "9.0.0"
 dependencies = [
  "anyhow",
  "log",
@@ -3864,10 +4038,10 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-php"
-version = "8.0.7"
+version = "9.0.0"
 dependencies = [
  "anyhow",
- "criterion",
+ "criterion 0.8.2",
  "insta",
  "log",
  "once_cell",
@@ -3882,7 +4056,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-pulumi"
-version = "8.0.7"
+version = "9.0.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -3895,7 +4069,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-puppet"
-version = "8.0.7"
+version = "9.0.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -3909,7 +4083,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-python"
-version = "8.0.7"
+version = "9.0.0"
 dependencies = [
  "anyhow",
  "insta",
@@ -3925,7 +4099,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-r"
-version = "8.0.7"
+version = "9.0.0"
 dependencies = [
  "anyhow",
  "log",
@@ -3938,10 +4112,10 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-ruby"
-version = "8.0.7"
+version = "9.0.0"
 dependencies = [
  "anyhow",
- "criterion",
+ "criterion 0.8.2",
  "env_logger",
  "insta",
  "log",
@@ -3956,10 +4130,10 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-rust"
-version = "8.0.7"
+version = "9.0.0"
 dependencies = [
  "anyhow",
- "criterion",
+ "criterion 0.8.2",
  "insta",
  "log",
  "lsp-types 0.97.0",
@@ -3976,7 +4150,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-salesforce-apex"
-version = "8.0.7"
+version = "9.0.0"
 dependencies = [
  "anyhow",
  "sqry-core",
@@ -3988,7 +4162,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-sap-abap"
-version = "8.0.7"
+version = "9.0.0"
 dependencies = [
  "sqry-core",
  "streaming-iterator",
@@ -3999,7 +4173,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-scala"
-version = "8.0.7"
+version = "9.0.0"
 dependencies = [
  "anyhow",
  "env_logger",
@@ -4013,7 +4187,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-servicenow-xanadu"
-version = "8.0.7"
+version = "9.0.0"
 dependencies = [
  "anyhow",
  "sqry-core",
@@ -4025,7 +4199,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-servicenow-xml"
-version = "8.0.7"
+version = "9.0.0"
 dependencies = [
  "roxmltree",
  "sqry-core",
@@ -4037,7 +4211,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-shell"
-version = "8.0.7"
+version = "9.0.0"
 dependencies = [
  "anyhow",
  "log",
@@ -4049,7 +4223,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-sql"
-version = "8.0.7"
+version = "9.0.0"
 dependencies = [
  "anyhow",
  "log",
@@ -4062,7 +4236,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-support"
-version = "8.0.7"
+version = "9.0.0"
 dependencies = [
  "sqry-core",
  "tree-sitter",
@@ -4071,7 +4245,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-svelte"
-version = "8.0.7"
+version = "9.0.0"
 dependencies = [
  "anyhow",
  "insta",
@@ -4092,7 +4266,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-swift"
-version = "8.0.7"
+version = "9.0.0"
 dependencies = [
  "anyhow",
  "dashmap",
@@ -4110,7 +4284,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-terraform"
-version = "8.0.7"
+version = "9.0.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -4124,7 +4298,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-typescript"
-version = "8.0.7"
+version = "9.0.0"
 dependencies = [
  "anyhow",
  "log",
@@ -4140,7 +4314,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-vue"
-version = "8.0.7"
+version = "9.0.0"
 dependencies = [
  "anyhow",
  "insta",
@@ -4161,10 +4335,10 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-zig"
-version = "8.0.7"
+version = "9.0.0"
 dependencies = [
  "anyhow",
- "criterion",
+ "criterion 0.8.2",
  "log",
  "sqry-core",
  "streaming-iterator",
@@ -4174,46 +4348,53 @@ dependencies = [
 
 [[package]]
 name = "sqry-lsp"
-version = "8.0.7"
+version = "9.0.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
  "base64 0.22.1",
  "chrono",
  "clap",
- "criterion",
+ "criterion 0.8.2",
  "dashmap",
  "env_logger",
  "futures",
+ "libc",
  "log",
  "parking_lot",
  "ropey",
  "serde",
  "serde_json",
+ "serial_test",
  "sqry-core",
+ "sqry-daemon-client",
+ "sqry-db",
  "sqry-lang-rust",
  "sqry-nl",
  "sqry-plugin-registry",
  "tempfile",
+ "thiserror 2.0.18",
  "tikv-jemalloc-sys",
  "tikv-jemallocator",
  "tokio",
+ "tokio-util",
  "tower",
  "tower-lsp",
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "which",
 ]
 
 [[package]]
 name = "sqry-mcp"
-version = "8.0.7"
+version = "9.0.0"
 dependencies = [
  "anyhow",
  "approx",
  "base64 0.22.1",
  "chrono",
- "criterion",
+ "criterion 0.8.2",
  "hdrhistogram",
  "hex",
  "indexmap",
@@ -4230,11 +4411,12 @@ dependencies = [
  "serial_test",
  "sha2",
  "sqry-core",
+ "sqry-daemon-client",
+ "sqry-db",
  "sqry-lang-rust",
  "sqry-mcp-redaction",
  "sqry-nl",
  "sqry-plugin-registry",
- "strsim",
  "tempfile",
  "tikv-jemalloc-sys",
  "tikv-jemallocator",
@@ -4243,11 +4425,12 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "walkdir",
+ "which",
 ]
 
 [[package]]
 name = "sqry-mcp-redaction"
-version = "8.0.7"
+version = "9.0.0"
 dependencies = [
  "log",
  "regex",
@@ -4259,9 +4442,9 @@ dependencies = [
 
 [[package]]
 name = "sqry-nl"
-version = "8.0.7"
+version = "9.0.0"
 dependencies = [
- "criterion",
+ "criterion 0.8.2",
  "lru",
  "once_cell",
  "ort",
@@ -4280,7 +4463,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-plugin-registry"
-version = "8.0.7"
+version = "9.0.0"
 dependencies = [
  "sqry-core",
  "sqry-lang-c",
@@ -4324,7 +4507,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-tree-sitter-support"
-version = "8.0.7"
+version = "9.0.0"
 dependencies = [
  "thiserror 2.0.18",
  "tree-sitter",
@@ -4403,6 +4586,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b7401a30af6cb5818bb64852270bb722533397edcfc7344954a38f420819ece2"
 
 [[package]]
+name = "symlink"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a7973cce6668464ea31f176d85b13c7ab3bba2cb3b77a2ed26abd7801688010a"
+
+[[package]]
 name = "syn"
 version = "2.0.117"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4438,6 +4627,12 @@ name = "tagptr"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7b2093cf4c8eb1e67749a6762251bc9cd836b6fc171623bd0a9d324d37af2417"
+
+[[package]]
+name = "target-triple"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "591ef38edfb78ca4771ee32cf494cb8771944bee237a9b91fc9c1424ac4b777b"
 
 [[package]]
 name = "tempfile"
@@ -4563,6 +4758,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "time"
+version = "0.3.47"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "743bd48c283afc0388f9b8827b976905fb217ad9e647fae3a379a9283c4def2c"
+dependencies = [
+ "deranged",
+ "itoa",
+ "num-conv",
+ "powerfmt",
+ "serde_core",
+ "time-core",
+ "time-macros",
+]
+
+[[package]]
+name = "time-core"
+version = "0.1.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7694e1cfe791f8d31026952abf09c69ca6f6fa4e1a1229e18988f06a04a12dca"
+
+[[package]]
+name = "time-macros"
+version = "0.2.27"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2e70e4c5a0e0a8a4823ad65dfe1a6930e4f4d756dcd9dd7939022b5e8c501215"
+dependencies = [
+ "num-conv",
+ "time-core",
+]
+
+[[package]]
 name = "tinystr"
 version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4633,9 +4859,9 @@ dependencies = [
 
 [[package]]
 name = "tokio"
-version = "1.51.1"
+version = "1.52.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f66bf9585cda4b724d3e78ab34b73fb2bbaba9011b9bfdf69dc836382ea13b8c"
+checksum = "b67dee974fe86fd92cc45b7a95fdd2f99a36a6d7b0d431a231178d3d670bbcc6"
 dependencies = [
  "bytes",
  "libc",
@@ -4679,6 +4905,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "futures-util",
  "pin-project-lite",
  "tokio",
 ]
@@ -4695,7 +4922,7 @@ dependencies = [
  "toml_datetime 1.1.1+spec-1.1.0",
  "toml_parser",
  "toml_writer",
- "winnow 1.0.1",
+ "winnow 1.0.2",
 ]
 
 [[package]]
@@ -4737,7 +4964,7 @@ dependencies = [
  "toml_datetime 1.1.1+spec-1.1.0",
  "toml_parser",
  "toml_writer",
- "winnow 1.0.1",
+ "winnow 1.0.2",
 ]
 
 [[package]]
@@ -4746,7 +4973,7 @@ version = "1.1.2+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2abe9b86193656635d2411dc43050282ca48aa31c2451210f4202550afb7526"
 dependencies = [
- "winnow 1.0.1",
+ "winnow 1.0.2",
 ]
 
 [[package]]
@@ -4835,6 +5062,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "tracing-appender"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "050686193eb999b4bb3bc2acfa891a13da00f79734704c4b8b4ef1a10b368a3c"
+dependencies = [
+ "crossbeam-channel",
+ "symlink",
+ "thiserror 2.0.18",
+ "time",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "tracing-attributes"
 version = "0.1.31"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4867,6 +5107,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tracing-serde"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "704b1aeb7be0d0a84fc9828cae51dab5970fee5088f83d1dd7ee6f6246fc6ff1"
+dependencies = [
+ "serde",
+ "tracing-core",
+]
+
+[[package]]
 name = "tracing-subscriber"
 version = "0.3.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4876,12 +5126,15 @@ dependencies = [
  "nu-ansi-term",
  "once_cell",
  "regex-automata",
+ "serde",
+ "serde_json",
  "sharded-slab",
  "smallvec",
  "thread_local",
  "tracing",
  "tracing-core",
  "tracing-log",
+ "tracing-serde",
 ]
 
 [[package]]
@@ -4900,7 +5153,7 @@ dependencies = [
 
 [[package]]
 name = "tree-sitter-abap-sqry"
-version = "8.0.7"
+version = "9.0.0"
 dependencies = [
  "cc",
  "sqry-tree-sitter-support",
@@ -4929,9 +5182,9 @@ dependencies = [
 
 [[package]]
 name = "tree-sitter-c-sharp"
-version = "0.23.1"
+version = "0.23.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "67f06accca7b45351758663b8215089e643d53bd9a660ce0349314263737fcb0"
+checksum = "c1aac67f1ad71de1d6d39708d34811081c26dfa495658de6c14c34200849357c"
 dependencies = [
  "cc",
  "tree-sitter-language",
@@ -4969,7 +5222,7 @@ dependencies = [
 
 [[package]]
 name = "tree-sitter-elixir-sqry"
-version = "8.0.7"
+version = "9.0.0"
 dependencies = [
  "cc",
  "sqry-tree-sitter-support",
@@ -4988,7 +5241,7 @@ dependencies = [
 
 [[package]]
 name = "tree-sitter-groovy-sqry"
-version = "8.0.7"
+version = "9.0.0"
 dependencies = [
  "cc",
  "sqry-tree-sitter-support",
@@ -5057,7 +5310,7 @@ dependencies = [
 
 [[package]]
 name = "tree-sitter-kotlin-sqry"
-version = "8.0.7"
+version = "9.0.0"
 dependencies = [
  "cc",
  "sqry-tree-sitter-support",
@@ -5082,7 +5335,7 @@ dependencies = [
 
 [[package]]
 name = "tree-sitter-perl-sqry"
-version = "8.0.7"
+version = "9.0.0"
 dependencies = [
  "cc",
  "sqry-tree-sitter-support",
@@ -5101,7 +5354,7 @@ dependencies = [
 
 [[package]]
 name = "tree-sitter-plsql-sqry"
-version = "8.0.7"
+version = "9.0.0"
 dependencies = [
  "cc",
  "sqry-tree-sitter-support",
@@ -5160,9 +5413,9 @@ dependencies = [
 
 [[package]]
 name = "tree-sitter-scala"
-version = "0.25.0"
+version = "0.25.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "83079f50ea7d03e0faf6be6260ed97538e6df7349ec3cbcbf5771f7b38e3c8b7"
+checksum = "3394d6bc99bceae03c75482a93f1bcefff11e69d3a405f1410e864212b52739a"
 dependencies = [
  "cc",
  "tree-sitter-language",
@@ -5190,7 +5443,7 @@ dependencies = [
 
 [[package]]
 name = "tree-sitter-svelte-sqry"
-version = "8.0.7"
+version = "9.0.0"
 dependencies = [
  "cc",
  "sqry-tree-sitter-support",
@@ -5219,7 +5472,7 @@ dependencies = [
 
 [[package]]
 name = "tree-sitter-vue-sqry"
-version = "8.0.7"
+version = "9.0.0"
 dependencies = [
  "cc",
  "sqry-tree-sitter-support",
@@ -5253,6 +5506,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
+name = "trybuild"
+version = "1.0.116"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "47c635f0191bd3a2941013e5062667100969f8c4e9cd787c14f977265d73616e"
+dependencies = [
+ "glob",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "target-triple",
+ "termcolor",
+ "toml",
+]
+
+[[package]]
 name = "trycmd"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5278,9 +5546,9 @@ checksum = "8e28f89b80c87b8fb0cf04ab448d5dd0dd0ade2f8891bae878de66a75a28600e"
 
 [[package]]
 name = "typenum"
-version = "1.19.0"
+version = "1.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "562d481066bde0658276a35467c4af00bdc6ee726305698a55b86e61d7ad82bb"
+checksum = "40ce102ab67701b8526c123c1bab5cbe42d7040ccfd0f64af1a385808d2f43de"
 
 [[package]]
 name = "unarray"
@@ -5368,6 +5636,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "users"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "24cc0f6d6f267b73e5a2cadf007ba8f9bc39c6a6f9666f8cf25ea809a153b032"
+dependencies = [
+ "libc",
+ "log",
+]
+
+[[package]]
 name = "utf8_iter"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5381,9 +5659,9 @@ checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 
 [[package]]
 name = "uuid"
-version = "1.23.0"
+version = "1.23.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5ac8b6f42ead25368cf5b098aeb3dc8a1a2c05a3eee8a9a1a68c640edbfc79d9"
+checksum = "ddd74a9687298c6858e9b88ec8935ec45d22e8fd5e6394fa1bd4e99a87789c76"
 dependencies = [
  "getrandom 0.4.2",
  "js-sys",
@@ -5438,11 +5716,11 @@ checksum = "ccf3ec651a847eb01de73ccad15eb7d99f80485de043efb2f370cd654f4ea44b"
 
 [[package]]
 name = "wasip2"
-version = "1.0.2+wasi-0.2.9"
+version = "1.0.3+wasi-0.2.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9517f9239f02c069db75e65f174b3da828fe5f5b945c4dd26bd25d89c03ebcf5"
+checksum = "20064672db26d7cdc89c7798c48a0fdfac8213434a1186e5ef29fd560ae223d6"
 dependencies = [
- "wit-bindgen",
+ "wit-bindgen 0.57.1",
 ]
 
 [[package]]
@@ -5451,7 +5729,7 @@ version = "0.4.0+wasi-0.3.0-rc-2026-01-06"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5428f8bf88ea5ddc08faddef2ac4a67e390b88186c703ce6dbd955e1c145aca5"
 dependencies = [
- "wit-bindgen",
+ "wit-bindgen 0.51.0",
 ]
 
 [[package]]
@@ -5527,7 +5805,7 @@ version = "0.244.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47b807c72e1bac69382b3a6fb3dbe8ea4c0ed87ff5629b8685ae6b9a611028fe"
 dependencies = [
- "bitflags 2.11.0",
+ "bitflags 2.11.1",
  "hashbrown 0.15.5",
  "indexmap",
  "semver",
@@ -5870,9 +6148,9 @@ dependencies = [
 
 [[package]]
 name = "winnow"
-version = "1.0.1"
+version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "09dac053f1cd375980747450bfc7250c264eaae0583872e845c0c7cd578872b5"
+checksum = "2ee1708bef14716a11bae175f579062d4554d95be2c6829f518df847b7b3fdd0"
 dependencies = [
  "memchr",
 ]
@@ -5885,6 +6163,12 @@ checksum = "d7249219f66ced02969388cf2bb044a09756a083d0fab1e566056b04d9fbcaa5"
 dependencies = [
  "wit-bindgen-rust-macro",
 ]
+
+[[package]]
+name = "wit-bindgen"
+version = "0.57.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 
 [[package]]
 name = "wit-bindgen-core"
@@ -5935,7 +6219,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9d66ea20e9553b30172b5e831994e35fbde2d165325bec84fc43dbf6f4eb9cb2"
 dependencies = [
  "anyhow",
- "bitflags 2.11.0",
+ "bitflags 2.11.1",
  "indexmap",
  "log",
  "serde",

@@ -147,6 +147,21 @@ fn load_expected(name: &str, path_suffix: &str) -> Result<Value> {
     Ok(value)
 }
 
+/// When `SQRY_UPDATE_GOLDENS=1` is set, overwrite the on-disk golden with the
+/// actual (normalized) output. Used to re-baseline expected fixtures after
+/// intentional engine behavior changes (e.g. Phase 4c-prime call-site position
+/// improvements). The updated golden is then compared against `actual` so the
+/// test still asserts the file round-trips cleanly.
+fn maybe_update_golden(name: &str, actual: &Value) -> Result<()> {
+    if std::env::var("SQRY_UPDATE_GOLDENS").ok().as_deref() == Some("1") {
+        let path = fixture_output_path(name);
+        let serialized = serde_json::to_string_pretty(actual)?;
+        std::fs::write(&path, serialized + "\n")
+            .with_context(|| format!("update golden fixture {}", path.display()))?;
+    }
+    Ok(())
+}
+
 fn run_query_fixture(query: &str, relative_fixture: &str) -> Result<Value> {
     let temp_root = tempfile::tempdir()?;
     let temp_fixture_root = temp_root.path().join(relative_fixture);
@@ -188,45 +203,49 @@ fn run_query_fixture(query: &str, relative_fixture: &str) -> Result<Value> {
 
 #[test]
 fn query_baseline_single_result() -> Result<()> {
+    let actual = run_query_fixture("name:hello_rust", "tests/fixtures/polyglot_micro")?;
+    maybe_update_golden("expected_query_output.json", &actual)?;
     let expected = load_expected(
         "expected_query_output.json",
         "tests/fixtures/polyglot_micro",
     )?;
-    let actual = run_query_fixture("name:hello_rust", "tests/fixtures/polyglot_micro")?;
     assert_eq!(actual, expected);
     Ok(())
 }
 
 #[test]
 fn query_baseline_multi_result() -> Result<()> {
+    let actual = run_query_fixture("kind:function", "tests/fixtures/relations/typescript")?;
+    maybe_update_golden("expected_query_output_multi.json", &actual)?;
     let expected = load_expected(
         "expected_query_output_multi.json",
         "tests/fixtures/relations/typescript",
     )?;
-    let actual = run_query_fixture("kind:function", "tests/fixtures/relations/typescript")?;
     assert_eq!(actual, expected);
     Ok(())
 }
 
 #[test]
 fn query_baseline_cross_language() -> Result<()> {
+    let actual = run_query_fixture("kind:function", "tests/fixtures/polyglot_micro")?;
+    maybe_update_golden("expected_query_output_cross_language.json", &actual)?;
     let expected = load_expected(
         "expected_query_output_cross_language.json",
         "tests/fixtures/polyglot_micro",
     )?;
-    let actual = run_query_fixture("kind:function", "tests/fixtures/polyglot_micro")?;
     assert_eq!(actual, expected);
     Ok(())
 }
 
 #[test]
 fn query_baseline_empty_result() -> Result<()> {
-    let expected = load_expected(
-        "expected_query_output_empty.json",
-        "tests/fixtures/polyglot_micro",
-    )?;
     let actual = run_query_fixture(
         "kind:function AND name:does_not_exist",
+        "tests/fixtures/polyglot_micro",
+    )?;
+    maybe_update_golden("expected_query_output_empty.json", &actual)?;
+    let expected = load_expected(
+        "expected_query_output_empty.json",
         "tests/fixtures/polyglot_micro",
     )?;
     assert_eq!(actual, expected);
@@ -235,12 +254,13 @@ fn query_baseline_empty_result() -> Result<()> {
 
 #[test]
 fn query_baseline_metadata_rich() -> Result<()> {
-    let expected = load_expected(
-        "expected_query_output_metadata.json",
-        "tests/fixtures/metadata_consistency/async_functions",
-    )?;
     let actual = run_query_fixture(
         "kind:function",
+        "tests/fixtures/metadata_consistency/async_functions",
+    )?;
+    maybe_update_golden("expected_query_output_metadata.json", &actual)?;
+    let expected = load_expected(
+        "expected_query_output_metadata.json",
         "tests/fixtures/metadata_consistency/async_functions",
     )?;
     assert_eq!(actual, expected);

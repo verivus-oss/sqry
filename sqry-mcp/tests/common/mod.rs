@@ -1,3 +1,7 @@
+pub mod daemon_fixture;
+#[allow(unused_imports)]
+pub use daemon_fixture::DaemonFixture;
+
 use anyhow::Result;
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Write};

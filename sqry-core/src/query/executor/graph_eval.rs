@@ -8,7 +8,13 @@
 //! Key semantics preserved from the legacy index path:
 //! - `name:` uses `segments_match` for qualified name suffix matching
 //! - `kind:`, `lang:`, `visibility:`, `scope.*` are **case-sensitive**
-//! - `imports:` uses SUBSTRING (contains) matching at file level
+//! - `imports:` per-node — matches a node iff its own outgoing `Imports`
+//!   edge target/alias/wildcard matches, or it is an `Import` node whose
+//!   text matches. Aligned with `sqry-db::queries::ImportsQuery` per the
+//!   Phase N "Unified Surface Contract" (planner-IR is canonical, all
+//!   transports mirror it). The previous file-scoped semantic was retired
+//!   in DB15 to remove the cross-engine divergence flagged by Codex's
+//!   DB14 review.
 //! - `references:` includes `References` + `Calls` + `Imports` + `FfiCall` edges
 //! - `callers:` checks OUTGOING edges (find nodes that call X)
 //! - `callees:` checks INCOMING edges (find nodes called by X)
@@ -74,9 +80,6 @@ pub struct GraphEvalContext<'a> {
     pub workspace_root: Option<&'a Path>,
     /// If true, disable parallel execution
     pub disable_parallel: bool,
-    /// Precomputed cache: module name -> set of `FileIds` that import it
-    /// Used by `match_imports` to avoid O(N^2) per-node scan
-    pub importing_files: HashMap<String, HashSet<FileId>>,
     /// Precomputed subquery result sets, keyed by `(span.start, span.end)`.
     /// Populated by `precompute_subqueries()` before the per-node evaluation loop.
     pub subquery_cache: SubqueryCache,
@@ -91,7 +94,6 @@ impl<'a> GraphEvalContext<'a> {
             plugin_manager,
             workspace_root: None,
             disable_parallel: false,
-            importing_files: HashMap::new(),
             subquery_cache: HashMap::new(),
         }
     }
@@ -108,17 +110,6 @@ impl<'a> GraphEvalContext<'a> {
     pub fn with_parallel_disabled(mut self, disabled: bool) -> Self {
         self.disable_parallel = disabled;
         self
-    }
-
-    /// Precomputes importing files for a given module (call before `evaluate_all`).
-    ///
-    /// This avoids O(N^2) performance by caching which files import a given module.
-    pub fn precompute_imports(&mut self, target_module: &str) {
-        if !self.importing_files.contains_key(target_module) {
-            let files = precompute_importing_files(self.graph, target_module);
-            self.importing_files
-                .insert(target_module.to_string(), files);
-        }
     }
 
     /// Precomputes all subquery result sets from the expression tree.
@@ -173,38 +164,6 @@ fn collect_subquery_exprs<'a>(expr: &'a Expr, out: &mut Vec<((usize, usize), &'a
     }
 }
 
-/// Collects all `imports:` predicate values from the query AST (deduplicated).
-///
-/// This is used to precompute the importing files cache before evaluation.
-#[must_use]
-pub fn collect_import_targets(expr: &Expr) -> HashSet<String> {
-    let mut targets = HashSet::new();
-    collect_import_targets_inner(expr, &mut targets);
-    targets
-}
-
-fn collect_import_targets_inner(expr: &Expr, targets: &mut HashSet<String>) {
-    match expr {
-        Expr::Condition(cond) => {
-            if cond.field.as_str() == "imports"
-                && let Some(value) = cond.value.as_string()
-            {
-                targets.insert(value.to_string());
-            }
-        }
-        Expr::And(operands) | Expr::Or(operands) => {
-            for operand in operands {
-                collect_import_targets_inner(operand, targets);
-            }
-        }
-        Expr::Not(inner) => collect_import_targets_inner(inner, targets),
-        Expr::Join(join) => {
-            collect_import_targets_inner(&join.left, targets);
-            collect_import_targets_inner(&join.right, targets);
-        }
-    }
-}
-
 /// Evaluates query against all nodes, returning matching `NodeIds`.
 ///
 /// # Errors
@@ -226,7 +185,15 @@ pub fn evaluate_all(ctx: &mut GraphEvalContext, expr: &Expr) -> Result<Vec<NodeI
     if ctx.disable_parallel {
         // Sequential evaluation
         let mut matches = Vec::new();
-        for (id, _) in arena.iter() {
+        for (id, entry) in arena.iter() {
+            // Skip Phase 4c-prime unified-away losers — they remain in
+            // the arena as inert duplicates so CSR row_ptr sizing stays
+            // stable, but publish-visible query evaluation must not
+            // surface them (Gate 0d iter-1 blocker). See
+            // `NodeEntry::is_unified_loser`.
+            if entry.is_unified_loser() {
+                continue;
+            }
             if evaluate_node(ctx, id, expr, &mut guard)? {
                 matches.push(id);
             }
@@ -236,7 +203,11 @@ pub fn evaluate_all(ctx: &mut GraphEvalContext, expr: &Expr) -> Result<Vec<NodeI
         // Parallel evaluation - each thread needs its own guard
         use rayon::prelude::*;
 
-        let node_ids: Vec<_> = arena.iter().map(|(id, _)| id).collect();
+        let node_ids: Vec<_> = arena
+            .iter()
+            .filter(|(_id, entry)| !entry.is_unified_loser())
+            .map(|(id, _)| id)
+            .collect();
         let results: Vec<Result<Option<NodeId>>> = node_ids
             .into_par_iter()
             .map(|id| {
@@ -832,7 +803,8 @@ fn match_callers(ctx: &GraphEvalContext, node_id: NodeId, value: &Value) -> bool
 /// Extract the method name from a qualified name.
 /// e.g., "`Player::takeDamage`" -> Some("takeDamage")
 /// e.g., "takeDamage" -> None (no separator, not qualified)
-fn extract_method_name(qualified: &str) -> Option<String> {
+#[must_use]
+pub fn extract_method_name(qualified: &str) -> Option<String> {
     // Look for separator from the end
     for sep in ["::", ".", "#", ":", "/"] {
         if let Some(pos) = qualified.rfind(sep) {
@@ -874,57 +846,53 @@ fn match_callees(ctx: &GraphEvalContext, node_id: NodeId, value: &Value) -> bool
     false
 }
 
-/// `imports:X` - find symbols in files that import X
+/// `imports:X` — per-node match.
 ///
-/// Current behavior: all symbols in a file match if that file imports X.
-/// Uses SUBSTRING matching (contains) to match legacy import semantics across:
-/// - Import node names (module paths)
-/// - Imported symbol node names (edge targets)
-/// - `EdgeKind::Imports` alias metadata and wildcard flag
+/// A node matches iff:
+/// 1. It is itself an `Import` node whose name (or alias text) matches `X`, or
+/// 2. It has at least one outgoing `Imports` edge whose target name, alias,
+///    or wildcard flag matches `X` (see [`import_edge_matches`]).
 ///
-/// OPTIMIZATION: Precompute `importing_files` set once per query, then check membership.
+/// This is the planner-canonical semantic per
+/// `docs/development/phase-n-structural-semantics/02_DESIGN.md` §6 — every
+/// transport (planner, MCP, CLI, LSP) shares it. The previous file-scoped
+/// behavior ("every node in a file that imports X matches") was retired in
+/// DB15 to remove the cross-engine divergence flagged by Codex's DB14
+/// review. Matches the set returned by
+/// [`sqry_db::queries::ImportsQuery`](https://docs.rs/sqry-db) for the same
+/// key.
 fn match_imports(ctx: &GraphEvalContext, node_id: NodeId, value: &Value) -> bool {
     let Some(target_module) = value.as_string() else {
         return false;
     };
 
-    // Get this node's file ID
     let Some(entry) = ctx.graph.nodes().get(node_id) else {
         return false;
     };
-    let file_id = entry.file;
 
-    // Check if this file imports the target module
-    // Uses precomputed importing_files if available, otherwise computes inline
-    if let Some(importing_files) = ctx.importing_files.get(target_module) {
-        return importing_files.contains(&file_id);
+    if entry.kind == NodeKind::Import && import_entry_matches(ctx.graph, entry, target_module) {
+        return true;
     }
 
-    // Fallback: compute inline (should not happen with proper initialization)
-    // Scan Import nodes and Imports edges in this file using SUBSTRING (contains) matching
-    for (other_id, other_entry) in ctx.graph.nodes().iter() {
-        if other_entry.file != file_id {
-            continue;
-        }
-
-        // Import node name (module path)
-        if other_entry.kind == NodeKind::Import
-            && import_entry_matches(ctx.graph, other_entry, target_module)
-        {
+    for edge in ctx.graph.edges().edges_from(node_id) {
+        if import_edge_matches(ctx.graph, &edge, target_module) {
             return true;
-        }
-
-        // Imports edges metadata + imported symbol node names
-        for edge in ctx.graph.edges().edges_from(other_id) {
-            if import_edge_matches(ctx.graph, &edge, target_module) {
-                return true;
-            }
         }
     }
     false
 }
 
-fn import_edge_matches(graph: &CodeGraph, edge: &StoreEdgeRef, target_module: &str) -> bool {
+/// Returns `true` when the given `Imports` edge imports something matching
+/// `target_module`, checking the target node text, the edge's alias, and the
+/// wildcard flag. Shared with [`crate::graph::unified::concurrent::GraphSnapshot`]
+/// consumers (including `sqry-db::queries::relation`) that need the same
+/// semantics as the graph-native `imports:` predicate.
+#[must_use]
+pub fn import_edge_matches<G: crate::graph::unified::concurrent::GraphAccess>(
+    graph: &G,
+    edge: &StoreEdgeRef,
+    target_module: &str,
+) -> bool {
     let EdgeKind::Imports { alias, is_wildcard } = &edge.kind else {
         return false;
     };
@@ -950,27 +918,12 @@ fn import_edge_matches(graph: &CodeGraph, edge: &StoreEdgeRef, target_module: &s
     target_match || alias_match || wildcard_match
 }
 
-/// Precomputes which files import a given module (call once per unique `imports:` value).
-fn precompute_importing_files(graph: &CodeGraph, target_module: &str) -> HashSet<FileId> {
-    let mut importing_files = HashSet::new();
-
-    for (node_id, entry) in graph.nodes().iter() {
-        if entry.kind == NodeKind::Import && import_entry_matches(graph, entry, target_module) {
-            importing_files.insert(entry.file);
-        }
-
-        for edge in graph.edges().edges_from(node_id) {
-            if import_edge_matches(graph, &edge, target_module) {
-                importing_files.insert(entry.file);
-            }
-        }
-    }
-
-    importing_files
-}
-
-fn import_text_matches(
-    graph: &CodeGraph,
+/// Substring-based text match for `imports:` semantics, with language-aware
+/// canonicalization fallback when the file's language maps the input module
+/// path into graph-internal `::` form.
+#[must_use]
+pub fn import_text_matches<G: crate::graph::unified::concurrent::GraphAccess>(
+    graph: &G,
     file_id: FileId,
     candidate: &str,
     target_module: &str,
@@ -988,14 +941,26 @@ fn import_text_matches(
         })
 }
 
-fn import_entry_matches(graph: &CodeGraph, entry: &NodeEntry, target_module: &str) -> bool {
+/// Matches an Import/candidate node entry against a target module using
+/// the shared `imports:` substring + canonicalization semantics.
+#[must_use]
+pub fn import_entry_matches<G: crate::graph::unified::concurrent::GraphAccess>(
+    graph: &G,
+    entry: &NodeEntry,
+    target_module: &str,
+) -> bool {
     entry_query_texts(graph, entry)
         .iter()
         .any(|candidate| import_text_matches(graph, entry.file, candidate, target_module))
 }
 
-fn language_aware_segments_match(
-    graph: &CodeGraph,
+/// Segment-aware name equality with a language-specific canonicalization
+/// fallback. First tries a direct [`segments_match`]; if that fails, the
+/// file's language (if any) is consulted to canonicalize `expected` into
+/// graph-internal `::` form before retrying.
+#[must_use]
+pub fn language_aware_segments_match<G: crate::graph::unified::concurrent::GraphAccess>(
+    graph: &G,
     file_id: FileId,
     candidate: &str,
     expected: &str,
@@ -1020,7 +985,16 @@ fn push_unique_query_text(texts: &mut Vec<String>, candidate: impl Into<String>)
     }
 }
 
-fn entry_query_texts(graph: &CodeGraph, entry: &NodeEntry) -> Vec<String> {
+/// Collects every string form that can satisfy a name query for the given
+/// node entry: the interned name, the qualified name, and (when a language
+/// is recorded) the display-qualified name produced by
+/// [`display_graph_qualified_name`]. Duplicates are dropped so that relation
+/// matchers do not re-check equivalent forms.
+#[must_use]
+pub fn entry_query_texts<G: crate::graph::unified::concurrent::GraphAccess>(
+    graph: &G,
+    entry: &NodeEntry,
+) -> Vec<String> {
     let mut texts = Vec::with_capacity(3);
 
     if let Some(name) = graph.strings().resolve(entry.name) {
@@ -1459,6 +1433,10 @@ fn match_callees_subquery(
 }
 
 /// Match imports using a precomputed subquery result set.
+///
+/// Per-node semantic (DB15): returns true iff this specific node has an
+/// outgoing `Imports` edge whose target is in the precomputed subquery set.
+/// Aligned with [`match_imports`] and `sqry_db::queries::ImportsQuery`.
 fn match_imports_subquery(
     ctx: &GraphEvalContext,
     node_id: NodeId,
@@ -1469,20 +1447,11 @@ fn match_imports_subquery(
             "subquery cache miss: precompute_subqueries did not populate cache for this relation predicate"
         ));
     };
-    let Some(entry) = ctx.graph.nodes().get(node_id) else {
-        return Ok(false);
-    };
-
-    // Check all nodes in the same file for import edges
-    for (other_id, other_entry) in ctx.graph.nodes().iter() {
-        if other_entry.file == entry.file {
-            for edge in ctx.graph.edges().edges_from(other_id) {
-                if let EdgeKind::Imports { .. } = &edge.kind
-                    && matches.contains(&edge.target)
-                {
-                    return Ok(true);
-                }
-            }
+    for edge in ctx.graph.edges().edges_from(node_id) {
+        if let EdgeKind::Imports { .. } = &edge.kind
+            && matches.contains(&edge.target)
+        {
+            return Ok(true);
         }
     }
     Ok(false)
@@ -1626,49 +1595,6 @@ mod tests {
     use crate::graph::node::Language;
     use crate::query::types::{Condition, Field, Span};
     use std::path::Path;
-
-    #[test]
-    fn test_collect_import_targets_empty() {
-        // Empty And expression has no import targets
-        let expr = Expr::And(vec![]);
-        let targets = collect_import_targets(&expr);
-        assert!(targets.is_empty());
-    }
-
-    #[test]
-    fn test_collect_import_targets_single() {
-        let cond = Condition {
-            field: Field("imports".to_string()),
-            operator: Operator::Equal,
-            value: Value::String("react".to_string()),
-            span: Span::default(),
-        };
-        let expr = Expr::Condition(cond);
-        let targets = collect_import_targets(&expr);
-        assert_eq!(targets.len(), 1);
-        assert!(targets.contains("react"));
-    }
-
-    #[test]
-    fn test_collect_import_targets_nested() {
-        let cond1 = Condition {
-            field: Field("imports".to_string()),
-            operator: Operator::Equal,
-            value: Value::String("react".to_string()),
-            span: Span::default(),
-        };
-        let cond2 = Condition {
-            field: Field("imports".to_string()),
-            operator: Operator::Equal,
-            value: Value::String("lodash".to_string()),
-            span: Span::default(),
-        };
-        let expr = Expr::And(vec![Expr::Condition(cond1), Expr::Condition(cond2)]);
-        let targets = collect_import_targets(&expr);
-        assert_eq!(targets.len(), 2);
-        assert!(targets.contains("react"));
-        assert!(targets.contains("lodash"));
-    }
 
     #[test]
     fn test_import_text_matches_canonicalized_qualified_imports() {

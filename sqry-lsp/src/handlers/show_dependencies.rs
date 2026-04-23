@@ -175,6 +175,11 @@ fn find_seed_nodes(
         snapshot
             .iter_nodes()
             .filter_map(|(node_id, entry)| {
+                // Gate 0d iter-2 fix: skip unified losers. See
+                // `NodeEntry::is_unified_loser`.
+                if entry.is_unified_loser() {
+                    return None;
+                }
                 let node_file = files.resolve(entry.file)?;
                 if node_file.as_ref() == target_relative {
                     Some(node_id)

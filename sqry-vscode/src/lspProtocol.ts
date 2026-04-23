@@ -232,7 +232,9 @@ export interface SqryListCircularDependenciesParams {
 export interface SqryCycleMemberLocation {
   readonly name: string;
   readonly file?: string;
+  /** 0-based line offset within the source file. */
   readonly line?: number;
+  /** 0-based UTF-16 column offset within the source line; omitted when unavailable. */
   readonly column?: number;
 }
 
@@ -252,6 +254,7 @@ export interface SqryCycle {
 
 export interface SqryListCircularDependenciesResult {
   readonly cycles: SqryCycle[];
+  /** Exact total when not truncated; otherwise `limit + 1` as a lower-bound sentinel. */
   readonly total_cycles: number;
   /** Whether results were truncated due to limit */
   readonly truncated: boolean;
@@ -268,6 +271,7 @@ export interface SqryListUnusedSymbolsParams {
 
 export interface SqryListUnusedSymbolsResult {
   readonly symbols: SqrySearchItem[];
+  /** Exact total when not truncated; otherwise `limit + 1` as a lower-bound sentinel. */
   readonly total: number;
   /** Whether results were truncated due to limit */
   readonly truncated: boolean;

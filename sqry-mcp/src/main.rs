@@ -2,6 +2,19 @@
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
+// Daemon adapter is unused by the sqry-mcp binary itself — it exists
+// for the sqry-daemon crate to consume through the library. Task 7
+// (sqry-daemon tool_dispatch) wires in the callers. `daemon_params`
+// is the companion module holding the wire-schema → *Args converters
+// that both the rmcp path (server.rs) and the daemon path
+// (daemon_adapter::dispatch) delegate through.
+#[allow(dead_code)]
+mod daemon_adapter;
+// Phase 8c U12 — daemon shim-mode helpers (exposed from the lib target too
+// so integration tests can call resolve_daemon_socket directly).
+#[allow(dead_code)]
+mod daemon_params;
+mod daemon_shim;
 mod engine;
 mod error;
 mod execution;
@@ -11,13 +24,17 @@ mod pagination;
 mod path_resolver;
 mod prompts;
 mod resources;
+mod response;
 mod server;
 mod tools;
+#[allow(dead_code)]
+mod tools_schema;
 mod workspace_session;
 
 use anyhow::Result;
 use rmcp::ServiceExt;
 use std::num::NonZeroUsize;
+use std::path::PathBuf;
 use std::time::Duration;
 
 const HELP_TEXT: &str = r"sqry-mcp - Semantic code search MCP server
@@ -26,9 +43,11 @@ USAGE:
     sqry-mcp [OPTIONS]
 
 OPTIONS:
-    -h, --help       Print this help message
-    -V, --version    Print version information
-    --list-tools     List all available tools with their descriptions
+    -h, --help                   Print this help message
+    -V, --version                Print version information
+    --list-tools                 List all available tools with their descriptions
+    --daemon                     Connect to a running sqryd daemon as a shim client
+    --daemon-socket <PATH>       Daemon socket path (requires --daemon)
 
 ENVIRONMENT VARIABLES:
     SQRY_MCP_WORKSPACE_ROOT               Root directory for searches (security boundary)
@@ -38,11 +57,13 @@ ENVIRONMENT VARIABLES:
     SQRY_MCP_RETRY_DELAY_MS               Retry delay for exceeded deadlines in ms (default: 500)
     SQRY_MCP_ENGINE_CACHE_CAPACITY        Max cached workspace engines (default: 5)
     SQRY_MCP_DISCOVERY_CACHE_CAPACITY     Max cached workspace paths (default: 100)
-    SQRY_MCP_TRACE_PATH_CACHE_CAPACITY    Trace path cache capacity (default: 256)
-    SQRY_MCP_SUBGRAPH_CACHE_CAPACITY      Subgraph cache capacity (default: 128)
-    SQRY_MCP_QUERY_CACHE_TTL_SECS         Query cache TTL in seconds (default: 300)
+    SQRY_MCP_TRACE_CACHE_SIZE             Trace path payload cache capacity (default: 256)
+    SQRY_MCP_SUBGRAPH_CACHE_SIZE          Subgraph payload cache capacity (default: 128)
     SQRY_MCP_MAX_CROSS_LANG_EDGES         Max edges for cross-language analysis (default: 50000)
     SQRY_REDACTION_PRESET                 Response redaction: none|minimal|standard|strict (default: minimal)
+    SQRYD_SOCKET                          Daemon socket path override for --daemon mode
+    SQRY_DAEMON_NO_AUTO_START             Set to 1 to disable sqryd auto-start in --daemon mode
+    SQRYD_PATH                            Explicit path to sqryd binary for --daemon auto-start
 
 AVAILABLE TOOLS:
     Use --list-tools to view the full rmcp tool catalog
@@ -78,23 +99,112 @@ PROTOCOL:
     MCP 2024-11-05 (JSON-RPC 2.0 over stdio, newline-delimited)
 ";
 
+/// The parsed action resulting from manual CLI argument inspection.
+///
+/// sqry-mcp uses manual argument parsing (not clap) because the binary's
+/// primary use-case — serving the MCP protocol over stdio — does not
+/// benefit from clap's full argument-parsing machinery. Structured
+/// variants are added here as new runtime modes are introduced.
+///
+/// # Variants
+///
+/// - [`CliAction::Help`] — print help text and exit.
+/// - [`CliAction::Version`] — print version and exit.
+/// - [`CliAction::ListTools`] — enumerate available MCP tools and exit.
+/// - [`CliAction::Daemon`] — connect to a running sqryd daemon as a shim
+///   client (Phase 8c U12). Owns stdio end-to-end, pumping bytes between
+///   the calling process's stdin/stdout and the daemon's hosted MCP
+///   server. `socket` is `Some` when `--daemon-socket <PATH>` was
+///   supplied; otherwise [`daemon_shim::resolve_daemon_socket`] determines
+///   the path at runtime.
+/// - [`CliAction::Unknown`] — unrecognised flag: print an error and exit
+///   with code 1.
+/// - [`CliAction::None`] — no flag given: proceed to the normal rmcp
+///   server loop.
 #[derive(Debug)]
 enum CliAction {
     Help,
     Version,
     ListTools,
+    /// Connect to a sqryd daemon as an MCP shim client (Phase 8c U12).
+    ///
+    /// `socket` is the optional `--daemon-socket <PATH>` override. When
+    /// `None`, the socket path is resolved at runtime by
+    /// [`daemon_shim::resolve_daemon_socket`] (env var → platform default).
+    Daemon {
+        socket: Option<PathBuf>,
+    },
     Unknown(String),
     None,
 }
 
-fn parse_cli_action(args: &[String]) -> CliAction {
-    match args.get(1).map(String::as_str) {
-        Some("-h" | "--help") => CliAction::Help,
-        Some("-V" | "--version") => CliAction::Version,
-        Some("--list-tools") => CliAction::ListTools,
-        Some(arg) => CliAction::Unknown(arg.to_string()),
-        None => CliAction::None,
+/// Parse CLI arguments into a [`CliAction`].
+///
+/// The parser is deliberately simple and sequential:
+///
+/// - Recognises single-flag forms `-h`/`--help`, `-V`/`--version`,
+///   `--list-tools`.
+/// - Delegates the `--daemon` / `--daemon-socket` subset to
+///   [`daemon_shim::parse_daemon_args`] and maps `DaemonParseResult` →
+///   `CliAction`.
+/// - Unrecognised leading flags produce [`CliAction::Unknown`].
+/// - No arguments produce [`CliAction::None`] (proceed to normal server mode).
+///
+/// # Constraint: `--daemon-socket` requires `--daemon`
+///
+/// Passing `--daemon-socket` without `--daemon` is rejected as
+/// `Unknown("--daemon-socket requires --daemon")`.  This mirrors the
+/// compile-time guard that clap provides via `requires = "daemon"` in
+/// U11 (`sqry-lsp`).  The error message is surfaced via
+/// [`handle_cli_action_sync`] which calls [`std::process::exit(1)`].
+pub(crate) fn parse_cli_action(args: &[String]) -> CliAction {
+    // Collect all arguments after the program name.
+    let tail: Vec<&str> = args.iter().skip(1).map(String::as_str).collect();
+
+    // Fast-path for no arguments.
+    if tail.is_empty() {
+        return CliAction::None;
     }
+
+    // Check the first argument for single-flag commands.
+    match tail[0] {
+        "-h" | "--help" => return CliAction::Help,
+        "-V" | "--version" => return CliAction::Version,
+        "--list-tools" => return CliAction::ListTools,
+        _ => {}
+    }
+
+    // Delegate daemon-flag scanning to daemon_shim (single source of truth).
+    use daemon_shim::DaemonParseResult;
+    match daemon_shim::parse_daemon_args(args) {
+        DaemonParseResult::Daemon { socket } => return CliAction::Daemon { socket },
+        DaemonParseResult::MissingDaemon => {
+            return CliAction::Unknown("--daemon-socket requires --daemon".to_string());
+        }
+        DaemonParseResult::MissingSocketPath => {
+            return CliAction::Unknown("--daemon-socket requires a PATH argument".to_string());
+        }
+        DaemonParseResult::UnknownInDaemonMode { token } => {
+            // Codex iter-0 MINOR-1 fix: silently ignoring trailing args
+            // after `--daemon` lets operator typos change behaviour
+            // without warning. Surface the offending token verbatim so
+            // the operator can fix it. Matches the stricter clap-based
+            // parser path used by `sqry-lsp`.
+            return CliAction::Unknown(format!(
+                "unknown argument {token:?} after --daemon (use --help for usage)"
+            ));
+        }
+        DaemonParseResult::NotDaemonMode => {
+            // Fall through to check for unknown flags.
+        }
+    }
+
+    // No recognised flag was found; surface the first unrecognised token.
+    if let Some(first) = tail.first() {
+        return CliAction::Unknown(first.to_string());
+    }
+
+    CliAction::None
 }
 
 fn available_tools() -> Vec<rmcp::model::Tool> {
@@ -103,7 +213,17 @@ fn available_tools() -> Vec<rmcp::model::Tool> {
     server.get_filtered_tools()
 }
 
-fn handle_cli_action(action: CliAction) -> bool {
+/// Dispatch on the parsed [`CliAction`] and return whether the action was
+/// handled (i.e. the caller should NOT fall through to the normal server loop).
+///
+/// The `Daemon` variant is **async** and must be invoked inside the Tokio
+/// runtime; the other variants are synchronous.  The caller in `main` dispatches
+/// the daemon variant separately after initialising tracing, so that the
+/// log subscriber is in place before `run_daemon_shim` begins connecting.
+///
+/// Returns `true` for all handled variants except [`CliAction::Daemon`] and
+/// [`CliAction::None`].
+fn handle_cli_action_sync(action: &CliAction) -> bool {
     match action {
         CliAction::Help => {
             print!("{HELP_TEXT}");
@@ -128,7 +248,8 @@ fn handle_cli_action(action: CliAction) -> bool {
             eprintln!("Use --help for usage information");
             std::process::exit(1);
         }
-        CliAction::None => false,
+        // Daemon and None are NOT handled here; the caller dispatches them.
+        CliAction::Daemon { .. } | CliAction::None => false,
     }
 }
 
@@ -155,11 +276,20 @@ async fn run_rmcp_server() -> Result<()> {
 
     // CRITICAL: Initialize all caches before handling requests
     // This must happen after config load but before server starts accepting requests
+    //
+    // Phase 3C DB21: the payload LRU caches in `execution::graph_cache`
+    // (retained per the DB17 follow-up + DB19 confirmation — they cache
+    // response DTOs, not predicate results) are now sized from the
+    // existing `trace_cache_size` / `subgraph_cache_size` fields. The
+    // TTL is fixed at `execution::graph_cache::CACHE_TTL_SECS` (currently
+    // 300 s). The retired `trace_path_cache_capacity` /
+    // `subgraph_cache_capacity` / `query_cache_ttl_secs` fields were
+    // duplicate knobs; see the DB21 notes in mcp_config.rs.
     let engine_capacity = mcp_config.effective_engine_cache_capacity()?;
     let discovery_capacity = mcp_config.effective_discovery_cache_capacity()?;
-    let trace_path_capacity = mcp_config.effective_trace_path_cache_capacity()?;
-    let subgraph_capacity = mcp_config.effective_subgraph_cache_capacity()?;
-    let query_ttl_secs = mcp_config.effective_query_cache_ttl_secs()?;
+    let trace_path_capacity = mcp_config.effective_trace_cache_size()?;
+    let subgraph_capacity = mcp_config.effective_subgraph_cache_size()?;
+    let query_ttl_secs = execution::graph_cache::CACHE_TTL_SECS;
 
     tracing::info!(
         engine_capacity = engine_capacity,
@@ -237,9 +367,12 @@ async fn run_rmcp_server() -> Result<()> {
 /// no persistent state between messages - each request is handled independently.
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Handle CLI arguments
+    // Handle synchronous CLI arguments (--help, --version, --list-tools,
+    // unknown flags) before initialising the tracing subscriber.
     let args: Vec<String> = std::env::args().collect();
-    if handle_cli_action(parse_cli_action(&args)) {
+    let action = parse_cli_action(&args);
+
+    if handle_cli_action_sync(&action) {
         return Ok(());
     }
 
@@ -250,5 +383,142 @@ async fn main() -> Result<()> {
         .without_time()
         .init();
 
+    // Daemon shim mode — owns stdio end-to-end; skip the normal rmcp
+    // server initialisation entirely.
+    if let CliAction::Daemon { socket } = action {
+        return daemon_shim::run_daemon_shim(socket).await;
+    }
+
     run_rmcp_server().await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// `parse_cli_action` with no extra arguments produces `CliAction::None`
+    /// (proceed to normal server mode — the hot-path for AI tooling).
+    #[test]
+    fn parse_no_args_returns_none() {
+        let a = parse_cli_action(&args(&["sqry-mcp"]));
+        assert!(matches!(a, CliAction::None));
+    }
+
+    /// `--help` / `-h` produce `CliAction::Help`.
+    #[test]
+    fn parse_help_flags() {
+        assert!(matches!(
+            parse_cli_action(&args(&["sqry-mcp", "--help"])),
+            CliAction::Help
+        ));
+        assert!(matches!(
+            parse_cli_action(&args(&["sqry-mcp", "-h"])),
+            CliAction::Help
+        ));
+    }
+
+    /// `--version` / `-V` produce `CliAction::Version`.
+    #[test]
+    fn parse_version_flags() {
+        assert!(matches!(
+            parse_cli_action(&args(&["sqry-mcp", "--version"])),
+            CliAction::Version
+        ));
+        assert!(matches!(
+            parse_cli_action(&args(&["sqry-mcp", "-V"])),
+            CliAction::Version
+        ));
+    }
+
+    /// `--list-tools` produces `CliAction::ListTools`.
+    #[test]
+    fn parse_list_tools() {
+        assert!(matches!(
+            parse_cli_action(&args(&["sqry-mcp", "--list-tools"])),
+            CliAction::ListTools
+        ));
+    }
+
+    /// `--daemon` alone produces `CliAction::Daemon { socket: None }`.
+    #[test]
+    fn parse_daemon_without_socket() {
+        let a = parse_cli_action(&args(&["sqry-mcp", "--daemon"]));
+        assert!(matches!(a, CliAction::Daemon { socket: None }));
+    }
+
+    /// `--daemon --daemon-socket <PATH>` produces `CliAction::Daemon { socket: Some(..) }`.
+    #[test]
+    fn parse_daemon_with_socket() {
+        let a = parse_cli_action(&args(&[
+            "sqry-mcp",
+            "--daemon",
+            "--daemon-socket",
+            "/custom/sqryd.sock",
+        ]));
+        match a {
+            CliAction::Daemon { socket: Some(p) } => {
+                assert_eq!(p, std::path::PathBuf::from("/custom/sqryd.sock"));
+            }
+            other => panic!("expected Daemon with socket, got: {other:?}"),
+        }
+    }
+
+    /// `--daemon-socket <PATH>` without `--daemon` produces `CliAction::Unknown`
+    /// with a message that mentions the dependency.
+    #[test]
+    fn parse_daemon_socket_without_daemon_is_unknown() {
+        let a = parse_cli_action(&args(&["sqry-mcp", "--daemon-socket", "/some/path"]));
+        match a {
+            CliAction::Unknown(msg) => {
+                assert!(
+                    msg.contains("--daemon-socket requires --daemon"),
+                    "error message should explain the requirement; got: {msg}"
+                );
+            }
+            other => panic!("expected Unknown, got: {other:?}"),
+        }
+    }
+
+    /// `--daemon-socket` with no following path argument produces `CliAction::Unknown`.
+    #[test]
+    fn parse_daemon_socket_missing_path_arg() {
+        let a = parse_cli_action(&args(&["sqry-mcp", "--daemon-socket"]));
+        assert!(matches!(a, CliAction::Unknown(_)));
+    }
+
+    /// `--daemon --daemon-socket <PATH>` and `--daemon-socket <PATH> --daemon`
+    /// are both valid (order-independent).
+    #[test]
+    fn parse_daemon_flags_are_order_independent() {
+        // socket before daemon
+        let a = parse_cli_action(&args(&[
+            "sqry-mcp",
+            "--daemon-socket",
+            "/reorder.sock",
+            "--daemon",
+        ]));
+        match a {
+            CliAction::Daemon { socket: Some(p) } => {
+                assert_eq!(p, std::path::PathBuf::from("/reorder.sock"));
+            }
+            other => panic!("expected Daemon with socket, got: {other:?}"),
+        }
+    }
+
+    /// An unrecognised flag produces `CliAction::Unknown` with that flag as
+    /// the message.
+    #[test]
+    fn parse_unknown_flag() {
+        let a = parse_cli_action(&args(&["sqry-mcp", "--unknown-flag"]));
+        match a {
+            CliAction::Unknown(msg) => {
+                assert_eq!(msg, "--unknown-flag");
+            }
+            other => panic!("expected Unknown, got: {other:?}"),
+        }
+    }
 }

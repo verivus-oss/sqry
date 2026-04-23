@@ -31,10 +31,11 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tracing = "0.1"
 tracing-subscriber = "0.3"
-sqry-core = { version = "8.0.7", path = "../sqry-core" }
-sqry-plugin-registry = { version = "8.0.7", path = "../sqry-plugin-registry" }
-sqry-nl = { version = "8.0.7", path = "../sqry-nl", default-features = false }
-sqry-mcp-redaction = { version = "8.0.7", path = "../sqry-mcp-redaction" }
+sqry-core = { version = "9.0.0", path = "../sqry-core" }
+sqry-db = { version = "9.0.0", path = "../sqry-db" }
+sqry-plugin-registry = { version = "9.0.0", path = "../sqry-plugin-registry" }
+sqry-nl = { version = "9.0.0", path = "../sqry-nl", default-features = false }
+sqry-mcp-redaction = { version = "9.0.0", path = "../sqry-mcp-redaction" }
 
 # MCP SDK for protocol compliance
 rmcp = { version = "0.16", features = ["server", "transport-io"] }
@@ -50,16 +51,31 @@ sha2.workspace = true
 hex.workspace = true
 base64 = "0.22"
 tempfile = "3.10"
-strsim = "0.11"
 indexmap = "2"
 rayon.workspace = true
 lru = "0.16"
+
+# Phase 8c U12 — shim-mode client for `--daemon` / `--daemon-socket`.
+# sqry-daemon-client is a leaf on the dep graph (no sqry-daemon server
+# dep); no cycle is introduced. Verify with `cargo tree -p sqry-mcp`.
+sqry-daemon-client = { version = "9.0.0", path = "../sqry-daemon-client" }
+
+# Task 12 U1 — `which` resolves the sqryd binary via PATH lookup (tier 3
+# of the resolution order: SQRYD_PATH env > sibling > which). Pinned to
+# the same major version as sqry-lsp (8) for consistency.
+which = "8"
 
 [target.'cfg(target_env = "musl")'.dependencies]
 tikv-jemallocator = "0.6"
 tikv-jemalloc-sys = { version = "0.6", features = ["unprefixed_malloc_on_supported_platforms"] }
 
-[target.'cfg(target_os = "macos")'.dependencies]
+# Phase 8c U12 — `libc::getuid()` backs the UID-scoped
+# `/tmp/sqry-<uid>/sqryd.sock` fallback in `resolve_daemon_socket`,
+# matching `sqry-daemon/src/config.rs::user_scoped_dir_name` exactly
+# so a default-configured daemon + default-configured client meet
+# without user configuration. unix-only; windows uses the named-pipe
+# path which needs no UID scoping (the pipe namespace is per-session).
+[target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [target.'cfg(unix)'.dev-dependencies]

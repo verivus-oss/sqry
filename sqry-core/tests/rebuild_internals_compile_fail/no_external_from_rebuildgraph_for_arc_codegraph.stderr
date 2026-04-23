@@ -1,0 +1,12 @@
+error[E0117]: only traits defined in the current crate can be implemented for types defined outside of the crate
+  --> tests/rebuild_internals_compile_fail/no_external_from_rebuildgraph_for_arc_codegraph.rs:22:1
+   |
+22 | impl From<RebuildGraph> for Arc<CodeGraph> {
+   | ^^^^^------------------^^^^^--------------
+   |      |                      |
+   |      |                      `Arc` is not defined in the current crate
+   |      `RebuildGraph` is not defined in the current crate
+   |
+   = note: impl doesn't have any local type before any uncovered type parameters
+   = note: for more information see https://doc.rust-lang.org/reference/items/implementations.html#orphan-rules
+   = note: define and implement a trait or new type instead

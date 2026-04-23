@@ -278,6 +278,12 @@ impl GraphComparator {
         let mut map = HashMap::new();
 
         for (_node_id, entry) in snapshot.iter_nodes() {
+            // Gate 0d iter-2 fix: skip unified losers from
+            // snapshot-diff node map. See
+            // `NodeEntry::is_unified_loser`.
+            if entry.is_unified_loser() {
+                continue;
+            }
             let name = strings
                 .resolve(entry.name)
                 .map(|s| s.to_string())

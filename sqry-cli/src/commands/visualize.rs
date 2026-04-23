@@ -137,6 +137,20 @@ fn placeholder_node(name: &str) -> Node {
 ///
 /// Uses the kernel for BFS traversal, then converts the result into
 /// diagram-specific `GraphData` with sorted edges and labeled edges.
+///
+/// # Frontier invariant (DB19)
+///
+/// Root nodes are resolved once at the handler boundary via
+/// [`resolve_nodes`] and passed as a `&[NodeId]` into [`traverse`]. The
+/// kernel walks the NodeId-keyed graph and never re-resolves names at
+/// depth ≥ 1. This is the same invariant DB17/DB18 locked for
+/// `trace_path`, `subgraph`, `call-chain-depth`, and `dependency-tree`
+/// — a same-simple-name node at depth 1 never broadens the frontier
+/// because the kernel operates on generational-indexed `NodeId`s, not
+/// names.
+///
+/// Regressions that reintroduced DB15-class same-name broadening would
+/// surface in the CLI `migration_golden_cli_test` golden tests.
 fn collect_graph_data_unified(
     relation: &RelationQuery,
     snapshot: &GraphSnapshot,
@@ -302,6 +316,11 @@ fn collect_node_matches(
     let mut pattern = Vec::new();
 
     for (node_id, entry) in snapshot.iter_nodes() {
+        // Gate 0d iter-2 fix: skip unified losers from CLI
+        // `visualize` matching. See `NodeEntry::is_unified_loser`.
+        if entry.is_unified_loser() {
+            continue;
+        }
         if required_kind.is_some_and(|kind| entry.kind != kind) {
             continue;
         }

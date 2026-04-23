@@ -18,10 +18,8 @@
 //! ```
 
 pub(crate) mod core;
-pub(crate) mod graph_cycles;
 pub(crate) mod graph_duplicates;
-pub(crate) mod graph_eval;
-pub(crate) mod graph_unused;
+pub mod graph_eval;
 pub(crate) mod pipeline;
 
 #[cfg(test)]
@@ -30,13 +28,12 @@ mod tests;
 // Re-export public API
 pub use core::QueryExecutor;
 
-// Graph-based analysis (preferred)
-pub use graph_cycles::{CircularConfig, CircularType, find_all_cycles_graph, is_node_in_cycle};
+// Graph-based duplicate detection (not yet migrated to sqry-db — DB20
+// scope). Cycle detection and unused detection migrated to sqry-db in
+// DB15-DB19; their config types live in `super::cycles_config` /
+// `super::unused_config`.
 pub use graph_duplicates::{
     DuplicateConfig, DuplicateGroup, DuplicateType, build_duplicate_groups_graph,
-};
-pub use graph_unused::{
-    UnusedScope, compute_reachable_set_graph, find_unused_nodes, is_node_unused,
 };
 
 // Pipeline execution

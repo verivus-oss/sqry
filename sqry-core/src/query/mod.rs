@@ -98,9 +98,11 @@
 //! ```
 
 // Core query modules
-mod executor;
-pub(crate) mod name_matching;
+pub mod cycles_config;
+pub mod executor;
+pub mod name_matching;
 mod repo_filter;
+pub mod unused_config;
 
 // Boolean query language modules
 pub mod builder;
@@ -123,14 +125,20 @@ pub mod validator;
 pub use executor::QueryExecutor;
 
 // CD Predicate exports (duplicate detection, cycle detection, unused analysis)
-// Graph-based analysis (CodeGraph API)
-pub use executor::UnusedScope;
-pub use executor::{CircularConfig, CircularType};
-pub use executor::{DuplicateConfig, DuplicateGroup, DuplicateType};
+//
+// Cycle detection (`CircularType` + `CircularConfig`) and unused-symbol
+// detection (`UnusedScope`) have their *configuration types* in
+// `cycles_config` / `unused_config`. The actual queries moved to
+// `sqry-db` in Phase 3C DB15-DB19 (cached derived queries). The legacy
+// `find_all_cycles_graph` / `is_node_in_cycle` / `find_unused_nodes` /
+// `compute_reachable_set_graph` / `is_node_unused` functions were
+// deleted in DB19 — all callers route through sqry-db.
+pub use cycles_config::{CircularConfig, CircularType};
+pub use unused_config::UnusedScope;
 
+// Duplicate detection still lives in the executor (DB20 scope).
 pub use executor::build_duplicate_groups_graph;
-pub use executor::{compute_reachable_set_graph, find_unused_nodes, is_node_unused};
-pub use executor::{find_all_cycles_graph, is_node_in_cycle};
+pub use executor::{DuplicateConfig, DuplicateGroup, DuplicateType};
 
 pub use repo_filter::RepoFilter;
 

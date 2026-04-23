@@ -193,7 +193,14 @@ fn test_cache_initialization_order() {
     assert_eq!(ttl.as_secs(), 300);
 }
 
-/// Test that config-driven cache sizing is applied
+/// Test that config-driven cache sizing is applied.
+///
+/// Phase 3C DB21: the former `trace_path_cache_capacity`,
+/// `subgraph_cache_capacity`, and `query_cache_ttl_secs` McpConfig
+/// fields were removed (they duplicated `trace_cache_size` /
+/// `subgraph_cache_size` and the TTL is now sourced from
+/// `execution::graph_cache::CACHE_TTL_SECS`). This test was updated to
+/// cover the retained knobs.
 #[test]
 fn test_config_cache_sizing() {
     use sqry_mcp::mcp_config::McpConfig;
@@ -203,19 +210,17 @@ fn test_config_cache_sizing() {
     // Verify default cache sizes match spec
     assert_eq!(config.engine_cache_capacity, 5);
     assert_eq!(config.discovery_cache_capacity, 100);
-    assert_eq!(config.trace_path_cache_capacity, 256);
-    assert_eq!(config.subgraph_cache_capacity, 128);
-    assert_eq!(config.query_cache_ttl_secs, 300);
+    assert_eq!(config.trace_cache_size, 256);
+    assert_eq!(config.subgraph_cache_size, 128);
 
     // Verify validation works
     assert!(config.effective_engine_cache_capacity().is_ok());
     assert!(config.effective_discovery_cache_capacity().is_ok());
-    assert!(config.effective_trace_path_cache_capacity().is_ok());
-    assert!(config.effective_subgraph_cache_capacity().is_ok());
-    assert!(config.effective_query_cache_ttl_secs().is_ok());
+    assert!(config.effective_trace_cache_size().is_ok());
+    assert!(config.effective_subgraph_cache_size().is_ok());
 }
 
-/// Test that invalid cache configurations are rejected
+/// Test that invalid cache configurations are rejected.
 #[test]
 fn test_cache_config_validation() {
     use sqry_mcp::mcp_config::McpConfig;
@@ -234,25 +239,19 @@ fn test_cache_config_validation() {
     assert!(config.effective_discovery_cache_capacity().is_err());
 
     let config = McpConfig {
-        trace_path_cache_capacity: 0,
+        trace_cache_size: 0,
         ..Default::default()
     };
-    assert!(config.effective_trace_path_cache_capacity().is_err());
+    assert!(config.effective_trace_cache_size().is_err());
 
     let config = McpConfig {
-        subgraph_cache_capacity: 0,
+        subgraph_cache_size: 0,
         ..Default::default()
     };
-    assert!(config.effective_subgraph_cache_capacity().is_err());
-
-    let config = McpConfig {
-        query_cache_ttl_secs: 0,
-        ..Default::default()
-    };
-    assert!(config.effective_query_cache_ttl_secs().is_err());
+    assert!(config.effective_subgraph_cache_size().is_err());
 }
 
-/// Test that cache capacities above hard caps are rejected
+/// Test that cache capacities above hard caps are rejected.
 #[test]
 fn test_cache_config_hard_caps() {
     use sqry_mcp::mcp_config::McpConfig;
@@ -271,25 +270,19 @@ fn test_cache_config_hard_caps() {
     assert!(config.effective_discovery_cache_capacity().is_err());
 
     let config = McpConfig {
-        trace_path_cache_capacity: 4097, // Hard cap is 4096
+        trace_cache_size: 4097, // Hard cap is 4096
         ..Default::default()
     };
-    assert!(config.effective_trace_path_cache_capacity().is_err());
+    assert!(config.effective_trace_cache_size().is_err());
 
     let config = McpConfig {
-        subgraph_cache_capacity: 2049, // Hard cap is 2048
+        subgraph_cache_size: 2049, // Hard cap is 2048
         ..Default::default()
     };
-    assert!(config.effective_subgraph_cache_capacity().is_err());
-
-    let config = McpConfig {
-        query_cache_ttl_secs: 86_401, // Hard cap is 86_400
-        ..Default::default()
-    };
-    assert!(config.effective_query_cache_ttl_secs().is_err());
+    assert!(config.effective_subgraph_cache_size().is_err());
 }
 
-/// Test that cache capacities at hard caps are accepted
+/// Test that cache capacities at hard caps are accepted.
 #[test]
 fn test_cache_config_at_hard_caps() {
     use sqry_mcp::mcp_config::McpConfig;
@@ -308,20 +301,14 @@ fn test_cache_config_at_hard_caps() {
     assert_eq!(config.effective_discovery_cache_capacity().unwrap(), 10_000);
 
     let config = McpConfig {
-        trace_path_cache_capacity: 4096,
+        trace_cache_size: 4096,
         ..Default::default()
     };
-    assert_eq!(config.effective_trace_path_cache_capacity().unwrap(), 4096);
+    assert_eq!(config.effective_trace_cache_size().unwrap(), 4096);
 
     let config = McpConfig {
-        subgraph_cache_capacity: 2048,
+        subgraph_cache_size: 2048,
         ..Default::default()
     };
-    assert_eq!(config.effective_subgraph_cache_capacity().unwrap(), 2048);
-
-    let config = McpConfig {
-        query_cache_ttl_secs: 86_400,
-        ..Default::default()
-    };
-    assert_eq!(config.effective_query_cache_ttl_secs().unwrap(), 86_400);
+    assert_eq!(config.effective_subgraph_cache_size().unwrap(), 2048);
 }

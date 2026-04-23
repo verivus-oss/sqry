@@ -3,6 +3,7 @@ use std::{
     path::Path,
 };
 
+use sqry_core::graph::unified::build::helper::CalleeKindHint;
 use sqry_core::graph::unified::edge::FfiConvention;
 use sqry_core::graph::unified::edge::kind::TypeOfContext;
 use sqry_core::graph::unified::{GraphBuildHelper, StagingGraph};
@@ -482,7 +483,8 @@ fn walk_tree_for_graph_impl(
                 {
                     // Ensure both nodes exist
                     let source_id = helper.ensure_method(&source_qname, None, false, is_singleton);
-                    let target_id = helper.ensure_function(&target_qname, None, false, false);
+                    let target_id =
+                        helper.ensure_callee(&target_qname, span, CalleeKindHint::Function);
 
                     // Add call edge
                     let argument_count = u8::try_from(argument_count).unwrap_or(u8::MAX);

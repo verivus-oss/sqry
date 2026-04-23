@@ -32,6 +32,7 @@ use std::{collections::HashMap, path::Path};
 
 use sqry_core::graph::unified::StagingGraph;
 use sqry_core::graph::unified::build::GraphBuildHelper;
+use sqry_core::graph::unified::build::helper::CalleeKindHint;
 use sqry_core::graph::unified::edge::FfiConvention;
 use sqry_core::graph::unified::edge::kind::TypeOfContext;
 use sqry_core::graph::unified::node::NodeId;
@@ -541,7 +542,11 @@ fn build_ffi_edges(
             _ => "unknown",
         };
         let ffi_target_name = format!("ffi::{convention_str}::{}", decl.foreign_symbol);
-        let ffi_target_node = helper.ensure_function(&ffi_target_name, None, false, false);
+        let ffi_target_node = helper.ensure_callee(
+            &ffi_target_name,
+            Span::from_bytes(decl.span.0, decl.span.1),
+            CalleeKindHint::Function,
+        );
 
         // Create FfiCall edge from wrapper to foreign symbol
         helper.add_ffi_edge(wrapper_node, ffi_target_node, decl.convention);

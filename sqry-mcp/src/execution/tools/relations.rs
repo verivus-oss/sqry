@@ -3,15 +3,40 @@
 //! This module implements the `relation_query` tool which finds callers,
 //! callees, imports, exports, and return types for a given symbol.
 //!
-//! #
+//! # DB15 migration (post-followup)
 //!
-//! ✅ Fully migrated to unified graph architecture. Uses `GraphSnapshot` for:
-//! - Symbol lookup via shared resolver buckets
-//! - Relation queries via `edges().edges_from()` and `edges().edges_to()`
-//! - Full edge metadata (async, argument count, aliases, etc.)
+//! Two different primitives serve the `relation_query` surface:
+//!
+//! 1. **Name-keyed predicate dispatch** (Phase N "unified surface
+//!    contract", planner-canonical) is used by `direct_callers` /
+//!    `direct_callees` via [`crate::execution::relation_dispatch`].
+//!    Those tools take a user-supplied symbol name as the predicate
+//!    value and want callers / callees of "any node with that name".
+//! 2. **NodeId-anchored graph traversal** is used by `relation_query`.
+//!    `find_nodes_by_name` resolves the user's `args.symbol` to a set
+//!    of `start_nodes`, and from that point the operation is to walk
+//!    Calls edges touching those specific nodes. Going through sqry-db
+//!    for the first hop would re-do the resolution step less
+//!    precisely (the segment matcher is stricter than
+//!    `find_symbol_candidates`'s suffix matcher) and can broaden the
+//!    BFS frontier with unrelated same-named symbols. The DB15
+//!    followup switched this path to direct edge enumeration;
+//!    `collect_call_relation_via_db` explains the rationale in its
+//!    rustdoc.
+//!
+//! Structural relations (`Imports`, `Exports`, `Returns`) are always
+//! `edges_from(start)` walks because they enumerate "what does this node
+//! import / export / return", not "which nodes import / export / return
+//! X". Routing them through `sqry-db` would silently change the
+//! user-visible semantic.
+//!
+//! Edge metadata (`argument_count`, `is_async`, `alias`, `is_wildcard`,
+//! `kind`) is reconstructed from the enumerated edges so the MCP payload
+//! contract is preserved.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{Result, bail};
@@ -26,6 +51,7 @@ use crate::engine::{canonicalize_in_workspace, engine_for_workspace};
 use crate::tools::{CallHierarchyArgs, CallHierarchyDirection, RelationQueryArgs, RelationType};
 
 use crate::execution::graph_builders::build_graph_metadata;
+use crate::execution::location::node_location_for_reporting_snapshot;
 use crate::execution::types::{
     CallHierarchyData, CallHierarchyNode, NodeRefData, PositionData, RangeData, RelationEdgeData,
     RelationQueryData, ToolExecution,
@@ -44,6 +70,14 @@ fn resolve_workspace_path(path: &str) -> Option<PathBuf> {
         Some(PathBuf::from(path))
     }
 }
+
+/// Execute the `relation_query` tool to find symbol relations.
+///
+/// # Errors
+///
+/// Returns an error if the workspace path cannot be resolved, the unified
+/// graph cannot be loaded or auto-built, or the requested symbol does not
+/// exist anywhere in the graph.
 pub fn execute_relation_query(
     args: &RelationQueryArgs,
 ) -> Result<ToolExecution<RelationQueryData>> {
@@ -55,44 +89,70 @@ pub fn execute_relation_query(
     // Require unified graph for relation queries
     let graph = engine.ensure_graph()?;
 
-    let snapshot = graph.snapshot();
+    let ctx = crate::daemon_adapter::WorkspaceContext {
+        workspace_root,
+        graph,
+        executor: engine.executor_arc(),
+    };
+    inner::execute_relation_query(&ctx, args)
+}
 
-    let start = Instant::now();
+pub(crate) mod inner {
+    use super::{
+        RelationQueryArgs, RelationQueryData, Result, ToolExecution, build_graph_metadata,
+        collect_relation_edges_unified, duration_to_ms, paginate,
+    };
+    use crate::daemon_adapter::WorkspaceContext;
+    use std::sync::Arc;
+    use std::time::Instant;
 
-    tracing::debug!(
-        symbol = %args.symbol,
-        relation = %args.relation.as_str(),
-        max_depth = args.max_depth,
-        max_results = args.max_results,
-        path = %args.path,
-        "Executing relation_query tool"
-    );
+    /// Daemon/SqryServer-shared body for `relation_query`.
+    pub(crate) fn execute_relation_query(
+        ctx: &WorkspaceContext,
+        args: &RelationQueryArgs,
+    ) -> Result<ToolExecution<RelationQueryData>> {
+        let snapshot = Arc::new(ctx.graph.snapshot());
 
-    let edges = collect_relation_edges_unified(&snapshot, &workspace_root, args, args.max_results)?;
+        let start = Instant::now();
 
-    let total = edges.len();
-    let (page_slice, next_page_token) = paginate(&edges, &args.pagination);
+        tracing::debug!(
+            symbol = %args.symbol,
+            relation = %args.relation.as_str(),
+            max_depth = args.max_depth,
+            max_results = args.max_results,
+            path = %args.path,
+            "Executing relation_query tool"
+        );
 
-    let relations = page_slice.to_vec();
+        let edges =
+            collect_relation_edges_unified(&snapshot, &ctx.workspace_root, args, args.max_results)?;
 
-    let graph_metadata = build_graph_metadata(Some(&workspace_root), Some(&snapshot), None);
+        let total = edges.len();
+        let (page_slice, next_page_token) = paginate(&edges, &args.pagination);
 
-    Ok(ToolExecution {
-        data: RelationQueryData {
-            relation_type: args.relation.as_str().to_string(),
-            relations,
-            total: total as u64,
-        },
-        used_index: false,
-        used_graph: true,
-        graph_metadata: Some(graph_metadata),
-        execution_ms: duration_to_ms(start.elapsed()),
-        next_page_token,
-        total: Some(total as u64),
-        truncated: Some(total > args.max_results),
-        candidates_scanned: None,
-        workspace_path: crate::execution::symbol_utils::path_to_forward_slash(workspace_root),
-    })
+        let relations = page_slice.to_vec();
+
+        let graph_metadata = build_graph_metadata(Some(&ctx.workspace_root), Some(&snapshot), None);
+
+        Ok(ToolExecution {
+            data: RelationQueryData {
+                relation_type: args.relation.as_str().to_string(),
+                relations,
+                total: total as u64,
+            },
+            used_index: false,
+            used_graph: true,
+            graph_metadata: Some(graph_metadata),
+            execution_ms: duration_to_ms(start.elapsed()),
+            next_page_token,
+            total: Some(total as u64),
+            truncated: Some(total > args.max_results),
+            candidates_scanned: None,
+            workspace_path: crate::execution::symbol_utils::path_to_forward_slash(
+                &ctx.workspace_root,
+            ),
+        })
+    }
 }
 
 /// Returns true if the node kind is a "definition" kind suitable as a call hierarchy root.
@@ -119,9 +179,14 @@ fn is_definition_kind(kind: NodeKind) -> bool {
     )
 }
 
-/// Collect relation edges for a symbol using unified graph.
+/// Collect relation edges for a symbol using the unified graph.
+///
+/// Predicate-style relations (`Callers`, `Callees`) route through sqry-db.
+/// Structural relations (`Imports`, `Exports`, `Returns`) iterate the start
+/// nodes' outgoing edges directly because they enumerate "what does this
+/// node import/export/return", not "which nodes import X".
 fn collect_relation_edges_unified(
-    snapshot: &GraphSnapshot,
+    snapshot: &Arc<GraphSnapshot>,
     workspace_root: &Path,
     args: &RelationQueryArgs,
     max_results: usize,
@@ -131,157 +196,222 @@ fn collect_relation_edges_unified(
         bail!("Symbol '{}' not found in graph", args.symbol);
     }
 
-    let mut results = Vec::new();
-    let mut visited: HashSet<(NodeId, usize)> = HashSet::new();
-    let mut queue: VecDeque<(NodeId, usize)> = VecDeque::new();
+    match args.relation {
+        RelationType::Callers | RelationType::Callees => Ok(collect_call_relation_via_db(
+            snapshot,
+            workspace_root,
+            &start_nodes,
+            &args.symbol,
+            args.relation,
+            args.max_depth,
+            max_results,
+        )),
+        RelationType::Imports | RelationType::Exports | RelationType::Returns => {
+            Ok(collect_structural_relation(
+                snapshot,
+                workspace_root,
+                &start_nodes,
+                args.relation,
+                max_results,
+            ))
+        }
+    }
+}
 
-    // Initialize BFS from all matching nodes
-    for &node in &start_nodes {
-        queue.push_back((node, 0));
+/// Collect call-style relations (`Callers`/`Callees`) by enumerating Calls
+/// edges anchored on each `start_node`, then BFS-expanding via
+/// `snapshot.get_callers` / `get_callees` for additional depth.
+///
+/// # Why not route through sqry-db here?
+///
+/// `relation_query` resolves a name to `start_nodes` through
+/// `find_nodes_by_name` (suffix-aware), and from that point on the
+/// operation is fundamentally NodeId-anchored: enumerate the Calls edges
+/// touching each `start_node` and walk them. sqry-db's predicate queries
+/// are name-keyed and would re-do the resolution step less precisely
+/// (the segment matcher is stricter than `find_symbol_candidates`'s
+/// suffix matcher). The post-DB15 Codex review caught a multi-hop bug
+/// where a stripped-name dispatch leaked unrelated same-named chains
+/// into the BFS frontier; the structural fix is to not go through the
+/// name-keyed dispatch at all for `relation_query`.
+///
+/// `direct_callers` / `direct_callees` still route through sqry-db (see
+/// [`crate::execution::relation_dispatch`]) because they take a
+/// user-supplied name as the predicate value rather than a resolved
+/// NodeId set, and sqry-db's segment-aware matching with caching is the
+/// right primitive there.
+///
+/// The Phase N architectural mandate that "transport must not bypass
+/// sqry-db" targets bespoke name-keyed predicate dispatch (which DB15
+/// already retired), not NodeId-anchored graph traversal.
+/// `snapshot.edges().edges_to(node)` is a graph primitive, not
+/// transport-owned traversal code.
+fn collect_call_relation_via_db(
+    snapshot: &Arc<GraphSnapshot>,
+    workspace_root: &Path,
+    start_nodes: &[NodeId],
+    _symbol: &str,
+    relation: RelationType,
+    max_depth: usize,
+    max_results: usize,
+) -> Vec<RelationEdgeData> {
+    debug_assert!(matches!(
+        relation,
+        RelationType::Callers | RelationType::Callees
+    ));
+
+    let mut results = Vec::new();
+    let start_set: HashSet<NodeId> = start_nodes.iter().copied().collect();
+
+    // Depth-1: enumerate Calls edges touching each start node directly.
+    // Track which neighbours actually produced an edge so depth-2+ BFS
+    // only walks from real depth-1 endpoints.
+    let mut depth_one_anchors: Vec<NodeId> = Vec::new();
+    let mut depth_one_anchor_set: HashSet<NodeId> = HashSet::new();
+
+    for &start_node in start_nodes {
+        if results.len() >= max_results {
+            return results;
+        }
+        let edges = match relation {
+            RelationType::Callers => snapshot.edges().edges_to(start_node),
+            RelationType::Callees => snapshot.edges().edges_from(start_node),
+            _ => unreachable!("guarded by debug_assert above"),
+        };
+        for edge in edges {
+            if results.len() >= max_results {
+                return results;
+            }
+            if !matches!(edge.kind, EdgeKind::Calls { .. }) {
+                continue;
+            }
+            let counterpart = match relation {
+                RelationType::Callers => edge.source,
+                RelationType::Callees => edge.target,
+                _ => unreachable!(),
+            };
+            let (from_id, to_id) = match relation {
+                RelationType::Callers => (counterpart, start_node),
+                RelationType::Callees => (start_node, counterpart),
+                _ => unreachable!(),
+            };
+            let from_ref = build_node_ref(snapshot, from_id, workspace_root);
+            let to_ref = build_node_ref(snapshot, to_id, workspace_root);
+            let metadata = match &edge.kind {
+                EdgeKind::Calls {
+                    argument_count,
+                    is_async,
+                } => Some(json!({
+                    "argument_count": argument_count,
+                    "is_async": is_async,
+                })),
+                _ => None,
+            };
+            results.push(RelationEdgeData {
+                from: Some(from_ref),
+                to: Some(to_ref),
+                relation_type: relation.as_str().to_string(),
+                depth: 1,
+                metadata,
+            });
+            if depth_one_anchor_set.insert(counterpart) {
+                depth_one_anchors.push(counterpart);
+            }
+        }
     }
 
-    while let Some((current, depth)) = queue.pop_front() {
-        if !should_visit(depth, args.max_depth, (current, depth), &mut visited) {
-            continue;
+    if max_depth <= 1 {
+        return results;
+    }
+
+    // Depth >1: NodeId-anchored BFS seeded ONLY from depth-1 anchors
+    // (counterparts of the start nodes' direct Calls edges). Each anchor
+    // becomes the new "start" for the next level.
+    let mut visited: HashSet<NodeId> = start_set;
+    visited.extend(&depth_one_anchor_set);
+
+    let mut current_frontier: Vec<NodeId> = depth_one_anchors;
+    for depth in 1..max_depth {
+        if results.len() >= max_results {
+            return results;
         }
-
-        let edges_data =
-            collect_edges_for_relation(snapshot, current, depth, workspace_root, args.relation);
-        let reached_limit = append_edges_until_limit(&mut results, edges_data, max_results);
-
-        if reached_limit {
+        let mut next_frontier: Vec<NodeId> = Vec::new();
+        for &node in &current_frontier {
+            let neighbours = match relation {
+                RelationType::Callers => snapshot.get_callers(node),
+                RelationType::Callees => snapshot.get_callees(node),
+                _ => unreachable!("relation enum guarded by debug_assert above"),
+            };
+            for next in neighbours {
+                if !visited.insert(next) {
+                    continue;
+                }
+                let neighbour_set: HashSet<NodeId> = std::iter::once(node).collect();
+                let edges = collect_call_edges_between(
+                    snapshot,
+                    next,
+                    &neighbour_set,
+                    relation,
+                    depth,
+                    workspace_root,
+                );
+                for edge in edges {
+                    if results.len() >= max_results {
+                        return results;
+                    }
+                    results.push(edge);
+                }
+                next_frontier.push(next);
+            }
+        }
+        if next_frontier.is_empty() {
             break;
         }
-
-        enqueue_next_nodes(snapshot, current, depth, args.relation, &mut queue);
-    }
-
-    Ok(results)
-}
-
-/// Check if a node should be visited in BFS traversal.
-fn should_visit(
-    depth: usize,
-    max_depth: usize,
-    key: (NodeId, usize),
-    visited: &mut HashSet<(NodeId, usize)>,
-) -> bool {
-    depth < max_depth && visited.insert(key)
-}
-
-/// Collect edges for a specific relation type.
-fn collect_edges_for_relation(
-    snapshot: &GraphSnapshot,
-    node: NodeId,
-    depth: usize,
-    workspace_root: &Path,
-    relation: RelationType,
-) -> Vec<RelationEdgeData> {
-    match relation {
-        RelationType::Callers => collect_callers(snapshot, node, depth, workspace_root),
-        RelationType::Callees => collect_callees(snapshot, node, depth, workspace_root),
-        RelationType::Imports => collect_imports(snapshot, node, depth, workspace_root),
-        RelationType::Exports => collect_exports(snapshot, node, depth, workspace_root),
-        RelationType::Returns => collect_returns(snapshot, node, depth, workspace_root),
-    }
-}
-
-/// Append edges to results until `max_results` is reached. Returns true if limit was reached.
-fn append_edges_until_limit(
-    results: &mut Vec<RelationEdgeData>,
-    edges: Vec<RelationEdgeData>,
-    max_results: usize,
-) -> bool {
-    for edge in edges {
-        if results.len() >= max_results {
-            return true;
-        }
-        results.push(edge);
-    }
-    results.len() >= max_results
-}
-
-/// Enqueue next nodes for traversal based on relation type.
-fn enqueue_next_nodes(
-    snapshot: &GraphSnapshot,
-    current: NodeId,
-    depth: usize,
-    relation: RelationType,
-    queue: &mut VecDeque<(NodeId, usize)>,
-) {
-    match relation {
-        RelationType::Callers => {
-            for caller_id in snapshot.get_callers(current) {
-                queue.push_back((caller_id, depth + 1));
-            }
-        }
-        RelationType::Callees => {
-            for callee_id in snapshot.get_callees(current) {
-                queue.push_back((callee_id, depth + 1));
-            }
-        }
-        // Imports, Exports, Returns don't continue traversal
-        _ => {}
-    }
-}
-
-/// Collect callers (functions that call this node).
-fn collect_callers(
-    snapshot: &GraphSnapshot,
-    node: NodeId,
-    depth: usize,
-    workspace_root: &Path,
-) -> Vec<RelationEdgeData> {
-    let mut results = Vec::new();
-
-    for edge in snapshot.edges().edges_to(node) {
-        if !matches!(edge.kind, EdgeKind::Calls { .. }) {
-            continue;
-        }
-
-        let from_ref = build_node_ref(snapshot, edge.source, workspace_root);
-        let to_ref = build_node_ref(snapshot, node, workspace_root);
-
-        let metadata = match &edge.kind {
-            EdgeKind::Calls {
-                argument_count,
-                is_async,
-            } => Some(json!({
-                "argument_count": argument_count,
-                "is_async": is_async,
-            })),
-            _ => None,
-        };
-
-        results.push(RelationEdgeData {
-            from: Some(from_ref),
-            to: Some(to_ref),
-            relation_type: "callers".to_string(),
-            depth: depth.try_into().unwrap_or(u32::MAX).saturating_add(1),
-            metadata,
-        });
+        current_frontier = next_frontier;
     }
 
     results
 }
 
-/// Collect callees (functions called by this node).
-fn collect_callees(
+/// For a `(frontier_node, start_set)` pair, look up the actual Calls
+/// edges between them and emit one `RelationEdgeData` per edge with full
+/// metadata (`argument_count`, `is_async`).
+///
+/// Direction depends on the relation: `Callers` means the edge goes
+/// `frontier -> start`; `Callees` means `start -> frontier`.
+fn collect_call_edges_between(
     snapshot: &GraphSnapshot,
-    node: NodeId,
+    frontier_node: NodeId,
+    start_set: &HashSet<NodeId>,
+    relation: RelationType,
     depth: usize,
     workspace_root: &Path,
 ) -> Vec<RelationEdgeData> {
-    let mut results = Vec::new();
-
-    for edge in snapshot.edges().edges_from(node) {
+    let mut emitted = Vec::new();
+    let edges = match relation {
+        RelationType::Callers => snapshot.edges().edges_from(frontier_node),
+        RelationType::Callees => snapshot.edges().edges_to(frontier_node),
+        _ => unreachable!("only Callers/Callees route here"),
+    };
+    for edge in edges {
         if !matches!(edge.kind, EdgeKind::Calls { .. }) {
             continue;
         }
-
-        let from_ref = build_node_ref(snapshot, node, workspace_root);
-        let to_ref = build_node_ref(snapshot, edge.target, workspace_root);
-
+        let counterpart = match relation {
+            RelationType::Callers => edge.target,
+            RelationType::Callees => edge.source,
+            _ => unreachable!(),
+        };
+        if !start_set.contains(&counterpart) {
+            continue;
+        }
+        let (from_id, to_id) = match relation {
+            RelationType::Callers => (frontier_node, counterpart),
+            RelationType::Callees => (counterpart, frontier_node),
+            _ => unreachable!(),
+        };
+        let from_ref = build_node_ref(snapshot, from_id, workspace_root);
+        let to_ref = build_node_ref(snapshot, to_id, workspace_root);
         let metadata = match &edge.kind {
             EdgeKind::Calls {
                 argument_count,
@@ -292,16 +422,50 @@ fn collect_callees(
             })),
             _ => None,
         };
-
-        results.push(RelationEdgeData {
+        emitted.push(RelationEdgeData {
             from: Some(from_ref),
             to: Some(to_ref),
-            relation_type: "callees".to_string(),
-            depth: depth.try_into().unwrap_or(u32::MAX).saturating_add(1),
+            relation_type: relation.as_str().to_string(),
+            depth: u32::try_from(depth).unwrap_or(u32::MAX).saturating_add(1),
             metadata,
         });
     }
+    emitted
+}
 
+/// Collect structural (NodeId-anchored) relations: `Imports`, `Exports`,
+/// `Returns`. These enumerate the start nodes' own outgoing edges and are
+/// always single-level.
+fn collect_structural_relation(
+    snapshot: &Arc<GraphSnapshot>,
+    workspace_root: &Path,
+    start_nodes: &[NodeId],
+    relation: RelationType,
+    max_results: usize,
+) -> Vec<RelationEdgeData> {
+    debug_assert!(matches!(
+        relation,
+        RelationType::Imports | RelationType::Exports | RelationType::Returns
+    ));
+
+    let mut results = Vec::new();
+    for &start in start_nodes {
+        if results.len() >= max_results {
+            break;
+        }
+        let edges = match relation {
+            RelationType::Imports => collect_imports(snapshot, start, 0, workspace_root),
+            RelationType::Exports => collect_exports(snapshot, start, 0, workspace_root),
+            RelationType::Returns => collect_returns(snapshot, start, 0, workspace_root),
+            _ => unreachable!("guarded by debug_assert"),
+        };
+        for edge in edges {
+            if results.len() >= max_results {
+                break;
+            }
+            results.push(edge);
+        }
+    }
     results
 }
 
@@ -417,6 +581,14 @@ fn collect_returns(
 }
 
 /// Build `NodeRefData` from a unified graph node.
+///
+/// Uses [`node_location_for_reporting_snapshot`] as the source of truth for
+/// `range`, `file_uri`, `language`, and `resolution_source`. When the node
+/// is a cross-file stub, the resolved location may live in a different file
+/// than `entry.file` (e.g. an `ExternSymbol` resolution into a header or
+/// classpath JAR), so file-path / language / range must all come from the
+/// resolved location to stay consistent. Falls back to the raw entry when
+/// resolution returns `None` (corrupt graph).
 fn build_node_ref(snapshot: &GraphSnapshot, node_id: NodeId, workspace_root: &Path) -> NodeRefData {
     use sqry_core::graph::unified::node::NodeKind;
 
@@ -448,19 +620,34 @@ fn build_node_ref(snapshot: &GraphSnapshot, node_id: NodeId, workspace_root: &Pa
         _ => "function",
     };
 
-    let language = files
-        .language_for_file(entry.file)
-        .map_or_else(|| "unknown".to_string(), |l| l.to_string());
+    let loc = node_location_for_reporting_snapshot(snapshot, node_id, workspace_root);
 
-    let file_path = files
-        .resolve(entry.file)
-        .map(|arc_path| workspace_root.join(arc_path.as_ref()))
+    // Use the resolved location's file/language when available — the
+    // resolved file may differ from `entry.file` when the node was a stub
+    // resolved through a sibling or extern symbol.
+    let language = loc
+        .as_ref()
+        .and_then(|l| l.language.clone())
+        .or_else(|| files.language_for_file(entry.file).map(|l| l.to_string()))
+        .unwrap_or_else(|| "unknown".to_string());
+
+    let file_path = loc
+        .as_ref()
+        .filter(|l| !l.file_path.is_empty())
+        .map(|l| workspace_root.join(&l.file_path))
+        .or_else(|| {
+            files
+                .resolve(entry.file)
+                .map(|arc_path| workspace_root.join(arc_path.as_ref()))
+        })
         .unwrap_or_default();
 
     let file_uri = url::Url::from_file_path(&file_path).ok().map_or_else(
         || crate::execution::symbol_utils::path_to_forward_slash(&file_path),
         Into::into,
     );
+
+    let resolution_source = loc.as_ref().map(|l| format!("{:?}", l.resolution_source));
 
     NodeRefData {
         name,
@@ -470,15 +657,16 @@ fn build_node_ref(snapshot: &GraphSnapshot, node_id: NodeId, workspace_root: &Pa
         file_uri,
         range: RangeData {
             start: PositionData {
-                line: entry.start_line,
-                character: entry.start_column,
+                line: loc.as_ref().map_or(entry.start_line, |l| l.line),
+                character: loc.as_ref().map_or(entry.start_column, |l| l.column),
             },
             end: PositionData {
-                line: entry.end_line,
-                character: entry.end_column,
+                line: loc.as_ref().map_or(entry.end_line, |l| l.end_line),
+                character: loc.as_ref().map_or(entry.end_column, |l| l.end_column),
             },
         },
         metadata: None,
+        resolution_source,
     }
 }
 
@@ -501,6 +689,7 @@ fn fallback_ref(name: &str, workspace_root: &Path) -> NodeRefData {
             },
         },
         metadata: None,
+        resolution_source: None,
     }
 }
 
@@ -816,77 +1005,6 @@ mod tests {
         }
     }
 
-    // ===== should_visit tests =====
-
-    #[test]
-    fn should_visit_depth_zero_max_one_is_true() {
-        // Create a minimal node to get a real NodeId
-        let mut g = CodeGraph::new();
-        let file_id = g.files_mut().register(Path::new("x.rs")).unwrap();
-        let nm = g.strings_mut().intern("f").unwrap();
-        let entry = NodeEntry::new(NodeKind::Function, nm, file_id);
-        let nid = g.nodes_mut().alloc(entry).unwrap();
-
-        let mut vis: std::collections::HashSet<(NodeId, usize)> = std::collections::HashSet::new();
-        // depth=0, max_depth=1, first visit
-        assert!(should_visit(0, 1, (nid, 0), &mut vis));
-        // second visit (already visited)
-        assert!(!should_visit(0, 1, (nid, 0), &mut vis));
-    }
-
-    #[test]
-    fn should_visit_depth_at_or_above_max_returns_false() {
-        let mut g = CodeGraph::new();
-        let file_id = g.files_mut().register(Path::new("x.rs")).unwrap();
-        let nm = g.strings_mut().intern("g").unwrap();
-        let entry = NodeEntry::new(NodeKind::Function, nm, file_id);
-        let nid = g.nodes_mut().alloc(entry).unwrap();
-        let mut vis = std::collections::HashSet::new();
-        // depth == max_depth
-        assert!(!should_visit(5, 5, (nid, 5), &mut vis));
-        // depth > max_depth
-        assert!(!should_visit(6, 5, (nid, 6), &mut vis));
-    }
-
-    // ===== append_edges_until_limit tests =====
-
-    fn make_edge_data(rel: &str) -> RelationEdgeData {
-        RelationEdgeData {
-            from: None,
-            to: None,
-            relation_type: rel.to_string(),
-            depth: 1,
-            metadata: None,
-        }
-    }
-
-    #[test]
-    fn append_edges_until_limit_below_limit_returns_false() {
-        let mut results = Vec::new();
-        let edges = vec![make_edge_data("callers"), make_edge_data("callers")];
-        let reached = append_edges_until_limit(&mut results, edges, 10);
-        assert!(!reached);
-        assert_eq!(results.len(), 2);
-    }
-
-    #[test]
-    fn append_edges_until_limit_reaches_limit_returns_true() {
-        let mut results = Vec::new();
-        let edges: Vec<_> = (0..5).map(|_| make_edge_data("callers")).collect();
-        let reached = append_edges_until_limit(&mut results, edges, 3);
-        assert!(reached);
-        assert_eq!(results.len(), 3);
-    }
-
-    #[test]
-    fn append_edges_until_limit_already_at_limit_returns_true() {
-        let mut results: Vec<RelationEdgeData> = (0..3).map(|_| make_edge_data("x")).collect();
-        let new_edges = vec![make_edge_data("y")];
-        let reached = append_edges_until_limit(&mut results, new_edges, 3);
-        assert!(reached);
-        assert_eq!(results.len(), 3); // no new edges appended
-    }
-
     // ===== fallback_ref tests =====
 
     #[test]
@@ -1068,60 +1186,246 @@ mod tests {
         }
     }
 
-    // ===== collect_callers / collect_callees tests =====
+    // ===== collect_call_edges_between tests (DB15 migration) =====
+    //
+    // collect_callers / collect_callees were retired in DB15. The new
+    // primitive `collect_call_edges_between` enumerates per-edge metadata
+    // for one (frontier_node, start_set) pair after sqry-db identifies the
+    // matching frontier set.
 
     #[test]
-    fn collect_callees_returns_callee_edge() {
-        let (graph, node_a, _node_b) = make_graph_with_call_edge();
+    fn collect_call_edges_between_emits_callee_edge_under_callees_relation() {
+        let (graph, node_a, node_b) = make_graph_with_call_edge();
         let snapshot = graph.snapshot();
         let ws = workspace_root();
-
-        let callees = collect_callees(&snapshot, node_a, 0, &ws);
-        assert_eq!(callees.len(), 1);
-        assert_eq!(callees[0].relation_type, "callees");
-        assert_eq!(callees[0].depth, 1);
-        // metadata should contain argument_count
-        let meta = callees[0].metadata.as_ref().unwrap();
+        // Callees relation: the user asked "what does X call?" with X =
+        // node_a. sqry-db returns frontier = {node_b} (callees of X). The
+        // dispatcher's start_set holds X = {node_a} (the caller). For each
+        // frontier node we iterate edges_to(frontier) looking for source
+        // in start_set, then emit the (caller -> callee) edge.
+        let start_set: HashSet<NodeId> = std::iter::once(node_a).collect();
+        let edges = collect_call_edges_between(
+            &snapshot,
+            node_b,
+            &start_set,
+            RelationType::Callees,
+            0,
+            &ws,
+        );
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].relation_type, "callees");
+        assert_eq!(edges[0].depth, 1);
+        // Output keeps the physical edge direction: from=caller,
+        // to=callee.
+        assert_eq!(edges[0].from.as_ref().unwrap().name, "caller_fn");
+        assert_eq!(edges[0].to.as_ref().unwrap().name, "callee_fn");
+        let meta = edges[0].metadata.as_ref().unwrap();
         assert!(meta.get("argument_count").is_some());
-        // from is caller_fn, to is callee_fn
-        assert_eq!(callees[0].from.as_ref().unwrap().name, "caller_fn");
-        assert_eq!(callees[0].to.as_ref().unwrap().name, "callee_fn");
     }
 
     #[test]
-    fn collect_callers_returns_caller_edge() {
+    fn collect_call_edges_between_emits_caller_edge_under_callers_relation() {
+        let (graph, node_a, node_b) = make_graph_with_call_edge();
+        let snapshot = graph.snapshot();
+        let ws = workspace_root();
+        // Callers relation: the user asked "who calls X?" with X = node_b.
+        // sqry-db returns frontier = {node_a} (callers of X). The
+        // dispatcher's start_set holds X = {node_b}. For each frontier
+        // node we iterate edges_from(frontier) looking for target in
+        // start_set, then emit the (caller -> callee) edge.
+        let start_set: HashSet<NodeId> = std::iter::once(node_b).collect();
+        let edges = collect_call_edges_between(
+            &snapshot,
+            node_a,
+            &start_set,
+            RelationType::Callers,
+            0,
+            &ws,
+        );
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].relation_type, "callers");
+        assert_eq!(edges[0].from.as_ref().unwrap().name, "caller_fn");
+        assert_eq!(edges[0].to.as_ref().unwrap().name, "callee_fn");
+        let meta = edges[0].metadata.as_ref().unwrap();
+        assert!(meta.get("is_async").is_some());
+    }
+
+    #[test]
+    fn collect_call_edges_between_empty_when_frontier_has_no_call_edges() {
         let (graph, _node_a, node_b) = make_graph_with_call_edge();
         let snapshot = graph.snapshot();
         let ws = workspace_root();
-
-        let callers = collect_callers(&snapshot, node_b, 0, &ws);
-        assert_eq!(callers.len(), 1);
-        assert_eq!(callers[0].relation_type, "callers");
-        // from is caller_fn, to is callee_fn
-        assert_eq!(callers[0].from.as_ref().unwrap().name, "caller_fn");
-        assert_eq!(callers[0].to.as_ref().unwrap().name, "callee_fn");
+        // Use node_b (the callee) as frontier under Callers — node_b has
+        // no outgoing Calls edges so the result must be empty.
+        let start_set: HashSet<NodeId> = HashSet::new();
+        let edges = collect_call_edges_between(
+            &snapshot,
+            node_b,
+            &start_set,
+            RelationType::Callers,
+            0,
+            &ws,
+        );
+        assert!(edges.is_empty());
     }
 
     #[test]
-    fn collect_callers_empty_when_no_callers() {
+    fn collect_call_edges_between_skips_edges_outside_start_set() {
         let (graph, node_a, _node_b) = make_graph_with_call_edge();
         let snapshot = graph.snapshot();
         let ws = workspace_root();
-
-        // node_a is the caller, it should have no callers itself
-        let callers = collect_callers(&snapshot, node_a, 0, &ws);
-        assert!(callers.is_empty());
+        // Frontier node_a has an outgoing Calls edge to node_b, but our
+        // start_set is empty — so the edge does not match.
+        let start_set: HashSet<NodeId> = HashSet::new();
+        let edges = collect_call_edges_between(
+            &snapshot,
+            node_a,
+            &start_set,
+            RelationType::Callers,
+            0,
+            &ws,
+        );
+        assert!(edges.is_empty());
     }
 
-    #[test]
-    fn collect_callees_empty_when_no_callees() {
-        let (graph, _node_a, node_b) = make_graph_with_call_edge();
-        let snapshot = graph.snapshot();
-        let ws = workspace_root();
+    // ===== collect_call_relation_via_db multi-hop regression =====
 
-        // node_b is the callee, it should have no callees itself
-        let callees = collect_callees(&snapshot, node_b, 0, &ws);
-        assert!(callees.is_empty());
+    /// Codex's post-DB15 review found that depth-2+ `relation_query`
+    /// could leak chains belonging to unrelated same-named symbols when
+    /// the start set was narrower than the BFS frontier. The structural
+    /// fix is to enumerate Calls edges directly from the resolved
+    /// `start_nodes` (NodeId-anchored) at depth 1, then BFS only from
+    /// the counterparts of those edges. This unit test constructs a
+    /// graph that distinguishes `alpha::helper` from `beta::helper`
+    /// (the Rust language plugin doesn't surface this distinction so a
+    /// Rust integration fixture cannot exercise the bug; an in-memory
+    /// graph can).
+    ///
+    /// Layout:
+    ///
+    /// ```text
+    /// alpha::helper, beta::helper
+    /// alpha::caller_a -> alpha::helper
+    /// beta::caller_b  -> beta::helper
+    /// alpha::root_a   -> alpha::caller_a
+    /// beta::root_b    -> beta::caller_b
+    /// ```
+    ///
+    /// Querying with `start_nodes = [alpha::helper]` and
+    /// `max_depth = 2` must emit ONLY the alpha chain:
+    ///   alpha::caller_a -> alpha::helper (depth 1)
+    ///   alpha::root_a   -> alpha::caller_a (depth 2)
+    ///
+    /// The pre-fix dispatch would seed depth-2 BFS with both caller_a
+    /// AND caller_b (broad sqry-db result), then emit
+    /// `beta::root_b -> beta::caller_b` at depth 2 — leaking the
+    /// unrelated chain.
+    #[test]
+    fn collect_call_relation_via_db_does_not_leak_unrelated_same_named_chains() {
+        use std::sync::Arc;
+
+        let mut graph = CodeGraph::new();
+        let file_id = graph.files_mut().register(Path::new("lib.rs")).unwrap();
+
+        // Distinct qualified names, identical simple name (`helper`).
+        let mk_node = |g: &mut CodeGraph, qname: &str, simple: &str| -> NodeId {
+            let qn = g.strings_mut().intern(qname).unwrap();
+            let nm = g.strings_mut().intern(simple).unwrap();
+            g.nodes_mut()
+                .alloc(NodeEntry::new(NodeKind::Function, nm, file_id).with_qualified_name(qn))
+                .unwrap()
+        };
+        let alpha_helper = mk_node(&mut graph, "alpha::helper", "helper");
+        let beta_helper = mk_node(&mut graph, "beta::helper", "helper");
+        let alpha_caller = mk_node(&mut graph, "alpha::caller_a", "caller_a");
+        let beta_caller = mk_node(&mut graph, "beta::caller_b", "caller_b");
+        let alpha_root = mk_node(&mut graph, "alpha::root_a", "root_a");
+        let beta_root = mk_node(&mut graph, "beta::root_b", "root_b");
+
+        let calls = EdgeKind::Calls {
+            argument_count: 0,
+            is_async: false,
+        };
+        graph
+            .edges_mut()
+            .add_edge(alpha_caller, alpha_helper, calls.clone(), file_id);
+        graph
+            .edges_mut()
+            .add_edge(beta_caller, beta_helper, calls.clone(), file_id);
+        graph
+            .edges_mut()
+            .add_edge(alpha_root, alpha_caller, calls.clone(), file_id);
+        graph
+            .edges_mut()
+            .add_edge(beta_root, beta_caller, calls, file_id);
+
+        let snapshot = Arc::new(graph.snapshot());
+        let start_nodes = vec![alpha_helper];
+
+        let edges = collect_call_relation_via_db(
+            &snapshot,
+            &workspace_root(),
+            &start_nodes,
+            "alpha::helper",
+            RelationType::Callers,
+            2,
+            100,
+        );
+
+        // Every emitted edge must touch only the alpha chain.
+        for edge in &edges {
+            let from_qn = edge
+                .from
+                .as_ref()
+                .map(|f| f.qualified_name.as_str())
+                .unwrap_or("");
+            let to_qn = edge
+                .to
+                .as_ref()
+                .map(|f| f.qualified_name.as_str())
+                .unwrap_or("");
+            assert!(
+                !from_qn.contains("beta") && !to_qn.contains("beta"),
+                "depth-2 BFS leaked a beta chain: from={from_qn:?} \
+                 to={to_qn:?} (full edges: {edges:#?})"
+            );
+        }
+
+        // Positive: alpha::caller_a -> alpha::helper at depth 1.
+        let depth1 = edges
+            .iter()
+            .any(|e| e.depth == 1 && e.from.as_ref().is_some_and(|f| f.name == "caller_a"));
+        assert!(
+            depth1,
+            "expected alpha::caller_a -> alpha::helper at depth 1, got {edges:#?}"
+        );
+
+        // Positive: alpha::root_a -> alpha::caller_a at depth 2.
+        let depth2 = edges
+            .iter()
+            .any(|e| e.depth >= 2 && e.from.as_ref().is_some_and(|f| f.name == "root_a"));
+        assert!(
+            depth2,
+            "expected alpha::root_a -> alpha::caller_a at depth >= 2, got {edges:#?}"
+        );
+
+        // Sanity: beta nodes were defined and have edges in the graph
+        // (so their absence from the result is the BFS filter, not a
+        // missing fixture).
+        assert!(graph_has_edge(&snapshot, beta_root, beta_caller));
+        assert!(graph_has_edge(&snapshot, beta_caller, beta_helper));
+    }
+
+    fn graph_has_edge(
+        snapshot: &sqry_core::graph::unified::concurrent::GraphSnapshot,
+        src: NodeId,
+        tgt: NodeId,
+    ) -> bool {
+        snapshot
+            .edges()
+            .edges_from(src)
+            .iter()
+            .any(|edge| edge.target == tgt)
     }
 
     // ===== collect_imports tests =====
@@ -1249,103 +1553,16 @@ mod tests {
         assert!(nodes.is_empty());
     }
 
-    // ===== collect_edges_for_relation dispatch tests =====
-
-    #[test]
-    fn collect_edges_for_relation_callers_dispatches_correctly() {
-        let (graph, _node_a, node_b) = make_graph_with_call_edge();
-        let snapshot = graph.snapshot();
-        let ws = workspace_root();
-
-        let edges = collect_edges_for_relation(&snapshot, node_b, 0, &ws, RelationType::Callers);
-        assert_eq!(edges.len(), 1);
-        assert_eq!(edges[0].relation_type, "callers");
-    }
-
-    #[test]
-    fn collect_edges_for_relation_callees_dispatches_correctly() {
-        let (graph, node_a, _node_b) = make_graph_with_call_edge();
-        let snapshot = graph.snapshot();
-        let ws = workspace_root();
-
-        let edges = collect_edges_for_relation(&snapshot, node_a, 0, &ws, RelationType::Callees);
-        assert_eq!(edges.len(), 1);
-        assert_eq!(edges[0].relation_type, "callees");
-    }
-
-    #[test]
-    fn collect_edges_for_relation_returns_dispatches_correctly() {
-        let (graph, node_a, _) = make_graph_with_call_edge();
-        let snapshot = graph.snapshot();
-        let ws = workspace_root();
-
-        let edges = collect_edges_for_relation(&snapshot, node_a, 0, &ws, RelationType::Returns);
-        assert_eq!(edges.len(), 1);
-        assert_eq!(edges[0].relation_type, "returns");
-    }
-
-    // ===== enqueue_next_nodes tests =====
-
-    #[test]
-    fn enqueue_next_nodes_callers_adds_callers_to_queue() {
-        let (graph, _node_a, node_b) = make_graph_with_call_edge();
-        let snapshot = graph.snapshot();
-
-        let mut queue: std::collections::VecDeque<(NodeId, usize)> =
-            std::collections::VecDeque::new();
-        enqueue_next_nodes(&snapshot, node_b, 0, RelationType::Callers, &mut queue);
-
-        // node_b's caller is node_a
-        assert_eq!(queue.len(), 1);
-        assert_eq!(queue[0].1, 1); // depth should be depth+1
-    }
-
-    #[test]
-    fn enqueue_next_nodes_callees_adds_callees_to_queue() {
-        let (graph, node_a, _node_b) = make_graph_with_call_edge();
-        let snapshot = graph.snapshot();
-
-        let mut queue: std::collections::VecDeque<(NodeId, usize)> =
-            std::collections::VecDeque::new();
-        enqueue_next_nodes(&snapshot, node_a, 0, RelationType::Callees, &mut queue);
-
-        // node_a calls node_b
-        assert_eq!(queue.len(), 1);
-        assert_eq!(queue[0].1, 1);
-    }
-
-    #[test]
-    fn enqueue_next_nodes_imports_does_not_enqueue() {
-        let (graph, node_a, _) = make_graph_with_call_edge();
-        let snapshot = graph.snapshot();
-
-        let mut queue: std::collections::VecDeque<(NodeId, usize)> =
-            std::collections::VecDeque::new();
-        enqueue_next_nodes(&snapshot, node_a, 0, RelationType::Imports, &mut queue);
-        assert!(queue.is_empty());
-    }
-
-    #[test]
-    fn enqueue_next_nodes_exports_does_not_enqueue() {
-        let (graph, node_a, _) = make_graph_with_call_edge();
-        let snapshot = graph.snapshot();
-
-        let mut queue: std::collections::VecDeque<(NodeId, usize)> =
-            std::collections::VecDeque::new();
-        enqueue_next_nodes(&snapshot, node_a, 0, RelationType::Exports, &mut queue);
-        assert!(queue.is_empty());
-    }
-
-    #[test]
-    fn enqueue_next_nodes_returns_does_not_enqueue() {
-        let (graph, node_a, _) = make_graph_with_call_edge();
-        let snapshot = graph.snapshot();
-
-        let mut queue: std::collections::VecDeque<(NodeId, usize)> =
-            std::collections::VecDeque::new();
-        enqueue_next_nodes(&snapshot, node_a, 0, RelationType::Returns, &mut queue);
-        assert!(queue.is_empty());
-    }
+    // ===== collect_structural_relation dispatch tests =====
+    //
+    // The DB15 migration retired the BFS-style `collect_edges_for_relation`
+    // and `enqueue_next_nodes` in favour of two narrower helpers:
+    // `collect_call_relation_via_db` (Callers/Callees, sqry-db-routed) and
+    // `collect_structural_relation` (Imports/Exports/Returns, NodeId-anchored
+    // edge enumeration). The Callers/Callees path is exercised by
+    // `collect_call_edges_between_*` above; the structural path is
+    // exercised by the per-relation `collect_*` tests below
+    // (`collect_imports_*`, `collect_exports_*`, `collect_returns_*`).
 
     // ===== collect_exports tests =====
 

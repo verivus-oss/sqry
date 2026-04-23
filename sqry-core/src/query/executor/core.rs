@@ -497,6 +497,59 @@ impl QueryExecutor {
 
         let workspace_root = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
 
+        self.execute_evaluate_with(graph, &parsed, &workspace_root, variables)
+    }
+
+    /// Execute a query against a caller-supplied `CodeGraph`, bypassing the
+    /// graph cache and on-disk loading entirely.
+    ///
+    /// This is the daemon hot-path: the caller already holds the
+    /// workspace-loaded `Arc<CodeGraph>` under a workspace lock, and we must
+    /// NOT re-enter [`Self::get_or_load_graph`] (which would hit disk and
+    /// pollute the executor's process-wide `graph_cache`). Query parsing still
+    /// goes through the AST parse cache; only the graph acquisition path is
+    /// skipped.
+    ///
+    /// The caller-supplied `workspace_root` is canonicalized by this method
+    /// (mirroring [`Self::execute_on_graph_with_variables`]); the caller need
+    /// not pre-canonicalize it. Passing the workspace root is the caller's
+    /// responsibility — it is not derived from the graph.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if query parsing, variable resolution, or predicate
+    /// evaluation fails. Unlike [`Self::execute_on_graph_with_variables`],
+    /// this method cannot produce a "no graph found" error — the graph is
+    /// always supplied by the caller.
+    pub fn execute_on_preloaded_graph(
+        &self,
+        graph: Arc<CodeGraph>,
+        query: &str,
+        workspace_root: &Path,
+        variables: Option<&HashMap<String, String>>,
+    ) -> Result<QueryResults> {
+        let parsed = self.parse_query_ast(query)?;
+        let workspace_root = workspace_root
+            .canonicalize()
+            .unwrap_or_else(|_| workspace_root.to_path_buf());
+
+        self.execute_evaluate_with(graph, &parsed, &workspace_root, variables)
+    }
+
+    /// Shared evaluation body for `execute_on_graph_with_variables` and
+    /// `execute_on_preloaded_graph`.
+    ///
+    /// Both public entrypoints differ only in how they obtain the
+    /// `Arc<CodeGraph>`; everything from variable resolution through
+    /// `evaluate_all` + result assembly is identical and lives here to
+    /// guarantee matching semantics.
+    fn execute_evaluate_with(
+        &self,
+        graph: Arc<CodeGraph>,
+        parsed: &crate::query::ParsedQuery,
+        workspace_root: &Path,
+        variables: Option<&HashMap<String, String>>,
+    ) -> Result<QueryResults> {
         // Resolve variables if provided
         let effective_root = if let Some(vars) = variables {
             crate::query::types::resolve_variables(&parsed.ast.root, vars)
@@ -506,16 +559,12 @@ impl QueryExecutor {
         };
 
         let mut ctx = graph_eval::GraphEvalContext::new(&graph, &self.plugin_manager)
-            .with_workspace_root(&workspace_root)
+            .with_workspace_root(workspace_root)
             .with_parallel_disabled(self.disable_parallel);
 
-        // Precompute imports once per unique imports: target before evaluation
-        for target in graph_eval::collect_import_targets(&effective_root) {
-            ctx.precompute_imports(&target);
-        }
-
         let matches = graph_eval::evaluate_all(&mut ctx, &effective_root)?;
-        let mut results = QueryResults::new(graph, matches).with_workspace_root(workspace_root);
+        let mut results =
+            QueryResults::new(graph, matches).with_workspace_root(workspace_root.to_path_buf());
         results.sort_by_location();
         Ok(results)
     }

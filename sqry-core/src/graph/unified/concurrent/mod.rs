@@ -53,4 +53,4 @@ mod channel;
 mod graph;
 
 pub use channel::{ChannelError, ChannelStats, GraphUpdate, UpdateChannel, UpdateReceiver};
-pub use graph::{CodeGraph, ConcurrentCodeGraph, GraphSnapshot};
+pub use graph::{CodeGraph, ConcurrentCodeGraph, GraphAccess, GraphSnapshot};

@@ -566,8 +566,13 @@ fn preindex_nodes_by_file(snapshot: &GraphSnapshot) -> HashMap<String, Vec<NodeI
 
     let mut by_file: HashMap<String, Vec<NodeId>> = HashMap::new();
 
-    // Single pass over all nodes
+    // Single pass over all nodes.
+    // Gate 0d iter-2 fix: skip unified losers from hierarchical
+    // search preindex. See `NodeEntry::is_unified_loser`.
     for (node_id, entry) in snapshot.iter_nodes() {
+        if entry.is_unified_loser() {
+            continue;
+        }
         let Some(relative_path) = file_paths.get(&entry.file) else {
             continue;
         };

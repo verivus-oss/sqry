@@ -11,15 +11,20 @@ use serde::{Deserialize, Serialize};
 
 use std::collections::HashMap;
 
-use super::format::{FormatVersion, GraphHeader, MAGIC_BYTES_V8, VERSION};
+use super::format::{FormatVersion, GraphHeader, MAGIC_BYTES_V9, MAGIC_BYTES_V10, VERSION};
 use super::manifest::ConfigProvenance;
 use crate::config::buffers::max_snapshot_bytes;
 use crate::graph::unified::BidirectionalEdgeStore;
+use crate::graph::unified::bind::alias::AliasTable;
+use crate::graph::unified::bind::scope::arena::ScopeArena;
+use crate::graph::unified::bind::scope::provenance::ScopeProvenanceStore;
+use crate::graph::unified::bind::shadow::ShadowTable;
+use crate::graph::unified::build::phase4e_binding::derive_binding_plane;
 use crate::graph::unified::concurrent::CodeGraph;
 use crate::graph::unified::resolution::is_canonical_graph_qualified_name;
 use crate::graph::unified::storage::{
-    AuxiliaryIndices, EdgeProvenanceStore, FileRegistry, NodeArena, NodeMetadataStore,
-    NodeProvenanceStore, StringInterner,
+    AuxiliaryIndices, EdgeProvenanceStore, FileRegistry, FileSegmentTable, NodeArena,
+    NodeMetadataStore, NodeProvenanceStore, StringInterner,
 };
 use crate::plugin::PluginManager;
 
@@ -131,9 +136,11 @@ impl From<postcard::Error> for PersistenceError {
     }
 }
 
-/// Serializable snapshot of the graph state (V8+).
+/// Serializable snapshot of the graph state (V8 shape, used as V8 legacy read target).
 ///
-/// This is the complete graph state that gets persisted to disk.
+/// This is the V8 on-disk layout. The V9 writer extends this with Phase 2 binding-plane
+/// stores. On load of a V8 blob, this struct is deserialized and then upconverted to V9
+/// via `upconvert_v8_to_v9`.
 #[derive(Debug, Serialize, Deserialize)]
 struct GraphSnapshotData {
     /// Node storage
@@ -152,6 +159,74 @@ struct GraphSnapshotData {
     node_provenance: NodeProvenanceStore,
     /// Dense edge provenance (Phase 1 fact layer).
     edge_provenance: EdgeProvenanceStore,
+}
+
+/// Serializable snapshot of the graph state (V9 — Phase 2 binding plane).
+///
+/// Extends [`GraphSnapshotData`] (V8) with `scope_arena`, `alias_table`,
+/// `shadow_table`, and `scope_provenance`. On V9 load, the loader calls
+/// `ScopeProvenanceStore::rebuild_reverse_index(&scope_arena)` after
+/// deserialization to restore the in-memory `stable_id → ScopeId` map.
+#[derive(Debug, Serialize, Deserialize)]
+struct GraphSnapshotDataV9 {
+    /// Node storage.
+    nodes: NodeArena,
+    /// Edge storage (forward + reverse).
+    edges: BidirectionalEdgeStore,
+    /// String interner.
+    strings: StringInterner,
+    /// File registry.
+    files: FileRegistry,
+    /// Auxiliary indices.
+    indices: AuxiliaryIndices,
+    /// Sparse macro boundary metadata (keyed by full `NodeId`).
+    macro_metadata: NodeMetadataStore,
+    /// Dense node provenance (Phase 1 fact layer).
+    node_provenance: NodeProvenanceStore,
+    /// Dense edge provenance (Phase 1 fact layer).
+    edge_provenance: EdgeProvenanceStore,
+    /// Phase 2: generational scope arena (slot-based, tombstoned-on-free).
+    scope_arena: ScopeArena,
+    /// Phase 2: alias derivation table (sorted by scope; `by_scope` index rebuilt on load).
+    alias_table: AliasTable,
+    /// Phase 2: shadow derivation table (sorted by scope+symbol; index rebuilt on load).
+    shadow_table: ShadowTable,
+    /// Phase 2: scope provenance store (reverse index rebuilt on load from `scope_arena`).
+    scope_provenance: ScopeProvenanceStore,
+}
+
+/// Serializable snapshot of the graph state (V10 — Phase 3 derived DB).
+///
+/// Extends [`GraphSnapshotDataV9`] with `file_segments`. On V9 load, the
+/// upconvert function rebuilds the segment table from the node arena.
+#[derive(Debug, Serialize, Deserialize)]
+struct GraphSnapshotDataV10 {
+    /// Node storage.
+    nodes: NodeArena,
+    /// Edge storage (forward + reverse).
+    edges: BidirectionalEdgeStore,
+    /// String interner.
+    strings: StringInterner,
+    /// File registry.
+    files: FileRegistry,
+    /// Auxiliary indices.
+    indices: AuxiliaryIndices,
+    /// Sparse macro boundary metadata (keyed by full `NodeId`).
+    macro_metadata: NodeMetadataStore,
+    /// Dense node provenance (Phase 1 fact layer).
+    node_provenance: NodeProvenanceStore,
+    /// Dense edge provenance (Phase 1 fact layer).
+    edge_provenance: EdgeProvenanceStore,
+    /// Phase 2: generational scope arena.
+    scope_arena: ScopeArena,
+    /// Phase 2: alias derivation table.
+    alias_table: AliasTable,
+    /// Phase 2: shadow derivation table.
+    shadow_table: ShadowTable,
+    /// Phase 2: scope provenance store.
+    scope_provenance: ScopeProvenanceStore,
+    /// Phase 3: per-file segment table mapping FileId to node arena ranges.
+    file_segments: FileSegmentTable,
 }
 
 /// V7-shaped snapshot data (pre-Phase-1, no provenance fields).
@@ -206,6 +281,9 @@ fn validate_header_sanity(header: &GraphHeader) -> Result<(), PersistenceError> 
     Ok(())
 }
 
+/// Validates header counts against a deserialized V8 snapshot (legacy; kept for
+/// reference — all live load paths now use [`validate_loaded_snapshot_v9`]).
+#[allow(dead_code)]
 fn validate_loaded_snapshot(
     header: &GraphHeader,
     snapshot_data: &GraphSnapshotData,
@@ -246,8 +324,200 @@ fn validate_loaded_snapshot(
     Ok(())
 }
 
+/// Validates header counts against a deserialized V9 snapshot.
+#[allow(dead_code)] // Preserved as reference; V10 live paths bypass this.
+fn validate_loaded_snapshot_v9(
+    header: &GraphHeader,
+    snapshot_data: &GraphSnapshotDataV9,
+) -> Result<(), PersistenceError> {
+    let forward_stats = snapshot_data.edges.stats().forward;
+    let total_edges = forward_stats.csr_edge_count + forward_stats.delta_edge_count;
+
+    if header.node_count != snapshot_data.nodes.len() {
+        return Err(PersistenceError::ValidationFailed(format!(
+            "node_count mismatch: header={}, data={}",
+            header.node_count,
+            snapshot_data.nodes.len()
+        )));
+    }
+    if header.edge_count != total_edges {
+        return Err(PersistenceError::ValidationFailed(format!(
+            "edge_count mismatch: header={}, data={}",
+            header.edge_count, total_edges
+        )));
+    }
+    if header.string_count != snapshot_data.strings.len() {
+        return Err(PersistenceError::ValidationFailed(format!(
+            "string_count mismatch: header={}, data={}",
+            header.string_count,
+            snapshot_data.strings.len()
+        )));
+    }
+    if header.file_count != snapshot_data.files.len() {
+        return Err(PersistenceError::ValidationFailed(format!(
+            "file_count mismatch: header={}, data={}",
+            header.file_count,
+            snapshot_data.files.len()
+        )));
+    }
+
+    validate_snapshot_semantics_v9(snapshot_data)?;
+
+    Ok(())
+}
+
+/// Validates semantic invariants of a deserialized V8 snapshot (legacy; kept for
+/// reference — all live load paths now use [`validate_snapshot_semantics_v9`]).
+#[allow(dead_code)]
 fn validate_snapshot_semantics(snapshot_data: &GraphSnapshotData) -> Result<(), PersistenceError> {
     for (node_id, entry) in snapshot_data.nodes.iter() {
+        // Skip inert merged-losers from Phase 4c-prime cross-file node
+        // unification — those arena slots are kept `Occupied` so
+        // `NodeArena::slot_count()` stays stable for CSR row_ptr
+        // sizing, but `merge_node_into` clears their `name` to
+        // `StringId::INVALID` and their `qualified_name` to `None`.
+        // They are name-invisible by construction (see
+        // `AuxiliaryIndices::build_from_arena`), so the resolver
+        // never surfaces them; validating resolver-eligibility fields
+        // would be both wrong (they have no resolvable name) and a
+        // regression on the Gate 0d iter-1 blocker fix.
+        if entry.name == crate::graph::unified::string::StringId::INVALID {
+            continue;
+        }
+
+        let file_path = snapshot_data.files.resolve(entry.file).ok_or_else(|| {
+            PersistenceError::ValidationFailed(format!(
+                "resolver-eligible node {node_id:?} has unresolved file id {:?}; run `sqry index` to rebuild",
+                entry.file
+            ))
+        })?;
+
+        let _name = snapshot_data.strings.resolve(entry.name).ok_or_else(|| {
+            PersistenceError::ValidationFailed(format!(
+                "resolver-eligible node {node_id:?} has unresolved name string id {:?}; run `sqry index` to rebuild",
+                entry.name
+            ))
+        })?;
+
+        let Some(qualified_name_id) = entry.qualified_name else {
+            continue;
+        };
+
+        let qualified_name =
+            snapshot_data
+                .strings
+                .resolve(qualified_name_id)
+                .ok_or_else(|| {
+                    PersistenceError::ValidationFailed(format!(
+                        "resolver-eligible node {node_id:?} has unresolved qualified-name string id {qualified_name_id:?}; run `sqry index` to rebuild"
+                    ))
+                })?;
+
+        let language = snapshot_data
+            .files
+            .language_for_file(entry.file)
+            .ok_or_else(|| {
+                PersistenceError::ValidationFailed(format!(
+                    "resolver-eligible node {node_id:?} in '{}' is missing file language metadata; run `sqry index` to rebuild",
+                    file_path.display()
+                ))
+            })?;
+
+        if !is_canonical_graph_qualified_name(language, qualified_name.as_ref()) {
+            return Err(PersistenceError::ValidationFailed(format!(
+                "resolver-eligible node {node_id:?} in '{}' stores non-canonical qualified name '{}'; run `sqry index` to rebuild",
+                file_path.display(),
+                qualified_name
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+/// Validates semantic invariants of a deserialized V9 snapshot.
+///
+/// Checks every live node's file and name string IDs against the registry and
+/// interner. V9-specific stores (scope_arena, alias_table, shadow_table,
+/// scope_provenance) are not cross-validated here — they carry internal
+/// consistency invariants enforced during derivation.
+#[allow(dead_code)] // Preserved as reference; V10 writers bypass this.
+fn validate_snapshot_semantics_v9(
+    snapshot_data: &GraphSnapshotDataV9,
+) -> Result<(), PersistenceError> {
+    for (node_id, entry) in snapshot_data.nodes.iter() {
+        // Skip inert merged-losers (see `validate_snapshot_semantics`
+        // above for the full contract).
+        if entry.name == crate::graph::unified::string::StringId::INVALID {
+            continue;
+        }
+
+        let file_path = snapshot_data.files.resolve(entry.file).ok_or_else(|| {
+            PersistenceError::ValidationFailed(format!(
+                "resolver-eligible node {node_id:?} has unresolved file id {:?}; run `sqry index` to rebuild",
+                entry.file
+            ))
+        })?;
+
+        let _name = snapshot_data.strings.resolve(entry.name).ok_or_else(|| {
+            PersistenceError::ValidationFailed(format!(
+                "resolver-eligible node {node_id:?} has unresolved name string id {:?}; run `sqry index` to rebuild",
+                entry.name
+            ))
+        })?;
+
+        let Some(qualified_name_id) = entry.qualified_name else {
+            continue;
+        };
+
+        let qualified_name =
+            snapshot_data
+                .strings
+                .resolve(qualified_name_id)
+                .ok_or_else(|| {
+                    PersistenceError::ValidationFailed(format!(
+                        "resolver-eligible node {node_id:?} has unresolved qualified-name string id {qualified_name_id:?}; run `sqry index` to rebuild"
+                    ))
+                })?;
+
+        let language = snapshot_data
+            .files
+            .language_for_file(entry.file)
+            .ok_or_else(|| {
+                PersistenceError::ValidationFailed(format!(
+                    "resolver-eligible node {node_id:?} in '{}' is missing file language metadata; run `sqry index` to rebuild",
+                    file_path.display()
+                ))
+            })?;
+
+        if !is_canonical_graph_qualified_name(language, qualified_name.as_ref()) {
+            return Err(PersistenceError::ValidationFailed(format!(
+                "resolver-eligible node {node_id:?} in '{}' stores non-canonical qualified name '{}'; run `sqry index` to rebuild",
+                file_path.display(),
+                qualified_name
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+/// Validates snapshot semantics for V10 (same rules as V9, operates on V10 fields).
+fn validate_snapshot_semantics_v10(
+    snapshot_data: &GraphSnapshotDataV10,
+) -> Result<(), PersistenceError> {
+    for (node_id, entry) in snapshot_data.nodes.iter() {
+        // Skip inert merged-losers from Phase 4c-prime cross-file node
+        // unification. Their slots stay `Occupied` so CSR sizing is
+        // preserved, but `merge_node_into` clears `name` /
+        // `qualified_name` on the loser. The resolver never surfaces
+        // them (see `AuxiliaryIndices::build_from_arena`), so
+        // resolver-eligibility validation must treat them as
+        // intentionally-inert rather than corrupt.
+        if entry.name == crate::graph::unified::string::StringId::INVALID {
+            continue;
+        }
+
         let file_path = snapshot_data.files.resolve(entry.file).ok_or_else(|| {
             PersistenceError::ValidationFailed(format!(
                 "resolver-eligible node {node_id:?} has unresolved file id {:?}; run `sqry index` to rebuild",
@@ -325,18 +595,11 @@ fn read_prev_fact_epoch(path: &Path) -> Option<u64> {
     let file = File::open(path).ok()?;
     let mut reader = BufReader::new(file);
 
-    // Read magic — accept both V7 and V8
-    let mut magic = [0u8; 13];
-    reader.read_exact(&mut magic).ok()?;
-    FormatVersion::from_magic(&magic)?; // reject unknown magic
-
-    // Read header length
-    let header_len = read_u32_le(&mut reader).ok()? as usize;
+    let (_version, header_len, _consumed) = read_magic_and_header_len(&mut reader).ok()?;
     if header_len > MAX_HEADER_BYTES {
         return None;
     }
 
-    // Read and deserialize header
     let mut header_buf = vec![0u8; header_len];
     reader.read_exact(&mut header_buf).ok()?;
     let header: GraphHeader = postcard::from_bytes(&header_buf).ok()?;
@@ -370,7 +633,192 @@ fn upconvert_v7_to_v8(v7: GraphSnapshotDataV7) -> GraphSnapshotData {
     }
 }
 
+/// Upconverts a deserialized V8 snapshot into V9 by running Phase 4e binding-plane
+/// derivation on the materialized graph.
+///
+/// This function:
+/// 1. Materializes a `CodeGraph` from the V8 components.
+/// 2. Runs `derive_binding_plane(&mut graph)` to populate `scope_arena`,
+///    `alias_table`, `shadow_table`, and `scope_provenance_store`.
+/// 3. Returns a `GraphSnapshotDataV9` ready for validation and `CodeGraph` construction.
+///
+/// The reverse index on `ScopeProvenanceStore` is built during derivation;
+/// no separate `rebuild_reverse_index` call is required here.
+fn upconvert_v8_to_v9(v8: GraphSnapshotData) -> GraphSnapshotDataV9 {
+    let node_provenance = v8.node_provenance;
+    let edge_provenance = v8.edge_provenance;
+    let fact_epoch = 0; // V8 fact_epoch stamped on header; CodeGraph.fact_epoch defaults to 0 for upconvert
+
+    let mut graph = CodeGraph::from_components(
+        v8.nodes,
+        v8.edges,
+        v8.strings,
+        v8.files,
+        v8.indices,
+        v8.macro_metadata,
+    );
+    graph.set_provenance(node_provenance, edge_provenance, fact_epoch);
+
+    // Run Phase 4e binding-plane derivation (scopes, aliases, shadows, provenance).
+    derive_binding_plane(&mut graph);
+
+    // Extract V9 fields from the now-derived graph.
+    let snapshot = graph.snapshot();
+    let scope_arena = snapshot.scope_arena().clone();
+    let alias_table = snapshot.alias_table().clone();
+    let shadow_table = snapshot.shadow_table().clone();
+    let scope_provenance = snapshot.scope_provenance_store().clone();
+
+    // Re-extract V8 fields (the underlying stores are unchanged by Phase 4e).
+    let node_prov = snapshot.nodes().iter().fold(
+        {
+            let mut s = NodeProvenanceStore::new();
+            s.resize_to(snapshot.nodes().slot_count());
+            s
+        },
+        |mut acc, (nid, _)| {
+            if let Some(p) = snapshot.node_provenance(nid) {
+                acc.insert(nid, *p);
+            }
+            acc
+        },
+    );
+
+    use crate::graph::unified::edge::id::EdgeId;
+    use crate::graph::unified::storage::edge_provenance::EdgeProvenance;
+    let edge_stats = snapshot.edges().stats().forward;
+    let total_edges = edge_stats.csr_edge_count + edge_stats.delta_edge_count;
+    let mut edge_prov = EdgeProvenanceStore::new();
+    edge_prov.resize_to(total_edges);
+    for edge_idx in 0..total_edges {
+        if let Ok(idx) = u32::try_from(edge_idx) {
+            let eid = EdgeId::new(idx);
+            if eid.is_valid() {
+                let p = snapshot
+                    .edge_provenance(eid)
+                    .cloned()
+                    .unwrap_or_else(|| EdgeProvenance::fresh(0));
+                edge_prov.insert(eid, p);
+            }
+        }
+    }
+
+    GraphSnapshotDataV9 {
+        nodes: snapshot.nodes().clone(),
+        edges: snapshot.edges().clone(),
+        strings: snapshot.strings().clone(),
+        files: snapshot.files().clone(),
+        indices: snapshot.indices().clone(),
+        macro_metadata: snapshot.macro_metadata().clone(),
+        node_provenance: node_prov,
+        edge_provenance: edge_prov,
+        scope_arena,
+        alias_table,
+        shadow_table,
+        scope_provenance,
+    }
+}
+
+/// Upconvert a V9 snapshot to V10 by rebuilding the `FileSegmentTable` from
+/// the node arena.
+///
+/// The segment table maps each `FileId` to its contiguous `(start_slot, slot_count)`
+/// range in the arena. Since V9 does not persist this table, we scan the arena
+/// to derive it: for each file, find the min and max occupied slot indices, then
+/// record `(min, max - min + 1)`.
+fn upconvert_v9_to_v10(v9: GraphSnapshotDataV9) -> GraphSnapshotDataV10 {
+    let file_segments = rebuild_file_segments_from_arena(&v9.nodes);
+
+    GraphSnapshotDataV10 {
+        nodes: v9.nodes,
+        edges: v9.edges,
+        strings: v9.strings,
+        files: v9.files,
+        indices: v9.indices,
+        macro_metadata: v9.macro_metadata,
+        node_provenance: v9.node_provenance,
+        edge_provenance: v9.edge_provenance,
+        scope_arena: v9.scope_arena,
+        alias_table: v9.alias_table,
+        shadow_table: v9.shadow_table,
+        scope_provenance: v9.scope_provenance,
+        file_segments,
+    }
+}
+
+/// Rebuilds a `FileSegmentTable` by scanning the node arena.
+///
+/// For each occupied slot, records the `FileId` and slot index. Then for each
+/// file, computes `(min_slot, max_slot - min_slot + 1)`.
+///
+/// This is used during V9→V10 upconversion and as a fallback when loading
+/// snapshots without a persisted segment table.
+pub fn rebuild_file_segments_from_arena(arena: &NodeArena) -> FileSegmentTable {
+    use crate::graph::unified::file::id::FileId;
+    use std::collections::HashMap;
+
+    let mut file_ranges: HashMap<FileId, (u32, u32)> = HashMap::new(); // (min, max)
+
+    for (idx, slot) in arena.slots().iter().enumerate() {
+        if let Some(entry) = slot.get() {
+            let fid = entry.file;
+            if fid != FileId::INVALID {
+                let slot_idx = idx as u32;
+                file_ranges
+                    .entry(fid)
+                    .and_modify(|(min, max)| {
+                        if slot_idx < *min {
+                            *min = slot_idx;
+                        }
+                        if slot_idx > *max {
+                            *max = slot_idx;
+                        }
+                    })
+                    .or_insert((slot_idx, slot_idx));
+            }
+        }
+    }
+
+    let mut table = FileSegmentTable::with_capacity(file_ranges.len());
+    for (fid, (min, max)) in file_ranges {
+        table.record_range(fid, min, max - min + 1);
+    }
+    table
+}
+
 /// Read a little-endian u32 from a reader.
+/// Reads magic bytes and header length from a reader, handling both 13-byte
+/// (V7-V9) and 14-byte (V10) magic sequences.
+///
+/// Returns `(FormatVersion, header_length, bytes_consumed)`.
+fn read_magic_and_header_len(
+    reader: &mut impl Read,
+) -> Result<(FormatVersion, usize, u64), PersistenceError> {
+    // Read 14 bytes to cover the longest magic (V10 = 14 bytes).
+    // If the file is shorter, `read_exact` returns an IO error, which is fine —
+    // a valid snapshot is always longer than 14 bytes.
+    let mut magic = [0u8; 14];
+    reader.read_exact(&mut magic)?;
+
+    let format_version =
+        FormatVersion::from_magic(&magic).ok_or_else(|| PersistenceError::InvalidMagic {
+            expected: MAGIC_BYTES_V10.to_vec(),
+            found: magic.to_vec(),
+        })?;
+
+    // V10 magic is 14 bytes — all consumed. Read full u32 header length.
+    // V7-V9 magic is 13 bytes — byte 14 is the first byte of the header length.
+    if format_version == FormatVersion::V10 {
+        let hl = read_u32_le(reader)? as usize;
+        Ok((format_version, hl, 18)) // 14 magic + 4 header_len
+    } else {
+        let mut rest = [0u8; 3];
+        reader.read_exact(&mut rest)?;
+        let hl = u32::from_le_bytes([magic[13], rest[0], rest[1], rest[2]]) as usize;
+        Ok((format_version, hl, 17)) // 14 read + 3 rest = 17; equivalent to 13 magic + 4 header_len
+    }
+}
+
 fn read_u32_le(reader: &mut impl Read) -> Result<u32, std::io::Error> {
     let mut buf = [0u8; 4];
     reader.read_exact(&mut buf)?;
@@ -565,6 +1013,116 @@ fn stamp_file_indexed_at(files: &mut FileRegistry, epoch: u64) {
     }
 }
 
+/// Writes a framed V9 snapshot to a buffered writer.
+///
+/// Frame layout (same as V8 but with `MAGIC_BYTES_V9`):
+/// 1. Magic bytes (`SQRY_GRAPH_V9`, 13 bytes)
+/// 2. Header length (LE u32)
+/// 3. Header (postcard-encoded `GraphHeader`)
+/// 4. Data length (LE u64)
+/// 5. Data (postcard-encoded `GraphSnapshotDataV9`)
+#[allow(clippy::cast_possible_truncation)] // data_bytes.len() validated < max_snapshot_bytes()
+#[allow(dead_code)] // Preserved for V9 compatibility reference.
+fn write_framed_v9(
+    writer: &mut BufWriter<File>,
+    header: &GraphHeader,
+    snapshot_data: &GraphSnapshotDataV9,
+) -> Result<(), PersistenceError> {
+    // Invariant: interner lookup must be consistent before serialization.
+    debug_assert!(
+        !snapshot_data.strings.is_lookup_stale(),
+        "Cannot serialize StringInterner with stale lookup — \
+         call build_dedup_table() before saving"
+    );
+
+    let header_bytes = postcard::to_allocvec(header)?;
+    let data_bytes = postcard::to_allocvec(snapshot_data)?;
+
+    if header_bytes.len() > MAX_HEADER_BYTES {
+        return Err(PersistenceError::ValidationFailed(format!(
+            "header too large to save: {} bytes exceeds MAX_HEADER_BYTES ({} bytes)",
+            header_bytes.len(),
+            MAX_HEADER_BYTES,
+        )));
+    }
+    let max_data_bytes = max_snapshot_bytes();
+    if data_bytes.len() as u64 > max_data_bytes {
+        return Err(PersistenceError::ValidationFailed(format!(
+            "data section too large to save: {} bytes exceeds limit ({} bytes); \
+             increase SQRY_MAX_SNAPSHOT_BYTES if the codebase legitimately requires a larger snapshot",
+            data_bytes.len(),
+            max_data_bytes,
+        )));
+    }
+
+    writer.write_all(MAGIC_BYTES_V9)?;
+    writer.write_all(
+        &u32::try_from(header_bytes.len())
+            .map_err(|_| {
+                PersistenceError::ValidationFailed(
+                    "header too large for u32 length prefix".to_string(),
+                )
+            })?
+            .to_le_bytes(),
+    )?;
+    writer.write_all(&header_bytes)?;
+    writer.write_all(&(data_bytes.len() as u64).to_le_bytes())?;
+    writer.write_all(&data_bytes)?;
+
+    writer.flush()?;
+    Ok(())
+}
+
+/// Writes a V10 snapshot with length-prefixed framing.
+fn write_framed_v10(
+    writer: &mut BufWriter<File>,
+    header: &GraphHeader,
+    snapshot_data: &GraphSnapshotDataV10,
+) -> Result<(), PersistenceError> {
+    debug_assert!(
+        !snapshot_data.strings.is_lookup_stale(),
+        "Cannot serialize StringInterner with stale lookup — \
+         call build_dedup_table() before saving"
+    );
+
+    let header_bytes = postcard::to_allocvec(header)?;
+    let data_bytes = postcard::to_allocvec(snapshot_data)?;
+
+    if header_bytes.len() > MAX_HEADER_BYTES {
+        return Err(PersistenceError::ValidationFailed(format!(
+            "header too large to save: {} bytes exceeds MAX_HEADER_BYTES ({} bytes)",
+            header_bytes.len(),
+            MAX_HEADER_BYTES,
+        )));
+    }
+    let max_data_bytes = max_snapshot_bytes();
+    if data_bytes.len() as u64 > max_data_bytes {
+        return Err(PersistenceError::ValidationFailed(format!(
+            "data section too large to save: {} bytes exceeds limit ({} bytes); \
+             increase SQRY_MAX_SNAPSHOT_BYTES if the codebase legitimately requires a larger snapshot",
+            data_bytes.len(),
+            max_data_bytes,
+        )));
+    }
+
+    writer.write_all(MAGIC_BYTES_V10)?;
+    writer.write_all(
+        &u32::try_from(header_bytes.len())
+            .map_err(|_| {
+                PersistenceError::ValidationFailed(
+                    "header too large for u32 length prefix".to_string(),
+                )
+            })?
+            .to_le_bytes(),
+    )?;
+    writer.write_all(&header_bytes)?;
+    writer.write_all(&(data_bytes.len() as u64).to_le_bytes())?;
+    writer.write_all(&data_bytes)?;
+
+    writer.flush()?;
+    Ok(())
+}
+
 /// # Errors
 ///
 /// Returns an error if the file cannot be created or serialization fails.
@@ -596,7 +1154,16 @@ pub fn save_to_path(graph: &CodeGraph, path: impl AsRef<Path>) -> Result<(), Per
     // Stamp file-level provenance: indexed_at = fact_epoch for every entry
     stamp_file_indexed_at(&mut files, fact_epoch);
 
-    let snapshot_data = GraphSnapshotData {
+    // Extract Phase 2 binding-plane stores from the snapshot.
+    let scope_arena = snapshot.scope_arena().clone();
+    let alias_table = snapshot.alias_table().clone();
+    let shadow_table = snapshot.shadow_table().clone();
+    let scope_provenance = snapshot.scope_provenance_store().clone();
+
+    // Extract Phase 3 file segment table.
+    let file_segments = snapshot.file_segments().clone();
+
+    let snapshot_data = GraphSnapshotDataV10 {
         nodes,
         edges,
         strings,
@@ -605,21 +1172,16 @@ pub fn save_to_path(graph: &CodeGraph, path: impl AsRef<Path>) -> Result<(), Per
         macro_metadata,
         node_provenance,
         edge_provenance,
+        scope_arena,
+        alias_table,
+        shadow_table,
+        scope_provenance,
+        file_segments,
     };
 
-    validate_snapshot_semantics(&snapshot_data)?;
+    validate_snapshot_semantics_v10(&snapshot_data)?;
 
-    // Invariant: the interner's lookup must be consistent before serialization.
-    // A stale lookup would serialize correctly (lookup_stale is #[serde(skip)]),
-    // but deserialization would silently produce an interner where lookup and
-    // slots are out of sync. Assert this invariant at the persistence boundary.
-    debug_assert!(
-        !snapshot_data.strings.is_lookup_stale(),
-        "Cannot serialize StringInterner with stale lookup — \
-         call build_dedup_table() before saving"
-    );
-
-    // Create header — V8 with stamped fact_epoch and correct version tag
+    // Create header — V10 with stamped fact_epoch and correct version tag
     let forward_stats = snapshot_data.edges.stats().forward;
     let total_edges = forward_stats.csr_edge_count + forward_stats.delta_edge_count;
     let mut header = GraphHeader::new(
@@ -628,48 +1190,10 @@ pub fn save_to_path(graph: &CodeGraph, path: impl AsRef<Path>) -> Result<(), Per
         snapshot_data.strings.len(),
         snapshot_data.files.len(),
     );
-    header.version = FormatVersion::V8.as_u32();
+    header.version = FormatVersion::V10.as_u32();
     header.set_fact_epoch(fact_epoch);
 
-    // Serialize header and data to buffers
-    let header_bytes = postcard::to_allocvec(&header)?;
-    let data_bytes = postcard::to_allocvec(&snapshot_data)?;
-
-    // Validate sizes match load-time limits (symmetry: reject on save what load would reject)
-    if header_bytes.len() > MAX_HEADER_BYTES {
-        return Err(PersistenceError::ValidationFailed(format!(
-            "header too large to save: {} bytes exceeds MAX_HEADER_BYTES ({} bytes)",
-            header_bytes.len(),
-            MAX_HEADER_BYTES,
-        )));
-    }
-    let max_data_bytes = max_snapshot_bytes();
-    if data_bytes.len() as u64 > max_data_bytes {
-        return Err(PersistenceError::ValidationFailed(format!(
-            "data section too large to save: {} bytes exceeds limit ({} bytes); \
-             increase SQRY_MAX_SNAPSHOT_BYTES if the codebase legitimately requires a larger snapshot",
-            data_bytes.len(),
-            max_data_bytes,
-        )));
-    }
-
-    // Write V8 framed format
-    writer.write_all(MAGIC_BYTES_V8)?;
-    writer.write_all(
-        &u32::try_from(header_bytes.len())
-            .map_err(|_| {
-                PersistenceError::ValidationFailed(
-                    "header too large for u32 length prefix".to_string(),
-                )
-            })?
-            .to_le_bytes(),
-    )?;
-    writer.write_all(&header_bytes)?;
-    writer.write_all(&(data_bytes.len() as u64).to_le_bytes())?;
-    writer.write_all(&data_bytes)?;
-
-    writer.flush()?;
-    Ok(())
+    write_framed_v10(&mut writer, &header, &snapshot_data)
 }
 
 /// Saves a graph to the specified path with config provenance.
@@ -722,7 +1246,16 @@ pub fn save_to_path_with_provenance(
         })
         .collect();
 
-    let snapshot_data = GraphSnapshotData {
+    // Extract Phase 2 binding-plane stores from the snapshot.
+    let scope_arena = snapshot.scope_arena().clone();
+    let alias_table = snapshot.alias_table().clone();
+    let shadow_table = snapshot.shadow_table().clone();
+    let scope_provenance = snapshot.scope_provenance_store().clone();
+
+    // Extract Phase 3 file segment table.
+    let file_segments = snapshot.file_segments().clone();
+
+    let snapshot_data = GraphSnapshotDataV10 {
         nodes,
         edges,
         strings,
@@ -731,18 +1264,14 @@ pub fn save_to_path_with_provenance(
         macro_metadata,
         node_provenance,
         edge_provenance,
+        scope_arena,
+        alias_table,
+        shadow_table,
+        scope_provenance,
+        file_segments,
     };
 
-    validate_snapshot_semantics(&snapshot_data)?;
-
-    // Invariant: the interner's lookup must be consistent before serialization.
-    debug_assert!(
-        !snapshot_data.strings.is_lookup_stale(),
-        "Cannot serialize StringInterner with stale lookup — \
-         call build_dedup_table() before saving"
-    );
-
-    // Create header with provenance, plugin versions, V8 version tag, and fact epoch
+    // Create header with provenance, plugin versions, V10 version tag, and fact epoch
     let forward_stats = snapshot_data.edges.stats().forward;
     let total_edges = forward_stats.csr_edge_count + forward_stats.delta_edge_count;
     let mut header = GraphHeader::with_provenance_and_plugins(
@@ -753,48 +1282,10 @@ pub fn save_to_path_with_provenance(
         provenance,
         plugin_versions,
     );
-    header.version = FormatVersion::V8.as_u32();
+    header.version = FormatVersion::V10.as_u32();
     header.set_fact_epoch(fact_epoch);
 
-    // Serialize header and data to buffers
-    let header_bytes = postcard::to_allocvec(&header)?;
-    let data_bytes = postcard::to_allocvec(&snapshot_data)?;
-
-    // Validate sizes match load-time limits (symmetry: reject on save what load would reject)
-    if header_bytes.len() > MAX_HEADER_BYTES {
-        return Err(PersistenceError::ValidationFailed(format!(
-            "header too large to save: {} bytes exceeds MAX_HEADER_BYTES ({} bytes)",
-            header_bytes.len(),
-            MAX_HEADER_BYTES,
-        )));
-    }
-    let max_data_bytes = max_snapshot_bytes();
-    if data_bytes.len() as u64 > max_data_bytes {
-        return Err(PersistenceError::ValidationFailed(format!(
-            "data section too large to save: {} bytes exceeds limit ({} bytes); \
-             increase SQRY_MAX_SNAPSHOT_BYTES if the codebase legitimately requires a larger snapshot",
-            data_bytes.len(),
-            max_data_bytes,
-        )));
-    }
-
-    // Write V8 framed format
-    writer.write_all(MAGIC_BYTES_V8)?;
-    writer.write_all(
-        &u32::try_from(header_bytes.len())
-            .map_err(|_| {
-                PersistenceError::ValidationFailed(
-                    "header too large for u32 length prefix".to_string(),
-                )
-            })?
-            .to_le_bytes(),
-    )?;
-    writer.write_all(&header_bytes)?;
-    writer.write_all(&(data_bytes.len() as u64).to_le_bytes())?;
-    writer.write_all(&data_bytes)?;
-
-    writer.flush()?;
-    Ok(())
+    write_framed_v10(&mut writer, &header, &snapshot_data)
 }
 
 /// Validates that plugin versions in the graph match current plugin versions.
@@ -882,19 +1373,8 @@ pub fn load_from_bytes(
     let mut reader = Cursor::new(bytes);
     let mut bytes_consumed: u64 = 0;
 
-    // Read and validate magic bytes — accept V7 and V8
-    let mut magic = [0u8; 13];
-    reader.read_exact(&mut magic)?;
-    bytes_consumed += 13;
-    let format_version =
-        FormatVersion::from_magic(&magic).ok_or_else(|| PersistenceError::InvalidMagic {
-            expected: MAGIC_BYTES_V8.to_vec(),
-            found: magic.to_vec(),
-        })?;
-
-    // Read header length and validate before allocation
-    let header_len = read_u32_le(&mut reader)? as usize;
-    bytes_consumed += 4;
+    let (format_version, header_len, magic_bytes) = read_magic_and_header_len(&mut reader)?;
+    bytes_consumed += magic_bytes;
     if header_len > MAX_HEADER_BYTES {
         return Err(PersistenceError::ValidationFailed(
             "header too large".to_string(),
@@ -913,10 +1393,14 @@ pub fn load_from_bytes(
     bytes_consumed += header_len as u64;
     let header: GraphHeader = postcard::from_bytes(&header_buf)?;
 
-    // Validate version — accept V7 (legacy) and V8 (current)
-    if header.version != VERSION && header.version != FormatVersion::V8.as_u32() {
+    // Validate version — accept V7 (legacy), V8, V9 (upconvert), V10 (current)
+    if header.version != VERSION
+        && header.version != FormatVersion::V8.as_u32()
+        && header.version != FormatVersion::V9.as_u32()
+        && header.version != FormatVersion::V10.as_u32()
+    {
         return Err(PersistenceError::IncompatibleVersion {
-            expected: FormatVersion::V8.as_u32(),
+            expected: FormatVersion::V10.as_u32(),
             found: header.version,
         });
     }
@@ -946,17 +1430,33 @@ pub fn load_from_bytes(
         ));
     }
 
-    // Read and deserialize data. The GraphSnapshotData fields
-    // `node_provenance` and `edge_provenance` are #[serde(default)], so
-    // V7 blobs that lack these fields deserialize cleanly as empty stores.
+    // Read and deserialize data, dispatching on detected format version.
     let mut data_buf = vec![0u8; data_len as usize];
     reader.read_exact(&mut data_buf)?;
-    let snapshot_data = if format_version == FormatVersion::V7 {
-        let v7: GraphSnapshotDataV7 = postcard::from_bytes(&data_buf)?;
-        upconvert_v7_to_v8(v7)
-    } else {
-        postcard::from_bytes(&data_buf)?
+    let mut snapshot_data: GraphSnapshotDataV10 = match format_version {
+        FormatVersion::V7 => {
+            let v7: GraphSnapshotDataV7 = postcard::from_bytes(&data_buf)?;
+            let v8 = upconvert_v7_to_v8(v7);
+            let v9 = upconvert_v8_to_v9(v8);
+            upconvert_v9_to_v10(v9)
+        }
+        FormatVersion::V8 => {
+            let v8: GraphSnapshotData = postcard::from_bytes(&data_buf)?;
+            let v9 = upconvert_v8_to_v9(v8);
+            upconvert_v9_to_v10(v9)
+        }
+        FormatVersion::V9 => {
+            let v9: GraphSnapshotDataV9 = postcard::from_bytes(&data_buf)?;
+            upconvert_v9_to_v10(v9)
+        }
+        FormatVersion::V10 => postcard::from_bytes(&data_buf)?,
     };
+
+    // Rebuild the scope-provenance reverse index after deserialization.
+    // The map is not persisted on disk; it is always derived from occupied slots.
+    snapshot_data
+        .scope_provenance
+        .rebuild_reverse_index(&snapshot_data.scope_arena);
 
     // Reject trailing bytes
     let mut trailing = [0u8; 1];
@@ -966,7 +1466,7 @@ pub fn load_from_bytes(
         ));
     }
 
-    validate_loaded_snapshot(&header, &snapshot_data)?;
+    validate_snapshot_semantics_v10(&snapshot_data)?;
 
     let mut graph = CodeGraph::from_components(
         snapshot_data.nodes,
@@ -981,13 +1481,21 @@ pub fn load_from_bytes(
         snapshot_data.edge_provenance,
         header.fact_epoch(),
     );
+    graph.set_scope_arena(snapshot_data.scope_arena);
+    graph.set_alias_table(snapshot_data.alias_table);
+    graph.set_shadow_table(snapshot_data.shadow_table);
+    graph.set_scope_provenance_store(snapshot_data.scope_provenance);
+    graph.set_file_segments(snapshot_data.file_segments);
     Ok(graph)
 }
 
 /// Loads a graph from the specified path.
 ///
-/// Reads the framed format (V7 or V8) with length-prefixed sections and
+/// Reads the framed format (V7, V8, or V9) with length-prefixed sections and
 /// pre-allocation validation. Rejects formats older than V7.
+///
+/// V7 snapshots are upconverted to V8 shape and then to V9 via
+/// `derive_binding_plane`. V8 snapshots are upconverted to V9 inline.
 ///
 /// # Errors
 ///
@@ -1003,19 +1511,8 @@ pub fn load_from_path(
     let mut reader = BufReader::new(file);
     let mut bytes_consumed: u64 = 0;
 
-    // Read and validate magic bytes — accept V7 and V8
-    let mut magic = [0u8; 13];
-    reader.read_exact(&mut magic)?;
-    bytes_consumed += 13;
-    let format_version =
-        FormatVersion::from_magic(&magic).ok_or_else(|| PersistenceError::InvalidMagic {
-            expected: MAGIC_BYTES_V8.to_vec(),
-            found: magic.to_vec(),
-        })?;
-
-    // Read header length and validate before allocation
-    let header_len = read_u32_le(&mut reader)? as usize;
-    bytes_consumed += 4;
+    let (format_version, header_len, magic_bytes) = read_magic_and_header_len(&mut reader)?;
+    bytes_consumed += magic_bytes;
     if header_len > MAX_HEADER_BYTES {
         return Err(PersistenceError::ValidationFailed(
             "header too large".to_string(),
@@ -1034,10 +1531,14 @@ pub fn load_from_path(
     bytes_consumed += header_len as u64;
     let header: GraphHeader = postcard::from_bytes(&header_buf)?;
 
-    // Validate version — accept V7 (legacy) and V8 (current)
-    if header.version != VERSION && header.version != FormatVersion::V8.as_u32() {
+    // Validate version — accept V7 (legacy), V8, V9 (upconvert), V10 (current)
+    if header.version != VERSION
+        && header.version != FormatVersion::V8.as_u32()
+        && header.version != FormatVersion::V9.as_u32()
+        && header.version != FormatVersion::V10.as_u32()
+    {
         return Err(PersistenceError::IncompatibleVersion {
-            expected: FormatVersion::V8.as_u32(),
+            expected: FormatVersion::V10.as_u32(),
             found: header.version,
         });
     }
@@ -1068,14 +1569,33 @@ pub fn load_from_path(
     }
 
     // Read and deserialize data — dispatch on format version.
+    // V7 → V8 → V9 → V10 (chained upconvert); V8 → V9 → V10; V9 → V10; V10 → direct.
     let mut data_buf = vec![0u8; data_len as usize];
     reader.read_exact(&mut data_buf)?;
-    let snapshot_data = if format_version == FormatVersion::V7 {
-        let v7: GraphSnapshotDataV7 = postcard::from_bytes(&data_buf)?;
-        upconvert_v7_to_v8(v7)
-    } else {
-        postcard::from_bytes(&data_buf)?
+    let mut snapshot_data: GraphSnapshotDataV10 = match format_version {
+        FormatVersion::V7 => {
+            let v7: GraphSnapshotDataV7 = postcard::from_bytes(&data_buf)?;
+            let v8 = upconvert_v7_to_v8(v7);
+            let v9 = upconvert_v8_to_v9(v8);
+            upconvert_v9_to_v10(v9)
+        }
+        FormatVersion::V8 => {
+            let v8: GraphSnapshotData = postcard::from_bytes(&data_buf)?;
+            let v9 = upconvert_v8_to_v9(v8);
+            upconvert_v9_to_v10(v9)
+        }
+        FormatVersion::V9 => {
+            let v9: GraphSnapshotDataV9 = postcard::from_bytes(&data_buf)?;
+            upconvert_v9_to_v10(v9)
+        }
+        FormatVersion::V10 => postcard::from_bytes(&data_buf)?,
     };
+
+    // Rebuild the scope-provenance reverse index after deserialization.
+    // The map is not persisted on disk; it is always derived from occupied slots.
+    snapshot_data
+        .scope_provenance
+        .rebuild_reverse_index(&snapshot_data.scope_arena);
 
     // Reject trailing bytes
     let mut trailing = [0u8; 1];
@@ -1085,7 +1605,7 @@ pub fn load_from_path(
         ));
     }
 
-    validate_loaded_snapshot(&header, &snapshot_data)?;
+    validate_snapshot_semantics_v10(&snapshot_data)?;
 
     let mut graph = CodeGraph::from_components(
         snapshot_data.nodes,
@@ -1100,6 +1620,11 @@ pub fn load_from_path(
         snapshot_data.edge_provenance,
         header.fact_epoch(),
     );
+    graph.set_scope_arena(snapshot_data.scope_arena);
+    graph.set_alias_table(snapshot_data.alias_table);
+    graph.set_shadow_table(snapshot_data.shadow_table);
+    graph.set_scope_provenance_store(snapshot_data.scope_provenance);
+    graph.set_file_segments(snapshot_data.file_segments);
     Ok(graph)
 }
 
@@ -1117,19 +1642,8 @@ pub fn validate_snapshot(path: impl AsRef<Path>) -> Result<bool, PersistenceErro
     let mut reader = BufReader::new(file);
     let mut bytes_consumed: u64 = 0;
 
-    // Read and validate magic bytes — accept V7 and V8
-    let mut magic = [0u8; 13];
-    reader.read_exact(&mut magic)?;
-    bytes_consumed += 13;
-    let _format_version =
-        FormatVersion::from_magic(&magic).ok_or_else(|| PersistenceError::InvalidMagic {
-            expected: MAGIC_BYTES_V8.to_vec(),
-            found: magic.to_vec(),
-        })?;
-
-    // Read header length
-    let header_len = read_u32_le(&mut reader)? as usize;
-    bytes_consumed += 4;
+    let (_format_version, header_len, magic_bytes) = read_magic_and_header_len(&mut reader)?;
+    bytes_consumed += magic_bytes;
     if header_len > MAX_HEADER_BYTES {
         return Err(PersistenceError::ValidationFailed(
             "header too large".to_string(),
@@ -1147,10 +1661,14 @@ pub fn validate_snapshot(path: impl AsRef<Path>) -> Result<bool, PersistenceErro
     reader.read_exact(&mut header_buf)?;
     let header: GraphHeader = postcard::from_bytes(&header_buf)?;
 
-    // Validate version — accept V7 (legacy) and V8 (current)
-    if header.version != VERSION && header.version != FormatVersion::V8.as_u32() {
+    // Validate version — accept V7 (legacy), V8, V9 (upconvert), V10 (current)
+    if header.version != VERSION
+        && header.version != FormatVersion::V8.as_u32()
+        && header.version != FormatVersion::V9.as_u32()
+        && header.version != FormatVersion::V10.as_u32()
+    {
         return Err(PersistenceError::IncompatibleVersion {
-            expected: FormatVersion::V8.as_u32(),
+            expected: FormatVersion::V10.as_u32(),
             found: header.version,
         });
     }
@@ -1171,19 +1689,8 @@ pub fn load_header_from_path(path: impl AsRef<Path>) -> Result<GraphHeader, Pers
     let mut reader = BufReader::new(file);
     let mut bytes_consumed: u64 = 0;
 
-    // Read and validate magic bytes — accept V7 and V8
-    let mut magic = [0u8; 13];
-    reader.read_exact(&mut magic)?;
-    bytes_consumed += 13;
-    let _format_version =
-        FormatVersion::from_magic(&magic).ok_or_else(|| PersistenceError::InvalidMagic {
-            expected: MAGIC_BYTES_V8.to_vec(),
-            found: magic.to_vec(),
-        })?;
-
-    // Read header length
-    let header_len = read_u32_le(&mut reader)? as usize;
-    bytes_consumed += 4;
+    let (_format_version, header_len, magic_bytes) = read_magic_and_header_len(&mut reader)?;
+    bytes_consumed += magic_bytes;
     if header_len > MAX_HEADER_BYTES {
         return Err(PersistenceError::ValidationFailed(
             "header too large".to_string(),
@@ -1201,10 +1708,14 @@ pub fn load_header_from_path(path: impl AsRef<Path>) -> Result<GraphHeader, Pers
     reader.read_exact(&mut header_buf)?;
     let header: GraphHeader = postcard::from_bytes(&header_buf)?;
 
-    // Validate version — accept V7 (legacy) and V8 (current)
-    if header.version != VERSION && header.version != FormatVersion::V8.as_u32() {
+    // Validate version — accept V7 (legacy), V8, V9 (upconvert), V10 (current)
+    if header.version != VERSION
+        && header.version != FormatVersion::V8.as_u32()
+        && header.version != FormatVersion::V9.as_u32()
+        && header.version != FormatVersion::V10.as_u32()
+    {
         return Err(PersistenceError::IncompatibleVersion {
-            expected: FormatVersion::V8.as_u32(),
+            expected: FormatVersion::V10.as_u32(),
             found: header.version,
         });
     }
@@ -1233,7 +1744,7 @@ pub fn check_config_drift(
 
 #[cfg(test)]
 mod tests {
-    use super::super::format::MAGIC_BYTES;
+    use super::super::format::{MAGIC_BYTES, MAGIC_BYTES_V8};
     use super::super::manifest::{OverrideEntry, OverrideSource};
     use super::*;
     use crate::graph::node::Language;
@@ -1442,9 +1953,11 @@ mod tests {
         let path = temp_file.path();
         let plugins = create_test_plugin_manager();
 
-        // Write V3 magic bytes (old format)
+        // Write V3 magic bytes (old format) + padding to 14 bytes so
+        // `read_magic_and_header_len` gets past `read_exact` and returns
+        // `InvalidMagic` (not `Io::UnexpectedEof`).
         let mut file = File::create(path).unwrap();
-        file.write_all(b"SQRY_GRAPH_V3").unwrap();
+        file.write_all(b"SQRY_GRAPH_V3\x00").unwrap();
         file.flush().unwrap();
 
         let result = load_from_path(path, Some(&plugins));

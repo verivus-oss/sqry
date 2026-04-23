@@ -32,7 +32,7 @@ pub mod params;
 #[cfg_attr(test, allow(dead_code))]
 mod validation;
 
-pub use params::SqryAskParams;
+pub use params::{SqryAskParams, SqryQueryParams};
 pub use validation::{
     CallHierarchyArgs,
     CallHierarchyDirection,

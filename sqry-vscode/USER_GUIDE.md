@@ -1,7 +1,7 @@
 # sqry VS Code Extension - User Guide
 
-**Version**: 8.0.7
-**Last Updated**: 2026-04-12
+**Version**: 9.0.0
+**Last Updated**: 2026-04-23
 
 ---
 
@@ -56,7 +56,7 @@ cargo install --path sqry-cli
 
 # Verify installation
 sqry --version
-# Should output: sqry 8.0.7 (or later)
+# Should output: sqry 9.0.0 (or later)
 ```
 
 ### Option 1: Install from VSIX
@@ -125,6 +125,14 @@ For marketplace/Open VSX installs, the requested `binaryVersion` must already
 exist as a public GitHub release. If the exact release has not been published
 yet, auto-download will fail closed rather than silently pulling an arbitrary
 binary.
+
+Public auto-download binaries are currently expected for:
+
+- Linux `x86_64`
+- Linux `arm64`
+- Windows `x86_64`
+- macOS Apple Silicon (`arm64`)
+- macOS Intel (`x86_64`)
 
 For Extension Development Host / test runs launched from source, the downloader
 may fall back to the latest published patch release in the same `major.minor`
@@ -833,6 +841,6 @@ This build installs locally via VSIX while we prepare the Marketplace release—
 
 ---
 
-**Last Updated**: 2026-04-12
-**Extension Version**: 8.0.7
-**sqry Version**: 8.0.7+
+**Last Updated**: 2026-04-23
+**Extension Version**: 9.0.0
+**sqry Version**: 9.0.0+

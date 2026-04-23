@@ -1,12 +1,11 @@
 {
   "query": {
-    "pattern": "kind:function AND name:does_not_exist",
-    "execution_time_ms": 1.935556
+    "pattern": "kind:function AND name:does_not_exist"
   },
+  "results": [],
   "stats": {
-    "total_matches": 0,
     "returned": 0,
+    "total_matches": 0,
     "truncated": false
-  },
-  "results": []
+  }
 }

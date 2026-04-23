@@ -1,3 +1,7 @@
+pub mod daemon_fixture;
+#[allow(unused_imports)]
+pub use daemon_fixture::DaemonFixture;
+
 use anyhow::Result;
 use sqry_lsp::config::DocumentLimits;
 use sqry_lsp::session::SessionManager;
@@ -44,6 +48,8 @@ pub fn options_for(root: &Path) -> LspOptions {
         log_level: "warn".into(),
         config: None,
         allow_public_bind: false,
+        daemon: false,
+        daemon_socket: None,
     }
 }
 

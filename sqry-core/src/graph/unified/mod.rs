@@ -100,17 +100,48 @@ pub mod resolution;
 // Transaction API (Workstream A)
 pub mod txn;
 
-// Query adapter (Workstream C)
-pub mod query_adapter;
-
 // Build pipeline (Steps 19-21)
 pub mod build;
+
+// Mutation-plane trait that lets Pass 1-5 helpers operate uniformly on
+// `CodeGraph` (full build) or `RebuildGraph` (incremental rebuild).
+// See module docs for the Phase 1 / Phase 2 migration split; the trait
+// itself is `pub(crate)` so external crates cannot name it.
+pub(crate) mod mutation_target;
 
 // Persistence layer (Workstream H)
 pub mod persistence;
 
 // Graph analysis precomputation (Pass 5)
 pub mod analysis;
+
+// Publish-boundary invariant helper (sqryd daemon, Task 4 Gate 0d).
+// Single source of truth for bijection + tombstone-residue assertions.
+// Every publish call path (full rebuild end, `RebuildGraph::finalize`
+// step 13+14, Task 6's `WorkspaceManager::publish_graph`, §E harness)
+// routes through `assert_publish_invariants`.
+pub mod publish;
+
+// Incremental rebuild pre-implementation gates (sqryd daemon, Task 4).
+// Gate 0b — NodeIdBearing trait + §K master coverage matrix.
+// Gate 0c/0d will extend this module with RebuildGraph + finalize() and
+// the bijection / tombstone-residue invariants.
+//
+// Visibility: `pub(crate)` by default so the coverage matrix and the
+// NodeIdBearing trait are an implementation detail; **`pub` under the
+// `rebuild-internals` feature** so `sqry-daemon` (the only whitelisted
+// consumer per `tests/rebuild_internals_whitelist.rs`) can reach
+// [`rebuild::RebuildGraph`] and the public
+// `CodeGraph::clone_for_rebuild` entry point. Even when `rebuild` is
+// `pub`, the individual struct fields on `RebuildGraph` and the
+// `__assemble_from_rebuild_parts_internal` constructor on `CodeGraph`
+// remain `pub(crate)`, enforcing the A2 §H "Type-enforced publish
+// path" invariant at the downstream-crate boundary.
+#[cfg(not(feature = "rebuild-internals"))]
+pub(crate) mod rebuild;
+
+#[cfg(feature = "rebuild-internals")]
+pub mod rebuild;
 
 // Loom concurrency tests (Steps 28-30)
 #[cfg(all(test, feature = "loom"))]
@@ -155,7 +186,6 @@ pub use materialize::{
 };
 pub use memory::{BTREEMAP_ENTRY_OVERHEAD, GraphMemorySize, HASHMAP_ENTRY_OVERHEAD};
 pub use node::{GenerationOverflowError, NodeId, NodeKind};
-pub use query_adapter::GraphQueryAdapter;
 pub use resolution::{
     FileScope, FileScopeError, NormalizedSymbolQuery, ResolutionMode, ResolvedFileScope,
     SymbolCandidateBucket, SymbolCandidateOutcome, SymbolCandidateSearchWitness,

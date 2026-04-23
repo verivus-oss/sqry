@@ -43,6 +43,22 @@ pub const MAGIC_BYTES_V7: &[u8; 13] = b"SQRY_GRAPH_V7";
 /// revision counter is introduced.
 pub const MAGIC_BYTES_V8: &[u8; 13] = b"SQRY_GRAPH_V8";
 
+/// Phase 2 V9 magic bytes.
+///
+/// Emitted by the Phase 2 binding-plane writer (P2U12) and accepted by the V9
+/// reader. V9 extends V8 with `ScopeArena`, `AliasTable`, `ShadowTable`, and
+/// `ScopeProvenanceStore` fields. V8 snapshots are upconverted to V9 inline on
+/// load by running `derive_binding_plane`.
+pub const MAGIC_BYTES_V9: &[u8; 13] = b"SQRY_GRAPH_V9";
+
+/// Phase 3 V10 magic bytes.
+///
+/// Emitted by the Phase 3 derived-db writer (DB03) and accepted by the V10
+/// reader. V10 extends V9 with `FileSegmentTable`. V9 snapshots are
+/// upconverted to V10 inline on load by rebuilding the segment table from
+/// the node arena.
+pub const MAGIC_BYTES_V10: &[u8; 14] = b"SQRY_GRAPH_V10";
+
 /// Legacy V7 numeric version, exposed with a versioned name so the Phase 1 reader
 /// dispatch can cite it explicitly. Equal to [`VERSION`].
 pub const LEGACY_VERSION_V7: u32 = 7;
@@ -50,24 +66,35 @@ pub const LEGACY_VERSION_V7: u32 = 7;
 /// Typed snapshot format version.
 ///
 /// Phase 1 introduces V8 as read/write and preserves V7 as a read-only compatibility
-/// path. Later format additions bump the magic bytes (V9, V10, …) rather than
-/// relying on any in-format revision counter.
+/// path. Phase 2 introduces V9 as read/write and preserves V8 as an upconvert path.
+/// Later format additions bump the magic bytes (V10, …) rather than relying on any
+/// in-format revision counter.
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum FormatVersion {
     /// Legacy V7 — read-only after Phase 1 lands.
     V7 = 7,
-    /// V8 — read/write after Phase 1.
+    /// V8 — read/write after Phase 1, upconvert source after Phase 2.
     V8 = 8,
+    /// V9 — read/write after Phase 2 (binding plane: `ScopeArena`, `AliasTable`,
+    /// `ShadowTable`, `ScopeProvenanceStore`). V8 snapshots are upconverted to V9
+    /// inline on load by running `derive_binding_plane`.
+    V9 = 9,
+    /// V10 — read/write after Phase 3 (derived DB: `FileSegmentTable`). V9
+    /// snapshots are upconverted to V10 inline on load by rebuilding the
+    /// segment table from the node arena.
+    V10 = 10,
 }
 
 impl FormatVersion {
     /// Returns the magic-byte sequence identifying this format version.
     #[must_use]
-    pub const fn magic(self) -> &'static [u8; 13] {
+    pub const fn magic(self) -> &'static [u8] {
         match self {
-            Self::V7 => MAGIC_BYTES_V7,
-            Self::V8 => MAGIC_BYTES_V8,
+            Self::V7 => MAGIC_BYTES_V7.as_slice(),
+            Self::V8 => MAGIC_BYTES_V8.as_slice(),
+            Self::V9 => MAGIC_BYTES_V9.as_slice(),
+            Self::V10 => MAGIC_BYTES_V10.as_slice(),
         }
     }
 
@@ -82,6 +109,12 @@ impl FormatVersion {
     /// Returns `None` if the bytes do not match any known format magic.
     #[must_use]
     pub fn from_magic(bytes: &[u8]) -> Option<Self> {
+        // V10 magic is 14 bytes; check it first since it's the longest.
+        if bytes.len() >= MAGIC_BYTES_V10.len()
+            && bytes[..MAGIC_BYTES_V10.len()] == *MAGIC_BYTES_V10
+        {
+            return Some(Self::V10);
+        }
         if bytes.len() < MAGIC_BYTES_V7.len() {
             return None;
         }
@@ -90,14 +123,16 @@ impl FormatVersion {
             Some(Self::V7)
         } else if prefix == MAGIC_BYTES_V8 {
             Some(Self::V8)
+        } else if prefix == MAGIC_BYTES_V9 {
+            Some(Self::V9)
         } else {
             None
         }
     }
 }
 
-/// Current writer format version (Phase 1+: V8).
-pub const CURRENT_VERSION: FormatVersion = FormatVersion::V8;
+/// Current writer format version (Phase 3+: V10).
+pub const CURRENT_VERSION: FormatVersion = FormatVersion::V10;
 
 /// Header for persisted graph files.
 ///
@@ -508,11 +543,12 @@ mod tests {
     fn phase1_format_version_discriminants() {
         assert_eq!(FormatVersion::V7 as u32, 7);
         assert_eq!(FormatVersion::V8 as u32, 8);
+        assert_eq!(FormatVersion::V9 as u32, 9);
     }
 
     #[test]
-    fn phase1_current_version_is_v8() {
-        assert_eq!(CURRENT_VERSION, FormatVersion::V8);
+    fn current_version_is_v10() {
+        assert_eq!(CURRENT_VERSION, FormatVersion::V10);
     }
 
     #[test]
@@ -532,6 +568,22 @@ mod tests {
     }
 
     #[test]
+    fn phase2_magic_bytes_v9_is_distinct_and_13_bytes() {
+        assert_eq!(MAGIC_BYTES_V9, b"SQRY_GRAPH_V9");
+        assert_eq!(MAGIC_BYTES_V9.len(), 13);
+        assert_ne!(MAGIC_BYTES_V9, MAGIC_BYTES_V7);
+        assert_ne!(MAGIC_BYTES_V9, MAGIC_BYTES_V8);
+    }
+
+    #[test]
+    fn phase2_format_version_from_magic_v9() {
+        assert_eq!(
+            FormatVersion::from_magic(MAGIC_BYTES_V9),
+            Some(FormatVersion::V9),
+        );
+    }
+
+    #[test]
     fn phase1_format_version_from_magic_unknown() {
         assert_eq!(FormatVersion::from_magic(b"SQRY_GRAPH_V1"), None);
         assert_eq!(FormatVersion::from_magic(b"NOT_A_GRAPH_!"), None);
@@ -539,7 +591,7 @@ mod tests {
 
     #[test]
     fn phase1_format_version_magic_round_trip() {
-        for version in [FormatVersion::V7, FormatVersion::V8] {
+        for version in [FormatVersion::V7, FormatVersion::V8, FormatVersion::V9] {
             let bytes = version.magic();
             assert_eq!(FormatVersion::from_magic(bytes), Some(version));
         }
@@ -551,6 +603,14 @@ mod tests {
         let copied = v;
         assert_eq!(v, copied);
         assert_eq!(format!("{v:?}"), "V8");
+    }
+
+    #[test]
+    fn phase2_format_version_v9_copy_eq_debug() {
+        let v = FormatVersion::V9;
+        let copied = v;
+        assert_eq!(v, copied);
+        assert_eq!(format!("{v:?}"), "V9");
     }
 
     #[test]

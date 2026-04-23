@@ -2,6 +2,7 @@ use std::{collections::HashMap, path::Path};
 
 use sqry_core::graph::unified::StagingGraph;
 use sqry_core::graph::unified::build::GraphBuildHelper;
+use sqry_core::graph::unified::build::helper::CalleeKindHint;
 use sqry_core::graph::unified::edge::FfiConvention;
 use sqry_core::graph::unified::node::NodeId as UnifiedNodeId;
 use sqry_core::graph::{GraphBuilder, GraphBuilderError, GraphResult, Language, Span};
@@ -328,13 +329,15 @@ fn walk_tree_for_graph(
                 {
                     // Ensure both nodes exist
                     let call_context = ast_graph.get_callable_context(node.id());
-                    let is_async = call_context.is_some_and(|c| c.is_async);
+                    let _is_async = call_context.is_some_and(|c| c.is_async);
 
-                    let source_id = helper.ensure_function(&caller_qname, None, is_async, false);
-                    let target_id = helper.ensure_function(&callee_qname, None, false, false);
+                    let call_span = span_from_node(node);
+                    let source_id =
+                        helper.ensure_callee(&caller_qname, call_span, CalleeKindHint::Function);
+                    let target_id =
+                        helper.ensure_callee(&callee_qname, call_span, CalleeKindHint::Function);
 
                     // Add call edge
-                    let call_span = span_from_node(node);
                     let argument_count = u8::try_from(argument_count).unwrap_or(u8::MAX);
                     helper.add_call_edge_full_with_span(
                         source_id,

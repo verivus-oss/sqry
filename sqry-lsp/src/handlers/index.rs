@@ -50,6 +50,7 @@ use sqry_core::json_response::IndexStatus;
 use sqry_core::progress::{IndexProgress, ProgressReporter, SharedReporter};
 use sqry_plugin_registry::create_plugin_manager;
 
+use crate::handlers::LspHandlerError;
 use crate::protocol::{
     CrossLanguageRelation, SortOrder, SqryCycle, SqryDuplicateGroup,
     SqryListCircularDependenciesParams, SqryListCircularDependenciesResult,
@@ -59,8 +60,7 @@ use crate::protocol::{
     SqryListSymbolsResult, SqryListUnusedSymbolsParams, SqryListUnusedSymbolsResult,
 };
 use crate::session::SessionManager;
-use sqry_core::query::{CircularConfig, CircularType, find_all_cycles_graph};
-use sqry_core::query::{UnusedScope, find_unused_nodes};
+use sqry_core::query::{CircularType, UnusedScope};
 
 // ===== Graph-based statistics functions =====
 
@@ -122,6 +122,66 @@ fn compute_file_counts_from_graph(graph: &CodeGraph) -> HashMap<String, usize> {
         *counts.entry(lang_str).or_insert(0) += 1;
     }
     counts
+}
+
+fn resolve_cycle_member_column(
+    graph: &CodeGraph,
+    target: &Path,
+    entry: &sqry_core::graph::unified::storage::arena::NodeEntry,
+    member_name: &str,
+) -> Option<u32> {
+    let Some(file_path) = graph.files().resolve(entry.file) else {
+        log::warn!(
+            "failed to resolve cycle member source for {} (file id {:?})",
+            member_name,
+            entry.file
+        );
+        return None;
+    };
+    let resolved_path = if file_path.is_absolute() {
+        file_path.to_path_buf()
+    } else {
+        target.join(file_path)
+    };
+    let Some(line_index) = entry.start_line.checked_sub(1).map(|line| line as usize) else {
+        log::warn!(
+            "cycle member line missing for {} at {}",
+            member_name,
+            resolved_path.display()
+        );
+        return None;
+    };
+    let Ok(content) = std::fs::read_to_string(&resolved_path) else {
+        log::warn!(
+            "failed to read cycle member source for {} at {}",
+            member_name,
+            resolved_path.display()
+        );
+        return None;
+    };
+    let Some(line_text) = content.split('\n').nth(line_index) else {
+        log::warn!(
+            "cycle member line {} out of bounds for {} at {}",
+            entry.start_line,
+            member_name,
+            resolved_path.display()
+        );
+        return None;
+    };
+    let byte_col = entry.start_column as usize;
+    if byte_col > line_text.len() {
+        log::warn!(
+            "cycle member byte column {} out of bounds for {} at {}:{}",
+            entry.start_column,
+            member_name,
+            resolved_path.display(),
+            entry.start_line
+        );
+        return None;
+    }
+    crate::utils::position::line_byte_to_utf16_col(line_text, byte_col)
+        .try_into()
+        .ok()
 }
 
 /// Returns `true` if the given `EdgeKind` is a cross-language relation type.
@@ -1006,10 +1066,17 @@ pub fn list_duplicate_groups(
     }
 
     // Group nodes by body hash (for body duplicates)
-    // BodyHash128 stores high/low u64 values - use as_u128() for grouping
+    // BodyHash128 stores high/low u64 values - use as_u128() for grouping.
+    // Gate 0d iter-2 fix: skip unified losers from LSP
+    // `find_duplicates` handler. `merge_node_into` also clears
+    // `body_hash` on losers, but the `is_unified_loser()` guard is the
+    // canonical exclusion check. See `NodeEntry::is_unified_loser`.
     let mut hash_groups: HashMap<u128, Vec<NodeId>> = HashMap::new();
 
     for (node_id, entry) in graph.nodes().iter() {
+        if entry.is_unified_loser() {
+            continue;
+        }
         if let Some(body_hash) = entry.body_hash {
             let hash_key = body_hash.as_u128();
             hash_groups.entry(hash_key).or_default().push(node_id);
@@ -1143,30 +1210,65 @@ pub fn list_circular_dependencies(
 
     // Parse circular type - strict validation
     let Some(circular_type) = CircularType::try_parse(&params.circular_type) else {
-        return Err(anyhow::anyhow!(
+        return Err(LspHandlerError::InvalidParams(format!(
             "Unsupported circular_type '{circular_type}'. Valid values: 'calls', 'imports', 'modules'.",
             circular_type = params.circular_type.as_str()
-        ));
+        ))
+        .into());
     };
 
-    let config = CircularConfig {
-        should_include_self_loops: params.should_include_self_loops,
-        max_results: params
-            .limit
-            .unwrap_or(DEFAULT_LIST_LIMIT)
-            .min(MAX_LIST_LIMIT),
-        ..Default::default()
-    };
-
-    // Find cycles using graph-based algorithm
-    let cycles = find_all_cycles_graph(circular_type, &graph, &config);
-
-    let limit = params
+    let cap = params
         .limit
         .unwrap_or(DEFAULT_LIST_LIMIT)
         .min(MAX_LIST_LIMIT);
-    let actual_total_cycles = cycles.len();
-    let truncated = actual_total_cycles > limit;
+
+    // Route through sqry-db: `CyclesQuery` is the name-keyed cycle
+    // predicate in the Phase 3C dispatch taxonomy (DB19), cached
+    // per-snapshot. Behavior matches the pre-DB19
+    // `CircularConfig { min_depth: 2, max_depth: None,
+    // max_results: cap, should_include_self_loops }` default exactly.
+    // The `Arc<Vec<Vec<NodeId>>>` result is materialized to qualified
+    // names below (mirroring the pre-DB19 return-shape contract).
+    let snapshot = std::sync::Arc::new(graph.snapshot());
+    // PN3 CLIENT_LOAD: opportunistic cold-load from workspace companion file.
+    let workspace_root = session.index_root_for_cold_load();
+    let db = sqry_db::queries::dispatch::make_query_db_cold(
+        std::sync::Arc::clone(&snapshot),
+        &workspace_root,
+    );
+    let cycle_node_ids = db.get::<sqry_db::queries::CyclesQuery>(&sqry_db::queries::CyclesKey {
+        circular_type,
+        bounds: sqry_db::queries::CycleBounds {
+            min_depth: 2,
+            max_depth: None,
+            max_results: cap.saturating_add(1),
+            should_include_self_loops: params.should_include_self_loops,
+        },
+    });
+    let cycles: Vec<Vec<String>> = {
+        let strings = snapshot.strings();
+        cycle_node_ids
+            .iter()
+            .map(|component| {
+                component
+                    .iter()
+                    .filter_map(|&node_id| {
+                        snapshot.get_node(node_id).and_then(|entry| {
+                            entry
+                                .qualified_name
+                                .and_then(|sid| strings.resolve(sid))
+                                .or_else(|| strings.resolve(entry.name))
+                                .map(|s| s.to_string())
+                        })
+                    })
+                    .collect()
+            })
+            .filter(|names: &Vec<String>| !names.is_empty())
+            .collect()
+    };
+
+    let probed_total_cycles = cycles.len();
+    let truncated = probed_total_cycles > cap;
 
     // Build a lookup from qualified/simple name to node entry for location resolution
     let name_to_node: HashMap<
@@ -1179,6 +1281,11 @@ pub fn list_circular_dependencies(
         let strings = graph.strings();
         let mut map = HashMap::new();
         for (node_id, entry) in graph.nodes().iter() {
+            // Gate 0d iter-2 fix: skip unified losers from LSP
+            // cycle-name lookup map. See `NodeEntry::is_unified_loser`.
+            if entry.is_unified_loser() {
+                continue;
+            }
             if let Some(name) = entry
                 .qualified_name
                 .and_then(|id| strings.resolve(id))
@@ -1193,7 +1300,7 @@ pub fn list_circular_dependencies(
     // Convert to protocol types
     let result_cycles: Vec<SqryCycle> = cycles
         .into_iter()
-        .take(limit)
+        .take(cap)
         .map(|members| {
             // Generate stable cycle ID from sorted members
             let mut sorted_members = members.clone();
@@ -1225,7 +1332,7 @@ pub fn list_circular_dependencies(
                             None
                         };
                         let column = if entry.start_line > 0 {
-                            Some(entry.start_column)
+                            resolve_cycle_member_column(&graph, &target, entry, member_name)
                         } else {
                             None
                         };
@@ -1266,11 +1373,16 @@ pub fn list_circular_dependencies(
     perf_log(&format!(
         "list_circular_dependencies TOTAL took {elapsed:?}, cycles={cycles}/{actual_total_cycles}",
         elapsed = handler_start.elapsed(),
-        cycles = result_cycles.len()
+        cycles = result_cycles.len(),
+        actual_total_cycles = probed_total_cycles
     ));
 
     Ok(SqryListCircularDependenciesResult {
-        total_cycles: actual_total_cycles,
+        total_cycles: if truncated {
+            cap.saturating_add(1)
+        } else {
+            probed_total_cycles
+        },
         truncated,
         cycles: result_cycles,
     })
@@ -1314,10 +1426,11 @@ pub fn list_unused_symbols(
 
     // Parse scope - strict validation
     let Some(scope) = UnusedScope::try_parse(&params.scope) else {
-        return Err(anyhow::anyhow!(
+        return Err(LspHandlerError::InvalidParams(format!(
             "Unsupported scope '{scope}'. Valid values: 'public', 'private', 'function', 'struct', 'all'.",
             scope = params.scope
-        ));
+        ))
+        .into());
     };
 
     let limit = params
@@ -1325,12 +1438,29 @@ pub fn list_unused_symbols(
         .unwrap_or(DEFAULT_LIST_LIMIT)
         .min(MAX_LIST_LIMIT);
 
-    // Find unused nodes using graph-based analysis
-    // find_unused_nodes computes reachable set internally
+    // Route through sqry-db: `UnusedQuery` is a name-keyed predicate in
+    // the Phase 3C dispatch taxonomy (DB19), cached per-snapshot. The LSP
+    // surface only exposes `scope` (no free-form `lang` / `kind`
+    // post-filter) so we can use the same scope in the key (no superset
+    // widening needed — unlike MCP's `Struct` variant, the LSP contract
+    // passes `UnusedScope` verbatim to both the user and sqry-db).
+    //
+    // We fetch `limit + 1` rows so the caller can detect truncation
+    // (matches the pre-DB19 contract exactly).
     let check_start = Instant::now();
-    let unused_node_ids = find_unused_nodes(scope, &graph, limit + 1);
+    let snapshot = std::sync::Arc::new(graph.snapshot());
+    // PN3 CLIENT_LOAD: opportunistic cold-load from workspace companion file.
+    let workspace_root = session.index_root_for_cold_load();
+    let db = sqry_db::queries::dispatch::make_query_db_cold(
+        std::sync::Arc::clone(&snapshot),
+        &workspace_root,
+    );
+    let unused_node_ids = db.get::<sqry_db::queries::UnusedQuery>(&sqry_db::queries::UnusedKey {
+        scope,
+        max_results: limit + 1,
+    });
     perf_log(&format!(
-        "list_unused_symbols find_unused_nodes took {elapsed:?}, found {found}",
+        "list_unused_symbols UnusedQuery took {elapsed:?}, found {found}",
         elapsed = check_start.elapsed(),
         found = unused_node_ids.len()
     ));
@@ -1344,7 +1474,8 @@ pub fn list_unused_symbols(
         })
         .collect();
 
-    let truncated = unused_symbols.len() > limit;
+    let total = unused_symbols.len();
+    let truncated = total > limit;
     unused_symbols.truncate(limit);
 
     perf_log(&format!(
@@ -1354,7 +1485,11 @@ pub fn list_unused_symbols(
     ));
 
     Ok(SqryListUnusedSymbolsResult {
-        total: unused_symbols.len(),
+        total: if truncated {
+            limit.saturating_add(1)
+        } else {
+            total
+        },
         truncated,
         scope: params.scope,
         symbols: unused_symbols,

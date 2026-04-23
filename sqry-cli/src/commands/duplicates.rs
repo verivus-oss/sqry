@@ -82,6 +82,7 @@ pub fn run_duplicates(
         },
         max_results,
         is_exact_only: exact || threshold >= 100,
+        ..Default::default()
     };
 
     // Find duplicates using graph-based detection

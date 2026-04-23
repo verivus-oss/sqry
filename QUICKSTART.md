@@ -1,6 +1,6 @@
 # sqry Quick Start Guide - by Verivus
 
-**Version**: 8.0.7
+**Version**: 9.0.0
 **Rust**: 1.90+ (Edition 2024)
 
 ---
@@ -10,22 +10,28 @@
 ### Windows
 
 ```powershell
-irm https://raw.githubusercontent.com/verivus-oss/sqry/main/scripts/install.ps1 | iex
-```
-
-Default behavior resolves the latest GitHub release. For a pinned install, download the script and run `.\install.ps1 -Version vX.Y.Z`.
-
-Review-first/signed variant:
-
-```powershell
 Invoke-WebRequest https://raw.githubusercontent.com/verivus-oss/sqry/main/scripts/install.ps1 -OutFile install.ps1
 Get-Content .\install.ps1
 .\install.ps1 -VerifySignatures
 ```
 
+Default behavior resolves the latest GitHub release. For a pinned install, download the script and run `.\install.ps1 -Version vX.Y.Z`.
+
+`-VerifySignatures` checks that the release zip was produced by the official GitHub Actions release workflow for this repository. Install `cosign` and ensure it is on `PATH` before using this mode. SHA256 verification is enabled by default for download integrity; use `-NoChecksum` only for troubleshooting.
+
+> **Note**: Windows Defender and enterprise EDR products often block the `irm ... | iex` pattern heuristically. On managed machines, prefer the download-review-run flow above or install from release assets instead of piping the script into `iex`.
+>
+> If PowerShell execution policy blocks `.\install.ps1` after download, prefer release assets instead of loosening machine-wide policy settings.
+
+Convenience shortcut for personal or non-managed machines:
+
+```powershell
+irm https://raw.githubusercontent.com/verivus-oss/sqry/main/scripts/install.ps1 | iex
+```
+
 Manual fallback:
-- download `sqry-windows-x86_64.zip`
-- extract `sqry.exe`, `sqry-mcp.exe`, `sqry-lsp.exe`
+- download the Windows ZIP release asset (`sqry-<version>-windows-x86_64.zip`)
+- extract all contents, including the bundled `.dll` runtime files
 - place them in a directory on `PATH`
 
 ### macOS / Linux
@@ -51,8 +57,9 @@ cargo build --workspace
 
 # Install to PATH (required for examples below)
 cargo install --path sqry-cli
-cargo install --path sqry-mcp    # MCP server binary
-cargo install --path sqry-lsp    # LSP server binary
+cargo install --path sqry-mcp      # MCP server binary
+cargo install --path sqry-lsp      # LSP server binary
+cargo install --path sqry-daemon   # sqryd daemon binary
 ```
 
 > **Note**: The examples below assume `sqry` is on your `PATH`. If you skip the install step, prefix commands with `./target/debug/` (e.g., `./target/debug/sqry index`).
@@ -279,6 +286,48 @@ sqry lsp
 
 ---
 
+## Daemon Mode
+
+`sqryd` is a background index server that keeps your workspace graphs hot across
+CLI, LSP, and MCP sessions. Instead of rebuilding the index from scratch on each
+invocation, daemon-backed tools connect to `sqryd` over a local socket and receive
+responses from an already-loaded, incrementally-maintained graph.
+
+```bash
+# Start the daemon (background process; logs to stderr by default,
+# or to the file set in daemon.toml `log_file`)
+sqry daemon start
+
+# Check status — shows version, uptime, memory, high-water mark, and loaded workspaces
+sqry daemon status
+
+# Example status output:
+#   sqryd v8.0.6 -- uptime 3h 14m
+#
+#   Memory: 412 MB / 2048 MB  (peak: 487 MB)
+#
+#   Workspaces (1 loaded):
+#     ~/my-project                    147 MB    (peak: 180 MB   )  [Loaded]
+
+# Stop the daemon
+sqry daemon stop
+```
+
+`sqry-mcp` and `sqry lsp` gain `--daemon` / `--daemon-socket PATH` flags for
+daemon-backed operation. If the daemon is not running when a shim connects, it
+is started automatically:
+
+```bash
+sqry-mcp --daemon                          # use default socket path
+sqry-mcp --daemon --daemon-socket /tmp/sqryd.sock  # custom socket
+sqry lsp  --daemon                         # LSP in daemon-backed mode
+```
+
+For tuning memory limits, socket paths, log rotation, and `daemon.toml`
+configuration reference, see [docs/cli/daemon.md](docs/cli/daemon.md).
+
+---
+
 ## Language Support
 
 **37 languages** in two capability groups:
@@ -297,6 +346,10 @@ sqry/
 ├── sqry-cli/               # CLI binary ('sqry')
 ├── sqry-lsp/               # LSP server
 ├── sqry-mcp/               # MCP server (AI assistant integration)
+├── sqry-daemon/            # Daemon binary (sqryd) + library
+├── sqry-daemon-protocol/   # Wire types and framing (free functions)
+├── sqry-daemon-client/     # Client library (shim mode, management API)
+├── sqry-db/                # Derived analysis DB and query planner
 ├── sqry-nl/                # Natural language translation
 ├── sqry-plugin-registry/   # Plugin registration
 ├── sqry-lang-*/            # 37 language plugins

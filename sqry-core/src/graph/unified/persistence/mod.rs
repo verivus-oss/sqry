@@ -59,12 +59,13 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 pub use format::{
-    FormatVersion, GraphHeader, MAGIC_BYTES, MAGIC_BYTES_V7, MAGIC_BYTES_V8, VERSION,
+    FormatVersion, GraphHeader, MAGIC_BYTES, MAGIC_BYTES_V7, MAGIC_BYTES_V8, MAGIC_BYTES_V9,
+    MAGIC_BYTES_V10, VERSION,
 };
 pub use manifest::{
     BuildProvenance, ConfigProvenance, ConfigProvenanceBuilder, MANIFEST_SCHEMA_VERSION, Manifest,
-    OverrideEntry, OverrideSource, PluginSelectionManifest, SNAPSHOT_FORMAT_VERSION,
-    compute_config_checksum, default_provenance,
+    ManifestCheck, OverrideEntry, OverrideSource, PluginSelectionManifest, SNAPSHOT_FORMAT_VERSION,
+    compute_config_checksum, default_provenance, try_load_manifest,
 };
 pub use snapshot::{
     PersistenceError, check_config_drift, load_from_bytes, load_from_path, load_header_from_path,
@@ -223,6 +224,28 @@ impl GraphStorage {
     /// Returns an error if the manifest file cannot be read or parsed.
     pub fn load_manifest(&self) -> std::io::Result<Manifest> {
         Manifest::load(&self.manifest_path)
+    }
+
+    /// Attempts to load the graph manifest from disk, returning a typed
+    /// [`ManifestCheck`] instead of propagating `ENOENT` as a hard error.
+    ///
+    /// This is the non-panicking, policy-neutral variant of
+    /// [`Self::load_manifest`]. Use it in freshness checks, serve-path
+    /// guards, and any code that must distinguish "missing" from "corrupt"
+    /// to apply the correct policy:
+    ///
+    /// - `ManifestCheck::Present(m)` — manifest exists and parsed.
+    /// - `ManifestCheck::Missing` — file not on disk (e.g. during rebuild
+    ///   window). Callers should treat the graph as stale and either wait,
+    ///   trigger a rebuild, or refuse to serve unverified snapshots.
+    /// - `ManifestCheck::Corrupt(e)` — file exists but is unreadable or
+    ///   invalid JSON; same policy as Missing (rebuild).
+    ///
+    /// The SHA-256 integrity contract is preserved: a `Missing` or `Corrupt`
+    /// result means no snapshot is served without verification.
+    #[must_use]
+    pub fn try_load_manifest(&self) -> ManifestCheck {
+        manifest::try_load_manifest(&self.manifest_path)
     }
 
     /// Computes the age of the snapshot based on the manifest timestamp.
@@ -395,5 +418,116 @@ mod tests {
             result.is_err(),
             "Loading from missing snapshot should return error, not panic"
         );
+    }
+
+    // ====================================================================
+    // ManifestCheck / try_load_manifest tests (MANIFEST_1)
+    // ====================================================================
+
+    /// Removing the manifest file returns `ManifestCheck::Missing` (not `Err`).
+    #[test]
+    fn test_try_load_manifest_missing_returns_missing() {
+        let tmp = TempDir::new().unwrap();
+        let storage = GraphStorage::new(tmp.path());
+
+        // No manifest exists at all — directory not even created.
+        let result = storage.try_load_manifest();
+        assert!(
+            result.is_missing(),
+            "Missing manifest file should return ManifestCheck::Missing, not Err"
+        );
+        assert!(!result.is_present());
+        assert!(!result.is_corrupt());
+    }
+
+    /// Removing the manifest after it was present returns `ManifestCheck::Missing`.
+    #[test]
+    fn test_try_load_manifest_removed_after_creation() {
+        let tmp = TempDir::new().unwrap();
+        let storage = GraphStorage::new(tmp.path());
+
+        // Create directory + manifest
+        std::fs::create_dir_all(storage.graph_dir()).unwrap();
+        let provenance = BuildProvenance::new("0.15.0", "sqry index");
+        let manifest = Manifest::new("/test/path", 10, 20, "sha_initial", provenance);
+        manifest.save(storage.manifest_path()).unwrap();
+
+        // Confirm it loads correctly first
+        assert!(storage.try_load_manifest().is_present());
+
+        // Remove the manifest — simulates rebuild window where manifest is absent
+        std::fs::remove_file(storage.manifest_path()).unwrap();
+
+        let result = storage.try_load_manifest();
+        assert!(
+            result.is_missing(),
+            "Freshness check on removed manifest must return Missing, not Err/Corrupt"
+        );
+    }
+
+    /// A corrupt manifest (invalid JSON) returns `ManifestCheck::Corrupt`.
+    #[test]
+    fn test_try_load_manifest_corrupt_returns_corrupt() {
+        let tmp = TempDir::new().unwrap();
+        let storage = GraphStorage::new(tmp.path());
+
+        std::fs::create_dir_all(storage.graph_dir()).unwrap();
+        // Write invalid JSON
+        std::fs::write(storage.manifest_path(), b"not valid json {{{{").unwrap();
+
+        let result = storage.try_load_manifest();
+        assert!(
+            result.is_corrupt(),
+            "Invalid JSON in manifest should return ManifestCheck::Corrupt"
+        );
+        assert!(!result.is_present());
+        assert!(!result.is_missing());
+    }
+
+    /// A valid manifest returns `ManifestCheck::Present` with correct fields.
+    #[test]
+    fn test_try_load_manifest_valid_returns_present() {
+        let tmp = TempDir::new().unwrap();
+        let storage = GraphStorage::new(tmp.path());
+
+        std::fs::create_dir_all(storage.graph_dir()).unwrap();
+        let provenance = BuildProvenance::new("9.0.0", "sqry index");
+        let original = Manifest::new("/workspace/root", 42, 99, "sha256_test", provenance);
+        original.save(storage.manifest_path()).unwrap();
+
+        match storage.try_load_manifest() {
+            ManifestCheck::Present(m) => {
+                assert_eq!(m.node_count, 42);
+                assert_eq!(m.edge_count, 99);
+                assert_eq!(m.snapshot_sha256, "sha256_test");
+                assert_eq!(m.root_path, "/workspace/root");
+            }
+            ManifestCheck::Missing => panic!("Expected Present, got Missing"),
+            ManifestCheck::Corrupt(e) => panic!("Expected Present, got Corrupt: {e}"),
+        }
+    }
+
+    /// `ManifestCheck::into_manifest()` converts `Present` to `Some`, `Missing`/`Corrupt` to `None`.
+    #[test]
+    fn test_manifest_check_into_manifest() {
+        let tmp = TempDir::new().unwrap();
+        let storage = GraphStorage::new(tmp.path());
+
+        // Missing → None
+        let missing = storage.try_load_manifest();
+        assert!(missing.into_manifest().is_none());
+
+        // Corrupt → None
+        std::fs::create_dir_all(storage.graph_dir()).unwrap();
+        std::fs::write(storage.manifest_path(), b"bad json").unwrap();
+        let corrupt = storage.try_load_manifest();
+        assert!(corrupt.into_manifest().is_none());
+
+        // Present → Some
+        let provenance = BuildProvenance::new("9.0.0", "sqry index");
+        let manifest = Manifest::new("/path", 1, 2, "sha", provenance);
+        manifest.save(storage.manifest_path()).unwrap();
+        let present = storage.try_load_manifest();
+        assert!(present.into_manifest().is_some());
     }
 }

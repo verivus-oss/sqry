@@ -417,6 +417,7 @@ pub(crate) fn node_to_ref(
         file_uri,
         range,
         metadata: None,
+        resolution_source: None,
     })
 }
 

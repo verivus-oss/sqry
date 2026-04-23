@@ -1,0 +1,16 @@
+error[E0624]: associated function `__assemble_from_rebuild_parts_internal` is private
+  --> tests/rebuild_internals_compile_fail/rebuild_graph_no_public_assembly.rs:16:35
+   |
+16 |       let _: CodeGraph = CodeGraph::__assemble_from_rebuild_parts_internal(
+   |                                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ private associated function
+   |
+  ::: src/graph/unified/concurrent/graph.rs
+   |
+   | /     pub(crate) fn __assemble_from_rebuild_parts_internal(
+   | |         nodes: NodeArena,
+   | |         edges: BidirectionalEdgeStore,
+   | |         strings: StringInterner,
+...  |
+   | |         file_segments: FileSegmentTable,
+   | |     ) -> Self {
+   | |_____________- private associated function defined here

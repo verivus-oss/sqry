@@ -1,0 +1,33 @@
+[package]
+name = "sqry-daemon-protocol"
+description = "sqryd daemon wire types + framing codec (leaf crate, no sqry-* deps)."
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(disabled)', 'cfg(fuzzing)'] }
+
+[lib]
+name = "sqry_daemon_protocol"
+path = "src/lib.rs"
+
+[dependencies]
+# Serialization
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+
+# Async IO framing codec
+tokio = { workspace = true, features = ["io-util", "macros"] }
+
+# Error plumbing
+thiserror = { workspace = true }
+
+# RFC3339 rendering for ResponseMeta::stale_from
+chrono = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["io-util", "macros", "rt", "rt-multi-thread"] }

@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
+use sqry_core::graph::unified::build::helper::CalleeKindHint;
 use sqry_core::graph::unified::edge::kind::TypeOfContext;
 use sqry_core::graph::unified::{FfiConvention, GraphBuildHelper, GraphSnapshot, StagingGraph};
 use sqry_core::graph::{CodeEdge, GraphBuilder, GraphBuilderError, GraphResult, Language, Span};
@@ -568,15 +569,17 @@ fn handle_call_expression(
         return;
     };
 
-    let caller_function_id = helper.ensure_function(&caller_qualified, None, false, false);
+    let caller_function_id =
+        helper.ensure_callee(&caller_qualified, span, CalleeKindHint::Function);
 
     if let Some((ffi_qualified, ffi_convention)) = ffi_registry.get(&target_qualified) {
-        let ffi_target_id = helper.ensure_function(ffi_qualified, None, false, true);
+        let ffi_target_id = helper.ensure_callee(ffi_qualified, span, CalleeKindHint::Function);
         helper.add_ffi_edge(caller_function_id, ffi_target_id, *ffi_convention);
         return;
     }
 
-    let target_function_id = helper.ensure_function(&target_qualified, None, false, false);
+    let target_function_id =
+        helper.ensure_callee(&target_qualified, span, CalleeKindHint::Function);
     let argument_count = u8::try_from(argument_count).unwrap_or(u8::MAX);
     helper.add_call_edge_full_with_span(
         caller_function_id,
@@ -726,7 +729,11 @@ fn extract_initializer_list_targets(
             continue;
         }
 
-        let target_id = helper.ensure_function(func_name, None, false, false);
+        let target_id = helper.ensure_callee(
+            func_name,
+            span_from_node(value_node),
+            CalleeKindHint::Function,
+        );
         helper.add_reference_edge(var_id, target_id);
     }
 }

@@ -8,6 +8,7 @@
 
 use std::{collections::HashMap, path::Path};
 
+use sqry_core::graph::unified::build::helper::CalleeKindHint;
 use sqry_core::graph::unified::edge::FfiConvention;
 use sqry_core::graph::unified::{GraphBuildHelper, NodeKind, StagingGraph};
 use sqry_core::graph::{GraphBuilder, GraphBuilderError, GraphResult, Language, Position, Span};
@@ -354,9 +355,9 @@ fn walk_tree_for_graph(
                 let source_id = if is_method {
                     helper.ensure_method(&caller_qname, None, false, false)
                 } else {
-                    helper.ensure_function(&caller_qname, None, false, false)
+                    helper.ensure_callee(&caller_qname, span, CalleeKindHint::Function)
                 };
-                let target_id = helper.ensure_function(&callee_qname, None, false, false);
+                let target_id = helper.ensure_callee(&callee_qname, span, CalleeKindHint::Function);
 
                 // Add call edge
                 let argument_count = u8::try_from(argument_count).unwrap_or(u8::MAX);
@@ -470,8 +471,9 @@ fn handle_return_table_exports(node: Node<'_>, content: &[u8], helper: &mut Grap
         if let Some(name) = exported_name {
             // Create export edge
             // The exported symbol should already exist from function_declaration/assignment handling
-            // If it doesn't exist yet, create it as a function node using ensure_function
-            let exported_id = helper.ensure_function(&name, None, false, false);
+            // If it doesn't exist yet, create it as a function node using ensure_callee
+            let exported_id =
+                helper.ensure_callee(&name, span_from_node(field), CalleeKindHint::Function);
 
             helper.add_export_edge(module_id, exported_id);
         }
@@ -959,7 +961,11 @@ fn emit_ffi_edge(
     };
 
     // Ensure target node exists
-    let target_id = helper.ensure_function(&target_name, None, false, false);
+    let target_id = helper.ensure_callee(
+        &target_name,
+        span_from_node(call_node),
+        CalleeKindHint::Function,
+    );
 
     // Add FfiCall edge with C convention
     helper.add_ffi_edge(caller_id, target_id, FfiConvention::C);
@@ -972,12 +978,17 @@ fn get_ffi_caller_node_id(
     ast_graph: &ASTGraph,
     helper: &mut GraphBuildHelper,
 ) -> sqry_core::graph::unified::node::NodeId {
+    let call_span = span_from_node(call_node);
     // Try to get context from AST graph
     if let Some(call_context) = ast_graph.get_callable_context(call_node.id()) {
         if call_context.is_method {
             return helper.ensure_method(&call_context.qualified_name, None, false, false);
         }
-        return helper.ensure_function(&call_context.qualified_name, None, false, false);
+        return helper.ensure_callee(
+            &call_context.qualified_name,
+            call_span,
+            CalleeKindHint::Function,
+        );
     }
 
     // Walk up tree to find enclosing function
@@ -988,14 +999,18 @@ fn get_ffi_caller_node_id(
             if let Some(name_node) = node.child_by_field_name("name")
                 && let Ok(name_text) = name_node.utf8_text(content)
             {
-                return helper.ensure_function(name_text, None, false, false);
+                return helper.ensure_callee(
+                    name_text,
+                    span_from_node(node),
+                    CalleeKindHint::Function,
+                );
             }
         }
         current = node.parent();
     }
 
     // Fallback: file-level context
-    helper.ensure_function("<file_level>", None, false, false)
+    helper.ensure_callee("<file_level>", call_span, CalleeKindHint::Function)
 }
 
 /// Build call edge information for the staging graph.

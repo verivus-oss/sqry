@@ -66,6 +66,11 @@ fn find_seed_nodes(
 
     for symbol in symbols {
         let found = graph.nodes().iter().find(|(_, entry)| {
+            // Gate 0d iter-2 fix: skip unified losers from CLI
+            // `subgraph` seed lookup. See `NodeEntry::is_unified_loser`.
+            if entry.is_unified_loser() {
+                return false;
+            }
             // Check qualified name
             if let Some(qn_id) = entry.qualified_name
                 && let Some(qn) = strings.resolve(qn_id)
@@ -103,6 +108,19 @@ struct SubgraphBfsResult {
 /// Uses the traversal kernel with configurable direction and edge filter.
 /// Converts the kernel's `TraversalResult` into the `SubgraphBfsResult`
 /// expected by downstream code.
+///
+/// # Frontier invariant (DB19)
+///
+/// `seed_nodes` is a `&[NodeId]` — seeds are resolved once at the
+/// handler boundary. The [`traverse`] kernel walks the NodeId-keyed
+/// graph and never re-resolves names at depth ≥ 1. This is the same
+/// invariant that DB17/DB18 locked for `trace_path`, `call-chain-depth`,
+/// and `dependency-tree`: a same-simple-name node at depth 1 never
+/// broadens the frontier because the kernel operates on
+/// generational-indexed `NodeId`s, not names.
+///
+/// Regressions that reintroduced DB15-class same-name broadening would
+/// surface in the CLI `migration_golden_cli_test` golden tests.
 #[allow(clippy::similar_names)]
 fn collect_subgraph_bfs(
     graph: &sqry_core::graph::unified::concurrent::CodeGraph,

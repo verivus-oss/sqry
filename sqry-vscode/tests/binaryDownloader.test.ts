@@ -199,7 +199,7 @@ describe("binaryDownloader", () => {
       }
     });
 
-    it("throws for darwin-x64 with descriptive message", () => {
+    it("returns correct asset for darwin-x64", () => {
       const mod = loadModule();
       const origPlatform = Object.getOwnPropertyDescriptor(process, "platform");
       const origArch = Object.getOwnPropertyDescriptor(process, "arch");
@@ -208,15 +208,16 @@ describe("binaryDownloader", () => {
       Object.defineProperty(process, "arch", { value: "x64", configurable: true });
 
       try {
-        expect(() => mod.detectPlatform()).to.throw("macOS Intel");
-        expect(() => mod.detectPlatform()).to.throw("cargo install sqry-cli");
+        const result = mod.detectPlatform();
+        expect(result.asset).to.equal("sqry-macos-x86_64");
+        expect(result.binaryName).to.equal("sqry");
       } finally {
         if (origPlatform) Object.defineProperty(process, "platform", origPlatform);
         if (origArch) Object.defineProperty(process, "arch", origArch);
       }
     });
 
-    it("throws for linux-arm64 (unsupported)", () => {
+    it("returns correct asset for linux-arm64", () => {
       const mod = loadModule();
       const origPlatform = Object.getOwnPropertyDescriptor(process, "platform");
       const origArch = Object.getOwnPropertyDescriptor(process, "arch");
@@ -225,8 +226,9 @@ describe("binaryDownloader", () => {
       Object.defineProperty(process, "arch", { value: "arm64", configurable: true });
 
       try {
-        expect(() => mod.detectPlatform()).to.throw("does not provide pre-built binaries");
-        expect(() => mod.detectPlatform()).to.throw("cargo install sqry-cli");
+        const result = mod.detectPlatform();
+        expect(result.asset).to.equal("sqry-linux-arm64");
+        expect(result.binaryName).to.equal("sqry");
       } finally {
         if (origPlatform) Object.defineProperty(process, "platform", origPlatform);
         if (origArch) Object.defineProperty(process, "arch", origArch);

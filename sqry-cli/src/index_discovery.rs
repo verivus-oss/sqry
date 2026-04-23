@@ -184,11 +184,19 @@ fn escape_path_for_query(path: &Path) -> String {
 /// Paths need quoting when they contain:
 /// - Spaces or double quotes (for tokenization)
 /// - Glob metacharacters with escapes (backslash escapes only work in quoted strings)
+/// - A leading character that the query lexer does not accept as a word start
+///   (the lexer's `is_word_start` permits only ASCII alphabetic + `_`, so paths
+///   beginning with `.`, `-`, a digit, `/`, etc. must be quoted).
 fn path_needs_quoting(path: &Path) -> bool {
     let path_str = path.to_string_lossy();
-    path_str
+    let leading_requires_quoting = path_str
         .chars()
-        .any(|c| c == ' ' || c == '"' || PATH_ESCAPE_CHARS.contains(&c))
+        .next()
+        .is_some_and(|c| !c.is_ascii_alphabetic() && c != '_');
+    leading_requires_quoting
+        || path_str
+            .chars()
+            .any(|c| c == ' ' || c == '"' || PATH_ESCAPE_CHARS.contains(&c))
 }
 
 /// Augment a query with an implicit path filter when using ancestor index.
@@ -495,6 +503,31 @@ mod tests {
         let result =
             augment_query_with_scope("kind:fn AND path:*.rs", Path::new("src/utils"), false);
         assert_eq!(result, "(kind:fn AND path:*.rs) AND path:src/utils/**");
+    }
+
+    #[test]
+    fn augment_query_path_with_leading_dot() {
+        // Paths starting with `.` (e.g. hidden directories or git worktrees under
+        // `.worktrees/`) must be quoted because the query lexer's word-start rule
+        // accepts only ASCII alpha + `_`. An unquoted `path:.worktrees/...` value
+        // parses as `path:` followed by a stray `.` and fails.
+        let result = augment_query_with_scope(
+            "kind:function",
+            Path::new(".worktrees/phase3a/test-fixtures/cli-basic"),
+            false,
+        );
+        assert_eq!(
+            result,
+            "(kind:function) AND path:\".worktrees/phase3a/test-fixtures/cli-basic/**\""
+        );
+    }
+
+    #[test]
+    fn augment_query_path_with_leading_digit() {
+        // Paths starting with a digit similarly violate the lexer's word-start rule.
+        let result =
+            augment_query_with_scope("kind:function", Path::new("2024-archive/src"), false);
+        assert_eq!(result, "(kind:function) AND path:\"2024-archive/src/**\"");
     }
 
     #[test]

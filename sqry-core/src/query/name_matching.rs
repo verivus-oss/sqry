@@ -1,14 +1,25 @@
 //! Shared name matching helpers for relation and validation checks.
 
-pub(crate) fn is_separator(byte: u8) -> bool {
+/// Returns `true` if `byte` is one of the qualified-name separators recognized
+/// across sqry's supported languages (`::`, `.`, `#`, `$`, `/`, `\`).
+#[must_use]
+pub fn is_separator(byte: u8) -> bool {
     matches!(byte, b'.' | b':' | b'#' | b'$' | b'/' | b'\\')
 }
 
-pub(crate) fn contains_separator(value: &str) -> bool {
+/// Returns `true` if `value` contains any character recognized by
+/// [`is_separator`]. Used to detect qualified names without splitting them.
+#[must_use]
+pub fn contains_separator(value: &str) -> bool {
     value.as_bytes().iter().any(|c| is_separator(*c))
 }
 
-pub(crate) fn suffix_match(long: &str, short: &str) -> bool {
+/// Returns `true` if `long` ends with `short` on a separator boundary.
+///
+/// The boundary check prevents false positives such as `"foobar".ends_with("bar")`
+/// matching `"bar"` when the caller intended qualified-name segment matching.
+#[must_use]
+pub fn suffix_match(long: &str, short: &str) -> bool {
     if long.len() <= short.len() {
         return false;
     }
@@ -19,7 +30,11 @@ pub(crate) fn suffix_match(long: &str, short: &str) -> bool {
     prefix.as_bytes().last().is_none_or(|c| is_separator(*c))
 }
 
-pub(crate) fn segments_match(a: &str, b: &str) -> bool {
+/// Segment-aware equality. Two qualified names match when one is a suffix of
+/// the other at a separator boundary (e.g. `foo::bar::baz` matches `bar::baz`)
+/// or when the strings are exactly equal.
+#[must_use]
+pub fn segments_match(a: &str, b: &str) -> bool {
     if a == b {
         return true;
     }

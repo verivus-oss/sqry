@@ -279,8 +279,8 @@ function createCycleDiagnostics(
       const uri = loc.file.startsWith("file://")
         ? loc.file
         : vscode.Uri.file(loc.file).toString();
-      const line = Math.max(0, loc.line - 1); // 1-based to 0-based
-      const col = loc.column === undefined ? 0 : Math.max(0, loc.column - 1);
+      const line = loc.line;
+      const col = loc.column ?? 0;
       resolvedLocations.push({
         name: loc.name,
         uri,

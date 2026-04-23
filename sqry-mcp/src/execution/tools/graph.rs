@@ -31,6 +31,7 @@ use sqry_core::visualization::unified::{
 
 use crate::execution::graph_builders::build_graph_metadata;
 use crate::execution::graph_cache::{self, CacheOutcome};
+use crate::execution::location::node_location_for_reporting_snapshot;
 use crate::execution::types::{
     CacheRequestContext, DependencyGraphData, NodeRefData, PositionData, RangeData,
     RelationEdgeData, ToolExecution,
@@ -51,9 +52,41 @@ fn resolve_workspace_path(path: &str) -> Option<PathBuf> {
         Some(PathBuf::from(path))
     }
 }
+
+/// Execute the `show_dependencies` tool to walk a symbol's bidirectional
+/// dependency graph.
+///
+/// # Dispatch path (DB16)
+///
+/// `show_dependencies` is **NodeId-anchored**. Seeds come from
+/// [`collect_unified_seeds`] which either resolves `file_path` to all
+/// nodes in that file, or resolves `symbol_name` via
+/// [`find_nodes_by_name`] (segment-aware suffix matcher). From there the
+/// BFS walks only via direct `snapshot.edges().edges_from(current)` /
+/// `edges_to(current)` CSR lookups per direction, filtered to
+/// `EdgeKind::Calls`. This handler does NOT route through sqry-db; the
+/// name-to-NodeId resolution is the only name-keyed operation, and
+/// `find_nodes_by_name` already owns it.
+///
+/// See [`crate::execution::relation_dispatch`] module docs for the
+/// Phase 3 dispatch taxonomy.
+///
+/// # Frontier invariant
+///
+/// Each seed's BFS is locally anchored: every queue item is a concrete
+/// `NodeId`, and expansion uses direct edge lookups on that `NodeId`. An
+/// ambiguous simple-name seed expands to a union of per-node BFS walks
+/// (that's the documented planner-canonical semantic), but the walks
+/// never bleed into each other — there is no cross-seed frontier sharing
+/// besides the standard `visited` deduplication, and the standard dedup
+/// is keyed on `(NodeId, depth)` so same-name nodes remain structurally
+/// independent. The multi-hop frontier-broadening bug DB15's followup
+/// fixed for `relation_query` cannot manifest because no name-keyed
+/// dispatch runs inside the BFS.
 pub fn execute_get_dependencies(
     args: &ShowDependenciesArgs,
 ) -> Result<ToolExecution<DependencyGraphData>> {
+    // Pre-refactor timing: `start` fires before engine resolution.
     let start = Instant::now();
     let workspace_path = resolve_workspace_path(&args.path);
     let engine = engine_for_workspace(workspace_path.as_ref())?;
@@ -71,38 +104,12 @@ pub fn execute_get_dependencies(
     // Require the unified graph
     let graph = engine.ensure_graph()?;
 
-    let snapshot = graph.snapshot();
-    let (nodes, edges) = compute_dependencies_unified(args, &snapshot, &workspace_root)?;
-
-    let total = edges.len();
-    let truncated = total > args.max_results;
-    let mut edges = edges;
-    edges.truncate(args.max_results);
-
-    let (edge_slice, next_page_token) = paginate(&edges, &args.pagination);
-    let page_edges: Vec<RelationEdgeData> = edge_slice.to_vec();
-
-    let unique_nodes: Vec<NodeRefData> = nodes.into_values().collect();
-    let truncated_flag = truncated || next_page_token.is_some();
-
-    let graph_metadata = build_graph_metadata(Some(&workspace_root), Some(&snapshot), None);
-
-    Ok(ToolExecution {
-        data: DependencyGraphData {
-            nodes: unique_nodes,
-            edges: page_edges,
-            rendered: None,
-        },
-        used_index: false,
-        used_graph: true,
-        graph_metadata: Some(graph_metadata),
-        execution_ms: duration_to_ms(start.elapsed()),
-        next_page_token,
-        total: Some(total as u64),
-        truncated: Some(truncated_flag),
-        candidates_scanned: None,
-        workspace_path: crate::execution::symbol_utils::path_to_forward_slash(workspace_root),
-    })
+    let ctx = crate::daemon_adapter::WorkspaceContext {
+        workspace_root,
+        graph,
+        executor: engine.executor_arc(),
+    };
+    inner::execute_get_dependencies(&ctx, args, start)
 }
 
 /// Compute dependencies using the unified graph.
@@ -161,6 +168,11 @@ fn collect_unified_seeds(
         let rel_path = canon.strip_prefix(workspace_root).unwrap_or(&canon);
 
         for (node_id, entry) in snapshot.iter_nodes() {
+            // Gate 0d iter-2 fix: never seed `show_dependencies`
+            // from a unified loser. See `NodeEntry::is_unified_loser`.
+            if entry.is_unified_loser() {
+                continue;
+            }
             if let Some(path) = snapshot.files().resolve(entry.file)
                 && path.as_ref() == rel_path
             {
@@ -274,8 +286,34 @@ fn call_edge_metadata(edge_kind: &EdgeKind) -> Option<Value> {
 
 /// Execute the `export_graph` tool to export a dependency graph.
 ///
-/// Uses `CodeGraph` exclusively for graph export.
+/// # Dispatch path (DB17)
+///
+/// `export_graph` is **NodeId-anchored from a resolved seed set** under
+/// the Phase 3C dispatch taxonomy (`ART:mcp-dispatch-taxonomy`). Seeds are
+/// collected by [`collect_export_graph_seeds_unified`] from one or more
+/// of (`file_path`, `symbol_name`, `symbols`); name-based seeds are
+/// resolved up front via
+/// [`sqry_core::graph::unified::materialize::find_nodes_by_name`].
+///
+/// The whole-graph walk in [`collect_export_graph_data_unified`] is a
+/// pure BFS over `snapshot.edges().edges_from(current_id)` via
+/// [`process_bfs_node_for_export`], keyed on `NodeId` / `(NodeId, depth)`.
+/// No sqry-db dispatch — the export question is "from these concrete
+/// seeds, walk the graph with these edge-kind filters", which is a
+/// graph-primitive operation, not a planner predicate. The existing
+/// rendering path (`dot` / `d2` / `mermaid` / JSON) is unchanged.
+///
+/// # Frontier invariant
+///
+/// Expansion uses only `edges_from(current_id)` from concrete `NodeId`s,
+/// and the per-depth visited set prevents reprocessing. Same-simple-name
+/// nodes in unrelated files never fuse into a single frontier node —
+/// the visited set is keyed on the `NodeId`, not on the qualified name.
+/// A `module::a::helper` seed will therefore never pull in
+/// `module::b::helper`'s call chain, matching the DB15/DB16 frontier
+/// invariant used by `dependency_impact` / `show_dependencies`.
 pub fn execute_export_graph(args: &ExportGraphArgs) -> Result<ToolExecution<DependencyGraphData>> {
+    // Pre-refactor timing: `start` fires before engine resolution.
     let start = Instant::now();
     let workspace_path = resolve_workspace_path(&args.path);
     let engine = engine_for_workspace(workspace_path.as_ref())?;
@@ -285,41 +323,12 @@ pub fn execute_export_graph(args: &ExportGraphArgs) -> Result<ToolExecution<Depe
     // Require the unified graph
     let graph = engine.ensure_graph()?;
 
-    let snapshot = graph.snapshot();
-    let seeds = collect_export_graph_seeds_unified(args, &snapshot, &workspace_root)?;
-    let (nodes, edges, was_truncated) =
-        collect_export_graph_data_unified(args, &snapshot, &workspace_root, &seeds);
-
-    let total = edges.len();
-    let (page_edges, nodes_vec, next_page_token) =
-        paginate_export_graph(&edges, nodes, &args.pagination);
-
-    // Render from the EXACT post-pagination node set so mermaid/dot/d2 output
-    // matches the filtered JSON data rather than the entire snapshot.
-    let page_node_ids = resolve_page_node_ids(&snapshot, &nodes_vec);
-    let rendered = render_export_graph(args, Some(graph.clone()), &page_node_ids);
-
-    let graph_metadata = build_graph_metadata(Some(&workspace_root), Some(&snapshot), None);
-
-    // Check truncation before moving next_page_token
-    let is_truncated = was_truncated || next_page_token.is_some();
-
-    Ok(ToolExecution {
-        data: DependencyGraphData {
-            nodes: nodes_vec,
-            edges: page_edges,
-            rendered,
-        },
-        used_index: false,
-        used_graph: true,
-        graph_metadata: Some(graph_metadata),
-        execution_ms: duration_to_ms(start.elapsed()),
-        next_page_token,
-        total: Some(total as u64),
-        truncated: Some(is_truncated),
-        candidates_scanned: None,
-        workspace_path: crate::execution::symbol_utils::path_to_forward_slash(workspace_root),
-    })
+    let ctx = crate::daemon_adapter::WorkspaceContext {
+        workspace_root,
+        graph,
+        executor: engine.executor_arc(),
+    };
+    inner::execute_export_graph(&ctx, args, start)
 }
 
 /// Collect seed nodes from a specific file.
@@ -334,6 +343,11 @@ fn collect_seeds_by_file(
 
     let mut seeds = Vec::new();
     for (node_id, entry) in snapshot.iter_nodes() {
+        // Gate 0d iter-2 fix: never seed `export_graph` from a
+        // unified loser. See `NodeEntry::is_unified_loser`.
+        if entry.is_unified_loser() {
+            continue;
+        }
         if let Some(node_file) = files.resolve(entry.file)
             && node_file.as_ref() == relative_path
         {
@@ -597,6 +611,13 @@ fn resolve_page_node_ids(snapshot: &GraphSnapshot, nodes_vec: &[NodeRefData]) ->
     snapshot
         .iter_nodes()
         .filter_map(|(nid, entry)| {
+            // Gate 0d iter-2 fix: never resolve a page NodeId to a
+            // unified loser. Losers also have `qualified_name = None`
+            // now, so this is also defense-in-depth via
+            // `is_unified_loser()`. See `NodeEntry::is_unified_loser`.
+            if entry.is_unified_loser() {
+                return None;
+            }
             let qname = entry.qualified_name.and_then(|sid| strings.resolve(sid))?;
             if page_qnames.contains(qname.as_ref()) {
                 Some(nid)
@@ -661,8 +682,38 @@ fn render_export_graph(
 
 /// Execute subgraph extraction around seed symbols.
 ///
-/// Uses `CodeGraph` exclusively for subgraph extraction.
+/// # Dispatch path (DB17)
+///
+/// `subgraph` is **NodeId-anchored from a resolved seed set** under the
+/// Phase 3C dispatch taxonomy (`ART:mcp-dispatch-taxonomy`). Seeds are
+/// resolved up front by [`collect_seed_nodes_unified`] via
+/// [`sqry_core::graph::unified::materialize::find_nodes_by_name`]; the
+/// bidirectional BFS in [`traverse_forward`] and [`traverse_backward`]
+/// walks only `snapshot.edges().edges_from(current)` /
+/// `snapshot.edges().edges_to(current)` from concrete `NodeId`s. No
+/// sqry-db routing: subgraph extraction is a two-direction graph walk
+/// around concrete seeds, not a name-keyed planner predicate.
+///
+/// # Frontier invariant
+///
+/// Forward and backward visited sets are keyed on `(NodeId, depth)` in
+/// [`UnifiedSubgraphState::visited_forward`] /
+/// [`UnifiedSubgraphState::visited_backward`]. Expansion is strictly via
+/// CSR edge lookups from the current `NodeId`. Because simple-name
+/// strings never enter the frontier decision, two unrelated modules
+/// each containing a `helper` cannot cross-pollute the BFS result —
+/// seeding on `alpha::helper` yields only `alpha_*` nodes, matching the
+/// invariant DB16 locked in for `dependency_impact` /
+/// `show_dependencies`.
+///
+/// # Caching
+///
+/// The payload LRU in [`graph_cache::get_or_compute_subgraph`] is
+/// retained — it is a materialization cache keyed on the full
+/// `SubgraphCacheKey` (including `GraphIdentity`), not a planner query.
+/// DB19 / DB21 own the retirement decision.
 pub fn execute_subgraph(args: &SubgraphArgs) -> Result<ToolExecution<DependencyGraphData>> {
+    // Pre-refactor timing: `start` fires before engine resolution.
     let start = Instant::now();
     let workspace_path = resolve_workspace_path(&args.path);
     let engine = engine_for_workspace(workspace_path.as_ref())?;
@@ -672,65 +723,12 @@ pub fn execute_subgraph(args: &SubgraphArgs) -> Result<ToolExecution<DependencyG
     // Require the unified graph
     let graph = engine.ensure_graph()?;
 
-    let snapshot = graph.snapshot();
-
-    // Get GraphIdentity for cache isolation
-    let identity = get_graph_identity(&workspace_root)?;
-
-    // Create cache key with full GraphIdentity for workspace isolation
-    let cache_key = graph_cache::SubgraphCacheKey::new(
-        args.symbols.clone(),
-        args.max_depth,
-        args.max_nodes,
-        args.include_callers,
-        args.include_callees,
-        args.include_imports,
-        args.cross_language,
-    )
-    .with_graph_identity(&identity);
-
-    // Try cache first, fall back to computation
-    let CacheOutcome {
-        data: graph_data,
-        state: cache_state,
-        latency_ms: cache_latency_ms,
-    } = graph_cache::get_or_compute_subgraph(cache_key, || {
-        compute_subgraph_data(args, &snapshot, &workspace_root)
-    });
-
-    tracing::debug!(
-        cache_state = ?cache_state,
-        cache_latency_ms,
-        "subgraph cache outcome"
-    );
-
-    let (graph_data, next_page_token, total_nodes, _total_edges) =
-        apply_subgraph_pagination(graph_data, &args.pagination);
-
-    let execution_ms = duration_to_ms(start.elapsed());
-
-    let graph_metadata = build_graph_metadata(
-        Some(&workspace_root),
-        Some(&snapshot),
-        Some(CacheRequestContext {
-            tool: "subgraph",
-            state: cache_state,
-            latency_ms: cache_latency_ms,
-        }),
-    );
-
-    Ok(ToolExecution {
-        data: graph_data,
-        used_index: false,
-        used_graph: true,
-        graph_metadata: Some(graph_metadata),
-        execution_ms,
-        next_page_token,
-        total: Some(total_nodes as u64),
-        truncated: Some(total_nodes > args.max_nodes),
-        candidates_scanned: Some(total_nodes as u64),
-        workspace_path: crate::execution::symbol_utils::path_to_forward_slash(workspace_root),
-    })
+    let ctx = crate::daemon_adapter::WorkspaceContext {
+        workspace_root,
+        graph,
+        executor: engine.executor_arc(),
+    };
+    inner::execute_subgraph(&ctx, args, start)
 }
 
 fn compute_subgraph_data(
@@ -1164,6 +1162,9 @@ fn build_node_ref_unified(
         Into::into,
     );
 
+    let loc = node_location_for_reporting_snapshot(snapshot, node_id, workspace_root);
+    let resolution_source = loc.as_ref().map(|l| format!("{:?}", l.resolution_source));
+
     NodeRefData {
         name,
         qualified_name,
@@ -1172,15 +1173,16 @@ fn build_node_ref_unified(
         file_uri,
         range: RangeData {
             start: PositionData {
-                line: entry.start_line,
-                character: entry.start_column,
+                line: loc.as_ref().map_or(entry.start_line, |l| l.line),
+                character: loc.as_ref().map_or(entry.start_column, |l| l.column),
             },
             end: PositionData {
-                line: entry.end_line,
-                character: entry.end_column,
+                line: loc.as_ref().map_or(entry.end_line, |l| l.end_line),
+                character: loc.as_ref().map_or(entry.end_column, |l| l.end_column),
             },
         },
         metadata: None,
+        resolution_source,
     }
 }
 
@@ -1203,6 +1205,176 @@ fn fallback_node_ref_unified(name: &str, workspace_root: &Path) -> NodeRefData {
             },
         },
         metadata: None,
+        resolution_source: None,
+    }
+}
+
+pub(crate) mod inner {
+    use super::{
+        CacheOutcome, CacheRequestContext, DependencyGraphData, ExportGraphArgs, NodeRefData,
+        RelationEdgeData, Result, ShowDependenciesArgs, SubgraphArgs, ToolExecution,
+        apply_subgraph_pagination, build_graph_metadata, collect_export_graph_data_unified,
+        collect_export_graph_seeds_unified, compute_dependencies_unified, compute_subgraph_data,
+        duration_to_ms, get_graph_identity, graph_cache, paginate, paginate_export_graph,
+        render_export_graph, resolve_page_node_ids,
+    };
+    use crate::daemon_adapter::WorkspaceContext;
+    use std::time::Instant;
+
+    /// Daemon/SqryServer-shared body for `show_dependencies`.
+    pub(crate) fn execute_get_dependencies(
+        ctx: &WorkspaceContext,
+        args: &ShowDependenciesArgs,
+        start: Instant,
+    ) -> Result<ToolExecution<DependencyGraphData>> {
+        let snapshot = ctx.graph.snapshot();
+        let (nodes, edges) = compute_dependencies_unified(args, &snapshot, &ctx.workspace_root)?;
+
+        let total = edges.len();
+        let truncated = total > args.max_results;
+        let mut edges = edges;
+        edges.truncate(args.max_results);
+
+        let (edge_slice, next_page_token) = paginate(&edges, &args.pagination);
+        let page_edges: Vec<RelationEdgeData> = edge_slice.to_vec();
+
+        let unique_nodes: Vec<NodeRefData> = nodes.into_values().collect();
+        let truncated_flag = truncated || next_page_token.is_some();
+
+        let graph_metadata = build_graph_metadata(Some(&ctx.workspace_root), Some(&snapshot), None);
+
+        Ok(ToolExecution {
+            data: DependencyGraphData {
+                nodes: unique_nodes,
+                edges: page_edges,
+                rendered: None,
+            },
+            used_index: false,
+            used_graph: true,
+            graph_metadata: Some(graph_metadata),
+            execution_ms: duration_to_ms(start.elapsed()),
+            next_page_token,
+            total: Some(total as u64),
+            truncated: Some(truncated_flag),
+            candidates_scanned: None,
+            workspace_path: crate::execution::symbol_utils::path_to_forward_slash(
+                &ctx.workspace_root,
+            ),
+        })
+    }
+
+    /// Daemon/SqryServer-shared body for `export_graph`.
+    pub(crate) fn execute_export_graph(
+        ctx: &WorkspaceContext,
+        args: &ExportGraphArgs,
+        start: Instant,
+    ) -> Result<ToolExecution<DependencyGraphData>> {
+        let snapshot = ctx.graph.snapshot();
+        let seeds = collect_export_graph_seeds_unified(args, &snapshot, &ctx.workspace_root)?;
+        let (nodes, edges, was_truncated) =
+            collect_export_graph_data_unified(args, &snapshot, &ctx.workspace_root, &seeds);
+
+        let total = edges.len();
+        let (page_edges, nodes_vec, next_page_token) =
+            paginate_export_graph(&edges, nodes, &args.pagination);
+
+        // Render from the EXACT post-pagination node set so mermaid/dot/d2 output
+        // matches the filtered JSON data rather than the entire snapshot.
+        let page_node_ids = resolve_page_node_ids(&snapshot, &nodes_vec);
+        let rendered = render_export_graph(args, Some(ctx.graph.clone()), &page_node_ids);
+
+        let graph_metadata = build_graph_metadata(Some(&ctx.workspace_root), Some(&snapshot), None);
+
+        // Check truncation before moving next_page_token
+        let is_truncated = was_truncated || next_page_token.is_some();
+
+        Ok(ToolExecution {
+            data: DependencyGraphData {
+                nodes: nodes_vec,
+                edges: page_edges,
+                rendered,
+            },
+            used_index: false,
+            used_graph: true,
+            graph_metadata: Some(graph_metadata),
+            execution_ms: duration_to_ms(start.elapsed()),
+            next_page_token,
+            total: Some(total as u64),
+            truncated: Some(is_truncated),
+            candidates_scanned: None,
+            workspace_path: crate::execution::symbol_utils::path_to_forward_slash(
+                &ctx.workspace_root,
+            ),
+        })
+    }
+
+    /// Daemon/SqryServer-shared body for `subgraph`.
+    pub(crate) fn execute_subgraph(
+        ctx: &WorkspaceContext,
+        args: &SubgraphArgs,
+        start: Instant,
+    ) -> Result<ToolExecution<DependencyGraphData>> {
+        let snapshot = ctx.graph.snapshot();
+
+        // Get GraphIdentity for cache isolation
+        let identity = get_graph_identity(&ctx.workspace_root)?;
+
+        // Create cache key with full GraphIdentity for workspace isolation
+        let cache_key = graph_cache::SubgraphCacheKey::new(
+            args.symbols.clone(),
+            args.max_depth,
+            args.max_nodes,
+            args.include_callers,
+            args.include_callees,
+            args.include_imports,
+            args.cross_language,
+        )
+        .with_graph_identity(&identity);
+
+        // Try cache first, fall back to computation
+        let CacheOutcome {
+            data: graph_data,
+            state: cache_state,
+            latency_ms: cache_latency_ms,
+        } = graph_cache::get_or_compute_subgraph(cache_key, || {
+            compute_subgraph_data(args, &snapshot, &ctx.workspace_root)
+        });
+
+        tracing::debug!(
+            cache_state = ?cache_state,
+            cache_latency_ms,
+            "subgraph cache outcome"
+        );
+
+        let (graph_data, next_page_token, total_nodes, _total_edges) =
+            apply_subgraph_pagination(graph_data, &args.pagination);
+
+        let execution_ms = duration_to_ms(start.elapsed());
+
+        let graph_metadata = build_graph_metadata(
+            Some(&ctx.workspace_root),
+            Some(&snapshot),
+            Some(CacheRequestContext {
+                tool: "subgraph",
+                state: cache_state,
+                latency_ms: cache_latency_ms,
+            }),
+        );
+
+        Ok(ToolExecution {
+            data: graph_data,
+            used_index: false,
+            used_graph: true,
+            graph_metadata: Some(graph_metadata),
+            execution_ms,
+            next_page_token,
+            total: Some(total_nodes as u64),
+            truncated: Some(total_nodes > args.max_nodes),
+            candidates_scanned: Some(total_nodes as u64),
+            workspace_path: crate::execution::symbol_utils::path_to_forward_slash(
+                &ctx.workspace_root,
+            ),
+        })
     }
 }
 

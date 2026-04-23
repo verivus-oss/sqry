@@ -1,0 +1,43 @@
+[package]
+name = "sqry-daemon-client"
+description = "sqryd daemon client library: shim-mode (connect_shim + pump_stdio) and management (DaemonClient + JSON-RPC)."
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(disabled)', 'cfg(fuzzing)'] }
+
+[lib]
+name = "sqry_daemon_client"
+path = "src/lib.rs"
+
+[dependencies]
+# Wire types + framing codec (the only sqry-* dep — keeps this crate a leaf
+# on the client side of the dep graph, sibling to the daemon itself).
+sqry-daemon-protocol = { version = "9.0.0", path = "../sqry-daemon-protocol" }
+
+# Async transport. `net` gives us UnixStream + NamedPipeClient; `io-std`
+# exposes the process-global stdin/stdout handles used by pump_stdio;
+# `io-util` provides AsyncRead/AsyncWriteExt + tokio::io::copy/split;
+# `rt` + `macros` cover tests and tokio::select! / #[tokio::main]-adjacent
+# call sites; `fs` is needed for future socket-path canonicalisation;
+# `time` backs the bounded connect / handshake `tokio::time::timeout`
+# wrappers (DEFAULT_CONNECT_TIMEOUT / DEFAULT_HANDSHAKE_TIMEOUT).
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "io-std", "fs", "time"] }
+
+# JSON-RPC payload construction in DaemonClient::send_request / stop / status.
+serde_json = { workspace = true }
+
+# Error plumbing.
+thiserror = { workspace = true }
+
+[dev-dependencies]
+# `anyhow` is only used by the in-crate test helpers (`spawn_fake_daemon`
+# handler closures); keeping it out of the production `[dependencies]`
+# keeps the runtime dep surface minimal.
+anyhow = { workspace = true }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "io-std", "fs", "time"] }

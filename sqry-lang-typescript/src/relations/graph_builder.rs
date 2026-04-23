@@ -1,5 +1,6 @@
 use std::{collections::HashMap, path::Path};
 
+use sqry_core::graph::unified::build::helper::CalleeKindHint;
 use sqry_core::graph::unified::edge::kind::TypeOfContext;
 use sqry_core::graph::unified::edge::{ExportKind, FfiConvention, HttpMethod};
 use sqry_core::graph::unified::{GraphBuildHelper, StagingGraph};
@@ -589,8 +590,9 @@ fn build_call_edge_with_helper(
         callee_simple.to_string()
     };
 
-    let source_id = helper.ensure_function(&caller_qname, None, call_context.is_async, false);
-    let target_id = helper.ensure_function(&target_qname, None, false, false);
+    let call_site_span = span_from_node(call_node);
+    let source_id = helper.ensure_callee(&caller_qname, call_site_span, CalleeKindHint::Function);
+    let target_id = helper.ensure_callee(&target_qname, call_site_span, CalleeKindHint::Function);
 
     let argument_count = count_arguments(call_node);
     let uses_await = is_awaited_call(call_node);
@@ -644,13 +646,14 @@ fn build_constructor_edge_with_helper(
     }
 
     let constructor_simple = simple_name(&constructor_text);
-    let source_id = helper.ensure_function(
+    let new_site_span = span_from_node(new_node);
+    let source_id = helper.ensure_callee(
         &call_context.qualified_name(),
-        None,
-        call_context.is_async,
-        false,
+        new_site_span,
+        CalleeKindHint::Function,
     );
-    let target_id = helper.ensure_function(constructor_simple, None, false, false);
+    let target_id =
+        helper.ensure_callee(constructor_simple, new_site_span, CalleeKindHint::Function);
 
     let argument_count = count_arguments(new_node);
     let uses_await = is_awaited_call(new_node);

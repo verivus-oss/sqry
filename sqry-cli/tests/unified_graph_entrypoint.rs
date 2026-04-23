@@ -401,10 +401,13 @@ fn test_entrypoint_fails_with_empty_registry() {
     let config = BuildConfig::default();
 
     let result = build_unified_graph(root, &plugins, &config);
-    assert!(result.is_err());
+    let err = result.expect_err("empty registry must error");
+    // Task 7 Phase 7c: the internal pipeline now surfaces
+    // `GraphBuilderError::Internal { reason }`; the legacy wrapper
+    // prefixes with "Internal graph builder error: ".
     assert_eq!(
-        result.unwrap_err().to_string(),
-        "No graph builders registered – cannot build code graph"
+        err.to_string(),
+        "Internal graph builder error: No graph builders registered – cannot build code graph"
     );
 }
 

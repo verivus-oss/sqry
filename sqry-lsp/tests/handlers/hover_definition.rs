@@ -17,6 +17,8 @@ fn new_session(root: &Path) -> sqry_lsp::session::SessionManager {
         log_level: "warn".into(),
         config: None,
         allow_public_bind: false,
+        daemon: false,
+        daemon_socket: None,
     };
     sqry_lsp::session::SessionManager::new(options)
 }

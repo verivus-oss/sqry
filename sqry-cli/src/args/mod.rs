@@ -646,6 +646,44 @@ pub enum Command {
         plugin_selection: PluginSelectionArgs,
     },
 
+    /// Execute a structural query through the sqry-db planner (DB13).
+    ///
+    /// Uses the new salsa-style planner pipeline (parse → compile → fuse →
+    /// execute) instead of the legacy `query` engine. Accepts the same text
+    /// syntax documented in `docs/superpowers/specs/2026-04-12-derived-analysis-db-query-planner-design.md`
+    /// (§3 — Text Syntax Frontend).
+    ///
+    /// Predicate examples:
+    ///   - `kind:function`                          Find every function
+    ///   - `kind:function has:caller`               Functions that have at least one caller
+    ///   - `kind:function callers:main`             Functions called by `main`
+    ///   - `kind:function traverse:reverse(calls,3)`  Callers up to 3 hops deep
+    ///   - `kind:function in:src/api/**`            Functions under src/api
+    ///   - `kind:function references ~= /handle_.*/i`  Regex-matched references
+    ///   - `kind:struct implements:Visitor`         Structs implementing `Visitor`
+    ///
+    /// Subqueries nest via parentheses:
+    ///   - `kind:function callees:(kind:method name:visit_*)`
+    ///
+    /// DB13 scope note: this subcommand is parallel to the legacy `query`;
+    /// DB14+ will migrate the legacy handlers and eventually replace
+    /// `sqry query` with the planner path.
+    #[command(name = "plan-query", display_order = 3, verbatim_doc_comment)]
+    PlanQuery {
+        /// Text query to parse and execute.
+        #[arg(help_heading = headings::QUERY_INPUT, display_order = 10)]
+        query: String,
+
+        /// Search path (defaults to current directory). If no index exists
+        /// here, walks up to find the nearest `.sqry-index`.
+        #[arg(help_heading = headings::QUERY_INPUT, display_order = 20)]
+        path: Option<String>,
+
+        /// Maximum number of results to print (default: 1000).
+        #[arg(long, value_name = "N", default_value = "1000", help_heading = headings::SECURITY_LIMITS, display_order = 10)]
+        limit: usize,
+    },
+
     /// Graph-based queries and analysis
     ///
     /// Advanced graph operations using the unified graph architecture.
@@ -1701,6 +1739,98 @@ pub enum Command {
         #[command(subcommand)]
         command: McpCommand,
     },
+
+    /// Manage the sqry daemon (sqryd).
+    ///
+    /// The daemon provides persistent, shared code-graph indexing for
+    /// faster queries across concurrent editor sessions.
+    ///
+    /// Examples:
+    ///   sqry daemon start              # Start the daemon in the background
+    ///   sqry daemon stop               # Stop the running daemon
+    ///   sqry daemon status             # Show daemon health and workspaces
+    ///   sqry daemon status --json      # Machine-readable status
+    ///   sqry daemon logs --follow      # Tail the daemon log
+    #[command(display_order = 35, verbatim_doc_comment)]
+    Daemon {
+        #[command(subcommand)]
+        action: Box<DaemonAction>,
+    },
+}
+
+/// Daemon management subcommands
+#[derive(Subcommand, Debug, Clone)]
+pub enum DaemonAction {
+    /// Start the sqry daemon in the background.
+    ///
+    /// Locates the `sqryd` binary (sibling to `sqry` or on PATH),
+    /// spawns it with `sqryd start --detach`, and waits for readiness.
+    Start {
+        /// Path to the sqryd binary (default: auto-detect).
+        #[arg(long)]
+        sqryd_path: Option<PathBuf>,
+        /// Maximum seconds to wait for daemon readiness.
+        #[arg(long, default_value_t = 10)]
+        timeout: u64,
+    },
+    /// Stop the running sqry daemon.
+    Stop {
+        /// Maximum seconds to wait for graceful shutdown.
+        #[arg(long, default_value_t = 15)]
+        timeout: u64,
+    },
+    /// Show daemon status (version, uptime, memory, workspaces).
+    Status {
+        /// Emit machine-readable JSON instead of human-readable output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Tail the daemon log file.
+    Logs {
+        /// Number of lines to show from the end of the log.
+        #[arg(long, short = 'n', default_value_t = 50)]
+        lines: usize,
+        /// Follow the log file for new output (like `tail -f`).
+        #[arg(long, short = 'f')]
+        follow: bool,
+    },
+    /// Load a workspace into the running daemon.
+    ///
+    /// Connects to the daemon and sends a `daemon/load` request with the
+    /// canonicalized path. The daemon's `WorkspaceManager` indexes the
+    /// workspace, caches the graph in memory, and starts watching for
+    /// file changes to rebuild incrementally.
+    Load {
+        /// Workspace root directory to load.
+        path: PathBuf,
+    },
+    /// Trigger an in-place graph rebuild for a loaded workspace.
+    ///
+    /// Sends a `daemon/rebuild` request to the running daemon for the specified
+    /// workspace root. Once wired (CLI_REBUILD_3), the daemon will re-index the
+    /// workspace and replace the in-memory graph atomically on completion.
+    ///
+    /// Use `--force` to discard any incremental state and perform a full rebuild
+    /// from scratch (equivalent to dropping and re-loading the workspace).
+    ///
+    /// The command will wait up to `--timeout` seconds for the rebuild to finish
+    /// and report the result as human-readable text or, with `--json`, as a
+    /// machine-readable JSON object.
+    #[command(verbatim_doc_comment)]
+    Rebuild {
+        /// Workspace root directory to rebuild.
+        path: PathBuf,
+        /// Force a full rebuild from scratch, discarding incremental state.
+        #[arg(long)]
+        force: bool,
+        /// Maximum seconds to wait for the rebuild to complete.
+        /// Default is 1800 seconds (30 minutes). Pass 0 to fire-and-forget.
+        #[arg(long, default_value_t = 1800)]
+        timeout: u64,
+        /// Emit machine-readable JSON output instead of human-readable text.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// MCP server integration subcommands
@@ -2017,6 +2147,38 @@ pub enum GraphOperation {
 
         /// Output as JSON.
         #[arg(long, help_heading = headings::GRAPH_OUTPUT_OPTIONS, display_order = 10)]
+        json: bool,
+    },
+
+    /// Resolve a symbol through the Phase 2 binding plane
+    ///
+    /// Loads the snapshot, constructs a BindingPlane facade, runs
+    /// BindingPlane::resolve() for the given symbol, and prints the outcome
+    /// along with the list of matched bindings. This is the end-to-end proof
+    /// point for the Phase 2 binding plane (FR9).
+    ///
+    /// With `--explain` the ordered witness step trace is printed below the
+    /// binding list, showing every bucket probe, candidate considered, and
+    /// the terminal Chose/Ambiguous/Unresolved step.
+    ///
+    /// Example: sqry graph resolve my_function
+    /// Example: sqry graph resolve my_function --explain
+    /// Example: sqry graph resolve my_function --explain --json
+    #[command(alias = "res")]
+    Resolve {
+        /// Symbol name to resolve (qualified or unqualified).
+        #[arg(help_heading = headings::GRAPH_ANALYSIS_INPUT, display_order = 10)]
+        symbol: String,
+
+        /// Print the ordered witness step trace (bucket probes, candidate
+        /// evaluations, and the terminal Chose/Ambiguous/Unresolved step).
+        #[arg(long, help_heading = headings::GRAPH_OUTPUT_OPTIONS, display_order = 10)]
+        explain: bool,
+
+        /// Emit a stable JSON document instead of human-readable text.
+        /// The JSON shape (symbol/outcome/bindings/explain) is the documented
+        /// stable external contract for scripting and tool integration.
+        #[arg(long, help_heading = headings::GRAPH_OUTPUT_OPTIONS, display_order = 20)]
         json: bool,
     },
 
@@ -3697,6 +3859,99 @@ mod tests {
             assert!(!macro_boundaries);
         } else {
             panic!("Expected Search command");
+        }
+    }
+    }
+
+    // ===== Daemon subcommand CLI tests (Task 10 U2) =====
+
+    large_stack_test! {
+    #[test]
+    fn daemon_start_parses() {
+        let cli = Cli::parse_from(["sqry", "daemon", "start"]);
+        if let Some(Command::Daemon { action }) = cli.command.as_deref() {
+            match action.as_ref() {
+                DaemonAction::Start { sqryd_path, timeout } => {
+                    assert!(sqryd_path.is_none(), "sqryd_path should default to None");
+                    assert_eq!(*timeout, 10, "default timeout should be 10");
+                }
+                other => panic!("Expected DaemonAction::Start, got {:?}", other),
+            }
+        } else {
+            panic!("Expected Command::Daemon");
+        }
+    }
+    }
+
+    large_stack_test! {
+    #[test]
+    fn daemon_stop_parses() {
+        let cli = Cli::parse_from(["sqry", "daemon", "stop", "--timeout", "30"]);
+        if let Some(Command::Daemon { action }) = cli.command.as_deref() {
+            match action.as_ref() {
+                DaemonAction::Stop { timeout } => {
+                    assert_eq!(*timeout, 30, "timeout should be 30");
+                }
+                other => panic!("Expected DaemonAction::Stop, got {:?}", other),
+            }
+        } else {
+            panic!("Expected Command::Daemon");
+        }
+    }
+    }
+
+    large_stack_test! {
+    #[test]
+    fn daemon_status_json_parses() {
+        let cli = Cli::parse_from(["sqry", "daemon", "status", "--json"]);
+        if let Some(Command::Daemon { action }) = cli.command.as_deref() {
+            match action.as_ref() {
+                DaemonAction::Status { json } => {
+                    assert!(*json, "--json flag should be true");
+                }
+                other => panic!("Expected DaemonAction::Status, got {:?}", other),
+            }
+        } else {
+            panic!("Expected Command::Daemon");
+        }
+    }
+    }
+
+    large_stack_test! {
+    #[test]
+    fn daemon_logs_follow_parses() {
+        let cli = Cli::parse_from(["sqry", "daemon", "logs", "--follow", "--lines", "100"]);
+        if let Some(Command::Daemon { action }) = cli.command.as_deref() {
+            match action.as_ref() {
+                DaemonAction::Logs { lines, follow } => {
+                    assert_eq!(*lines, 100, "lines should be 100");
+                    assert!(*follow, "--follow flag should be true");
+                }
+                other => panic!("Expected DaemonAction::Logs, got {:?}", other),
+            }
+        } else {
+            panic!("Expected Command::Daemon");
+        }
+    }
+    }
+
+    large_stack_test! {
+    #[test]
+    fn daemon_load_parses() {
+        let cli = Cli::parse_from(["sqry", "daemon", "load", "/some/workspace"]);
+        if let Some(Command::Daemon { action }) = cli.command.as_deref() {
+            match action.as_ref() {
+                DaemonAction::Load { path } => {
+                    assert_eq!(
+                        path,
+                        &std::path::PathBuf::from("/some/workspace"),
+                        "path should be /some/workspace"
+                    );
+                }
+                other => panic!("Expected DaemonAction::Load, got {:?}", other),
+            }
+        } else {
+            panic!("Expected Command::Daemon");
         }
     }
     }

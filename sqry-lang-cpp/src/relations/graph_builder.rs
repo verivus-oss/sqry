@@ -15,6 +15,7 @@
 //! 3. **Pass 3**: Extract call expressions → Create Call edges
 //! 4. **Pass 4**: Extract FFI declarations → Create FFI function nodes
 
+use sqry_core::graph::unified::build::helper::CalleeKindHint;
 use sqry_core::graph::unified::{FfiConvention, GraphBuildHelper, StagingGraph};
 use sqry_core::graph::{GraphBuilder, GraphBuilderError, GraphResult, Language, Position, Span};
 use std::{
@@ -1805,7 +1806,8 @@ fn walk_tree_for_graph(
                 build_call_for_staging(ast_graph, node, content)
             {
                 // Ensure caller node exists
-                let caller_function_id = helper.ensure_function(&caller_qname, None, false, false);
+                let caller_function_id =
+                    helper.ensure_callee(&caller_qname, span, CalleeKindHint::Function);
                 let argument_count = u8::try_from(argument_count).unwrap_or(u8::MAX);
 
                 // Check if the callee is a known FFI function
@@ -1815,12 +1817,12 @@ fn walk_tree_for_graph(
                     if let Some((ffi_qualified, ffi_convention)) = ffi_registry.get(&callee_qname) {
                         // This is a call to an FFI function - create FfiCall edge
                         let ffi_target_id =
-                            helper.ensure_function(ffi_qualified, None, false, true);
+                            helper.ensure_callee(ffi_qualified, span, CalleeKindHint::Function);
                         helper.add_ffi_edge(caller_function_id, ffi_target_id, *ffi_convention);
                     } else {
                         // Regular call - create normal Call edge
                         let target_function_id =
-                            helper.ensure_function(&callee_qname, None, false, false);
+                            helper.ensure_callee(&callee_qname, span, CalleeKindHint::Function);
                         helper.add_call_edge_full_with_span(
                             caller_function_id,
                             target_function_id,
@@ -1832,7 +1834,7 @@ fn walk_tree_for_graph(
                 } else {
                     // Qualified call - create normal Call edge
                     let target_function_id =
-                        helper.ensure_function(&callee_qname, None, false, false);
+                        helper.ensure_callee(&callee_qname, span, CalleeKindHint::Function);
                     helper.add_call_edge_full_with_span(
                         caller_function_id,
                         target_function_id,

@@ -63,6 +63,7 @@
 //! - Add edges without full rebuild
 
 pub mod body_hash;
+pub mod cancellation;
 pub mod entrypoint;
 pub mod helper;
 pub mod identity;
@@ -71,9 +72,13 @@ pub mod parallel_commit;
 pub mod pass3_intra;
 pub mod pass4_cross;
 pub mod pass5_cross_language;
+pub mod phase4e_binding;
+pub mod phase4e_incremental;
 pub mod progress;
+pub mod reindex;
 pub mod staging;
 pub mod test_helpers;
+pub(crate) mod unification;
 
 // === Graph Build Phase Names (for progress reporting) ===
 // These are `&'static str` constants to avoid allocations in progress events.
@@ -108,26 +113,39 @@ pub const SAVE_COMPONENT_RELATIONS: &str = "relations";
 pub const SAVE_COMPONENT_GRAPH: &str = "unified graph";
 
 // Re-exports
+pub use cancellation::CancellationToken;
 pub use entrypoint::{
     AnalysisStrategySummary, BuildConfig, BuildResult, GRAPH_FILE_PROCESSING_PHASE,
     build_and_persist_graph, build_and_persist_graph_with_progress, build_unified_graph,
-    build_unified_graph_with_progress, persist_and_analyze_graph,
+    build_unified_graph_cancellable, build_unified_graph_with_progress,
+    build_unified_graph_with_progress_cancellable, persist_and_analyze_graph,
 };
 pub use helper::{GraphBuildHelper, HelperStats};
 pub use identity::{IdentityIndex, IdentityKey};
-pub use incremental::{IncrementalStats, add_edge_incremental, remove_file_nodes};
+pub use incremental::{
+    IncrementalStats, add_edge_incremental, compute_reverse_dep_closure, incremental_rebuild,
+    remove_file_nodes,
+};
 pub use parallel_commit::{
     ChunkCommitPlan, FilePlan, GlobalOffsets, Phase3Result, compute_commit_plan,
-    pending_edges_to_delta, phase2_assign_ranges, phase3_parallel_commit,
-    phase4_apply_global_remap, remap_edge_kind_string_ids, remap_node_entry_global,
-    remap_option_string_id, remap_string_id,
+    pending_edges_to_delta, phase2_assign_ranges, phase4_apply_global_remap,
+    remap_edge_kind_string_ids, remap_node_entry_global, remap_option_string_id, remap_string_id,
 };
+// `phase3_parallel_commit` is intentionally *not* re-exported here as
+// of Task 4 Step 4 Phase 1. Its new `G: GraphMutationTarget` generic
+// bound is `pub(crate)`, which requires the function itself to be
+// `pub(crate)`. The only call sites are `entrypoint.rs` and the
+// in-module tests, both of which reach the helper through its direct
+// module path (`parallel_commit::phase3_parallel_commit`). No external
+// crate consumed this function before the migration; the downgrade is
+// a no-op for the public API surface.
 pub use pass3_intra::{
     IntraFileReference, Pass3Result, Pass3Stats, PendingEdge, UnresolvedRef, pass3_intra_edges,
 };
 pub use pass4_cross::{ExportMap, Pass4Stats, pass4_cross_file};
 pub use pass5_cross_language::{Pass5Stats, link_cross_language_edges};
 pub use progress::GraphBuildProgressTracker;
+pub use reindex::{ReindexStats, allocate_new_segment, reindex_files};
 pub use staging::{StagedEdgeRef, StagedNodeRef, StagingGraph, StagingOp};
 
 // Body hash utilities for duplicate detection

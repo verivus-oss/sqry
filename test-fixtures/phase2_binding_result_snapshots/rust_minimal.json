@@ -1,0 +1,24 @@
+{
+  "query": {
+    "symbol": "lib0",
+    "file_scope": "Any",
+    "mode": "AllowSuffixCandidates"
+  },
+  "bindings": [
+    {
+      "node_id": {
+        "index": 0,
+        "generation": 1
+      },
+      "classification": "Unknown",
+      "bucket": "ExactSimple",
+      "kind": "module"
+    }
+  ],
+  "outcome": {
+    "Resolved": {
+      "index": 0,
+      "generation": 1
+    }
+  }
+}

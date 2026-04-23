@@ -67,6 +67,24 @@ struct BfsResult {
 /// Uses the traversal kernel with incoming direction and dependency edges
 /// (calls, imports, references, inheritance). Converts the kernel's
 /// `TraversalResult` into the `BfsResult` expected by downstream code.
+///
+/// # Dispatch path (DB18)
+///
+/// `impact` is a **NodeId-anchored multi-hop BFS** under the Phase 3C
+/// dispatch taxonomy; it does not route through sqry-db's name-keyed
+/// queries. The target is resolved to a single `NodeId` in
+/// [`run_impact`] via substring / qualified-name matching *before* this
+/// traversal starts.
+///
+/// # Frontier invariant
+///
+/// Traversal broadens strictly through edges physically adjacent to
+/// already-visited `NodeId`s (kernel `traverse` with `edges_from` in
+/// the `Incoming` direction). It never re-resolves a name at depth ≥ 1,
+/// preserving the same-name frontier invariant: a user who seeds on
+/// `AlphaMarker::helper` cannot pull in unrelated `BetaMarker::helper`
+/// dependents. The single-seed `target_node_id` lookup in
+/// [`run_impact`] guarantees only one canonical anchor per invocation.
 fn collect_dependents_bfs(
     graph: &sqry_core::graph::unified::concurrent::CodeGraph,
     target_node_id: NodeId,

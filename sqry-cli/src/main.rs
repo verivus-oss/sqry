@@ -356,6 +356,12 @@ fn run() -> Result<()> {
             &history_argv,
         )?,
 
+        // Structural plan query (DB13 — parser + executor through sqry-db)
+        Some(Command::PlanQuery { query, path, limit }) => {
+            commands::run_planner_query(&cli, query, path.as_deref(), *limit)
+                .context("Plan-query command failed")?;
+        }
+
         // Interactive shell command
         Some(Command::Shell { path }) => {
             commands::run_shell(&cli, path.as_deref().unwrap_or("."))
@@ -827,6 +833,11 @@ fn run() -> Result<()> {
             commands::mcp::run(command).context("MCP command failed")?;
         }
 
+        // Daemon lifecycle management
+        Some(Command::Daemon { action }) => {
+            commands::daemon::run(&cli, action).context("Daemon command failed")?;
+        }
+
         // No subcommand - use pattern shorthand
         None => handle_no_command(&cli, &history_argv)?,
     }
@@ -1225,6 +1236,7 @@ fn handle_no_command(cli: &Cli, history_argv: &[String]) -> Result<()> {
     eprintln!("       sqry index [PATH]");
     eprintln!("       sqry update [PATH]");
     eprintln!("       sqry cache <stats|clear>");
+    eprintln!("       sqry daemon {{start,stop,status,logs}}");
     eprintln!();
     eprintln!("Try 'sqry --help' for more information.");
     std::process::exit(2)
@@ -1480,5 +1492,89 @@ fn record_history(search_path: &str, command: &str, argv: &[String], success: bo
     // Log failures in debug mode but don't affect command execution
     if let Err(e) = result {
         log::debug!("Failed to record history: {e}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// U4 wiring smoke tests — verify `Command::Daemon` is dispatched from main.rs
+// and `commands::daemon::run` is reachable from the dispatch table.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod wiring_tests {
+    use super::*;
+    use clap::Parser;
+
+    large_stack_test! {
+    /// Smoke test: `sqry daemon start` reaches the Daemon variant with defaults.
+    ///
+    /// These tests exercise parse wiring (spec: "compilation smoke tests via
+    /// `Cli::parse_from`"). The `run()` match arm at main.rs:837 is a compile-time
+    /// wiring guarantee: if `commands::daemon::run` signature changes, this module
+    /// would fail to compile.
+    #[test]
+    fn daemon_start_parses_wiring() {
+        let cli = args::Cli::parse_from(["sqry", "daemon", "start"]);
+        if let Some(args::Command::Daemon { action }) = cli.command.as_deref() {
+            assert!(
+                matches!(
+                    action.as_ref(),
+                    args::DaemonAction::Start { sqryd_path: None, timeout: 10 }
+                ),
+                "DaemonAction::Start must have default sqryd_path=None, timeout=10"
+            );
+        } else {
+            panic!("Expected Command::Daemon");
+        }
+    }
+    }
+
+    large_stack_test! {
+    /// Smoke test: `sqry daemon stop --timeout 30` reaches the Daemon::Stop variant
+    /// with timeout=30.
+    #[test]
+    fn daemon_stop_parses_wiring() {
+        let cli = args::Cli::parse_from(["sqry", "daemon", "stop", "--timeout", "30"]);
+        if let Some(args::Command::Daemon { action }) = cli.command.as_deref() {
+            assert!(
+                matches!(action.as_ref(), args::DaemonAction::Stop { timeout: 30 }),
+                "DaemonAction::Stop must have timeout=30 when --timeout 30 is passed"
+            );
+        } else {
+            panic!("Expected Command::Daemon");
+        }
+    }
+    }
+
+    large_stack_test! {
+    /// Smoke test: `sqry daemon status --json` reaches the Daemon variant.
+    #[test]
+    fn daemon_status_json_parses_wiring() {
+        let cli = args::Cli::parse_from(["sqry", "daemon", "status", "--json"]);
+        if let Some(args::Command::Daemon { action }) = cli.command.as_deref() {
+            assert!(
+                matches!(action.as_ref(), args::DaemonAction::Status { json: true }),
+                "DaemonAction::Status must have json=true when --json is passed"
+            );
+        } else {
+            panic!("Expected Command::Daemon");
+        }
+    }
+    }
+
+    large_stack_test! {
+    /// Smoke test: `sqry daemon logs -f` reaches the Daemon::Logs variant with follow=true.
+    #[test]
+    fn daemon_logs_follow_parses_wiring() {
+        let cli = args::Cli::parse_from(["sqry", "daemon", "logs", "-f"]);
+        if let Some(args::Command::Daemon { action }) = cli.command.as_deref() {
+            assert!(
+                matches!(action.as_ref(), args::DaemonAction::Logs { follow: true, .. }),
+                "DaemonAction::Logs must have follow=true when -f is passed"
+            );
+        } else {
+            panic!("Expected Command::Daemon");
+        }
+    }
     }
 }

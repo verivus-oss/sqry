@@ -10,6 +10,7 @@ use std::{
     path::Path,
 };
 
+use sqry_core::graph::unified::build::helper::CalleeKindHint;
 use sqry_core::graph::unified::edge::ExportKind;
 use sqry_core::graph::{
     GraphBuilder, GraphBuilderError, GraphResult, Language, Span,
@@ -199,8 +200,10 @@ impl GraphBuilder for ShellGraphBuilder {
                 else if let Some((caller_qname, callee_qname, argument_count, span)) =
                     build_call_edge_for_staging(&ast_graph, node, content, &module_qualified)?
                 {
-                    let source_id = helper.ensure_function(&caller_qname, None, false, false);
-                    let target_id = helper.ensure_function(&callee_qname, None, false, false);
+                    let source_id =
+                        helper.ensure_callee(&caller_qname, span, CalleeKindHint::Function);
+                    let target_id =
+                        helper.ensure_callee(&callee_qname, span, CalleeKindHint::Function);
 
                     let argument_count = u8::try_from(argument_count).unwrap_or(u8::MAX);
                     helper.add_call_edge_full_with_span(

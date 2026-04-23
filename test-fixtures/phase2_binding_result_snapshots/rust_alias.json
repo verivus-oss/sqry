@@ -1,0 +1,24 @@
+{
+  "query": {
+    "symbol": "baz",
+    "file_scope": "Any",
+    "mode": "AllowSuffixCandidates"
+  },
+  "bindings": [
+    {
+      "node_id": {
+        "index": 1,
+        "generation": 1
+      },
+      "classification": "Import",
+      "bucket": "ExactSimple",
+      "kind": "import"
+    }
+  ],
+  "outcome": {
+    "Resolved": {
+      "index": 1,
+      "generation": 1
+    }
+  }
+}

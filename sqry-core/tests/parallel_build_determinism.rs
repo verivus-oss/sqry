@@ -149,3 +149,73 @@ fn varying_thread_counts_agree() {
         );
     }
 }
+
+/// After unification, no call-compatible node group should have a mix of
+/// line-0 and line-nonzero members (would indicate a unification failure).
+///
+/// Stub-only groups (external references like `println!`) are acceptable
+/// at line 0 — they reference symbols outside the workspace.
+///
+/// This is a line-zero holistic fix (HU08) regression guard added to the
+/// existing determinism suite.
+#[test]
+fn no_line_zero_in_call_compatible_nodes() {
+    use sqry_core::graph::unified::node::{NodeId, NodeKind};
+    use std::collections::HashMap;
+
+    let call_compatible = &[
+        NodeKind::Function,
+        NodeKind::Method,
+        NodeKind::Macro,
+        NodeKind::Constant,
+        NodeKind::LambdaTarget,
+    ];
+
+    let graph = {
+        let plugins = create_rust_plugin_manager();
+        let config = BuildConfig::default();
+        build_unified_graph(&cli_basic_fixtures(), &plugins, &config)
+            .expect("graph build should succeed")
+    };
+
+    let strings = graph.strings();
+    let files = graph.files();
+
+    // Group call-compatible nodes by qualified name
+    let mut groups: HashMap<String, Vec<(NodeId, u32, bool)>> = HashMap::new();
+    for (node_id, entry) in graph.nodes().iter() {
+        if !call_compatible.contains(&entry.kind) {
+            continue;
+        }
+        let key = entry
+            .qualified_name
+            .and_then(|id| strings.resolve(id))
+            .or_else(|| strings.resolve(entry.name))
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        if key.is_empty() {
+            continue;
+        }
+        let is_external = files.is_external(entry.file);
+        groups
+            .entry(key)
+            .or_default()
+            .push((node_id, entry.start_line, is_external));
+    }
+
+    for (qn, members) in &groups {
+        let has_real_span = members.iter().any(|(_, line, _)| *line > 0);
+        if !has_real_span {
+            continue; // Stub-only group — acceptable
+        }
+        for (node_id, line, is_external) in members {
+            if *line > 0 || *is_external {
+                continue;
+            }
+            panic!(
+                "Node {node_id:?} ({qn}) has start_line == 0 but a sibling has a \
+                 real span — unification should have eliminated this"
+            );
+        }
+    }
+}

@@ -116,46 +116,15 @@ pub struct McpConfig {
     #[serde(default = "default_discovery_cache_capacity")]
     pub discovery_cache_capacity: usize,
 
-    /// Trace path cache capacity (default: 256)
-    ///
-    /// Controls how many `trace_path` query results are cached to improve
-    /// performance for repeated queries. This is the primary cache capacity
-    /// field; the legacy `trace_cache_size` field is retained for backward
-    /// compatibility but this field takes precedence.
-    ///
-    /// # Environment Override
-    /// Can be overridden with `SQRY_MCP_TRACE_PATH_CACHE_CAPACITY` environment variable.
-    #[serde(default = "default_trace_path_cache_capacity")]
-    pub trace_path_cache_capacity: usize,
-
-    /// Subgraph cache capacity (default: 128)
-    ///
-    /// Controls how many subgraph extraction results are cached. This is the
-    /// primary cache capacity field; the legacy `subgraph_cache_size` field
-    /// is retained for backward compatibility but this field takes precedence.
-    ///
-    /// # Environment Override
-    /// Can be overridden with `SQRY_MCP_SUBGRAPH_CACHE_CAPACITY` environment variable.
-    #[serde(default = "default_subgraph_cache_capacity")]
-    pub subgraph_cache_capacity: usize,
-
-    /// Query cache TTL in seconds (default: 300)
-    ///
-    /// Time-to-live for cached query results (`trace_path`, subgraph).
-    /// Expired entries are evicted on access. Lower values keep results
-    /// fresher but increase computation. Higher values improve performance
-    /// but may serve stale results.
-    ///
-    /// # Validation
-    /// - Minimum: 10 seconds (avoid thrashing)
-    /// - Maximum: 3600 seconds (1 hour, recommended)
-    /// - Hard cap: 86400 seconds (24 hours, absolute maximum)
-    ///
-    /// # Environment Override
-    /// Can be overridden with `SQRY_MCP_QUERY_CACHE_TTL_SECS` environment variable.
-    #[serde(default = "default_query_cache_ttl")]
-    pub query_cache_ttl_secs: u64,
-
+    // Phase 3C DB21: `trace_path_cache_capacity`, `subgraph_cache_capacity`,
+    // and `query_cache_ttl_secs` were removed. They duplicated
+    // `trace_cache_size` / `subgraph_cache_size` (which main.rs now uses
+    // to initialise the payload LRU caches in `execution::graph_cache`)
+    // and the TTL is sourced from `execution::graph_cache::CACHE_TTL_SECS`.
+    // The `SQRY_MCP_TRACE_PATH_CACHE_CAPACITY`,
+    // `SQRY_MCP_SUBGRAPH_CACHE_CAPACITY`, and
+    // `SQRY_MCP_QUERY_CACHE_TTL_SECS` environment overrides were retired
+    // in the same pass. Callers should use the `_SIZE` variants instead.
     /// Timeout for index rebuild operations in milliseconds (default: 600000 = 10 min).
     ///
     /// Separate from the general tool timeout because index builds are inherently
@@ -187,17 +156,8 @@ fn default_discovery_cache_capacity() -> usize {
     100
 }
 
-fn default_trace_path_cache_capacity() -> usize {
-    256
-}
-
-fn default_subgraph_cache_capacity() -> usize {
-    128
-}
-
-fn default_query_cache_ttl() -> u64 {
-    300
-}
+// Phase 3C DB21: default_trace_path_cache_capacity, default_subgraph_cache_capacity
+// and default_query_cache_ttl removed along with the fields they backed.
 
 fn default_index_timeout() -> u64 {
     600_000 // 10 minutes
@@ -217,9 +177,6 @@ impl Default for McpConfig {
             max_cross_lang_edges: 50_000,
             engine_cache_capacity: default_engine_cache_capacity(),
             discovery_cache_capacity: default_discovery_cache_capacity(),
-            trace_path_cache_capacity: default_trace_path_cache_capacity(),
-            subgraph_cache_capacity: default_subgraph_cache_capacity(),
-            query_cache_ttl_secs: default_query_cache_ttl(),
             index_timeout_ms: default_index_timeout(),
             redaction_preset: default_redaction_preset(),
         }
@@ -291,32 +248,12 @@ impl McpConfig {
     /// Absolute hard cap for discovery cache capacity
     const ABSOLUTE_MAX_DISCOVERY_CACHE_CAPACITY: usize = 10_000;
 
-    /// Minimum allowed trace path cache capacity (overrides `trace_cache_size`)
-    const MIN_TRACE_PATH_CACHE_CAPACITY: usize = 16;
-
-    /// Maximum recommended trace path cache capacity
-    const MAX_TRACE_PATH_CACHE_CAPACITY: usize = 1024;
-
-    /// Absolute hard cap for trace path cache capacity
-    const ABSOLUTE_MAX_TRACE_PATH_CACHE_CAPACITY: usize = 4096;
-
-    /// Minimum allowed subgraph cache capacity (overrides `subgraph_cache_size`)
-    const MIN_SUBGRAPH_CACHE_CAPACITY: usize = 8;
-
-    /// Maximum recommended subgraph cache capacity
-    const MAX_SUBGRAPH_CACHE_CAPACITY: usize = 512;
-
-    /// Absolute hard cap for subgraph cache capacity
-    const ABSOLUTE_MAX_SUBGRAPH_CACHE_CAPACITY: usize = 2048;
-
-    /// Minimum allowed query cache TTL
-    const MIN_QUERY_CACHE_TTL_SECS: u64 = 10;
-
-    /// Maximum recommended query cache TTL
-    const MAX_QUERY_CACHE_TTL_SECS: u64 = 3600;
-
-    /// Absolute hard cap for query cache TTL
-    const ABSOLUTE_MAX_QUERY_CACHE_TTL_SECS: u64 = 86_400;
+    // Phase 3C DB21: removed MIN/MAX/ABSOLUTE_MAX constants for
+    // trace_path_cache_capacity, subgraph_cache_capacity, and
+    // query_cache_ttl_secs. The cache-size constraints now live on the
+    // legacy `trace_cache_size` / `subgraph_cache_size` fields (MIN/MAX
+    // constants defined above), and the TTL constant lives in
+    // `execution::graph_cache::CACHE_TTL_SECS`.
 
     /// Create a new MCP configuration with custom values
     ///
@@ -339,9 +276,6 @@ impl McpConfig {
             max_cross_lang_edges,
             engine_cache_capacity: default_engine_cache_capacity(),
             discovery_cache_capacity: default_discovery_cache_capacity(),
-            trace_path_cache_capacity: default_trace_path_cache_capacity(),
-            subgraph_cache_capacity: default_subgraph_cache_capacity(),
-            query_cache_ttl_secs: default_query_cache_ttl(),
             index_timeout_ms: default_index_timeout(),
             redaction_preset: default_redaction_preset(),
         };
@@ -393,22 +327,12 @@ impl McpConfig {
             )?;
         }
 
-        if let Ok(trace_path_cache_str) = env::var("SQRY_MCP_TRACE_PATH_CACHE_CAPACITY") {
-            config.trace_path_cache_capacity = Self::parse_env_var_usize(
-                &trace_path_cache_str,
-                "SQRY_MCP_TRACE_PATH_CACHE_CAPACITY",
-            )?;
-        }
-
-        if let Ok(subgraph_cache_str) = env::var("SQRY_MCP_SUBGRAPH_CACHE_CAPACITY") {
-            config.subgraph_cache_capacity =
-                Self::parse_env_var_usize(&subgraph_cache_str, "SQRY_MCP_SUBGRAPH_CACHE_CAPACITY")?;
-        }
-
-        if let Ok(ttl_str) = env::var("SQRY_MCP_QUERY_CACHE_TTL_SECS") {
-            config.query_cache_ttl_secs =
-                Self::parse_env_var(&ttl_str, "SQRY_MCP_QUERY_CACHE_TTL_SECS")?;
-        }
+        // Phase 3C DB21: SQRY_MCP_TRACE_PATH_CACHE_CAPACITY,
+        // SQRY_MCP_SUBGRAPH_CACHE_CAPACITY, and SQRY_MCP_QUERY_CACHE_TTL_SECS
+        // environment overrides were retired. Use SQRY_MCP_TRACE_CACHE_SIZE
+        // / SQRY_MCP_SUBGRAPH_CACHE_SIZE for cache capacities; the payload
+        // cache TTL is now fixed at `execution::graph_cache::CACHE_TTL_SECS`
+        // (currently 300 seconds).
 
         if let Ok(index_timeout_str) = env::var("SQRY_MCP_INDEX_TIMEOUT_MS") {
             config.index_timeout_ms =
@@ -695,126 +619,12 @@ impl McpConfig {
         Ok(self.discovery_cache_capacity)
     }
 
-    /// Get effective trace path cache capacity with validation
-    ///
-    /// This takes precedence over `trace_cache_size`.
-    ///
-    /// # Errors
-    /// Returns an error if:
-    /// - Value is 0 (caching disabled not allowed)
-    /// - Value is below minimum (< 16)
-    /// - Value exceeds hard cap (> 4096)
-    pub fn effective_trace_path_cache_capacity(&self) -> Result<usize> {
-        if self.trace_path_cache_capacity == 0 {
-            bail!("mcp.trace_path_cache_capacity cannot be 0 (caching disabled not allowed)");
-        }
-
-        if self.trace_path_cache_capacity < Self::MIN_TRACE_PATH_CACHE_CAPACITY {
-            bail!(
-                "mcp.trace_path_cache_capacity {} is below minimum {}",
-                self.trace_path_cache_capacity,
-                Self::MIN_TRACE_PATH_CACHE_CAPACITY
-            );
-        }
-
-        if self.trace_path_cache_capacity > Self::MAX_TRACE_PATH_CACHE_CAPACITY {
-            tracing::warn!(
-                "mcp.trace_path_cache_capacity {} exceeds recommended maximum {}",
-                self.trace_path_cache_capacity,
-                Self::MAX_TRACE_PATH_CACHE_CAPACITY
-            );
-        }
-
-        if self.trace_path_cache_capacity > Self::ABSOLUTE_MAX_TRACE_PATH_CACHE_CAPACITY {
-            bail!(
-                "mcp.trace_path_cache_capacity {} exceeds absolute hard cap {}",
-                self.trace_path_cache_capacity,
-                Self::ABSOLUTE_MAX_TRACE_PATH_CACHE_CAPACITY
-            );
-        }
-
-        Ok(self.trace_path_cache_capacity)
-    }
-
-    /// Get effective subgraph cache capacity with validation
-    ///
-    /// This takes precedence over `subgraph_cache_size`.
-    ///
-    /// # Errors
-    /// Returns an error if:
-    /// - Value is 0 (caching disabled not allowed)
-    /// - Value is below minimum (< 8)
-    /// - Value exceeds hard cap (> 2048)
-    pub fn effective_subgraph_cache_capacity(&self) -> Result<usize> {
-        if self.subgraph_cache_capacity == 0 {
-            bail!("mcp.subgraph_cache_capacity cannot be 0 (caching disabled not allowed)");
-        }
-
-        if self.subgraph_cache_capacity < Self::MIN_SUBGRAPH_CACHE_CAPACITY {
-            bail!(
-                "mcp.subgraph_cache_capacity {} is below minimum {}",
-                self.subgraph_cache_capacity,
-                Self::MIN_SUBGRAPH_CACHE_CAPACITY
-            );
-        }
-
-        if self.subgraph_cache_capacity > Self::MAX_SUBGRAPH_CACHE_CAPACITY {
-            tracing::warn!(
-                "mcp.subgraph_cache_capacity {} exceeds recommended maximum {}",
-                self.subgraph_cache_capacity,
-                Self::MAX_SUBGRAPH_CACHE_CAPACITY
-            );
-        }
-
-        if self.subgraph_cache_capacity > Self::ABSOLUTE_MAX_SUBGRAPH_CACHE_CAPACITY {
-            bail!(
-                "mcp.subgraph_cache_capacity {} exceeds absolute hard cap {}",
-                self.subgraph_cache_capacity,
-                Self::ABSOLUTE_MAX_SUBGRAPH_CACHE_CAPACITY
-            );
-        }
-
-        Ok(self.subgraph_cache_capacity)
-    }
-
-    /// Get effective query cache TTL with validation
-    ///
-    /// # Errors
-    /// Returns an error if:
-    /// - Value is 0 (no TTL not allowed)
-    /// - Value is below minimum (< 10 seconds)
-    /// - Value exceeds hard cap (> 86400 seconds)
-    pub fn effective_query_cache_ttl_secs(&self) -> Result<u64> {
-        if self.query_cache_ttl_secs == 0 {
-            bail!("mcp.query_cache_ttl_secs cannot be 0 (TTL required for freshness)");
-        }
-
-        if self.query_cache_ttl_secs < Self::MIN_QUERY_CACHE_TTL_SECS {
-            bail!(
-                "mcp.query_cache_ttl_secs {} is below minimum {}",
-                self.query_cache_ttl_secs,
-                Self::MIN_QUERY_CACHE_TTL_SECS
-            );
-        }
-
-        if self.query_cache_ttl_secs > Self::MAX_QUERY_CACHE_TTL_SECS {
-            tracing::warn!(
-                "mcp.query_cache_ttl_secs {} exceeds recommended maximum {}",
-                self.query_cache_ttl_secs,
-                Self::MAX_QUERY_CACHE_TTL_SECS
-            );
-        }
-
-        if self.query_cache_ttl_secs > Self::ABSOLUTE_MAX_QUERY_CACHE_TTL_SECS {
-            bail!(
-                "mcp.query_cache_ttl_secs {} exceeds absolute hard cap {}",
-                self.query_cache_ttl_secs,
-                Self::ABSOLUTE_MAX_QUERY_CACHE_TTL_SECS
-            );
-        }
-
-        Ok(self.query_cache_ttl_secs)
-    }
+    // Phase 3C DB21: effective_trace_path_cache_capacity,
+    // effective_subgraph_cache_capacity, and effective_query_cache_ttl_secs
+    // were removed. main.rs now initialises the payload caches via
+    // `effective_trace_cache_size()` / `effective_subgraph_cache_size()`
+    // (the already-validated sibling accessors), and the TTL is taken
+    // from `execution::graph_cache::CACHE_TTL_SECS`.
 
     /// Get effective index rebuild timeout with validation.
     ///
@@ -852,9 +662,6 @@ impl McpConfig {
         self.effective_max_cross_lang_edges()?;
         self.effective_engine_cache_capacity()?;
         self.effective_discovery_cache_capacity()?;
-        self.effective_trace_path_cache_capacity()?;
-        self.effective_subgraph_cache_capacity()?;
-        self.effective_query_cache_ttl_secs()?;
         Ok(())
     }
 
@@ -1244,19 +1051,9 @@ mod tests {
                 config.discovery_cache_capacity = case.value;
                 config.effective_discovery_cache_capacity()
             }
-            "trace_path_cache_capacity" => {
-                config.trace_path_cache_capacity = case.value;
-                config.effective_trace_path_cache_capacity()
-            }
-            "subgraph_cache_capacity" => {
-                config.subgraph_cache_capacity = case.value;
-                config.effective_subgraph_cache_capacity()
-            }
-            "query_cache_ttl_secs" => {
-                config.query_cache_ttl_secs = case.value as u64;
-                #[allow(clippy::cast_possible_truncation)] // Port number fits in u16
-                config.effective_query_cache_ttl_secs().map(|v| v as usize)
-            }
+            // Phase 3C DB21: trace_path_cache_capacity,
+            // subgraph_cache_capacity, and query_cache_ttl_secs dispatch
+            // arms were removed along with their fields.
             _ => panic!("Unknown field: {}", case.field),
         };
 
@@ -1368,129 +1165,11 @@ mod tests {
                 expected_value: 0,
                 error_contains: "exceeds absolute hard cap",
             },
-            // trace_path_cache_capacity: default=256, min=16, cap=4096
-            CacheCapacityCase {
-                name: "trace_path_default",
-                field: "trace_path_cache_capacity",
-                value: 256,
-                expect_ok: true,
-                expected_value: 256,
-                error_contains: "",
-            },
-            CacheCapacityCase {
-                name: "trace_path_zero",
-                field: "trace_path_cache_capacity",
-                value: 0,
-                expect_ok: false,
-                expected_value: 0,
-                error_contains: "cannot be 0",
-            },
-            CacheCapacityCase {
-                name: "trace_path_below_min",
-                field: "trace_path_cache_capacity",
-                value: 8,
-                expect_ok: false,
-                expected_value: 0,
-                error_contains: "below minimum 16",
-            },
-            CacheCapacityCase {
-                name: "trace_path_at_cap",
-                field: "trace_path_cache_capacity",
-                value: 4096,
-                expect_ok: true,
-                expected_value: 4096,
-                error_contains: "",
-            },
-            CacheCapacityCase {
-                name: "trace_path_above_cap",
-                field: "trace_path_cache_capacity",
-                value: 4097,
-                expect_ok: false,
-                expected_value: 0,
-                error_contains: "exceeds absolute hard cap",
-            },
-            // subgraph_cache_capacity: default=128, min=8, cap=2048
-            CacheCapacityCase {
-                name: "subgraph_cap_default",
-                field: "subgraph_cache_capacity",
-                value: 128,
-                expect_ok: true,
-                expected_value: 128,
-                error_contains: "",
-            },
-            CacheCapacityCase {
-                name: "subgraph_cap_zero",
-                field: "subgraph_cache_capacity",
-                value: 0,
-                expect_ok: false,
-                expected_value: 0,
-                error_contains: "cannot be 0",
-            },
-            CacheCapacityCase {
-                name: "subgraph_cap_below_min",
-                field: "subgraph_cache_capacity",
-                value: 4,
-                expect_ok: false,
-                expected_value: 0,
-                error_contains: "below minimum 8",
-            },
-            CacheCapacityCase {
-                name: "subgraph_cap_at_cap",
-                field: "subgraph_cache_capacity",
-                value: 2048,
-                expect_ok: true,
-                expected_value: 2048,
-                error_contains: "",
-            },
-            CacheCapacityCase {
-                name: "subgraph_cap_above_cap",
-                field: "subgraph_cache_capacity",
-                value: 2049,
-                expect_ok: false,
-                expected_value: 0,
-                error_contains: "exceeds absolute hard cap",
-            },
-            // query_cache_ttl_secs: default=300, min=10, cap=86_400
-            CacheCapacityCase {
-                name: "ttl_default",
-                field: "query_cache_ttl_secs",
-                value: 300,
-                expect_ok: true,
-                expected_value: 300,
-                error_contains: "",
-            },
-            CacheCapacityCase {
-                name: "ttl_zero",
-                field: "query_cache_ttl_secs",
-                value: 0,
-                expect_ok: false,
-                expected_value: 0,
-                error_contains: "cannot be 0",
-            },
-            CacheCapacityCase {
-                name: "ttl_below_min",
-                field: "query_cache_ttl_secs",
-                value: 5,
-                expect_ok: false,
-                expected_value: 0,
-                error_contains: "below minimum 10",
-            },
-            CacheCapacityCase {
-                name: "ttl_at_cap",
-                field: "query_cache_ttl_secs",
-                value: 86_400,
-                expect_ok: true,
-                expected_value: 86_400,
-                error_contains: "",
-            },
-            CacheCapacityCase {
-                name: "ttl_above_cap",
-                field: "query_cache_ttl_secs",
-                value: 86_401,
-                expect_ok: false,
-                expected_value: 0,
-                error_contains: "exceeds absolute hard cap",
-            },
+            // Phase 3C DB21: trace_path_cache_capacity,
+            // subgraph_cache_capacity, and query_cache_ttl_secs test
+            // cases were removed along with their fields. Use
+            // trace_cache_size / subgraph_cache_size boundary coverage
+            // in the surrounding tests for the retained equivalents.
         ];
 
         for case in &cases {
@@ -1535,9 +1214,6 @@ mod tests {
             max_cross_lang_edges: 50_000,
             engine_cache_capacity: default_engine_cache_capacity(),
             discovery_cache_capacity: default_discovery_cache_capacity(),
-            trace_path_cache_capacity: default_trace_path_cache_capacity(),
-            subgraph_cache_capacity: default_subgraph_cache_capacity(),
-            query_cache_ttl_secs: default_query_cache_ttl(),
             index_timeout_ms: default_index_timeout(),
             redaction_preset: default_redaction_preset(),
         };
@@ -1554,9 +1230,6 @@ mod tests {
             max_cross_lang_edges: 50_000,
             engine_cache_capacity: default_engine_cache_capacity(),
             discovery_cache_capacity: default_discovery_cache_capacity(),
-            trace_path_cache_capacity: default_trace_path_cache_capacity(),
-            subgraph_cache_capacity: default_subgraph_cache_capacity(),
-            query_cache_ttl_secs: default_query_cache_ttl(),
             index_timeout_ms: default_index_timeout(),
             redaction_preset: default_redaction_preset(),
         };

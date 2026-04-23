@@ -10,6 +10,7 @@ use std::time::Instant;
 use anyhow::Result;
 
 use crate::engine::engine_for_workspace;
+use crate::execution::location::node_location_for_reporting;
 use crate::execution::types::{
     CrateCacheEntry, ExpandCacheStatusData, FileEntryData, GraphStatsData, ListFilesData,
     ListSymbolsData, MacroBoundariesStatsData, SymbolEntryData, ToolExecution,
@@ -167,7 +168,16 @@ pub fn execute_list_symbols(args: &ListSymbolsArgs) -> Result<ToolExecution<List
     let mut symbol_entries: Vec<SymbolEntryData> = Vec::new();
     let mut total_count = 0u64;
 
-    for (_node_id, entry) in graph.nodes().iter() {
+    for (node_id, entry) in graph.nodes().iter() {
+        // Gate 0d iter-2 Major fix: skip Phase 4c-prime unified-away
+        // losers. They remain in the arena as inert duplicates but
+        // must not appear in `list_symbols` output — the prior bug
+        // was that `StringId::INVALID` resolved via
+        // `unwrap_or_default()` to an empty string and losers leaked
+        // as blank/unnamed symbol rows. See `NodeEntry::is_unified_loser`.
+        if entry.is_unified_loser() {
+            continue;
+        }
         // Get node info
         let name = strings
             .resolve(entry.name)
@@ -204,7 +214,8 @@ pub fn execute_list_symbols(args: &ListSymbolsArgs) -> Result<ToolExecution<List
         let offset = args.pagination.offset;
         let limit = args.max_results;
         if total_count > offset as u64 && symbol_entries.len() < limit {
-            let line = entry.start_line;
+            let loc = node_location_for_reporting(&graph, node_id, &workspace_root);
+            let line = loc.as_ref().map_or(entry.start_line, |l| l.line);
 
             symbol_entries.push(SymbolEntryData {
                 name,
@@ -280,12 +291,18 @@ pub fn execute_get_graph_stats(args: &GetGraphStatsArgs) -> Result<ToolExecution
         }
     }
 
-    // Count workspace vs classpath nodes using a snapshot for iteration
+    // Count workspace vs classpath nodes using a snapshot for iteration.
+    // Gate 0d iter-2 fix: skip unified losers — they are inert duplicates
+    // and must not be counted on any publish-visible surface.
+    // See `NodeEntry::is_unified_loser`.
     let mut classpath_node_count: u64 = 0;
     {
         let snapshot = graph.snapshot();
         let files_ref = snapshot.files();
         for (_node_id, entry) in snapshot.iter_nodes() {
+            if entry.is_unified_loser() {
+                continue;
+            }
             if files_ref.is_external(entry.file) {
                 classpath_node_count += 1;
             }
@@ -367,6 +384,11 @@ fn count_symbol_stats(
     let mut seen_files = std::collections::HashSet::new();
 
     for (_node_id, entry) in snapshot.iter_nodes() {
+        // Gate 0d iter-2 fix: skip unified losers from `get_insights`
+        // symbol counts. See `NodeEntry::is_unified_loser`.
+        if entry.is_unified_loser() {
+            continue;
+        }
         total_symbols += 1;
 
         let kind = format!("{:?}", entry.kind).to_lowercase();
@@ -404,11 +426,21 @@ fn count_edge_stats(
     let mut cross_language_edges = 0usize;
 
     for (source_id, target_id, _edge_kind) in snapshot.iter_edges() {
-        total_edges += 1;
-
         if let (Some(from_entry), Some(to_entry)) =
             (snapshot.get_node(source_id), snapshot.get_node(target_id))
         {
+            // Gate 0d iter-2 fix: skip edges whose endpoints are
+            // unified losers. Phase 4c-prime `NodeRemapTable`
+            // rewrites edges through `merge_node_into` so losers
+            // should not appear as edge endpoints post-finalize, but
+            // defensive filtering here keeps counts honest if any
+            // path misses the remap.
+            if from_entry.is_unified_loser() || to_entry.is_unified_loser() {
+                continue;
+            }
+
+            total_edges += 1;
+
             let from_lang = files.language_for_file(from_entry.file);
             let to_lang = files.language_for_file(to_entry.file);
 
@@ -417,6 +449,10 @@ fn count_edge_stats(
             {
                 cross_language_edges += 1;
             }
+        } else {
+            // Endpoint resolution failed but the edge exists — still
+            // count it as an edge (pre-iter-2 behavior).
+            total_edges += 1;
         }
     }
 
@@ -426,7 +462,13 @@ fn count_edge_stats(
 /// Estimate the number of 2-hop cycles (A calls B, B calls A).
 fn estimate_cycle_count(snapshot: &sqry_core::graph::unified::concurrent::GraphSnapshot) -> usize {
     let mut cycles = 0usize;
-    for (node_id, _entry) in snapshot.iter_nodes() {
+    for (node_id, entry) in snapshot.iter_nodes() {
+        // Gate 0d iter-2 fix: skip unified losers. They have no
+        // outgoing/incoming publish-visible edges (merged into
+        // the winner), but defensive filter keeps counts honest.
+        if entry.is_unified_loser() {
+            continue;
+        }
         let callees = snapshot.get_callees(node_id);
         for callee in callees {
             let callee_callees = snapshot.get_callees(callee);
@@ -441,7 +483,12 @@ fn estimate_cycle_count(snapshot: &sqry_core::graph::unified::concurrent::GraphS
 /// Estimate the number of potentially unused symbols (no callers but has callees).
 fn estimate_unused_count(snapshot: &sqry_core::graph::unified::concurrent::GraphSnapshot) -> usize {
     let mut unused_symbols = 0usize;
-    for (node_id, _entry) in snapshot.iter_nodes() {
+    for (node_id, entry) in snapshot.iter_nodes() {
+        // Gate 0d iter-2 fix: skip unified losers from "unused"
+        // counts. See `NodeEntry::is_unified_loser`.
+        if entry.is_unified_loser() {
+            continue;
+        }
         let callers = snapshot.get_callers(node_id);
         if callers.is_empty() {
             let has_outgoing = !snapshot.get_callees(node_id).is_empty();
@@ -490,10 +537,17 @@ pub fn execute_get_insights(
     let cycles = estimate_cycle_count(&snapshot);
     let unused_symbols = estimate_unused_count(&snapshot);
 
-    // Count duplicate groups (symbols with same name)
+    // Count duplicate groups (symbols with same name).
+    // Gate 0d iter-2 fix: skip unified losers — their `name` is
+    // `StringId::INVALID` which would resolve to empty / none, but
+    // the explicit guard is clearer than relying on string-resolve
+    // side-effects. See `NodeEntry::is_unified_loser`.
     let mut name_counts: HashMap<String, usize> = HashMap::new();
     let strings = snapshot.strings();
     for (_node_id, entry) in snapshot.iter_nodes() {
+        if entry.is_unified_loser() {
+            continue;
+        }
         if let Some(name) = strings.resolve(entry.name) {
             *name_counts.entry(name.to_string()).or_insert(0) += 1;
         }
@@ -813,6 +867,8 @@ fn collect_complexity_metric(
         return None;
     }
 
+    // NOTE: These raw entry spans are used for line-count computation and complexity
+    // estimation, not for user-visible display. Do NOT migrate to node_location_for_reporting.
     let lines = entry
         .end_line
         .saturating_sub(entry.start_line)
@@ -861,11 +917,55 @@ fn summarize_complexity_metrics(
 }
 
 /// Execute the `complexity_metrics` tool to analyze code complexity.
+///
+/// # Dispatch path (DB17)
+///
+/// `complexity_metrics` remains a **direct linear scan** over the
+/// snapshot — it is NOT migrated to sqry-db in DB17.
+///
+/// ## Why no sqry-db route?
+///
+/// The DB17 audit confirmed that sqry-db currently exposes no
+/// `ComplexityQuery` / `ComplexityMetricsQuery` / `CyclomaticComplexityQuery`
+/// derived query (see `sqry-db/src/queries/mod.rs` — the published query
+/// set is `SccQuery`, `CondensationQuery`, `ReachabilityQuery`, the
+/// relation family, `CyclesQuery`/`IsInCycleQuery`, and the unused/
+/// entry-point family only). DB17 scope is migration, not new query
+/// invention; introducing a `ComplexityQuery` is out of scope and
+/// belongs to a dedicated future unit (see the DB17 DAG entry at
+/// `docs/superpowers/plans/2026-04-12-phase3-4-combined-implementation-dag.toml`).
+///
+/// Semantically, `complexity_metrics` is a mixed question: a global
+/// linear scan over [`sqry_core::graph::unified::concurrent::GraphSnapshot::iter_nodes`]
+/// with per-node cyclomatic complexity computation. Each per-node
+/// answer depends on the node's own AST shape (fan-out + branch
+/// metadata), not on any cross-node relation. That is structurally
+/// different from the edge-revision-indexed predicates sqry-db caches
+/// (which are valuable because recomputing them from scratch every
+/// call would require re-walking the whole graph). For complexity,
+/// each per-node answer is already local to one node's metadata —
+/// there is no shared substructure to cache, so the planner-canonical
+/// gain of a derived query is marginal.
+///
+/// If this ever shifts (e.g. the metric becomes cross-node, or the
+/// per-node cost becomes non-trivial), this handler should migrate via
+/// the DB15 pattern: [`crate::execution::relation_dispatch::make_query_db`]
+/// plus an `execute`-dispatching predicate. Until then, the linear
+/// scan here is both correct and the architecturally correct layer.
+///
+/// ## Shape
+///
+/// Iterates every node via `snapshot.iter_nodes()`, skips
+/// macro-generated symbols (those are compiler output, not human code),
+/// computes the per-node complexity via
+/// [`collect_complexity_metric`], and collects the rows that meet
+/// `args.min_complexity`. Post-filters by `args.target` (substring
+/// match on symbol name / file path) inside
+/// [`collect_complexity_metric`].
 pub fn execute_complexity_metrics(
     args: &crate::tools::ComplexityMetricsArgs,
 ) -> Result<ToolExecution<super::super::types::ComplexityMetricsData>> {
-    use super::super::types::ComplexityMetricData;
-
+    // Pre-refactor timing: `start` fires before engine resolution.
     let start = std::time::Instant::now();
     let workspace_path = resolve_workspace_path(&args.path);
     let engine = engine_for_workspace(workspace_path.as_ref())?;
@@ -880,66 +980,98 @@ pub fn execute_complexity_metrics(
 
     let graph = engine.ensure_graph()?;
 
-    let snapshot = graph.snapshot();
-    let target_filter = args.target.as_ref().map(|target| target.to_lowercase());
+    let ctx = crate::daemon_adapter::WorkspaceContext {
+        workspace_root,
+        graph,
+        executor: engine.executor_arc(),
+    };
+    inner::execute_complexity_metrics(&ctx, args, start)
+}
 
-    let mut metrics: Vec<ComplexityMetricData> = Vec::new();
+pub(crate) mod inner {
+    use super::{
+        Result, ToolExecution, collect_complexity_metric, duration_to_ms,
+        summarize_complexity_metrics,
+    };
+    use crate::daemon_adapter::WorkspaceContext;
+    use std::time::Instant;
 
-    let macro_meta_store = snapshot.macro_metadata();
+    /// Daemon/SqryServer-shared body for `complexity_metrics`.
+    pub(crate) fn execute_complexity_metrics(
+        ctx: &WorkspaceContext,
+        args: &crate::tools::ComplexityMetricsArgs,
+        start: Instant,
+    ) -> Result<ToolExecution<super::super::super::types::ComplexityMetricsData>> {
+        use super::super::super::types::ComplexityMetricData;
 
-    for (node_id, entry) in snapshot.iter_nodes() {
-        // Skip macro-generated symbols — they are compiler output, not human code
-        if let Some(meta) = macro_meta_store.get(node_id)
-            && meta.macro_generated == Some(true)
-        {
-            continue;
+        let snapshot = ctx.graph.snapshot();
+        let target_filter = args.target.as_ref().map(|target| target.to_lowercase());
+
+        let mut metrics: Vec<ComplexityMetricData> = Vec::new();
+
+        let macro_meta_store = snapshot.macro_metadata();
+
+        for (node_id, entry) in snapshot.iter_nodes() {
+            // Gate 0d iter-2 fix: skip unified losers from
+            // `complexity_metrics`. See `NodeEntry::is_unified_loser`.
+            if entry.is_unified_loser() {
+                continue;
+            }
+            // Skip macro-generated symbols — they are compiler output, not human code
+            if let Some(meta) = macro_meta_store.get(node_id)
+                && meta.macro_generated == Some(true)
+            {
+                continue;
+            }
+
+            let Some(metric) =
+                collect_complexity_metric(&snapshot, node_id, entry, target_filter.as_deref())
+            else {
+                continue;
+            };
+
+            if metric.complexity >= args.min_complexity {
+                metrics.push(metric);
+            }
         }
 
-        let Some(metric) =
-            collect_complexity_metric(&snapshot, node_id, entry, target_filter.as_deref())
-        else {
-            continue;
-        };
-
-        if metric.complexity >= args.min_complexity {
-            metrics.push(metric);
+        // Sort by complexity or name
+        if args.sort_by_complexity {
+            metrics.sort_by(|a, b| {
+                b.complexity
+                    .cmp(&a.complexity)
+                    .then_with(|| a.name.cmp(&b.name))
+            });
+        } else {
+            metrics.sort_by(|a, b| a.name.cmp(&b.name));
         }
+
+        metrics.truncate(args.max_results);
+        let data = summarize_complexity_metrics(metrics);
+        let total = data.total;
+        let max_complexity = data.max_complexity;
+
+        tracing::debug!(
+            total = total,
+            max_complexity = max_complexity,
+            "complexity_metrics completed"
+        );
+
+        Ok(ToolExecution {
+            data,
+            used_index: false,
+            used_graph: true,
+            graph_metadata: None,
+            execution_ms: duration_to_ms(start.elapsed()),
+            next_page_token: None,
+            total: Some(total as u64),
+            truncated: Some(false),
+            candidates_scanned: None,
+            workspace_path: crate::execution::symbol_utils::path_to_forward_slash(
+                &ctx.workspace_root,
+            ),
+        })
     }
-
-    // Sort by complexity or name
-    if args.sort_by_complexity {
-        metrics.sort_by(|a, b| {
-            b.complexity
-                .cmp(&a.complexity)
-                .then_with(|| a.name.cmp(&b.name))
-        });
-    } else {
-        metrics.sort_by(|a, b| a.name.cmp(&b.name));
-    }
-
-    metrics.truncate(args.max_results);
-    let data = summarize_complexity_metrics(metrics);
-    let total = data.total;
-    let max_complexity = data.max_complexity;
-
-    tracing::debug!(
-        total = total,
-        max_complexity = max_complexity,
-        "complexity_metrics completed"
-    );
-
-    Ok(ToolExecution {
-        data,
-        used_index: false,
-        used_graph: true,
-        graph_metadata: None,
-        execution_ms: duration_to_ms(start.elapsed()),
-        next_page_token: None,
-        total: Some(total as u64),
-        truncated: Some(false),
-        candidates_scanned: None,
-        workspace_path: crate::execution::symbol_utils::path_to_forward_slash(workspace_root),
-    })
 }
 
 #[cfg(test)]
@@ -1381,6 +1513,102 @@ mod tests {
         assert_eq!(cfg_gated, 1);
         assert_eq!(macro_generated, 1);
         assert_eq!(unresolved, 1);
+    }
+
+    /// Gate 0d iter-2 regression: MCP `list_symbols` MUST skip Phase
+    /// 4c-prime unified losers. Before the fix,
+    /// `introspection.rs:171` walked `graph.nodes().iter()` with no
+    /// `is_unified_loser()` guard and `StringId::INVALID` resolved to
+    /// an empty string via `unwrap_or_default()`, leaking losers as
+    /// blank/unnamed symbol rows.
+    ///
+    /// We reproduce the iteration pattern directly (rather than
+    /// going through `execute_list_symbols`, which needs an engine +
+    /// workspace). The loser is constructed by directly mutating the
+    /// arena entry to the `NodeEntry::is_unified_loser` sentinel —
+    /// this is the same end-state `merge_node_into` leaves in the
+    /// arena, just without invoking that `pub(crate)` helper from
+    /// outside sqry-core.
+    #[test]
+    fn list_symbols_iteration_pattern_excludes_unified_losers() {
+        use sqry_core::graph::unified::node::NodeId;
+        use sqry_core::graph::unified::string::StringId;
+
+        let mut graph = CodeGraph::new();
+        let workspace_root = test_workspace_root();
+        let name = graph.strings_mut().intern("shared_fn").unwrap();
+        let qn = graph.strings_mut().intern("mod::shared_fn").unwrap();
+        let file_a = graph
+            .files_mut()
+            .register(&workspace_root.join("src/a.rs"))
+            .unwrap();
+        let file_b = graph
+            .files_mut()
+            .register(&workspace_root.join("src/b.rs"))
+            .unwrap();
+
+        let (winner_id, loser_id): (NodeId, NodeId) = {
+            let arena = graph.nodes_mut();
+            let mut w =
+                NodeEntry::new(NodeKind::Function, name, file_a).with_location(10, 0, 20, 0);
+            w.qualified_name = Some(qn);
+            let w_id = arena.alloc(w).unwrap();
+            let mut l = NodeEntry::new(NodeKind::Function, name, file_b).with_location(5, 0, 15, 0);
+            l.qualified_name = Some(qn);
+            let l_id = arena.alloc(l).unwrap();
+            (w_id, l_id)
+        };
+        graph.files_mut().record_node(file_a, winner_id);
+        graph.files_mut().record_node(file_b, loser_id);
+
+        // Simulate the end-state `merge_node_into` leaves in the
+        // arena for a loser (name == INVALID, qualified_name = None,
+        // content-addressable fields cleared). We cannot call the
+        // `pub(crate)` merge helper from here.
+        {
+            let arena = graph.nodes_mut();
+            let l_mut = arena.get_mut(loser_id).expect("loser present");
+            l_mut.name = StringId::INVALID;
+            l_mut.qualified_name = None;
+            l_mut.signature = None;
+            l_mut.body_hash = None;
+            l_mut.doc = None;
+            l_mut.visibility = None;
+        }
+        graph.rebuild_indices();
+
+        // Sanity: the loser is marked.
+        assert!(
+            graph
+                .nodes()
+                .get(loser_id)
+                .expect("loser")
+                .is_unified_loser()
+        );
+
+        // Reproduce the exact filter pattern used by `execute_list_symbols`.
+        let mut visible: Vec<NodeId> = Vec::new();
+        for (node_id, entry) in graph.nodes().iter() {
+            if entry.is_unified_loser() {
+                continue;
+            }
+            visible.push(node_id);
+        }
+
+        assert!(
+            visible.contains(&winner_id),
+            "list_symbols iteration must yield the winner"
+        );
+        assert!(
+            !visible.contains(&loser_id),
+            "list_symbols iteration must NOT yield the unified loser \
+             (iter-2 blocker)"
+        );
+        assert_eq!(
+            visible.iter().filter(|&&id| id == winner_id).count(),
+            1,
+            "winner must appear exactly once"
+        );
     }
 
     #[test]

@@ -314,6 +314,35 @@ impl NodeMetadataStore {
             self.entries.insert(key, value.clone());
         }
     }
+
+    /// Retain only entries whose `(index, generation)` key satisfies `keep`.
+    ///
+    /// Used by the Gate 0b [`NodeIdBearing`] impl
+    /// (`sqry-core/src/graph/unified/rebuild/coverage.rs`) to drop
+    /// metadata for tombstoned NodeIds during
+    /// `RebuildGraph::finalize()`. Exposed at `pub(crate)` scope because
+    /// only the rebuild pipeline needs predicate-based filtering;
+    /// downstream callers use the targeted [`Self::remove`] /
+    /// [`Self::remove_metadata`] entry points.
+    ///
+    /// `#[allow(dead_code)]` is present because Gate 0b delivers only
+    /// the scaffolding — the call sites in `RebuildGraph::finalize()`
+    /// (Gate 0c) and the residue check (Gate 0d) land in follow-up
+    /// commits. Unit coverage in
+    /// `sqry-core/src/graph/unified/rebuild/coverage.rs::tests` already
+    /// exercises this helper through the [`NodeIdBearing::retain_nodes`]
+    /// impl.
+    ///
+    /// [`NodeIdBearing`]: crate::graph::unified::rebuild::coverage::NodeIdBearing
+    /// [`NodeIdBearing::retain_nodes`]: crate::graph::unified::rebuild::coverage::NodeIdBearing::retain_nodes
+    #[allow(dead_code)]
+    pub(crate) fn retain_entries<F>(&mut self, mut keep: F)
+    where
+        F: FnMut(u32, u64) -> bool,
+    {
+        self.entries
+            .retain(|&(index, generation), _meta| keep(index, generation));
+    }
 }
 
 impl PartialEq for NodeMetadataStore {

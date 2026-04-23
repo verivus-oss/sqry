@@ -9,6 +9,7 @@
 //! - Function and method call edges
 //! - Async call detection
 
+use sqry_core::graph::unified::build::helper::CalleeKindHint;
 use sqry_core::graph::unified::edge::kind::TypeOfContext;
 use sqry_core::graph::unified::node::NodeKind;
 use sqry_core::graph::{
@@ -827,7 +828,11 @@ fn process_parameter_typeof(
     let func_id = if class_name.is_some() {
         helper.ensure_method(func_name, None, false, false)
     } else {
-        helper.ensure_function(func_name, None, false, false)
+        helper.ensure_callee(
+            func_name,
+            node_to_span(&param_node),
+            CalleeKindHint::Function,
+        )
     };
 
     // Create TypeOf edge with Parameter context
@@ -1247,7 +1252,11 @@ fn process_function_return_typeof(
     let func_id = if class_name.is_some() {
         helper.ensure_method(func_name, None, false, false)
     } else {
-        helper.ensure_function(func_name, None, false, false)
+        helper.ensure_callee(
+            func_name,
+            node_to_span(&func_node),
+            CalleeKindHint::Function,
+        )
     };
 
     // Create TypeOf edge with Return context (index 0)
@@ -1588,10 +1597,11 @@ fn process_function_call(
     };
 
     // Create callee node (ensure it exists)
-    let target_id = helper.ensure_function(&target_name, None, false, false);
+    let call_site_span = node_to_span(&node);
+    let target_id = helper.ensure_callee(&target_name, call_site_span, CalleeKindHint::Function);
 
     // Add call edge with metadata
-    let call_span: Vec<Span> = Some(node_to_span(&node)).into_iter().collect();
+    let call_span: Vec<Span> = Some(call_site_span).into_iter().collect();
     helper.add_call_edge_full_with_span(
         source_id,
         target_id,
@@ -1646,10 +1656,11 @@ fn process_cascade_call(
     };
 
     // Create callee node
-    let target_id = helper.ensure_function(&target_name, None, false, false);
+    let cascade_site_span = node_to_span(&node);
+    let target_id = helper.ensure_callee(&target_name, cascade_site_span, CalleeKindHint::Function);
 
     // Add call edge
-    let call_span: Vec<Span> = Some(node_to_span(&node)).into_iter().collect();
+    let call_span: Vec<Span> = Some(cascade_site_span).into_iter().collect();
     helper.add_call_edge_full_with_span(
         source_id,
         target_id,
@@ -2206,10 +2217,15 @@ fn detect_ffi_annotation_from_marker(
     let ffi_target_id = helper.add_function(&ffi_target_name, None, false, false);
 
     // Get or create caller node ID
+    let ffi_site_span = node_to_span(&func_sig);
     let caller_id = if is_method {
         helper.ensure_method(&caller_qualified_name, None, false, false)
     } else {
-        helper.ensure_function(&caller_qualified_name, None, false, false)
+        helper.ensure_callee(
+            &caller_qualified_name,
+            ffi_site_span,
+            CalleeKindHint::Function,
+        )
     };
 
     // Create FFI edge
@@ -2299,7 +2315,11 @@ fn detect_ffi_annotation_from_marker_simple(
     let ffi_target_id = helper.add_function(&ffi_target_name, None, false, false);
 
     // Get or create caller node ID
-    let caller_id = helper.ensure_function(&caller_qualified_name, None, false, false);
+    let caller_id = helper.ensure_callee(
+        &caller_qualified_name,
+        node_to_span(&annotation_node),
+        CalleeKindHint::Function,
+    );
 
     // Create FFI edge
     use sqry_core::graph::unified::edge::kind::FfiConvention;
@@ -2355,11 +2375,16 @@ fn detect_ffi_annotation(node: Node, content: &[u8], helper: &mut GraphBuildHelp
     let ffi_target_id = helper.add_function(&ffi_target_name, None, false, false);
 
     // Get or create caller node ID
-    // Note: We don't have full context info here, so we use basic ensure_function/ensure_method
+    // Note: We don't have full context info here, so we use basic ensure_callee/ensure_method
+    let ffi_site_span = node_to_span(&node);
     let caller_id = if is_method {
         helper.ensure_method(&caller_qualified_name, None, false, false)
     } else {
-        helper.ensure_function(&caller_qualified_name, None, false, false)
+        helper.ensure_callee(
+            &caller_qualified_name,
+            ffi_site_span,
+            CalleeKindHint::Function,
+        )
     };
 
     // Create FFI edge

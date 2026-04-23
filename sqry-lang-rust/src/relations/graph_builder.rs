@@ -6,7 +6,7 @@ use std::{
 
 use sqry_core::graph::unified::{
     FfiConvention, GraphBuildHelper, LifetimeConstraintKind, MacroExpansionKind, NodeId, NodeKind,
-    StagingGraph,
+    StagingGraph, build::helper::CalleeKindHint,
 };
 use sqry_core::graph::{GraphBuilder, GraphBuilderError, GraphResult, Language, Span};
 use sqry_core::relations::SyntheticNameBuilder;
@@ -1207,13 +1207,13 @@ fn walk_tree_for_staging(
                 } = built_call;
                 // Get caller context for async/unsafe attributes
                 let call_context = ast_graph.get_callable_context(node.id());
-                let is_async = call_context.is_some_and(|c| c.is_async);
-                let is_unsafe = call_context.is_some_and(|c| c.is_unsafe);
+                let _is_async = call_context.is_some_and(|c| c.is_async);
+                let _is_unsafe = call_context.is_some_and(|c| c.is_unsafe);
                 let is_awaited = is_directly_awaited(node);
                 let argument_count = u8::try_from(count_arguments(node)).unwrap_or(u8::MAX);
 
                 // Ensure caller node exists
-                let source_id = helper.ensure_function(&source_qname, None, is_async, is_unsafe);
+                let source_id = helper.ensure_callee(&source_qname, span, CalleeKindHint::Function);
 
                 // Check if the callee is a known FFI function
                 // IMPORTANT: Only do FFI lookup for unqualified calls (no `::`)
@@ -1230,11 +1230,12 @@ fn walk_tree_for_staging(
                     {
                         // This is a call to an FFI function - create FfiCall edge
                         let ffi_target_id =
-                            helper.ensure_function(ffi_qualified, None, false, true);
+                            helper.ensure_callee(ffi_qualified, span, CalleeKindHint::Function);
                         helper.add_ffi_edge(source_id, ffi_target_id, *ffi_convention);
                     } else {
                         // Regular call - create normal Call edge
-                        let target_id = helper.ensure_function(&target_qname, None, false, false);
+                        let target_id =
+                            helper.ensure_callee(&target_qname, span, CalleeKindHint::Function);
                         helper.add_call_edge_full_with_span(
                             source_id,
                             target_id,
@@ -1245,7 +1246,8 @@ fn walk_tree_for_staging(
                     }
                 } else {
                     // Qualified call - create normal Call edge (not FFI lookup)
-                    let target_id = helper.ensure_function(&target_qname, None, false, false);
+                    let target_id =
+                        helper.ensure_callee(&target_qname, span, CalleeKindHint::Function);
                     helper.add_call_edge_full_with_span(
                         source_id,
                         target_id,
@@ -1288,12 +1290,12 @@ fn walk_tree_for_staging(
             {
                 // Get caller context
                 let call_context = ast_graph.get_callable_context(node.id());
-                let is_async = call_context.is_some_and(|c| c.is_async);
-                let is_unsafe = call_context.is_some_and(|c| c.is_unsafe);
+                let _is_async = call_context.is_some_and(|c| c.is_async);
+                let _is_unsafe = call_context.is_some_and(|c| c.is_unsafe);
                 let is_awaited = is_directly_awaited(node);
 
                 // Ensure source function exists
-                let source_id = helper.ensure_function(&source_qname, None, is_async, is_unsafe);
+                let source_id = helper.ensure_callee(&source_qname, span, CalleeKindHint::Function);
 
                 // Create CallSite node for this specific invocation
                 let invocation_qualified = format!(
@@ -1339,10 +1341,14 @@ fn walk_tree_for_staging(
                 build_field_access_for_staging(ast_graph, node, content)
             {
                 let call_context = ast_graph.get_callable_context(node.id());
-                let is_async = call_context.is_some_and(|c| c.is_async);
-                let is_unsafe = call_context.is_some_and(|c| c.is_unsafe);
+                let _is_async = call_context.is_some_and(|c| c.is_async);
+                let _is_unsafe = call_context.is_some_and(|c| c.is_unsafe);
 
-                let source_id = helper.ensure_function(&caller_qname, None, is_async, is_unsafe);
+                let source_id = helper.ensure_callee(
+                    &caller_qname,
+                    span_from_node(node),
+                    CalleeKindHint::Function,
+                );
                 let target_id = helper.add_variable(&field_target, None);
                 helper.add_reference_edge(source_id, target_id);
             }

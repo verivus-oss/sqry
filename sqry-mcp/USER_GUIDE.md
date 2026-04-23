@@ -1,7 +1,7 @@
 # sqry MCP Server - User Guide - by Verivus
 
-**Version**: 8.0.7
-**Last Updated**: 2026-04-12
+**Version**: 9.0.0
+**Last Updated**: 2026-04-23
 
 Integrate sqry's semantic code search with AI assistants (Codex, Claude Desktop, Windsurf, Cursor, and others) via the Model Context Protocol (MCP).
 
@@ -380,9 +380,14 @@ Codex and Gemini usually invoke tools directly rather than slash prompt aliases.
 | `SQRY_INCLUDE_HIGH_COST` | Include high-cost plugins | `0` | `1` |
 | `SQRY_MCP_ENGINE_CACHE_CAPACITY` | Max cached workspace engines | 5 | `10` |
 | `SQRY_MCP_DISCOVERY_CACHE_CAPACITY` | Max cached workspace paths | 100 | `200` |
-| `SQRY_MCP_TRACE_PATH_CACHE_CAPACITY` | Max cached trace path results | 256 | `512` |
-| `SQRY_MCP_SUBGRAPH_CACHE_CAPACITY` | Max cached subgraph results | 128 | `256` |
-| `SQRY_MCP_QUERY_CACHE_TTL_SECS` | Query cache TTL in seconds | 300 | `600` |
+| `SQRY_MCP_TRACE_CACHE_SIZE` | Max cached trace path results | 256 | `512` |
+| `SQRY_MCP_SUBGRAPH_CACHE_SIZE` | Max cached subgraph results | 128 | `256` |
+
+> Phase 3C DB21: `SQRY_MCP_TRACE_PATH_CACHE_CAPACITY`,
+> `SQRY_MCP_SUBGRAPH_CACHE_CAPACITY`, and `SQRY_MCP_QUERY_CACHE_TTL_SECS`
+> were retired — they duplicated `SQRY_MCP_TRACE_CACHE_SIZE` /
+> `SQRY_MCP_SUBGRAPH_CACHE_SIZE`. The payload-cache TTL is now fixed at
+> 300 seconds in `execution::graph_cache::CACHE_TTL_SECS`.
 
 ### Cache Configuration
 
@@ -409,7 +414,8 @@ The MCP server caches workspace engines, discovery results, and query results to
         "SQRY_MCP_WORKSPACE_ROOT": "/path/to/project",
         "SQRY_MCP_ENGINE_CACHE_CAPACITY": "10",
         "SQRY_MCP_DISCOVERY_CACHE_CAPACITY": "200",
-        "SQRY_MCP_QUERY_CACHE_TTL_SECS": "600"
+        "SQRY_MCP_TRACE_CACHE_SIZE": "512",
+        "SQRY_MCP_SUBGRAPH_CACHE_SIZE": "256"
       }
     }
   }
@@ -883,7 +889,7 @@ ls -la .sqry-index
 **3. Test binary**:
 ```bash
 sqry --version
-# Should output: sqry 8.0.7+
+# Should output: sqry 9.0.0+
 ```
 
 **4. Check logs** (AI assistant specific):
@@ -969,7 +975,7 @@ sqry MCP is production-ready but evolving. Your feedback helps!
 
 ---
 
-**Last Updated**: 2026-04-12
-**MCP Server Version**: 8.0.7
+**Last Updated**: 2026-04-23
+**MCP Server Version**: 9.0.0
 **Protocol**: MCP 2024-11-05 (JSON-RPC 2.0)
-**sqry CLI Required**: 8.0.7+
+**sqry CLI Required**: 9.0.0+

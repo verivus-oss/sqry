@@ -270,8 +270,8 @@ describe("SqryDiagnosticsProvider", () => {
               members: ["foo", "bar"],
               cycle_type: "calls",
               member_locations: [
-                { name: "foo", file: "/src/a.rs", line: 10, column: 5 },
-                { name: "bar", file: "/src/b.rs", line: 20, column: 3 },
+                { name: "foo", file: "/src/a.rs", line: 2, column: 5 },
+                { name: "bar", file: "/src/b.rs", line: 4, column: 3 },
               ],
             },
           ],
@@ -299,8 +299,12 @@ describe("SqryDiagnosticsProvider", () => {
       expect(fooDiags![0].source).to.equal("sqry");
       expect(fooDiags![0].code).to.equal("sqry:cycle");
       expect(fooDiags![0].message).to.include("foo -> bar -> foo");
+      expect(fooDiags![0].range.startLine).to.equal(2);
+      expect(fooDiags![0].range.startChar).to.equal(5);
       expect(fooDiags![0].relatedInformation).to.have.lengthOf(1);
       expect(fooDiags![0].relatedInformation![0].message).to.include("bar");
+      expect(fooDiags![0].relatedInformation![0].location.range.startLine).to.equal(4);
+      expect(fooDiags![0].relatedInformation![0].location.range.startChar).to.equal(3);
 
       const barDiags = collection.entries.get(barUri);
       expect(barDiags).to.have.lengthOf(1);
@@ -319,8 +323,8 @@ describe("SqryDiagnosticsProvider", () => {
               members: ["a", "b"],
               cycle_type: "calls",
               member_locations: [
-                { name: "a", file: "/src/a.rs", line: 5 },
-                { name: "b" }, // no file
+                { name: "a", file: "/src/a.rs", line: 2, column: null },
+                { name: "b", file: "/src/b.rs", line: 2, column: 5 },
               ],
             },
           ],
@@ -340,9 +344,12 @@ describe("SqryDiagnosticsProvider", () => {
       const aUri = "file:///src/a.rs";
       const aDiags = collection.entries.get(aUri);
       expect(aDiags).to.have.lengthOf(1);
+      expect(aDiags![0].range.startLine).to.equal(2);
+      expect(aDiags![0].range.startChar).to.equal(0);
 
-      // No related info (b has no location)
-      expect(aDiags![0].relatedInformation).to.have.lengthOf(0);
+      expect(aDiags![0].relatedInformation).to.have.lengthOf(1);
+      expect(aDiags![0].relatedInformation![0].location.range.startLine).to.equal(2);
+      expect(aDiags![0].relatedInformation![0].location.range.startChar).to.equal(5);
     });
   });
 

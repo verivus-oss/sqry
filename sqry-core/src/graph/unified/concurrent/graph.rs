@@ -6,7 +6,7 @@
 //! - [`ConcurrentCodeGraph`]: `RwLock` wrapper with epoch versioning
 //! - [`GraphSnapshot`]: Immutable snapshot for long-running queries
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -14,7 +14,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use crate::confidence::ConfidenceMetadata;
+use crate::graph::unified::bind::alias::AliasTable;
+use crate::graph::unified::bind::scope::provenance::{
+    ScopeProvenance, ScopeProvenanceStore, ScopeStableId,
+};
+use crate::graph::unified::bind::scope::{ScopeArena, ScopeId};
+use crate::graph::unified::bind::shadow::ShadowTable;
+use crate::graph::unified::edge::EdgeKind;
 use crate::graph::unified::edge::bidirectional::BidirectionalEdgeStore;
+use crate::graph::unified::file::FileId;
 use crate::graph::unified::memory::{GraphMemorySize, HASHMAP_ENTRY_OVERHEAD};
 use crate::graph::unified::storage::arena::NodeArena;
 use crate::graph::unified::storage::edge_provenance::{EdgeProvenance, EdgeProvenanceStore};
@@ -23,6 +31,7 @@ use crate::graph::unified::storage::interner::StringInterner;
 use crate::graph::unified::storage::metadata::NodeMetadataStore;
 use crate::graph::unified::storage::node_provenance::{NodeProvenance, NodeProvenanceStore};
 use crate::graph::unified::storage::registry::{FileProvenanceView, FileRegistry};
+use crate::graph::unified::storage::segment::FileSegmentTable;
 use crate::graph::unified::string::id::StringId;
 
 /// Core graph with Arc-wrapped internals for O(1) `CoW` snapshots.
@@ -44,31 +53,60 @@ use crate::graph::unified::string::id::StringId;
 /// - Snapshot creation: O(5) Arc clones ≈ <1μs
 /// - Read access: Direct Arc dereference, no locking
 /// - Write access: `Arc::make_mut` clones only if refcount > 1
+///
+/// # Phase 2 binding-plane access
+///
+/// Use the two-line snapshot pattern to access `BindingPlane`:
+///
+/// ```rust,ignore
+/// let snapshot = graph.snapshot();
+/// let plane = snapshot.binding_plane();
+/// let resolution = plane.resolve(&query);
+/// ```
+///
+/// The two-line form is intentional: `BindingPlane<'g>` borrows from
+/// `GraphSnapshot` and the explicit snapshot handle makes the MVCC lifetime
+/// visible at the call site. The full Phase 2 scope/alias/shadow and
+/// witness-bearing resolution API is exposed through `BindingPlane`.
+// Field visibility is `pub(crate)` so the Gate 0c `rebuild_graph` module
+// (A2 §H) can destructure `CodeGraph` exhaustively in `clone_for_rebuild`.
+// External crates still go through the public accessor methods below.
 #[derive(Clone)]
 pub struct CodeGraph {
     /// Node storage with generational indices.
-    nodes: Arc<NodeArena>,
+    pub(crate) nodes: Arc<NodeArena>,
     /// Bidirectional edge storage (forward + reverse).
-    edges: Arc<BidirectionalEdgeStore>,
+    pub(crate) edges: Arc<BidirectionalEdgeStore>,
     /// String interner for symbol names.
-    strings: Arc<StringInterner>,
+    pub(crate) strings: Arc<StringInterner>,
     /// File registry for path deduplication.
-    files: Arc<FileRegistry>,
+    pub(crate) files: Arc<FileRegistry>,
     /// Auxiliary indices for fast lookup.
-    indices: Arc<AuxiliaryIndices>,
+    pub(crate) indices: Arc<AuxiliaryIndices>,
     /// Sparse macro boundary metadata (keyed by full `NodeId`).
-    macro_metadata: Arc<NodeMetadataStore>,
+    pub(crate) macro_metadata: Arc<NodeMetadataStore>,
     /// Dense node provenance (Phase 1 fact layer).
-    node_provenance: Arc<NodeProvenanceStore>,
+    pub(crate) node_provenance: Arc<NodeProvenanceStore>,
     /// Dense edge provenance (Phase 1 fact layer).
-    edge_provenance: Arc<EdgeProvenanceStore>,
+    pub(crate) edge_provenance: Arc<EdgeProvenanceStore>,
     /// Monotonic fact-layer epoch (0 until set by the V8 persistence path).
-    fact_epoch: u64,
+    pub(crate) fact_epoch: u64,
     /// Epoch for version tracking.
-    epoch: u64,
+    pub(crate) epoch: u64,
     /// Per-language confidence metadata collected during build.
     /// Maps language name (e.g., "rust") to aggregated confidence.
-    confidence: HashMap<String, ConfidenceMetadata>,
+    pub(crate) confidence: HashMap<String, ConfidenceMetadata>,
+    /// Phase 2 binding-plane scope arena (populated by Phase 4e).
+    pub(crate) scope_arena: Arc<ScopeArena>,
+    /// Phase 2 binding-plane alias table (populated by Phase 4e / P2U04).
+    pub(crate) alias_table: Arc<AliasTable>,
+    /// Phase 2 binding-plane shadow table (populated by Phase 4e / P2U05).
+    pub(crate) shadow_table: Arc<ShadowTable>,
+    /// Phase 2 binding-plane scope provenance store (populated by Phase 4e / P2U11).
+    pub(crate) scope_provenance_store: Arc<ScopeProvenanceStore>,
+    /// Phase 3 file segment table mapping `FileId` to contiguous node ranges.
+    /// Populated during build Phase 3 parallel commit, persisted in V10+ snapshots.
+    pub(crate) file_segments: Arc<FileSegmentTable>,
 }
 
 impl CodeGraph {
@@ -96,6 +134,11 @@ impl CodeGraph {
             fact_epoch: 0,
             epoch: 0,
             confidence: HashMap::new(),
+            scope_arena: Arc::new(ScopeArena::new()),
+            alias_table: Arc::new(AliasTable::new()),
+            shadow_table: Arc::new(ShadowTable::new()),
+            scope_provenance_store: Arc::new(ScopeProvenanceStore::new()),
+            file_segments: Arc::new(FileSegmentTable::new()),
         }
     }
 
@@ -124,6 +167,11 @@ impl CodeGraph {
             fact_epoch: 0,
             epoch: 0,
             confidence: HashMap::new(),
+            scope_arena: Arc::new(ScopeArena::new()),
+            alias_table: Arc::new(AliasTable::new()),
+            shadow_table: Arc::new(ShadowTable::new()),
+            scope_provenance_store: Arc::new(ScopeProvenanceStore::new()),
+            file_segments: Arc::new(FileSegmentTable::new()),
         }
     }
 
@@ -154,6 +202,11 @@ impl CodeGraph {
             edge_provenance: Arc::clone(&self.edge_provenance),
             fact_epoch: self.fact_epoch,
             epoch: self.epoch,
+            scope_arena: Arc::clone(&self.scope_arena),
+            alias_table: Arc::clone(&self.alias_table),
+            shadow_table: Arc::clone(&self.shadow_table),
+            scope_provenance_store: Arc::clone(&self.scope_provenance_store),
+            file_segments: Arc::clone(&self.file_segments),
         }
     }
 
@@ -250,6 +303,154 @@ impl CodeGraph {
         self.files.file_provenance(id)
     }
 
+    // ------------------------------------------------------------------
+    // Phase 2 binding-plane accessors (P2U03).
+    // ------------------------------------------------------------------
+
+    /// Returns a reference to the scope arena derived during Phase 4e.
+    ///
+    /// The arena is empty on freshly-constructed `CodeGraph` instances and is
+    /// populated by calling `phase4e_binding::derive_binding_plane`.
+    #[inline]
+    #[must_use]
+    pub fn scope_arena(&self) -> &ScopeArena {
+        &self.scope_arena
+    }
+
+    /// Installs a freshly-derived scope arena.
+    ///
+    /// Called from `phase4e_binding::derive_binding_plane` during the build
+    /// pipeline. External callers that run Phase 4e manually (e.g., test
+    /// fixture builders) use this to store the result.
+    pub(crate) fn set_scope_arena(&mut self, arena: ScopeArena) {
+        self.scope_arena = Arc::new(arena);
+    }
+
+    /// Returns a reference to the alias table derived during Phase 4e.
+    ///
+    /// The table is empty on freshly-constructed `CodeGraph` instances and is
+    /// populated by calling `phase4e_binding::derive_binding_plane`.
+    #[inline]
+    #[must_use]
+    pub fn alias_table(&self) -> &AliasTable {
+        &self.alias_table
+    }
+
+    /// Installs a freshly-derived alias table.
+    ///
+    /// Called from `phase4e_binding::derive_binding_plane` during the build
+    /// pipeline. External callers that run Phase 4e manually (e.g., test
+    /// fixture builders) use this to store the result.
+    pub(crate) fn set_alias_table(&mut self, table: AliasTable) {
+        self.alias_table = Arc::new(table);
+    }
+
+    /// Returns a reference to the shadow table derived during Phase 4e.
+    ///
+    /// The table is empty on freshly-constructed `CodeGraph` instances and is
+    /// populated by calling `phase4e_binding::derive_binding_plane`.
+    #[inline]
+    #[must_use]
+    pub fn shadow_table(&self) -> &ShadowTable {
+        &self.shadow_table
+    }
+
+    /// Installs a freshly-derived shadow table.
+    ///
+    /// Called from `phase4e_binding::derive_binding_plane` during the build
+    /// pipeline. External callers that run Phase 4e manually (e.g., test
+    /// fixture builders) use this to store the result.
+    pub(crate) fn set_shadow_table(&mut self, table: ShadowTable) {
+        self.shadow_table = Arc::new(table);
+    }
+
+    /// Returns a reference to the scope provenance store derived during Phase 4e.
+    ///
+    /// The store is empty on freshly-constructed `CodeGraph` instances and is
+    /// populated by calling `phase4e_binding::derive_binding_plane`.
+    #[inline]
+    #[must_use]
+    pub fn scope_provenance_store(&self) -> &ScopeProvenanceStore {
+        &self.scope_provenance_store
+    }
+
+    /// Looks up scope provenance by `ScopeId`.
+    ///
+    /// Returns `None` if the slot is out of range, vacant, or the stored
+    /// generation does not match (stale handle).
+    #[inline]
+    #[must_use]
+    pub fn scope_provenance(&self, id: ScopeId) -> Option<&ScopeProvenance> {
+        self.scope_provenance_store.lookup(id)
+    }
+
+    /// Looks up the live `ScopeId` for a stable scope identity.
+    ///
+    /// Returns `None` if no provenance record is registered for that stable id.
+    /// The reverse index is populated by `insert` during Phase 4e and must be
+    /// rebuilt after V9 deserialization.
+    #[inline]
+    #[must_use]
+    pub fn scope_by_stable_id(&self, stable: ScopeStableId) -> Option<ScopeId> {
+        self.scope_provenance_store.scope_by_stable_id(stable)
+    }
+
+    /// Installs a freshly-derived scope provenance store.
+    ///
+    /// Called from `phase4e_binding::derive_binding_plane` during the build
+    /// pipeline. External callers that run Phase 4e manually (e.g., test
+    /// fixture builders) use this to store the result.
+    pub(crate) fn set_scope_provenance_store(&mut self, store: ScopeProvenanceStore) {
+        self.scope_provenance_store = Arc::new(store);
+    }
+
+    /// Returns a reference to the file segment table.
+    #[inline]
+    #[must_use]
+    pub fn file_segments(&self) -> &FileSegmentTable {
+        &self.file_segments
+    }
+
+    /// Replaces the file segment table.
+    pub(crate) fn set_file_segments(&mut self, table: FileSegmentTable) {
+        self.file_segments = Arc::new(table);
+    }
+
+    /// Returns a mutable reference to the file segment table (via `Arc::make_mut`).
+    pub(crate) fn file_segments_mut(&mut self) -> &mut FileSegmentTable {
+        Arc::make_mut(&mut self.file_segments)
+    }
+
+    /// Test-only helper that records a file segment directly on the
+    /// graph, bypassing the full Phase 3 commit pipeline. Only
+    /// available under `#[cfg(feature = "rebuild-internals")]` so the
+    /// surface is opt-in for rebuild-plane consumers (the feature is
+    /// whitelisted to sqry-daemon + sqry-core integration tests; see
+    /// `sqry-core/tests/rebuild_internals_whitelist.rs`).
+    ///
+    /// Integration tests (notably
+    /// `sqry-core/tests/incremental_remove_file_scale.rs`) call this
+    /// to seed the synthetic workspaces they build before exercising
+    /// `RebuildGraph::remove_file` / `CodeGraph::remove_file`. Production
+    /// code paths never touch this method — Phase 3 parallel commit
+    /// is the sole production writer, via the crate-internal
+    /// `file_segments_mut` accessor above.
+    ///
+    /// Renamed with `test_only_` prefix so the purpose is unambiguous
+    /// at every call site; `#[doc(hidden)]` hides it from rendered
+    /// rustdoc so downstream daemon integrations don't discover it by
+    /// accident.
+    #[cfg(feature = "rebuild-internals")]
+    #[doc(hidden)]
+    pub fn test_only_record_file_segment(
+        &mut self,
+        file_id: FileId,
+        start_slot: u32,
+        slot_count: u32,
+    ) {
+        Arc::make_mut(&mut self.file_segments).record_range(file_id, start_slot, slot_count);
+    }
+
     /// Sets the provenance stores and fact epoch, typically called by the
     /// persistence loader after deserializing a V8 snapshot.
     pub(crate) fn set_provenance(
@@ -339,9 +540,17 @@ impl CodeGraph {
     /// Internally calls `AuxiliaryIndices::build_from_arena` which clears
     /// existing indices and rebuilds in a single pass without per-element
     /// duplicate checking.
+    ///
+    /// As of Task 4 Step 4 Phase 2 this inherent method delegates to the
+    /// generic
+    /// [`crate::graph::unified::build::parallel_commit::rebuild_indices`]
+    /// free function so the same implementation serves both the
+    /// full-build (`CodeGraph`) and incremental-rebuild (`RebuildGraph`)
+    /// pipelines. Call sites that hold a concrete `CodeGraph` can keep
+    /// using `graph.rebuild_indices()`; incremental rebuild call sites
+    /// should use the free function directly.
     pub fn rebuild_indices(&mut self) {
-        let nodes = &self.nodes;
-        Arc::make_mut(&mut self.indices).build_from_arena(nodes);
+        crate::graph::unified::build::parallel_commit::rebuild_indices(self);
     }
 
     /// Increments the epoch counter and returns the new value.
@@ -440,6 +649,130 @@ impl CodeGraph {
             .map(|(id, arc_path)| (id, arc_path.as_ref()))
     }
 
+    /// Returns the set of files that import one or more symbols exported by
+    /// `file_id`, deduplicated and sorted ascending.
+    ///
+    /// For every [`EdgeKind::Imports`] edge whose target node lives in
+    /// `file_id`, the source node's [`FileId`] is added to the result. Files
+    /// are returned sorted by raw index so the result is deterministic across
+    /// runs. The caller's own file is never included — an `Imports` edge
+    /// whose source and target both live in `file_id` is treated as a
+    /// self-import and elided. Edges whose source node is no longer resolvable
+    /// in the arena (tombstoned) are silently skipped.
+    ///
+    /// This is the file-level view of Pass 4 cross-file `Imports` edges, used
+    /// by the incremental rebuild engine to compute reverse-dependency
+    /// closures: "if file X changes its exports, which files need to be
+    /// re-linked?"
+    ///
+    /// # Complexity
+    ///
+    /// `O(|nodes_in_file_id| × avg_incoming_edges_per_node)` amortized. Uses
+    /// [`AuxiliaryIndices::by_file`] for O(1)-amortized per-file node lookup
+    /// (HashMap-backed) and the bidirectional edge store's reverse adjacency;
+    /// no full-graph scan. A final `O(R log R)` sort over the deduplicated
+    /// importer set (where `R` is the importer count) is negligible in
+    /// practice since `R ≤ file_count`.
+    ///
+    /// [`AuxiliaryIndices::by_file`]: crate::graph::unified::storage::indices::AuxiliaryIndices::by_file
+    #[must_use]
+    pub fn reverse_import_index(&self, file_id: FileId) -> Vec<FileId> {
+        let mut importers: HashSet<FileId> = HashSet::new();
+        for &target_node in self.indices.by_file(file_id) {
+            for edge_ref in self.edges.edges_to(target_node) {
+                if !matches!(edge_ref.kind, EdgeKind::Imports { .. }) {
+                    continue;
+                }
+                let Some(source_entry) = self.nodes.get(edge_ref.source) else {
+                    continue;
+                };
+                let source_file = source_entry.file;
+                if source_file != file_id {
+                    importers.insert(source_file);
+                }
+            }
+        }
+        let mut result: Vec<FileId> = importers.into_iter().collect();
+        result.sort();
+        result
+    }
+
+    /// Returns the set of files that hold at least one live inter-file edge
+    /// targeting a node in `file_id`, deduplicated and sorted ascending.
+    ///
+    /// Unlike [`reverse_import_index`](Self::reverse_import_index) — which
+    /// filters to [`EdgeKind::Imports`] only — this helper treats **every**
+    /// cross-file edge as a dependency signal: `Calls`, `References`,
+    /// `TypeOf`, `Inherits`, `Implements`, `FfiCall`, `HttpRequest`,
+    /// `GrpcCall`, `WebAssemblyCall`, `DbQuery`, `TableRead`, `TableWrite`,
+    /// `TriggeredBy`, `MessageQueue`, `WebSocket`, `GraphQLOperation`,
+    /// `ProcessExec`, `FileIpc`, `ProtocolCall`, and any future
+    /// cross-file-capable variant. This is the reverse-dependency surface the
+    /// incremental rebuild engine (Task 4 Step 4 Phase 3e) needs: when
+    /// `file_id` changes, every file whose committed edges point into
+    /// `file_id`'s nodes must re-enter the rebuild closure so its cross-file
+    /// references survive the target-side tombstone-and-reparse cycle.
+    ///
+    /// The caller's own file is never included — an edge whose source and
+    /// target both live in `file_id` is a self-reference and is elided.
+    /// Edges whose source node is no longer resolvable in the arena
+    /// (tombstoned) are silently skipped.
+    ///
+    /// # When to use this vs [`reverse_import_index`](Self::reverse_import_index)
+    ///
+    /// * [`reverse_import_index`](Self::reverse_import_index) remains the
+    ///   right surface for consumers that specifically need *import*
+    ///   relationships (export surface analysis, module-dependency graphs,
+    ///   etc.).
+    /// * `reverse_dependency_index` is the right surface for incremental
+    ///   rebuild closure computation. Widening past imports is necessary
+    ///   because call sites, type references, trait implementations, FFI
+    ///   declarations, HTTP clients, and every other cross-file edge kind
+    ///   hold a committed edge into the target file that becomes stale the
+    ///   moment `remove_file(target)` tombstones its arena nodes. Leaving
+    ///   those files out of the closure leaves the committed edges pointing
+    ///   at the stale (pre-tombstone) node IDs — Phase 4c-prime only
+    ///   rewrites edges on **re-parsed** files' `PendingEdge` sets, never
+    ///   committed edges owned by files outside the reparse scope.
+    ///
+    /// # Complexity
+    ///
+    /// `O(|nodes_in_file_id| × avg_incoming_edges_per_node)` amortized —
+    /// same bound as [`reverse_import_index`](Self::reverse_import_index).
+    /// Uses [`AuxiliaryIndices::by_file`] for O(1)-amortized per-file node
+    /// lookup and the bidirectional edge store's reverse adjacency; no
+    /// full-graph scan. Final `O(R log R)` sort over the deduplicated
+    /// dependent set is negligible since `R ≤ file_count`.
+    ///
+    /// # Over-widening is expected and acceptable
+    ///
+    /// The closure will include every file that references anything in
+    /// `file_id`, not just files whose exports change. In common codebases
+    /// this widens the reparse set modestly (a 10-file change may expand
+    /// to 20–30 dependent files in a medium crate). Correctness requires
+    /// the widening; minimality is a follow-up optimisation if profiling
+    /// demands it.
+    ///
+    /// [`AuxiliaryIndices::by_file`]: crate::graph::unified::storage::indices::AuxiliaryIndices::by_file
+    #[must_use]
+    pub fn reverse_dependency_index(&self, file_id: FileId) -> Vec<FileId> {
+        let mut dependents: HashSet<FileId> = HashSet::new();
+        for &target_node in self.indices.by_file(file_id) {
+            for edge_ref in self.edges.edges_to(target_node) {
+                let Some(source_entry) = self.nodes.get(edge_ref.source) else {
+                    continue;
+                };
+                let source_file = source_entry.file;
+                if source_file != file_id {
+                    dependents.insert(source_file);
+                }
+            }
+        }
+        let mut result: Vec<FileId> = dependents.into_iter().collect();
+        result.sort();
+        result
+    }
+
     /// Returns the per-language confidence metadata.
     ///
     /// This contains analysis confidence information collected during graph build,
@@ -497,6 +830,422 @@ impl CodeGraph {
     pub fn set_confidence(&mut self, confidence: HashMap<String, ConfidenceMetadata>) {
         self.confidence = confidence;
     }
+
+    // ------------------------------------------------------------------
+    // Task 4 Step 2 (A2 §F.2) — File-level tombstoning on a CodeGraph.
+    //
+    // Unlike the rebuild pipeline's `RebuildGraph::remove_file`, this
+    // path mutates a live `CodeGraph` in place and is the mechanism
+    // used by the full-rebuild flow when it needs to evict a file's
+    // nodes+edges between compactions. The daemon's incremental
+    // `WorkspaceManager` (Task 6) goes through the rebuild path, which
+    // is why this entry point is `pub(crate)`.
+    // ------------------------------------------------------------------
+
+    /// Tombstone every node that belongs to `file_id`, invalidate every
+    /// edge whose source or target is one of those nodes (across both
+    /// forward and reverse CSR + delta tiers), drop the file's entry
+    /// from the [`FileRegistry`], and return the set of [`NodeId`]s
+    /// that were tombstoned.
+    ///
+    /// This is the §F.2-aware file-removal primitive. Semantically, the
+    /// post-condition matches what a full rebuild of the workspace
+    /// without `file_id` would produce:
+    ///
+    /// * Every [`NodeEntry`] whose [`NodeEntry.file`] was `file_id` has
+    ///   been `NodeArena::remove`d, advancing its slot generation so
+    ///   stale [`NodeId`] handles do not alias a later re-allocation.
+    /// * Every CSR edge whose source or target slot matches one of the
+    ///   tombstoned slot indices has its `csr_tombstones` bit set; the
+    ///   read path's merge step already filters tombstoned CSR edges
+    ///   out of every query result.
+    /// * Every delta-buffer edge (Add or Remove, any file) whose source
+    ///   or target matches a tombstoned slot has been dropped from the
+    ///   delta in both directions.
+    /// * The [`AuxiliaryIndices`] (kind / name / qualified-name / file)
+    ///   no longer reference any of the tombstoned `NodeId`s.
+    /// * [`NodeMetadataStore`], [`NodeProvenanceStore`], [`ScopeArena`],
+    ///   [`AliasTable`], and [`ShadowTable`] have been compacted through
+    ///   the [`NodeIdBearing::retain_nodes`] predicate so no
+    ///   tombstoned NodeId survives in any publish-visible store.
+    /// * [`FileRegistry::per_file_nodes`] no longer holds a bucket for
+    ///   `file_id`, the lookup slot is recycled, and
+    ///   [`FileRegistry::resolve(file_id)`] returns `None`.
+    ///
+    /// Returns the `Vec<NodeId>` of tombstoned nodes. The returned list
+    /// is useful for downstream housekeeping (e.g., resetting per-file
+    /// caches keyed by NodeId) and for tests that need to assert on the
+    /// exact membership of the tombstone set.
+    ///
+    /// # Idempotency
+    ///
+    /// Calling `remove_file` twice with the same `file_id` — or calling
+    /// it for a `file_id` that was never registered — is a safe no-op.
+    /// The returned `Vec<NodeId>` is empty on the second call; no
+    /// arena / edge / index state is mutated (the predicate-based
+    /// compaction of `NodeIdBearing` surfaces short-circuits when the
+    /// dead set is empty).
+    ///
+    /// # Visibility
+    ///
+    /// `pub(crate)` because external callers (Task 6's
+    /// `WorkspaceManager` on the sqry-daemon side) route through
+    /// [`super::super::rebuild::rebuild_graph::RebuildGraph::remove_file`]
+    /// instead. This `CodeGraph`-level variant is used by full-rebuild
+    /// housekeeping paths inside sqry-core and by the Task 4 Step 4
+    /// incremental fallback for cases where the caller already has a
+    /// `&mut CodeGraph` and does not need the clone-and-publish
+    /// round-trip of [`clone_for_rebuild`](Self::clone_for_rebuild) →
+    /// [`finalize`](super::super::rebuild::rebuild_graph::RebuildGraph::finalize).
+    ///
+    /// # Performance
+    ///
+    /// * `O(|tombstoned| + |csr_edges| + |delta_edges|)` amortised.
+    ///   The CSR walk is linear in total edge count (not per-file),
+    ///   which is the dominant cost; each row check is O(1) via the
+    ///   precomputed dead-slot-index `HashSet` in
+    ///   [`BidirectionalEdgeStore::tombstone_edges_for_nodes`].
+    /// * Delta filtering is `O(|delta|)` per direction.
+    /// * Auxiliary-index compaction is `O(|tombstoned|)` amortised
+    ///   because each of the four indices keys its entries by the
+    ///   tombstoned NodeIds directly.
+    ///
+    /// [`NodeEntry`]: crate::graph::unified::storage::arena::NodeEntry
+    /// [`NodeEntry.file`]: crate::graph::unified::storage::arena::NodeEntry::file
+    /// [`NodeIdBearing::retain_nodes`]: crate::graph::unified::rebuild::coverage::NodeIdBearing::retain_nodes
+    #[allow(dead_code)] // Consumer is Task 4 Step 4 (`incremental_rebuild`)
+    // and the unit tests below; published in this commit so the §F.2
+    // invariant surface can be reviewed in isolation per the Gate 0c
+    // split contract.
+    pub(crate) fn remove_file(
+        &mut self,
+        file_id: FileId,
+    ) -> Vec<crate::graph::unified::node::NodeId> {
+        use crate::graph::unified::node::NodeId;
+        use crate::graph::unified::rebuild::coverage::NodeIdBearing;
+
+        // Drain the per-file bucket. For a file that was never
+        // registered, this returns an empty Vec — the rest of the
+        // method short-circuits on the `if tombstoned.is_empty()` test
+        // below so we still deregister the file on the off chance the
+        // bucket was empty but the file was registered (defensive; the
+        // common case is the bucket existed iff the file was
+        // registered).
+        let tombstoned: Vec<NodeId> = self.files_mut().take_nodes(file_id);
+        // Always drop the file's path entry + recycle its slot, even
+        // when the bucket was empty, so repeated registrations of the
+        // same path don't resurrect a zombie FileId. `unregister` is
+        // idempotent (returns None for unknown IDs) so the cost is a
+        // single HashMap probe when file_id is already gone.
+        self.files_mut().unregister(file_id);
+        // Clear the file's segment entry unconditionally (idempotent
+        // — `FileSegmentTable::remove` no-ops on unknown ids). This
+        // MUST run before `FileRegistry::unregister` recycles the
+        // FileId slot for reuse, otherwise a later registration of a
+        // different path under the reused FileId would inherit the
+        // previous file's stale node range (see
+        // `sqry-core/src/graph/unified/build/reindex.rs` — which
+        // trusts `file_segments().get(file_id)` to decide which slots
+        // to tombstone). Note: `unregister` above was called first
+        // only to keep the existing bucket-drain ordering; the
+        // segment-clear is order-independent with respect to
+        // `unregister` because neither touches the other's backing
+        // store, and the FileId slot cannot be recycled-and-reissued
+        // across a single `remove_file` call (the registry's slot
+        // recycler is driven by a later `register`, not by
+        // `unregister`).
+        self.file_segments_mut().remove(file_id);
+
+        if tombstoned.is_empty() {
+            return tombstoned;
+        }
+
+        // Dead set keyed on NodeId for NodeIdBearing predicates.
+        // `retain_nodes` uses `HashSet::contains` so membership is O(1).
+        let dead: HashSet<NodeId> = tombstoned.iter().copied().collect();
+
+        // 1. Tombstone the arena slots. `NodeArena::remove` is
+        //    idempotent — stale NodeIds that don't match a slot's
+        //    current generation are no-ops, which lets this method be
+        //    safely re-run on the same file.
+        {
+            let arena = self.nodes_mut();
+            for &nid in &tombstoned {
+                let _ = arena.remove(nid);
+            }
+        }
+
+        // 2. Invalidate edges across both CSR + delta in both
+        //    directions. This is the expensive step; the helper uses a
+        //    precomputed dead-slot-index set so the CSR walk is linear
+        //    in total edge count, not quadratic.
+        self.edges_mut().tombstone_edges_for_nodes(&dead);
+
+        // 3. Compact the auxiliary indices so name/kind/qname/file
+        //    lookups do not return tombstoned NodeIds. Using the
+        //    NodeIdBearing surface keeps this step in lockstep with the
+        //    rebuild pipeline's step 4 — any future publish-visible
+        //    NodeId-bearing container added to the K.A/K.B matrix is
+        //    automatically swept here too.
+        {
+            let predicate: Box<dyn Fn(NodeId) -> bool + '_> = Box::new(|nid| !dead.contains(&nid));
+            self.indices_mut().retain_nodes(&*predicate);
+            self.macro_metadata_mut().retain_nodes(&*predicate);
+            // The remaining K.A rows (node_provenance, scope_arena,
+            // alias_table, shadow_table) need Arc::make_mut accessors —
+            // they are wrapped in Arc at rest so this is where the
+            // CoW clone happens on demand. Inline the Arc::make_mut
+            // calls here (no public mut accessor exists today because
+            // the sole writer has been the rebuild path; extend the
+            // set by adding a similar inline call plus a K.A/K.B row
+            // in `super::super::rebuild::coverage`).
+            Arc::make_mut(&mut self.node_provenance).retain_nodes(&*predicate);
+            Arc::make_mut(&mut self.scope_arena).retain_nodes(&*predicate);
+            Arc::make_mut(&mut self.alias_table).retain_nodes(&*predicate);
+            Arc::make_mut(&mut self.shadow_table).retain_nodes(&*predicate);
+        }
+
+        tombstoned
+    }
+
+    // ------------------------------------------------------------------
+    // Gate 0c (A2 §H, Task 4) — RebuildGraph assembly path.
+    // ------------------------------------------------------------------
+
+    /// Assemble a [`CodeGraph`] from owned rebuild-local parts produced
+    /// by `RebuildGraph::finalize()` (defined in
+    /// `super::super::rebuild::rebuild_graph`).
+    ///
+    /// This constructor is deliberately `pub(crate)` and named with a
+    /// leading `__` so it is inaccessible from downstream crates even
+    /// when the `rebuild-internals` feature is enabled: only code in
+    /// `sqry-core` itself (specifically `RebuildGraph::finalize`) is
+    /// permitted to call it. The trybuild fixture
+    /// `sqry-core/tests/rebuild_internals_compile_fail/rebuild_graph_no_public_assembly.rs`
+    /// proves there is no other path from `RebuildGraph` to
+    /// `Arc<CodeGraph>`.
+    ///
+    /// The argument order mirrors the `CodeGraph` struct declaration
+    /// order exactly; the public `clone_for_rebuild` → `finalize`
+    /// round-trip uses the same macro-driven field enumeration so any
+    /// new `CodeGraph` field automatically threads through this
+    /// constructor as well.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    #[must_use]
+    pub(crate) fn __assemble_from_rebuild_parts_internal(
+        nodes: NodeArena,
+        edges: BidirectionalEdgeStore,
+        strings: StringInterner,
+        files: FileRegistry,
+        indices: AuxiliaryIndices,
+        macro_metadata: NodeMetadataStore,
+        node_provenance: NodeProvenanceStore,
+        edge_provenance: EdgeProvenanceStore,
+        fact_epoch: u64,
+        epoch: u64,
+        confidence: HashMap<String, ConfidenceMetadata>,
+        scope_arena: ScopeArena,
+        alias_table: AliasTable,
+        shadow_table: ShadowTable,
+        scope_provenance_store: ScopeProvenanceStore,
+        file_segments: FileSegmentTable,
+    ) -> Self {
+        Self {
+            nodes: Arc::new(nodes),
+            edges: Arc::new(edges),
+            strings: Arc::new(strings),
+            files: Arc::new(files),
+            indices: Arc::new(indices),
+            macro_metadata: Arc::new(macro_metadata),
+            node_provenance: Arc::new(node_provenance),
+            edge_provenance: Arc::new(edge_provenance),
+            fact_epoch,
+            epoch,
+            confidence,
+            scope_arena: Arc::new(scope_arena),
+            alias_table: Arc::new(alias_table),
+            shadow_table: Arc::new(shadow_table),
+            scope_provenance_store: Arc::new(scope_provenance_store),
+            file_segments: Arc::new(file_segments),
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Gate 0c (A2 §F) — publish-boundary debug invariants.
+    //
+    // These checks fire only in debug / test builds; release builds
+    // compile them out. They are called from
+    // `RebuildGraph::finalize()` steps 13 and 14 (the single source of
+    // truth for the residue check, per §F and §H agreement). Gate 0d
+    // will additionally wire the bijection check into
+    // `build_and_persist_graph`, `WorkspaceManager::publish_graph`, and
+    // every §E equivalence-harness run.
+    // ------------------------------------------------------------------
+
+    /// Assert the bijective bucket-membership invariant (A2 §F.1).
+    ///
+    /// Four conditions must hold simultaneously:
+    /// (a) every `NodeId` inside any `per_file_nodes` bucket maps to a
+    ///     live arena slot;
+    /// (b) every `NodeId` appears in exactly one bucket (no duplicates
+    ///     across buckets, no duplicates within a bucket);
+    /// (c) the bucket's `FileId` matches the node's own `file` field on
+    ///     `NodeEntry`;
+    /// (d) when at least one bucket is populated, every live node in
+    ///     the arena is accounted for by some bucket.
+    ///
+    /// Condition (d) is guarded on `!seen.is_empty()` so an empty-graph
+    /// (no recorded buckets) publish boundary is vacuously consistent:
+    /// legacy V7 snapshots, fresh `CodeGraph::new()` instances, and
+    /// rebuilds on graphs that predate Gate 0c's parallel-commit
+    /// bucketing must not panic. Once any bucket is populated, every
+    /// live arena slot must appear in a bucket.
+    ///
+    /// Iter-2 B2 (verbatim): this check used to be documented as
+    /// "vacuous until future `per_file_nodes` work lands". Pulling
+    /// base-plan Step 1 into Gate 0c retires that phrasing — the check
+    /// is non-vacuous the moment parallel-parse commits nodes, which
+    /// happens on every real build. The `!seen.is_empty()` guard now
+    /// exists solely for the empty-graph corner case, not as a phased-
+    /// delivery deferral.
+    ///
+    /// The check is a no-op in release builds. Panics with a
+    /// descriptive message on violation. This is intentional: publish-
+    /// boundary violations are programmer errors that must surface
+    /// loudly during CI / test runs.
+    #[cfg(any(debug_assertions, test))]
+    pub fn assert_bucket_bijection(&self) {
+        use std::collections::HashMap as StdHashMap;
+        // (a) + (b) + (c): every bucketed node is live, unique across
+        // buckets, and the bucket's FileId matches the node's own file.
+        let mut seen: StdHashMap<
+            crate::graph::unified::node::NodeId,
+            crate::graph::unified::file::FileId,
+        > = StdHashMap::new();
+        let mut any_bucket_populated = false;
+        for (file_id, bucket) in self.files.per_file_nodes_for_gate0d() {
+            if !bucket.is_empty() {
+                any_bucket_populated = true;
+            }
+            // Local dedup guard within the bucket itself. `retain_nodes_in_buckets`
+            // dedups during finalize step 6, but we re-check here so the
+            // invariant covers non-finalize publish paths too (e.g. if a
+            // future pipeline builds a graph without routing through
+            // `RebuildGraph::finalize`).
+            let mut within_bucket: std::collections::HashSet<crate::graph::unified::node::NodeId> =
+                std::collections::HashSet::new();
+            for node_id in bucket {
+                assert!(
+                    within_bucket.insert(node_id),
+                    "assert_bucket_bijection: duplicate node {node_id:?} inside bucket {file_id:?}"
+                );
+                assert!(
+                    self.nodes.get(node_id).is_some(),
+                    "assert_bucket_bijection: dead node {node_id:?} in bucket {file_id:?}"
+                );
+                let prior = seen.insert(node_id, file_id);
+                assert!(
+                    prior.is_none(),
+                    "assert_bucket_bijection: node {node_id:?} in multiple buckets: \
+                     prior={prior:?}, current={file_id:?}"
+                );
+                if let Some(entry) = self.nodes.get(node_id) {
+                    assert_eq!(
+                        entry.file, file_id,
+                        "assert_bucket_bijection: node {node_id:?} misfiled: in bucket \
+                         {file_id:?}, actual {:?}",
+                        entry.file
+                    );
+                }
+            }
+        }
+        // (d): every live node is accounted for by `seen` once buckets
+        // are populated. The guard keeps legacy-empty-graph boundaries
+        // vacuously consistent (see docs above).
+        if any_bucket_populated {
+            for (node_id, _entry) in self.nodes.iter() {
+                assert!(
+                    seen.contains_key(&node_id),
+                    "assert_bucket_bijection: live node {node_id:?} absent from all buckets"
+                );
+            }
+        }
+    }
+
+    /// Assert the pre-reuse tombstone-residue invariant (A2 §F.2).
+    ///
+    /// Iterates every publish-visible NodeId-bearing structure on
+    /// `self` and panics if any contains a node in `dead`. Called from
+    /// `RebuildGraph::finalize()` step 14 against the set drained at
+    /// step 8 — exactly one site per the plan's §F / §H agreement.
+    ///
+    /// No-op when `dead` is empty or in release builds.
+    #[cfg(any(debug_assertions, test))]
+    pub fn assert_no_tombstone_residue_for(
+        &self,
+        dead: &std::collections::HashSet<crate::graph::unified::node::NodeId>,
+    ) {
+        use super::super::rebuild::coverage::NodeIdBearing;
+        if dead.is_empty() {
+            return;
+        }
+        // Every K.A/K.B row must be inspected per §F.2.
+        for nid in self.nodes.all_node_ids() {
+            assert!(
+                !dead.contains(&nid),
+                "assert_no_tombstone_residue: tombstone {nid:?} still in NodeArena"
+            );
+        }
+        for nid in self.indices.all_node_ids() {
+            assert!(
+                !dead.contains(&nid),
+                "assert_no_tombstone_residue: tombstone {nid:?} still in auxiliary indices"
+            );
+        }
+        for nid in self.edges.all_node_ids() {
+            assert!(
+                !dead.contains(&nid),
+                "assert_no_tombstone_residue: tombstone {nid:?} still in edge store"
+            );
+        }
+        for nid in self.macro_metadata.all_node_ids() {
+            assert!(
+                !dead.contains(&nid),
+                "assert_no_tombstone_residue: tombstone {nid:?} still in macro metadata"
+            );
+        }
+        for nid in self.node_provenance.all_node_ids() {
+            assert!(
+                !dead.contains(&nid),
+                "assert_no_tombstone_residue: tombstone {nid:?} still in node provenance"
+            );
+        }
+        for nid in self.scope_arena.all_node_ids() {
+            assert!(
+                !dead.contains(&nid),
+                "assert_no_tombstone_residue: tombstone {nid:?} still in scope arena"
+            );
+        }
+        for nid in self.alias_table.all_node_ids() {
+            assert!(
+                !dead.contains(&nid),
+                "assert_no_tombstone_residue: tombstone {nid:?} still in alias table"
+            );
+        }
+        for nid in self.shadow_table.all_node_ids() {
+            assert!(
+                !dead.contains(&nid),
+                "assert_no_tombstone_residue: tombstone {nid:?} still in shadow table"
+            );
+        }
+        for nid in self.files.all_node_ids() {
+            assert!(
+                !dead.contains(&nid),
+                "assert_no_tombstone_residue: tombstone {nid:?} still in per-file bucket"
+            );
+        }
+    }
 }
 
 impl Default for CodeGraph {
@@ -552,6 +1301,9 @@ impl GraphMemorySize for CodeGraph {
             + self.node_provenance.heap_bytes()
             + self.edge_provenance.heap_bytes()
             + confidence_bytes
+            + self.file_segments.capacity()
+                * std::mem::size_of::<Option<crate::graph::unified::storage::segment::FileSegment>>(
+                )
     }
 }
 
@@ -568,6 +1320,21 @@ impl GraphMemorySize for CodeGraph {
 /// - Fair scheduling prevents writer starvation
 /// - No poisoning (unlike `std::sync::RwLock`)
 /// - Faster lock/unlock operations
+///
+/// # Phase 2 binding-plane access
+///
+/// Use the three-line snapshot pattern to access `BindingPlane`:
+///
+/// ```rust,ignore
+/// let read_guard = concurrent.read();
+/// let snapshot = read_guard.snapshot();
+/// let plane = snapshot.binding_plane();
+/// let resolution = plane.resolve(&query);
+/// ```
+///
+/// The explicit snapshot handle makes the MVCC lifetime visible at the call
+/// site. The full Phase 2 scope/alias/shadow and witness-bearing resolution
+/// API is exposed through `BindingPlane`.
 ///
 /// # Usage
 ///
@@ -706,6 +1473,74 @@ impl ConcurrentCodeGraph {
         })
     }
 
+    // ------------------------------------------------------------------
+    // Phase 2 binding-plane accessors (P2U03).
+    // ------------------------------------------------------------------
+
+    /// Returns the scope arena from the underlying graph (acquires a brief
+    /// read lock).
+    ///
+    /// Returns an `Arc` clone so the caller does not hold the lock beyond
+    /// this call site.
+    #[must_use]
+    pub fn scope_arena(&self) -> Arc<ScopeArena> {
+        Arc::clone(&self.inner.read().scope_arena)
+    }
+
+    /// Returns the alias table from the underlying graph (acquires a brief
+    /// read lock).
+    ///
+    /// Returns an `Arc` clone so the caller does not hold the lock beyond
+    /// this call site.
+    #[must_use]
+    pub fn alias_table(&self) -> Arc<AliasTable> {
+        Arc::clone(&self.inner.read().alias_table)
+    }
+
+    /// Returns the shadow table from the underlying graph (acquires a brief
+    /// read lock).
+    ///
+    /// Returns an `Arc` clone so the caller does not hold the lock beyond
+    /// this call site.
+    #[must_use]
+    pub fn shadow_table(&self) -> Arc<ShadowTable> {
+        Arc::clone(&self.inner.read().shadow_table)
+    }
+
+    /// Returns the scope provenance store from the underlying graph (acquires
+    /// a brief read lock).
+    ///
+    /// Returns an `Arc` clone so the caller does not hold the lock beyond
+    /// this call site.
+    #[must_use]
+    pub fn scope_provenance_store(&self) -> Arc<ScopeProvenanceStore> {
+        Arc::clone(&self.inner.read().scope_provenance_store)
+    }
+
+    /// Looks up scope provenance by `ScopeId` (acquires a brief read lock).
+    ///
+    /// Returns an owned copy since the borrow cannot outlive the lock guard.
+    #[must_use]
+    pub fn scope_provenance(&self, id: ScopeId) -> Option<ScopeProvenance> {
+        self.inner.read().scope_provenance(id).cloned()
+    }
+
+    /// Looks up the live `ScopeId` for a stable scope identity (acquires a
+    /// brief read lock).
+    ///
+    /// Returns `None` if no provenance record is registered for that stable id.
+    #[must_use]
+    pub fn scope_by_stable_id(&self, stable: ScopeStableId) -> Option<ScopeId> {
+        self.inner.read().scope_by_stable_id(stable)
+    }
+
+    /// Returns the file segment table from the underlying graph (acquires a
+    /// brief read lock).
+    #[must_use]
+    pub fn file_segments(&self) -> Arc<FileSegmentTable> {
+        Arc::clone(&self.inner.read().file_segments)
+    }
+
     /// Attempts to acquire a read lock without blocking.
     ///
     /// Returns `None` if the lock is currently held exclusively.
@@ -807,6 +1642,16 @@ pub struct GraphSnapshot {
     fact_epoch: u64,
     /// Epoch at snapshot time (for cursor validation).
     epoch: u64,
+    /// Phase 2 binding-plane scope arena snapshot (populated by Phase 4e).
+    scope_arena: Arc<ScopeArena>,
+    /// Phase 2 binding-plane alias table snapshot (populated by Phase 4e / P2U04).
+    alias_table: Arc<AliasTable>,
+    /// Phase 2 binding-plane shadow table snapshot (populated by Phase 4e / P2U05).
+    shadow_table: Arc<ShadowTable>,
+    /// Phase 2 binding-plane scope provenance store snapshot (populated by Phase 4e / P2U11).
+    scope_provenance_store: Arc<ScopeProvenanceStore>,
+    /// Phase 3 file segment table snapshot mapping `FileId` to node ranges.
+    file_segments: Arc<FileSegmentTable>,
 }
 
 impl GraphSnapshot {
@@ -893,6 +1738,81 @@ impl GraphSnapshot {
         self.files.file_provenance(id)
     }
 
+    // ------------------------------------------------------------------
+    // Phase 2 binding-plane accessors (P2U03).
+    // ------------------------------------------------------------------
+
+    /// Returns a reference to the scope arena at snapshot time.
+    ///
+    /// Participates in MVCC: the snapshot holds an `Arc` clone of the arena
+    /// as it existed when `snapshot()` was called. Subsequent calls to
+    /// `set_scope_arena` on the source `CodeGraph` do not affect this view.
+    #[inline]
+    #[must_use]
+    pub fn scope_arena(&self) -> &ScopeArena {
+        &self.scope_arena
+    }
+
+    /// Returns a reference to the alias table at snapshot time.
+    ///
+    /// Participates in MVCC: the snapshot holds an `Arc` clone of the table
+    /// as it existed when `snapshot()` was called. Subsequent calls to
+    /// `set_alias_table` on the source `CodeGraph` do not affect this view.
+    #[inline]
+    #[must_use]
+    pub fn alias_table(&self) -> &AliasTable {
+        &self.alias_table
+    }
+
+    /// Returns a reference to the shadow table at snapshot time.
+    ///
+    /// Participates in MVCC: the snapshot holds an `Arc` clone of the table
+    /// as it existed when `snapshot()` was called. Subsequent calls to
+    /// `set_shadow_table` on the source `CodeGraph` do not affect this view.
+    #[inline]
+    #[must_use]
+    pub fn shadow_table(&self) -> &ShadowTable {
+        &self.shadow_table
+    }
+
+    /// Returns a reference to the scope provenance store at snapshot time.
+    ///
+    /// Participates in MVCC: the snapshot holds an `Arc` clone of the store
+    /// as it existed when `snapshot()` was called. Subsequent calls to
+    /// `set_scope_provenance_store` on the source `CodeGraph` do not affect
+    /// this view.
+    #[inline]
+    #[must_use]
+    pub fn scope_provenance_store(&self) -> &ScopeProvenanceStore {
+        &self.scope_provenance_store
+    }
+
+    /// Looks up scope provenance by `ScopeId` at snapshot time.
+    ///
+    /// Returns `None` if the slot is out of range, vacant, or the stored
+    /// generation does not match (stale handle).
+    #[inline]
+    #[must_use]
+    pub fn scope_provenance(&self, id: ScopeId) -> Option<&ScopeProvenance> {
+        self.scope_provenance_store.lookup(id)
+    }
+
+    /// Looks up the live `ScopeId` for a stable scope identity at snapshot time.
+    ///
+    /// Returns `None` if no provenance record is registered for that stable id.
+    #[inline]
+    #[must_use]
+    pub fn scope_by_stable_id(&self, stable: ScopeStableId) -> Option<ScopeId> {
+        self.scope_provenance_store.scope_by_stable_id(stable)
+    }
+
+    /// Returns a reference to the file segment table at snapshot time.
+    #[inline]
+    #[must_use]
+    pub fn file_segments(&self) -> &FileSegmentTable {
+        &self.file_segments
+    }
+
     /// Returns the epoch at which this snapshot was taken.
     ///
     /// This can be compared against the current graph epoch to
@@ -910,6 +1830,40 @@ impl GraphSnapshot {
     #[must_use]
     pub fn epoch_matches(&self, other_epoch: u64) -> bool {
         self.epoch == other_epoch
+    }
+
+    // ------------------------------------------------------------------
+    // Phase 2 binding-plane facade accessor (P2U07).
+    // ------------------------------------------------------------------
+
+    /// Returns a [`BindingPlane`] facade borrowing this snapshot's lifetime.
+    ///
+    /// The facade is the stable Phase 2 public API for scope/alias/shadow
+    /// queries and witness-bearing resolution. It provides a single entry
+    /// point (`resolve`) that returns both a `BindingResult` and an ordered
+    /// step trace in a `BindingResolution`.
+    ///
+    /// # MVCC note
+    ///
+    /// `BindingPlane<'_>` borrows from this snapshot, which is already an
+    /// MVCC-consistent view of the graph at snapshot time. Callers from
+    /// `CodeGraph` or `ConcurrentCodeGraph` should follow the two-line
+    /// pattern so the snapshot lifetime is explicit:
+    ///
+    /// ```rust,ignore
+    /// // CodeGraph caller:
+    /// let snapshot = graph.snapshot();
+    /// let plane = snapshot.binding_plane();
+    ///
+    /// // ConcurrentCodeGraph caller:
+    /// let read_guard = concurrent.read();
+    /// let snapshot = read_guard.snapshot();
+    /// let plane = snapshot.binding_plane();
+    /// ```
+    #[inline]
+    #[must_use]
+    pub fn binding_plane(&self) -> crate::graph::unified::bind::plane::BindingPlane<'_> {
+        crate::graph::unified::bind::plane::BindingPlane::new(self)
     }
 
     // ============================================================================
@@ -1080,6 +2034,71 @@ impl fmt::Debug for GraphSnapshot {
             .field("nodes", &self.nodes.len())
             .field("epoch", &self.epoch)
             .finish_non_exhaustive()
+    }
+}
+
+/// Read-only accessor trait shared by [`CodeGraph`] and [`GraphSnapshot`].
+///
+/// This lets helpers that only *read* graph state (name-matching, relation
+/// traversal, reference lookups) be written once and called from both the
+/// live `CodeGraph` path in `sqry-core::query::executor::graph_eval` and
+/// the snapshot-based path in `sqry-db::queries::*`. No mutation is exposed.
+pub trait GraphAccess {
+    /// Returns the node arena (read-only).
+    fn nodes(&self) -> &NodeArena;
+    /// Returns the bidirectional edge store (read-only).
+    fn edges(&self) -> &BidirectionalEdgeStore;
+    /// Returns the string interner (read-only).
+    fn strings(&self) -> &StringInterner;
+    /// Returns the file registry (read-only).
+    fn files(&self) -> &FileRegistry;
+    /// Returns the auxiliary indices (read-only).
+    fn indices(&self) -> &AuxiliaryIndices;
+}
+
+impl GraphAccess for CodeGraph {
+    #[inline]
+    fn nodes(&self) -> &NodeArena {
+        CodeGraph::nodes(self)
+    }
+    #[inline]
+    fn edges(&self) -> &BidirectionalEdgeStore {
+        CodeGraph::edges(self)
+    }
+    #[inline]
+    fn strings(&self) -> &StringInterner {
+        CodeGraph::strings(self)
+    }
+    #[inline]
+    fn files(&self) -> &FileRegistry {
+        CodeGraph::files(self)
+    }
+    #[inline]
+    fn indices(&self) -> &AuxiliaryIndices {
+        CodeGraph::indices(self)
+    }
+}
+
+impl GraphAccess for GraphSnapshot {
+    #[inline]
+    fn nodes(&self) -> &NodeArena {
+        GraphSnapshot::nodes(self)
+    }
+    #[inline]
+    fn edges(&self) -> &BidirectionalEdgeStore {
+        GraphSnapshot::edges(self)
+    }
+    #[inline]
+    fn strings(&self) -> &StringInterner {
+        GraphSnapshot::strings(self)
+    }
+    #[inline]
+    fn files(&self) -> &FileRegistry {
+        GraphSnapshot::files(self)
+    }
+    #[inline]
+    fn indices(&self) -> &AuxiliaryIndices {
+        GraphSnapshot::indices(self)
     }
 }
 
@@ -1923,5 +2942,557 @@ mod tests {
         // iter_edges returns all edges regardless of kind
         let edges: Vec<_> = snapshot.iter_edges().collect();
         assert_eq!(edges.len(), 2);
+    }
+
+    // -------- reverse_import_index tests --------
+
+    /// Helper: build an empty graph with the given file paths registered, a
+    /// single placeholder node allocated per file, and indices rebuilt so
+    /// `by_file` returns the per-file node sets. Returns the file IDs in
+    /// the order passed in and the per-file node ID.
+    #[cfg(test)]
+    fn build_import_test_graph(files: &[&str]) -> (CodeGraph, Vec<FileId>, Vec<NodeId>) {
+        use crate::graph::unified::node::NodeKind;
+        use crate::graph::unified::storage::arena::NodeEntry;
+        use std::path::Path;
+
+        let mut graph = CodeGraph::new();
+        let placeholder_name = graph.strings_mut().intern("sym").unwrap();
+        let mut file_ids = Vec::with_capacity(files.len());
+        let mut node_ids = Vec::with_capacity(files.len());
+        for path in files {
+            let file_id = graph.files_mut().register(Path::new(path)).unwrap();
+            let node_id = graph
+                .nodes_mut()
+                .alloc(NodeEntry::new(
+                    NodeKind::Function,
+                    placeholder_name,
+                    file_id,
+                ))
+                .unwrap();
+            file_ids.push(file_id);
+            node_ids.push(node_id);
+        }
+        graph.rebuild_indices();
+        (graph, file_ids, node_ids)
+    }
+
+    /// Helper: add an `Imports` edge from `source_node` (in importer file) to
+    /// `target_node` (in exporter file). The edge is recorded against the
+    /// importer file so `clear_file` cleanup would behave identically to
+    /// production Pass 4 writes.
+    #[cfg(test)]
+    fn add_import_edge(
+        graph: &mut CodeGraph,
+        source_node: NodeId,
+        target_node: NodeId,
+        importer_file: FileId,
+    ) {
+        graph.edges_mut().add_edge(
+            source_node,
+            target_node,
+            EdgeKind::Imports {
+                alias: None,
+                is_wildcard: false,
+            },
+            importer_file,
+        );
+    }
+
+    #[test]
+    fn reverse_import_index_empty_graph_returns_empty() {
+        let (graph, files, _) = build_import_test_graph(&["only.rs"]);
+        assert!(graph.reverse_import_index(files[0]).is_empty());
+    }
+
+    #[test]
+    fn reverse_import_index_single_importer() {
+        // File A imports a symbol exported by file B. Reverse index of B
+        // should return exactly [A]; reverse index of A should be empty.
+        let (mut graph, files, nodes) = build_import_test_graph(&["a.rs", "b.rs"]);
+        let (a, b) = (files[0], files[1]);
+        add_import_edge(&mut graph, nodes[0], nodes[1], a);
+
+        let importers_of_b = graph.reverse_import_index(b);
+        assert_eq!(importers_of_b, vec![a]);
+
+        let importers_of_a = graph.reverse_import_index(a);
+        assert!(
+            importers_of_a.is_empty(),
+            "A has no inbound Imports edges; reverse index must be empty"
+        );
+    }
+
+    #[test]
+    fn reverse_import_index_multiple_importers_deduped_and_sorted() {
+        // A, B, C all import from D. Reverse index of D must contain each
+        // importer exactly once, sorted ascending by FileId.
+        let (mut graph, files, nodes) = build_import_test_graph(&["a.rs", "b.rs", "c.rs", "d.rs"]);
+        let (a, b, c, d) = (files[0], files[1], files[2], files[3]);
+        add_import_edge(&mut graph, nodes[0], nodes[3], a);
+        add_import_edge(&mut graph, nodes[1], nodes[3], b);
+        add_import_edge(&mut graph, nodes[2], nodes[3], c);
+        // Add a duplicate edge from A to D to confirm dedup behavior.
+        add_import_edge(&mut graph, nodes[0], nodes[3], a);
+
+        let importers_of_d = graph.reverse_import_index(d);
+        assert_eq!(importers_of_d, vec![a, b, c]);
+        // Sort invariant: Vec is ascending by raw index.
+        let mut sorted = importers_of_d.clone();
+        sorted.sort();
+        assert_eq!(importers_of_d, sorted);
+    }
+
+    #[test]
+    fn reverse_import_index_filters_non_import_edges() {
+        // A `Calls` edge from A into B must not contribute to B's reverse
+        // import index. Only `EdgeKind::Imports` edges count.
+        let (mut graph, files, nodes) = build_import_test_graph(&["a.rs", "b.rs"]);
+        let (a, b) = (files[0], files[1]);
+        graph.edges_mut().add_edge(
+            nodes[0],
+            nodes[1],
+            EdgeKind::Calls {
+                argument_count: 0,
+                is_async: false,
+            },
+            a,
+        );
+        graph
+            .edges_mut()
+            .add_edge(nodes[0], nodes[1], EdgeKind::References, a);
+
+        assert!(
+            graph.reverse_import_index(b).is_empty(),
+            "non-Imports edges must not register as importers"
+        );
+    }
+
+    #[test]
+    fn reverse_import_index_elides_self_imports() {
+        // An Imports edge whose source and target are both in the same file
+        // is a self-import; the caller's own file must not appear in its own
+        // reverse index.
+        let (mut graph, files, nodes) = build_import_test_graph(&["a.rs"]);
+        let a = files[0];
+        // Add a second node in the same file so we have a distinct source.
+        let name2 = graph.strings_mut().intern("sym2").unwrap();
+        let second_in_a = graph
+            .nodes_mut()
+            .alloc(crate::graph::unified::storage::arena::NodeEntry::new(
+                crate::graph::unified::node::NodeKind::Function,
+                name2,
+                a,
+            ))
+            .unwrap();
+        graph.rebuild_indices();
+        add_import_edge(&mut graph, second_in_a, nodes[0], a);
+
+        assert!(
+            graph.reverse_import_index(a).is_empty(),
+            "self-imports must be elided from reverse index"
+        );
+    }
+
+    #[test]
+    fn reverse_import_index_mixed_edge_kinds_counts_only_imports() {
+        // Two files: A has both Calls and Imports edges into B. Reverse
+        // index must return exactly [A] — the Calls edge contributes
+        // nothing.
+        let (mut graph, files, nodes) = build_import_test_graph(&["a.rs", "b.rs"]);
+        let (a, b) = (files[0], files[1]);
+        add_import_edge(&mut graph, nodes[0], nodes[1], a);
+        graph.edges_mut().add_edge(
+            nodes[0],
+            nodes[1],
+            EdgeKind::Calls {
+                argument_count: 0,
+                is_async: false,
+            },
+            a,
+        );
+
+        assert_eq!(graph.reverse_import_index(b), vec![a]);
+    }
+
+    #[test]
+    fn reverse_import_index_uninitialized_file_returns_empty() {
+        // Querying a FileId that is not registered in the graph must return
+        // an empty Vec, not panic.
+        let (graph, _, _) = build_import_test_graph(&["a.rs"]);
+        let bogus = FileId::new(9999);
+        assert!(
+            graph.reverse_import_index(bogus).is_empty(),
+            "unknown FileId must return empty Vec without panicking"
+        );
+    }
+
+    #[test]
+    fn reverse_import_index_skips_tombstoned_source_nodes() {
+        // In the incremental rebuild path the prior graph retains tombstoned
+        // arena slots for nodes belonging to closure files that have been
+        // removed but not yet fully compacted. reverse_import_index is
+        // called on that prior graph to widen the closure, so its
+        // tombstone guard (`let Some(source_entry) = self.nodes.get(...)`)
+        // is a semantically important branch, not a theoretical one.
+        // This test exercises it directly by tombstoning the source node of
+        // an Imports edge and asserting the edge silently disappears from
+        // the reverse index.
+        let (mut graph, files, nodes) = build_import_test_graph(&["a.rs", "b.rs"]);
+        let (a, b) = (files[0], files[1]);
+        add_import_edge(&mut graph, nodes[0], nodes[1], a);
+        // Sanity: before tombstoning, A shows up as the importer of B.
+        assert_eq!(graph.reverse_import_index(b), vec![a]);
+        // Tombstone the source node via the arena (generation bump). The
+        // Imports edge still exists in the edge store but its source NodeId
+        // is now stale; `nodes.get(edge_ref.source)` returns None and the
+        // guard skips the edge.
+        let removed = graph.nodes_mut().remove(nodes[0]);
+        assert!(
+            removed.is_some(),
+            "arena.remove must succeed for a live node"
+        );
+        assert!(
+            graph.nodes().get(nodes[0]).is_none(),
+            "tombstoned lookup must return None"
+        );
+        assert!(
+            graph.reverse_import_index(b).is_empty(),
+            "Imports edges whose source is tombstoned must be silently skipped"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Task 4 Step 2 — CodeGraph::remove_file
+    // ------------------------------------------------------------------
+
+    /// Seed a graph with 2 files × `per_file` nodes per file, plus a set
+    /// of intra- and inter-file edges. Each call site produces a
+    /// canonical topology so tests below can assert bit-level on edge
+    /// survival. Returns `(graph, file_a, file_b, file_a_nodes,
+    /// file_b_nodes)`.
+    fn seed_two_file_graph(
+        per_file: usize,
+    ) -> (
+        CodeGraph,
+        crate::graph::unified::file::FileId,
+        crate::graph::unified::file::FileId,
+        Vec<NodeId>,
+        Vec<NodeId>,
+    ) {
+        use crate::graph::unified::edge::EdgeKind;
+        use crate::graph::unified::node::NodeKind;
+        use crate::graph::unified::storage::arena::NodeEntry;
+        use std::path::Path;
+
+        let mut graph = CodeGraph::new();
+        let sym = graph.strings_mut().intern("sym").expect("intern");
+        let file_a = graph
+            .files_mut()
+            .register(Path::new("/tmp/remove_file_test/a.rs"))
+            .expect("register a");
+        let file_b = graph
+            .files_mut()
+            .register(Path::new("/tmp/remove_file_test/b.rs"))
+            .expect("register b");
+
+        let mut file_a_nodes = Vec::with_capacity(per_file);
+        let mut file_b_nodes = Vec::with_capacity(per_file);
+
+        for _ in 0..per_file {
+            let n = graph
+                .nodes_mut()
+                .alloc(NodeEntry::new(NodeKind::Function, sym, file_a))
+                .expect("alloc a-node");
+            file_a_nodes.push(n);
+            graph.files_mut().record_node(file_a, n);
+            graph
+                .indices_mut()
+                .add(n, NodeKind::Function, sym, None, file_a);
+        }
+        for _ in 0..per_file {
+            let n = graph
+                .nodes_mut()
+                .alloc(NodeEntry::new(NodeKind::Function, sym, file_b))
+                .expect("alloc b-node");
+            file_b_nodes.push(n);
+            graph.files_mut().record_node(file_b, n);
+            graph
+                .indices_mut()
+                .add(n, NodeKind::Function, sym, None, file_b);
+        }
+
+        // Intra-file edges inside each file: pairwise a[i] -> a[i+1],
+        // b[i] -> b[i+1]. These are the ones that must die when the
+        // corresponding file is removed.
+        for i in 0..per_file.saturating_sub(1) {
+            graph.edges_mut().add_edge(
+                file_a_nodes[i],
+                file_a_nodes[i + 1],
+                EdgeKind::Calls {
+                    argument_count: 0,
+                    is_async: false,
+                },
+                file_a,
+            );
+            graph.edges_mut().add_edge(
+                file_b_nodes[i],
+                file_b_nodes[i + 1],
+                EdgeKind::Calls {
+                    argument_count: 0,
+                    is_async: false,
+                },
+                file_b,
+            );
+        }
+        // Cross-file edges: a[0] -> b[0], b[0] -> a[0]. Both must die
+        // when *either* endpoint's file is removed (plan §F.2).
+        graph.edges_mut().add_edge(
+            file_a_nodes[0],
+            file_b_nodes[0],
+            EdgeKind::Calls {
+                argument_count: 0,
+                is_async: false,
+            },
+            file_a,
+        );
+        graph.edges_mut().add_edge(
+            file_b_nodes[0],
+            file_a_nodes[0],
+            EdgeKind::Calls {
+                argument_count: 0,
+                is_async: false,
+            },
+            file_b,
+        );
+
+        (graph, file_a, file_b, file_a_nodes, file_b_nodes)
+    }
+
+    #[test]
+    fn code_graph_remove_file_tombstones_all_per_file_nodes() {
+        let (mut graph, file_a, _file_b, file_a_nodes, _file_b_nodes) = seed_two_file_graph(3);
+
+        let returned = graph.remove_file(file_a);
+
+        // Returned list must equal the original per-file bucket
+        // membership, deterministically.
+        let returned_set: std::collections::HashSet<NodeId> = returned.iter().copied().collect();
+        let expected_set: std::collections::HashSet<NodeId> =
+            file_a_nodes.iter().copied().collect();
+        assert_eq!(
+            returned_set, expected_set,
+            "remove_file must return exactly the file_a nodes drained from the bucket"
+        );
+
+        // Every returned NodeId is gone from the arena.
+        for nid in &file_a_nodes {
+            assert!(
+                graph.nodes().get(*nid).is_none(),
+                "node {nid:?} from removed file must be tombstoned in arena"
+            );
+        }
+    }
+
+    #[test]
+    fn code_graph_remove_file_invalidates_all_edges_sourced_or_targeted_at_removed_nodes() {
+        use crate::graph::unified::edge::EdgeKind;
+
+        let (mut graph, file_a, _file_b, file_a_nodes, file_b_nodes) = seed_two_file_graph(3);
+
+        // Sanity: the seed has 2 intra-A edges, 2 intra-B edges, plus
+        // 2 cross-file edges (a0↔b0).
+        let before_delta = graph.edges().stats().forward.delta_edge_count;
+        assert_eq!(
+            before_delta, 6,
+            "seed must produce 2 intra-A + 2 intra-B + 2 cross edges"
+        );
+
+        let _ = graph.remove_file(file_a);
+
+        // Forward delta after removal: all 2 intra-A edges are gone,
+        // both cross edges are gone, only the 2 intra-B edges remain.
+        let after_delta_forward = graph.edges().stats().forward.delta_edge_count;
+        assert_eq!(
+            after_delta_forward, 2,
+            "only intra-B forward edges must remain after removing file_a"
+        );
+        let after_delta_reverse = graph.edges().stats().reverse.delta_edge_count;
+        assert_eq!(
+            after_delta_reverse, 2,
+            "only intra-B reverse edges must remain after removing file_a"
+        );
+
+        // Cross-file edge from b[0] -> a[0] must no longer be visible
+        // from either direction, because a[0] is tombstoned.
+        let b0 = file_b_nodes[0];
+        let a0 = file_a_nodes[0];
+        let remaining_from_b0: Vec<_> = graph
+            .edges()
+            .edges_from(b0)
+            .into_iter()
+            .filter(|e| {
+                matches!(
+                    e.kind,
+                    EdgeKind::Calls {
+                        argument_count: 0,
+                        is_async: false
+                    }
+                )
+            })
+            .collect();
+        assert!(
+            !remaining_from_b0.iter().any(|e| e.target == a0),
+            "edge b0 -> a0 must be gone after remove_file(file_a)"
+        );
+        let remaining_to_a0: Vec<_> = graph.edges().edges_to(a0).into_iter().collect();
+        assert!(
+            remaining_to_a0.is_empty(),
+            "every edge targeting the tombstoned a0 must be gone"
+        );
+    }
+
+    #[test]
+    fn code_graph_remove_file_drops_file_registry_entry() {
+        let (mut graph, file_a, _file_b, _, _) = seed_two_file_graph(2);
+
+        assert!(
+            graph.files().resolve(file_a).is_some(),
+            "seed registered file_a"
+        );
+        assert!(
+            !graph.files().nodes_for_file(file_a).is_empty(),
+            "seed populated the file_a bucket"
+        );
+
+        let _ = graph.remove_file(file_a);
+
+        assert!(
+            graph.files().resolve(file_a).is_none(),
+            "FileRegistry::resolve must return None after remove_file"
+        );
+        assert!(
+            graph.files().nodes_for_file(file_a).is_empty(),
+            "per-file bucket for file_a must be drained"
+        );
+    }
+
+    #[test]
+    fn code_graph_remove_file_is_idempotent_on_unknown_file() {
+        use crate::graph::unified::file::FileId;
+        let (mut graph, _file_a, _file_b, _, _) = seed_two_file_graph(2);
+
+        // Snapshot state before idempotent no-op.
+        let nodes_before = graph.nodes().len();
+        let delta_fwd_before = graph.edges().stats().forward.delta_edge_count;
+        let delta_rev_before = graph.edges().stats().reverse.delta_edge_count;
+        let files_before = graph.files().len();
+
+        // A FileId that was never registered: the caller may legitimately
+        // receive a bogus id from stale indexing state. `remove_file`
+        // must be a silent no-op.
+        let bogus = FileId::new(9999);
+        let returned = graph.remove_file(bogus);
+        assert!(
+            returned.is_empty(),
+            "remove_file on unknown FileId must return an empty Vec"
+        );
+
+        assert_eq!(graph.nodes().len(), nodes_before, "arena count unchanged");
+        assert_eq!(
+            graph.edges().stats().forward.delta_edge_count,
+            delta_fwd_before,
+            "forward delta unchanged"
+        );
+        assert_eq!(
+            graph.edges().stats().reverse.delta_edge_count,
+            delta_rev_before,
+            "reverse delta unchanged"
+        );
+        assert_eq!(graph.files().len(), files_before, "file count unchanged");
+    }
+
+    #[test]
+    fn code_graph_remove_file_clears_file_segments_entry() {
+        // Iter-1 Codex review fix: a file's `FileSegmentTable` entry
+        // must be cleared on `remove_file`. Without this, a later
+        // `FileId` recycle (via `FileRegistry::free_list`) would
+        // inherit the previous file's stale node-range and
+        // `reindex_files` (`build/reindex.rs`) would tombstone the
+        // wrong slots. This unit test seeds a segment entry, removes
+        // the file, and asserts the entry is gone.
+        use crate::graph::unified::storage::segment::FileSegmentTable;
+
+        let (mut graph, file_a, _file_b, file_a_nodes, _file_b_nodes) = seed_two_file_graph(3);
+
+        // Seed a segment for file A. Production code sets this via
+        // Phase 3 parallel commit; here we go through the crate-
+        // internal accessor because we are a unit test inside the
+        // crate. (The feature-gated `test_only_record_file_segment`
+        // public helper exists for the integration tests in
+        // `sqry-core/tests/incremental_remove_file_scale.rs`.)
+        let first_index = file_a_nodes
+            .iter()
+            .map(|n| n.index())
+            .min()
+            .expect("per_file = 3");
+        let last_index = file_a_nodes
+            .iter()
+            .map(|n| n.index())
+            .max()
+            .expect("per_file = 3");
+        let slot_count = last_index - first_index + 1;
+        let table: &mut FileSegmentTable = graph.file_segments_mut();
+        table.record_range(file_a, first_index, slot_count);
+        assert!(
+            graph.file_segments().get(file_a).is_some(),
+            "seed must install a segment for file_a before remove_file"
+        );
+
+        // Remove the file.
+        let _ = graph.remove_file(file_a);
+
+        // The segment entry must be gone. `FileSegmentTable::remove`
+        // is idempotent (a no-op on unknown ids), so this assertion
+        // holds whether or not the seeded range was contiguous.
+        assert!(
+            graph.file_segments().get(file_a).is_none(),
+            "remove_file must clear the FileSegmentTable entry for file_a"
+        );
+    }
+
+    #[test]
+    fn code_graph_remove_file_repeated_calls_are_idempotent() {
+        let (mut graph, file_a, _file_b, file_a_nodes, _file_b_nodes) = seed_two_file_graph(3);
+
+        // First call does the work.
+        let first = graph.remove_file(file_a);
+        assert_eq!(first.len(), file_a_nodes.len());
+
+        // Snapshot post-first-call state.
+        let nodes_after = graph.nodes().len();
+        let delta_fwd_after = graph.edges().stats().forward.delta_edge_count;
+        let delta_rev_after = graph.edges().stats().reverse.delta_edge_count;
+        let files_after = graph.files().len();
+
+        // Second call must be a silent no-op — the bucket is empty,
+        // the file is unregistered, and the arena slots are already
+        // tombstoned (NodeArena::remove ignores stale generations).
+        let second = graph.remove_file(file_a);
+        assert!(
+            second.is_empty(),
+            "second remove_file on the same file must return an empty Vec"
+        );
+
+        assert_eq!(graph.nodes().len(), nodes_after);
+        assert_eq!(
+            graph.edges().stats().forward.delta_edge_count,
+            delta_fwd_after
+        );
+        assert_eq!(
+            graph.edges().stats().reverse.delta_edge_count,
+            delta_rev_after
+        );
+        assert_eq!(graph.files().len(), files_after);
     }
 }

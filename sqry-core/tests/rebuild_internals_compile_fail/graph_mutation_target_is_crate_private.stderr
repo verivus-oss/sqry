@@ -1,0 +1,13 @@
+error[E0603]: module `mutation_target` is private
+  --> tests/rebuild_internals_compile_fail/graph_mutation_target_is_crate_private.rs:17:32
+   |
+17 | use sqry_core::graph::unified::mutation_target::GraphMutationTarget;
+   |                                ^^^^^^^^^^^^^^^  ------------------- trait `GraphMutationTarget` is not publicly re-exported
+   |                                |
+   |                                private module
+   |
+note: the module `mutation_target` is defined here
+  --> src/graph/unified/mod.rs
+   |
+   | pub(crate) mod mutation_target;
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

@@ -21,6 +21,7 @@ use crate::engine::{canonicalize_in_workspace, engine_for_workspace};
 use crate::execution::graph_builders::build_graph_metadata;
 use crate::tools::ExplainCodeArgs;
 
+use crate::execution::location::node_location_for_reporting_snapshot;
 use crate::execution::symbol_utils::{build_context, get_classpath_provenance_for_node};
 use crate::execution::types::{ExplainCodeData, ExplainRelations, NodeRefData, ToolExecution};
 use crate::execution::utils::duration_to_ms;
@@ -139,7 +140,7 @@ fn explain_symbol_unified(
     let files = snapshot.files();
 
     // Build symbol reference using shared helper
-    let node_ref = build_node_ref_from_entry(entry, snapshot, workspace_root);
+    let node_ref = build_node_ref_from_entry(entry, node_id, snapshot, workspace_root);
 
     // Build context (source code around the symbol)
     let file_path = files
@@ -147,6 +148,8 @@ fn explain_symbol_unified(
         .map(|arc_path| workspace_root.join(arc_path.as_ref()))
         .unwrap_or_default();
 
+    // NOTE: These raw entry spans are used for character-offset math (source code extraction),
+    // not for user-visible line/column display. Do NOT migrate to node_location_for_reporting.
     let context = build_context_if_requested(
         include_context,
         &file_path,
@@ -226,6 +229,7 @@ fn node_kind_to_str(kind: NodeKind) -> &'static str {
 /// Build a `NodeRefData` from a unified graph node entry.
 fn build_node_ref_from_entry(
     entry: &sqry_core::graph::unified::storage::arena::NodeEntry,
+    node_id: NodeId,
     snapshot: &GraphSnapshot,
     workspace_root: &Path,
 ) -> NodeRefData {
@@ -256,6 +260,9 @@ fn build_node_ref_from_entry(
         Into::into,
     );
 
+    let loc = node_location_for_reporting_snapshot(snapshot, node_id, workspace_root);
+    let resolution_source = loc.as_ref().map(|l| format!("{:?}", l.resolution_source));
+
     NodeRefData {
         name,
         qualified_name,
@@ -264,15 +271,16 @@ fn build_node_ref_from_entry(
         file_uri,
         range: crate::execution::types::RangeData {
             start: crate::execution::types::PositionData {
-                line: entry.start_line,
-                character: entry.start_column,
+                line: loc.as_ref().map_or(entry.start_line, |l| l.line),
+                character: loc.as_ref().map_or(entry.start_column, |l| l.column),
             },
             end: crate::execution::types::PositionData {
-                line: entry.end_line,
-                character: entry.end_column,
+                line: loc.as_ref().map_or(entry.end_line, |l| l.end_line),
+                character: loc.as_ref().map_or(entry.end_column, |l| l.end_column),
             },
         },
         metadata: None,
+        resolution_source,
     }
 }
 
@@ -285,8 +293,15 @@ fn collect_callers_unified(
     snapshot
         .get_callers(node_id)
         .into_iter()
-        .filter_map(|caller_id| snapshot.get_node(caller_id))
-        .map(|entry| build_node_ref_from_entry(entry, snapshot, workspace_root))
+        .filter_map(|caller_id| {
+            let entry = snapshot.get_node(caller_id)?;
+            Some(build_node_ref_from_entry(
+                entry,
+                caller_id,
+                snapshot,
+                workspace_root,
+            ))
+        })
         .collect()
 }
 
@@ -299,8 +314,15 @@ fn collect_callees_unified(
     snapshot
         .get_callees(node_id)
         .into_iter()
-        .filter_map(|callee_id| snapshot.get_node(callee_id))
-        .map(|entry| build_node_ref_from_entry(entry, snapshot, workspace_root))
+        .filter_map(|callee_id| {
+            let entry = snapshot.get_node(callee_id)?;
+            Some(build_node_ref_from_entry(
+                entry,
+                callee_id,
+                snapshot,
+                workspace_root,
+            ))
+        })
         .collect()
 }
 

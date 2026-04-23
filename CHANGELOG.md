@@ -7,6 +7,251 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **feat(mcp) [BEHAVIOR CHANGE]**: `find_duplicates` now caps each duplicate
+  group to **10 member symbols** by default (previously unlimited).
+
+  Large codebases (e.g. Linux kernel with 11.2M nodes) could return groups
+  with hundreds or thousands of members, producing multi-megabyte MCP
+  responses that exceed payload budgets and degrade AI-assistant usability.
+
+  **Wire output additions (additive — no breaking schema change):**
+  - `total_members` (`usize`): pre-truncation member count for the group.
+    Always equals `count` (symbols.len()) when `members_truncated` is `false`.
+  - `members_truncated` (`bool`): `true` when the `symbols` list was capped
+    by `max_members_per_group`.
+
+  **New parameter `max_members_per_group` (optional integer, default 10):**
+  - Controls the per-group member cap. Valid range: `[0, 10000]`.
+  - `0` disables the cap entirely, restoring unlimited (pre-v9.1) behavior.
+  - Values outside `[0, 10000]` are rejected with `InvalidParams`.
+
+  **Migration for callers relying on unlimited members:**
+  Pass `"max_members_per_group": 0` to restore pre-v9.1 behavior.
+
+  **Example wire output (truncated group):**
+  ```json
+  {
+    "groupId": "0x1a2b3c4d",
+    "count": 10,
+    "totalMembers": 847,
+    "membersTruncated": true,
+    "symbols": [ ... 10 entries ... ]
+  }
+  ```
+
+### Fixed
+
+- **fix(graph)**: line-zero reporting for cross-file callees and
+  macro-shadowed call targets across all 16 language plugins and all MCP
+  tool outputs. Extends `dec44131f` Method/Function cross-kind reuse
+  (2026-03-30) to the complete root-cause surface: `CALL_COMPATIBLE_KINDS`
+  generalization (Function, Method, Macro, Constant, LambdaTarget),
+  `ensure_callee()` API with required span, Phase 4c-prime cross-file
+  node unification, `node_location_for_reporting()` query-layer helper,
+  and 30 MCP tool read site migrations. 47 new regression tests.
+
+### Features
+
+- **feat(daemon)**: `sqryd` — background index server that keeps semantic
+  graphs hot across CLI, LSP, and MCP sessions (Tasks 1-13, shipped on
+  `sqryd/task-2-source-tree-watcher`).
+
+  **Core components:**
+  - `sqry-daemon` library + `sqryd` binary: production daemon process
+    with pidfile locking, SIGTERM/SIGINT graceful shutdown, optional
+    `--detach` daemonization mode, structured log rotation (configurable
+    `log_max_size_mb` / `log_keep_rotations`), and systemd user-service /
+    launchd plist unit generators (reserved; not yet wired to CLI).
+  - `sqry-daemon-protocol` leaf crate: wire types, length-prefixed
+    framing via free functions (`read_frame` / `write_frame` /
+    `read_frame_json` / `write_frame_json`), and
+    `deny_unknown_fields` envelope versioning.
+  - `sqry-daemon-client` crate: `connect_shim` / `pump_stdio` for
+    stdio-over-IPC transport, sealed `AsyncReadWrite` trait, envelope
+    version negotiation, connect/handshake timeouts.
+
+  **Workspace management:**
+  - `WorkspaceManager`: per-workspace admission control with
+    configurable `memory_limit_mb` budget, LRU eviction of least-
+    recently-used workspaces when the memory ceiling is approached.
+  - Per-workspace high-water mark telemetry: `high_water_bytes`
+    is a monotonic counter that tracks the peak resident graph memory
+    since the workspace was loaded. It persists across incremental
+    rebuilds but resets to zero on workspace unload or eviction.
+    Visible via `sqry daemon status` alongside current resident bytes,
+    workspace count, and a daemon-wide `high_water_bytes` aggregate.
+
+  **Incremental rebuild:**
+  - `RebuildDispatcher` wraps `SourceTreeWatcher` (notify-based
+    recursive file-system watcher, Task 2) with a 2 s debounce
+    (configurable via `debounce_ms`),
+    `CancellationToken`-based in-flight rebuild cancellation, and
+    a `Rebuilding / Loaded / Failed` state machine.
+
+  **IPC transport:**
+  - Unix domain sockets (Linux/macOS) and Named Pipes (Windows).
+  - `ShimRegistry` with bounded admission cap (256 simultaneous
+    shim connections); excess connections receive a `ShimRegisterAck`
+    `accepted: false` response.
+  - Shape-discriminating first-frame router: frames carrying
+    `{protocol, pid}` enter the shim path; all other frames enter
+    the hello/management path.
+  - `DaemonMcpHandler` implements rmcp `ServerHandler` with
+    feature-flag-locked `enabled_tool_names` field; disabled tools
+    return `-32602 InvalidArgument` rather than a silent 404.
+
+  **CLI subcommands** (`sqry daemon {start,stop,status,logs}`):
+  - `start [--sqryd-path PATH] [--timeout SECS]`: spawn daemon,
+    wait for READY, return exit 0 on success / exit 1 on timeout.
+  - `stop [--timeout SECS]`: send shutdown request, poll until the
+    socket disappears; exit 0 whether stopped cleanly or daemon was
+    not running (idempotent), exit 1 on poll timeout.
+  - `status [--json]`: print daemon version, uptime, current memory,
+    `high_water_bytes`, and per-workspace breakdown; exit 0 if
+    running, exit 1 if not. `--json` emits the full
+    `ResponseEnvelope<DaemonStatus>` returned by `daemon/status`:
+    `{ "result": <DaemonStatus>, "meta": <ResponseMeta> }`. The
+    `result` field carries the daemon status payload; the `meta`
+    field carries per-response metadata (`daemon_version`, staleness
+    flags).
+  - `logs [--lines N] [--follow]`: tail the daemon log file
+    (requires `log_file` configured in `daemon.toml`);
+    `--follow` streams new lines until interrupted.
+
+  **Shim mode (LSP and MCP):**
+  - `sqry-mcp --daemon [--daemon-socket PATH]` connects to the running
+    daemon over IPC and routes all MCP tool calls through the daemon's
+    dispatch layer; auto-starts the daemon if not running.
+  - `sqry-lsp --daemon [--daemon-socket PATH]` delegates the LSP
+    session to the daemon (daemon-hosted LSP); auto-starts the
+    daemon if not running.
+
+  **Configuration (`~/.config/sqry/daemon.toml`):**
+  - Key fields: `memory_limit_mb` (`SQRY_DAEMON_MEMORY_MB`),
+    `idle_timeout_minutes`, `tool_timeout_secs`
+    (`SQRY_DAEMON_TOOL_TIMEOUT_SECS`), `max_shim_connections`
+    (`SQRY_DAEMON_MAX_SHIM_CONNECTIONS`), `log_file`
+    (`SQRY_DAEMON_LOG_FILE`), `log_max_size_mb`, `log_keep_rotations`
+    (`SQRY_DAEMON_LOG_KEEP_ROTATIONS`), `socket.path`
+    (`SQRY_DAEMON_SOCKET` on Unix) / `socket.pipe_name`
+    (`SQRY_DAEMON_PIPE` on Windows), `auto_start_ready_timeout_secs`
+    (`SQRY_DAEMON_AUTO_START_READY_TIMEOUT_SECS`). Config path
+    overridable via `SQRY_DAEMON_CONFIG`. Restart required for
+    changes to take effect.
+
+  **Wire error codes:** `-32000 ToolTimeout` (deadline_exceeded,
+  retryable), `-32001 WorkspaceBuildFailed`, `-32002
+  WorkspaceStaleExpired`, `-32602 InvalidArgument`, `-32603 Internal`.
+
+- **feat(graph)**: formalize binding plane as V9 snapshot layer with
+  scope/alias/shadow derivation and witness-bearing resolution (#[PR]).
+  The binding plane is derived during a new Phase 4e inside
+  `build_unified_graph_inner`, runs between Phase 4d and Pass 5, and
+  consumes only the language-local edge kinds (Contains, Defines,
+  Imports, Exports) already emitted by Phase 1 plugins. `BindingPlane<'g>`
+  is the stable Phase 2 facade; `BindingResolution { result, witness }`
+  is the new return shape that wraps `BindingResult` alongside the
+  18-variant witness step trace. `BindingQuery::resolve()` is preserved
+  byte-for-byte via a shared `resolve_shared()` helper.
+- **feat(cli)**: new `sqry graph resolve <symbol> [--explain] [--json]`
+  subcommand that loads the V9 snapshot, runs a BindingPlane query, and
+  prints the outcome + optional witness trace. Documented stable JSON
+  shape for `--explain --json`.
+- **feat(db,planner,mcp,cli)**: Phase 3 — Derived Analysis DB + Query
+  Planner (2026-04-15). New `sqry-db` crate centralizes every derived
+  graph query behind a `DerivedQuery` trait with a sharded three-tier
+  cache (Tier 1 file-level, Tier 2 global edge revision, Tier 3 global
+  metadata revision). A new structural query planner (IR → compile →
+  fuse → execute) runs queries with shared-prefix fusion across batches
+  and subquery memoization. Text syntax added: `sqry plan-query
+  "kind:function has:caller:main"` via a new CLI subcommand, plus a
+  `sqry_query` MCP tool that exposes the same planner.
+- **feat(db)**: incremental reindex via `FileSegmentTable` and
+  `reindex_files` — always-append node allocation with
+  edges-before-nodes tombstone ordering (proof-tested regression
+  against edge aliasing). The sqry-db cache reuses hot results for all
+  files whose segment revisions are unchanged. Snapshot format bumped
+  to V10 (`SQRY_GRAPH_V10`) to carry the file-segment table.
+- **feat(db)**: `ComparativeQueryDb::diff()` — `semantic_diff` now runs
+  through a cross-snapshot wrapper owning both graphs; the heuristic
+  (0.7 signature + 0.3 location weights, 0.9 rename threshold, 50-line
+  same-file window) is preserved byte-for-byte. Deliberately not a
+  `DerivedQuery` because cross-snapshot results have no valid
+  invalidation criterion in the single-snapshot dependency model.
+- **feat(mcp,cli)**: 20+ handlers migrated to sqry-db with a formal
+  dispatch taxonomy: name-keyed predicates (`direct_callers`,
+  `direct_callees`, `find_unused`, `find_cycles`) route through
+  `db.get::<Q>(key)`; NodeId-anchored handlers (`dependency_impact`,
+  `show_dependencies`, `trace_path`, `subgraph`, `export_graph`,
+  `relation_query`, CLI `impact`, `call-chain-depth`,
+  `dependency-tree`, `subgraph`, `visualize`) enumerate
+  `snapshot.edges()` from resolved start nodes; `is_node_in_cycle` uses
+  strict resolution + a sqry-db per-node predicate.
+
+### Changed
+
+- **feat(mcp,lsp)**: `sqry-mcp` and `sqry-lsp` gain `--daemon` /
+  `--daemon-socket` flags for daemon-backed operation; standalone mode
+  (no flags) is unchanged and remains the default. `sqry-mcp --daemon`
+  routes all MCP tool calls through the daemon's dispatch layer.
+  `sqry-lsp --daemon` delegates the LSP session to the daemon.
+  Both auto-start the daemon if it is not already running.
+
+- **chore(mcp)**: legacy `trace_path_cache_capacity`,
+  `subgraph_cache_capacity`, and `query_cache_ttl_secs` `McpConfig`
+  fields (plus their `effective_*` accessors and env-var overrides)
+  removed. sqry-db now owns its own config surface (shard count,
+  compaction threshold, `derived.sqry` path). The orthogonal MCP
+  payload-response LRU (`graph_cache.rs`) is preserved — it is a
+  response cache keyed on request shape, distinct from the planner
+  predicate cache.
+- **chore(mcp)**: ambiguous name policy formalized. Name-keyed
+  predicates return a union across matching nodes (planner-aligned
+  semantic). NodeId-anchored handlers and per-node boolean predicates
+  (`is_node_in_cycle`, `dependency_impact`, etc.) return a `Use a
+  canonical qualified name` error on ambiguous simple names — a
+  multi-hop traversal with a broadened seed set is indistinguishable
+  from a frontier-leak regression.
+
+### Removed
+
+- **chore(core)**: ~3,090 LOC of legacy traversal code deleted:
+  `sqry-core/src/query/executor/graph_cycles.rs` (1,082 LOC, subsumed by
+  `sqry-db::CyclesQuery` / `IsInCycleQuery` / `SccQuery`),
+  `sqry-core/src/query/executor/graph_unused.rs` (735 LOC, subsumed by
+  `sqry-db::UnusedQuery` / `ReachabilityQuery` / `EntryPointsQuery`),
+  `sqry-core/src/graph/unified/query_adapter.rs` (456 LOC),
+  `sqry-mcp/src/execution/diff_comparator.rs` (648 LOC, subsumed by
+  `sqry-db::comparative`), plus ~1,000 LOC of handler helpers folded
+  into sqry-db queries or the MCP inversion wrappers.
+  `sqry-core/src/query/executor/graph_eval.rs` is deliberately retained
+  for the legacy `sqry query` CLI path until a future unit routes it
+  through `sqry plan-query`.
+
+### Breaking changes
+
+- The snapshot format magic is bumped from SQRY_GRAPH_V8 to SQRY_GRAPH_V9.
+  V8 snapshots load cleanly via inline upconvert on first read
+  (`upconvert_v8_to_v9` runs `derive_binding_plane(&mut CodeGraph)`), so
+  existing users see no migration friction.
+- The snapshot format magic is further bumped from SQRY_GRAPH_V9 to
+  SQRY_GRAPH_V10 to persist `FileSegmentTable`. Users upgrading past
+  this release must rebuild their graph once with `sqry index --force`
+  (or call `rebuild_index` via MCP). V9-to-V10 inline upconvert was not
+  provided because the file-segment table cannot be reconstructed
+  post-hoc from the V9 node/edge arenas.
+- `CircularType` / `CircularConfig` relocated from
+  `sqry-core/src/query/executor/graph_cycles.rs` to
+  `sqry-core/src/query/cycles_config.rs`; `UnusedScope` relocated from
+  `sqry-core/src/query/executor/graph_unused.rs` to
+  `sqry-core/src/query/unused_config.rs`. All public re-exports through
+  `sqry_core::query::*` preserved; external `use` paths unchanged.
+- (Internal) `sqry-core::graph::unified::bind` is now a directory-style
+  module; all public types re-export through `bind::mod.rs` so external
+  `use` paths are unchanged.
+
 ## [8.0.3] - 2026-04-11
 
 ### Fixed

@@ -202,6 +202,56 @@ impl NodeProvenanceStore {
             *entry = None;
         }
     }
+
+    /// Yields the `NodeId` every occupied slot is bound to, reconstructed from
+    /// the slot's `(index, stored generation)` pair.
+    ///
+    /// Vacant slots are silently skipped. Callers must not rely on any
+    /// particular ordering beyond "ascending by slot index", which is a direct
+    /// consequence of the dense `Vec`-backed layout. The iterator borrows
+    /// from `self`.
+    ///
+    /// This is the read side of the Gate 0b `NodeIdBearing` coverage matrix
+    /// (A2 §K row K.A10): the tombstone-residue invariant (§F) iterates here
+    /// to confirm that no tombstoned `NodeId` outlives a `finalize()` call.
+    pub fn iter_node_ids(&self) -> impl Iterator<Item = NodeId> + '_ {
+        self.slots.iter().enumerate().filter_map(|(index, slot)| {
+            slot.as_ref().map(|(generation, _provenance)| {
+                NodeId::new(
+                    u32::try_from(index).expect("slot index fits u32"),
+                    *generation,
+                )
+            })
+        })
+    }
+
+    /// Applies `keep` to every occupied slot's reconstructed `NodeId`,
+    /// clearing slots whose `NodeId` fails the predicate.
+    ///
+    /// This is the mutation side of the Gate 0b `NodeIdBearing` coverage
+    /// matrix (A2 §K row K.A10). It does **not** shrink `self.slots`; dense
+    /// slot alignment with the parent `NodeArena` is a load-bearing invariant
+    /// of this store (each slot index corresponds 1:1 to an arena slot index),
+    /// so rejected slots are set to `None` rather than removed.
+    ///
+    /// `#[allow(dead_code)]` mirrors the NodeIdBearing trait itself: Gate 0b
+    /// lands the scaffolding and unit tests, Gate 0c adds the production
+    /// call site in `RebuildGraph::finalize()`.
+    #[allow(dead_code)]
+    pub(crate) fn retain_by_node(&mut self, keep: &dyn Fn(NodeId) -> bool) {
+        for (index, slot) in self.slots.iter_mut().enumerate() {
+            let Some((generation, _provenance)) = slot else {
+                continue;
+            };
+            let id = NodeId::new(
+                u32::try_from(index).expect("slot index fits u32"),
+                *generation,
+            );
+            if !keep(id) {
+                *slot = None;
+            }
+        }
+    }
 }
 
 impl crate::graph::unified::memory::GraphMemorySize for NodeProvenanceStore {

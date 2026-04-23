@@ -44,6 +44,12 @@ pub mod workspace_symbol;
 
 static TEST_DELAY_MS: AtomicU64 = AtomicU64::new(0);
 
+#[derive(Debug, thiserror::Error)]
+pub enum LspHandlerError {
+    #[error("invalid parameter: {0}")]
+    InvalidParams(String),
+}
+
 /// Configure an artificial delay (in milliseconds) that handler execution will respect.
 /// Used exclusively by integration tests to simulate long-running operations.
 pub fn configure_test_delay_ms(ms: u64) {

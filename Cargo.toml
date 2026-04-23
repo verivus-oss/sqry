@@ -55,6 +55,10 @@ members = [
     "sqry-mcp-redaction",
     "sqry-nl", "sqry-plugin-registry",
     "sqry-classpath",
+    "sqry-db",
+    "sqry-daemon",
+    "sqry-daemon-client",
+    "sqry-daemon-protocol",
 ]
 exclude = [
     "tools/detection-corpus-validator",  # Standalone utility, not part of workspace
@@ -64,7 +68,7 @@ exclude = [
 ]
 
 [workspace.package]
-version = "8.0.7"
+version = "9.0.0"
 edition = "2024"
 authors = ["Verivus Pty Ltd"]
 license = "MIT"
@@ -89,6 +93,14 @@ tree-sitter = "0.26"
 # CLI dependencies
 clap = { version = "4.5", features = ["derive", "env"] }
 colored = "2.1"
+
+# Task 9 U15a — Linux-only deps for sqry-daemon lifecycle.
+# sd-notify: sends READY=1/STATUS=/STOPPING=1 to systemd on Type=notify units.
+# users: validates POSIX account names in the systemd system-unit generator.
+# Both are declared here so target-gated [target.*.dependencies] in
+# sqry-daemon/Cargo.toml can reference them via `{ workspace = true }`.
+sd-notify = "0.4"
+users = "0.11"
 
 # Serialization
 serde = { version = "1.0", features = ["derive", "rc"] }  # rc enables Arc serialization
@@ -122,6 +134,7 @@ lru = "0.16"
 dashmap = "6.1"
 memmap2 = "0.9"
 parking_lot = "0.12"
+smallvec = "1.13"
 semver = "1.0"
 blake3 = "1.5"  # Fast cryptographic hashing for cache keys
 zstd = "0.13.3"   # Fast compression for index files (pinned for reproducibility)
@@ -137,6 +150,7 @@ once_cell = "1.20"
 sha2 = "0.10"
 zip = { version = "8.5", default-features = false, features = ["deflate"] }
 cafebabe = { version = "0.9", features = ["threadsafe"] }  # JVM .class file parser (Track C)
+
 
 # Logging
 log = "0.4"

@@ -3,7 +3,7 @@
 [CmdletBinding()]
 param(
     [string]$Version = "latest",
-    [ValidateSet("sqry", "sqry-mcp", "sqry-lsp", "all")]
+    [ValidateSet("sqry", "sqry-mcp", "sqry-lsp", "sqryd", "all")]
     [string]$Component = "all",
     [string]$InstallDir = "$env:LOCALAPPDATA\Programs\sqry\bin",
     [string]$Repo = "verivus-oss/sqry",
@@ -119,7 +119,7 @@ try {
     New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
 
     $components = if ($Component -eq "all") {
-        @("sqry", "sqry-mcp", "sqry-lsp")
+        @("sqry", "sqry-mcp", "sqry-lsp", "sqryd")
     } else {
         @($Component)
     }
@@ -132,6 +132,12 @@ try {
         $target = Join-Path $InstallDir "$name.exe"
         Copy-Item -Force -Path $source -Destination $target
         Write-Host "Installed: $target"
+    }
+
+    foreach ($runtime in Get-ChildItem -Path $extractDir -Filter '*.dll' -File -ErrorAction SilentlyContinue) {
+        $target = Join-Path $InstallDir $runtime.Name
+        Copy-Item -Force -Path $runtime.FullName -Destination $target
+        Write-Host "Installed runtime: $target"
     }
 
     $pathUpdated = Add-InstallDirToUserPath -PathToAdd $InstallDir

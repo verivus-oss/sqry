@@ -10,7 +10,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow};
 use sqry_core::graph::unified::node::NodeId;
 use sqry_core::graph::unified::{FileScope, ResolutionMode, SymbolQuery, SymbolResolutionOutcome};
 use sqry_core::search::matcher::{FuzzyMatcher, MatchConfig};
@@ -18,7 +18,7 @@ use sqry_core::search::matcher::{FuzzyMatcher, MatchConfig};
 use crate::engine::{canonicalize_in_workspace, engine_for_workspace};
 use crate::tools::{SearchSimilarArgs, SemanticSearchArgs};
 
-use crate::execution::symbol_utils::{build_search_hits_from_nodes, filter_node};
+use crate::execution::location::node_location_for_reporting_snapshot;
 use crate::execution::types::{
     FindSimilarData, SemanticSearchData, SimilarSymbolData, ToolExecution,
 };
@@ -121,6 +121,8 @@ fn semantic_sort_key(
         )
     });
 
+    // NOTE: SemanticSortKey uses raw entry spans for deterministic sort ordering,
+    // not for user-visible display. Do NOT migrate to node_location_for_reporting.
     SemanticSortKey {
         display_name,
         relative_path,
@@ -145,88 +147,130 @@ pub fn execute_semantic_search(
     // Now load the engine (requires valid workspace)
     let workspace_path = resolve_workspace_path(&args.path);
     let engine = engine_for_workspace(workspace_path.as_ref())?;
-    let workspace_root = engine.workspace_root();
-    let query = args.query.trim();
-    if query.is_empty() {
-        bail!("query cannot be empty");
-    }
+    let workspace_root = engine.workspace_root().to_path_buf();
 
-    tracing::debug!(
-        query = %query,
-        path = %search_root.display(),
-        max_results = args.max_results,
-        context_lines = args.context_lines,
-        "Executing semantic_search tool"
-    );
-
+    // Pre-refactor timing: `start` fires before `ensure_graph`; preserve by
+    // taking the instant here and threading it into `inner::`.
     let start = Instant::now();
 
-    // Get the graph for filtering
     let graph = engine.ensure_graph()?;
-    let snapshot = graph.snapshot();
+    let ctx = crate::daemon_adapter::WorkspaceContext {
+        workspace_root,
+        graph,
+        executor: engine.executor_arc(),
+    };
+    inner::execute_semantic_search(&ctx, args, &search_root, start)
+}
 
-    let query_results = engine
-        .executor()
-        .execute_on_graph(query, &search_root)
-        .with_context(|| format!("Failed to execute query '{query}'"))?;
+pub(crate) mod inner {
+    use super::{NodeId, Result, SemanticSearchArgs, SemanticSearchData, ToolExecution, anyhow};
+    use crate::daemon_adapter::WorkspaceContext;
+    use crate::execution::symbol_utils::{build_search_hits_from_nodes, filter_node};
+    use crate::execution::utils::{duration_to_ms, paginate};
+    use anyhow::bail;
+    use std::path::Path;
+    use std::sync::Arc;
+    use std::time::Instant;
 
-    let nodes_searched = query_results.len();
-    let elapsed = duration_to_ms(start.elapsed());
+    /// Daemon/SqryServer-shared body for `semantic_search`.
+    ///
+    /// `search_root` is the caller-canonicalized target directory (NOT the
+    /// workspace root). The caller is responsible for the
+    /// `resolve_workspace_root_for_security` + `canonicalize_in_workspace`
+    /// preflight that enforces the workspace boundary on `args.path`. `start`
+    /// is supplied by the caller so pre-refactor timing (which enclosed
+    /// `ensure_graph`) is preserved exactly.
+    pub(crate) fn execute_semantic_search(
+        ctx: &WorkspaceContext,
+        args: &SemanticSearchArgs,
+        search_root: &Path,
+        start: Instant,
+    ) -> Result<ToolExecution<SemanticSearchData>> {
+        let query = args.query.trim();
+        if query.is_empty() {
+            bail!("query cannot be empty");
+        }
 
-    // Filter using NodeId + graph lookups
-    let mut filtered: Vec<NodeId> = query_results
-        .node_ids()
-        .iter()
-        .filter(|&&node_id| filter_node(&snapshot, node_id, &args.filters))
-        .copied()
-        .collect();
+        tracing::debug!(
+            query = %query,
+            path = %search_root.display(),
+            max_results = args.max_results,
+            context_lines = args.context_lines,
+            "Executing semantic_search tool"
+        );
 
-    // Filter out classpath (external) nodes unless explicitly requested
-    if !args.include_classpath {
-        filtered.retain(|&node_id| {
-            !crate::execution::symbol_utils::is_node_external(&snapshot, node_id)
-        });
+        // Get the graph for filtering
+        let snapshot = ctx.graph.snapshot();
+
+        let query_results = ctx
+            .executor
+            .execute_on_preloaded_graph(Arc::clone(&ctx.graph), query, search_root, None)
+            .map_err(|e| anyhow!("Failed to execute query '{query}': {e}"))?;
+
+        let nodes_searched = query_results.len();
+        let elapsed = duration_to_ms(start.elapsed());
+
+        // Filter using NodeId + graph lookups
+        let mut filtered: Vec<NodeId> = query_results
+            .node_ids()
+            .iter()
+            .filter(|&&node_id| filter_node(&snapshot, node_id, &args.filters))
+            .copied()
+            .collect();
+
+        // Filter out classpath (external) nodes unless explicitly requested
+        if !args.include_classpath {
+            filtered.retain(|&node_id| {
+                !crate::execution::symbol_utils::is_node_external(&snapshot, node_id)
+            });
+        }
+
+        // Sort by user-facing display identity for deterministic MCP output.
+        let workspace_root: &Path = &ctx.workspace_root;
+        filtered
+            .sort_by_key(|&node_id| super::semantic_sort_key(&snapshot, node_id, workspace_root));
+
+        // Apply score (all results get 1.0 for now since executor doesn't provide scores)
+        let mut scored: Vec<(NodeId, f64)> =
+            filtered.into_iter().map(|node_id| (node_id, 1.0)).collect();
+
+        if let Some(min_score) = args.score_min {
+            scored.retain(|(_, score)| (*score) >= min_score);
+        }
+
+        let total = scored.len();
+        let limited_len = total.min(args.max_results);
+        let truncated = total > args.max_results;
+        scored.truncate(limited_len);
+
+        let (page_slice, next_token) = paginate(&scored, &args.pagination);
+
+        // Build search hits using NodeId + graph lookups
+        let hits = build_search_hits_from_nodes(
+            &snapshot,
+            page_slice,
+            args.context_lines,
+            workspace_root,
+        )?;
+        let truncated_flag = truncated || next_token.is_some();
+
+        Ok(ToolExecution {
+            data: SemanticSearchData {
+                results: hits,
+                total: total as u64,
+                truncated: truncated_flag,
+            },
+            used_index: false,
+            used_graph: true,
+            graph_metadata: None,
+            execution_ms: elapsed,
+            next_page_token: next_token,
+            total: Some(total as u64),
+            truncated: Some(truncated_flag),
+            candidates_scanned: Some(nodes_searched as u64),
+            workspace_path: crate::execution::symbol_utils::path_to_forward_slash(workspace_root),
+        })
     }
-
-    // Sort by user-facing display identity for deterministic MCP output.
-    filtered.sort_by_key(|&node_id| semantic_sort_key(&snapshot, node_id, workspace_root));
-
-    // Apply score (all results get 1.0 for now since executor doesn't provide scores)
-    let mut scored: Vec<(NodeId, f64)> =
-        filtered.into_iter().map(|node_id| (node_id, 1.0)).collect();
-
-    if let Some(min_score) = args.score_min {
-        scored.retain(|(_, score)| (*score) >= min_score);
-    }
-
-    let total = scored.len();
-    let limited_len = total.min(args.max_results);
-    let truncated = total > args.max_results;
-    scored.truncate(limited_len);
-
-    let (page_slice, next_token) = paginate(&scored, &args.pagination);
-
-    // Build search hits using NodeId + graph lookups
-    let hits =
-        build_search_hits_from_nodes(&snapshot, page_slice, args.context_lines, workspace_root)?;
-    let truncated_flag = truncated || next_token.is_some();
-
-    Ok(ToolExecution {
-        data: SemanticSearchData {
-            results: hits,
-            total: total as u64,
-            truncated: truncated_flag,
-        },
-        used_index: false,
-        used_graph: true,
-        graph_metadata: None,
-        execution_ms: elapsed,
-        next_page_token: next_token,
-        total: Some(total as u64),
-        truncated: Some(truncated_flag),
-        candidates_scanned: Some(nodes_searched as u64),
-        workspace_path: crate::execution::symbol_utils::path_to_forward_slash(workspace_root),
-    })
 }
 
 /// Find the reference node for similarity search.
@@ -319,7 +363,12 @@ pub fn execute_find_similar(args: &SearchSimilarArgs) -> Result<ToolExecution<Fi
         .language_for_file(reference_entry.file)
         .map_or_else(|| "unknown".to_string(), |l| l.to_string());
 
-    let reference_ref = build_node_ref_from_node(&reference_entry, &snapshot, &workspace_root);
+    let reference_ref = build_node_ref_from_node(
+        &reference_entry,
+        reference_node_id,
+        &snapshot,
+        &workspace_root,
+    );
 
     // Use FuzzyMatcher for similarity
     let matcher = FuzzyMatcher::with_config(MatchConfig {
@@ -334,6 +383,11 @@ pub fn execute_find_similar(args: &SearchSimilarArgs) -> Result<ToolExecution<Fi
 
     // Iterate through all nodes and find similar ones
     for (node_id, entry) in snapshot.iter_nodes() {
+        // Gate 0d iter-2 fix: skip unified losers from
+        // `search_similar`. See `NodeEntry::is_unified_loser`.
+        if entry.is_unified_loser() {
+            continue;
+        }
         candidates_scanned += 1;
 
         // Skip the reference symbol itself
@@ -395,6 +449,8 @@ pub fn execute_find_similar(args: &SearchSimilarArgs) -> Result<ToolExecution<Fi
         );
 
         // Build NodeRefData for the candidate
+        let loc = node_location_for_reporting_snapshot(&snapshot, node_id, &workspace_root);
+        let resolution_source = loc.as_ref().map(|l| format!("{:?}", l.resolution_source));
         let candidate_ref = crate::execution::types::NodeRefData {
             name: candidate_name,
             qualified_name: candidate_display_name,
@@ -403,15 +459,16 @@ pub fn execute_find_similar(args: &SearchSimilarArgs) -> Result<ToolExecution<Fi
             file_uri,
             range: crate::execution::types::RangeData {
                 start: crate::execution::types::PositionData {
-                    line: entry.start_line,
-                    character: entry.start_column,
+                    line: loc.as_ref().map_or(entry.start_line, |l| l.line),
+                    character: loc.as_ref().map_or(entry.start_column, |l| l.column),
                 },
                 end: crate::execution::types::PositionData {
-                    line: entry.end_line,
-                    character: entry.end_column,
+                    line: loc.as_ref().map_or(entry.end_line, |l| l.end_line),
+                    character: loc.as_ref().map_or(entry.end_column, |l| l.end_column),
                 },
             },
             metadata: None,
+            resolution_source,
         };
 
         let similar_data = SimilarSymbolData {
@@ -467,6 +524,7 @@ pub fn execute_find_similar(args: &SearchSimilarArgs) -> Result<ToolExecution<Fi
 /// Build `NodeRefData` from a graph node entry.
 fn build_node_ref_from_node(
     entry: &sqry_core::graph::unified::storage::arena::NodeEntry,
+    node_id: NodeId,
     snapshot: &sqry_core::graph::unified::concurrent::GraphSnapshot,
     workspace_root: &Path,
 ) -> crate::execution::types::NodeRefData {
@@ -495,6 +553,9 @@ fn build_node_ref_from_node(
         .language_for_file(entry.file)
         .map_or_else(|| "unknown".to_string(), |l| l.to_string());
 
+    let loc = node_location_for_reporting_snapshot(snapshot, node_id, workspace_root);
+    let resolution_source = loc.as_ref().map(|l| format!("{:?}", l.resolution_source));
+
     NodeRefData {
         name,
         qualified_name,
@@ -503,15 +564,16 @@ fn build_node_ref_from_node(
         file_uri,
         range: RangeData {
             start: PositionData {
-                line: entry.start_line,
-                character: entry.start_column,
+                line: loc.as_ref().map_or(entry.start_line, |l| l.line),
+                character: loc.as_ref().map_or(entry.start_column, |l| l.column),
             },
             end: PositionData {
-                line: entry.end_line,
-                character: entry.end_column,
+                line: loc.as_ref().map_or(entry.end_line, |l| l.end_line),
+                character: loc.as_ref().map_or(entry.end_column, |l| l.end_column),
             },
         },
         metadata: None,
+        resolution_source,
     }
 }
 

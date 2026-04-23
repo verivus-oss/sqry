@@ -1,7 +1,45 @@
-//! Graph cache for `trace_path` and subgraph operations
+//! Graph cache for `trace_path` and subgraph operations.
 //!
-//! Provides in-memory LRU caching with TTL expiration for expensive graph traversals and
-//! records telemetry snapshots so MCP clients can understand cache behaviour.
+//! Provides in-memory LRU caching with TTL expiration for expensive graph
+//! traversals and records telemetry snapshots so MCP clients can
+//! understand cache behaviour.
+//!
+//! # Relationship to sqry-db caching (DB17-DB19 clarification)
+//!
+//! This module caches **materialized payload DTOs** (response-shaped
+//! [`TracePathData`] / [`DependencyGraphData`]) keyed on a full request
+//! signature. It is **not** a predicate cache.
+//!
+//! sqry-db (see `sqry_db::queries`) caches **predicate results**
+//! (e.g. [`sqry_db::queries::CyclesQuery`] returns the
+//! `Arc<Vec<Vec<NodeId>>>` set of strongly connected components for a
+//! given `(CircularType, CycleBounds)` key, and
+//! [`sqry_db::queries::UnusedQuery`] returns the `Arc<Vec<NodeId>>` set
+//! of unused nodes for a given `UnusedKey`). Predicate cache hits
+//! return raw graph identifiers — materialization into response shapes
+//! still has to happen before the MCP surface replies.
+//!
+//! The two layers are **orthogonal**:
+//!
+//! * A `trace_path` request may be a sqry-db cache hit at the predicate
+//!   layer (underlying path enumeration is cached) while still being a
+//!   miss at this payload layer (the final
+//!   `TracePathData { nodes, edges, full_paths, ... }` DTO has to be
+//!   rebuilt on every unique request signature).
+//! * Conversely, a payload hit here short-circuits the entire pipeline
+//!   including the sqry-db dispatch — the cached DTO is returned
+//!   verbatim.
+//!
+//! Phase 3C DB17 followup (`c39a0f88f`, 2026-04-15) surveyed whether
+//! this payload LRU layer should be folded into sqry-db. The
+//! conclusion — reconfirmed by DB19 (2026-04-15) — is that payload
+//! caching is a separate concern from predicate caching: the TTL
+//! semantics (5 minutes here vs. epoch-bound in sqry-db), the key
+//! shape (full request signature here vs. query-canonical key there),
+//! and the value shape (response DTO here vs. raw NodeId / edge data
+//! there) all differ. Keeping both layers preserves the locality of
+//! each optimization and the telemetry this module emits for payload
+//! observability.
 
 use hdrhistogram::Histogram;
 use parking_lot::Mutex;

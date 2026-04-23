@@ -11,7 +11,7 @@ use sqry_core::query::QueryExecutor;
 use sqry_plugin_registry::create_plugin_manager;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 //=============================================================================
 // Cache Identity and Metadata Types
@@ -74,7 +74,7 @@ static ENGINE: RwLock<Option<Arc<Engine>>> = RwLock::new(None);
 
 pub struct Engine {
     workspace_root: PathBuf,
-    executor: QueryExecutor,
+    executor: Arc<QueryExecutor>,
     graph_cache: RwLock<Option<Arc<CodeGraph>>>,
 }
 
@@ -91,7 +91,7 @@ impl Engine {
             "Engine initializing with workspace root"
         );
         let plugin_manager = build_plugin_manager();
-        let executor = QueryExecutor::with_plugin_manager(plugin_manager);
+        let executor = Arc::new(QueryExecutor::with_plugin_manager(plugin_manager));
         Ok(Self {
             workspace_root,
             executor,
@@ -114,7 +114,7 @@ impl Engine {
             "Creating Engine for specific workspace"
         );
         let plugin_manager = build_plugin_manager();
-        let executor = QueryExecutor::with_plugin_manager(plugin_manager);
+        let executor = Arc::new(QueryExecutor::with_plugin_manager(plugin_manager));
         Ok(Self {
             workspace_root,
             executor,
@@ -128,6 +128,14 @@ impl Engine {
 
     pub fn executor(&self) -> &QueryExecutor {
         &self.executor
+    }
+
+    /// Clone the shared `QueryExecutor` handle. Used by MCP tool handlers to
+    /// build a [`crate::daemon_adapter::WorkspaceContext`] for
+    /// `inner::execute_*` dispatch.
+    #[must_use]
+    pub fn executor_arc(&self) -> Arc<QueryExecutor> {
+        Arc::clone(&self.executor)
     }
 
     #[must_use]
@@ -255,6 +263,10 @@ impl Engine {
                  Run `sqry index` to create the graph."
             );
         }
+
+        // Daemon workspace mutual exclusion: bail if sqryd is already managing this workspace.
+        // Must run before the slow build path to avoid concurrent writer corruption.
+        check_daemon_workspace_conflict(&self.workspace_root)?;
 
         // Slow path: auto-build
         tracing::info!(
@@ -542,6 +554,202 @@ fn is_auto_index_enabled() -> bool {
     }
     // Default: enabled
     true
+}
+
+/// Check whether a running sqryd daemon is already managing `workspace_root`.
+///
+/// If the daemon socket is reachable and reports a workspace matching
+/// `workspace_root`, standalone auto-indexing is unsafe (concurrent writer).
+/// Bail with a clear message so the caller can switch to `--daemon` mode or
+/// stop the daemon.
+///
+/// # Bail conditions
+///
+/// - `SQRY_FORCE_STANDALONE=1` → skips check entirely (warn logged)
+/// - Socket not present → `Ok(())` (daemon not running, proceed)
+/// - Connect/handshake failure → `Ok(())` (daemon dead socket, proceed)
+/// - `daemon/status` timeout → `Ok(())` (daemon unresponsive, do not block auto-index)
+/// - `daemon/status` RPC error → `Ok(())` (status unavailable, proceed)
+/// - Workspace found in daemon → `Err(...)` (concurrent writer risk)
+/// - Workspace NOT found in daemon → `Ok(())` (different workspace, safe)
+fn check_daemon_workspace_conflict(workspace_root: &Path) -> Result<()> {
+    if is_force_standalone() {
+        tracing::warn!(
+            workspace = %workspace_root.display(),
+            "SQRY_FORCE_STANDALONE=1: skipping daemon workspace conflict check. \
+             Concurrent writer risk accepted by caller."
+        );
+        return Ok(());
+    }
+
+    let socket_path = crate::daemon_shim::resolve_daemon_socket(None);
+    if !socket_path.exists() {
+        tracing::debug!(
+            socket = %socket_path.display(),
+            "Daemon socket not present — no conflict check needed"
+        );
+        return Ok(());
+    }
+
+    // We are in a sync context (ensure_graph is sync) but may be called from within
+    // a tokio executor (rmcp spawns an async task per connection).
+    // block_in_place suspends the executor thread so we can block_on safely without
+    // triggering "Cannot start a runtime from within a runtime".
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => {
+            let workspace_owned = workspace_root.to_path_buf();
+            let socket_owned = socket_path.clone();
+            tokio::task::block_in_place(move || {
+                handle.block_on(async move {
+                    check_daemon_workspace_conflict_async(&workspace_owned, &socket_owned).await
+                })
+            })
+        }
+        Err(_) => {
+            // No async runtime available (e.g., called from a pure sync test binary).
+            tracing::debug!(
+                socket = %socket_path.display(),
+                "No async runtime available — skipping daemon conflict check"
+            );
+            Ok(())
+        }
+    }
+}
+
+/// Async inner body of [`check_daemon_workspace_conflict`].
+///
+/// Connects to the daemon, fetches `daemon/status`, and checks whether the
+/// daemon's workspace list includes `workspace_root`.
+async fn check_daemon_workspace_conflict_async(
+    workspace_root: &Path,
+    socket_path: &Path,
+) -> Result<()> {
+    let connect_budget = Duration::from_secs(1);
+    let hello_budget = Duration::from_secs(1);
+    let status_budget = Duration::from_secs(2);
+
+    let mut client = match sqry_daemon_client::DaemonClient::connect_with_timeouts(
+        socket_path,
+        connect_budget,
+        hello_budget,
+    )
+    .await
+    {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::debug!(
+                socket = %socket_path.display(),
+                error = %e,
+                "Daemon socket present but connect/handshake failed — proceeding standalone"
+            );
+            return Ok(());
+        }
+    };
+
+    let status_value = match tokio::time::timeout(status_budget, client.status()).await {
+        Ok(Ok(v)) => v,
+        Ok(Err(e)) => {
+            tracing::debug!(
+                socket = %socket_path.display(),
+                error = %e,
+                "daemon/status RPC failed — proceeding standalone"
+            );
+            return Ok(());
+        }
+        Err(_elapsed) => {
+            tracing::warn!(
+                socket = %socket_path.display(),
+                timeout_secs = status_budget.as_secs(),
+                "daemon/status timed out — proceeding standalone \
+                 (do not block auto-index on unresponsive daemon)"
+            );
+            return Ok(());
+        }
+    };
+
+    let canonical_workspace = match std::fs::canonicalize(workspace_root) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::debug!(
+                workspace = %workspace_root.display(),
+                error = %e,
+                "Could not canonicalize workspace root — skipping conflict check"
+            );
+            return Ok(());
+        }
+    };
+
+    // daemon/status returns a ResponseEnvelope<DaemonStatus> serialised as JSON.
+    // DaemonStatus is in sqry-daemon which is not a dep of sqry-mcp — parse as
+    // raw serde_json::Value.
+    //
+    // Wire shape:  { "result": { "workspaces": [...], ... }, "meta": { ... } }
+    //
+    // DaemonStatus does not carry a daemon_pid field; attempt to read the PID
+    // from the pidfile in the same runtime directory as the socket.
+    let daemon_pid = read_daemon_pid_from_socket_dir(socket_path)
+        .map_or_else(|| "unknown".to_owned(), |pid| pid.to_string());
+
+    let Some(workspaces) = status_value
+        .get("result")
+        .and_then(|r| r.get("workspaces"))
+        .and_then(serde_json::Value::as_array)
+    else {
+        tracing::debug!(
+            socket = %socket_path.display(),
+            "daemon/status returned no 'result.workspaces' array — no conflict detected"
+        );
+        return Ok(());
+    };
+
+    for ws in workspaces {
+        let Some(root_str) = ws.get("index_root").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        let daemon_ws_root = PathBuf::from(root_str);
+        let canonical_daemon_root =
+            std::fs::canonicalize(&daemon_ws_root).unwrap_or(daemon_ws_root);
+        if canonical_daemon_root == canonical_workspace {
+            bail!(
+                "sqryd daemon (PID {daemon_pid}) is managing workspace '{}'. \
+                 Use --daemon mode or stop the daemon before standalone auto-indexing.",
+                canonical_workspace.display()
+            );
+        }
+    }
+
+    tracing::debug!(
+        workspace = %workspace_root.display(),
+        socket = %socket_path.display(),
+        "No daemon workspace conflict detected — proceeding with standalone auto-index"
+    );
+    Ok(())
+}
+
+/// Returns `true` when `SQRY_FORCE_STANDALONE=1` (or `true`) is set.
+///
+/// This env var is an escape hatch for callers that know it is safe to run
+/// standalone alongside a daemon (e.g., different snapshots, test harnesses).
+fn is_force_standalone() -> bool {
+    matches!(
+        std::env::var("SQRY_FORCE_STANDALONE").as_deref(),
+        Ok("1") | Ok("true")
+    )
+}
+
+/// Read the daemon PID from the `sqryd.pid` file in the same runtime directory
+/// as the daemon socket.
+///
+/// `sqryd.pid` is written atomically by the daemon on start and unlinked on
+/// clean exit. The file lives next to the socket:
+/// - Unix: `$XDG_RUNTIME_DIR/sqry/sqryd.pid` or `$TMPDIR/sqry-<uid>/sqryd.pid`
+/// - Windows: `%LOCALAPPDATA%\sqry\sqryd.pid`
+///
+/// Returns `None` if the file does not exist or cannot be parsed.
+fn read_daemon_pid_from_socket_dir(socket_path: &Path) -> Option<u32> {
+    let pid_path = socket_path.parent()?.join("sqryd.pid");
+    let contents = std::fs::read_to_string(&pid_path).ok()?;
+    contents.trim().parse::<u32>().ok()
 }
 
 /// Simple concurrency guard for future mutable operations (e.g., index updates).
@@ -853,13 +1061,63 @@ fn get_cached_engine(workspace: &Path) -> Result<Option<Arc<Engine>>> {
         return Ok(Some(cached_engine));
     }
 
-    // Phase 3: Cold path - manifest changed, reload identity and metadata atomically
+    // Phase 3: Cold path - manifest stale or missing.
+    //
+    // If the manifest is absent (e.g. transiently deleted during a rebuild window),
+    // evict the cache entry and return Ok(None) so the caller can trigger a fresh
+    // load/rebuild.  Attempting read_graph_identity_with_metadata on a missing file
+    // would propagate a "Manifest missing" error up to the MCP caller, which is the
+    // very surface this fix targets.
+    let manifest_path = workspace.join(".sqry/graph/manifest.json");
+    match std::fs::metadata(&manifest_path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            tracing::debug!(
+                workspace = %workspace.display(),
+                "Manifest absent during cache reload — evicting cache entry"
+            );
+            let mut cache = ENGINE_CACHE.lock();
+            if let Some(lru) = cache.as_mut() {
+                lru.pop(workspace);
+            }
+            return Ok(None);
+        }
+        Err(e) => {
+            return Err(e).context("Failed to stat manifest.json during cache reload");
+        }
+        Ok(_) => {} // manifest present — proceed with full reload below
+    }
+
     tracing::debug!(
         workspace = %workspace.display(),
         "Manifest changed, reloading identity"
     );
 
-    let (new_identity, new_metadata) = read_graph_identity_with_metadata(workspace)?;
+    // TOCTOU gap: the manifest could be removed between the stat above and here.
+    // Handle NotFound from read_graph_identity_with_metadata the same way as the
+    // stat-based NotFound check above: evict and return Ok(None).
+    let (new_identity, new_metadata) = match read_graph_identity_with_metadata(workspace) {
+        Ok(pair) => pair,
+        Err(e) => {
+            // Inspect the error chain for an underlying NotFound to handle the
+            // TOCTOU case (manifest removed after our stat succeeded).
+            let is_not_found = e.chain().any(|c| {
+                c.downcast_ref::<std::io::Error>()
+                    .is_some_and(|ioe| ioe.kind() == std::io::ErrorKind::NotFound)
+            });
+            if is_not_found {
+                tracing::debug!(
+                    workspace = %workspace.display(),
+                    "Manifest removed between stat and open (TOCTOU) — evicting cache entry"
+                );
+                let mut cache = ENGINE_CACHE.lock();
+                if let Some(lru) = cache.as_mut() {
+                    lru.pop(workspace);
+                }
+                return Ok(None);
+            }
+            return Err(e);
+        }
+    };
 
     // Phase 4: TOCTOU guard - re-lock and verify no concurrent update
     let mut cache = ENGINE_CACHE.lock();
@@ -918,12 +1176,24 @@ fn get_cached_engine(workspace: &Path) -> Result<Option<Arc<Engine>>> {
 /// # Returns
 ///
 /// - `Ok(true)` if manifest unchanged (all metadata matches)
-/// - `Ok(false)` if manifest changed (any metadata differs)
-/// - `Err(_)` if stat syscall fails
+/// - `Ok(false)` if manifest changed (any metadata differs), or if the manifest file
+///   does not exist (e.g. transiently absent during a rebuild window)
+/// - `Err(_)` if stat syscall fails for a reason other than `NotFound`
 fn is_manifest_fresh(cached: &ManifestMetadata, workspace: &Path) -> Result<bool> {
     let manifest_path = workspace.join(".sqry/graph/manifest.json");
-    let current = std::fs::metadata(&manifest_path)
-        .context("Failed to stat manifest.json for freshness check")?;
+    let current = match std::fs::metadata(&manifest_path) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            tracing::debug!(
+                workspace = %workspace.display(),
+                "Manifest missing during freshness check — treating as stale"
+            );
+            return Ok(false);
+        }
+        Err(e) => {
+            return Err(e).context("Failed to stat manifest.json for freshness check");
+        }
+    };
 
     Ok(current.modified()? == cached.mtime
         && current.len() == cached.size
@@ -1281,6 +1551,84 @@ mod engine_cache_tests {
         Ok(())
     }
 
+    #[test]
+    fn test_engine_graph_returns_none_when_manifest_missing() -> Result<()> {
+        // Manifest absent (e.g. during a rebuild window) must not panic or error —
+        // graph() delegates to GraphStorage::exists() which already handles NotFound
+        // by returning false, so this test validates that contract end-to-end.
+        let temp = TempDir::new()?;
+        let engine = Engine::for_workspace(temp.path().to_path_buf())?;
+        // No .sqry/graph directory or manifest at all
+        let graph = engine.graph();
+        assert!(
+            graph.is_none(),
+            "engine.graph() must return None when manifest is absent"
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[serial_test::serial(engine_cache)]
+    fn test_get_cached_engine_returns_none_when_manifest_removed() -> Result<()> {
+        // Scenario: a workspace is cached (engine + identity seeded by a valid
+        // manifest), then the manifest is removed mid-flight (rebuild window).
+        // get_cached_engine() must return Ok(None) — not Err — and evict the stale
+        // cache entry so the next call triggers a fresh load/rebuild.
+        reset_engine_cache();
+        let cap = std::num::NonZeroUsize::new(4).unwrap();
+        init_engine_cache(cap);
+
+        // Seed the cache with a valid workspace that has a manifest.
+        let workspace = create_test_workspace()?;
+        let workspace_path = workspace.path().canonicalize()?;
+        let manifest_path = workspace_path.join(".sqry/graph/manifest.json");
+
+        // Warm the cache by reading identity + inserting manually.
+        let (identity, metadata) = read_graph_identity_with_metadata(&workspace_path)?;
+        {
+            let mut cache = ENGINE_CACHE.lock();
+            let lru = cache.as_mut().expect("cache initialized");
+            lru.put(
+                workspace_path.clone(),
+                CachedEngine {
+                    engine: Arc::new(Engine::for_workspace(workspace_path.clone())?),
+                    identity,
+                    metadata,
+                },
+            );
+        }
+
+        // Verify cache is hot.
+        assert!(
+            get_cached_engine(&workspace_path)?.is_some(),
+            "cache should be hot before manifest removal"
+        );
+
+        // Remove the manifest — simulates the rebuild window.
+        std::fs::remove_file(&manifest_path)?;
+
+        // get_cached_engine must return Ok(None), not Err.
+        let result = get_cached_engine(&workspace_path);
+        assert!(
+            result.is_ok(),
+            "get_cached_engine must return Ok when manifest is absent, got Err"
+        );
+        assert!(
+            result.unwrap().is_none(),
+            "get_cached_engine must return None (stale) when manifest is absent"
+        );
+
+        // Cache entry must have been evicted.
+        let result2 = get_cached_engine(&workspace_path);
+        assert!(result2.is_ok());
+        assert!(
+            result2.unwrap().is_none(),
+            "cache entry must be evicted after manifest-absent eviction"
+        );
+
+        Ok(())
+    }
+
     // ===== GraphIdentity equality tests =====
 
     #[test]
@@ -1348,18 +1696,23 @@ mod engine_cache_tests {
     // ===== is_manifest_fresh with modified file =====
 
     #[test]
-    fn test_is_manifest_fresh_missing_file_errors() {
+    fn test_is_manifest_fresh_missing_file_returns_stale() {
         let temp = TempDir::new().unwrap();
-        // Create a fake metadata by using a file that exists
-        let _manifest_path = temp.path().join(".sqry/graph/manifest.json");
-        // The file doesn't exist — stat should fail
+        // The manifest file does not exist — should return Ok(false) (stale), not Err.
         let fake_metadata = ManifestMetadata {
             mtime: std::time::SystemTime::now(),
             size: 100,
             file_id: None,
         };
         let result = is_manifest_fresh(&fake_metadata, temp.path());
-        assert!(result.is_err());
+        assert!(
+            result.is_ok(),
+            "Missing manifest should return Ok, not Err: {result:?}"
+        );
+        assert!(
+            !result.unwrap(),
+            "Missing manifest should be treated as stale (Ok(false))"
+        );
     }
 
     #[test]

@@ -120,6 +120,9 @@ export function detectPlatform(): PlatformInfo {
   if (platform === "linux" && arch === "x64") {
     return { asset: "sqry-linux-x86_64", binaryName: "sqry" };
   }
+  if (platform === "linux" && arch === "arm64") {
+    return { asset: "sqry-linux-arm64", binaryName: "sqry" };
+  }
   if (platform === "win32" && arch === "x64") {
     return { asset: "sqry-windows-x86_64.exe", binaryName: "sqry.exe" };
   }
@@ -127,10 +130,7 @@ export function detectPlatform(): PlatformInfo {
     return { asset: "sqry-macos-arm64", binaryName: "sqry" };
   }
   if (platform === "darwin" && arch === "x64") {
-    throw new Error(
-      "sqry does not provide pre-built binaries for macOS Intel (x86_64). " +
-      "Install via: cargo install sqry-cli"
-    );
+    return { asset: "sqry-macos-x86_64", binaryName: "sqry" };
   }
 
   throw new Error(

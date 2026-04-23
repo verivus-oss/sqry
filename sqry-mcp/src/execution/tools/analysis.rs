@@ -4,6 +4,7 @@
 //! `semantic_diff`.
 
 use std::collections::{HashSet, VecDeque};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -15,12 +16,13 @@ use sqry_core::graph::unified::{
 use crate::engine::{Engine, canonicalize_in_workspace, engine_for_workspace};
 use crate::tools::{CrossLanguageEdgesArgs, DependencyImpactArgs, SemanticDiffArgs};
 
-use crate::execution::diff_comparator;
 use crate::execution::git_worktree;
 use crate::execution::graph_builders::build_graph_metadata;
+use crate::execution::location::node_location_for_reporting;
 use crate::execution::types::{
-    CrossLanguageEdgesData, DependencyImpactData, FindUnusedData, ImpactedSymbol, NodeRefData,
-    PositionData, RangeData, RelationEdgeData, SemanticDiffData, ToolExecution, UnusedSymbolData,
+    CrossLanguageEdgesData, DependencyImpactData, FindUnusedData, ImpactedSymbol, NodeChange,
+    NodeRefData, PositionData, RangeData, RelationEdgeData, SemanticDiffData, ToolExecution,
+    UnusedSymbolData,
 };
 use crate::execution::utils::{duration_to_ms, paginate};
 
@@ -32,24 +34,150 @@ fn resolve_workspace_path(path: &str) -> Option<std::path::PathBuf> {
     }
 }
 
+/// Resolve a symbol to a single `NodeId` using strict resolution.
+///
+/// # Parameters
+///
+/// * `snapshot` — graph snapshot to query
+/// * `symbol` — raw symbol text (qualified or simple name)
+/// * `file_path` — optional pre-canonicalized file path to restrict the search.
+///   When provided the resolver uses `FileScope::Path` so only candidates in
+///   that file are considered. Path canonicalization and workspace validation
+///   are the caller's responsibility (owned by DISAMBIG_2's validation layer).
+///
+/// # Errors
+///
+/// * Symbol not found → `"Symbol 'X' not found in graph."`
+/// * When `file_path` is given and matches zero candidates →
+///   `"No definition of 'X' found in file 'Y'"`
+/// * When `file_path` is given and matches multiple candidates in the same
+///   file → lists those candidates and suggests a qualified name
+/// * Symbol is ambiguous without `file_path` → error includes up to 3 sample
+///   candidates with `file:line` and instructs use of `file_path`
 fn resolve_global_symbol_strict(
     snapshot: &sqry_core::graph::unified::concurrent::GraphSnapshot,
     symbol: &str,
+    file_path: Option<&Path>,
 ) -> Result<sqry_core::graph::unified::node::NodeId> {
+    let file_scope = match file_path {
+        Some(path) => FileScope::Path(path),
+        None => FileScope::Any,
+    };
+
     match snapshot.resolve_symbol(&SymbolQuery {
         symbol,
-        file_scope: FileScope::Any,
+        file_scope,
         mode: ResolutionMode::Strict,
     }) {
         SymbolResolutionOutcome::Resolved(node_id) => Ok(node_id),
         SymbolResolutionOutcome::NotFound | SymbolResolutionOutcome::FileNotIndexed => {
-            Err(anyhow!("Symbol '{symbol}' not found in graph."))
+            if let Some(path) = file_path {
+                Err(anyhow!(
+                    "No definition of '{}' found in file '{}'.",
+                    symbol,
+                    path.display()
+                ))
+            } else {
+                Err(anyhow!("Symbol '{symbol}' not found in graph."))
+            }
         }
-        SymbolResolutionOutcome::Ambiguous(candidates) => Err(anyhow!(
-            "Symbol '{symbol}' is ambiguous in graph ({} candidates). Use a canonical qualified name.",
-            candidates.len()
-        )),
+        SymbolResolutionOutcome::Ambiguous(candidates) => {
+            if let Some(path) = file_path {
+                // file_path matched multiple candidates in the same file
+                build_same_file_ambiguity_error(snapshot, symbol, path, &candidates)
+            } else {
+                // No file_path: include up to 3 sample candidates with file:line
+                build_global_ambiguity_error(snapshot, symbol, &candidates)
+            }
+        }
     }
+}
+
+/// Format a disambiguation error when `file_path` was supplied but matched
+/// multiple candidates in the same file.  Lists those candidates and suggests
+/// using a qualified name.
+fn build_same_file_ambiguity_error(
+    snapshot: &sqry_core::graph::unified::concurrent::GraphSnapshot,
+    symbol: &str,
+    file_path: &Path,
+    candidates: &[sqry_core::graph::unified::node::NodeId],
+) -> Result<sqry_core::graph::unified::node::NodeId> {
+    let file_display = file_path.display();
+    let count = candidates.len();
+
+    let mut lines: Vec<String> = Vec::with_capacity(count + 2);
+    lines.push(format!(
+        "Symbol '{symbol}' is ambiguous in file '{file_display}' ({count} candidates).\nTry a more qualified name:"
+    ));
+
+    for &node_id in candidates {
+        if let Some(entry) = snapshot.get_node(node_id) {
+            let qname = entry
+                .qualified_name
+                .and_then(|id| snapshot.strings().resolve(id))
+                .map(|s| s.to_string())
+                .or_else(|| {
+                    snapshot
+                        .strings()
+                        .resolve(entry.name)
+                        .map(|s| s.to_string())
+                })
+                .unwrap_or_else(|| symbol.to_string());
+            let line = entry.start_line;
+            let file_str = snapshot
+                .files()
+                .resolve(entry.file)
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| file_display.to_string());
+            lines.push(format!("  - {qname} ({file_str}:{line})"));
+        }
+    }
+
+    lines.push("Use a fully-qualified name to disambiguate.".to_string());
+    Err(anyhow!("{}", lines.join("\n")))
+}
+
+/// Format a disambiguation error when no `file_path` was supplied and the
+/// symbol is ambiguous.  Includes up to 3 sample candidates with `file:line`
+/// so the caller can pick the right one.
+fn build_global_ambiguity_error(
+    snapshot: &sqry_core::graph::unified::concurrent::GraphSnapshot,
+    symbol: &str,
+    candidates: &[sqry_core::graph::unified::node::NodeId],
+) -> Result<sqry_core::graph::unified::node::NodeId> {
+    let total = candidates.len();
+    const MAX_SAMPLES: usize = 3;
+
+    let mut lines: Vec<String> = Vec::with_capacity(MAX_SAMPLES + 3);
+    lines.push(format!(
+        "Symbol '{symbol}' is ambiguous ({total} candidates). Try one of:"
+    ));
+
+    for &node_id in candidates.iter().take(MAX_SAMPLES) {
+        if let Some(entry) = snapshot.get_node(node_id) {
+            let qname = entry
+                .qualified_name
+                .and_then(|id| snapshot.strings().resolve(id))
+                .map(|s| s.to_string())
+                .or_else(|| {
+                    snapshot
+                        .strings()
+                        .resolve(entry.name)
+                        .map(|s| s.to_string())
+                })
+                .unwrap_or_else(|| symbol.to_string());
+            let line = entry.start_line;
+            let file_str = snapshot
+                .files()
+                .resolve(entry.file)
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "<unknown>".to_string());
+            lines.push(format!("  - {qname} ({file_str}:{line})"));
+        }
+    }
+
+    lines.push("Use 'file_path' parameter to disambiguate.".to_string());
+    Err(anyhow!("{}", lines.join("\n")))
 }
 
 fn candidate_bucket_for_symbol(
@@ -66,93 +194,6 @@ fn candidate_bucket_for_symbol(
     }
 }
 
-/// Extract cycles from precomputed SCC data
-///
-/// Converts non-trivial SCCs to the same format as `find_all_cycles_graph`
-fn extract_cycles_from_scc(
-    graph: &sqry_core::graph::unified::CodeGraph,
-    scc_data: &sqry_core::graph::unified::analysis::SccData,
-    config: &sqry_core::query::CircularConfig,
-) -> Vec<Vec<String>> {
-    let snapshot = graph.snapshot();
-    let strings = snapshot.strings();
-
-    let mut index_to_node_id = vec![None; scc_data.node_count as usize];
-    for (node_id, _entry) in snapshot.nodes().iter() {
-        let idx = node_id.index() as usize;
-        if idx < index_to_node_id.len() {
-            index_to_node_id[idx] = Some(node_id);
-        }
-    }
-
-    let mut cycles = Vec::new();
-
-    // Iterate through all SCCs, using precomputed self-loop data from SccData.
-    // This avoids the expensive O(V * edges_per_node) full-edge iteration that
-    // was causing timeouts on large graphs (238K+ nodes).
-    for scc_id in 0..scc_data.scc_count {
-        let members = scc_data.scc_members(scc_id);
-        let size = members.len();
-
-        let is_self_loop = size == 1
-            && scc_data
-                .has_self_loop
-                .get(scc_id as usize)
-                .copied()
-                .unwrap_or(false);
-        if !should_include_scc(size, is_self_loop, config) {
-            continue;
-        }
-
-        if cycles.len() >= config.max_results {
-            break;
-        }
-
-        // Convert node IDs to qualified names
-        let cycle: Vec<String> = members
-            .iter()
-            .filter_map(|&node_idx| {
-                let node_id = index_to_node_id.get(node_idx as usize).and_then(|id| *id)?;
-                snapshot.get_node(node_id).and_then(|entry| {
-                    entry
-                        .qualified_name
-                        .and_then(|sid| strings.resolve(sid))
-                        .or_else(|| strings.resolve(entry.name))
-                        .map(|s| s.to_string())
-                })
-            })
-            .collect();
-
-        if !cycle.is_empty() {
-            cycles.push(cycle);
-        }
-    }
-
-    cycles
-}
-
-fn cycle_edge_kind_name(cycle_type: CycleType) -> &'static str {
-    match cycle_type {
-        CycleType::Calls => "calls",
-        CycleType::Imports | CycleType::Modules => "imports",
-    }
-}
-
-fn cycle_edge_kind(cycle_type: CycleType) -> sqry_core::graph::unified::edge::EdgeKind {
-    match cycle_type {
-        CycleType::Calls => sqry_core::graph::unified::edge::EdgeKind::Calls {
-            argument_count: 0,
-            is_async: false,
-        },
-        CycleType::Imports | CycleType::Modules => {
-            sqry_core::graph::unified::edge::EdgeKind::Imports {
-                alias: None,
-                is_wildcard: false,
-            }
-        }
-    }
-}
-
 fn cycle_type_label(cycle_type: CycleType) -> &'static str {
     match cycle_type {
         CycleType::Calls => "calls",
@@ -161,109 +202,71 @@ fn cycle_type_label(cycle_type: CycleType) -> &'static str {
     }
 }
 
-fn compute_cycles_from_graph(
-    graph: &sqry_core::graph::unified::concurrent::CodeGraph,
+/// Map MCP [`CycleType`] to the [`CircularType`] that sqry-db's
+/// [`sqry_db::queries::CyclesQuery`] and [`sqry_db::queries::IsInCycleQuery`]
+/// consume. `Modules` collapses to `Imports` so module-level cycles are
+/// detected on the `Imports` edge kind — that mirrors the pre-DB17
+/// `cycle_edge_kind_name`/`cycle_edge_kind` pair and is asserted by
+/// `sqry_db::queries::cycles::edge_probe_for`.
+fn mcp_cycle_type_to_core(cycle_type: CycleType) -> CircularType {
+    match cycle_type {
+        CycleType::Calls => CircularType::Calls,
+        CycleType::Imports => CircularType::Imports,
+        CycleType::Modules => CircularType::Modules,
+    }
+}
+
+/// Build the sqry-db [`CycleBounds`] that corresponds to a MCP
+/// `FindCyclesArgs` / `IsNodeInCycleArgs` request. `max_results` is the
+/// pool cap — sqry-db truncates the [`CyclesQuery`] result to this many
+/// cycles; the MCP handler still applies its own `max_results` cap on
+/// top via the `CycleBounds::max_results` field so that both handlers
+/// stay aligned with the pre-DB17 `CircularConfig::max_results`
+/// semantic.
+fn cycle_bounds_for(
+    min_depth: usize,
+    max_depth: Option<usize>,
+    max_results: usize,
+    include_self_loops: bool,
+) -> sqry_db::queries::CycleBounds {
+    sqry_db::queries::CycleBounds {
+        min_depth,
+        max_depth,
+        max_results,
+        should_include_self_loops: include_self_loops,
+    }
+}
+
+/// Materialize a cache-hit `CyclesQuery` payload (`Arc<Vec<Vec<NodeId>>>`)
+/// into the name-shaped `Vec<Vec<String>>` that [`convert_cycles_to_output`]
+/// consumes. Qualified names are preferred; a node without a qualified
+/// name falls back to its simple name. Nodes whose entries cannot be
+/// resolved (stale `NodeId`s post-tombstone) are skipped silently — they
+/// are never in a live cycle because sqry-db's Tarjan walk only visits
+/// arena-live nodes per [`sqry_db::queries::SccQuery`].
+fn materialize_cycle_node_ids(
+    cycles: &[Vec<sqry_core::graph::unified::node::NodeId>],
     snapshot: &sqry_core::graph::unified::concurrent::GraphSnapshot,
-    cycle_type: CycleType,
-    core_cycle_type: CircularType,
-    config: &CircularConfig,
-) -> Result<Vec<Vec<String>>> {
-    use sqry_core::graph::unified::analysis::csr::CsrAdjacency;
-    use sqry_core::graph::unified::compaction::build::snapshot_edges;
-
-    let edge_kind = cycle_edge_kind(cycle_type);
-    let node_count = snapshot.nodes().len();
-
-    let csr_result = {
-        let forward_store = graph.edges().forward();
-        let compaction_snapshot = snapshot_edges(&forward_store, node_count);
-        drop(forward_store);
-        CsrAdjacency::build_from_snapshot(&compaction_snapshot)
-    };
-
-    match csr_result {
-        Ok(csr) => match sqry_core::graph::unified::analysis::scc::SccData::compute_tarjan(
-            &csr, &edge_kind,
-        ) {
-            Ok(scc_data) => Ok(extract_cycles_from_scc(graph, &scc_data, config)),
-            Err(error) => handle_cycle_analysis_failure(
-                "SCC computation",
-                error,
-                node_count,
-                core_cycle_type,
-                graph,
-                config,
-            ),
-        },
-        Err(error) => handle_cycle_analysis_failure(
-            "CSR build",
-            error,
-            node_count,
-            core_cycle_type,
-            graph,
-            config,
-        ),
-    }
-}
-
-fn handle_cycle_analysis_failure<E: std::fmt::Display>(
-    stage: &str,
-    error: E,
-    node_count: usize,
-    core_cycle_type: CircularType,
-    graph: &sqry_core::graph::unified::concurrent::CodeGraph,
-    config: &CircularConfig,
-) -> Result<Vec<Vec<String>>> {
-    tracing::warn!("{stage} failed: {error}. Falling back to graph traversal.");
-    if node_count > 100_000 {
-        return Err(anyhow!(
-            "Graph has {node_count} nodes and {stage} failed: {error}. \
-             Run `sqry index --force` or `sqry analyze` to rebuild cycle data.",
-        ));
-    }
-    Ok(find_all_cycles_graph(core_cycle_type, graph, config))
-}
-
-fn should_include_scc(
-    size: usize,
-    is_self_loop: bool,
-    config: &sqry_core::query::CircularConfig,
-) -> bool {
-    if is_self_loop {
-        return config.should_include_self_loops;
-    }
-
-    if size == 1 {
-        return false;
-    }
-
-    if size < config.min_depth {
-        return false;
-    }
-
-    if config.max_depth.is_some_and(|max| size > max) {
-        return false;
-    }
-
-    true
-}
-
-/// Fast O(1) check if node is in a cycle using precomputed SCC data
-fn is_node_in_cycle_precomputed(
-    node_id: sqry_core::graph::unified::node::NodeId,
-    scc_data: &sqry_core::graph::unified::analysis::SccData,
-    config: &sqry_core::query::CircularConfig,
-) -> bool {
-    // Get the SCC ID for this node
-    let Some(scc_id) = scc_data.scc_of(node_id) else {
-        return false;
-    };
-
-    let members = scc_data.scc_members(scc_id);
-    let size = members.len();
-    let is_self_loop = size == 1 && scc_data.has_self_loop[scc_id as usize];
-
-    should_include_scc(size, is_self_loop, config)
+) -> Vec<Vec<String>> {
+    let strings = snapshot.strings();
+    cycles
+        .iter()
+        .map(|cycle| {
+            cycle
+                .iter()
+                .filter_map(|&node_id| {
+                    snapshot.get_node(node_id).and_then(|entry| {
+                        entry
+                            .qualified_name
+                            .and_then(|sid| strings.resolve(sid))
+                            .or_else(|| strings.resolve(entry.name))
+                            .map(|s| s.to_string())
+                    })
+                })
+                .collect()
+        })
+        .filter(|cycle: &Vec<String>| !cycle.is_empty())
+        .collect()
 }
 
 /// Check whether a node should be included in unused results based on filters.
@@ -314,6 +317,8 @@ fn should_include_in_unused_results(
 /// Build an `UnusedSymbolData` from a graph node entry.
 fn build_unused_symbol_data(
     entry: &sqry_core::graph::unified::storage::arena::NodeEntry,
+    node_id: sqry_core::graph::unified::node::NodeId,
+    graph: &sqry_core::graph::unified::concurrent::CodeGraph,
     strings: &sqry_core::graph::unified::storage::StringInterner,
     files: &sqry_core::graph::unified::storage::registry::FileRegistry,
     workspace_root: &std::path::Path,
@@ -340,159 +345,17 @@ fn build_unused_symbol_data(
     let kind = format!("{:?}", entry.kind).to_lowercase();
     let visibility = format!("{:?}", entry.visibility).to_lowercase();
 
+    let loc = node_location_for_reporting(graph, node_id, workspace_root);
+
     UnusedSymbolData {
         name,
         qualified_name,
         kind,
         file_uri,
-        line: entry.start_line,
+        line: loc.as_ref().map_or(entry.start_line, |l| l.line),
         language,
         visibility,
     }
-}
-
-/// Mark all nodes reachable from entry points using SCC data and condensation DAG.
-fn mark_reachable_from_entries(
-    entry_points: &[sqry_core::graph::unified::node::NodeId],
-    scc_data: &sqry_core::graph::unified::analysis::SccData,
-    cond_dag: &sqry_core::graph::unified::analysis::CondensationDag,
-) -> HashSet<sqry_core::graph::unified::node::NodeId> {
-    use sqry_core::graph::unified::node::NodeId;
-
-    // Step 1: Collect entry SCCs (deduplicated)
-    let mut entry_sccs = HashSet::new();
-    for entry_node in entry_points {
-        if let Some(scc_id) = scc_data.scc_of(*entry_node) {
-            entry_sccs.insert(scc_id);
-        }
-    }
-
-    // Step 2: BFS on the condensation DAG to find all reachable SCCs.
-    // This is O(S + E_cond) instead of O(entry_count * S * label_check).
-    let mut reachable_sccs = HashSet::new();
-    let mut queue = VecDeque::new();
-
-    for &scc_id in &entry_sccs {
-        if reachable_sccs.insert(scc_id) {
-            queue.push_back(scc_id);
-        }
-    }
-
-    while let Some(current_scc) = queue.pop_front() {
-        for &successor in cond_dag.successors(current_scc) {
-            if reachable_sccs.insert(successor) {
-                queue.push_back(successor);
-            }
-        }
-    }
-
-    // Step 3: Expand reachable SCCs to reachable nodes
-    let mut reachable = HashSet::with_capacity(entry_points.len() * 2);
-    for &scc_id in &reachable_sccs {
-        for &node_idx in scc_data.scc_members(scc_id) {
-            reachable.insert(NodeId::new(node_idx, 0));
-        }
-    }
-
-    reachable
-}
-
-/// Find unused code using Pass 5 reachability analysis
-fn find_unused_with_reachability(
-    snapshot: &sqry_core::graph::unified::concurrent::GraphSnapshot,
-    scc_data: &sqry_core::graph::unified::analysis::SccData,
-    cond_dag: &sqry_core::graph::unified::analysis::CondensationDag,
-    args: &FindUnusedArgs,
-    workspace_root: &std::path::Path,
-) -> Vec<UnusedSymbolData> {
-    let strings = snapshot.strings();
-    let files = snapshot.files();
-
-    // Step 1: Identify entry points
-    let entry_points = identify_entry_points(snapshot, args);
-
-    if entry_points.is_empty() {
-        tracing::warn!("No entry points identified for unused code detection");
-        return Vec::new();
-    }
-
-    tracing::debug!(
-        "Found {} entry points for reachability analysis",
-        entry_points.len()
-    );
-
-    // Step 2: Mark reachable nodes using 2-hop labels
-    let reachable = mark_reachable_from_entries(&entry_points, scc_data, cond_dag);
-
-    tracing::debug!("Marked {} nodes as reachable", reachable.len());
-
-    // Step 3: Collect unreachable nodes that match filters
-    let mut unused = Vec::new();
-    for (node_id, entry) in snapshot.nodes().iter() {
-        if reachable.contains(&node_id) {
-            continue;
-        }
-
-        if !should_include_in_unused_results(entry, args, strings, files) {
-            continue;
-        }
-
-        unused.push(build_unused_symbol_data(
-            entry,
-            strings,
-            files,
-            workspace_root,
-        ));
-
-        if unused.len() >= args.max_results {
-            break;
-        }
-    }
-
-    unused
-}
-
-/// Identify entry points for reachability analysis
-fn identify_entry_points(
-    snapshot: &sqry_core::graph::unified::concurrent::GraphSnapshot,
-    _args: &FindUnusedArgs,
-) -> Vec<sqry_core::graph::unified::node::NodeId> {
-    let files = snapshot.files();
-    let mut entry_points = Vec::new();
-
-    for (node_id, entry) in snapshot.nodes().iter() {
-        // Language-specific entry point heuristics
-        let is_entry = if let Some(lang) = files.language_for_file(entry.file) {
-            match lang {
-                sqry_core::graph::Language::Rust => {
-                    is_rust_entry_point(node_id, entry, files, snapshot)
-                }
-                sqry_core::graph::Language::Python => {
-                    is_python_entry_point(node_id, entry, files, snapshot)
-                }
-                sqry_core::graph::Language::JavaScript | sqry_core::graph::Language::TypeScript => {
-                    is_js_ts_entry_point(node_id, entry, snapshot)
-                }
-                sqry_core::graph::Language::Java => is_java_entry_point(node_id, entry, snapshot),
-                sqry_core::graph::Language::Go => is_go_entry_point(node_id, entry, snapshot),
-                sqry_core::graph::Language::C | sqry_core::graph::Language::Cpp => {
-                    is_c_cpp_entry_point(node_id, entry, snapshot)
-                }
-                _ => {
-                    // For other languages, use generic heuristic: public exports or main
-                    is_generic_entry_point(node_id, entry, snapshot)
-                }
-            }
-        } else {
-            false
-        };
-
-        if is_entry {
-            entry_points.push(node_id);
-        }
-    }
-
-    entry_points
 }
 
 /// Check if a symbol matches the scope filter
@@ -516,215 +379,6 @@ fn matches_scope_filter(
 }
 
 // Language-specific entry point detection
-
-fn is_rust_entry_point(
-    _node_id: sqry_core::graph::unified::node::NodeId,
-    entry: &sqry_core::graph::unified::storage::arena::NodeEntry,
-    files: &sqry_core::graph::unified::storage::registry::FileRegistry,
-    snapshot: &sqry_core::graph::unified::concurrent::GraphSnapshot,
-) -> bool {
-    use sqry_core::graph::unified::node::NodeKind;
-
-    let strings = snapshot.strings();
-
-    // main() function
-    if entry.kind == NodeKind::Function
-        && let Some(name) = strings.resolve(entry.name)
-        && name.as_ref() == "main"
-    {
-        return true;
-    }
-
-    // Public items in lib.rs or main.rs
-    let is_public = entry
-        .visibility
-        .and_then(|vid| strings.resolve(vid))
-        .is_some_and(|v| v.as_ref().eq_ignore_ascii_case("public"));
-
-    if is_public && let Some(file_path) = files.resolve(entry.file) {
-        let path_str = file_path.to_string_lossy();
-        if path_str.ends_with("lib.rs") || path_str.ends_with("main.rs") {
-            return true;
-        }
-    }
-
-    // Test functions (#[test] - detected as Function with specific markers)
-    // Note: This requires attributes to be stored in the graph, which may not be available
-    // For now, we'll consider all pub fn as potential entry points
-
-    // Exported items (pub use, pub fn, pub struct, etc.)
-    is_public && !matches!(entry.kind, NodeKind::Variable | NodeKind::Constant)
-}
-
-fn is_python_entry_point(
-    _node_id: sqry_core::graph::unified::node::NodeId,
-    entry: &sqry_core::graph::unified::storage::arena::NodeEntry,
-    files: &sqry_core::graph::unified::storage::registry::FileRegistry,
-    _snapshot: &sqry_core::graph::unified::concurrent::GraphSnapshot,
-) -> bool {
-    use sqry_core::graph::unified::node::NodeKind;
-
-    // Functions/classes in __init__.py
-    if let Some(file_path) = files.resolve(entry.file) {
-        let path_str = file_path.to_string_lossy();
-        if path_str.ends_with("__init__.py") {
-            return matches!(entry.kind, NodeKind::Function | NodeKind::Class);
-        }
-    }
-
-    // if __name__ == "__main__" (heuristic: top-level functions)
-    if entry.kind == NodeKind::Function {
-        return true;
-    }
-
-    // Classes are often entry points
-    entry.kind == NodeKind::Class
-}
-
-fn is_js_ts_entry_point(
-    node_id: sqry_core::graph::unified::node::NodeId,
-    entry: &sqry_core::graph::unified::storage::arena::NodeEntry,
-    snapshot: &sqry_core::graph::unified::concurrent::GraphSnapshot,
-) -> bool {
-    use sqry_core::graph::unified::node::NodeKind;
-
-    // Check for export edges from this node
-    for edge in snapshot.edges().edges_from(node_id) {
-        if matches!(
-            edge.kind,
-            sqry_core::graph::unified::edge::EdgeKind::Exports { .. }
-        ) {
-            return true;
-        }
-    }
-
-    // Default export (heuristic: top-level functions/classes)
-    matches!(
-        entry.kind,
-        NodeKind::Function | NodeKind::Class | NodeKind::Component
-    )
-}
-
-fn is_java_entry_point(
-    _node_id: sqry_core::graph::unified::node::NodeId,
-    entry: &sqry_core::graph::unified::storage::arena::NodeEntry,
-    snapshot: &sqry_core::graph::unified::concurrent::GraphSnapshot,
-) -> bool {
-    use sqry_core::graph::unified::node::NodeKind;
-
-    let strings = snapshot.strings();
-    let is_public = entry
-        .visibility
-        .and_then(|vid| strings.resolve(vid))
-        .is_some_and(|v| v.as_ref().eq_ignore_ascii_case("public"));
-
-    // public static void main(String[] args)
-    if entry.kind == NodeKind::Method
-        && is_public
-        && let Some(name) = strings.resolve(entry.name)
-        && name.as_ref() == "main"
-    {
-        return true;
-    }
-
-    // Public classes
-    entry.kind == NodeKind::Class && is_public
-}
-
-fn is_go_entry_point(
-    _node_id: sqry_core::graph::unified::node::NodeId,
-    entry: &sqry_core::graph::unified::storage::arena::NodeEntry,
-    snapshot: &sqry_core::graph::unified::concurrent::GraphSnapshot,
-) -> bool {
-    use sqry_core::graph::unified::node::NodeKind;
-
-    let strings = snapshot.strings();
-
-    // func main()
-    if entry.kind == NodeKind::Function
-        && let Some(name) = strings.resolve(entry.name)
-        && name.as_ref() == "main"
-    {
-        return true;
-    }
-
-    // Exported symbols (capitalized names)
-    let is_public = entry
-        .visibility
-        .and_then(|vid| strings.resolve(vid))
-        .is_some_and(|v| v.as_ref().eq_ignore_ascii_case("public"));
-
-    if is_public && let Some(name) = strings.resolve(entry.name) {
-        let first_char = name.chars().next();
-        if first_char.is_some_and(char::is_uppercase) {
-            return true;
-        }
-    }
-
-    false
-}
-
-fn is_c_cpp_entry_point(
-    _node_id: sqry_core::graph::unified::node::NodeId,
-    entry: &sqry_core::graph::unified::storage::arena::NodeEntry,
-    snapshot: &sqry_core::graph::unified::concurrent::GraphSnapshot,
-) -> bool {
-    use sqry_core::graph::unified::node::NodeKind;
-
-    let strings = snapshot.strings();
-
-    // main() function
-    if entry.kind == NodeKind::Function
-        && let Some(name) = strings.resolve(entry.name)
-        && name.as_ref() == "main"
-    {
-        return true;
-    }
-
-    // Functions without static modifier (public functions)
-    // Note: Static detection requires parsing attributes, may not be available
-    // Heuristic: all non-private functions are entry points
-    let is_private = entry
-        .visibility
-        .and_then(|vid| strings.resolve(vid))
-        .is_some_and(|v| v.as_ref().eq_ignore_ascii_case("private"));
-
-    entry.kind == NodeKind::Function && !is_private
-}
-
-fn is_generic_entry_point(
-    node_id: sqry_core::graph::unified::node::NodeId,
-    entry: &sqry_core::graph::unified::storage::arena::NodeEntry,
-    snapshot: &sqry_core::graph::unified::concurrent::GraphSnapshot,
-) -> bool {
-    use sqry_core::graph::unified::node::NodeKind;
-
-    let strings = snapshot.strings();
-
-    // Generic heuristic: public exports or main
-    if entry.kind == NodeKind::Function
-        && let Some(name) = strings.resolve(entry.name)
-        && name.as_ref() == "main"
-    {
-        return true;
-    }
-
-    // Check for export edges from this node
-    for edge in snapshot.edges().edges_from(node_id) {
-        if matches!(
-            edge.kind,
-            sqry_core::graph::unified::edge::EdgeKind::Exports { .. }
-        ) {
-            return true;
-        }
-    }
-
-    // Public visibility
-    entry
-        .visibility
-        .and_then(|vid| strings.resolve(vid))
-        .is_some_and(|v| v.as_ref().eq_ignore_ascii_case("public"))
-}
 
 /// Execute the `cross_language_edges` tool to find cross-language dependencies.
 ///
@@ -782,12 +436,26 @@ pub fn execute_cross_language_edges(
         }
 
         // Build NodeRefData for source node
-        let from_ref =
-            build_node_ref_from_node(source_node, from_lang, files, strings, &workspace_root);
+        let from_ref = build_node_ref_from_node(
+            source_node,
+            source_id,
+            &graph,
+            from_lang,
+            files,
+            strings,
+            &workspace_root,
+        );
 
         // Build NodeRefData for target node
-        let to_ref =
-            build_node_ref_from_node(target_node, to_lang, files, strings, &workspace_root);
+        let to_ref = build_node_ref_from_node(
+            target_node,
+            target_id,
+            &graph,
+            to_lang,
+            files,
+            strings,
+            &workspace_root,
+        );
 
         edges.push(RelationEdgeData {
             from: Some(from_ref),
@@ -828,6 +496,8 @@ pub fn execute_cross_language_edges(
 /// Builds a `NodeRefData` from a unified graph `NodeEntry`.
 fn build_node_ref_from_node(
     node: &sqry_core::graph::unified::storage::arena::NodeEntry,
+    node_id: sqry_core::graph::unified::node::NodeId,
+    graph: &sqry_core::graph::unified::concurrent::CodeGraph,
     language: sqry_core::graph::Language,
     files: &sqry_core::graph::unified::storage::FileRegistry,
     strings: &sqry_core::graph::unified::storage::StringInterner,
@@ -871,6 +541,9 @@ fn build_node_ref_from_node(
         Into::into,
     );
 
+    let loc = node_location_for_reporting(graph, node_id, workspace_root);
+    let resolution_source = loc.as_ref().map(|l| format!("{:?}", l.resolution_source));
+
     NodeRefData {
         name,
         qualified_name,
@@ -879,21 +552,24 @@ fn build_node_ref_from_node(
         file_uri,
         range: RangeData {
             start: PositionData {
-                line: node.start_line,
-                character: node.start_column,
+                line: loc.as_ref().map_or(node.start_line, |l| l.line),
+                character: loc.as_ref().map_or(node.start_column, |l| l.column),
             },
             end: PositionData {
-                line: node.end_line,
-                character: node.end_column,
+                line: loc.as_ref().map_or(node.end_line, |l| l.end_line),
+                character: loc.as_ref().map_or(node.end_column, |l| l.end_column),
             },
         },
         metadata: None,
+        resolution_source,
     }
 }
 
 /// Build a `NodeRefData` for an impact analysis result from a graph node entry.
 fn build_impact_node_ref(
     entry: &sqry_core::graph::unified::storage::arena::NodeEntry,
+    node_id: sqry_core::graph::unified::node::NodeId,
+    graph: &sqry_core::graph::unified::concurrent::CodeGraph,
     strings: &sqry_core::graph::unified::storage::StringInterner,
     files: &sqry_core::graph::unified::storage::registry::FileRegistry,
     workspace_root: &std::path::Path,
@@ -920,6 +596,9 @@ fn build_impact_node_ref(
 
     let kind = format!("{:?}", entry.kind).to_lowercase();
 
+    let loc = node_location_for_reporting(graph, node_id, workspace_root);
+    let resolution_source = loc.as_ref().map(|l| format!("{:?}", l.resolution_source));
+
     NodeRefData {
         name,
         qualified_name,
@@ -928,28 +607,31 @@ fn build_impact_node_ref(
         file_uri,
         range: RangeData {
             start: PositionData {
-                line: entry.start_line,
-                character: entry.start_column,
+                line: loc.as_ref().map_or(entry.start_line, |l| l.line),
+                character: loc.as_ref().map_or(entry.start_column, |l| l.column),
             },
             end: PositionData {
-                line: entry.end_line,
-                character: entry.end_column,
+                line: loc.as_ref().map_or(entry.end_line, |l| l.end_line),
+                character: loc.as_ref().map_or(entry.end_column, |l| l.end_column),
             },
         },
         metadata: None,
+        resolution_source,
     }
 }
 
 /// Process a caller node and return impacted symbol data and file URI.
 fn process_caller_node(
     entry: &sqry_core::graph::unified::NodeEntry,
+    node_id: sqry_core::graph::unified::node::NodeId,
+    graph: &sqry_core::graph::unified::concurrent::CodeGraph,
     strings: &sqry_core::graph::unified::storage::StringInterner,
     files: &sqry_core::graph::unified::storage::registry::FileRegistry,
     workspace_root: &std::path::Path,
     depth: usize,
     _args: &DependencyImpactArgs,
 ) -> (ImpactedSymbol, String) {
-    let node_ref = build_impact_node_ref(entry, strings, files, workspace_root);
+    let node_ref = build_impact_node_ref(entry, node_id, graph, strings, files, workspace_root);
     let file_uri = node_ref.file_uri.clone();
 
     let symbol = ImpactedSymbol {
@@ -964,8 +646,22 @@ fn process_caller_node(
 /// BFS traversal to collect all impacted callers of a target symbol.
 ///
 /// Returns the list of impacted symbols and set of affected file URIs.
+///
+/// # Frontier invariant (DB16)
+///
+/// The BFS is strictly NodeId-anchored. The seed is a single
+/// `target_node_id` (the caller resolves via
+/// [`resolve_global_symbol_strict`] which errors on ambiguity, so the seed
+/// set is always exactly one node). The frontier is expanded only via
+/// `snapshot.get_callers(current_id)` — a direct CSR lookup for incoming
+/// `Calls` edges to `current_id`. There is no name-keyed dispatch anywhere
+/// in the loop, so the multi-hop frontier-broadening bug DB15's followup
+/// fixed for `relation_query` cannot manifest here: an ambiguous simple
+/// name never reaches the frontier because the resolver rejects it before
+/// BFS starts.
 fn collect_impacted_callers_bfs(
     snapshot: &sqry_core::graph::unified::concurrent::GraphSnapshot,
+    graph: &sqry_core::graph::unified::concurrent::CodeGraph,
     target_node_id: sqry_core::graph::unified::node::NodeId,
     args: &DependencyImpactArgs,
     workspace_root: &std::path::Path,
@@ -995,8 +691,16 @@ fn collect_impacted_callers_bfs(
             let Some(entry) = snapshot.get_node(caller_id) else {
                 continue;
             };
-            let (symbol, file_uri) =
-                process_caller_node(entry, strings, files, workspace_root, depth, args);
+            let (symbol, file_uri) = process_caller_node(
+                entry,
+                caller_id,
+                graph,
+                strings,
+                files,
+                workspace_root,
+                depth,
+                args,
+            );
 
             if args.include_files {
                 affected_files.insert(file_uri);
@@ -1016,10 +720,35 @@ fn collect_impacted_callers_bfs(
 
 /// Execute the `dependency_impact` tool to analyze impact of changes.
 ///
-/// Uses the unified `CodeGraph` for dependency traversal via BFS on call/import edges.
+/// # Dispatch path (DB16)
+///
+/// `dependency_impact` is **NodeId-anchored**: the user supplies a symbol
+/// name, it's resolved via [`resolve_global_symbol_strict`] (ambiguity is
+/// rejected with a canonical-name hint), and from that point on the BFS
+/// walks only via `snapshot.get_callers(current_id)`. This handler does
+/// NOT route through sqry-db at depth-1; the name-to-NodeId resolution is
+/// the only name-keyed operation, and `resolve_global_symbol_strict`
+/// already owns it with the strict segment matcher.
+///
+/// This mirrors the DB15 followup decision for `relation_query`: once the
+/// seed is a concrete NodeId, BFS via direct CSR edge lookups is the right
+/// primitive, and sqry-db's name-keyed predicate queries (which could
+/// reintroduce a segment-matcher mismatch at depth 1) are not. See
+/// [`crate::execution::relation_dispatch`] module docs for the taxonomy.
+///
+/// # Behavior
+///
+/// Ambiguous simple names return a
+/// "Use a canonical qualified name" error via
+/// [`resolve_global_symbol_strict`]. This is stricter than the DB15
+/// behavior shift for `direct_callers` / `direct_callees` (which now
+/// return the union across ambiguous matches) — `dependency_impact` must
+/// stay single-node anchored because the returned impact depths are
+/// meaningless across a union of unrelated chains.
 pub fn execute_dependency_impact(
     args: &DependencyImpactArgs,
 ) -> Result<ToolExecution<DependencyImpactData>> {
+    // Pre-refactor timing: `start` fires before engine resolution.
     let start = Instant::now();
     let workspace_path = resolve_workspace_path(&args.path);
     let engine = engine_for_workspace(workspace_path.as_ref())?;
@@ -1037,161 +766,186 @@ pub fn execute_dependency_impact(
     // Require the unified graph
     let graph = engine.ensure_graph()?;
 
-    let snapshot = graph.snapshot();
-
-    // Find the target symbol
-    let target_node_id = resolve_global_symbol_strict(&snapshot, &args.symbol)?;
-
-    let (mut impacted, affected_files) =
-        collect_impacted_callers_bfs(&snapshot, target_node_id, args, &workspace_root);
-
-    let total = impacted.len();
-    let truncated = total > args.max_results;
-    impacted.truncate(args.max_results);
-
-    let (page_slice, next_page_token) = paginate(&impacted, &args.pagination);
-    let page_impacted: Vec<ImpactedSymbol> = page_slice.to_vec();
-
-    let affected_files_vec = if args.include_files {
-        let mut files_list: Vec<String> = affected_files.into_iter().collect();
-        files_list.sort();
-        Some(files_list)
-    } else {
-        None
+    let ctx = crate::daemon_adapter::WorkspaceContext {
+        workspace_root,
+        graph,
+        executor: engine.executor_arc(),
     };
-
-    let truncated_flag = truncated || next_page_token.is_some();
-
-    Ok(ToolExecution {
-        data: DependencyImpactData {
-            target_symbol: args.symbol.clone(),
-            impacted_symbols: page_impacted,
-            affected_files: affected_files_vec,
-            total: total as u64,
-        },
-        used_index: false,
-        used_graph: true,
-        graph_metadata: None,
-        execution_ms: duration_to_ms(start.elapsed()),
-        next_page_token,
-        total: Some(total as u64),
-        truncated: Some(truncated_flag),
-        candidates_scanned: None,
-        workspace_path: crate::execution::symbol_utils::path_to_forward_slash(workspace_root),
-    })
+    inner::execute_dependency_impact(&ctx, args, start)
 }
 
 /// Execute the `semantic_diff` tool to compare code between git refs.
 ///
-/// Uses `CodeGraph` for semantic comparison between two git refs.
+/// # DB20 migration
+///
+/// Phase 1 (worktree creation) and Phase 2 (graph build) still happen here —
+/// `semantic_diff` is the only MCP tool that needs two independent graphs
+/// built from git worktrees, so that orchestration stays in the handler.
+///
+/// Phase 3 (the actual diff computation) routes through
+/// [`sqry_db::ComparativeQueryDb::diff`] (DB20, Option A). The comparative
+/// DB is the only handler that does NOT go through `make_query_db` — it
+/// deliberately bypasses the `ShardedCache` because cross-snapshot results
+/// have no meaningful invalidation criterion. See
+/// `docs/superpowers/specs/2026-04-12-derived-analysis-db-query-planner-design.md`
+/// (M6) for the rationale.
+///
+/// Phases 4–7 (filter / summary / pagination) remain in the MCP handler so
+/// the wire DTO (`SemanticDiffData` + `NodeChange` camelCase shape + `fileUri`
+/// URLs + `resolution_source`) stays stable at the network boundary.
 pub fn execute_semantic_diff(args: &SemanticDiffArgs) -> Result<ToolExecution<SemanticDiffData>> {
-    use sqry_core::graph::unified::build::{BuildConfig, build_unified_graph};
-
+    // Pre-refactor timing: `start` fires before engine resolution.
     let start = Instant::now();
     let workspace_path = resolve_workspace_path(&args.path);
     let engine = engine_for_workspace(workspace_path.as_ref())?;
     let workspace_root = engine.workspace_root().to_path_buf();
 
-    tracing::debug!(
-        base_ref = %args.base.git_ref,
-        target_ref = %args.target.git_ref,
-        include_unchanged = args.include_unchanged,
-        max_results = args.max_results,
-        "Executing semantic_diff tool"
-    );
+    // NOTE: `semantic_diff` builds its own per-worktree graphs in the inner
+    // body and does not consume `ctx.graph` or `ctx.executor`. We still call
+    // `ensure_graph` here so every public `execute_*` emits the same
+    // `WorkspaceContext` shape required by the daemon path (Task 4).
+    // `ctx.graph` therefore reflects the workspace's CURRENT index, not either
+    // of the git refs being diffed.
+    let graph = engine.ensure_graph()?;
+    let ctx = crate::daemon_adapter::WorkspaceContext {
+        workspace_root,
+        graph,
+        executor: engine.executor_arc(),
+    };
+    inner::execute_semantic_diff(&ctx, args, start)
+}
 
-    // Phase 1: Create git worktrees
-    let worktree_mgr = git_worktree::WorktreeManager::create(
-        &workspace_root,
-        &args.base.git_ref,
-        &args.target.git_ref,
-    )?;
+/// Convert a sqry-db [`sqry_db::NodeChange`] into the MCP wire-format
+/// [`crate::execution::types::NodeChange`], translating worktree paths back
+/// to workspace paths and building `file://` URIs.
+///
+/// This preserves the exact pre-DB20 wire shape: `change_type` is a
+/// lowercase string ("added" / "removed" / "modified" / "renamed" /
+/// "signature_changed"), `baseLocation` / `targetLocation` are
+/// [`NodeRefData`] structs with `fileUri` URLs, and empty-optional fields
+/// are omitted via `serde(skip_serializing_if = "Option::is_none")`.
+fn convert_db_change_to_wire(
+    db_change: sqry_db::NodeChange,
+    workspace_root: &std::path::Path,
+    base_worktree: &std::path::Path,
+    target_worktree: &std::path::Path,
+) -> Result<NodeChange> {
+    let sqry_db::NodeChange {
+        symbol_name,
+        qualified_name,
+        kind,
+        change_type,
+        base_location,
+        target_location,
+        signature_before,
+        signature_after,
+    } = db_change;
 
-    // Phase 2: Build CodeGraphs for both worktrees
-    let plugins = Engine::plugin_manager();
-    let config = BuildConfig::default();
+    let base_wire = base_location
+        .map(|loc| {
+            db_location_to_ref(
+                &loc,
+                workspace_root,
+                base_worktree,
+                &symbol_name,
+                &qualified_name,
+                &kind,
+            )
+        })
+        .transpose()?;
+    let target_wire = target_location
+        .map(|loc| {
+            db_location_to_ref(
+                &loc,
+                workspace_root,
+                target_worktree,
+                &symbol_name,
+                &qualified_name,
+                &kind,
+            )
+        })
+        .transpose()?;
 
-    let base_graph = Arc::new(
-        build_unified_graph(worktree_mgr.base_path(), &plugins, &config)
-            .map_err(|e| anyhow!("Failed to build base graph: {e}"))?,
-    );
-    let target_graph = Arc::new(
-        build_unified_graph(worktree_mgr.target_path(), &plugins, &config)
-            .map_err(|e| anyhow!("Failed to build target graph: {e}"))?,
-    );
-
-    // Phase 3: Compare graphs using CodeGraph comparator
-    let comparator = diff_comparator::GraphComparator::new(
-        base_graph,
-        target_graph,
-        workspace_root.clone(),
-        worktree_mgr.base_path().to_path_buf(),
-        worktree_mgr.target_path().to_path_buf(),
-    );
-    let mut changes = comparator.compute_changes()?;
-
-    // Phase 4: Apply filters
-    if !args.filters.change_types.is_empty() {
-        changes.retain(|change| {
-            args.filters
-                .change_types
-                .iter()
-                .any(|ct| ct.as_str() == change.change_type)
-        });
-    }
-
-    if !args.filters.symbol_kinds.is_empty() {
-        changes.retain(|change| {
-            args.filters
-                .symbol_kinds
-                .iter()
-                .any(|kind| kind.eq_ignore_ascii_case(&change.kind))
-        });
-    }
-
-    if !args.include_unchanged {
-        changes.retain(|change| change.change_type != "unchanged");
-    }
-
-    // Phase 5: Compute summary before pagination
-    let summary = diff_comparator::compute_summary(&changes);
-
-    // Phase 6: Apply pagination
-    let total = changes.len();
-    let truncated = total > args.max_results;
-    changes.truncate(args.max_results);
-
-    let (page_slice, next_page_token) = paginate(&changes, &args.pagination);
-    let page_changes = page_slice.to_vec();
-
-    let execution_ms = duration_to_ms(start.elapsed());
-
-    tracing::debug!(
-        total_changes = total,
-        page_size = page_changes.len(),
-        execution_ms = execution_ms,
-        "semantic_diff tool completed"
-    );
-
-    Ok(ToolExecution {
-        data: SemanticDiffData {
-            base_ref: args.base.git_ref.clone(),
-            target_ref: args.target.git_ref.clone(),
-            changes: page_changes,
-            summary,
-            total: total as u64,
-        },
-        used_index: false,
-        used_graph: true,
-        graph_metadata: None,
-        execution_ms,
-        next_page_token,
-        total: Some(total as u64),
-        truncated: Some(truncated),
-        candidates_scanned: None,
-        workspace_path: crate::execution::symbol_utils::path_to_forward_slash(workspace_root),
+    Ok(NodeChange {
+        symbol_name,
+        qualified_name,
+        kind,
+        change_type: change_type.as_str().to_string(),
+        base_location: base_wire,
+        target_location: target_wire,
+        signature_before,
+        signature_after,
     })
-    // worktree_mgr drops here, automatic cleanup
+}
+
+/// Convert a sqry-db [`sqry_db::NodeLocation`] into the MCP wire-format
+/// [`NodeRefData`]. Worktree paths are translated back to the real
+/// workspace root; the resulting path is rendered as a `file://` URI.
+fn db_location_to_ref(
+    loc: &sqry_db::NodeLocation,
+    workspace_root: &std::path::Path,
+    worktree_root: &std::path::Path,
+    symbol_name: &str,
+    qualified_name: &str,
+    kind: &str,
+) -> Result<NodeRefData> {
+    let real_path = if let Ok(relative) = loc.file_path.strip_prefix(worktree_root) {
+        workspace_root.join(relative)
+    } else {
+        tracing::trace!(
+            path = %loc.file_path.display(),
+            "Worktree path did not match expected root; using as-is"
+        );
+        loc.file_path.clone()
+    };
+
+    let file_uri = url::Url::from_file_path(&real_path)
+        .map_err(|()| anyhow!("Invalid file path: {}", real_path.display()))?
+        .to_string();
+
+    Ok(NodeRefData {
+        name: symbol_name.to_string(),
+        qualified_name: qualified_name.to_string(),
+        kind: kind.to_string(),
+        language: loc.language.clone(),
+        file_uri,
+        range: RangeData {
+            start: PositionData {
+                line: loc.start_line.saturating_sub(1),
+                character: 0,
+            },
+            end: PositionData {
+                line: loc.end_line.saturating_sub(1),
+                character: 0,
+            },
+        },
+        metadata: None,
+        resolution_source: None,
+    })
+}
+
+/// Summarise wire-format changes by their string `change_type`. Matches the
+/// pre-DB20 `diff_comparator::compute_summary` semantics exactly.
+fn summarise_wire_changes(changes: &[NodeChange]) -> crate::execution::types::DiffSummary {
+    let mut summary = crate::execution::types::DiffSummary {
+        added: 0,
+        removed: 0,
+        modified: 0,
+        renamed: 0,
+        signature_changed: 0,
+        unchanged: 0,
+    };
+    for change in changes {
+        match change.change_type.as_str() {
+            "added" => summary.added += 1,
+            "removed" => summary.removed += 1,
+            "modified" => summary.modified += 1,
+            "renamed" => summary.renamed += 1,
+            "signature_changed" => summary.signature_changed += 1,
+            _ => summary.unchanged += 1,
+        }
+    }
+    summary
 }
 
 // ============================================================================
@@ -1206,10 +960,7 @@ use crate::tools::{
     CycleType, DuplicateType, FindCyclesArgs, FindDuplicatesArgs, FindUnusedArgs, UnusedScope,
 };
 use sqry_core::query::DuplicateType as CoreDuplicateType;
-use sqry_core::query::{
-    CircularConfig, CircularType, DuplicateConfig, build_duplicate_groups_graph,
-    find_all_cycles_graph, is_node_in_cycle,
-};
+use sqry_core::query::{CircularType, DuplicateConfig, build_duplicate_groups_graph};
 
 /// Convert raw duplicate groups from the core library into output-format `DuplicateGroupData`.
 ///
@@ -1218,6 +969,7 @@ use sqry_core::query::{
 fn convert_duplicate_groups(
     groups: Vec<sqry_core::query::DuplicateGroup>,
     snapshot: &sqry_core::graph::unified::concurrent::GraphSnapshot,
+    graph: &sqry_core::graph::unified::concurrent::CodeGraph,
     workspace_root: &std::path::Path,
 ) -> Vec<DuplicateGroupData> {
     let strings = snapshot.strings();
@@ -1225,7 +977,7 @@ fn convert_duplicate_groups(
 
     groups
         .into_iter()
-        .filter(|g| g.node_ids.len() > 1)
+        .filter(|g| g.total_members > 1)
         .map(|group| {
             let symbols: Vec<DuplicateSymbolData> = group
                 .node_ids
@@ -1253,12 +1005,14 @@ fn convert_duplicate_groups(
 
                     let language = language.map_or("unknown".to_string(), |l| l.to_string());
 
+                    let loc = node_location_for_reporting(graph, node_id, workspace_root);
+
                     Some(DuplicateSymbolData {
                         name,
                         qualified_name,
                         kind: format!("{:?}", entry.kind).to_lowercase(),
                         file_uri,
-                        line: entry.start_line,
+                        line: loc.as_ref().map_or(entry.start_line, |l| l.line),
                         language,
                     })
                 })
@@ -1276,10 +1030,12 @@ fn convert_duplicate_groups(
             DuplicateGroupData {
                 group_id,
                 count: symbols.len(),
+                total_members: group.total_members,
+                members_truncated: group.members_truncated,
                 symbols,
             }
         })
-        .filter(|g| g.count > 1)
+        .filter(|g| g.total_members > 1)
         .collect()
 }
 
@@ -1315,6 +1071,7 @@ pub fn execute_find_duplicates(
         },
         max_results: args.max_results,
         is_exact_only: args.exact || args.threshold >= 100,
+        max_members_per_group: args.max_members_per_group,
     };
 
     // Find duplicates using CodeGraph
@@ -1323,12 +1080,14 @@ pub fn execute_find_duplicates(
     let snapshot = graph.snapshot();
 
     // Convert to output format
-    let mut output_groups = convert_duplicate_groups(groups, &snapshot, &workspace_root);
+    let mut output_groups = convert_duplicate_groups(groups, &snapshot, &graph, &workspace_root);
 
-    // Sort by group size (largest first), secondary by group_id for stability
+    // Sort by total_members (largest first, using pre-truncation count so that
+    // large groups with the same displayed count are ranked correctly), secondary
+    // by group_id for stability.
     output_groups.sort_by(|a, b| {
-        b.count
-            .cmp(&a.count)
+        b.total_members
+            .cmp(&a.total_members)
             .then_with(|| a.group_id.cmp(&b.group_id))
     });
 
@@ -1366,6 +1125,7 @@ pub fn execute_find_duplicates(
 fn resolve_cycle_node(
     name: &str,
     snapshot: &sqry_core::graph::unified::concurrent::GraphSnapshot,
+    graph: &sqry_core::graph::unified::concurrent::CodeGraph,
     workspace_root: &std::path::Path,
 ) -> CycleNodeData {
     let strings = snapshot.strings();
@@ -1390,11 +1150,13 @@ fn resolve_cycle_node(
             Into::into,
         );
 
+        let loc = node_location_for_reporting(graph, node_id, workspace_root);
+
         return CycleNodeData {
             name: node_name,
             qualified_name,
             file_uri,
-            line: entry.start_line,
+            line: loc.as_ref().map_or(entry.start_line, |l| l.line),
         };
     }
 
@@ -1411,6 +1173,7 @@ fn resolve_cycle_node(
 fn convert_cycles_to_output(
     cycles: Vec<Vec<String>>,
     snapshot: &sqry_core::graph::unified::concurrent::GraphSnapshot,
+    graph: &sqry_core::graph::unified::concurrent::CodeGraph,
     workspace_root: &std::path::Path,
 ) -> Vec<CycleData> {
     cycles
@@ -1418,7 +1181,7 @@ fn convert_cycles_to_output(
         .map(|cycle| {
             let nodes: Vec<CycleNodeData> = cycle
                 .iter()
-                .map(|name| resolve_cycle_node(name, snapshot, workspace_root))
+                .map(|name| resolve_cycle_node(name, snapshot, graph, workspace_root))
                 .collect();
 
             // Build chain string: A -> B -> C -> A
@@ -1441,8 +1204,43 @@ fn convert_cycles_to_output(
 
 /// Execute the `find_cycles` tool to find circular dependencies.
 ///
-/// Uses `CodeGraph` with `find_all_cycles_graph` for cycle detection.
+/// # Dispatch path (DB17)
+///
+/// `find_cycles` is a **name-keyed predicate** under the Phase 3C dispatch
+/// taxonomy (`ART:mcp-dispatch-taxonomy`): "enumerate every non-trivial SCC
+/// in the graph's `Calls`/`Imports` edge-kind projection whose size falls
+/// inside `[min_depth, max_depth]`". That is the planner contract sqry-db's
+/// [`sqry_db::queries::CyclesQuery`] caches, keyed on
+/// [`sqry_db::queries::CyclesKey`] (`circular_type` + `bounds`).
+///
+/// The handler:
+/// 1. Acquires a per-call [`sqry_db::QueryDb`] via
+///    [`crate::execution::relation_dispatch::make_query_db`] (see that
+///    module's docs for the Phase 3 dispatch taxonomy).
+/// 2. Dispatches [`sqry_db::queries::CyclesQuery`] with the user's
+///    `circular_type` and a [`sqry_db::queries::CycleBounds`] copy of the
+///    MCP filter knobs. sqry-db runs one cached Tarjan SCC pass per edge
+///    kind (via [`sqry_db::queries::SccQuery`]) and applies the bounds on
+///    top. Second calls on the same snapshot are O(1) cache hits.
+/// 3. Materializes the returned
+///    [`sqry_core::graph::unified::node::NodeId`] vectors into the
+///    qualified-name-shaped [`Vec<Vec<String>>`] that
+///    [`convert_cycles_to_output`] consumes via [`materialize_cycle_node_ids`],
+///    then builds per-cycle [`CycleData`] rows for the MCP payload.
+///
+/// # Behavior shift
+///
+/// The pre-DB17 implementation tried to load a pre-persisted `SccData`
+/// blob from disk (`try_load_scc`) and only fell back to on-demand Tarjan
+/// when the blob was missing. That fast-path is retired: sqry-db computes
+/// and caches on demand in-memory, so no disk round-trip is needed and the
+/// "CSR build"/"SCC computation" failure-warning branch
+/// (`handle_cycle_analysis_failure`) that printed "Run `sqry index --force`
+/// or `sqry analyze`" is gone. The result set is still bounded by
+/// `args.max_results` plus `min_depth`/`max_depth`, matching the old
+/// `extract_cycles_from_scc` + `should_include_scc` filtering exactly.
 pub fn execute_find_cycles(args: &FindCyclesArgs) -> Result<ToolExecution<FindCyclesData>> {
+    // Pre-refactor timing: `start` fires before engine resolution.
     let start = Instant::now();
     let workspace_path = resolve_workspace_path(&args.path);
     let engine = engine_for_workspace(workspace_path.as_ref())?;
@@ -1452,66 +1250,104 @@ pub fn execute_find_cycles(args: &FindCyclesArgs) -> Result<ToolExecution<FindCy
     // Require the unified graph
     let graph = engine.ensure_graph()?;
 
-    // Convert args to core types
-    let core_cycle_type = match args.cycle_type {
-        CycleType::Calls => CircularType::Calls,
-        CycleType::Imports => CircularType::Imports,
-        CycleType::Modules => CircularType::Modules,
+    let ctx = crate::daemon_adapter::WorkspaceContext {
+        workspace_root,
+        graph,
+        executor: engine.executor_arc(),
     };
-
-    let config = CircularConfig {
-        min_depth: args.min_depth,
-        max_depth: args.max_depth,
-        max_results: args.max_results,
-        should_include_self_loops: args.include_self_loops,
-    };
-
-    let storage = sqry_core::graph::unified::persistence::GraphStorage::new(&workspace_root);
-    let snapshot = graph.snapshot();
-    let cycles = if let Some(scc_data) = sqry_core::graph::unified::analysis::try_load_scc(
-        &storage,
-        &snapshot,
-        cycle_edge_kind_name(args.cycle_type),
-    ) {
-        extract_cycles_from_scc(&graph, &scc_data, &config)
-    } else {
-        compute_cycles_from_graph(&graph, &snapshot, args.cycle_type, core_cycle_type, &config)?
-    };
-
-    // Convert to output format
-    let output_cycles = convert_cycles_to_output(cycles, &snapshot, &workspace_root);
-
-    let total = output_cycles.len();
-    let (page_slice, next_page_token) = paginate(&output_cycles, &args.pagination);
-    let page_cycles = page_slice.to_vec();
-
-    Ok(ToolExecution {
-        data: FindCyclesData {
-            cycle_type: cycle_type_label(args.cycle_type).to_string(),
-            cycles: page_cycles,
-            total: total as u64,
-        },
-        used_index: false,
-        used_graph: true,
-        graph_metadata: None,
-        execution_ms: duration_to_ms(start.elapsed()),
-        next_page_token,
-        total: Some(total as u64),
-        truncated: Some(total > args.max_results),
-        candidates_scanned: None,
-        workspace_path: crate::execution::symbol_utils::path_to_forward_slash(workspace_root),
-    })
+    inner::execute_find_cycles(&ctx, args, start)
 }
 
 // ============================================================================
 // Find Unused Tool
 // ============================================================================
 
+/// Map the MCP [`UnusedScope`] to a sqry-core [`sqry_core::query::UnusedScope`]
+/// that is a *provable superset* of the MCP semantic, so the MCP post-filter
+/// in [`should_include_in_unused_results`] / [`matches_scope_filter`] is the
+/// single authoritative gate on what reaches the user.
+///
+/// # Why this is not an isomorphic mapping
+///
+/// The sqry-db scope must **never be narrower** than MCP's. Post-filtering
+/// cannot recover rows sqry-db never returned. Audit:
+///
+/// | MCP scope | sqry-db semantic          | Relation to MCP   | Dispatch              |
+/// |-----------|---------------------------|-------------------|-----------------------|
+/// | `All`     | any node                  | exact             | sqry-db `All`         |
+/// | `Public`  | visibility in `public`/`pub` | superset (MCP is strict `"public"`) | sqry-db `Public` |
+/// | `Private` | visibility not in `public`/`pub` | superset (MCP is strict `"private"`) | sqry-db `Private` |
+/// | `Function`| `Function` \| `Method`    | exact             | sqry-db `Function`    |
+/// | `Struct`  | `Struct` \| `Class`       | **narrower** (MCP adds `Interface` \| `Trait`) | sqry-db `All` |
+///
+/// The DB16 landing passed `Struct` through verbatim, which silently dropped
+/// unused interfaces and traits from results. That regression is the Codex
+/// review blocker fixed here.
+fn mcp_scope_to_core_superset(scope: UnusedScope) -> sqry_core::query::UnusedScope {
+    match scope {
+        UnusedScope::All => sqry_core::query::UnusedScope::All,
+        UnusedScope::Public => sqry_core::query::UnusedScope::Public,
+        UnusedScope::Private => sqry_core::query::UnusedScope::Private,
+        UnusedScope::Function => sqry_core::query::UnusedScope::Function,
+        // MCP `Struct` is `Struct | Class | Interface | Trait`; sqry-db's
+        // `Struct` is only `Struct | Class`. Use `All` as the provable
+        // superset and let the MCP post-filter narrow.
+        UnusedScope::Struct => sqry_core::query::UnusedScope::All,
+    }
+}
+
 /// Execute the `find_unused` tool to find unused/dead code.
 ///
-/// Note: This feature requires reachability analysis which is being migrated to `CodeGraph`.
-/// Currently returns empty results as unused detection is being migrated.
+/// # Dispatch path (DB16 + Codex post-review followup)
+///
+/// `find_unused` is a **name-keyed predicate** under the Phase 3C dispatch
+/// taxonomy: the question is "which nodes match this scope AND are not
+/// reachable from any entry point", which is exactly the planner-canonical
+/// contract that sqry-db's [`sqry_db::queries::UnusedQuery`] computes.
+///
+/// The handler acquires a per-call [`sqry_db::QueryDb`] via
+/// [`crate::execution::relation_dispatch::make_query_db`] (see that module's
+/// docs for the Phase 3 dispatch taxonomy), dispatches
+/// [`sqry_db::queries::UnusedQuery`] keyed on
+/// [`sqry_db::queries::UnusedKey`] with:
+///
+/// * a **superset** sqry-db scope chosen by [`mcp_scope_to_core_superset`]
+///   so the stage never returns fewer candidates than MCP's contract
+///   accepts (see that function's docs for the full audit table —
+///   `UnusedScope::Struct` in particular maps to sqry-db `All` because
+///   sqry-db's `Struct` drops `Interface` / `Trait`), and
+/// * `max_results = node_count` — i.e. no sqry-db truncation — whenever
+///   MCP has a post-filter that may reject raw candidates (stricter
+///   scope, `languages`, or `kinds`). This replaces the earlier fixed
+///   `16x` cap, which could silently under-return when the first
+///   16 × `max_results` raw candidates were mostly filtered out MCP-side
+///   (Codex finding #2). When no MCP-side filter can narrow (MCP scope
+///   is `All` / `Function` and both filter lists are empty), sqry-db
+///   scope matches MCP exactly and the handler asks for only
+///   `max_results` rows — strictly cheaper.
+///
+/// The post-filter ([`should_include_in_unused_results`]) applies MCP's
+/// `languages` and `kinds` filters AND re-applies the scope filter using
+/// MCP's stricter semantic for `Private` (visibility string is literally
+/// `"private"`, rather than sqry-db's broader "anything that is not
+/// `public`/`pub`") and broader semantic for `Struct` (`Struct | Class |
+/// Interface | Trait`, vs sqry-db's `Struct | Class`). Because sqry-db is
+/// invoked with the superset scope, the post-filter is the single
+/// authoritative gate on what reaches the user, and the MCP API surface
+/// is preserved exactly.
+///
+/// # Behavior shift
+///
+/// Results are now planner-canonical: the cache lives in sqry-db, so a
+/// warm cache across MCP calls on the same snapshot is O(1) after the first
+/// query. The legacy SCC-condensation fast-path (`find_unused_with_reachability`,
+/// `mark_reachable_from_entries`, `identify_entry_points`) has been deleted —
+/// those were DB14-era precomputed-SCC consumers that the sqry-db
+/// [`sqry_db::queries::ReachableFromEntryPointsQuery`] supersedes. The
+/// previous "Analysis files not found" empty-result warning branch is gone;
+/// sqry-db computes on demand and caches.
 pub fn execute_find_unused(args: &FindUnusedArgs) -> Result<ToolExecution<FindUnusedData>> {
+    // Pre-refactor timing: `start` fires before engine resolution.
     let start = Instant::now();
     let workspace_path = resolve_workspace_path(&args.path);
     let engine = engine_for_workspace(workspace_path.as_ref())?;
@@ -1521,53 +1357,12 @@ pub fn execute_find_unused(args: &FindUnusedArgs) -> Result<ToolExecution<FindUn
     // Require the unified graph
     let graph = engine.ensure_graph()?;
 
-    let snapshot = graph.snapshot();
-
-    let scope_str = match args.scope {
-        UnusedScope::Public => "public",
-        UnusedScope::Private => "private",
-        UnusedScope::Function => "function",
-        UnusedScope::Struct => "struct",
-        UnusedScope::All => "all",
+    let ctx = crate::daemon_adapter::WorkspaceContext {
+        workspace_root,
+        graph,
+        executor: engine.executor_arc(),
     };
-
-    // Try Pass 5 optimization: use precomputed analyses for reachability
-    let storage = sqry_core::graph::unified::persistence::GraphStorage::new(&workspace_root);
-
-    let unused_symbols = if let Some((scc, cond)) =
-        sqry_core::graph::unified::analysis::try_load_scc_and_condensation(
-            &storage, &snapshot, "calls",
-        ) {
-        // Fast path: reachability-based unused detection
-        find_unused_with_reachability(&snapshot, &scc, &cond, args, &workspace_root)
-    } else {
-        // No analyses available — skip rather than hang
-        tracing::warn!(
-            "Analysis files not found at {}. Run `sqry index --force` or `sqry analyze` to rebuild analysis data for find_unused.",
-            storage.analysis_dir().display(),
-        );
-        Vec::new()
-    };
-
-    let total = unused_symbols.len();
-    let (page_slice, next_page_token) = paginate(&unused_symbols, &args.pagination);
-
-    Ok(ToolExecution {
-        data: FindUnusedData {
-            scope: scope_str.to_string(),
-            symbols: page_slice.to_vec(),
-            total: total as u64,
-        },
-        used_index: false,
-        used_graph: true,
-        graph_metadata: None,
-        execution_ms: duration_to_ms(start.elapsed()),
-        next_page_token,
-        total: Some(total as u64),
-        truncated: Some(total > args.max_results),
-        candidates_scanned: None,
-        workspace_path: crate::execution::symbol_utils::path_to_forward_slash(workspace_root),
-    })
+    inner::execute_find_unused(&ctx, args, start)
 }
 
 // ============================================================================
@@ -1580,62 +1375,78 @@ use crate::execution::types::{
 };
 use crate::tools::{DirectCalleesArgs, DirectCallersArgs, IsNodeInCycleArgs, PatternSearchArgs};
 
-/// Find the cycle containing a specific node, if it is in one.
-///
-/// Returns `(true, Some(cycle))` if the node is in a cycle, `(false, None)` otherwise.
-/// Uses precomputed SCC data when available for O(1) membership check.
-fn find_cycle_containing_node(
-    node_id: sqry_core::graph::unified::node::NodeId,
-    graph: &sqry_core::graph::unified::concurrent::CodeGraph,
-    snapshot: &sqry_core::graph::unified::concurrent::GraphSnapshot,
-    core_cycle_type: CircularType,
-    config: &CircularConfig,
-    scc_data_opt: Option<&sqry_core::graph::unified::analysis::SccData>,
-) -> (bool, Option<Vec<String>>) {
-    let strings = snapshot.strings();
-
-    let node_in_cycle = if let Some(scc_data) = scc_data_opt {
-        is_node_in_cycle_precomputed(node_id, scc_data, config)
-    } else {
-        is_node_in_cycle(node_id, core_cycle_type, graph, config)
-    };
-
-    if !node_in_cycle {
-        return (false, None);
-    }
-
-    // Only fetch cycle details if node is actually in a cycle
-    let cycles = if let Some(scc_data) = scc_data_opt {
-        extract_cycles_from_scc(graph, scc_data, config)
-    } else {
-        find_all_cycles_graph(core_cycle_type, graph, config)
-    };
-
-    // Get the node's name for comparison
-    let entry = snapshot.get_node(node_id);
-    let node_name = entry
-        .and_then(|e| {
-            e.qualified_name
-                .and_then(|id| strings.resolve(id))
-                .or_else(|| strings.resolve(e.name))
-                .map(|s| s.to_string())
-        })
-        .unwrap_or_default();
-
-    let found_cycle = cycles
-        .iter()
-        .find(|c| c.iter().any(|name| name == &node_name));
-
-    (true, found_cycle.cloned())
-}
-
 /// Execute the `is_node_in_cycle` tool to check if a symbol is in a cycle.
 ///
-/// Uses the optimized `is_node_in_cycle` function for efficient cycle detection.
-/// Only performs full cycle enumeration if the node is found to be in a cycle.
+/// # Dispatch path (DB17)
+///
+/// `is_node_in_cycle` is a **hybrid** under the Phase 3C dispatch taxonomy:
+/// the surface takes a user-supplied symbol name (resolved via
+/// [`resolve_global_symbol_strict`] — ambiguous simple names are rejected
+/// with a canonical-qualified-name hint, mirroring the DB16 policy for
+/// NodeId-anchored handlers), but the predicate it then answers is
+/// strictly per-node ("does this `NodeId` participate in a cycle whose
+/// size falls inside `[min_depth, max_depth]`"), which is exactly the
+/// planner contract sqry-db's [`sqry_db::queries::IsInCycleQuery`]
+/// caches on [`sqry_db::queries::IsInCycleKey`].
+///
+/// The handler:
+/// 1. Resolves the symbol strictly to a single `NodeId` (ambiguous names
+///    surface an MCP-error with the canonical-name workaround — a stricter
+///    policy than sqry-db's name-keyed union because answering "in a
+///    cycle?" for several unrelated `NodeId`s under one request has no
+///    well-defined single boolean).
+/// 2. Dispatches [`sqry_db::queries::IsInCycleQuery`] via
+///    [`crate::execution::relation_dispatch::make_query_db`] to get the
+///    boolean answer.
+/// 3. Only if the answer is `true` dispatches [`sqry_db::queries::CyclesQuery`]
+///    with the same `circular_type` + `bounds` to fetch the containing
+///    cycle. sqry-db's `IsInCycleQuery` returns only `bool` today, so
+///    this is a two-query flow; the second call is a cache hit on the
+///    already-warmed [`sqry_db::queries::SccQuery`] and O(1) after the
+///    first. Swapping to a richer `IsInCycleQuery` that returns the
+///    component directly would save one Arc clone but requires sqry-db
+///    changes; that is deliberately out of scope for DB17 (migration,
+///    not query-surface invention — see the DB17 DAG entry).
+///
+/// # Behavior shift
+///
+/// The pre-DB17 implementation tried to load pre-persisted SCC data from
+/// disk via `try_load_scc` and fell back to on-demand Tarjan otherwise.
+/// That disk-first fast-path is retired — sqry-db computes and caches
+/// on demand in memory, so first-call cost shifts into sqry-db and
+/// warm-cache cost is the same O(1). The `CycleType::Modules` edge
+/// probe now flows through
+/// [`sqry_db::queries::cycles::edge_probe_for`], which collapses
+/// `Modules` onto the `Imports` edge kind exactly like the pre-DB17
+/// `cycle_edge_kind_name` helper did.
+///
+/// A second behavior-shift nuance (relative to the pre-DB17 CLI path
+/// `find_cycle_containing_node`): the pre-DB17 implementation treated
+/// `CycleType::Modules` inconsistently between the predicate path and
+/// the materialization path. The DB17 migration routes both through
+/// `edge_probe_for(Modules) = Imports`, so the two calls now agree on
+/// the same edge-probe. If a user previously saw `in_cycle=true` for
+/// `Modules` but got an empty or mismatched `cycle` list (or vice
+/// versa), that asymmetry is silently fixed in DB17.
+///
+/// # `in_cycle=true, cycle=null` is unreachable
+///
+/// Codex peer-review Low 1 (2026-04-15): when the predicate reports
+/// `in_cycle = true`, the containing-cycle lookup must always
+/// succeed. The DB17 followup removes the `max_results = 100` cap on
+/// the warm-cache `CyclesQuery` (it had no semantic justification
+/// once `IsInCycleQuery` had already confirmed the node *is* in a
+/// cycle — a 100-cycle cap could only hide the answer, never improve
+/// correctness) and uses `usize::MAX` for the containing-cycle lookup.
+/// The predicate-path `IsInCycleQuery` still uses the
+/// handler-supplied `max_results = 100` default on the outer
+/// `find_cycles` surface; this function's two calls are aligned on
+/// bounds + circular_type so the `CyclesQuery` is a cache hit on the
+/// already-warmed `SccQuery`.
 pub fn execute_is_node_in_cycle(
     args: &IsNodeInCycleArgs,
 ) -> Result<ToolExecution<NodeInCycleData>> {
+    // Pre-refactor timing: `start` fires before engine resolution.
     let start = Instant::now();
     let workspace_path = resolve_workspace_path(&args.path);
     let engine = engine_for_workspace(workspace_path.as_ref())?;
@@ -1645,65 +1456,12 @@ pub fn execute_is_node_in_cycle(
     // Require the unified graph
     let graph = engine.ensure_graph()?;
 
-    let snapshot = graph.snapshot();
-
-    // Find the node by name
-    let node_id = resolve_global_symbol_strict(&snapshot, &args.symbol)?;
-
-    let core_cycle_type = match args.cycle_type {
-        CycleType::Calls => CircularType::Calls,
-        CycleType::Imports => CircularType::Imports,
-        CycleType::Modules => CircularType::Modules,
+    let ctx = crate::daemon_adapter::WorkspaceContext {
+        workspace_root,
+        graph,
+        executor: engine.executor_arc(),
     };
-
-    let config = CircularConfig {
-        min_depth: args.min_depth,
-        max_depth: args.max_depth,
-        max_results: 100,
-        should_include_self_loops: args.include_self_loops,
-    };
-
-    let edge_kind_name = match args.cycle_type {
-        CycleType::Calls | CycleType::Modules => "calls",
-        CycleType::Imports => "imports",
-    };
-
-    let storage = sqry_core::graph::unified::persistence::GraphStorage::new(&workspace_root);
-    let scc_data_opt =
-        sqry_core::graph::unified::analysis::try_load_scc(&storage, &snapshot, edge_kind_name);
-
-    let (in_cycle, cycle) = find_cycle_containing_node(
-        node_id,
-        &graph,
-        &snapshot,
-        core_cycle_type,
-        &config,
-        scc_data_opt.as_ref(),
-    );
-
-    let cycle_type_str = match args.cycle_type {
-        CycleType::Calls => "calls",
-        CycleType::Imports => "imports",
-        CycleType::Modules => "modules",
-    };
-
-    Ok(ToolExecution {
-        data: NodeInCycleData {
-            symbol: args.symbol.clone(),
-            in_cycle,
-            cycle_type: cycle_type_str.to_string(),
-            cycle,
-        },
-        used_index: false,
-        used_graph: true,
-        graph_metadata: None,
-        execution_ms: duration_to_ms(start.elapsed()),
-        next_page_token: None,
-        total: None,
-        truncated: None,
-        candidates_scanned: None,
-        workspace_path: crate::execution::symbol_utils::path_to_forward_slash(workspace_root),
-    })
+    inner::execute_is_node_in_cycle(&ctx, args, start)
 }
 
 /// Execute the `pattern_search` tool to find symbols by pattern.
@@ -1764,12 +1522,14 @@ pub fn execute_pattern_search(
                 &snapshot, node_id,
             );
 
+            let loc = node_location_for_reporting(&graph, node_id, &workspace_root);
+
             Some(PatternMatchData {
                 name,
                 qualified_name,
                 kind,
                 file_uri,
-                line: entry.start_line,
+                line: loc.as_ref().map_or(entry.start_line, |l| l.line),
                 language,
                 provenance,
             })
@@ -1800,33 +1560,6 @@ pub fn execute_pattern_search(
     })
 }
 
-/// Find one symbol using shared candidate semantics.
-///
-/// Candidate lookup preserves suffix fallback but does not silently collapse
-/// ambiguity to the first match.
-fn resolve_single_candidate_node(
-    snapshot: &sqry_core::graph::unified::concurrent::GraphSnapshot,
-    symbol: &str,
-) -> Result<sqry_core::graph::unified::node::NodeId> {
-    match snapshot.find_symbol_candidates(&SymbolQuery {
-        symbol,
-        file_scope: FileScope::Any,
-        mode: ResolutionMode::AllowSuffixCandidates,
-    }) {
-        SymbolCandidateOutcome::Candidates(candidates) => match candidates.as_slice() {
-            [node_id] => Ok(*node_id),
-            [] => Err(anyhow!("Symbol '{symbol}' not found in graph.")),
-            _ => Err(anyhow!(
-                "Symbol '{symbol}' is ambiguous in graph ({} candidates). Use a canonical qualified name.",
-                candidates.len()
-            )),
-        },
-        SymbolCandidateOutcome::NotFound | SymbolCandidateOutcome::FileNotIndexed => {
-            Err(anyhow!("Symbol '{symbol}' not found in graph."))
-        }
-    }
-}
-
 /// Find similar symbol names for error message suggestions.
 ///
 /// Uses simple substring and prefix matching to find candidates.
@@ -1849,6 +1582,11 @@ fn find_similar_symbols(
         .unwrap_or(&query_lower);
 
     for (_node_id, entry) in snapshot.nodes().iter() {
+        // Gate 0d iter-2 fix: skip unified losers from symbol
+        // suggestion lists. See `NodeEntry::is_unified_loser`.
+        if entry.is_unified_loser() {
+            continue;
+        }
         if suggestions.len() >= max_suggestions * 2 {
             break;
         }
@@ -1909,9 +1647,27 @@ fn decorate_single_symbol_lookup_error(
 }
 
 /// Execute the `direct_callers` tool to find direct callers of a symbol.
+///
+/// DB15 migration: routes the depth-1 caller predicate through sqry-db's
+/// `mcp_callers_query` (which dispatches to `CalleesQuery` per the planner
+/// inversion documented in [`crate::execution::relation_dispatch`]).
+/// Behavior shift relative to the pre-DB15 implementation: instead of
+/// "callers of THE canonically-resolved node X", returns "callers of any
+/// node named X" (planner-aligned, segment-aware). The two collapse for
+/// uniquely-named symbols; for ambiguous names the new behavior is broader
+/// and matches the planner-canonical semantic (Phase N "Unified Surface
+/// Contract": planner IR is the canonical semantics surface, CLI/MCP/LSP
+/// mirror).
+///
+/// # Errors
+///
+/// Returns an error if the workspace path cannot be resolved, the unified
+/// graph cannot be loaded or auto-built, or the requested symbol does not
+/// exist anywhere in the graph (suggestion-decorated diagnostic).
 pub fn execute_direct_callers(
     args: &DirectCallersArgs,
 ) -> Result<ToolExecution<DirectCallersData>> {
+    // Pre-refactor timing: `start` fires before engine resolution.
     let start = Instant::now();
     let workspace_path = resolve_workspace_path(&args.path);
     let engine = engine_for_workspace(workspace_path.as_ref())?;
@@ -1921,78 +1677,29 @@ pub fn execute_direct_callers(
     // Require the unified graph
     let graph = engine.ensure_graph()?;
 
-    let snapshot = graph.snapshot();
-    let strings = snapshot.strings();
-    let files = snapshot.files();
-
-    // Find the target node (with suffix matching for unqualified names)
-    let target_node_id = resolve_single_candidate_node(&snapshot, &args.symbol)
-        .map_err(|error| decorate_single_symbol_lookup_error(&snapshot, &args.symbol, error))?;
-
-    // Get callers using the graph's reverse edges
-    let caller_ids = snapshot.get_callers(target_node_id);
-
-    // Convert to output format
-    let mut callers: Vec<CallerCalleeData> = caller_ids
-        .into_iter()
-        .filter_map(|node_id| {
-            let entry = snapshot.get_node(node_id)?;
-            let name = strings.resolve(entry.name)?.to_string();
-            let language = files.language_for_file(entry.file);
-            let qualified_name = crate::execution::symbol_utils::display_entry_qualified_name(
-                entry, strings, files, &name,
-            );
-
-            let file_path = files.resolve(entry.file)?;
-            let full_path = workspace_root.join(file_path.as_ref());
-            let file_uri = url::Url::from_file_path(&full_path).ok().map_or_else(
-                || crate::execution::symbol_utils::path_to_forward_slash(&full_path),
-                Into::into,
-            );
-
-            let language = language.map_or("unknown".to_string(), |l| l.to_string());
-
-            let kind = format!("{:?}", entry.kind).to_lowercase();
-
-            Some(CallerCalleeData {
-                name,
-                qualified_name,
-                kind,
-                file_uri,
-                line: entry.start_line,
-                language,
-            })
-        })
-        .collect();
-
-    let total = callers.len();
-    callers.truncate(args.max_results);
-
-    let (page_slice, next_page_token) = paginate(&callers, &args.pagination);
-    let page_callers = page_slice.to_vec();
-
-    Ok(ToolExecution {
-        data: DirectCallersData {
-            target: args.symbol.clone(),
-            callers: page_callers,
-            total: total as u64,
-        },
-        used_index: false,
-        used_graph: true,
-        graph_metadata: None,
-        execution_ms: duration_to_ms(start.elapsed()),
-        next_page_token,
-        total: Some(total as u64),
-        truncated: Some(total > args.max_results),
-        candidates_scanned: None,
-        workspace_path: crate::execution::symbol_utils::path_to_forward_slash(workspace_root),
-    })
+    let ctx = crate::daemon_adapter::WorkspaceContext {
+        workspace_root,
+        graph,
+        executor: engine.executor_arc(),
+    };
+    inner::execute_direct_callers(&ctx, args, start)
 }
 
 /// Execute the `direct_callees` tool to find direct callees of a symbol.
+///
+/// DB15 migration: routes the depth-1 callee predicate through sqry-db's
+/// `mcp_callees_query` (which dispatches to `CallersQuery` per the planner
+/// inversion documented in [`crate::execution::relation_dispatch`]). See
+/// [`execute_direct_callers`] for the behavior-shift note that applies
+/// equally here.
+///
+/// # Errors
+///
+/// Same error surface as [`execute_direct_callers`].
 pub fn execute_direct_callees(
     args: &DirectCalleesArgs,
 ) -> Result<ToolExecution<DirectCalleesData>> {
+    // Pre-refactor timing: `start` fires before engine resolution.
     let start = Instant::now();
     let workspace_path = resolve_workspace_path(&args.path);
     let engine = engine_for_workspace(workspace_path.as_ref())?;
@@ -2002,21 +1709,28 @@ pub fn execute_direct_callees(
     // Require the unified graph
     let graph = engine.ensure_graph()?;
 
-    let snapshot = graph.snapshot();
+    let ctx = crate::daemon_adapter::WorkspaceContext {
+        workspace_root,
+        graph,
+        executor: engine.executor_arc(),
+    };
+    inner::execute_direct_callees(&ctx, args, start)
+}
+
+/// Build `CallerCalleeData` rows for a sqry-db result set, looking up
+/// per-node display info from the snapshot.
+fn build_caller_callee_data(
+    graph: &sqry_core::graph::unified::concurrent::CodeGraph,
+    snapshot: &sqry_core::graph::unified::concurrent::GraphSnapshot,
+    node_ids: &[sqry_core::graph::unified::node::NodeId],
+    workspace_root: &std::path::Path,
+) -> Vec<CallerCalleeData> {
     let strings = snapshot.strings();
     let files = snapshot.files();
 
-    // Find the source node (with suffix matching for unqualified names)
-    let source_node_id = resolve_single_candidate_node(&snapshot, &args.symbol)
-        .map_err(|error| decorate_single_symbol_lookup_error(&snapshot, &args.symbol, error))?;
-
-    // Get callees using the graph's forward edges
-    let callee_ids = snapshot.get_callees(source_node_id);
-
-    // Convert to output format
-    let mut callees: Vec<CallerCalleeData> = callee_ids
-        .into_iter()
-        .filter_map(|node_id| {
+    node_ids
+        .iter()
+        .filter_map(|&node_id| {
             let entry = snapshot.get_node(node_id)?;
             let name = strings.resolve(entry.name)?.to_string();
             let language = files.language_for_file(entry.file);
@@ -2024,14 +1738,33 @@ pub fn execute_direct_callees(
                 entry, strings, files, &name,
             );
 
-            let file_path = files.resolve(entry.file)?;
-            let full_path = workspace_root.join(file_path.as_ref());
-            let file_uri = url::Url::from_file_path(&full_path).ok().map_or_else(
-                || crate::execution::symbol_utils::path_to_forward_slash(&full_path),
+            let loc = node_location_for_reporting(graph, node_id, workspace_root);
+
+            // Resolved location may live in a different file than
+            // entry.file (cross-file stub via CanonicalSibling /
+            // ExternSymbol). Use the resolved location's file/language so
+            // the file_uri / line / language fields stay consistent.
+            let file_path = loc
+                .as_ref()
+                .filter(|l| !l.file_path.is_empty())
+                .map(|l| workspace_root.join(&l.file_path))
+                .or_else(|| {
+                    files
+                        .resolve(entry.file)
+                        .map(|p| workspace_root.join(p.as_ref()))
+                })
+                .unwrap_or_default();
+
+            let file_uri = url::Url::from_file_path(&file_path).ok().map_or_else(
+                || crate::execution::symbol_utils::path_to_forward_slash(&file_path),
                 Into::into,
             );
 
-            let language = language.map_or("unknown".to_string(), |l| l.to_string());
+            let language = loc
+                .as_ref()
+                .and_then(|l| l.language.clone())
+                .or_else(|| language.map(|l| l.to_string()))
+                .unwrap_or_else(|| "unknown".to_string());
 
             let kind = format!("{:?}", entry.kind).to_lowercase();
 
@@ -2040,104 +1773,533 @@ pub fn execute_direct_callees(
                 qualified_name,
                 kind,
                 file_uri,
-                line: entry.start_line,
+                line: loc.as_ref().map_or(entry.start_line, |l| l.line),
                 language,
             })
         })
-        .collect();
-
-    let total = callees.len();
-    callees.truncate(args.max_results);
-
-    let (page_slice, next_page_token) = paginate(&callees, &args.pagination);
-    let page_callees = page_slice.to_vec();
-
-    Ok(ToolExecution {
-        data: DirectCalleesData {
-            source: args.symbol.clone(),
-            callees: page_callees,
-            total: total as u64,
-        },
-        used_index: false,
-        used_graph: true,
-        graph_metadata: None,
-        execution_ms: duration_to_ms(start.elapsed()),
-        next_page_token,
-        total: Some(total as u64),
-        truncated: Some(total > args.max_results),
-        candidates_scanned: None,
-        workspace_path: crate::execution::symbol_utils::path_to_forward_slash(workspace_root),
-    })
+        .collect()
 }
+
+pub(crate) mod inner {
+    use super::*;
+
+    /// Daemon/SqryServer-shared body for `dependency_impact`.
+    pub(crate) fn execute_dependency_impact(
+        ctx: &crate::daemon_adapter::WorkspaceContext,
+        args: &DependencyImpactArgs,
+        start: Instant,
+    ) -> Result<ToolExecution<DependencyImpactData>> {
+        let workspace_root: &std::path::Path = &ctx.workspace_root;
+        let graph = &ctx.graph;
+
+        let snapshot = graph.snapshot();
+
+        let target_node_id =
+            resolve_global_symbol_strict(&snapshot, &args.symbol, args.file_path.as_deref())?;
+
+        let (mut impacted, affected_files) =
+            collect_impacted_callers_bfs(&snapshot, graph, target_node_id, args, workspace_root);
+
+        let total = impacted.len();
+        let truncated = total > args.max_results;
+        impacted.truncate(args.max_results);
+
+        let (page_slice, next_page_token) = paginate(&impacted, &args.pagination);
+        let page_impacted: Vec<ImpactedSymbol> = page_slice.to_vec();
+
+        let affected_files_vec = if args.include_files {
+            let mut files_list: Vec<String> = affected_files.into_iter().collect();
+            files_list.sort();
+            Some(files_list)
+        } else {
+            None
+        };
+
+        let truncated_flag = truncated || next_page_token.is_some();
+
+        Ok(ToolExecution {
+            data: DependencyImpactData {
+                target_symbol: args.symbol.clone(),
+                impacted_symbols: page_impacted,
+                affected_files: affected_files_vec,
+                total: total as u64,
+            },
+            used_index: false,
+            used_graph: true,
+            graph_metadata: None,
+            execution_ms: duration_to_ms(start.elapsed()),
+            next_page_token,
+            total: Some(total as u64),
+            truncated: Some(truncated_flag),
+            candidates_scanned: None,
+            workspace_path: crate::execution::symbol_utils::path_to_forward_slash(workspace_root),
+        })
+    }
+
+    /// Daemon/SqryServer-shared body for `semantic_diff`.
+    ///
+    /// `ctx.graph` is unused — `semantic_diff` builds per-git-ref graphs from
+    /// worktrees (see rustdoc on the public wrapper). The context is still
+    /// supplied for daemon-path symmetry.
+    pub(crate) fn execute_semantic_diff(
+        ctx: &crate::daemon_adapter::WorkspaceContext,
+        args: &SemanticDiffArgs,
+        start: Instant,
+    ) -> Result<ToolExecution<SemanticDiffData>> {
+        use sqry_core::graph::unified::build::{BuildConfig, build_unified_graph};
+        use sqry_db::{ComparativeQueryDb, DiffOptions};
+
+        let workspace_root: &std::path::Path = &ctx.workspace_root;
+
+        tracing::debug!(
+            base_ref = %args.base.git_ref,
+            target_ref = %args.target.git_ref,
+            include_unchanged = args.include_unchanged,
+            max_results = args.max_results,
+            "Executing semantic_diff tool"
+        );
+
+        // Phase 1: Create git worktrees (one per ref). The manager is RAII: the
+        // worktrees are cleaned up when it drops at the end of this function.
+        let worktree_mgr = git_worktree::WorktreeManager::create(
+            workspace_root,
+            &args.base.git_ref,
+            &args.target.git_ref,
+        )?;
+
+        // Phase 2: Build CodeGraphs for both worktrees. These do NOT populate
+        // the engine's shared `QueryDb` — the handler owns them directly.
+        let plugins = Engine::plugin_manager();
+        let config = BuildConfig::default();
+        let base_graph = build_unified_graph(worktree_mgr.base_path(), &plugins, &config)
+            .map_err(|e| anyhow!("Failed to build base graph: {e}"))?;
+        let target_graph = build_unified_graph(worktree_mgr.target_path(), &plugins, &config)
+            .map_err(|e| anyhow!("Failed to build target graph: {e}"))?;
+
+        // Phase 3: Compare snapshots through ComparativeQueryDb (uncached).
+        let base_snapshot = Arc::new(base_graph.snapshot());
+        let target_snapshot = Arc::new(target_graph.snapshot());
+        let cmp_db =
+            ComparativeQueryDb::new(Arc::clone(&base_snapshot), Arc::clone(&target_snapshot));
+        let diff_opts = DiffOptions {
+            old_worktree_path: worktree_mgr.base_path().to_path_buf(),
+            new_worktree_path: worktree_mgr.target_path().to_path_buf(),
+        };
+        let diff_output = cmp_db.diff(&diff_opts);
+
+        let worktree_base = worktree_mgr.base_path().to_path_buf();
+        let worktree_target = worktree_mgr.target_path().to_path_buf();
+        let mut changes: Vec<NodeChange> = diff_output
+            .changes
+            .into_iter()
+            .map(|c| convert_db_change_to_wire(c, workspace_root, &worktree_base, &worktree_target))
+            .collect::<Result<Vec<_>>>()?;
+
+        // Phase 4: Apply filters (wire-level strings — predicates unchanged).
+        if !args.filters.change_types.is_empty() {
+            changes.retain(|change| {
+                args.filters
+                    .change_types
+                    .iter()
+                    .any(|ct| ct.as_str() == change.change_type)
+            });
+        }
+        if !args.filters.symbol_kinds.is_empty() {
+            changes.retain(|change| {
+                args.filters
+                    .symbol_kinds
+                    .iter()
+                    .any(|kind| kind.eq_ignore_ascii_case(&change.kind))
+            });
+        }
+        if !args.include_unchanged {
+            changes.retain(|change| change.change_type != "unchanged");
+        }
+
+        // Phase 5: Compute summary post-filter, pre-pagination.
+        let summary = summarise_wire_changes(&changes);
+
+        // Phase 6: Apply pagination.
+        let total = changes.len();
+        let truncated = total > args.max_results;
+        changes.truncate(args.max_results);
+
+        let (page_slice, next_page_token) = paginate(&changes, &args.pagination);
+        let page_changes = page_slice.to_vec();
+
+        let execution_ms = duration_to_ms(start.elapsed());
+
+        tracing::debug!(
+            total_changes = total,
+            page_size = page_changes.len(),
+            execution_ms = execution_ms,
+            "semantic_diff tool completed"
+        );
+
+        Ok(ToolExecution {
+            data: SemanticDiffData {
+                base_ref: args.base.git_ref.clone(),
+                target_ref: args.target.git_ref.clone(),
+                changes: page_changes,
+                summary,
+                total: total as u64,
+            },
+            used_index: false,
+            used_graph: true,
+            graph_metadata: None,
+            execution_ms,
+            next_page_token,
+            total: Some(total as u64),
+            truncated: Some(truncated),
+            candidates_scanned: None,
+            workspace_path: crate::execution::symbol_utils::path_to_forward_slash(workspace_root),
+        })
+        // worktree_mgr drops here, automatic cleanup.
+    }
+
+    /// Daemon/SqryServer-shared body for `find_cycles`.
+    pub(crate) fn execute_find_cycles(
+        ctx: &crate::daemon_adapter::WorkspaceContext,
+        args: &FindCyclesArgs,
+        start: Instant,
+    ) -> Result<ToolExecution<FindCyclesData>> {
+        let workspace_root: &std::path::Path = &ctx.workspace_root;
+        let graph = &ctx.graph;
+
+        let snapshot = Arc::new(graph.snapshot());
+
+        // Route through sqry-db: `CyclesQuery` is the name-keyed cycle
+        // predicate in the planner taxonomy, cached per-snapshot.
+        // PN3 CLIENT_LOAD: cold-load derived cache from workspace companion file.
+        let db =
+            sqry_db::queries::dispatch::make_query_db_cold(Arc::clone(&snapshot), workspace_root);
+        let key = sqry_db::queries::CyclesKey {
+            circular_type: mcp_cycle_type_to_core(args.cycle_type),
+            bounds: cycle_bounds_for(
+                args.min_depth,
+                args.max_depth,
+                args.max_results,
+                args.include_self_loops,
+            ),
+        };
+        let cycle_node_ids = db.get::<sqry_db::queries::CyclesQuery>(&key);
+        let cycles = materialize_cycle_node_ids(&cycle_node_ids, snapshot.as_ref());
+
+        // Convert to output format
+        let output_cycles =
+            convert_cycles_to_output(cycles, snapshot.as_ref(), graph, workspace_root);
+
+        let total = output_cycles.len();
+        let (page_slice, next_page_token) = paginate(&output_cycles, &args.pagination);
+        let page_cycles = page_slice.to_vec();
+
+        Ok(ToolExecution {
+            data: FindCyclesData {
+                cycle_type: cycle_type_label(args.cycle_type).to_string(),
+                cycles: page_cycles,
+                total: total as u64,
+            },
+            used_index: false,
+            used_graph: true,
+            graph_metadata: None,
+            execution_ms: duration_to_ms(start.elapsed()),
+            next_page_token,
+            total: Some(total as u64),
+            truncated: Some(total > args.max_results),
+            candidates_scanned: None,
+            workspace_path: crate::execution::symbol_utils::path_to_forward_slash(workspace_root),
+        })
+    }
+
+    /// Daemon/SqryServer-shared body for `find_unused`.
+    pub(crate) fn execute_find_unused(
+        ctx: &crate::daemon_adapter::WorkspaceContext,
+        args: &FindUnusedArgs,
+        start: Instant,
+    ) -> Result<ToolExecution<FindUnusedData>> {
+        let workspace_root: &std::path::Path = &ctx.workspace_root;
+        let graph = &ctx.graph;
+
+        let snapshot = Arc::new(graph.snapshot());
+
+        let scope_str = match args.scope {
+            UnusedScope::Public => "public",
+            UnusedScope::Private => "private",
+            UnusedScope::Function => "function",
+            UnusedScope::Struct => "struct",
+            UnusedScope::All => "all",
+        };
+
+        // PN3 CLIENT_LOAD: cold-load derived cache from workspace companion file.
+        let db =
+            sqry_db::queries::dispatch::make_query_db_cold(Arc::clone(&snapshot), workspace_root);
+        let node_count = snapshot.nodes().len();
+        let mcp_may_narrow_further = !args.languages.is_empty()
+            || !args.kinds.is_empty()
+            || matches!(
+                args.scope,
+                UnusedScope::Public | UnusedScope::Private | UnusedScope::Struct
+            );
+        let candidate_cap = if mcp_may_narrow_further {
+            node_count.max(args.max_results)
+        } else {
+            args.max_results
+        };
+        let key = sqry_db::queries::UnusedKey {
+            scope: mcp_scope_to_core_superset(args.scope),
+            max_results: candidate_cap,
+        };
+        let unused_ids = db.get::<sqry_db::queries::UnusedQuery>(&key);
+
+        let strings = snapshot.strings();
+        let files = snapshot.files();
+
+        let mut unused_symbols: Vec<UnusedSymbolData> = Vec::new();
+        for &node_id in unused_ids.iter() {
+            if unused_symbols.len() >= args.max_results {
+                break;
+            }
+            let Some(entry) = snapshot.get_node(node_id) else {
+                continue;
+            };
+            // MCP post-filter: applies language + kind filters and re-asserts
+            // the scope using MCP's stricter `Private` semantic.
+            if !should_include_in_unused_results(entry, args, strings, files) {
+                continue;
+            }
+            unused_symbols.push(build_unused_symbol_data(
+                entry,
+                node_id,
+                graph,
+                strings,
+                files,
+                workspace_root,
+            ));
+        }
+
+        let total = unused_symbols.len();
+        let (page_slice, next_page_token) = paginate(&unused_symbols, &args.pagination);
+
+        Ok(ToolExecution {
+            data: FindUnusedData {
+                scope: scope_str.to_string(),
+                symbols: page_slice.to_vec(),
+                total: total as u64,
+            },
+            used_index: false,
+            used_graph: true,
+            graph_metadata: None,
+            execution_ms: duration_to_ms(start.elapsed()),
+            next_page_token,
+            total: Some(total as u64),
+            truncated: Some(total > args.max_results),
+            candidates_scanned: None,
+            workspace_path: crate::execution::symbol_utils::path_to_forward_slash(workspace_root),
+        })
+    }
+
+    /// Daemon/SqryServer-shared body for `is_node_in_cycle`.
+    pub(crate) fn execute_is_node_in_cycle(
+        ctx: &crate::daemon_adapter::WorkspaceContext,
+        args: &IsNodeInCycleArgs,
+        start: Instant,
+    ) -> Result<ToolExecution<NodeInCycleData>> {
+        let workspace_root: &std::path::Path = &ctx.workspace_root;
+        let graph = &ctx.graph;
+
+        let snapshot = Arc::new(graph.snapshot());
+
+        let node_id = resolve_global_symbol_strict(
+            snapshot.as_ref(),
+            &args.symbol,
+            args.file_path.as_deref(),
+        )?;
+
+        let circular_type = mcp_cycle_type_to_core(args.cycle_type);
+        let predicate_bounds =
+            cycle_bounds_for(args.min_depth, args.max_depth, 100, args.include_self_loops);
+
+        // PN3 CLIENT_LOAD: cold-load derived cache from workspace companion file.
+        let db =
+            sqry_db::queries::dispatch::make_query_db_cold(Arc::clone(&snapshot), workspace_root);
+        let in_cycle =
+            db.get::<sqry_db::queries::IsInCycleQuery>(&sqry_db::queries::IsInCycleKey {
+                node_id,
+                circular_type,
+                bounds: predicate_bounds,
+            });
+
+        let cycle = if in_cycle {
+            let cycle_lookup_bounds = cycle_bounds_for(
+                args.min_depth,
+                args.max_depth,
+                usize::MAX,
+                args.include_self_loops,
+            );
+            let cycles_key = sqry_db::queries::CyclesKey {
+                circular_type,
+                bounds: cycle_lookup_bounds,
+            };
+            let all_cycles = db.get::<sqry_db::queries::CyclesQuery>(&cycles_key);
+            all_cycles
+                .iter()
+                .find(|component| component.contains(&node_id))
+                .map(|component| {
+                    materialize_cycle_node_ids(std::slice::from_ref(component), snapshot.as_ref())
+                        .into_iter()
+                        .next()
+                        .unwrap_or_default()
+                })
+        } else {
+            None
+        };
+
+        let cycle_type_str = match args.cycle_type {
+            CycleType::Calls => "calls",
+            CycleType::Imports => "imports",
+            CycleType::Modules => "modules",
+        };
+
+        Ok(ToolExecution {
+            data: NodeInCycleData {
+                symbol: args.symbol.clone(),
+                in_cycle,
+                cycle_type: cycle_type_str.to_string(),
+                cycle,
+            },
+            used_index: false,
+            used_graph: true,
+            graph_metadata: None,
+            execution_ms: duration_to_ms(start.elapsed()),
+            next_page_token: None,
+            total: None,
+            truncated: None,
+            candidates_scanned: None,
+            workspace_path: crate::execution::symbol_utils::path_to_forward_slash(workspace_root),
+        })
+    }
+
+    /// Daemon/SqryServer-shared body for `direct_callers`.
+    pub(crate) fn execute_direct_callers(
+        ctx: &crate::daemon_adapter::WorkspaceContext,
+        args: &DirectCallersArgs,
+        start: Instant,
+    ) -> Result<ToolExecution<DirectCallersData>> {
+        let workspace_root: &std::path::Path = &ctx.workspace_root;
+        let graph = &ctx.graph;
+
+        let snapshot = std::sync::Arc::new(graph.snapshot());
+
+        // Existence check — surfaces the same suggestion-decorated error when
+        // the symbol is unresolvable.
+        if sqry_core::graph::unified::materialize::find_nodes_by_name(&snapshot, &args.symbol)
+            .is_empty()
+        {
+            return Err(decorate_single_symbol_lookup_error(
+                &snapshot,
+                &args.symbol,
+                anyhow!("Symbol '{}' not found in graph.", args.symbol),
+            ));
+        }
+
+        // PN3 CLIENT_LOAD: cold-load derived cache from workspace companion file.
+        let db = sqry_db::queries::dispatch::make_query_db_cold(
+            std::sync::Arc::clone(&snapshot),
+            workspace_root,
+        );
+        let key = sqry_db::queries::RelationKey::exact(&args.symbol);
+        let caller_ids = crate::execution::relation_dispatch::mcp_callers_query(&db, &key);
+
+        let mut callers = build_caller_callee_data(graph, &snapshot, &caller_ids, workspace_root);
+
+        let total = callers.len();
+        callers.truncate(args.max_results);
+
+        let (page_slice, next_page_token) = paginate(&callers, &args.pagination);
+        let page_callers = page_slice.to_vec();
+
+        Ok(ToolExecution {
+            data: DirectCallersData {
+                target: args.symbol.clone(),
+                callers: page_callers,
+                total: total as u64,
+            },
+            used_index: false,
+            used_graph: true,
+            graph_metadata: None,
+            execution_ms: duration_to_ms(start.elapsed()),
+            next_page_token,
+            total: Some(total as u64),
+            truncated: Some(total > args.max_results),
+            candidates_scanned: None,
+            workspace_path: crate::execution::symbol_utils::path_to_forward_slash(workspace_root),
+        })
+    }
+
+    /// Daemon/SqryServer-shared body for `direct_callees`.
+    pub(crate) fn execute_direct_callees(
+        ctx: &crate::daemon_adapter::WorkspaceContext,
+        args: &DirectCalleesArgs,
+        start: Instant,
+    ) -> Result<ToolExecution<DirectCalleesData>> {
+        let workspace_root: &std::path::Path = &ctx.workspace_root;
+        let graph = &ctx.graph;
+
+        let snapshot = std::sync::Arc::new(graph.snapshot());
+
+        if sqry_core::graph::unified::materialize::find_nodes_by_name(&snapshot, &args.symbol)
+            .is_empty()
+        {
+            return Err(decorate_single_symbol_lookup_error(
+                &snapshot,
+                &args.symbol,
+                anyhow!("Symbol '{}' not found in graph.", args.symbol),
+            ));
+        }
+
+        // PN3 CLIENT_LOAD: cold-load derived cache from workspace companion file.
+        let db = sqry_db::queries::dispatch::make_query_db_cold(
+            std::sync::Arc::clone(&snapshot),
+            workspace_root,
+        );
+        let key = sqry_db::queries::RelationKey::exact(&args.symbol);
+        let callee_ids = crate::execution::relation_dispatch::mcp_callees_query(&db, &key);
+
+        let mut callees = build_caller_callee_data(graph, &snapshot, &callee_ids, workspace_root);
+
+        let total = callees.len();
+        callees.truncate(args.max_results);
+
+        let (page_slice, next_page_token) = paginate(&callees, &args.pagination);
+        let page_callees = page_slice.to_vec();
+
+        Ok(ToolExecution {
+            data: DirectCalleesData {
+                source: args.symbol.clone(),
+                callees: page_callees,
+                total: total as u64,
+            },
+            used_index: false,
+            used_graph: true,
+            graph_metadata: None,
+            execution_ms: duration_to_ms(start.elapsed()),
+            next_page_token,
+            total: Some(total as u64),
+            truncated: Some(total > args.max_results),
+            candidates_scanned: None,
+            workspace_path: crate::execution::symbol_utils::path_to_forward_slash(workspace_root),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sqry_core::graph::unified::analysis::CsrAdjacency;
-    use sqry_core::graph::unified::compaction::snapshot_edges;
     use sqry_core::graph::unified::concurrent::CodeGraph;
     use sqry_core::graph::unified::edge::EdgeKind;
     use sqry_core::graph::unified::node::NodeKind;
     use sqry_core::graph::unified::storage::NodeEntry;
-    use sqry_core::query::CircularConfig;
     use std::path::Path;
-
-    #[test]
-    fn test_extract_cycles_from_scc_self_loop_respects_config() {
-        let mut graph = CodeGraph::new();
-        let file_id = graph.files_mut().register(Path::new("test.rs")).unwrap();
-
-        let name_a = graph.strings_mut().intern("A").unwrap();
-        let name_b = graph.strings_mut().intern("B").unwrap();
-
-        let node_a = graph
-            .nodes_mut()
-            .alloc(NodeEntry::new(NodeKind::Function, name_a, file_id))
-            .unwrap();
-        let node_b = graph
-            .nodes_mut()
-            .alloc(NodeEntry::new(NodeKind::Function, name_b, file_id))
-            .unwrap();
-
-        let kind = EdgeKind::Calls {
-            argument_count: 0,
-            is_async: false,
-        };
-        graph
-            .edges_mut()
-            .add_edge(node_a, node_a, kind.clone(), file_id);
-        graph
-            .edges_mut()
-            .add_edge(node_a, node_b, kind.clone(), file_id);
-
-        let snapshot = graph.snapshot();
-        let edges = snapshot.edges();
-        let forward_store = edges.forward();
-        let node_count = snapshot.nodes().len();
-        let compaction_snapshot = snapshot_edges(&forward_store, node_count);
-
-        let csr = CsrAdjacency::build_from_snapshot(&compaction_snapshot).unwrap();
-        let scc_data =
-            sqry_core::graph::unified::analysis::SccData::compute_tarjan(&csr, &kind).unwrap();
-
-        let config_no_self = CircularConfig {
-            min_depth: 3,
-            max_depth: None,
-            max_results: 10,
-            should_include_self_loops: false,
-        };
-        let cycles_no_self = extract_cycles_from_scc(&graph, &scc_data, &config_no_self);
-        assert!(cycles_no_self.is_empty());
-
-        let config_with_self = CircularConfig {
-            min_depth: 3,
-            max_depth: None,
-            max_results: 10,
-            should_include_self_loops: true,
-        };
-        let cycles_with_self = extract_cycles_from_scc(&graph, &scc_data, &config_with_self);
-        assert_eq!(cycles_with_self.len(), 1);
-        assert_eq!(cycles_with_self[0], vec!["A".to_string()]);
-    }
 
     // ========================================================================
     // Find Unused Tests
@@ -2221,94 +2383,6 @@ mod tests {
             .add_edge(node_public, node_public, export_kind, lib_rs);
 
         graph
-    }
-
-    #[test]
-    fn test_rust_entry_point_detection_main() {
-        let graph = create_test_graph_for_unused();
-        let snapshot = graph.snapshot();
-        let files = snapshot.files();
-
-        // Find main function
-        let main_node = candidate_bucket_for_symbol(&snapshot, "main")
-            .into_iter()
-            .next()
-            .unwrap();
-        let entry = snapshot.get_node(main_node).unwrap();
-
-        // Test that main() is detected as an entry point
-        assert!(is_rust_entry_point(main_node, entry, files, &snapshot));
-    }
-
-    #[test]
-    fn test_rust_entry_point_detection_public_export() {
-        let graph = create_test_graph_for_unused();
-        let snapshot = graph.snapshot();
-        let files = snapshot.files();
-
-        // Find public_function
-        let public_node = candidate_bucket_for_symbol(&snapshot, "public_function")
-            .into_iter()
-            .next()
-            .unwrap();
-        let entry = snapshot.get_node(public_node).unwrap();
-
-        // Test that public function with Export edge is detected as entry point
-        assert!(is_rust_entry_point(public_node, entry, files, &snapshot));
-    }
-
-    #[test]
-    fn test_rust_entry_point_detection_private_not_entry() {
-        let graph = create_test_graph_for_unused();
-        let snapshot = graph.snapshot();
-        let files = snapshot.files();
-
-        // Find unused_helper (private, no export)
-        let unused_node = candidate_bucket_for_symbol(&snapshot, "unused_helper")
-            .into_iter()
-            .next()
-            .unwrap();
-        let entry = snapshot.get_node(unused_node).unwrap();
-
-        // Test that private function without export is NOT an entry point
-        assert!(!is_rust_entry_point(unused_node, entry, files, &snapshot));
-    }
-
-    #[test]
-    fn test_entry_point_detection_integration() {
-        let graph = create_test_graph_for_unused();
-        let snapshot = graph.snapshot();
-        let files = snapshot.files();
-
-        // Verify main is detected as entry point
-        let main_nodes = candidate_bucket_for_symbol(&snapshot, "main");
-        assert!(!main_nodes.is_empty(), "main function should exist");
-        let main_node = main_nodes[0];
-        let main_entry = snapshot.get_node(main_node).unwrap();
-        assert!(
-            is_rust_entry_point(main_node, main_entry, files, &snapshot),
-            "main should be detected as entry point"
-        );
-
-        // Verify public_function is detected as entry point
-        let public_nodes = candidate_bucket_for_symbol(&snapshot, "public_function");
-        assert!(!public_nodes.is_empty(), "public_function should exist");
-        let public_node = public_nodes[0];
-        let public_entry = snapshot.get_node(public_node).unwrap();
-        assert!(
-            is_rust_entry_point(public_node, public_entry, files, &snapshot),
-            "public_function should be detected as entry point"
-        );
-
-        // Verify unused_helper is NOT detected as entry point
-        let unused_nodes = candidate_bucket_for_symbol(&snapshot, "unused_helper");
-        assert!(!unused_nodes.is_empty(), "unused_helper should exist");
-        let unused_node = unused_nodes[0];
-        let unused_entry = snapshot.get_node(unused_node).unwrap();
-        assert!(
-            !is_rust_entry_point(unused_node, unused_entry, files, &snapshot),
-            "unused_helper should NOT be detected as entry point"
-        );
     }
 
     #[test]
@@ -2417,132 +2491,9 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn test_python_entry_point_detection() {
-        let mut graph = CodeGraph::new();
-        let init_py = graph
-            .files_mut()
-            .register(Path::new("mypackage/__init__.py"))
-            .unwrap();
-
-        let func_name = graph.strings_mut().intern("my_function").unwrap();
-        let vis_public = graph.strings_mut().intern("public").unwrap();
-
-        let mut func_entry = NodeEntry::new(NodeKind::Function, func_name, init_py);
-        func_entry.visibility = Some(vis_public);
-        let func_node = graph.nodes_mut().alloc(func_entry).unwrap();
-
-        let snapshot = graph.snapshot();
-        let files = snapshot.files();
-        let entry = snapshot.get_node(func_node).unwrap();
-
-        // Functions in __init__.py should be entry points
-        assert!(is_python_entry_point(func_node, entry, files, &snapshot));
-    }
-
-    #[test]
-    fn test_js_ts_entry_point_detection() {
-        use sqry_core::graph::unified::ExportKind;
-
-        let mut graph = CodeGraph::new();
-        let index_js = graph
-            .files_mut()
-            .register(Path::new("src/index.js"))
-            .unwrap();
-
-        let func_name = graph.strings_mut().intern("exportedFunction").unwrap();
-        let func_entry = NodeEntry::new(NodeKind::Function, func_name, index_js);
-        let func_node = graph.nodes_mut().alloc(func_entry).unwrap();
-
-        // Add export edge
-        let export_kind = EdgeKind::Exports {
-            kind: ExportKind::Direct,
-            alias: None,
-        };
-        graph
-            .edges_mut()
-            .add_edge(func_node, func_node, export_kind, index_js);
-
-        let snapshot = graph.snapshot();
-        let entry = snapshot.get_node(func_node).unwrap();
-
-        // Functions with Export edges should be entry points
-        assert!(is_js_ts_entry_point(func_node, entry, &snapshot));
-    }
-
-    #[test]
-    fn test_generic_entry_point_detection_main() {
-        let mut graph = CodeGraph::new();
-        let file_id = graph
-            .files_mut()
-            .register(Path::new("main.unknown"))
-            .unwrap();
-
-        let main_name = graph.strings_mut().intern("main").unwrap();
-        let main_entry = NodeEntry::new(NodeKind::Function, main_name, file_id);
-        let main_node = graph.nodes_mut().alloc(main_entry).unwrap();
-
-        let snapshot = graph.snapshot();
-        let entry = snapshot.get_node(main_node).unwrap();
-
-        // main() should always be an entry point
-        assert!(is_generic_entry_point(main_node, entry, &snapshot));
-    }
-
     // ========================================================================
     // Cycle helper mapping function tests
     // ========================================================================
-
-    #[test]
-    fn test_cycle_edge_kind_name_calls() {
-        assert_eq!(cycle_edge_kind_name(CycleType::Calls), "calls");
-    }
-
-    #[test]
-    fn test_cycle_edge_kind_name_imports() {
-        assert_eq!(cycle_edge_kind_name(CycleType::Imports), "imports");
-    }
-
-    #[test]
-    fn test_cycle_edge_kind_name_modules() {
-        assert_eq!(cycle_edge_kind_name(CycleType::Modules), "imports");
-    }
-
-    #[test]
-    fn test_cycle_edge_kind_calls() {
-        let kind = cycle_edge_kind(CycleType::Calls);
-        assert_eq!(
-            kind,
-            EdgeKind::Calls {
-                argument_count: 0,
-                is_async: false,
-            }
-        );
-    }
-
-    #[test]
-    fn test_cycle_edge_kind_imports() {
-        let kind = cycle_edge_kind(CycleType::Imports);
-        assert_eq!(
-            kind,
-            EdgeKind::Imports {
-                alias: None,
-                is_wildcard: false,
-            }
-        );
-    }
-
-    #[test]
-    fn test_cycle_edge_kind_modules() {
-        let kind = cycle_edge_kind(CycleType::Modules);
-        assert_eq!(
-            kind,
-            EdgeKind::Imports {
-                alias: None,
-                is_wildcard: false,
-            }
-        );
-    }
 
     #[test]
     fn test_cycle_type_label_calls() {
@@ -2559,72 +2510,24 @@ mod tests {
         assert_eq!(cycle_type_label(CycleType::Modules), "modules");
     }
 
-    // ========================================================================
-    // should_include_scc tests
-    // ========================================================================
-
-    fn make_circular_config(
-        min_depth: usize,
-        max_depth: Option<usize>,
-        self_loops: bool,
-    ) -> CircularConfig {
-        CircularConfig {
-            min_depth,
-            max_depth,
-            max_results: 100,
-            should_include_self_loops: self_loops,
-        }
-    }
-
     #[test]
-    fn test_should_include_scc_self_loop_included_when_enabled() {
-        let config = make_circular_config(2, None, true);
-        // size=1 + is_self_loop=true + config allows self loops
-        assert!(should_include_scc(1, true, &config));
-    }
-
-    #[test]
-    fn test_should_include_scc_self_loop_excluded_when_disabled() {
-        let config = make_circular_config(2, None, false);
-        assert!(!should_include_scc(1, true, &config));
-    }
-
-    #[test]
-    fn test_should_include_scc_size_one_no_self_loop_excluded() {
-        let config = make_circular_config(1, None, false);
-        // size=1, not a self-loop => excluded
-        assert!(!should_include_scc(1, false, &config));
-    }
-
-    #[test]
-    fn test_should_include_scc_smaller_than_min_depth_excluded() {
-        let config = make_circular_config(3, None, false);
-        // size=2, min_depth=3
-        assert!(!should_include_scc(2, false, &config));
-    }
-
-    #[test]
-    fn test_should_include_scc_at_min_depth_included() {
-        let config = make_circular_config(2, None, false);
-        assert!(should_include_scc(2, false, &config));
-    }
-
-    #[test]
-    fn test_should_include_scc_larger_than_max_depth_excluded() {
-        let config = make_circular_config(1, Some(3), false);
-        assert!(!should_include_scc(4, false, &config));
-    }
-
-    #[test]
-    fn test_should_include_scc_at_max_depth_included() {
-        let config = make_circular_config(1, Some(3), false);
-        assert!(should_include_scc(3, false, &config));
-    }
-
-    #[test]
-    fn test_should_include_scc_no_max_depth_any_size_included() {
-        let config = make_circular_config(1, None, false);
-        assert!(should_include_scc(100, false, &config));
+    fn test_mcp_cycle_type_to_core_parity() {
+        // Locks the MCP→sqry-db cycle-type bridge used by the DB17
+        // migration of `find_cycles` / `is_node_in_cycle`. Any shift in
+        // the mapping (e.g. collapsing `Modules` onto `Calls`) would be
+        // a silent behavior change for the MCP API.
+        assert_eq!(
+            mcp_cycle_type_to_core(CycleType::Calls),
+            CircularType::Calls
+        );
+        assert_eq!(
+            mcp_cycle_type_to_core(CycleType::Imports),
+            CircularType::Imports
+        );
+        assert_eq!(
+            mcp_cycle_type_to_core(CycleType::Modules),
+            CircularType::Modules
+        );
     }
 
     // ========================================================================
@@ -2692,7 +2595,7 @@ mod tests {
         let graph = CodeGraph::new();
         let snapshot = graph.snapshot();
         let ws = Path::new("/workspace");
-        let result = convert_cycles_to_output(vec![], &snapshot, ws);
+        let result = convert_cycles_to_output(vec![], &snapshot, &graph, ws);
         assert!(result.is_empty());
     }
 
@@ -2704,7 +2607,7 @@ mod tests {
 
         // A cycle with two symbol names
         let cycles = vec![vec!["alpha".to_string(), "beta".to_string()]];
-        let result = convert_cycles_to_output(cycles, &snapshot, ws);
+        let result = convert_cycles_to_output(cycles, &snapshot, &graph, ws);
         assert_eq!(result.len(), 1);
         let cycle = &result[0];
         assert_eq!(cycle.depth, 2);
@@ -2722,7 +2625,7 @@ mod tests {
         let ws = Path::new("/workspace");
 
         let cycles = vec![vec!["selfloop".to_string()]];
-        let result = convert_cycles_to_output(cycles, &snapshot, ws);
+        let result = convert_cycles_to_output(cycles, &snapshot, &graph, ws);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].depth, 1);
         // Chain: "selfloop → selfloop"
@@ -2847,330 +2750,22 @@ mod tests {
         let vis_pub = graph.strings_mut().intern("public").unwrap();
         let mut entry = NodeEntry::new(NodeKind::Function, nm, file_id);
         entry.visibility = Some(vis_pub);
-        let _ = graph.nodes_mut().alloc(entry.clone()).unwrap();
+        let node_id = graph.nodes_mut().alloc(entry.clone()).unwrap();
         let snapshot = graph.snapshot();
         let strings = snapshot.strings();
         let files = snapshot.files();
 
-        let data = build_unused_symbol_data(&entry, strings, files, ws);
+        let data = build_unused_symbol_data(&entry, node_id, &graph, strings, files, ws);
         assert_eq!(data.name, "orphan_fn");
         assert_eq!(data.kind, "function");
         assert!(!data.file_uri.is_empty());
     }
 
     // ========================================================================
-    // is_java_entry_point tests
+    // Entry-point classification tests removed in DB16: classification now
+    // lives in sqry-db (`sqry_db::queries::EntryPointsQuery`) and is tested
+    // there.
     // ========================================================================
-
-    #[test]
-    fn test_java_entry_point_public_main_method() {
-        let mut graph = CodeGraph::new();
-        let file_id = graph.files_mut().register(Path::new("Main.java")).unwrap();
-        let nm = graph.strings_mut().intern("main").unwrap();
-        let vis_pub = graph.strings_mut().intern("public").unwrap();
-        let mut entry = NodeEntry::new(NodeKind::Method, nm, file_id);
-        entry.visibility = Some(vis_pub);
-        let node_id = graph.nodes_mut().alloc(entry).unwrap();
-
-        let snapshot = graph.snapshot();
-        let entry = snapshot.get_node(node_id).unwrap();
-        assert!(is_java_entry_point(node_id, entry, &snapshot));
-    }
-
-    #[test]
-    fn test_java_entry_point_public_class() {
-        let mut graph = CodeGraph::new();
-        let file_id = graph
-            .files_mut()
-            .register(Path::new("MyClass.java"))
-            .unwrap();
-        let nm = graph.strings_mut().intern("MyClass").unwrap();
-        let vis_pub = graph.strings_mut().intern("public").unwrap();
-        let mut entry = NodeEntry::new(NodeKind::Class, nm, file_id);
-        entry.visibility = Some(vis_pub);
-        let node_id = graph.nodes_mut().alloc(entry).unwrap();
-
-        let snapshot = graph.snapshot();
-        let entry = snapshot.get_node(node_id).unwrap();
-        assert!(is_java_entry_point(node_id, entry, &snapshot));
-    }
-
-    #[test]
-    fn test_java_entry_point_private_class_is_not_entry() {
-        let mut graph = CodeGraph::new();
-        let file_id = graph
-            .files_mut()
-            .register(Path::new("Helper.java"))
-            .unwrap();
-        let nm = graph.strings_mut().intern("Helper").unwrap();
-        let vis_priv = graph.strings_mut().intern("private").unwrap();
-        let mut entry = NodeEntry::new(NodeKind::Class, nm, file_id);
-        entry.visibility = Some(vis_priv);
-        let node_id = graph.nodes_mut().alloc(entry).unwrap();
-
-        let snapshot = graph.snapshot();
-        let entry = snapshot.get_node(node_id).unwrap();
-        assert!(!is_java_entry_point(node_id, entry, &snapshot));
-    }
-
-    // ========================================================================
-    // is_go_entry_point tests
-    // ========================================================================
-
-    #[test]
-    fn test_go_entry_point_main_function() {
-        let mut graph = CodeGraph::new();
-        let file_id = graph.files_mut().register(Path::new("main.go")).unwrap();
-        let nm = graph.strings_mut().intern("main").unwrap();
-        let entry = NodeEntry::new(NodeKind::Function, nm, file_id);
-        let node_id = graph.nodes_mut().alloc(entry).unwrap();
-
-        let snapshot = graph.snapshot();
-        let entry = snapshot.get_node(node_id).unwrap();
-        assert!(is_go_entry_point(node_id, entry, &snapshot));
-    }
-
-    #[test]
-    fn test_go_entry_point_capitalized_public_symbol() {
-        let mut graph = CodeGraph::new();
-        let file_id = graph.files_mut().register(Path::new("handler.go")).unwrap();
-        let nm = graph.strings_mut().intern("HandleRequest").unwrap();
-        let vis_pub = graph.strings_mut().intern("public").unwrap();
-        let mut entry = NodeEntry::new(NodeKind::Function, nm, file_id);
-        entry.visibility = Some(vis_pub);
-        let node_id = graph.nodes_mut().alloc(entry).unwrap();
-
-        let snapshot = graph.snapshot();
-        let entry = snapshot.get_node(node_id).unwrap();
-        assert!(is_go_entry_point(node_id, entry, &snapshot));
-    }
-
-    #[test]
-    fn test_go_entry_point_lowercase_private_not_entry() {
-        let mut graph = CodeGraph::new();
-        let file_id = graph
-            .files_mut()
-            .register(Path::new("internal.go"))
-            .unwrap();
-        let nm = graph.strings_mut().intern("internalHelper").unwrap();
-        let vis_priv = graph.strings_mut().intern("private").unwrap();
-        let mut entry = NodeEntry::new(NodeKind::Function, nm, file_id);
-        entry.visibility = Some(vis_priv);
-        let node_id = graph.nodes_mut().alloc(entry).unwrap();
-
-        let snapshot = graph.snapshot();
-        let entry = snapshot.get_node(node_id).unwrap();
-        assert!(!is_go_entry_point(node_id, entry, &snapshot));
-    }
-
-    // ========================================================================
-    // is_c_cpp_entry_point tests
-    // ========================================================================
-
-    #[test]
-    fn test_c_entry_point_main() {
-        let mut graph = CodeGraph::new();
-        let file_id = graph.files_mut().register(Path::new("main.c")).unwrap();
-        let nm = graph.strings_mut().intern("main").unwrap();
-        let entry = NodeEntry::new(NodeKind::Function, nm, file_id);
-        let node_id = graph.nodes_mut().alloc(entry).unwrap();
-
-        let snapshot = graph.snapshot();
-        let entry = snapshot.get_node(node_id).unwrap();
-        assert!(is_c_cpp_entry_point(node_id, entry, &snapshot));
-    }
-
-    #[test]
-    fn test_c_entry_point_non_private_function() {
-        let mut graph = CodeGraph::new();
-        let file_id = graph.files_mut().register(Path::new("lib.c")).unwrap();
-        let nm = graph.strings_mut().intern("process_data").unwrap();
-        let entry = NodeEntry::new(NodeKind::Function, nm, file_id);
-        let node_id = graph.nodes_mut().alloc(entry).unwrap();
-
-        let snapshot = graph.snapshot();
-        let entry = snapshot.get_node(node_id).unwrap();
-        // No private visibility => entry point
-        assert!(is_c_cpp_entry_point(node_id, entry, &snapshot));
-    }
-
-    #[test]
-    fn test_c_entry_point_private_function_not_entry() {
-        let mut graph = CodeGraph::new();
-        let file_id = graph.files_mut().register(Path::new("lib.c")).unwrap();
-        let nm = graph.strings_mut().intern("static_helper").unwrap();
-        let vis_priv = graph.strings_mut().intern("private").unwrap();
-        let mut entry = NodeEntry::new(NodeKind::Function, nm, file_id);
-        entry.visibility = Some(vis_priv);
-        let node_id = graph.nodes_mut().alloc(entry).unwrap();
-
-        let snapshot = graph.snapshot();
-        let entry = snapshot.get_node(node_id).unwrap();
-        assert!(!is_c_cpp_entry_point(node_id, entry, &snapshot));
-    }
-
-    // ========================================================================
-    // is_generic_entry_point tests
-    // ========================================================================
-
-    #[test]
-    fn test_generic_entry_point_public_visibility() {
-        let mut graph = CodeGraph::new();
-        let file_id = graph.files_mut().register(Path::new("main.xyz")).unwrap();
-        let nm = graph.strings_mut().intern("public_api").unwrap();
-        let vis_pub = graph.strings_mut().intern("public").unwrap();
-        let mut entry = NodeEntry::new(NodeKind::Function, nm, file_id);
-        entry.visibility = Some(vis_pub);
-        let node_id = graph.nodes_mut().alloc(entry).unwrap();
-
-        let snapshot = graph.snapshot();
-        let entry = snapshot.get_node(node_id).unwrap();
-        assert!(is_generic_entry_point(node_id, entry, &snapshot));
-    }
-
-    #[test]
-    fn test_generic_entry_point_with_export_edge() {
-        use sqry_core::graph::unified::ExportKind;
-
-        let mut graph = CodeGraph::new();
-        let file_id = graph.files_mut().register(Path::new("main.xyz")).unwrap();
-        let nm = graph.strings_mut().intern("exported_fn").unwrap();
-        let entry = NodeEntry::new(NodeKind::Function, nm, file_id);
-        let node_id = graph.nodes_mut().alloc(entry).unwrap();
-        graph
-            .indices_mut()
-            .add(node_id, NodeKind::Function, nm, None, file_id);
-
-        let nm2 = graph.strings_mut().intern("target").unwrap();
-        let entry2 = NodeEntry::new(NodeKind::Function, nm2, file_id);
-        let node2 = graph.nodes_mut().alloc(entry2).unwrap();
-        graph
-            .indices_mut()
-            .add(node2, NodeKind::Function, nm2, None, file_id);
-
-        graph.edges_mut().add_edge(
-            node_id,
-            node2,
-            EdgeKind::Exports {
-                kind: ExportKind::Direct,
-                alias: None,
-            },
-            file_id,
-        );
-
-        let snapshot = graph.snapshot();
-        let entry = snapshot.get_node(node_id).unwrap();
-        assert!(is_generic_entry_point(node_id, entry, &snapshot));
-    }
-
-    #[test]
-    fn test_generic_entry_point_private_no_export_not_entry() {
-        let mut graph = CodeGraph::new();
-        let file_id = graph.files_mut().register(Path::new("lib.xyz")).unwrap();
-        let nm = graph.strings_mut().intern("private_helper").unwrap();
-        let vis_priv = graph.strings_mut().intern("private").unwrap();
-        let mut entry = NodeEntry::new(NodeKind::Function, nm, file_id);
-        entry.visibility = Some(vis_priv);
-        let node_id = graph.nodes_mut().alloc(entry).unwrap();
-
-        let snapshot = graph.snapshot();
-        let entry = snapshot.get_node(node_id).unwrap();
-        assert!(!is_generic_entry_point(node_id, entry, &snapshot));
-    }
-
-    // ========================================================================
-    // is_python_entry_point edge cases
-    // ========================================================================
-
-    #[test]
-    fn test_python_entry_point_class_in_init_py() {
-        let mut graph = CodeGraph::new();
-        let file_id = graph
-            .files_mut()
-            .register(Path::new("mymod/__init__.py"))
-            .unwrap();
-        let nm = graph.strings_mut().intern("MyClass").unwrap();
-        let entry = NodeEntry::new(NodeKind::Class, nm, file_id);
-        let node_id = graph.nodes_mut().alloc(entry).unwrap();
-
-        let snapshot = graph.snapshot();
-        let files = snapshot.files();
-        let entry = snapshot.get_node(node_id).unwrap();
-        assert!(is_python_entry_point(node_id, entry, files, &snapshot));
-    }
-
-    #[test]
-    fn test_python_entry_point_class_outside_init_is_entry() {
-        let mut graph = CodeGraph::new();
-        let file_id = graph
-            .files_mut()
-            .register(Path::new("mymod/models.py"))
-            .unwrap();
-        let nm = graph.strings_mut().intern("SomeClass").unwrap();
-        let entry = NodeEntry::new(NodeKind::Class, nm, file_id);
-        let node_id = graph.nodes_mut().alloc(entry).unwrap();
-
-        let snapshot = graph.snapshot();
-        let files = snapshot.files();
-        let entry = snapshot.get_node(node_id).unwrap();
-        // Classes outside __init__.py: matches `entry.kind == NodeKind::Class`
-        assert!(is_python_entry_point(node_id, entry, files, &snapshot));
-    }
-
-    #[test]
-    fn test_python_entry_point_function_outside_init() {
-        let mut graph = CodeGraph::new();
-        let file_id = graph
-            .files_mut()
-            .register(Path::new("mymod/utils.py"))
-            .unwrap();
-        let nm = graph.strings_mut().intern("helper").unwrap();
-        let entry = NodeEntry::new(NodeKind::Function, nm, file_id);
-        let node_id = graph.nodes_mut().alloc(entry).unwrap();
-
-        let snapshot = graph.snapshot();
-        let files = snapshot.files();
-        let entry = snapshot.get_node(node_id).unwrap();
-        assert!(is_python_entry_point(node_id, entry, files, &snapshot));
-    }
-
-    // ========================================================================
-    // is_js_ts_entry_point without export edge
-    // ========================================================================
-
-    #[test]
-    fn test_js_ts_entry_point_function_without_export_is_entry() {
-        use sqry_core::graph::unified::node::NodeKind;
-        let mut graph = CodeGraph::new();
-        let file_id = graph
-            .files_mut()
-            .register(Path::new("src/component.js"))
-            .unwrap();
-        let nm = graph.strings_mut().intern("MyComponent").unwrap();
-        let entry = NodeEntry::new(NodeKind::Component, nm, file_id);
-        let node_id = graph.nodes_mut().alloc(entry).unwrap();
-
-        let snapshot = graph.snapshot();
-        let entry = snapshot.get_node(node_id).unwrap();
-        // Component without export edge — falls through to default matches!
-        assert!(is_js_ts_entry_point(node_id, entry, &snapshot));
-    }
-
-    #[test]
-    fn test_js_ts_entry_point_variable_without_export_not_entry() {
-        let mut graph = CodeGraph::new();
-        let file_id = graph
-            .files_mut()
-            .register(Path::new("src/utils.js"))
-            .unwrap();
-        let nm = graph.strings_mut().intern("localVar").unwrap();
-        let entry = NodeEntry::new(NodeKind::Variable, nm, file_id);
-        let node_id = graph.nodes_mut().alloc(entry).unwrap();
-
-        let snapshot = graph.snapshot();
-        let entry = snapshot.get_node(node_id).unwrap();
-        assert!(!is_js_ts_entry_point(node_id, entry, &snapshot));
-    }
 
     // ========================================================================
     // resolve_global_symbol_strict error paths
@@ -3180,7 +2775,7 @@ mod tests {
     fn test_resolve_global_symbol_strict_not_found() {
         let graph = CodeGraph::new();
         let snapshot = graph.snapshot();
-        let result = resolve_global_symbol_strict(&snapshot, "nonexistent_symbol_xyz");
+        let result = resolve_global_symbol_strict(&snapshot, "nonexistent_symbol_xyz", None);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not found"));
     }
@@ -3197,38 +2792,276 @@ mod tests {
             .add(node_id, NodeKind::Function, nm, None, file_id);
 
         let snapshot = graph.snapshot();
-        let result = resolve_global_symbol_strict(&snapshot, "unique_function_xyz");
+        let result = resolve_global_symbol_strict(&snapshot, "unique_function_xyz", None);
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), node_id);
     }
 
     // ========================================================================
-    // resolve_single_candidate_node tests
+    // resolve_global_symbol_strict: file_path disambiguation (DISAMBIG_1)
     // ========================================================================
 
-    #[test]
-    fn test_resolve_single_candidate_node_not_found() {
-        let graph = CodeGraph::new();
-        let snapshot = graph.snapshot();
-        let result = resolve_single_candidate_node(&snapshot, "totally_missing");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_resolve_single_candidate_node_unique_found() {
+    /// Build a graph with two files each containing a function with the same
+    /// simple name, so that simple-name lookup is ambiguous.
+    fn make_ambiguous_two_file_graph() -> (
+        CodeGraph,
+        sqry_core::graph::unified::file::id::FileId,
+        sqry_core::graph::unified::file::id::FileId,
+    ) {
         let mut graph = CodeGraph::new();
-        let file_id = graph.files_mut().register(Path::new("src/lib.rs")).unwrap();
-        let nm = graph.strings_mut().intern("solo_func").unwrap();
-        let entry = NodeEntry::new(NodeKind::Function, nm, file_id);
-        let node_id = graph.nodes_mut().alloc(entry).unwrap();
+        let file_a = graph
+            .files_mut()
+            .register(Path::new("src/module_a.rs"))
+            .unwrap();
+        let file_b = graph
+            .files_mut()
+            .register(Path::new("src/module_b.rs"))
+            .unwrap();
+
+        let nm = graph.strings_mut().intern("shared_fn").unwrap();
+
+        // Node in file_a at line 10
+        let mut entry_a = NodeEntry::new(NodeKind::Function, nm, file_a);
+        entry_a.start_line = 10;
+        let node_a = graph.nodes_mut().alloc(entry_a).unwrap();
         graph
             .indices_mut()
-            .add(node_id, NodeKind::Function, nm, None, file_id);
+            .add(node_a, NodeKind::Function, nm, None, file_a);
 
+        // Node in file_b at line 20
+        let mut entry_b = NodeEntry::new(NodeKind::Function, nm, file_b);
+        entry_b.start_line = 20;
+        let node_b = graph.nodes_mut().alloc(entry_b).unwrap();
+        graph
+            .indices_mut()
+            .add(node_b, NodeKind::Function, nm, None, file_b);
+
+        (graph, file_a, file_b)
+    }
+
+    /// Build a graph with four files each containing `shared_fn` so the global
+    /// ambiguity error can be verified to cap sample output at 3 candidates.
+    fn make_ambiguous_four_file_graph() -> CodeGraph {
+        let mut graph = CodeGraph::new();
+        let paths = [
+            "src/module_a.rs",
+            "src/module_b.rs",
+            "src/module_c.rs",
+            "src/module_d.rs",
+        ];
+        let nm = graph.strings_mut().intern("shared_fn").unwrap();
+        for (i, path) in paths.iter().enumerate() {
+            let file_id = graph.files_mut().register(Path::new(path)).unwrap();
+            let mut entry = NodeEntry::new(NodeKind::Function, nm, file_id);
+            entry.start_line = (i as u32 + 1) * 10;
+            let node_id = graph.nodes_mut().alloc(entry).unwrap();
+            graph
+                .indices_mut()
+                .add(node_id, NodeKind::Function, nm, None, file_id);
+        }
+        graph
+    }
+
+    /// Build a graph with one file containing two functions with the same simple
+    /// name (different qualified names) so that a file-scoped lookup is still
+    /// ambiguous within that file.
+    fn make_same_file_two_candidate_graph()
+    -> (CodeGraph, sqry_core::graph::unified::file::id::FileId) {
+        let mut graph = CodeGraph::new();
+        let file_id = graph
+            .files_mut()
+            .register(Path::new("src/module_x.rs"))
+            .unwrap();
+
+        let nm = graph.strings_mut().intern("shared_fn").unwrap();
+        let qn_a = graph
+            .strings_mut()
+            .intern("module_x::ImplA::shared_fn")
+            .unwrap();
+        let qn_b = graph
+            .strings_mut()
+            .intern("module_x::ImplB::shared_fn")
+            .unwrap();
+
+        // First candidate at line 5
+        let mut entry_a = NodeEntry::new(NodeKind::Function, nm, file_id);
+        entry_a.start_line = 5;
+        entry_a.qualified_name = Some(qn_a);
+        let node_a = graph.nodes_mut().alloc(entry_a).unwrap();
+        graph
+            .indices_mut()
+            .add(node_a, NodeKind::Function, nm, Some(qn_a), file_id);
+
+        // Second candidate at line 25
+        let mut entry_b = NodeEntry::new(NodeKind::Function, nm, file_id);
+        entry_b.start_line = 25;
+        entry_b.qualified_name = Some(qn_b);
+        let node_b = graph.nodes_mut().alloc(entry_b).unwrap();
+        graph
+            .indices_mut()
+            .add(node_b, NodeKind::Function, nm, Some(qn_b), file_id);
+
+        (graph, file_id)
+    }
+
+    #[test]
+    fn test_resolve_global_symbol_strict_file_path_narrows_to_one() {
+        let (graph, _file_a, _file_b) = make_ambiguous_two_file_graph();
         let snapshot = graph.snapshot();
-        let result = resolve_single_candidate_node(&snapshot, "solo_func");
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), node_id);
+
+        // Resolving without file_path should fail due to ambiguity
+        let result_ambiguous = resolve_global_symbol_strict(&snapshot, "shared_fn", None);
+        assert!(result_ambiguous.is_err());
+        let err_msg = result_ambiguous.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("ambiguous"),
+            "Expected ambiguous error, got: {err_msg}"
+        );
+
+        // Resolving with a file_path pointing to src/module_a.rs should succeed
+        let path_a = Path::new("src/module_a.rs");
+        let result = resolve_global_symbol_strict(&snapshot, "shared_fn", Some(path_a));
+        assert!(
+            result.is_ok(),
+            "Expected Ok with file_path, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_resolve_global_symbol_strict_file_path_zero_candidates() {
+        let (graph, _file_a, _file_b) = make_ambiguous_two_file_graph();
+        let snapshot = graph.snapshot();
+
+        // Resolving with a file_path to a file not indexed in the graph
+        let nonexistent_path = Path::new("src/nonexistent.rs");
+        let result = resolve_global_symbol_strict(&snapshot, "shared_fn", Some(nonexistent_path));
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        // FileNotIndexed or NotFound -> "No definition of 'X' found in file 'Y'"
+        assert!(
+            err_msg.contains("No definition of") || err_msg.contains("not found"),
+            "Expected no-definition error, got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn test_resolve_global_symbol_strict_ambiguity_error_includes_samples() {
+        let (graph, _file_a, _file_b) = make_ambiguous_two_file_graph();
+        let snapshot = graph.snapshot();
+
+        let result = resolve_global_symbol_strict(&snapshot, "shared_fn", None);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+
+        // Error should mention the symbol and that it is ambiguous
+        assert!(
+            err_msg.contains("shared_fn"),
+            "Expected symbol name in error, got: {err_msg}"
+        );
+        assert!(
+            err_msg.contains("ambiguous"),
+            "Expected 'ambiguous' in error, got: {err_msg}"
+        );
+        // Should contain file_path guidance
+        assert!(
+            err_msg.contains("file_path"),
+            "Expected 'file_path' hint in error, got: {err_msg}"
+        );
+        // Must contain bullet-formatted sample candidates with file:line
+        assert!(
+            err_msg.contains("module_a.rs:10"),
+            "Expected 'module_a.rs:10' bullet in error, got: {err_msg}"
+        );
+        assert!(
+            err_msg.contains("module_b.rs:20"),
+            "Expected 'module_b.rs:20' bullet in error, got: {err_msg}"
+        );
+        // Bullet marker must be present
+        assert!(
+            err_msg.contains("  - "),
+            "Expected '  - ' bullet shape in error, got: {err_msg}"
+        );
+        // Guidance phrase from acceptance criteria
+        assert!(
+            err_msg.contains("Try one of:"),
+            "Expected 'Try one of:' in error, got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn test_resolve_global_symbol_strict_ambiguity_error_caps_samples_at_three() {
+        let graph = make_ambiguous_four_file_graph();
+        let snapshot = graph.snapshot();
+
+        let result = resolve_global_symbol_strict(&snapshot, "shared_fn", None);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+
+        // With 4 candidates only 3 samples should appear as bullet lines
+        let bullet_count = err_msg.matches("  - ").count();
+        assert_eq!(
+            bullet_count, 3,
+            "Expected exactly 3 bullet samples (cap), got {bullet_count} in: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn test_resolve_global_symbol_strict_file_path_not_found_error_mentions_file() {
+        let (graph, _file_a, _file_b) = make_ambiguous_two_file_graph();
+        let snapshot = graph.snapshot();
+
+        let missing_path = Path::new("kernel/rcu/tree.c");
+        let result = resolve_global_symbol_strict(&snapshot, "shared_fn", Some(missing_path));
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        // The error message must mention the file name for usability
+        assert!(
+            err_msg.contains("tree.c") || err_msg.contains("kernel"),
+            "Expected file name in error, got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn test_resolve_global_symbol_strict_same_file_ambiguity_lists_candidates() {
+        let (graph, _file_id) = make_same_file_two_candidate_graph();
+        let snapshot = graph.snapshot();
+
+        // Using a file_path that matches the single indexed file should still be
+        // ambiguous (two candidates in same file) and must produce a helpful error.
+        let file_path = Path::new("src/module_x.rs");
+        let result = resolve_global_symbol_strict(&snapshot, "shared_fn", Some(file_path));
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+
+        // Error must mention ambiguity within the file
+        assert!(
+            err_msg.contains("ambiguous"),
+            "Expected 'ambiguous' in error, got: {err_msg}"
+        );
+        assert!(
+            err_msg.contains("module_x.rs"),
+            "Expected file name in error, got: {err_msg}"
+        );
+        // Both qualified-name candidates must be listed
+        assert!(
+            err_msg.contains("ImplA::shared_fn"),
+            "Expected ImplA candidate in error, got: {err_msg}"
+        );
+        assert!(
+            err_msg.contains("ImplB::shared_fn"),
+            "Expected ImplB candidate in error, got: {err_msg}"
+        );
+        // Qualified-name guidance must be present
+        assert!(
+            err_msg.contains("qualified name") || err_msg.contains("qualified-name"),
+            "Expected qualified-name guidance in error, got: {err_msg}"
+        );
+        // Bullet shape must be present
+        assert!(
+            err_msg.contains("  - "),
+            "Expected '  - ' bullet shape in error, got: {err_msg}"
+        );
     }
 
     // ========================================================================
@@ -3278,9 +3111,10 @@ mod tests {
                 offset: 0,
                 size: 100,
             },
+            file_path: None,
         };
 
-        let (impacted, _) = collect_impacted_callers_bfs(&snapshot, node_b, &args, ws);
+        let (impacted, _) = collect_impacted_callers_bfs(&snapshot, &graph, node_b, &args, ws);
         assert_eq!(impacted.len(), 1);
         assert_eq!(impacted[0].symbol.name, "caller_of_target");
         assert_eq!(impacted[0].impact_type, "caller");
@@ -3329,9 +3163,11 @@ mod tests {
                 offset: 0,
                 size: 100,
             },
+            file_path: None,
         };
 
-        let (impacted, affected_files) = collect_impacted_callers_bfs(&snapshot, node_b, &args, ws);
+        let (impacted, affected_files) =
+            collect_impacted_callers_bfs(&snapshot, &graph, node_b, &args, ws);
         assert_eq!(impacted.len(), 1);
         assert!(!affected_files.is_empty());
     }
@@ -3432,46 +3268,6 @@ mod tests {
     }
 
     // ========================================================================
-    // mark_reachable_from_entries tests (via direct call with real SCC)
-    // ========================================================================
-
-    #[test]
-    fn test_mark_reachable_empty_entry_points() {
-        // Build minimal graph + SCC to test mark_reachable_from_entries
-        use sqry_core::graph::unified::analysis::CondensationDag;
-        use sqry_core::graph::unified::analysis::CsrAdjacency;
-        use sqry_core::graph::unified::compaction::snapshot_edges;
-
-        let mut graph = CodeGraph::new();
-        let file_id = graph.files_mut().register(Path::new("empty.rs")).unwrap();
-        let nm = graph.strings_mut().intern("lone").unwrap();
-        let entry = NodeEntry::new(NodeKind::Function, nm, file_id);
-        let node_id = graph.nodes_mut().alloc(entry).unwrap();
-        graph
-            .indices_mut()
-            .add(node_id, NodeKind::Function, nm, None, file_id);
-
-        let snapshot = graph.snapshot();
-        let forward = snapshot.edges().forward();
-        let node_count = snapshot.nodes().len();
-        let compaction = snapshot_edges(&forward, node_count);
-        drop(forward);
-
-        let call_kind = EdgeKind::Calls {
-            argument_count: 0,
-            is_async: false,
-        };
-        let csr = CsrAdjacency::build_from_snapshot(&compaction).unwrap();
-        let scc =
-            sqry_core::graph::unified::analysis::SccData::compute_tarjan(&csr, &call_kind).unwrap();
-        let cond = CondensationDag::build(&scc, &csr).unwrap();
-
-        // Zero entry points => empty reachable set
-        let reachable = mark_reachable_from_entries(&[], &scc, &cond);
-        assert!(reachable.is_empty());
-    }
-
-    // ========================================================================
     // process_caller_node tests
     // ========================================================================
 
@@ -3482,7 +3278,7 @@ mod tests {
         let file_id = graph.files_mut().register(Path::new("src/lib.rs")).unwrap();
         let nm = graph.strings_mut().intern("caller_fn").unwrap();
         let entry = NodeEntry::new(NodeKind::Function, nm, file_id);
-        let _ = graph.nodes_mut().alloc(entry.clone()).unwrap();
+        let node_id = graph.nodes_mut().alloc(entry.clone()).unwrap();
 
         let snapshot = graph.snapshot();
         let strings = snapshot.strings();
@@ -3500,11 +3296,97 @@ mod tests {
                 offset: 0,
                 size: 100,
             },
+            file_path: None,
         };
 
-        let (symbol, _file_uri) = process_caller_node(&entry, strings, files, ws, 0, &args);
+        let (symbol, _file_uri) =
+            process_caller_node(&entry, node_id, &graph, strings, files, ws, 0, &args);
         assert_eq!(symbol.symbol.name, "caller_fn");
         assert_eq!(symbol.impact_type, "caller");
         assert_eq!(symbol.depth, 1); // depth+1
+    }
+
+    // ========================================================================
+    // PARSE_2: hierarchical_search implicit AND integration test
+    //
+    // hierarchical_search calls executor.execute_on_graph(query, &search_root),
+    // which goes through the same parse_query_ast → execute_evaluate_with
+    // pipeline as execute_on_preloaded_graph.  This test proves that the
+    // implicit AND parser fix (PARSE_1) is exercised on the shared parser path
+    // that hierarchical_search uses — satisfying US-1's requirement that
+    // "hierarchical_search benefits automatically (shares parser via
+    // executor.execute_on_graph)".
+    //
+    // Before PARSE_1, `kind:function smb2_open` failed with an UnexpectedToken
+    // error because parse_and() stopped after the first predicate when no
+    // explicit AND token followed.  After PARSE_1, the bare word `smb2_open`
+    // is treated as implicit AND with name~=/smb2_open/, producing
+    // And([Condition(kind=function), Condition(name~=/smb2_open/)]).
+    // ========================================================================
+
+    #[test]
+    fn hierarchical_search_implicit_and_kind_plus_bare_word_returns_results() {
+        use sqry_core::graph::Language;
+        use sqry_core::query::QueryExecutor;
+        use std::sync::Arc;
+
+        // Build a minimal in-memory graph containing a Function node named
+        // `smb2_open`.  This mirrors the Linux kernel fixture referenced in
+        // US-1 without requiring on-disk graph loading.
+        let mut graph = CodeGraph::new();
+        let file_id = graph
+            .files_mut()
+            .register_with_language(Path::new("/workspace/fs/smb2.c"), Some(Language::C))
+            .expect("register smb2.c");
+
+        let nm = graph
+            .strings_mut()
+            .intern("smb2_open")
+            .expect("intern smb2_open");
+        let entry = NodeEntry::new(NodeKind::Function, nm, file_id);
+        let node_id = graph
+            .nodes_mut()
+            .alloc(entry)
+            .expect("alloc smb2_open node");
+        // Register in the auxiliary indices so kind-based index lookups
+        // (used by some predicate optimizers) also find the node.
+        graph
+            .indices_mut()
+            .add(node_id, NodeKind::Function, nm, None, file_id);
+
+        let graph = Arc::new(graph);
+        let executor = QueryExecutor::new();
+        let workspace_root = Path::new("/workspace");
+
+        // The implicit-AND query: bare word `smb2_open` is promoted to
+        // name~=/smb2_open/ and combined with kind:function via implicit AND.
+        // This is the same query string that hierarchical_search passes to
+        // executor.execute_on_graph via normalized_query() → execute_evaluate_with().
+        let results = executor
+            .execute_on_preloaded_graph(
+                Arc::clone(&graph),
+                "kind:function smb2_open",
+                workspace_root,
+                None,
+            )
+            .expect("execute_on_preloaded_graph must succeed for implicit AND query");
+
+        // The query must find exactly the smb2_open function node.
+        assert_eq!(
+            results.len(),
+            1,
+            "kind:function smb2_open via shared executor parser must return the smb2_open node"
+        );
+
+        let matched_name = results
+            .iter()
+            .next()
+            .and_then(|m| m.name())
+            .map(|n| n.to_string())
+            .unwrap_or_default();
+        assert_eq!(
+            matched_name, "smb2_open",
+            "matched node name must be smb2_open"
+        );
     }
 }

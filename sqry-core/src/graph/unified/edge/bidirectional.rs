@@ -150,6 +150,27 @@ impl BidirectionalEdgeStore {
         self.forward.read().edges_from(source)
     }
 
+    /// Returns every live forward edge in the store in a single pass.
+    ///
+    /// Thin wrapper over [`EdgeStore::all_live_forward_edges`] on the
+    /// forward store. The reverse store is intentionally not walked
+    /// (it mirrors the forward store; iterating both would double-count
+    /// every edge). Use this when you need a graph-wide edge-kind filter
+    /// — e.g. Pass 5's HTTP request collector or FFI declaration scan —
+    /// rather than a per-source query.
+    ///
+    /// Asymptotic cost is `O(|csr| + |delta|)` on both pre- and
+    /// post-compaction graphs. Calling [`edges_from`](Self::edges_from)
+    /// in a loop across every node is instead `O(N * |delta|)` because
+    /// each call rebuilds a per-source delta LWW map — this helper
+    /// exists specifically to avoid that regression.
+    ///
+    /// See [`EdgeStore::all_live_forward_edges`] for correctness and
+    /// determinism details.
+    pub fn all_live_forward_edges(&self) -> Vec<StoreEdgeRef> {
+        self.forward.read().all_live_forward_edges()
+    }
+
     /// Returns incoming edges to a target node (reverse traversal).
     ///
     /// Answers: "What connects to `target`?"
@@ -231,6 +252,170 @@ impl BidirectionalEdgeStore {
 
         forward.clear_delta();
         reverse.clear_delta();
+    }
+
+    /// Drops the CSR caches in **both** directions so the next read path
+    /// rebuilds them from the (compacted) delta.
+    ///
+    /// Called by `RebuildGraph::finalize()` step 9 (A2 §H). After the
+    /// preceding `retain_nodes` pass has filtered the delta to live
+    /// endpoints, the cached CSRs still store column-indices into the
+    /// pre-compaction arena layout and therefore cannot be reused. Per
+    /// §K row K.A9 ("CSR adjacency is derived state; rebuilt from
+    /// compacted edges — never mutated in place"), the correct operation
+    /// is to drop both CSRs; the read path regenerates them lazily.
+    pub fn reset_csr_caches(&mut self) {
+        self.forward.get_mut().reset_csr();
+        self.reverse.get_mut().reset_csr();
+    }
+
+    /// Rewrite every `StringId` payload carried by every committed `EdgeKind`
+    /// (in both forward and reverse stores, across both CSR and delta tiers)
+    /// through the canonical-StringId `remap`.
+    ///
+    /// Called exclusively by [`RebuildGraph::finalize`] step 1 (plan §H
+    /// lines 658–707, §K row **K.B1**) after
+    /// [`StringInterner::build_dedup_table`] canonicalises duplicate
+    /// interner slots. Without this rewrite, committed edges still
+    /// reference the pre-dedup `StringId`s, leaving dangling keys once
+    /// [`StringInterner::recycle_unreferenced`] frees the collapsed
+    /// slots. This is the edge-store counterpart to
+    /// `NodeArena` / `AuxiliaryIndices` / `FileRegistry` /
+    /// `AliasTable` / `ShadowTable` remaps already wired in
+    /// `RebuildGraph::finalize` step 1.
+    ///
+    /// Semantics (matches `build_unified_graph_inner::phase4_apply_global_remap`
+    /// in [`parallel_commit::remap_edge_kind_string_ids`]):
+    ///
+    /// * CSR tier: walks every entry of `edge_kind` via
+    ///   [`CsrGraph::edge_kind_mut`]. `row_ptr`, `col_idx`, `edge_seq`,
+    ///   and `edge_spans` are unaffected; only the `EdgeKind` payloads
+    ///   are rewritten in place.
+    /// * Delta tier: walks every `DeltaEdge` via
+    ///   [`DeltaBuffer::iter_mut`] and rewrites `edge.kind` in place.
+    ///   Sequence numbers and per-file partitioning are unaffected.
+    /// * Both tiers receive the same exhaustive `match` on
+    ///   [`EdgeKind`] via `remap_edge_kind_string_ids`; new variants
+    ///   carrying `StringId`s force a compile error until the match arm
+    ///   is added there.
+    ///
+    /// No deduplication is performed here. Edges whose `EdgeKind`
+    /// payloads collapse onto a canonical representation after remap
+    /// remain distinct `DeltaEdge`s: the read path's LWW merge in
+    /// [`EdgeStore::edges_from`] / [`EdgeStore::edges_to`] naturally
+    /// resolves them by `EdgeKey` (source, target, kind), keeping the
+    /// edge with the highest `seq`. Byte sizes are preserved because
+    /// [`EdgeKind::estimated_size`] is variant-only and does not depend
+    /// on `StringId` values; `DeltaBuffer::byte_size` therefore stays
+    /// accurate without recomputation.
+    ///
+    /// # Lock ordering
+    ///
+    /// Acquires `get_mut()` on both `RwLock<EdgeStore>`s — no contention
+    /// possible because finalize holds the rebuild writer exclusively.
+    ///
+    /// `pub(crate)` because the only legitimate caller is
+    /// [`RebuildGraph::finalize`] step 1 inside `sqry-core`. External
+    /// crates (including `sqry-daemon` with `rebuild-internals` enabled)
+    /// must never reach into committed edge storage directly — the
+    /// finalize contract is the single publish path. See Gate 0c plan
+    /// §H "Type-enforced publish path" and iter-4 blocker.
+    #[allow(clippy::implicit_hasher)]
+    #[allow(dead_code)] // Only reachable through the rebuild-internals-gated path.
+    pub(crate) fn rewrite_edge_kind_string_ids_through_remap(
+        &mut self,
+        remap: &std::collections::HashMap<
+            crate::graph::unified::string::id::StringId,
+            crate::graph::unified::string::id::StringId,
+        >,
+    ) {
+        if remap.is_empty() {
+            return;
+        }
+        // Forward store: CSR edge_kind + delta edges
+        {
+            let forward = self.forward.get_mut();
+            if let Some(csr) = forward.csr_mut() {
+                for kind in csr.edge_kind_mut() {
+                    crate::graph::unified::build::parallel_commit::remap_edge_kind_string_ids(
+                        kind, remap,
+                    );
+                }
+            }
+            for edge in forward.delta_mut().iter_mut() {
+                crate::graph::unified::build::parallel_commit::remap_edge_kind_string_ids(
+                    &mut edge.kind,
+                    remap,
+                );
+            }
+        }
+        // Reverse store: same treatment
+        {
+            let reverse = self.reverse.get_mut();
+            if let Some(csr) = reverse.csr_mut() {
+                for kind in csr.edge_kind_mut() {
+                    crate::graph::unified::build::parallel_commit::remap_edge_kind_string_ids(
+                        kind, remap,
+                    );
+                }
+            }
+            for edge in reverse.delta_mut().iter_mut() {
+                crate::graph::unified::build::parallel_commit::remap_edge_kind_string_ids(
+                    &mut edge.kind,
+                    remap,
+                );
+            }
+        }
+    }
+
+    /// Tombstone every committed CSR edge, and drop every delta-buffer
+    /// edge, whose source or target slot index is in `dead`, across both
+    /// forward and reverse stores.
+    ///
+    /// This is the §F.2 invalidation primitive behind
+    /// [`super::super::concurrent::CodeGraph::remove_file`] and
+    /// [`super::super::rebuild::rebuild_graph::RebuildGraph::remove_file`].
+    /// The caller has already tombstoned the affected arena slots (via
+    /// [`NodeArena::remove`]); this helper ensures no CSR or delta edge
+    /// remains pointing at those now-freed slots.
+    ///
+    /// Returns the total number of CSR edges newly tombstoned across
+    /// both stores. Delta drops are not counted here — callers that
+    /// need the delta count can read `stats()` before and after.
+    ///
+    /// # Lock ordering
+    ///
+    /// Acquires `get_mut` on the forward store's `RwLock` first, then
+    /// the reverse store's `RwLock`, matching the convention used by
+    /// [`swap_csrs_and_clear_deltas`](Self::swap_csrs_and_clear_deltas)
+    /// and
+    /// [`rewrite_edge_kind_string_ids_through_remap`](Self::rewrite_edge_kind_string_ids_through_remap).
+    /// Safe against concurrent readers because the caller holds
+    /// exclusive `&mut self`.
+    ///
+    /// `pub(crate)` because the only legitimate callers are
+    /// `CodeGraph::remove_file` / `RebuildGraph::remove_file` inside
+    /// sqry-core. External crates must go through those higher-level
+    /// entry points (which in turn gate the rebuild via the
+    /// `rebuild-internals` feature or the explicit `CodeGraph::remove_file`
+    /// pub(crate) API on the full-rebuild path).
+    ///
+    /// [`NodeArena::remove`]: super::super::storage::arena::NodeArena::remove
+    #[allow(clippy::implicit_hasher)]
+    #[allow(dead_code)] // Consumer is `CodeGraph::remove_file` +
+    // `RebuildGraph::remove_file` (Task 4 Steps 2–3) and the unit
+    // tests below; lives here so the §F.2 invalidation primitive is
+    // reviewable independently of the higher-level entry points.
+    pub(crate) fn tombstone_edges_for_nodes(
+        &mut self,
+        dead: &std::collections::HashSet<super::super::node::NodeId>,
+    ) -> usize {
+        if dead.is_empty() {
+            return 0;
+        }
+        let forward_tombstoned = self.forward.get_mut().tombstone_edges_for_nodes(dead);
+        let reverse_tombstoned = self.reverse.get_mut().tombstone_edges_for_nodes(dead);
+        forward_tombstoned + reverse_tombstoned
     }
 
     /// Returns a read lock on the forward store.

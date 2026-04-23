@@ -152,6 +152,13 @@ fn detect_orphaned_nodes(
     for (node_id, entry) in graph.nodes().iter() {
         let _ = node_id; // Suppress unused warning
 
+        // Gate 0d iter-2 fix: skip unified losers from orphan
+        // detection. Losers are inert duplicates, not orphaned
+        // nodes. See `NodeEntry::is_unified_loser`.
+        if entry.is_unified_loser() {
+            continue;
+        }
+
         if let Some(file_path) = files.resolve(entry.file) {
             let full_path = root_path.join(file_path.as_ref());
             if !full_path.exists() {

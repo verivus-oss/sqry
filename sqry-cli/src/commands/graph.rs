@@ -16,6 +16,7 @@
 
 pub mod loader;
 pub mod provenance;
+pub mod resolve;
 
 use crate::args::{Cli, GraphOperation};
 use anyhow::{Context, Result, bail};
@@ -262,6 +263,7 @@ pub fn run_graph(
             show_cycle,
         } => run_is_in_cycle_unified(
             &unified_graph,
+            root.as_path(),
             symbol,
             cycle_type,
             *show_cycle,
@@ -271,6 +273,14 @@ pub fn run_graph(
         GraphOperation::Provenance { symbol, json } => {
             let snapshot = unified_graph.snapshot();
             provenance::run(&snapshot, symbol, *json)
+        }
+        GraphOperation::Resolve {
+            symbol,
+            explain,
+            json,
+        } => {
+            let snapshot = unified_graph.snapshot();
+            resolve::run(&snapshot, symbol, *explain, *json)
         }
         GraphOperation::Status => {
             unreachable!("Status is handled before loading the unified graph in run_graph")
@@ -442,6 +452,11 @@ fn collect_language_counts_unified(
 ) -> HashMap<String, usize> {
     let mut lang_counts = HashMap::new();
     for (_node_id, entry) in snapshot.iter_nodes() {
+        // Gate 0d iter-2 fix: skip unified losers from CLI graph
+        // language stats. See `NodeEntry::is_unified_loser`.
+        if entry.is_unified_loser() {
+            continue;
+        }
         if let Some(lang) = snapshot.files().language_for_file(entry.file) {
             let lang_str = format!("{lang:?}");
             *lang_counts.entry(lang_str).or_insert(0) += 1;
@@ -457,6 +472,11 @@ fn collect_file_counts_unified(
 ) -> HashMap<String, usize> {
     let mut file_counts = HashMap::new();
     for (_node_id, entry) in snapshot.iter_nodes() {
+        // Gate 0d iter-2 fix: skip unified losers from CLI graph
+        // file stats. See `NodeEntry::is_unified_loser`.
+        if entry.is_unified_loser() {
+            continue;
+        }
         if let Some(path) = snapshot.files().resolve(entry.file) {
             let file_str = path.to_string_lossy().to_string();
             *file_counts.entry(file_str).or_insert(0) += 1;
@@ -1012,6 +1032,11 @@ fn detect_cycles_unified(
     let mut path = Vec::new();
 
     for (node_id, entry) in snapshot.iter_nodes() {
+        // Gate 0d iter-2 fix: skip unified losers from CLI cycle
+        // detection. See `NodeEntry::is_unified_loser`.
+        if entry.is_unified_loser() {
+            continue;
+        }
         // Apply language filter
         if !language_filter.is_empty() {
             let node_lang = snapshot.files().language_for_file(entry.file);
@@ -1271,6 +1296,26 @@ fn write_call_chain_depth_output(
 ///
 /// Uses the traversal kernel with standard BFS (outgoing, `calls_only`) and
 /// derives the max depth from the deepest edge in the result.
+///
+/// # Dispatch path (DB18)
+///
+/// `call-chain-depth` is a **NodeId-anchored multi-hop BFS** under the
+/// Phase 3C dispatch taxonomy (it does not take a name-keyed predicate
+/// over the whole graph — the start is resolved to a specific `NodeId`
+/// first). It intentionally does **not** route through sqry-db's
+/// name-keyed queries.
+///
+/// # Frontier invariant
+///
+/// The BFS only broadens through edges physically adjacent to already-visited
+/// `NodeId`s (kernel `traverse` with `edges_from`). It never re-resolves a
+/// name against [`find_nodes_by_name`] at depth ≥ 1. This preserves the
+/// same-name frontier invariant: if the user seeds on `AlphaMarker::helper`,
+/// unrelated `BetaMarker::helper` chains never leak into the depth count.
+/// The CLI resolves the seeds via [`find_nodes_by_name`] at the handler
+/// entry (`run_call_chain_depth_unified` → `filter_matching_nodes_by_language`)
+/// so an ambiguous simple name produces a `depth` per resolved candidate,
+/// which is the pre-DB18 contract.
 fn calculate_call_chain_depth_unified(
     snapshot: &sqry_core::graph::unified::concurrent::GraphSnapshot,
     start: UnifiedNodeId,
@@ -1624,6 +1669,24 @@ fn build_dependency_tree_unified(
 /// Uses the traversal kernel with outgoing direction and all edge types.
 /// This replaces the previous O(E) per-node `iter_edges()` loop with the
 /// kernel's O(degree) `edges_from()`.
+///
+/// # Dispatch path (DB18)
+///
+/// `dependency-tree` is a **NodeId-anchored multi-hop BFS** under the
+/// Phase 3C dispatch taxonomy; it does not route through sqry-db's
+/// name-keyed queries.
+///
+/// # Frontier invariant
+///
+/// Traversal broadens strictly through edges physically adjacent to
+/// already-visited `NodeId`s (kernel `traverse` with `edges_from`). It
+/// never re-resolves a name against [`find_nodes_by_name`] at depth ≥ 1,
+/// preserving the same-name frontier invariant: a user who seeds on
+/// `AlphaMarker::helper` cannot pull in unrelated `BetaMarker::helper`
+/// chains. Root-node resolution happens in
+/// [`run_dependency_tree_unified`] via [`find_nodes_by_name`] at the
+/// handler entry; the traversal operates only on the resolved `NodeId`s
+/// after that.
 fn collect_dependency_edges_unified(
     snapshot: &sqry_core::graph::unified::concurrent::GraphSnapshot,
     root_nodes: &[UnifiedNodeId],
@@ -2231,6 +2294,11 @@ fn run_nodes_unified(
 
     let mut matches = Vec::new();
     for (node_id, entry) in snapshot.iter_nodes() {
+        // Gate 0d iter-2 fix: skip unified losers from CLI
+        // `graph nodes` listing. See `NodeEntry::is_unified_loser`.
+        if entry.is_unified_loser() {
+            continue;
+        }
         if !kind_filter.is_empty() && !kind_filter.contains(&entry.kind) {
             continue;
         }
@@ -2661,6 +2729,11 @@ fn calculate_complexity_metrics_unified(
     let mut complexities = Vec::new();
 
     for (node_id, entry) in snapshot.iter_nodes() {
+        // Gate 0d iter-2 fix: skip unified losers from CLI
+        // complexity metrics. See `NodeEntry::is_unified_loser`.
+        if entry.is_unified_loser() {
+            continue;
+        }
         if !node_matches_language_filter(snapshot, entry, language_filter) {
             continue;
         }
@@ -3382,25 +3455,136 @@ struct DirectCallOptions<'a> {
     verbose: bool,
 }
 
+/// Build a JSON row for a direct-caller/callee result.
+fn direct_call_row(
+    snapshot: &UnifiedGraphSnapshot,
+    root: &Path,
+    node_id: sqry_core::graph::unified::node::NodeId,
+    full_paths: bool,
+) -> Option<serde_json::Value> {
+    use serde_json::json;
+    let entry = snapshot.nodes().get(node_id)?;
+    let strings = snapshot.strings();
+    let files = snapshot.files();
+    let name = strings.resolve(entry.name).unwrap_or_default().to_string();
+    let qualified_name = entry
+        .qualified_name
+        .and_then(|id| strings.resolve(id))
+        .map_or_else(|| name.clone(), |s| s.to_string());
+    let language = files
+        .language_for_file(entry.file)
+        .map_or_else(|| "unknown".to_string(), |l| l.to_string());
+    let file_path = files
+        .resolve(entry.file)
+        .map(|p| {
+            if full_paths {
+                p.display().to_string()
+            } else {
+                p.strip_prefix(root)
+                    .unwrap_or(p.as_ref())
+                    .display()
+                    .to_string()
+            }
+        })
+        .unwrap_or_default();
+    Some(json!({
+        "name": name,
+        "qualified_name": qualified_name,
+        "kind": format!("{:?}", entry.kind),
+        "file": file_path,
+        "line": entry.start_line,
+        "language": language,
+    }))
+}
+
+/// Print a direct-callers / direct-callees result set in text or JSON.
+fn emit_direct_call_output(
+    symbol: &str,
+    key: &'static str,
+    label_noun: &'static str,
+    rows: &[serde_json::Value],
+    limit: usize,
+    format: &str,
+) -> Result<()> {
+    use serde_json::json;
+    if format == "json" {
+        let output = json!({
+            "symbol": symbol,
+            key: rows,
+            "total": rows.len(),
+            "truncated": rows.len() >= limit,
+        });
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else {
+        println!("{label_noun}s of '{symbol}':");
+        println!();
+        if rows.is_empty() {
+            println!("  (no {label_noun}s found)");
+        } else {
+            for row in rows {
+                let name = row["qualified_name"].as_str().unwrap_or("");
+                let file = row["file"].as_str().unwrap_or("");
+                let line = row["line"].as_u64().unwrap_or(0);
+                println!("  {name} ({file}:{line})");
+            }
+            println!();
+            println!("Total: {total} {label_noun}(s)", total = rows.len());
+        }
+    }
+    Ok(())
+}
+
 /// Find all direct callers of a symbol using the unified graph.
+///
+/// # Dispatch path (DB18)
+///
+/// `direct-callers` is a **name-keyed predicate** under the Phase 3C
+/// dispatch taxonomy: the user supplies a symbol name and expects the set
+/// of nodes that call *any* node with that name, under the
+/// `graph_eval`-style convention (identical to the MCP `direct_callers`
+/// tool). The handler routes through [`sqry_db::queries::dispatch::mcp_callers_query`],
+/// which inverts sqry-db's planner-side naming (`CalleesQuery` keyed on
+/// `X` returns nodes whose `callees` set includes `X` — i.e. callers of
+/// `X`). See [`sqry_db::queries::dispatch`] for the full rationale.
+///
+/// Language + limit filters are applied MCP-style: sqry-db returns the
+/// full candidate set, then this handler post-filters by language and
+/// truncates at `limit`. The JSON schema is unchanged from the pre-DB18
+/// inline-BFS implementation.
+///
+/// # Behavior shift (DB18)
+///
+/// The pre-DB18 implementation resolved the query through
+/// [`find_nodes_by_name`] and walked reverse edges from each resolved
+/// `NodeId`, so a query like `AlphaMarker::helper` returned callers of
+/// exactly that node. The post-DB18 implementation uses sqry-db's
+/// name-keyed, **segment-aware** `CalleesQuery`, which matches the
+/// trailing method segment for `Calls` edges (identical to MCP's
+/// `direct_callers` as of DB15 — see [`sqry_db::queries::relation`] for
+/// `method_segment_matches`). On a fixture with two disjoint inherent
+/// impls sharing a simple method name (`AlphaMarker::helper` and
+/// `BetaMarker::helper`), a query for either qualified name now returns
+/// callers of **both** methods, matching the MCP behavior. CLI and MCP
+/// share one cache behavior after DB18. If stricter qualified-name
+/// semantics is needed, users should pass the most specific unique
+/// qualified name or use `sqry impact <symbol> --direct-only` (which
+/// is NodeId-anchored and does not segment-broaden).
 fn run_direct_callers_unified(
     graph: &UnifiedCodeGraph,
     root: &Path,
     options: &DirectCallOptions<'_>,
 ) -> Result<()> {
-    use serde_json::json;
-
-    let snapshot = graph.snapshot();
-    let strings = snapshot.strings();
+    let snapshot = std::sync::Arc::new(graph.snapshot());
     let files = snapshot.files();
 
     let language_filter = parse_language_filter(options.languages)?
         .into_iter()
         .collect::<HashSet<_>>();
 
-    // Find the target node(s) matching the symbol
+    // Verify the symbol exists in the graph (matches the pre-DB18
+    // not-found error contract). sqry-db's predicate returns an empty
+    // set for unknown names, so we still resolve here for the error.
     let target_nodes = find_nodes_by_name(&snapshot, options.symbol);
-
     if target_nodes.is_empty() {
         bail!(
             "Symbol '{symbol}' not found in the graph",
@@ -3416,114 +3600,82 @@ fn run_direct_callers_unified(
         );
     }
 
-    // Collect all callers
-    let mut callers = Vec::new();
-    let reverse_store = snapshot.edges().reverse();
+    // Route through sqry-db: name-keyed predicate, graph_eval-style
+    // inversion (mcp_callers_query == db.get::<CalleesQuery>).
+    // PN3 CLIENT_LOAD: opportunistic cold-load from workspace companion file.
+    let db = sqry_db::queries::dispatch::make_query_db_cold(std::sync::Arc::clone(&snapshot), root);
+    let key = sqry_db::queries::RelationKey::exact(options.symbol);
+    let caller_ids = sqry_db::queries::dispatch::mcp_callers_query(&db, &key);
 
-    for target_id in &target_nodes {
-        for edge_ref in reverse_store.edges_from(*target_id) {
-            if callers.len() >= options.limit {
-                break;
-            }
-
-            // In reverse store, edge_ref.target is the actual caller
-            let caller_id = edge_ref.target;
-
-            // Filter by edge type - only Calls edges
-            if !matches!(edge_ref.kind, UnifiedEdgeKind::Calls { .. }) {
-                continue;
-            }
-
-            if let Some(entry) = snapshot.nodes().get(caller_id) {
-                // Apply language filter
-                if !language_filter.is_empty()
-                    && let Some(lang) = files.language_for_file(entry.file)
-                    && !language_filter.contains(&lang)
-                {
-                    continue;
-                }
-
-                let name = strings.resolve(entry.name).unwrap_or_default().to_string();
-                let qualified_name = entry
-                    .qualified_name
-                    .and_then(|id| strings.resolve(id))
-                    .map_or_else(|| name.clone(), |s| s.to_string());
-                let language = files
-                    .language_for_file(entry.file)
-                    .map_or_else(|| "unknown".to_string(), |l| l.to_string());
-                let file_path = files
-                    .resolve(entry.file)
-                    .map(|p| {
-                        if options.full_paths {
-                            p.display().to_string()
-                        } else {
-                            p.strip_prefix(root)
-                                .unwrap_or(p.as_ref())
-                                .display()
-                                .to_string()
-                        }
-                    })
-                    .unwrap_or_default();
-
-                callers.push(json!({
-                    "name": name,
-                    "qualified_name": qualified_name,
-                    "kind": format!("{:?}", entry.kind),
-                    "file": file_path,
-                    "line": entry.start_line,
-                    "language": language
-                }));
-            }
+    // Post-filter: language filter + limit truncation.
+    let mut rows = Vec::new();
+    for &caller_id in caller_ids.iter() {
+        if rows.len() >= options.limit {
+            break;
+        }
+        let Some(entry) = snapshot.nodes().get(caller_id) else {
+            continue;
+        };
+        if !language_filter.is_empty()
+            && let Some(lang) = files.language_for_file(entry.file)
+            && !language_filter.contains(&lang)
+        {
+            continue;
+        }
+        if let Some(row) = direct_call_row(&snapshot, root, caller_id, options.full_paths) {
+            rows.push(row);
         }
     }
 
-    if options.format == "json" {
-        let output = json!({
-            "symbol": options.symbol,
-            "callers": callers,
-            "total": callers.len(),
-            "truncated": callers.len() >= options.limit
-        });
-        println!("{}", serde_json::to_string_pretty(&output)?);
-    } else {
-        println!("Callers of '{symbol}':", symbol = options.symbol);
-        println!();
-        if callers.is_empty() {
-            println!("  (no callers found)");
-        } else {
-            for caller in &callers {
-                let name = caller["qualified_name"].as_str().unwrap_or("");
-                let file = caller["file"].as_str().unwrap_or("");
-                let line = caller["line"].as_u64().unwrap_or(0);
-                println!("  {name} ({file}:{line})");
-            }
-            println!();
-            println!("Total: {total} caller(s)", total = callers.len());
-        }
-    }
-
-    Ok(())
+    emit_direct_call_output(
+        options.symbol,
+        "callers",
+        "caller",
+        &rows,
+        options.limit,
+        options.format,
+    )
 }
 
 /// Find all direct callees of a symbol using the unified graph.
+///
+/// # Dispatch path (DB18)
+///
+/// `direct-callees` is a **name-keyed predicate** under the Phase 3C
+/// dispatch taxonomy: the user supplies a symbol name and expects the set
+/// of nodes that *any* node with that name calls, under the
+/// `graph_eval`-style convention (identical to the MCP `direct_callees`
+/// tool). The handler routes through [`sqry_db::queries::dispatch::mcp_callees_query`],
+/// which inverts sqry-db's planner-side naming (`CallersQuery` keyed on
+/// `X` returns nodes whose `callers` set includes `X` — i.e. nodes that
+/// `X` calls). See [`sqry_db::queries::dispatch`] for the full rationale.
+///
+/// Language + limit filters are applied MCP-style: sqry-db returns the
+/// full candidate set, then this handler post-filters by language and
+/// truncates at `limit`. The JSON schema is unchanged from the pre-DB18
+/// inline-edge-walk implementation.
+///
+/// # Behavior shift (DB18)
+///
+/// See [`run_direct_callers_unified`]'s docstring — the same name-keyed,
+/// segment-aware semantic applies here. Ambiguous simple names (or
+/// qualified names that share a trailing method segment with another
+/// node) now return the union of callees across every matching node,
+/// matching MCP's DB15 behavior.
 fn run_direct_callees_unified(
     graph: &UnifiedCodeGraph,
     root: &Path,
     options: &DirectCallOptions<'_>,
 ) -> Result<()> {
-    use serde_json::json;
-
-    let snapshot = graph.snapshot();
-    let strings = snapshot.strings();
+    let snapshot = std::sync::Arc::new(graph.snapshot());
     let files = snapshot.files();
 
     let language_filter = parse_language_filter(options.languages)?
         .into_iter()
         .collect::<HashSet<_>>();
 
-    // Find the source node(s) matching the symbol
+    // Verify the symbol exists (matches pre-DB18 not-found contract).
     let source_nodes = find_nodes_by_name(&snapshot, options.symbol);
-
     if source_nodes.is_empty() {
         bail!(
             "Symbol '{symbol}' not found in the graph",
@@ -3539,92 +3691,41 @@ fn run_direct_callees_unified(
         );
     }
 
-    // Collect all callees
-    let mut callees = Vec::new();
-    let edge_store = snapshot.edges();
+    // Route through sqry-db: name-keyed predicate, graph_eval-style
+    // inversion (mcp_callees_query == db.get::<CallersQuery>).
+    // PN3 CLIENT_LOAD: opportunistic cold-load from workspace companion file.
+    let db = sqry_db::queries::dispatch::make_query_db_cold(std::sync::Arc::clone(&snapshot), root);
+    let key = sqry_db::queries::RelationKey::exact(options.symbol);
+    let callee_ids = sqry_db::queries::dispatch::mcp_callees_query(&db, &key);
 
-    for source_id in &source_nodes {
-        for edge_ref in edge_store.edges_from(*source_id) {
-            if callees.len() >= options.limit {
-                break;
-            }
-
-            // Filter by edge type - only Calls edges
-            if !matches!(edge_ref.kind, UnifiedEdgeKind::Calls { .. }) {
-                continue;
-            }
-
-            let callee_id = edge_ref.target;
-
-            if let Some(entry) = snapshot.nodes().get(callee_id) {
-                // Apply language filter
-                if !language_filter.is_empty()
-                    && let Some(lang) = files.language_for_file(entry.file)
-                    && !language_filter.contains(&lang)
-                {
-                    continue;
-                }
-
-                let name = strings.resolve(entry.name).unwrap_or_default().to_string();
-                let qualified_name = entry
-                    .qualified_name
-                    .and_then(|id| strings.resolve(id))
-                    .map_or_else(|| name.clone(), |s| s.to_string());
-                let language = files
-                    .language_for_file(entry.file)
-                    .map_or_else(|| "unknown".to_string(), |l| l.to_string());
-                let file_path = files
-                    .resolve(entry.file)
-                    .map(|p| {
-                        if options.full_paths {
-                            p.display().to_string()
-                        } else {
-                            p.strip_prefix(root)
-                                .unwrap_or(p.as_ref())
-                                .display()
-                                .to_string()
-                        }
-                    })
-                    .unwrap_or_default();
-
-                callees.push(json!({
-                    "name": name,
-                    "qualified_name": qualified_name,
-                    "kind": format!("{:?}", entry.kind),
-                    "file": file_path,
-                    "line": entry.start_line,
-                    "language": language
-                }));
-            }
+    // Post-filter: language filter + limit truncation.
+    let mut rows = Vec::new();
+    for &callee_id in callee_ids.iter() {
+        if rows.len() >= options.limit {
+            break;
+        }
+        let Some(entry) = snapshot.nodes().get(callee_id) else {
+            continue;
+        };
+        if !language_filter.is_empty()
+            && let Some(lang) = files.language_for_file(entry.file)
+            && !language_filter.contains(&lang)
+        {
+            continue;
+        }
+        if let Some(row) = direct_call_row(&snapshot, root, callee_id, options.full_paths) {
+            rows.push(row);
         }
     }
 
-    if options.format == "json" {
-        let output = json!({
-            "symbol": options.symbol,
-            "callees": callees,
-            "total": callees.len(),
-            "truncated": callees.len() >= options.limit
-        });
-        println!("{}", serde_json::to_string_pretty(&output)?);
-    } else {
-        println!("Callees of '{symbol}':", symbol = options.symbol);
-        println!();
-        if callees.is_empty() {
-            println!("  (no callees found)");
-        } else {
-            for callee in &callees {
-                let name = callee["qualified_name"].as_str().unwrap_or("");
-                let file = callee["file"].as_str().unwrap_or("");
-                let line = callee["line"].as_u64().unwrap_or(0);
-                println!("  {name} ({file}:{line})");
-            }
-            println!();
-            println!("Total: {total} callee(s)", total = callees.len());
-        }
-    }
-
-    Ok(())
+    emit_direct_call_output(
+        options.symbol,
+        "callees",
+        "callee",
+        &rows,
+        options.limit,
+        options.format,
+    )
 }
 
 // ===== Call Hierarchy =====
@@ -3890,9 +3991,33 @@ fn print_hierarchy_text(nodes: &[serde_json::Value], indent: usize) {
 
 // ===== Is In Cycle =====
 
-/// Check if a symbol is in a cycle using the unified graph.
+/// Check if a symbol is in a cycle using sqry-db's cycle queries.
+///
+/// # Dispatch path (DB19)
+///
+/// `is-in-cycle` is a **hybrid** under the Phase 3C dispatch taxonomy:
+/// the symbol name is strictly resolved to a single `NodeId` up front
+/// (mirroring the MCP policy in
+/// [`sqry_mcp::execution::tools::analysis::execute_is_node_in_cycle`]),
+/// then dispatches to two sqry-db queries:
+///
+/// 1. [`sqry_db::queries::IsInCycleQuery`] keyed on the resolved `NodeId`
+///    for the boolean answer (cached per-snapshot).
+/// 2. On a `true` answer and when `--show-cycle` is requested, a
+///    follow-up [`sqry_db::queries::CyclesQuery`] with `max_results =
+///    usize::MAX` to fetch the containing cycle. The SCC table is already
+///    warmed by `IsInCycleQuery`, so this is O(cycles) filtering work on
+///    a hot cache. Uncapped matches the DB17 peer-review (Low 1)
+///    decision for the MCP surface: capping could surface
+///    `in_cycle=true, cycle=null` corner cases which are correctness bugs.
+///
+/// Ambiguous simple names are rejected up front (strict resolution) —
+/// the pre-DB19 implementation walked every candidate and merged the
+/// results, which returned nondeterministic output for same-name
+/// candidates in disjoint modules.
 fn run_is_in_cycle_unified(
     graph: &UnifiedCodeGraph,
+    root: &Path,
     symbol: &str,
     cycle_type: &str,
     show_cycle: bool,
@@ -3900,58 +4025,121 @@ fn run_is_in_cycle_unified(
     verbose: bool,
 ) -> Result<()> {
     use serde_json::json;
+    use sqry_core::graph::unified::{
+        FileScope, ResolutionMode, SymbolQuery, SymbolResolutionOutcome,
+    };
+    use sqry_core::query::CircularType;
+    use std::sync::Arc;
 
-    let snapshot = graph.snapshot();
-    let strings = snapshot.strings();
+    // Parse cycle type. We accept the canonical plural forms (`calls`,
+    // `imports`, `modules`) plus the DB17 MCP surface's singular aliases
+    // so the CLI and MCP surfaces stay in lock-step. The pre-DB19 CLI
+    // also accepted `all` meaning "cycles across any edge kind" — we
+    // preserve that by running two sqry-db queries (`Calls` then
+    // `Imports`) and unioning the results.
+    let cycle_types: Vec<CircularType> = if cycle_type.eq_ignore_ascii_case("all") {
+        vec![CircularType::Calls, CircularType::Imports]
+    } else {
+        let parsed = CircularType::try_parse(cycle_type).with_context(|| {
+            format!("Invalid cycle type: {cycle_type}. Use: calls, imports, modules, all")
+        })?;
+        vec![parsed]
+    };
 
-    // Find the node(s) matching the symbol
-    let target_nodes = find_nodes_by_name(&snapshot, symbol);
+    let snapshot = Arc::new(graph.snapshot());
 
-    if target_nodes.is_empty() {
-        bail!("Symbol '{symbol}' not found in the graph");
-    }
+    // Strict resolution: reject ambiguous simple names up front rather
+    // than answering "in a cycle?" on an arbitrary candidate. Mirrors
+    // the DB17 MCP policy for `is_node_in_cycle` / `dependency_impact`.
+    let target_id = match snapshot.resolve_symbol(&SymbolQuery {
+        symbol,
+        file_scope: FileScope::Any,
+        mode: ResolutionMode::Strict,
+    }) {
+        SymbolResolutionOutcome::Resolved(node_id) => node_id,
+        SymbolResolutionOutcome::NotFound | SymbolResolutionOutcome::FileNotIndexed => {
+            bail!("Symbol '{symbol}' not found in the graph");
+        }
+        SymbolResolutionOutcome::Ambiguous(candidates) => {
+            bail!(
+                "Symbol '{symbol}' is ambiguous ({} candidates). Use a canonical qualified name.",
+                candidates.len()
+            );
+        }
+    };
 
     if verbose {
         eprintln!(
-            "Checking if symbol '{}' is in a {} cycle ({} node(s) found)",
-            symbol,
-            cycle_type,
-            target_nodes.len()
+            "Checking if symbol '{}' ({:?}) is in a {} cycle",
+            symbol, target_id, cycle_type
         );
     }
 
-    let imports_only = cycle_type == "imports";
-    let calls_only = cycle_type == "calls";
-
-    // Check each matching node for cycles
-    let mut found_cycles = Vec::new();
-
-    for &target_id in &target_nodes {
-        if let Some(cycle) =
-            find_cycle_containing_node(&snapshot, target_id, imports_only, calls_only)
-        {
-            // Convert cycle to qualified names
-            let cycle_names: Vec<String> = cycle
-                .iter()
-                .filter_map(|&node_id| {
-                    snapshot.nodes().get(node_id).and_then(|entry| {
-                        entry
-                            .qualified_name
-                            .and_then(|id| strings.resolve(id))
-                            .map(|s| s.to_string())
-                            .or_else(|| strings.resolve(entry.name).map(|s| s.to_string()))
-                    })
-                })
-                .collect();
-
-            found_cycles.push(json!({
-                "node": format!("{target_id:?}"),
-                "cycle": cycle_names
-            }));
+    // Route through sqry-db: `IsInCycleQuery` is the hybrid cycle
+    // predicate in the planner taxonomy, cached per-snapshot.
+    // Predicate bounds use the pre-DB19 default `max_results = 100`
+    // for the predicate; the containing-cycle materialization below
+    // uses `usize::MAX` so `in_cycle=true` never coexists with
+    // `cycle=null` (matches DB17 MCP peer-review Low 1 fix).
+    //
+    // For `cycle_type == "all"`, we iterate over both Calls and Imports
+    // circular types and union the results. This preserves the
+    // pre-DB19 CLI semantic (which followed both edge kinds in a
+    // single DFS) without exposing a union variant in sqry-db.
+    // PN3 CLIENT_LOAD: opportunistic cold-load from workspace companion file.
+    let db = sqry_db::queries::dispatch::make_query_db_cold(Arc::clone(&snapshot), root);
+    let predicate_bounds = sqry_db::queries::CycleBounds {
+        min_depth: 2,
+        max_depth: None,
+        max_results: 100,
+        should_include_self_loops: false,
+    };
+    let mut in_cycle = false;
+    let mut found_cycles: Vec<serde_json::Value> = Vec::new();
+    for &ct in &cycle_types {
+        if db.get::<sqry_db::queries::IsInCycleQuery>(&sqry_db::queries::IsInCycleKey {
+            node_id: target_id,
+            circular_type: ct,
+            bounds: predicate_bounds,
+        }) {
+            in_cycle = true;
+            if show_cycle {
+                let cycle_lookup_bounds = sqry_db::queries::CycleBounds {
+                    min_depth: 2,
+                    max_depth: None,
+                    max_results: usize::MAX,
+                    should_include_self_loops: false,
+                };
+                let all_cycles =
+                    db.get::<sqry_db::queries::CyclesQuery>(&sqry_db::queries::CyclesKey {
+                        circular_type: ct,
+                        bounds: cycle_lookup_bounds,
+                    });
+                if let Some(component) = all_cycles
+                    .iter()
+                    .find(|component| component.contains(&target_id))
+                {
+                    let strings = snapshot.strings();
+                    let cycle_names: Vec<String> = component
+                        .iter()
+                        .filter_map(|&node_id| {
+                            snapshot.get_node(node_id).and_then(|entry| {
+                                entry
+                                    .qualified_name
+                                    .and_then(|id| strings.resolve(id))
+                                    .or_else(|| strings.resolve(entry.name))
+                                    .map(|s| s.to_string())
+                            })
+                        })
+                        .collect();
+                    found_cycles.push(json!({
+                        "node": format!("{target_id:?}"),
+                        "cycle": cycle_names
+                    }));
+                }
+            }
         }
     }
-
-    let in_cycle = !found_cycles.is_empty();
 
     if format == "json" {
         let output = if show_cycle {
@@ -3980,7 +4168,7 @@ fn run_is_in_cycle_unified(
                         let prefix = if j == 0 { "  " } else { "  → " };
                         println!("{prefix}{name}", name = name.as_str().unwrap_or("?"));
                     }
-                    // Show the loop back
+                    // Show the loop back.
                     if let Some(first) = names.first() {
                         println!("  → {} (cycle)", first.as_str().unwrap_or("?"));
                     }
@@ -3992,57 +4180,6 @@ fn run_is_in_cycle_unified(
     }
 
     Ok(())
-}
-
-/// Find a cycle containing a specific node.
-fn find_cycle_containing_node(
-    snapshot: &UnifiedGraphSnapshot,
-    target: sqry_core::graph::unified::node::NodeId,
-    imports_only: bool,
-    calls_only: bool,
-) -> Option<Vec<sqry_core::graph::unified::node::NodeId>> {
-    // DFS to find a path from target back to itself
-    let mut stack = vec![(target, vec![target])];
-    let mut visited = HashSet::new();
-
-    while let Some((current, path)) = stack.pop() {
-        if visited.contains(&current) && path.len() > 1 {
-            continue;
-        }
-        visited.insert(current);
-
-        for edge_ref in snapshot.edges().edges_from(current) {
-            // Filter by edge type
-            let is_import = matches!(edge_ref.kind, UnifiedEdgeKind::Imports { .. });
-            let is_call = matches!(edge_ref.kind, UnifiedEdgeKind::Calls { .. });
-
-            if imports_only && !is_import {
-                continue;
-            }
-            if calls_only && !is_call {
-                continue;
-            }
-            if !imports_only && !calls_only && !is_import && !is_call {
-                continue;
-            }
-
-            let next = edge_ref.target;
-
-            // Found a cycle back to the target!
-            if next == target && path.len() > 1 {
-                return Some(path);
-            }
-
-            // Don't revisit in this path
-            if !path.contains(&next) {
-                let mut new_path = path.clone();
-                new_path.push(next);
-                stack.push((next, new_path));
-            }
-        }
-    }
-
-    None
 }
 
 #[cfg(test)]
