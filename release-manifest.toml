@@ -242,8 +242,8 @@ publish_order = [
     "sqry-lang-zig",
     # Phase 5: Registry & servers
     "sqry-plugin-registry",
-    "sqry-daemon",
     "sqry-lsp",
     "sqry-mcp",
+    "sqry-daemon",
     "sqry-cli",
 ]
