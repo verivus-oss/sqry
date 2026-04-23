@@ -486,5 +486,5 @@ MIT - See root LICENSE file
 ---
 
 **Last Updated**: 2026-04-23
-**Version**: 9.0.0
+**Version**: 9.0.1
 **Tested With**: sqry v4.8.2, Claude Desktop, Windsurf, Claude Code, Codex, Gemini CLI
