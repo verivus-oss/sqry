@@ -6,10 +6,15 @@ version = 2
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
 # Note: All vulnerability advisories now emit errors by default (cargo-deny v0.14+)
-# To allow specific CVEs, add them to the ignore list below
+# To allow specific CVEs, add them to the ignore list below. Exceptions must
+# also be documented in `.cargo/audit.toml` with rationale and expiry.
 unmaintained = "workspace" # Keep failures scoped to direct dependencies until async-std is removed (RUSTSEC-2025-0052)
 yanked = "warn"
-ignore = []
+ignore = [
+  "RUSTSEC-2023-0040", # users: unmaintained, accepted with RUSTSEC-2025-0040 exception
+  "RUSTSEC-2023-0059", # users: unsound advisory, no fixed upgrade path
+  "RUSTSEC-2025-0040", # users: group listing bug, no fixed upgrade path
+]
 
 [licenses]
 version = 2
