@@ -22,7 +22,7 @@ permissions:
   attestations: write
 
 concurrency:
-  group: oss-distribute-${{ github.event.client_payload.tag || github.event.inputs.tag }}
+  group: release-distribute-${{ github.event.client_payload.tag || github.event.inputs.tag }}
   cancel-in-progress: false
 
 jobs:
