@@ -13,7 +13,6 @@ on:
     inputs:
       tag:
         required: true
-        type: string
         description: "Release tag (e.g. v6.0.15) - all other values derived from ledger"
 
 permissions:
