@@ -13,6 +13,7 @@ on:
     inputs:
       tag:
         required: true
+        type: string
         description: "Release tag (e.g. v6.0.15) - all other values derived from ledger"
 
 permissions:
@@ -354,17 +355,17 @@ jobs:
               done
 
               python3 - <<'PY'
-import os
-import pathlib
-import zipfile
+              import os
+              import pathlib
+              import zipfile
 
-version = os.environ["VERSION"]
-package_dir = pathlib.Path(f"dist/sqry-{version}-windows-x86_64")
-archive_path = pathlib.Path(f"dist/sqry-{version}-windows-x86_64.zip")
-with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-    for path in sorted(package_dir.iterdir()):
-        archive.write(path, arcname=path.name)
-PY
+              version = os.environ["VERSION"]
+              package_dir = pathlib.Path(f"dist/sqry-{version}-windows-x86_64")
+              archive_path = pathlib.Path(f"dist/sqry-{version}-windows-x86_64.zip")
+              with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                  for path in sorted(package_dir.iterdir()):
+                      archive.write(path, arcname=path.name)
+              PY
             fi
           done
 
@@ -388,16 +389,16 @@ PY
           rm -rf "$package_dir"
           mkdir -p "$package_dir"
           python3 - <<'PY'
-import os
-import pathlib
-import zipfile
+          import os
+          import pathlib
+          import zipfile
 
-version = os.environ["VERSION"]
-archive_path = pathlib.Path(f"dist/sqry-{version}-windows-x86_64.zip")
-extract_dir = pathlib.Path(os.environ["RUNNER_TEMP"]) / "sqry-windows-package"
-with zipfile.ZipFile(archive_path) as archive:
-    archive.extractall(extract_dir)
-PY
+          version = os.environ["VERSION"]
+          archive_path = pathlib.Path(f"dist/sqry-{version}-windows-x86_64.zip")
+          extract_dir = pathlib.Path(os.environ["RUNNER_TEMP"]) / "sqry-windows-package"
+          with zipfile.ZipFile(archive_path) as archive:
+              archive.extractall(extract_dir)
+          PY
           wine64 "${package_dir}/sqry.exe" --version
 
       # Phase 6.5: VS Code extension
