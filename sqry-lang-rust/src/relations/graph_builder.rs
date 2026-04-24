@@ -78,6 +78,10 @@ pub struct RustGraphConfig {
     /// When enabled, type inference uses rust-analyzer for more accurate results.
     /// Falls back gracefully if rust-analyzer is not available.
     pub enable_rust_analyzer: bool,
+    /// Optional rust-analyzer executable override for tests or specialized environments.
+    ///
+    /// When set, availability checks use this executable path instead of PATH lookup.
+    pub rust_analyzer_command: Option<std::path::PathBuf>,
     /// Workspace root for proc-macro detection and macro expansion.
     pub workspace_root: Option<std::path::PathBuf>,
 }
@@ -98,6 +102,7 @@ impl RustGraphConfig {
             enable_trait_binding: true,
             enable_lifetime_extraction: true,
             enable_rust_analyzer: true,
+            rust_analyzer_command: None,
             workspace_root: None,
         }
     }
@@ -123,6 +128,7 @@ impl RustGraphConfig {
             enable_trait_binding: true,
             enable_lifetime_extraction: true,
             enable_rust_analyzer: false,
+            rust_analyzer_command: None,
             workspace_root: None,
         }
     }
@@ -138,6 +144,7 @@ impl RustGraphConfig {
             enable_trait_binding: false,
             enable_lifetime_extraction: false,
             enable_rust_analyzer: false,
+            rust_analyzer_command: None,
             workspace_root: None,
         }
     }
@@ -160,6 +167,13 @@ impl RustGraphConfig {
     #[must_use]
     pub fn without_rust_analyzer(mut self) -> Self {
         self.enable_rust_analyzer = false;
+        self
+    }
+
+    /// Builder method to override the rust-analyzer executable path.
+    #[must_use]
+    pub fn with_rust_analyzer_command(mut self, command: std::path::PathBuf) -> Self {
+        self.rust_analyzer_command = Some(command);
         self
     }
 }
@@ -267,7 +281,9 @@ impl RustGraphBuilder {
                 };
             }
 
-            let check = RustAnalyzerBridge::check_availability();
+            let check = RustAnalyzerBridge::check_availability_with_command(
+                self.config.rust_analyzer_command.as_deref(),
+            );
 
             // Compute limitation message once (only for unavailable RA)
             // Version parse warnings are NOT limitations - RA is still usable
@@ -5012,41 +5028,10 @@ fn simple_function() {
         use serial_test::serial;
         use std::os::unix::fs::PermissionsExt;
 
-        /// `PathGuard` for PATH manipulation in tests.
-        struct PathGuard {
-            original: String,
-        }
-
-        impl PathGuard {
-            fn new() -> Self {
-                Self {
-                    original: std::env::var("PATH").unwrap_or_default(),
-                }
-            }
-
-            fn prepend(&self, dir: &std::path::Path) {
-                // SAFETY: Single-threaded test (serial_test), PATH restoration guaranteed
-                unsafe {
-                    std::env::set_var("PATH", format!("{}:{}", dir.display(), self.original));
-                }
-            }
-        }
-
-        impl Drop for PathGuard {
-            fn drop(&mut self) {
-                // SAFETY: Restoring original PATH
-                unsafe {
-                    std::env::set_var("PATH", &self.original);
-                }
-            }
-        }
-
         #[test]
         #[serial]
         fn test_ra_check_cached_no_recheck_with_shim() {
             use tempfile::tempdir;
-
-            let _guard = PathGuard::new();
 
             // Create counter file and shim
             let temp = tempdir().unwrap();
@@ -5074,11 +5059,8 @@ echo "rust-analyzer 1.85.0 (fake)"
             perms.set_mode(0o755);
             std::fs::set_permissions(&shim_path, perms).unwrap();
 
-            #[allow(clippy::used_underscore_binding)]
-            // Underscore prefix indicates partial use pattern
-            _guard.prepend(&shim_dir);
-
-            let builder = RustGraphBuilder::default();
+            let config = RustGraphConfig::new().with_rust_analyzer_command(shim_path.clone());
+            let builder = RustGraphBuilder::with_config(DEFAULT_SCOPE_DEPTH, config);
 
             // Before first call - cache should be empty
             assert!(
@@ -5179,38 +5161,14 @@ echo "rust-analyzer 1.85.0 (fake)"
         use super::*;
         use serial_test::serial;
 
-        struct PathGuard {
-            original: String,
-        }
-
-        impl PathGuard {
-            fn new_empty() -> Self {
-                let original = std::env::var("PATH").unwrap_or_default();
-                // SAFETY: Single-threaded test via serial_test
-                unsafe {
-                    std::env::set_var("PATH", "");
-                }
-                Self { original }
-            }
-        }
-
-        impl Drop for PathGuard {
-            fn drop(&mut self) {
-                // SAFETY: Restoring original PATH
-                unsafe {
-                    std::env::set_var("PATH", &self.original);
-                }
-            }
-        }
-
         #[test]
         #[serial]
         fn test_t10_ra_not_found_adds_limitation_and_unavailable() {
             use tempfile::tempdir;
 
-            let _guard = PathGuard::new_empty(); // Clear PATH so RA cannot be found
-
-            let config = RustGraphConfig::new(); // RA enabled by default
+            let temp = tempdir().unwrap();
+            let missing_binary = temp.path().join("missing-rust-analyzer");
+            let config = RustGraphConfig::new().with_rust_analyzer_command(missing_binary);
             let builder = RustGraphBuilder::with_config(4, config.clone());
             let ra_check = builder.get_ra_check();
 
@@ -5256,41 +5214,11 @@ echo "rust-analyzer 1.85.0 (fake)"
         use serial_test::serial;
         use std::os::unix::fs::PermissionsExt;
 
-        struct PathGuard {
-            original: String,
-        }
-
-        impl PathGuard {
-            fn new() -> Self {
-                Self {
-                    original: std::env::var("PATH").unwrap_or_default(),
-                }
-            }
-
-            fn prepend(&self, dir: &std::path::Path) {
-                // SAFETY: Single-threaded test via serial_test
-                unsafe {
-                    std::env::set_var("PATH", format!("{}:{}", dir.display(), self.original));
-                }
-            }
-        }
-
-        impl Drop for PathGuard {
-            fn drop(&mut self) {
-                // SAFETY: Restoring original PATH
-                unsafe {
-                    std::env::set_var("PATH", &self.original);
-                }
-            }
-        }
-
         #[test]
         #[serial]
         #[allow(clippy::used_underscore_binding)] // Underscore prefix pattern
         fn test_t10_ra_available_still_marks_type_inference_unavailable() {
             use tempfile::tempdir;
-
-            let _guard = PathGuard::new();
 
             // Create shim that outputs valid version (simulates RA available)
             let temp = tempdir().unwrap();
@@ -5311,9 +5239,7 @@ exit 0
             perms.set_mode(0o755);
             std::fs::set_permissions(&shim_path, perms).unwrap();
 
-            _guard.prepend(&shim_dir);
-
-            let config = RustGraphConfig::new();
+            let config = RustGraphConfig::new().with_rust_analyzer_command(shim_path.clone());
             let builder = RustGraphBuilder::with_config(4, config.clone());
             let ra_check = builder.get_ra_check();
 
@@ -5357,8 +5283,6 @@ exit 0
         fn test_t10_version_parse_failure_still_available() {
             use tempfile::tempdir;
 
-            let _guard = PathGuard::new();
-
             // Create shim that outputs malformed version (exits 0 but unparseable)
             let temp = tempdir().unwrap();
             let shim_dir = temp.path().join("shim");
@@ -5378,9 +5302,7 @@ exit 0
             perms.set_mode(0o755);
             std::fs::set_permissions(&shim_path, perms).unwrap();
 
-            _guard.prepend(&shim_dir);
-
-            let config = RustGraphConfig::new();
+            let config = RustGraphConfig::new().with_rust_analyzer_command(shim_path.clone());
             let builder = RustGraphBuilder::with_config(4, config.clone());
             let ra_check = builder.get_ra_check();
 

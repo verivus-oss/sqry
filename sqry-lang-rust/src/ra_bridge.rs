@@ -468,6 +468,13 @@ pub struct RustAnalyzerBridge {
 }
 
 impl RustAnalyzerBridge {
+    fn availability_command(command_override: Option<&Path>) -> Command {
+        match command_override {
+            Some(command_path) => Command::new(command_path),
+            None => Command::new("rust-analyzer"),
+        }
+    }
+
     /// Create a new bridge for the given workspace.
     ///
     /// This does NOT start rust-analyzer - use `initialize()` for that.
@@ -485,7 +492,7 @@ impl RustAnalyzerBridge {
     /// Check if rust-analyzer is available in PATH.
     #[must_use]
     pub fn is_available() -> bool {
-        Command::new("rust-analyzer")
+        Self::availability_command(None)
             .arg("--version")
             .output()
             .is_ok()
@@ -507,7 +514,16 @@ impl RustAnalyzerBridge {
     /// - `version_warning` contains any warnings (exit status, parse failure)
     #[must_use]
     pub fn check_availability() -> RaAvailabilityCheck {
-        let Ok(output) = Command::new("rust-analyzer").arg("--version").output() else {
+        Self::check_availability_with_command(None)
+    }
+
+    /// Check availability and attempt to get version using an explicit command override.
+    #[must_use]
+    pub fn check_availability_with_command(command_override: Option<&Path>) -> RaAvailabilityCheck {
+        let Ok(output) = Self::availability_command(command_override)
+            .arg("--version")
+            .output()
+        else {
             // Spawn failed - RA not found in PATH
             return RaAvailabilityCheck {
                 available: false,
