@@ -184,7 +184,7 @@ impl PlanNodeKind {
 ///   different snapshot. Semantic filtering on the names these
 ///   [`StringId`]s reference belongs in a [`Predicate`] (e.g.
 ///   [`Predicate::Implements`] with a
-///   [`PredicateValue::Pattern`](super::ir::PredicateValue::Pattern)), not
+///   [`PredicateValue::Pattern`]), not
 ///   in the edge kind itself.
 ///
 /// ## Semantic discriminators — always preserved

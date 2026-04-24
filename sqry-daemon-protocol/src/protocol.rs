@@ -11,7 +11,7 @@
 //! - Requests and responses carry the mandatory `"jsonrpc": "2.0"` tag
 //!   enforced by [`JsonRpcVersion`]'s manual serde impls.
 //! - Response ids follow the spec exactly: a response to a request
-//!   with a missing/invalid id MUST carry `id: null`; Option<JsonRpcId>
+//!   with a missing/invalid id MUST carry `id: null`; `Option<JsonRpcId>`
 //!   on [`JsonRpcResponse::id`] is NOT marked `skip_serializing_if`, so
 //!   `None` serialises as JSON `null` instead of being omitted.
 //! - Batches are implemented in the sqry-daemon router; this module
