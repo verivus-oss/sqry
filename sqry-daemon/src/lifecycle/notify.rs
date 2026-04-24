@@ -126,6 +126,7 @@ pub fn is_under_systemd() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lifecycle::test_support::NotifySocketGuard;
 
     /// On non-Linux platforms every notify function must be a no-op that
     /// returns `Ok(())`.  On Linux without `NOTIFY_SOCKET` set the real
@@ -224,67 +225,5 @@ mod tests {
             result.is_err(),
             "notify_ready must return Err when NOTIFY_SOCKET points to a non-existent socket"
         );
-    }
-
-    // ── Test helpers ──────────────────────────────────────────────────────
-
-    /// Process-wide mutex serialising all `NOTIFY_SOCKET` env-var mutations.
-    ///
-    /// `std::env::set_var` / `remove_var` are unsafe in multi-threaded
-    /// contexts (Rust 2024 edition requires `unsafe`).  Rather than running
-    /// with `--test-threads=1`, we hold this lock for the entire lifetime of
-    /// every `NotifySocketGuard` so that concurrent tests in this module do
-    /// not race on the env var.  Tests in *other* modules that never touch
-    /// `NOTIFY_SOCKET` are unaffected.
-    static NOTIFY_SOCKET_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    /// RAII guard that acquires [`NOTIFY_SOCKET_LOCK`], saves, and then
-    /// restores `NOTIFY_SOCKET` when dropped.  All env-var mutations in
-    /// this module go through this guard, which guarantees that no two
-    /// `NOTIFY_SOCKET`-touching tests run concurrently even under the
-    /// default `--test-threads` setting.
-    struct NotifySocketGuard {
-        previous: Option<std::ffi::OsString>,
-        // Held for the duration of the test; released on drop after the
-        // env var is restored.
-        _lock: std::sync::MutexGuard<'static, ()>,
-    }
-
-    impl NotifySocketGuard {
-        fn unset() -> Self {
-            let _lock = NOTIFY_SOCKET_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-            let previous = std::env::var_os("NOTIFY_SOCKET");
-            // SAFETY: we hold NOTIFY_SOCKET_LOCK for the duration of this
-            // guard, so no other thread in this process will read or write
-            // NOTIFY_SOCKET concurrently.
-            unsafe {
-                std::env::remove_var("NOTIFY_SOCKET");
-            }
-            Self { previous, _lock }
-        }
-
-        fn set(value: &str) -> Self {
-            let _lock = NOTIFY_SOCKET_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-            let previous = std::env::var_os("NOTIFY_SOCKET");
-            // SAFETY: see above; NOTIFY_SOCKET_LOCK guards this mutation.
-            unsafe {
-                std::env::set_var("NOTIFY_SOCKET", value);
-            }
-            Self { previous, _lock }
-        }
-    }
-
-    impl Drop for NotifySocketGuard {
-        fn drop(&mut self) {
-            // Restore before releasing the lock.
-            match &self.previous {
-                Some(v) => unsafe {
-                    std::env::set_var("NOTIFY_SOCKET", v);
-                },
-                None => unsafe {
-                    std::env::remove_var("NOTIFY_SOCKET");
-                },
-            }
-        }
     }
 }

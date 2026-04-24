@@ -28,3 +28,45 @@ pub mod notify;
 pub mod pidfile;
 pub mod signals;
 pub mod units;
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::ffi::OsString;
+    use std::sync::{Mutex, MutexGuard};
+
+    static NOTIFY_SOCKET_LOCK: Mutex<()> = Mutex::new(());
+
+    pub(crate) struct NotifySocketGuard {
+        previous: Option<OsString>,
+        _lock: MutexGuard<'static, ()>,
+    }
+
+    impl NotifySocketGuard {
+        pub(crate) fn unset() -> Self {
+            let _lock = NOTIFY_SOCKET_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let previous = std::env::var_os("NOTIFY_SOCKET");
+            unsafe {
+                std::env::remove_var("NOTIFY_SOCKET");
+            }
+            Self { previous, _lock }
+        }
+
+        pub(crate) fn set(value: &str) -> Self {
+            let _lock = NOTIFY_SOCKET_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let previous = std::env::var_os("NOTIFY_SOCKET");
+            unsafe {
+                std::env::set_var("NOTIFY_SOCKET", value);
+            }
+            Self { previous, _lock }
+        }
+    }
+
+    impl Drop for NotifySocketGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => unsafe { std::env::set_var("NOTIFY_SOCKET", value) },
+                None => unsafe { std::env::remove_var("NOTIFY_SOCKET") },
+            }
+        }
+    }
+}

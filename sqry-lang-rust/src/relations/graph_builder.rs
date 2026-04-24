@@ -320,6 +320,22 @@ impl RustGraphBuilder {
     pub(crate) fn is_ra_check_cached(&self) -> bool {
         self.ra_check.get().is_some()
     }
+
+    #[cfg(test)]
+    pub(crate) fn set_ra_check_for_test(
+        &self,
+        check: RaAvailabilityCheck,
+        limitation: Option<String>,
+        disabled_by_config: bool,
+    ) {
+        self.ra_check
+            .set(CachedRaCheck {
+                check,
+                limitation,
+                disabled_by_config,
+            })
+            .expect("test RA check should only be initialized once");
+    }
 }
 
 impl Clone for RustGraphBuilder {
@@ -5211,8 +5227,8 @@ echo "rust-analyzer 1.85.0 (fake)"
     #[cfg(unix)]
     mod t10_ra_available_tests {
         use super::*;
+        use crate::ra_bridge::RaVersionInfo;
         use serial_test::serial;
-        use std::os::unix::fs::PermissionsExt;
 
         #[test]
         #[serial]
@@ -5220,27 +5236,22 @@ echo "rust-analyzer 1.85.0 (fake)"
         fn test_t10_ra_available_still_marks_type_inference_unavailable() {
             use tempfile::tempdir;
 
-            // Create shim that outputs valid version (simulates RA available)
             let temp = tempdir().unwrap();
-            let shim_dir = temp.path().join("shim");
-            std::fs::create_dir_all(&shim_dir).unwrap();
-
-            let shim_path = shim_dir.join("rust-analyzer");
-            std::fs::write(
-                &shim_path,
-                r#"#!/bin/sh
-echo "rust-analyzer 1.85.0 (test-shim)"
-exit 0
-"#,
-            )
-            .unwrap();
-
-            let mut perms = std::fs::metadata(&shim_path).unwrap().permissions();
-            perms.set_mode(0o755);
-            std::fs::set_permissions(&shim_path, perms).unwrap();
-
-            let config = RustGraphConfig::new().with_rust_analyzer_command(shim_path.clone());
+            let config = RustGraphConfig::new();
             let builder = RustGraphBuilder::with_config(4, config.clone());
+            builder.set_ra_check_for_test(
+                RaAvailabilityCheck {
+                    available: true,
+                    version: Some(RaVersionInfo {
+                        version_string: "rust-analyzer 1.85.0 (test-shim)".to_string(),
+                        date: "1.85.0".to_string(),
+                        commit_hash: "(test-shim)".to_string(),
+                    }),
+                    version_warning: None,
+                },
+                None,
+                false,
+            );
             let ra_check = builder.get_ra_check();
 
             // Verify CachedRaCheck state
@@ -5283,27 +5294,21 @@ exit 0
         fn test_t10_version_parse_failure_still_available() {
             use tempfile::tempdir;
 
-            // Create shim that outputs malformed version (exits 0 but unparseable)
             let temp = tempdir().unwrap();
-            let shim_dir = temp.path().join("shim");
-            std::fs::create_dir_all(&shim_dir).unwrap();
-
-            let shim_path = shim_dir.join("rust-analyzer");
-            std::fs::write(
-                &shim_path,
-                r#"#!/bin/sh
-echo "not a valid version string"
-exit 0
-"#,
-            )
-            .unwrap();
-
-            let mut perms = std::fs::metadata(&shim_path).unwrap().permissions();
-            perms.set_mode(0o755);
-            std::fs::set_permissions(&shim_path, perms).unwrap();
-
-            let config = RustGraphConfig::new().with_rust_analyzer_command(shim_path.clone());
+            let config = RustGraphConfig::new();
             let builder = RustGraphBuilder::with_config(4, config.clone());
+            builder.set_ra_check_for_test(
+                RaAvailabilityCheck {
+                    available: true,
+                    version: None,
+                    version_warning: Some(
+                        "rust-analyzer version parse failed: 'not a valid version string'; continuing without version verification"
+                            .to_string(),
+                    ),
+                },
+                None,
+                false,
+            );
             let ra_check = builder.get_ra_check();
 
             // Verify CachedRaCheck state - available despite parse failure

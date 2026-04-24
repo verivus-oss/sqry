@@ -657,6 +657,7 @@ pub fn install_tracing(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lifecycle::test_support::NotifySocketGuard;
     use std::sync::{Arc, Barrier};
     use std::thread;
     use tempfile::TempDir;
@@ -1132,35 +1133,5 @@ mod tests {
              stderr-fallback path under systemd supervision (NOTIFY_SOCKET set); \
              file existence would prove RollingSizeAppender was instantiated"
         );
-    }
-
-    // ── env-var serialisation guard ───────────────────────────────────────────
-
-    static NOTIFY_SOCKET_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    struct NotifySocketGuard {
-        previous: Option<std::ffi::OsString>,
-        _lock: std::sync::MutexGuard<'static, ()>,
-    }
-
-    impl NotifySocketGuard {
-        fn set(value: &str) -> Self {
-            let _lock = NOTIFY_SOCKET_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-            let previous = std::env::var_os("NOTIFY_SOCKET");
-            // SAFETY: NOTIFY_SOCKET_LOCK serialises all mutations in this module.
-            unsafe {
-                std::env::set_var("NOTIFY_SOCKET", value);
-            }
-            Self { previous, _lock }
-        }
-    }
-
-    impl Drop for NotifySocketGuard {
-        fn drop(&mut self) {
-            match &self.previous {
-                Some(v) => unsafe { std::env::set_var("NOTIFY_SOCKET", v) },
-                None => unsafe { std::env::remove_var("NOTIFY_SOCKET") },
-            }
-        }
     }
 }
