@@ -455,7 +455,7 @@ PY
       - name: Copy attestation bundle
         run: |
           set -euo pipefail
-          cp "${{ steps.attest-release-assets.outputs.bundle-path }}" dist/release-artifacts.attestation.json
+          cp "${{ steps['attest-release-assets'].outputs['bundle-path'] }}" dist/release-artifacts.attestation.json
 
       - name: Publish VS Code extension to marketplace
         id: publish-vscode
@@ -485,8 +485,8 @@ PY
       - name: Generate release manifest and update ledger
         env:
           LEDGER_PATH: ${{ steps.ledger.outputs.path }}
-          ATTESTATION_ID: ${{ steps.attest-release-assets.outputs.attestation-id }}
-          ATTESTATION_URL: ${{ steps.attest-release-assets.outputs.attestation-url }}
+          ATTESTATION_ID: ${{ steps['attest-release-assets'].outputs['attestation-id'] }}
+          ATTESTATION_URL: ${{ steps['attest-release-assets'].outputs['attestation-url'] }}
           VSCE_STATUS: ${{ steps.publish-vscode.outputs.status }}
         run: |
           set -euo pipefail
