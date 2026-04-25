@@ -32,7 +32,7 @@ jobs:
           toolchain: "1.90"
 
       - name: Install cargo-cyclonedx
-        run: cargo install --locked cargo-cyclonedx
+        run: cargo install --locked --force cargo-cyclonedx
 
       - name: Prepare local tool bin
         run: |
