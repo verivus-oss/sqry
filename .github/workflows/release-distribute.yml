@@ -231,6 +231,21 @@ jobs:
         with:
           targets: x86_64-unknown-linux-gnu,aarch64-unknown-linux-gnu,x86_64-apple-darwin,aarch64-apple-darwin,x86_64-pc-windows-gnu
 
+      - name: Verify Rust target stdlibs
+        run: |
+          set -euo pipefail
+          rustup target add \
+            x86_64-unknown-linux-gnu \
+            aarch64-unknown-linux-gnu \
+            x86_64-pc-windows-gnu
+          rustup target list --installed | sort
+          for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-pc-windows-gnu; do
+            if ! rustup target list --installed | grep -Fx "$target" >/dev/null; then
+              echo "FATAL: Rust stdlib target missing after installation: $target" >&2
+              exit 1
+            fi
+          done
+
       # Verify self-hosted runner toolchain (installed by setup-runner.sh)
       - name: Verify cross-compilation toolchain
         run: |
