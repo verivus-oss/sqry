@@ -264,6 +264,10 @@ criteria = "safe-to-deploy"
 version = "1.8.4"
 criteria = "safe-to-deploy"
 
+[[exemptions.blake3]]
+version = "1.8.5"
+criteria = "safe-to-deploy"
+
 [[exemptions.block-buffer]]
 version = "0.10.4"
 criteria = "safe-to-deploy"
@@ -298,6 +302,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.cc]]
 version = "1.2.60"
+criteria = "safe-to-deploy"
+
+[[exemptions.cc]]
+version = "1.2.61"
 criteria = "safe-to-deploy"
 
 [[exemptions.cesu8]]

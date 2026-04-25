@@ -377,7 +377,7 @@ jobs:
               for dll_name in "${imported_dlls[@]}"; do
                 dll_path="$(x86_64-w64-mingw32-gcc -print-file-name="${dll_name}")"
                 if [[ -n "$dll_path" && "$dll_path" != "$dll_name" && -f "$dll_path" ]]; then
-                  cp "$dll_path" "$package_dir/$dll_name"
+                  cp "$dll_path" "$package_dir/$(printf '%s' "$dll_name" | tr '[:upper:]' '[:lower:]')"
                 fi
               done
 
@@ -387,6 +387,12 @@ jobs:
                 "libwinpthread-1.dll"
               )
               for dll_name in "${required_runtime_dlls[@]}"; do
+                if [[ ! -f "$package_dir/$dll_name" ]]; then
+                  dll_path="$(x86_64-w64-mingw32-gcc -print-file-name="${dll_name}")"
+                  if [[ -n "$dll_path" && "$dll_path" != "$dll_name" && -f "$dll_path" ]]; then
+                    cp "$dll_path" "$package_dir/$dll_name"
+                  fi
+                fi
                 if [[ ! -f "$package_dir/$dll_name" ]]; then
                   echo "FATAL: Windows package is missing required runtime DLL ${dll_name}" >&2
                   exit 1
