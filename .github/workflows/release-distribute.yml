@@ -257,11 +257,16 @@ jobs:
             echo "FATAL: cargo executable not found after rust-toolchain setup" >&2
             exit 1
           fi
-          echo "$(dirname "$CARGO_BIN")" >> "$GITHUB_PATH"
+          CARGO_BIN_DIR="$(dirname "$CARGO_BIN")"
+          echo "$CARGO_BIN_DIR" >> "$GITHUB_PATH"
+          export PATH="$CARGO_BIN_DIR:$PATH"
           if [[ -x /opt/zig/current/zig ]]; then
             echo "/opt/zig/current" >> "$GITHUB_PATH"
             export PATH="/opt/zig/current:$PATH"
           fi
+          export XDG_CACHE_HOME="${RUNNER_TEMP}/xdg-cache"
+          rm -rf "${XDG_CACHE_HOME}/cargo-zigbuild" "${HOME}/.cache/cargo-zigbuild"
+          mkdir -p "${XDG_CACHE_HOME}"
           zig version
           zig_major="$(zig version | awk -F. '{print $1}')"
           zig_minor="$(zig version | awk -F. '{print $2}')"
@@ -269,10 +274,10 @@ jobs:
             echo "FATAL: Darwin cross-compilation requires Zig 0.15+ with SDKROOT support; found $(zig version)" >&2
             exit 1
           fi
-          if ! command -v cargo-zigbuild >/dev/null 2>&1; then
+          if [[ ! -x "${CARGO_BIN_DIR}/cargo-zigbuild" ]]; then
             "$CARGO_BIN" install cargo-zigbuild --locked
           fi
-          cargo-zigbuild --version
+          "${CARGO_BIN_DIR}/cargo-zigbuild" --version
           export SDKROOT="${SDKROOT:-/opt/macos-sdk/MacOSX14.0.sdk}"
           export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-10.12}"
           if [[ ! -d "$SDKROOT/System/Library/Frameworks/CoreFoundation.framework" ]]; then
@@ -304,7 +309,11 @@ jobs:
             echo "FATAL: cargo executable not found after rust-toolchain setup" >&2
             exit 1
           fi
-          export PATH="/opt/zig/current:$(dirname "$CARGO_BIN"):$PATH"
+          CARGO_BIN_DIR="$(dirname "$CARGO_BIN")"
+          export PATH="/opt/zig/current:${CARGO_BIN_DIR}:$PATH"
+          if [[ ! -x "${CARGO_BIN_DIR}/cargo-zigbuild" ]]; then
+            "$CARGO_BIN" install cargo-zigbuild --locked
+          fi
           export SDKROOT="${SDKROOT:-/opt/macos-sdk/MacOSX14.0.sdk}"
           export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-10.12}"
           if [[ ! -d "$SDKROOT/System/Library/Frameworks/CoreFoundation.framework" ]]; then
@@ -312,7 +321,7 @@ jobs:
             exit 1
           fi
           export XDG_CACHE_HOME="${RUNNER_TEMP}/xdg-cache"
-          rm -rf "${XDG_CACHE_HOME}/cargo-zigbuild"
+          rm -rf "${XDG_CACHE_HOME}/cargo-zigbuild" "${HOME}/.cache/cargo-zigbuild"
           mkdir -p "${XDG_CACHE_HOME}"
           TARGETS=(
             "x86_64-unknown-linux-gnu"
