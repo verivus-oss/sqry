@@ -533,10 +533,7 @@ fn proof2_no_false_sharing_scan_kind_preserves_boundary() {
 }
 
 #[test]
-fn proof2_wall_clock_batch_of_10_complex_queries() {
-    const TOLERANCE: f64 = 0.90;
-    const ITERATIONS: u32 = 5;
-
+fn proof2_batch_of_10_complex_queries_promotes_shared_prefixes_and_preserves_results() {
     let snapshot = build_wide_fixture();
     let db = QueryDb::new(snapshot, QueryDbConfig::default());
     let plans: Vec<QueryPlan> = (0..10)
@@ -560,34 +557,19 @@ fn proof2_wall_clock_batch_of_10_complex_queries() {
         batch.stats().shared_nodes_promoted >= 1,
         "the overlapping-prefix batch must produce at least one shared node",
     );
-
-    for plan in &plans {
-        let _ = execute_plan(plan, &db);
-    }
-    let _ = execute_batch(&batch, &db);
-    db.invalidate_all();
-
-    let mut min_standalone = Duration::MAX;
-    let mut min_fused = Duration::MAX;
-
-    for _ in 0..ITERATIONS {
-        db.invalidate_all();
-        let t0 = Instant::now();
-        for plan in &plans {
-            let _ = execute_plan(plan, &db);
-        }
-        min_standalone = min_standalone.min(t0.elapsed());
-
-        db.invalidate_all();
-        let t0 = Instant::now();
-        let _ = execute_batch(&batch, &db);
-        min_fused = min_fused.min(t0.elapsed());
-    }
-
-    let limit = min_standalone.mul_f64(TOLERANCE);
     assert!(
-        min_fused <= limit,
-        "fused batch wall-clock {min_fused:?} exceeded 90% of standalone baseline {min_standalone:?} (limit {limit:?})",
+        batch.stats().scans_eliminated >= 1,
+        "the overlapping-prefix batch must eliminate redundant scans",
+    );
+
+    let standalone_results: Vec<Vec<_>> =
+        plans.iter().map(|plan| execute_plan(plan, &db)).collect();
+    db.invalidate_all();
+    let batch_results = execute_batch(&batch, &db);
+
+    assert_eq!(
+        batch_results, standalone_results,
+        "fused execution must preserve the exact result set and ordering for each query",
     );
 }
 

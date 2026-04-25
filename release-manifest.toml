@@ -111,7 +111,12 @@ excluded = [
 public = [".cargo/config.toml", ".cargo/audit.toml"]
 
 [selection.docs]
-files_public = ["docs/FEATURE_LIST.md", "docs/SCHEMA.md", "docs/SEMANTIC_VERSIONING.md"]
+files_public = [
+    "docs/FEATURE_LIST.md",
+    "docs/SCHEMA.md",
+    "docs/SEMANTIC_VERSIONING.md",
+    "docs/superpowers/plans/2026-03-19-sqryd-daemon.md",
+]
 dirs_public = ["docs/user-guide/"]
 
 [selection.scripts]
@@ -160,7 +165,7 @@ allowed_extensions = [
     ".css", ".html", ".sh", ".ps1", ".c", ".h", ".cc", ".hh", ".scm",
 ]
 allowed_dotfiles = [".gitignore", ".gitattributes", ".cargo", ".editorconfig"]
-allowed_basenames = [
+	allowed_basenames = [
     "LICENSE",
     "LICENSE-*",
     "COPYING",
@@ -169,8 +174,15 @@ allowed_basenames = [
     "NOTICE.*",
     "AUTHORS",
     "AUTHORS.*",
-    "VERSION",
-]
+	    "VERSION",
+	    "BUILD",
+	    "WORKSPACE",
+	    "build.gradle",
+	    "settings.gradle",
+	    "build.gradle.kts",
+	    "build.sbt",
+	    "pom.xml",
+	]
 binary_assets = [
     "assets/*.png",
     "assets/*.svg",

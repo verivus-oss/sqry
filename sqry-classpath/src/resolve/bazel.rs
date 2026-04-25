@@ -18,6 +18,8 @@ use crate::{ClasspathError, ClasspathResult};
 
 use super::{ClasspathEntry, ResolveConfig, ResolvedClasspath};
 
+const BAZEL_CACHE_FILE: &str = "bazel-resolved-classpath.json";
+
 /// Bazel cquery command and arguments for listing Java dependency outputs.
 const BAZEL_CQUERY_KIND_PATTERN: &str =
     r#"kind("java_library|java_import|jvm_import", deps(//...))"#;
@@ -332,9 +334,14 @@ fn try_cache_fallback(
     original_error: &ClasspathError,
 ) -> ClasspathResult<Vec<ResolvedClasspath>> {
     if let Some(ref cache_path) = config.cache_path {
+        let cache_path = if cache_path.is_dir() {
+            cache_path.join(BAZEL_CACHE_FILE)
+        } else {
+            cache_path.clone()
+        };
         if cache_path.exists() {
             info!("Loading cached classpath from {}", cache_path.display());
-            let content = std::fs::read_to_string(cache_path).map_err(|e| {
+            let content = std::fs::read_to_string(&cache_path).map_err(|e| {
                 ClasspathError::CacheError(format!(
                     "Failed to read cache file {}: {e}",
                     cache_path.display()

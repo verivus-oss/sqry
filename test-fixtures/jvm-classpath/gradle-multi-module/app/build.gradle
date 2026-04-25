@@ -1,0 +1,13 @@
+plugins {
+    id 'java'
+    id 'application'
+}
+
+dependencies {
+    implementation project(':lib')
+    implementation 'com.google.guava:guava:33.0.0-jre'
+}
+
+application {
+    mainClass = 'com.example.app.Main'
+}

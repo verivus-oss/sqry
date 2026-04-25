@@ -6,13 +6,14 @@
 //! 3. Index persistence roundtrip (save → load → verify identical)
 //! 4. FQN workspace shadowing (workspace FQN takes precedence)
 //! 5. Package and annotation index lookup
-//! 6. Full pipeline tests requiring JVM toolchain (ignored in CI)
+//! 6. Full pipeline cache-fallback tests for build-system-resolved classpaths
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use sqry_classpath::detect::{BuildSystem, detect_build_system};
 use sqry_classpath::pipeline::{ClasspathConfig, ClasspathDepth, run_classpath_pipeline};
+use sqry_classpath::resolve::{ClasspathEntry, ResolvedClasspath};
 use sqry_classpath::stub::index::ClasspathIndex;
 use sqry_classpath::stub::model::{
     AccessFlags, AnnotationStub, BaseType, ClassKind, ClassStub, FieldStub, MethodStub,
@@ -199,6 +200,56 @@ fn write_classpath_file(dir: &Path, jar_paths: &[&Path]) -> PathBuf {
         .join("\n");
     std::fs::write(&cp_file, format!("{contents}\n")).unwrap();
     cp_file
+}
+
+fn copy_fixture_to_temp(fixture_name: &str) -> TempDir {
+    let source = fixtures_dir().join(fixture_name);
+    assert!(source.exists(), "fixture not found: {}", source.display());
+    let tmp = TempDir::new().unwrap();
+    copy_dir_recursive(&source, tmp.path());
+    tmp
+}
+
+fn copy_dir_recursive(source: &Path, destination: &Path) {
+    std::fs::create_dir_all(destination).unwrap();
+    for entry in std::fs::read_dir(source).unwrap() {
+        let entry = entry.unwrap();
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        if source_path.is_dir() {
+            copy_dir_recursive(&source_path, &destination_path);
+        } else {
+            std::fs::copy(&source_path, &destination_path).unwrap();
+        }
+    }
+}
+
+fn write_cached_resolved_classpath(project_root: &Path, cache_file_name: &str) {
+    let jar_path = write_test_jar(
+        project_root,
+        "cached-dependency.jar",
+        &[(
+            "com/example/CachedDependency.class",
+            &build_minimal_class("com/example/CachedDependency"),
+        )],
+    );
+    let resolved = vec![ResolvedClasspath {
+        module_name: "cached".to_string(),
+        module_root: project_root.to_path_buf(),
+        entries: vec![ClasspathEntry {
+            jar_path,
+            coordinates: Some("com.example:cached-dependency:1.0.0".to_string()),
+            is_direct: true,
+            source_jar: None,
+        }],
+    }];
+    let cache_dir = project_root.join(".sqry/classpath");
+    std::fs::create_dir_all(&cache_dir).unwrap();
+    std::fs::write(
+        cache_dir.join(cache_file_name),
+        serde_json::to_string(&resolved).unwrap(),
+    )
+    .unwrap();
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1239,13 +1290,13 @@ fn detect_override_invalid_returns_none() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 13. Full Pipeline Tests Requiring JVM Toolchain (ignored in CI)
+// 13. Full pipeline fallback tests for build-system-resolved classpaths.
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[test]
-#[ignore = "requires JVM toolchain: Gradle must be installed and on PATH"]
 fn pipeline_gradle_single_module_real() {
-    let fixture = fixtures_dir().join("gradle-single-module");
+    let project = copy_fixture_to_temp("gradle-single-module");
+    write_cached_resolved_classpath(project.path(), "resolved-classpath.json");
     let config = ClasspathConfig {
         enabled: true,
         depth: ClasspathDepth::Full,
@@ -1255,7 +1306,7 @@ fn pipeline_gradle_single_module_real() {
         timeout_secs: 120,
     };
 
-    let result = run_classpath_pipeline(&fixture, &config).unwrap();
+    let result = run_classpath_pipeline(project.path(), &config).unwrap();
     assert!(
         result.jars_scanned > 0,
         "should scan at least one JAR from Gradle"
@@ -1267,9 +1318,9 @@ fn pipeline_gradle_single_module_real() {
 }
 
 #[test]
-#[ignore = "requires JVM toolchain: Maven must be installed and on PATH"]
 fn pipeline_maven_single_module_real() {
-    let fixture = fixtures_dir().join("maven-single-module");
+    let project = copy_fixture_to_temp("maven-single-module");
+    write_cached_resolved_classpath(project.path(), "maven-resolved-classpath.json");
     let config = ClasspathConfig {
         enabled: true,
         depth: ClasspathDepth::Full,
@@ -1279,7 +1330,7 @@ fn pipeline_maven_single_module_real() {
         timeout_secs: 120,
     };
 
-    let result = run_classpath_pipeline(&fixture, &config).unwrap();
+    let result = run_classpath_pipeline(project.path(), &config).unwrap();
     assert!(
         result.jars_scanned > 0,
         "should scan at least one JAR from Maven"
@@ -1287,9 +1338,9 @@ fn pipeline_maven_single_module_real() {
 }
 
 #[test]
-#[ignore = "requires JVM toolchain: Bazel must be installed and on PATH"]
 fn pipeline_bazel_java_real() {
-    let fixture = fixtures_dir().join("bazel-java");
+    let project = copy_fixture_to_temp("bazel-java");
+    write_cached_resolved_classpath(project.path(), "bazel-resolved-classpath.json");
     let config = ClasspathConfig {
         enabled: true,
         depth: ClasspathDepth::Full,
@@ -1299,7 +1350,7 @@ fn pipeline_bazel_java_real() {
         timeout_secs: 120,
     };
 
-    let result = run_classpath_pipeline(&fixture, &config).unwrap();
+    let result = run_classpath_pipeline(project.path(), &config).unwrap();
     assert!(
         result.jars_scanned > 0,
         "should scan at least one JAR from Bazel"
@@ -1307,9 +1358,9 @@ fn pipeline_bazel_java_real() {
 }
 
 #[test]
-#[ignore = "requires JVM toolchain: Gradle (KTS) must be installed and on PATH"]
 fn pipeline_kotlin_project_real() {
-    let fixture = fixtures_dir().join("kotlin-project");
+    let project = copy_fixture_to_temp("kotlin-project");
+    write_cached_resolved_classpath(project.path(), "resolved-classpath.json");
     let config = ClasspathConfig {
         enabled: true,
         depth: ClasspathDepth::Full,
@@ -1319,7 +1370,7 @@ fn pipeline_kotlin_project_real() {
         timeout_secs: 120,
     };
 
-    let result = run_classpath_pipeline(&fixture, &config).unwrap();
+    let result = run_classpath_pipeline(project.path(), &config).unwrap();
     assert!(
         result.jars_scanned > 0,
         "should scan at least one JAR from Kotlin/Gradle"
@@ -1327,9 +1378,9 @@ fn pipeline_kotlin_project_real() {
 }
 
 #[test]
-#[ignore = "requires JVM toolchain: sbt must be installed and on PATH"]
 fn pipeline_scala_project_real() {
-    let fixture = fixtures_dir().join("scala-project");
+    let project = copy_fixture_to_temp("scala-project");
+    write_cached_resolved_classpath(project.path(), "sbt-resolved-classpath.json");
     let config = ClasspathConfig {
         enabled: true,
         depth: ClasspathDepth::Full,
@@ -1339,7 +1390,7 @@ fn pipeline_scala_project_real() {
         timeout_secs: 120,
     };
 
-    let result = run_classpath_pipeline(&fixture, &config).unwrap();
+    let result = run_classpath_pipeline(project.path(), &config).unwrap();
     assert!(
         result.jars_scanned > 0,
         "should scan at least one JAR from sbt"

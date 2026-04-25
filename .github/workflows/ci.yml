@@ -83,24 +83,7 @@ jobs:
         if: matrix.platform != 'Windows'
         run: cargo run --locked -p sqry-cli --bin sqry -- --help
       - name: Run tests
-        run: |
-          cargo test --locked --all --verbose -- \
-            --skip detect_gradle_single_module \
-            --skip detect_gradle_multi_module \
-            --skip detect_maven_single_module \
-            --skip detect_maven_multi_module \
-            --skip detect_bazel_java \
-            --skip detect_kotlin_gradle_project \
-            --skip detect_scala_sbt_project \
-            --skip coverage_rs_matches_plan_assert_impl_all_block \
-            --skip every_code_graph_field_is_classified_by_name \
-            --skip plan_ka_and_kb_field_names_all_exist_on_code_graph \
-            --skip plan_ka_field_names_parses_real_plan \
-            --skip plan_not_in_ka_fields_parses_real_plan \
-            --skip plan_not_in_ka_matches_classified_excluded_fields \
-            --skip proof2_wall_clock_batch_of_10_complex_queries \
-            --skip test_relation_callers_supports_fqn_and_simple_names \
-            --skip test_relation_returns_supports_fqn_and_simple_names
+        run: cargo test --locked --all --verbose
         env:
           CARGO_PROFILE_DEV_DEBUG: 0
           CARGO_PROFILE_TEST_DEBUG: 0
@@ -112,8 +95,13 @@ jobs:
           echo "Testing all 34 language plugins with malformed inputs..." >> $GITHUB_STEP_SUMMARY
 
           if [ ! -d "sqry-tree-sitter-fuzz-support" ]; then
+            if find . -path '*/tests/malformed_input.rs' -print -quit | grep -q .; then
+              echo "ERROR: malformed-input tests are present but sqry-tree-sitter-fuzz-support is absent." >&2
+              find . -path '*/tests/malformed_input.rs' -print >&2
+              exit 1
+            fi
             echo "" >> $GITHUB_STEP_SUMMARY
-            echo "Skipped: sqry-tree-sitter-fuzz-support is not present in this sanitized public tree." >> $GITHUB_STEP_SUMMARY
+            echo "Verified: sanitized public tree contains no malformed-input test targets requiring the internal fuzz-support crate." >> $GITHUB_STEP_SUMMARY
             echo "Malformed input tests are run in the internal release source before sanitization."
             exit 0
           fi

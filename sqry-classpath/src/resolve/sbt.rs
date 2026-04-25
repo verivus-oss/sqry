@@ -19,6 +19,8 @@ use crate::{ClasspathError, ClasspathResult};
 
 use super::{ClasspathEntry, ResolveConfig, ResolvedClasspath};
 
+const SBT_CACHE_FILE: &str = "sbt-resolved-classpath.json";
+
 /// Default Coursier cache directory (relative to user home).
 const COURSIER_CACHE_REL: &str = ".cache/coursier/v1";
 
@@ -309,9 +311,14 @@ fn try_cache_fallback(
     original_error: &ClasspathError,
 ) -> ClasspathResult<Vec<ResolvedClasspath>> {
     if let Some(ref cache_path) = config.cache_path {
+        let cache_path = if cache_path.is_dir() {
+            cache_path.join(SBT_CACHE_FILE)
+        } else {
+            cache_path.clone()
+        };
         if cache_path.exists() {
             info!("Loading cached classpath from {}", cache_path.display());
-            let content = std::fs::read_to_string(cache_path).map_err(|e| {
+            let content = std::fs::read_to_string(&cache_path).map_err(|e| {
                 ClasspathError::CacheError(format!(
                     "Failed to read cache file {}: {e}",
                     cache_path.display()
