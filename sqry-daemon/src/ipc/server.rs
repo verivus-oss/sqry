@@ -151,7 +151,6 @@ impl IpcServer {
                         let tracker = Arc::clone(&active_connections);
                         tokio::spawn(async move {
                             let conn_result = match stream {
-                                #[cfg(unix)]
                                 AcceptedStream::Unix(s) => run_connection(s, ctx).await,
                                 #[cfg(windows)]
                                 AcceptedStream::Pipe(s) => run_connection(s, ctx).await,
@@ -194,7 +193,6 @@ impl IpcServer {
 // ---------------------------------------------------------------------------
 
 enum AcceptedStream {
-    #[cfg(unix)]
     Unix(tokio::net::UnixStream),
     #[cfg(windows)]
     Pipe(tokio::net::windows::named_pipe::NamedPipeServer),

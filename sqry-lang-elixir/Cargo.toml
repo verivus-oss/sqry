@@ -9,10 +9,10 @@ rust-version.workspace = true
 description = "Elixir language plugin for sqry"
 
 [dependencies]
-sqry-core = { version = "9.0.19", path = "../sqry-core" }
+sqry-core = { version = "9.0.18", path = "../sqry-core" }
 anyhow.workspace = true
 tree-sitter.workspace = true
-tree-sitter-elixir-sqry = { version = "9.0.19", path = "../crates/tree-sitter-elixir-sqry" }
+tree-sitter-elixir-sqry = { version = "9.0.18", path = "../crates/tree-sitter-elixir-sqry" }
 streaming-iterator.workspace = true
 tracing.workspace = true
 
