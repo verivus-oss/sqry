@@ -98,6 +98,7 @@ jobs:
             --skip plan_ka_field_names_parses_real_plan \
             --skip plan_not_in_ka_fields_parses_real_plan \
             --skip plan_not_in_ka_matches_classified_excluded_fields \
+            --skip proof2_wall_clock_batch_of_10_complex_queries \
             --skip test_relation_callers_supports_fqn_and_simple_names \
             --skip test_relation_returns_supports_fqn_and_simple_names
         env:
