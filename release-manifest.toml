@@ -156,8 +156,8 @@ path_patterns = [
 [packaging]
 allowed_extensions = [
     ".rs", ".toml", ".lock", ".md", ".txt", ".yml", ".yaml",
-    ".json", ".js", ".ts", ".py", ".dart", ".sql", ".css", ".html", ".sh", ".ps1",
-    ".c", ".h", ".cc", ".hh", ".scm",
+    ".json", ".js", ".ts", ".py", ".dart", ".go", ".java", ".swift", ".sql",
+    ".css", ".html", ".sh", ".ps1", ".c", ".h", ".cc", ".hh", ".scm",
 ]
 allowed_dotfiles = [".gitignore", ".gitattributes", ".cargo", ".editorconfig"]
 allowed_basenames = [
