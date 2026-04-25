@@ -124,6 +124,22 @@
     {
       "end_column": 1,
       "end_line": 7,
+      "file_path": "<WORKSPACE_ROOT>/tests/fixtures/metadata_consistency/async_functions/swift_async.swift",
+      "kind": "function",
+      "metadata": {
+        "__raw_file_path": "<WORKSPACE_ROOT>/tests/fixtures/metadata_consistency/async_functions/swift_async.swift",
+        "__raw_language": "swift",
+        "async": "true",
+        "visibility": "public"
+      },
+      "name": "fetchData",
+      "qualified_name": "fetchData",
+      "start_column": 0,
+      "start_line": 4
+    },
+    {
+      "end_column": 1,
+      "end_line": 7,
       "file_path": "<WORKSPACE_ROOT>/tests/fixtures/metadata_consistency/async_functions/typescript_async.ts",
       "kind": "function",
       "metadata": {
@@ -327,6 +343,21 @@
     {
       "end_column": 1,
       "end_line": 11,
+      "file_path": "<WORKSPACE_ROOT>/tests/fixtures/metadata_consistency/async_functions/swift_async.swift",
+      "kind": "function",
+      "metadata": {
+        "__raw_file_path": "<WORKSPACE_ROOT>/tests/fixtures/metadata_consistency/async_functions/swift_async.swift",
+        "__raw_language": "swift",
+        "visibility": "public"
+      },
+      "name": "syncFunction",
+      "qualified_name": "syncFunction",
+      "start_column": 0,
+      "start_line": 9
+    },
+    {
+      "end_column": 1,
+      "end_line": 11,
       "file_path": "<WORKSPACE_ROOT>/tests/fixtures/metadata_consistency/async_functions/typescript_async.ts",
       "kind": "function",
       "metadata": {
@@ -370,8 +401,8 @@
     }
   ],
   "stats": {
-    "returned": 25,
-    "total_matches": 25,
+    "returned": 27,
+    "total_matches": 27,
     "truncated": false
   }
 }
