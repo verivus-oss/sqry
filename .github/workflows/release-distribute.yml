@@ -855,7 +855,7 @@ jobs:
             esac
           }
 
-          if tag_ref_file="$(fetch_tag_ref_file)"; then
+          if fetch_tag_ref_file; then
             current_tag_sha="$(resolve_tag_commit_sha_from_file "$FETCHED_TAG_REF_FILE")"
             rm -f "$FETCHED_TAG_REF_FILE"
           else
