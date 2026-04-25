@@ -34,6 +34,11 @@ jobs:
       - name: Install cargo-cyclonedx
         run: cargo install --locked cargo-cyclonedx
 
+      - name: Prepare local tool bin
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
       - name: Install Cosign (for tool verification)
         uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
 
@@ -74,7 +79,7 @@ jobs:
           (cd /tmp && sha256sum -c grype.sha256)
 
           tar -xzf "/tmp/${GRYPE_TARBALL}" -C /tmp
-          sudo install -m 0755 /tmp/grype /usr/local/bin/grype
+          install -m 0755 /tmp/grype "$HOME/.local/bin/grype"
 
       - name: Install vexctl (verified)
         shell: bash
@@ -111,7 +116,7 @@ jobs:
           grep -F " ${VEXCTL_ASSET}" "/tmp/${VEXCTL_CHECKSUMS}" > /tmp/vexctl.sha256
           (cd /tmp && sha256sum -c vexctl.sha256)
 
-          sudo install -m 0755 "/tmp/${VEXCTL_ASSET}" /usr/local/bin/vexctl
+          install -m 0755 "/tmp/${VEXCTL_ASSET}" "$HOME/.local/bin/vexctl"
 
       - name: Install Syft (verified; used for SBOM format conversion)
         shell: bash
@@ -150,7 +155,7 @@ jobs:
           (cd /tmp && sha256sum -c syft.sha256)
 
           tar -xzf "/tmp/${SYFT_TARBALL}" -C /tmp
-          sudo install -m 0755 /tmp/syft /usr/local/bin/syft
+          install -m 0755 /tmp/syft "$HOME/.local/bin/syft"
 
       - name: Generate SBOMs (CycloneDX)
         run: |
