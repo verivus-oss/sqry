@@ -110,6 +110,13 @@ jobs:
           echo "## Malformed Input Test Results" >> $GITHUB_STEP_SUMMARY
           echo "Testing all 34 language plugins with malformed inputs..." >> $GITHUB_STEP_SUMMARY
 
+          if [ ! -d "sqry-tree-sitter-fuzz-support" ]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Skipped: sqry-tree-sitter-fuzz-support is not present in this sanitized public tree." >> $GITHUB_STEP_SUMMARY
+            echo "Malformed input tests are run in the internal release source before sanitization."
+            exit 0
+          fi
+
           RESULTS_FILE="${RUNNER_TEMP}/malformed-input-results.txt"
           cargo test --locked --workspace --test malformed_input 2>&1 | tee "$RESULTS_FILE"
 
