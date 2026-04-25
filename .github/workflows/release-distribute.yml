@@ -693,30 +693,33 @@ jobs:
           ledger_path.write_text(json.dumps(ledger, indent=2, sort_keys=True) + "\n", encoding="utf-8")
           PY
 
+      - name: Generate GitHub App token (public release)
+        id: public-release-app-token
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1
+        with:
+          app-id: ${{ secrets.MIRROR_APP_ID }}
+          private-key: ${{ secrets.MIRROR_APP_PRIVATE_KEY }}
+          owner: verivus-oss
+          repositories: sqry
+          permission-contents: write
+          permission-workflows: write
+
       - name: Select public release credential
         id: public-release-auth
         env:
-          DEFAULT_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APP_TOKEN: ${{ steps.public-release-app-token.outputs.token }}
         run: |
           set -euo pipefail
-          TOKEN="$(gh auth token -u verivusOSS-releases)"
-          if [[ -z "$TOKEN" ]]; then
-            echo "FATAL: verivusOSS-releases token not configured on the runner" >&2
+          if [[ -z "${APP_TOKEN:-}" ]]; then
+            echo "FATAL: MIRROR_APP token unavailable; public release publication must use the GitHub App credential" >&2
             exit 1
           fi
-          LOGIN="$(GH_TOKEN="$TOKEN" gh api user --jq '.login')"
-          if [[ "$LOGIN" != "verivusOSS-releases" ]]; then
-            echo "FATAL: release credential resolved to '$LOGIN', expected 'verivusOSS-releases'" >&2
-            exit 1
-          fi
-          BYPASS="$(GH_TOKEN="$TOKEN" gh api repos/verivus-oss/sqry/rulesets/13600966 --jq '.current_user_can_bypass')"
-          if [[ "$BYPASS" != "always" ]]; then
-            echo "FATAL: release credential cannot bypass release-tag-protection (current_user_can_bypass=$BYPASS)" >&2
-            exit 1
-          fi
+          TOKEN="$APP_TOKEN"
+          GH_TOKEN="$TOKEN" gh api repos/verivus-oss/sqry --jq '.full_name' | grep -q '^verivus-oss/sqry$'
+          GH_TOKEN="$TOKEN" gh api repos/verivus-oss/sqry/actions/workflows/release-distribute.yml --jq '.state' | grep -q '^active$'
           echo "::add-mask::$TOKEN"
           echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
-          echo "login=$LOGIN" >> "$GITHUB_OUTPUT"
+          echo "source=mirror_app" >> "$GITHUB_OUTPUT"
 
       - name: Ensure public tag exists at expected SHA
         env:
