@@ -1259,16 +1259,52 @@ async fn preload_pinned_workspaces(
 // Unix-specific low-level helpers
 // ---------------------------------------------------------------------------
 
-/// Create a pipe with `O_CLOEXEC` on both ends.  Returns `(read_fd, write_fd)`.
-#[cfg(unix)]
+/// Create a pipe with `O_CLOEXEC` on both ends. Returns `(read_fd, write_fd)`.
+#[cfg(all(unix, target_os = "linux"))]
 fn create_pipe() -> DaemonResult<(libc::c_int, libc::c_int)> {
     let mut fds = [0i32; 2];
-    // SAFETY: pipe2 is a standard Linux/macOS syscall; fds is a valid 2-element array.
+    // SAFETY: pipe2 is a Linux syscall; fds is a valid 2-element array.
     let rc = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
     if rc < 0 {
         return Err(DaemonError::Io(std::io::Error::last_os_error()));
     }
     Ok((fds[0], fds[1]))
+}
+
+/// Create a pipe with close-on-exec set on both ends. Returns `(read_fd, write_fd)`.
+#[cfg(all(unix, not(target_os = "linux")))]
+fn create_pipe() -> DaemonResult<(libc::c_int, libc::c_int)> {
+    let mut fds = [0i32; 2];
+    // SAFETY: pipe is available on POSIX Unix targets; fds is a valid 2-element array.
+    let rc = unsafe { libc::pipe(fds.as_mut_ptr()) };
+    if rc < 0 {
+        return Err(DaemonError::Io(std::io::Error::last_os_error()));
+    }
+
+    if let Err(err) = set_close_on_exec(fds[0]).and_then(|()| set_close_on_exec(fds[1])) {
+        drop_raw_fd(fds[0]);
+        drop_raw_fd(fds[1]);
+        return Err(err);
+    }
+
+    Ok((fds[0], fds[1]))
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn set_close_on_exec(fd: libc::c_int) -> DaemonResult<()> {
+    // SAFETY: fcntl only observes and updates descriptor flags for a live fd.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    if flags < 0 {
+        return Err(DaemonError::Io(std::io::Error::last_os_error()));
+    }
+
+    // SAFETY: F_SETFD sets descriptor flags; FD_CLOEXEC preserves fork/exec hygiene.
+    let rc = unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) };
+    if rc < 0 {
+        return Err(DaemonError::Io(std::io::Error::last_os_error()));
+    }
+
+    Ok(())
 }
 
 /// Close a raw FD; ignore errors (only call once per FD).
