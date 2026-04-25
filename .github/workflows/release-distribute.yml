@@ -258,11 +258,31 @@ jobs:
             exit 1
           fi
           echo "$(dirname "$CARGO_BIN")" >> "$GITHUB_PATH"
+          if [[ -x /opt/zig/current/zig ]]; then
+            echo "/opt/zig/current" >> "$GITHUB_PATH"
+            export PATH="/opt/zig/current:$PATH"
+          fi
           zig version
+          zig_major="$(zig version | awk -F. '{print $1}')"
+          zig_minor="$(zig version | awk -F. '{print $2}')"
+          if (( zig_major == 0 && zig_minor < 15 )); then
+            echo "FATAL: Darwin cross-compilation requires Zig 0.15+ with SDKROOT support; found $(zig version)" >&2
+            exit 1
+          fi
           if ! command -v cargo-zigbuild >/dev/null 2>&1; then
             "$CARGO_BIN" install cargo-zigbuild --locked
           fi
           cargo-zigbuild --version
+          export SDKROOT="${SDKROOT:-/opt/macos-sdk/MacOSX14.0.sdk}"
+          export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-10.12}"
+          if [[ ! -d "$SDKROOT/System/Library/Frameworks/CoreFoundation.framework" ]]; then
+            echo "FATAL: macOS SDK missing CoreFoundation.framework at SDKROOT=$SDKROOT" >&2
+            exit 1
+          fi
+          if [[ ! -d "$SDKROOT/System/Library/Frameworks/CoreServices.framework" ]]; then
+            echo "FATAL: macOS SDK missing CoreServices.framework at SDKROOT=$SDKROOT" >&2
+            exit 1
+          fi
           x86_64-w64-mingw32-gcc --version | head -1 || {
             echo "Installing gcc-mingw-w64-x86-64..."
             sudo apt-get update -qq && sudo apt-get install -y -qq gcc-mingw-w64-x86-64
@@ -284,7 +304,13 @@ jobs:
             echo "FATAL: cargo executable not found after rust-toolchain setup" >&2
             exit 1
           fi
-          export PATH="$(dirname "$CARGO_BIN"):$PATH"
+          export PATH="/opt/zig/current:$(dirname "$CARGO_BIN"):$PATH"
+          export SDKROOT="${SDKROOT:-/opt/macos-sdk/MacOSX14.0.sdk}"
+          export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-10.12}"
+          if [[ ! -d "$SDKROOT/System/Library/Frameworks/CoreFoundation.framework" ]]; then
+            echo "FATAL: macOS SDK missing CoreFoundation.framework at SDKROOT=$SDKROOT" >&2
+            exit 1
+          fi
           export XDG_CACHE_HOME="${RUNNER_TEMP}/xdg-cache"
           rm -rf "${XDG_CACHE_HOME}/cargo-zigbuild"
           mkdir -p "${XDG_CACHE_HOME}"
