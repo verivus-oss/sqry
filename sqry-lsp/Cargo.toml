@@ -39,15 +39,15 @@ tracing-subscriber.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-sqry-core = { version = "9.0.12", path = "../sqry-core" }
-sqry-db = { version = "9.0.12", path = "../sqry-db" }
-sqry-nl = { version = "9.0.12", path = "../sqry-nl" }
-sqry-plugin-registry = { version = "9.0.12", path = "../sqry-plugin-registry" }
+sqry-core = { version = "9.0.16", path = "../sqry-core" }
+sqry-db = { version = "9.0.16", path = "../sqry-db" }
+sqry-nl = { version = "9.0.16", path = "../sqry-nl" }
+sqry-plugin-registry = { version = "9.0.16", path = "../sqry-plugin-registry" }
 # Phase 8c U11 — `sqry-lsp --daemon` shim client transport. Provides
 # `connect_shim` + `pump_stdio` so this binary can run as a byte-pump
 # shim against a long-lived sqryd daemon. Leaf crate on our dep graph
 # (only pulls in `sqry-daemon-protocol` + `tokio`); no cycle.
-sqry-daemon-client = { version = "9.0.12", path = "../sqry-daemon-client" }
+sqry-daemon-client = { version = "9.0.16", path = "../sqry-daemon-client" }
 # Task 11 U1 — `resolve_sqryd_binary` PATH lookup (used by daemon auto-start in
 # `run_daemon_client_mode`). Version matches the `sqry-cli` dependency so both
 # crates resolve to the same version in the workspace lock-file.
