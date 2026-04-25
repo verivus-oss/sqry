@@ -913,7 +913,13 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.public-release-auth.outputs.token }}
         run: |
-          gh release upload "$TAG" dist/* --clobber
+          set -euo pipefail
+          mapfile -d '' release_assets < <(find dist -maxdepth 1 -type f -print0 | sort -z)
+          if [[ ${#release_assets[@]} -eq 0 ]]; then
+            echo "FATAL: no release asset files found in dist/" >&2
+            exit 1
+          fi
+          gh release upload "$TAG" "${release_assets[@]}" --clobber
 
       # Phase 6.7: Promote release
       - name: Promote public release from draft
