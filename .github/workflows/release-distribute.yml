@@ -37,7 +37,6 @@ jobs:
       STAGED_ORIGIN: ${{ github.event.client_payload.staged_origin || '' }}
       STAGED_SHA: ${{ github.event.client_payload.staged_sha || '' }}
       EXPECTED_DIGEST: ${{ github.event.client_payload.sanitized_tree_sha256 || '' }}
-      CARGO_ZIGBUILD_IMAGE: ghcr.io/rust-cross/cargo-zigbuild@sha256:dce4ea213244423439d97a2070031c6ea287fc32f01b0aaa38f8b4d46f52e68c
     steps:
       - name: Workspace wipe
         run: |
@@ -237,9 +236,11 @@ jobs:
           rustup target add \
             x86_64-unknown-linux-gnu \
             aarch64-unknown-linux-gnu \
+            x86_64-apple-darwin \
+            aarch64-apple-darwin \
             x86_64-pc-windows-gnu
           rustup target list --installed | sort
-          for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-pc-windows-gnu; do
+          for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-apple-darwin aarch64-apple-darwin x86_64-pc-windows-gnu; do
             if ! rustup target list --installed | grep -Fx "$target" >/dev/null; then
               echo "FATAL: Rust stdlib target missing after installation: $target" >&2
               exit 1
@@ -306,15 +307,6 @@ jobs:
               chmod +x /tmp/mingw-linker-wrapper.sh
               CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=/tmp/mingw-linker-wrapper.sh \
                 "$CARGO_BIN" build --release --target "$target" -p sqry-cli -p sqry-lsp -p sqry-mcp -p sqry-daemon
-            elif [[ "$target" == *"apple-darwin"* ]]; then
-              docker run --rm --user "$(id -u):$(id -g)" \
-                -v "$(pwd):/io" -w /io \
-                -e HOME=/io/.docker-home \
-                -e CARGO_HOME=/io/.docker-cargo \
-                -e XDG_CACHE_HOME=/io/.docker-cache \
-                -e RUSTFLAGS="$RUSTFLAGS" \
-                "$CARGO_ZIGBUILD_IMAGE" \
-                bash -c "rustup target add $target && cargo zigbuild --release --target $target -p sqry-cli -p sqry-lsp -p sqry-mcp -p sqry-daemon"
             else
               "$CARGO_BIN" zigbuild --release --target "$target" -p sqry-cli -p sqry-lsp -p sqry-mcp -p sqry-daemon
             fi
