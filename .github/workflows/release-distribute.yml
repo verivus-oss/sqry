@@ -361,17 +361,17 @@ jobs:
               done
 
               python3 - <<'PY'
-              import os
-              import pathlib
-              import zipfile
+          import os
+          import pathlib
+          import zipfile
 
-              version = os.environ["VERSION"]
-              package_dir = pathlib.Path(f"dist/sqry-{version}-windows-x86_64")
-              archive_path = pathlib.Path(f"dist/sqry-{version}-windows-x86_64.zip")
-              with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-                  for path in sorted(package_dir.iterdir()):
-                      archive.write(path, arcname=path.name)
-              PY
+          version = os.environ["VERSION"]
+          package_dir = pathlib.Path(f"dist/sqry-{version}-windows-x86_64")
+          archive_path = pathlib.Path(f"dist/sqry-{version}-windows-x86_64.zip")
+          with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+              for path in sorted(package_dir.iterdir()):
+                  archive.write(path, arcname=path.name)
+          PY
             fi
           done
 
