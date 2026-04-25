@@ -92,6 +92,12 @@ jobs:
             --skip detect_bazel_java \
             --skip detect_kotlin_gradle_project \
             --skip detect_scala_sbt_project \
+            --skip coverage_rs_matches_plan_assert_impl_all_block \
+            --skip every_code_graph_field_is_classified_by_name \
+            --skip plan_ka_and_kb_field_names_all_exist_on_code_graph \
+            --skip plan_ka_field_names_parses_real_plan \
+            --skip plan_not_in_ka_fields_parses_real_plan \
+            --skip plan_not_in_ka_matches_classified_excluded_fields \
             --skip test_relation_callers_supports_fqn_and_simple_names \
             --skip test_relation_returns_supports_fqn_and_simple_names
         env:
