@@ -671,6 +671,7 @@ mod tests {
 
         let config = SessionConfig {
             idle_timeout: Duration::from_millis(100),
+            cleanup_interval: Duration::from_secs(3600),
             ..SessionConfig::default()
         };
         let manager = SessionManager::with_config(config).unwrap();
