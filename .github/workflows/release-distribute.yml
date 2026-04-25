@@ -41,8 +41,14 @@ jobs:
     steps:
       - name: Workspace wipe
         run: |
-          # Docker may create root-owned files; use sudo if needed
-          sudo rm -rf "$GITHUB_WORKSPACE" && mkdir -p "$GITHUB_WORKSPACE"
+          # Docker may create root-owned files; use passwordless sudo only
+          # when the runner is configured for it.
+          if sudo -n true 2>/dev/null; then
+            sudo rm -rf "$GITHUB_WORKSPACE"
+          else
+            rm -rf "$GITHUB_WORKSPACE"
+          fi
+          mkdir -p "$GITHUB_WORKSPACE"
 
       # For workflow_dispatch, resolve all env vars from ledger before validation
       - name: Resolve inputs from ledger (manual trigger)
