@@ -6,7 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
-## [9.0.18](https://github.com/verivus-oss/sqry/compare/v9.0.17...v9.0.18) - 2026-04-25
+## [9.0.19](https://github.com/verivus-oss/sqry/compare/v9.0.17...v9.0.19) - 2026-04-25
+
+### Fixed
+- *(daemon)* compile Windows IPC release target## [9.0.18](https://github.com/verivus-oss/sqry/compare/v9.0.17...v9.0.18) - 2026-04-25
 
 ### Other
 - update Cargo.lock dependencies
