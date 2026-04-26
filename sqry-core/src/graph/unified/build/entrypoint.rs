@@ -87,6 +87,39 @@ pub struct AnalysisStrategySummary {
 /// `SQRY_STAGING_MEMORY_LIMIT_MB` or [`BuildConfig::staging_memory_limit`].
 const DEFAULT_STAGING_MEMORY_LIMIT: usize = 512 * 1024 * 1024;
 
+/// Directory names skipped by default when discovering first-party source files.
+///
+/// These are dependency, build output, editor cache, or CI runner cache roots
+/// that routinely contain generated code or vendored third-party dependencies.
+/// The indexer still honors `.gitignore` and related ignore files; this list
+/// protects editor-triggered indexing when those files are absent or incomplete.
+/// Set `SQRY_INCLUDE_DEFAULT_EXCLUDED_DIRS=1` to disable these built-in
+/// excludes for repositories that intentionally keep first-party code in one
+/// of these directories.
+const DEFAULT_EXCLUDED_SOURCE_DIRS: &[&str] = &[
+    ".git",
+    ".hg",
+    ".svn",
+    ".cache",
+    ".next",
+    ".nuxt",
+    ".sqry",
+    ".turbo",
+    ".venv",
+    "__pycache__",
+    "_actions",
+    "_update",
+    "_work",
+    "build",
+    "dist",
+    "node_modules",
+    "target",
+    "vendor",
+    "venv",
+];
+
+const DEFAULT_EXCLUDED_SOURCE_DIR_PREFIXES: &[&str] = &["externals."];
+
 /// Configuration for building the unified graph.
 #[derive(Debug, Clone)]
 pub struct BuildConfig {
@@ -1232,6 +1265,14 @@ fn find_source_files(root: &Path, config: &BuildConfig) -> Vec<std::path::PathBu
         builder.threads(threads);
     }
 
+    let root_for_filter = root.to_path_buf();
+    builder.filter_entry(move |entry| {
+        entry
+            .file_type()
+            .is_none_or(|file_type| !file_type.is_dir())
+            || should_visit_source_dir(&root_for_filter, entry.path())
+    });
+
     let mut files = Vec::new();
 
     for entry in builder.build() {
@@ -1249,6 +1290,31 @@ fn find_source_files(root: &Path, config: &BuildConfig) -> Vec<std::path::PathBu
     }
 
     files
+}
+
+fn should_visit_source_dir(root: &Path, path: &Path) -> bool {
+    if path == root {
+        return true;
+    }
+
+    let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+        return true;
+    };
+
+    !is_default_excluded_source_dir(name)
+}
+
+fn is_default_excluded_source_dir(name: &str) -> bool {
+    if std::env::var("SQRY_INCLUDE_DEFAULT_EXCLUDED_DIRS")
+        .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+    {
+        return false;
+    }
+
+    DEFAULT_EXCLUDED_SOURCE_DIRS.contains(&name)
+        || DEFAULT_EXCLUDED_SOURCE_DIR_PREFIXES
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
 }
 
 fn sort_files_for_build(root: &Path, files: &mut [PathBuf]) {
@@ -1599,8 +1665,9 @@ mod tests {
     use crate::graph::{GraphBuilder, GraphBuilderError, GraphResult, Language};
     use crate::plugin::error::{ParseError, ScopeError};
     use crate::plugin::{LanguageMetadata, LanguagePlugin};
+    use serial_test::serial;
     use std::fs;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use tempfile::TempDir;
     use tree_sitter::{Parser, Tree};
 
@@ -1827,6 +1894,80 @@ mod tests {
         assert!(!config.follow_links);
         assert!(!config.include_hidden);
         assert_eq!(config.num_threads, None);
+    }
+
+    #[test]
+    #[serial]
+    fn test_find_source_files_excludes_generated_dependency_roots() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let root = temp_dir.path();
+
+        fs::write(root.join("src.rs"), "fn src() {}").expect("write source file");
+        for dir in [
+            "_work",
+            "_actions",
+            "_update",
+            "externals.2.334.0",
+            "node_modules",
+            "target",
+            "vendor",
+        ] {
+            let nested = root.join(dir).join("nested");
+            fs::create_dir_all(&nested).expect("create excluded dir");
+            fs::write(nested.join("ignored.rs"), "fn ignored() {}")
+                .expect("write ignored source file");
+        }
+        for dir in ["external_tools", "vendorized"] {
+            let nested = root.join(dir).join("nested");
+            fs::create_dir_all(&nested).expect("create included sibling dir");
+            fs::write(nested.join("included.rs"), "fn included() {}")
+                .expect("write included source file");
+        }
+
+        let config = BuildConfig::default();
+        let mut relative_files: Vec<_> = find_source_files(root, &config)
+            .iter()
+            .map(|path| path.strip_prefix(root).expect("strip root").to_path_buf())
+            .collect();
+        relative_files.sort();
+
+        assert_eq!(
+            relative_files,
+            vec![
+                PathBuf::from("external_tools/nested/included.rs"),
+                PathBuf::from("src.rs"),
+                PathBuf::from("vendorized/nested/included.rs"),
+            ]
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_find_source_files_can_include_default_excluded_roots() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let root = temp_dir.path();
+        let nested = root.join("vendor").join("first_party");
+        fs::create_dir_all(&nested).expect("create vendor dir");
+        fs::write(nested.join("included.rs"), "fn included() {}").expect("write included source");
+
+        unsafe {
+            std::env::set_var("SQRY_INCLUDE_DEFAULT_EXCLUDED_DIRS", "1");
+        }
+        let config = BuildConfig::default();
+        let files = find_source_files(root, &config);
+        unsafe {
+            std::env::remove_var("SQRY_INCLUDE_DEFAULT_EXCLUDED_DIRS");
+        }
+
+        let relative_files: Vec<_> = files
+            .iter()
+            .map(|path| path.strip_prefix(root).expect("strip root").to_path_buf())
+            .collect();
+
+        assert_eq!(
+            relative_files,
+            vec![PathBuf::from("vendor/first_party/included.rs")]
+        );
     }
 
     #[test]

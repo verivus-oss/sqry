@@ -35,7 +35,7 @@ use sqry_core::progress::IndexProgress;
 use sqry_core::query::error::QueryError;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::task::JoinError;
 use tokio::time;
@@ -1971,22 +1971,18 @@ impl SqryLanguageServer {
         let summary = match rebuild.await {
             Ok(Ok(summary)) => summary,
             Ok(Err(err)) => {
-                progress_task.abort();
-                // ProgressGuard will handle cleanup via Drop
                 guard.end(format!("✗ Index build failed: {err}")).await;
+                abort_progress_task(progress_task).await;
                 return Err(map_error(err));
             }
             Err(join_err) => {
-                progress_task.abort();
-                // ProgressGuard will handle cleanup via Drop
                 guard
                     .end("✗ Index build failed (task error)".to_string())
                     .await;
+                abort_progress_task(progress_task).await;
                 return Err(map_join_error(&join_err));
             }
         };
-
-        let _ = progress_task.await; // Wait for progress task to complete
 
         // End progress with success message
         guard
@@ -1996,6 +1992,7 @@ impl SqryLanguageServer {
                 summary.duration.as_secs_f64()
             ))
             .await;
+        abort_progress_task(progress_task).await;
 
         // Show completion message that will auto-dismiss after a few seconds
         let () = self
@@ -2055,8 +2052,6 @@ impl ProgressGuard {
     async fn end(self, message: String) {
         use std::sync::atomic::Ordering;
 
-        self.ended.store(true, Ordering::SeqCst);
-
         let end = WorkDoneProgressEnd {
             message: Some(message),
         };
@@ -2067,6 +2062,7 @@ impl ProgressGuard {
                 value: ProgressParamsValue::WorkDone(WorkDoneProgress::End(end)),
             })
             .await;
+        self.ended.store(true, Ordering::SeqCst);
     }
 }
 
@@ -2119,6 +2115,11 @@ async fn forward_progress(
             break;
         }
     }
+}
+
+async fn abort_progress_task(progress_task: tokio::task::JoinHandle<()>) {
+    progress_task.abort();
+    let _ = time::timeout(Duration::from_millis(100), progress_task).await;
 }
 
 struct ProgressState {
@@ -2343,7 +2344,13 @@ fn calc_percentage(done: usize, total: Option<usize>) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::{SinkExt, StreamExt};
+    use tempfile::TempDir;
     use tokio::time::Duration;
+    use tower::Service;
+    use tower::ServiceExt;
+    use tower_lsp::jsonrpc::{Request, Response};
+    use tower_lsp::lsp_types::{ExecuteCommandParams, InitializeParams, WorkDoneProgressParams};
 
     #[tokio::test(flavor = "current_thread")]
     async fn map_join_error_reports_cancelled_new() {
@@ -2354,5 +2361,142 @@ mod tests {
         let err = handle.await.unwrap_err();
         let rpc_error = map_join_error(&err);
         assert_eq!(rpc_error.code, ErrorCode::RequestCancelled);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn abort_progress_task_is_bounded_new() {
+        let handle = tokio::spawn(async {
+            std::future::pending::<()>().await;
+        });
+
+        let start = std::time::Instant::now();
+        abort_progress_task(handle).await;
+
+        assert!(
+            start.elapsed() < Duration::from_millis(500),
+            "progress cleanup must not block index completion"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn index_command_sends_one_terminal_progress_end_on_success_new() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        std::fs::write(temp_dir.path().join("lib.rs"), "fn indexed() {}\n").expect("write source");
+
+        let end_count = run_index_command_and_count_terminal_progress(temp_dir.path(), true).await;
+
+        assert_eq!(end_count, 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn index_command_sends_one_terminal_progress_end_on_failure_new() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let file_path = temp_dir.path().join("not-a-directory.rs");
+        std::fs::write(&file_path, "fn invalid_target() {}\n").expect("write source");
+
+        let end_count = run_index_command_and_count_terminal_progress(&file_path, false).await;
+
+        assert_eq!(end_count, 1);
+    }
+
+    async fn run_index_command_and_count_terminal_progress(
+        target: &std::path::Path,
+        expect_success: bool,
+    ) -> usize {
+        let options = crate::LspOptions {
+            stdio: false,
+            socket: None,
+            index_root: Some(target.to_path_buf()),
+            log_level: "warn".into(),
+            config: None,
+            allow_public_bind: false,
+            daemon: false,
+            daemon_socket: None,
+        };
+        let session = SessionManager::new(options);
+        let (service, mut socket) = crate::build_sqry_service(session);
+        let mut service = service;
+
+        let initialize = Request::build("initialize")
+            .params(serde_json::to_value(InitializeParams::default()).expect("init params"))
+            .id(0i64)
+            .finish();
+        let init_response = service
+            .ready()
+            .await
+            .expect("service ready")
+            .call(initialize)
+            .await
+            .expect("initialize call")
+            .expect("initialize response");
+        assert!(init_response.is_ok(), "initialize must succeed");
+
+        let command = ExecuteCommandParams {
+            command: "sqry.index".to_string(),
+            arguments: vec![serde_json::json!(target), serde_json::json!(true)],
+            work_done_progress_params: WorkDoneProgressParams::default(),
+        };
+        let request = Request::build("workspace/executeCommand")
+            .params(serde_json::to_value(command).expect("command params"))
+            .id(1i64)
+            .finish();
+
+        let mut response_future =
+            Box::pin(service.ready().await.expect("service ready").call(request));
+        let mut end_count = 0usize;
+
+        loop {
+            tokio::select! {
+                response = &mut response_future => {
+                    let response = response
+                        .expect("execute command call")
+                        .expect("execute command response");
+                    assert_eq!(response.is_ok(), expect_success, "unexpected command response: {response:?}");
+                    break;
+                }
+                message = socket.next() => {
+                    let Some(message) = message else {
+                        break;
+                    };
+                    if message.method() == "window/workDoneProgress/create" {
+                        let id = message.id().expect("progress create id").clone();
+                        socket
+                            .send(Response::from_ok(id, serde_json::Value::Null))
+                            .await
+                            .expect("send progress create response");
+                    } else if message.method() == "$/progress"
+                        && progress_notification_kind(&message) == Some("end")
+                    {
+                        end_count += 1;
+                    }
+                }
+            }
+        }
+
+        drain_progress_notifications(&mut socket, &mut end_count).await;
+        end_count
+    }
+
+    async fn drain_progress_notifications(
+        socket: &mut tower_lsp::ClientSocket,
+        end_count: &mut usize,
+    ) {
+        while let Ok(Some(message)) =
+            tokio::time::timeout(Duration::from_millis(50), socket.next()).await
+        {
+            if message.method() == "$/progress"
+                && progress_notification_kind(&message) == Some("end")
+            {
+                *end_count += 1;
+            }
+        }
+    }
+
+    fn progress_notification_kind(message: &Request) -> Option<&str> {
+        message
+            .params()
+            .and_then(|params| params.get("value"))
+            .and_then(|value| value.get("kind"))
+            .and_then(serde_json::Value::as_str)
     }
 }

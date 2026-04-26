@@ -405,11 +405,18 @@ impl SessionManager {
             project.index_root.display()
         );
 
-        // Use per-project graph caching
-        let graph = project
-            .graph()
-            .map_err(|e| anyhow::anyhow!("failed to load project graph: {e}"))?;
-        Ok(graph)
+        // Use per-project graph caching, with the same corrupt/incompatible
+        // snapshot self-healing behavior as single-root mode.
+        match project.graph() {
+            Ok(graph) => Ok(graph),
+            Err(load_error) => {
+                log::warn!(
+                    "Graph load failed for project '{}' ({load_error}), auto-rebuilding index for LSP",
+                    project.index_root.display()
+                );
+                self.rebuild_project_graph_after_load_failure(&project, &load_error)
+            }
+        }
     }
 
     /// Load (or reuse) the cached unified graph for single-root mode.
@@ -473,10 +480,50 @@ impl SessionManager {
         }
     }
 
+    fn rebuild_project_graph_after_load_failure(
+        &self,
+        project: &Project,
+        load_error: &sqry_core::project::ProjectError,
+    ) -> Result<Option<Arc<CodeGraph>>> {
+        let plugins = create_plugin_manager();
+        let config = sqry_core::graph::unified::build::BuildConfig::default();
+        let (new_graph, _build_result) = sqry_core::graph::unified::build::build_and_persist_graph(
+            &project.index_root,
+            &plugins,
+            &config,
+            "lsp:project_auto_rebuild",
+        )
+        .with_context(|| {
+            format!(
+                "auto-rebuild failed for {} (original error: {})",
+                project.index_root.display(),
+                load_error
+            )
+        })?;
+
+        let graph = Arc::new(new_graph);
+        project.clear_graph_cache();
+        Ok(Some(graph))
+    }
+
     /// Clear the cached unified graph.
     pub fn clear_graph_cache(&self) {
         let mut cache = self.graph_cache.write();
         *cache = None;
+    }
+
+    /// Clear the cached unified graph for the project that owns `path`.
+    ///
+    /// This is used after explicit multi-root rebuilds. The single-root cache is
+    /// cleared separately by [`Self::clear_graph_cache`].
+    pub fn clear_project_graph_cache_for_path(&self, path: &Path) {
+        match self.project_for_path(path) {
+            Ok(project) => project.clear_graph_cache(),
+            Err(err) => log::warn!(
+                "failed to clear project graph cache for '{}': {err}",
+                path.display()
+            ),
+        }
     }
 
     #[must_use]
@@ -551,11 +598,21 @@ impl SessionManager {
     ) -> Result<Vec<NodeMatch>> {
         let has_unsaved_changes = snapshot.is_some() && !document_matches_disk(snapshot, path);
 
-        if !has_unsaved_changes
-            && let Some(graph) = self.graph_for_path(path)?
-            && let Some(nodes) = Self::nodes_from_graph(path, &graph)
-        {
-            return Ok(nodes);
+        if !has_unsaved_changes {
+            match self.graph_for_path(path) {
+                Ok(Some(graph)) => {
+                    if let Some(nodes) = Self::nodes_from_graph(path, &graph) {
+                        return Ok(nodes);
+                    }
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    log::warn!(
+                        "failed to load graph for '{}'; falling back to document content: {err}",
+                        path.display()
+                    );
+                }
+            }
         }
 
         self.nodes_from_content(path, content)

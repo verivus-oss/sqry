@@ -2,8 +2,9 @@ mod common;
 
 use assert_cmd::Command;
 use common::sqry_bin;
+use sqry_core::graph::unified::persistence::GraphStorage;
 use sqry_lsp::LspOptions;
-use sqry_lsp::handlers::{index, relations, search};
+use sqry_lsp::handlers::{document_symbol, index, relations, search};
 use sqry_lsp::protocol::{
     RelationKind, SqryListCrossLanguageRelationsParams, SqryRelationParams, SqrySearchParams,
 };
@@ -12,6 +13,10 @@ use std::env;
 use std::fs;
 use std::path::Path;
 use tempfile::TempDir;
+use tower_lsp::lsp_types::{
+    DocumentSymbolParams, DocumentSymbolResponse, TextDocumentIdentifier, Url,
+    WorkDoneProgressParams,
+};
 
 fn copy_fixture_dir(relative: &str) -> TempDir {
     let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -62,6 +67,25 @@ fn session_for(path: &Path) -> SessionManager {
         daemon_socket: None,
     };
     SessionManager::new(options)
+}
+
+fn document_symbol_names(session: &SessionManager, source_path: &Path) -> Vec<String> {
+    let params = DocumentSymbolParams {
+        text_document: TextDocumentIdentifier {
+            uri: Url::from_file_path(source_path).expect("file url"),
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: Default::default(),
+    };
+
+    let response = document_symbol::handle(session, &params)
+        .expect("document symbols")
+        .expect("document symbols response");
+    let DocumentSymbolResponse::Nested(symbols) = response else {
+        panic!("expected nested document symbols");
+    };
+
+    symbols.into_iter().map(|symbol| symbol.name).collect()
 }
 
 #[test]
@@ -151,6 +175,90 @@ fn index_status_returns_stats() {
             .as_ref()
             .is_none_or(std::collections::HashMap::is_empty),
         "single-language fixture should have no relation counts by pair"
+    );
+}
+
+#[test]
+fn multi_workspace_index_status_self_heals_corrupt_graph() {
+    let project = TempDir::new().expect("create temp dir");
+    fs::write(
+        project.path().join("lib.rs"),
+        "pub fn recovered_symbol() {}\n",
+    )
+    .expect("write fixture");
+
+    let storage = GraphStorage::new(project.path());
+    fs::create_dir_all(storage.graph_dir()).expect("create graph dir");
+    fs::write(storage.manifest_path(), "{}").expect("write manifest");
+    fs::write(storage.snapshot_path(), b"not a sqry snapshot").expect("write corrupt snapshot");
+
+    let session = session_for(project.path());
+    session.set_workspace_folders(vec![project.path().to_path_buf()]);
+
+    let status =
+        index::index_status(&session, Some(&project.path().display().to_string())).expect("status");
+
+    assert!(status.exists, "index should be rebuilt after corrupt load");
+    assert!(
+        status.symbol_count.unwrap_or(0) > 0,
+        "rebuilt index should contain the fixture symbol"
+    );
+}
+
+#[test]
+fn document_symbols_fall_back_to_content_when_multi_workspace_graph_is_corrupt() {
+    let project = TempDir::new().expect("create temp dir");
+    let source_path = project.path().join("lib.rs");
+    fs::write(&source_path, "pub fn recovered_symbol() {}\n").expect("write fixture");
+
+    let storage = GraphStorage::new(project.path());
+    fs::create_dir_all(storage.graph_dir()).expect("create graph dir");
+    fs::write(storage.manifest_path(), "{}").expect("write manifest");
+    fs::create_dir(storage.snapshot_path()).expect("create invalid snapshot directory");
+
+    let session = session_for(project.path());
+    session.set_workspace_folders(vec![project.path().to_path_buf()]);
+
+    let symbols = document_symbol_names(&session, &source_path);
+
+    assert!(
+        symbols.iter().any(|symbol| symbol == "recovered_symbol"),
+        "expected recovered_symbol from content fallback"
+    );
+}
+
+#[test]
+fn rebuild_index_clears_multi_workspace_project_graph_cache() {
+    let project = TempDir::new().expect("create temp dir");
+    let source_path = project.path().join("lib.rs");
+    fs::write(&source_path, "pub fn before_rebuild() {}\n").expect("write fixture");
+
+    let session = session_for(project.path());
+    session.set_workspace_folders(vec![project.path().to_path_buf()]);
+    let reporter = sqry_core::progress::no_op_reporter();
+    index::rebuild_index(&session, project.path(), &reporter, false).expect("initial rebuild");
+
+    let before_symbols = document_symbol_names(&session, &source_path);
+    assert!(
+        before_symbols
+            .iter()
+            .any(|symbol| symbol == "before_rebuild"),
+        "initial graph should expose before_rebuild"
+    );
+
+    fs::write(&source_path, "pub fn after_rebuild() {}\n").expect("rewrite fixture");
+    index::rebuild_index(&session, project.path(), &reporter, false).expect("second rebuild");
+
+    let after_symbols = document_symbol_names(&session, &source_path);
+    assert!(
+        after_symbols.iter().any(|symbol| symbol == "after_rebuild"),
+        "rebuilt graph should expose after_rebuild"
+    );
+    assert!(
+        !after_symbols
+            .iter()
+            .any(|symbol| symbol == "before_rebuild"),
+        "stale project cache should not expose before_rebuild after rebuild"
     );
 }
 

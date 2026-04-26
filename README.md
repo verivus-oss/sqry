@@ -404,6 +404,15 @@ echo "target/" >> .sqryignore
 sqry index
 ```
 
+sqry also skips common dependency, generated, build-output, editor-cache, and
+CI-runner roots by default: `.git`, `.hg`, `.svn`, `.cache`, `.next`, `.nuxt`,
+`.sqry`, `.turbo`, `.venv`, `__pycache__`, `_actions`, `_update`, `_work`,
+`build`, `dist`, `node_modules`, `target`, `vendor`, `venv`, and directories
+whose names start with `externals.`. This keeps editor-triggered indexing from
+walking third-party or generated trees when ignore files are absent. If a
+repository intentionally stores first-party code in those directories, run with
+`SQRY_INCLUDE_DEFAULT_EXCLUDED_DIRS=1`.
+
 ## Daemon Mode
 
 `sqryd` is a background daemon that keeps your code graph in memory across multiple CLI, LSP, and MCP invocations. Instead of parsing and indexing from scratch on every `sqry query` or AI assistant request, `sqryd` keeps the graph hot and rebuilds it incrementally when source files change.

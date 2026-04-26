@@ -421,6 +421,7 @@ pub fn rebuild_index(
 
     // Clear the graph cache so it reloads the newly built graph
     session.clear_graph_cache();
+    session.clear_project_graph_cache_for_path(target);
 
     let node_count = graph.node_count();
 

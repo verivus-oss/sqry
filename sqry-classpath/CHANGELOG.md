@@ -6,7 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
-## [8.0.0](https://github.com/verivus-oss/sqry/compare/v7.2.0...v8.0.0) - 2026-04-10
+## [9.0.20](https://github.com/verivus-oss/sqry/compare/v9.0.19...v9.0.20) - 2026-04-26
+
+### Fixed
+- *(ci)* eliminate release test skips## [8.0.0](https://github.com/verivus-oss/sqry/compare/v7.2.0...v8.0.0) - 2026-04-10
 
 ### Added
 - *(graph)* land curated provenance and staged-release updates

@@ -1,7 +1,7 @@
 # sqry VS Code Extension - User Guide
 
-**Version**: 9.0.19
-**Last Updated**: 2026-04-25
+**Version**: 9.0.20
+**Last Updated**: 2026-04-26
 
 ---
 
@@ -56,7 +56,7 @@ cargo install --path sqry-cli
 
 # Verify installation
 sqry --version
-# Should output: sqry 9.0.19 (or later)
+# Should output: sqry 9.0.20 (or later)
 ```
 
 ### Option 1: Install from VSIX
@@ -166,6 +166,12 @@ sqry index .
 - All code files in supported languages (TypeScript, Python, Rust, Go, Java, etc.)
 - Symbols: functions, classes, methods, variables, imports, exports
 - Relationships: callers, callees, imports, references
+- sqry skips common dependency/generated/cache roots by default: `.git`, `.hg`,
+  `.svn`, `.cache`, `.next`, `.nuxt`, `.sqry`, `.turbo`, `.venv`,
+  `__pycache__`, `_actions`, `_update`, `_work`, `build`, `dist`,
+  `node_modules`, `target`, `vendor`, `venv`, and `externals.*`. Set
+  `SQRY_INCLUDE_DEFAULT_EXCLUDED_DIRS=1` before launching VS Code if your
+  workspace intentionally keeps first-party code in one of those directories.
 
 **Index location**: `.sqry-index` in your project root (gitignore this!)
 
@@ -841,6 +847,6 @@ This build installs locally via VSIX while we prepare the Marketplace release—
 
 ---
 
-**Last Updated**: 2026-04-25
-**Extension Version**: 9.0.19
-**sqry Version**: 9.0.19+
+**Last Updated**: 2026-04-26
+**Extension Version**: 9.0.20
+**sqry Version**: 9.0.20+

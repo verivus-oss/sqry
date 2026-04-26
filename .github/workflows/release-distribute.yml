@@ -695,6 +695,7 @@ jobs:
 
       - name: Generate GitHub App token (public release)
         id: public-release-app-token
+        continue-on-error: true
         uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1
         with:
           app-id: ${{ secrets.MIRROR_APP_ID }}
@@ -710,16 +711,33 @@ jobs:
           APP_TOKEN: ${{ steps.public-release-app-token.outputs.token }}
         run: |
           set -euo pipefail
-          if [[ -z "${APP_TOKEN:-}" ]]; then
-            echo "FATAL: MIRROR_APP token unavailable; public release publication must use the GitHub App credential" >&2
-            exit 1
+          if [[ -n "${APP_TOKEN:-}" ]]; then
+            TOKEN="$APP_TOKEN"
+            GH_TOKEN="$TOKEN" gh api repos/verivus-oss/sqry --jq '.full_name' | grep -q '^verivus-oss/sqry$'
+            GH_TOKEN="$TOKEN" gh api repos/verivus-oss/sqry --jq '.permissions.push' | grep -q '^true$'
+            GH_TOKEN="$TOKEN" gh api repos/verivus-oss/sqry/actions/workflows/release-distribute.yml --jq '.state' | grep -q '^active$'
+            SOURCE="mirror_app"
+          else
+            TOKEN="$(gh auth token -u verivusOSS-releases || true)"
+            if [[ -z "$TOKEN" ]]; then
+              echo "FATAL: MIRROR_APP token unavailable and verivusOSS-releases host credential is not configured" >&2
+              exit 1
+            fi
+            LOGIN="$(GH_TOKEN="$TOKEN" gh api user --jq '.login')"
+            if [[ "$LOGIN" != "verivusOSS-releases" ]]; then
+              echo "FATAL: fallback token resolved to '$LOGIN', expected 'verivusOSS-releases'" >&2
+              exit 1
+            fi
+            GH_TOKEN="$TOKEN" gh api repos/verivus-oss/sqry --jq '.full_name' | grep -q '^verivus-oss/sqry$'
+            GH_TOKEN="$TOKEN" gh api repos/verivus-oss/sqry --jq '.permissions.push' | grep -q '^true$'
+            GH_TOKEN="$TOKEN" gh api repos/verivus-oss/sqry/actions/workflows/release-distribute.yml --jq '.state' | grep -q '^active$'
+            SOURCE="host_public_operator"
+            echo "::warning::MIRROR_APP token unavailable; falling back to host credential verivusOSS-releases for public release operations"
           fi
-          TOKEN="$APP_TOKEN"
-          GH_TOKEN="$TOKEN" gh api repos/verivus-oss/sqry --jq '.full_name' | grep -q '^verivus-oss/sqry$'
-          GH_TOKEN="$TOKEN" gh api repos/verivus-oss/sqry/actions/workflows/release-distribute.yml --jq '.state' | grep -q '^active$'
           echo "::add-mask::$TOKEN"
           echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
-          echo "source=mirror_app" >> "$GITHUB_OUTPUT"
+          echo "source=$SOURCE" >> "$GITHUB_OUTPUT"
+          echo "Using public auth source: $SOURCE"
 
       - name: Ensure public tag exists at expected SHA
         env:
