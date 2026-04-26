@@ -709,6 +709,7 @@ jobs:
         id: public-release-auth
         env:
           APP_TOKEN: ${{ steps.public-release-app-token.outputs.token }}
+          PUBLIC_RELEASE_OPERATOR_TOKEN: ${{ secrets.PUBLIC_RELEASE_OPERATOR_TOKEN }}
         run: |
           set -euo pipefail
 
@@ -731,9 +732,12 @@ jobs:
 
           select_fallback_token() {
             local token login
-            token="$(gh auth token -u verivusOSS-releases || true)"
+            token="${PUBLIC_RELEASE_OPERATOR_TOKEN:-}"
             if [[ -z "$token" ]]; then
-              echo "FATAL: no public release credential available for verivusOSS-releases" >&2
+              token="$(gh auth token -u verivusOSS-releases || true)"
+            fi
+            if [[ -z "$token" ]]; then
+              echo "FATAL: no public release credential available for verivusOSS-releases; set PUBLIC_RELEASE_OPERATOR_TOKEN or configure gh auth for verivusOSS-releases" >&2
               exit 1
             fi
             login="$(GH_TOKEN="$token" gh api user --jq '.login')"
