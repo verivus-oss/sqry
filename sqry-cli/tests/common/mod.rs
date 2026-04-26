@@ -3,11 +3,18 @@ use std::path::PathBuf;
 
 /// Helper to find the sqry binary for testing
 ///
-/// Tries `CARGO_BIN_EXE_sqry` first, then falls back to looking in target/debug or target/release.
-/// This makes tests work both in CI (where `CARGO_BIN_EXE_sqry` is set) and locally
-/// (where it might not be set in workspace contexts).
+/// Tries `SQRY_E2E_SQRY_BIN` first for installed-binary validation, then
+/// `CARGO_BIN_EXE_sqry`, then target/debug or target/release.
+/// This makes tests work for release smoke checks, CI, and local workspace contexts.
 #[allow(dead_code)] // Used by integration tests; keep available for new tests
 pub fn sqry_bin() -> PathBuf {
+    if let Ok(path) = std::env::var("SQRY_E2E_SQRY_BIN") {
+        let path = PathBuf::from(path);
+        if path.is_file() {
+            return path;
+        }
+    }
+
     let exe_suffix = std::env::consts::EXE_SUFFIX;
     let make_candidate = |base: &str| {
         if exe_suffix.is_empty() {

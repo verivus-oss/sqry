@@ -55,6 +55,13 @@ fn workspace_root() -> std::path::PathBuf {
 /// is at `target/debug/sqry-mcp`. We check both the parent directory
 /// (`deps/`) and its parent (`debug/`) to find the binary.
 fn find_sqry_mcp_binary() -> Option<std::path::PathBuf> {
+    if let Ok(path) = std::env::var("SQRY_E2E_SQRY_MCP_BIN") {
+        let path = std::path::PathBuf::from(path);
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+
     let binary_name = format!("sqry-mcp{}", std::env::consts::EXE_SUFFIX);
     let exe = std::env::current_exe().ok()?;
     // Check parent (target/debug/deps/)
