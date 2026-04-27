@@ -138,8 +138,23 @@ pub fn resolve_gradle_classpath(config: &ResolveConfig) -> ClasspathResult<Vec<R
 
 /// Locate the Gradle command to use.
 ///
-/// Prefers the project-local wrapper and falls back to installed `gradle`.
+/// Prefers the project-local wrapper and falls back to installed `gradle`
+/// resolved via the process `PATH` environment variable.
 fn find_gradle_command(project_root: &Path) -> Option<PathBuf> {
+    find_gradle_command_with_path(project_root, std::env::var_os("PATH").as_deref())
+}
+
+/// Locate the Gradle command using an explicit `PATH` value.
+///
+/// Factored out of [`find_gradle_command`] so tests can inject a deterministic
+/// `PATH` (typically `None` or an empty path-list pointing at an isolated
+/// tempdir) instead of relying on the host's installed `gradle`. Production
+/// callers should always go through [`find_gradle_command`], which sources
+/// `PATH` from the process environment.
+fn find_gradle_command_with_path(
+    project_root: &Path,
+    path_var: Option<&std::ffi::OsStr>,
+) -> Option<PathBuf> {
     let wrapper_name = if cfg!(windows) {
         "gradlew.bat"
     } else {
@@ -150,11 +165,14 @@ fn find_gradle_command(project_root: &Path) -> Option<PathBuf> {
     if wrapper_path.exists() {
         Some(wrapper_path)
     } else {
-        which_binary(if cfg!(windows) {
-            "gradle.bat"
-        } else {
-            "gradle"
-        })
+        which_binary_in(
+            if cfg!(windows) {
+                "gradle.bat"
+            } else {
+                "gradle"
+            },
+            path_var,
+        )
     }
 }
 
@@ -599,9 +617,12 @@ fn warn_if_cache_stale(cache_dir: &Path, classpaths: &[ResolvedClasspath]) {
     }
 }
 
-fn which_binary(name: &str) -> Option<PathBuf> {
-    let path_var = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path_var) {
+/// Search for `name` inside `path_var`, treating `None` as an empty `PATH`
+/// (no candidates). Used by [`find_gradle_command_with_path`] for deterministic
+/// test injection.
+fn which_binary_in(name: &str, path_var: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
+    let path_var = path_var?;
+    for dir in std::env::split_paths(path_var) {
         let candidate = dir.join(name);
         if candidate.is_file() {
             return Some(candidate);
@@ -898,9 +919,15 @@ SQRY_CP:app:org.slf4j:slf4j-api:2.0.9:/path/to/slf4j-api.jar";
 
     #[test]
     fn test_missing_gradle_command_returns_none() {
+        // Use the path-injecting helper directly so the test is deterministic
+        // regardless of whether the host has `gradle` installed in `PATH`
+        // (e.g. GitHub Actions runners ship a preinstalled gradle).
         let tmp = TempDir::new().unwrap();
-        let result = find_gradle_command(tmp.path());
-        assert!(result.is_none());
+        let result = find_gradle_command_with_path(tmp.path(), None);
+        assert!(
+            result.is_none(),
+            "expected None when no wrapper exists and PATH is empty, got {result:?}"
+        );
     }
 
     #[test]

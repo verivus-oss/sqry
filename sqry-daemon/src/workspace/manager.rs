@@ -369,12 +369,12 @@ impl WorkspaceManager {
 
             let Some(requester_ws) = workspaces.get(for_key) else {
                 return Err(DaemonError::WorkspaceEvicted {
-                    root: for_key.index_root.clone(),
+                    root: for_key.source_root.clone(),
                 });
             };
             if requester_ws.rebuild_cancelled.load(Ordering::Acquire) {
                 return Err(DaemonError::WorkspaceEvicted {
-                    root: for_key.index_root.clone(),
+                    root: for_key.source_root.clone(),
                 });
             }
 
@@ -502,23 +502,42 @@ impl WorkspaceManager {
     ///    `get_or_load` / rebuild running against this workspace
     ///    observes the signal at its next pass boundary and aborts
     ///    without publishing.
-    /// 4. Mark the state `Evicted`.
-    /// 5. Remove the workspace from the manager map.
+    /// 4. Mark the state `Evicted` — and **leave the entry in the
+    ///    manager map** as a tombstone. STEP_6 (workspace-aware-
+    ///    cross-repo, 2026-04-26): keeping the tombstone is what
+    ///    makes per-source-root partial eviction observable through
+    ///    `daemon/workspaceStatus`. The aggregate must report
+    ///    `state == Evicted` for individually-evicted source roots
+    ///    while siblings remain `Loaded`. Removing the entry would
+    ///    silently hide the eviction from the aggregate — exactly
+    ///    the codex iter-1 BLOCK item.
     ///
     /// The order is load-bearing: the cancellation flag is set
-    /// *before* the map removal so a concurrent loader that
+    /// *before* the state transition so a concurrent loader that
     /// re-checks `rebuild_cancelled` after its build (per
     /// [`Self::get_or_load`]) sees the cancel.
+    ///
+    /// To **fully unload** a workspace (drop the tombstone too),
+    /// callers route through [`Self::unload`] / `daemon/unload`,
+    /// which calls this function and then explicitly removes the
+    /// map entry. LRU eviction (`evict_lru`, `reserve_rebuild`'s
+    /// Phase 2) keeps the tombstone; only an explicit user-driven
+    /// unload removes it.
     ///
     /// Codex Task 6 Phase 6b iter-1 MAJOR: the pre-fix version
     /// dropped the evicted `Arc` at function end and subtracted
     /// bytes from `loaded_bytes` without inserting a retained
     /// entry — leaking accounting for any graph still held by a
     /// slow query.
+    ///
+    /// Codex STEP_6 iter-1 BLOCK: the pre-fix version unconditionally
+    /// removed the entry from `self.workspaces` after marking it
+    /// `Evicted`, defeating partial-eviction reporting. The
+    /// remove-entry step now lives in [`Self::unload`] alone.
     fn execute_eviction(&self, key: &WorkspaceKey) {
         // Hold `workspaces.write()` across the ENTIRE eviction —
-        // from the initial lookup through the final `remove` — so
-        // no concurrent `get_or_load` post-build re-check can
+        // from the initial lookup through the final state store —
+        // so no concurrent `get_or_load` post-build re-check can
         // interleave with us. Loaders serialize against eviction
         // by holding `workspaces.read()` across their own publish
         // critical section (see `get_or_load` step 7+).
@@ -537,46 +556,18 @@ impl WorkspaceManager {
         // `workspaces.write()` across the full eviction closes
         // that window.
         let mut workspaces = self.workspaces.write();
-        let Some(ws) = workspaces.get(key).cloned() else {
-            return; // already unloaded / never loaded
-        };
-
-        // Step 1 — swap the ArcSwap to an empty placeholder. This
-        // drops one ArcSwap-held strong reference on the old graph.
-        let old_arc = ws.graph.swap(Arc::new(CodeGraph::new()));
-        let prior_bytes_usize = ws.memory_bytes.swap(0, Ordering::AcqRel);
-        let prior_bytes = prior_bytes_usize as u64;
-
-        // Step 2 — move bytes loaded → retained under the admission
-        // mutex. A fresh token keeps this entry distinct from any
-        // retained entries published via `publish_and_retain`.
-        let token = OldGraphToken::new();
-        {
-            let mut state = self.admission.lock();
-            state.loaded_bytes = state.loaded_bytes.saturating_sub(prior_bytes);
-            state.retained_old.insert(
-                token,
-                RetainedEntry {
-                    bytes: prior_bytes,
-                    graph: old_arc,
-                    published_at: Instant::now(),
-                    warned_past_timeout: false,
-                },
-            );
-            self.bump_high_water(&state);
-        }
-
-        // Step 3 — cancellation + state transition (both are per-
-        // workspace atomic stores; safe to interleave with any
-        // concurrent query that already held an `Arc<LoadedWorkspace>`
-        // cloned from the map).
-        ws.rebuild_cancelled.store(true, Ordering::Release);
-        ws.store_state(WorkspaceState::Evicted);
-
-        // Step 4 — remove from the manager map. Still under the
-        // write lock, so no concurrent reader observes the
-        // stale "evicted-but-still-in-map" intermediate state.
-        workspaces.remove(key);
+        // Steps 1–3 (ArcSwap, admission tier transfer, cancellation
+        // + state store) are factored into the shared helper so
+        // [`Self::unload`] can reuse them under a single
+        // workspaces.write() guard.
+        //
+        // Step 4 (DO NOT remove from `self.workspaces`) is implicit
+        // here — the entry stays in the map as a tombstone. The
+        // tombstone is what STEP_6 partial-eviction reporting
+        // depends on. `unload` (the explicit user-driven path)
+        // removes the entry separately after this function returns.
+        self.evict_to_tombstone_locked(&mut workspaces, key);
+        drop(workspaces);
     }
 
     /// Load the workspace's graph, building it via `builder` if not
@@ -653,7 +644,7 @@ impl WorkspaceManager {
             WorkspaceState::Failed.as_u8(),
             WorkspaceState::Evicted.as_u8(),
         ];
-        let mut acquired = false;
+        let mut acquired_from: Option<WorkspaceState> = None;
         for prior in allowed {
             if ws
                 .state
@@ -665,11 +656,11 @@ impl WorkspaceManager {
                 )
                 .is_ok()
             {
-                acquired = true;
+                acquired_from = WorkspaceState::from_u8(prior);
                 break;
             }
         }
-        if !acquired {
+        let Some(prior_state) = acquired_from else {
             // Someone else already holds the gate (Loading /
             // Rebuilding) OR raced us into Loaded. Cache-read and
             // return if Loaded, else surface a transient error.
@@ -679,25 +670,35 @@ impl WorkspaceManager {
                 return Ok(ws.graph.load_full());
             }
             return Err(DaemonError::WorkspaceBuildFailed {
-                root: key.index_root.clone(),
+                root: key.source_root.clone(),
                 reason: format!("workspace load already in progress ({current})"),
             });
-        }
+        };
         // We own the gate. Clear the cancellation flag AFTER the
-        // CAS: at this point no prior evict can have raced in
-        // front of us because evict takes a shared Arc<Workspace>
-        // from the map and sets cancelled *before* removing. If
-        // cancelled is true here, evict ran on the prior state and
-        // we should honour it.
+        // CAS, but interpret a pre-cleared `cancelled = true`
+        // differently depending on the prior state we won from:
+        //
+        // - Prior = `Evicted`: STEP_6 iter-2. LRU eviction
+        //   completed on this entry (workspaces.write() was held
+        //   across both the `cancelled.store(true)` and the
+        //   `state.store(Evicted)` in `execute_eviction`). The
+        //   cancelled flag is a stale residue of that completed
+        //   eviction; this `get_or_load` is a fresh reload and
+        //   must clear cancelled unconditionally.
+        // - Prior = `Unloaded` / `Failed`: a concurrent eviction
+        //   is racing us. The flag is a live cancel signal — the
+        //   eviction reached `cancelled.store(true)` before our
+        //   CAS but the state had not yet been moved to
+        //   `Evicted`. Honour the cancel and fail this load.
         let pre_cancelled = ws.rebuild_cancelled.swap(false, Ordering::AcqRel);
-        if pre_cancelled {
+        if pre_cancelled && prior_state != WorkspaceState::Evicted {
             // Evict raced us out of the allowed-state list. Put
             // the cancelled flag back, transition to Failed (so
             // this caller's LoadingGuard doesn't fire), and fail.
             ws.rebuild_cancelled.store(true, Ordering::Release);
             ws.store_state(WorkspaceState::Failed);
             return Err(DaemonError::WorkspaceBuildFailed {
-                root: key.index_root.clone(),
+                root: key.source_root.clone(),
                 reason: "workspace evicted mid-load".to_string(),
             });
         }
@@ -713,7 +714,7 @@ impl WorkspaceManager {
         let reservation = self.reserve_rebuild(key, working_set_estimate)?;
 
         // --- Step 5: build the graph ----------------------------
-        let graph = match builder.build(&key.index_root) {
+        let graph = match builder.build(&key.source_root) {
             Ok(g) => g,
             Err(err) => {
                 drop(reservation);
@@ -758,13 +759,13 @@ impl WorkspaceManager {
             drop(workspaces_guard);
             drop(reservation);
             ws.record_failure(DaemonError::WorkspaceBuildFailed {
-                root: key.index_root.clone(),
+                root: key.source_root.clone(),
                 reason: "workspace evicted mid-load".to_string(),
             });
             loading.armed = false;
             ws.store_state(WorkspaceState::Failed);
             return Err(DaemonError::WorkspaceBuildFailed {
-                root: key.index_root.clone(),
+                root: key.source_root.clone(),
                 reason: "workspace evicted mid-load".to_string(),
             });
         }
@@ -772,13 +773,13 @@ impl WorkspaceManager {
             drop(workspaces_guard);
             drop(reservation);
             ws.record_failure(DaemonError::WorkspaceBuildFailed {
-                root: key.index_root.clone(),
+                root: key.source_root.clone(),
                 reason: "workspace removed mid-load".to_string(),
             });
             loading.armed = false;
             ws.store_state(WorkspaceState::Failed);
             return Err(DaemonError::WorkspaceBuildFailed {
-                root: key.index_root.clone(),
+                root: key.source_root.clone(),
                 reason: "workspace removed mid-load".to_string(),
             });
         }
@@ -814,7 +815,7 @@ impl WorkspaceManager {
         // but spawn-only: hook impls are expected to return
         // immediately after scheduling background work.
         let hook = self.hook_snapshot();
-        hook.on_publish(&key.index_root, Arc::clone(&published_arc));
+        hook.on_publish(&key.source_root, Arc::clone(&published_arc));
 
         Ok(published_arc)
     }
@@ -858,17 +859,79 @@ impl WorkspaceManager {
         candidate
     }
 
-    /// Explicitly unload a workspace. Equivalent to
-    /// [`Self::execute_eviction`] but callable by the IPC
-    /// `daemon/unload` method and `sqry daemon unload <path>` CLI.
+    /// Explicitly unload a workspace. Drives a full eviction
+    /// (releases graph data + admission accounting via
+    /// [`Self::evict_to_tombstone_locked`]) **and** removes the
+    /// tombstone entry from the manager map atomically under a
+    /// single `workspaces.write()` critical section.
+    ///
+    /// This is the only path that removes the map entry. LRU
+    /// eviction (`evict_lru`, `reserve_rebuild`'s Phase 2) leaves
+    /// the tombstone in place so per-source-root partial-eviction
+    /// state stays observable through `daemon/workspaceStatus` —
+    /// see [`Self::execute_eviction`] doc and STEP_6 iter-1 BLOCK.
+    ///
     /// Returns `true` if the workspace was present, `false` if it
     /// was already absent.
     pub fn unload(&self, key: &WorkspaceKey) -> bool {
-        let present = self.workspaces.read().contains_key(key);
-        if present {
-            self.execute_eviction(key);
+        let mut workspaces = self.workspaces.write();
+        if !workspaces.contains_key(key) {
+            return false;
         }
-        present
+        // Drop graph + admission bytes under the same write lock
+        // we will use for `remove`. Holding the lock across both
+        // operations means external observers see EITHER "entry
+        // present + Loaded" OR "entry absent" — never the "entry
+        // present + Evicted but about to be removed" intermediate
+        // state. (LRU eviction is a separate flow that DOES expose
+        // the Evicted tombstone — that is the STEP_6 contract.)
+        self.evict_to_tombstone_locked(&mut workspaces, key);
+        workspaces.remove(key);
+        true
+    }
+
+    /// Helper: run the eviction body (steps 1–4 of
+    /// [`Self::execute_eviction`]) with the caller's
+    /// `workspaces.write()` guard already held. Used by
+    /// [`Self::unload`] so unloading remains atomic — no observer
+    /// sees the `Evicted`-but-still-in-map intermediate window.
+    ///
+    /// Re-eviction safety mirrors `execute_eviction` — an entry
+    /// already in `Evicted` is left alone.
+    fn evict_to_tombstone_locked(
+        &self,
+        workspaces: &mut HashMap<WorkspaceKey, Arc<LoadedWorkspace>>,
+        key: &WorkspaceKey,
+    ) {
+        let Some(ws) = workspaces.get(key).cloned() else {
+            return;
+        };
+        if ws.load_state() == WorkspaceState::Evicted {
+            return;
+        }
+
+        let old_arc = ws.graph.swap(Arc::new(CodeGraph::new()));
+        let prior_bytes_usize = ws.memory_bytes.swap(0, Ordering::AcqRel);
+        let prior_bytes = prior_bytes_usize as u64;
+
+        let token = OldGraphToken::new();
+        {
+            let mut state = self.admission.lock();
+            state.loaded_bytes = state.loaded_bytes.saturating_sub(prior_bytes);
+            state.retained_old.insert(
+                token,
+                RetainedEntry {
+                    bytes: prior_bytes,
+                    graph: old_arc,
+                    published_at: Instant::now(),
+                    warned_past_timeout: false,
+                },
+            );
+            self.bump_high_water(&state);
+        }
+
+        ws.rebuild_cancelled.store(true, Ordering::Release);
+        ws.store_state(WorkspaceState::Evicted);
     }
 
     /// Find a loaded workspace by its directory path.
@@ -887,7 +950,7 @@ impl WorkspaceManager {
         let workspaces = self.workspaces.read();
         workspaces
             .iter()
-            .find(|(k, _)| k.index_root == path)
+            .find(|(k, _)| k.source_root == path)
             .map(|(k, ws)| (k.clone(), Arc::clone(ws)))
     }
 
@@ -898,7 +961,7 @@ impl WorkspaceManager {
             let mut entries: Vec<_> = workspaces
                 .iter()
                 .map(|(k, ws)| WorkspaceStatus {
-                    index_root: k.index_root.clone(),
+                    index_root: k.source_root.clone(),
                     state: ws.load_state(),
                     pinned: ws.pinned,
                     current_bytes: ws.memory_bytes.load(Ordering::Acquire) as u64,
@@ -906,6 +969,12 @@ impl WorkspaceManager {
                     last_good_at: *ws.last_good_at.read(),
                     last_error: ws.last_error.read().as_ref().map(|e| e.to_string()),
                     retry_count: ws.retry_count.load(Ordering::Acquire),
+                    // STEP_12 telemetry: surface both display and machine
+                    // identity hex forms when the key carries a logical
+                    // workspace_id; anonymous keys leave both as None so
+                    // the wire shape is uniform.
+                    workspace_id_short: k.workspace_id.as_ref().map(|id| id.as_short_hex()),
+                    workspace_id_full: k.workspace_id.as_ref().map(|id| id.as_full_hex()),
                 })
                 .collect();
             entries.sort_by(|a, b| a.index_root.cmp(&b.index_root));
@@ -942,6 +1011,69 @@ impl WorkspaceManager {
         }
     }
 
+    /// Aggregate `daemon/workspaceStatus` snapshot for a single
+    /// `workspace_id` (STEP_6 of the workspace-aware-cross-repo plan).
+    ///
+    /// Walks the manager's workspace map, collects every
+    /// [`WorkspaceKey`] whose `workspace_id == Some(target_id)`, and
+    /// renders a deterministic per-source-root rollup. Per-source-root
+    /// LRU eviction means individual entries can carry
+    /// [`WorkspaceState::Evicted`] while siblings remain
+    /// [`WorkspaceState::Loaded`] — the aggregate exposes that
+    /// "partially evicted" shape unchanged via
+    /// [`sqry_daemon_protocol::WorkspaceIndexStatus::partially_evicted`].
+    ///
+    /// Returns `None` when no entry in the map carries the requested
+    /// `workspace_id`. The IPC layer surfaces that as
+    /// `DaemonError::WorkspaceNotLoaded`; the manager itself does not
+    /// classify "no entries" as an error so callers can distinguish a
+    /// genuinely absent grouping from an empty workspace.
+    #[must_use]
+    pub fn workspace_index_status(
+        &self,
+        target_id: &sqry_daemon_protocol::WorkspaceId,
+    ) -> Option<sqry_daemon_protocol::WorkspaceIndexStatus> {
+        let workspaces = self.workspaces.read();
+        let mut rows: Vec<sqry_daemon_protocol::WorkspaceSourceRootStatus> = workspaces
+            .iter()
+            .filter_map(|(k, ws)| {
+                k.workspace_id
+                    .as_ref()
+                    .filter(|id| *id == target_id)
+                    .map(|_| sqry_daemon_protocol::WorkspaceSourceRootStatus {
+                        source_root: k.source_root.clone(),
+                        state: ws.load_state(),
+                        current_bytes: ws.memory_bytes.load(Ordering::Acquire) as u64,
+                        // STEP_11_4 — probe `<source_root>/.sqry/classpath/`
+                        // for presence. Status path; never blocks on
+                        // anything heavier than `fs::metadata`. Probe
+                        // failures (permission denied, racy unlink, …)
+                        // collapse to `false`; the LSP-side
+                        // `WorkspaceIndexStatus.warnings` channel surfaces
+                        // the underlying error detail when the daemon's
+                        // workspace builder hits the same probe.
+                        classpath_present: probe_classpath_present(&k.source_root),
+                    })
+            })
+            .collect();
+        if rows.is_empty() {
+            return None;
+        }
+        rows.sort_by(|a, b| a.source_root.cmp(&b.source_root));
+        Some(sqry_daemon_protocol::WorkspaceIndexStatus {
+            workspace_id: *target_id,
+            // STEP_12 — derive the hex display strings here so JSON
+            // consumers (`sqry daemon status --json`, MCP redaction,
+            // CI scripts) never have to re-encode the 32-byte digest
+            // themselves. The two strings are byte-derivative of
+            // `workspace_id`; they do not introduce a new identity
+            // axis.
+            workspace_id_short: target_id.as_short_hex(),
+            workspace_id_full: target_id.as_full_hex(),
+            source_roots: rows,
+        })
+    }
+
     /// Bump the daemon-wide high-water mark using the current
     /// `AdmissionState`. Must be called with `admission` held.
     fn bump_high_water(&self, state: &AdmissionState) {
@@ -964,6 +1096,30 @@ impl WorkspaceManager {
         let ws = Arc::new(LoadedWorkspace::new(key.clone(), false));
         ws.store_state(state);
         self.workspaces.write().insert(key, ws);
+    }
+
+    /// Test-only helper: insert a `LoadedWorkspace` into the manager
+    /// map with explicit state, pinning, and pre-set `memory_bytes`.
+    /// STEP_6 LRU + workspace-aggregate tests use this to exercise
+    /// per-source-root eviction without spinning up a full
+    /// `RealWorkspaceBuilder` pipeline. Returns the inserted Arc so
+    /// the caller can keep observing it (e.g. to assert `load_state`
+    /// after a follow-up mutation).
+    ///
+    /// `#[doc(hidden)]` to signal "test affordance only".
+    #[doc(hidden)]
+    pub fn insert_workspace_for_test_with_bytes(
+        &self,
+        key: WorkspaceKey,
+        state: WorkspaceState,
+        pinned: bool,
+        bytes: usize,
+    ) -> Arc<LoadedWorkspace> {
+        let ws = Arc::new(LoadedWorkspace::new(key.clone(), pinned));
+        ws.store_state(state);
+        ws.update_memory(bytes);
+        self.workspaces.write().insert(key, Arc::clone(&ws));
+        ws
     }
 
     /// Acquire the internal `workspaces` RwLock in read mode.
@@ -1059,7 +1215,7 @@ impl WorkspaceManager {
             let workspaces = self.workspaces.read();
             let Some(ws) = workspaces.get(key).cloned() else {
                 return Err(DaemonError::WorkspaceEvicted {
-                    root: key.index_root.clone(),
+                    root: key.source_root.clone(),
                 });
             };
             let state = ws.load_state();
@@ -1081,7 +1237,7 @@ impl WorkspaceManager {
                 let cap = self.config.stale_serve_max_age_hours;
                 match classify_staleness(last_good, cap, now) {
                     StalenessVerdict::NoPriorGood => Err(DaemonError::WorkspaceBuildFailed {
-                        root: key.index_root.clone(),
+                        root: key.source_root.clone(),
                         reason: last_error_text
                             .unwrap_or_else(|| "no prior successful build".into()),
                     }),
@@ -1097,7 +1253,7 @@ impl WorkspaceManager {
                     }),
                     StalenessVerdict::Expired { age_hours } => {
                         Err(DaemonError::WorkspaceStaleExpired {
-                            root: key.index_root.clone(),
+                            root: key.source_root.clone(),
                             age_hours,
                             cap_hours: cap,
                             last_good_at: last_good,
@@ -1112,7 +1268,7 @@ impl WorkspaceManager {
             // Transient window between store_state(Evicted) and
             // workspaces.remove; same semantics as map-absent.
             WorkspaceState::Evicted => Err(DaemonError::WorkspaceEvicted {
-                root: key.index_root.clone(),
+                root: key.source_root.clone(),
             }),
         }
     }
@@ -1313,6 +1469,22 @@ impl Drop for WorkspaceManager {
     }
 }
 
+/// STEP_11_4 — probe `<source_root>/.sqry/classpath/` for presence at
+/// `daemon/workspaceStatus` time.
+///
+/// Status path: cheap (`fs::metadata`), never blocks on anything
+/// heavier, and degrades silently to `false` on any error so a racy
+/// classpath unlink or a permission denial cannot fail the status
+/// response. The LSP-side `WorkspaceIndexStatus.warnings` channel
+/// surfaces the underlying error detail when the daemon's workspace
+/// builder hits the same probe and wants to record the failure.
+fn probe_classpath_present(source_root: &std::path::Path) -> bool {
+    let probe = source_root.join(".sqry").join("classpath");
+    std::fs::metadata(&probe)
+        .map(|m| m.is_dir())
+        .unwrap_or(false)
+}
+
 // ---------------------------------------------------------------------------
 // LoadingGuard (panic-safety for get_or_load)
 // ---------------------------------------------------------------------------
@@ -1352,7 +1524,7 @@ impl<'a> Drop for LoadingGuard<'a> {
             let mut slot = self.ws.last_error.write();
             if slot.is_none() {
                 *slot = Some(DaemonError::WorkspaceBuildFailed {
-                    root: self.key.index_root.clone(),
+                    root: self.key.source_root.clone(),
                     reason: "workspace load aborted unexpectedly".to_string(),
                 });
             }
@@ -2165,12 +2337,22 @@ mod tests {
         // `a` was touched first, so it should be the LRU victim.
         let victim = mgr.evict_lru().expect("one candidate");
         assert_eq!(victim, a, "oldest workspace must be evicted first");
-        assert!(
-            !mgr.workspaces.read().contains_key(&a),
-            "evicted workspace must be removed from the manager map",
+        // STEP_6 iter-2 contract change: LRU eviction keeps the
+        // tombstone in the map (state == Evicted) so partial-
+        // eviction reporting via `daemon/workspaceStatus` can
+        // still surface the source root. Only `unload` removes
+        // the entry.
+        let workspaces = mgr.workspaces.read();
+        let evicted_ws = workspaces
+            .get(&a)
+            .expect("LRU victim stays as tombstone in the manager map");
+        assert_eq!(
+            evicted_ws.load_state(),
+            WorkspaceState::Evicted,
+            "LRU victim must transition to Evicted, not be removed",
         );
         assert!(
-            mgr.workspaces.read().contains_key(&b),
+            workspaces.contains_key(&b),
             "non-victim workspace must remain",
         );
     }
@@ -2282,8 +2464,22 @@ mod tests {
         let reservation = mgr
             .reserve_rebuild(&new_key, 600_000)
             .expect("Phase 2 eviction must free headroom");
-        // Victim is gone from the map.
-        assert!(!mgr.workspaces.read().contains_key(&victim_key));
+        // STEP_6 iter-2 contract: LRU eviction (Phase 2 of
+        // `reserve_rebuild`) leaves the tombstone in the map.
+        // The entry is now `Evicted` with `memory_bytes == 0` —
+        // accounting moved to `retained_old`, but the key stays
+        // visible to `daemon/workspaceStatus`.
+        let workspaces = mgr.workspaces.read();
+        let victim_tombstone = workspaces
+            .get(&victim_key)
+            .expect("victim stays as tombstone");
+        assert_eq!(victim_tombstone.load_state(), WorkspaceState::Evicted);
+        assert_eq!(
+            victim_tombstone.memory_bytes.load(Ordering::Acquire),
+            0,
+            "evicted tombstone must hold no resident bytes",
+        );
+        drop(workspaces);
         // Admission reserved the new bytes.
         assert_eq!(mgr.admission.lock().reserved_bytes, 600_000);
         drop(reservation);
@@ -2607,7 +2803,7 @@ mod tests {
         );
         assert_eq!(
             hook.invocation_roots(),
-            vec![key.index_root.clone()],
+            vec![key.source_root.clone()],
             "hook must receive the workspace's index_root",
         );
     }

@@ -4,6 +4,133 @@ use std::path::PathBuf;
 
 use crate::whitelist::{WHITELIST_MINIMAL, WHITELIST_STANDARD, WHITELIST_STRICT};
 
+/// Wire-side view of `sqry_core::workspace::LogicalWorkspace` carried into
+/// the redactor.
+///
+/// Defined locally so the leaf redaction crate stays free of
+/// a `sqry-core` dependency; `sqry-mcp` (which already depends on both)
+/// constructs a `LogicalWorkspaceView` from a real
+/// `sqry_core::workspace::LogicalWorkspace` before handing it to
+/// [`crate::Redactor::with_logical_workspace`].
+///
+/// Only the four fields required by the STEP_7 path-redaction policy are
+/// carried — `workspace_id_short` (for member-folder prefix emission),
+/// `source_roots` (each tagged with its short identifier so distinct
+/// source roots inside one workspace are distinguishable in redacted
+/// output), `member_folders` (for per-member-folder prefix emission), and
+/// `exclusions` (for the exclusions-take-precedence rule of acceptance
+/// criterion 6 / 9). Member-folder reasons and the workspace identity
+/// metadata are deliberately not carried — they are not needed for path
+/// rewrite.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LogicalWorkspaceView {
+    /// First 16 hex chars of the workspace `WorkspaceId`. Used as the
+    /// member-folder prefix in `minimal` mode (acceptance criterion 5)
+    /// and folded into the strict-mode hash input (criterion 7).
+    pub workspace_id_short: String,
+    /// Per-source-root entries: `(source_root_id, canonical_path)`. The
+    /// `source_root_id` is an 8-hex-char digest of the source-root path
+    /// scoped under the parent workspace_id (see
+    /// [`compute_source_root_id`]) — used as the prefix in `minimal`
+    /// mode (criterion 4) and folded into the strict-mode hash input
+    /// (criterion 7).
+    pub source_roots: Vec<(String, PathBuf)>,
+    /// Canonical absolute paths of member folders (non-indexed but
+    /// in-workspace).
+    pub member_folders: Vec<PathBuf>,
+    /// Canonical absolute paths of excluded entries. The redactor (and
+    /// the `sqry-mcp` engine) consult this list **before** the
+    /// workspace-bound check; an excluded path is rejected / emitted as
+    /// an opaque hash regardless of where it sits relative to the
+    /// source roots.
+    pub exclusions: Vec<PathBuf>,
+}
+
+impl LogicalWorkspaceView {
+    /// Construct an empty view. Equivalent to `Default::default()`. Kept
+    /// as an explicit constructor so call-sites read clearly.
+    #[must_use]
+    pub fn empty() -> Self {
+        Self::default()
+    }
+
+    /// `true` if `path` (or one of its ancestors up to the source-root
+    /// boundary) appears in `exclusions`. Path matching mirrors
+    /// [`sqry_core::workspace::LogicalWorkspace::classify`]: exact
+    /// match or descendant. The redactor uses this for criterion 6
+    /// and 9 (excluded paths take precedence over containment).
+    #[must_use]
+    pub fn is_excluded(&self, path: &std::path::Path) -> bool {
+        self.exclusions.iter().any(|excl| {
+            // Exact match or descendant — same semantics as sqry-core's
+            // `path_matches`.
+            path == excl.as_path() || path.starts_with(excl)
+        })
+    }
+
+    /// Return the source root that **contains** `path`, if any. The
+    /// redactor uses this to decide which `source_root_id` to emit as
+    /// a path prefix in `minimal` mode (criterion 4).
+    #[must_use]
+    pub fn enclosing_source_root(&self, path: &std::path::Path) -> Option<&(String, PathBuf)> {
+        // Iterate longest-prefix first so a nested source root wins over
+        // its ancestor when both match.
+        let mut best: Option<&(String, PathBuf)> = None;
+        for entry in &self.source_roots {
+            let (_, root) = entry;
+            if path == root.as_path() || path.starts_with(root) {
+                match best {
+                    Some(prev)
+                        if prev.1.as_path().components().count() >= root.components().count() => {}
+                    _ => best = Some(entry),
+                }
+            }
+        }
+        best
+    }
+
+    /// Return the member folder that **contains** `path`, if any.
+    #[must_use]
+    pub fn enclosing_member_folder(&self, path: &std::path::Path) -> Option<&PathBuf> {
+        let mut best: Option<&PathBuf> = None;
+        for folder in &self.member_folders {
+            if path == folder.as_path() || path.starts_with(folder) {
+                match best {
+                    Some(prev) if prev.components().count() >= folder.components().count() => {}
+                    _ => best = Some(folder),
+                }
+            }
+        }
+        best
+    }
+}
+
+/// Compute a short, stable `source_root_id` for a source-root path under
+/// a parent workspace_id_short. 8 hex chars, derived from
+/// `SHA-256(workspace_id_short || ":" || source_root_path_utf8)`.
+///
+/// The redactor uses this to emit deterministic but workspace-scoped
+/// source-root prefixes in minimal mode (criterion 4) without leaking
+/// the underlying path. The same digest is folded into the strict-mode
+/// hash input so strict tokens cover the source-root prefix (criterion 7).
+#[must_use]
+pub fn compute_source_root_id(
+    workspace_id_short: &str,
+    source_root_path: &std::path::Path,
+) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(workspace_id_short.as_bytes());
+    hasher.update(b":");
+    let s = source_root_path.to_string_lossy();
+    hasher.update(s.as_bytes());
+    let digest = hasher.finalize();
+    format!(
+        "{:08x}",
+        u32::from_be_bytes([digest[0], digest[1], digest[2], digest[3]])
+    )
+}
+
 /// Maximum allowed salt length in characters.
 pub const MAX_SALT_LENGTH: usize = 256;
 
@@ -138,6 +265,30 @@ pub struct RedactionConfig {
     /// Default: [`DEFAULT_REDACTION_MAX_DEPTH`] (128).
     /// Override via `SQRY_REDACTION_MAX_DEPTH` environment variable.
     pub max_depth: usize,
+
+    /// Optional `LogicalWorkspace` view bound to this redactor.
+    ///
+    /// Populated by [`crate::Redactor::with_logical_workspace`]; left
+    /// `None` when the redactor is constructed without workspace
+    /// awareness. When `Some`, the path-rewrite rules consult
+    /// `source_roots` / `member_folders` / `exclusions` per acceptance
+    /// criteria 3-9 of STEP_7. When `None`, behavior matches the
+    /// pre-STEP_7 single-workspace pipeline.
+    pub logical_workspace: Option<LogicalWorkspaceView>,
+
+    /// Whether to prefer workspace-scoped path rewrite (`<workspace_id_short>/...`)
+    /// over source-root-scoped rewrite (`<source_root_id>/...`).
+    ///
+    /// Defaults to `true` when a `LogicalWorkspace` is bound (criterion 8).
+    /// Used to disambiguate paths that fall inside a member folder vs a
+    /// source root: when `aggregate_workspace_paths` is `true`,
+    /// member-folder paths render as `<workspace_id_short>/...` and
+    /// source-root paths render as `<source_root_id>/...`. Setting this
+    /// to `false` forces all in-workspace paths to render as
+    /// `<source_root_id>/...` even when they sit in a member folder
+    /// (the member-folder path is then treated as out-of-source-root and
+    /// the redactor falls back to the legacy `<external>` prefix).
+    pub aggregate_workspace_paths: bool,
 }
 
 impl RedactionConfig {
@@ -174,6 +325,8 @@ impl RedactionConfig {
             preserve_paths: Vec::new(),
             dry_run: false,
             max_depth: redaction_max_depth(),
+            logical_workspace: None,
+            aggregate_workspace_paths: true,
         }
     }
 
@@ -205,6 +358,8 @@ impl RedactionConfig {
             preserve_paths: Vec::new(),
             dry_run: false,
             max_depth: redaction_max_depth(),
+            logical_workspace: None,
+            aggregate_workspace_paths: true,
         }
     }
 
@@ -237,6 +392,8 @@ impl RedactionConfig {
             preserve_paths: Vec::new(),
             dry_run: false,
             max_depth: redaction_max_depth(),
+            logical_workspace: None,
+            aggregate_workspace_paths: true,
         }
     }
 
@@ -269,6 +426,8 @@ impl RedactionConfig {
             preserve_paths: Vec::new(),
             dry_run: false,
             max_depth: redaction_max_depth(),
+            logical_workspace: None,
+            aggregate_workspace_paths: true,
         }
     }
 

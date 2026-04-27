@@ -12,6 +12,10 @@
 //! - `daemon/rebuild` — [`daemon_rebuild`]
 //! - `daemon/cancel_rebuild` — [`daemon_cancel_rebuild`]
 //!
+//! STEP_6 of the workspace-aware-cross-repo plan adds:
+//!
+//! - `daemon/workspaceStatus` — [`daemon_workspace_status`]
+//!
 //! Phase 8b will add 14 MCP tool methods on the same router; the
 //! [`MethodError`] enum below already carries every variant the tool
 //! methods will need.
@@ -22,6 +26,7 @@ pub mod daemon_rebuild;
 pub mod daemon_status;
 pub mod daemon_stop;
 pub mod daemon_unload;
+pub mod daemon_workspace_status;
 pub(crate) mod tool_dispatch;
 
 use std::sync::Arc;
@@ -39,6 +44,7 @@ use crate::workspace::{WorkspaceBuilder, WorkspaceManager};
 
 use super::protocol::{JsonRpcId, JsonRpcPayload, JsonRpcRequest, JsonRpcResponse};
 use super::shim_registry::ShimRegistry;
+use sqry_daemon_protocol::LogicalWorkspaceWire;
 
 /// Shared context each per-connection task + per-method handler needs.
 ///
@@ -74,6 +80,56 @@ impl std::fmt::Debug for HandlerContext {
         f.debug_struct("HandlerContext")
             .field("daemon_version", &self.daemon_version)
             .finish_non_exhaustive()
+    }
+}
+
+/// Per-connection state captured at handshake time and inherited by
+/// every subsequent request on the same connection.
+///
+/// STEP_6 (workspace-aware-cross-repo, 2026-04-26) iter-2 BLOCK fix:
+/// `DaemonHello.logical_workspace` documented a connection-level
+/// binding contract — every later `daemon/load` that omits
+/// `logical_workspace` from its own params should inherit the
+/// connection's binding. The pre-fix router parsed the field on the
+/// hello frame and discarded it. This struct gives every per-frame
+/// dispatch path a place to read the inherited binding.
+///
+/// Precedence rule:
+///   1. Per-request `LoadParams.logical_workspace` if present.
+///   2. Otherwise the connection-level
+///      `connection_logical_workspace` recorded from `DaemonHello`.
+///   3. Otherwise `None` — anonymous (per-source-root) semantics,
+///      bit-for-bit pre-STEP_6 behaviour.
+///
+/// The struct is per-connection (NOT shared across connections), so
+/// every connection has its own binding. `run_hello_connection` in
+/// `super::super::router` constructs it once from the parsed
+/// `DaemonHello` and passes it by reference into the per-frame
+/// dispatch chain.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ConnectionState {
+    /// Connection-level logical-workspace binding from `DaemonHello`.
+    /// `None` for connections that do not bind a logical workspace.
+    pub connection_logical_workspace: Option<LogicalWorkspaceWire>,
+}
+
+impl ConnectionState {
+    /// Construct a connection state with no binding. Equivalent to
+    /// `Default::default()`. Useful for tests that synthesise a
+    /// dispatch path without a real handshake; production code
+    /// always builds via [`Self::from_hello`] from a parsed
+    /// `DaemonHello.logical_workspace`.
+    #[allow(dead_code)] // exposed for unit tests / future synthetic dispatch paths
+    pub fn empty() -> Self {
+        Self::default()
+    }
+
+    /// Construct a connection state pre-populated with a
+    /// `DaemonHello`-supplied logical-workspace binding.
+    pub fn from_hello(binding: Option<LogicalWorkspaceWire>) -> Self {
+        Self {
+            connection_logical_workspace: binding,
+        }
     }
 }
 
@@ -213,16 +269,30 @@ pub fn format_panic_payload(join_err: JoinError) -> String {
 
 /// Dispatch a validated, typed [`JsonRpcRequest`]. Returns `None` for
 /// notifications (no response expected).
-pub(crate) async fn dispatch(ctx: &HandlerContext, req: JsonRpcRequest) -> Option<JsonRpcResponse> {
+///
+/// `conn` carries per-connection state captured at handshake time —
+/// today only the optional `DaemonHello.logical_workspace` binding,
+/// inherited by `daemon/load` calls that omit their own
+/// `logical_workspace` param (STEP_6 iter-2 BLOCK fix).
+pub(crate) async fn dispatch(
+    ctx: &HandlerContext,
+    conn: &ConnectionState,
+    req: JsonRpcRequest,
+) -> Option<JsonRpcResponse> {
     let id = req.id.clone()?;
 
     let result = match req.method.as_str() {
         "daemon/status" => daemon_status::handle(ctx, req.params).await,
-        "daemon/load" => daemon_load::handle(ctx, req.params).await,
+        "daemon/load" => daemon_load::handle(ctx, conn, req.params).await,
         "daemon/unload" => daemon_unload::handle(ctx, req.params).await,
         "daemon/stop" => daemon_stop::handle(ctx, req.params).await,
         "daemon/rebuild" => daemon_rebuild::handle(ctx, req.params).await,
         "daemon/cancel_rebuild" => daemon_cancel_rebuild::handle(ctx, req.params).await,
+        // STEP_6 (workspace-aware-cross-repo): aggregate
+        // per-source-root rollup of every WorkspaceKey grouped under
+        // the requested `workspace_id`. See
+        // `daemon_workspace_status` module docs for the contract.
+        "daemon/workspaceStatus" => daemon_workspace_status::handle(ctx, req.params).await,
         // Phase 8b Task 7 — the 14 MCP tool methods. Each is gated on
         // `WorkspaceManager::classify_for_serve` inside
         // `tool_dispatch::classify_and_build`; NotReady verdicts surface

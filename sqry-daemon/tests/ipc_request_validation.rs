@@ -45,6 +45,7 @@ async fn parse_error_serializes_id_as_null() {
         &sqry_daemon::DaemonHello {
             client_version: "test/0".into(),
             protocol_version: 1,
+            logical_workspace: None,
         },
     )
     .await

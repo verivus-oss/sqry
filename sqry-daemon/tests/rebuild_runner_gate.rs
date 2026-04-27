@@ -200,7 +200,7 @@ async fn successful_rebuild_stamps_last_good_at_and_resets_retry_count() {
     *ws.last_good_at.write() = None;
     ws.retry_count.store(5, Ordering::Release);
     *ws.last_error.write() = Some(DaemonError::WorkspaceBuildFailed {
-        root: h.key.index_root.clone(),
+        root: h.key.source_root.clone(),
         reason: "seeded prior-error".into(),
     });
 

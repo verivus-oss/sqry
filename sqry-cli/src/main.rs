@@ -557,6 +557,19 @@ fn run() -> Result<()> {
         }
 
         Some(Command::Workspace { action }) => {
+            // STEP_8: hard-error on collision between the global `--workspace`
+            // flag and the `sqry workspace` subcommand. Each `sqry workspace`
+            // subcommand carries its own positional `<workspace>` argument; a
+            // silent override would surprise users.
+            if cli.workspace.is_some() {
+                anyhow::bail!(
+                    "the global `--workspace` flag (and `SQRY_WORKSPACE_FILE` env var) \
+                     conflicts with the `sqry workspace` subcommand. \
+                     The subcommand has its own positional `<workspace>` argument; \
+                     drop the global flag (or unset `SQRY_WORKSPACE_FILE`) and pass \
+                     the workspace path positionally instead."
+                );
+            }
             commands::run_workspace(&cli, action).context("Workspace command failed")?;
         }
 
@@ -941,7 +954,11 @@ fn handle_query_command(
         );
     }
 
-    let search_path = path.unwrap_or(cli.search_path());
+    // STEP_8 precedence: positional `<path>` wins; otherwise fall back to the
+    // global `--workspace` / `SQRY_WORKSPACE_FILE`; otherwise `cli.search_path()`.
+    // Non-UTF-8 workspace paths surface as a hard error rather than silently
+    // falling back to `cli.search_path()` (STEP_8 codex iter1 fix).
+    let search_path = cli.resolve_subcommand_path(path)?;
 
     // Validate index before execution if requested
     if let Err(code) = validate_index_if_requested(cli, search_path, validate, cli.auto_rebuild) {
@@ -1120,7 +1137,11 @@ fn handle_index_command(
     build_system: Option<&str>,
     force_classpath: bool,
 ) -> Result<()> {
-    let index_path = path.unwrap_or(cli.search_path());
+    // STEP_8 precedence: positional `<path>` wins; otherwise fall back to the
+    // global `--workspace` / `SQRY_WORKSPACE_FILE`; otherwise `cli.search_path()`.
+    // Non-UTF-8 workspace paths surface as a hard error rather than silently
+    // falling back to `cli.search_path()` (STEP_8 codex iter1 fix).
+    let index_path = cli.resolve_subcommand_path(path)?;
 
     if enable_macro_expansion {
         eprintln!("WARNING: Macro expansion enabled. This executes build scripts and proc macros.");

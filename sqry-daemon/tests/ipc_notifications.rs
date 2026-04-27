@@ -19,6 +19,7 @@ async fn notification_without_id_emits_no_response() {
         &sqry_daemon::DaemonHello {
             client_version: "test/0".into(),
             protocol_version: 1,
+            logical_workspace: None,
         },
     )
     .await

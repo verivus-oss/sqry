@@ -6,12 +6,24 @@ use tower_lsp::lsp_types::{Hover, HoverContents, HoverParams, MarkupContent, Mar
 ///
 /// Uses graph builders to extract node information.
 ///
+/// STEP_11_4 — gates on [`SessionManager::evaluate_handler_gate`] before
+/// touching the graph: requests against member folders or excluded
+/// paths return `Ok(None)` (LSP-standard "no result") without making
+/// any per-folder filesystem probe.
+///
 /// # Errors
 ///
 /// Returns an error when symbol lookup or range conversion fails.
 pub fn handle(session: &SessionManager, params: &HoverParams) -> Result<Option<Hover>> {
     let uri = &params.text_document_position_params.text_document.uri;
     let position = params.text_document_position_params.position;
+
+    // STEP_11_4 — workspace classification gate. Member folders and
+    // excluded paths short-circuit to `Ok(None)` (the LSP-standard
+    // "no result" shape for hover) before any filesystem probe runs.
+    if session.evaluate_handler_gate(uri).is_short_circuit() {
+        return Ok(None);
+    }
 
     // Use graph-native node lookup at position
     let Some(node) = session.node_at(uri, position)? else {

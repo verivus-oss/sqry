@@ -742,13 +742,19 @@ fn test_batch_help_workflow_ordering() {
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
 
-    // Batch Input section: PATH should appear before --queries
+    // Batch Input section: PATH should appear before --queries.
+    //
+    // Look for `[PATH]` (the optional-positional rendering) first; clap
+    // renders required positionals as `<PATH>` and optional ones as
+    // `[PATH]`. The batch positional is optional. Falling back to `<PATH>`
+    // would match the global `--workspace <PATH>` value-name token that
+    // appears later in the help, which is a different argument entirely.
     let batch_input_start = stdout
         .find("Batch Input")
         .expect("Batch Input heading not found");
     let path_pos = stdout[batch_input_start..]
-        .find("<PATH>")
-        .or_else(|| stdout[batch_input_start..].find("[PATH]"))
+        .find("[PATH]")
+        .or_else(|| stdout[batch_input_start..].find("<PATH>"))
         .expect("PATH argument not found in Batch Input section");
     let queries_pos = stdout[batch_input_start..]
         .find("--queries")

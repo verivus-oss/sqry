@@ -1,0 +1,32 @@
+[package]
+name = "sqry-integration-tests"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Cross-surface integration tests for workspace-aware-cross-repo (STEP_11). Not published."
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+sqry-core = { path = "../../sqry-core" }
+sqry-mcp-redaction = { path = "../../sqry-mcp-redaction" }
+tempfile = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+# Real LSP SessionManager so the cross-surface parity test exercises
+# the production `classify_path` re-export rather than a hand-rolled
+# wrapper. Codex iter1 MAJOR — the test must drive real surface
+# entry points where they exist.
+sqry-lsp = { path = "../../sqry-lsp" }
+tempfile = { workspace = true }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

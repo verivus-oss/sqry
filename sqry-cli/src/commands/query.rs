@@ -116,6 +116,13 @@ struct HybridQueryParams<'a> {
 ///
 /// # Errors
 /// Returns an error if query validation fails, execution fails, or output cannot be written.
+///
+/// # STEP_8 precedence
+///
+/// `search_path` must be resolved by the caller via
+/// [`crate::args::Cli::resolve_subcommand_path`] so that an explicit positional
+/// `<path>` argument wins over the global `--workspace` /
+/// `SQRY_WORKSPACE_FILE` flag.
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::fn_params_excessive_bools)] // CLI flags map directly to booleans.
 pub fn run_query(

@@ -12,6 +12,11 @@ pub const COMMAND_EXPLAIN_SYMBOL: &str = "sqry.explainSymbol";
 
 /// Build sqry-specific code actions for the current symbol.
 ///
+/// STEP_11_4 — gates on [`SessionManager::evaluate_handler_gate`] before
+/// touching the graph: requests against member folders or excluded
+/// paths return `Ok(None)` (LSP-standard "no actions available")
+/// without making any per-folder filesystem probe.
+///
 /// # Errors
 ///
 /// Returns an error when symbol lookup fails (propagated from the session).
@@ -21,6 +26,12 @@ pub fn handle(
 ) -> Result<Option<CodeActionResponse>> {
     let uri = &params.text_document.uri;
     let position = params.range.start;
+
+    // STEP_11_4 — workspace classification gate.
+    if session.evaluate_handler_gate(uri).is_short_circuit() {
+        return Ok(None);
+    }
+
     let Some(node) = session.node_at(uri, position)? else {
         return Ok(None);
     };

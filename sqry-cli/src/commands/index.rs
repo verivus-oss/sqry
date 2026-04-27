@@ -471,6 +471,12 @@ pub(crate) fn build_and_persist_with_optional_classpath(
 /// Panics if the index is missing after a successful build-and-save sequence.
 #[allow(clippy::fn_params_excessive_bools)] // CLI flags map directly to booleans.
 #[allow(clippy::too_many_arguments)]
+/// Build a fresh index for the given path.
+///
+/// STEP_8 precedence: callers must resolve `path` via
+/// [`crate::args::Cli::resolve_subcommand_path`] so that an explicit positional
+/// `<path>` always wins over the global `--workspace` / `SQRY_WORKSPACE_FILE`
+/// flag. This function trusts the caller to have applied that precedence.
 pub fn run_index(
     cli: &Cli,
     path: &str,

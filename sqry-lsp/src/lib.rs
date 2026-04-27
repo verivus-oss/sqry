@@ -571,6 +571,10 @@ pub(crate) fn build_sqry_service(
             server::SqryLanguageServer::handle_index_status,
         )
         .custom_method(
+            "sqry/workspaceStatus",
+            server::SqryLanguageServer::handle_workspace_status,
+        )
+        .custom_method(
             "sqry/listFiles",
             server::SqryLanguageServer::handle_list_files,
         )

@@ -920,6 +920,11 @@ async fn send_management_request(
     let hello = DaemonHello {
         client_version: env!("CARGO_PKG_VERSION").to_owned(),
         protocol_version: 1,
+        // STEP_6 (workspace-aware-cross-repo): in-process status query
+        // never binds a logical workspace; the daemon `status` path
+        // does not depend on the grouping, so the anonymous hello is
+        // the correct shape.
+        logical_workspace: None,
     };
     write_frame_json(&mut stream, &hello)
         .await

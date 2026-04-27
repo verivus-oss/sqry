@@ -87,6 +87,36 @@ impl Redactor {
         Self::new(RedactionConfig::from_env())
     }
 
+    /// Create a redactor bound to a [`crate::LogicalWorkspaceView`].
+    ///
+    /// This is the STEP_7 entry point: callers pass a view of their
+    /// `sqry_core::workspace::LogicalWorkspace` (translated by the
+    /// upstream `sqry-mcp` crate) so the path-redaction pipeline can
+    /// emit the workspace-aware forms specified by acceptance criteria
+    /// 3-7. Equivalent to:
+    ///
+    /// ```ignore
+    /// let mut config = base_config;
+    /// config.logical_workspace = Some(view);
+    /// // aggregate_workspace_paths defaults to true when bound (criterion 8).
+    /// Redactor::new(config)
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if configuration validation fails or JSONPath
+    /// expressions are invalid (same conditions as [`Self::new`]).
+    pub fn with_logical_workspace(
+        mut config: RedactionConfig,
+        view: crate::config::LogicalWorkspaceView,
+    ) -> Result<Self, RedactionError> {
+        config.logical_workspace = Some(view);
+        // aggregate_workspace_paths is already `true` by default — we
+        // re-affirm it here for clarity (criterion 8).
+        config.aggregate_workspace_paths = true;
+        Self::new(config)
+    }
+
     /// Redact a JSON-RPC response in place.
     ///
     /// Returns statistics about what was redacted.

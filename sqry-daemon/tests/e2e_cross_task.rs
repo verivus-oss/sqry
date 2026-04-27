@@ -772,8 +772,8 @@ async fn file_change_triggers_rebuild() {
     let ws = server.manager.lookup(&key).unwrap_or_else(|| {
         panic!(
             "workspace must be registered after daemon/load; \
-                 key.index_root={}",
-            key.index_root.display()
+                 key.source_root={}",
+            key.source_root.display()
         )
     });
 
@@ -1077,8 +1077,12 @@ async fn lru_eviction_under_memory_pressure() {
 
     // ── 7. Verify daemon/status shows workspace B present and A absent ─────────
     //
-    // After eviction, workspace A is removed from the manager map entirely.
-    // `daemon/status` only lists workspaces currently tracked in the map.
+    // STEP_6 (workspace-aware-cross-repo) iter-2 contract change:
+    // LRU eviction keeps the entry in the manager map as an Evicted
+    // tombstone so per-source-root partial-eviction is observable
+    // through `daemon/workspaceStatus`. `daemon/status` therefore
+    // surfaces the tombstone with `state == "Evicted"` rather than
+    // omitting the entry entirely.
     {
         let mut client = TestIpcClient::connect(&server.path).await;
         client.hello(1).await;
@@ -1090,26 +1094,45 @@ async fn lru_eviction_under_memory_pressure() {
                 panic!("daemon/status result.workspaces must be an array; result={result}")
             });
 
-        // Workspace B must be present.
+        // Workspace B must be present and Loaded.
         let b_path_str = canon_b.to_string_lossy().to_string();
-        let b_present = workspaces
+        let b_entry = workspaces
             .iter()
-            .any(|ws| ws["index_root"].as_str() == Some(&b_path_str));
-        assert!(
-            b_present,
-            "daemon/status must show workspace B loaded after LRU eviction of A; \
-             workspaces={workspaces:?}"
+            .find(|ws| ws["index_root"].as_str() == Some(&b_path_str))
+            .unwrap_or_else(|| {
+                panic!(
+                    "daemon/status must show workspace B loaded after LRU eviction of A; \
+                     workspaces={workspaces:?}"
+                )
+            });
+        assert_eq!(
+            b_entry["state"].as_str(),
+            Some("Loaded"),
+            "workspace B must remain Loaded; entry={b_entry}",
         );
 
-        // Workspace A must be absent (evicted workspaces are removed from the map).
+        // Workspace A must be present as an Evicted tombstone (STEP_6
+        // iter-2 contract — partial-eviction reporting depends on the
+        // tombstone surviving in the manager map).
         let a_path_str = canon_a.to_string_lossy().to_string();
-        let a_absent = !workspaces
+        let a_entry = workspaces
             .iter()
-            .any(|ws| ws["index_root"].as_str() == Some(&a_path_str));
-        assert!(
-            a_absent,
-            "daemon/status must NOT show workspace A after LRU eviction; \
-             workspaces={workspaces:?}"
+            .find(|ws| ws["index_root"].as_str() == Some(&a_path_str))
+            .unwrap_or_else(|| {
+                panic!(
+                    "daemon/status must surface the LRU-evicted workspace A as an Evicted \
+                     tombstone (STEP_6 iter-2 contract); workspaces={workspaces:?}"
+                )
+            });
+        assert_eq!(
+            a_entry["state"].as_str(),
+            Some("Evicted"),
+            "workspace A must surface as Evicted, not absent; entry={a_entry}",
+        );
+        assert_eq!(
+            a_entry["current_bytes"].as_u64(),
+            Some(0),
+            "evicted tombstone must report zero resident bytes; entry={a_entry}",
         );
     }
 

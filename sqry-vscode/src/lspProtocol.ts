@@ -95,6 +95,94 @@ export interface SqryIndexStatusResult {
   readonly status: SqryIndexStatus;
 }
 
+// ===== Workspace-aware status surface (STEP_5) =====
+//
+// The aggregate `WorkspaceIndexStatus` payload is the SOLE status
+// surface the extension uses for UI rendering — no per-folder
+// filesystem stat probing. Drill-down into a single source root
+// happens through `getSourceRootStatus()` which sends a path-scoped
+// `sqry/indexStatus` request and unwraps the per-source-root response
+// from `aggregate.source_root_statuses`.
+
+export type SqrySourceRootIndexState = "ok" | "missing" | "building" | "error";
+
+export interface SqrySourceRootStatus {
+  /** Absolute path of the source root the entry describes. */
+  readonly path: string;
+  readonly status: SqrySourceRootIndexState;
+  /** Last-indexed timestamp encoded as RFC3339 / ISO 8601, when available. */
+  readonly last_indexed_at?: string;
+  readonly symbol_count?: number;
+}
+
+/**
+ * Aggregate workspace status returned by `getWorkspaceStatus()`.
+ *
+ * Mirrors the Rust `sqry_core::workspace::WorkspaceIndexStatus` shape
+ * (sqry-core/src/workspace/cache.rs). The LSP wraps it inside
+ * `IndexStatus.aggregate` when the requested path classifies as a
+ * member folder, and as the top-level shape on the dedicated workspace
+ * status surface introduced in STEP_4.
+ */
+export interface SqryWorkspaceStatus {
+  readonly source_root_statuses: ReadonlyArray<SqrySourceRootStatus>;
+  readonly missing_count: number;
+  readonly building_count: number;
+  readonly ok_count: number;
+  readonly error_count: number;
+  /** Wall-clock time the aggregate was computed (RFC3339 / ISO 8601). */
+  readonly generated_at: string;
+}
+
+/**
+ * Optional fields STEP_4 added to `IndexStatus` for the member-folder
+ * branch. They are present only when the LSP returns the aggregate
+ * shape (path classifies as a member of a logical workspace).
+ */
+export interface SqryAggregateIndexStatus extends SqryIndexStatus {
+  readonly aggregate?: SqryWorkspaceStatus;
+  readonly partial?: boolean;
+}
+
+// ===== Logical-workspace identity surface (STEP_12 telemetry) =====
+//
+// `sqry/workspaceStatus` returns the logical-workspace identity plus a
+// projection of structural counts. The extension consumes this surface
+// at activation time to emit ONE aggregate startup telemetry line via
+// `formatWorkspaceResolutionTelemetry`. The full hex digest is included
+// for forensic identity checks; UI surfaces use the short form.
+
+export interface SqryMemberFolderInfo {
+  readonly path: string;
+  readonly reason: string;
+}
+
+export interface SqryLogicalWorkspaceInfo {
+  /** First 16 hex chars of the BLAKE3 digest. Display only. */
+  readonly workspace_id_short: string;
+  /**
+   * Full 64-char hex digest. Cross-process script consumers MUST key on
+   * this rather than the short form to avoid the (remote, non-zero)
+   * possibility of short-hex collisions across many workspaces.
+   */
+  readonly workspace_id_full: string;
+  readonly project_root_mode: string;
+  readonly source_roots: ReadonlyArray<string>;
+  readonly member_folders: ReadonlyArray<SqryMemberFolderInfo>;
+  readonly exclusions: ReadonlyArray<string>;
+  /** Aggregate status of every source root inside this workspace. */
+  readonly aggregate: SqryWorkspaceStatus;
+}
+
+export interface SqryWorkspaceStatusParams {
+  /**
+   * Optional client-side `workspace_id_full` for sanity-checking.
+   * The LSP does not act on a mismatch — it always returns the
+   * server's view; callers compare to detect drift.
+   */
+  readonly workspace_id?: string;
+}
+
 // ===== List Files Endpoint =====
 
 export interface SqryListFilesParams {

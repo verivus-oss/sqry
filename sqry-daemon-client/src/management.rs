@@ -378,6 +378,14 @@ where
     let hello = DaemonHello {
         client_version: env!("CARGO_PKG_VERSION").to_owned(),
         protocol_version: 1,
+        // STEP_6 (workspace-aware-cross-repo): the management client
+        // surface does not bind a logical workspace at hello time —
+        // callers that need cross-repo grouping pass the
+        // `logical_workspace` payload on the per-method request (e.g.
+        // `daemon/load`). The standalone `DaemonClient` keeps the
+        // pre-STEP_6 anonymous semantics: every workspace it loads is
+        // its own per-source-root entry.
+        logical_workspace: None,
     };
     framing::write_frame_json(&mut stream, &hello).await?;
 

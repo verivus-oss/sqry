@@ -41,7 +41,9 @@ use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use crate::ENVELOPE_VERSION;
 
 use super::framing::{FrameError, read_frame, write_frame_json};
-use super::methods::{HandlerContext, dispatch as dispatch_request, internal_error_response};
+use super::methods::{
+    ConnectionState, HandlerContext, dispatch as dispatch_request, internal_error_response,
+};
 use super::protocol::{
     DaemonHello, DaemonHelloResponse, JsonRpcResponse, ShimProtocol, ShimRegister, ShimRegisterAck,
 };
@@ -237,6 +239,12 @@ where
         return Ok(());
     }
 
+    // STEP_6 iter-2 BLOCK fix: capture the connection-level
+    // `logical_workspace` binding from the parsed `DaemonHello`.
+    // Every subsequent `daemon/load` on this connection that omits
+    // its own `logical_workspace` param inherits this binding.
+    let conn_state = ConnectionState::from_hello(hello.logical_workspace);
+
     // JSON-RPC request loop.
     loop {
         tokio::select! {
@@ -245,7 +253,7 @@ where
             frame = read_frame(&mut reader) => match frame {
                 Ok(None) => break,
                 Ok(Some(bytes)) => {
-                    let outcome = handle_frame(&ctx, &bytes).await;
+                    let outcome = handle_frame(&ctx, &conn_state, &bytes).await;
                     match outcome {
                         FrameResponse::None => {}
                         FrameResponse::Single(resp) => {
@@ -388,14 +396,18 @@ where
 
 /// Top-level per-frame dispatch: parse → array vs object → batch or
 /// single dispatch.
-async fn handle_frame(ctx: &HandlerContext, bytes: &[u8]) -> FrameResponse {
+///
+/// `conn` carries per-connection state captured at the
+/// `DaemonHello` handshake (today: the optional
+/// `logical_workspace` binding inherited by `daemon/load`).
+async fn handle_frame(ctx: &HandlerContext, conn: &ConnectionState, bytes: &[u8]) -> FrameResponse {
     let value: serde_json::Value = match serde_json::from_slice(bytes) {
         Ok(v) => v,
         Err(e) => return FrameResponse::ParseError(parse_error_response(e)),
     };
     match value {
-        serde_json::Value::Array(items) => dispatch_batch(ctx, items).await,
-        serde_json::Value::Object(_) => dispatch_single(ctx, value).await,
+        serde_json::Value::Array(items) => dispatch_batch(ctx, conn, items).await,
+        serde_json::Value::Object(_) => dispatch_single(ctx, conn, value).await,
         _ => FrameResponse::Single(
             ValidationError::InvalidRequest {
                 reason: "request must be an object or array",
@@ -409,7 +421,11 @@ async fn handle_frame(ctx: &HandlerContext, bytes: &[u8]) -> FrameResponse {
 /// Process a JSON-RPC 2.0 batch. Empty batches return a single
 /// `-32600` response; notifications are filtered out of the response
 /// array; nested-array elements become per-slot `-32600` errors.
-async fn dispatch_batch(ctx: &HandlerContext, items: Vec<serde_json::Value>) -> FrameResponse {
+async fn dispatch_batch(
+    ctx: &HandlerContext,
+    conn: &ConnectionState,
+    items: Vec<serde_json::Value>,
+) -> FrameResponse {
     if items.is_empty() {
         return FrameResponse::Single(
             ValidationError::InvalidRequest {
@@ -431,7 +447,7 @@ async fn dispatch_batch(ctx: &HandlerContext, items: Vec<serde_json::Value>) -> 
             );
             continue;
         }
-        match dispatch_single(ctx, item).await {
+        match dispatch_single(ctx, conn, item).await {
             FrameResponse::Single(resp) => responses.push(resp),
             FrameResponse::None => {}
             other => responses.push(internal_error_response(
@@ -448,9 +464,13 @@ async fn dispatch_batch(ctx: &HandlerContext, items: Vec<serde_json::Value>) -> 
 }
 
 /// Validate + dispatch a single request value.
-async fn dispatch_single(ctx: &HandlerContext, value: serde_json::Value) -> FrameResponse {
+async fn dispatch_single(
+    ctx: &HandlerContext,
+    conn: &ConnectionState,
+    value: serde_json::Value,
+) -> FrameResponse {
     match validate_request_value(value) {
-        Ok(req) => match dispatch_request(ctx, req).await {
+        Ok(req) => match dispatch_request(ctx, conn, req).await {
             Some(resp) => FrameResponse::Single(resp),
             None => FrameResponse::None, // notification
         },

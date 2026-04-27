@@ -59,6 +59,12 @@ members = [
     "sqry-daemon",
     "sqry-daemon-client",
     "sqry-daemon-protocol",
+    # Cross-surface integration tests for the workspace-aware-cross-repo
+    # workstream (STEP_11). This is a tiny library crate with three
+    # `tests/*.rs` files exercising the same `LogicalWorkspace` /
+    # operational-folder fixtures across CLI / LSP / MCP / daemon /
+    # extension-classifier-stub surfaces.
+    "tests/integration",
 ]
 exclude = [
     "tools/detection-corpus-validator",  # Standalone utility, not part of workspace
@@ -68,7 +74,7 @@ exclude = [
 ]
 
 [workspace.package]
-version = "9.0.23"
+version = "10.0.0"
 edition = "2024"
 authors = ["Verivus Pty Ltd"]
 license = "MIT"

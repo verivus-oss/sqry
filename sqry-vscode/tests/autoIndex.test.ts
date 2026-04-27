@@ -1,5 +1,9 @@
 import { expect } from "chai";
 import { AutoIndexManager } from "../src/autoIndex";
+import type {
+  SqrySourceRootStatus,
+  SqryWorkspaceStatus,
+} from "../src/lspProtocol";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -218,5 +222,148 @@ describe("AutoIndexManager — never setting no-op", () => {
 
     await tick(50);
     expect(fired).to.equal(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// STEP_5 codex iter1 MAJOR 3 — enqueueFromWorkspaceStatus contract
+// ---------------------------------------------------------------------------
+
+function buildStatus(entries: SqrySourceRootStatus[]): SqryWorkspaceStatus {
+  let missing = 0;
+  let building = 0;
+  let ok = 0;
+  let error = 0;
+  for (const e of entries) {
+    if (e.status === "missing") missing += 1;
+    else if (e.status === "building") building += 1;
+    else if (e.status === "ok") ok += 1;
+    else if (e.status === "error") error += 1;
+  }
+  return {
+    source_root_statuses: entries,
+    missing_count: missing,
+    building_count: building,
+    ok_count: ok,
+    error_count: error,
+    generated_at: "2026-04-27T00:00:00Z",
+  };
+}
+
+describe("AutoIndexManager.enqueueFromWorkspaceStatus — STEP_5 codex iter1 MAJOR 3", () => {
+  it("enqueues only entries with status === 'missing'", async () => {
+    const mgr = new AutoIndexManager();
+    const status = buildStatus([
+      { path: "/repo-a", status: "missing" },
+      { path: "/repo-b", status: "ok" },
+      { path: "/repo-c", status: "missing" },
+      { path: "/repo-d", status: "building" },
+      { path: "/repo-e", status: "error" },
+    ]);
+    const ran: string[] = [];
+    const result = await mgr.enqueueFromWorkspaceStatus(status, async (root) => {
+      ran.push(root.path);
+    });
+    expect(ran).to.deep.equal(["/repo-a", "/repo-c"]);
+    expect(result.inspected).to.equal(5);
+    expect(result.enqueued).to.equal(2);
+    expect(result.excluded).to.equal(0);
+    expect(result.nonMissing).to.equal(3);
+    mgr.dispose();
+  });
+
+  it("respects the exclude predicate (ignores excluded entries even when missing)", async () => {
+    const mgr = new AutoIndexManager();
+    const status = buildStatus([
+      { path: "/wanted", status: "missing" },
+      { path: "/excluded", status: "missing" },
+      { path: "/also-wanted", status: "missing" },
+    ]);
+    const ran: string[] = [];
+    const result = await mgr.enqueueFromWorkspaceStatus(
+      status,
+      async (root) => {
+        ran.push(root.path);
+      },
+      { exclude: (path) => path === "/excluded" },
+    );
+    expect(ran).to.deep.equal(["/wanted", "/also-wanted"]);
+    expect(result.enqueued).to.equal(2);
+    expect(result.excluded).to.equal(1);
+    expect(result.nonMissing).to.equal(0);
+    mgr.dispose();
+  });
+
+  it("does NOT enqueue member folders (status !== 'missing' is treated as nonMissing)", async () => {
+    const mgr = new AutoIndexManager();
+    // Member folders surface in the aggregate ONLY as part of source-root
+    // entries when they happen to also be source roots — but their `status`
+    // is set by the LSP based on on-disk presence, not their classification.
+    // A member-folder-only path that is not also a source root simply does
+    // NOT appear in the aggregate. We model that here by omitting it.
+    const status = buildStatus([
+      { path: "/source-root", status: "missing" },
+      { path: "/member-and-source-root", status: "ok" }, // already indexed
+    ]);
+    const ran: string[] = [];
+    await mgr.enqueueFromWorkspaceStatus(status, async (root) => {
+      ran.push(root.path);
+    });
+    expect(ran).to.deep.equal(["/source-root"]);
+    mgr.dispose();
+  });
+
+  it("runs sequentially — each runner resolves before the next is invoked", async () => {
+    const mgr = new AutoIndexManager();
+    const status = buildStatus([
+      { path: "/a", status: "missing" },
+      { path: "/b", status: "missing" },
+      { path: "/c", status: "missing" },
+    ]);
+    const events: string[] = [];
+    await mgr.enqueueFromWorkspaceStatus(status, async (root) => {
+      events.push(`start:${root.path}`);
+      await new Promise<void>((r) => setTimeout(r, 5));
+      events.push(`end:${root.path}`);
+    });
+    expect(events).to.deep.equal([
+      "start:/a", "end:/a",
+      "start:/b", "end:/b",
+      "start:/c", "end:/c",
+    ]);
+    mgr.dispose();
+  });
+
+  it("propagates runner failures and stops further enqueue", async () => {
+    const mgr = new AutoIndexManager();
+    const status = buildStatus([
+      { path: "/a", status: "missing" },
+      { path: "/b", status: "missing" },
+      { path: "/c", status: "missing" },
+    ]);
+    const ran: string[] = [];
+    let caught: unknown;
+    try {
+      await mgr.enqueueFromWorkspaceStatus(status, async (root) => {
+        ran.push(root.path);
+        if (root.path === "/b") {
+          throw new Error("boom");
+        }
+      });
+    } catch (err) {
+      caught = err;
+    }
+    expect(ran).to.deep.equal(["/a", "/b"]);
+    expect((caught as Error | undefined)?.message).to.equal("boom");
+    mgr.dispose();
+  });
+
+  it("returns zeros when the aggregate is empty", async () => {
+    const mgr = new AutoIndexManager();
+    const result = await mgr.enqueueFromWorkspaceStatus(buildStatus([]), async () => {
+      throw new Error("runner must not be called");
+    });
+    expect(result).to.deep.equal({ inspected: 0, enqueued: 0, excluded: 0, nonMissing: 0 });
+    mgr.dispose();
   });
 });

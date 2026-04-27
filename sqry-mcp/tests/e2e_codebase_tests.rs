@@ -319,9 +319,32 @@ fn test_e2e_minimal_redaction_preserves_workspace_relative_list_files_paths() ->
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Expected string path in first file entry: {json}"))?;
 
+    // STEP_7 minimal-preset wire form: a path inside a source root
+    // renders as `<source_root_id>/<rel>` (acceptance criterion 4).
+    // Pre-STEP_7 the same field rendered as the bare workspace-relative
+    // form (`src/lib.rs`) because the legacy redactor only stripped
+    // `workspace_root` without binding a `LogicalWorkspaceView`. With
+    // the STEP_7 fix the redactor binds the resolved
+    // (single-root-fallback) `LogicalWorkspace`, so the source-root
+    // prefix is now the 8-hex `compute_source_root_id` digest. We
+    // assert the suffix matches `src/lib.rs` and the prefix is exactly
+    // 8 hex chars to lock both halves of the new wire contract.
+    assert!(
+        file_path.ends_with("/src/lib.rs"),
+        "minimal preset should emit `<source_root_id>/src/lib.rs`, got {file_path:?}"
+    );
+    let prefix = file_path
+        .split_once('/')
+        .map(|(p, _)| p)
+        .unwrap_or_default();
     assert_eq!(
-        file_path, "src/lib.rs",
-        "Minimal redaction should preserve workspace-relative file paths for MCP clients"
+        prefix.len(),
+        8,
+        "source_root_id prefix should be 8 hex chars, got {prefix:?} from {file_path:?}"
+    );
+    assert!(
+        prefix.chars().all(|c| c.is_ascii_hexdigit()),
+        "source_root_id prefix should be lowercase hex, got {prefix:?} from {file_path:?}"
     );
 
     Ok(())

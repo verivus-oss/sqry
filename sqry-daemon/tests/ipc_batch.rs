@@ -60,6 +60,7 @@ async fn batch_of_only_notifications_returns_no_frame() {
         &sqry_daemon::DaemonHello {
             client_version: "test/0".into(),
             protocol_version: 1,
+            logical_workspace: None,
         },
     )
     .await

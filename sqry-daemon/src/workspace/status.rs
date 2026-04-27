@@ -99,6 +99,24 @@ pub struct WorkspaceStatus {
     /// Count of consecutive failed rebuilds since the last successful
     /// publish. Resets to 0 on `record_success`.
     pub retry_count: u32,
+
+    /// STEP_12 telemetry — short (16 hex chars) form of the
+    /// `WorkspaceKey::workspace_id` digest, suitable for human-scale
+    /// log lines and CLI columns. `None` for anonymous (per-source-root)
+    /// keys that carry no logical-workspace identity. Display only —
+    /// **do not** key on this for cross-process identity comparisons;
+    /// see [`Self::workspace_id_full`] for that.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_id_short: Option<String>,
+
+    /// STEP_12 telemetry — full 64-hex-char form of the
+    /// `WorkspaceKey::workspace_id` digest. Machine identity. Scripts
+    /// consuming the JSON payload **MUST** key on this field rather
+    /// than [`Self::workspace_id_short`] to avoid the (remote, but
+    /// non-zero) possibility of short-hex collisions across hundreds
+    /// of thousands of distinct workspaces. `None` for anonymous keys.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_id_full: Option<String>,
 }
 
 #[cfg(test)]
@@ -125,6 +143,8 @@ mod tests {
                 last_good_at: None,
                 last_error: None,
                 retry_count: 0,
+                workspace_id_short: None,
+                workspace_id_full: None,
             }],
         };
         let json = serde_json::to_string(&status).expect("serialise");

@@ -4,7 +4,7 @@
 # sanitize-for-oss.sh and verify-sanitized-tree.sh read this file.
 
 [manifest]
-version = 5
+version = 6
 default = "deny"
 
 [selection.crates]
@@ -110,11 +110,25 @@ excluded = [
 [selection.cargo]
 public = [".cargo/config.toml", ".cargo/audit.toml"]
 
+[selection.workflows]
+# GitHub Actions workflows tracked as part of the OSS surface contract.
+# Workflows in `public` ship to the OSS mirror; release/distribution
+# workflows are managed separately via scripts/release/managed-paths/.
+public = [
+    # STEP_11 (workspace-aware-cross-repo) — six-gate CI workflow.
+    # Referenced by branch-protection on master.
+    ".github/workflows/ci.yml",
+    # Homebrew formula publisher. Runs in verivus-oss/sqry and pushes the
+    # rendered formula to verivus-oss/homebrew-sqry on every release.
+    ".github/workflows/publish-homebrew-tap.yml",
+]
+
 [selection.docs]
 files_public = [
     "docs/FEATURE_LIST.md",
     "docs/SCHEMA.md",
     "docs/SEMANTIC_VERSIONING.md",
+    "docs/release/homebrew-tap.md",
     "docs/superpowers/plans/2026-03-19-sqryd-daemon.md",
 ]
 dirs_public = ["docs/user-guide/"]
@@ -123,7 +137,24 @@ dirs_public = ["docs/user-guide/"]
 public = [
     "scripts/install.sh",
     "scripts/install.ps1",
+    "scripts/release/render-homebrew-formula.sh",
     "scripts/sync-versions.sh",
+    # STEP_11 (workspace-aware-cross-repo) CI gate scripts. These run in
+    # .github/workflows/ci.yml and are referenced by branch-protection.
+    "scripts/ci/check_claim_traceability.sh",
+    "scripts/ci/check_routing_gates.sh",
+    "scripts/ci/check_vscode_settings_parity.sh",
+    # STEP_8 reproduction harness for the operational-folder regression
+    # (zero member/excluded `No index found` lines).
+    "scripts/repro/operational_folder.sh",
+]
+
+[selection.packaging]
+# Homebrew formula template — consumed by scripts/release/render-homebrew-formula.sh
+# during the publish-homebrew-tap workflow. Must ship to the OSS repo so the
+# workflow can render against it.
+public = [
+    "packaging/homebrew/sqry.rb",
 ]
 
 [selection.dirs]

@@ -363,7 +363,14 @@ LSP server config file.
 | `sqry.callHierarchy.maxResults` | Call hierarchy result limit | `200` |
 | `sqry.callHierarchy.timeoutMs` | Call hierarchy timeout (ms) | `5000` |
 | `sqry.callHierarchy.includeDetail` | Include call detail | `true` |
-| `sqry.projectRootMode` | Project root mode (`gitRoot`, `workspaceFolder`, `workspaceRoot`) | `"gitRoot"` |
+| `sqry.projectRootMode` | Project-root detection mode for the LSP server. Accepted values: `"gitRoot"` (default), `"workspaceFolder"`, `"workspaceRoot"`. The VS Code extension's `sqry.workspaceClassification.projectRootMode` setting uses the short forms `"gitRoot" \| "folder" \| "explicit"` for the same enum; the per-workspace `.code-workspace` `sqry.workspace.projectRootMode` block always wins when present. | `"gitRoot"` |
+| `sqry.indexRoot` | LSP server config key (parsed by `sqry-lsp/src/config.rs::apply_index_root` from `workspace/didChangeConfiguration` and the LSP server config file). Sets the index root directly. The VS Code extension also exposes `sqry.indexRoot` as a contributed setting and forwards its value through to `sqry lsp` via the LSP configuration channel. Empty string means no override. | `""` |
+| `sqry.workspaceFolderExcludes` | VS Code-side setting only. Glob patterns matched against `WorkspaceFolder.uri.fsPath`. Folders matching any pattern are excluded from every sqry enumeration loop in the extension (auto-index, status fan-out, manual rebuild). Not consumed by the LSP server directly. | `[]` |
+| `sqry.workspaceClassification` | VS Code-side setting only. Inline classification block — `sourceRoots`, `memberFolders`, `exclusions`, `projectRootMode` — parallel to the `.code-workspace` `sqry.workspace` block. Surfaces the user-editable form (the `Sqry: Edit Workspace Classification` command writes from this form into the `.code-workspace` block when one exists). When no `.code-workspace` is open today, the extension does NOT synthesize a `LogicalWorkspace` from this setting and forward it to `sqry lsp` — `sqry lsp` falls through to its `.sqry-workspace` / anonymous-multi-root branches. The contributed setting ships now so it is present when that wiring lands as a follow-up task. | `null` |
+
+> Configurable per-workspace cross-repo: sqry treats each opened tree as a single repo by default. Cross-repo classification is enabled by either committing a `.sqry-workspace` registry file (CLI / standalone LSP) or by adding a `sqry.workspace` block inside a `.code-workspace` (VS Code). Both surfaces deserialize into the same `LogicalWorkspace` value before reaching the runtime. <!-- claim:configurable-cross-repo test:resolve_logical_workspace_short_circuits_in_documented_order -->
+
+See [docs/cli/workspace.md](cli/workspace.md) for end-to-end configuration flows and [docs/development/code-map/workspace-aware.md](development/code-map/workspace-aware.md) for the data-flow code map.
 
 ---
 

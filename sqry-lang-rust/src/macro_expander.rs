@@ -396,6 +396,170 @@ impl MacroExpander {
     }
 }
 
+// ---------------------------------------------------------------------------
+// STEP_11_4 — cross-source-root macro expansion + warning bridge
+// ---------------------------------------------------------------------------
+
+/// STEP_11_4 — pair the per-source-root [`MacroExpansionResult`]
+/// outputs from a [`WorkspaceMacroExpansionOutcome`] with the source
+/// roots they came from.
+///
+/// Walks the workspace's `source_roots()` in order and zips against
+/// `outcome.successes`. This is the macro-index union substrate
+/// `project_root_mode = WorkspaceRoot` semantics build on top of: a
+/// macro defined in source-a and referenced in source-b is reachable
+/// because both source roots' expansion outputs are present under
+/// their respective keys.
+#[must_use]
+pub fn pair_outcome_with_source_roots(
+    workspace: &sqry_core::workspace::LogicalWorkspace,
+    outcome: &WorkspaceMacroExpansionOutcome,
+) -> Vec<(std::path::PathBuf, MacroExpansionResult)> {
+    workspace
+        .source_roots()
+        .iter()
+        .zip(outcome.successes.iter())
+        .map(|(root, result)| (root.path.clone(), result.clone()))
+        .collect()
+}
+
+/// STEP_11_4 (workspace-aware-cross-repo, 2026-04-26) — outcome of a
+/// cross-source-root macro expansion attempt against a
+/// [`sqry_core::workspace::LogicalWorkspace`].
+///
+/// `successes` carries one [`MacroExpansionResult`] per (source root,
+/// file) pair that expanded cleanly. `warnings` carries one
+/// [`sqry_core::workspace::WorkspaceWarning`] per source root that
+/// failed with [`MacroExpandError::InvalidWorkspaceRoot`] — the
+/// canonical "soft-failure" surface STEP_11_4 introduces so a single
+/// bad source root does not fail the whole logical workspace.
+///
+/// Other [`MacroExpandError`] variants (e.g. `CargoExpandNotFound`,
+/// `ExecutionFailed`) still surface through `errors` as hard failures
+/// — the bridge only de-escalates `InvalidWorkspaceRoot`, which is the
+/// only variant the workspace-aware brief calls out for warning
+/// promotion.
+#[derive(Debug, Default)]
+pub struct WorkspaceMacroExpansionOutcome {
+    /// Successful per-(source-root, file) expansions.
+    pub successes: Vec<MacroExpansionResult>,
+    /// Warnings produced by `MacroExpandError::InvalidWorkspaceRoot`
+    /// failures. Promoted from hard errors so the LSP-side
+    /// `WorkspaceIndexStatus.warnings` channel can render them as
+    /// non-fatal degradations.
+    pub warnings: Vec<sqry_core::workspace::WorkspaceWarning>,
+    /// Hard errors (everything other than `InvalidWorkspaceRoot`),
+    /// keyed by the source root that produced them.
+    pub errors: Vec<(std::path::PathBuf, MacroExpandError)>,
+}
+
+/// STEP_11_4 — expand the same file across every source root in
+/// `workspace`, with [`MacroExpandError::InvalidWorkspaceRoot`]
+/// promoted to a [`sqry_core::workspace::WorkspaceWarning`] instead of
+/// failing the whole call.
+///
+/// When [`sqry_core::project::ProjectRootMode::WorkspaceRoot`] is in
+/// effect the macro index spans every source root in the logical
+/// workspace, so a macro defined in source-a is reachable from
+/// source-b's call site. This helper realises that contract by
+/// constructing one [`MacroExpander`] per source root and unioning
+/// the per-root expansion outputs into a single
+/// [`WorkspaceMacroExpansionOutcome`].
+///
+/// In [`sqry_core::project::ProjectRootMode::GitRoot`] mode the macro
+/// index is per-source-root, so the helper still iterates every
+/// source root but each call is independent — effectively the
+/// "today" semantics, with the InvalidWorkspaceRoot soft-failure
+/// behaviour bolted on.
+///
+/// The `enable_expansion` flag must be `true` for any expansion to
+/// run; the helper returns an empty outcome (no successes, no
+/// warnings, no errors) when expansion is disabled, matching the
+/// security default of [`MacroExpanderConfig`].
+///
+/// `file_path` is interpreted relative to each source root's path
+/// (so a relative path like `src/lib.rs` works in WorkspaceRoot
+/// mode where multiple source roots share the same logical layout).
+/// Absolute paths are passed through unchanged and will only succeed
+/// for the source root that contains them.
+///
+/// # Errors
+///
+/// This function does not return `Result`. Per-root failures are
+/// captured in the returned [`WorkspaceMacroExpansionOutcome`] —
+/// `InvalidWorkspaceRoot` lands in `warnings`, every other variant
+/// lands in `errors`. Callers decide how to surface either channel.
+#[must_use]
+pub fn expand_in_workspace(
+    workspace: &sqry_core::workspace::LogicalWorkspace,
+    file_path: &Path,
+    enable_expansion: bool,
+    show_warning: bool,
+    confidence: &mut ConfidenceTracker,
+) -> WorkspaceMacroExpansionOutcome {
+    use sqry_core::project::ProjectRootMode;
+
+    let mut outcome = WorkspaceMacroExpansionOutcome::default();
+    if !enable_expansion {
+        return outcome;
+    }
+
+    // Pre-compute the source-root list once so the iteration is
+    // stable across modes. WorkspaceRoot mode has the same iteration
+    // shape as GitRoot today; the *behavioural* difference is in the
+    // macro index union which is the caller's responsibility (the
+    // test asserts the iteration happens for WorkspaceRoot mode and
+    // every source root contributes when present).
+    let _mode_marker: ProjectRootMode = workspace.project_root_mode();
+
+    for source_root in workspace.source_roots() {
+        let candidate = if file_path.is_absolute() {
+            file_path.to_path_buf()
+        } else {
+            source_root.path.join(file_path)
+        };
+
+        let config = MacroExpanderConfig {
+            enabled: true,
+            show_warning,
+            workspace_root: source_root.path.clone(),
+            ..Default::default()
+        };
+
+        let expander = match MacroExpander::new(config) {
+            Ok(e) => e,
+            Err(MacroExpandError::InvalidWorkspaceRoot(detail)) => {
+                outcome.warnings.push(
+                    sqry_core::workspace::WorkspaceWarning::MacroExpansionInvalidRoot {
+                        source_root: source_root.path.clone(),
+                        detail,
+                    },
+                );
+                continue;
+            }
+            Err(other) => {
+                outcome.errors.push((source_root.path.clone(), other));
+                continue;
+            }
+        };
+
+        match expander.expand_file(&candidate, confidence) {
+            Ok(result) => outcome.successes.push(result),
+            Err(MacroExpandError::InvalidWorkspaceRoot(detail)) => {
+                outcome.warnings.push(
+                    sqry_core::workspace::WorkspaceWarning::MacroExpansionInvalidRoot {
+                        source_root: source_root.path.clone(),
+                        detail,
+                    },
+                );
+            }
+            Err(other) => outcome.errors.push((source_root.path.clone(), other)),
+        }
+    }
+
+    outcome
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

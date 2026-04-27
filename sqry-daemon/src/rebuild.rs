@@ -936,7 +936,7 @@ impl RebuildDispatcher {
             self.manager
                 .lookup(key)
                 .ok_or_else(|| DaemonError::WorkspaceEvicted {
-                    root: key.index_root.clone(),
+                    root: key.source_root.clone(),
                 })?;
 
         // ================================================================
@@ -1016,7 +1016,7 @@ impl RebuildDispatcher {
                 ws.rebuild_in_flight.store(false, Ordering::Release);
                 sentinel.armed = false;
                 return Err(DaemonError::WorkspaceEvicted {
-                    root: key.index_root.clone(),
+                    root: key.source_root.clone(),
                 });
             }
 
@@ -1224,7 +1224,7 @@ impl RebuildDispatcher {
                 // NO record_failure / state transition: eviction owns
                 // those.
                 return Err(DaemonError::WorkspaceEvicted {
-                    root: key.index_root.clone(),
+                    root: key.source_root.clone(),
                 });
             }
             if !workspaces_guard.contains_key(key) {
@@ -1234,7 +1234,7 @@ impl RebuildDispatcher {
                     cap.publish_path_evictions.fetch_add(1, Ordering::AcqRel);
                 }
                 return Err(DaemonError::WorkspaceEvicted {
-                    root: key.index_root.clone(),
+                    root: key.source_root.clone(),
                 });
             }
 
@@ -1325,7 +1325,7 @@ impl RebuildDispatcher {
         mode: RebuildMode,
         changes: ChangeSet,
     ) -> Result<CodeGraph, DaemonError> {
-        let root = key.index_root.clone();
+        let root = key.source_root.clone();
         let plugins = Arc::clone(&self.plugins);
         let cfg = self.build_config.clone();
         let prior_for_blocking = Arc::clone(prior);
@@ -1728,7 +1728,7 @@ fn watch_loop_blocking(
             Ok(None) => {
                 tracing::info!(
                     target: "sqry_daemon::watch",
-                    workspace = %ws.key.index_root.display(),
+                    workspace = %ws.key.source_root.display(),
                     "watcher cancelled; terminating blocking loop"
                 );
                 break;
@@ -1736,7 +1736,7 @@ fn watch_loop_blocking(
             Err(e) => {
                 tracing::error!(
                     target: "sqry_daemon::watch",
-                    workspace = %ws.key.index_root.display(),
+                    workspace = %ws.key.source_root.display(),
                     error = %e,
                     "watcher channel disconnected; terminating blocking loop"
                 );
@@ -1797,7 +1797,7 @@ fn watch_loop_blocking(
                 // triggers the rebuild as intended.
                 tracing::debug!(
                     target: "sqry_daemon::watch",
-                    workspace = %ws.key.index_root.display(),
+                    workspace = %ws.key.source_root.display(),
                     git_class = ?cs.git_change_class,
                     "skipping empty-files full-rebuild signal: TOCTOU or graph-neutral git move"
                 );
@@ -1814,7 +1814,7 @@ fn watch_loop_blocking(
                 if tx.blocking_send((cs, new_git_state)).is_err() {
                     tracing::debug!(
                         target: "sqry_daemon::watch",
-                        workspace = %ws.key.index_root.display(),
+                        workspace = %ws.key.source_root.display(),
                         "async dispatcher task dropped receiver; terminating blocking loop"
                     );
                     break;
@@ -1854,7 +1854,7 @@ async fn dispatch_loop_async(
         let Some((cs, new_git_state)) = rx.recv().await else {
             tracing::debug!(
                 target: "sqry_daemon::watch",
-                workspace = %ws.key.index_root.display(),
+                workspace = %ws.key.source_root.display(),
                 "watcher channel closed; terminating async dispatcher"
             );
             break;
@@ -1871,7 +1871,7 @@ async fn dispatch_loop_async(
             Err(DaemonError::WorkspaceEvicted { .. }) => {
                 tracing::info!(
                     target: "sqry_daemon::watch",
-                    workspace = %ws.key.index_root.display(),
+                    workspace = %ws.key.source_root.display(),
                     "workspace evicted; terminating async dispatcher"
                 );
                 break;
@@ -1879,7 +1879,7 @@ async fn dispatch_loop_async(
             Err(e) => {
                 tracing::warn!(
                     target: "sqry_daemon::watch",
-                    workspace = %ws.key.index_root.display(),
+                    workspace = %ws.key.source_root.display(),
                     error = %e,
                     "rebuild failed; baseline unchanged, retrying on next change"
                 );
@@ -2048,7 +2048,7 @@ impl Drop for DrainLoopSentinel {
         }
         tracing::error!(
             target: "sqry_daemon::rebuild",
-            workspace = %self.ws.key.index_root.display(),
+            workspace = %self.ws.key.source_root.display(),
             "handle_changes unwound with armed DrainLoopSentinel — \
              releasing rebuild_in_flight defensively; any parked \
              PendingRebuild will be processed on the next dispatch"

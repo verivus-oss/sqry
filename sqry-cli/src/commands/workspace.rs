@@ -17,6 +17,14 @@ const REGISTRY_FILE: &str = ".sqry-workspace";
 ///
 /// # Errors
 /// Returns an error if any subcommand fails to execute.
+///
+/// # STEP_8 invariant
+///
+/// `sqry workspace …` is incompatible with the global `--workspace` /
+/// `SQRY_WORKSPACE_FILE` flag — each `WorkspaceCommand` variant carries its
+/// own positional `<workspace>` argument, and silently choosing between the
+/// two is a footgun. The collision is rejected by `main.rs` *before* entering
+/// this function; reaching here implies `cli.workspace.is_none()`.
 pub fn run_workspace(cli: &Cli, action: &WorkspaceCommand) -> Result<()> {
     match action {
         WorkspaceCommand::Init {
@@ -43,6 +51,11 @@ pub fn run_workspace(cli: &Cli, action: &WorkspaceCommand) -> Result<()> {
             threads,
         } => query_workspace(cli, workspace, query, *threads),
         WorkspaceCommand::Stats { workspace } => stats_workspace(cli, workspace),
+        WorkspaceCommand::Status {
+            workspace,
+            json,
+            no_cache,
+        } => crate::commands::workspace_status::run(cli, workspace, *json, *no_cache),
     }
 }
 
@@ -340,18 +353,27 @@ fn stats_workspace(cli: &Cli, workspace: &str) -> Result<()> {
 
     let mut streams = OutputStreams::with_pager(cli.pager_config());
 
+    let registry = index.registry();
+    let project_root_mode = registry.project_root_mode.as_str();
+    let member_folder_count = registry.member_folders.len();
+    let exclusion_count = registry.exclusions.len();
+
     if cli.json {
         let json = serde_json::json!({
             "workspace": {
                 "path": workspace_root,
                 "name": metadata.workspace_name,
                 "default_discovery_mode": metadata.default_discovery_mode,
+                "project_root_mode": project_root_mode,
+                "schema_version": metadata.version,
             },
             "repositories": {
                 "total": detailed_stats.total_repos,
                 "indexed": detailed_stats.indexed_repos,
                 "unindexed": detailed_stats.unindexed_repos,
             },
+            "member_folders": { "total": member_folder_count },
+            "exclusions": { "total": exclusion_count },
             "symbols": {
                 "total": detailed_stats.total_symbols,
                 "avg_per_repo": detailed_stats.avg_symbols_per_repo,
@@ -378,12 +400,15 @@ fn stats_workspace(cli: &Cli, workspace: &str) -> Result<()> {
             streams.write_result(&format!("Default discovery mode: {mode}"))?;
         }
         streams.write_result("")?;
+        streams.write_result(&format!("Project root mode: {project_root_mode}"))?;
         streams.write_result(&format!(
-            "Repositories: {} total ({} indexed, {} unindexed)",
+            "Source roots: {} total ({} indexed, {} unindexed)",
             detailed_stats.total_repos,
             detailed_stats.indexed_repos,
             detailed_stats.unindexed_repos
         ))?;
+        streams.write_result(&format!("Member folders: {member_folder_count}"))?;
+        streams.write_result(&format!("Exclusions: {exclusion_count}"))?;
         streams.write_result(&format!(
             "Total symbols: {} ({:.1} avg per repo)",
             detailed_stats.total_symbols, detailed_stats.avg_symbols_per_repo

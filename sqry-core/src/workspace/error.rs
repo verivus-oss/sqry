@@ -53,7 +53,8 @@ pub enum WorkspaceError {
     /// Too many repositories discovered during workspace scanning (`DoS` prevention).
     ///
     /// This limit prevents denial-of-service attacks via workspaces containing
-    /// thousands of `.sqry-index` files. See RR-10 Gap #2.
+    /// thousands of repositories (each one carrying its own
+    /// `.sqry/graph/` artifact tree). See RR-10 Gap #2.
     #[error(
         "Too many repositories found in workspace: {found} exceeds limit of {limit}. \
          Adjust SQRY_MAX_REPOSITORIES environment variable if needed."

@@ -12,6 +12,7 @@
 use sha2::{Digest, Sha256};
 
 use crate::PathError;
+use crate::config::LogicalWorkspaceView;
 
 /// Maximum path length in characters.
 pub const MAX_PATH_LENGTH: usize = 4096;
@@ -657,6 +658,294 @@ fn format_external_plain_path(canonical: &CanonicalPath) -> String {
             .unwrap_or(&canonical.path);
         format!("<external>/{filename}")
     }
+}
+
+// ---------------------------------------------------------------------------
+// Workspace-aware path redaction (STEP_7).
+// ---------------------------------------------------------------------------
+
+/// Outcome of [`workspace_relative_form`] — the redactor's decision about
+/// what prefix (if any) to apply when emitting a path under a bound
+/// `LogicalWorkspaceView`.
+///
+/// This is **not** a wire-form structure; it is consumed exclusively by
+/// [`redact_path_with_workspace`]. The variants exactly mirror acceptance
+/// criteria 3-6 of STEP_7:
+///
+/// - [`Self::Excluded`] — criterion 6: path matches an `exclusions` entry.
+/// - [`Self::SourceRootRelative`] — criterion 4: path lives inside a
+///   source root, render as `<source_root_id>/<rel>` in minimal mode.
+/// - [`Self::MemberFolderRelative`] — criterion 5: path lives inside a
+///   member folder, render as `<workspace_id_short>/<rel-to-member-folder>`
+///   in minimal mode.
+/// - [`Self::OutsideWorkspace`] — path falls outside the bound
+///   workspace; the legacy single-workspace pipeline applies.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkspaceRelativeForm {
+    /// Path matched a `LogicalWorkspaceView::exclusions` entry. The
+    /// redactor emits an opaque hash and sets the `excluded: true` flag
+    /// (criterion 6). Carries the canonicalized path for hashing.
+    Excluded {
+        /// Canonicalized path string used as the hash input.
+        canonical: String,
+    },
+    /// Path lives inside a source root. Carries the source-root id and
+    /// the path relative to that source root (no leading `/`).
+    SourceRootRelative {
+        /// 8-hex-char source-root identifier (see
+        /// [`crate::config::compute_source_root_id`]).
+        source_root_id: String,
+        /// Path relative to the matching source-root, with no leading
+        /// `/`. Empty string when the input *is* the source root.
+        relative: String,
+    },
+    /// Path lives inside a member folder. Carries the workspace_id_short
+    /// and the path relative to the member folder (no leading `/`).
+    MemberFolderRelative {
+        /// 16-hex-char workspace-id prefix (see
+        /// [`crate::config::LogicalWorkspaceView::workspace_id_short`]).
+        workspace_id_short: String,
+        /// Path relative to the matching member folder, with no leading
+        /// `/`. Empty string when the input *is* the member folder.
+        relative: String,
+    },
+    /// Path is outside the workspace's source roots and member folders.
+    /// The legacy `<external>` / `<workspace>` pipeline applies.
+    OutsideWorkspace,
+}
+
+/// Decide which workspace-relative form a canonicalized path should
+/// take given the bound `LogicalWorkspaceView` and the configured
+/// preferences.
+///
+/// Implements the precedence rules from acceptance criteria
+/// 4, 5, 6, 8, and 9:
+///
+/// 1. **Exclusions take precedence** (criterion 9). Returns
+///    [`WorkspaceRelativeForm::Excluded`] before any source-root /
+///    member-folder check.
+/// 2. **Source roots beat member folders.** A path that is *both*
+///    descendant of a source root and a member folder (rare, but
+///    possible if a member folder nests under a source root) is
+///    treated as source-root-relative.
+/// 3. **`aggregate_workspace_paths = false` collapses member folders.**
+///    When the caller opts out of workspace aggregation (criterion 8),
+///    a member-folder hit is reported as
+///    [`WorkspaceRelativeForm::OutsideWorkspace`] so the legacy
+///    `<external>` pipeline applies.
+#[must_use]
+pub fn workspace_relative_form(
+    canonical: &CanonicalPath,
+    workspace: &LogicalWorkspaceView,
+    aggregate_workspace_paths: bool,
+) -> WorkspaceRelativeForm {
+    let path_for_match = std::path::PathBuf::from(canonical.path.clone());
+
+    // Criterion 9: exclusions first.
+    if workspace.is_excluded(&path_for_match) {
+        return WorkspaceRelativeForm::Excluded {
+            canonical: canonical.path.clone(),
+        };
+    }
+
+    // Criterion 4: source roots take precedence over member folders.
+    if let Some((id, root)) = workspace.enclosing_source_root(&path_for_match) {
+        let root_str = root.to_string_lossy();
+        let rel = strip_path_prefix(&canonical.path, root_str.as_ref());
+        return WorkspaceRelativeForm::SourceRootRelative {
+            source_root_id: id.clone(),
+            relative: rel,
+        };
+    }
+
+    // Criterion 5 / 8: member folders only when aggregation is enabled.
+    if aggregate_workspace_paths
+        && let Some(member) = workspace.enclosing_member_folder(&path_for_match)
+    {
+        let member_str = member.to_string_lossy();
+        let rel = strip_path_prefix(&canonical.path, member_str.as_ref());
+        return WorkspaceRelativeForm::MemberFolderRelative {
+            workspace_id_short: workspace.workspace_id_short.clone(),
+            relative: rel,
+        };
+    }
+
+    WorkspaceRelativeForm::OutsideWorkspace
+}
+
+/// Strip a path prefix and return the leading-slash-free remainder.
+/// `/home/user/proj` minus `/home/user/proj` -> `""`.
+/// `/home/user/proj/src/main.rs` minus `/home/user/proj` -> `src/main.rs`.
+fn strip_path_prefix(full: &str, prefix: &str) -> String {
+    let trimmed_prefix = prefix.trim_end_matches('/');
+    if let Some(rest) = full.strip_prefix(trimmed_prefix) {
+        rest.trim_start_matches('/').to_string()
+    } else {
+        full.trim_start_matches('/').to_string()
+    }
+}
+
+/// Workspace-aware variant of [`redact_path`]. Implements the STEP_7
+/// path-redaction policy as specified by acceptance criteria 3-7:
+///
+/// | Preset | Form | Output |
+/// |--------|------|--------|
+/// | `none` | any | absolute path (criterion 3) |
+/// | `minimal` | source root | `<source_root_id>/<rel>` (criterion 4) |
+/// | `minimal` | member folder | `<workspace_id_short>/<rel>` (criterion 5) |
+/// | any | excluded | `<opaque-hash>` + `excluded: true` flag (criterion 6) |
+/// | `strict` | any in-workspace | hashed `<workspace-prefix>/<rel>` token (criterion 7) |
+///
+/// `strict` mode applies the workspace-aware rewrite **before** the
+/// hash step so the hashed token covers the workspace prefix —
+/// `<source_root_id>` / `<workspace_id_short>` never appears in
+/// cleartext on the wire (criterion 7).
+///
+/// # Returns
+///
+/// `Ok(RedactedPath { rendered, excluded })` where `rendered` is the
+/// emitted path and `excluded` is `true` iff the input matched an
+/// exclusion (criterion 6). `excluded` is wire-side metadata — the
+/// caller (typically the redaction walker) decides whether to surface
+/// it as a JSON sibling field or fold it into the result envelope.
+///
+/// # Errors
+///
+/// Returns [`PathError`] for malformed inputs, identical to
+/// [`redact_path`].
+pub fn redact_path_with_workspace(
+    path: &str,
+    workspace: &LogicalWorkspaceView,
+    workspace_placeholder: &str,
+    hash_filenames: bool,
+    hash_salt: Option<&str>,
+    aggregate_workspace_paths: bool,
+    workspace_root_for_legacy: Option<&str>,
+) -> Result<RedactedPath, PathError> {
+    let canonical = canonicalize_for_hash(path, workspace_root_for_legacy)?;
+    // STEP_7 codex iter3 fix: `canonicalize_for_hash` strips
+    // `workspace_root_for_legacy` to a workspace-relative form when the
+    // input falls under it (see `resolve_workspace_containment`). The
+    // workspace-aware containment check below requires the **absolute**
+    // path so it can match against the view's `source_roots` (which are
+    // canonical absolute paths). Reconstruct an absolute view here when
+    // the canonicalize step stripped the prefix; the original `canonical`
+    // is preserved for the legacy fallback branch (`OutsideWorkspace`)
+    // below so the previously-shipped wire form is unchanged for paths
+    // not covered by the bound `LogicalWorkspaceView`.
+    let absolute_canonical = if canonical.is_workspace_relative
+        && let Some(root) = workspace_root_for_legacy
+    {
+        let trimmed_root = root.trim_end_matches('/');
+        let trimmed_rel = canonical.path.trim_start_matches('/');
+        let joined = if trimmed_rel.is_empty() {
+            trimmed_root.to_string()
+        } else {
+            format!("{trimmed_root}/{trimmed_rel}")
+        };
+        CanonicalPath {
+            path: joined,
+            ..canonical.clone()
+        }
+    } else {
+        canonical.clone()
+    };
+    let form = workspace_relative_form(&absolute_canonical, workspace, aggregate_workspace_paths);
+
+    match form {
+        WorkspaceRelativeForm::Excluded { canonical: full } => {
+            // Criterion 6: opaque hash + excluded flag, regardless of preset.
+            // The hash always covers the full canonical path so the same
+            // excluded path always renders identically.
+            let hash = hash_path(&full, hash_salt);
+            Ok(RedactedPath {
+                rendered: format!("<excluded>/[{hash}]"),
+                excluded: true,
+            })
+        }
+        WorkspaceRelativeForm::SourceRootRelative {
+            source_root_id,
+            relative,
+        } => Ok(emit_workspace_relative(
+            &source_root_id,
+            &relative,
+            hash_filenames,
+            hash_salt,
+        )),
+        WorkspaceRelativeForm::MemberFolderRelative {
+            workspace_id_short,
+            relative,
+        } => Ok(emit_workspace_relative(
+            &workspace_id_short,
+            &relative,
+            hash_filenames,
+            hash_salt,
+        )),
+        WorkspaceRelativeForm::OutsideWorkspace => {
+            // Fall back to the legacy single-workspace pipeline so paths
+            // outside the bound workspace continue to render as
+            // `<external>/...` (or workspace-relative when the legacy
+            // `workspace_root` happens to contain them).
+            let rendered = if canonical.is_workspace_relative {
+                redact_workspace_relative_path(
+                    &canonical,
+                    workspace_placeholder,
+                    hash_filenames,
+                    hash_salt,
+                )
+            } else {
+                redact_external_path(&canonical, hash_filenames, hash_salt)
+            };
+            Ok(RedactedPath {
+                rendered,
+                excluded: false,
+            })
+        }
+    }
+}
+
+/// Render a workspace-relative path token. Strict mode (i.e.
+/// `hash_filenames = true`) hashes the **whole** prefixed token so the
+/// workspace prefix never escapes in cleartext (criterion 7); minimal
+/// mode emits the prefixed cleartext directly (criteria 4 + 5).
+fn emit_workspace_relative(
+    prefix: &str,
+    relative: &str,
+    hash_filenames: bool,
+    hash_salt: Option<&str>,
+) -> RedactedPath {
+    let token = if relative.is_empty() {
+        prefix.to_string()
+    } else {
+        format!("{prefix}/{relative}")
+    };
+    let rendered = if hash_filenames {
+        // Strict pipeline: hash the entire prefixed token. The `prefix`
+        // (source_root_id / workspace_id_short) is folded into the
+        // SHA-256 input so the hashed token covers it (criterion 7).
+        let hash = hash_path(&token, hash_salt);
+        format!("<redacted>/[{hash}]")
+    } else {
+        token
+    };
+    RedactedPath {
+        rendered,
+        excluded: false,
+    }
+}
+
+/// Result of [`redact_path_with_workspace`]: the emitted path plus a
+/// wire-side `excluded` metadata flag.
+///
+/// The flag is set only for paths that matched a
+/// `LogicalWorkspaceView::exclusions` entry; non-excluded paths always
+/// carry `excluded: false`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RedactedPath {
+    /// The redacted path string (workspace-relative, hashed, or `<excluded>`).
+    pub rendered: String,
+    /// `true` iff the input path matched an exclusion entry.
+    pub excluded: bool,
 }
 
 #[cfg(test)]

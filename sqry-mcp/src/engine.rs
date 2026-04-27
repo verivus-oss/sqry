@@ -462,11 +462,86 @@ pub fn resolve_workspace_root() -> Result<PathBuf> {
     Ok(canon)
 }
 
+/// Typed errors emitted by the workspace-bound canonicalization paths.
+///
+/// Used by [`canonicalize_in_workspace`] /
+/// [`canonicalize_in_workspace_with_logical`] /
+/// [`crate::path_resolver::resolve_path_in_logical_workspace`] so callers
+/// (MCP tool handlers, the redaction crate, future LSP integrations) can
+/// distinguish "outside workspace" (invalid input) from "explicitly
+/// excluded" (criterion 9: exclusions take precedence over containment)
+/// without parsing free-form `anyhow` strings.
+#[derive(Debug, thiserror::Error)]
+pub enum WorkspacePathError {
+    /// Path resolved outside the workspace root (containment violation).
+    #[error("Path '{path}' is outside of the workspace root '{workspace_root}'")]
+    OutsideWorkspace {
+        /// The offending path as supplied (or normalized).
+        path: PathBuf,
+        /// The workspace root the request was resolved against.
+        workspace_root: PathBuf,
+    },
+    /// Path matched a `LogicalWorkspace::exclusions` entry. Exclusion
+    /// match is checked **before** the workspace-bound check so an
+    /// excluded path is rejected even when it would have been
+    /// in-workspace per containment alone (acceptance criterion 9).
+    #[error("Path '{path}' is excluded by the logical workspace policy")]
+    Excluded {
+        /// The offending path as supplied.
+        path: PathBuf,
+    },
+    /// Filesystem canonicalization (`realpath(3)`) failed — typically
+    /// because the path does not exist.
+    #[error("Failed to canonicalize path: {path} ({source})")]
+    Canonicalize {
+        /// The offending path.
+        path: PathBuf,
+        /// The underlying IO error.
+        source: std::io::Error,
+    },
+}
+
 /// Returns an error if the operation fails.
 ///
 /// # Errors
 ///
 pub fn canonicalize_in_workspace(path_str: &str, workspace_root: &Path) -> Result<PathBuf> {
+    canonicalize_in_workspace_inner(path_str, workspace_root, None).map_err(Into::into)
+}
+
+/// Workspace-bound canonicalization with optional `LogicalWorkspace`
+/// awareness — `STEP_7` acceptance criterion 9.
+///
+/// When `workspace` is `Some`, the function checks the workspace's
+/// `exclusions` list **before** the containment check; an excluded path
+/// is rejected with [`WorkspacePathError::Excluded`] regardless of where
+/// it sits relative to the workspace root.
+///
+/// When `workspace` is `None` the behavior is identical to
+/// [`canonicalize_in_workspace`].
+///
+/// Tagged `#[allow(dead_code)]` because tool wiring to honour
+/// exclusions is staged behind the redactor today; the tool-side caller
+/// is added in a follow-on workspace-aware-cross-repo step.
+///
+/// # Errors
+///
+/// Returns [`WorkspacePathError`] for excluded, out-of-workspace, or
+/// uncanonicalizable inputs.
+#[allow(dead_code)]
+pub fn canonicalize_in_workspace_with_logical(
+    path_str: &str,
+    workspace_root: &Path,
+    workspace: Option<&sqry_core::workspace::LogicalWorkspace>,
+) -> Result<PathBuf, WorkspacePathError> {
+    canonicalize_in_workspace_inner(path_str, workspace_root, workspace)
+}
+
+fn canonicalize_in_workspace_inner(
+    path_str: &str,
+    workspace_root: &Path,
+    workspace: Option<&sqry_core::workspace::LogicalWorkspace>,
+) -> Result<PathBuf, WorkspacePathError> {
     let input_path = Path::new(path_str);
     let joined = if input_path.is_absolute() {
         input_path.to_path_buf()
@@ -478,21 +553,42 @@ pub fn canonicalize_in_workspace(path_str: &str, workspace_root: &Path) -> Resul
     // This is critical for security - we must detect directory traversal even if path doesn't exist
     let normalized = normalize_path(&joined);
 
+    // Acceptance criterion 9: exclusions take precedence over the
+    // workspace-bound check. A path that matches an `exclusions` entry
+    // is rejected even when it would have been accepted by containment.
+    if let Some(ws) = workspace
+        && exclusion_matches(&normalized, ws)
+    {
+        return Err(WorkspacePathError::Excluded {
+            path: normalized.clone(),
+        });
+    }
+
     // Security check: Ensure the normalized path is within workspace root
     // This check must happen BEFORE canonicalization to catch malicious paths
     if !normalized.starts_with(workspace_root) {
-        bail!(
-            "Path '{}' is outside of the workspace root '{}'",
-            normalized.display(),
-            workspace_root.display()
-        );
+        return Err(WorkspacePathError::OutsideWorkspace {
+            path: normalized,
+            workspace_root: workspace_root.to_path_buf(),
+        });
     }
 
     // Now attempt to canonicalize the actual path (follows symlinks, verifies existence)
     // If this fails, we return the failure, but we've already prevented directory traversal
-    let canon = std::fs::canonicalize(&joined).map_err(|e| {
-        anyhow::anyhow!("Failed to canonicalize path: {} ({})", joined.display(), e)
-    })?;
+    let canon =
+        std::fs::canonicalize(&joined).map_err(|source| WorkspacePathError::Canonicalize {
+            path: joined.clone(),
+            source,
+        })?;
+
+    // Re-check exclusions after symlink resolution — a symlink could
+    // point into an excluded directory even when the lexical path did
+    // not (criterion 9 robustness).
+    if let Some(ws) = workspace
+        && exclusion_matches(&canon, ws)
+    {
+        return Err(WorkspacePathError::Excluded { path: canon });
+    }
 
     // Double-check after canonicalization (symlinks could still escape).
     // Canonicalize the workspace root too — on macOS, /var is a symlink to
@@ -500,13 +596,23 @@ pub fn canonicalize_in_workspace(path_str: &str, workspace_root: &Path) -> Resul
     let canon_root =
         std::fs::canonicalize(workspace_root).unwrap_or_else(|_| workspace_root.to_path_buf());
     if !canon.starts_with(&canon_root) {
-        bail!(
-            "Path '{}' is outside of the workspace root '{}'",
-            canon.display(),
-            canon_root.display()
-        );
+        return Err(WorkspacePathError::OutsideWorkspace {
+            path: canon,
+            workspace_root: canon_root,
+        });
     }
     Ok(canon)
+}
+
+/// Returns `true` if `path` matches one of `workspace.exclusions()`
+/// (exact or descendant) — same semantics as
+/// [`sqry_core::workspace::LogicalWorkspace::classify`]'s exclusion
+/// branch.
+fn exclusion_matches(path: &Path, workspace: &sqry_core::workspace::LogicalWorkspace) -> bool {
+    workspace
+        .exclusions()
+        .iter()
+        .any(|excl| path == excl.as_path() || path.starts_with(excl))
 }
 
 /// Normalize a path by resolving "." and ".." components without accessing the filesystem.

@@ -39,7 +39,8 @@ pub enum SessionError {
     /// Failure to read filesystem metadata for the cached index.
     #[error("failed to read metadata for {path}: {source}")]
     IndexMetadata {
-        /// Path to the `.sqry-index` file.
+        /// Path to the affected file inside `<workspace>/.sqry/graph/`
+        /// (typically `snapshot.sqry` or `manifest.json`).
         path: PathBuf,
         /// Filesystem error that occurred while reading metadata.
         #[source]
@@ -49,7 +50,8 @@ pub enum SessionError {
     /// Failure to deserialize a symbol index from disk.
     #[error("failed to load symbol index from {path}: {source}")]
     IndexLoad {
-        /// Path to the `.sqry-index` file.
+        /// Path to the snapshot file
+        /// (`<workspace>/.sqry/graph/snapshot.sqry`) that failed to load.
         path: PathBuf,
         /// Deserialization error emitted by the symbol index loader.
         #[source]

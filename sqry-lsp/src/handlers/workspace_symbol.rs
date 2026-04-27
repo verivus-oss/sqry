@@ -27,6 +27,18 @@ pub struct WorkspaceSymbolResult {
     pub offset: usize,
     pub languages: Vec<String>,
     pub query: String,
+    /// STEP_11_4 — `true` when at least one workspace search root was
+    /// dropped from the search because
+    /// [`crate::session::SessionManager::evaluate_handler_gate`]
+    /// classified it as a member folder. The remaining results come
+    /// from the still-included source roots only; consumers should
+    /// surface a "partial workspace" hint to users.
+    pub partial: bool,
+    /// STEP_11_4 — `true` when at least one workspace search root was
+    /// dropped because it classified as `Excluded`. Set independently
+    /// of [`Self::partial`] so consumers can distinguish "skipped
+    /// member folder" from "skipped excluded path".
+    pub excluded: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,7 +83,36 @@ pub fn handle(
     let query_terms = workspace_query_terms(&parsed.query);
 
     let search_query = search_query_or_match_all(&parsed.query);
-    let search_roots = resolve_search_roots(session);
+    let unfiltered_roots = resolve_search_roots(session);
+    // STEP_11_4 — apply the LogicalWorkspace classification to every
+    // search root before issuing any per-root query. Member folders
+    // are skipped (they do not own a per-root index — their content
+    // is reachable through the source roots they belong to) and
+    // excluded paths are skipped outright. Each filter sets the
+    // matching flag on the response so the consumer can surface a
+    // "partial" / "excluded" hint instead of treating the empty
+    // result as authoritative.
+    let logical_workspace = session.logical_workspace();
+    let mut filtered_roots = SearchRoots {
+        roots: Vec::with_capacity(unfiltered_roots.roots.len()),
+    };
+    let mut partial = false;
+    let mut excluded = false;
+    for root in unfiltered_roots.roots {
+        match logical_workspace.classify(&root) {
+            sqry_core::workspace::Classification::Excluded => {
+                excluded = true;
+            }
+            sqry_core::workspace::Classification::Member { .. } => {
+                partial = true;
+            }
+            sqry_core::workspace::Classification::Source
+            | sqry_core::workspace::Classification::Unknown => {
+                filtered_roots.roots.push(root);
+            }
+        }
+    }
+    let search_roots = filtered_roots;
     let language_filter: HashSet<String> = parsed.languages.iter().cloned().collect();
 
     let search_outcome = collect_workspace_symbols(
@@ -92,6 +133,8 @@ pub fn handle(
             offset: 0,
             languages: parsed.languages,
             query: parsed.query,
+            partial,
+            excluded,
         }));
     }
 
@@ -121,6 +164,8 @@ pub fn handle(
         offset,
         languages: parsed.languages,
         query: parsed.query,
+        partial,
+        excluded,
     }))
 }
 
@@ -143,6 +188,8 @@ fn empty_workspace_result() -> WorkspaceSymbolResult {
         offset: 0,
         languages: Vec::new(),
         query: String::new(),
+        partial: false,
+        excluded: false,
     }
 }
 
@@ -1107,5 +1154,7 @@ mod tests {
         assert_eq!(result.offset, 0);
         assert!(result.languages.is_empty());
         assert!(result.query.is_empty());
+        assert!(!result.partial);
+        assert!(!result.excluded);
     }
 }

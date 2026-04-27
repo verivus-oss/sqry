@@ -321,16 +321,24 @@ impl SessionManager {
         let cached = CachedIndex::new(Arc::clone(&arc_graph), file_mtime);
         self.cache.insert(path.to_path_buf(), cached);
 
-        self.register_watcher(path, snapshot_path);
+        self.register_watcher(path, storage.manifest_path());
 
         Ok(arc_graph)
     }
 
-    fn register_watcher(&self, workspace_path: &Path, snapshot_path: &Path) {
+    /// Register a filesystem watch for the workspace's
+    /// `.sqry/graph/manifest.json` so cache entries are invalidated when
+    /// the live build pipeline rewrites the manifest. The watcher's
+    /// `handle_event` filter matches only manifest writes (see
+    /// `session::watcher::FileWatcher::handle_event`), so the registered
+    /// path **must** be the manifest path; passing the snapshot path here
+    /// would silently disable invalidation because no callback would ever
+    /// match the filtered event path.
+    fn register_watcher(&self, workspace_path: &Path, manifest_path: &Path) {
         if let Ok(mut watcher) = self.watcher.lock() {
             let cache = Arc::clone(&self.cache);
             let callback_path = workspace_path.to_path_buf();
-            let watch_path = snapshot_path.to_path_buf();
+            let watch_path = manifest_path.to_path_buf();
             if let Err(err) = watcher.watch(watch_path.clone(), move || {
                 cache.remove(&callback_path);
                 info!(
@@ -364,8 +372,11 @@ impl SessionManager {
             self.cache.remove(&path);
             debug!("evicted LRU session cache entry: {}", path.display());
             if let Ok(mut watcher) = self.watcher.lock() {
+                // Must mirror `register_watcher` and pass the manifest path —
+                // unwatching a different path silently no-ops because the
+                // watcher's callback table is keyed on the registered path.
                 let storage = GraphStorage::new(&path);
-                if let Err(err) = watcher.unwatch(storage.snapshot_path()) {
+                if let Err(err) = watcher.unwatch(storage.manifest_path()) {
                     debug!("failed to unwatch session path {}: {err}", path.display());
                 }
             }
@@ -395,8 +406,12 @@ impl SessionManager {
             && let Ok(mut guard) = watcher.lock()
         {
             for path in &to_remove {
+                // Must match the path used in `register_watcher`
+                // (`.sqry/graph/manifest.json`), otherwise the watcher
+                // callback table never receives the unwatch and the entry
+                // leaks.
                 let storage = GraphStorage::new(path);
-                guard.unwatch(storage.snapshot_path())?;
+                guard.unwatch(storage.manifest_path())?;
             }
         }
 
@@ -466,6 +481,17 @@ mod tests {
             SessionError::IndexLoad {
                 path: storage.snapshot_path().to_path_buf(),
                 source: source.into(),
+            }
+        })?;
+        // Production callers register the file watcher against
+        // `<workspace>/.sqry/graph/manifest.json` — and `notify` requires
+        // the watch target to exist before `watch()` is called. The live
+        // build pipeline writes the manifest alongside the snapshot, so
+        // mirror that here for tests that depend on watcher registration.
+        fs::write(storage.manifest_path(), b"{}").map_err(|source| {
+            SessionError::IndexMetadata {
+                path: storage.manifest_path().to_path_buf(),
+                source,
             }
         })?;
         Ok(())
@@ -696,6 +722,85 @@ mod tests {
     }
 
     #[test]
+    fn register_watcher_uses_manifest_path() {
+        // Regression test for STEP_3 codex iter2 BLOCK: production must
+        // register the watcher against `.sqry/graph/manifest.json` —
+        // the only path that `FileWatcher::handle_event` matches — not
+        // the snapshot path. Wiring the watcher to the snapshot path is
+        // a silent no-op because no event will ever satisfy the
+        // manifest filter.
+        let temp = tempdir().unwrap();
+        write_empty_graph(temp.path()).unwrap();
+
+        let manager = SessionManager::new().unwrap();
+        manager.get_graph(temp.path()).unwrap();
+
+        let storage = GraphStorage::new(temp.path());
+        let watched = manager
+            .watcher
+            .lock()
+            .expect("watcher lock poisoned in test")
+            .watched_paths();
+
+        assert!(
+            watched.contains(&storage.manifest_path().to_path_buf()),
+            "watcher must be registered for manifest path {} (registered: {:?})",
+            storage.manifest_path().display(),
+            watched,
+        );
+        assert!(
+            !watched.contains(&storage.snapshot_path().to_path_buf()),
+            "watcher must NOT be registered for snapshot path {} (registered: {:?})",
+            storage.snapshot_path().display(),
+            watched,
+        );
+
+        manager.shutdown().unwrap();
+    }
+
+    #[test]
+    fn evict_lru_unwatches_manifest_path() {
+        // Regression test: LRU eviction's `unwatch` call must mirror
+        // `register_watcher` and target the manifest path. If the paths
+        // diverge the unwatch silently no-ops and the watcher leaks.
+        let temp = tempdir().unwrap();
+        let base = temp.path();
+
+        let config = SessionConfig {
+            max_cached_indexes: 1,
+            ..SessionConfig::default()
+        };
+        let manager = SessionManager::with_config(config).unwrap();
+
+        let repo1 = base.join("repo1");
+        let repo2 = base.join("repo2");
+        write_empty_graph(&repo1).unwrap();
+        write_empty_graph(&repo2).unwrap();
+
+        manager.get_graph(&repo1).unwrap();
+        manager.get_graph(&repo2).unwrap(); // evicts repo1
+
+        let watched = manager
+            .watcher
+            .lock()
+            .expect("watcher lock poisoned in test")
+            .watched_paths();
+
+        let repo1_manifest = GraphStorage::new(&repo1).manifest_path().to_path_buf();
+        let repo2_manifest = GraphStorage::new(&repo2).manifest_path().to_path_buf();
+        assert!(
+            !watched.contains(&repo1_manifest),
+            "evicted workspace's manifest watch must be released; still watching: {watched:?}",
+        );
+        assert!(
+            watched.contains(&repo2_manifest),
+            "current workspace must remain watched; registered: {watched:?}",
+        );
+
+        manager.shutdown().unwrap();
+    }
+
+    #[test]
     #[ignore = "flaky: timing-sensitive file watcher test"]
     fn file_changes_trigger_invalidation() {
         let temp = tempdir().unwrap();
@@ -705,8 +810,10 @@ mod tests {
         manager.get_graph(temp.path()).unwrap();
         assert!(manager.cache.contains_key(temp.path()));
 
+        // The watcher matches writes to `.sqry/graph/manifest.json` —
+        // touching the snapshot file would never fire a callback.
         let storage = GraphStorage::new(temp.path());
-        std::fs::write(storage.snapshot_path(), b"modified").unwrap();
+        std::fs::write(storage.manifest_path(), b"modified").unwrap();
 
         let evicted = wait_until(watcher_timeout(), || {
             manager
@@ -736,7 +843,7 @@ mod tests {
 
         manager.get_graph(temp.path()).unwrap();
         let storage = GraphStorage::new(temp.path());
-        std::fs::write(storage.snapshot_path(), b"changed").unwrap();
+        std::fs::write(storage.manifest_path(), b"changed").unwrap();
 
         let evicted = wait_until(background_timeout(), || {
             !manager.cache.contains_key(temp.path())

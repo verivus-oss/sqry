@@ -327,15 +327,26 @@ async fn run_rmcp_server() -> Result<()> {
 
     tracing::info!("All caches initialized successfully");
 
-    // Initialize response redactor from environment config
+    // Initialize response redactor from environment config.
+    //
+    // STEP_7 codex iter4: `preset=none` now constructs a passthrough
+    // redactor (rather than `None`) so the walker's
+    // exclusions-override-passthrough branch
+    // (`redact_excluded_in_passthrough`) can fire end-to-end when a
+    // `LogicalWorkspaceView` is bound at request time. The walker
+    // remains a no-op for non-excluded fields under passthrough mode,
+    // so criterion 3 (`preset=none + non-excluded path → absolute
+    // emitted`) is preserved. `None` only arises here for an unknown /
+    // misconfigured preset.
     let redactor = server::SqryServer::create_redactor(&mcp_config.redaction_preset);
-    if redactor.is_some() {
-        tracing::info!(
-            preset = mcp_config.redaction_preset.as_str(),
-            "Response redaction enabled"
-        );
-    } else {
-        tracing::info!("Response redaction disabled (passthrough mode)");
+    match (&redactor, mcp_config.redaction_preset.as_str()) {
+        (Some(_), "none") => tracing::info!(
+            "Response redaction in passthrough mode (preset=none): excluded paths still rewritten when LogicalWorkspaceView is bound"
+        ),
+        (Some(_), preset) => tracing::info!(preset, "Response redaction enabled"),
+        (None, preset) => {
+            tracing::info!(preset, "Response redaction disabled (unknown preset)");
+        }
     }
 
     let server = server::SqryServer::with_config(

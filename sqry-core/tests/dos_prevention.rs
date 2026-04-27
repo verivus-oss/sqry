@@ -183,8 +183,8 @@ fn test_repository_discovery_within_limit() {
     let workspace = TempDir::new().unwrap();
     for i in 0..5 {
         let repo_dir = workspace.path().join(format!("repo{i}"));
-        std::fs::create_dir_all(&repo_dir).unwrap();
-        std::fs::write(repo_dir.join(".sqry-index"), b"{}").unwrap();
+        std::fs::create_dir_all(repo_dir.join(".sqry/graph")).unwrap();
+        std::fs::write(repo_dir.join(".sqry/graph/manifest.json"), b"{}").unwrap();
     }
 
     // Should succeed
@@ -212,8 +212,8 @@ fn test_repository_discovery_exceeds_limit() {
     // Create 1001 repositories (exceeds default limit of 1000)
     for i in 0..1001 {
         let repo_dir = workspace.path().join(format!("repo{i:04}"));
-        std::fs::create_dir_all(&repo_dir).unwrap();
-        std::fs::write(repo_dir.join(".sqry-index"), b"{}").unwrap();
+        std::fs::create_dir_all(repo_dir.join(".sqry/graph")).unwrap();
+        std::fs::write(repo_dir.join(".sqry/graph/manifest.json"), b"{}").unwrap();
     }
 
     // Should fail when trying to add the 1001st repository

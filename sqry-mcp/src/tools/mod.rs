@@ -31,6 +31,9 @@
 pub mod params;
 #[cfg_attr(test, allow(dead_code))]
 mod validation;
+pub mod workspace_status;
+
+pub use workspace_status::{WorkspaceStatusArgs, execute_workspace_status};
 
 pub use params::{SqryAskParams, SqryQueryParams};
 pub use validation::{

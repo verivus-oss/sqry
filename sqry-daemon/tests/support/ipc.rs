@@ -20,6 +20,7 @@ use sqry_daemon::{
     ipc::protocol::{DaemonHello, DaemonHelloResponse, JsonRpcError, JsonRpcResponse},
     ipc::shim_registry::ShimRegistry,
 };
+use sqry_daemon_protocol::LogicalWorkspaceWire;
 use tempfile::TempDir;
 use tokio::io::AsyncWriteExt;
 use tokio::net::UnixStream;
@@ -170,9 +171,22 @@ impl TestIpcClient {
 
     /// Send `DaemonHello` and read the response.
     pub async fn hello(&mut self, protocol_version: u32) -> DaemonHelloResponse {
+        self.hello_with_binding(protocol_version, None).await
+    }
+
+    /// Send `DaemonHello` with an explicit `logical_workspace`
+    /// connection-level binding (STEP_6 iter-2). Used by tests that
+    /// verify the binding is inherited by subsequent `daemon/load`
+    /// calls that omit `logical_workspace` from their own params.
+    pub async fn hello_with_binding(
+        &mut self,
+        protocol_version: u32,
+        logical_workspace: Option<LogicalWorkspaceWire>,
+    ) -> DaemonHelloResponse {
         let hello = DaemonHello {
             client_version: "test/0.0.1".into(),
             protocol_version,
+            logical_workspace,
         };
         write_frame_json(&mut self.stream, &hello)
             .await

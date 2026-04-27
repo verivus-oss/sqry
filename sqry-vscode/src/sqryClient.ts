@@ -12,6 +12,7 @@ import { IndexQueue } from "./indexQueue";
 import { SqryResult, SqrySymbolResult } from "./types";
 import {
   SortOrder,
+  SqryAggregateIndexStatus,
   SqryIndexStatus,
   SqryIndexStatusParams,
   SqryIndexStatusResult,
@@ -34,13 +35,87 @@ import {
   SqryListUnusedSymbolsResult,
   SqryBatchCallerCalleeCountParams,
   SqryBatchCallerCalleeCountResult,
+  SqryLogicalWorkspaceInfo,
+  SqrySourceRootStatus,
   SqrySymbolRef,
+  SqryWorkspaceStatus,
+  SqryWorkspaceStatusParams,
 } from "./lspProtocol";
 
-type ActiveRequest = {
-  cancel: () => void;
-  timer: NodeJS.Timeout | null;
-};
+interface ActiveRequest {
+  /** Cancellation source — disposed when the request resolves. */
+  readonly source: CancellationTokenSource;
+  /** Timeout watchdog — cleared when the request resolves. */
+  readonly timer: NodeJS.Timeout | null;
+}
+
+/**
+ * Optional initialization-options payload sent to the LSP on start-up.
+ *
+ * STEP_5 (codex iter1 MAJOR fix) forwards two distinct shapes:
+ *
+ * - `workspace`: the parsed + classified `.code-workspace` payload
+ *   produced by the extension's `workspaceClassifier` (folders +
+ *   inline `sqry.workspace` block). The LSP attempts to deserialize
+ *   this as a `LogicalWorkspace`; when the shape is the lightweight
+ *   classification hint the extension produces, the LSP falls through
+ *   to the path-based branch (see `sqry-lsp/src/session.rs`
+ *   `resolve_step_1` + `resolve_step_4`). Always an OBJECT, never a
+ *   path string.
+ * - `workspaceFile`: absolute fsPath of the active `.code-workspace`,
+ *   passed verbatim to the LSP's `resolve_step_4` branch which loads
+ *   the file from disk and runs the heuristic classifier in-process.
+ *   Always a PATH STRING, never an object.
+ *
+ * The LSP only reads `initializationOptions` once during the LSP
+ * `initialize` handshake; callers MUST set this before
+ * `SqryClient.initialize()`.
+ */
+export interface SqryInitializationOptions {
+  /** Parsed/classified `.code-workspace` payload — see the JSDoc above. */
+  readonly workspace?: SqryWorkspaceInitializationPayload;
+  /** Absolute path to the `.code-workspace` file. */
+  readonly workspaceFile?: string;
+  /**
+   * Absolute path forwarded from the `sqry.indexRoot` VS Code setting.
+   *
+   * STEP_10 iter3 wire-up. The extension reads the user's
+   * `sqry.indexRoot` setting at activation and forwards the value here
+   * so the LSP can use it as the canonical workspace identity (the
+   * in-band replacement for the legacy `--index-root` CLI flag). The
+   * LSP picks this up in `extract_sqry_init_options` and feeds it into
+   * `WorkspaceResolutionInputs.index_root` when no explicit
+   * `--index-root` flag was passed on the command line. Empty/absent
+   * means "no override; auto-detect".
+   */
+  readonly indexRoot?: string;
+}
+
+/**
+ * Lightweight classification hint produced by the extension and sent
+ * under `initializationOptions.sqry.workspace`. Mirrors the
+ * `ParsedWorkspaceFile` shape from `workspaceClassifier.ts` but is
+ * declared here so `SqryClient` does not depend on a UI-side module.
+ */
+export interface SqryWorkspaceInitializationPayload {
+  /** Verbatim `folders[]` array from the `.code-workspace`. */
+  readonly folders: ReadonlyArray<{
+    readonly path: string;
+    readonly name?: string;
+  }>;
+  /**
+   * The `sqry.workspace` block from the `.code-workspace`, when set by
+   * the user. `null` means the file did not contain the block — the
+   * LSP should fall through to the heuristic classifier on the file
+   * itself (branch 4).
+   */
+  readonly classification: {
+    readonly sourceRoots?: ReadonlyArray<string>;
+    readonly exclusions?: ReadonlyArray<string>;
+    readonly memberFolders?: ReadonlyArray<string>;
+    readonly projectRootMode?: "gitRoot" | "folder" | "explicit";
+  } | null;
+}
 
 // Progress notification handler type
 type ProgressHandler = (token: string) => void;
@@ -56,8 +131,19 @@ export class SqryClient implements vscode.Disposable {
   private languageClient: LanguageClient | null = null;
   private currentBinaryPath: string | null = null;
   private downloadedBinaryPath: string | null = null;
-  private currentRequest: ActiveRequest | null = null;
+  /**
+   * In-flight request set. Each request owns its own cancellation
+   * token + timer pair, so concurrent requests do NOT race on a
+   * shared `currentRequest` slot. `dispose()` cancels every member.
+   *
+   * STEP_5 acceptance criterion 6 — concurrent status requests must
+   * be safe to issue in parallel. `cancelActiveRequest` is reduced
+   * to a `dispose()`-time helper that drains the set.
+   */
+  private readonly activeRequests = new Set<ActiveRequest>();
   private readonly progressHandlers: Map<string, ProgressHandler> = new Map();
+  /** Initialization options forwarded to the LSP on each start. */
+  private initializationOptions: SqryInitializationOptions = {};
 
   public readonly onDidChangeConfig = this.onDidChangeConfigEmitter.event;
 
@@ -135,9 +221,18 @@ export class SqryClient implements vscode.Disposable {
   }
 
   public dispose(): void {
-    this.cancelActiveRequest();
+    this.cancelAllRequests();
     void this.stopLanguageClient();
     this.disposables.forEach((disposable) => disposable.dispose());
+  }
+
+  /**
+   * Set the initialization options forwarded to the LSP. Must be
+   * called before [`initialize`]; later changes require a restart
+   * (the LSP only reads `initializationOptions` once).
+   */
+  public setInitializationOptions(options: SqryInitializationOptions): void {
+    this.initializationOptions = { ...options };
   }
 
   public async refreshConfig(): Promise<void> {
@@ -179,19 +274,139 @@ export class SqryClient implements vscode.Disposable {
     };
   }
 
-  public async getIndexStatus(workspace: vscode.WorkspaceFolder): Promise<SqryIndexStatus> {
+  /**
+   * Fetch the aggregate workspace status — the SOLE status surface for
+   * the extension UI (DAG STEP_5 criterion 5).
+   *
+   * Routes through `sqry/indexStatus` with no `path` argument, which
+   * the LSP interprets as "tell me about the entire logical workspace".
+   * The aggregate is returned via the `IndexStatus.aggregate` field
+   * (added in STEP_4 iter2). When the LSP does not yet know about a
+   * `.code-workspace` (e.g. the user opened a single folder), the
+   * single-source-root branch is repackaged into a one-entry aggregate
+   * here so callers always see the same shape.
+   */
+  public async getWorkspaceStatus(): Promise<SqryWorkspaceStatus> {
     const cfg = await this.ensureConfig();
-    const params: SqryIndexStatusParams = {
-      path: workspace.uri.fsPath,
-    };
-
-    // LSP returns { status: IndexStatus }, so we need to unwrap
+    const params: SqryIndexStatusParams = {};
     const result = await this.sendRequest<SqryIndexStatusResult>(
       "sqry/indexStatus",
       params,
       cfg,
     );
-    return result.status;
+    return this.normalizeWorkspaceStatus(result.status);
+  }
+
+  /**
+   * STEP_12 telemetry — fetch the logical-workspace identity + structure
+   * projection for the active workspace. Returns the LSP's
+   * `sqry/workspaceStatus` payload verbatim, including both the
+   * scannable `workspace_id_short` (16 hex) and the machine-identity
+   * `workspace_id_full` (64 hex). Callers (extension activation) use
+   * this to emit ONE aggregate startup line per the DAG contract.
+   */
+  public async getLogicalWorkspaceInfo(): Promise<SqryLogicalWorkspaceInfo> {
+    const cfg = await this.ensureConfig();
+    const params: SqryWorkspaceStatusParams = {};
+    return await this.sendRequest<SqryLogicalWorkspaceInfo>(
+      "sqry/workspaceStatus",
+      params,
+      cfg,
+    );
+  }
+
+  /**
+   * Drill-down into a single source root. Used by per-root rebuild
+   * operations and by the search/results panel when the user expands
+   * one root inside a multi-root workspace.
+   *
+   * Returns the matching `SourceRootStatus` from the aggregate when
+   * available (preserves freshness consistent with the rest of the
+   * UI); falls back to a synthesized entry for the single-folder
+   * branch where the LSP returned a per-folder `IndexStatus`.
+   */
+  public async getSourceRootStatus(
+    folder: vscode.WorkspaceFolder,
+  ): Promise<SqrySourceRootStatus> {
+    const cfg = await this.ensureConfig();
+    const params: SqryIndexStatusParams = { path: folder.uri.fsPath };
+    const result = await this.sendRequest<SqryIndexStatusResult>(
+      "sqry/indexStatus",
+      params,
+      cfg,
+    );
+    return this.extractSourceRootStatus(result.status, folder.uri.fsPath);
+  }
+
+  /**
+   * Coerce a raw `IndexStatus` into a `WorkspaceStatus` aggregate.
+   * Single-folder responses (the legacy non-aggregate branch) are
+   * repackaged into a one-entry aggregate so the UI sees a uniform
+   * shape regardless of which branch the LSP took.
+   */
+  private normalizeWorkspaceStatus(status: SqryAggregateIndexStatus): SqryWorkspaceStatus {
+    if (status.aggregate) {
+      return status.aggregate;
+    }
+    const singleEntry: SqrySourceRootStatus = {
+      path: status.path ?? "",
+      status: this.classifyLegacyStatus(status),
+      symbol_count: status.symbol_count,
+    };
+    const ok = singleEntry.status === "ok" ? 1 : 0;
+    const missing = singleEntry.status === "missing" ? 1 : 0;
+    const building = singleEntry.status === "building" ? 1 : 0;
+    const error = singleEntry.status === "error" ? 1 : 0;
+    return {
+      source_root_statuses: [singleEntry],
+      missing_count: missing,
+      building_count: building,
+      ok_count: ok,
+      error_count: error,
+      generated_at: new Date().toISOString(),
+    };
+  }
+
+  private extractSourceRootStatus(
+    status: SqryAggregateIndexStatus,
+    requestedPath: string,
+  ): SqrySourceRootStatus {
+    const aggregate = status.aggregate;
+    if (aggregate) {
+      const match = aggregate.source_root_statuses.find((s) => s.path === requestedPath);
+      if (match) {
+        return match;
+      }
+      // Member-folder branch with no exact match — synthesize a
+      // composite status from the aggregate counts.
+      if (aggregate.error_count > 0) {
+        return { path: requestedPath, status: "error" };
+      }
+      if (aggregate.building_count > 0) {
+        return { path: requestedPath, status: "building" };
+      }
+      if (aggregate.missing_count > 0) {
+        return { path: requestedPath, status: "missing" };
+      }
+      return { path: requestedPath, status: "ok" };
+    }
+    return {
+      path: requestedPath,
+      status: this.classifyLegacyStatus(status),
+      symbol_count: status.symbol_count,
+    };
+  }
+
+  private classifyLegacyStatus(
+    status: SqryIndexStatus,
+  ): "ok" | "missing" | "building" | "error" {
+    if (status.building) {
+      return "building";
+    }
+    if (status.exists && (status.symbol_count ?? 0) > 0) {
+      return "ok";
+    }
+    return "missing";
   }
 
   public async runQuery(
@@ -545,14 +760,24 @@ export class SqryClient implements vscode.Disposable {
       },
     };
 
-    const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+    // STEP_5 acceptance criterion 7: do NOT pin
+    // `LanguageClientOptions.workspaceFolder` to `workspaceFolders[0]`.
+    // The per-request `path` parameter is the routing key the LSP uses
+    // to resolve which logical workspace + source root to serve from.
+    // Pinning the first folder confuses the LSP in multi-root setups
+    // (the pinned folder shadows every member folder for the lifetime
+    // of the language client).
+    const initializationOptions =
+      Object.keys(this.initializationOptions).length > 0
+        ? { sqry: { ...this.initializationOptions } }
+        : undefined;
     const clientOptions: LanguageClientOptions = {
       documentSelector: [{ scheme: "file" }],
       outputChannel: this.outputChannel,
       synchronize: {
         configurationSection: "sqry",
       },
-      workspaceFolder,
+      ...(initializationOptions ? { initializationOptions } : {}),
     };
 
     const languageClient = new LanguageClient(
@@ -653,17 +878,14 @@ export class SqryClient implements vscode.Disposable {
     this.outputChannel.appendLine(
       `[sqry] Request ${method} (${this.describeParams(params)})`,
     );
-    this.cancelActiveRequest();
+    // STEP_5 acceptance criterion 6: each request owns its own
+    // cancellation source. Concurrent requests do not race here.
     const source = new CancellationTokenSource();
     const timer = setTimeout(() => {
       source.cancel();
     }, cfg.timeoutMs);
-
-    const request: ActiveRequest = {
-      cancel: () => source.cancel(),
-      timer,
-    };
-    this.currentRequest = request;
+    const request: ActiveRequest = { source, timer };
+    this.activeRequests.add(request);
 
     try {
       const result = await client.sendRequest<T>(method, params, source.token);
@@ -676,11 +898,11 @@ export class SqryClient implements vscode.Disposable {
       }
       throw error;
     } finally {
-      clearTimeout(timer);
-      source.dispose();
-      if (this.currentRequest === request) {
-        this.currentRequest = null;
+      if (timer) {
+        clearTimeout(timer);
       }
+      source.dispose();
+      this.activeRequests.delete(request);
     }
   }
 
@@ -695,17 +917,12 @@ export class SqryClient implements vscode.Disposable {
     this.outputChannel.appendLine(
       `[sqry] Command ${command} (${args.map(String).join(" ")})`,
     );
-    this.cancelActiveRequest();
     const source = new CancellationTokenSource();
     const timer = setTimeout(() => {
       source.cancel();
     }, timeout);
-
-    const request: ActiveRequest = {
-      cancel: () => source.cancel(),
-      timer,
-    };
-    this.currentRequest = request;
+    const request: ActiveRequest = { source, timer };
+    this.activeRequests.add(request);
 
     try {
       await client.sendRequest(
@@ -727,11 +944,11 @@ export class SqryClient implements vscode.Disposable {
       }
       throw error;
     } finally {
-      clearTimeout(timer);
-      source.dispose();
-      if (this.currentRequest === request) {
-        this.currentRequest = null;
+      if (timer) {
+        clearTimeout(timer);
       }
+      source.dispose();
+      this.activeRequests.delete(request);
     }
   }
 
@@ -778,14 +995,22 @@ export class SqryClient implements vscode.Disposable {
     return parts.length ? parts.join(" ") : "no-params";
   }
 
-  private cancelActiveRequest(): void {
-    if (this.currentRequest) {
-      this.currentRequest.cancel();
-      if (this.currentRequest.timer) {
-        clearTimeout(this.currentRequest.timer);
+  /**
+   * Cancel every in-flight request. Used by `dispose()` only —
+   * concurrent requests do NOT cancel each other.
+   *
+   * STEP_5 acceptance criterion 6 — the legacy `cancelActiveRequest`
+   * was renamed to make the "cancel everything" semantics explicit.
+   */
+  private cancelAllRequests(): void {
+    for (const request of this.activeRequests) {
+      request.source.cancel();
+      if (request.timer) {
+        clearTimeout(request.timer);
       }
-      this.currentRequest = null;
+      request.source.dispose();
     }
+    this.activeRequests.clear();
   }
 
   private async ensureConfig(): Promise<ResolvedSqryConfig> {

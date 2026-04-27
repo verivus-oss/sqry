@@ -169,6 +169,7 @@ fn tool_arguments(name: &str, project: &Path) -> Option<Value> {
         "sqry_query" => json!({"query": "kind:function", "limit": 20}),
         "subgraph" => json!({"symbols": ["process"], "max_depth": 2, "max_nodes": 20}),
         "trace_path" => json!({"from_symbol": "process", "to_symbol": "helper", "max_hops": 4}),
+        "workspace_status" => json!({}),
         _ => return None,
     };
 

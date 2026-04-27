@@ -1,4 +1,23 @@
 //! Workspace registry data structures and persistence helpers.
+//!
+//! ## On-disk schema versions
+//!
+//! - **v1** (legacy): single flat `repositories` array. Carries
+//!   `metadata { version: 1 }` and a list of [`WorkspaceRepository`] entries.
+//! - **v2** (current): `source_roots` (renamed from `repositories`),
+//!   `member_folders`, `exclusions`, `project_root_mode`. Carries
+//!   `metadata { version: 2 }`.
+//!
+//! ## Upgrade path
+//!
+//! Loading a v1 file via [`WorkspaceRegistry::load`] auto-upgrades it in
+//! memory: each v1 repository entry becomes a v2 source root, and the
+//! v2-only collections are initialized empty / default. The next
+//! [`WorkspaceRegistry::save`] persists v2.
+//!
+//! Loading a file with `metadata.version > 2` returns
+//! [`WorkspaceError::UnsupportedVersion`]; we never silently downgrade
+//! a future schema.
 
 use std::collections::BTreeMap;
 use std::fs::{self, File};
@@ -8,74 +27,122 @@ use std::time::SystemTime;
 use serde::{Deserialize, Serialize};
 
 use super::error::{WorkspaceError, WorkspaceResult};
+use super::logical::MemberReason;
 use super::serde_time;
+use crate::project::types::ProjectRootMode;
 
 /// Current on-disk registry format version.
-pub const WORKSPACE_REGISTRY_VERSION: u32 = 1;
+pub const WORKSPACE_REGISTRY_VERSION: u32 = 2;
 
 /// Serializable workspace registry stored in `.sqry-workspace`.
+///
+/// On-disk layout corresponds to schema **v2** — see the module-level
+/// docs for the v1 → v2 upgrade contract.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkspaceRegistry {
     /// Registry metadata (versioning, timestamps).
     pub metadata: WorkspaceMetadata,
-    /// Registered repositories.
-    #[serde(default)]
+    /// Auto-indexed source roots. Persisted under the `source_roots`
+    /// JSON key in v2; deserialization also accepts the v1
+    /// `repositories` key (see [`Self::load`]).
+    #[serde(default, rename = "source_roots", alias = "repositories")]
     pub repositories: Vec<WorkspaceRepository>,
+    /// Workspace member folders — part of the workspace but **not**
+    /// auto-indexed (reads still resolve through the workspace's source
+    /// roots). Empty in v1.
+    #[serde(default)]
+    pub member_folders: Vec<WorkspaceMemberFolder>,
+    /// Explicitly excluded paths (opaque to sqry). Empty in v1.
+    #[serde(default)]
+    pub exclusions: Vec<PathBuf>,
+    /// Workspace-scoped project-root resolution mode.
+    /// Defaults to [`ProjectRootMode::default`] (= `GitRoot`) when absent.
+    #[serde(default)]
+    pub project_root_mode: ProjectRootMode,
 }
 
 impl WorkspaceRegistry {
-    /// Construct a new empty registry.
+    /// Construct a new empty registry at the current schema version.
     #[must_use]
     pub fn new(workspace_name: Option<String>) -> Self {
         Self {
             metadata: WorkspaceMetadata::new(workspace_name),
             repositories: Vec::new(),
+            member_folders: Vec::new(),
+            exclusions: Vec::new(),
+            project_root_mode: ProjectRootMode::default(),
         }
     }
 
     /// Load a registry from `path`.
     ///
+    /// Schema v1 files (single-flat `repositories` array) are auto-upgraded
+    /// to v2 in memory: existing entries become source roots; member-folder,
+    /// exclusion, and project-root-mode fields are initialised to their
+    /// defaults. Files with `metadata.version > 2` are rejected.
+    ///
     /// # Errors
     ///
-    /// Returns [`WorkspaceError`] when the file cannot be read, parsed, or when the version is unsupported.
+    /// Returns [`WorkspaceError::Io`] when the file cannot be read,
+    /// [`WorkspaceError::Serialization`] when the JSON is malformed, and
+    /// [`WorkspaceError::UnsupportedVersion`] when the on-disk version is
+    /// newer than this build understands.
     pub fn load(path: &Path) -> WorkspaceResult<Self> {
         let file = File::open(path).map_err(|err| WorkspaceError::io(path, err))?;
         let mut registry: WorkspaceRegistry =
             serde_json::from_reader(file).map_err(WorkspaceError::Serialization)?;
 
-        if registry.metadata.version != WORKSPACE_REGISTRY_VERSION {
-            return Err(WorkspaceError::UnsupportedVersion {
-                found: registry.metadata.version,
-                expected: WORKSPACE_REGISTRY_VERSION,
-            });
+        match registry.metadata.version {
+            1 => {
+                // v1 → v2 upgrade: keep already-deserialized `repositories`
+                // (the `alias = "repositories"` lets us read the v1 key as
+                // `source_roots`), default the v2-only collections, and
+                // bump the in-memory version. The next `save()` writes v2.
+                registry.member_folders = Vec::new();
+                registry.exclusions = Vec::new();
+                registry.project_root_mode = ProjectRootMode::default();
+                registry.metadata.version = WORKSPACE_REGISTRY_VERSION;
+            }
+            2 => {}
+            other => {
+                return Err(WorkspaceError::UnsupportedVersion {
+                    found: other,
+                    expected: WORKSPACE_REGISTRY_VERSION,
+                });
+            }
         }
 
         registry.sort_repositories();
         Ok(registry)
     }
 
-    /// Persist the registry to `path`, creating parent directories if necessary.
+    /// Persist the registry to `path`, creating parent directories if
+    /// necessary. Always writes the current ([`WORKSPACE_REGISTRY_VERSION`])
+    /// schema regardless of how the in-memory representation was loaded.
     ///
     /// # Errors
     ///
-    /// Returns [`WorkspaceError`] when directories cannot be created or serialization fails.
+    /// Returns [`WorkspaceError`] when directories cannot be created or
+    /// serialization fails.
     pub fn save(&mut self, path: &Path) -> WorkspaceResult<()> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|err| WorkspaceError::io(parent, err))?;
         }
 
         self.sort_repositories();
+        self.metadata.version = WORKSPACE_REGISTRY_VERSION;
         self.metadata.touch_updated();
 
         let file = File::create(path).map_err(|err| WorkspaceError::io(path, err))?;
         serde_json::to_writer_pretty(file, self).map_err(WorkspaceError::Serialization)
     }
 
-    /// Insert or update a repository entry.
+    /// Insert or update a source-root repository entry.
     ///
     /// # Errors
     ///
-    /// Returns [`WorkspaceError`] when persistence metadata updates fail (currently infallible placeholder).
+    /// Returns [`WorkspaceError`] when persistence metadata updates fail
+    /// (currently infallible placeholder).
     pub fn upsert_repo(&mut self, repo: WorkspaceRepository) -> WorkspaceResult<()> {
         let id = repo.id.clone();
 
@@ -93,7 +160,8 @@ impl WorkspaceRegistry {
         Ok(())
     }
 
-    /// Remove a repository by id. Returns `true` if an entry was removed.
+    /// Remove a source-root repository by id. Returns `true` if an entry
+    /// was removed.
     pub fn remove_repo(&mut self, repo_id: &WorkspaceRepoId) -> bool {
         let len_before = self.repositories.len();
         self.repositories.retain(|repo| repo.id != *repo_id);
@@ -108,6 +176,8 @@ impl WorkspaceRegistry {
 
     fn sort_repositories(&mut self) {
         self.repositories.sort_by(|a, b| a.id.cmp(&b.id));
+        self.member_folders.sort_by(|a, b| a.id.cmp(&b.id));
+        self.exclusions.sort();
     }
 
     /// Returns an ordered map keyed by repo id (primarily for testing/introspection).
@@ -228,5 +298,26 @@ impl WorkspaceRepository {
             symbol_count: None,
             primary_language: None,
         }
+    }
+}
+
+/// Persisted member-folder entry. Mirrors
+/// [`super::logical::MemberFolder`] but is keyed by a stable
+/// workspace-relative identifier so it round-trips through the registry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceMemberFolder {
+    /// Stable identifier (workspace-relative path).
+    pub id: WorkspaceRepoId,
+    /// Absolute path to the member folder root.
+    pub root: PathBuf,
+    /// Why the folder was classified as a member.
+    pub reason: MemberReason,
+}
+
+impl WorkspaceMemberFolder {
+    /// Create a member folder entry.
+    #[must_use]
+    pub fn new(id: WorkspaceRepoId, root: PathBuf, reason: MemberReason) -> Self {
+        Self { id, root, reason }
     }
 }

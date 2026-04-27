@@ -281,9 +281,34 @@ fn language_matches(lang: Language, query: &str) -> bool {
     }
 }
 
+/// Build the `IndexStatus` for a member-folder request per §1.4
+/// (acceptance criterion 3).
+///
+/// Member folders never own a snapshot; they route through the
+/// workspace's source roots. The response carries the **full**
+/// `WorkspaceIndexStatus` aggregate — `source_root_statuses`,
+/// `missing_count`, `building_count`, `ok_count`, `error_count`, and
+/// `generated_at` — inside `IndexStatus.aggregate`, plus a dedicated
+/// `partial` flag when any source root is `Missing` or `Error`. The
+/// summary scalars (`exists`, `path`, `building`, `age_seconds`) on
+/// the outer `IndexStatus` are convenience projections so simple
+/// consumers can render a one-line summary without re-walking the
+/// vector. See [`sqry_core::json_response::IndexStatus::aggregate`]
+/// for the precise contract.
+fn member_folder_aggregate_status(session: &SessionManager, target: &Path) -> IndexStatus {
+    let workspace = session.logical_workspace();
+    let aggregate = crate::session::aggregate_workspace_index_status(workspace.as_ref());
+    IndexStatus::aggregate(target.to_path_buf(), aggregate)
+}
+
 /// Fetch the current index status for the requested path.
 ///
 /// Uses the unified graph (`.sqry/graph/`) for status information.
+///
+/// Routes per §1.4: source-root paths return per-source-root data; member
+/// folders return an aggregate `WorkspaceIndexStatus`; excluded paths
+/// return `IndexStatus::excluded()`; out-of-workspace paths return
+/// `IndexStatus::not_found()`.
 ///
 /// # Errors
 ///
@@ -293,7 +318,56 @@ pub fn index_status(session: &SessionManager, path: Option<&str>) -> Result<Inde
     let handler_start = Instant::now();
     perf_log(&format!("index_status START path={path:?}"));
 
-    let target = session.resolve_path(path)?;
+    // §1.4 contract: classify the requested path against the logical
+    // workspace **before** consulting graph storage so member /
+    // excluded / unknown paths short-circuit to the contract-correct
+    // wire shape (rather than returning per-source-root data for a
+    // path that does not own a snapshot).
+    //
+    // - `Source` (path is or descends from a source root) → continue
+    //   into the per-source-root graph load below (today's behaviour).
+    // - `Member` → aggregate WorkspaceIndexStatus over every source
+    //   root, surfaced through the IndexStatus extra fields. Member
+    //   folders never own a snapshot themselves; they route through
+    //   their workspace's source roots.
+    // - `Excluded` → IndexStatus::excluded(): no graph data, no path,
+    //   no per-source-root detail.
+    // - `Unknown` → IndexStatus::not_found(); `--index-root` boundary
+    //   enforcement happens in `session.resolve_path`.
+    let resolve_attempt = session.resolve_path(path);
+    let target = match resolve_attempt {
+        Ok(p) => p,
+        Err(_err) => {
+            // resolve_path rejected the input — either non-canonicalizable
+            // or outside the --index-root boundary. The contract
+            // (acceptance criterion 7) keeps that boundary intact: surface
+            // a "not found" payload so the client cannot use sqry/indexStatus
+            // as a probe for paths outside the security envelope.
+            perf_log("index_status: resolve_path rejected the input");
+            return Ok(IndexStatus::not_found());
+        }
+    };
+
+    match session.classify_path(&target) {
+        sqry_core::workspace::Classification::Excluded => {
+            perf_log("index_status: path classified as Excluded");
+            let mut status = IndexStatus::excluded();
+            status.path = Some(target.display().to_string());
+            return Ok(status);
+        }
+        sqry_core::workspace::Classification::Unknown => {
+            perf_log("index_status: path classified as Unknown");
+            return Ok(IndexStatus::not_found());
+        }
+        sqry_core::workspace::Classification::Member { reason: _ } => {
+            perf_log("index_status: path classified as Member -> aggregate");
+            return Ok(member_folder_aggregate_status(session, &target));
+        }
+        sqry_core::workspace::Classification::Source => {
+            // Continue into the per-source-root branch below.
+        }
+    }
+
     let graph_storage = GraphStorage::new(&target);
 
     if !graph_storage.exists() {

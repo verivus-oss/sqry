@@ -39,6 +39,7 @@ fn setup_fixture() -> TempDir {
     fs::create_dir_all(temp.path().join(".xdg/config")).expect("create isolated config");
     fs::create_dir_all(temp.path().join(".xdg/cache")).expect("create isolated cache");
     fs::create_dir_all(temp.path().join(".xdg/data")).expect("create isolated data");
+    fs::create_dir_all(temp.path().join(".xdg/runtime")).expect("create isolated runtime");
     temp
 }
 
@@ -47,6 +48,13 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
+    // Point the daemon socket at a guaranteed-nonexistent path inside the
+    // project tempdir so the test never accidentally contacts a daemon
+    // running on the developer's host. This keeps the `daemon status`
+    // surface check deterministic on every machine (no daemon, no host
+    // daemon ambiguity, exit code is always 1 with the documented
+    // "daemon is not running" message).
+    let isolated_socket = project.join(".xdg/runtime/sqryd.sock");
     Command::new(sqry_bin())
         .args(args)
         .current_dir(project)
@@ -57,6 +65,8 @@ where
         .env("XDG_CONFIG_HOME", project.join(".xdg/config"))
         .env("XDG_CACHE_HOME", project.join(".xdg/cache"))
         .env("XDG_DATA_HOME", project.join(".xdg/data"))
+        .env("XDG_RUNTIME_DIR", project.join(".xdg/runtime"))
+        .env("SQRY_DAEMON_SOCKET", isolated_socket)
         .output()
         .expect("run sqry")
 }
@@ -214,7 +224,6 @@ fn installed_cli_feature_surface_matrix() {
             &["visualize", "callees:process", "--path", "."],
         ),
         ("export", &["export", "--format", "json", "."]),
-        ("daemon status", &["daemon", "status"]),
         ("config init", &["config", "init", "--path", "."]),
         ("config show", &["config", "show", "--path", ".", "--json"]),
         ("cache stats", &["cache", "stats"]),
@@ -300,5 +309,40 @@ fn installed_cli_feature_surface_matrix() {
     assert_failure(
         "invalid path",
         &run(project.path(), ["index", "/definitely/not/a/sqry/path"]),
+    );
+
+    // `daemon status` is a special case in the surface matrix. This e2e
+    // test does not spin up a `sqryd` instance, so the documented and
+    // expected behaviour is: exit code 1, stderr message "daemon is not
+    // running (socket <path>)". The test environment forces
+    // `SQRY_DAEMON_SOCKET` to an isolated path inside the tempdir
+    // (see `run`) so this is deterministic regardless of any developer
+    // host daemon.
+    let daemon_status_output = run(project.path(), ["daemon", "status"]);
+    let stderr = String::from_utf8_lossy(&daemon_status_output.stderr);
+    assert!(
+        !daemon_status_output.status.success(),
+        "daemon status with no daemon must exit non-zero\nstdout:\n{}\nstderr:\n{stderr}",
+        String::from_utf8_lossy(&daemon_status_output.stdout)
+    );
+    assert!(
+        stderr.contains("daemon is not running"),
+        "daemon status stderr must explain why it failed\nstderr:\n{stderr}"
+    );
+
+    // `daemon status --json` should still exit 1 in the no-daemon case
+    // but emit `{}` on stdout per the documented contract.
+    let daemon_status_json = run(project.path(), ["daemon", "status", "--json"]);
+    assert!(
+        !daemon_status_json.status.success(),
+        "daemon status --json with no daemon must exit non-zero\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&daemon_status_json.stdout),
+        String::from_utf8_lossy(&daemon_status_json.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&daemon_status_json.stdout);
+    assert_eq!(
+        stdout.trim(),
+        "{}",
+        "daemon status --json with no daemon must emit `{{}}` on stdout, got: {stdout}"
     );
 }

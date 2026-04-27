@@ -82,7 +82,7 @@ pub mod tool_args {
         DirectCallersArgs, ExportGraphArgs, FindCyclesArgs, FindUnusedArgs, GitVersionRef,
         IsNodeInCycleArgs, PaginationArgs, RelationQueryArgs, RelationType, SearchFilters,
         SemanticDiffArgs, SemanticDiffFilters, SemanticSearchArgs, ShowDependenciesArgs,
-        SubgraphArgs, TracePathArgs, UnusedScope,
+        SubgraphArgs, TracePathArgs, UnusedScope, WorkspaceStatusArgs,
     };
 }
 
@@ -98,6 +98,26 @@ pub mod tool_handlers {
         execute_get_dependencies, execute_is_node_in_cycle, execute_relation_query,
         execute_semantic_diff, execute_subgraph, execute_trace_path,
     };
+    pub use crate::tools::execute_workspace_status;
+}
+
+// `STEP_7` MAJOR 2 test surface — re-exports of the workspace_status
+// tool entry points so integration tests can drive the per-request
+// thread-local LogicalWorkspace override path end-to-end. Mirrors what
+// the rmcp tool dispatch wires at runtime (resolved_workspace ->
+// with_workspace_override -> tool execution).
+//
+// Folded into `tool_args` and `tool_handlers` to avoid a name
+// collision with the private `mod tools;` declaration above. We do not
+// re-export under `pub mod tools` because that would shadow the
+// private module path used everywhere else in the crate.
+
+/// `STEP_7` MAJOR 2 test surface — public access to the per-request
+/// thread-local workspace override so integration tests can bind a
+/// LogicalWorkspace before invoking workspace-aware tools (mirroring
+/// the runtime dispatch in `SqryServer::execute_tool_for_request`).
+pub mod workspace_session_test_api {
+    pub use crate::workspace_session::{current_logical_workspace, with_workspace_override};
 }
 
 /// Test-only setup helpers. Integration tests must initialize the

@@ -17,7 +17,21 @@ pub struct LspOptions {
     #[arg(long, value_name = "ADDR")]
     pub socket: Option<String>,
 
-    /// Explicit index root (defaults to first workspace folder containing .sqry-index)
+    /// Explicit index root (defaults to first workspace folder containing .sqry-index).
+    ///
+    /// **Deprecation note (Step 10).** When the LSP `initialize` request
+    /// carries an in-band workspace signal — either an
+    /// `initializationOptions.sqry.workspace` classification hint
+    /// (a `{ folders, classification }` payload that the `sqry-vscode`
+    /// extension constructs from the active `.code-workspace` after
+    /// Step 5) **or** an `initializationOptions.sqry.indexRoot` value
+    /// (forwarded from the extension's `sqry.indexRoot` setting in
+    /// Step 10 iter3) — `--index-root` is redundant: the `initialize`
+    /// payload already communicates the canonical workspace identity
+    /// in-band. The server emits a single `tracing::warn!` event at
+    /// session start when the flag is combined with either in-band
+    /// signal, with a pointer to `docs/cli/workspace-wrapper-migration.md`.
+    /// The flag continues to work — this is informational, not a refusal.
     #[arg(long, value_name = "PATH")]
     pub index_root: Option<PathBuf>,
 

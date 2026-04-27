@@ -11,6 +11,7 @@ import {
   SqryListCircularDependenciesResult,
   SqryCycle,
   SqryListUnusedSymbolsResult,
+  SqryWorkspaceStatus,
 } from "./lspProtocol";
 import { SqryClient } from "./sqryClient";
 import { SqryResult, SqrySymbolResult, SqryTextMatch } from "./types";
@@ -475,6 +476,20 @@ class SqryTreeDataProvider
   private indexStatus: SqryIndexStatus | null = null;
   private readonly indexStatusMap = new Map<string, SqryIndexStatus>();
   private hasSearched = false;
+  /**
+   * Aggregate workspace status surface (STEP_5). When non-null this
+   * supersedes `indexStatusMap` for tree rendering — there is exactly
+   * one workspace, classification per source root lives inside the
+   * aggregate. The tree shows a per-source-root row for each entry.
+   */
+  private workspaceStatus: SqryWorkspaceStatus | null = null;
+  /**
+   * Loading phase mirror — when truthy the tree renders a single
+   * skeleton row in place of the normal content. Set via
+   * [`setLoadingPhase`].
+   */
+  private loadingPhase: "loading" | "ready" | "failed" = "ready";
+  private failedReason: string | null = null;
 
   // Filter / sort state
   private unfilteredSymbols: SqrySymbolResult[] = [];
@@ -865,8 +880,58 @@ class SqryTreeDataProvider
     return this.getElementChildren(element);
   }
 
+  /**
+   * Update the loading-phase mirror (STEP_5 acceptance criterion 2).
+   * `loading` collapses the tree to a single skeleton row regardless
+   * of the underlying status / search state, so the user never sees
+   * empty / "no results" flicker during workspace resolution.
+   */
+  public setLoadingPhase(phase: "loading" | "ready" | "failed", reason?: string): void {
+    this.loadingPhase = phase;
+    this.failedReason = reason ?? null;
+    this._onDidChangeTreeData.fire();
+  }
+
+  /**
+   * Replace the aggregate workspace status surface (STEP_5
+   * acceptance criterion 5). Supersedes the legacy
+   * `replaceIndexStatusMap()` for the new code path; both remain
+   * present so the search-results panel can show drill-down detail
+   * without a second LSP round-trip.
+   */
+  public setWorkspaceStatus(status: SqryWorkspaceStatus | null): void {
+    this.workspaceStatus = status;
+    this._onDidChangeTreeData.fire();
+  }
+
   /** Get children for root level (no parent element). */
   private getRootChildren(): vscode.TreeItem[] {
+    // STEP_5 contract — single skeleton row during loading. Must
+    // be checked BEFORE search results so a stale result from a
+    // previous workspace doesn't leak through during reload.
+    if (this.loadingPhase === "loading") {
+      const skeleton = new vscode.TreeItem(
+        "sqry: resolving workspace…",
+        vscode.TreeItemCollapsibleState.None,
+      );
+      skeleton.iconPath = new vscode.ThemeIcon("loading~spin");
+      skeleton.contextValue = "sqry.skeleton";
+      return [skeleton];
+    }
+    if (this.loadingPhase === "failed") {
+      const item = new vscode.TreeItem(
+        this.failedReason ? `sqry: unavailable — ${this.failedReason}` : "sqry: unavailable",
+        vscode.TreeItemCollapsibleState.None,
+      );
+      item.iconPath = new vscode.ThemeIcon("error");
+      item.command = {
+        command: "sqry.showOutput",
+        title: "View Logs",
+      };
+      item.contextValue = "sqry.unavailable";
+      return [item];
+    }
+
     // Show search results if we have them
     if (this.symbols.length || this.textMatches.length) {
       const categories: vscode.TreeItem[] = [];
@@ -1736,6 +1801,19 @@ export class SearchPanel implements vscode.Disposable {
    */
   public getIndexStatusMap(): Map<string, SqryIndexStatus> {
     return this.treeDataProvider.getIndexStatusMap();
+  }
+
+  /**
+   * Forward STEP_5 loading-phase transitions to the tree provider.
+   * `loading` collapses the tree to a skeleton row.
+   */
+  public setLoadingPhase(phase: "loading" | "ready" | "failed", reason?: string): void {
+    this.treeDataProvider.setLoadingPhase(phase, reason);
+  }
+
+  /** Replace the aggregate workspace status surface (STEP_5). */
+  public setWorkspaceStatus(status: SqryWorkspaceStatus | null): void {
+    this.treeDataProvider.setWorkspaceStatus(status);
   }
 
   /**

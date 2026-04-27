@@ -12,6 +12,7 @@ use sqry_core::graph::unified::{NodeEntry, NodeKind, StagingGraph, StagingOp, St
 use sqry_core::plugin::PluginManager;
 use sqry_core::project::{Project, ProjectManager};
 use sqry_core::query::QueryExecutor;
+use sqry_core::workspace::{Classification, HeuristicVerdict, LogicalWorkspace, MemberReason};
 use sqry_plugin_registry::create_plugin_manager;
 use std::collections::HashMap;
 use std::env;
@@ -33,6 +34,17 @@ pub struct SessionManager {
     graph_cache: Arc<RwLock<Option<Arc<CodeGraph>>>>,
     /// Project manager for multi-project support (per `PROJECT_ROOT_SPEC.md` Section 9).
     project_manager: Arc<ProjectManager>,
+    /// Logical workspace identity owned by the session.
+    ///
+    /// Wrapped in `Arc<RwLock<Arc<_>>>` so handlers can read the current
+    /// workspace lock-free via `Arc::clone` while a future
+    /// `sqry/workspaceUpdate` request (Step 5) can atomically swap in a
+    /// new workspace without invalidating in-flight reads. The default
+    /// value at construction is an `AnonymousMultiRoot` over the
+    /// `LspOptions::index_root` (or current dir), which preserves the
+    /// pre-Step-4 single-root behaviour until `initialize()` resolves
+    /// the real workspace.
+    logical_workspace: Arc<RwLock<Arc<LogicalWorkspace>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -132,6 +144,13 @@ fn canonicalize_with_missing_tail(path: &Path) -> Result<PathBuf> {
 }
 
 impl SessionManager {
+    /// Construct a fresh `SessionManager` from CLI options.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if [`LogicalWorkspace::anonymous_multi_root`] cannot
+    /// construct an empty workspace — which is unreachable by contract
+    /// (an empty folder list never canonicalizes anything).
     #[must_use]
     pub fn new(options: LspOptions) -> Self {
         let root =
@@ -146,6 +165,26 @@ impl SessionManager {
         // Initialize ProjectManager with mode from config (per PROJECT_ROOT_SPEC.md Section 9.1)
         let project_manager = Arc::new(ProjectManager::new(config.project_root_mode));
 
+        // Default LogicalWorkspace covers the single index_root / cwd as an
+        // anonymous multi-root; initialize() will replace it with the real
+        // workspace per §1.3 once the LSP handshake delivers
+        // workspace_folders + initializationOptions.
+        let logical_workspace = Arc::new(RwLock::new(Arc::new(
+            LogicalWorkspace::anonymous_multi_root(vec![root.clone()]).unwrap_or_else(|err| {
+                log::warn!(
+                    "failed to construct default LogicalWorkspace at {} ({err}); falling back to single_root",
+                    root.display()
+                );
+                LogicalWorkspace::single_root(root.clone()).unwrap_or_else(|err2| {
+                    log::error!(
+                        "failed to construct any default LogicalWorkspace ({err2}); using empty anonymous multi-root"
+                    );
+                    LogicalWorkspace::anonymous_multi_root(Vec::new())
+                        .expect("empty AnonymousMultiRoot is always constructible")
+                })
+            }),
+        )));
+
         Self {
             options: Arc::new(options),
             root_path: Arc::new(root),
@@ -154,6 +193,7 @@ impl SessionManager {
             documents: DocumentStore::new(),
             graph_cache: Arc::new(RwLock::new(None)),
             project_manager,
+            logical_workspace,
         }
     }
 
@@ -365,6 +405,51 @@ impl SessionManager {
     pub fn shutdown(&self) {
         log::info!("Shutting down SessionManager");
         self.project_manager.shutdown();
+    }
+
+    /// Snapshot the current `Arc<LogicalWorkspace>`. The returned handle is
+    /// stable for the duration of the caller — even if a concurrent
+    /// `sqry/workspaceUpdate` swaps the inner `Arc`, this snapshot keeps
+    /// pointing at the value seen at call time.
+    #[must_use]
+    pub fn logical_workspace(&self) -> Arc<LogicalWorkspace> {
+        Arc::clone(&self.logical_workspace.read())
+    }
+
+    /// Replace the session's logical workspace.
+    ///
+    /// Called by `initialize()` once the §1.3 5-step resolution order has
+    /// produced a `LogicalWorkspace`, and (in Step 5) by the
+    /// `sqry/workspaceUpdate` handler when the client wants to swap in a
+    /// freshly resolved workspace without restarting the LSP.
+    ///
+    /// Concurrent readers that already cloned the prior `Arc` keep their
+    /// view stable (Arc-clone semantics); future readers see the new
+    /// workspace.
+    pub fn set_logical_workspace(&self, workspace: Arc<LogicalWorkspace>) {
+        // STEP_12 — the user-visible aggregate telemetry line is the
+        // tracing::info! event under target `sqry::workspace` emitted
+        // by `server::initialize` (the resolution site). The detailed
+        // debug below is intentionally NOT under that target so the
+        // regression guard
+        // (`sqry-lsp/tests/telemetry_resolution.rs::no_per_folder_resolution_lines_emitted`)
+        // can pin "exactly ONE INFO event under sqry::workspace per
+        // resolution" without picking up bookkeeping logs from setter
+        // call sites (e.g. `sqry/workspaceUpdate`).
+        let workspace_id_short = workspace.workspace_id().as_short_hex();
+        let source_root_count = workspace.source_roots().len();
+        let member_folder_count = workspace.member_folders().len();
+        tracing::debug!(
+            target: "sqry::workspace::session",
+            workspace_id_short = %workspace_id_short,
+            source_root_count,
+            member_folder_count,
+            project_root_mode = %workspace.project_root_mode(),
+            identity = ?workspace.identity(),
+            "set_logical_workspace"
+        );
+        let mut guard = self.logical_workspace.write();
+        *guard = workspace;
     }
 
     fn current_index_root(&self) -> PathBuf {
@@ -874,6 +959,588 @@ fn resolve_root_path(index_root: Option<PathBuf>) -> Result<PathBuf> {
 fn build_plugin_manager() -> PluginManager {
     create_plugin_manager()
 }
+
+// ---------------------------------------------------------------------------
+// LogicalWorkspace resolution (§1.3 of 03_IMPLEMENTATION_PLAN.md)
+// ---------------------------------------------------------------------------
+//
+// The five resolution branches are exposed as separate public functions so
+// the integration suite (`sqry-lsp/tests/multi_root_logical_workspace.rs`)
+// can exercise each branch deterministically. `resolve_logical_workspace`
+// composes them in the documented short-circuit order.
+
+/// Inputs needed to resolve the §1.3 [`LogicalWorkspace`] from an LSP
+/// `initialize` request. All fields are pre-extracted by `server::initialize`
+/// so this resolver stays unit-testable without a live LSP transport.
+#[derive(Debug, Clone, Default)]
+pub struct WorkspaceResolutionInputs {
+    /// `params.workspace_folders[*]` mapped to local filesystem paths.
+    /// Empty when the client did not advertise workspace folders.
+    pub workspace_folders: Vec<PathBuf>,
+    /// `--index-root` / `LspOptions::index_root`. Bounds the security
+    /// envelope (acceptance criterion 7) and feeds branch 2.
+    pub index_root: Option<PathBuf>,
+    /// Decoded `initializationOptions.sqry.workspace` payload (branch 1).
+    /// Accepts a JSON object that round-trips through
+    /// [`serde_json::from_value`] into [`LogicalWorkspace`].
+    pub init_options_workspace: Option<serde_json::Value>,
+    /// Decoded `initializationOptions.sqry.workspaceFile` (branch 4): path
+    /// to a sibling `.code-workspace` file the extension passes through.
+    pub init_options_workspace_file: Option<PathBuf>,
+}
+
+/// Branch number reported by [`resolve_logical_workspace`] so the caller
+/// can log which §1.3 step produced the workspace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolutionBranch {
+    /// Step 1 — `initializationOptions.sqry.workspace` produced a workspace.
+    InitializationOptions,
+    /// Step 2 — `--index-root` contained a `.sqry-workspace` file.
+    IndexRootSqryWorkspace,
+    /// Step 3 — a `workspace_folders[*]` directory contained a
+    /// `.sqry-workspace` file.
+    WorkspaceFolderSqryWorkspace,
+    /// Step 4 — a sibling `.code-workspace` was identifiable.
+    SiblingCodeWorkspace,
+    /// Step 5 — fall back to `AnonymousMultiRoot`.
+    AnonymousMultiRoot,
+}
+
+const SQRY_WORKSPACE_FILENAME: &str = ".sqry-workspace";
+
+/// Branch 1 — accept a fully serialized [`LogicalWorkspace`] from
+/// `initializationOptions.sqry.workspace`. Returns `Ok(None)` when the
+/// caller did not provide the option; `Err` only on a present-but-invalid
+/// payload so the caller can surface the failure rather than silently
+/// fall through.
+///
+/// STEP_5 codex iter1 MAJOR fix: when the payload is the lightweight
+/// **extension-side classification hint** (a JSON object with a top-level
+/// `folders` array and a `classification` key — see
+/// `sqry-vscode/src/sqryClient.ts::SqryWorkspaceInitializationPayload`),
+/// the function returns `Ok(None)` so the resolver falls through to
+/// branch 4 (`workspaceFile` path), which loads + classifies the
+/// `.code-workspace` in-process. This keeps the contract that the
+/// extension parses + classifies + sends both shapes while preserving the
+/// existing strict-deserialize behaviour for genuine `LogicalWorkspace`
+/// payloads (e.g. produced by other automation).
+///
+/// # Errors
+///
+/// Returns an error when the JSON payload is present, is not a
+/// recognized extension-side hint, and cannot be deserialized into
+/// a [`LogicalWorkspace`].
+pub fn resolve_step_1(
+    init_options_workspace: Option<&serde_json::Value>,
+) -> Result<Option<LogicalWorkspace>> {
+    let Some(value) = init_options_workspace else {
+        return Ok(None);
+    };
+    if is_extension_classification_hint(value) {
+        // Extension-side classification hint — branch 4 owns the actual
+        // resolution. Soft fall-through.
+        return Ok(None);
+    }
+    let workspace: LogicalWorkspace = serde_json::from_value(value.clone()).with_context(
+        || "initializationOptions.sqry.workspace: payload did not deserialize as LogicalWorkspace",
+    )?;
+    Ok(Some(workspace))
+}
+
+/// Detect the lightweight classification-hint shape produced by
+/// `sqry-vscode/src/extension.ts` (the parsed `.code-workspace`):
+///
+/// - top-level object with a `folders` ARRAY field, AND
+/// - a `classification` field that is either `null` or an OBJECT.
+///
+/// Both fields must be present; this is intentionally strict so a
+/// hand-crafted `LogicalWorkspace` payload (which carries
+/// `source_roots`, `member_folders`, `workspace_id`, etc., but no
+/// `classification` key) does not get misclassified as a hint.
+fn is_extension_classification_hint(value: &serde_json::Value) -> bool {
+    let Some(obj) = value.as_object() else {
+        return false;
+    };
+    let folders_ok = obj.get("folders").is_some_and(serde_json::Value::is_array);
+    let classification_ok = obj
+        .get("classification")
+        .is_some_and(|v| v.is_null() || v.is_object());
+    folders_ok && classification_ok
+}
+
+/// Branch 2 — `--index-root` is set AND that path contains a
+/// `.sqry-workspace`. Returns `Ok(None)` when either precondition is
+/// unmet; `Err` only on a present-but-malformed registry.
+///
+/// # Errors
+///
+/// Returns an error when the registry file exists but cannot be parsed.
+pub fn resolve_step_2(index_root: Option<&Path>) -> Result<Option<LogicalWorkspace>> {
+    let Some(root) = index_root else {
+        return Ok(None);
+    };
+    let candidate = root.join(SQRY_WORKSPACE_FILENAME);
+    if !candidate.is_file() {
+        return Ok(None);
+    }
+    let workspace = LogicalWorkspace::from_sqry_workspace(&candidate).with_context(|| {
+        format!(
+            "failed to load .sqry-workspace at {} (branch 2)",
+            candidate.display()
+        )
+    })?;
+    Ok(Some(workspace))
+}
+
+/// Branch 3 — any `workspace_folders[*]` directory contains a
+/// `.sqry-workspace`. The first folder (in client-provided order) that
+/// holds the registry wins. Returns `Ok(None)` when no folder qualifies.
+///
+/// # Errors
+///
+/// Returns an error when the first qualifying registry file fails to
+/// parse.
+pub fn resolve_step_3(workspace_folders: &[PathBuf]) -> Result<Option<LogicalWorkspace>> {
+    for folder in workspace_folders {
+        let candidate = folder.join(SQRY_WORKSPACE_FILENAME);
+        if !candidate.is_file() {
+            continue;
+        }
+        let workspace = LogicalWorkspace::from_sqry_workspace(&candidate).with_context(|| {
+            format!(
+                "failed to load .sqry-workspace at {} (branch 3)",
+                candidate.display()
+            )
+        })?;
+        return Ok(Some(workspace));
+    }
+    Ok(None)
+}
+
+/// Branch 4 — `initializationOptions.sqry.workspaceFile` points at a
+/// `.code-workspace`. Returns `Ok(None)` when the option is absent.
+///
+/// `heuristic_fn` is the per-folder classifier; the LSP supplies a
+/// best-effort heuristic (currently `HeuristicVerdict::Unknown` for
+/// every folder, which yields the §1.3 last-resort default of
+/// `Member::NoLanguagePluginMatch`). Future steps will wire a real
+/// heuristic here.
+///
+/// # Errors
+///
+/// Returns an error when the file is missing or cannot be parsed as a
+/// `.code-workspace`.
+pub fn resolve_step_4(
+    workspace_file: Option<&Path>,
+    heuristic_fn: &dyn Fn(&Path) -> HeuristicVerdict,
+) -> Result<Option<LogicalWorkspace>> {
+    let Some(path) = workspace_file else {
+        return Ok(None);
+    };
+    let workspace =
+        LogicalWorkspace::from_code_workspace(path, heuristic_fn).with_context(|| {
+            format!(
+                "failed to load .code-workspace at {} (branch 4)",
+                path.display()
+            )
+        })?;
+    Ok(Some(workspace))
+}
+
+/// Branch 5 — the last-resort fallback: synthesize an
+/// [`LogicalWorkspace::anonymous_multi_root`] from the client-provided
+/// `workspace_folders`. When no folders were advertised, falls back to
+/// the session root path so the workspace still has a single source root.
+///
+/// This branch is infallible by contract; any canonicalization failure
+/// is reported as `LogicalWorkspaceError` from the constructor.
+///
+/// # Errors
+///
+/// Returns an error when no folders can be canonicalized at all.
+pub fn resolve_step_5(
+    workspace_folders: Vec<PathBuf>,
+    fallback_root: &Path,
+) -> Result<LogicalWorkspace> {
+    let folders = if workspace_folders.is_empty() {
+        vec![fallback_root.to_path_buf()]
+    } else {
+        workspace_folders
+    };
+    LogicalWorkspace::anonymous_multi_root(folders).with_context(|| {
+        format!(
+            "AnonymousMultiRoot fallback failed for root {}",
+            fallback_root.display()
+        )
+    })
+}
+
+/// The default heuristic for branch 4: returns `Unknown` for every
+/// folder, which causes [`LogicalWorkspace::from_code_workspace`] to
+/// apply the §1.3 last-resort default (`Member::NoLanguagePluginMatch`).
+/// A future step will replace this with a real per-folder classifier.
+pub fn default_workspace_heuristic() -> impl Fn(&Path) -> HeuristicVerdict {
+    |_path: &Path| HeuristicVerdict::Unknown
+}
+
+/// Resolve a [`LogicalWorkspace`] per §1.3 of the implementation plan.
+///
+/// Short-circuits in the documented order; never falls back beyond
+/// branch 5.
+///
+/// # Errors
+///
+/// Returns the first hard failure encountered in any branch. Soft misses
+/// (option absent, file not present) fall through to the next branch.
+pub fn resolve_logical_workspace(
+    inputs: &WorkspaceResolutionInputs,
+    fallback_root: &Path,
+    heuristic_fn: &dyn Fn(&Path) -> HeuristicVerdict,
+) -> Result<(LogicalWorkspace, ResolutionBranch)> {
+    if let Some(ws) = resolve_step_1(inputs.init_options_workspace.as_ref())? {
+        return Ok((ws, ResolutionBranch::InitializationOptions));
+    }
+    if let Some(ws) = resolve_step_2(inputs.index_root.as_deref())? {
+        return Ok((ws, ResolutionBranch::IndexRootSqryWorkspace));
+    }
+    if let Some(ws) = resolve_step_3(&inputs.workspace_folders)? {
+        return Ok((ws, ResolutionBranch::WorkspaceFolderSqryWorkspace));
+    }
+    if let Some(ws) = resolve_step_4(inputs.init_options_workspace_file.as_deref(), heuristic_fn)? {
+        return Ok((ws, ResolutionBranch::SiblingCodeWorkspace));
+    }
+    let ws = resolve_step_5(inputs.workspace_folders.clone(), fallback_root)?;
+    Ok((ws, ResolutionBranch::AnonymousMultiRoot))
+}
+
+/// Compute an aggregate [`sqry_core::workspace::WorkspaceIndexStatus`] over
+/// every source root in `workspace`.
+///
+/// Each entry's [`sqry_core::workspace::SourceRootStatus`] is derived from
+/// on-disk graph state: present + readable manifest -> `Ok` (with
+/// last-modified mtime + symbol count where available), absent ->
+/// `Missing`, build lock present -> `Building`, IO/parse failure ->
+/// `Error`. The aggregate is built fresh on every call; persistence /
+/// caching belongs to a future step.
+#[must_use]
+pub fn aggregate_workspace_index_status(
+    workspace: &LogicalWorkspace,
+) -> sqry_core::workspace::WorkspaceIndexStatus {
+    use sqry_core::graph::unified::persistence::GraphStorage;
+    use sqry_core::workspace::{SourceRootIndexState, SourceRootStatus, WorkspaceWarning};
+
+    let mut entries = Vec::with_capacity(workspace.source_roots().len());
+    let mut warnings: Vec<WorkspaceWarning> = Vec::new();
+    for source_root in workspace.source_roots() {
+        let storage = GraphStorage::new(&source_root.path);
+        let snapshot_path = storage.snapshot_path();
+        let lock_path = source_root.path.join(".sqry/graph/build.lock");
+        let lock_present = lock_path.is_file();
+
+        let (status, last_indexed_at) = if lock_present {
+            (SourceRootIndexState::Building, None)
+        } else if !storage.exists() || !storage.snapshot_exists() {
+            (SourceRootIndexState::Missing, None)
+        } else {
+            match fs::metadata(snapshot_path) {
+                Ok(meta) => {
+                    let modified = meta.modified().ok();
+                    (SourceRootIndexState::Ok, modified)
+                }
+                Err(_) => (SourceRootIndexState::Error, None),
+            }
+        };
+
+        // STEP_11_4 — re-probe `<root>/.sqry/classpath/` so live status
+        // reflects current on-disk state. Probe failures other than
+        // NotFound surface as `WorkspaceWarning::ClasspathProbeFailed`;
+        // absence of the dir is the common-case non-event.
+        let classpath_probe = source_root.path.join(".sqry").join("classpath");
+        if let Err(err) = fs::metadata(&classpath_probe)
+            && err.kind() != std::io::ErrorKind::NotFound
+        {
+            warnings.push(WorkspaceWarning::ClasspathProbeFailed {
+                source_root: source_root.path.clone(),
+                detail: err.to_string(),
+            });
+        }
+
+        entries.push(SourceRootStatus {
+            path: source_root.path.clone(),
+            status,
+            last_indexed_at,
+            symbol_count: None,
+            // STEP_11_4 — surface auto-populated `SourceRoot.classpath_dir`
+            // through the per-root status so LSP / MCP / CLI consumers
+            // render JVM-classpath presence from the same source-of-truth.
+            classpath_dir: source_root.classpath_dir.clone(),
+        });
+    }
+    let mut aggregate =
+        sqry_core::workspace::WorkspaceIndexStatus::from_source_root_statuses(entries);
+    for warning in warnings {
+        aggregate.push_warning(warning);
+    }
+    aggregate
+}
+
+/// STEP_11_4 — aggregator variant that folds in extra
+/// [`sqry_core::workspace::WorkspaceWarning`] entries (e.g. from a
+/// `sqry_lang_rust::macro_expander::expand_in_workspace` outcome)
+/// before the aggregate is returned. Without this, macro-expansion
+/// warnings produced by the bridge never reach the user-visible
+/// status payload.
+#[must_use]
+pub fn aggregate_workspace_index_status_with_warnings(
+    workspace: &LogicalWorkspace,
+    extra_warnings: Vec<sqry_core::workspace::WorkspaceWarning>,
+) -> sqry_core::workspace::WorkspaceIndexStatus {
+    let mut aggregate = aggregate_workspace_index_status(workspace);
+    for warning in extra_warnings {
+        aggregate.push_warning(warning);
+    }
+    aggregate
+}
+
+/// STEP_11_4 iter3 — structural validation of every source root for
+/// Rust macro-expansion compatibility. Produces one
+/// [`sqry_core::workspace::WorkspaceWarning::MacroExpansionInvalidRoot`]
+/// per source root that fails the `MacroExpander::new` guard
+/// (root empty / not absolute / does not exist on disk). This is the
+/// production producer that feeds
+/// [`build_workspace_status_info`] so the live `sqry/workspaceStatus`
+/// payload carries the warning surface.
+///
+/// The check runs `MacroExpander::new(MacroExpanderConfig { enabled:
+/// true, workspace_root: root.path, .. })` per source root. The
+/// `enabled: true` flag is required to bypass the
+/// `MacroExpandError::Disabled` arm so the structural validators
+/// (workspace-root-empty, workspace-root-not-absolute,
+/// workspace-root-not-found) are exercised. The expander itself is
+/// dropped immediately — no cargo expand process is spawned, no
+/// arbitrary code is executed.
+#[must_use]
+pub fn collect_macro_expansion_warnings(
+    workspace: &LogicalWorkspace,
+) -> Vec<sqry_core::workspace::WorkspaceWarning> {
+    use sqry_core::workspace::WorkspaceWarning;
+    use sqry_lang_rust::macro_expander::{MacroExpandError, MacroExpander, MacroExpanderConfig};
+
+    let mut warnings = Vec::new();
+    for root in workspace.source_roots() {
+        let config = MacroExpanderConfig {
+            enabled: true,
+            show_warning: false,
+            workspace_root: root.path.clone(),
+            ..MacroExpanderConfig::default()
+        };
+        if let Err(MacroExpandError::InvalidWorkspaceRoot(detail)) = MacroExpander::new(config) {
+            warnings.push(WorkspaceWarning::MacroExpansionInvalidRoot {
+                source_root: root.path.clone(),
+                detail,
+            });
+        }
+        // All other arms (Disabled, success, CargoExpandNotFound at
+        // expand_file time, etc.) are not surfaced here — only
+        // structural InvalidWorkspaceRoot validation is the
+        // production warning producer.
+    }
+    warnings
+}
+
+/// Serializable wire view returned by `sqry/workspaceStatus` — see
+/// `handlers::workspace_status::handle_workspace_status`. Lives next to
+/// the resolution helpers because it composes the same accessors.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct WorkspaceStatusInfo {
+    /// Short BLAKE3 prefix for human-readable surfaces.
+    pub workspace_id_short: String,
+    /// Full BLAKE3 hex digest (acceptance criterion 6).
+    pub workspace_id_full: String,
+    /// Per-source-root + summary counters (§1.4 aggregate contract).
+    pub aggregate: sqry_core::workspace::WorkspaceIndexStatus,
+    /// Workspace-level `project_root_mode` (string-form).
+    pub project_root_mode: String,
+    /// Source root paths (canonical).
+    pub source_roots: Vec<PathBuf>,
+    /// Member folder paths + reason.
+    pub member_folders: Vec<MemberFolderInfo>,
+    /// Excluded paths (canonical).
+    pub exclusions: Vec<PathBuf>,
+}
+
+/// Wire-side view of [`sqry_core::workspace::MemberFolder`].
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MemberFolderInfo {
+    /// Canonical absolute path.
+    pub path: PathBuf,
+    /// Why the folder was classified as a member (camelCase per
+    /// `sqry-core`'s serde rename).
+    pub reason: MemberReason,
+}
+
+/// Build the wire-side `WorkspaceStatusInfo` for the LSP handler.
+#[must_use]
+pub fn build_workspace_status_info(workspace: &LogicalWorkspace) -> WorkspaceStatusInfo {
+    // STEP_11_4 iter3 — validate every source root for macro-expansion
+    // compatibility and fold the resulting `MacroExpansionInvalidRoot`
+    // warnings into the live `WorkspaceIndexStatus.warnings` channel
+    // through `aggregate_workspace_index_status_with_warnings`. This
+    // closes iter2 MAJOR 3: `expand_in_workspace`'s warning channel
+    // is no longer dead production code; every `sqry/workspaceStatus`
+    // response carries the structural-validation outcome.
+    let macro_warnings = collect_macro_expansion_warnings(workspace);
+    let aggregate = aggregate_workspace_index_status_with_warnings(workspace, macro_warnings);
+    let source_roots = workspace
+        .source_roots()
+        .iter()
+        .map(|r| r.path.clone())
+        .collect();
+    let member_folders = workspace
+        .member_folders()
+        .iter()
+        .map(|m| MemberFolderInfo {
+            path: m.path.clone(),
+            reason: m.reason,
+        })
+        .collect();
+    WorkspaceStatusInfo {
+        workspace_id_short: workspace.workspace_id().as_short_hex(),
+        workspace_id_full: workspace.workspace_id().as_full_hex(),
+        aggregate,
+        project_root_mode: workspace.project_root_mode().to_string(),
+        source_roots,
+        member_folders,
+        exclusions: workspace.exclusions().to_vec(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Path classification — re-exported for handlers
+// ---------------------------------------------------------------------------
+
+/// Classification result enriched with a `MemberReason` when applicable.
+/// Re-exported so handlers do not need to import `sqry_core::workspace`
+/// directly.
+pub use sqry_core::workspace::Classification as PathClassification;
+pub use sqry_core::workspace::MemberReason as PathMemberReason;
+
+/// STEP_11_4 — verdict returned by [`SessionManager::evaluate_handler_gate`]
+/// for an LSP-handler URI. Each handler short-circuits on
+/// [`Self::Member`] and [`Self::Excluded`], returning an empty / `None`
+/// result without touching the graph; only [`Self::Continue`] (with
+/// `Source` or `Unknown` paths — `Unknown` is treated as "not in the
+/// workspace, fall through to today's per-repo behaviour") proceeds
+/// into the normal handler body.
+///
+/// The gate is invoked by every URI-keyed LSP handler (code_action,
+/// hover, document_symbol, workspace_symbol; see
+/// `sqry-lsp/tests/lsp_handler_member_excluded_contract.rs`) so the
+/// regression class STEP_11_4 was opened to close — "a non-status
+/// handler probes the filesystem per folder and bypasses the
+/// workspace classifier" — cannot re-emerge through any of those
+/// handler surfaces.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HandlerGate {
+    /// Handler should proceed with normal logic — the URI either
+    /// belongs to a registered source root, or is `Unknown` (outside
+    /// the workspace, where today's per-repo handler semantics
+    /// already apply).
+    Continue,
+    /// URI lives inside a member folder. Handlers must return the
+    /// "empty + partial" shape for their result type (`Ok(None)` for
+    /// LSP-standard handlers, an empty struct with `partial: true`
+    /// for the structured handlers we own).
+    Member(PathMemberReason),
+    /// URI lives inside an excluded folder. Handlers must return the
+    /// "empty + excluded" shape for their result type.
+    Excluded,
+}
+
+impl HandlerGate {
+    /// `true` when the gate authorises the handler body to run. The
+    /// inverse of `is_short_circuit`.
+    #[must_use]
+    pub fn allows_continue(&self) -> bool {
+        matches!(self, Self::Continue)
+    }
+
+    /// `true` when the handler must short-circuit (Member or
+    /// Excluded). Used by handlers that fold the gate into a single
+    /// `if gate.is_short_circuit() { return ...; }` line.
+    #[must_use]
+    pub fn is_short_circuit(&self) -> bool {
+        !self.allows_continue()
+    }
+
+    /// `true` for the [`Self::Member`] arm.
+    #[must_use]
+    pub fn is_member(&self) -> bool {
+        matches!(self, Self::Member(_))
+    }
+
+    /// `true` for the [`Self::Excluded`] arm.
+    #[must_use]
+    pub fn is_excluded(&self) -> bool {
+        matches!(self, Self::Excluded)
+    }
+}
+
+/// Classify `path` against the session's current logical workspace.
+///
+/// This is a thin wrapper around [`LogicalWorkspace::classify`] that
+/// handles the `Arc` indirection so handlers can call
+/// `session.classify_path(&abs_path)` without touching the lock.
+impl SessionManager {
+    /// Classify `path` against the current logical workspace.
+    #[must_use]
+    pub fn classify_path(&self, path: &Path) -> Classification {
+        self.logical_workspace().classify(path)
+    }
+
+    /// STEP_11_4 — evaluate the handler-level URI gate against the
+    /// current logical workspace. Returns the [`HandlerGate`] verdict
+    /// every URI-keyed LSP handler must consult before touching the
+    /// graph.
+    ///
+    /// The gate exists so member-folder and excluded-path requests
+    /// short-circuit through the same code path the
+    /// `sqry/indexStatus` handler already uses (STEP_4), preventing
+    /// the regression class where a non-status handler bypasses the
+    /// classifier and probes the filesystem per folder.
+    ///
+    /// # Behaviour
+    ///
+    /// - URI that does not parse to a file path → [`HandlerGate::Continue`]
+    ///   (the handler then handles the malformed URI with its own
+    ///   error path, as it always has).
+    /// - File-path classification:
+    ///     - [`Classification::Source`] → [`HandlerGate::Continue`]
+    ///     - [`Classification::Unknown`] → [`HandlerGate::Continue`]
+    ///       (out-of-workspace requests preserve today's per-repo
+    ///       semantics; the workspace classifier never adds new
+    ///       restrictions on them)
+    ///     - [`Classification::Member { reason }`] →
+    ///       [`HandlerGate::Member(reason)`]
+    ///     - [`Classification::Excluded`] → [`HandlerGate::Excluded`]
+    #[must_use]
+    pub fn evaluate_handler_gate(&self, uri: &tower_lsp::lsp_types::Url) -> HandlerGate {
+        let Ok(path) = uri.to_file_path() else {
+            // A malformed URI is not the gate's problem — let the
+            // handler's own error path produce its usual response.
+            return HandlerGate::Continue;
+        };
+        match self.classify_path(&path) {
+            Classification::Source | Classification::Unknown => HandlerGate::Continue,
+            Classification::Member { reason } => HandlerGate::Member(reason),
+            Classification::Excluded => HandlerGate::Excluded,
+        }
+    }
+}
+
+// `LogicalWorkspaceError: std::error::Error`, so anyhow's blanket
+// `From<E> for anyhow::Error` already covers conversion through `?`.
+// No explicit impl required.
 
 #[cfg(test)]
 mod tests {

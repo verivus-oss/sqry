@@ -100,7 +100,8 @@ pub const GRAPH_PHASE_5_NAME: &str = "Cross-language linking";
 
 // === Save Component Names (for progress reporting) ===
 
-/// Component: Node index (main .sqry-index file)
+/// Component: Symbol nodes inside the unified graph snapshot
+/// (`<workspace>/.sqry/graph/snapshot.sqry`).
 pub const SAVE_COMPONENT_SYMBOLS: &str = "symbols";
 
 /// Component: Trigram index for fuzzy search

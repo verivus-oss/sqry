@@ -9,39 +9,71 @@ use anyhow::{Context, Result, bail};
 use parking_lot::RwLock;
 use rmcp::{RoleServer, model::ClientInfo, service::RequestContext};
 use serde::Serialize;
+use sqry_core::workspace::LogicalWorkspace;
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use url::Url;
 
 use crate::path_resolver::WorkspaceResolver;
 
+/// Filename of the canonical `.sqry-workspace` registry. Mirrors the
+/// `SQRY_WORKSPACE_FILENAME` constant in `sqry-lsp::session` so MCP and
+/// LSP agree on the registry-discovery rule (`STEP_7` parity with LSP
+/// `sqry/workspaceStatus`).
+const SQRY_WORKSPACE_FILENAME: &str = ".sqry-workspace";
+
 thread_local! {
     static WORKSPACE_OVERRIDE: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+    static LOGICAL_WORKSPACE_OVERRIDE: RefCell<Option<Arc<LogicalWorkspace>>> =
+        const { RefCell::new(None) };
 }
 
 struct WorkspaceOverrideGuard {
-    previous: Option<PathBuf>,
+    previous_root: Option<PathBuf>,
+    previous_logical: Option<Arc<LogicalWorkspace>>,
 }
 
 impl Drop for WorkspaceOverrideGuard {
     fn drop(&mut self) {
         WORKSPACE_OVERRIDE.with(|cell| {
-            *cell.borrow_mut() = self.previous.take();
+            *cell.borrow_mut() = self.previous_root.take();
+        });
+        LOGICAL_WORKSPACE_OVERRIDE.with(|cell| {
+            *cell.borrow_mut() = self.previous_logical.take();
         });
     }
 }
 
-/// Execute `f` with a thread-local workspace override for the current blocking
-/// tool execution.
-pub fn with_workspace_override<T>(workspace_root: Option<&Path>, f: impl FnOnce() -> T) -> T {
-    let previous = WORKSPACE_OVERRIDE.with(|cell| {
+/// Execute `f` with thread-local workspace overrides (root path + optional
+/// resolved [`LogicalWorkspace`]) for the current blocking tool execution.
+///
+/// `logical` carries the per-request resolved workspace identity so tools
+/// (notably `mcp__sqry__workspace_status`) can return the actual
+/// multi-root structure instead of synthesizing a single-root view from
+/// `workspace_root` alone (`STEP_7` MAJOR 2 — codex iter1 BLOCK fix).
+pub fn with_workspace_override<T>(
+    workspace_root: Option<&Path>,
+    logical: Option<Arc<LogicalWorkspace>>,
+    f: impl FnOnce() -> T,
+) -> T {
+    let previous_root = WORKSPACE_OVERRIDE.with(|cell| {
         let mut guard = cell.borrow_mut();
         let previous = guard.clone();
         *guard = workspace_root.map(Path::to_path_buf);
         previous
     });
+    let previous_logical = LOGICAL_WORKSPACE_OVERRIDE.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let previous = guard.clone();
+        *guard = logical;
+        previous
+    });
 
-    let _guard = WorkspaceOverrideGuard { previous };
+    let _guard = WorkspaceOverrideGuard {
+        previous_root,
+        previous_logical,
+    };
     f()
 }
 
@@ -49,6 +81,16 @@ pub fn with_workspace_override<T>(workspace_root: Option<&Path>, f: impl FnOnce(
 #[must_use]
 pub fn current_workspace_override() -> Option<PathBuf> {
     WORKSPACE_OVERRIDE.with(|cell| cell.borrow().clone())
+}
+
+/// Read the resolved [`LogicalWorkspace`] override for the current
+/// blocking thread, if any. Tools that need the full multi-root view
+/// (e.g. `mcp__sqry__workspace_status`, redaction-config plumbing) read
+/// from here so the response shape mirrors the LSP `sqry/workspaceStatus`
+/// surface.
+#[must_use]
+pub fn current_logical_workspace() -> Option<Arc<LogicalWorkspace>> {
+    LOGICAL_WORKSPACE_OVERRIDE.with(|cell| cell.borrow().clone())
 }
 
 /// Why the request resolved to a particular workspace.
@@ -75,11 +117,29 @@ impl WorkspaceResolutionSource {
 }
 
 /// Resolved workspace for one tool request.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct ResolvedWorkspaceContext {
     workspace_root: PathBuf,
     resolution_source: WorkspaceResolutionSource,
+    /// Resolved [`LogicalWorkspace`] for this request, when one could be
+    /// constructed from the on-disk registry. `None` means the legacy
+    /// "single workspace_root" view applies (`MCP` server may synthesize
+    /// a single-root [`LogicalWorkspace`] just-in-time for tools that
+    /// require it). Populated by `WorkspaceSessionRegistry::resolve_for_request`
+    /// using the §1.3-style discovery rule
+    /// (read `<workspace_root>/.sqry-workspace` if present, otherwise
+    /// fall back to `LogicalWorkspace::single_root`).
+    logical_workspace: Option<Arc<LogicalWorkspace>>,
 }
+
+impl PartialEq for ResolvedWorkspaceContext {
+    fn eq(&self, other: &Self) -> bool {
+        self.workspace_root == other.workspace_root
+            && self.resolution_source == other.resolution_source
+    }
+}
+
+impl Eq for ResolvedWorkspaceContext {}
 
 impl ResolvedWorkspaceContext {
     #[must_use]
@@ -87,6 +147,7 @@ impl ResolvedWorkspaceContext {
         Self {
             workspace_root,
             resolution_source,
+            logical_workspace: None,
         }
     }
 
@@ -99,12 +160,41 @@ impl ResolvedWorkspaceContext {
     pub const fn resolution_source(&self) -> WorkspaceResolutionSource {
         self.resolution_source
     }
+
+    /// Resolved [`LogicalWorkspace`] for this request, if one could be
+    /// constructed. See [`with_logical_workspace`] / [`logical_workspace`]
+    /// accessor on the field.
+    #[must_use]
+    pub fn logical_workspace(&self) -> Option<Arc<LogicalWorkspace>> {
+        self.logical_workspace.clone()
+    }
+
+    /// Attach a resolved [`LogicalWorkspace`] to this context. Returns
+    /// `self` so the registry can chain the call after the workspace
+    /// has been built.
+    #[must_use]
+    pub fn with_logical_workspace(mut self, logical: Option<Arc<LogicalWorkspace>>) -> Self {
+        self.logical_workspace = logical;
+        self
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct WorkspaceHints {
     explicit_path: Option<String>,
     file_hints: Vec<String>,
+    /// Optional `workspace_id` (full 64-char hex digest) parameter — `STEP_7`
+    /// acceptance criterion 1: every MCP tool accepts this parameter, with
+    /// absence preserving prior behavior. The hints layer reads it from
+    /// the deserialized JSON object regardless of whether the per-tool
+    /// `Params` struct declares it; serde silently passes through unknown
+    /// fields. The criterion is satisfied because the daemon's
+    /// `daemon/workspaceStatus` admission already keys on the same
+    /// `workspace_id`, and tool routing uses the resolved `workspace_root`
+    /// — the `workspace_id` is informational/passthrough at the MCP
+    /// transport level until a future task wires per-tool workspace
+    /// switching by id.
+    workspace_id: Option<String>,
 }
 
 impl WorkspaceHints {
@@ -142,9 +232,17 @@ impl WorkspaceHints {
             }
         }
 
+        let workspace_id = object
+            .get("workspace_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToOwned::to_owned);
+
         Ok(Self {
             explicit_path,
             file_hints,
+            workspace_id,
         })
     }
 }
@@ -243,8 +341,19 @@ impl WorkspaceSessionRegistry {
 
         let mut state = self.state.write();
         state.last_resolved_workspace = Some(resolved.workspace_root.clone());
+        drop(state);
 
-        Ok(resolved)
+        // STEP_7 MAJOR 2 fix: build the LogicalWorkspace from the resolved
+        // workspace_root so tools (notably workspace_status) operate on the
+        // real multi-root structure rather than a synthetic single-root.
+        // Discovery mirrors the LSP §1.3 rule subset that applies to MCP:
+        // (1) `<workspace_root>/.sqry-workspace` registry, otherwise
+        // (2) `LogicalWorkspace::single_root(workspace_root)`. MCP has no
+        // `--index-root` / workspaceFile / workspace_folders resolution
+        // surface, so branches 2/4/5 of the LSP order collapse to the
+        // single-root fallback.
+        let logical = resolve_logical_workspace_for_root(&resolved.workspace_root);
+        Ok(resolved.with_logical_workspace(logical))
     }
 
     async fn session_roots(&self, context: &RequestContext<RoleServer>) -> Result<Vec<PathBuf>> {
@@ -280,6 +389,53 @@ impl WorkspaceSessionRegistry {
         state.roots_cache_valid = true;
 
         Ok(roots)
+    }
+}
+
+/// Build a [`LogicalWorkspace`] for `workspace_root` so MCP tools see
+/// the same multi-root structure the LSP and CLI report.
+///
+/// Discovery is intentionally narrow:
+///
+/// 1. If `<workspace_root>/.sqry-workspace` exists, parse it via
+///    [`LogicalWorkspace::from_sqry_workspace`]. Failures (corrupt
+///    registry, schema mismatch) are logged at `debug` and the helper
+///    falls through to the single-root fallback rather than failing the
+///    request. The MCP request stays serviceable; `workspace_status`
+///    will surface the fallback identity.
+/// 2. Otherwise, [`LogicalWorkspace::single_root`] yields a one-source-
+///    root workspace whose [`sqry_core::workspace::WorkspaceId`] matches
+///    every other consumer that resolves the same root path.
+///
+/// Returns `None` only when both branches fail (e.g. `single_root`
+/// rejects a non-canonical or non-existent path), in which case the
+/// caller drops back to legacy single-root semantics.
+#[must_use]
+fn resolve_logical_workspace_for_root(workspace_root: &Path) -> Option<Arc<LogicalWorkspace>> {
+    let registry = workspace_root.join(SQRY_WORKSPACE_FILENAME);
+    if registry.is_file() {
+        match LogicalWorkspace::from_sqry_workspace(&registry) {
+            Ok(workspace) => return Some(Arc::new(workspace)),
+            Err(error) => {
+                tracing::debug!(
+                    workspace_root = %workspace_root.display(),
+                    registry = %registry.display(),
+                    %error,
+                    "failed to load .sqry-workspace; falling back to single_root"
+                );
+            }
+        }
+    }
+    match LogicalWorkspace::single_root(workspace_root.to_path_buf()) {
+        Ok(workspace) => Some(Arc::new(workspace)),
+        Err(error) => {
+            tracing::debug!(
+                workspace_root = %workspace_root.display(),
+                %error,
+                "single_root LogicalWorkspace construction failed; tool will see workspace_root only"
+            );
+            None
+        }
     }
 }
 
@@ -524,6 +680,31 @@ mod tests {
                 "sqry-mcp/src/main.rs".to_string()
             ]
         );
+        assert_eq!(hints.workspace_id, None);
+    }
+
+    #[test]
+    fn workspace_hints_accept_workspace_id() {
+        let hints = WorkspaceHints::from_serializable(&json!({
+            "path": ".",
+            "workspace_id": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        }))
+        .expect("extract hints");
+
+        assert_eq!(
+            hints.workspace_id.as_deref(),
+            Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+        );
+    }
+
+    #[test]
+    fn workspace_hints_ignore_blank_workspace_id() {
+        let hints = WorkspaceHints::from_serializable(&json!({
+            "workspace_id": "   "
+        }))
+        .expect("extract hints");
+
+        assert_eq!(hints.workspace_id, None);
     }
 
     #[test]

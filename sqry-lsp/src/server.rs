@@ -2,11 +2,11 @@ use crate::cancel;
 use crate::config::ConfigDiff;
 use crate::handlers::LspHandlerError;
 use crate::handlers::{
-    ask, batch_counts, call_hierarchy, code_action, complexity_metrics, definition,
-    dependency_impact, direct_relations, document_symbol, execute_command, explain_symbol,
-    get_insights, graph_export, graph_stats, hierarchical_search, hover, index, is_node_in_cycle,
-    pattern_search, references, relations, search, semantic_diff, show_dependencies,
-    similar_symbols, subgraph, trace_path, workspace_symbol,
+    ask, batch_counts, call_hierarchy, code_action, codelens, complexity_metrics, definition,
+    dependency_impact, diagnostics, direct_relations, document_symbol, execute_command,
+    explain_symbol, get_insights, graph_export, graph_stats, hierarchical_search, hover, index,
+    is_node_in_cycle, pattern_search, references, relations, search, semantic_diff,
+    show_dependencies, similar_symbols, subgraph, trace_path, workspace_status, workspace_symbol,
 };
 use crate::protocol::{
     SqryAskParams, SqryAskResult, SqryBatchCallerCalleeCountParams,
@@ -28,6 +28,7 @@ use crate::protocol::{
     SqrySimilarSymbolsResult, SqrySubgraphParams, SqrySubgraphResult, SqryTracePathParams,
     SqryTracePathResult,
 };
+use crate::session;
 use crate::session::SessionManager;
 use log::{info, warn};
 use serde_json::{Value, json};
@@ -423,6 +424,33 @@ impl SqryLanguageServer {
         let status =
             index::index_status(&self.sessions, params.path.as_deref()).map_err(map_error)?;
         Ok(SqryIndexStatusResult { status })
+    }
+
+    /// Execute the custom `sqry/workspaceStatus` request.
+    ///
+    /// Returns a `WorkspaceStatusInfo` over the session's current
+    /// `LogicalWorkspace` — workspace identity (short + full BLAKE3
+    /// hex), aggregate per-source-root index status, project root
+    /// mode, and the source-root / member-folder / exclusion lists.
+    ///
+    /// # Errors
+    ///
+    /// Returns an RPC error when status assembly fails. Currently
+    /// infallible by construction; the result-shaped signature is
+    /// kept so future enhancements (e.g. daemon-backed counts) can
+    /// fail without breaking the wire contract.
+    ///
+    /// # Cancellation Safety
+    ///
+    /// This handler is cancellation-safe. It performs only `Arc::clone`
+    /// plus read-only filesystem probes (per-source-root snapshot stat)
+    /// and does not mutate shared state.
+    #[allow(clippy::unused_async)] // Required by tower_lsp custom_method signature; kept async for API consistency.
+    pub async fn handle_workspace_status(
+        &self,
+        params: workspace_status::SqryWorkspaceStatusParams,
+    ) -> RpcResult<workspace_status::SqryWorkspaceStatusResult> {
+        workspace_status::workspace_status(&self.sessions, &params).map_err(map_error)
     }
 
     /// Execute the custom `sqry/listFiles` request.
@@ -1006,11 +1034,104 @@ impl LanguageServer for SqryLanguageServer {
                 "registering {} workspace folder(s) with ProjectManager",
                 workspace_folders.len()
             );
-            self.sessions.set_workspace_folders(workspace_folders);
+            self.sessions
+                .set_workspace_folders(workspace_folders.clone());
         }
 
         if let Some(root) = &self.sessions.options().index_root {
             info!("using explicit index root: {}", root.display());
+        }
+
+        // Resolve LogicalWorkspace per §1.3 of 03_IMPLEMENTATION_PLAN.md.
+        //
+        // Parse `initializationOptions.sqry.{workspace,workspaceFile}` so
+        // branches 1 and 4 of the resolution order have inputs to consume.
+        // The 5-step resolver short-circuits in the documented order; we
+        // log which branch fired so STEP_12 can refine the wording later.
+        let (init_options_workspace, init_options_workspace_file, init_options_index_root) =
+            extract_sqry_init_options(params.initialization_options.as_ref());
+
+        // STEP_10 — wrapper deprecation. When the client supplies an
+        // `initializationOptions.sqry.workspace` payload (a
+        // `{ folders, classification }` workspace hint that the
+        // `sqry-vscode` extension's `workspaceClassifier` constructs
+        // after Step 5) AND the operator also passed `--index-root` on
+        // the command line (the legacy `sqry-workspace-wrapper`
+        // shape), emit one INFO/WARN line with a pointer to the
+        // migration doc. The flag continues to work — this is
+        // informational, not a refusal. See
+        // `docs/cli/workspace-wrapper-migration.md`.
+        emit_index_root_deprecation_warning_if_applicable(
+            self.sessions.options().index_root.as_deref(),
+            init_options_workspace.as_ref(),
+            init_options_index_root.as_deref(),
+        );
+
+        // STEP_10 iter3 wire-up — fold the in-band
+        // `initializationOptions.sqry.indexRoot` value (forwarded from
+        // the `sqry-vscode` extension's `sqry.indexRoot` setting) into
+        // the resolver's `index_root` input. The CLI `--index-root`
+        // flag wins when both are present (explicit operator override
+        // > settings-based default); when only the in-band value is
+        // present, it becomes the resolver's `index_root` so branch 2
+        // can consume it. See `docs/cli/workspace-wrapper-migration.md`.
+        let cli_index_root = self.sessions.options().index_root.clone();
+        let effective_index_root = cli_index_root
+            .clone()
+            .or_else(|| init_options_index_root.clone());
+        if cli_index_root.is_none()
+            && let Some(root) = init_options_index_root.as_deref()
+        {
+            tracing::info!(
+                target: "sqry::workspace",
+                index_root = %root.display(),
+                "Using in-band initializationOptions.sqry.indexRoot as canonical workspace root"
+            );
+        }
+
+        let resolution_inputs = session::WorkspaceResolutionInputs {
+            workspace_folders: workspace_folders.clone(),
+            index_root: effective_index_root,
+            init_options_workspace,
+            init_options_workspace_file,
+        };
+        let fallback_root = self.sessions.root_path().to_path_buf();
+        let heuristic = session::default_workspace_heuristic();
+        match session::resolve_logical_workspace(&resolution_inputs, &fallback_root, &heuristic) {
+            Ok((workspace, branch)) => {
+                // STEP_12 — single aggregate INFO line per LogicalWorkspace
+                // resolution. Target `sqry::workspace` so log filters can
+                // dial it independently of the rest of the LSP. Carries
+                // `workspace_id_short` (16 hex chars) for scannable logs;
+                // the DEBUG event below adds the full 64-char digest for
+                // forensic identity comparisons.
+                let workspace_id_short = workspace.workspace_id().as_short_hex();
+                let source_root_count = workspace.source_roots().len();
+                let member_count = workspace.member_folders().len();
+                let exclusion_count = workspace.exclusions().len();
+                tracing::info!(
+                    target: "sqry::workspace",
+                    workspace_id_short = %workspace_id_short,
+                    source_root_count,
+                    member_count,
+                    exclusion_count,
+                    branch = ?branch,
+                    "Resolved logical workspace"
+                );
+                tracing::debug!(
+                    target: "sqry::workspace",
+                    workspace_id_full = %workspace.workspace_id().as_full_hex(),
+                    branch = ?branch,
+                    "Resolved logical workspace (full id)"
+                );
+                self.sessions
+                    .set_logical_workspace(std::sync::Arc::new(workspace));
+            }
+            Err(err) => {
+                warn!(
+                    "LogicalWorkspace resolution failed ({err}); keeping default AnonymousMultiRoot constructed at session init"
+                );
+            }
         }
 
         let code_action_options = CodeActionOptions {
@@ -1051,6 +1172,30 @@ impl LanguageServer for SqryLanguageServer {
                 }),
                 file_operations: None,
             }),
+            // STEP_11_4 iter4 — advertise the diagnostic + code-lens
+            // capabilities the iter3 dispatchers wired into the
+            // tower_lsp `LanguageServer` trait. Without these,
+            // standard LSP clients never call `textDocument/diagnostic`
+            // or `textDocument/codeLens` because the server signalled
+            // it does not support them. The advertised options use
+            // the simplest server-side defaults — no resolve_provider,
+            // no workspace_diagnostic, no inter_file_dependencies —
+            // because the gated handlers return empty in steady state
+            // (sqry has no diagnostic / code-lens producer); the
+            // capability advertisement exists purely so the gate runs
+            // on every URI request.
+            code_lens_provider: Some(tower_lsp::lsp_types::CodeLensOptions {
+                resolve_provider: Some(false),
+            }),
+            diagnostic_provider: Some(tower_lsp::lsp_types::DiagnosticServerCapabilities::Options(
+                tower_lsp::lsp_types::DiagnosticOptions {
+                    identifier: Some("sqry".to_string()),
+                    inter_file_dependencies: false,
+                    workspace_diagnostics: false,
+                    work_done_progress_options:
+                        tower_lsp::lsp_types::WorkDoneProgressOptions::default(),
+                },
+            )),
             ..ServerCapabilities::default()
         };
         let server_info = Some(ServerInfo {
@@ -1083,13 +1228,27 @@ impl LanguageServer for SqryLanguageServer {
             return;
         }
 
-        // Collect workspace folders; fall back to legacy root path.
-        let pm = self.sessions.project_manager();
-        let folders = pm.workspace_folders();
-        let targets: Vec<PathBuf> = if folders.is_empty() {
+        // Auto-index ONLY logical-workspace source roots (acceptance
+        // criterion 4 / §1.4 contract D2 of 03_IMPLEMENTATION_PLAN.md).
+        //
+        // Member folders MUST NOT trigger an auto-index — see §1.4, "Member
+        // folder ⇒ aggregate WorkspaceIndexStatus, NOT excluded; routes
+        // through workspace's source roots". Excluded paths likewise stay
+        // out of the auto-index loop.
+        //
+        // When no source roots are present (e.g., empty AnonymousMultiRoot
+        // in the cold-start fallback), fall back to the legacy session
+        // root so single-root behaviour is preserved.
+        let logical_workspace = self.sessions.logical_workspace();
+        let source_root_paths: Vec<PathBuf> = logical_workspace
+            .source_roots()
+            .iter()
+            .map(|r| r.path.clone())
+            .collect();
+        let targets: Vec<PathBuf> = if source_root_paths.is_empty() {
             vec![self.sessions.root_path().to_path_buf()]
         } else {
-            folders
+            source_root_paths
         };
 
         // Filter to folders that are missing a graph snapshot.
@@ -1614,6 +1773,101 @@ impl LanguageServer for SqryLanguageServer {
             }
             Err(join_err) => {
                 log_handler_join_error("code_action", guard.elapsed(), &join_err);
+                guard.mark_complete();
+                Err(map_join_error(&join_err))
+            }
+        }
+    }
+
+    /// STEP_11_4 iter3 — `textDocument/diagnostic` dispatcher
+    /// (LSP 3.17 pull-model). Routes to
+    /// [`crate::handlers::diagnostics::handle`] which gates on
+    /// [`crate::session::SessionManager::evaluate_handler_gate`]. The
+    /// handler returns an empty diagnostic list today; the gate
+    /// ensures member-folder + excluded-path requests short-circuit
+    /// before any body work.
+    ///
+    /// # Cancellation Safety
+    ///
+    /// Spawned via `cancel::spawn_blocking()`. Safe because the
+    /// handler is read-only.
+    async fn diagnostic(
+        &self,
+        params: tower_lsp::lsp_types::DocumentDiagnosticParams,
+    ) -> RpcResult<tower_lsp::lsp_types::DocumentDiagnosticReportResult> {
+        let mut guard = HandlerGuard::new("diagnostic");
+        let session = self.sessions.clone();
+        let uri = params.text_document.uri.clone();
+        let handle = cancel::spawn_blocking(move || diagnostics::handle(&session, &uri));
+        match handle.await {
+            Ok(Ok(outcome)) => {
+                log_handler_success("diagnostic", guard.elapsed());
+                guard.mark_complete();
+                use tower_lsp::lsp_types::{
+                    DocumentDiagnosticReport, DocumentDiagnosticReportResult,
+                    FullDocumentDiagnosticReport, RelatedFullDocumentDiagnosticReport,
+                };
+                Ok(DocumentDiagnosticReportResult::Report(
+                    DocumentDiagnosticReport::Full(RelatedFullDocumentDiagnosticReport {
+                        related_documents: None,
+                        full_document_diagnostic_report: FullDocumentDiagnosticReport {
+                            result_id: None,
+                            items: outcome.diagnostics,
+                        },
+                    }),
+                ))
+            }
+            Ok(Err(err)) => {
+                log_handler_error("diagnostic", guard.elapsed(), &err);
+                guard.mark_complete();
+                Err(map_error(err))
+            }
+            Err(join_err) => {
+                log_handler_join_error("diagnostic", guard.elapsed(), &join_err);
+                guard.mark_complete();
+                Err(map_join_error(&join_err))
+            }
+        }
+    }
+
+    /// STEP_11_4 iter3 — `textDocument/codeLens` dispatcher. Routes
+    /// to [`crate::handlers::codelens::handle`] which gates on
+    /// [`crate::session::SessionManager::evaluate_handler_gate`]. The
+    /// handler returns an empty lens list today (sqry has no code-lens
+    /// producer); the gate ensures member-folder + excluded-path
+    /// requests short-circuit through the same code path the
+    /// `sqry/indexStatus` handler already uses, closing the
+    /// regression class STEP_11_4 was opened to address.
+    ///
+    /// # Cancellation Safety
+    ///
+    /// Spawned via `cancel::spawn_blocking()` — the blocking task is
+    /// automatically aborted if the future is dropped (LSP
+    /// `$/cancelRequest`). Safe because the handler is read-only.
+    async fn code_lens(
+        &self,
+        params: tower_lsp::lsp_types::CodeLensParams,
+    ) -> RpcResult<Option<Vec<tower_lsp::lsp_types::CodeLens>>> {
+        let mut guard = HandlerGuard::new("code_lens");
+        let session = self.sessions.clone();
+        let handle = cancel::spawn_blocking(move || codelens::handle(&session, &params));
+        match handle.await {
+            Ok(Ok(outcome)) => {
+                log_handler_success("code_lens", guard.elapsed());
+                guard.mark_complete();
+                // The outcome's `partial`/`excluded` flags surface
+                // through tracing telemetry only — the LSP wire
+                // shape is `Vec<CodeLens>`, which is empty in the
+                // gated arms by contract.
+                Ok(Some(outcome.lenses))
+            }
+            Ok(Err(err)) => {
+                log_handler_error("code_lens", guard.elapsed(), &err);
+                guard.mark_complete();
+                Err(map_error(err))
+            }
+            Err(join_err) => {
+                log_handler_join_error("code_lens", guard.elapsed(), &join_err);
                 guard.mark_complete();
                 Err(map_join_error(&join_err))
             }
@@ -2323,6 +2577,114 @@ async fn handle_completed_event(
         Some(100),
     )
     .await;
+}
+
+/// Extract `initializationOptions.sqry.workspace`,
+/// `initializationOptions.sqry.workspaceFile`, and
+/// `initializationOptions.sqry.indexRoot` from the LSP `initialize`
+/// payload.
+///
+/// Returns `(workspace_value, workspace_file_path, index_root_path)`
+/// where each component is `None` when the corresponding key is absent
+/// or has an unexpected type. This is intentionally lenient —
+/// `sqry-core` validates the `workspace` payload structure when it
+/// deserializes, and wrong-type `workspaceFile` / `indexRoot` values
+/// are logged and ignored upstream.
+///
+/// STEP_10 iter3 wire-up — `indexRoot` is the in-band replacement for
+/// the legacy `--index-root` CLI flag. The `sqry-vscode` extension
+/// reads its `sqry.indexRoot` setting at activation and forwards the
+/// non-empty value here so the LSP can use it as the canonical
+/// workspace identity. The caller folds it into
+/// [`WorkspaceResolutionInputs::index_root`] only when no explicit
+/// CLI `--index-root` flag was passed (CLI wins for explicit operator
+/// overrides; the in-band setting is the steady-state input).
+fn extract_sqry_init_options(
+    init_options: Option<&Value>,
+) -> (Option<Value>, Option<PathBuf>, Option<PathBuf>) {
+    let Some(opts) = init_options else {
+        return (None, None, None);
+    };
+    let Some(sqry) = opts.get("sqry") else {
+        return (None, None, None);
+    };
+    let workspace = sqry.get("workspace").cloned();
+    let workspace_file = sqry
+        .get("workspaceFile")
+        .and_then(|v| v.as_str())
+        .map(PathBuf::from);
+    let index_root = sqry
+        .get("indexRoot")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from);
+    (workspace, workspace_file, index_root)
+}
+
+/// STEP_10 — emit a single deprecation warning when `--index-root` is
+/// passed alongside an in-band workspace signal from the LSP
+/// `initialize` request.
+///
+/// **Trigger condition.** `--index-root <PATH>` was supplied on the
+/// command line AND **at least one** of the in-band signals is present:
+/// 1. A non-`null` `initializationOptions.sqry.workspace` value (the
+///    `{ folders, classification }` workspace hint that the
+///    [`sqry-vscode`] extension's `workspaceClassifier` constructs
+///    after STEP_5 from an open `.code-workspace` `sqry.workspace`
+///    block; standalone CLI callers can also hand-craft the payload).
+/// 2. A non-empty `initializationOptions.sqry.indexRoot` string (the
+///    in-band wire-up of the `sqry.indexRoot` setting added in
+///    STEP_10 iter3 — operators get the canonical root identity from
+///    the extension setting without needing the legacy
+///    `--index-root` CLI flag).
+///
+/// When only the CLI flag is present (no in-band signal at all) we
+/// stay quiet — that is the legacy invocation shape and there is no
+/// migration target to point at.
+///
+/// **Output shape.** A single [`tracing::warn!`] event targeting
+/// `sqry::workspace`, carrying:
+/// - `index_root` — the redundant flag value (debug-printed).
+/// - `migration_doc` — the literal path
+///   `"docs/cli/workspace-wrapper-migration.md"` for grep-friendly logs.
+///
+/// We deliberately use `warn!` (not `info!`) because operators following
+/// log lines while validating multi-root flows expect actionable
+/// migration signals at WARN level. The flag continues to work — this is
+/// informational, not a refusal. See
+/// `docs/cli/workspace-wrapper-migration.md` for the operator migration
+/// guide.
+///
+/// [`sqry-vscode`]: https://marketplace.visualstudio.com/items?itemName=verivusai.sqry-vscode
+fn emit_index_root_deprecation_warning_if_applicable(
+    index_root: Option<&std::path::Path>,
+    init_options_workspace: Option<&Value>,
+    init_options_index_root: Option<&std::path::Path>,
+) {
+    let Some(root) = index_root else {
+        return;
+    };
+    // `Value::Null` is treated as "no payload" — VS Code clients that
+    // omit the key entirely won't send it, but a defensively encoded
+    // `null` should not trigger the warning.
+    let workspace_payload_present = init_options_workspace.is_some_and(|v| !v.is_null());
+    let index_root_inband_present = init_options_index_root.is_some();
+    if !workspace_payload_present && !index_root_inband_present {
+        return;
+    }
+    tracing::warn!(
+        target: "sqry::workspace",
+        index_root = %root.display(),
+        migration_doc = "docs/cli/workspace-wrapper-migration.md",
+        "--index-root is redundant when an in-band workspace signal is present \
+         (initializationOptions.sqry.workspace and/or initializationOptions.sqry.indexRoot); \
+         prefer the in-band route (the `sqry-vscode` extension forwards the `sqry.indexRoot` \
+         setting as `initializationOptions.sqry.indexRoot`, and parses the active \
+         `.code-workspace` into `initializationOptions.sqry.workspace`; the active \
+         `.sqry-workspace` registry is also picked up automatically). \
+         See docs/cli/workspace-wrapper-migration.md."
+    );
 }
 
 fn calc_percentage(done: usize, total: Option<usize>) -> Option<u32> {

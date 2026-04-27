@@ -40,6 +40,232 @@ use std::marker::PhantomData;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
 // ---------------------------------------------------------------------------
+// WorkspaceId — protocol-side wire wrapper for sqry-core's WorkspaceId.
+// ---------------------------------------------------------------------------
+
+/// 32-byte stable identity for a logical workspace, byte-identical to
+/// `sqry_core::workspace::WorkspaceId`.
+///
+/// Defined here in the leaf protocol crate so the daemon wire types
+/// (`DaemonHello.logical_workspace`, `daemon/load.logical_workspace`,
+/// `daemon/workspaceStatus.workspace_id`) can carry the identity without
+/// the protocol crate taking a `sqry-core` dependency. The `sqry-daemon`
+/// binary owns the `From`/`Into` bridge against the canonical
+/// `sqry_core::workspace::WorkspaceId` type — both use the same 32-byte
+/// representation, so the bridge is a zero-cost newtype unwrap.
+///
+/// STEP_6 (workspace-aware-cross-repo DAG) introduced this type. Older
+/// daemon clients that send `DaemonHello` without `logical_workspace`
+/// continue to work because the field is `#[serde(default)]` — they
+/// reproduce today's per-source-root semantics, with `workspace_id =
+/// None` on the matching [`crate::WorkspaceState`] entries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct WorkspaceId([u8; 32]);
+
+impl WorkspaceId {
+    /// Construct from raw 32 bytes. Callers in `sqry-daemon` use this
+    /// to bridge from `sqry_core::workspace::WorkspaceId::as_bytes()`.
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    /// Borrow the 32-byte digest. Callers cross the bridge by feeding
+    /// these bytes back into `sqry_core::workspace::WorkspaceId`.
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    /// First 16 hex characters. Suitable for log lines / short
+    /// identifiers; **not** sufficient for cross-process identity.
+    #[must_use]
+    pub fn as_short_hex(&self) -> String {
+        let full = self.as_full_hex();
+        full[..16].to_string()
+    }
+
+    /// Full 64-character hex digest. Use this for any identity
+    /// comparison.
+    #[must_use]
+    pub fn as_full_hex(&self) -> String {
+        use std::fmt::Write as _;
+        let mut s = String::with_capacity(64);
+        for byte in &self.0 {
+            // `write!` to a `String` is infallible.
+            let _ = write!(s, "{byte:02x}");
+        }
+        s
+    }
+}
+
+impl std::fmt::Display for WorkspaceId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.as_short_hex())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// LogicalWorkspaceWire — daemon-IPC wire form of sqry-core's LogicalWorkspace.
+// ---------------------------------------------------------------------------
+
+/// Wire-form summary of a `LogicalWorkspace`, attached to
+/// [`DaemonHello`] / `daemon/load` payloads. Carries the workspace
+/// identity plus the canonical source-root paths the client wants the
+/// daemon to bind under a single grouping `workspace_id`.
+///
+/// `member_folders` and `exclusions` are explicitly **not** carried on
+/// this wire shape — they are MCP / redaction-side concerns (Step 7 of
+/// the workspace-aware-cross-repo plan), not daemon admission concerns.
+/// The daemon only needs `workspace_id` + the source-root list to build
+/// one [`crate::WorkspaceState`]-keyed entry per source root.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LogicalWorkspaceWire {
+    /// 32-byte BLAKE3-256 identity of the logical workspace.
+    pub workspace_id: WorkspaceId,
+    /// Canonical absolute source-root paths. The daemon constructs one
+    /// `WorkspaceKey { workspace_id: Some(this id), source_root: <p>, .. }`
+    /// per entry, all sharing the same `workspace_id` for grouping.
+    pub source_roots: Vec<std::path::PathBuf>,
+    /// STEP_11_4 — per-source-root bindings. Each entry's `path` MUST
+    /// appear in [`Self::source_roots`]; the binding's
+    /// `config_fingerprint` overrides the workspace-level default for
+    /// that root only. Empty in the common case so the wire stays
+    /// pre-STEP_11_4-compatible.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_root_bindings: Vec<SourceRootBinding>,
+    /// STEP_11_4 — workspace-level config fingerprint applied to any
+    /// source root that does not carry its own
+    /// [`SourceRootBinding::config_fingerprint`] override. `0` is the
+    /// "fingerprint not set" sentinel.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub workspace_config_fingerprint: u64,
+}
+
+fn is_zero_u64(value: &u64) -> bool {
+    *value == 0
+}
+
+/// STEP_11_4 — per-source-root binding inside a [`LogicalWorkspaceWire`].
+///
+/// `path` MUST appear in the parent [`LogicalWorkspaceWire::source_roots`]
+/// vector; the daemon matches bindings to source roots by canonical path
+/// equality. A binding whose `path` is not in `source_roots` is silently
+/// ignored.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SourceRootBinding {
+    /// Canonical absolute path of the source root this binding applies to.
+    pub path: std::path::PathBuf,
+    /// Per-source-root override of the config fingerprint. `0` means
+    /// "use the workspace-level fingerprint"; non-zero overrides for
+    /// this source root only.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub config_fingerprint: u64,
+    /// Optional pre-resolved classpath directory for this source root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub classpath_dir: Option<std::path::PathBuf>,
+}
+
+// ---------------------------------------------------------------------------
+// WorkspaceIndexStatus — daemon/workspaceStatus result payload.
+// ---------------------------------------------------------------------------
+
+/// Aggregate status of a single source root inside a logical workspace.
+/// Mirrors the per-source-root subset of `WorkspaceStatus` so cross-repo
+/// MCP / LSP queries can render a per-source-root state without paying
+/// the cost of the full `daemon/status` snapshot.
+///
+/// STEP_11_4 (workspace-aware-cross-repo, 2026-04-26) — adds the
+/// `classpath_present` flag so consumers of `daemon/workspaceStatus`
+/// know which source roots have JVM classpath analysis available
+/// (`<source_root>/.sqry/classpath/` exists) without having to make a
+/// separate filesystem probe. The flag is per-source-root, never
+/// aggregated, so a workspace mixing JVM and non-JVM source roots
+/// reports accurate per-root granularity.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceSourceRootStatus {
+    /// Canonical absolute path to the source root.
+    pub source_root: std::path::PathBuf,
+    /// Per-source-root lifecycle state. `Evicted` is a valid (and
+    /// useful — partial eviction is observable here) value for a
+    /// source root that has been LRU'd out while sibling source roots
+    /// remain `Loaded`.
+    pub state: WorkspaceState,
+    /// Live graph size for this source root, in bytes.
+    pub current_bytes: u64,
+    /// STEP_11_4 — `true` when the daemon observed
+    /// `<source_root>/.sqry/classpath/` as a directory at status time.
+    /// `false` when the directory is absent or the probe failed (the
+    /// daemon never blocks status on a classpath probe; failures
+    /// surface through the LSP-side `WorkspaceIndexStatus.warnings`
+    /// channel instead).
+    ///
+    /// `#[serde(default)]` so v1 IPC payloads (which never carried the
+    /// flag) round-trip into `false`. `skip_serializing_if = ...` is
+    /// deliberately NOT applied — the flag must be serialised even
+    /// when `false` so consumers can distinguish "JVM-aware daemon
+    /// reporting no classpath" from "older daemon that does not yet
+    /// surface the flag".
+    #[serde(default)]
+    pub classpath_present: bool,
+}
+
+/// Aggregate status of a logical workspace, returned by
+/// `daemon/workspaceStatus { workspace_id }`.
+///
+/// The daemon walks every `WorkspaceKey` whose `workspace_id` matches
+/// the request and aggregates them into this view. A workspace is
+/// "partially evicted" when at least one source root reports
+/// [`WorkspaceState::Evicted`] but at least one other reports any
+/// non-Evicted state — see [`Self::partially_evicted`].
+///
+/// STEP_12 (workspace-aware-cross-repo, 2026-04-26) introduced the
+/// hex-string telemetry fields `workspace_id_short` (16 hex chars,
+/// display) and `workspace_id_full` (64 hex chars, machine identity).
+/// Scripts consuming this payload should key on `workspace_id_full` —
+/// the 32-byte `workspace_id` is the canonical bytewise identity but
+/// the hex string is what humans / shell tooling read. The two hex
+/// fields are derived from `workspace_id`; they are NOT independent
+/// inputs — they exist purely for ergonomic JSON consumption.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceIndexStatus {
+    /// Identity the request matched against.
+    pub workspace_id: WorkspaceId,
+    /// STEP_12 — short (16 hex) form of `workspace_id`, suitable for
+    /// CLI columns and human-scale log lines. Display only.
+    pub workspace_id_short: String,
+    /// STEP_12 — full (64 hex) form of `workspace_id`. Machine
+    /// identity. Cross-process script consumers MUST key on this
+    /// rather than the short form to avoid the (remote, non-zero)
+    /// possibility of short-hex collisions across hundreds of
+    /// thousands of distinct workspaces.
+    pub workspace_id_full: String,
+    /// Per-source-root status rows, sorted by `source_root` for
+    /// deterministic CLI / test output.
+    pub source_roots: Vec<WorkspaceSourceRootStatus>,
+}
+
+impl WorkspaceIndexStatus {
+    /// Whether at least one source root is in [`WorkspaceState::Evicted`]
+    /// while at least one other is not. `false` for fully-loaded or
+    /// fully-evicted aggregates.
+    #[must_use]
+    pub fn partially_evicted(&self) -> bool {
+        let any_evicted = self
+            .source_roots
+            .iter()
+            .any(|r| matches!(r.state, WorkspaceState::Evicted));
+        let any_alive = self
+            .source_roots
+            .iter()
+            .any(|r| !matches!(r.state, WorkspaceState::Evicted));
+        any_evicted && any_alive
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Wire envelope version.
 // ---------------------------------------------------------------------------
 
@@ -180,6 +406,21 @@ pub struct DaemonHello {
 
     /// Wire protocol version. Phase 8a accepts exactly `1`.
     pub protocol_version: u32,
+
+    /// Optional logical-workspace binding hint (STEP_6 of the
+    /// workspace-aware-cross-repo plan). When present, every
+    /// subsequent `daemon/load` on this connection that does not
+    /// itself supply `logical_workspace` inherits this binding —
+    /// keeping today's anonymous behaviour for clients that do not
+    /// set the hint.
+    ///
+    /// `#[serde(default)]` so older clients (and the standalone
+    /// `sqry-mcp` / `sqry-lsp` shims that have not yet learned about
+    /// logical workspaces) keep working with `None`. The daemon
+    /// router synthesises one `WorkspaceKey` per source root with
+    /// `workspace_id = Some(this id)`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logical_workspace: Option<LogicalWorkspaceWire>,
 }
 
 /// Server's reply to [`DaemonHello`]. If `compatible` is `false` the

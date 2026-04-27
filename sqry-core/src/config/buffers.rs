@@ -148,8 +148,10 @@ const MAX_MAX_SOURCE_FILE_SIZE: u64 = 500 * 1024 * 1024; // 500 MB maximum
 
 /// Maximum number of repositories per workspace (1,000)
 ///
-/// Limits the number of repositories discovered during workspace scanning
-/// to prevent `DoS` attacks via workspaces with thousands of .sqry-index files (RR-10 Gap #2).
+/// Limits the number of repositories discovered during workspace scanning to
+/// prevent `DoS` attacks via workspaces declaring thousands of indexed
+/// repositories (each one materialised as a `.sqry/graph/` artifact tree).
+/// See RR-10 Gap #2.
 pub const DEFAULT_MAX_REPOSITORIES: usize = 1_000;
 
 // Safety bounds for repository count (RR-10: DoS prevention)
@@ -230,9 +232,11 @@ pub fn max_source_file_size() -> u64 {
 ///
 /// # `DoS` Prevention
 ///
-/// Limits the number of repositories discovered during workspace scanning to prevent
-/// memory exhaustion attacks via workspaces containing thousands of `.sqry-index` files.
-/// Workspaces exceeding this limit are rejected with a clear error message.
+/// Limits the number of repositories discovered during workspace scanning to
+/// prevent memory exhaustion attacks via workspaces declaring thousands of
+/// indexed repositories (each one carrying its own `.sqry/graph/` artifact
+/// tree). Workspaces exceeding this limit are rejected with a clear error
+/// message.
 ///
 /// # Examples
 ///

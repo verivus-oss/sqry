@@ -3,6 +3,11 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as vscode from "vscode";
 import which from "which";
+import {
+  isFolderExcluded,
+  ProjectRootMode,
+  WorkspaceClassification,
+} from "./workspaceClassifier";
 
 export interface SqrySettings {
   readonly sqryPath: string;
@@ -11,6 +16,29 @@ export interface SqrySettings {
   readonly indexTimeoutMs: number;
   readonly autoIndexOnOpen: "always" | "prompt" | "never";
   readonly codeLensEnabled: boolean;
+  /**
+   * Optional canonical "index root" override. When set, sqry treats
+   * this path as the workspace's logical root regardless of which
+   * folder VS Code surfaced first. Empty string means "auto-detect".
+   */
+  readonly indexRoot: string;
+  /** How sqry decides what counts as a project root inside a folder. */
+  readonly projectRootMode: ProjectRootMode;
+  /**
+   * Glob patterns matched against `vscode.WorkspaceFolder.uri.fsPath`.
+   * Folders matching any glob are excluded from every enumeration loop
+   * (auto-index, status fan-out, manual rebuild) so users can keep
+   * non-source folders (e.g. `docs`, `examples`) inside the workspace
+   * without sqry trying to index them.
+   */
+  readonly workspaceFolderExcludes: ReadonlyArray<string>;
+  /**
+   * Inline classification block, parallel to the `sqry.workspace` entry
+   * in a `.code-workspace` file. The settings.json copy is the
+   * fallback used when no `.code-workspace` is open; the
+   * `.code-workspace` block always wins when both are present.
+   */
+  readonly workspaceClassification: WorkspaceClassification | null;
 }
 
 export interface ResolvedSqryConfig extends SqrySettings {
@@ -27,6 +55,17 @@ const DEFAULT_BINARY = "sqry";
 
 export function readSettings(): SqrySettings {
   const config = vscode.workspace.getConfiguration(SECTION);
+  const projectRootModeRaw = config.get<string>("projectRootMode", "gitRoot");
+  const projectRootMode: ProjectRootMode =
+    projectRootModeRaw === "folder" || projectRootModeRaw === "explicit"
+      ? projectRootModeRaw
+      : "gitRoot";
+  const excludesRaw = config.get<unknown>("workspaceFolderExcludes", []);
+  const workspaceFolderExcludes = Array.isArray(excludesRaw)
+    ? excludesRaw.filter((v): v is string => typeof v === "string")
+    : [];
+  const classificationRaw = config.get<unknown>("workspaceClassification", null);
+  const workspaceClassification = normalizeClassification(classificationRaw);
   return {
     sqryPath: config.get<string>("path", DEFAULT_BINARY),
     limit: config.get<number>("limit", 200),
@@ -37,7 +76,68 @@ export function readSettings(): SqrySettings {
       "prompt",
     ),
     codeLensEnabled: config.get<boolean>("codeLens.enabled", true),
+    indexRoot: config.get<string>("indexRoot", ""),
+    projectRootMode,
+    workspaceFolderExcludes,
+    workspaceClassification,
   };
+}
+
+/**
+ * Coerce the loosely-typed `sqry.workspaceClassification` setting into
+ * a strongly-typed `WorkspaceClassification`. Returns `null` for
+ * absent / unparseable values.
+ */
+function normalizeClassification(value: unknown): WorkspaceClassification | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const obj = value as Record<string, unknown>;
+  const sourceRoots = Array.isArray(obj.sourceRoots)
+    ? obj.sourceRoots.filter((v): v is string => typeof v === "string")
+    : undefined;
+  const exclusions = Array.isArray(obj.exclusions)
+    ? obj.exclusions.filter((v): v is string => typeof v === "string")
+    : undefined;
+  const memberFolders = Array.isArray(obj.memberFolders)
+    ? obj.memberFolders.filter((v): v is string => typeof v === "string")
+    : undefined;
+  const projectRootMode =
+    obj.projectRootMode === "gitRoot" ||
+    obj.projectRootMode === "folder" ||
+    obj.projectRootMode === "explicit"
+      ? (obj.projectRootMode as ProjectRootMode)
+      : undefined;
+  return {
+    ...(sourceRoots !== undefined ? { sourceRoots } : {}),
+    ...(exclusions !== undefined ? { exclusions } : {}),
+    ...(memberFolders !== undefined ? { memberFolders } : {}),
+    ...(projectRootMode !== undefined ? { projectRootMode } : {}),
+  };
+}
+
+/**
+ * Test whether a workspace folder is excluded by the user's
+ * `sqry.workspaceFolderExcludes` setting. Every enumeration loop in
+ * the extension consumes this (per DAG STEP_5 acceptance criterion 8).
+ */
+export function isWorkspaceFolderExcluded(
+  folder: vscode.WorkspaceFolder,
+  settings: SqrySettings = readSettings(),
+): boolean {
+  return isFolderExcluded(folder.uri.fsPath, settings.workspaceFolderExcludes);
+}
+
+/**
+ * Filter a list of workspace folders down to those NOT excluded by
+ * `sqry.workspaceFolderExcludes`. Convenience wrapper for call sites
+ * that iterate `vscode.workspace.workspaceFolders`.
+ */
+export function nonExcludedFolders(
+  folders: ReadonlyArray<vscode.WorkspaceFolder>,
+  settings: SqrySettings = readSettings(),
+): vscode.WorkspaceFolder[] {
+  return folders.filter((f) => !isWorkspaceFolderExcluded(f, settings));
 }
 
 export async function resolveConfig(fallbackBinaryPath?: string): Promise<ResolvedSqryConfig> {

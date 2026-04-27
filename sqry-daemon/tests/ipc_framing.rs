@@ -21,6 +21,7 @@ async fn hello_raw(path: &std::path::Path) -> UnixStream {
         &sqry_daemon::DaemonHello {
             client_version: "test/0".into(),
             protocol_version: 1,
+            logical_workspace: None,
         },
     )
     .await

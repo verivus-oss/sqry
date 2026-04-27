@@ -1,9 +1,14 @@
 //! Filesystem watcher utility for session cache invalidation.
 //!
-//! Wraps the `notify` crate with a small abstraction that tracks callbacks per
-//! workspace directory. Each callback is triggered when the corresponding
-//! `.sqry-index` file is modified; callers typically use this to invalidate the
-//! in-memory cache entry for that workspace.
+//! Wraps the `notify` crate with a small abstraction that tracks callbacks
+//! keyed by the watched file path. Each callback is triggered when the
+//! corresponding workspace's `.sqry/graph/manifest.json` file is modified;
+//! callers typically use this to invalidate the in-memory cache entry for
+//! that workspace. The manifest is the canonical marker emitted by
+//! `build_unified_graph_inner` (see
+//! `graph/unified/persistence/mod.rs`'s `GRAPH_DIR_NAME` /
+//! `MANIFEST_FILE_NAME` constants); the legacy `.sqry-index` placeholder
+//! was never written by the live build pipeline.
 //!
 //! ## RR-10 Gap #3: Bounded Event Queue (`DoS` Prevention)
 //!
@@ -25,8 +30,33 @@ use notify::{
 use super::error::{SessionError, SessionResult};
 use crate::config::buffers::watch_event_queue_capacity;
 
-/// File name for the sqry index (used for file watching)
-const INDEX_FILE_NAME: &str = ".sqry-index";
+/// File name of the canonical sqry graph manifest. The live build pipeline
+/// writes `<workspace>/.sqry/graph/manifest.json` via
+/// `graph/unified/persistence::GraphStorage`; this watcher matches events
+/// whose target leaf name equals this constant and whose parent directory
+/// chain is `.sqry/graph/`.
+const MANIFEST_FILE_NAME: &str = "manifest.json";
+
+/// Directory segment containing [`MANIFEST_FILE_NAME`].
+const GRAPH_DIR_SEGMENT: &str = "graph";
+
+/// Parent directory of [`GRAPH_DIR_SEGMENT`]. The full canonical relative
+/// path is `.sqry/graph/manifest.json`.
+const SQRY_DIR_SEGMENT: &str = ".sqry";
+
+/// Build the canonical manifest path watched for changes inside `workspace`.
+///
+/// Returns `<workspace>/.sqry/graph/manifest.json`. Currently only the
+/// in-module tests construct paths through this helper; production callers
+/// (e.g. `session::manager::register_watcher`) already hold a fully-formed
+/// `GraphStorage` path and pass it directly.
+#[cfg(test)]
+fn manifest_path(workspace: &Path) -> PathBuf {
+    workspace
+        .join(SQRY_DIR_SEGMENT)
+        .join(GRAPH_DIR_SEGMENT)
+        .join(MANIFEST_FILE_NAME)
+}
 
 type Callback = Arc<dyn Fn() + Send + Sync + 'static>;
 
@@ -44,7 +74,8 @@ impl WatcherState {
     }
 }
 
-/// Lightweight wrapper around `notify` for watching `.sqry-index` files.
+/// Lightweight wrapper around `notify` for watching
+/// `.sqry/graph/manifest.json` files.
 pub struct FileWatcher {
     state: Option<WatcherState>,
 }
@@ -84,9 +115,13 @@ impl FileWatcher {
         Self { state: None }
     }
 
-    /// Register a workspace path for change notifications.
+    /// Register a path for change notifications.
     ///
-    /// When the underlying `.sqry-index` file changes, `on_change` is invoked.
+    /// When the underlying `.sqry/graph/manifest.json` file changes,
+    /// `on_change` is invoked. The `path` argument is forwarded directly to
+    /// the underlying `notify` watcher — callers that already know the
+    /// manifest's location (e.g. `GraphStorage::manifest_path()`) pass it
+    /// here.
     ///
     /// # Errors
     ///
@@ -118,7 +153,7 @@ impl FileWatcher {
         Ok(())
     }
 
-    /// Stop watching a workspace path.
+    /// Stop watching a path.
     ///
     /// # Errors
     ///
@@ -139,6 +174,20 @@ impl FileWatcher {
         }
 
         Ok(())
+    }
+
+    /// Returns the set of paths currently registered for change
+    /// notifications. Test-only helper used to assert that production
+    /// callers wire the watcher to the correct artifact path
+    /// (`.sqry/graph/manifest.json`); accessing it from non-test code
+    /// would defeat the encapsulation of the callback table.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn watched_paths(&self) -> Vec<PathBuf> {
+        self.state
+            .as_ref()
+            .map(|state| state.lock_callbacks().keys().cloned().collect())
+            .unwrap_or_default()
     }
 
     /// Drain pending filesystem events and invoke registered callbacks.
@@ -218,11 +267,22 @@ impl FileWatcher {
         {
             let callbacks = state.lock_callbacks();
             for path in &event.paths {
+                // Only react to writes targeting `.sqry/graph/manifest.json`.
+                // We require the full parent chain so unrelated `manifest.json`
+                // files (e.g. NPM package manifests) cannot trigger spurious
+                // invalidations.
                 if path
                     .file_name()
-                    .is_some_and(|name| name == OsStr::new(INDEX_FILE_NAME))
-                    && let Some(parent) = path.parent()
-                    && let Some(callback) = callbacks.get(parent)
+                    .is_some_and(|name| name == OsStr::new(MANIFEST_FILE_NAME))
+                    && let Some(graph_dir) = path.parent()
+                    && graph_dir
+                        .file_name()
+                        .is_some_and(|name| name == OsStr::new(GRAPH_DIR_SEGMENT))
+                    && let Some(sqry_dir) = graph_dir.parent()
+                    && sqry_dir
+                        .file_name()
+                        .is_some_and(|name| name == OsStr::new(SQRY_DIR_SEGMENT))
+                    && let Some(callback) = callbacks.get(path)
                 {
                     callbacks_to_run.push(Arc::clone(callback));
                 }
@@ -263,20 +323,21 @@ mod tests {
     fn detects_changes_to_index_file() {
         let temp = tempdir().unwrap();
         let workspace = temp.path();
-        let index_path = workspace.join(".sqry-index");
-        std::fs::write(&index_path, b"initial").unwrap();
+        let manifest = manifest_path(workspace);
+        std::fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+        std::fs::write(&manifest, b"initial").unwrap();
 
         let mut watcher = FileWatcher::new().unwrap();
 
         let triggered = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&triggered);
         watcher
-            .watch(workspace.to_path_buf(), move || {
+            .watch(manifest.clone(), move || {
                 flag.store(true, Ordering::SeqCst);
             })
             .unwrap();
 
-        std::fs::write(&index_path, b"modified").unwrap();
+        std::fs::write(&manifest, b"modified").unwrap();
 
         watcher.wait_and_process(event_timeout()).unwrap();
 
@@ -287,11 +348,13 @@ mod tests {
     fn disabled_watcher_is_noop() {
         let temp = tempdir().unwrap();
         let workspace = temp.path();
-        std::fs::write(workspace.join(".sqry-index"), b"data").unwrap();
+        let manifest = manifest_path(workspace);
+        std::fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+        std::fs::write(&manifest, b"data").unwrap();
 
         let mut watcher = FileWatcher::disabled();
         watcher
-            .watch(workspace.to_path_buf(), || {
+            .watch(manifest, || {
                 panic!("disabled watcher should not invoke callback");
             })
             .unwrap();

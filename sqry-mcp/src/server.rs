@@ -21,7 +21,7 @@ use crate::tools::params::{
     RebuildIndexParams, RelationQueryParams, RelationTypeParam, SearchFiltersParams,
     SearchSimilarParams, SemanticDiffParams, SemanticSearchParams, ShowDependenciesParams,
     SqryAskParams, SqryQueryParams, SubgraphParams, TracePathParams, UnusedScopeParam,
-    VisibilityParam,
+    VisibilityParam, WorkspaceStatusParams,
 };
 use crate::workspace_session::{self, WorkspaceSessionRegistry};
 use rmcp::{
@@ -40,7 +40,8 @@ use rmcp::{
 };
 use serde::Serialize;
 use serde_json::json;
-use sqry_mcp_redaction::{RedactionConfig, Redactor};
+use sqry_core::workspace::LogicalWorkspace;
+use sqry_mcp_redaction::{LogicalWorkspaceView, RedactionConfig, Redactor, compute_source_root_id};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -129,16 +130,31 @@ impl SqryServer {
         }
     }
 
-    /// Create a `Redactor` from the given preset name, returning `None` for `"none"` (passthrough).
+    /// Create a `Redactor` from the given preset name.
     ///
     /// Uses `RedactionConfig::from_preset_with_env()` to apply the given preset as base,
     /// then layer fine-grained env var overrides (`SQRY_REDACT_PATHS`, `SQRY_REDACT_CODE`, etc.)
     /// on top. This ensures config-file presets are respected even when `SQRY_REDACTION_PRESET`
     /// is not set in the environment.
+    ///
+    /// `STEP_7` codex iter4 BLOCK fix — `"none"` no longer short-circuits
+    /// to [`None`]. Acceptance criterion 6 requires excluded paths to render
+    /// as the opaque-hash form **regardless of preset**, including
+    /// `preset=none`. The redaction walker enforces criterion 6 in
+    /// passthrough mode only when a [`Redactor`] exists **and** a
+    /// [`LogicalWorkspaceView`] is bound at request time (via
+    /// [`Self::redactor_for_workspace`]). Returning `None` for `"none"`
+    /// kept the criterion-6 path off end-to-end. We now construct a
+    /// passthrough redactor (`RedactionConfig::none()`); the
+    /// `redact_excluded_in_passthrough` branch in
+    /// `sqry_mcp_redaction::walker` only rewrites excluded paths and
+    /// leaves every other field verbatim, preserving criterion 3
+    /// (`preset=none + path inside source_root → absolute emitted`).
+    /// Unknown preset names still return `None` so misconfiguration
+    /// degrades to no-redaction rather than panicking.
     pub fn create_redactor(preset: &str) -> Option<Arc<Redactor>> {
         match preset {
-            "none" => return None,
-            "minimal" | "standard" | "strict" => {}
+            "none" | "minimal" | "standard" | "strict" => {}
             other => {
                 tracing::warn!("Unknown redaction preset '{other}', disabling redaction");
                 return None;
@@ -156,13 +172,44 @@ impl SqryServer {
         }
     }
 
+    /// Build a per-request redactor scoped to the resolved workspace.
+    ///
+    /// `STEP_7` codex iter2 BLOCK fix — the redactor MUST be bound to
+    /// the resolved [`LogicalWorkspace`] (translated to a
+    /// [`LogicalWorkspaceView`]) when the per-request session resolved
+    /// one, so JSON path fields render with the workspace-aware forms
+    /// (`<source_root_id>/<rel>`, `<workspace_id_short>/<rel>`,
+    /// `<excluded>/[hash]`) specified by acceptance criteria 3-9.
+    ///
+    /// Pre-fix this helper only set `config.workspace_root` and the
+    /// walker fell back to the legacy `redact_path()` pipeline (no
+    /// workspace-aware rendering, no exclusion-precedence handling).
+    /// Now we route through [`Redactor::with_logical_workspace`] when a
+    /// view is available; the legacy single-root path is preserved when
+    /// no logical workspace is bound (single-root / pre-resolution
+    /// paths) so call sites that don't run inside a request context
+    /// still get the same redactor as before.
     fn redactor_for_workspace(
         redactor: &Arc<Redactor>,
         workspace_root: Option<&Path>,
+        logical: Option<&LogicalWorkspace>,
     ) -> Option<Redactor> {
         let mut config = redactor.config().clone();
         if let Some(workspace_root) = workspace_root {
             config.workspace_root = Some(workspace_root.to_path_buf());
+        }
+        if let Some(logical) = logical {
+            // Workspace-aware path: bind the `LogicalWorkspaceView` so
+            // path fields render with the source-root-id /
+            // workspace-id-short / opaque-hash forms required by
+            // acceptance criteria 4 / 5 / 6. We keep `workspace_root`
+            // set so `canonicalize_for_hash` can resolve relative
+            // inputs to absolute (and the workspace-aware reconstruct
+            // step in `redact_path_with_workspace` re-promotes the
+            // canonicalize-stripped path back to absolute before
+            // source-root containment).
+            let view = logical_workspace_to_view(logical);
+            return Redactor::with_logical_workspace(config, view).ok();
         }
         Redactor::new(config).ok()
     }
@@ -237,13 +284,22 @@ impl SqryServer {
         );
 
         let workspace_root = resolved_workspace.workspace_root().to_path_buf();
+        let logical = resolved_workspace.logical_workspace();
+        // Clone so the same per-request LogicalWorkspace is consumed
+        // both by the redactor binding (`execute_tool_with_timeout`)
+        // and by the blocking-thread thread-local override
+        // (`with_workspace_override`). Arc<LogicalWorkspace> clones
+        // are O(1) refcount bumps, not deep copies.
+        let logical_for_redaction = logical.clone();
         self.execute_tool_with_timeout(
             tool_name,
             self.timeout_ms,
             Some(workspace_root),
+            logical_for_redaction,
             move || {
                 workspace_session::with_workspace_override(
                     Some(resolved_workspace.workspace_root()),
+                    logical,
                     f,
                 )
             },
@@ -279,9 +335,22 @@ impl SqryServer {
         );
 
         let workspace_root = resolved_workspace.workspace_root().to_path_buf();
-        self.execute_tool_with_timeout(tool_name, timeout_ms, Some(workspace_root), move || {
-            workspace_session::with_workspace_override(Some(resolved_workspace.workspace_root()), f)
-        })
+        let logical = resolved_workspace.logical_workspace();
+        // See `execute_tool_for_request` for the rationale on cloning.
+        let logical_for_redaction = logical.clone();
+        self.execute_tool_with_timeout(
+            tool_name,
+            timeout_ms,
+            Some(workspace_root),
+            logical_for_redaction,
+            move || {
+                workspace_session::with_workspace_override(
+                    Some(resolved_workspace.workspace_root()),
+                    logical,
+                    f,
+                )
+            },
+        )
         .await
     }
 
@@ -289,11 +358,25 @@ impl SqryServer {
     ///
     /// Used for long-running operations (e.g., `rebuild_index`) that need a
     /// longer timeout than the general tool default.
+    ///
+    /// `redaction_logical_workspace` carries the per-request resolved
+    /// [`LogicalWorkspace`] (when one was bound by
+    /// `WorkspaceSessionRegistry::resolve_for_request`). It is plumbed
+    /// down into [`Self::redactor_for_workspace`] so the live response
+    /// redactor binds the matching [`LogicalWorkspaceView`] for every
+    /// tool call (`STEP_7` codex iter2 BLOCK fix). Threading it as an
+    /// explicit parameter — rather than relying on the
+    /// `LOGICAL_WORKSPACE_OVERRIDE` thread-local set by
+    /// `with_workspace_override` — is required because the redactor
+    /// binding runs **after** `spawn_blocking` returns, back on the
+    /// tokio reactor thread where the blocking-thread thread-local is
+    /// no longer in scope.
     async fn execute_tool_with_timeout<F, T>(
         &self,
         tool_name: &str,
         timeout_ms: u64,
         redaction_workspace_root: Option<PathBuf>,
+        redaction_logical_workspace: Option<Arc<LogicalWorkspace>>,
         f: F,
     ) -> Result<serde_json::Value, McpError>
     where
@@ -306,11 +389,16 @@ impl SqryServer {
         let retry_delay_ms = self.retry_delay_ms;
         let redactor_clone = self.redactor.clone();
         let redaction_workspace_root = redaction_workspace_root.clone();
+        let redaction_logical_workspace = redaction_logical_workspace.clone();
 
         async move {
             let result = timeout(timeout_duration, spawn_blocking(f)).await;
             let workspace_scoped_redactor = redactor_clone.as_ref().and_then(|redactor| {
-                Self::redactor_for_workspace(redactor, redaction_workspace_root.as_deref())
+                Self::redactor_for_workspace(
+                    redactor,
+                    redaction_workspace_root.as_deref(),
+                    redaction_logical_workspace.as_deref(),
+                )
             });
 
             // Helper: redact an error message string if redactor is active
@@ -566,6 +654,31 @@ impl SqryServer {
         let result = self
             .execute_tool_for_request("get_index_status", &params, &context, move || {
                 execution::execute_index_status(&args)
+            })
+            .await?;
+
+        Ok(Self::success_result(&result))
+    }
+
+    /// Return aggregate `WorkspaceIndexStatus` for the resolved
+    /// workspace, plus `workspace_id_short`/`workspace_id_full` and the
+    /// projection of `source_roots` / `member_folders` / `exclusions`
+    /// (`STEP_7` acceptance criteria 1 + 2).
+    #[tool(
+        description = "Return the aggregate WorkspaceIndexStatus for the active logical workspace, with workspace identity and structure projection",
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
+    async fn workspace_status(
+        &self,
+        Parameters(params): Parameters<WorkspaceStatusParams>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        self.ensure_tool_enabled("workspace_status")?;
+
+        let args = convert_workspace_status_params(params.clone());
+        let result = self
+            .execute_tool_for_request("workspace_status", &params, &context, move || {
+                crate::tools::execute_workspace_status(&args)
             })
             .await?;
 
@@ -1665,6 +1778,15 @@ fn convert_get_index_status_params(params: GetIndexStatusParams) -> GetIndexStat
     GetIndexStatusArgs { path: params.path }
 }
 
+fn convert_workspace_status_params(
+    params: WorkspaceStatusParams,
+) -> crate::tools::WorkspaceStatusArgs {
+    crate::tools::WorkspaceStatusArgs {
+        workspace_id: params.workspace_id,
+        path: params.path,
+    }
+}
+
 fn convert_rebuild_index_params(params: RebuildIndexParams) -> crate::tools::RebuildIndexArgs {
     crate::tools::RebuildIndexArgs {
         path: params.path,
@@ -2120,6 +2242,44 @@ fn convert_get_workspace_symbols_params(
         max_results,
         pagination,
     })
+}
+
+/// Translate a [`sqry_core::workspace::LogicalWorkspace`] into the
+/// leaf-crate [`LogicalWorkspaceView`] consumed by the redaction
+/// pipeline.
+///
+/// `STEP_7` codex iter2 BLOCK fix support — the leaf
+/// `sqry-mcp-redaction` crate deliberately does not depend on
+/// `sqry-core`, so the translation lives here in `sqry-mcp` (the only
+/// crate that already pulls in both). We compute each
+/// `source_root_id` via [`compute_source_root_id`] so the redactor's
+/// per-source-root prefix exactly matches what
+/// `sqry_mcp_redaction::rules::path::redact_path_with_workspace` will
+/// emit at runtime (and what the unit tests in
+/// `sqry-mcp-redaction/tests/workspace_aware_paths.rs` already lock
+/// down).
+fn logical_workspace_to_view(workspace: &LogicalWorkspace) -> LogicalWorkspaceView {
+    let workspace_id_short = workspace.workspace_id().as_short_hex();
+    let source_roots = workspace
+        .source_roots()
+        .iter()
+        .map(|root| {
+            let id = compute_source_root_id(&workspace_id_short, &root.path);
+            (id, root.path.clone())
+        })
+        .collect();
+    let member_folders = workspace
+        .member_folders()
+        .iter()
+        .map(|m| m.path.clone())
+        .collect();
+    let exclusions = workspace.exclusions().to_vec();
+    LogicalWorkspaceView {
+        workspace_id_short,
+        source_roots,
+        member_folders,
+        exclusions,
+    }
 }
 
 #[cfg(test)]

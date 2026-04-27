@@ -23,6 +23,7 @@ pub mod builder;
 pub mod hook;
 pub mod loaded;
 pub mod manager;
+pub mod persisted_state;
 pub mod staleness;
 pub mod state;
 pub mod status;
@@ -33,6 +34,9 @@ pub use hook::{NoOpHook, RecordingHook, SharedHook, SqrydHook, noop_hook, spawn_
 pub use loaded::{LoadedWorkspace, PendingRebuild};
 pub(crate) use manager::clone_err;
 pub use manager::{RebuildReservation, ServeVerdict, WorkspaceManager};
+pub use persisted_state::{
+    PersistedState, PersistedStateError, load_persisted_state, parse_persisted_state,
+};
 pub use staleness::{BACKOFF_SCHEDULE, StalenessVerdict, backoff_delay_for, classify_staleness};
-pub use state::{OldGraphToken, WorkspaceKey, WorkspaceState};
+pub use state::{OldGraphToken, WorkspaceKey, WorkspaceState, wire_workspace_id_from_core};
 pub use status::{DaemonStatus, MemoryStatus, WorkspaceStatus};

@@ -278,6 +278,34 @@ pub struct Cli {
     #[arg(long, global = true, help_heading = headings::COMMON_OPTIONS, display_order = 40)]
     pub debug_cache: bool,
 
+    /// Operate against a logical workspace defined by a `.sqry-workspace` or
+    /// `.code-workspace` file (STEP_8).
+    ///
+    /// When set, every subcommand resolves its target through the
+    /// `LogicalWorkspace` referenced by `<PATH>`. Path-scoped subcommands
+    /// (`sqry index <PATH>`, `sqry query <PATH> …`) still take their explicit
+    /// positional argument first; this flag is the fallback when no positional
+    /// is provided.
+    ///
+    /// The `SQRY_WORKSPACE_FILE` environment variable resolves identically;
+    /// when both are present, the explicit `--workspace` flag wins.
+    ///
+    /// Conflicts with the `sqry workspace …` subcommand (which has its own
+    /// positional `<workspace>` argument): combining them is a hard error,
+    /// raised by `main.rs` at dispatch time. The clap `id` is namespaced as
+    /// `global_workspace_path` so it does not collide with the `workspace`
+    /// positional that lives on each `WorkspaceCommand` variant.
+    #[arg(
+        id = "global_workspace_path",
+        long = "workspace",
+        global = true,
+        value_name = "PATH",
+        env = "SQRY_WORKSPACE_FILE",
+        help_heading = headings::COMMON_OPTIONS,
+        display_order = 41
+    )]
+    pub workspace: Option<PathBuf>,
+
     /// Display fully qualified symbol names in CLI output.
     ///
     /// Helpful for disambiguating relation queries (callers/callees) where
@@ -2745,6 +2773,21 @@ pub enum WorkspaceCommand {
         #[arg(value_name = "WORKSPACE", help_heading = headings::WORKSPACE_INPUT, display_order = 10)]
         workspace: String,
     },
+
+    /// Print the aggregate index status for every source root in the workspace
+    Status {
+        /// Workspace root containing the .sqry-workspace file.
+        #[arg(value_name = "WORKSPACE", help_heading = headings::WORKSPACE_INPUT, display_order = 10)]
+        workspace: String,
+
+        /// Emit machine-readable JSON instead of the human-friendly summary.
+        #[arg(long, help_heading = headings::WORKSPACE_CONFIGURATION, display_order = 10)]
+        json: bool,
+
+        /// Bypass the 60-second aggregate-status cache and force a recompute.
+        #[arg(long, help_heading = headings::WORKSPACE_CONFIGURATION, display_order = 20)]
+        no_cache: bool,
+    },
 }
 
 /// CLI discovery modes converted to workspace `DiscoveryMode` values
@@ -3224,6 +3267,63 @@ impl Cli {
     #[must_use]
     pub fn search_path(&self) -> &str {
         self.path.as_deref().unwrap_or(".")
+    }
+
+    /// Resolve the path-scoped subcommand path, applying the global
+    /// `--workspace` / `SQRY_WORKSPACE_FILE` fallback (`STEP_8`).
+    ///
+    /// Precedence (least-surprise, codified in
+    /// `docs/development/workspace-aware-cross-repo/03_IMPLEMENTATION_PLAN.md`
+    /// Step 8):
+    ///   1. Explicit positional `<path>` on the subcommand wins.
+    ///   2. The global `--workspace <PATH>` flag (or `SQRY_WORKSPACE_FILE`
+    ///      environment variable; CLI flag wins on conflict) is the fallback.
+    ///   3. Otherwise, the top-level `cli.path` shorthand or `"."`.
+    ///
+    /// Callers pass `positional` from the subcommand's own positional argument.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the workspace fallback (from `--workspace` or
+    /// `SQRY_WORKSPACE_FILE`) is set but contains non-UTF-8 bytes. The
+    /// downstream CLI pipeline (positional `<path>` arguments and
+    /// `commands::run_index` / `commands::run_query` signatures) operates on
+    /// `&str`, so a non-UTF-8 workspace path cannot be propagated faithfully —
+    /// silently falling back to `"."` (or the top-level `cli.path`) would
+    /// violate the documented precedence semantics. Surface the failure
+    /// instead so the operator can supply a UTF-8 path. (STEP_8 codex iter1
+    /// fix.)
+    pub fn resolve_subcommand_path<'a>(
+        &'a self,
+        positional: Option<&'a str>,
+    ) -> anyhow::Result<&'a str> {
+        if let Some(p) = positional {
+            return Ok(p);
+        }
+        if let Some(ws) = self.workspace.as_deref() {
+            return ws.to_str().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "--workspace / SQRY_WORKSPACE_FILE path is not valid UTF-8: {}. \
+                     sqry's path-scoped subcommands require UTF-8 paths; supply a \
+                     valid UTF-8 workspace path or pass an explicit positional \
+                     argument.",
+                    ws.display()
+                )
+            });
+        }
+        Ok(self.search_path())
+    }
+
+    /// Returns the workspace path supplied via `--workspace` /
+    /// `SQRY_WORKSPACE_FILE`, if any (`STEP_8`).
+    ///
+    /// Surfaced for downstream consumers (LSP/MCP/test harnesses); the
+    /// CLI binary itself currently routes through `resolve_subcommand_path`,
+    /// so the binary build flags this as unused.
+    #[allow(dead_code)]
+    #[must_use]
+    pub fn workspace_path(&self) -> Option<&std::path::Path> {
+        self.workspace.as_deref()
     }
 
     /// Return the plugin-selection arguments for the active subcommand.

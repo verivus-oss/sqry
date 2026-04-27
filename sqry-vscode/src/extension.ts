@@ -1,18 +1,42 @@
+import * as fs from "node:fs";
 import * as vscode from "vscode";
-import { readSettings } from "./config";
+import {
+  isWorkspaceFolderExcluded,
+  nonExcludedFolders,
+  readSettings,
+} from "./config";
 import { downloadBinary, findExistingBinary, getBinaryVersion, detectPlatform } from "./binaryDownloader";
 import { SqryCodeLensProvider } from "./codeLens";
 import { SearchPanel } from "./searchPanel";
 import { SqryClient } from "./sqryClient";
 import { addToHistory, clearHistory, formatRelativeTime, SearchHistoryEntry } from "./searchHistory";
 import { SqryCodeActionProvider } from "./codeActions";
-import { SqryIndexStatus } from "./lspProtocol";
+import { SqrySourceRootStatus, SqryWorkspaceStatus } from "./lspProtocol";
 import { SqryDiagnosticsProvider } from "./diagnosticsProvider";
 import { SqryHoverProvider } from "./hoverProvider";
 import { SqryGraphPanel, GraphNode, GraphEdge } from "./graphPanel";
 import { SqryStatusBar } from "./statusBar";
 import { exportAsJson, exportAsMarkdown, exportAsCsv } from "./exportResults";
 import { AutoIndexManager } from "./autoIndex";
+import { LoadingStateMachine, MANUAL_GATE_TIMEOUT_MS } from "./loadingState";
+import {
+  buildClassificationScaffold,
+  buildWorkspaceInitializationPayload,
+  resolveWorkspaceFilePath,
+} from "./workspaceClassifier";
+import {
+  gatedManualRebuild,
+  isManualRebuildGateTimeout,
+} from "./manualRebuildGate";
+import { emitWorkspaceResolutionTelemetry as sharedEmitWorkspaceResolutionTelemetry } from "./workspaceTelemetry";
+
+// STEP_12 — re-export the formatter + shared emitter so callers that
+// imported them from `extension.ts` previously continue to compile.
+// New callers SHOULD import directly from `./workspaceTelemetry`.
+export {
+  emitWorkspaceResolutionTelemetry as sharedEmitWorkspaceResolutionTelemetry,
+  formatWorkspaceResolutionTelemetry,
+} from "./workspaceTelemetry";
 
 const HISTORY_STATE_KEY = "sqry.searchHistory";
 
@@ -21,6 +45,16 @@ let outputChannel: vscode.OutputChannel | undefined;
 let searchPanel: SearchPanel | undefined;
 let statusBar: SqryStatusBar | undefined;
 let diagnosticsProvider: SqryDiagnosticsProvider | undefined;
+let loadingState: LoadingStateMachine | undefined;
+/**
+ * Activation-scoped reference to the singleton [`AutoIndexManager`].
+ *
+ * STEP_5 codex iter1 MAJOR fix: `maybeAutoIndex` now delegates the
+ * source-root filtering to `AutoIndexManager.enqueueFromWorkspaceStatus`,
+ * so the helper needs the activation-scoped instance. The reference is
+ * assigned during `activate` and cleared by `deactivate`.
+ */
+let autoIndexManagerRef: AutoIndexManager | undefined;
 
 export async function activate(
   context: vscode.ExtensionContext,
@@ -28,12 +62,76 @@ export async function activate(
   outputChannel = vscode.window.createOutputChannel("Sqry");
   context.subscriptions.push(outputChannel);
 
+  // STEP_5 contract: state machine starts in `Activating`. Both UI
+  // surfaces (status bar + tree view) are created BEFORE the LSP starts
+  // so the user sees the resolving spinner during binary resolution
+  // and the language-server boot — never an empty / "no index" view.
+  loadingState = new LoadingStateMachine();
+  context.subscriptions.push({ dispose: () => loadingState?.dispose() });
+
   client = new SqryClient(outputChannel);
   context.subscriptions.push(client);
 
-  const initialized = await initializeClient(context, client, outputChannel);
-  if (!initialized) {
-    return;
+  // Forward `.code-workspace` location to the LSP so the
+  // LogicalWorkspaceRegistry can classify per-request paths. This MUST
+  // be set before `initializeClient`, since the LSP only reads
+  // initializationOptions during the initialize handshake.
+  //
+  // STEP_5 codex iter1 MAJOR fix: the contract is two distinct shapes —
+  // `workspace` carries the PARSED + CLASSIFIED object (from the
+  // extension-side `workspaceClassifier`); `workspaceFile` carries the
+  // PATH STRING (the LSP loads + classifies in-process via branch 4 of
+  // `resolve_logical_workspace`). We parse here at activation so the
+  // classification is computed once; on a parse failure we still send
+  // the path so the LSP can fall back to its in-process loader.
+  const workspaceFilePath = resolveWorkspaceFilePath(
+    vscode.workspace.workspaceFile?.fsPath,
+  );
+  // STEP_10 iter3 wire-up — read the `sqry.indexRoot` setting at
+  // activation. When non-empty, forward as `initializationOptions.sqry.indexRoot`
+  // so the LSP can use it as the canonical workspace identity (the
+  // in-band replacement for the legacy `--index-root` CLI flag — see
+  // `docs/cli/workspace-wrapper-migration.md`). We deliberately read
+  // settings here (rather than calling `readSettings()` for the full
+  // bag) so the wire-up stays self-contained: the `.code-workspace`
+  // path and the `indexRoot` are independent inputs to the LSP
+  // resolver, and either, both, or neither may be set.
+  const indexRootSetting = vscode.workspace
+    .getConfiguration("sqry")
+    .get<string>("indexRoot", "")
+    .trim();
+  const indexRoot = indexRootSetting.length > 0 ? indexRootSetting : undefined;
+  if (workspaceFilePath || indexRoot) {
+    let payload: ReturnType<typeof buildWorkspaceInitializationPayload> = null;
+    if (workspaceFilePath) {
+      try {
+        payload = buildWorkspaceInitializationPayload(workspaceFilePath);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        outputChannel.appendLine(
+          `[sqry] Failed to parse .code-workspace at ${workspaceFilePath}: ${message}. ` +
+            "LSP will fall back to in-process classification (branch 4).",
+        );
+      }
+    }
+    client.setInitializationOptions({
+      // The parsed object — defaults to `{folders:[], classification:null}`
+      // when the workspace file does not exist or could not be parsed;
+      // the LSP detects this lightweight hint shape and falls through to
+      // branch 4 (`workspaceFile`) which loads + classifies in-process.
+      // Only emitted when a `.code-workspace` was open at activation.
+      ...(workspaceFilePath
+        ? {
+            workspace: payload ?? { folders: [], classification: null },
+            workspaceFile: workspaceFilePath,
+          }
+        : {}),
+      // `sqry.indexRoot` — forwarded as a separate sibling field
+      // (`initializationOptions.sqry.indexRoot`). The LSP feeds it
+      // into `WorkspaceResolutionInputs.index_root` when no explicit
+      // CLI `--index-root` flag was passed.
+      ...(indexRoot ? { indexRoot } : {}),
+    });
   }
 
   searchPanel = new SearchPanel(context, client, outputChannel);
@@ -42,6 +140,38 @@ export async function activate(
   const statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
   statusBar = new SqryStatusBar(statusBarItem, outputChannel ?? null);
   context.subscriptions.push(statusBar);
+
+  // Wire phase transitions to the visible surfaces. The state machine
+  // owns the contract; the surfaces just mirror it.
+  context.subscriptions.push(
+    loadingState.onDidChangePhase((phase, failed) => {
+      statusBar?.setLoadingPhase(phase, failed?.reason);
+      if (phase === "Failed") {
+        searchPanel?.setLoadingPhase("failed", failed?.reason);
+      } else if (phase === "Ready") {
+        searchPanel?.setLoadingPhase("ready");
+      } else {
+        searchPanel?.setLoadingPhase("loading");
+      }
+    }),
+  );
+
+  // Show the spinner immediately — covers the brief window before the
+  // LSP can start, including binary download.
+  searchPanel?.setLoadingPhase("loading");
+  loadingState.transition("LspStarting");
+
+  const initialized = await initializeClient(context, client, outputChannel);
+  if (!initialized) {
+    if (loadingState && !loadingState.isFailed()) {
+      loadingState.transition("Failed", {
+        reason: "sqry language server failed to start",
+        viewLogsAction: true,
+      });
+    }
+    return;
+  }
+  loadingState.transition("WorkspaceResolving");
 
   // Diagnostics provider — publishes findings to VS Code Problems panel
   const diagCollection = vscode.languages.createDiagnosticCollection("sqry");
@@ -81,7 +211,7 @@ export async function activate(
     client.onDidChangeConfig(async () => {
       if (client) {
         try {
-          await refreshAllIndexStatuses(client);
+          await refreshWorkspaceStatus(client);
         } catch {
           // Config change may cause temporary LSP unavailability
         }
@@ -238,7 +368,7 @@ export async function activate(
         return;
       }
       try {
-        await refreshAllIndexStatuses(activeClient);
+        await refreshWorkspaceStatus(activeClient);
         outputChannel?.appendLine("[sqry] Refreshed index stats for all workspace roots");
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -249,6 +379,9 @@ export async function activate(
     vscode.commands.registerCommand("sqry.showOutput", () => {
       outputChannel?.show(true);
     }),
+    vscode.commands.registerCommand("sqry.editWorkspaceClassification", () =>
+      editWorkspaceClassification(),
+    ),
     vscode.commands.registerCommand("sqry.clearResults", () => {
       if (searchPanel) {
         searchPanel.clearResults();
@@ -324,7 +457,7 @@ export async function activate(
         outputChannel?.appendLine("[sqry] Language server restarted successfully");
         void vscode.window.showInformationMessage("sqry: Language server restarted.");
         // Refresh stats for all workspace roots after restart
-        await refreshAllIndexStatuses(activeClient);
+        await refreshWorkspaceStatus(activeClient);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         outputChannel?.appendLine(`[sqry] Failed to restart language server: ${message}`);
@@ -341,10 +474,17 @@ export async function activate(
         void vscode.window.showWarningMessage("sqry: No workspace folder detected.");
         return;
       }
+      // STEP_5 codex iter1 MAJOR fix: manual rebuild commands MUST gate
+      // on `Ready` (DAG mandate, 30s timeout). The legacy direct call
+      // bypassed the gate and hit `runIndex` while the LSP was still
+      // resolving the workspace, producing the bug the loading-state
+      // contract was designed to prevent.
       try {
-        await activeClient.runIndex(workspace);
-        await refreshWorkspaceIndexStatus(activeClient, workspace);
-        await refreshAllIndexStatuses(activeClient);
+        await runGatedRebuild(async () => {
+          await activeClient.runIndex(workspace);
+          await refreshSourceRootStatus(activeClient, workspace);
+          await refreshWorkspaceStatus(activeClient);
+        });
       } catch (error) {
         await handleError(error);
       }
@@ -585,7 +725,7 @@ export async function activate(
       void (async () => {
         await maybeAutoIndex();
         if (client) {
-          await refreshAllIndexStatuses(client);
+          await refreshWorkspaceStatus(client);
         }
       })();
     }),
@@ -595,7 +735,15 @@ export async function activate(
   // Auto-index on save (sqry.autoIndexOnSave)
   // ---------------------------------------------------------------------------
   const autoIndexManager = new AutoIndexManager();
-  context.subscriptions.push({ dispose: () => autoIndexManager.dispose() });
+  autoIndexManagerRef = autoIndexManager;
+  context.subscriptions.push({
+    dispose: () => {
+      autoIndexManager.dispose();
+      if (autoIndexManagerRef === autoIndexManager) {
+        autoIndexManagerRef = undefined;
+      }
+    },
+  });
 
   const triggerAutoIndex = (rootPath: string, workspaceFolder: vscode.WorkspaceFolder): void => {
     autoIndexManager.schedule(rootPath, 30_000, () => {
@@ -611,8 +759,8 @@ export async function activate(
 
         try {
           await activeClient.runIndex(workspaceFolder);
-          await refreshWorkspaceIndexStatus(activeClient, workspaceFolder);
-          await refreshAllIndexStatuses(activeClient);
+          await refreshSourceRootStatus(activeClient, workspaceFolder);
+          await refreshWorkspaceStatus(activeClient);
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           outputChannel?.appendLine(`[sqry] Auto-index failed: ${message}`);
@@ -655,14 +803,32 @@ export async function activate(
     }),
   );
 
-  await maybeAutoIndex();
-
-  // Refresh index status for all workspace folders on startup.
-  // maybeAutoIndex only indexes folders that are missing; this ensures folders
-  // that already have an index also get their status populated in the tree view.
+  // Hydrate the aggregate workspace status before we transition to
+  // Ready — the UI is gated on at least one successful round-trip so
+  // the tree view never flips to "no index" because of a transient
+  // post-LSP-start race.
   if (client) {
-    await refreshAllIndexStatuses(client);
+    await refreshWorkspaceStatus(client);
   }
+
+  // STEP_12 telemetry — emit ONE aggregate startup line that summarises
+  // the resolved logical workspace. The line goes to the existing
+  // `Sqry` outputChannel; format is the DAG-spec verbatim:
+  //   [sqry] Resolved workspace <id-short> with N source roots, M members, K exclusions
+  // Per the DAG, the short hex (16 chars) is for human eyes; the full
+  // hex digest is reachable through `sqry/workspaceStatus`'s
+  // `workspace_id_full` field for forensic identity comparisons.
+  if (client && outputChannel) {
+    await emitWorkspaceResolutionTelemetry(client, outputChannel);
+  }
+
+  if (loadingState && !loadingState.isFailed()) {
+    loadingState.transition("Ready");
+  }
+
+  // Auto-index runs only after Ready — by definition, the LSP has
+  // already told us which source roots are missing.
+  await maybeAutoIndex();
 }
 
 async function handleIndexCommand(): Promise<void> {
@@ -691,10 +857,13 @@ async function indexSingleRoot(activeClient: SqryClient): Promise<void> {
   if (!workspace) {
     return;
   }
+  // STEP_5 codex iter1 MAJOR fix: gate on Ready. See `sqry.rebuildIndex`.
   try {
-    await activeClient.runIndex(workspace);
-    await refreshWorkspaceIndexStatus(activeClient, workspace);
-    await refreshAllIndexStatuses(activeClient);
+    await runGatedRebuild(async () => {
+      await activeClient.runIndex(workspace);
+      await refreshSourceRootStatus(activeClient, workspace);
+      await refreshWorkspaceStatus(activeClient);
+    });
   } catch (error) {
     await handleError(error);
   }
@@ -712,28 +881,114 @@ async function indexMultiRoot(activeClient: SqryClient, folders: readonly vscode
     return;
   }
 
+  // STEP_5 codex iter1 MAJOR fix: every branch of the multi-root path
+  // gates on Ready before issuing `runIndex`. We open the gate ONCE
+  // around the whole operation so the user is not asked to wait twice
+  // when “All Workspace Folders” is selected.
   if (!picked.folder) {
     // "All Workspace Folders" selected — index each sequentially
-    for (const folder of folders) {
-      try {
-        await activeClient.runIndex(folder);
-        await refreshWorkspaceIndexStatus(activeClient, folder);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        outputChannel?.appendLine(`[sqry] Failed to index ${folder.name}: ${message}`);
-      }
+    try {
+      await runGatedRebuild(async () => {
+        for (const folder of folders) {
+          try {
+            await activeClient.runIndex(folder);
+            await refreshSourceRootStatus(activeClient, folder);
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            outputChannel?.appendLine(`[sqry] Failed to index ${folder.name}: ${message}`);
+          }
+        }
+        await refreshWorkspaceStatus(activeClient);
+      });
+    } catch (error) {
+      await handleError(error);
     }
-    await refreshAllIndexStatuses(activeClient);
     return;
   }
 
   // Single folder selected
   try {
-    await activeClient.runIndex(picked.folder);
-    await refreshWorkspaceIndexStatus(activeClient, picked.folder);
-    await refreshAllIndexStatuses(activeClient);
+    await runGatedRebuild(async () => {
+      await activeClient.runIndex(picked.folder!);
+      await refreshSourceRootStatus(activeClient, picked.folder!);
+      await refreshWorkspaceStatus(activeClient);
+    });
   } catch (error) {
     await handleError(error);
+  }
+}
+
+/**
+ * Wrap a manual-rebuild operation in the loading-state gate.
+ *
+ * STEP_5 acceptance criterion (codex iter1 MAJOR fix): every command
+ * that ends in `runIndex` from a USER-FACING command handler funnels
+ * through this helper so the LSP is guaranteed to be `Ready` before
+ * the rebuild is dispatched. The 30-second timeout is the DAG-mandated
+ * `MANUAL_GATE_TIMEOUT_MS`.
+ *
+ * Errors:
+ * - On gate timeout, surfaces a typed `ManualRebuildGateTimeoutError`
+ *   to the user via `showWarningMessage` (and the output channel) and
+ *   re-throws so callers can propagate. UI-side handlers (`handleError`)
+ *   detect the gate-timeout shape and skip the generic error toast to
+ *   avoid double notification.
+ * - On terminal LSP failure, the `LoadingStateMachine.waitForReady`
+ *   rejection propagates through unchanged — the user sees the actual
+ *   failure cause via the existing `handleError` path.
+ *
+ * The helper is a thin VS Code-aware wrapper around the pure
+ * `gatedManualRebuild` from `manualRebuildGate.ts`. The pure helper is
+ * unit-tested (no extension host required); this wrapper exists only
+ * to add the user-visible warning and the loadingState resolution.
+ */
+async function runGatedRebuild<T>(operation: () => Promise<T>): Promise<T> {
+  const gate = loadingState;
+  if (!gate) {
+    // Activation has not finished yet — fail loudly rather than
+    // silently bypass the gate.
+    throw new Error(
+      "sqry: loading-state machine is not initialized; refuse to dispatch manual rebuild",
+    );
+  }
+  try {
+    return await gatedManualRebuild(gate, operation, {
+      timeoutMs: MANUAL_GATE_TIMEOUT_MS,
+      log: (event) => {
+        switch (event.kind) {
+          case "gate-immediate":
+            // No log — Ready at entry is the steady-state path.
+            break;
+          case "gate-waited":
+            outputChannel?.appendLine(
+              `[sqry] Manual rebuild gate cleared after ${event.waitedMs}ms`,
+            );
+            break;
+          case "gate-timeout":
+            outputChannel?.appendLine(
+              `[sqry] Manual rebuild gate TIMED OUT after ${event.timeoutMs}ms` +
+                (event.cause ? ` (cause: ${event.cause})` : ""),
+            );
+            void vscode.window.showWarningMessage(
+              `sqry: cannot rebuild — language server did not reach Ready within ${event.timeoutMs}ms.`,
+            );
+            break;
+          case "gate-failed":
+            outputChannel?.appendLine(
+              `[sqry] Manual rebuild gate FAILED — language server reached terminal Failed state: ${event.reason}`,
+            );
+            break;
+        }
+      },
+    });
+  } catch (err) {
+    if (isManualRebuildGateTimeout(err)) {
+      // Re-throw so the caller can decide whether to also surface a
+      // toast — but mark the error so `handleError` skips its default
+      // notification. We tag with the same code constant the gate uses.
+      throw err;
+    }
+    throw err;
   }
 }
 
@@ -910,165 +1165,214 @@ export function deactivate(): void {
   client = undefined;
 }
 
+/**
+ * STEP_5: auto-index walks the aggregate `WorkspaceStatus`. The LSP is
+ * the source of truth for which source roots are missing — per-folder
+ * filesystem stat probing is forbidden by acceptance criterion 4.
+ *
+ * STEP_5 codex iter1 MAJOR fix: the source-root filtering logic
+ * (`status === "missing"` + exclude-predicate filter) lives in
+ * [`AutoIndexManager.enqueueFromWorkspaceStatus`], NOT inline here.
+ * This wiring layer is responsible only for resolving the `WorkspaceFolder`
+ * for each enqueued root and dispatching the user-facing prompt /
+ * background rebuild via `indexWithProgress`.
+ */
 async function maybeAutoIndex(): Promise<void> {
   const settings = readSettings();
   if (settings.autoIndexOnOpen === "never") {
     return;
   }
-  const folders = vscode.workspace.workspaceFolders ?? [];
-  if (!folders.length || !client) {
+  if (!client || !loadingState?.isReady()) {
+    return;
+  }
+  const status = await safeWorkspaceStatus();
+  if (!status) {
+    return;
+  }
+  const manager = autoIndexManagerRef;
+  if (!manager) {
+    // Activation has not finished yet. The same `manager` instance is
+    // used by the on-save debouncer; if it is missing here we are in a
+    // pathological state (e.g. tests calling maybeAutoIndex directly)
+    // and there is no safe action other than to bail.
     return;
   }
 
-  for (const folder of folders) {
-    const hasIndex = await folderHasIndex(folder);
-    if (hasIndex) {
-      continue;
+  // The exclude predicate maps a source-root path to a boolean by
+  // resolving the matching `WorkspaceFolder` and consulting
+  // `isWorkspaceFolderExcluded`. The autoIndex helper does not know
+  // about VS Code workspace folders by design — this lookup is the
+  // wiring that bridges the two surfaces.
+  const exclude = (rootPath: string): boolean => {
+    const folder = resolveFolderForSourceRoot({
+      path: rootPath,
+      // The predicate only consults `path`; we synthesise the rest of
+      // the SqrySourceRootStatus shape because the lookup function is
+      // path-keyed.
+      status: "missing",
+    });
+    if (!folder) {
+      // Source roots that have no matching workspace folder cannot be
+      // indexed via `indexWithProgress` (which requires a folder).
+      // Treat them as excluded so the autoIndex helper does not try to
+      // run them.
+      return true;
     }
+    return isWorkspaceFolderExcluded(folder, settings);
+  };
 
-    if (settings.autoIndexOnOpen === "always") {
-      await indexWithProgress(folder);
-    } else if (settings.autoIndexOnOpen === "prompt") {
-      const answer = await vscode.window.showInformationMessage(
-        `sqry: No index found for ${folder.name}. Run "sqry index" now?`,
-        "Index Now",
-        "Skip",
-      );
-      if (answer === "Index Now") {
+  await manager.enqueueFromWorkspaceStatus(
+    status,
+    async (root) => {
+      const folder = resolveFolderForSourceRoot(root);
+      if (!folder) {
+        return;
+      }
+      if (settings.autoIndexOnOpen === "always") {
         await indexWithProgress(folder);
+      } else if (settings.autoIndexOnOpen === "prompt") {
+        const answer = await vscode.window.showInformationMessage(
+          `sqry: No index found for ${folder.name}. Run "sqry index" now?`,
+          "Index Now",
+          "Skip",
+        );
+        if (answer === "Index Now") {
+          await indexWithProgress(folder);
+        }
       }
-    }
-  }
+    },
+    { exclude },
+  );
 }
 
-/** Check if a recent lock file indicates build is in progress. Returns true if build is active. */
-async function isLockFileActive(
-  lockPath: vscode.Uri,
-  folderName: string,
-): Promise<boolean> {
+/** Resolve a `WorkspaceFolder` for a given source-root path. */
+function resolveFolderForSourceRoot(
+  root: SqrySourceRootStatus,
+): vscode.WorkspaceFolder | undefined {
+  const folders = vscode.workspace.workspaceFolders ?? [];
+  return folders.find((f) => f.uri.fsPath === root.path);
+}
+
+/**
+ * Implementation of the `sqry.editWorkspaceClassification` command.
+ *
+ * Resolves the active `.code-workspace`, scaffolds the
+ * `sqry.workspace` block when absent (without overwriting any other
+ * keys), writes the file atomically, and opens it in an editor pane.
+ *
+ * When no `.code-workspace` is open we surface a `Save Workspace`
+ * suggestion — VS Code's `workbench.action.saveWorkspaceAs` lets the
+ * user materialise one. We do NOT silently scaffold against
+ * `settings.json`; the DAG ties the command to the workspace file.
+ */
+async function editWorkspaceClassification(): Promise<void> {
+  const workspaceFilePath = resolveWorkspaceFilePath(
+    vscode.workspace.workspaceFile?.fsPath,
+  );
+  if (!workspaceFilePath) {
+    const action = await vscode.window.showInformationMessage(
+      "sqry: No `.code-workspace` file is currently open. Save the workspace first to scaffold a `sqry.workspace` block.",
+      "Save Workspace…",
+    );
+    if (action === "Save Workspace…") {
+      await vscode.commands.executeCommand("workbench.action.saveWorkspaceAs");
+    }
+    return;
+  }
+  let raw: string | null = null;
   try {
-    const lockStat = await vscode.workspace.fs.stat(lockPath);
-    const lockAge = Date.now() - lockStat.mtime;
-    const lockAgeMin = Math.floor(lockAge / 60000);
-    outputChannel?.appendLine(`[sqry] Lock file found, age: ${lockAgeMin} min`);
-
-    if (lockAge < 30 * 60 * 1000) {
-      outputChannel?.appendLine(`[sqry] Build in progress for ${folderName} (lock age: ${lockAgeMin} min)`);
-      return true;
+    raw = fs.readFileSync(workspaceFilePath, "utf-8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+      const message = err instanceof Error ? err.message : String(err);
+      void vscode.window.showErrorMessage(`sqry: cannot read workspace file: ${message}`);
+      return;
     }
-    outputChannel?.appendLine(`[sqry] Stale lock detected for ${folderName} (age: ${lockAgeMin} min)`);
-  } catch {
-    outputChannel?.appendLine(`[sqry] No lock file found`);
   }
-  return false;
+  let scaffolded: { content: string; alreadyHadBlock: boolean };
+  try {
+    scaffolded = buildClassificationScaffold(raw);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    void vscode.window.showErrorMessage(
+      `sqry: cannot scaffold sqry.workspace — workspace file is not valid JSON (${message}). Open the file manually and add the block.`,
+    );
+    const doc = await vscode.workspace.openTextDocument(workspaceFilePath);
+    await vscode.window.showTextDocument(doc);
+    return;
+  }
+  if (!scaffolded.alreadyHadBlock) {
+    try {
+      fs.writeFileSync(workspaceFilePath, scaffolded.content, "utf-8");
+      outputChannel?.appendLine(
+        `[sqry] Scaffolded sqry.workspace block in ${workspaceFilePath}`,
+      );
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      void vscode.window.showErrorMessage(`sqry: cannot write workspace file: ${message}`);
+      return;
+    }
+  }
+  const doc = await vscode.workspace.openTextDocument(workspaceFilePath);
+  await vscode.window.showTextDocument(doc);
 }
 
-/** Validate index via LSP. Returns true if index is healthy, false if invalid, undefined if can't validate. */
-async function validateIndexViaLSP(
-  folder: vscode.WorkspaceFolder,
-): Promise<boolean | undefined> {
+/**
+ * Fetch the logical-workspace info via `sqry/workspaceStatus` and emit
+ * the STEP_12 single startup telemetry line.
+ *
+ * Delegates to the shared
+ * [`emitWorkspaceResolutionTelemetry`](./workspaceTelemetry.ts) helper
+ * so the activation path and the unit tests share a single
+ * implementation. Failure is logged but never propagated — telemetry
+ * is best-effort and must not block activation. STEP_12 codex iter1
+ * MINOR fix: the shared helper guarantees `getLogicalWorkspaceInfo()`
+ * is called exactly once and `appendLine` is called exactly once
+ * (success or failure path), pinned by
+ * `sqry-vscode/tests/telemetry.test.ts`.
+ */
+async function emitWorkspaceResolutionTelemetry(
+  activeClient: SqryClient,
+  channel: vscode.OutputChannel,
+): Promise<void> {
+  await sharedEmitWorkspaceResolutionTelemetry(activeClient, channel);
+}
+
+/** Wrap `getWorkspaceStatus` with logging — returns null on failure. */
+async function safeWorkspaceStatus(): Promise<SqryWorkspaceStatus | null> {
   if (!client) {
-    return undefined;
+    return null;
   }
-
   try {
-    outputChannel?.appendLine(`[sqry] Validating index via LSP for ${folder.name}...`);
-    const status = await client.getIndexStatus(folder);
-    outputChannel?.appendLine(
-      `[sqry] LSP index status: exists=${status.exists}, symbols=${status.symbol_count}, files=${status.file_count}`,
-    );
-
-    if (status.exists && status.symbol_count && status.symbol_count > 0) {
-      if (status.building) {
-        const ageMin = status.build_age_seconds ? Math.floor(status.build_age_seconds / 60) : 0;
-        outputChannel?.appendLine(`[sqry] Build in progress for ${folder.name} (${ageMin} min)`);
-      }
-      outputChannel?.appendLine(`[sqry] Index is healthy for ${folder.name}`);
-      // Status bar and tree view are updated by refreshAllIndexStatuses after
-      // maybeAutoIndex completes — avoid per-folder side effects here to prevent
-      // incorrect single-root state in multi-root workspaces.
-      return true;
-    }
-
-    outputChannel?.appendLine(
-      `[sqry] Index validation failed for ${folder.name}: exists=${status.exists}, symbols=${status.symbol_count}`,
-    );
-    return false;
+    return await client.getWorkspaceStatus();
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    outputChannel?.appendLine(`[sqry] Index validation error for ${folder.name}: ${message}`);
-    return false;
-  }
-}
-
-/** Check if index file is too old (> 7 days). */
-function isIndexStale(indexMtime: number, folderName: string): boolean {
-  const indexAge = Date.now() - indexMtime;
-  const maxAge = 7 * 24 * 60 * 60 * 1000; // 7 days
-
-  if (indexAge > maxAge) {
-    const ageDays = Math.floor(indexAge / (24 * 60 * 60 * 1000));
-    outputChannel?.appendLine(`[sqry] Index for ${folderName} is ${ageDays} days old, needs rebuild`);
-    return true;
-  }
-  return false;
-}
-
-async function folderHasIndex(
-  folder: vscode.WorkspaceFolder,
-): Promise<boolean> {
-  try {
-    // Unified graph format: .sqry/graph/manifest.json
-    const indexPath = vscode.Uri.joinPath(folder.uri, ".sqry", "graph", "manifest.json");
-    // Legacy flat file format (deprecated)
-    const legacyIndexPath = vscode.Uri.joinPath(folder.uri, ".sqry-index");
-    const lockPath = vscode.Uri.joinPath(folder.uri, ".sqry-index.lock");
-
-    outputChannel?.appendLine(`[sqry] Checking index for folder: ${folder.name} at ${folder.uri.fsPath}`);
-
-    // Check if index file exists (unified graph format first, then legacy)
-    let indexStat;
-    try {
-      indexStat = await vscode.workspace.fs.stat(indexPath);
-      outputChannel?.appendLine(`[sqry] Unified graph manifest exists at ${indexPath.fsPath}`);
-    } catch {
-      // Fallback: check legacy .sqry-index format
-      try {
-        indexStat = await vscode.workspace.fs.stat(legacyIndexPath);
-        outputChannel?.appendLine(`[sqry] Legacy index file exists at ${legacyIndexPath.fsPath}`);
-      } catch {
-        outputChannel?.appendLine(`[sqry] No index found at ${indexPath.fsPath} or ${legacyIndexPath.fsPath}`);
-        const lockActive = await isLockFileActive(lockPath, folder.name);
-        return lockActive; // Return true only if build is in progress
-      }
-    }
-
-    // Index exists - validate via LSP if available
-    const lspResult = await validateIndexViaLSP(folder);
-    if (lspResult !== undefined) {
-      return lspResult;
-    }
-
-    // Fallback: check index age
-    return !isIndexStale(indexStat.mtime, folder.name);
-  } catch (error) {
-    outputChannel?.appendLine(`[sqry] Error checking index for ${folder.name}: ${error}`);
-    return false;
+    outputChannel?.appendLine(`[sqry] getWorkspaceStatus failed: ${message}`);
+    return null;
   }
 }
 
 function getActiveWorkspaceFolder():
   | vscode.WorkspaceFolder
   | undefined {
+  const settings = readSettings();
   const editor = vscode.window.activeTextEditor;
   if (editor) {
-    return vscode.workspace.getWorkspaceFolder(editor.document.uri);
+    const candidate = vscode.workspace.getWorkspaceFolder(editor.document.uri);
+    if (candidate && !isWorkspaceFolderExcluded(candidate, settings)) {
+      return candidate;
+    }
   }
-  return vscode.workspace.workspaceFolders?.[0];
+  // Fall back to the first non-excluded folder (STEP_5 criterion 8).
+  return nonExcludedFolders(vscode.workspace.workspaceFolders ?? [], settings)[0];
 }
 
 function getAllWorkspaceFolders(): readonly vscode.WorkspaceFolder[] {
-  return vscode.workspace.workspaceFolders ?? [];
+  // STEP_5 acceptance criterion 8 — every enumeration loop filters
+  // through `isWorkspaceFolderExcluded()`. Centralising the filter
+  // here means the rest of the extension never has to remember.
+  const all = vscode.workspace.workspaceFolders ?? [];
+  return nonExcludedFolders(all);
 }
 
 /**
@@ -1260,76 +1564,78 @@ async function handleError(error: unknown): Promise<void> {
 }
 
 /**
- * Refresh index status for ALL workspace folders serially and replace the
- * status map atomically. This is the single entrypoint for multi-root status
- * synchronization — every path that repopulates status should call this.
- *
- * Serial iteration is required because `SqryClient.sendRequest` calls
- * `cancelActiveRequest()` before each new request, making parallel calls unsafe.
+ * Refresh the aggregate workspace status — the SOLE status surface
+ * (DAG STEP_5 acceptance criterion 5). This is the single entrypoint
+ * for status synchronization; every path that repopulates status
+ * (`onDidChangeWorkspaceFolders`, `onDidChangeConfiguration("sqry")`,
+ * `sqry.refreshStats`, post-rebuild) calls this exactly once.
  */
-async function refreshAllIndexStatuses(activeClient: SqryClient): Promise<void> {
-    const folders = vscode.workspace.workspaceFolders ?? [];
-
-    // Zero folders: clear all state and return
-    if (!folders.length || !searchPanel) {
-        if (searchPanel) {
-            searchPanel.replaceIndexStatusMap(new Map());
-        }
-        statusBar?.update(null);
-        return;
-    }
-
-    const freshMap = new Map<string, SqryIndexStatus>();
-
-    // Serial iteration — cancelActiveRequest() makes parallel unsafe
-    for (const folder of folders) {
-        try {
-            const status = await activeClient.getIndexStatus(folder);
-            if (status.exists) {
-                freshMap.set(folder.uri.fsPath, status);
-            }
-            // exists === false → omit from map → renders "not indexed"
-        } catch {
-            // Failed → omit from map → renders "not indexed"
-        }
-    }
-
-    // Atomic replacement — clears removed roots, no stale entries
-    searchPanel.replaceIndexStatusMap(freshMap);
-
-    // Status bar
-    if (folders.length > 1) {
-        statusBar?.updateMultiRoot(freshMap);
-    } else {
-        const single = freshMap.values().next().value;
-        statusBar?.update(single ?? null);
-    }
+async function refreshWorkspaceStatus(activeClient: SqryClient): Promise<void> {
+  try {
+    const status = await activeClient.getWorkspaceStatus();
+    searchPanel?.setWorkspaceStatus(status);
+    statusBar?.updateWorkspace(status);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    outputChannel?.appendLine(`[sqry] Failed to refresh workspace status: ${message}`);
+    statusBar?.update(null);
+  }
 }
 
 /**
- * Refresh index status for a single workspace folder with side effects
- * (output logging, diagnostics refresh). Does NOT update the tree view map —
- * call `refreshAllIndexStatuses` after this for map synchronization.
+ * Drill-down refresh for a single source root (post-rebuild diagnostics
+ * and tree drill-down updates). Does NOT replace the aggregate surface
+ * — `refreshWorkspaceStatus` follows for that.
  */
-async function refreshWorkspaceIndexStatus(
-    activeClient: SqryClient,
-    workspace: vscode.WorkspaceFolder,
+async function refreshSourceRootStatus(
+  activeClient: SqryClient,
+  workspace: vscode.WorkspaceFolder,
 ): Promise<void> {
-    try {
-        const status = await activeClient.getIndexStatus(workspace);
-        outputChannel?.appendLine(
-            `[sqry] Index stats refreshed: ${status.symbol_count} symbols, ${status.file_count} files`,
-        );
+  try {
+    const status = await activeClient.getSourceRootStatus(workspace);
+    outputChannel?.appendLine(
+      `[sqry] Source root ${workspace.name}: ${status.status} (symbols=${status.symbol_count ?? "?"})`,
+    );
 
-        // After index rebuild, clear stale diagnostics and refresh for open editors
-        if (diagnosticsProvider) {
-            diagnosticsProvider.clear();
-            await diagnosticsProvider.refreshForOpenEditors(workspace);
-        }
-    } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        outputChannel?.appendLine(`[sqry] Failed to refresh index stats after rebuild: ${message}`);
+    // After index rebuild, clear stale diagnostics and refresh for open editors
+    if (diagnosticsProvider) {
+      diagnosticsProvider.clear();
+      await diagnosticsProvider.refreshForOpenEditors(workspace);
     }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    outputChannel?.appendLine(
+      `[sqry] Failed to refresh source-root status after rebuild: ${message}`,
+    );
+  }
+}
+
+/**
+ * Gate a manual rebuild on `Ready`. Returns `true` when the gate is
+ * open and the caller may proceed; throws/handles the timeout error
+ * otherwise.
+ */
+async function awaitReadyOrFail(actionLabel: string): Promise<boolean> {
+  if (!loadingState) {
+    return true;
+  }
+  if (loadingState.isReady()) {
+    return true;
+  }
+  if (loadingState.isFailed()) {
+    void vscode.window.showErrorMessage(
+      `sqry: cannot ${actionLabel} — extension is unavailable. Check the Output panel.`,
+    );
+    return false;
+  }
+  try {
+    await loadingState.waitForReady(MANUAL_GATE_TIMEOUT_MS);
+    return true;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    void vscode.window.showErrorMessage(`sqry: ${message}`);
+    return false;
+  }
 }
 
 async function indexWithProgress(folder: vscode.WorkspaceFolder): Promise<void> {
@@ -1338,31 +1644,35 @@ async function indexWithProgress(folder: vscode.WorkspaceFolder): Promise<void> 
     return;
   }
 
-  // Check if build is already in progress
+  // STEP_5: gate manual rebuild on Ready (DAG criterion 11 timeout
+  // contract). The LSP enforces its own build-lock semantics; we no
+  // longer probe `.sqry-index.lock` from the extension because that
+  // would be per-folder filesystem stat probing — forbidden by
+  // criterion 4.
+  if (!(await awaitReadyOrFail(`rebuild ${folder.name}`))) {
+    return;
+  }
   let force = false;
+  // Surface the in-progress build via the aggregate status: if the
+  // matching source root reports `building`, prompt the user to
+  // confirm a force rebuild. This replaces the legacy filesystem
+  // stat probe.
   try {
-    const lockPath = vscode.Uri.joinPath(folder.uri, ".sqry-index.lock");
-    try {
-      const lockStat = await vscode.workspace.fs.stat(lockPath);
-      const lockAge = Date.now() - lockStat.mtime;
-      if (lockAge < 30 * 60 * 1000) {  // 30 minutes
-        const ageMin = Math.floor(lockAge / 60000);
-        const action = await vscode.window.showWarningMessage(
-          `sqry: Index build already in progress for ${folder.name} (started ${ageMin} min ago)`,
-          "Wait",
-          "Force Rebuild"
-        );
-        if (action !== "Force Rebuild") {
-          return;
-        }
-        // User chose Force Rebuild - pass force=true
-        force = true;
+    const status = await activeClient.getSourceRootStatus(folder);
+    if (status.status === "building") {
+      const action = await vscode.window.showWarningMessage(
+        `sqry: Index build already in progress for ${folder.name}`,
+        "Wait",
+        "Force Rebuild",
+      );
+      if (action !== "Force Rebuild") {
+        return;
       }
-    } catch {
-      // No lock file - OK to proceed
+      force = true;
     }
   } catch (error) {
-    outputChannel?.appendLine(`[sqry] Error checking lock file: ${error}`);
+    const message = error instanceof Error ? error.message : String(error);
+    outputChannel?.appendLine(`[sqry] Pre-rebuild status check failed: ${message}`);
   }
 
   // Step 7: Graceful degradation - show fallback notification if LSP progress not received within 3s
@@ -1389,8 +1699,8 @@ async function indexWithProgress(folder: vscode.WorkspaceFolder): Promise<void> 
   try {
     await activeClient.runIndex(folder, force);
     // Success message is sent by LSP server via window/showMessage with symbol counts
-    await refreshWorkspaceIndexStatus(activeClient, folder);
-    await refreshAllIndexStatuses(activeClient);
+    await refreshSourceRootStatus(activeClient, folder);
+    await refreshWorkspaceStatus(activeClient);
   } catch (error) {
     await handleError(error);
   } finally {

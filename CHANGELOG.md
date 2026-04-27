@@ -7,7 +7,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **feat(workspace) [USER-VISIBLE]**: workspace-aware cross-repo analysis is now
+  configurable per workspace. Two surfaces ship in this release:
+
+  - **`.sqry-workspace`** v2 registry file (CLI / standalone LSP). A JSON
+    registry initialised with `sqry workspace init <path>` and populated via
+    `sqry workspace add` / `scan`. Consumed by `sqry workspace stats|status|query`
+    directly. Path-scoped subcommands (`sqry index`, `sqry query`, etc.)
+    accept the file path via `--workspace <PATH>` (or
+    `SQRY_WORKSPACE_FILE=<PATH>`) as a fallback positional path; STEP_9
+    documents the current contract — file-driven `LogicalWorkspace` loading
+    inside non-workspace subcommands lands in a follow-up task.
+  - **`sqry.workspace` block inside a `.code-workspace`** (VS Code). When the
+    `.code-workspace` file is open, the extension parses `folders[]` plus the
+    `sqry.workspace` block at activation and forwards a lightweight
+    `{ folders, classification }` hint plus the workspace-file path under
+    `initializationOptions.sqry` (`sqry.workspace` carries the hint,
+    `sqry.workspaceFile` carries the path). `sqry lsp` runs its canonical
+    `LogicalWorkspace` resolver: branch 1 detects and skips the lightweight
+    hint, branch 4 then loads the `.code-workspace` directly via
+    `LogicalWorkspace::from_code_workspace`. Four new contributed settings
+    — `sqry.indexRoot`, `sqry.projectRootMode`,
+    `sqry.workspaceFolderExcludes`, `sqry.workspaceClassification` —
+    govern runtime behaviour: `sqry.workspaceClassification` is the
+    user-editable surface (mirrored back into the open `.code-workspace`
+    by the `Sqry: Edit Workspace Classification` command);
+    `sqry.workspaceFolderExcludes` filters every enumeration loop;
+    `sqry.indexRoot` and `sqry.projectRootMode` are read by the
+    extension's classifier helpers.
+
+  Both surfaces resolve to the same `LogicalWorkspace` value (defined in
+  `sqry-core::workspace::logical`), keyed by a stable 32-byte BLAKE3-256
+  `workspace_id` derived from a constructor-specific `WorkspaceIdentity`
+  enum: the canonical workspace-file path for `.sqry-workspace` and
+  `.code-workspace` constructors, the canonical single-root path for the
+  single-root constructor (`WorkspaceIdentity::SingleRoot { path }`),
+  and the canonical sorted source-root list for the anonymous-multi-root
+  constructor only. The MCP server, LSP, daemon (`sqryd`
+  `WorkspaceManager`), and redaction layer all key on this identity.
+
+  **Migration guidance.** Existing single-repo workflows are unchanged: with no
+  `.sqry-workspace` and no `.code-workspace` `sqry.workspace` block, sqry
+  behaves exactly as before (single index_root resolved from the CLI argument,
+  the workspace folder, or git root per `projectRootMode`). To enable
+  cross-repo analysis, add one of the two configuration files; pre-existing
+  documentation that described "cross-repo by default" was inaccurate and is
+  corrected in this release. See [`docs/cli/workspace.md`](docs/cli/workspace.md)
+  for the full configuration reference and
+  [`docs/development/code-map/workspace-aware.md`](docs/development/code-map/workspace-aware.md)
+  for the contributor-facing data-flow code map.
+
 ### Changed
+
+- **docs(README,marketing,FEATURE_LIST)** [USER-VISIBLE]: removed the
+  inaccurate "cross-repo by default" wording from `README.md`,
+  `docs/marketing/SQRY_ONE_PAGER.md`, and `docs/FEATURE_LIST.md`. Each surface
+  now describes the configurable-per-workspace model precisely and cross-links
+  to the new `docs/cli/workspace.md`.
 
 - **feat(mcp) [BEHAVIOR CHANGE]**: `find_duplicates` now caps each duplicate
   group to **10 member symbols** by default (previously unlimited).

@@ -149,6 +149,19 @@ fn handle_object_field(map: &mut Map<String, Value>, key: &str, ctx: &mut Walker
 
     if should_redact_field(key, ctx) {
         redact_value(key, field_value, ctx);
+    } else if passthrough_exclusion_applies(key, ctx) {
+        // Passthrough mode is normally a no-op (`should_redact_field` short-
+        // circuits on `is_passthrough`), but `STEP_7` acceptance criterion 6
+        // (preset=any + path in exclusions → opaque hash + excluded: true)
+        // requires excluded paths to be redacted regardless of preset. When
+        // a `LogicalWorkspaceView` is bound and the field is path-bearing,
+        // route through `redact_excluded_in_passthrough` which rewrites
+        // only excluded paths to the opaque-hash form and leaves every
+        // other path (including absolute non-excluded paths) verbatim.
+        // This preserves criterion 3 (preset=none + path inside source_root
+        // → absolute emitted) while closing the criterion-6 gap that the
+        // codex iter1 BLOCK called out.
+        redact_excluded_in_passthrough(key, field_value, ctx);
     } else if ctx.matches_jsonpath(ctx.preserve_paths) {
         // Preserved fields get full short-circuit: no traversal, no pattern detection.
         // This guarantees preserve_paths is a hard override — the value is untouched.
@@ -157,6 +170,72 @@ fn handle_object_field(map: &mut Map<String, Value>, key: &str, ctx: &mut Walker
         }
     } else {
         walk_and_redact(field_value, ctx);
+    }
+}
+
+/// `STEP_7` criterion 6 hook: `true` iff we are in passthrough mode but
+/// the operator bound a `LogicalWorkspaceView` AND the current field is
+/// path-bearing. Drives the exclusions-override-passthrough branch in
+/// [`handle_object_field`].
+fn passthrough_exclusion_applies(field_name: &str, ctx: &WalkerContext<'_>) -> bool {
+    let config = ctx.config;
+    if !is_passthrough(config) {
+        return false;
+    }
+    if config.logical_workspace.is_none() {
+        return false;
+    }
+    whitelist::is_path_field(field_name) || whitelist::is_workspace_field(field_name)
+}
+
+/// Rewrite a path-bearing string field under passthrough mode when a
+/// bound `LogicalWorkspaceView` flags it as excluded. Non-excluded
+/// values are left untouched (criterion 3). Object/array shaped values
+/// recurse so nested path-bearing fields get the same treatment.
+fn redact_excluded_in_passthrough(
+    field_name: &str,
+    value: &mut Value,
+    ctx: &mut WalkerContext<'_>,
+) {
+    match value {
+        Value::String(s) => {
+            let Some(view) = ctx.config.logical_workspace.as_ref() else {
+                return;
+            };
+            let outcome = crate::rules::path::redact_path_with_workspace(
+                s,
+                view,
+                &ctx.config.workspace_placeholder,
+                ctx.config.hash_filenames,
+                ctx.config.normalized_salt(),
+                ctx.config.aggregate_workspace_paths,
+                ctx.config.workspace_root.as_ref().and_then(|p| p.to_str()),
+            );
+            let Ok(redacted_path) = outcome else {
+                return;
+            };
+            if !redacted_path.excluded {
+                // Non-excluded paths flow through unchanged — passthrough
+                // semantics for criterion 3.
+                return;
+            }
+            ctx.result.paths_redacted += 1;
+            if ctx.config.dry_run {
+                ctx.record_preview(s, &redacted_path.rendered, RedactionReason::AbsolutePath);
+            } else {
+                *value = Value::String(redacted_path.rendered);
+            }
+        }
+        Value::Object(_) | Value::Array(_) => {
+            // Path-bearing object / array values (e.g. `{ "fileUri": "...",
+            // "range": {...} }`) recurse so nested string fields receive
+            // the same passthrough-exclusion treatment. We rely on the
+            // walker's normal traversal to re-enter `handle_object_field`
+            // for descendant string values; no preset escalation occurs.
+            let _ = field_name;
+            walk_and_redact(value, ctx);
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
     }
 }
 
@@ -375,14 +454,7 @@ fn redact_path_field(
         return None;
     }
 
-    let result = crate::rules::path::redact_path(
-        content,
-        config.workspace_root.as_ref().and_then(|p| p.to_str()),
-        &config.workspace_placeholder,
-        config.hash_filenames,
-        config.normalized_salt(),
-    )
-    .unwrap_or_else(|_| config.workspace_placeholder.clone());
+    let result = redact_path_for_config(content, config);
 
     let reason = if crate::rules::uri::is_file_uri(content) {
         RedactionReason::FileUri
@@ -391,6 +463,45 @@ fn redact_path_field(
     };
 
     Some((result, reason))
+}
+
+/// Run the path-redaction pipeline that the walker uses for any field
+/// classified as a path field. When a [`crate::config::LogicalWorkspaceView`]
+/// is bound on the config we route through
+/// [`crate::rules::path::redact_path_with_workspace`] so STEP_7
+/// acceptance criteria 3-7 apply; otherwise we fall back to the legacy
+/// single-workspace pipeline.
+///
+/// The `excluded` flag returned by the workspace-aware path is folded
+/// into the rendered string as a sibling-free wire form
+/// (`<excluded>/[hash]`); the legacy walker model does not carry
+/// per-field metadata and folding the flag into the rendered string
+/// keeps every consumer (JSON walker, pattern-detect string fixup,
+/// streaming redactor) on the same code path.
+fn redact_path_for_config(content: &str, config: &RedactionConfig) -> String {
+    if let Some(view) = config.logical_workspace.as_ref() {
+        return match crate::rules::path::redact_path_with_workspace(
+            content,
+            view,
+            &config.workspace_placeholder,
+            config.hash_filenames,
+            config.normalized_salt(),
+            config.aggregate_workspace_paths,
+            config.workspace_root.as_ref().and_then(|p| p.to_str()),
+        ) {
+            Ok(r) => r.rendered,
+            Err(_) => config.workspace_placeholder.clone(),
+        };
+    }
+
+    crate::rules::path::redact_path(
+        content,
+        config.workspace_root.as_ref().and_then(|p| p.to_str()),
+        &config.workspace_placeholder,
+        config.hash_filenames,
+        config.normalized_salt(),
+    )
+    .unwrap_or_else(|_| config.workspace_placeholder.clone())
 }
 
 fn redact_code_context_field(

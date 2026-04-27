@@ -108,7 +108,9 @@ impl FeatureFlags {
             | "get_document_symbols"
             | "get_workspace_symbols"
             // Structural planner tool (DB13, always enabled — requires unified graph)
-            | "sqry_query" => true,
+            | "sqry_query"
+            // Workspace identity / status surface (`STEP_7`, always enabled).
+            | "workspace_status" => true,
             _ => false,
         }
     }

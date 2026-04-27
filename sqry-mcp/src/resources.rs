@@ -261,7 +261,11 @@ fn tool_category(name: &str) -> ToolCategory {
         | "rebuild_index"
         | "list_files"
         | "list_symbols"
-        | "expand_cache_status" => ToolCategory::IndexManagement,
+        | "expand_cache_status"
+        // STEP_7 — `workspace_status` belongs with index-management since it
+        // returns the aggregate `WorkspaceIndexStatus` for the active
+        // logical workspace.
+        | "workspace_status" => ToolCategory::IndexManagement,
 
         "export_graph" => ToolCategory::Export,
 
@@ -429,6 +433,7 @@ All fields are optional. Filters are applied before query evaluation.
 | `list_files` | List indexed files | language:str? |
 | `list_symbols` | List indexed symbols | kind:str?, language:str? |
 | `expand_cache_status` | Macro expansion cache status (Rust) | path:str? |
+| `workspace_status` | Aggregate WorkspaceIndexStatus + workspace identity | workspace_id:str? |
 
 ## Export
 
@@ -791,6 +796,7 @@ mod tests {
             "expand_cache_status".into(),
             "export_graph".into(),
             "sqry_ask".into(),
+            "workspace_status".into(),
         ]);
         let result = read_resource(RESOURCE_CAPABILITY_MAP);
         assert!(result.is_some(), "capability-map resource missing");
@@ -882,6 +888,7 @@ mod tests {
             "expand_cache_status",
             "export_graph",
             "sqry_ask",
+            "workspace_status",
         ];
 
         // Set up

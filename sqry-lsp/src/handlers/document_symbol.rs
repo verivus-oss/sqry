@@ -9,6 +9,11 @@ use tower_lsp::lsp_types::{DocumentSymbol, DocumentSymbolParams, DocumentSymbolR
 
 /// Return the document symbol tree for a file.
 ///
+/// STEP_11_4 — gates on [`SessionManager::evaluate_handler_gate`] before
+/// touching the graph: requests against member folders or excluded
+/// paths return `Ok(None)` (LSP-standard "no symbols available")
+/// without making any per-folder filesystem probe.
+///
 /// # Errors
 ///
 /// Returns an error when symbol extraction fails or when range conversion is
@@ -18,6 +23,12 @@ pub fn handle(
     params: &DocumentSymbolParams,
 ) -> Result<Option<DocumentSymbolResponse>> {
     let uri = &params.text_document.uri;
+
+    // STEP_11_4 — workspace classification gate.
+    if session.evaluate_handler_gate(uri).is_short_circuit() {
+        return Ok(None);
+    }
+
     let mut nodes = session.nodes_in_document(uri)?;
 
     nodes.sort_by_key(|node| {

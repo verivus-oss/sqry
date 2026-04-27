@@ -558,6 +558,30 @@ pub struct GetIndexStatusParams {
     pub path: String,
 }
 
+/// `workspace_status` params (`STEP_7`).
+///
+/// Returns the aggregate `WorkspaceIndexStatus` for the
+/// currently-resolved workspace plus identity surfaces. The optional
+/// `workspace_id` is **not** used for routing today (the session
+/// resolver still anchors on `path`); it is echoed back in the
+/// response so clients can detect mismatches against the identity they
+/// expected.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
+#[schemars(example = "json!({
+    \"path\": \".\"
+})")]
+pub struct WorkspaceStatusParams {
+    /// Workspace path. Defaults to the current directory if omitted.
+    #[serde(default = "default_path")]
+    pub path: String,
+    /// Optional client-supplied workspace identity (full 64-char hex
+    /// digest of the BLAKE3 `WorkspaceId`). Echoed back in the
+    /// response so clients can validate that the server resolved the
+    /// expected workspace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
+}
+
 /// `export_graph` params.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct ExportGraphParams {

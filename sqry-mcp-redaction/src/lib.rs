@@ -90,7 +90,7 @@ mod whitelist;
 
 pub mod rules;
 
-pub use config::{RedactionConfig, SecurityMode};
+pub use config::{LogicalWorkspaceView, RedactionConfig, SecurityMode, compute_source_root_id};
 pub use preview::{RedactionPreview, RedactionReason, RedactionTarget};
 pub use redactor::{RedactionResult, Redactor};
 

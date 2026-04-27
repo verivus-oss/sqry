@@ -2,8 +2,8 @@
   "name": "sqry-vscode",
   "displayName": "sqry Semantic Search",
   "description": "Semantic code search for 35 languages. Navigate call graphs, inheritance hierarchies, FFI boundaries, imports/exports - powered by unified graph architecture.",
-  "version": "9.0.23",
-  "binaryVersion": "9.0.23",
+  "version": "10.0.0",
+  "binaryVersion": "10.0.0",
   "publisher": "verivus",
   "license": "MIT",
   "icon": "media/sqry-icon-512.png",
@@ -144,6 +144,11 @@
         "title": "Sqry: Export Results",
         "category": "Sqry",
         "icon": "$(export)"
+      },
+      {
+        "command": "sqry.editWorkspaceClassification",
+        "title": "Sqry: Edit Workspace Classification (.code-workspace)",
+        "category": "Sqry"
       }
     ],
     "configuration": {
@@ -227,6 +232,72 @@
           ],
           "default": "never",
           "description": "Auto-rebuild index after file saves. 'debounced' waits 30s after the last save before triggering a rebuild."
+        },
+        "sqry.indexRoot": {
+          "type": "string",
+          "default": "",
+          "description": "Optional canonical workspace root. When set, sqry uses this absolute path as the logical workspace identity, regardless of which folder VS Code surfaces first. Empty string means auto-detect from the active `.code-workspace` (or the single open folder).",
+          "scope": "machine-overridable"
+        },
+        "sqry.projectRootMode": {
+          "type": "string",
+          "enum": [
+            "gitRoot",
+            "folder",
+            "explicit"
+          ],
+          "default": "gitRoot",
+          "description": "How sqry decides which directories inside a workspace folder count as project roots. `gitRoot` walks upward to the nearest `.git` checkout, `folder` treats every workspace folder as a single root, `explicit` uses only the entries listed under `sqry.workspaceClassification.sourceRoots`.",
+          "scope": "machine-overridable"
+        },
+        "sqry.workspaceFolderExcludes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Glob patterns matched against `WorkspaceFolder.uri.fsPath`. Folders matching any pattern are excluded from every sqry enumeration loop (auto-index, status fan-out, manual rebuild). Use this to keep documentation-only folders inside the workspace without sqry trying to index them."
+        },
+        "sqry.workspaceClassification": {
+          "type": "object",
+          "default": null,
+          "description": "Inline classification block — parallel to the `sqry.workspace` entry inside a `.code-workspace` file. The settings.json copy is the fallback used when no `.code-workspace` is open; the `.code-workspace` block always wins when both are present.",
+          "properties": {
+            "sourceRoots": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": [],
+              "description": "Explicit list of source roots (absolute paths). Overrides auto-discovery."
+            },
+            "exclusions": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": [],
+              "description": "Glob patterns for folders that must NOT be treated as source roots."
+            },
+            "memberFolders": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": [],
+              "description": "Folders that participate in the workspace but are not source roots. Status queries against these folders return the aggregate workspace status."
+            },
+            "projectRootMode": {
+              "type": "string",
+              "enum": [
+                "gitRoot",
+                "folder",
+                "explicit"
+              ],
+              "default": "gitRoot",
+              "description": "Project-root detection mode (overrides the top-level `sqry.projectRootMode` for this workspace)."
+            }
+          }
         }
       }
     },

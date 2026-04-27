@@ -301,6 +301,31 @@ pub struct IndexStatus {
     /// Age of the lock file in seconds (if build is in progress)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub build_age_seconds: Option<u64>,
+
+    /// Aggregate `WorkspaceIndexStatus` for the workspace this path
+    /// belongs to.
+    ///
+    /// Set only by [`Self::aggregate`]. The §1.4 contract for the
+    /// member-folder branch of `sqry/indexStatus`: when `path`
+    /// classifies as `Member`, the response carries the full
+    /// per-source-root status vector, the `missing_count` /
+    /// `building_count` / `ok_count` / `error_count` summary counters,
+    /// and the `generated_at` timestamp. Source / Excluded / Unknown
+    /// branches leave this field `None` so the wire shape stays
+    /// backwards-compatible.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub aggregate: Option<crate::workspace::WorkspaceIndexStatus>,
+
+    /// `true` when this status is a *partial* aggregate — at least one
+    /// source root is `missing` or `error`, so the workspace is not
+    /// fully indexed. Set only on the [`Self::aggregate`] path.
+    ///
+    /// Distinct from [`Self::stale`] (which carries the >24h freshness
+    /// bit on per-source-root responses); the two flags coexist in the
+    /// wire shape so consumers can disambiguate "old snapshot" from
+    /// "incomplete workspace".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub partial: Option<bool>,
 }
 
 impl IndexStatus {
@@ -324,6 +349,141 @@ impl IndexStatus {
             stale: None,
             building: None,
             build_age_seconds: None,
+            aggregate: None,
+            partial: None,
+        }
+    }
+
+    /// Create an index status indicating the path is explicitly excluded from
+    /// the logical workspace (per `LogicalWorkspace::classify` returning
+    /// `Classification::Excluded`).
+    ///
+    /// Wire shape mirrors [`Self::not_found`] (no graph data) but the `path`
+    /// field carries the canonical excluded path so the client can disambiguate
+    /// "outside workspace" from "inside but excluded". Callers must populate
+    /// `path` post-construction when context is available.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sqry_core::json_response::IndexStatus;
+    /// let status = IndexStatus::excluded();
+    /// assert!(!status.exists);
+    /// ```
+    #[must_use]
+    pub fn excluded() -> Self {
+        Self {
+            exists: false,
+            path: None,
+            created_at: None,
+            age_seconds: None,
+            symbol_count: None,
+            file_count: None,
+            languages: None,
+            supports_fuzzy: false,
+            supports_relations: false,
+            cross_language_relation_count: None,
+            symbol_counts_by_kind: None,
+            file_counts_by_language: None,
+            relation_counts_by_pair: None,
+            stale: None,
+            building: None,
+            build_age_seconds: None,
+            aggregate: None,
+            partial: None,
+        }
+    }
+
+    /// Create an `IndexStatus` carrying the full aggregate
+    /// [`crate::workspace::WorkspaceIndexStatus`] for a workspace that
+    /// the requested path belongs to as a member folder (§1.4 of the
+    /// implementation plan, acceptance criterion 3).
+    ///
+    /// Member folders never own a snapshot themselves; they route
+    /// through their workspace's source roots. The response therefore
+    /// preserves the full per-source-root detail (`source_root_statuses`,
+    /// `missing_count`, `building_count`, `ok_count`, `error_count`,
+    /// `generated_at`) inside the [`Self::aggregate`] field, and
+    /// surfaces convenience summary projections through the existing
+    /// [`Self::exists`], [`Self::building`], and [`Self::age_seconds`]
+    /// scalars so simple consumers (e.g. `--json` formatters) can
+    /// render a one-line summary without re-walking the vector.
+    ///
+    /// - [`Self::exists`] is `true` iff every source root reports `Ok`
+    ///   (no missing, no errors). This mirrors the §1.4 contract that
+    ///   a member folder "is indexed" only when the workspace as a
+    ///   whole is.
+    /// - [`Self::path`] is set to the canonical member-folder path the
+    ///   caller supplied; consumers can disambiguate from
+    ///   [`Self::not_found`] (which omits `path`).
+    /// - [`Self::building`] is set when any source root has a
+    ///   build-lock present.
+    /// - [`Self::partial`] is set when any source root is `Missing`
+    ///   or `Error`, signalling that the aggregate is incomplete.
+    /// - [`Self::age_seconds`] is computed against `aggregate.generated_at`
+    ///   when at least one source root reports `Ok`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::path::PathBuf;
+    /// use sqry_core::json_response::IndexStatus;
+    /// use sqry_core::workspace::WorkspaceIndexStatus;
+    /// let aggregate = WorkspaceIndexStatus::from_source_root_statuses(Vec::new());
+    /// let status = IndexStatus::aggregate(PathBuf::from("/tmp/member"), aggregate);
+    /// assert_eq!(status.path.as_deref(), Some("/tmp/member"));
+    /// ```
+    #[must_use]
+    pub fn aggregate(
+        member_path: std::path::PathBuf,
+        aggregate: crate::workspace::WorkspaceIndexStatus,
+    ) -> Self {
+        let exists =
+            aggregate.error_count == 0 && aggregate.missing_count == 0 && aggregate.ok_count > 0;
+        let building = if aggregate.building_count > 0 {
+            Some(true)
+        } else {
+            None
+        };
+        let partial = if aggregate.missing_count > 0 || aggregate.error_count > 0 {
+            Some(true)
+        } else {
+            None
+        };
+        let age_seconds = if aggregate.ok_count > 0 {
+            let now_secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs());
+            let generated_secs = aggregate
+                .generated_at
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(now_secs, |d| d.as_secs());
+            Some(now_secs.saturating_sub(generated_secs))
+        } else {
+            None
+        };
+        Self {
+            exists,
+            path: Some(member_path.display().to_string()),
+            created_at: None,
+            age_seconds,
+            symbol_count: None,
+            file_count: None,
+            languages: None,
+            supports_fuzzy: false,
+            supports_relations: false,
+            cross_language_relation_count: None,
+            symbol_counts_by_kind: None,
+            file_counts_by_language: None,
+            relation_counts_by_pair: None,
+            // `stale` is reserved for the >24h freshness bit on
+            // per-source-root responses; on the aggregate path the
+            // partial-coverage flag lives in `partial`.
+            stale: None,
+            building,
+            build_age_seconds: None,
+            aggregate: Some(aggregate),
+            partial,
         }
     }
 
@@ -477,6 +637,8 @@ impl IndexStatusBuilder {
             stale: Some(stale),
             building: self.building,
             build_age_seconds: self.build_age_seconds,
+            aggregate: None,
+            partial: None,
         }
     }
 }
