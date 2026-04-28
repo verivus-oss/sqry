@@ -9,7 +9,7 @@ rust-version.workspace = true
 description = "python language plugin for sqry"
 
 [dependencies]
-sqry-core = { version = "10.0.1", path = "../sqry-core" }
+sqry-core = { version = "10.0.2", path = "../sqry-core" }
 anyhow.workspace = true
 tree-sitter.workspace = true
 tree-sitter-python.workspace = true

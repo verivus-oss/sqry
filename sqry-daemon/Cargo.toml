@@ -39,13 +39,13 @@ rebuild-internals = []
 
 [dependencies]
 # sqry workspace crates
-sqry-core = { version = "10.0.1", path = "../sqry-core", features = ["rebuild-internals"] }
-sqry-plugin-registry = { version = "10.0.1", path = "../sqry-plugin-registry" }
+sqry-core = { version = "10.0.2", path = "../sqry-core", features = ["rebuild-internals"] }
+sqry-plugin-registry = { version = "10.0.2", path = "../sqry-plugin-registry" }
 # Phase 8c U1: wire types + framing codec extracted into the
 # `sqry-daemon-protocol` leaf crate so shim clients can depend on
 # the wire format without pulling in the full daemon (and creating
 # a `sqry-daemon → sqry-lsp → sqry-daemon` cycle).
-sqry-daemon-protocol = { version = "10.0.1", path = "../sqry-daemon-protocol" }
+sqry-daemon-protocol = { version = "10.0.2", path = "../sqry-daemon-protocol" }
 # Phase 8b Task 7 — the daemon routes 14 MCP tool methods through
 # sqry-mcp's `daemon_adapter::execute_*_for_daemon` wrappers and the
 # shared `build_tool_response` renderer (via `tool_response_json`).
@@ -53,7 +53,7 @@ sqry-daemon-protocol = { version = "10.0.1", path = "../sqry-daemon-protocol" }
 # sqry-mcp-redaction / sqry-plugin-registry — none of which depend on
 # sqry-daemon, so this edge does not create a cycle (verified via
 # `cargo tree -p sqry-daemon`).
-sqry-mcp = { version = "10.0.1", path = "../sqry-mcp" }
+sqry-mcp = { version = "10.0.2", path = "../sqry-mcp" }
 
 # Phase 8c U10 — the daemon hosts an in-process tower_lsp server on
 # each LSP shim byte-pump connection via
@@ -61,7 +61,7 @@ sqry-mcp = { version = "10.0.1", path = "../sqry-mcp" }
 # depends only on sqry-core / sqry-db / sqry-nl /
 # sqry-plugin-registry — none of which depend on sqry-daemon.
 # Confirmed via `cargo tree -p sqry-daemon` post-commit.
-sqry-lsp = { version = "10.0.1", path = "../sqry-lsp" }
+sqry-lsp = { version = "10.0.2", path = "../sqry-lsp" }
 
 # Phase 8c U8 — the daemon hosts an in-process rmcp `ServerHandler`
 # (`mcp_host::DaemonMcpHandler`) on each MCP shim byte-pump connection
@@ -133,7 +133,7 @@ tempfile = "3.10"
 rmcp = { version = "0.16", features = ["client", "transport-io"] }
 # Task 9 U14 — e2e smoke tests use `connect_shim_with_timeouts` to perform
 # the shim handshake and assert `daemon_version` against the live sqryd binary.
-sqry-daemon-client = { version = "10.0.1", path = "../sqry-daemon-client" }
+sqry-daemon-client = { version = "10.0.2", path = "../sqry-daemon-client" }
 # Codex gpt-5.4 iter-1 MINOR fix — integration tests that mutate
 # process-global state (current working directory) must run
 # serialised; `serial_test` mirrors sqry-mcp's existing usage

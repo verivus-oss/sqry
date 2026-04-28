@@ -1,0 +1,182 @@
+name: Publish Homebrew Tap
+
+# Auto-publishes the verivus-oss/sqry release as a Homebrew formula in
+# verivus-oss/homebrew-sqry. Triggered by every release publish event so the
+# tap is always current; also exposes workflow_dispatch for manual republish
+# and historical backfill.
+#
+# Required secret: HOMEBREW_TAP_PUSH_TOKEN — a fine-grained PAT with
+# `contents:write` on verivus-oss/homebrew-sqry. Configure under
+# Settings -> Secrets and variables -> Actions on the source repository.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to publish (default: latest non-draft, non-prerelease)"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-homebrew-tap
+  cancel-in-progress: false
+
+jobs:
+  publish-tap:
+    name: Render formula and push to tap
+    runs-on: ubuntu-latest
+    env:
+      SOURCE_REPO: ${{ github.repository }}
+      TAP_REPO: verivus-oss/homebrew-sqry
+    steps:
+      - name: Resolve target tag and gating flags
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_DRAFT: ${{ github.event.release.draft }}
+          RELEASE_PRERELEASE: ${{ github.event.release.prerelease }}
+        run: |
+          set -euo pipefail
+          TAG=""
+          DRAFT="false"
+          PRERELEASE="false"
+
+          if [[ "$EVENT_NAME" == "release" ]]; then
+            TAG="$RELEASE_TAG"
+            DRAFT="$RELEASE_DRAFT"
+            PRERELEASE="$RELEASE_PRERELEASE"
+          elif [[ -n "$INPUT_TAG" ]]; then
+            TAG="$INPUT_TAG"
+            META="$(gh release view "$TAG" --repo "$SOURCE_REPO" --json isDraft,isPrerelease -q '.isDraft,.isPrerelease' || true)"
+            DRAFT="$(echo "$META" | sed -n '1p')"
+            PRERELEASE="$(echo "$META" | sed -n '2p')"
+          else
+            TAG="$(gh release view --repo "$SOURCE_REPO" --json tagName -q .tagName)"
+            META="$(gh release view "$TAG" --repo "$SOURCE_REPO" --json isDraft,isPrerelease -q '.isDraft,.isPrerelease')"
+            DRAFT="$(echo "$META" | sed -n '1p')"
+            PRERELEASE="$(echo "$META" | sed -n '2p')"
+          fi
+
+          if [[ -z "$TAG" ]]; then
+            echo "ERROR: could not resolve target tag" >&2
+            exit 1
+          fi
+
+          # Strict tag-format validation: vMAJOR.MINOR.PATCH[-prerelease].
+          # Defends against arbitrary user input flowing through inputs.tag.
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$ ]]; then
+            echo "ERROR: refusing tag with non-conforming format: '$TAG'" >&2
+            exit 1
+          fi
+
+          SKIP="false"
+          if [[ "$DRAFT" == "true" || "$PRERELEASE" == "true" ]]; then
+            SKIP="true"
+          fi
+
+          echo "tag=$TAG"   >> "$GITHUB_OUTPUT"
+          echo "skip=$SKIP" >> "$GITHUB_OUTPUT"
+          echo "Resolved tag=$TAG draft=$DRAFT prerelease=$PRERELEASE skip=$SKIP"
+
+      - name: Skip prerelease/draft
+        if: steps.resolve.outputs.skip == 'true'
+        env:
+          TAG: ${{ steps.resolve.outputs.tag }}
+        run: |
+          echo "Skipping tap publish for prerelease/draft tag $TAG."
+
+      - name: Checkout source repo
+        if: steps.resolve.outputs.skip != 'true'
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Install ruby (for syntax check)
+        if: steps.resolve.outputs.skip != 'true'
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.2"
+
+      - name: Render formula
+        if: steps.resolve.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.resolve.outputs.tag }}
+        run: |
+          set -euo pipefail
+          bash scripts/release/render-homebrew-formula.sh \
+            --tag "$TAG" \
+            --repo "$SOURCE_REPO" \
+            --out Formula/sqry.rb
+
+      - name: Verify rendered formula syntax
+        if: steps.resolve.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          ruby -c Formula/sqry.rb
+
+      - name: Checkout tap repo
+        if: steps.resolve.outputs.skip != 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: verivus-oss/homebrew-sqry
+          token: ${{ secrets.HOMEBREW_TAP_PUSH_TOKEN }}
+          path: tap-checkout
+          ref: main
+          fetch-depth: 1
+          persist-credentials: true
+
+      - name: Update tap formula and README
+        if: steps.resolve.outputs.skip != 'true'
+        id: stage
+        run: |
+          set -euo pipefail
+
+          mkdir -p tap-checkout/Formula
+          cp Formula/sqry.rb tap-checkout/Formula/sqry.rb
+
+          # Bake a real README on first run if the existing one is < 1 KB.
+          README_SIZE=0
+          if [[ -f tap-checkout/README.md ]]; then
+            README_SIZE="$(wc -c < tap-checkout/README.md)"
+          fi
+          if [[ "$README_SIZE" -lt 1024 ]]; then
+            # Write README via base64 to keep YAML indentation orthogonal to
+            # markdown content (avoids fragile heredoc / dedent gymnastics).
+            base64 -d > tap-checkout/README.md <<'README_B64'
+          IyBIb21lYnJldyBUYXAgZm9yIHNxcnkKCltzcXJ5XShodHRwczovL3NxcnkuZGV2KSBpcyBhIGxlYW4sIGZvY3VzZWQgKipzZW1hbnRpYyBjb2RlIHNlYXJjaCB0b29sKioKYnVpbHQgaW4gUnVzdC4gSXQgdW5kZXJzdGFuZHMgY29kZSBzdHJ1Y3R1cmUgdGhyb3VnaCBBU1QgYW5hbHlzaXMgc28KeW91IGNhbiBzZWFyY2ggYnkgd2hhdCBjb2RlICptZWFucyosIG5vdCBqdXN0IHdoYXQgaXQgc2F5cy4KCiMjIEluc3RhbGwKCmBgYGJhc2gKYnJldyB0YXAgdmVyaXZ1cy1vc3Mvc3FyeQpicmV3IGluc3RhbGwgdmVyaXZ1cy1vc3Mvc3FyeS9zcXJ5CmBgYAoKIyMgVXBncmFkZQoKYGBgYmFzaApicmV3IHVwZGF0ZQpicmV3IHVwZ3JhZGUgc3FyeQpgYGAKCiMjIFVuaW5zdGFsbAoKYGBgYmFzaApicmV3IHVuaW5zdGFsbCBzcXJ5CmJyZXcgdW50YXAgdmVyaXZ1cy1vc3Mvc3FyeQpgYGAKCiMjIFdoYXQgZ2V0cyBpbnN0YWxsZWQKClRoZSBmb3JtdWxhIGluc3RhbGxzIGZvdXIgYmluYXJpZXMgaW50byB5b3VyIEhvbWVicmV3IHByZWZpeDoKCnwgQmluYXJ5ICAgICAgIHwgUHVycG9zZSAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIHwKfC0tLS0tLS0tLS0tLS0tfC0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tfAp8IGBzcXJ5YCAgICAgICB8IENMSSBmb3IgaW5kZXhpbmcsIHNlYXJjaGluZywgYW5kIGdyYXBoIHF1ZXJpZXMgICAgICAgICAgICAgICB8CnwgYHNxcnktbWNwYCAgIHwgTUNQIHNlcnZlciBmb3IgQUkgYXNzaXN0YW50cyAoMzQgSlNPTi1SUEMgdG9vbHMpICAgICAgICAgICAgIHwKfCBgc3FyeS1sc3BgICAgfCBMU1Agc2VydmVyIGZvciBlZGl0b3IgaW50ZWdyYXRpb24gICAgICAgICAgICAgICAgICAgICAgICAgICAgfAp8IGBzcXJ5ZGAgICAgICB8IFdvcmtzcGFjZS1hd2FyZSBkYWVtb24gKG1lbW9yeS1yZXNpZGVudCBncmFwaCBjYWNoZSwgSVBDKSAgICB8CgojIyBRdWljayBzdGFydAoKYGBgYmFzaApzcXJ5IGluZGV4IC4gICAgICAgICAgICAjIGJ1aWxkIHRoZSBzZW1hbnRpYyBncmFwaCBmb3IgdGhlIGN1cnJlbnQgcmVwbwpzcXJ5IHNlYXJjaCAidXNlciBhdXRoIiAjIHNlbWFudGljIHNlYXJjaCBvdmVyIHRoZSBpbmRleGVkIGdyYXBoCnNxcnlkIHN0YXJ0ICAgICAgICAgICAgICMgc3RhcnQgdGhlIGRhZW1vbiBmb3IgbG93LWxhdGVuY3kgTUNQL0xTUCB1c2UKYGBgCgpTZWUgW3NxcnkuZGV2XShodHRwczovL3NxcnkuZGV2KSBmb3IgdGhlIGZ1bGwgZG9jdW1lbnRhdGlvbiwgcXVlcnkKbGFuZ3VhZ2UgcmVmZXJlbmNlLCBhbmQgaW50ZWdyYXRpb24gZ3VpZGVzLgoKIyMgQXV0by1wdWJsaXNoaW5nCgpUaGlzIHRhcCBpcyBhdXRvLXB1Ymxpc2hlZCBvbiBldmVyeSBHaXRIdWIgcmVsZWFzZSBvZgpbdmVyaXZ1cy1vc3Mvc3FyeV0oaHR0cHM6Ly9naXRodWIuY29tL3Zlcml2dXMtb3NzL3NxcnkpLiBUbyB0cmFjawp0aGUgbGF0ZXN0IHJlbGVhc2UgcnVuOgoKYGBgYmFzaApicmV3IHVwZGF0ZSAmJiBicmV3IHVwZ3JhZGUgc3FyeQpgYGAKCiMjIExpY2Vuc2UKClRoZSBmb3JtdWxhIGlzIHB1Ymxpc2hlZCB1bmRlciB0aGUgc2FtZSBNSVQgbGljZW5zZSBhcyBzcXJ5IGl0c2VsZi4K
+          README_B64
+            echo "readme_updated=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "readme_updated=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Commit and push to tap
+        if: steps.resolve.outputs.skip != 'true'
+        env:
+          TAG: ${{ steps.resolve.outputs.tag }}
+        run: |
+          set -euo pipefail
+          cd tap-checkout
+
+          git config user.name  "verivusOSS-releases"
+          git config user.email "releases@sqry.dev"
+
+          git add Formula/sqry.rb README.md
+
+          if git diff --cached --quiet; then
+            echo "No diff in tap repo — formula already current. Skipping commit."
+            exit 0
+          fi
+
+          git diff --cached --stat
+          git commit -m "chore(formula): bump to ${TAG}"
+          git push origin main
