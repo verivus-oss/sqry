@@ -11,6 +11,7 @@ import {
   SqryListCircularDependenciesResult,
   SqryCycle,
   SqryListUnusedSymbolsResult,
+  SqrySourceRootIndexState,
   SqryWorkspaceStatus,
 } from "./lspProtocol";
 import { SqryClient } from "./sqryClient";
@@ -30,6 +31,10 @@ const DEFAULT_SYMBOL_LIMIT = 100;
 const DEFAULT_FILE_LIMIT = 100;
 const DEFAULT_LANGUAGE_FILE_LIMIT = 50;
 const DEFAULT_CROSS_LANGUAGE_LIMIT = 50;
+
+type RenderableIndexStatus = SqryIndexStatus & {
+  readonly sourceRootStatus?: SqrySourceRootIndexState;
+};
 
 /**
  * Format a duration in seconds to a human-readable string.
@@ -569,6 +574,11 @@ class SqryTreeDataProvider
     this._onDidChangeTreeData.fire();
   }
 
+  public hydrateIndexStatus(status: SqryIndexStatus | null): void {
+    this.indexStatus = status;
+    this._onDidChangeTreeData.fire();
+  }
+
   public setIndexStatusForRoot(rootPath: string, status: SqryIndexStatus): void {
     this.indexStatusMap.set(rootPath, status);
     // Also update the single-root status for backward compat (use latest)
@@ -904,6 +914,53 @@ class SqryTreeDataProvider
     this._onDidChangeTreeData.fire();
   }
 
+  private sourceRootIndexStatus(rootPath: string): RenderableIndexStatus | null {
+    const status = this.workspaceStatus?.source_root_statuses.find((s) => s.path === rootPath);
+    if (!status) {
+      return null;
+    }
+    const isIndexed = status.status === "ok" || status.status === "building";
+    return {
+      exists: isIndexed,
+      path: status.path,
+      sourceRootStatus: status.status,
+      symbol_count: status.symbol_count ?? undefined,
+      supports_fuzzy: isIndexed,
+      supports_relations: isIndexed,
+      building: status.status === "building",
+    };
+  }
+
+  private hasRenderableIndexStatus(status: SqryIndexStatus): boolean {
+    const aggregate = (status as { readonly aggregate?: unknown }).aggregate;
+    if (!aggregate) {
+      return true;
+    }
+    return status.symbol_count !== undefined
+      || status.file_count !== undefined
+      || (status.languages !== undefined && status.languages.length > 0);
+  }
+
+  private workspaceStatusRootItems(folders: readonly vscode.WorkspaceFolder[]): vscode.TreeItem[] {
+    const sourceRoots = this.workspaceStatus?.source_root_statuses ?? [];
+    if (sourceRoots.length === 0) {
+      return [];
+    }
+    if (sourceRoots.length === 1) {
+      const sourceRoot = sourceRoots[0];
+      const status = this.sourceRootIndexStatus(sourceRoot.path);
+      return status ? this.buildStatsItems(status, sourceRoot.path) : [];
+    }
+    return sourceRoots.map((sourceRoot) => {
+      const folder = folders.find((f) => f.uri.fsPath === sourceRoot.path);
+      return new SqryWorkspaceRootItem(
+        sourceRoot.path,
+        folder?.name ?? path.basename(sourceRoot.path),
+        this.sourceRootIndexStatus(sourceRoot.path) ?? undefined,
+      );
+    });
+  }
+
   /** Get children for root level (no parent element). */
   private getRootChildren(): vscode.TreeItem[] {
     // STEP_5 contract — single skeleton row during loading. Must
@@ -949,7 +1006,8 @@ class SqryTreeDataProvider
       return [new vscode.TreeItem("No results found", vscode.TreeItemCollapsibleState.None)];
     }
 
-    // Multi-root: show per-root grouping when >1 root has status
+    // Multi-root: show per-root grouping when >1 root has status.
+    // routing-gate-allow:UI presentation only; indexStatusMap is hydrated from classifier-aware workspace status.
     const folders = vscode.workspace.workspaceFolders ?? [];
     if (folders.length > 1 && this.indexStatusMap.size > 0) {
       return folders.map(f => new SqryWorkspaceRootItem(
@@ -960,8 +1018,13 @@ class SqryTreeDataProvider
     }
 
     // Show index stats directly at root level (flat structure per UX guidelines)
-    if (this.indexStatus) {
+    if (this.indexStatus && this.hasRenderableIndexStatus(this.indexStatus)) {
       return this.buildStatsItems(this.indexStatus);
+    }
+
+    const workspaceStatusItems = this.workspaceStatusRootItems(folders);
+    if (workspaceStatusItems.length > 0) {
+      return workspaceStatusItems;
     }
 
     // No stats available yet - welcome view will show via viewsWelcome
@@ -971,7 +1034,8 @@ class SqryTreeDataProvider
   /** Get children for a specific element based on its type. */
   private getElementChildren(element: vscode.TreeItem): vscode.ProviderResult<vscode.TreeItem[]> {
     if (element instanceof SqryWorkspaceRootItem) {
-      const status = this.indexStatusMap.get(element.rootPath);
+      const status = this.indexStatusMap.get(element.rootPath)
+        ?? this.sourceRootIndexStatus(element.rootPath);
       if (status) {
         return this.buildStatsItems(status, element.rootPath);
       }
@@ -1694,7 +1758,9 @@ class SqryTreeDataProvider
 
   /** Add CD predicates (duplicates, circular dependencies, unused code). */
   private addCDPredicates(items: vscode.TreeItem[], status: SqryIndexStatus, rootPath?: string): void {
-    if (!status.supports_relations) return;
+    if (!status.supports_relations) {
+      return;
+    }
 
     const rootKey = rootPath ?? "";
     const duplicatesCount = this.cachedDuplicatesResult.get(rootKey)?.total_groups ?? null;
@@ -1710,6 +1776,8 @@ class SqryTreeDataProvider
 
   /** Add status indicators (index age, stale warning, building). */
   private addStatusIndicators(items: vscode.TreeItem[], status: SqryIndexStatus): void {
+    const sourceRootStatus = (status as RenderableIndexStatus).sourceRootStatus;
+
     if (status.age_seconds !== undefined) {
       const indexedItem = new SqryStatItem(
         "Indexed",
@@ -1740,6 +1808,24 @@ class SqryTreeDataProvider
         "sync~spin",
         "Index build is in progress",
       ));
+    }
+
+    if (sourceRootStatus === "error") {
+      items.push(new SqryStatItem(
+        "Status",
+        "index error",
+        "error",
+        "The source root index is unavailable. Rebuild the index or check the sqry output.",
+      ));
+    } else if (sourceRootStatus === "missing" || (!status.exists && !status.building)) {
+      const missingItem = new SqryStatItem(
+        "Status",
+        "not indexed",
+        "warning",
+        "Run sqry: Index Workspace to build the index",
+      );
+      missingItem.contextValue = "sqry.stats.indexed";
+      items.push(missingItem);
     }
   }
 }
@@ -1778,6 +1864,10 @@ export class SearchPanel implements vscode.Disposable {
    */
   public setIndexStatus(status: SqryIndexStatus | null): void {
     this.treeDataProvider.setIndexStatus(status);
+  }
+
+  public hydrateIndexStatus(status: SqryIndexStatus | null): void {
+    this.treeDataProvider.hydrateIndexStatus(status);
   }
 
   /**

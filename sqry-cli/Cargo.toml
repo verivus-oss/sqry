@@ -22,15 +22,15 @@ share = ["sqry-core/share"]
 jvm-classpath = ["dep:sqry-classpath", "sqry-core/jvm-classpath"]
 
 [dependencies]
-sqry-core = { version = "10.0.2", path = "../sqry-core", features = ["uses", "insights", "troubleshoot"] }
-sqry-db = { version = "10.0.2", path = "../sqry-db" }
-sqry-daemon = { version = "10.0.2", path = "../sqry-daemon", default-features = false }
-sqry-daemon-client = { version = "10.0.2", path = "../sqry-daemon-client" }
-sqry-lang-rust = { version = "10.0.2", path = "../sqry-lang-rust" }
-sqry-lsp = { version = "10.0.2", path = "../sqry-lsp" }
-sqry-plugin-registry = { version = "10.0.2", path = "../sqry-plugin-registry" }
-sqry-nl = { version = "10.0.2", path = "../sqry-nl", default-features = false }
-sqry-classpath = { version = "10.0.2", path = "../sqry-classpath", optional = true }
+sqry-core = { version = "10.0.4", path = "../sqry-core", features = ["uses", "insights", "troubleshoot"] }
+sqry-db = { version = "10.0.4", path = "../sqry-db" }
+sqry-daemon = { version = "10.0.4", path = "../sqry-daemon", default-features = false }
+sqry-daemon-client = { version = "10.0.4", path = "../sqry-daemon-client" }
+sqry-lang-rust = { version = "10.0.4", path = "../sqry-lang-rust" }
+sqry-lsp = { version = "10.0.4", path = "../sqry-lsp" }
+sqry-plugin-registry = { version = "10.0.4", path = "../sqry-plugin-registry" }
+sqry-nl = { version = "10.0.4", path = "../sqry-nl", default-features = false }
+sqry-classpath = { version = "10.0.4", path = "../sqry-classpath", optional = true }
 anyhow.workspace = true
 miette.workspace = true
 once_cell.workspace = true

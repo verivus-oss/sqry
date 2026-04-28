@@ -9,16 +9,16 @@ rust-version.workspace = true
 description = "Svelte language plugin for sqry"
 
 [dependencies]
-sqry-core = { version = "10.0.2", path = "../sqry-core" }
+sqry-core = { version = "10.0.4", path = "../sqry-core" }
 anyhow.workspace = true
 tree-sitter.workspace = true
-tree-sitter-svelte-sqry = { version = "10.0.2", path = "../crates/tree-sitter-svelte-sqry" }
+tree-sitter-svelte-sqry = { version = "10.0.4", path = "../crates/tree-sitter-svelte-sqry" }
 tree-sitter-javascript.workspace = true
 tree-sitter-typescript.workspace = true
 streaming-iterator.workspace = true
-sqry-lang-support = { version = "10.0.2", path = "../sqry-lang-support" }
-sqry-lang-javascript = { version = "10.0.2", path = "../sqry-lang-javascript" }
-sqry-lang-typescript = { version = "10.0.2", path = "../sqry-lang-typescript" }
+sqry-lang-support = { version = "10.0.4", path = "../sqry-lang-support" }
+sqry-lang-javascript = { version = "10.0.4", path = "../sqry-lang-javascript" }
+sqry-lang-typescript = { version = "10.0.4", path = "../sqry-lang-typescript" }
 regex.workspace = true
 
 [dev-dependencies]

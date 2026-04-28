@@ -1,6 +1,6 @@
 # sqry VS Code Extension - Troubleshooting Guide
 
-**Version**: 10.0.2
+**Version**: 10.0.4
 **Last Updated**: 2026-04-28
 
 Quick solutions to common issues with the sqry VS Code extension.
@@ -13,12 +13,13 @@ Quick solutions to common issues with the sqry VS Code extension.
 
 1. **Check extension is activated**:
    - Open Command Palette (`Ctrl/Cmd+Shift+P`)
-   - Type "Sqry" - you should see 6 commands
+   - Type "Sqry" - you should see the sqry commands such as Search Workspace,
+     Run Query, Index Workspace, Refresh Index Stats, and Restart Language Server
 
 2. **Check sqry CLI**:
    ```bash
    sqry --version
-   # Should output: sqry 10.0.2 or later
+   # Should output: sqry 10.0.4 or later
    ```
 
 3. **Check extension logs**:
@@ -150,7 +151,7 @@ Quick solutions to common issues with the sqry VS Code extension.
 ```bash
 cd /path/to/sqry/repo
 cargo install --path sqry-cli --force
-sqry --version  # Verify: 10.0.2+
+sqry --version  # Verify: 10.0.4+
 ```
 
 ### Binary Execution Fails
@@ -180,6 +181,31 @@ sqry --version  # Verify: 10.0.2+
    # Look for "not found"
    ```
 
+### "Failed to download sqry binary: Binary provenance could not..." Error
+
+**Symptom**: The extension prompts to install sqry, then binary download fails
+with a provenance or certificate-identity error.
+
+**What it means**: The extension verifies release assets with checksum and
+Sigstore/Cosign provenance. Current releases are expected to be signed by the
+public `release-distribute.yml` workflow; older assets may have been signed by
+the legacy `oss-distribute.yml` workflow.
+
+**Solutions**:
+
+1. **Update the extension** to 10.0.1 or later so both current and legacy
+   workflow identities are accepted.
+2. **Reload VS Code** after updating:
+   ```
+   Command Palette → Developer: Reload Window
+   ```
+3. **Install manually if your network blocks Sigstore/GitHub downloads**:
+   - Download the matching release asset from GitHub releases.
+   - Verify `SHA256SUMS.txt`.
+   - Set `"sqry.path"` to the installed binary.
+4. **Check the sqry output channel** for the exact workflow identity that was
+   attempted.
+
 ---
 
 ## Index Issues
@@ -199,6 +225,40 @@ Or via CLI:
 cd /your/project
 sqry index .
 ```
+
+### Multi-Root Workspace Still Shows "Not Indexed"
+
+**Symptom**: You open a saved `.code-workspace`, indexing appears to run for
+each folder, but the sqry pane still says the workspace is not indexed.
+
+**What to check**:
+
+1. **Verify you are on extension 10.0.1 or later**. Earlier builds could read a
+   no-path `sqry/indexStatus` response as though it were the aggregate
+   workspace status.
+2. **Inspect the aggregate workspace status from the CLI**:
+   ```bash
+   sqry workspace status /path/to/workspace-root --json --no-cache
+   ```
+   Source roots should show `ok` after indexing. `missing` means that source
+   root still needs an index.
+3. **Check your `.code-workspace` classification**. Source roots should be
+   listed under `sqry.workspace.sourceRoots`; docs-only folders should be
+   `memberFolders`.
+   ```jsonc
+   {
+     "sqry.workspace": {
+       "sourceRoots": ["services/auth", "services/billing"],
+       "memberFolders": ["docs"],
+       "exclusions": ["vendor"],
+       "projectRootMode": "gitRoot"
+     }
+   }
+   ```
+4. **Reload VS Code** after changing the workspace file:
+   ```
+   Command Palette → Developer: Reload Window
+   ```
 
 ### Indexing Timeouts
 
@@ -480,7 +540,7 @@ sqry index --force .
 1. **Check sqry version**:
    ```bash
    sqry --version
-   # Extension version 10.0.2+ required for progress indicators
+   # Extension version 10.0.4+ required for progress indicators
    ```
 
 2. **Check notifications are enabled**:

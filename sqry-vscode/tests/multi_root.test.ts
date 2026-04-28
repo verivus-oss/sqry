@@ -168,27 +168,27 @@ const noopOutput = {
 } as unknown as import("vscode").OutputChannel;
 
 describe("STEP_5 — SqryClient.getWorkspaceStatus", () => {
-  it("returns the aggregate when the LSP supplies one", async () => {
+  it("returns the aggregate from sqry/workspaceStatus", async () => {
     const responses = new Map<string, (params: unknown) => unknown>([
       [
-        "sqry/indexStatus",
+        "sqry/workspaceStatus",
         () => ({
-          status: {
-            exists: true,
-            supports_fuzzy: true,
-            supports_relations: true,
-            aggregate: {
-              source_root_statuses: [
-                { path: "/a", status: "ok", symbol_count: 100 },
-                { path: "/b", status: "missing" },
-              ],
-              missing_count: 1,
-              building_count: 0,
-              ok_count: 1,
-              error_count: 0,
-              generated_at: "2026-04-26T00:00:00Z",
-            },
-            partial: true,
+          workspace_id_short: "abc123",
+          workspace_id_full: "abc123",
+          project_root_mode: "gitRoot",
+          source_roots: ["/a", "/b"],
+          member_folders: [],
+          exclusions: [],
+          aggregate: {
+            source_root_statuses: [
+              { path: "/a", status: "ok", symbol_count: 100 },
+              { path: "/b", status: "missing" },
+            ],
+            missing_count: 1,
+            building_count: 0,
+            ok_count: 1,
+            error_count: 0,
+            generated_at: "2026-04-26T00:00:00Z",
           },
         }),
       ],
@@ -203,17 +203,26 @@ describe("STEP_5 — SqryClient.getWorkspaceStatus", () => {
     client.dispose();
   });
 
-  it("repackages a non-aggregate response into a one-entry aggregate", async () => {
+  it("returns a single-source-root workspace aggregate", async () => {
     const responses = new Map<string, (params: unknown) => unknown>([
       [
-        "sqry/indexStatus",
+        "sqry/workspaceStatus",
         () => ({
-          status: {
-            exists: true,
-            symbol_count: 42,
-            path: "/single/folder",
-            supports_fuzzy: true,
-            supports_relations: false,
+          workspace_id_short: "single",
+          workspace_id_full: "single",
+          project_root_mode: "gitRoot",
+          source_roots: ["/single/folder"],
+          member_folders: [],
+          exclusions: [],
+          aggregate: {
+            source_root_statuses: [
+              { path: "/single/folder", status: "ok", symbol_count: 42 },
+            ],
+            missing_count: 0,
+            building_count: 0,
+            ok_count: 1,
+            error_count: 0,
+            generated_at: "2026-04-26T00:00:00Z",
           },
         }),
       ],
@@ -288,6 +297,12 @@ describe("STEP_5 acceptance criterion 6 — per-request cancellation", () => {
           });
         },
       ],
+      [
+        "sqry/workspaceStatus",
+        () => new Promise((resolve) => {
+          slots.second = resolve;
+        }),
+      ],
     ]);
     const { SqryClient, calls } = buildSqryClientModule(responses);
     const client = new SqryClient(noopOutput);
@@ -328,18 +343,19 @@ describe("STEP_5 acceptance criterion 6 — per-request cancellation", () => {
       },
     });
     slots.second({
-      status: {
-        exists: true,
-        supports_fuzzy: true,
-        supports_relations: true,
-        aggregate: {
-          source_root_statuses: [{ path: "/x", status: "ok" }],
-          missing_count: 0,
-          building_count: 0,
-          ok_count: 1,
-          error_count: 0,
-          generated_at: "now",
-        },
+      workspace_id_short: "x",
+      workspace_id_full: "x",
+      project_root_mode: "gitRoot",
+      source_roots: ["/x"],
+      member_folders: [],
+      exclusions: [],
+      aggregate: {
+        source_root_statuses: [{ path: "/x", status: "ok" }],
+        missing_count: 0,
+        building_count: 0,
+        ok_count: 1,
+        error_count: 0,
+        generated_at: "now",
       },
     });
     await Promise.all([a, b]);

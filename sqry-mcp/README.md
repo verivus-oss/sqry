@@ -44,6 +44,19 @@ cd /path/to/your/project
 sqry index
 ```
 
+For repeated AI-assistant calls, keep the graph warm in `sqryd` and run MCP as
+a daemon shim:
+
+```bash
+sqry daemon start
+sqry daemon load .
+sqry-mcp --daemon
+```
+
+If `sqry-mcp --daemon` cannot reach a daemon, it auto-starts one unless
+`SQRY_DAEMON_NO_AUTO_START=1` is set. Use `sqry daemon rebuild <path>` to
+refresh a loaded workspace without restarting the assistant session.
+
 ### 3. Auto-Configure AI Tools
 
 ```bash
@@ -67,6 +80,8 @@ Codex now uses session-scoped workspace resolution in `sqry-mcp`: explicit
 `path` first, then file-bearing args, then MCP roots cached for the current
 session, then last-resolved workspace, then legacy env/CWD fallback. In the
 common single-repository session you do not need `path` on every call.
+For ambiguous multi-root sessions, pass `path` or a file-bearing argument so
+the tool resolves the intended source root.
 
 ### Gemini CLI Notes
 
@@ -241,6 +256,16 @@ Use `standard` or `strict` when sending responses to external/hosted LLM provide
 | Natural Language | `sqry_ask` | NL → sqry command translation |
 
 See [User Guide](USER_GUIDE.md#available-tools) for full parameters and examples.
+
+Recent MCP behavior notes:
+- `semantic_search` and related query tools accept normal sqry predicate
+  strings; space-separated predicates are treated as implicit `AND`.
+- `dependency_impact` and `is_node_in_cycle` accept file-path disambiguation
+  for same-named symbols in different files.
+- `find_duplicates` reports per-group truncation metadata when a duplicate
+  group has more members than the display cap.
+- `rebuild_index` can be routed through daemon-backed mode when `sqry-mcp` is
+  started with `--daemon`.
 
 ### MCP Prompts (Claude Code)
 
@@ -486,5 +511,5 @@ MIT - See root LICENSE file
 ---
 
 **Last Updated**: 2026-04-28
-**Version**: 10.0.2
+**Version**: 10.0.4
 **Tested With**: sqry v4.8.2, Claude Desktop, Windsurf, Claude Code, Codex, Gemini CLI

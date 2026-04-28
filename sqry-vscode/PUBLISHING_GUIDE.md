@@ -19,8 +19,17 @@ That autodownload path verifies:
 The expected signing identity is:
 
 ```text
-https://github.com/verivus-oss/sqry/.github/workflows/oss-distribute.yml@refs/tags/v<version>
+https://github.com/verivus-oss/sqry/.github/workflows/release-distribute.yml@refs/tags/v<version>
 ```
+
+Older public releases may still carry the retired
+`oss-distribute.yml` workflow identity; the extension accepts that
+identity only as a legacy fallback.
+
+For both current and legacy workflow names, the extension also accepts
+the corresponding `@refs/heads/main` identity as a compatibility fallback
+for historical public release artifacts that were signed from a
+main-branch dispatch rather than the tag ref.
 
 Release artifacts must therefore be published from `verivus-oss/sqry`, and the
 public release must include:

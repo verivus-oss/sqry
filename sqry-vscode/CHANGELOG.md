@@ -4,6 +4,46 @@ All notable changes to the "sqry-vscode" extension will be documented in this fi
 
 Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
 
+## [Unreleased]
+
+## [10.0.1] - 2026-04-27
+
+### Fixed
+- Fixed VS Code binary auto-download provenance verification for current public releases signed by `release-distribute.yml`, while keeping compatibility with older releases signed by `oss-distribute.yml`.
+- Fixed multi-root workspace status rendering so indexed source roots are shown from the authoritative `sqry/workspaceStatus` aggregate instead of falling back to a false "not indexed" state.
+- Improved single-folder status hydration so rich index statistics remain visible while aggregate workspace status is still used for workspace health.
+
+### Changed
+- Updated binary compatibility to the sqry `10.0.1` toolchain.
+- Added regression coverage for release provenance, workspace-status routing, and multi-root panel rendering.
+
+## [10.0.0] - 2026-04-27
+
+### Added
+- Added workspace-aware multi-root support for saved `.code-workspace` files with `sqry.workspace` classification.
+- Added source-root, member-folder, exclusion, and project-root-mode handling for cross-repo workspace analysis.
+- Added aggregate workspace status rendering in the sqry pane and status bar.
+
+### Changed
+- Updated extension activation to pass workspace classification hints and the workspace-file path to the sqry LSP server.
+- Updated index prompts and auto-index behavior to operate over source roots instead of treating every opened folder as an independent workspace.
+
+## [9.0.0] - 2026-04-23
+
+### Added
+- Added daemon-backed workflows for sqry `9.x`, including shared graph use across CLI, LSP, and MCP sessions.
+- Added support for daemon auto-start when the LSP or MCP server is launched in daemon mode.
+- Added support for semantic-diff, dependency, duplicate, cycle, and unused-code analysis backed by the unified query engine.
+
+### Changed
+- Improved graph and relation analysis consistency across CLI, LSP, MCP, and the VS Code extension.
+- Improved cold-start behavior by reusing persisted derived query data when available.
+
+## [8.0.3] - 2026-04-11
+
+### Fixed
+- Accepted the public Sigstore workflow identities emitted by `verivus-oss/sqry` so binary auto-download no longer rejects valid public releases with a provenance verification error.
+
 ## [7.1.0] - 2026-04-04
 
 ### Changed
@@ -16,13 +56,6 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 
 ### Fixed
 - Version bump for workspace release verification and pipeline stabilization fixes
-
-## [Unreleased]
-
-## [8.0.3] - 2026-04-11
-
-### Fixed
-- Accept the exact public Sigstore workflow identities currently emitted by `verivus-oss/sqry` so binary autodownload no longer rejects valid public releases with a provenance verification error.
 
 ## [6.0.24] - 2026-04-03
 

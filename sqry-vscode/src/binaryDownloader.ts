@@ -7,8 +7,7 @@ import * as vscode from "vscode";
 
 const GITHUB_RELEASE_BASE = "https://github.com/verivus-oss/sqry/releases/download";
 const OIDC_ISSUER = "https://token.actions.githubusercontent.com";
-const CERT_IDENTITY_TAG_PREFIX = "https://github.com/verivus-oss/sqry/.github/workflows/oss-distribute.yml@refs/tags/v";
-const CERT_IDENTITY_MAIN = "https://github.com/verivus-oss/sqry/.github/workflows/oss-distribute.yml@refs/heads/main";
+const CERT_IDENTITY_WORKFLOWS = ["release-distribute.yml", "oss-distribute.yml"] as const;
 const MAX_DOWNLOAD_SIZE = 200 * 1024 * 1024; // 200 MB
 const LOCK_STALE_MS = 10 * 60 * 1000; // 10 minutes
 const KEEP_VERSIONS = 2;
@@ -433,10 +432,11 @@ export async function verifyCosignBundle(
 }
 
 export function getCertificateIdentityCandidates(version: string): readonly string[] {
-  return [
-    `${CERT_IDENTITY_TAG_PREFIX}${version}`,
-    CERT_IDENTITY_MAIN,
-  ];
+  const base = "https://github.com/verivus-oss/sqry/.github/workflows";
+  return CERT_IDENTITY_WORKFLOWS.flatMap((workflow) => [
+    `${base}/${workflow}@refs/tags/v${version}`,
+    `${base}/${workflow}@refs/heads/main`,
+  ]);
 }
 
 export async function verifyCosignBundleWithIdentities(

@@ -1575,6 +1575,17 @@ async function refreshWorkspaceStatus(activeClient: SqryClient): Promise<void> {
     const status = await activeClient.getWorkspaceStatus();
     searchPanel?.setWorkspaceStatus(status);
     statusBar?.updateWorkspace(status);
+
+    const folders = getAllWorkspaceFolders();
+    if (folders.length === 1) {
+      try {
+        const rawStatus = await activeClient.getIndexStatus(folders[0]);
+        searchPanel?.hydrateIndexStatus(rawStatus);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        outputChannel?.appendLine(`[sqry] Failed to hydrate index stats: ${message}`);
+      }
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     outputChannel?.appendLine(`[sqry] Failed to refresh workspace status: ${message}`);

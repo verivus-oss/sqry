@@ -1,6 +1,6 @@
 # sqry VS Code Extension - User Guide
 
-**Version**: 10.0.2
+**Version**: 10.0.4
 **Last Updated**: 2026-04-28
 
 ---
@@ -56,7 +56,7 @@ cargo install --path sqry-cli
 
 # Verify installation
 sqry --version
-# Should output: sqry 10.0.2 (or later)
+# Should output: sqry 10.0.4 (or later)
 ```
 
 ### Option 1: Install from VSIX
@@ -83,7 +83,7 @@ sqry --version
 ```bash
 # Clone repository
 git clone https://github.com/verivus-oss/sqry.git
-cd sqry/tools/sqry-vscode
+cd sqry/sqry-vscode
 
 # Install dependencies
 npm install
@@ -102,7 +102,7 @@ code --install-extension sqry-vscode-<version>.vsix
 ### Option 3: Run from Source (Development Mode)
 
 ```bash
-cd sqry/tools/sqry-vscode
+cd sqry/sqry-vscode
 npm install
 npm run compile
 
@@ -120,6 +120,8 @@ production use:
 - it downloads only from `https://github.com/verivus-oss/sqry/releases`
 - it verifies the published checksum
 - it verifies the Sigstore/Cosign attestation bundle and workflow identity
+  (`release-distribute.yml` for current releases, with `oss-distribute.yml`
+  retained for legacy release compatibility)
 
 For marketplace/Open VSX installs, the requested `binaryVersion` must already
 exist as a public GitHub release. If the exact release has not been published
@@ -293,7 +295,7 @@ Hover over indexed symbols to see:
 - Type information
 - Caller count
 
-### 6. Index Stats Auto-Refresh
+### 6. Index Stats Auto-Refresh And Workspace Status
 
 After rebuilding the index (via Command Palette or auto-index), the extension automatically refreshes the index status panel with updated statistics including:
 - Symbol and file counts
@@ -301,9 +303,43 @@ After rebuilding the index (via Command Palette or auto-index), the extension au
 - Cross-language edge counts (per language pair)
 - Index age and health
 
-This means the Semantic Results panel always reflects the latest index state without needing to manually refresh.
+For saved multi-root `.code-workspace` files, the panel reads the LSP
+`sqry/workspaceStatus` aggregate rather than treating a no-path
+`sqry/indexStatus` response as the whole workspace. Each configured source root
+can therefore show `ok`, `building`, `missing`, or `error` independently, and a
+healthy multi-root workspace does not collapse into a false "not indexed" state.
 
-### 7. Auto-Indexing
+This means the Semantic Results panel reflects the latest authoritative
+workspace state without needing to manually refresh.
+
+### 7. Multi-Root Workspace Classification
+
+Cross-repo analysis is opt-in. Add a `sqry.workspace` block to a saved
+`.code-workspace` file to tell sqry which folders are source roots, which are
+member folders, and which paths should never be indexed:
+
+```jsonc
+{
+  "folders": [
+    { "path": "services/auth" },
+    { "path": "services/billing" },
+    { "path": "docs" }
+  ],
+  "sqry.workspace": {
+    "sourceRoots": ["services/auth", "services/billing"],
+    "memberFolders": ["docs"],
+    "exclusions": ["vendor"],
+    "projectRootMode": "gitRoot"
+  }
+}
+```
+
+The extension forwards the workspace-file path to `sqry lsp`, and the LSP loads
+the `.code-workspace` file directly as the authoritative logical workspace.
+Use `Sqry: Edit Workspace Classification (.code-workspace)` to seed or edit
+this block from VS Code.
+
+### 8. Auto-Indexing
 
 **On workspace open**, the extension can:
 - **Prompt** you to index (default)
@@ -337,6 +373,11 @@ Open VS Code Settings (`Ctrl/Cmd+,`) and search for "sqry":
 | `sqry.timeoutMs` | `15000` | Query timeout (15s) |
 | `sqry.indexTimeoutMs` | `300000` | Index timeout (5 min) |
 | `sqry.autoIndexOnOpen` | `"prompt"` | Auto-index behavior |
+| `sqry.autoIndexOnSave` | `"never"` | Optional debounced rebuild after file saves |
+| `sqry.indexRoot` | `""` | Optional LSP index-root override |
+| `sqry.projectRootMode` | `"gitRoot"` | Extension-side project root detection mode |
+| `sqry.workspaceFolderExcludes` | `[]` | Workspace folders skipped by extension enumeration loops |
+| `sqry.workspaceClassification` | `null` | User-editable classification used to write a `.code-workspace` `sqry.workspace` block |
 | `sqry.codeLens.enabled` | `true` | Show CodeLens annotations |
 
 ### Configuration Examples
@@ -618,8 +659,10 @@ sqry index --force .
 - Index size: ~1-5% of codebase size
 
 **4. Workspace-specific indexes**
-- Each workspace has its own index
-- Switching workspaces = different index
+- Single-folder workspaces use that folder's index
+- Saved `.code-workspace` files can aggregate several source-root indexes
+- Use `sqry workspace status <workspace> --json --no-cache` from the CLI to
+  inspect the same per-source-root status surface used by VS Code
 
 ### Search Tips
 
@@ -848,5 +891,5 @@ This build installs locally via VSIX while we prepare the Marketplace release—
 ---
 
 **Last Updated**: 2026-04-28
-**Extension Version**: 10.0.2
-**sqry Version**: 10.0.2+
+**Extension Version**: 10.0.4
+**sqry Version**: 10.0.4+

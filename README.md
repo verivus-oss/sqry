@@ -54,13 +54,14 @@ sqry is useful when you need to search by code **structure**: finding all caller
 
 sqry is focused on one thing: local semantic code search via AST analysis.
 
-## What's New In 8.0.6
+## What's New In 10.0.1
 
-- **Daemon mode**: run `sqryd` in the background to keep indexes hot across CLI, LSP, and MCP sessions. `sqry daemon start/stop/status/logs` subcommands, per-workspace memory telemetry with high-water mark, and `--daemon` shim flag on `sqry-mcp` and `sqry lsp`. See [Daemon Mode](#daemon-mode) below.
-- Graph analysis commands now share one traversal engine across CLI, LSP, and MCP, which makes `trace-path`, `show_dependencies`, `dependency_impact`, `subgraph`, and graph export behave more consistently.
-- Path traversal results now preserve deterministic discovery order, enforce node/edge limits atomically, and enumerate leaf paths when no explicit target is supplied.
-- MCP gained `expand_cache_status`, a Rust macro-expansion cache introspection tool, and its tool/reference docs now reflect the live tool catalog instead of stale hard-coded counts.
-- LSP workspace path resolution was hardened to reject directory-traversal escapes outside the configured workspace root.
+- **Workspace-aware multi-repo indexing**: define a logical workspace with a `.sqry-workspace` registry or a VS Code `.code-workspace` `sqry.workspace` block, then query and inspect every source root as one aggregate workspace.
+- **VS Code workspace status is authoritative**: the extension now reads the LSP `sqry/workspaceStatus` aggregate, so healthy multi-root workspaces show indexed source roots instead of a false "not indexed" state.
+- **Daemon workspace management**: `sqry daemon load` warms a workspace in `sqryd`, `sqry daemon rebuild` triggers an in-place rebuild with optional `--force`, and `sqry-mcp --daemon` / `sqry lsp --daemon` auto-start the daemon when needed.
+- **Faster repeated analysis**: derived query caches persist across sessions, graph/MCP/CLI analyses share the `sqry-db` query path, and cold-start queries reuse persisted derived data instead of recomputing every analysis from scratch.
+- **MCP robustness improvements**: session-scoped workspace resolution reduces the need to pass `path` on every tool call; duplicate, dependency, cycle, trace, and semantic-diff tools now share stricter frontier and truncation semantics.
+- **Release distribution improvements**: Homebrew tap publishing is automated from signed release checksums, and VS Code binary provenance now accepts the current `release-distribute.yml` workflow identity with the previous `oss-distribute.yml` identity retained as a legacy fallback.
 
 ## Install
 
@@ -75,7 +76,7 @@ Get-Content .\install.ps1
 This installs `sqry.exe`, `sqry-mcp.exe`, `sqry-lsp.exe`, and `sqryd.exe` into `%LOCALAPPDATA%\Programs\sqry\bin` and adds that directory to the user `PATH`. `-Component all` (the default) installs all four binaries from the Windows release ZIP.
 By default the installer resolves the latest GitHub release; use `.\install.ps1 -Version vX.Y.Z` to pin a specific release tag.
 
-`-VerifySignatures` uses Cosign to verify that the downloaded release zip was produced by the official `oss-distribute.yml` GitHub Actions workflow for this repository. Install `cosign` and ensure it is on `PATH` before using this mode. SHA256 verification remains enabled by default and protects against download corruption; use `-NoChecksum` only for diagnostics.
+`-VerifySignatures` uses Cosign to verify that the downloaded release zip was produced by the official `release-distribute.yml` GitHub Actions workflow for this repository. Older releases signed by `oss-distribute.yml` remain accepted for legacy compatibility. Install `cosign` and ensure it is on `PATH` before using this mode. SHA256 verification remains enabled by default and protects against download corruption; use `-NoChecksum` only for diagnostics.
 
 > **Note**: Windows Defender and enterprise EDR products commonly flag the `irm ... | iex` pattern heuristically, even when the installer script is benign. If you are on a managed machine, use the download-review-run path above or install from release assets/package-manager manifests instead of piping the script directly into `iex`.
 >
@@ -108,7 +109,8 @@ curl -fsSL https://raw.githubusercontent.com/verivus-oss/sqry/main/scripts/insta
 Installs `sqry`, `sqry-mcp`, `sqry-lsp`, and `sqryd` into `~/.local/bin` (override with `--install-dir`).
 Downloads individual binaries directly from GitHub releases with per-asset SHA256 checksum
 verification against `SHA256SUMS.txt`. Add `--verify-signatures` to enforce Cosign bundle
-verification (requires `cosign`). Current published macOS binaries target Apple Silicon (`arm64`) only.
+verification (requires `cosign`). Published binaries are available for Linux `x86_64`/`arm64`,
+Windows `x86_64`, and macOS Apple Silicon/Intel.
 
 Options: `--component sqry|sqry-mcp|sqry-lsp|sqryd|all`, `--version vX.Y.Z`, `--install-dir DIR`,
 `--repo OWNER/REPO`, `--no-checksum`.
@@ -132,7 +134,7 @@ sqryd --version
 ### Package managers
 
 Release packaging configs are generated from signed release checksums for:
-- Homebrew (tap formula)
+- Homebrew (published to the sqry tap and included as a release formula asset)
 - Scoop
 - Winget
 - AUR
@@ -140,7 +142,7 @@ Release packaging configs are generated from signed release checksums for:
 - Snap
 
 Look for these files in release assets (`homebrew-sqry.rb`, `scoop-sqry.json`, `winget-*.yaml`, `aur-PKGBUILD`, `nix-*.nix`, `snap-snapcraft.yaml`).
-Primary install methods provide `sqry`, `sqry-mcp`, `sqry-lsp`, and `sqryd`. The shell installer and the Windows ZIP both support `sqryd` as a component. Package manager manifests (Homebrew, Scoop, Winget, AUR, Nix, Snap) will include `sqryd` in future releases. Raw binaries and `.bundle` files are advanced/manual verification assets.
+Primary install methods provide `sqry`, `sqry-mcp`, `sqry-lsp`, and `sqryd`. The shell installer and the Windows ZIP both support `sqryd` as a component. Raw binaries and `.bundle` files are advanced/manual verification assets.
 
 ## Commands
 
@@ -321,6 +323,33 @@ sqry completions bash               # Shell completions
 
 `sqry search` parses files on demand - useful for one-off queries. `sqry query` and `sqry graph` use a prebuilt index and are much faster for repeated use.
 
+## Workspace-Aware Multi-Repo Indexing
+
+For monorepos or saved VS Code workspaces that contain several source roots,
+sqry can treat the folders as one logical workspace while preserving per-root
+index status.
+
+```bash
+sqry workspace init /projects --name "My Workspace"
+sqry workspace scan /projects --mode git-roots
+sqry workspace add /projects /projects/backend --name backend
+sqry workspace query /projects "kind:function AND repo:backend"
+sqry workspace stats /projects
+sqry workspace status /projects --json --no-cache
+```
+
+Discovery modes:
+- `index-files` (default): find existing `.sqry/graph/` indexes under the root.
+- `git-roots`: find repositories by `.git/` directories.
+
+Use `sqry workspace status` to see each source root as `ok`, `building`,
+`missing`, or `error` plus the aggregate workspace verdict. VS Code and the LSP
+use the same aggregate status surface, so a healthy multi-root workspace should
+show indexed roots in the sqry pane instead of a false "not indexed" state.
+
+See [docs/cli/workspace.md](docs/cli/workspace.md) for `.sqry-workspace` and
+`.code-workspace` configuration.
+
 ## Language Support
 
 sqry supports **37 languages** through tree-sitter-based plugins. 28 of these have full relation extraction (calls, imports, exports); the remaining 9 have symbol extraction with basic import tracking.
@@ -420,9 +449,13 @@ repository intentionally stores first-party code in those directories, run with
 ```bash
 # Start the daemon (background process, keeps graph in memory)
 sqry daemon start
+sqry daemon load /path/to/project
 
 # Check status — shows version, uptime, memory, workspaces
 sqry daemon status
+
+# Rebuild a loaded workspace in place
+sqry daemon rebuild /path/to/project --timeout 1800
 
 # Stop the daemon
 sqry daemon stop
@@ -434,7 +467,7 @@ sqry daemon logs --follow
 Example `sqry daemon status` output:
 
 ```
-sqryd v8.0.6 -- uptime 2h 14m
+sqryd v10.0.1 -- uptime 2h 14m
 
 Memory: 391 MB / 2048 MB  (peak: 418 MB)
 

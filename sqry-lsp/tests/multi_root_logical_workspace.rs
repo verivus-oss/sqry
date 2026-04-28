@@ -17,7 +17,6 @@ use sqry_core::workspace::{
     HeuristicVerdict, LogicalWorkspace, MemberFolder, MemberReason, SourceRoot, WorkspaceRegistry,
     WorkspaceRepoId, WorkspaceRepository,
 };
-use sqry_lsp::LspOptions;
 use sqry_lsp::handlers::index::index_status;
 use sqry_lsp::handlers::workspace_status::{
     SqryWorkspaceStatusParams, workspace_status as workspace_status_handler,
@@ -27,7 +26,13 @@ use sqry_lsp::session::{
     resolve_logical_workspace, resolve_step_1, resolve_step_2, resolve_step_3, resolve_step_4,
     resolve_step_5,
 };
+use sqry_lsp::{LspOptions, build_test_service};
 use tempfile::TempDir;
+use tower::Service;
+use tower::ServiceExt;
+use tower::buffer::Buffer;
+use tower_lsp::jsonrpc::Request;
+use tower_lsp::lsp_types::{InitializeParams, Url, WorkspaceFolder};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -74,6 +79,91 @@ fn write_code_workspace(dir: &Path, folders: &[&Path]) -> PathBuf {
     fs::write(&path, serde_json::to_string_pretty(&json_doc).unwrap())
         .expect("write code-workspace");
     path
+}
+
+/// Synthesize a `.code-workspace` JSON file whose folders are explicit
+/// sqry source roots. This mirrors the user-facing VS Code workspace
+/// shape and bypasses heuristic ambiguity in regression tests.
+fn write_source_code_workspace(dir: &Path, folders: &[(&Path, &str)]) -> PathBuf {
+    let entries: Vec<_> = folders
+        .iter()
+        .map(|(folder, name)| {
+            json!({
+                "path": folder.to_string_lossy(),
+                "name": name,
+                "sqry.role": "source"
+            })
+        })
+        .collect();
+    let json_doc = json!({"folders": entries});
+    let path = dir.join("project.code-workspace");
+    fs::write(&path, serde_json::to_string_pretty(&json_doc).unwrap())
+        .expect("write source code-workspace");
+    path
+}
+
+async fn drive_initialize_with_workspace_file(
+    buffered: &mut Buffer<tower_lsp::LspService<sqry_lsp::SqryLanguageServer>, Request>,
+    workspace_file: &Path,
+    folders: &[(&Path, &str)],
+) {
+    let workspace_folders: Vec<WorkspaceFolder> = folders
+        .iter()
+        .map(|(folder, name)| WorkspaceFolder {
+            uri: Url::from_file_path(folder).expect("workspace folder file url"),
+            name: (*name).to_string(),
+        })
+        .collect();
+    let params = InitializeParams {
+        root_uri: Some(Url::from_file_path(folders[0].0).expect("root file url")),
+        workspace_folders: Some(workspace_folders),
+        initialization_options: Some(json!({
+            "sqry": {
+                "workspaceFile": workspace_file
+            }
+        })),
+        ..Default::default()
+    };
+    let initialize = Request::build("initialize")
+        .params(serde_json::to_value(params).expect("initialize params serialize"))
+        .id(0i64)
+        .finish();
+    buffered
+        .ready()
+        .await
+        .expect("service ready for initialize")
+        .call(initialize)
+        .await
+        .expect("initialize request succeeds");
+
+    let initialized = Request::build("initialized").finish();
+    buffered
+        .ready()
+        .await
+        .expect("service ready for initialized")
+        .call(initialized)
+        .await
+        .expect("initialized notification succeeds");
+}
+
+async fn custom_request_json(
+    buffered: &mut Buffer<tower_lsp::LspService<sqry_lsp::SqryLanguageServer>, Request>,
+    method: &str,
+) -> serde_json::Value {
+    let request = Request::build(method.to_string())
+        .params(json!({}))
+        .id(1i64)
+        .finish();
+    let response = buffered
+        .ready()
+        .await
+        .expect("service ready for custom request")
+        .call(request)
+        .await
+        .expect("custom request succeeds")
+        .expect("custom request returns response");
+    let (_, body) = response.into_parts();
+    body.expect("custom request has success body")
 }
 
 fn fixture_logical_workspace_with_classification()
@@ -521,6 +611,88 @@ fn workspace_status_returns_workspace_id_short_and_full() {
         MemberReason::OperationalFolder
     );
     assert_eq!(result.info.exclusions.len(), 1);
+}
+
+#[test]
+fn real_lsp_workspace_status_is_authoritative_for_multi_root_code_workspace() {
+    // Regression guard for the VS Code pane bug reported on 2026-04-28:
+    // the extension must consume `sqry/workspaceStatus` for aggregate
+    // workspace state. No-path `sqry/indexStatus` is a path status
+    // surface; in a multi-root `.code-workspace` it may legitimately
+    // report `exists=false` for the fallback root and must never be
+    // synthesized into a fake one-entry "missing" workspace aggregate.
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    let repo_a = root.join("repo_a");
+    let repo_b = root.join("repo_b");
+    fs::create_dir_all(repo_a.join("src")).expect("repo_a dirs");
+    fs::create_dir_all(repo_b.join("src")).expect("repo_b dirs");
+    fs::write(
+        repo_a.join("src/lib.rs"),
+        "pub fn alpha_symbol() -> usize { 1 }\n",
+    )
+    .expect("write repo_a source");
+    fs::write(
+        repo_b.join("src/lib.rs"),
+        "pub fn beta_symbol() -> usize { 2 }\n",
+    )
+    .expect("write repo_b source");
+
+    let repo_a = repo_a.canonicalize().expect("repo_a canonical");
+    let repo_b = repo_b.canonicalize().expect("repo_b canonical");
+    let workspace_file =
+        write_source_code_workspace(root, &[(&repo_a, "repo_a"), (&repo_b, "repo_b")]);
+
+    let build_session = make_session(root.to_path_buf());
+    let reporter = sqry_core::progress::no_op_reporter();
+    sqry_lsp::handlers::index::rebuild_index(&build_session, &repo_a, &reporter, true)
+        .expect("repo_a real index builds");
+    sqry_lsp::handlers::index::rebuild_index(&build_session, &repo_b, &reporter, true)
+        .expect("repo_b real index builds");
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    runtime.block_on(async {
+        let session = make_session(root.to_path_buf());
+        let service = build_test_service(&session);
+        let mut buffered = Buffer::new(service, 4);
+        drive_initialize_with_workspace_file(
+            &mut buffered,
+            &workspace_file,
+            &[(&repo_a, "repo_a"), (&repo_b, "repo_b")],
+        )
+        .await;
+
+        let workspace_status = custom_request_json(&mut buffered, "sqry/workspaceStatus").await;
+        assert_eq!(
+            workspace_status["aggregate"]["ok_count"], 2,
+            "real workspaceStatus must see both prebuilt source-root indexes as ok: {workspace_status:#}"
+        );
+        assert_eq!(
+            workspace_status["aggregate"]["missing_count"], 0,
+            "real workspaceStatus must not re-prompt indexed source roots: {workspace_status:#}"
+        );
+        let source_roots = workspace_status["aggregate"]["source_root_statuses"]
+            .as_array()
+            .expect("source_root_statuses array");
+        assert_eq!(source_roots.len(), 2, "two source-root statuses");
+        assert!(
+            source_roots.iter().all(|entry| entry["status"] == "ok"),
+            "all source roots should be ok: {source_roots:#?}"
+        );
+
+        let no_path_index_status = custom_request_json(&mut buffered, "sqry/indexStatus").await;
+        assert_eq!(
+            no_path_index_status["status"]["exists"], false,
+            "no-path indexStatus remains a fallback-root path status in this fixture"
+        );
+        assert!(
+            no_path_index_status["status"].get("aggregate").is_none(),
+            "this regression guard intentionally proves no-path indexStatus is not the workspace aggregate"
+        );
+    });
 }
 
 // ---------------------------------------------------------------------------

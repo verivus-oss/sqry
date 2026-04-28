@@ -301,9 +301,40 @@ describe("binaryDownloader", () => {
   });
 
   describe("certificate identity candidates", () => {
-    it("includes both tag-scoped and main-branch workflow identities", () => {
+    it("keeps the current provenance identity synchronized with the public workflow control surface", () => {
+      const mod = loadModule();
+      const repoRoot = path.resolve(__dirname, "..", "..");
+      const publicWorkflow = path.join(
+        repoRoot,
+        ".github",
+        "workflows-public",
+        "release-distribute.yml",
+      );
+      const identities = mod.getCertificateIdentityCandidates("8.0.2");
+
+      expect(fs.existsSync(publicWorkflow)).to.equal(
+        true,
+        "current public release workflow control surface must exist",
+      );
+      expect(identities[0]).to.equal(
+        "https://github.com/verivus-oss/sqry/.github/workflows/release-distribute.yml@refs/tags/v8.0.2",
+      );
+      expect(identities[1]).to.equal(
+        "https://github.com/verivus-oss/sqry/.github/workflows/release-distribute.yml@refs/heads/main",
+      );
+      for (const identity of identities) {
+        expect(identity).to.match(
+          /^https:\/\/github\.com\/verivus-oss\/sqry\/\.github\/workflows\/(release-distribute|oss-distribute)\.yml@refs\/(tags\/v8\.0\.2|heads\/main)$/,
+          `unexpectedly broad provenance identity: ${identity}`,
+        );
+      }
+    });
+
+    it("includes current and legacy public workflow identities", () => {
       const mod = loadModule();
       expect(mod.getCertificateIdentityCandidates("8.0.2")).to.deep.equal([
+        "https://github.com/verivus-oss/sqry/.github/workflows/release-distribute.yml@refs/tags/v8.0.2",
+        "https://github.com/verivus-oss/sqry/.github/workflows/release-distribute.yml@refs/heads/main",
         "https://github.com/verivus-oss/sqry/.github/workflows/oss-distribute.yml@refs/tags/v8.0.2",
         "https://github.com/verivus-oss/sqry/.github/workflows/oss-distribute.yml@refs/heads/main",
       ]);
@@ -340,10 +371,12 @@ describe("binaryDownloader", () => {
         },
       );
 
-      expect(attempted).to.deep.equal([
-        "https://github.com/verivus-oss/sqry/.github/workflows/oss-distribute.yml@refs/tags/v8.0.2",
-        "https://github.com/verivus-oss/sqry/.github/workflows/oss-distribute.yml@refs/heads/main",
-      ]);
+      expect(attempted).to.include(
+        "https://github.com/verivus-oss/sqry/.github/workflows/release-distribute.yml@refs/tags/v8.0.2",
+      );
+      expect(attempted.at(-1)).to.equal(
+        "https://github.com/verivus-oss/sqry/.github/workflows/release-distribute.yml@refs/heads/main",
+      );
     });
 
     it("succeeds immediately when the first identity matches", async () => {

@@ -278,23 +278,29 @@ export class SqryClient implements vscode.Disposable {
    * Fetch the aggregate workspace status — the SOLE status surface for
    * the extension UI (DAG STEP_5 criterion 5).
    *
-   * Routes through `sqry/indexStatus` with no `path` argument, which
-   * the LSP interprets as "tell me about the entire logical workspace".
-   * The aggregate is returned via the `IndexStatus.aggregate` field
-   * (added in STEP_4 iter2). When the LSP does not yet know about a
-   * `.code-workspace` (e.g. the user opened a single folder), the
-   * single-source-root branch is repackaged into a one-entry aggregate
-   * here so callers always see the same shape.
+   * Routes through `sqry/workspaceStatus`, the LSP surface that owns
+   * logical workspace identity and source-root aggregation. `sqry/indexStatus`
+   * remains available through `getIndexStatus()` for per-root rich stats.
    */
   public async getWorkspaceStatus(): Promise<SqryWorkspaceStatus> {
+    return (await this.getLogicalWorkspaceInfo()).aggregate;
+  }
+
+  /**
+   * Fetch the raw index status payload for UI surfaces that need the
+   * complete stats projection (files, languages, relation summaries).
+   */
+  public async getIndexStatus(
+    workspace?: vscode.WorkspaceFolder,
+  ): Promise<SqryAggregateIndexStatus> {
     const cfg = await this.ensureConfig();
-    const params: SqryIndexStatusParams = {};
+    const params: SqryIndexStatusParams = { path: workspace?.uri.fsPath };
     const result = await this.sendRequest<SqryIndexStatusResult>(
       "sqry/indexStatus",
       params,
       cfg,
     );
-    return this.normalizeWorkspaceStatus(result.status);
+    return result.status;
   }
 
   /**
@@ -336,35 +342,6 @@ export class SqryClient implements vscode.Disposable {
       cfg,
     );
     return this.extractSourceRootStatus(result.status, folder.uri.fsPath);
-  }
-
-  /**
-   * Coerce a raw `IndexStatus` into a `WorkspaceStatus` aggregate.
-   * Single-folder responses (the legacy non-aggregate branch) are
-   * repackaged into a one-entry aggregate so the UI sees a uniform
-   * shape regardless of which branch the LSP took.
-   */
-  private normalizeWorkspaceStatus(status: SqryAggregateIndexStatus): SqryWorkspaceStatus {
-    if (status.aggregate) {
-      return status.aggregate;
-    }
-    const singleEntry: SqrySourceRootStatus = {
-      path: status.path ?? "",
-      status: this.classifyLegacyStatus(status),
-      symbol_count: status.symbol_count,
-    };
-    const ok = singleEntry.status === "ok" ? 1 : 0;
-    const missing = singleEntry.status === "missing" ? 1 : 0;
-    const building = singleEntry.status === "building" ? 1 : 0;
-    const error = singleEntry.status === "error" ? 1 : 0;
-    return {
-      source_root_statuses: [singleEntry],
-      missing_count: missing,
-      building_count: building,
-      ok_count: ok,
-      error_count: error,
-      generated_at: new Date().toISOString(),
-    };
   }
 
   private extractSourceRootStatus(

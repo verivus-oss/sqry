@@ -115,26 +115,8 @@ readonly -a RS_GATE_TOKENS=(
   "// routing-gate-allow:"
 )
 
-# ---------------------------------------------------------------------------
-# Pre-existing call sites that the routing gate would otherwise flag but
-# that are not, in fact, routing-relevant. Each entry must carry an
-# explicit owner and a justification — the list is INTENTIONALLY narrow
-# and the gate refuses to grow it implicitly.
-#
-# Format (per line):  <repo-relative-path>:<lineno>
-#
-#   - sqry-vscode/src/searchPanel.ts:953
-#       Tree-view rendering. Enumerates `vscode.workspace.workspaceFolders`
-#       only to materialize per-root tree items for an `indexStatusMap`
-#       that is itself populated upstream by classifier-aware code in
-#       extension.ts (`forEachClassifiedSourceRoot`). The loop is
-#       UI-presentation, not routing. Tracked for STEP_5 follow-up to
-#       add an inline `// routing-gate-allow:` comment so the gate
-#       no longer needs the carve-out.
-# ---------------------------------------------------------------------------
 known_ungated_ts="$(mktemp)"
 cat > "${known_ungated_ts}" <<'EOF'
-sqry-vscode/src/searchPanel.ts:953
 EOF
 sort -u -o "${known_ungated_ts}" "${known_ungated_ts}"
 

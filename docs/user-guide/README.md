@@ -33,22 +33,32 @@ sqry graph --path . --format json nodes --kind function
 sqry visualize "callers:main" --format mermaid --path .
 ```
 
-## Release Highlights (v7.2.0)
+## Release Highlights (v10.0.1)
 
-The changes since `v7.1.5` are concentrated in graph analysis, MCP introspection,
-and workspace safety:
+The recent v9/v10 release train concentrated on workspace-aware indexing,
+daemon-backed workflows, and faster repeated analysis:
 
-- Graph analyses now share a single traversal engine across CLI, LSP, and MCP.
-  This affects `trace-path`, `show_dependencies`, `dependency_impact`,
-  `subgraph`, and graph export behavior.
-- Traversal output is now more consistent:
-  - node/edge truncation is applied atomically
-  - path enumeration uses stable discovery order
-  - leaf paths are reported when no explicit target symbol is provided
-- MCP now exposes `expand_cache_status`, which lets assistants inspect Rust
-  macro-expansion cache health without rebuilding or guessing.
-- LSP path resolution now fails closed when a requested path escapes the active
-  workspace root, including missing-path and symlink-parent escape cases.
+- Logical workspaces can now be described by `.sqry-workspace` registries or
+  VS Code `.code-workspace` `sqry.workspace` blocks. CLI, LSP, MCP, daemon, and
+  VS Code all resolve the same source roots and aggregate status.
+- `sqry workspace status` reports each source root as `ok`, `building`,
+  `missing`, or `error`. VS Code consumes the same LSP `sqry/workspaceStatus`
+  aggregate so multi-root workspaces no longer fall back to a false
+  single-folder "not indexed" state.
+- `sqryd` now supports explicit workspace loading and rebuilds:
+  `sqry daemon load <path>` and `sqry daemon rebuild <path> [--force]`.
+  `sqry-mcp --daemon` and `sqry lsp --daemon` can auto-start the daemon.
+- Derived query caches persist across sessions. Relation, cycle, unused,
+  dependency-impact, trace, subgraph, export, and semantic-diff paths now share
+  the `sqry-db` dispatch layer, reducing cold-start recomputation.
+- MCP session-scoped workspace resolution uses explicit paths first, then
+  file-bearing arguments, MCP roots, the last resolved workspace, and finally
+  legacy environment/CWD fallback. In a normal single-repo session, assistants
+  no longer need to pass `path` on every call.
+- The release pipeline now publishes Homebrew tap updates automatically and
+  verifies binaries against the current `release-distribute.yml` provenance
+  identity, with the old `oss-distribute.yml` identity retained for legacy
+  releases.
 
 Example MCP introspection flow:
 
@@ -194,7 +204,7 @@ Note: Relation predicates in `sqry query` (`callers:`, `callees:`, `imports:`,
 `exports:`) are served from the symbol index RelationStore/ImportStore today.
 `sqry graph` and `sqry visualize` are backed by the unified graph snapshot.
 
-Traversal-specific notes for `7.2.0`:
+Traversal-specific notes:
 - traversal-backed commands now share one limit model (`max_depth`, node caps,
   edge caps, and path caps)
 - truncation metadata is produced consistently across interfaces

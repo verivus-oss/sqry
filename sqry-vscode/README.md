@@ -1,6 +1,6 @@
 # sqry VS Code Extension
 
-Semantic code search for **37 languages**. Navigate call graphs, inheritance hierarchies, FFI boundaries, imports/exports — powered by unified graph architecture with AST-based analysis.
+Semantic code search for sqry-indexed workspaces. Navigate call graphs, inheritance hierarchies, FFI boundaries, imports/exports — powered by unified graph architecture with AST-based analysis.
 
 ## Features
 
@@ -28,7 +28,8 @@ Semantic code search for **37 languages**. Navigate call graphs, inheritance hie
 - **Status Bar**: Persistent index health indicator (Ready/Stale/Building/No Index/Error) — click to act
 - **Auto-Indexing**: Automatic workspace indexing on open (configurable: always/prompt/never)
 - **Auto-Index on Save**: Optional debounced rebuild after file saves (`sqry.autoIndexOnSave`)
-- **Multi-Root Workspace**: Per-root index status, targeting, and aggregate status bar
+- **Multi-Root Workspace**: Per-root index status, targeting, aggregate status bar, and `.code-workspace` `sqry.workspace` classification
+- **Authoritative Workspace Status**: Uses the LSP `sqry/workspaceStatus` aggregate so indexed multi-root workspaces do not appear as a false single-folder "not indexed" state
 - **Real-time Progress**: Detailed progress during indexing with auto-refresh on completion
 
 ### Developer Experience
@@ -37,11 +38,15 @@ Semantic code search for **37 languages**. Navigate call graphs, inheritance hie
 - **Result Sorting**: Sort by name, file path, kind, or line number
 - **Export Results**: Export as JSON, Markdown, or CSV
 - **Getting Started Walkthrough**: 5-step onboarding for new users
-- **Auto-Download**: Automatically downloads the sqry binary from GitHub releases
+- **Auto-Download**: Automatically downloads the sqry binary from GitHub releases with checksum and Sigstore provenance verification
 
-## Supported Languages (35)
+## Supported Languages
 
-All languages use the same unified GraphBuilder architecture with full AST-based semantic analysis:
+The default extension indexing path enables the 35 standard language plugins.
+The full sqry distribution includes 37 tree-sitter plugins; high-cost plugins
+such as JSON and ServiceNow XML can be enabled from the CLI when needed.
+
+All languages use the same unified GraphBuilder architecture with AST-based semantic analysis:
 
 Rust, JavaScript, TypeScript, Python, Go, Java, C, C++, C#, Kotlin, Scala, Ruby, Swift, PHP, Lua, Perl, Elixir, Haskell, R, Dart, Zig, Groovy, Shell/Bash, HTML, CSS, SQL, Oracle PL/SQL, Terraform/HCL, Puppet, Pulumi, SAP ABAP, Salesforce Apex, ServiceNow, Vue, Svelte
 
@@ -94,11 +99,34 @@ Rust, JavaScript, TypeScript, Python, Go, Java, C, C++, C#, Kotlin, Scala, Ruby,
   "sqry.autoIndexOnOpen": "prompt",         // "always", "prompt", or "never"
   "sqry.autoIndexOnSave": "never",          // "never" or "debounced" (30s delay)
   "sqry.autoDownload": true,                // Auto-download binary from GitHub
+  "sqry.indexRoot": "",                     // Optional index root override
+  "sqry.projectRootMode": "gitRoot",        // "gitRoot", "folder", or "explicit"
+  "sqry.workspaceFolderExcludes": [],       // Workspace folders to skip
+  "sqry.workspaceClassification": null,     // .code-workspace source/member classification
   "sqry.codeLens.enabled": true,            // Enable CodeLens annotations
   "sqry.codeLens.segments": ["callers", "callees"],  // Which counts to show
   "sqry.diagnostics.enabled": true,         // Enable Problems panel integration
   "sqry.diagnostics.unusedCode": true,      // Show unused code as faded text
   "sqry.hover.enabled": true                // Show sqry info in hover tooltips
+}
+```
+
+For saved multi-root workspaces, add a `sqry.workspace` block to the
+`.code-workspace` file to opt into cross-repo analysis:
+
+```jsonc
+{
+  "folders": [
+    { "path": "services/auth" },
+    { "path": "services/billing" },
+    { "path": "docs" }
+  ],
+  "sqry.workspace": {
+    "sourceRoots": ["services/auth", "services/billing"],
+    "memberFolders": ["docs"],
+    "exclusions": ["vendor"],
+    "projectRootMode": "gitRoot"
+  }
 }
 ```
 
@@ -160,7 +188,7 @@ npm run compile
 ### Testing
 
 ```bash
-npm test          # Unit tests (195 tests)
+npm run test:unit # Unit tests
 npm run test:integration  # Integration tests (requires VS Code)
 ```
 
@@ -190,5 +218,5 @@ MIT — See root LICENSE file
 
 ---
 
-**Version**: 10.0.2
+**Version**: 10.0.4
 **Last Updated**: 2026-04-28
