@@ -7,66 +7,125 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thanks for reporting a bug. Please provide a minimal, reproducible report.
-  - type: input
-    id: version
+        Thanks for taking the time to file a bug. The more reproducible the
+        report, the faster the fix.
+
+        Before filing, please search [existing issues](https://github.com/verivus-oss/sqry/issues?q=is%3Aissue)
+        and skim the [README](https://github.com/verivus-oss/sqry#readme).
+
+  - type: checkboxes
+    id: prereqs
     attributes:
-      label: Version
-      description: Public release version affected, for example `v4.12.7`
-      placeholder: vX.Y.Z
-    validations:
-      required: true
+      label: Prerequisites
+      options:
+        - label: I have searched existing issues and this is not a duplicate.
+          required: true
+
   - type: dropdown
     id: component
     attributes:
       label: Component
       options:
-        - CLI
-        - LSP
-        - MCP
+        - CLI (sqry)
+        - LSP (sqry-lsp)
+        - MCP (sqry-mcp)
+        - Daemon (sqryd)
         - VS Code extension
+        - Language plugin
         - Release artifact
         - Documentation
+        - Other / unsure
+    validations:
+      required: true
+
+  - type: input
+    id: language
+    attributes:
+      label: Affected language plugin (if applicable)
+      description: For language-plugin or graph-analysis bugs, e.g. `Go`, `Rust`, `Python`.
+      placeholder: e.g. Go
+    validations:
+      required: false
+
+  - type: textarea
+    id: version
+    attributes:
+      label: sqry version
+      description: |
+        Please paste the full output of `sqry --version --verbose`. The build
+        commit and enabled features matter for triage.
+      render: shell
+      placeholder: |
+        $ sqry --version --verbose
+        sqry 10.0.4 (commit abc1234, built 2026-04-29)
+        ...
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Linux
+        - macOS
+        - Windows
+        - WSL
         - Other
     validations:
       required: true
-  - type: textarea
-    id: environment
+
+  - type: input
+    id: os-details
     attributes:
-      label: Environment
-      description: OS, architecture, shell, editor, and any relevant tooling details
-      placeholder: |
-        OS:
-        Architecture:
-        Shell:
-        Editor:
+      label: OS / kernel details
+      description: e.g. `Ubuntu 24.04`, `macOS 15.3 (arm64)`, `Arch Linux 6.19.13`.
+      placeholder: distro + version + arch
     validations:
-      required: true
+      required: false
+
   - type: textarea
     id: steps
     attributes:
       label: Steps to reproduce
+      description: |
+        A minimal, copy-pasteable script that reproduces the bug from a clean
+        directory is ideal. If your repro needs files outside the snippet,
+        please link a gist or repo in "Additional context" below.
+      render: bash
       placeholder: |
-        1.
-        2.
-        3.
+        tmp=$(mktemp -d) && cd "$tmp"
+        cat > main.go <<'EOF'
+        ...
+        EOF
+        sqry index --force .
+        sqry --json --exact parseConfig .
     validations:
       required: true
+
   - type: textarea
     id: expected
     attributes:
       label: Expected behavior
     validations:
       required: true
+
   - type: textarea
     id: actual
     attributes:
       label: Actual behavior
+      description: Paste the actual output, including any error messages or stack traces.
+      render: shell
     validations:
       required: true
+
   - type: textarea
-    id: logs
+    id: context
     attributes:
-      label: Logs or screenshots
-      description: Paste relevant output, stack traces, or screenshots
-      render: shell
+      label: Additional context
+      description: |
+        Anything else that might help — links to related issues, hypotheses
+        about the root cause, screenshots, or larger logs (use a gist for
+        anything over ~100 lines).
+    validations:
+      required: false
