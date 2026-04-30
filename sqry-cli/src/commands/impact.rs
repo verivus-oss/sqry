@@ -6,14 +6,129 @@ use crate::args::Cli;
 use crate::commands::graph::loader::{GraphLoadConfig, load_unified_graph_for_cli};
 use crate::index_discovery::find_nearest_index;
 use crate::output::OutputStreams;
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result};
 use serde::Serialize;
 use sqry_core::graph::unified::node::NodeId;
+use sqry_core::graph::unified::resolution::{AmbiguousSymbolError, SymbolResolveError};
 use sqry_core::graph::unified::traversal::EdgeClassification;
 use sqry_core::graph::unified::{
-    EdgeFilter, TraversalConfig, TraversalDirection, TraversalLimits, traverse,
+    EdgeFilter, FileScope, TraversalConfig, TraversalDirection, TraversalLimits, traverse,
 };
 use std::collections::{HashMap, HashSet};
+
+/// Stable CLI exit code surfaced when a symbol resolution is ambiguous.
+///
+/// Distinct from `1` (general error) and `2` (not-found / validation) so
+/// scripts can branch on the ambiguity case without parsing stderr.
+pub const AMBIGUOUS_SYMBOL_EXIT_CODE: i32 = 4;
+
+/// Stable CLI exit code surfaced when a symbol cannot be located in the
+/// graph.
+pub const SYMBOL_NOT_FOUND_EXIT_CODE: i32 = 2;
+
+/// Stable error code for the `sqry::ambiguous_symbol` envelope.
+pub const AMBIGUOUS_SYMBOL_ERROR_CODE: &str = "sqry::ambiguous_symbol";
+
+/// Stable error code for the `sqry::symbol_not_found` envelope.
+pub const SYMBOL_NOT_FOUND_ERROR_CODE: &str = "sqry::symbol_not_found";
+
+/// JSON envelope serialized for the `sqry::ambiguous_symbol` error.
+///
+/// Mirrors the shape used by the MCP boundary so a single response shape
+/// flows through every wire format. Kept private because callers should
+/// route through [`emit_ambiguous_symbol_error`].
+#[derive(Debug, Serialize)]
+struct AmbiguousSymbolEnvelope<'a> {
+    code: &'static str,
+    message: String,
+    candidates: &'a [sqry_core::graph::unified::resolution::AmbiguousSymbolCandidate],
+    truncated: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct AmbiguousSymbolWireWrapper<'a> {
+    error: AmbiguousSymbolEnvelope<'a>,
+}
+
+/// Emit the `sqry::ambiguous_symbol` error envelope on the active output
+/// streams and return the canonical CLI exit code.
+///
+/// JSON output is written to stdout (the same channel as the success
+/// payload) so `--json` consumers can pipe through `jq`. Human output is
+/// written to stderr and lists candidates one per line.
+pub(crate) fn emit_ambiguous_symbol_error(
+    streams: &mut OutputStreams,
+    err: &AmbiguousSymbolError,
+    json_output: bool,
+) -> i32 {
+    let message = format!(
+        "Symbol '{}' is ambiguous; specify the qualified name",
+        err.name
+    );
+    if json_output {
+        let envelope = AmbiguousSymbolWireWrapper {
+            error: AmbiguousSymbolEnvelope {
+                code: AMBIGUOUS_SYMBOL_ERROR_CODE,
+                message,
+                candidates: &err.candidates,
+                truncated: err.truncated,
+            },
+        };
+        let json = serde_json::to_string_pretty(&envelope).unwrap_or_else(|_| {
+            format!(
+                "{{\"error\":{{\"code\":\"{AMBIGUOUS_SYMBOL_ERROR_CODE}\",\"message\":\"{}\"}}}}",
+                err.name
+            )
+        });
+        let _ = streams.write_result(&json);
+    } else {
+        let mut lines = vec![format!("Error: {message}.")];
+        if err.truncated {
+            lines.push(format!(
+                "Showing first {} candidates (more matched):",
+                err.candidates.len()
+            ));
+        } else {
+            lines.push("Candidates:".to_string());
+        }
+        for candidate in &err.candidates {
+            lines.push(format!(
+                "  - {} [{}] ({}:{}:{})",
+                candidate.qualified_name,
+                candidate.kind,
+                candidate.file_path,
+                candidate.start_line,
+                candidate.start_column
+            ));
+        }
+        let _ = streams.write_diagnostic(&lines.join("\n"));
+    }
+    AMBIGUOUS_SYMBOL_EXIT_CODE
+}
+
+/// Emit the `sqry::symbol_not_found` envelope on the active output streams
+/// and return the canonical CLI exit code.
+pub(crate) fn emit_symbol_not_found(
+    streams: &mut OutputStreams,
+    name: &str,
+    json_output: bool,
+) -> i32 {
+    let message = format!("Symbol '{name}' not found in graph");
+    if json_output {
+        let envelope = serde_json::json!({
+            "error": {
+                "code": SYMBOL_NOT_FOUND_ERROR_CODE,
+                "message": message,
+            }
+        });
+        let json = serde_json::to_string_pretty(&envelope)
+            .unwrap_or_else(|_| format!("{{\"error\":{{\"code\":\"{SYMBOL_NOT_FOUND_ERROR_CODE}\",\"message\":\"{name}\"}}}}"));
+        let _ = streams.write_result(&json);
+    } else {
+        let _ = streams.write_diagnostic(&format!("Error: {message}."));
+    }
+    SYMBOL_NOT_FOUND_EXIT_CODE
+}
 
 /// Impact analysis output
 #[derive(Debug, Serialize)]
@@ -272,30 +387,27 @@ pub fn run_impact(
     let graph = load_unified_graph_for_cli(&loc.index_root, &config, cli)
         .context("Failed to load graph. Run 'sqry index' to build the graph.")?;
 
-    let strings = graph.strings();
-
-    // Find the target symbol by iterating over nodes
-    let target_node_id = graph
-        .nodes()
-        .iter()
-        .find(|(_, entry)| {
-            // Check qualified name
-            if let Some(qn_id) = entry.qualified_name
-                && let Some(qn) = strings.resolve(qn_id)
-                && (qn.as_ref() == symbol || qn.contains(symbol))
-            {
-                return true;
+    // Resolve the target symbol via the shared ambiguity-aware resolver.
+    // The legacy `nodes().iter().find()` substring scan was the bug
+    // surfaced in `verivus-oss/sqry#77` / `#156`: it silently picked the
+    // first match (or returned "not found in graph" when nothing matched
+    // by name) and gave the user no way to disambiguate. The shared
+    // resolver returns a typed [`SymbolResolveError`] with the full
+    // candidate list which we render through the
+    // `sqry::ambiguous_symbol` envelope.
+    let snapshot = graph.snapshot();
+    let target_node_id =
+        match snapshot.resolve_global_symbol_ambiguity_aware(symbol, FileScope::Any) {
+            Ok(node_id) => node_id,
+            Err(SymbolResolveError::Ambiguous(err)) => {
+                let exit_code = emit_ambiguous_symbol_error(&mut streams, &err, cli.json);
+                std::process::exit(exit_code);
             }
-            // Check simple name
-            if let Some(name) = strings.resolve(entry.name)
-                && name.as_ref() == symbol
-            {
-                return true;
+            Err(SymbolResolveError::NotFound { name }) => {
+                let exit_code = emit_symbol_not_found(&mut streams, &name, cli.json);
+                std::process::exit(exit_code);
             }
-            false
-        })
-        .map(|(id, _)| id)
-        .ok_or_else(|| anyhow!("Symbol '{symbol}' not found in graph"))?;
+        };
 
     // BFS to find all dependents (reverse dependency traversal)
     let effective_max_depth = if include_indirect { max_depth } else { 1 };

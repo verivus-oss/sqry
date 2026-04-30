@@ -409,6 +409,155 @@ impl GraphSnapshot {
             .collect()
     }
 
+    /// Resolve a symbol to one [`NodeId`] with a typed ambiguity error.
+    ///
+    /// This is the single, shared resolver used by every CLI, LSP, and MCP
+    /// surface that must collapse a user-supplied symbol name to one
+    /// canonical node. It accepts both bare names (`NeedTags`) and
+    /// fully-qualified names (`main.SelectorSource.NeedTags` or
+    /// `main::SelectorSource::NeedTags`):
+    ///
+    /// * For a fully-qualified name, the resolver normalizes native
+    ///   delimiters (`.`) to graph-canonical `::` form and looks up the
+    ///   exact-qualified bucket. A unique match is the **only** acceptable
+    ///   resolution — there is no fuzzy fallback to simple-name candidates
+    ///   even if the qualified form has zero hits, because qualified names
+    ///   are a user contract.
+    /// * For a bare name, the resolver tries the exact-simple bucket and
+    ///   resolves the unique match. If two or more nodes share the simple
+    ///   name (e.g. a struct field and a local variable), it returns
+    ///   [`SymbolResolveError::Ambiguous`] with the candidate list.
+    ///
+    /// The candidate list is sorted lexicographically by
+    /// `(qualified_name, file_path, start_line, start_column)` and capped
+    /// at [`AMBIGUOUS_SYMBOL_CANDIDATE_CAP`].
+    ///
+    /// # Errors
+    ///
+    /// * [`SymbolResolveError::NotFound`] — no nodes matched after both
+    ///   raw-form and dot-normalized lookups.
+    /// * [`SymbolResolveError::Ambiguous`] — two or more nodes matched
+    ///   the requested name in the most-specific eligible bucket.
+    ///
+    /// # File scope
+    ///
+    /// `file_scope` follows the same semantics as
+    /// [`SymbolQuery::file_scope`]:
+    ///
+    /// * [`FileScope::Any`] — global resolution. Used by `sqry impact`,
+    ///   `sqry-mcp dependency_impact`, etc.
+    /// * [`FileScope::Path`] / [`FileScope::FileId`] — file-scoped
+    ///   resolution. Used by `sqry explain` and similar
+    ///   single-file-anchored commands.
+    pub fn resolve_global_symbol_ambiguity_aware(
+        &self,
+        symbol: &str,
+        file_scope: FileScope<'_>,
+    ) -> Result<NodeId, SymbolResolveError> {
+        // Strict mode rejects suffix candidates — only exact-qualified
+        // and exact-simple buckets are eligible. That's correct here:
+        // canonical-suffix matching is a fuzzy fallback that has no place
+        // in a "resolve to one canonical node" contract.
+        let primary = self.resolve_symbol(&SymbolQuery {
+            symbol,
+            file_scope,
+            mode: ResolutionMode::Strict,
+        });
+
+        let outcome = match primary {
+            // Successful resolution short-circuits before the dot-norm fallback.
+            SymbolResolutionOutcome::Resolved(_) | SymbolResolutionOutcome::Ambiguous(_) => primary,
+            // Dot-normalized fallback: a user passing
+            // `pkg.subpkg.fn` against a graph that internally stores
+            // `pkg::subpkg::fn` (Go, Python, Java, etc.) lands here. We
+            // only attempt the rewrite when the symbol has dots and no
+            // existing `::`, to avoid shadowing native-form symbols.
+            SymbolResolutionOutcome::NotFound | SymbolResolutionOutcome::FileNotIndexed => {
+                if symbol.contains('.') && !symbol.contains("::") {
+                    let normalized = symbol.replace('.', "::");
+                    self.resolve_symbol(&SymbolQuery {
+                        symbol: &normalized,
+                        file_scope,
+                        mode: ResolutionMode::Strict,
+                    })
+                } else {
+                    primary
+                }
+            }
+        };
+
+        match outcome {
+            SymbolResolutionOutcome::Resolved(node_id) => Ok(node_id),
+            SymbolResolutionOutcome::NotFound | SymbolResolutionOutcome::FileNotIndexed => {
+                Err(SymbolResolveError::NotFound {
+                    name: symbol.to_string(),
+                })
+            }
+            SymbolResolutionOutcome::Ambiguous(candidates) => Err(SymbolResolveError::Ambiguous(
+                self.build_ambiguous_symbol_error(symbol, &candidates),
+            )),
+        }
+    }
+
+    /// Materialize a list of node ids into a stable, capped
+    /// [`AmbiguousSymbolError`] payload.
+    fn build_ambiguous_symbol_error(
+        &self,
+        symbol: &str,
+        candidates: &[NodeId],
+    ) -> AmbiguousSymbolError {
+        let mut materialized: Vec<AmbiguousSymbolCandidate> = candidates
+            .iter()
+            .filter_map(|node_id| self.materialize_ambiguous_candidate(*node_id))
+            .collect();
+
+        // Stable lexicographic ordering on the wire payload — independent
+        // of bucket ordering / arena insertion order. Kept here (not in
+        // the resolver) so the cap-and-truncate decision is taken on the
+        // user-visible projection.
+        materialized.sort_by(|left, right| {
+            left.qualified_name
+                .cmp(&right.qualified_name)
+                .then(left.file_path.cmp(&right.file_path))
+                .then(left.start_line.cmp(&right.start_line))
+                .then(left.start_column.cmp(&right.start_column))
+        });
+
+        let truncated = materialized.len() > AMBIGUOUS_SYMBOL_CANDIDATE_CAP;
+        materialized.truncate(AMBIGUOUS_SYMBOL_CANDIDATE_CAP);
+
+        AmbiguousSymbolError {
+            name: symbol.to_string(),
+            candidates: materialized,
+            truncated,
+        }
+    }
+
+    fn materialize_ambiguous_candidate(&self, node_id: NodeId) -> Option<AmbiguousSymbolCandidate> {
+        let entry = self.get_node(node_id)?;
+        let strings = self.strings();
+        let files = self.files();
+
+        let simple_name = strings
+            .resolve(entry.name)
+            .map_or_else(String::new, |s| s.to_string());
+        let qualified_name = entry
+            .qualified_name
+            .and_then(|id| strings.resolve(id))
+            .map_or_else(|| simple_name.clone(), |s| s.to_string());
+        let file_path = files
+            .resolve(entry.file)
+            .map_or_else(String::new, |p| p.display().to_string());
+
+        Some(AmbiguousSymbolCandidate {
+            qualified_name,
+            kind: entry.kind.as_str().to_string(),
+            file_path,
+            start_line: entry.start_line,
+            start_column: entry.start_column,
+        })
+    }
+
     fn candidate_sort_key(&self, node_id: NodeId) -> CandidateSortKey {
         let Some(entry) = self.get_node(node_id) else {
             return CandidateSortKey::default_for(node_id);
@@ -453,6 +602,95 @@ pub struct SymbolCandidateSearchWitness {
     /// Ordered candidate witnesses from the first non-empty bucket.
     pub candidates: Vec<SymbolCandidateWitness>,
 }
+
+/// Maximum number of candidates surfaced by [`AmbiguousSymbolError`].
+///
+/// The cap prevents pathological responses on simple names that happen to
+/// match hundreds of nodes (e.g. `init`); when the bucket contains more
+/// than this many candidates the rest are dropped and
+/// [`AmbiguousSymbolError::truncated`] is set to `true`.
+pub const AMBIGUOUS_SYMBOL_CANDIDATE_CAP: usize = 20;
+
+/// One candidate surfaced by an [`AmbiguousSymbolError`].
+///
+/// The fields are deliberately denormalized strings/integers — the wire
+/// envelope on the CLI/MCP boundary serializes this struct directly via
+/// `serde`, and consumers (humans + agents) read the displayed fields
+/// without having to look them up against the live snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AmbiguousSymbolCandidate {
+    /// Canonical qualified name with `::` separators (or simple name when
+    /// the node has no qualified name).
+    pub qualified_name: String,
+    /// Lowercase node-kind label (`"function"`, `"property"`, `"variable"`, …).
+    pub kind: String,
+    /// Display path of the source file the candidate is defined in.
+    pub file_path: String,
+    /// One-based start line of the candidate's definition span.
+    pub start_line: u32,
+    /// Zero-based start column of the candidate's definition span.
+    pub start_column: u32,
+}
+
+/// Typed payload for an ambiguous symbol resolution.
+///
+/// Surfaced by [`GraphSnapshot::resolve_global_symbol_ambiguity_aware`] when
+/// a bare symbol name resolves to multiple nodes. Consumers (CLI / MCP /
+/// LSP) serialize this directly into their wire envelope under the stable
+/// error code `sqry::ambiguous_symbol`.
+///
+/// Candidates are sorted by `(qualified_name, file_path, start_line,
+/// start_column)` lexicographically and capped at
+/// [`AMBIGUOUS_SYMBOL_CANDIDATE_CAP`]. When the cap fires, `truncated` is
+/// set to `true` so consumers can surface the cap to the user.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AmbiguousSymbolError {
+    /// The original (un-normalized) symbol the caller asked for.
+    pub name: String,
+    /// Bounded list of candidate definitions, deterministically ordered.
+    pub candidates: Vec<AmbiguousSymbolCandidate>,
+    /// `true` when more than [`AMBIGUOUS_SYMBOL_CANDIDATE_CAP`] candidates
+    /// matched and the tail was dropped.
+    pub truncated: bool,
+}
+
+impl std::fmt::Display for AmbiguousSymbolError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Symbol '{}' is ambiguous; specify the qualified name",
+            self.name
+        )
+    }
+}
+
+/// Single-result resolver outcome surfaced to CLI / MCP boundaries.
+///
+/// Distinct from [`SymbolResolutionOutcome`] because the boundary error
+/// shape needs typed metadata (kind, file, span) per candidate, not just
+/// `NodeId`s. CLI/MCP layers downcast through `anyhow::Error` chains and
+/// convert this to the `sqry::ambiguous_symbol` envelope verbatim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SymbolResolveError {
+    /// No node matched the requested symbol.
+    NotFound {
+        /// The symbol the caller asked for.
+        name: String,
+    },
+    /// Multiple nodes matched and the resolver refuses to choose.
+    Ambiguous(AmbiguousSymbolError),
+}
+
+impl std::fmt::Display for SymbolResolveError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFound { name } => write!(f, "Symbol '{name}' not found in graph"),
+            Self::Ambiguous(err) => write!(f, "{err}"),
+        }
+    }
+}
+
+impl std::error::Error for SymbolResolveError {}
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct CandidateSortKey {
@@ -1774,5 +2012,235 @@ mod tests {
         assert_eq!(witness.steps.len(), 1);
         assert_eq!(cloned.steps.len(), 1);
         assert_eq!(witness, cloned);
+    }
+
+    // ── C_AMBIGUOUS tests (typed AmbiguousSymbolError surface) ─────────────
+
+    /// Bare-name lookup with two same-name nodes returns the typed
+    /// [`super::SymbolResolveError::Ambiguous`] payload with both candidates
+    /// in stable lex order.
+    #[test]
+    fn resolve_global_symbol_ambiguity_aware_returns_ambiguous_for_simple_name_collision() {
+        let mut graph = CodeGraph::new();
+        let file_path = abs_path("src/main.go");
+
+        let property_node = add_node(
+            &mut graph,
+            NodeKind::Property,
+            "NeedTags",
+            Some("main::SelectorSource::NeedTags"),
+            &file_path,
+            Some(Language::Go),
+            4,
+            6,
+        );
+        let variable_node = add_node(
+            &mut graph,
+            NodeKind::Variable,
+            "NeedTags",
+            Some("main::unrelated::NeedTags"),
+            &file_path,
+            Some(Language::Go),
+            25,
+            6,
+        );
+
+        let snapshot = graph.snapshot();
+        let result =
+            snapshot.resolve_global_symbol_ambiguity_aware("NeedTags", super::FileScope::Any);
+
+        let err = result.expect_err("two same-name nodes must produce Ambiguous");
+        let super::SymbolResolveError::Ambiguous(payload) = err else {
+            panic!("expected Ambiguous variant, got {err:?}");
+        };
+        assert_eq!(payload.name, "NeedTags");
+        assert!(!payload.truncated);
+        assert_eq!(payload.candidates.len(), 2);
+
+        // Stable lex sort by qualified_name puts SelectorSource before unrelated.
+        assert_eq!(
+            payload.candidates[0].qualified_name,
+            "main::SelectorSource::NeedTags"
+        );
+        assert_eq!(payload.candidates[0].kind, "property");
+        assert_eq!(payload.candidates[0].start_line, 4);
+        assert_eq!(payload.candidates[0].start_column, 6);
+
+        assert_eq!(
+            payload.candidates[1].qualified_name,
+            "main::unrelated::NeedTags"
+        );
+        assert_eq!(payload.candidates[1].kind, "variable");
+        assert_eq!(payload.candidates[1].start_line, 25);
+
+        assert_ne!(property_node.node_id, variable_node.node_id);
+    }
+
+    /// Fully-qualified-name lookup resolves unambiguously when the
+    /// qualified bucket contains exactly one node.
+    #[test]
+    fn resolve_global_symbol_ambiguity_aware_resolves_qualified_name_uniquely() {
+        let mut graph = CodeGraph::new();
+        let file_path = abs_path("src/main.go");
+
+        let property_node = add_node(
+            &mut graph,
+            NodeKind::Property,
+            "NeedTags",
+            Some("main::SelectorSource::NeedTags"),
+            &file_path,
+            Some(Language::Go),
+            4,
+            6,
+        );
+        let _variable_node = add_node(
+            &mut graph,
+            NodeKind::Variable,
+            "NeedTags",
+            Some("main::unrelated::NeedTags"),
+            &file_path,
+            Some(Language::Go),
+            25,
+            6,
+        );
+
+        let snapshot = graph.snapshot();
+        let result = snapshot.resolve_global_symbol_ambiguity_aware(
+            "main::SelectorSource::NeedTags",
+            super::FileScope::Any,
+        );
+        assert_eq!(result, Ok(property_node.node_id));
+    }
+
+    /// The qualified-name normalization path accepts native dot
+    /// delimiters (Go, Python, Java, …) and resolves to the
+    /// `::`-canonical node.
+    #[test]
+    fn resolve_global_symbol_ambiguity_aware_normalizes_dot_delimiter() {
+        let mut graph = CodeGraph::new();
+        let file_path = abs_path("src/main.go");
+
+        let property_node = add_node(
+            &mut graph,
+            NodeKind::Property,
+            "NeedTags",
+            Some("main::SelectorSource::NeedTags"),
+            &file_path,
+            Some(Language::Go),
+            4,
+            6,
+        );
+        let _variable_node = add_node(
+            &mut graph,
+            NodeKind::Variable,
+            "NeedTags",
+            Some("main::unrelated::NeedTags"),
+            &file_path,
+            Some(Language::Go),
+            25,
+            6,
+        );
+
+        let snapshot = graph.snapshot();
+        let result = snapshot.resolve_global_symbol_ambiguity_aware(
+            "main.SelectorSource.NeedTags",
+            super::FileScope::Any,
+        );
+        assert_eq!(result, Ok(property_node.node_id));
+    }
+
+    /// Missing symbol returns the typed `NotFound` variant carrying the
+    /// caller's input symbol verbatim.
+    #[test]
+    fn resolve_global_symbol_ambiguity_aware_returns_not_found_for_missing_symbol() {
+        let graph = CodeGraph::new();
+        let snapshot = graph.snapshot();
+        let result =
+            snapshot.resolve_global_symbol_ambiguity_aware("does_not_exist", super::FileScope::Any);
+        assert_eq!(
+            result,
+            Err(super::SymbolResolveError::NotFound {
+                name: "does_not_exist".to_string(),
+            })
+        );
+    }
+
+    /// More than [`super::AMBIGUOUS_SYMBOL_CANDIDATE_CAP`] candidates trips
+    /// the truncation flag and caps the candidate list at the constant.
+    #[test]
+    fn resolve_global_symbol_ambiguity_aware_caps_candidates_at_truncation_limit() {
+        let mut graph = CodeGraph::new();
+        let file_path = abs_path("src/main.go");
+        let total = super::AMBIGUOUS_SYMBOL_CANDIDATE_CAP + 5;
+
+        for index in 0..total {
+            // Vary the qualified name so each candidate is distinct under
+            // the lexicographic sort used by the materializer.
+            let qualified = format!("pkg::module_{index:03}::collide");
+            add_node(
+                &mut graph,
+                NodeKind::Function,
+                "collide",
+                Some(qualified.as_str()),
+                &file_path,
+                Some(Language::Go),
+                u32::try_from(index + 1).unwrap_or(1),
+                0,
+            );
+        }
+
+        let snapshot = graph.snapshot();
+        let err = snapshot
+            .resolve_global_symbol_ambiguity_aware("collide", super::FileScope::Any)
+            .expect_err("collisions across many nodes must surface as Ambiguous");
+        let super::SymbolResolveError::Ambiguous(payload) = err else {
+            panic!("expected Ambiguous variant");
+        };
+
+        assert!(payload.truncated, "truncated flag must be set above cap");
+        assert_eq!(
+            payload.candidates.len(),
+            super::AMBIGUOUS_SYMBOL_CANDIDATE_CAP
+        );
+        // Stable lex sort: module_000, module_001, ... module_019.
+        assert_eq!(
+            payload.candidates[0].qualified_name,
+            "pkg::module_000::collide"
+        );
+    }
+
+    /// File-scoped resolver narrows ambiguity to candidates inside the
+    /// requested file.
+    #[test]
+    fn resolve_global_symbol_ambiguity_aware_respects_file_scope() {
+        let mut graph = CodeGraph::new();
+        let scope_file = abs_path("src/in_scope.go");
+        let other_file = abs_path("src/other.go");
+
+        let scoped_property = add_node(
+            &mut graph,
+            NodeKind::Property,
+            "Same",
+            Some("main::Owner::Same"),
+            &scope_file,
+            Some(Language::Go),
+            10,
+            6,
+        );
+        let _outside = add_node(
+            &mut graph,
+            NodeKind::Property,
+            "Same",
+            Some("main::Other::Same"),
+            &other_file,
+            Some(Language::Go),
+            10,
+            6,
+        );
+
+        let snapshot = graph.snapshot();
+        let result = snapshot
+            .resolve_global_symbol_ambiguity_aware("Same", super::FileScope::Path(&scope_file));
+        assert_eq!(result, Ok(scoped_property.node_id));
     }
 }

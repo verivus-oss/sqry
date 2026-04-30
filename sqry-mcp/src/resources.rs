@@ -390,6 +390,19 @@ All fields are optional. Filters are applied before query evaluation.
 | `direct_callees` | Immediate callees (depth=1) | symbol:str! |
 | `trace_path` | Ranked call paths between two symbols | from_symbol:str!, to_symbol:str! |
 
+### `relation_query` evaluation contract
+
+Each `relation_type` resolves against a specific edge kind in the
+unified graph; results are byte-exact, not signature-substring matches:
+
+| `relation_type` | Edge walked | Notes |
+|-----------------|-------------|-------|
+| `Callers` | reverse `Calls` | Inbound call sites of the symbol. |
+| `Callees` | forward `Calls` | Outbound call sites from the symbol. |
+| `Imports` | forward `Imports` | Symbols / modules imported by the named node. |
+| `Exports` | forward `Exports` | Symbols re-exported from the target. |
+| `Returns` | forward `TypeOf{context: Return}` | Return type nodes reached from the named function/method. **Supported (was an empty-set stub in v10.0.x prior to this release; now resolves via `TypeOf{Return}` edges produced by every plugin that materializes return-type information).** |
+
 ## Impact Analysis
 
 | Tool | Purpose | Key Params |

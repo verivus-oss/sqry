@@ -98,6 +98,48 @@ fn json_output_requested() -> bool {
     std::env::args().any(|arg| arg == "--json" || arg == "-j")
 }
 
+/// Compute the effective output format string for `graph *` subcommands
+/// from the per-graph `--format` value and the global `--json` flag.
+///
+/// The global `--json` flag is documented on `Cli` as a top-level
+/// output-format switch (`sqry-cli/src/args/mod.rs`), and clap promotes
+/// it through the subcommand boundary so users can write
+/// `sqry --json graph direct-callers helper`,
+/// `sqry graph direct-callers helper --json`, or
+/// `sqry graph --format json direct-callers helper` interchangeably.
+/// This helper is the single point that reconciles the two surfaces:
+///
+///   * No `--format`, no `--json`            -> `"text"`         (default).
+///   * `--format <fmt>`, no `--json`         -> `"<fmt>"`        (verbatim).
+///   * No `--format`, `--json` set           -> `"json"`         (alias).
+///   * `--format json`, `--json` set         -> `"json"`         (consistent).
+///   * `--format <non-json>`, `--json` set   -> error (loud conflict).
+///
+/// The conflict diagnostic names both `--format` and `--json` so the
+/// caller can see exactly which two flags disagreed; the global
+/// `--json` flag would otherwise silently lose to the explicit
+/// `--format` value, which is precisely the bug
+/// `verivus-oss/sqry#79` / `verivus-oss/sqry#158` reported.
+fn resolve_graph_format(format: Option<&str>, json: bool) -> Result<String> {
+    match (format, json) {
+        (None, false) => Ok("text".to_string()),
+        (None, true) => Ok("json".to_string()),
+        (Some(fmt), false) => Ok(fmt.to_string()),
+        (Some(fmt), true) => {
+            if fmt.eq_ignore_ascii_case("json") {
+                Ok("json".to_string())
+            } else {
+                anyhow::bail!(
+                    "conflicting output format: --format {fmt} cannot be combined with --json. \
+                     The global --json flag is an alias for --format json on graph * subcommands; \
+                     drop --json or change --format to json (or text/dot/mermaid/d2 without --json) \
+                     to resolve the conflict."
+                );
+            }
+        }
+    }
+}
+
 fn handle_run_error(err: &anyhow::Error, json_output: bool) -> i32 {
     if let Some(cli_error) = err.downcast_ref::<error::CliError>() {
         return handle_cli_error(cli_error, json_output);
@@ -290,7 +332,8 @@ fn run() -> Result<()> {
             ..
         }) => {
             let search_path = path.as_deref().unwrap_or(cli.search_path());
-            commands::run_graph(&cli, operation, search_path, format, *verbose)
+            let effective_format = resolve_graph_format(format.as_deref(), cli.json)?;
+            commands::run_graph(&cli, operation, search_path, &effective_format, *verbose)
                 .context("Graph command failed")?;
         }
 

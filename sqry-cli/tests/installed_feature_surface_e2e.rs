@@ -208,21 +208,26 @@ fn installed_cli_feature_surface_matrix() {
         ("duplicates", &["duplicates", "."]),
         ("cycles", &["cycles", "."]),
         ("unused", &["unused", "."]),
-        ("impact", &["impact", "process", "--path", "."]),
+        // C_AMBIGUOUS: `process` is now correctly flagged as ambiguous
+        // (it matches `lib::process` in Rust and `RequestHandler.process`
+        // in Python). The `impact` / `explain` / `similar` / `subgraph`
+        // / `visualize` smoke checks here are about surface availability,
+        // not about which target symbol they resolve to — switch to
+        // `helper`, the only symbol in this fixture that is unique by
+        // simple name and therefore safely resolvable through the new
+        // ambiguity-aware resolver.
+        ("impact", &["impact", "helper", "--path", "."]),
         ("diff", &["diff", "HEAD~1", "HEAD", "--path", "."]),
         (
             "explain",
-            &["explain", "src/lib.rs", "process", "--path", "."],
+            &["explain", "src/lib.rs", "helper", "--path", "."],
         ),
         (
             "similar",
             &["similar", "src/lib.rs", "process", "--path", "."],
         ),
-        ("subgraph", &["subgraph", "process", "--path", "."]),
-        (
-            "visualize",
-            &["visualize", "callees:process", "--path", "."],
-        ),
+        ("subgraph", &["subgraph", "helper", "--path", "."]),
+        ("visualize", &["visualize", "callees:helper", "--path", "."]),
         ("export", &["export", "--format", "json", "."]),
         ("config init", &["config", "init", "--path", "."]),
         ("config show", &["config", "show", "--path", ".", "--json"]),

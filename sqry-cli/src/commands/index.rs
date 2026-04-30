@@ -974,19 +974,28 @@ pub fn run_index_status(
     path: &str,
     _metrics_format: crate::args::MetricsFormat,
 ) -> Result<()> {
-    // Redirect to graph status as legacy index is removed
-    run_graph_status(cli, path)
+    // Redirect to graph status as legacy index is removed.
+    // Programmatic consumers of `run_index_status` only express JSON intent
+    // through `cli.json`, so do not synthesize an extra override here.
+    run_graph_status_with_format(cli, path, false)
 }
 
 /// Run graph status command using unified graph architecture.
 ///
-/// This command reports on the state of the unified graph snapshot
-/// stored in `.sqry/graph/` directory instead of the legacy `.sqry-index`.
+/// This command reports on the state of the unified graph snapshot stored in
+/// the `.sqry/graph/` directory instead of the legacy `.sqry-index`.
+///
+/// `json_from_format` carries the threaded `--format` decision computed by
+/// `resolve_graph_format` at the `Command::Graph` boundary, so that
+/// `sqry graph --format json status` honors the alias contract for the
+/// global `--json` flag and the per-subcommand `--json` flag (verivus-oss/sqry#79
+/// / verivus-oss/sqry#158). The non-`--format` paths continue to flow
+/// through `cli.json`.
 ///
 /// # Errors
 ///
 /// Returns an error if manifest cannot be loaded or output formatting fails.
-pub fn run_graph_status(cli: &Cli, path: &str) -> Result<()> {
+pub fn run_graph_status_with_format(cli: &Cli, path: &str, json_from_format: bool) -> Result<()> {
     let root_path = Path::new(path);
     let storage = GraphStorage::new(root_path);
     let status = build_graph_status(&storage)?;
@@ -994,7 +1003,8 @@ pub fn run_graph_status(cli: &Cli, path: &str) -> Result<()> {
     // Output result (same format as run_index_status for compatibility)
     let mut streams = crate::output::OutputStreams::with_pager(cli.pager_config());
 
-    if cli.json {
+    let json_out = cli.json || json_from_format;
+    if json_out {
         let json =
             serde_json::to_string_pretty(&status).context("Failed to serialize graph status")?;
         streams.write_result(&json)?;

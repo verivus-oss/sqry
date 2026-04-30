@@ -9,9 +9,47 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{Result, anyhow};
-use sqry_core::graph::unified::{
-    FileScope, ResolutionMode, SymbolCandidateOutcome, SymbolQuery, SymbolResolutionOutcome,
-};
+use sqry_core::graph::unified::resolution::{AmbiguousSymbolError, SymbolResolveError};
+use sqry_core::graph::unified::{FileScope, ResolutionMode, SymbolCandidateOutcome, SymbolQuery};
+
+/// Stable error code for the `sqry::ambiguous_symbol` MCP envelope.
+///
+/// Mirrors the CLI [`crate::execution::tools::analysis`] code so a single
+/// boundary contract flows through every wire format.
+pub const MCP_AMBIGUOUS_SYMBOL_ERROR_CODE: &str = "sqry::ambiguous_symbol";
+
+/// Build the canonical `sqry::ambiguous_symbol` JSON envelope from a
+/// shared-resolver [`AmbiguousSymbolError`].
+///
+/// The MCP transport layer in `sqry-mcp/src/server.rs` converts every
+/// `anyhow::Error` returned by an `execute_*` body into
+/// `McpError::internal_error(message, None)`. To deliver a structured
+/// envelope without a parallel transport-layer change, we encode the
+/// envelope as the JSON-RPC error message body itself: the MCP client
+/// receives `{"code": -32603, "message": "<envelope JSON>"}` and parses
+/// the message as JSON to recover `code`, `message`, `candidates[]`,
+/// `truncated`. This keeps the four-field shape stable across CLI and
+/// MCP without leaking transport details into the resolver.
+#[must_use]
+pub fn ambiguous_symbol_envelope_json(err: &AmbiguousSymbolError) -> String {
+    let envelope = serde_json::json!({
+        "error": {
+            "code": MCP_AMBIGUOUS_SYMBOL_ERROR_CODE,
+            "message": format!(
+                "Symbol '{}' is ambiguous; specify the qualified name",
+                err.name
+            ),
+            "candidates": err.candidates,
+            "truncated": err.truncated,
+        }
+    });
+    serde_json::to_string(&envelope).unwrap_or_else(|_| {
+        format!(
+            "{{\"error\":{{\"code\":\"{}\",\"message\":\"Symbol '{}' is ambiguous\"}}}}",
+            MCP_AMBIGUOUS_SYMBOL_ERROR_CODE, err.name
+        )
+    })
+}
 
 use crate::engine::{Engine, canonicalize_in_workspace, engine_for_workspace};
 use crate::tools::{CrossLanguageEdgesArgs, DependencyImpactArgs, SemanticDiffArgs};
@@ -64,13 +102,15 @@ fn resolve_global_symbol_strict(
         None => FileScope::Any,
     };
 
-    match snapshot.resolve_symbol(&SymbolQuery {
-        symbol,
-        file_scope,
-        mode: ResolutionMode::Strict,
-    }) {
-        SymbolResolutionOutcome::Resolved(node_id) => Ok(node_id),
-        SymbolResolutionOutcome::NotFound | SymbolResolutionOutcome::FileNotIndexed => {
+    // Route through the shared ambiguity-aware resolver
+    // (`resolve_global_symbol_ambiguity_aware`) so every CLI / MCP / LSP
+    // surface that resolves a user-supplied symbol name uses the same
+    // implementation. The previous bespoke wrapper (legacy text-only
+    // ambiguity messages) drifted from the CLI surface and did not carry
+    // the typed candidate metadata MCP clients now consume.
+    match snapshot.resolve_global_symbol_ambiguity_aware(symbol, file_scope) {
+        Ok(node_id) => Ok(node_id),
+        Err(SymbolResolveError::NotFound { .. }) => {
             if let Some(path) = file_path {
                 Err(anyhow!(
                     "No definition of '{}' found in file '{}'.",
@@ -81,103 +121,15 @@ fn resolve_global_symbol_strict(
                 Err(anyhow!("Symbol '{symbol}' not found in graph."))
             }
         }
-        SymbolResolutionOutcome::Ambiguous(candidates) => {
-            if let Some(path) = file_path {
-                // file_path matched multiple candidates in the same file
-                build_same_file_ambiguity_error(snapshot, symbol, path, &candidates)
-            } else {
-                // No file_path: include up to 3 sample candidates with file:line
-                build_global_ambiguity_error(snapshot, symbol, &candidates)
-            }
+        Err(SymbolResolveError::Ambiguous(err)) => {
+            // Encode the canonical `sqry::ambiguous_symbol` envelope as
+            // the `anyhow::Error` message. The MCP transport layer in
+            // `sqry-mcp/src/server.rs` lifts this verbatim into the
+            // JSON-RPC `error.message` field; clients parse the message
+            // as JSON to recover the structured envelope.
+            Err(anyhow!("{}", ambiguous_symbol_envelope_json(&err)))
         }
     }
-}
-
-/// Format a disambiguation error when `file_path` was supplied but matched
-/// multiple candidates in the same file.  Lists those candidates and suggests
-/// using a qualified name.
-fn build_same_file_ambiguity_error(
-    snapshot: &sqry_core::graph::unified::concurrent::GraphSnapshot,
-    symbol: &str,
-    file_path: &Path,
-    candidates: &[sqry_core::graph::unified::node::NodeId],
-) -> Result<sqry_core::graph::unified::node::NodeId> {
-    let file_display = file_path.display();
-    let count = candidates.len();
-
-    let mut lines: Vec<String> = Vec::with_capacity(count + 2);
-    lines.push(format!(
-        "Symbol '{symbol}' is ambiguous in file '{file_display}' ({count} candidates).\nTry a more qualified name:"
-    ));
-
-    for &node_id in candidates {
-        if let Some(entry) = snapshot.get_node(node_id) {
-            let qname = entry
-                .qualified_name
-                .and_then(|id| snapshot.strings().resolve(id))
-                .map(|s| s.to_string())
-                .or_else(|| {
-                    snapshot
-                        .strings()
-                        .resolve(entry.name)
-                        .map(|s| s.to_string())
-                })
-                .unwrap_or_else(|| symbol.to_string());
-            let line = entry.start_line;
-            let file_str = snapshot
-                .files()
-                .resolve(entry.file)
-                .map(|p| p.display().to_string())
-                .unwrap_or_else(|| file_display.to_string());
-            lines.push(format!("  - {qname} ({file_str}:{line})"));
-        }
-    }
-
-    lines.push("Use a fully-qualified name to disambiguate.".to_string());
-    Err(anyhow!("{}", lines.join("\n")))
-}
-
-/// Format a disambiguation error when no `file_path` was supplied and the
-/// symbol is ambiguous.  Includes up to 3 sample candidates with `file:line`
-/// so the caller can pick the right one.
-fn build_global_ambiguity_error(
-    snapshot: &sqry_core::graph::unified::concurrent::GraphSnapshot,
-    symbol: &str,
-    candidates: &[sqry_core::graph::unified::node::NodeId],
-) -> Result<sqry_core::graph::unified::node::NodeId> {
-    let total = candidates.len();
-    const MAX_SAMPLES: usize = 3;
-
-    let mut lines: Vec<String> = Vec::with_capacity(MAX_SAMPLES + 3);
-    lines.push(format!(
-        "Symbol '{symbol}' is ambiguous ({total} candidates). Try one of:"
-    ));
-
-    for &node_id in candidates.iter().take(MAX_SAMPLES) {
-        if let Some(entry) = snapshot.get_node(node_id) {
-            let qname = entry
-                .qualified_name
-                .and_then(|id| snapshot.strings().resolve(id))
-                .map(|s| s.to_string())
-                .or_else(|| {
-                    snapshot
-                        .strings()
-                        .resolve(entry.name)
-                        .map(|s| s.to_string())
-                })
-                .unwrap_or_else(|| symbol.to_string());
-            let line = entry.start_line;
-            let file_str = snapshot
-                .files()
-                .resolve(entry.file)
-                .map(|p| p.display().to_string())
-                .unwrap_or_else(|| "<unknown>".to_string());
-            lines.push(format!("  - {qname} ({file_str}:{line})"));
-        }
-    }
-
-    lines.push("Use 'file_path' parameter to disambiguate.".to_string());
-    Err(anyhow!("{}", lines.join("\n")))
 }
 
 fn candidate_bucket_for_symbol(
@@ -2947,62 +2899,81 @@ mod tests {
 
     #[test]
     fn test_resolve_global_symbol_strict_ambiguity_error_includes_samples() {
+        // C_AMBIGUOUS migration: the message body is now the canonical
+        // `sqry::ambiguous_symbol` JSON envelope (`code`, `message`,
+        // `candidates[]`, `truncated`). Legacy "Try one of:" / "  - "
+        // bullet text was retired alongside `build_global_ambiguity_error`.
         let (graph, _file_a, _file_b) = make_ambiguous_two_file_graph();
         let snapshot = graph.snapshot();
 
         let result = resolve_global_symbol_strict(&snapshot, "shared_fn", None);
-        assert!(result.is_err());
-        let err_msg = result.unwrap_err().to_string();
+        let err = result.expect_err("ambiguous symbol must surface as Err");
+        let err_msg = err.to_string();
 
-        // Error should mention the symbol and that it is ambiguous
+        let envelope: serde_json::Value =
+            serde_json::from_str(&err_msg).expect("envelope must be valid JSON");
+        let error_obj = envelope.get("error").expect("envelope wraps `error`");
+        assert_eq!(error_obj["code"], "sqry::ambiguous_symbol");
+        let msg = error_obj["message"].as_str().expect("message is string");
+        assert!(msg.contains("shared_fn"));
+        assert!(msg.contains("ambiguous"));
+        assert_eq!(error_obj["truncated"], serde_json::Value::Bool(false));
+
+        let candidates = error_obj["candidates"]
+            .as_array()
+            .expect("candidates[] required");
+        assert_eq!(candidates.len(), 2);
+
+        // Both candidate file paths and lines are present in the typed
+        // payload (no longer in the freeform message text).
+        let combined: Vec<(String, u64)> = candidates
+            .iter()
+            .map(|c| {
+                (
+                    c["file_path"].as_str().unwrap().to_string(),
+                    c["start_line"].as_u64().unwrap(),
+                )
+            })
+            .collect();
         assert!(
-            err_msg.contains("shared_fn"),
-            "Expected symbol name in error, got: {err_msg}"
+            combined
+                .iter()
+                .any(|(p, l)| p.contains("module_a.rs") && *l == 10),
+            "expected module_a.rs:10 candidate, got {combined:?}"
         );
         assert!(
-            err_msg.contains("ambiguous"),
-            "Expected 'ambiguous' in error, got: {err_msg}"
-        );
-        // Should contain file_path guidance
-        assert!(
-            err_msg.contains("file_path"),
-            "Expected 'file_path' hint in error, got: {err_msg}"
-        );
-        // Must contain bullet-formatted sample candidates with file:line
-        assert!(
-            err_msg.contains("module_a.rs:10"),
-            "Expected 'module_a.rs:10' bullet in error, got: {err_msg}"
-        );
-        assert!(
-            err_msg.contains("module_b.rs:20"),
-            "Expected 'module_b.rs:20' bullet in error, got: {err_msg}"
-        );
-        // Bullet marker must be present
-        assert!(
-            err_msg.contains("  - "),
-            "Expected '  - ' bullet shape in error, got: {err_msg}"
-        );
-        // Guidance phrase from acceptance criteria
-        assert!(
-            err_msg.contains("Try one of:"),
-            "Expected 'Try one of:' in error, got: {err_msg}"
+            combined
+                .iter()
+                .any(|(p, l)| p.contains("module_b.rs") && *l == 20),
+            "expected module_b.rs:20 candidate, got {combined:?}"
         );
     }
 
     #[test]
     fn test_resolve_global_symbol_strict_ambiguity_error_caps_samples_at_three() {
+        // C_AMBIGUOUS migration: candidate cap is now
+        // `AMBIGUOUS_SYMBOL_CANDIDATE_CAP` (20), not 3 — the legacy 3-sample
+        // truncation was bound to the freeform message text. With 4
+        // candidates the typed envelope now lists all 4 candidates and
+        // does NOT mark `truncated`.
         let graph = make_ambiguous_four_file_graph();
         let snapshot = graph.snapshot();
 
         let result = resolve_global_symbol_strict(&snapshot, "shared_fn", None);
-        assert!(result.is_err());
-        let err_msg = result.unwrap_err().to_string();
+        let err = result.expect_err("ambiguous symbol must surface as Err");
+        let err_msg = err.to_string();
 
-        // With 4 candidates only 3 samples should appear as bullet lines
-        let bullet_count = err_msg.matches("  - ").count();
+        let envelope: serde_json::Value =
+            serde_json::from_str(&err_msg).expect("envelope must be valid JSON");
+        let error_obj = envelope.get("error").expect("envelope wraps `error`");
+        let candidates = error_obj["candidates"]
+            .as_array()
+            .expect("candidates[] required");
+        assert_eq!(candidates.len(), 4, "all 4 candidates must surface");
         assert_eq!(
-            bullet_count, 3,
-            "Expected exactly 3 bullet samples (cap), got {bullet_count} in: {err_msg}"
+            error_obj["truncated"],
+            serde_json::Value::Bool(false),
+            "4 < cap of 20, truncated stays false"
         );
     }
 
@@ -3024,44 +2995,44 @@ mod tests {
 
     #[test]
     fn test_resolve_global_symbol_strict_same_file_ambiguity_lists_candidates() {
+        // C_AMBIGUOUS migration: same-file ambiguity now surfaces the
+        // canonical envelope (no longer a bespoke "Try a more qualified
+        // name" string).
         let (graph, _file_id) = make_same_file_two_candidate_graph();
         let snapshot = graph.snapshot();
 
-        // Using a file_path that matches the single indexed file should still be
-        // ambiguous (two candidates in same file) and must produce a helpful error.
         let file_path = Path::new("src/module_x.rs");
         let result = resolve_global_symbol_strict(&snapshot, "shared_fn", Some(file_path));
-        assert!(result.is_err());
-        let err_msg = result.unwrap_err().to_string();
+        let err = result.expect_err("ambiguous symbol must surface as Err");
+        let err_msg = err.to_string();
 
-        // Error must mention ambiguity within the file
+        let envelope: serde_json::Value =
+            serde_json::from_str(&err_msg).expect("envelope must be valid JSON");
+        let error_obj = envelope.get("error").expect("envelope wraps `error`");
+        assert_eq!(error_obj["code"], "sqry::ambiguous_symbol");
+
+        let candidates = error_obj["candidates"]
+            .as_array()
+            .expect("candidates[] required");
+        let qnames: Vec<&str> = candidates
+            .iter()
+            .map(|c| c["qualified_name"].as_str().unwrap())
+            .collect();
         assert!(
-            err_msg.contains("ambiguous"),
-            "Expected 'ambiguous' in error, got: {err_msg}"
+            qnames.iter().any(|q| q.ends_with("ImplA::shared_fn")),
+            "expected qualified name ending in ImplA::shared_fn in {qnames:?}"
         );
         assert!(
-            err_msg.contains("module_x.rs"),
-            "Expected file name in error, got: {err_msg}"
+            qnames.iter().any(|q| q.ends_with("ImplB::shared_fn")),
+            "expected qualified name ending in ImplB::shared_fn in {qnames:?}"
         );
-        // Both qualified-name candidates must be listed
-        assert!(
-            err_msg.contains("ImplA::shared_fn"),
-            "Expected ImplA candidate in error, got: {err_msg}"
-        );
-        assert!(
-            err_msg.contains("ImplB::shared_fn"),
-            "Expected ImplB candidate in error, got: {err_msg}"
-        );
-        // Qualified-name guidance must be present
-        assert!(
-            err_msg.contains("qualified name") || err_msg.contains("qualified-name"),
-            "Expected qualified-name guidance in error, got: {err_msg}"
-        );
-        // Bullet shape must be present
-        assert!(
-            err_msg.contains("  - "),
-            "Expected '  - ' bullet shape in error, got: {err_msg}"
-        );
+        // The file_path is reflected in every candidate's `file_path`.
+        for cand in candidates {
+            assert!(
+                cand["file_path"].as_str().unwrap().contains("module_x.rs"),
+                "every candidate must include the matched file path"
+            );
+        }
     }
 
     // ========================================================================

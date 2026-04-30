@@ -83,7 +83,7 @@ use globset::GlobBuilder;
 
 use sqry_core::graph::unified::bind::scope::arena::ScopeKind;
 use sqry_core::graph::unified::concurrent::GraphSnapshot;
-use sqry_core::graph::unified::edge::kind::EdgeKind;
+use sqry_core::graph::unified::edge::kind::{EdgeKind, TypeOfContext};
 use sqry_core::graph::unified::edge::store::StoreEdgeRef;
 use sqry_core::graph::unified::node::id::NodeId;
 use sqry_core::graph::unified::node::kind::NodeKind;
@@ -343,7 +343,7 @@ impl<'db> PlanExecutor<'db> {
                 for &id in ids {
                     if let Some(entry) = self.snapshot.nodes().get(id) {
                         Self::record_entry_deps(entry);
-                        if self.scan_match(entry, visibility, compiled_name.as_ref()) {
+                        if self.scan_match(id, entry, visibility, compiled_name.as_ref()) {
                             out.push(id);
                         }
                     }
@@ -358,7 +358,7 @@ impl<'db> PlanExecutor<'db> {
                         continue;
                     }
                     Self::record_entry_deps(entry);
-                    if self.scan_match(entry, visibility, compiled_name.as_ref()) {
+                    if self.scan_match(id, entry, visibility, compiled_name.as_ref()) {
                         out.push(id);
                     }
                 }
@@ -368,8 +368,28 @@ impl<'db> PlanExecutor<'db> {
         Arc::new(out)
     }
 
+    /// Apply scan-time predicates to a single node.
+    ///
+    /// **B1_ALIGN contract.** When `compiled_name` is present, the name
+    /// match is checked against **both** `entry.name` and
+    /// `entry.qualified_name` (mirroring
+    /// [`sqry_core::graph::unified::concurrent::graph::GraphSnapshot::find_by_exact_name`]),
+    /// and synthetic placeholder nodes (Go-plugin
+    /// `<field:operand.field>` shadows, `<ident>@<offset>`
+    /// per-binding-site Variables, `NodeMetadata::Synthetic`-flagged
+    /// nodes) are excluded via
+    /// [`sqry_core::graph::unified::concurrent::graph::GraphSnapshot::is_node_synthetic`].
+    /// This keeps the planner's `name:` predicate set-equal with the
+    /// CLI `--exact` shorthand against any fixture.
+    ///
+    /// When no name pattern is present the synthetic filter is **not**
+    /// applied — `kind:function` and similar context-free scans
+    /// preserve their existing behaviour (synthetics remain visible to
+    /// kind-only scans because the suppression bit is bound to the
+    /// name-resolution surface, not the kind index).
     fn scan_match(
         &self,
+        node_id: NodeId,
         entry: &NodeEntry,
         visibility: Option<Visibility>,
         compiled_name: Option<&CompiledStringPattern>,
@@ -380,10 +400,31 @@ impl<'db> PlanExecutor<'db> {
             return false;
         }
         if let Some(pattern) = compiled_name {
-            let Some(name) = self.snapshot.strings().resolve(entry.name) else {
+            // Check `entry.name` first (most common hit), then fall
+            // back to `entry.qualified_name` so a step like
+            // `name:main.SelectorSource.NeedTags` matches Property
+            // nodes whose simple name is the bare field but whose
+            // qualified name carries the package + receiver prefix.
+            let mut matched = false;
+            if let Some(name) = self.snapshot.strings().resolve(entry.name)
+                && pattern.matches(name.as_ref())
+            {
+                matched = true;
+            }
+            if !matched
+                && let Some(sid) = entry.qualified_name
+                && let Some(qname) = self.snapshot.strings().resolve(sid)
+                && pattern.matches(qname.as_ref())
+            {
+                matched = true;
+            }
+            if !matched {
                 return false;
-            };
-            if !pattern.matches(name.as_ref()) {
+            }
+            // B1_ALIGN: synthetic placeholders are invisible to the
+            // `name:` surface so the planner predicate matches the CLI
+            // `--exact` shorthand byte-for-byte.
+            if self.snapshot.is_node_synthetic(node_id) {
                 return false;
             }
         }
@@ -536,8 +577,9 @@ impl<'db> PlanExecutor<'db> {
             CompiledPredicate::InFile(glob) => entry_in_file(&self.snapshot, entry, glob),
             CompiledPredicate::InScope(kind) => entry_in_scope(&self.snapshot, node_id, *kind),
             CompiledPredicate::MatchesName(pattern) => {
-                entry_name_matches(&self.snapshot, entry, pattern)
+                entry_name_matches(&self.snapshot, node_id, entry, pattern)
             }
+            CompiledPredicate::Returns(type_name) => self.node_returns_type(node_id, type_name),
 
             CompiledPredicate::And(list) => list
                 .iter()
@@ -652,6 +694,47 @@ impl<'db> PlanExecutor<'db> {
         false
     }
 
+    /// Evaluates `returns:<TypeName>` for a single candidate node.
+    ///
+    /// Walks every outgoing edge from `node_id` and checks for the first
+    /// `EdgeKind::TypeOf { context: Some(TypeOfContext::Return), .. }` whose
+    /// target node's interned primary name equals `type_name` byte-exactly
+    /// (case-sensitive). Returns `false` if the candidate has no `Return`-
+    /// context type edges, or if every such edge targets a different name.
+    ///
+    /// This routes through `snapshot.edges().edges_from(...)` directly rather
+    /// than the relation-query DerivedQuery cache: `Predicate::Returns`
+    /// lands as a fresh predicate without sqry-db backing in this unit
+    /// (`B2_PLANNER`); a future unit can add a `ReturnsQuery` derived query
+    /// for cache reuse, but the dispatch surface stays edge-based here so
+    /// that the contract — `TypeOf { Return }` edges, not `NodeEntry.signature`
+    /// text — is enforced unconditionally.
+    fn node_returns_type(&self, node_id: NodeId, type_name: &str) -> bool {
+        for edge in self.snapshot.edges().edges_from(node_id) {
+            if !matches!(
+                edge.kind,
+                EdgeKind::TypeOf {
+                    context: Some(TypeOfContext::Return),
+                    ..
+                }
+            ) {
+                continue;
+            }
+            let Some(target_entry) = self.snapshot.nodes().get(edge.target) else {
+                continue;
+            };
+            // Record file dependency for the resolved target so the
+            // dependency recorder mirrors the data we read.
+            record_file_dep(target_entry.file);
+            if let Some(name) = self.snapshot.strings().resolve(target_entry.name)
+                && name.as_ref() == type_name
+            {
+                return true;
+            }
+        }
+        false
+    }
+
     /// Records a file-level dependency for the given node entry.
     ///
     /// Associated function (no `self`) because the body only consults the
@@ -689,6 +772,11 @@ enum CompiledPredicate {
     InFile(CompiledPathPattern),
     InScope(ScopeKind),
     MatchesName(CompiledStringPattern),
+    /// `returns:<TypeName>`. Carries the byte-exact type-name needle that
+    /// the executor compares against the resolved name string of any node
+    /// targeted by a forward `TypeOf { context: Some(Return), .. }` edge.
+    /// See [`Predicate::Returns`] for full semantics.
+    Returns(String),
     And(Vec<CompiledPredicate>),
     Or(Vec<CompiledPredicate>),
     Not(Box<CompiledPredicate>),
@@ -716,6 +804,7 @@ impl CompiledPredicate {
                 CompiledStringPattern::compile(pattern)
                     .unwrap_or(CompiledStringPattern::REJECT_ALL),
             ),
+            Predicate::Returns(type_name) => CompiledPredicate::Returns(type_name.clone()),
             Predicate::And(list) => {
                 CompiledPredicate::And(list.iter().map(CompiledPredicate::compile).collect())
             }
@@ -894,8 +983,19 @@ fn entry_in_scope(snapshot: &GraphSnapshot, node_id: NodeId, kind: ScopeKind) ->
     false
 }
 
+/// Filter-time `name:` predicate.
+///
+/// **B1_ALIGN contract.** Mirrors
+/// [`sqry_core::graph::unified::concurrent::graph::GraphSnapshot::find_by_exact_name`]
+/// (and the `--exact` CLI shorthand): matches `entry.name` or
+/// `entry.qualified_name`, then suppresses synthetic placeholder
+/// nodes via
+/// [`sqry_core::graph::unified::concurrent::graph::GraphSnapshot::is_node_synthetic`]
+/// so the planner's `name:` predicate returns the same set as
+/// `--exact` against any fixture.
 fn entry_name_matches(
     snapshot: &GraphSnapshot,
+    node_id: NodeId,
     entry: &NodeEntry,
     pattern: &CompiledStringPattern,
 ) -> bool {
@@ -903,13 +1003,19 @@ fn entry_name_matches(
         .strings()
         .resolve(entry.name)
         .is_some_and(|s| pattern.matches(s.as_ref()));
-    if name_matches {
-        return true;
+    let qname_matches = || {
+        entry
+            .qualified_name
+            .and_then(|sid| snapshot.strings().resolve(sid))
+            .is_some_and(|s| pattern.matches(s.as_ref()))
+    };
+    if !(name_matches || qname_matches()) {
+        return false;
     }
-    entry
-        .qualified_name
-        .and_then(|sid| snapshot.strings().resolve(sid))
-        .is_some_and(|s| pattern.matches(s.as_ref()))
+    // B1_ALIGN: synthetic placeholder nodes are invisible to the
+    // `name:` surface (locked by C_SUPPRESS in
+    // `sqry-core/src/graph/unified/concurrent/graph.rs`).
+    !snapshot.is_node_synthetic(node_id)
 }
 
 // ============================================================================

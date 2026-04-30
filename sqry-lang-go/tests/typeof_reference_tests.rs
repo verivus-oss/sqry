@@ -1743,24 +1743,35 @@ type Config struct {
     let staging = build_test_graph(source, "test.go");
     let field_edges = collect_typeof_edges_by_context(&staging, TypeOfContext::Field);
 
-    // Should have TypeOf edges for all 3 fields
+    // Post-`C_EDGE_MIGRATE`: each TypeOf{Field} edge is now sourced from
+    // the per-field `Property` node (qualified name
+    // `main.Config.<FieldName>`), not from the enclosing struct node.
+    // Aggregate "all fields of Config" queries still work via the
+    // `Defines` / `Contains` edges from struct → Property.
     assert!(
         field_edges
             .iter()
-            .any(|(s, t)| s == "main.Config" && t == "int"),
-        "Expected Config.Port → int TypeOf edge"
+            .any(|(s, t)| s == "main.Config.Port" && t == "int"),
+        "Expected main.Config.Port → int TypeOf edge"
     );
     assert!(
         field_edges
             .iter()
-            .any(|(s, t)| s == "main.Config" && t == "string"),
-        "Expected Config.Host → string TypeOf edge"
+            .any(|(s, t)| s == "main.Config.Host" && t == "string"),
+        "Expected main.Config.Host → string TypeOf edge"
     );
     assert!(
         field_edges
             .iter()
-            .any(|(s, t)| s == "main.Config" && t == "bool"),
-        "Expected Config.Debug → bool TypeOf edge"
+            .any(|(s, t)| s == "main.Config.Debug" && t == "bool"),
+        "Expected main.Config.Debug → bool TypeOf edge"
+    );
+
+    // No orphaned struct-sourced TypeOf{Field} edges remain.
+    assert!(
+        !field_edges.iter().any(|(s, _)| s == "main.Config"),
+        "Pre-migration struct-sourced TypeOf{{Field}} edges must not be \
+         emitted on Property-emitting languages, got: {field_edges:?}"
     );
 
     assert_eq!(
@@ -1786,21 +1797,24 @@ type Service struct {
     let field_edges = collect_typeof_edges_by_context(&staging, TypeOfContext::Field);
     let ref_edges = collect_edges_by_kind(&staging, |kind| matches!(kind, EdgeKind::References));
 
-    // TypeOf edges (pointer types)
+    // Post-`C_EDGE_MIGRATE`: TypeOf{Field} sources are the per-field
+    // Property nodes; `Reference` edges still source from the struct
+    // (those model "this struct mentions this nested type", a struct-level
+    // fact independent of which field carries it).
     assert!(
         field_edges
             .iter()
-            .any(|(s, t)| s == "main.Service" && t == "*Database"),
-        "Expected Service.DB → *Database TypeOf edge"
+            .any(|(s, t)| s == "main.Service.DB" && t == "*Database"),
+        "Expected main.Service.DB → *Database TypeOf edge"
     );
     assert!(
         field_edges
             .iter()
-            .any(|(s, t)| s == "main.Service" && t == "*Cache"),
-        "Expected Service.Cache → *Cache TypeOf edge"
+            .any(|(s, t)| s == "main.Service.Cache" && t == "*Cache"),
+        "Expected main.Service.Cache → *Cache TypeOf edge"
     );
 
-    // Reference edges (pointer targets)
+    // Reference edges (pointer targets) still source from the struct.
     assert!(
         ref_edges
             .iter()
@@ -1833,30 +1847,31 @@ type Service struct {
     let field_edges = collect_typeof_edges_by_context(&staging, TypeOfContext::Field);
     let ref_edges = collect_edges_by_kind(&staging, |kind| matches!(kind, EdgeKind::References));
 
-    // TypeOf edges (exact type strings)
+    // TypeOf edges (exact type strings) - sources migrated to per-field
+    // Property qualified names by `C_EDGE_MIGRATE`.
     assert!(
         field_edges
             .iter()
-            .any(|(s, t)| s == "main.Service" && t == "map[string]*User"),
-        "Expected Service.Users → map[string]*User TypeOf edge"
+            .any(|(s, t)| s == "main.Service.Users" && t == "map[string]*User"),
+        "Expected main.Service.Users → map[string]*User TypeOf edge"
     );
     assert!(
         field_edges
             .iter()
-            .any(|(s, t)| s == "main.Service" && t == "[]HandlerFunc"),
-        "Expected Service.Handlers → []HandlerFunc TypeOf edge"
+            .any(|(s, t)| s == "main.Service.Handlers" && t == "[]HandlerFunc"),
+        "Expected main.Service.Handlers → []HandlerFunc TypeOf edge"
     );
     assert!(
         field_edges
             .iter()
-            .any(|(s, t)| s == "main.Service" && t == "chan Result"),
-        "Expected Service.Results → chan Result TypeOf edge"
+            .any(|(s, t)| s == "main.Service.Results" && t == "chan Result"),
+        "Expected main.Service.Results → chan Result TypeOf edge"
     );
     assert!(
         field_edges
             .iter()
-            .any(|(s, t)| s == "main.Service" && t == "func(Request) Response"),
-        "Expected Service.Callback → func(Request) Response TypeOf edge"
+            .any(|(s, t)| s == "main.Service.Callback" && t == "func(Request) Response"),
+        "Expected main.Service.Callback → func(Request) Response TypeOf edge"
     );
 
     // Reference edges (nested types)
@@ -1892,16 +1907,23 @@ type Point struct {
     let staging = build_test_graph(source, "test.go");
     let field_edges = collect_typeof_edges_by_context(&staging, TypeOfContext::Field);
 
-    // Should create 3 separate TypeOf edges for X, Y, Z
-    let float_fields: Vec<_> = field_edges
-        .iter()
-        .filter(|(s, t)| s == "main.Point" && t == "float64")
-        .collect();
+    // Post-`C_EDGE_MIGRATE`: each name in `X, Y, Z float64` becomes a
+    // distinct Property node with its own TypeOf{Field} edge.
+    for field_name in ["X", "Y", "Z"] {
+        let qualified = format!("main.Point.{field_name}");
+        assert!(
+            field_edges
+                .iter()
+                .any(|(s, t)| s == &qualified && t == "float64"),
+            "Expected {qualified} → float64 TypeOf edge, got: {field_edges:?}"
+        );
+    }
 
-    assert_eq!(
-        float_fields.len(),
-        3,
-        "Expected 3 field TypeOf edges for X, Y, Z"
+    // No legacy struct-sourced shadow.
+    assert!(
+        !field_edges.iter().any(|(s, _)| s == "main.Point"),
+        "Pre-migration struct-sourced TypeOf{{Field}} edges must not be \
+         emitted, got: {field_edges:?}"
     );
 }
 
@@ -1934,27 +1956,32 @@ type Server struct {
         "Expected Inherits edges for embedded types"
     );
 
-    // Regular field should have TypeOf edge
+    // Regular field should have TypeOf edge sourced from the per-field
+    // Property node (`C_EDGE_MIGRATE`).
     assert!(
         field_edges
             .iter()
-            .any(|(s, t)| s == "main.Server" && t == "int"),
-        "Expected Server.Port → int TypeOf edge"
+            .any(|(s, t)| s == "main.Server.Port" && t == "int"),
+        "Expected main.Server.Port → int TypeOf edge"
     );
 
-    // Embedded fields should NOT create Field-context TypeOf edges
-    // (they're tracked via Inherits edges instead)
+    // Embedded fields should NOT create Field-context TypeOf edges - they
+    // are tracked via Inherits edges (the Property node itself is emitted
+    // by `process_struct_embedding` for promotion-name reachability, but
+    // no TypeOf{Field} edge is registered for it).
+    for unwanted_target in ["Base", "*Logger"] {
+        assert!(
+            !field_edges.iter().any(|(_, t)| t == unwanted_target),
+            "Embedded type {unwanted_target} should not have a Field TypeOf \
+             edge target, got: {field_edges:?}"
+        );
+    }
+
+    // And no orphaned struct-sourced TypeOf{Field} edges remain.
     assert!(
-        !field_edges
-            .iter()
-            .any(|(s, t)| s == "main.Server" && t == "Base"),
-        "Embedded Base should not have Field TypeOf edge"
-    );
-    assert!(
-        !field_edges
-            .iter()
-            .any(|(s, t)| s == "main.Server" && t == "*Logger"),
-        "Embedded *Logger should not have Field TypeOf edge"
+        !field_edges.iter().any(|(s, _)| s == "main.Server"),
+        "Pre-migration struct-sourced TypeOf{{Field}} edges must not be \
+         emitted, got: {field_edges:?}"
     );
 }
 
@@ -2126,18 +2153,20 @@ type config struct {
     let staging = build_test_graph(source, "test.go");
     let field_edges = collect_typeof_edges_by_context(&staging, TypeOfContext::Field);
 
-    // Both exported and unexported fields should have TypeOf edges
+    // Both exported and unexported fields produce TypeOf edges sourced
+    // from the per-field Property node (`C_EDGE_MIGRATE`). Visibility is
+    // a Property attribute - the struct-sourced shadow is gone.
     assert!(
         field_edges
             .iter()
-            .any(|(s, t)| s == "main.config" && t == "int"),
-        "Expected config.port → int TypeOf edge (unexported field)"
+            .any(|(s, t)| s == "main.config.port" && t == "int"),
+        "Expected main.config.port → int TypeOf edge (unexported field)"
     );
     assert!(
         field_edges
             .iter()
-            .any(|(s, t)| s == "main.config" && t == "string"),
-        "Expected config.Host → string TypeOf edge (exported field in unexported struct)"
+            .any(|(s, t)| s == "main.config.Host" && t == "string"),
+        "Expected main.config.Host → string TypeOf edge (exported field in unexported struct)"
     );
 }
 
@@ -2173,36 +2202,44 @@ type AllTypes struct {
         field_edges.len()
     );
 
-    // Spot check a few
+    // Spot check a few - sources are the per-field Property qualified
+    // names after `C_EDGE_MIGRATE`.
     assert!(
         field_edges
             .iter()
-            .any(|(s, t)| s == "main.AllTypes" && t == "int"),
-        "Expected BasicInt → int"
+            .any(|(s, t)| s == "main.AllTypes.BasicInt" && t == "int"),
+        "Expected main.AllTypes.BasicInt → int, got: {field_edges:?}"
     );
     assert!(
         field_edges
             .iter()
-            .any(|(s, t)| s == "main.AllTypes" && t == "context.Context"),
-        "Expected QualifiedType → context.Context"
+            .any(|(s, t)| s == "main.AllTypes.QualifiedType" && t == "context.Context"),
+        "Expected main.AllTypes.QualifiedType → context.Context"
     );
     assert!(
         field_edges
             .iter()
-            .any(|(s, t)| s == "main.AllTypes" && t == "*User"),
-        "Expected PointerType → *User"
+            .any(|(s, t)| s == "main.AllTypes.PointerType" && t == "*User"),
+        "Expected main.AllTypes.PointerType → *User"
     );
     assert!(
         field_edges
             .iter()
-            .any(|(s, t)| s == "main.AllTypes" && t == "[]string"),
-        "Expected SliceType → []string"
+            .any(|(s, t)| s == "main.AllTypes.SliceType" && t == "[]string"),
+        "Expected main.AllTypes.SliceType → []string"
     );
     assert!(
         field_edges
             .iter()
-            .any(|(s, t)| s == "main.AllTypes" && t == "map[string]int"),
-        "Expected MapType → map[string]int"
+            .any(|(s, t)| s == "main.AllTypes.MapType" && t == "map[string]int"),
+        "Expected main.AllTypes.MapType → map[string]int"
+    );
+
+    // No orphaned struct-sourced TypeOf{Field} edges remain.
+    assert!(
+        !field_edges.iter().any(|(s, _)| s == "main.AllTypes"),
+        "Pre-migration struct-sourced TypeOf{{Field}} edges must not be \
+         emitted on Property-emitting languages, got: {field_edges:?}"
     );
 }
 
@@ -2224,20 +2261,34 @@ type Child struct {
     let staging = build_test_graph(source, "test.go");
     let field_edges = collect_typeof_edges_by_context(&staging, TypeOfContext::Field);
 
-    // Should only have TypeOf edge for Name field, not for embedded Base
-    let child_fields: Vec<_> = field_edges
+    // Post-`C_EDGE_MIGRATE`: TypeOf{Field} edges are sourced from the
+    // per-field Property node. Filter on the `main.Child.*` namespace
+    // (Name field; the embedded Base field still gets a Property node
+    // for promotion-name reachability, but no TypeOf{Field} edge - that
+    // is `process_struct_embedding`'s contract).
+    let child_field_edges: Vec<_> = field_edges
         .iter()
-        .filter(|(s, _)| s == "main.Child")
+        .filter(|(s, _)| s.starts_with("main.Child."))
         .collect();
 
     assert_eq!(
-        child_fields.len(),
+        child_field_edges.len(),
         1,
-        "Expected only 1 field TypeOf edge (Name), not embedded Base"
+        "Expected only 1 Field TypeOf edge under main.Child.* (Name), not \
+         the embedded Base, got: {child_field_edges:?}"
     );
     assert!(
-        child_fields.iter().any(|(_, t)| t == "string"),
-        "Expected the one field to be string (Name)"
+        child_field_edges
+            .iter()
+            .any(|(s, t)| *s == "main.Child.Name" && t == "string"),
+        "Expected main.Child.Name → string, got: {child_field_edges:?}"
+    );
+
+    // No orphaned struct-sourced shadow.
+    assert!(
+        !field_edges.iter().any(|(s, _)| s == "main.Child"),
+        "Pre-migration struct-sourced TypeOf{{Field}} edges must not be \
+         emitted, got: {field_edges:?}"
     );
 }
 
@@ -2257,15 +2308,17 @@ func Process(port int) {}
     let field_edges = collect_typeof_edges_by_context(&staging, TypeOfContext::Field);
     let param_edges = collect_typeof_edges_by_context(&staging, TypeOfContext::Parameter);
 
-    // Field edge
+    // Field edge - sourced from the per-field Property node
+    // (`C_EDGE_MIGRATE`).
     assert!(
         field_edges
             .iter()
-            .any(|(s, t)| s == "main.Config" && t == "int"),
-        "Expected Config.Port → int field TypeOf edge"
+            .any(|(s, t)| s == "main.Config.Port" && t == "int"),
+        "Expected main.Config.Port → int field TypeOf edge, got: {field_edges:?}"
     );
 
-    // Parameter edge
+    // Parameter edge - sources unchanged (parameters are still attributed
+    // to the enclosing function node).
     assert!(
         param_edges
             .iter()
@@ -2279,7 +2332,9 @@ func Process(port int) {}
         "Process parameter should not appear in field edges"
     );
     assert!(
-        !param_edges.iter().any(|(s, _)| s == "main.Config"),
+        !param_edges
+            .iter()
+            .any(|(s, _)| s == "main.Config" || s == "main.Config.Port"),
         "Config field should not appear in parameter edges"
     );
 }
@@ -2357,24 +2412,25 @@ func NewService() *Service {
     let return_edges = collect_typeof_edges_by_context(&staging, TypeOfContext::Return);
     let var_edges = collect_typeof_edges_by_context(&staging, TypeOfContext::Variable);
 
-    // Struct fields
+    // Struct fields - sources are per-field Property qualified names
+    // after `C_EDGE_MIGRATE`.
     assert!(
         field_edges
             .iter()
-            .any(|(s, t)| s == "main.User" && t == "int"),
-        "User.ID field"
+            .any(|(s, t)| s == "main.User.ID" && t == "int"),
+        "User.ID field, got: {field_edges:?}"
     );
     assert!(
         field_edges
             .iter()
-            .any(|(s, t)| s == "main.User" && t == "string"),
-        "User.Name field"
+            .any(|(s, t)| s == "main.User.Name" && t == "string"),
+        "User.Name field, got: {field_edges:?}"
     );
     assert!(
         field_edges
             .iter()
-            .any(|(s, t)| s == "main.Service" && t == "map[string]*User"),
-        "Service.Users field"
+            .any(|(s, t)| s == "main.Service.Users" && t == "map[string]*User"),
+        "Service.Users field, got: {field_edges:?}"
     );
 
     // Interface method parameters
@@ -2455,12 +2511,13 @@ type Handler struct {
     let field_edges = collect_typeof_edges_by_context(&staging, TypeOfContext::Field);
     let ref_edges = collect_edges_by_kind(&staging, |kind| matches!(kind, EdgeKind::References));
 
-    // Should have TypeOf edge for the interface field
+    // Should have TypeOf edge for the interface field, sourced from the
+    // per-field Property node after `C_EDGE_MIGRATE`.
     assert!(
         field_edges
             .iter()
-            .any(|(s, t)| s == "main.Handler" && t.starts_with("interface")),
-        "Expected Handler.Callback → interface... TypeOf edge"
+            .any(|(s, t)| s == "main.Handler.Callback" && t.starts_with("interface")),
+        "Expected main.Handler.Callback → interface... TypeOf edge, got: {field_edges:?}"
     );
 
     // Should have Reference edges to types used in anonymous interface methods
@@ -2612,18 +2669,26 @@ type Point struct {
     let staging = build_test_graph(source, "test.go");
     let field_edges = collect_typeof_edges_by_context(&staging, TypeOfContext::Field);
 
-    // All three fields should have TypeOf edges with Field context
-    let point_fields: Vec<_> = field_edges
+    // Post-`C_EDGE_MIGRATE`: each field name produces a distinct Property
+    // node and a distinct TypeOf{Field} edge. Source is the Property's
+    // qualified name (`main.Point.X` etc), target is the field type
+    // (`float64`).
+    for field_name in ["X", "Y", "Z"] {
+        let qualified = format!("main.Point.{field_name}");
+        assert!(
+            field_edges
+                .iter()
+                .any(|(s, t)| s == &qualified && t == "float64"),
+            "Expected {qualified} → float64, got: {field_edges:?}"
+        );
+    }
+
+    let point_field_count = field_edges
         .iter()
-        .filter(|(s, t)| s == "main.Point" && t == "float64")
-        .collect();
-
+        .filter(|(s, t)| s.starts_with("main.Point.") && t == "float64")
+        .count();
     assert_eq!(
-        point_fields.len(),
-        3,
-        "Expected 3 field TypeOf edges for X, Y, Z"
+        point_field_count, 3,
+        "Expected 3 Property-sourced TypeOf{{Field}} edges under main.Point.*"
     );
-
-    // Note: We can't easily verify index/name metadata without extending test helpers,
-    // but the fact that we get 3 separate edges (not just 1) proves that indexing works
 }

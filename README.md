@@ -177,6 +177,16 @@ The same plugin-selection flags also apply to `sqry update` and `sqry watch`.
 `--enable-language` and `--disable-language` remain accepted compatibility
 aliases for `--enable-plugin` and `--disable-plugin`.
 
+#### Upgrade-rebuild requirement
+
+When sqry's in-format graph semantics change between releases (for example
+the v10.0.x Cluster C field-edge source migration that re-sources Go
+struct-field `TypeOf{Field}` edges from the new `NodeKind::Property`
+nodes), an existing `.sqry/graph/snapshot.sqry` keeps loading but returns
+the legacy graph shape until rebuilt. Run `sqry index --force` once after
+upgrading across such releases. The release notes for any version that
+needs the rebuild call this out explicitly.
+
 ### Macro Expansion (Rust)
 
 ```bash
@@ -227,6 +237,82 @@ sqry --fuzzy "patern" .
 sqry hier "kind:function visibility:public"
 ```
 
+### Query Language Reference
+
+`sqry query` (and `sqry plan-query`) accepts a whitespace-separated chain
+of *steps*. Each step narrows the result set; the chain must start with a
+context-free step (`kind:` or `name:`) and may continue with any number of
+filter / relation / traversal steps.
+
+| Step | Example | Meaning |
+|------|---------|---------|
+| `kind:<NodeKind>` | `kind:function` | Restrict to nodes of the given AST kind (`function`, `method`, `class`, `struct`, `enum`, `interface`, `trait`, `module`, `variable`, `constant`, `type`, `property`, …). |
+| `name:<value>` | `name:NeedTags` | **Literal value** is an exact byte-for-byte match against the interned simple **or** qualified name of the node (case-sensitive). **Glob meta** in the value (`*`, `?`, `[`) promotes the pattern to a glob match (e.g. `name:parse_*` matches `parse_expr`, `parse_stmt`). Either way, synthetic placeholder nodes are excluded and there is **no** implicit substring or regex form. See "`name:` contract" below. |
+| `visibility:<v>` | `visibility:public` | `public` or `private`. |
+| `has:caller` / `has:callee` | `kind:function has:caller` | Existence checks over the call graph. |
+| `unused` | `kind:function unused` | Nodes with no inbound use edges. |
+| `in:<glob>` | `in:src/api/**/*.rs` | Filter by file-path glob. |
+| `scope:<kind>` | `scope:module` | Restrict to a binding-plane scope kind (`module`, `function`, `class`, `namespace`, `trait`, `impl`). |
+| `returns:<TypeName>` | `returns:Result` | Functions whose `TypeOf{Return}` edge targets a node whose interned name **equals** `TypeName` (exact, no glob). |
+| `callers:<value>` / `callees:<value>` | `callees:visit_*` | Relation predicates; value can be a bare word, a glob, a quoted string, or a sub-query in parentheses. |
+| `imports:<value>` / `exports:<value>` | `imports:serde` | Module-graph relation predicates. |
+| `implements:<value>` (alias `impl:<value>`) | `kind:class implements:Visitor` | OO interface/trait conformance. |
+| `references:<value>` / `references ~= /regex/` | `references ~= /handle_.*/i` | Literal value or regex form (with `i`/`m`/`s` flags). |
+| `traverse:<dir>(<edge>,<depth>)` | `kind:function traverse:forward(calls,3)` | Walk `<edge>` for up to `<depth>` hops in `forward` / `reverse` / `both` direction. |
+
+**Name and qualified-name format.** Node names follow per-language
+conventions:
+
+- **Simple name** (`entry.name`) — typically the local identifier
+  (e.g. `NeedTags`, `parseConfig`).
+- **Qualified name** (`entry.qualified_name`) — language-canonical
+  fully-qualified form. For Go: `<package>.<TypeName>.<FieldName>`
+  (e.g. `main.SelectorSource.NeedTags`); for Rust:
+  `<crate>::<module>::<symbol>`; for Java/Kotlin/Scala:
+  `<package>.<Class>.<member>`. `name:<X>` matches both fields in
+  parallel — it returns a node whose simple name **or** qualified name
+  equals `X`.
+
+**`name:` contract (B1_ALIGN, locked).** For **literal** values (no
+`*`, `?`, or `[` in the pattern), the planner's `name:<literal>` step
+and the top-level CLI shorthand `sqry --exact <literal>` are
+contract-bound to return identical sets against any fixture:
+
+```bash
+sqry query 'name:NeedTags' .   # planner exact-name lookup (literal)
+sqry --exact NeedTags .        # CLI exact-name shorthand
+```
+
+Both:
+
+1. Look up the literal in the snapshot string interner.
+2. Walk the by-name and by-qualified-name indices for that interned id.
+3. Drop synthetic placeholder nodes (Go-plugin `<field:operand.field>`
+   shadows; `<ident>@<offset>` per-binding-site Variables; any future
+   nodes flagged `NodeMetadata::Synthetic`).
+4. Return the deduplicated `NodeId` set.
+
+For values containing glob meta (`*`, `?`, `[`), the planner's `name:`
+step promotes to a glob match (still synthetic-filtered); the
+top-level CLI `--exact` does **not** accept glob meta and treats every
+character as a literal. Use `sqry query 'name:parse_*'` for glob
+matching against names; the exact-set-equality contract above does
+not apply when the value contains glob meta.
+
+**Surface precedence and synthetic visibility.**
+
+| Surface | Match mode | Synthetic placeholders |
+|---------|------------|------------------------|
+| `sqry --exact <literal>` (top-level) | Exact byte-for-byte match (literal only; glob meta is treated as literal characters). | Filtered out. |
+| `sqry search <pat>` (no flag, default) | Regex match against interned simple **and** qualified names. Invalid regex returns an error; there is no implicit substring fallback. | Not filtered — the regex surface is a literal scan over interned strings. |
+| `sqry query 'name:<value>'` (planner) | Exact byte-for-byte match for **literal** values; glob match when the value contains `*`/`?`/`[`. | Filtered out (both literal and glob paths). |
+| `sqry query 'name~/<regex>/'` | **Reserved** for a future regex variant (mirrors the existing `references ~= /…/` split). Not yet implemented; users wanting regex name matching today should use `sqry search <regex>` or `references ~= /…/` for incoming references. | n/a |
+
+Only the structured `name:<literal>` prefix and the top-level
+`--exact <literal>` shorthand are bound to the exact-set-equality
+contract — every other surface in the table has its own match mode and
+synthetic-visibility policy as listed.
+
 ### Relations
 
 ```bash
@@ -257,6 +343,60 @@ sqry diff HEAD~1 HEAD                       # Semantic diff between git refs
 For very large C++ codebases, pathological single-file graph builds are now
 bounded so one oversized translation unit does not pin the entire index run
 indefinitely.
+
+### Ambiguous symbol resolution
+
+`sqry impact` and `sqry explain` (and the MCP `dependency_impact` tool)
+resolve a bare symbol name against the graph's by-name index. When a
+bare name matches more than one indexable node — for example `NeedTags`
+matches both the Go `Property` node `main.SelectorSource.NeedTags` and
+a local variable of the same name — the command returns a typed
+`AmbiguousSymbol` envelope under the stable error code
+`sqry::ambiguous_symbol`:
+
+```json
+{
+  "error": {
+    "code": "sqry::ambiguous_symbol",
+    "message": "Symbol 'NeedTags' is ambiguous; specify the qualified name",
+    "candidates": [
+      {
+        "qualified_name": "main.SelectorSource.NeedTags",
+        "kind": "property",
+        "file_path": "main.go",
+        "start_line": 12,
+        "start_column": 4
+      },
+      {
+        "qualified_name": "main.useSelector.NeedTags",
+        "kind": "variable",
+        "file_path": "main.go",
+        "start_line": 30,
+        "start_column": 6
+      }
+    ],
+    "truncated": false
+  }
+}
+```
+
+Pass the qualified name (`sqry impact main.SelectorSource.NeedTags`) to
+disambiguate. The candidate list is capped at 20 entries with
+`truncated: true` set when the underlying set is larger.
+
+**MCP redaction policy (`minimal` preset, default).** When the same
+`AmbiguousSymbol` envelope is delivered through the MCP transport
+(e.g. via `dependency_impact`), the `sqry-mcp-redaction` layer
+rewrites every per-candidate `file_path` to a workspace-relative form
+under the default `minimal` preset, so the absolute repository path
+(home directory, machine layout, etc.) is never exposed. The redacted
+MCP envelope still surfaces `qualified_name`, `kind`, `start_line`,
+and `start_column` per candidate so AI-assistant consumers can
+disambiguate. No source excerpt, snippet, or code-context field is
+introduced into the envelope. The CLI envelope is unredacted (CLI
+users have direct filesystem access already); only the MCP boundary
+applies the redaction. For stricter envelopes (filename hashing, no
+position info), set `SQRY_REDACTION_PRESET=strict`.
 
 ### Natural Language
 

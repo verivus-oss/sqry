@@ -1114,3 +1114,212 @@ fn fixture_node_count_matches_expected_layout() {
     // visitor_trait, run_fn, main_fn, visitor_impl, imports_lib.
     assert_eq!(fx.snapshot.nodes().len(), 9);
 }
+
+// ---------------------------------------------------------------------------
+// `returns:<TypeName>` predicate (B2_PLANNER)
+// ---------------------------------------------------------------------------
+//
+// These tests build a Go-shaped fixture where two functions return `error`
+// (modelled by a `TypeOf { context: Some(Return), .. }` edge to a Type node
+// named `error`) and one function returns `string`. The predicate must
+// resolve through edge structure, not through `NodeEntry.signature` text.
+
+mod returns_predicate {
+    use super::*;
+    use sqry_core::graph::unified::edge::kind::TypeOfContext;
+    use sqry_db::planner::Predicate;
+    use sqry_db::planner::parse_query;
+
+    struct ReturnsFixture {
+        db: QueryDb,
+        do_thing: NodeId,
+        validate: NodeId,
+        get_name: NodeId,
+        bare_void: NodeId,
+    }
+
+    impl ReturnsFixture {
+        fn build() -> Self {
+            let mut graph = CodeGraph::new();
+
+            let main_file = graph
+                .files_mut()
+                .register_with_language(Path::new("main.go"), Some(Language::Go))
+                .expect("register file");
+
+            let do_thing_name = graph.strings_mut().intern("DoThing").expect("intern");
+            let validate_name = graph.strings_mut().intern("Validate").expect("intern");
+            let get_name_name = graph.strings_mut().intern("GetName").expect("intern");
+            let bare_void_name = graph.strings_mut().intern("Bare").expect("intern");
+            let error_name = graph.strings_mut().intern("error").expect("intern");
+            let string_name = graph.strings_mut().intern("string").expect("intern");
+
+            let add_node = |graph: &mut CodeGraph, entry: NodeEntry| -> NodeId {
+                let id = graph.nodes_mut().alloc(entry.clone()).expect("alloc node");
+                graph.indices_mut().add(
+                    id,
+                    entry.kind,
+                    entry.name,
+                    entry.qualified_name,
+                    entry.file,
+                );
+                id
+            };
+
+            let do_thing = add_node(
+                &mut graph,
+                NodeEntry::new(NodeKind::Function, do_thing_name, main_file)
+                    .with_byte_range(10, 90),
+            );
+            let validate = add_node(
+                &mut graph,
+                NodeEntry::new(NodeKind::Function, validate_name, main_file)
+                    .with_byte_range(100, 180),
+            );
+            let get_name = add_node(
+                &mut graph,
+                NodeEntry::new(NodeKind::Function, get_name_name, main_file)
+                    .with_byte_range(200, 260),
+            );
+            let bare_void = add_node(
+                &mut graph,
+                NodeEntry::new(NodeKind::Function, bare_void_name, main_file)
+                    .with_byte_range(300, 340),
+            );
+            let error_type = add_node(
+                &mut graph,
+                NodeEntry::new(NodeKind::Type, error_name, main_file).with_byte_range(400, 410),
+            );
+            let string_type = add_node(
+                &mut graph,
+                NodeEntry::new(NodeKind::Type, string_name, main_file).with_byte_range(420, 430),
+            );
+
+            // Return-type edges: DoThing -> error, Validate -> error,
+            // GetName -> string. Bare has no return-type edge at all.
+            graph.edges().add_edge(
+                do_thing,
+                error_type,
+                EdgeKind::TypeOf {
+                    context: Some(TypeOfContext::Return),
+                    index: Some(0),
+                    name: None,
+                },
+                main_file,
+            );
+            graph.edges().add_edge(
+                validate,
+                error_type,
+                EdgeKind::TypeOf {
+                    context: Some(TypeOfContext::Return),
+                    index: Some(0),
+                    name: None,
+                },
+                main_file,
+            );
+            graph.edges().add_edge(
+                get_name,
+                string_type,
+                EdgeKind::TypeOf {
+                    context: Some(TypeOfContext::Return),
+                    index: Some(0),
+                    name: None,
+                },
+                main_file,
+            );
+
+            // Counter-example: a `Parameter`-context TypeOf edge to `error`
+            // on `Bare` should NOT cause `returns:error` to match.
+            graph.edges().add_edge(
+                bare_void,
+                error_type,
+                EdgeKind::TypeOf {
+                    context: Some(TypeOfContext::Parameter),
+                    index: Some(0),
+                    name: None,
+                },
+                main_file,
+            );
+
+            let snapshot = Arc::new(graph.snapshot());
+            let db = QueryDb::new(Arc::clone(&snapshot), QueryDbConfig::default());
+
+            Self {
+                db,
+                do_thing,
+                validate,
+                get_name,
+                bare_void,
+            }
+        }
+    }
+
+    #[test]
+    fn returns_error_matches_only_functions_with_return_typeof_edge_to_error() {
+        let fx = ReturnsFixture::build();
+        let plan = QueryBuilder::new()
+            .scan(NodeKind::Function)
+            .filter(Predicate::Returns("error".to_string()))
+            .build()
+            .unwrap();
+        let mut actual = execute_plan(&plan, &fx.db);
+        actual.sort_unstable_by_key(|id| (id.index(), id.generation()));
+        let mut expected = vec![fx.do_thing, fx.validate];
+        expected.sort_unstable_by_key(|id| (id.index(), id.generation()));
+        assert_eq!(actual, expected);
+        // Bare has only a Parameter-context TypeOf edge; must NOT match.
+        assert!(!actual.contains(&fx.bare_void));
+        // GetName returns string, not error.
+        assert!(!actual.contains(&fx.get_name));
+    }
+
+    #[test]
+    fn returns_string_matches_only_get_name() {
+        let fx = ReturnsFixture::build();
+        let plan = QueryBuilder::new()
+            .scan(NodeKind::Function)
+            .filter(Predicate::Returns("string".to_string()))
+            .build()
+            .unwrap();
+        let actual = execute_plan(&plan, &fx.db);
+        assert_eq!(actual, vec![fx.get_name]);
+    }
+
+    #[test]
+    fn returns_unknown_type_yields_empty_set() {
+        let fx = ReturnsFixture::build();
+        let plan = QueryBuilder::new()
+            .scan(NodeKind::Function)
+            .filter(Predicate::Returns("nonexistent".to_string()))
+            .build()
+            .unwrap();
+        let actual = execute_plan(&plan, &fx.db);
+        assert!(actual.is_empty());
+    }
+
+    #[test]
+    fn returns_predicate_via_text_parser_end_to_end() {
+        let fx = ReturnsFixture::build();
+        let plan = parse_query("kind:function returns:error").expect("parse");
+        let mut actual = execute_plan(&plan, &fx.db);
+        actual.sort_unstable_by_key(|id| (id.index(), id.generation()));
+        let mut expected = vec![fx.do_thing, fx.validate];
+        expected.sort_unstable_by_key(|id| (id.index(), id.generation()));
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn returns_is_case_sensitive_exact_match() {
+        let fx = ReturnsFixture::build();
+        // Lowercase needle that doesn't match the type's actual interned
+        // name `error` (verifies strict casing — case-insensitive matching
+        // is explicitly out of scope for this predicate).
+        let plan = QueryBuilder::new()
+            .scan(NodeKind::Function)
+            .filter(Predicate::Returns("ERROR".to_string()))
+            .build()
+            .unwrap();
+        let actual = execute_plan(&plan, &fx.db);
+        assert!(actual.is_empty());
+    }
+}

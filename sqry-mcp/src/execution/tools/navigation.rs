@@ -195,7 +195,7 @@ fn collect_declaration_refs(
                                 jar_path: Some(cp.jar_path.clone()),
                             })
                         }
-                        NodeMetadata::Macro(_) => None,
+                        NodeMetadata::Macro(_) | NodeMetadata::Synthetic => None,
                     })
             } else {
                 None
@@ -260,7 +260,7 @@ fn collect_caller_refs(
                                     jar_path: Some(cp.jar_path.clone()),
                                 })
                             }
-                            NodeMetadata::Macro(_) => None,
+                            NodeMetadata::Macro(_) | NodeMetadata::Synthetic => None,
                         })
                 } else {
                     None

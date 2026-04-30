@@ -218,6 +218,16 @@ pub(crate) mod inner {
             .copied()
             .collect();
 
+        // C_SUPPRESS: drop synthetic placeholder nodes (Go-plugin
+        // `<field:...>` shadows + `<ident>@<offset>` per-binding-site
+        // Variables) from the user-facing surface. The executor's
+        // node-name scan can surface these directly without going
+        // through GraphSnapshot::find_by_pattern, so we re-apply the
+        // suppression check here at the MCP boundary. There is no
+        // user-visible opt-in for synthetic nodes — they are an
+        // internal binding-plane implementation detail.
+        filtered.retain(|&node_id| !snapshot.is_node_synthetic(node_id));
+
         // Filter out classpath (external) nodes unless explicitly requested
         if !args.include_classpath {
             filtered.retain(|&node_id| {

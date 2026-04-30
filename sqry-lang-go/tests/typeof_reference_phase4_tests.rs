@@ -281,12 +281,13 @@ type List[T any] struct {
         "Expected TypeOf: List.T→any with Constraint context"
     );
 
-    // Field TypeOf: items → []T
+    // Field TypeOf: items → []T - sourced from the per-field Property
+    // node `main.List.items` after `C_EDGE_MIGRATE`.
     assert!(
         field_edges
             .iter()
-            .any(|(s, t)| s == "main.List" && t.contains("[]T")),
-        "Expected Field TypeOf: List.items→[]T"
+            .any(|(s, t)| s == "main.List.items" && t.contains("[]T")),
+        "Expected Field TypeOf: main.List.items→[]T, got: {field_edges:?}"
     );
 }
 
@@ -452,12 +453,13 @@ type Cache struct {
     let field_edges = collect_typeof_edges_by_context(&staging, TypeOfContext::Field);
     let ref_edges = collect_reference_edges(&staging);
 
-    // Field TypeOf: Cache.data → Map[string, User]
+    // Field TypeOf: Cache.data → Map[string, User] - sourced from the
+    // per-field Property node `main.Cache.data` after `C_EDGE_MIGRATE`.
     assert!(
         field_edges
             .iter()
-            .any(|(s, t)| s == "main.Cache" && t.contains("Map")),
-        "Expected Field TypeOf: Cache→Map[...]"
+            .any(|(s, t)| s == "main.Cache.data" && t.contains("Map")),
+        "Expected Field TypeOf: main.Cache.data→Map[...], got: {field_edges:?}"
     );
 
     // Reference edges

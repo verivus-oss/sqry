@@ -359,7 +359,9 @@ class UserService:
     // - find var user: Optional
     // - find_all param limit: int
     // - find_all var results: List
-    assert_eq!(count_edge_kind(&staging, "type_of"), 5);
+    // - find return: Optional[User]                (Return-context, byte-exact)
+    // - find_all return: List[User]                (Return-context, byte-exact)
+    assert_eq!(count_edge_kind(&staging, "type_of"), 7);
 
     // Should have signature metadata for methods with return types
     assert!(has_node_with_signature(&staging));
@@ -475,14 +477,18 @@ def find(id: int) -> "User":
 
     let staging = build_staging_graph(source, "test.py");
 
-    // Forward references should be normalized (quotes stripped)
-    // Both the parameter and variable should reference the same "User" type node
-    // At least 2 type-annotated variable nodes; local var tracking adds more
+    // Forward references in parameters/variables are normalized (quotes stripped),
+    // producing a single shared `User` type node for `id: int` and `user: "User"`.
+    // The new Return-context TypeOf edge is byte-exact, so `-> "User"` produces
+    // an additional `"User"` (quoted) type node — three type nodes total:
+    //   - `int`    (param `id`)
+    //   - `User`   (var `user`, normalized)
+    //   - `"User"` (return annotation, byte-exact)
     assert!(count_variable_nodes(&staging) >= 2);
-    assert_eq!(count_type_nodes(&staging), 2);
+    assert_eq!(count_type_nodes(&staging), 3);
 
-    // Should have TypeOf edges for both
-    assert_eq!(count_edge_kind(&staging, "type_of"), 2);
+    // Three TypeOf edges: param `id: int`, var `user: "User"`, and return `-> "User"`.
+    assert_eq!(count_edge_kind(&staging, "type_of"), 3);
 
     // Should have signature with normalized return type (verified by checking node with signature exists)
     assert!(has_node_with_signature(&staging));
@@ -629,7 +635,8 @@ class MyClass:
 
     // At least 6 type-annotated variable nodes; local var tracking adds more
     assert!(count_variable_nodes(&staging) >= 6);
-    assert_eq!(count_edge_kind(&staging, "type_of"), 6);
+    // 6 param/var/attr TypeOf edges + 1 Return-context TypeOf edge for `func -> bool`
+    assert_eq!(count_edge_kind(&staging, "type_of"), 7);
     // References include both type annotations and local var references
-    assert!(count_edge_kind(&staging, "references") >= 6);
+    assert!(count_edge_kind(&staging, "references") >= 7);
 }

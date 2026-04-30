@@ -43,6 +43,7 @@ use anyhow::{Result, bail};
 use serde_json::{Map, Value, json};
 use sqry_core::graph::unified::concurrent::GraphSnapshot;
 use sqry_core::graph::unified::edge::EdgeKind;
+use sqry_core::graph::unified::edge::kind::TypeOfContext;
 use sqry_core::graph::unified::materialize::find_nodes_by_name;
 use sqry_core::graph::unified::node::NodeId;
 use sqry_core::graph::unified::node::NodeKind;
@@ -545,39 +546,59 @@ fn collect_exports(
     results
 }
 
-/// Collect return type information (not stored as edges in unified graph).
+/// Walks outgoing `TypeOf{Return}` edges from `node` and emits one entry
+/// per resolved target type node. Mirrors the planner's `Predicate::Returns`
+/// evaluator in `sqry_db::planner::execute::node_returns_type` for
+/// cross-engine consistency. See B2 cluster of the BadLiveware Go-batch DAG.
 ///
-/// Note: The unified graph doesn't have a dedicated Returns edge type.
-/// This returns an empty result for now - return type tracking would need
-/// to be added to the unified graph edge model.
+/// Returns an empty `Vec` when the node has no Return edges (e.g. void
+/// function, constructor, or a language whose plugin does not yet emit
+/// `TypeOf{Return}` edges) — never a placeholder stub.
 fn collect_returns(
     snapshot: &GraphSnapshot,
     node: NodeId,
     depth: usize,
     workspace_root: &Path,
 ) -> Vec<RelationEdgeData> {
-    // The unified graph doesn't store return types as edges.
-    // We could potentially extract this from node metadata if available.
-    let from_ref = build_node_ref(snapshot, node, workspace_root);
+    let mut results = Vec::new();
 
-    // Check if node has return type in metadata (not currently implemented)
-    // For now, return empty as return type edges aren't in the unified model
-    let entry = snapshot.get_node(node);
-    if entry.is_some() {
-        // Return type would be in node metadata if we stored it
-        // For now, just indicate the function exists
-        vec![RelationEdgeData {
+    // Bail when the node id is unknown to the snapshot. Mirrors the guard
+    // in `collect_imports` / `collect_exports` (those rely on `edges_from`
+    // returning empty for unknown nodes; here we additionally surface no
+    // entries so the caller sees the same "no relation" semantic).
+    if snapshot.get_node(node).is_none() {
+        return results;
+    }
+
+    for edge in snapshot.edges().edges_from(node) {
+        if !matches!(
+            edge.kind,
+            EdgeKind::TypeOf {
+                context: Some(TypeOfContext::Return),
+                ..
+            }
+        ) {
+            continue;
+        }
+        // Skip edges whose target is no longer resolvable (tombstoned by
+        // a remap pass or pointing into an unloaded segment).
+        if snapshot.get_node(edge.target).is_none() {
+            continue;
+        }
+
+        let from_ref = build_node_ref(snapshot, node, workspace_root);
+        let to_ref = build_node_ref(snapshot, edge.target, workspace_root);
+
+        results.push(RelationEdgeData {
             from: Some(from_ref),
-            to: None,
+            to: Some(to_ref),
             relation_type: "returns".to_string(),
             depth: depth.try_into().unwrap_or(u32::MAX).saturating_add(1),
-            metadata: Some(json!({
-                "note": "Return type tracking not yet implemented in unified graph"
-            })),
-        }]
-    } else {
-        vec![]
+            metadata: None,
+        });
     }
+
+    results
 }
 
 /// Build `NodeRefData` from a unified graph node.
@@ -1506,19 +1527,108 @@ mod tests {
 
     // ===== collect_returns tests =====
 
+    /// Build a small graph with two functions and one type. `caller_fn`
+    /// has a `TypeOf{Return}` edge into `ret_type`; `other_fn` has no
+    /// outgoing TypeOf{Return} edges and exists only to prove the helper
+    /// returns an empty `Vec` (not a placeholder stub) for nodes that
+    /// genuinely lack a return-type edge.
+    fn make_graph_with_return_type_edge() -> (CodeGraph, NodeId, NodeId, NodeId) {
+        use sqry_core::graph::unified::edge::kind::TypeOfContext;
+
+        let mut graph = CodeGraph::new();
+        let file_id = graph.files_mut().register(Path::new("src/lib.rs")).unwrap();
+
+        let caller_name = graph.strings_mut().intern("caller_fn").unwrap();
+        let other_name = graph.strings_mut().intern("other_fn").unwrap();
+        let ret_name = graph.strings_mut().intern("ret_type").unwrap();
+
+        let caller = graph
+            .nodes_mut()
+            .alloc(NodeEntry::new(NodeKind::Function, caller_name, file_id))
+            .unwrap();
+        let other = graph
+            .nodes_mut()
+            .alloc(NodeEntry::new(NodeKind::Function, other_name, file_id))
+            .unwrap();
+        let ret_type_node = graph
+            .nodes_mut()
+            .alloc(NodeEntry::new(NodeKind::Type, ret_name, file_id))
+            .unwrap();
+
+        graph
+            .indices_mut()
+            .add(caller, NodeKind::Function, caller_name, None, file_id);
+        graph
+            .indices_mut()
+            .add(other, NodeKind::Function, other_name, None, file_id);
+        graph
+            .indices_mut()
+            .add(ret_type_node, NodeKind::Type, ret_name, None, file_id);
+
+        graph.edges_mut().add_edge(
+            caller,
+            ret_type_node,
+            EdgeKind::TypeOf {
+                context: Some(TypeOfContext::Return),
+                index: None,
+                name: None,
+            },
+            file_id,
+        );
+
+        (graph, caller, other, ret_type_node)
+    }
+
     #[test]
-    #[ignore = "validates placeholder behavior: collect_returns always returns a stub entry \
-                until return-type tracking is implemented in the unified graph edge model"]
-    fn collect_returns_returns_entry_when_node_exists() {
-        let (graph, node_a, _node_b) = make_graph_with_call_edge();
+    fn collect_returns_emits_edge_when_typeof_return_present() {
+        let (graph, caller, _other, ret_type_node) = make_graph_with_return_type_edge();
         let snapshot = graph.snapshot();
         let ws = workspace_root();
 
-        let returns = collect_returns(&snapshot, node_a, 0, &ws);
-        assert_eq!(returns.len(), 1);
-        assert_eq!(returns[0].relation_type, "returns");
-        assert!(returns[0].from.is_some());
-        assert!(returns[0].to.is_none());
+        let returns = collect_returns(&snapshot, caller, 0, &ws);
+        assert_eq!(
+            returns.len(),
+            1,
+            "expected exactly one TypeOf{{Return}} edge entry"
+        );
+        let edge = &returns[0];
+        assert_eq!(edge.relation_type, "returns");
+        let from = edge
+            .from
+            .as_ref()
+            .expect("from must be populated by collect_returns");
+        let to = edge
+            .to
+            .as_ref()
+            .expect("to must be populated post-fix (no more placeholder stub)");
+        assert_eq!(from.name, "caller_fn");
+        assert_eq!(to.name, "ret_type");
+        // The post-fix shape carries no `note` metadata — the placeholder
+        // is gone and the only structured payload would be edge-level
+        // metadata that TypeOf{Return} does not carry today.
+        assert!(
+            edge.metadata.is_none(),
+            "metadata must be None after migrating to real edge walk; got {:?}",
+            edge.metadata
+        );
+        // Sanity: snapshot resolution returned a real node for the target.
+        let resolved_target_name = snapshot
+            .get_node(ret_type_node)
+            .and_then(|e| snapshot.strings().resolve(e.name).map(|s| s.to_string()));
+        assert_eq!(resolved_target_name.as_deref(), Some("ret_type"));
+    }
+
+    #[test]
+    fn collect_returns_empty_for_node_without_return_edge() {
+        let (graph, _caller, other, _ret_type_node) = make_graph_with_return_type_edge();
+        let snapshot = graph.snapshot();
+        let ws = workspace_root();
+
+        let returns = collect_returns(&snapshot, other, 0, &ws);
+        assert!(
+            returns.is_empty(),
+            "node with no TypeOf{{Return}} edges must yield an empty Vec, not a stub; got {returns:?}"
+        );
     }
 
     #[test]

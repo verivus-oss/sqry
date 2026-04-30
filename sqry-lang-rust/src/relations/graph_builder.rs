@@ -6,7 +6,7 @@ use std::{
 
 use sqry_core::graph::unified::{
     FfiConvention, GraphBuildHelper, LifetimeConstraintKind, MacroExpansionKind, NodeId, NodeKind,
-    StagingGraph, build::helper::CalleeKindHint,
+    StagingGraph, build::helper::CalleeKindHint, edge::kind::TypeOfContext,
 };
 use sqry_core::graph::{GraphBuilder, GraphBuilderError, GraphResult, Language, Span};
 use sqry_core::relations::SyntheticNameBuilder;
@@ -755,6 +755,57 @@ fn process_single_derive_attribute(
     }
 }
 
+/// Emit a `TypeOf { context: Some(Return), index: Some(0), .. }` edge from a
+/// function/method/macro node to the type appearing after `->` in its signature.
+///
+/// Tree-sitter-rust exposes the explicit return-type annotation via the
+/// `return_type` field on `function_item` and `function_signature_item`. When
+/// the field is absent the function returns the implicit unit type `()` and
+/// no edge is emitted (the byte-exact `returns:<TypeName>` contract has no
+/// well-defined target name in that case).
+///
+/// The byte-exact target text is the raw source slice of the `return_type`
+/// node — the leading `->` token is *not* part of that field, so for
+/// `fn foo() -> Result<i32, Error>` we register the type `Result<i32, Error>`.
+/// A defensive `trim_start_matches("->").trim()` strips any stray arrow tokens
+/// in case a future grammar revision shifts the field span.
+///
+/// Async functions, generic functions, free functions, impl methods, and FFI
+/// `extern fn` declarations all flow through this helper. Closures
+/// (`closure_expression`) are intentionally not handled — their return types
+/// are inferred and lack a stable byte-exact spelling.
+fn emit_return_type_edge(
+    fn_node: Node<'_>,
+    function_id: NodeId,
+    function_name: &str,
+    content: &[u8],
+    helper: &mut GraphBuildHelper,
+) {
+    let Some(return_type_node) = fn_node.child_by_field_name("return_type") else {
+        return;
+    };
+    let Ok(raw_text) = return_type_node.utf8_text(content) else {
+        return;
+    };
+    let type_text = raw_text.trim().trim_start_matches("->").trim();
+    if type_text.is_empty() {
+        return;
+    }
+    // Anchor the synthesized Type node at the return-type annotation's span
+    // so downstream consumers (LSP `textDocument/documentSymbol`, MCP
+    // `get_document_symbols`) report a concrete source location rather than
+    // line 0.
+    let type_span = span_from_node(return_type_node);
+    let type_id = helper.add_type(type_text, Some(type_span));
+    helper.add_typeof_edge_with_context(
+        function_id,
+        type_id,
+        Some(TypeOfContext::Return),
+        Some(0),
+        Some(function_name),
+    );
+}
+
 /// This function handles:
 /// - Function definitions (`function_item`) → Function nodes
 /// - Call expressions (`call_expression`) → Call edges (or `FfiCall` for FFI targets)
@@ -848,6 +899,17 @@ fn walk_tree_for_staging(
                 build_ctx
                     .node_map
                     .insert(node.id(), (item_id, qualified_name.clone()));
+
+                // Emit Return-context TypeOf edge for the explicit `-> Type`
+                // annotation. The bare function name (last `::` segment)
+                // becomes the edge's `name` metadata, mirroring the C# /
+                // Kotlin / Go plugins. Implicit-unit returns (no annotation)
+                // produce no edge.
+                let fn_short_name = qualified_name
+                    .rsplit("::")
+                    .next()
+                    .unwrap_or(qualified_name.as_str());
+                emit_return_type_edge(node, item_id, fn_short_name, content, helper);
 
                 // Add Contains edge from containing module to this function/method/macro
                 // This enables scope.* predicate queries (scope.type:module, scope.parent:X, etc.)
@@ -2174,6 +2236,11 @@ fn build_ffi_block_for_staging(node: Node<'_>, content: &[u8], helper: &mut Grap
                                     false, // not async
                                     true,  // unsafe (FFI)
                                 );
+                                // Emit Return-context TypeOf edge for the
+                                // explicit return type on this FFI signature.
+                                // No-op when the signature returns implicit
+                                // unit (no `-> Type` annotation).
+                                emit_return_type_edge(decl, fn_id, fn_name, content, helper);
                                 // Export FFI functions so they're visible
                                 export_from_file_module(helper, fn_id);
                             }

@@ -303,8 +303,24 @@ fn run_regular_search(cli: &Cli, pattern: &str, search_path: &str) -> Result<Vec
             }
         }
     } else {
-        // Substring search using optimized graph method
-        let node_ids = graph.snapshot().find_by_pattern(pattern);
+        // `--exact`: contract-bound to the planner's `name:<literal>`
+        // predicate (see `sqry-db/src/planner/parse.rs` around the
+        // `name:` step). Both surfaces route through
+        // `GraphSnapshot::find_by_exact_name` for literal patterns, so
+        // `sqry --exact NeedTags .` and `sqry query 'name:NeedTags' .`
+        // return identical sets — exact byte-for-byte match against
+        // interned `entry.name` / `entry.qualified_name`, synthetic
+        // placeholders excluded. `--exact` does not accept glob meta;
+        // for glob behaviour use `sqry query 'name:parse_*'` instead.
+        //
+        // Reachable here only when `cli.exact` is true, because
+        // `build_pattern_regex` returns `Ok(Some(_))` for every
+        // non-exact path (or propagates the regex error).
+        debug_assert!(
+            cli.exact,
+            "non-exact path is owned by the regex branch above"
+        );
+        let node_ids = graph.snapshot().find_by_exact_name(pattern);
         matches.extend(node_ids);
     }
 

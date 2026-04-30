@@ -39,7 +39,11 @@ pub struct Cli {
 
     /// Search pattern (shorthand for 'search' command)
     ///
-    /// Supports regex patterns by default. Use --exact for literal matching.
+    /// Treated as a regex by default. Invalid regex returns an error.
+    /// Use `--exact` for byte-for-byte literal matching against the
+    /// interned symbol name (same contract as the planner's
+    /// `name:<literal>` predicate; glob meta is matched as literal
+    /// characters).
     #[arg(required = false)]
     pub pattern: Option<String>,
 
@@ -199,9 +203,20 @@ pub struct Cli {
     #[arg(long, short = 'i', help_heading = headings::MATCH_BEHAVIOUR, display_order = 11)]
     pub ignore_case: bool,
 
-    /// Exact match (disable regex)
+    /// Exact (literal-only) match against interned symbol name
+    /// (disables regex).
     ///
     /// Applies to search mode (top-level shorthand and `sqry search`).
+    /// Contract-bound to the structural query planner's
+    /// `name:<literal>` predicate (B1_ALIGN): `sqry --exact NeedTags .`
+    /// and `sqry query 'name:NeedTags' .` return identical sets — both
+    /// look up the pattern against `entry.name` / `entry.qualified_name`
+    /// byte-for-byte (case-sensitive) and exclude synthetic placeholder
+    /// nodes. `--exact` does not accept glob meta (`*`, `?`, `[`); they
+    /// are matched as literal characters. For glob matching against
+    /// names use `sqry query 'name:parse_*'` instead. For regex
+    /// matching, omit `--exact` and `sqry search` will treat the
+    /// pattern as a regex over interned strings.
     #[arg(long, short = 'x', help_heading = headings::MATCH_BEHAVIOUR, display_order = 10)]
     pub exact: bool,
 
@@ -479,7 +494,8 @@ pub enum Command {
     /// See also: 'sqry query' for structured AST-aware queries
     #[command(display_order = 1, verbatim_doc_comment)]
     Search {
-        /// Search pattern (regex or literal with --exact).
+        /// Search pattern (regex by default; literal byte-exact
+        /// symbol-name match with `--exact`).
         #[arg(help_heading = headings::SEARCH_INPUT, display_order = 10)]
         pattern: String,
 
@@ -739,8 +755,15 @@ pub enum Command {
         path: Option<String>,
 
         /// Output format (json, text, dot, mermaid, d2).
-        #[arg(long, short = 'f', default_value = "text", help_heading = headings::GRAPH_CONFIGURATION, display_order = 20)]
-        format: String,
+        ///
+        /// Defaults to `text` when neither `--format` nor the global
+        /// `--json` flag is supplied. The global `--json` flag is
+        /// accepted on every `graph *` subcommand as an alias for
+        /// `--format json`; passing both `--format text` (or any
+        /// non-`json` value) and `--json` is an error so silent
+        /// disagreement between the two flags can never occur.
+        #[arg(long, short = 'f', help_heading = headings::GRAPH_CONFIGURATION, display_order = 20)]
+        format: Option<String>,
 
         /// Show verbose output with detailed metadata.
         #[arg(long, short = 'v', help_heading = headings::GRAPH_CONFIGURATION, display_order = 30)]
@@ -765,6 +788,13 @@ pub enum Command {
     /// The index is saved to .sqry/ and includes precomputed graph analyses
     /// for cycle detection, reachability, and path queries.
     /// Uses parallel processing by default for faster indexing.
+    ///
+    /// Upgrade-rebuild requirement: when sqry's in-format graph semantics
+    /// change between releases (e.g. the v10.0.x Cluster C field-edge source
+    /// migration), an existing `.sqry/graph/snapshot.sqry` keeps loading but
+    /// returns the legacy shape until rebuilt. Run `sqry index --force` once
+    /// after upgrading across such releases. Release notes call out which
+    /// versions need the rebuild.
     #[command(display_order = 10)]
     Index {
         /// Directory to index (defaults to current directory).
@@ -772,6 +802,11 @@ pub enum Command {
         path: Option<String>,
 
         /// Force rebuild even if index exists.
+        ///
+        /// Required once after upgrading across a release that changes
+        /// in-format graph semantics (e.g. v10.0.x Cluster C field-edge
+        /// source migration). Without `--force`, the existing snapshot
+        /// loads but returns the pre-upgrade graph shape.
         #[arg(long, short = 'f', alias = "rebuild", help_heading = headings::INDEX_CONFIGURATION, display_order = 10)]
         force: bool,
 

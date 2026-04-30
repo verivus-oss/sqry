@@ -298,6 +298,50 @@ impl NodeEntry {
         self.name == StringId::INVALID
     }
 
+    /// Whether this entry is a synthetic placeholder according to its name shape.
+    ///
+    /// C_SUPPRESS introduced an explicit `NodeMetadata::Synthetic` flag
+    /// stored in [`crate::graph::unified::storage::metadata::NodeMetadataStore`];
+    /// see
+    /// [`crate::graph::unified::storage::metadata::NodeMetadataStore::is_synthetic`]
+    /// for the authoritative O(1) lookup that publish-visible callers
+    /// (`find_by_pattern`, MCP tool surfaces, CLI `search --exact`) use.
+    ///
+    /// This helper is the **fallback name-shape check** that runs alongside
+    /// the metadata bit so the filter remains correct in three boundary cases:
+    ///
+    /// 1. **V10 snapshots written before the synthetic bit existed** —
+    ///    pre-C_SUPPRESS Go indexes have no metadata entries flagging
+    ///    these placeholders, but their names still follow the canonical
+    ///    `<...>` (angle-bracket-wrapped pseudo-identifier) and
+    ///    `<ident>@<digit>` (per-binding-site offset suffix) shapes the
+    ///    Go plugin emits via
+    ///    `process_field_access_unified` and
+    ///    `sqry-lang-go/src/relations/local_scopes.rs`.
+    /// 2. **Cross-file unification losers** that retained their original
+    ///    synthetic name but lost their metadata entry during the
+    ///    rebuild's metadata retention pass.
+    /// 3. **Future plugins** that emit similarly-shaped placeholders
+    ///    without remembering to flip the bit — the name shape is a
+    ///    structural invariant Go identifiers cannot satisfy
+    ///    (Go identifiers are `[a-zA-Z_][a-zA-Z0-9_]*`, so `<` and `@`
+    ///    can never appear in a real Go symbol name).
+    ///
+    /// Callers that want the canonical "is this node user-visible"
+    /// answer should OR this against the metadata-store check.
+    /// `find_by_pattern` and the MCP analysis surfaces wire both checks
+    /// together via a single helper so the filter stays in lockstep.
+    ///
+    /// `display_name` is the simple-name string the interner returns
+    /// for `NodeEntry.name`; passing the qualified name instead is
+    /// also valid because the synthetic shape appears in both
+    /// (the Go plugin builds the qualified name from the same shape).
+    #[inline]
+    #[must_use]
+    pub fn is_synthetic_placeholder_name(display_name: &str) -> bool {
+        is_synthetic_placeholder_name_shape(display_name)
+    }
+
     /// Sets the signature for this node.
     #[must_use]
     pub fn with_signature(mut self, signature: StringId) -> Self {
@@ -792,6 +836,33 @@ impl crate::graph::unified::memory::GraphMemorySize for NodeArena {
     }
 }
 
+/// Returns `true` for the canonical synthetic-placeholder name shapes
+/// emitted by language plugins for binding-plane scaffolding.
+///
+/// See [`NodeEntry::is_synthetic_placeholder_name`] for the full
+/// rationale. Patterns recognised:
+///
+/// - **Angle-bracket pseudo-identifiers**: `<...>` — used for
+///   `<field:operand.field>` (Go field-access fallback) and similar
+///   shadows. Real source-language identifiers cannot start with `<`.
+/// - **Per-binding-site offset suffix**: `<ident>@<digits>` — used
+///   for the Go local-scope resolver's per-use Variable nodes. Real
+///   Go identifiers cannot contain `@` (Go's identifier grammar is
+///   `[a-zA-Z_][a-zA-Z0-9_]*`).
+fn is_synthetic_placeholder_name_shape(name: &str) -> bool {
+    if name.starts_with('<') {
+        return true;
+    }
+    // `ident@<digits>` shape: split on '@' and require digits after.
+    if let Some((_, rest)) = name.rsplit_once('@')
+        && !rest.is_empty()
+        && rest.bytes().all(|b| b.is_ascii_digit())
+    {
+        return true;
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -814,6 +885,40 @@ mod tests {
         assert_eq!(arena.len(), 0);
         assert!(arena.is_empty());
         assert_eq!(arena.capacity(), 0);
+    }
+
+    #[test]
+    fn synthetic_placeholder_name_shape_recognises_known_synthetics() {
+        // Go field-access fallback (process_field_access_unified)
+        assert!(is_synthetic_placeholder_name_shape("<field:s.NeedTags>"));
+        assert!(is_synthetic_placeholder_name_shape(
+            "<field:selector.NeedTags>"
+        ));
+        // Go type-assertion placeholder
+        assert!(is_synthetic_placeholder_name_shape("<type:main.Foo>"));
+        // Go local-scope per-binding-site Variable (graph_builder + local_scopes)
+        assert!(is_synthetic_placeholder_name_shape("NeedTags@469"));
+        assert!(is_synthetic_placeholder_name_shape("NeedTags@508"));
+        assert!(is_synthetic_placeholder_name_shape("foo@0"));
+        // The same check as exposed on NodeEntry
+        assert!(NodeEntry::is_synthetic_placeholder_name("<field:x.y>"));
+        assert!(NodeEntry::is_synthetic_placeholder_name("x@123"));
+    }
+
+    #[test]
+    fn synthetic_placeholder_name_shape_passes_real_identifiers() {
+        // Real Go identifiers (and qualified names) must NOT be flagged.
+        assert!(!is_synthetic_placeholder_name_shape("NeedTags"));
+        assert!(!is_synthetic_placeholder_name_shape(
+            "main.SelectorSource.NeedTags"
+        ));
+        assert!(!is_synthetic_placeholder_name_shape("main.useSelector"));
+        assert!(!is_synthetic_placeholder_name_shape("foo"));
+        assert!(!is_synthetic_placeholder_name_shape(""));
+        // `@` followed by non-digits — does not match the binding-site shape.
+        assert!(!is_synthetic_placeholder_name_shape("foo@bar"));
+        // `@` with empty suffix — degenerate, not synthetic.
+        assert!(!is_synthetic_placeholder_name_shape("foo@"));
     }
 
     #[test]

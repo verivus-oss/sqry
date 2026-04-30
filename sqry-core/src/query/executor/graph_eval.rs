@@ -20,10 +20,22 @@
 //! - `callees:` checks INCOMING edges (find nodes called by X)
 //! - Relation predicates use `segments_match` for qualified names
 //!
+//! # `returns:` evaluation
+//!
+//! `returns:<TypeName>` is evaluated edge-based, mirroring the planner's
+//! `node_returns_type` (see `sqry_db::planner::execute::node_returns_type`):
+//! the candidate node's outgoing edges are scanned for
+//! `EdgeKind::TypeOf { context: Some(TypeOfContext::Return), .. }`, and the
+//! target node's interned primary name is byte-exact-compared (case-sensitive)
+//! to the predicate value. Substring/regex semantics are out of scope and may
+//! land later as a distinct `returns~` operator. The legacy
+//! `NodeEntry.signature.contains(...)` substring path was retired in favour of
+//! this contract because it produced false positives whenever the requested
+//! type name occurred anywhere in the function signature text.
+//!
 //! # Limitations (v1)
 //!
 //! The following predicates are **NOT SUPPORTED** in graph backend v1:
-//! - `returns:` - requires signature parsing/metadata not in `NodeEntry`
 //! - Plugin fields - requires metadata `HashMap` not in `NodeEntry`
 //! - Numeric operators - requires metadata values
 //!
@@ -31,6 +43,7 @@
 
 use crate::graph::unified::FileId;
 use crate::graph::unified::concurrent::CodeGraph;
+use crate::graph::unified::edge::kind::TypeOfContext;
 use crate::graph::unified::edge::{EdgeKind, StoreEdgeRef};
 use crate::graph::unified::node::{NodeId, NodeKind};
 use crate::graph::unified::resolution::{
@@ -349,7 +362,13 @@ fn evaluate_condition(ctx: &GraphEvalContext, node_id: NodeId, cond: &Condition)
             &cond.operator,
             &cond.value,
         )),
-        "returns" => Ok(match_returns(ctx, entry, &cond.operator, &cond.value)),
+        "returns" => Ok(match_returns(
+            ctx,
+            node_id,
+            entry,
+            &cond.operator,
+            &cond.value,
+        )),
         field if is_plugin_field(ctx, field) => Err(anyhow!(
             "Plugin field '{field}' requires metadata not available in graph backend"
         )),
@@ -651,14 +670,34 @@ fn match_visibility(
 // Returns predicate
 // ============================================================================
 
-/// Match `returns:TypeName` predicate.
+/// Match `returns:<TypeName>` predicate via edge-based, byte-exact evaluation.
 ///
-/// Checks the `signature` field on `NodeEntry` for return type matching.
-/// Uses substring matching to support both:
-/// - Exact: `returns:Optional<User>` matches signature containing "Optional<User>"
-/// - Partial: `returns:Optional` matches any signature containing "Optional"
+/// Walks every outgoing edge from `node_id` and checks for the first
+/// `EdgeKind::TypeOf { context: Some(TypeOfContext::Return), .. }` whose
+/// target node's interned primary name equals the predicate value
+/// byte-exactly (case-sensitive). Returns `false` if the candidate has no
+/// `Return`-context type edges, or if every such edge targets a different
+/// name.
+///
+/// This mirrors `sqry_db::planner::execute::node_returns_type` exactly so
+/// that the legacy graph-query backend and the planner produce identical
+/// results for `returns:` predicates. The previous substring path against
+/// `NodeEntry.signature` was retired because it produced false positives
+/// whenever the requested type name occurred anywhere in the function
+/// signature text (e.g. `returns:error` matched any signature mentioning
+/// `error` in a parameter or doc).
+///
+/// Substring/regex semantics are out of scope here and may land later as a
+/// distinct `returns~` operator; only `Operator::Equal` is honoured.
+///
+/// The `entry.kind` guard for `Function`/`Method` is retained as a cheap
+/// fast-path early-out: only callable nodes can plausibly have a
+/// `TypeOf{Return}` outgoing edge, so non-callable candidates can be
+/// rejected without touching the edge store. The planner does not need
+/// this guard because its dispatch surface keys on a different shape.
 fn match_returns(
     ctx: &GraphEvalContext,
+    node_id: NodeId,
     entry: &NodeEntry,
     operator: &Operator,
     value: &Value,
@@ -667,26 +706,38 @@ fn match_returns(
         return false;
     };
 
-    // Only functions and methods have return types
+    // Only functions and methods can have a return type.  This is a fast
+    // early-out — see the doc comment above for the rationale.
     if !matches!(entry.kind, NodeKind::Function | NodeKind::Method) {
         return false;
     }
 
-    let Some(sig_id) = entry.signature else {
-        // No signature means no return type info
+    if !matches!(operator, Operator::Equal) {
         return false;
-    };
-
-    let Some(signature) = ctx.graph.strings().resolve(sig_id) else {
-        return false;
-    };
-
-    // The signature typically contains the return type.
-    // Use contains for substring matching to support partial matches.
-    match operator {
-        Operator::Equal => signature.contains(expected),
-        _ => false,
     }
+
+    let nodes = ctx.graph.nodes();
+    let strings = ctx.graph.strings();
+    for edge in ctx.graph.edges().edges_from(node_id) {
+        if !matches!(
+            edge.kind,
+            EdgeKind::TypeOf {
+                context: Some(TypeOfContext::Return),
+                ..
+            }
+        ) {
+            continue;
+        }
+        let Some(target_entry) = nodes.get(edge.target) else {
+            continue;
+        };
+        if let Some(name) = strings.resolve(target_entry.name)
+            && name.as_ref() == expected
+        {
+            return true;
+        }
+    }
+    false
 }
 
 // ============================================================================
@@ -1887,5 +1938,198 @@ mod tests {
             result,
             "references subquery should match FfiCall edge sources"
         );
+    }
+
+    // ================================================================
+    // returns: predicate (edge-based, byte-exact)
+    // ================================================================
+
+    /// Build a `CodeGraph` with two functions and an `error` type node:
+    /// - `returner_fn` --TypeOf{Return}--> `error`
+    /// - `plain_fn` (no outgoing TypeOf edges)
+    ///
+    /// Returns `(graph, returner_id, plain_id, error_type_id)`.
+    fn build_returns_graph() -> (CodeGraph, NodeId, NodeId, NodeId) {
+        let mut arena = NodeArena::new();
+        let edges = BidirectionalEdgeStore::new();
+        let mut strings = StringInterner::new();
+        let mut files = FileRegistry::new();
+        let mut indices = AuxiliaryIndices::new();
+
+        let returner_name = strings.intern("returner_fn").unwrap();
+        let plain_name = strings.intern("plain_fn").unwrap();
+        let error_name = strings.intern("error").unwrap();
+        let file_id = files.register(Path::new("test.go")).unwrap();
+
+        let returner_id = arena
+            .alloc(NodeEntry {
+                kind: NodeKind::Function,
+                name: returner_name,
+                file: file_id,
+                start_byte: 0,
+                end_byte: 100,
+                start_line: 1,
+                start_column: 0,
+                end_line: 5,
+                end_column: 0,
+                signature: None,
+                doc: None,
+                qualified_name: None,
+                visibility: None,
+                is_async: false,
+                is_static: false,
+                is_unsafe: false,
+                body_hash: None,
+            })
+            .unwrap();
+
+        let plain_id = arena
+            .alloc(NodeEntry {
+                kind: NodeKind::Function,
+                name: plain_name,
+                file: file_id,
+                start_byte: 200,
+                end_byte: 300,
+                start_line: 10,
+                start_column: 0,
+                end_line: 15,
+                end_column: 0,
+                signature: None,
+                doc: None,
+                qualified_name: None,
+                visibility: None,
+                is_async: false,
+                is_static: false,
+                is_unsafe: false,
+                body_hash: None,
+            })
+            .unwrap();
+
+        let error_type_id = arena
+            .alloc(NodeEntry {
+                kind: NodeKind::Type,
+                name: error_name,
+                file: file_id,
+                start_byte: 400,
+                end_byte: 410,
+                start_line: 20,
+                start_column: 0,
+                end_line: 20,
+                end_column: 10,
+                signature: None,
+                doc: None,
+                qualified_name: None,
+                visibility: None,
+                is_async: false,
+                is_static: false,
+                is_unsafe: false,
+                body_hash: None,
+            })
+            .unwrap();
+
+        indices.add(
+            returner_id,
+            NodeKind::Function,
+            returner_name,
+            None,
+            file_id,
+        );
+        indices.add(plain_id, NodeKind::Function, plain_name, None, file_id);
+        indices.add(error_type_id, NodeKind::Type, error_name, None, file_id);
+
+        edges.add_edge(
+            returner_id,
+            error_type_id,
+            EdgeKind::TypeOf {
+                context: Some(TypeOfContext::Return),
+                index: None,
+                name: None,
+            },
+            file_id,
+        );
+
+        let graph = CodeGraph::from_components(
+            arena,
+            edges,
+            strings,
+            files,
+            indices,
+            crate::graph::unified::NodeMetadataStore::new(),
+        );
+        (graph, returner_id, plain_id, error_type_id)
+    }
+
+    #[test]
+    fn test_match_returns_byte_exact_hit() {
+        let (graph, returner_id, _plain_id, _error_id) = build_returns_graph();
+        let pm = PluginManager::new();
+        let ctx = GraphEvalContext::new(&graph, &pm);
+        let entry = graph.nodes().get(returner_id).expect("returner exists");
+
+        // returns:error against the function with a TypeOf{Return} edge to
+        // the `error` type node should match (byte-exact).
+        assert!(match_returns(
+            &ctx,
+            returner_id,
+            entry,
+            &Operator::Equal,
+            &Value::String("error".to_string()),
+        ));
+    }
+
+    #[test]
+    fn test_match_returns_no_edges_misses() {
+        let (graph, _returner_id, plain_id, _error_id) = build_returns_graph();
+        let pm = PluginManager::new();
+        let ctx = GraphEvalContext::new(&graph, &pm);
+        let entry = graph.nodes().get(plain_id).expect("plain_fn exists");
+
+        // returns:error against a function with no TypeOf{Return} edges
+        // must NOT match (the legacy substring path would have to be
+        // entirely off this code path for this to hold).
+        assert!(!match_returns(
+            &ctx,
+            plain_id,
+            entry,
+            &Operator::Equal,
+            &Value::String("error".to_string()),
+        ));
+    }
+
+    #[test]
+    fn test_match_returns_byte_exact_miss_on_different_target_name() {
+        let (graph, returner_id, _plain_id, _error_id) = build_returns_graph();
+        let pm = PluginManager::new();
+        let ctx = GraphEvalContext::new(&graph, &pm);
+        let entry = graph.nodes().get(returner_id).expect("returner exists");
+
+        // returns:Error (capitalised) must NOT match `error` — byte-exact
+        // is case-sensitive.  This is the property the previous
+        // signature.contains substring path failed to enforce.
+        assert!(!match_returns(
+            &ctx,
+            returner_id,
+            entry,
+            &Operator::Equal,
+            &Value::String("Error".to_string()),
+        ));
+    }
+
+    #[test]
+    fn test_match_returns_rejects_non_callable_kinds() {
+        let (graph, _returner_id, _plain_id, error_id) = build_returns_graph();
+        let pm = PluginManager::new();
+        let ctx = GraphEvalContext::new(&graph, &pm);
+        // The `error` node is a Type, not a Function/Method, so the
+        // fast-path early-out should reject it without consulting edges.
+        let entry = graph.nodes().get(error_id).expect("error type exists");
+
+        assert!(!match_returns(
+            &ctx,
+            error_id,
+            entry,
+            &Operator::Equal,
+            &Value::String("error".to_string()),
+        ));
     }
 }

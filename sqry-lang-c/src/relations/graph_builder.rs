@@ -1816,6 +1816,36 @@ fn is_field_declarator_node(kind: &str) -> bool {
 }
 
 /// Process a single field declarator.
+///
+/// Cluster C / `C_OTHER_PLUGINS` (BadLiveware Go-batch DAG, 2026-04-29):
+/// every named C struct field is materialised as a `NodeKind::Property`
+/// node, parented to the enclosing struct via `Defines` + `Contains`
+/// edges. The qualified-name format is `<StructName>.<FieldName>`,
+/// matching the bare-name convention the C plugin already uses for
+/// struct/union nodes (the C plugin has no module concept), and aligned
+/// in shape with Java/Kotlin/Dart/classpath/Go's
+/// `<package>.<TypeName>.<FieldName>` cross-language norm.
+///
+/// The `TypeOf{Field}` edge's source is also migrated from the struct
+/// node to the new Property node (mirroring Go's `C_EDGE_MIGRATE`
+/// pattern). Aggregate "all fields of this struct" queries continue to
+/// resolve via the `Defines` / `Contains` parenting; only the edge
+/// source identity changes. The `TypeOfContext::Field` discriminator
+/// and the `field_name` metadata are unchanged.
+///
+/// Visibility and `static` are conservative defaults per the C audit
+/// (`docs/development/public-issue-triage/cluster_c_field_audit.md`):
+/// C struct members have no public/private discipline (everything is
+/// public-by-convention) and `static` at struct-member scope is not a
+/// language concept, so we pass `is_static = false` and
+/// `visibility = None`.
+///
+/// Fields whose declarator has no extractable name (e.g. anonymous
+/// bit-field padding `int : 4;`) are deliberately skipped — there is
+/// no stable qualified name we could synthesise that would be
+/// resolvable from CLI / MCP / LSP queries. Reference edges to the
+/// type tokens are also skipped in that case so we never emit an
+/// orphan edge with no field-side anchor.
 fn process_single_field_declarator(
     declarator: Node,
     struct_name: &str,
@@ -1823,8 +1853,11 @@ fn process_single_field_declarator(
     content: &[u8],
     helper: &mut GraphBuildHelper,
 ) {
-    // Extract field name
-    let Some(field_name) = extract_field_declarator_name(declarator, content) else {
+    // Extract field name + AST node so we can attach a line/column-aware
+    // span to the new Property node.
+    let Some((field_name, name_node)) =
+        extract_field_declarator_name_with_node(declarator, content)
+    else {
         return;
     };
 
@@ -1832,51 +1865,71 @@ fn process_single_field_declarator(
     let mut all_types = base_type_names.to_vec();
     all_types.extend(extract_all_type_names_from_c_type(declarator, content));
 
-    // Create struct node if needed
+    // Get or create the struct node. (`add_struct` is name-cached, so this
+    // is the same id `handle_struct_specifier` already registered.)
     let struct_id = helper.add_struct(struct_name, None);
 
-    // Create TypeOf edge with Field context
+    // Emit the per-field Property node and parent it to the struct.
+    let qualified_field_name = format!("{struct_name}.{field_name}");
+    let property_id = helper.add_property_with_static_and_visibility(
+        &qualified_field_name,
+        Some(span_from_node(name_node)),
+        false, // C struct members have no class-level `static`.
+        None,  // C has no field-level visibility discipline.
+    );
+    helper.add_defines_edge(struct_id, property_id);
+    helper.add_contains_edge(struct_id, property_id);
+
+    // Create TypeOf edge with Field context, sourced at the new Property
+    // node (post-migration shape — mirrors Go's C_EDGE_MIGRATE).
     let type_text = base_type_names.join(" ");
     let type_id = helper.add_type(&type_text, None);
     helper.add_typeof_edge_with_context(
-        struct_id,
+        property_id,
         type_id,
         Some(TypeOfContext::Field),
         None,
         Some(&field_name),
     );
 
-    // Create Reference edges for all referenced types
+    // Create Reference edges for all referenced types, also sourced at
+    // the Property node so the field is the queryable anchor for "what
+    // types does this field reference".
     for ref_type in &all_types {
         let ref_type_id = helper.add_type(ref_type, None);
-        helper.add_reference_edge(struct_id, ref_type_id);
+        helper.add_reference_edge(property_id, ref_type_id);
     }
 }
 
-/// Extract field name from a `field_declarator`.
-fn extract_field_declarator_name(declarator: Node, content: &[u8]) -> Option<String> {
-    // field_declarator can be:
-    // - field_identifier (simple field)
-    // - pointer_declarator, array_declarator, function_declarator (complex)
-
+/// Extract the field name **and** its identifier AST node from a
+/// `field_declarator`.
+///
+/// Returns the `field_identifier` `Node` alongside the extracted name so
+/// the caller can attach a line/column-aware `Span` to the new Property
+/// node (Cluster C / `C_OTHER_PLUGINS`). Anonymous bit-field padding
+/// (e.g. `int : 4;`) and other declarators that contain no
+/// `field_identifier` return `None`, which the caller treats as
+/// "skip Property emission for this field".
+fn extract_field_declarator_name_with_node<'tree>(
+    declarator: Node<'tree>,
+    content: &[u8],
+) -> Option<(String, Node<'tree>)> {
     match declarator.kind() {
         "field_identifier" => {
-            // Direct field identifier
-            declarator.utf8_text(content).ok().map(String::from)
+            let name = declarator.utf8_text(content).ok()?.to_string();
+            Some((name, declarator))
         }
         "field_declarator" => {
-            // Descend into field_declarator wrapper
             if let Some(nested) = declarator.child_by_field_name("declarator") {
-                return extract_field_declarator_name(nested, content);
+                return extract_field_declarator_name_with_node(nested, content);
             }
-            // Fallback to simple extraction
-            extract_simple_declarator_name(declarator, content)
+            extract_simple_declarator_name_with_node(declarator, content)
         }
         "function_declarator" => {
             if let Some(decl) = declarator.child_by_field_name("declarator") {
-                return extract_field_declarator_name(decl, content);
+                return extract_field_declarator_name_with_node(decl, content);
             }
-            extract_simple_declarator_name(declarator, content)
+            extract_simple_declarator_name_with_node(declarator, content)
         }
         _ => {
             // Check for direct field_identifier child
@@ -1886,13 +1939,43 @@ fn extract_field_declarator_name(declarator: Node, content: &[u8]) -> Option<Str
                 if let Some(child) = declarator.child(i as u32)
                     && child.kind() == "field_identifier"
                 {
-                    return child.utf8_text(content).ok().map(String::from);
+                    let name = child.utf8_text(content).ok()?.to_string();
+                    return Some((name, child));
                 }
             }
-
-            // Recurse for nested declarators
-            extract_simple_declarator_name(declarator, content)
+            extract_simple_declarator_name_with_node(declarator, content)
         }
+    }
+}
+
+/// Sibling of `extract_simple_declarator_name` that also returns the AST
+/// node where the identifier was found (for Span construction).
+fn extract_simple_declarator_name_with_node<'tree>(
+    declarator: Node<'tree>,
+    content: &[u8],
+) -> Option<(String, Node<'tree>)> {
+    match declarator.kind() {
+        "identifier" | "type_identifier" | "field_identifier" => {
+            let name = declarator.utf8_text(content).ok()?.to_string();
+            Some((name, declarator))
+        }
+        "pointer_declarator"
+        | "array_declarator"
+        | "function_declarator"
+        | "parenthesized_declarator" => {
+            if let Some(nested) = declarator.child_by_field_name("declarator") {
+                extract_simple_declarator_name_with_node(nested, content)
+            } else {
+                let mut cursor = declarator.walk();
+                for child in declarator.children(&mut cursor) {
+                    if let Some(found) = extract_simple_declarator_name_with_node(child, content) {
+                        return Some(found);
+                    }
+                }
+                None
+            }
+        }
+        _ => None,
     }
 }
 
@@ -1941,6 +2024,13 @@ fn process_single_union_field(
 }
 
 /// Process a single union field declarator.
+///
+/// Unions emit Property nodes per member with the same qualified-name
+/// shape as struct fields: `<UnionName>.<MemberName>`. Each `Property`
+/// is parented to the union node via `Defines` + `Contains`, and the
+/// `TypeOf{Field}` edge is sourced at the Property (mirroring the
+/// struct-field migration above). See `process_single_field_declarator`
+/// for the full Cluster C / `C_OTHER_PLUGINS` rationale.
 fn process_single_union_field_declarator(
     declarator: Node,
     union_name: &str,
@@ -1948,8 +2038,10 @@ fn process_single_union_field_declarator(
     content: &[u8],
     helper: &mut GraphBuildHelper,
 ) {
-    // Extract field name
-    let Some(field_name) = extract_field_declarator_name(declarator, content) else {
+    // Extract field name + AST node (for line/column-aware span).
+    let Some((field_name, name_node)) =
+        extract_field_declarator_name_with_node(declarator, content)
+    else {
         return;
     };
 
@@ -1960,21 +2052,33 @@ fn process_single_union_field_declarator(
     // Create union node if needed (use add_struct for now, unions are similar)
     let union_id = helper.add_struct(union_name, None);
 
-    // Create TypeOf edge with Field context
+    // Emit the per-member Property node.
+    let qualified_field_name = format!("{union_name}.{field_name}");
+    let property_id = helper.add_property_with_static_and_visibility(
+        &qualified_field_name,
+        Some(span_from_node(name_node)),
+        false,
+        None,
+    );
+    helper.add_defines_edge(union_id, property_id);
+    helper.add_contains_edge(union_id, property_id);
+
+    // Create TypeOf edge with Field context, sourced at the Property.
     let type_text = base_type_names.join(" ");
     let type_id = helper.add_type(&type_text, None);
     helper.add_typeof_edge_with_context(
-        union_id,
+        property_id,
         type_id,
         Some(TypeOfContext::Field),
         None,
         Some(&field_name),
     );
 
-    // Create Reference edges for all referenced types
+    // Create Reference edges for all referenced types, sourced at the
+    // Property so the union member is the queryable anchor.
     for ref_type in &all_types {
         let ref_type_id = helper.add_type(ref_type, None);
-        helper.add_reference_edge(union_id, ref_type_id);
+        helper.add_reference_edge(property_id, ref_type_id);
     }
 }
 

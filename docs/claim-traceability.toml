@@ -1,0 +1,41 @@
+# Public claim traceability manifest.
+#
+# The private source tree keeps the full manifest at
+# docs/development/workspace-aware-cross-repo/claims.toml. The sanitized
+# public/staged tree intentionally excludes docs/development/, so the CI gate
+# falls back to this public-safe manifest when the private manifest is absent.
+
+[manifest]
+version = 1
+updated_at = "2026-04-30"
+
+[claims.multi-root-supported]
+sources = [
+  "README.md:395",
+]
+surface = "README"
+runtime = "vscode"
+test_name = "resolve_logical_workspace_short_circuits_in_documented_order"
+test_file = "sqry-lsp/tests/multi_root_logical_workspace.rs"
+cargo_package = "sqry-lsp"
+cargo_test_target = "multi_root_logical_workspace"
+description = """
+Asserts that the five-branch LogicalWorkspace resolver short-circuits in
+the documented order across multi-root inputs.
+"""
+
+[claims.configurable-cross-repo]
+sources = [
+  "README.md:395",
+  "docs/FEATURE_LIST.md:371",
+]
+surface = "feature-list"
+runtime = "lsp"
+test_name = "resolve_logical_workspace_short_circuits_in_documented_order"
+test_file = "sqry-lsp/tests/multi_root_logical_workspace.rs"
+cargo_package = "sqry-lsp"
+cargo_test_target = "multi_root_logical_workspace"
+description = """
+Asserts that cross-repo classification is configurable per workspace and
+that the documented configuration surfaces resolve in the canonical order.
+"""

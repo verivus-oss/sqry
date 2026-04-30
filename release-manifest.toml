@@ -108,7 +108,7 @@ excluded = [
 ]
 
 [selection.cargo]
-public = [".cargo/config.toml", ".cargo/audit.toml"]
+public = [".cargo/config.toml", ".cargo/audit.toml", ".cargo/mutants.toml"]
 
 [selection.workflows]
 # GitHub Actions workflows tracked as part of the OSS surface contract.
@@ -121,10 +121,15 @@ public = [
     # Homebrew formula publisher. Runs in verivus-oss/sqry and pushes the
     # rendered formula to verivus-oss/homebrew-sqry on every release.
     ".github/workflows/publish-homebrew-tap.yml",
+    # P0 #1 of docs/reviews/test-strategy-audit-2026-04-30/CATALOGUE.md.
+    # cargo-mutants gate (PR changed-lines + master baseline rotation).
+    # Strategy ref: /srv/repos/Verivus_Test_Strategy.md §2.4, §7.1 #7.
+    ".github/workflows/mutation-gate.yml",
 ]
 
 [selection.docs]
 files_public = [
+    "docs/claim-traceability.toml",
     "docs/FEATURE_LIST.md",
     "docs/SCHEMA.md",
     "docs/SEMANTIC_VERSIONING.md",
@@ -147,6 +152,9 @@ public = [
     # STEP_8 reproduction harness for the operational-folder regression
     # (zero member/excluded `No index found` lines).
     "scripts/repro/operational_folder.sh",
+    # mutation-gate.yml summary renderer. Reads cargo-mutants outcomes.json
+    # and emits Markdown into GITHUB_STEP_SUMMARY.
+    "scripts/ci/mutants_summary.py",
 ]
 
 [selection.packaging]

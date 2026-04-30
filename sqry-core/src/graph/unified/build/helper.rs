@@ -192,6 +192,23 @@ impl<'a> GraphBuildHelper<'a> {
         &self.file_path
     }
 
+    /// Mutable access to the underlying [`StagingGraph`].
+    ///
+    /// Exposed for plugin call sites that need to forward typed
+    /// metadata into the staging buffer alongside their normal `add_*`
+    /// node-creation flow — for example, the Go plugin's
+    /// `add_synthetic_variable` helper (C_SUPPRESS) which calls
+    /// [`StagingGraph::merge_macro_metadata`] to record a
+    /// `NodeMetadata::Synthetic` flag on the freshly-staged Variable
+    /// node so the suppression contract on
+    /// [`crate::graph::unified::concurrent::graph::GraphSnapshot::find_by_pattern`]
+    /// is satisfied via the canonical metadata-bit channel (in addition
+    /// to the structural name-shape fallback).
+    #[must_use]
+    pub fn staging_mut(&mut self) -> &mut StagingGraph {
+        self.staging
+    }
+
     /// Attach body hashes to all staged nodes using the given content bytes.
     ///
     /// Multi-language plugins (Vue, Svelte) should call this per extracted

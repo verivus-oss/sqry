@@ -5,6 +5,7 @@ use crate::relations::local_scopes::{self, JavaScopeTree, ResolutionOutcome};
 use sqry_core::graph::unified::StagingGraph;
 use sqry_core::graph::unified::build::helper::GraphBuildHelper;
 use sqry_core::graph::unified::edge::FfiConvention;
+use sqry_core::graph::unified::edge::kind::TypeOfContext;
 use sqry_core::graph::{GraphBuilder, GraphBuilderError, GraphResult, Language, Span};
 use tree_sitter::{Node, Tree};
 
@@ -83,7 +84,7 @@ impl GraphBuilder for JavaGraphBuilder {
                 );
             } else {
                 // Use add_method_with_signature to store return type for `returns:` queries
-                helper.add_method_with_signature(
+                let method_id = helper.add_method_with_signature(
                     qualified_name,
                     Some(span),
                     false,
@@ -91,6 +92,30 @@ impl GraphBuilder for JavaGraphBuilder {
                     context.visibility.as_deref(),
                     context.return_type.as_deref(),
                 );
+
+                // Emit `TypeOf { context: Return }` edge so byte-exact
+                // `returns:<TypeName>` queries (B2_EXECUTOR contract) match
+                // Java methods. The target name is the source-text of the
+                // return-type annotation exactly as declared (no
+                // canonicalization, no generic stripping). `void` is skipped
+                // to mirror the C#/Kotlin/TypeScript precedent — the empty
+                // edge would otherwise alias every void-returning method to
+                // the same type node.
+                if let Some(return_type_text) = context.return_type.as_deref()
+                    && return_type_text.trim() != "void"
+                {
+                    let type_id = helper.add_type(return_type_text, None);
+                    let method_simple_name = qualified_name
+                        .rsplit_once('.')
+                        .map_or(qualified_name, |(_, simple)| simple);
+                    helper.add_typeof_edge_with_context(
+                        method_id,
+                        type_id,
+                        Some(TypeOfContext::Return),
+                        Some(0),
+                        Some(method_simple_name),
+                    );
+                }
 
                 // JNI: Create FFI edge for native methods
                 if context.is_native {

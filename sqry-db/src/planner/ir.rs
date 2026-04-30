@@ -331,6 +331,32 @@ pub enum Predicate {
     InScope(ScopeKind),
     /// `name:<pattern>`: true iff the node's name matches the pattern.
     MatchesName(StringPattern),
+    /// `returns:<TypeName>`: true iff the node (a function or method) has at
+    /// least one outgoing
+    /// [`EdgeKind::TypeOf { context: Some(TypeOfContext::Return), .. }`][crate::queries]
+    /// edge whose target node's interned name matches `TypeName` exactly.
+    ///
+    /// # Semantics
+    ///
+    /// The match is evaluated **edge-based, not signature-text-based**: the
+    /// executor walks `TypeOf` edges with `TypeOfContext::Return` from the
+    /// candidate node, resolves the target node's primary name through the
+    /// snapshot string interner, and compares with byte-exact equality
+    /// (case-sensitive). Substring, glob, and regex variants are deliberately
+    /// out of scope for this predicate; a future `returns~:` token (regex
+    /// form) will lower to a separate IR variant rather than overload this
+    /// one — the same shape used today for [`Predicate::References`] vs the
+    /// `references ~= /…/` regex form.
+    ///
+    /// # Why a bare `String` instead of [`StringPattern`]?
+    ///
+    /// [`StringPattern`] auto-detects glob meta-characters and promotes to
+    /// [`MatchMode::Glob`]; modelling the predicate value with `String`
+    /// keeps the contract narrow — `returns:Foo*` is a parse error in
+    /// users' minds, not a hidden glob expansion. The single-mode shape
+    /// also keeps cache keys monomorphic which simplifies any future
+    /// derived-query backing for this predicate.
+    Returns(String),
 
     // --- Boolean combinators ---
     /// Logical AND over a list of predicates. Empty list is vacuously true.
@@ -355,7 +381,8 @@ impl Predicate {
             | Predicate::IsUnused
             | Predicate::InFile(_)
             | Predicate::InScope(_)
-            | Predicate::MatchesName(_) => false,
+            | Predicate::MatchesName(_)
+            | Predicate::Returns(_) => false,
 
             Predicate::Callers(v)
             | Predicate::Callees(v)

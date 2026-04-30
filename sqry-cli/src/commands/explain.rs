@@ -4,13 +4,15 @@
 
 use crate::args::Cli;
 use crate::commands::graph::loader::{GraphLoadConfig, load_unified_graph_for_cli};
+use crate::commands::impact::{emit_ambiguous_symbol_error, emit_symbol_not_found};
 use crate::index_discovery::find_nearest_index;
 use crate::output::OutputStreams;
 use anyhow::{Context, Result, anyhow};
 use serde::Serialize;
+use sqry_core::graph::unified::FileScope;
 use sqry_core::graph::unified::concurrent::GraphSnapshot;
+use sqry_core::graph::unified::resolution::SymbolResolveError;
 use sqry_core::graph::unified::storage::{FileRegistry, NodeEntry};
-use sqry_core::graph::unified::{FileScope, ResolutionMode, SymbolQuery, SymbolResolutionOutcome};
 
 /// Symbol explanation output
 #[derive(Debug, Serialize)]
@@ -46,33 +48,22 @@ struct SymbolContext {
     end_line: u32,
 }
 
-/// Find a symbol in the graph by file path and symbol name.
+/// Find a symbol in the graph by file path and symbol name using the
+/// shared ambiguity-aware resolver.
+///
+/// The resolver scope is restricted to `file_path` so the candidate set
+/// reflects "what `symbol_name` could mean inside that one file." When
+/// two or more candidates collide (e.g. a struct field shadowed by a
+/// local variable in another function in the same file) the typed
+/// [`SymbolResolveError::Ambiguous`] payload propagates up to
+/// [`run_explain`], which renders the standard `sqry::ambiguous_symbol`
+/// envelope.
 fn resolve_symbol_by_file_and_name(
     snapshot: &GraphSnapshot,
     file_path: &std::path::Path,
     symbol_name: &str,
-) -> Result<sqry_core::graph::unified::NodeId> {
-    let query = SymbolQuery {
-        symbol: symbol_name,
-        file_scope: FileScope::Path(file_path),
-        mode: ResolutionMode::Strict,
-    };
-
-    let witness = snapshot.resolve_symbol_with_witness(&query);
-    match witness.outcome {
-        SymbolResolutionOutcome::Resolved(node_id) => Ok(node_id),
-        SymbolResolutionOutcome::NotFound => Err(anyhow!(
-            "Symbol '{symbol_name}' not found in '{}'",
-            file_path.display()
-        )),
-        SymbolResolutionOutcome::FileNotIndexed => {
-            Err(anyhow!("File '{}' is not indexed", file_path.display()))
-        }
-        SymbolResolutionOutcome::Ambiguous(_) => Err(anyhow!(
-            "Symbol '{symbol_name}' is ambiguous in '{}'",
-            file_path.display()
-        )),
-    }
+) -> Result<sqry_core::graph::unified::NodeId, SymbolResolveError> {
+    snapshot.resolve_global_symbol_ambiguity_aware(symbol_name, FileScope::Path(file_path))
 }
 
 /// Build a `SymbolContext` by reading the source file and extracting the relevant lines.
@@ -144,7 +135,24 @@ pub fn run_explain(
         loc.index_root.join(file_path)
     };
 
-    let node_id = resolve_symbol_by_file_and_name(&snapshot, &requested_file_path, symbol_name)?;
+    // Route resolution through the shared ambiguity-aware resolver. On
+    // ambiguity (e.g. `NeedTags` matching a struct field + a local
+    // variable inside the same file) we surface the typed
+    // `sqry::ambiguous_symbol` envelope and exit with the canonical
+    // ambiguous-symbol exit code (4); on absence we surface the
+    // `sqry::symbol_not_found` envelope and exit with 2.
+    let node_id =
+        match resolve_symbol_by_file_and_name(&snapshot, &requested_file_path, symbol_name) {
+            Ok(id) => id,
+            Err(SymbolResolveError::Ambiguous(err)) => {
+                let exit_code = emit_ambiguous_symbol_error(&mut streams, &err, cli.json);
+                std::process::exit(exit_code);
+            }
+            Err(SymbolResolveError::NotFound { name }) => {
+                let exit_code = emit_symbol_not_found(&mut streams, &name, cli.json);
+                std::process::exit(exit_code);
+            }
+        };
     let symbol_entry = snapshot
         .get_node(node_id)
         .ok_or_else(|| anyhow!("Symbol node not found in graph"))?;

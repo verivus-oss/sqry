@@ -25,6 +25,7 @@ use std::{
 };
 
 use sqry_core::graph::unified::NodeId as UnifiedNodeId;
+use sqry_core::graph::unified::NodeMetadataStore;
 use sqry_core::graph::unified::build::helper::CalleeKindHint;
 use sqry_core::graph::unified::build::helper::GraphBuildHelper;
 use sqry_core::graph::unified::build::staging::StagingGraph;
@@ -37,6 +38,52 @@ use tree_sitter::{Node, Tree};
 use crate::relations::local_scopes;
 
 const DEFAULT_SCOPE_DEPTH: usize = 4;
+
+/// Add a Variable node and immediately flag it synthetic (C_SUPPRESS).
+///
+/// Used at every Go-plugin emission site that creates a placeholder
+/// Variable for binding-plane / scope analysis instead of a real
+/// source-language symbol:
+///
+/// - `<field:operand.field>` field-access shadows produced by
+///   `process_field_access_unified` when the operand cannot be resolved
+///   to a known struct type (local `:=` bindings, package-qualified
+///   expressions, map / chan / func / anonymous-struct receivers).
+/// - `<ident>@<offset>` per-binding-site Variables produced by the
+///   local-scope resolver in [`local_scopes::handle_identifier_for_reference`]
+///   and its helpers. See `sqry-lang-go/src/relations/local_scopes.rs`.
+///
+/// The synthetic flag is delivered via two parallel channels so the
+/// node is suppressed from user-facing search even if the staging
+/// `NodeMetadataStore` does not get wired through to the global
+/// metadata store at commit time:
+///
+/// 1. `staging.merge_macro_metadata` records the
+///    `NodeMetadata::Synthetic` bit keyed on the staging-local
+///    `NodeId`. This is the canonical channel — it lights up the
+///    metadata-store side of the suppression check in
+///    [`sqry_core::graph::unified::concurrent::graph::GraphSnapshot::is_node_synthetic`]
+///    once the staging-to-graph metadata wire-through lands.
+/// 2. The node's qualified name (the string passed to
+///    `helper.add_variable`) follows the structural shape recognised
+///    by
+///    [`sqry_core::graph::unified::storage::arena::NodeEntry::is_synthetic_placeholder_name`].
+///    This name-shape fallback is what suppresses the node TODAY,
+///    independently of the metadata channel.
+///
+/// Use this helper at every synthetic emission site so the
+/// dual-channel contract is upheld in lockstep.
+fn add_synthetic_variable(
+    helper: &mut GraphBuildHelper,
+    qualified_name: &str,
+    span: Option<Span>,
+) -> UnifiedNodeId {
+    let node_id = helper.add_variable(qualified_name, span);
+    let mut store = NodeMetadataStore::new();
+    store.mark_synthetic(node_id);
+    helper.staging_mut().merge_macro_metadata(&store);
+    node_id
+}
 
 /// Go builtin functions that should be annotated with `is_builtin: true`
 const GO_BUILTINS: &[&str] = &[
@@ -143,7 +190,7 @@ impl GraphBuilder for GoGraphBuilder {
         // Phase 1: Create function/method nodes
         for context in ast_graph.contexts() {
             let qualified_name = context.qualified_name();
-            let span = Span::from_bytes(context.span.0, context.span.1);
+            let span = context.location;
             let visibility = visibility_for_identifier(&context.name);
 
             if context.is_method {
@@ -365,7 +412,7 @@ fn handle_type_alias(node: Node, content: &[u8], helper: &mut GraphBuildHelper, 
     let qualified_alias = format!("{package}.{alias_name}");
 
     // Create Type node for the alias
-    let alias_id = helper.add_type(&qualified_alias, None);
+    let alias_id = helper.add_type(&qualified_alias, Some(span_from_node(node)));
 
     // Add export edge if the alias is exported
     if is_exported {
@@ -711,8 +758,33 @@ struct FunctionContext {
     name: String,
     package: String,
     receiver_type: Option<String>,
+    /// Optional name bound to the receiver, e.g. `func (s *SelectorSource) F()`
+    /// records `Some("s")` here. Anonymous receivers (`func (*SelectorSource) F()`)
+    /// store `None`. Used by `C_EDGE_MIGRATE` field-access resolution to
+    /// recognise `s.NeedTags` as a reference into the receiver type.
+    receiver_name: Option<String>,
     is_method: bool,
+    /// Byte range of the function declaration node, kept for `find_context`
+    /// byte-based AST lookups during edge walks.
     span: (usize, usize),
+    /// Line/column source span of the function declaration, used for node
+    /// emission. Stored so that downstream emission paths (which previously
+    /// reconstructed a `Span::from_bytes(byte_start, byte_end)`) can produce
+    /// `(line, column)` coordinates instead of the legacy `(0, byte_offset)`
+    /// shape. See verivus-oss/sqry#74 / verivus-oss/sqry#153.
+    location: Span,
+    /// Map from in-scope identifier name to its declared type as written in
+    /// the source (the lexically-first segment of the type expression -
+    /// `*SelectorSource` is recorded as `SelectorSource`, `[]Foo` as `Foo`).
+    /// Populated from receiver + parameter declarations during
+    /// `extract_function_context` / `extract_method_context`. Used by
+    /// `C_EDGE_MIGRATE` to resolve `<operand>.<field>` selector accesses
+    /// to the field-Property qualified name `<package>.<TypeName>.<FieldName>`
+    /// without running full Go type inference. Local `:=` bindings inside
+    /// the body are intentionally NOT tracked here - that is the scope
+    /// tree's job, and field-access resolution from local bindings is left
+    /// to a future pass that needs Go type inference.
+    binding_types: HashMap<String, String>,
 }
 
 impl FunctionContext {
@@ -728,6 +800,126 @@ impl FunctionContext {
             format!("{}.{}", self.package, self.name)
         }
     }
+
+    /// Resolve a selector-expression operand text (e.g. `s` or `selector`)
+    /// to its package-qualified Go type name (e.g. `main.SelectorSource`)
+    /// using only the receiver + parameter type bindings captured at
+    /// function-context-extraction time.
+    ///
+    /// Returns `None` for unknown operands (locals not in `binding_types`,
+    /// package qualifiers like `pkg.Foo`, anonymous-struct receivers, etc.).
+    /// Callers fall back to the legacy placeholder edge shape on `None` so
+    /// no resolution failure ever silently drops a reference edge.
+    fn resolve_operand_to_type(&self, operand: &str) -> Option<String> {
+        let raw_type = self.binding_types.get(operand)?;
+        // Strip leading `*` (pointer), `[]` (slice), `...` (variadic) -
+        // we only resolve the base named type. Map / chan / func types
+        // are intentionally not resolved (they have no struct field set).
+        let trimmed = strip_go_type_modifiers(raw_type);
+        if trimmed.is_empty() || trimmed.contains('[') || trimmed.contains('(') {
+            return None;
+        }
+        if trimmed.contains('.') {
+            // Already qualified - assume it lives in another package and
+            // is reachable by its fully-qualified name as written.
+            Some(trimmed.to_string())
+        } else {
+            Some(format!("{}.{}", self.package, trimmed))
+        }
+    }
+}
+
+/// Strip leading Go type-expression prefixes that don't affect the base
+/// named type for field-access resolution. Examples:
+///
+/// - `*SelectorSource` -> `SelectorSource`
+/// - `**SelectorSource` -> `SelectorSource`
+/// - `[]SelectorSource` -> `SelectorSource`
+/// - `...SelectorSource` -> `SelectorSource`
+/// - `[5]SelectorSource` -> left as-is (returns the original string with
+///   `[5]` prefix; the caller's `contains('[')` guard then refuses to
+///   resolve it - we deliberately do not try to parse fixed-size array
+///   syntax here).
+///
+/// This is intentionally conservative: anything we cannot syntactically
+/// reduce to a bare identifier (or `pkg.Type`) is returned as-is and the
+/// caller treats it as unresolvable. Map / chan / func / generic types
+/// are all in that bucket.
+fn strip_go_type_modifiers(raw: &str) -> &str {
+    let mut s = raw.trim();
+    loop {
+        if let Some(rest) = s.strip_prefix('*') {
+            s = rest.trim_start();
+            continue;
+        }
+        if let Some(rest) = s.strip_prefix("...") {
+            s = rest.trim_start();
+            continue;
+        }
+        if let Some(rest) = s.strip_prefix("[]") {
+            s = rest.trim_start();
+            continue;
+        }
+        break;
+    }
+    s
+}
+
+/// Build a line-index-aware [`Span`] from a tree-sitter [`Node`].
+///
+/// Tree-sitter's [`Node::start_position`] and [`Node::end_position`] return
+/// `(row, column)` already, so this is a thin adapter — but using it
+/// consistently is what stops the Go plugin from regressing back to
+/// [`Span::from_bytes`], which records `(line=0, column=byte_offset)` and
+/// then off-by-ones into a "line 1, column = byte offset" output that breaks
+/// downstream tools (see verivus-oss/sqry#74, #75).
+pub(crate) fn span_from_node(node: Node<'_>) -> Span {
+    let start = node.start_position();
+    let end = node.end_position();
+    Span::new(
+        sqry_core::graph::node::Position::new(start.row, start.column),
+        sqry_core::graph::node::Position::new(end.row, end.column),
+    )
+}
+
+/// Build a line-index-aware [`Span`] from a byte range.
+///
+/// Used by emission paths that only have `(start_byte, end_byte)` available
+/// (typically because the originating tree-sitter [`Node`] has already been
+/// dropped — e.g. when emitting a node from a `local_scopes::Binding`).
+///
+/// Falls back to `(line=0, column=byte)` shape **only** if the byte range
+/// is malformed; well-formed inputs always produce a true `(line, column)`
+/// span. This avoids the verivus-oss/sqry#74 regression where every Go
+/// symbol surfaced `start_line: 1` and `start_column` was a byte offset.
+pub(crate) fn span_from_byte_range(content: &[u8], start_byte: usize, end_byte: usize) -> Span {
+    let (start_line, start_column) = byte_to_line_column(content, start_byte);
+    let (end_line, end_column) = byte_to_line_column(content, end_byte);
+    Span::new(
+        sqry_core::graph::node::Position::new(start_line, start_column),
+        sqry_core::graph::node::Position::new(end_line, end_column),
+    )
+}
+
+/// Convert a byte offset into a `(line, column)` pair, both **0-indexed** to
+/// match tree-sitter's `Point` representation (so it composes cleanly with
+/// `GraphBuildHelper::add_node_internal`'s 1-based line normalization).
+///
+/// Walks the content byte-by-byte counting newlines. Acceptable for the
+/// occasional binding emission site where this is called once per local
+/// reference; not on the hot Phase 1 path (which uses
+/// [`span_from_node`] directly).
+fn byte_to_line_column(content: &[u8], byte_offset: usize) -> (usize, usize) {
+    let clamped = byte_offset.min(content.len());
+    let mut line = 0usize;
+    let mut last_newline_after = 0usize;
+    for (i, &byte) in content.iter().take(clamped).enumerate() {
+        if byte == b'\n' {
+            line += 1;
+            last_newline_after = i + 1;
+        }
+    }
+    (line, clamped - last_newline_after)
 }
 
 #[allow(dead_code)]
@@ -805,12 +997,16 @@ fn extract_package_name(node: Node, content: &[u8]) -> Option<String> {
 fn extract_function_context(node: Node, content: &[u8], package: &str) -> Option<FunctionContext> {
     let name_node = node.child_by_field_name("name")?;
     let name = name_node.utf8_text(content).ok()?.to_string();
+    let binding_types = extract_parameter_bindings(node, content);
     Some(FunctionContext {
         name,
         package: package.to_string(),
         receiver_type: None,
+        receiver_name: None,
         is_method: false,
         span: (node.start_byte(), node.end_byte()),
+        location: span_from_node(node),
+        binding_types,
     })
 }
 
@@ -819,13 +1015,97 @@ fn extract_method_context(node: Node, content: &[u8], package: &str) -> Option<F
     let name_node = node.child_by_field_name("name")?;
     let name = name_node.utf8_text(content).ok()?.to_string();
     let receiver_type = extract_receiver_type(node, content);
+    let receiver_name = extract_receiver_name(node, content);
+    let mut binding_types = extract_parameter_bindings(node, content);
+    if let (Some(rname), Some(rtype)) = (receiver_name.as_deref(), receiver_type.as_deref()) {
+        binding_types.insert(rname.to_string(), rtype.to_string());
+    }
     Some(FunctionContext {
         name,
         package: package.to_string(),
         receiver_type,
+        receiver_name,
         is_method: true,
         span: (node.start_byte(), node.end_byte()),
+        location: span_from_node(node),
+        binding_types,
     })
+}
+
+/// Extract the named identifier bound to a method's receiver, if any.
+///
+/// `func (s *SelectorSource) Foo()` returns `Some("s")`; an anonymous
+/// receiver `func (*SelectorSource) Foo()` returns `None`.
+#[allow(dead_code)]
+fn extract_receiver_name(node: Node, content: &[u8]) -> Option<String> {
+    let receiver_node = node.child_by_field_name("receiver")?;
+    for i in 0..receiver_node.child_count() {
+        #[allow(clippy::cast_possible_truncation)]
+        if let Some(param) = receiver_node.child(i as u32)
+            && param.kind() == "parameter_declaration"
+            && let Some(name_node) = param.child_by_field_name("name")
+        {
+            return name_node
+                .utf8_text(content)
+                .ok()
+                .map(std::string::ToString::to_string);
+        }
+    }
+    None
+}
+
+/// Walk a function/method declaration's `parameters` list and record
+/// each named parameter's declared type as written in source.
+///
+/// Used by `C_EDGE_MIGRATE` selector-expression resolution. Captures
+/// the lexical type text - downstream callers strip pointer / slice /
+/// variadic prefixes via `strip_go_type_modifiers` to get the bare
+/// type name they need for Property qualified-name lookup.
+///
+/// Multi-name declarations like `func F(a, b SelectorSource)` produce
+/// two entries (`a -> SelectorSource`, `b -> SelectorSource`).
+/// Variadic parameters are recorded with their stripped element type.
+/// Anonymous parameters are skipped (they have no name to bind).
+#[allow(dead_code)]
+fn extract_parameter_bindings(node: Node, content: &[u8]) -> HashMap<String, String> {
+    let mut bindings = HashMap::new();
+    let Some(params_node) = node.child_by_field_name("parameters") else {
+        return bindings;
+    };
+    let mut cursor = params_node.walk();
+    for param_decl in params_node.named_children(&mut cursor) {
+        match param_decl.kind() {
+            "parameter_declaration" => {
+                let Some(type_node) = param_decl.child_by_field_name("type") else {
+                    continue;
+                };
+                let Ok(type_text) = type_node.utf8_text(content) else {
+                    continue;
+                };
+                let mut name_cursor = param_decl.walk();
+                for name_node in param_decl.children_by_field_name("name", &mut name_cursor) {
+                    if let Ok(name) = name_node.utf8_text(content) {
+                        bindings.insert(name.to_string(), type_text.to_string());
+                    }
+                }
+            }
+            "variadic_parameter_declaration" => {
+                let Some(type_node) = param_decl.child_by_field_name("type") else {
+                    continue;
+                };
+                let Ok(type_text) = type_node.utf8_text(content) else {
+                    continue;
+                };
+                if let Some(name_node) = param_decl.child_by_field_name("name")
+                    && let Ok(name) = name_node.utf8_text(content)
+                {
+                    bindings.insert(name.to_string(), type_text.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    bindings
 }
 
 #[allow(dead_code)]
@@ -866,7 +1146,7 @@ fn extract_call_target(node: Node, content: &[u8]) -> GraphResult<String> {
             .utf8_text(content)
             .map(std::string::ToString::to_string)
             .map_err(|_| GraphBuilderError::ParseError {
-                span: Span::from_bytes(node.start_byte(), node.end_byte()),
+                span: span_from_node(node),
                 reason: "Invalid UTF-8 in identifier".to_string(),
             }),
         "selector_expression" => {
@@ -881,7 +1161,7 @@ fn extract_call_target(node: Node, content: &[u8]) -> GraphResult<String> {
                 return Ok(method_name.to_string());
             }
             Err(GraphBuilderError::ParseError {
-                span: Span::from_bytes(node.start_byte(), node.end_byte()),
+                span: span_from_node(node),
                 reason: "Failed to parse selector_expression".to_string(),
             })
         }
@@ -889,7 +1169,7 @@ fn extract_call_target(node: Node, content: &[u8]) -> GraphResult<String> {
             .utf8_text(content)
             .map(|s| s.trim().to_string())
             .map_err(|_| GraphBuilderError::ParseError {
-                span: Span::from_bytes(node.start_byte(), node.end_byte()),
+                span: span_from_node(node),
                 reason: format!("Unknown call target kind: {}", node.kind()),
             }),
     }
@@ -932,7 +1212,7 @@ fn process_call_expression_unified(
 
     // Ensure both caller and callee nodes exist
     let source_id = ensure_caller_node(helper, caller_context);
-    let call_span = Span::from_bytes(node.start_byte(), node.end_byte());
+    let call_span = span_from_node(node);
     let target_id = helper.ensure_callee(&callee_qualified, call_span, CalleeKindHint::Function);
 
     // Add call edge
@@ -974,10 +1254,7 @@ fn ensure_caller_node(
 ) -> UnifiedNodeId {
     helper.ensure_function(
         &caller_context.qualified_name(),
-        Some(Span::from_bytes(
-            caller_context.span.0,
-            caller_context.span.1,
-        )),
+        Some(caller_context.location),
         false,
         false,
     )
@@ -1060,10 +1337,7 @@ fn process_import_spec_unified(
     if let Some(import_path) = path {
         // Create module nodes
         let from_id = helper.add_module(&ast_graph.package, None);
-        let to_module_id = helper.add_import(
-            &import_path,
-            Some(Span::from_bytes(node.start_byte(), node.end_byte())),
-        );
+        let to_module_id = helper.add_import(&import_path, Some(span_from_node(node)));
 
         // Add import edge
         helper.add_import_edge(from_id, to_module_id);
@@ -1083,7 +1357,7 @@ fn add_export_edge_unified(
     let visibility = visibility_for_identifier(name);
     let to_id = helper.add_function_with_visibility(
         &symbol_qualified,
-        Some(Span::from_bytes(node.start_byte(), node.end_byte())),
+        Some(span_from_node(node)),
         false,
         false,
         Some(visibility),
@@ -1111,7 +1385,7 @@ fn add_method_export_edge_unified(
     let visibility = visibility_for_identifier(name);
     let to_id = helper.add_method_with_visibility(
         &symbol_qualified,
-        Some(Span::from_bytes(node.start_byte(), node.end_byte())),
+        Some(span_from_node(node)),
         false,
         false,
         Some(visibility),
@@ -1209,8 +1483,22 @@ fn process_type_parameters(
             // Create qualified parameter name: TypeName.ParamName
             let qualified_param = format!("{package}.{type_name}.{param_name}");
 
-            // Create TypeParameter node
-            let param_id = helper.add_type(&qualified_param, None);
+            // Create TypeParameter node.
+            //
+            // Span MUST be `Some(span_from_node(name_node))`: each type
+            // parameter is a distinct source declaration (Go 1.18+ generics)
+            // anchored on the parameter-name identifier (e.g. `T` in
+            // `type List[T any]`). Passing `None` here was the gemini iter-2
+            // BLOCK on the BadLiveware Go-batch fix (verivus-oss/sqry#74,
+            // #75): it forced every type-parameter declaration onto
+            // `(line=0, column=0)`, which prevented "Find Definition" /
+            // hover navigation from landing on the parameter declaration
+            // site. The constraint-side `add_type(..., None)` calls in
+            // `process_type_constraint` are intentionally `None` — they
+            // create shared synthetic reference stubs (e.g. the single
+            // `any`, `comparable`, or `io.Reader` Type node referenced
+            // from many declarations) that have no single source location.
+            let param_id = helper.add_type(&qualified_param, Some(span_from_node(name_node)));
 
             // Process constraint if present
             if let Some(constraint) = constraint_node {
@@ -1364,7 +1652,7 @@ fn handle_type_spec(
             // Type alias: type UserID = int, type GenericAlias[T any] = []T
             // Create TypeOf edge (alias → target) and Reference edges
             let qualified_name = format!("{package}.{name}");
-            let type_id = helper.add_type(&qualified_name, None);
+            let type_id = helper.add_type(&qualified_name, Some(span_from_node(type_spec)));
 
             // Add export edge if exported
             if is_exported {
@@ -1460,10 +1748,7 @@ fn handle_struct_type_spec(ctx: &TypeSpecContext, helper: &mut GraphBuildHelper)
     let visibility = visibility_for_identifier(ctx.name);
     let struct_id = helper.add_struct_with_visibility(
         &symbol_qualified,
-        Some(Span::from_bytes(
-            ctx.type_spec.start_byte(),
-            ctx.type_spec.end_byte(),
-        )),
+        Some(span_from_node(ctx.type_spec)),
         Some(visibility),
     );
     if ctx.is_exported {
@@ -1471,10 +1756,17 @@ fn handle_struct_type_spec(ctx: &TypeSpecContext, helper: &mut GraphBuildHelper)
         helper.add_export_edge(module_id, struct_id);
     }
 
-    // Phase 1-2: Handle embedding (Inherits edges)
-    process_struct_embedding(ctx.type_node, ctx.content, helper, struct_id, ctx.package);
+    // Phase 1-2: Handle embedding (Inherits edges + embedded-field Property)
+    process_struct_embedding(
+        ctx.type_node,
+        ctx.content,
+        helper,
+        struct_id,
+        ctx.package,
+        &symbol_qualified,
+    );
 
-    // Phase 3: Handle field types (TypeOf and Reference edges)
+    // Phase 3: Handle field types (TypeOf and Reference edges + Property)
     process_struct_fields(
         ctx.type_node,
         &symbol_qualified,
@@ -1490,10 +1782,7 @@ fn handle_interface_type_spec(ctx: &TypeSpecContext, helper: &mut GraphBuildHelp
     let visibility = visibility_for_identifier(ctx.name);
     let interface_id = helper.add_interface_with_visibility(
         &symbol_qualified,
-        Some(Span::from_bytes(
-            ctx.type_spec.start_byte(),
-            ctx.type_spec.end_byte(),
-        )),
+        Some(span_from_node(ctx.type_spec)),
         Some(visibility),
     );
     if ctx.is_exported {
@@ -1557,6 +1846,7 @@ fn process_struct_embedding(
     helper: &mut GraphBuildHelper,
     child_id: UnifiedNodeId,
     package: &str,
+    enclosing_struct_qualified: &str,
 ) {
     // Find field_declaration_list inside struct_type
     let mut cursor = struct_node.walk();
@@ -1574,13 +1864,45 @@ fn process_struct_embedding(
                         // Qualify the embedded type name
                         let parent_qualified = if embedded_name.contains('.') {
                             // Already qualified (e.g., pkg.Type)
-                            embedded_name
+                            embedded_name.clone()
                         } else {
                             // Assume same package
                             format!("{package}.{embedded_name}")
                         };
                         let parent_id = helper.add_struct(&parent_qualified, None);
                         helper.add_inherits_edge(child_id, parent_id);
+
+                        // Cluster C / C_PROPERTY_EMIT: emit a `Property` node
+                        // for the embedded field as well. Go's "embedding" is
+                        // composition with promotion, so the embedded type
+                        // name doubles as the field name (`s.Parent.Foo()` is
+                        // also reachable as `s.Foo()`). Surface the embedded
+                        // slot as a Property under the enclosing struct using
+                        // the embedded type's last name segment as the field
+                        // name. Visibility follows the same Go-export rule
+                        // as named fields.
+                        //
+                        // Note: when the embedded type is qualified (e.g.
+                        // `pkg.Foo`), the Go field name promoted onto the
+                        // enclosing struct is just `Foo` - so we use
+                        // `embedded_name.rsplit('.').next()` as the local
+                        // field name, but parent it under the
+                        // `<package>.<EnclosingStruct>` qualifier.
+                        let local_field_name = embedded_name
+                            .rsplit('.')
+                            .next()
+                            .unwrap_or(embedded_name.as_str());
+                        let qualified_field_name =
+                            format!("{enclosing_struct_qualified}.{local_field_name}");
+                        let visibility = visibility_for_identifier(local_field_name);
+                        let property_id = helper.add_property_with_static_and_visibility(
+                            &qualified_field_name,
+                            Some(span_from_node(type_node)),
+                            false,
+                            Some(visibility),
+                        );
+                        helper.add_defines_edge(child_id, property_id);
+                        helper.add_contains_edge(child_id, property_id);
                     }
                 }
             }
@@ -1837,13 +2159,7 @@ fn process_single_var_spec(
         let qualified_var_name = format!("{package}.{var_name}");
 
         // Create variable node
-        let var_id = helper.add_variable(
-            &qualified_var_name,
-            Some(Span::from_bytes(
-                name_node.start_byte(),
-                name_node.end_byte(),
-            )),
-        );
+        let var_id = helper.add_variable(&qualified_var_name, Some(span_from_node(name_node)));
 
         // Create type node and TypeOf edge with Variable context
         let type_id = helper.add_type(&type_name, None);
@@ -2214,23 +2530,29 @@ fn process_single_struct_field(
         return;
     };
 
-    // Get field names (there can be multiple: X, Y, Z int)
+    // Get field-name AST nodes (there can be multiple: `X, Y, Z int`).
+    // We keep the AST node (not just the text) so each field gets its own
+    // line/column-aware Span tracking the identifier itself - matching the
+    // A_GO_SPANS contract enforced by `tests/span_correctness.rs`.
     let mut cursor = field_node.walk();
-    let names: Vec<_> = field_node
+    let name_nodes: Vec<Node<'_>> = field_node
         .children_by_field_name("name", &mut cursor)
-        .filter_map(|n| n.utf8_text(content).ok())
         .collect();
 
     let type_text = type_node.utf8_text(content).unwrap_or("").to_string();
     let referenced_types =
         extract_all_type_names_from_go_type_with_params(type_node, content, type_params);
 
-    // Create edges for each field name
-    for (i, name) in names.iter().enumerate() {
-        create_field_edges(
+    // Create the per-field Property + Defines/Contains + edges for each name.
+    for (i, name_node) in name_nodes.iter().enumerate() {
+        let Ok(name) = name_node.utf8_text(content) else {
+            continue;
+        };
+        emit_struct_field_node_and_edges(
             struct_name,
             base_index + i,
             name,
+            *name_node,
             &type_text,
             &referenced_types,
             helper,
@@ -2239,30 +2561,106 @@ fn process_single_struct_field(
     }
 }
 
-fn create_field_edges(
+/// Emit a `NodeKind::Property` node for a Go struct field, parent it to the
+/// enclosing struct via `Defines` + `Contains` edges, and source the
+/// `TypeOf{Field}` edge from the new Property node (post-`C_EDGE_MIGRATE`).
+///
+/// Qualified-name format: `<package>.<TypeName>.<FieldName>`. `struct_name`
+/// is already the package-qualified struct name (`<package>.<TypeName>`),
+/// so we build the field's qualified name as `{struct_name}.{name}` -
+/// matching Java/Kotlin/Dart/classpath precedent (see
+/// `docs/development/public-issue-triage/cluster_c_field_audit.md`).
+///
+/// Visibility: Go's standard rule - a capitalized first letter is exported
+/// (public); anything else is unexported (private). Resolved via
+/// `visibility_for_identifier`.
+///
+/// Static: always `false`. Go has no class-level statics for struct fields.
+///
+/// Note: the Property emission is unconditional. Cluster C of the
+/// 2026-04-29 BadLiveware Go batch DAG (see
+/// `docs/development/public-issue-triage/2026-04-29_badliveware_go_batch_dag.toml`,
+/// `[units.C_PROPERTY_EMIT]`) requires every struct field to land as a
+/// first-class graph node; there is no feature flag.
+///
+/// **Edge migration (`C_EDGE_MIGRATE`).** The `TypeOf{Field}` edge is now
+/// sourced from `property_id` (the field's Property node), not from
+/// `struct_id`. Aggregate "all fields of this struct" queries continue to
+/// work through the `Defines` / `Contains` edges from the struct to the
+/// Property node. The `TypeOfContext::Field` discriminator stays - only
+/// the source identity changes. See
+/// `docs/development/public-issue-triage/2026-04-29_badliveware_go_batch_dag.toml`,
+/// `[units.C_EDGE_MIGRATE]`.
+///
+/// **Anonymous struct fields** (e.g. `var x = struct { Bar int }{}`): such
+/// fields do not flow through `handle_struct_type_spec` - they appear in
+/// expression position with no enclosing named type, and the Go builder
+/// never reaches this emission path for them. We deliberately omit
+/// Property emission for anonymous-struct fields entirely, because there
+/// is no stable qualified name we could synthesise that would also be
+/// resolvable from CLI / MCP / LSP queries (matching the documented
+/// `failure_modes` choice in the C_PROPERTY_EMIT DAG unit).
+#[allow(clippy::too_many_arguments)]
+fn emit_struct_field_node_and_edges(
     struct_name: &str,
     index: usize,
     name: &str,
+    name_node: Node<'_>,
     type_text: &str,
     referenced_types: &[String],
     helper: &mut GraphBuildHelper,
     _package: &str,
 ) {
-    // Get or create struct node
+    // Get or create struct node (cached on the qualified name; this is the
+    // same id `handle_struct_type_spec` registered).
     let struct_id = helper.add_struct(struct_name, None);
 
-    // Create TypeOf edge: struct → field type with Field context
+    // Build the field's package-qualified name and emit the Property node.
+    // `struct_name` is already `<package>.<TypeName>`; appending
+    // `.<FieldName>` produces the canonical `<package>.<TypeName>.<FieldName>`
+    // form (e.g. `main.SelectorSource.NeedTags`).
+    let qualified_field_name = format!("{struct_name}.{name}");
+    let visibility = visibility_for_identifier(name);
+    let property_id = helper.add_property_with_static_and_visibility(
+        &qualified_field_name,
+        Some(span_from_node(name_node)),
+        false, // Go struct fields are never `static` in the class-static sense.
+        Some(visibility),
+    );
+
+    // Parent the property to the enclosing struct.
+    helper.add_defines_edge(struct_id, property_id);
+    helper.add_contains_edge(struct_id, property_id);
+
+    // Create TypeOf edge: Property → field type with Field context.
+    //
+    // C_EDGE_MIGRATE: source is `property_id`, NOT `struct_id`. The
+    // pre-migration shape sourced this edge from the struct with the
+    // field name in `TypeOf::name` metadata; the post-migration shape
+    // sources it from the per-field Property node so that
+    // `--to <field-property-qualified-name>` traversal walks back to the
+    // field-type target without going through the struct. Aggregate
+    // field-set queries on the struct keep working via `Defines` /
+    // `Contains` edges struct → Property emitted just above.
     let type_id = helper.add_type(type_text, None);
     #[allow(clippy::cast_possible_truncation)]
     helper.add_typeof_edge_with_context(
-        struct_id,
+        property_id,
         type_id,
         Some(TypeOfContext::Field),
         Some(index as u16),
         Some(name),
     );
 
-    // Create Reference edges to all referenced types
+    // Create Reference edges to all referenced types.
+    //
+    // These remain sourced from `struct_id`: a `Reference` edge here
+    // models "this struct's declaration text mentions type X", which is
+    // a struct-level fact (the struct's full declaration is what
+    // mentions every nested generic / element / pointer-base type).
+    // Per-field type-of resolution is the job of the Property-sourced
+    // `TypeOf{Field}` edge above; the per-struct Reference set is a
+    // distinct, coarser-grained view used by impact analysis.
     for ref_type in referenced_types {
         let ref_type_id = helper.add_type(ref_type, None);
         helper.add_reference_edge(struct_id, ref_type_id);
@@ -2498,7 +2896,39 @@ fn process_method_parameters(
     }
 }
 
-/// Process field access using `GraphBuildHelper`
+/// Process field access using `GraphBuildHelper`.
+///
+/// **C_EDGE_MIGRATE behaviour.** When the operand is a parameter or
+/// receiver whose declared type maps onto a known package-qualified
+/// struct name, the emitted `References` edge targets the field's
+/// `Property` node directly (qualified name
+/// `<package>.<TypeName>.<FieldName>`, matching the form
+/// `emit_struct_field_node_and_edges` registers when the struct is
+/// indexed). This makes
+///
+/// ```text
+/// sqry graph edges --kind references --to main.SelectorSource.NeedTags
+/// ```
+///
+/// return the call-site reference set sourced from the Property node
+/// rather than from a placeholder `<field:s.NeedTags>` Variable. The
+/// caller-side `Property` lookup uses the same
+/// `add_property_with_static_and_visibility(qualified_name, ...)` API
+/// the struct-emit path uses, so the qualified-name dedup at
+/// `add_node_internal` collapses both sites onto a single `NodeId`
+/// regardless of file order.
+///
+/// **Fallback.** When the operand cannot be resolved to a known struct
+/// type (local `:=` bindings, package-qualified expressions like
+/// `pkg.Foo.Bar`, map / chan / func types, anonymous structs, etc.),
+/// the edge is emitted to the legacy placeholder Variable
+/// (`<field:operand.field>`). This preserves the pre-migration shape
+/// for unresolved cases - per DAG `failure_modes`, "edge dedup helper
+/// sees both old-shape and new-shape edges during a partial rebuild"
+/// is guarded only because the resolved + unresolved cases now address
+/// distinct target nodes by qualified name. The placeholder fallback is
+/// covered by C_SUPPRESS, which marks these synthetic Variable nodes
+/// for filtering from user-facing surfaces.
 fn process_field_access_unified(
     node: Node,
     content: &[u8],
@@ -2525,18 +2955,43 @@ fn process_field_access_unified(
 
     let caller_id = helper.ensure_function(
         &caller_context.qualified_name(),
-        Some(Span::from_bytes(
-            caller_context.span.0,
-            caller_context.span.1,
-        )),
+        Some(caller_context.location),
         false,
         false,
     );
 
-    let field_ref_id = helper.add_variable(
-        &format!("<field:{operand_text}.{field_name}>"),
-        Some(Span::from_bytes(node.start_byte(), node.end_byte())),
-    );
+    let resolved_struct = caller_context.resolve_operand_to_type(&operand_text);
+
+    let field_ref_id = if let Some(struct_qualified) = resolved_struct {
+        // Resolved: target the field's Property node by qualified name.
+        // `add_property_with_static_and_visibility` is keyed on the
+        // qualified name in the StagingGraph, so passing the same
+        // `<package>.<TypeName>.<FieldName>` the struct-emit path used
+        // collapses to the same `NodeId` (same file or different file -
+        // Phase 4c-prime's cross-file unification does the rest).
+        //
+        // Visibility / static / span are passed as `None`/`false` because
+        // this is a USE-site, not a DEF-site. The struct-emit path is the
+        // authoritative DEF-site and registers the real visibility +
+        // line-aware span; passing `None` here lets the helper's
+        // qualified-name dedup keep the DEF-site metadata intact.
+        let qualified_field_name = format!("{struct_qualified}.{field_name}");
+        helper.add_property_with_static_and_visibility(&qualified_field_name, None, false, None)
+    } else {
+        // Unresolved operand (local binding, pkg-qualified expression,
+        // map / chan / func / anonymous-struct receiver). Fall back to
+        // the legacy placeholder shape so callers don't lose the edge.
+        // C_SUPPRESS marks `<field:...>` Variables as synthetic via
+        // both the metadata-store bit (canonical channel) and the
+        // structural name-shape fallback (the leading `<` is recognised
+        // by NodeEntry::is_synthetic_placeholder_name). See the doc on
+        // `add_synthetic_variable` for the dual-channel rationale.
+        add_synthetic_variable(
+            helper,
+            &format!("<field:{operand_text}.{field_name}>"),
+            Some(span_from_node(node)),
+        )
+    };
 
     helper.add_reference_edge(caller_id, field_ref_id);
 }
@@ -2571,10 +3026,7 @@ fn process_type_assertion_unified(
 
     let caller_id = helper.ensure_function(
         &caller_context.qualified_name(),
-        Some(Span::from_bytes(
-            caller_context.span.0,
-            caller_context.span.1,
-        )),
+        Some(caller_context.location),
         false,
         false,
     );
@@ -2588,10 +3040,18 @@ fn process_type_assertion_unified(
         format!("{package}.{base_type}")
     };
 
+    // C_SUPPRESS: `<type:...>` placeholders are synthetic Interface
+    // shadows for type-assertion expressions. They follow the same
+    // angle-bracket pseudo-identifier shape the structural fallback in
+    // NodeEntry::is_synthetic_placeholder_name catches, and we also
+    // flip the metadata-store bit so the canonical channel agrees.
     let type_ref_id = helper.add_interface(
         &format!("<type:{qualified_type}>"),
-        Some(Span::from_bytes(node.start_byte(), node.end_byte())),
+        Some(span_from_node(node)),
     );
+    let mut store = NodeMetadataStore::new();
+    store.mark_synthetic(type_ref_id);
+    helper.staging_mut().merge_macro_metadata(&store);
 
     helper.add_implements_edge(caller_id, type_ref_id);
 }
@@ -2750,16 +3210,13 @@ fn build_route_endpoint(
     handler_arg_index: usize,
 ) -> bool {
     let qualified_name = format!("route::{method}::{path}");
-    let span = Span::from_bytes(call_node.start_byte(), call_node.end_byte());
+    let span = span_from_node(call_node);
     let endpoint_id = helper.add_endpoint(&qualified_name, Some(span));
 
     // Add Calls edge from the enclosing function to the endpoint
     let caller_id = helper.ensure_function(
         &caller_context.qualified_name(),
-        Some(Span::from_bytes(
-            caller_context.span.0,
-            caller_context.span.1,
-        )),
+        Some(caller_context.location),
         false,
         false,
     );
@@ -2775,7 +3232,7 @@ fn build_route_endpoint(
         {
             let handler_id = helper.ensure_callee(
                 handler_name,
-                Span::from_bytes(handler_node.start_byte(), handler_node.end_byte()),
+                span_from_node(handler_node),
                 CalleeKindHint::Function,
             );
             helper.add_contains_edge(endpoint_id, handler_id);
@@ -2902,25 +3359,14 @@ fn build_cgo_edge(
 ) -> bool {
     let caller_id = helper.ensure_function(
         &caller_context.qualified_name(),
-        Some(Span::from_bytes(
-            caller_context.span.0,
-            caller_context.span.1,
-        )),
+        Some(caller_context.location),
         false,
         false,
     );
 
     // Create FFI target node for the C function
     let ffi_name = format!("C::{c_function_name}");
-    let ffi_node_id = helper.add_function(
-        &ffi_name,
-        Some(Span::from_bytes(
-            call_node.start_byte(),
-            call_node.end_byte(),
-        )),
-        false,
-        false,
-    );
+    let ffi_node_id = helper.add_function(&ffi_name, Some(span_from_node(call_node)), false, false);
 
     // Add FFI edge with C convention
     helper.add_ffi_edge(caller_id, ffi_node_id, FfiConvention::C);
@@ -2937,10 +3383,7 @@ fn build_syscall_edge(
 ) -> bool {
     let caller_id = helper.ensure_function(
         &caller_context.qualified_name(),
-        Some(Span::from_bytes(
-            caller_context.span.0,
-            caller_context.span.1,
-        )),
+        Some(caller_context.location),
         false,
         false,
     );
@@ -2950,15 +3393,8 @@ fn build_syscall_edge(
         extract_syscall_name(call_node, content).unwrap_or_else(|| "syscall::unknown".to_string());
 
     // Create FFI target node
-    let ffi_node_id = helper.add_function(
-        &syscall_name,
-        Some(Span::from_bytes(
-            call_node.start_byte(),
-            call_node.end_byte(),
-        )),
-        false,
-        false,
-    );
+    let ffi_node_id =
+        helper.add_function(&syscall_name, Some(span_from_node(call_node)), false, false);
 
     // Add FFI edge with C convention (syscalls use C ABI)
     helper.add_ffi_edge(caller_id, ffi_node_id, FfiConvention::C);
@@ -2975,10 +3411,7 @@ fn build_plugin_edge(
 ) -> bool {
     let caller_id = helper.ensure_function(
         &caller_context.qualified_name(),
-        Some(Span::from_bytes(
-            caller_context.span.0,
-            caller_context.span.1,
-        )),
+        Some(caller_context.location),
         false,
         false,
     );
@@ -2990,13 +3423,7 @@ fn build_plugin_edge(
     );
 
     // Create FFI target node
-    let ffi_node_id = helper.add_module(
-        &plugin_name,
-        Some(Span::from_bytes(
-            call_node.start_byte(),
-            call_node.end_byte(),
-        )),
-    );
+    let ffi_node_id = helper.add_module(&plugin_name, Some(span_from_node(call_node)));
 
     // Add FFI edge with C convention (plugins use C ABI for symbol lookup)
     helper.add_ffi_edge(caller_id, ffi_node_id, FfiConvention::C);
@@ -3708,5 +4135,307 @@ mod tests {
         assert!(is_builtin("append"));
         assert!(!is_builtin("fmt"));
         assert!(!is_builtin("myFunc"));
+    }
+
+    /// Regression test for verivus-oss/sqry#74 / verivus-oss/sqry#153.
+    ///
+    /// Before the fix, every Go symbol returned `start_line: 1` (the
+    /// `Span::from_bytes` legacy constructor records `(line=0, column=byte_offset)`,
+    /// and `GraphBuildHelper::add_node_internal` then off-by-ones the line to 1).
+    /// `start_column` ended up as a byte offset, not a 1-based UTF-8 column.
+    ///
+    /// The fixture mirrors BadLiveware's `main.go` repro. `parseConfig` is the
+    /// fifth top-level declaration and starts on line 8. The "p" of
+    /// `parseConfig` is the first character after `   func ` (8 chars), so the
+    /// 1-based UTF-8 column of the function-declaration node's first byte is 4
+    /// (the leading whitespace, then `func`), and the function declaration
+    /// itself starts at column 4 (column index 3 → 1-based 4).
+    #[test]
+    fn test_badliveware_function_span_is_line_index_aware() {
+        let source = "   package main\n\n   type SelectorSource struct {\n      NeedTags bool\n      Other    bool\n   }\n\n   func parseConfig(input string) (bool, error) {\n      return input != \"\", nil\n   }\n\n   func useSelector(selector SelectorSource) bool {\n      ok, err := parseConfig(\"x\")\n      if err != nil {\n         return false\n      }\n      if selector.NeedTags {\n         return ok\n      }\n      selector.Other = false\n      return selector.NeedTags\n   }\n\n   func unrelated() {\n      NeedTags := \"local variable\"\n      _ = NeedTags\n   }\n";
+
+        let tree = parse_go(source);
+        let mut staging = StagingGraph::new();
+        let builder = GoGraphBuilder::new(DEFAULT_SCOPE_DEPTH);
+
+        let result =
+            builder.build_graph(&tree, source.as_bytes(), Path::new("main.go"), &mut staging);
+        assert!(result.is_ok(), "graph build failed: {result:?}");
+
+        let strings = build_string_lookup(&staging);
+        let parse_config = staging
+            .nodes()
+            .find(|node| {
+                strings
+                    .get(&node.entry.name.index())
+                    .is_some_and(|name| name == "parseConfig")
+            })
+            .expect("parseConfig node should be staged");
+
+        // 1-based start line — the function declaration begins on line 8
+        // because the fixture's first 7 lines hold `package main`, a blank
+        // line, the SelectorSource type, and a trailing blank line.
+        assert_eq!(
+            parse_config.entry.start_line, 8,
+            "parseConfig should start at line 8 (1-based), got start_line={} \
+             start_column={} — Span::from_bytes regression?",
+            parse_config.entry.start_line, parse_config.entry.start_column,
+        );
+
+        // start_column is 0-based on the wire (entry.start_column) and the
+        // function declaration starts at column 3 (after three spaces of
+        // indent). It MUST NOT be a byte offset (which would be ≥ 100).
+        assert!(
+            parse_config.entry.start_column < 80,
+            "parseConfig start_column={} looks like a byte offset, not a column",
+            parse_config.entry.start_column,
+        );
+        assert_eq!(
+            parse_config.entry.start_column, 3,
+            "parseConfig should start at column 3 (0-based, after the 3-space indent), \
+             got {}",
+            parse_config.entry.start_column,
+        );
+    }
+
+    /// Regression test for the codex-flagged span-emission gap on Go
+    /// `type` aliases / `type_spec` non-struct/non-interface declarations.
+    ///
+    /// Before the fix, `handle_type_alias` (graph_builder.rs:368) and the
+    /// fallback branch of `handle_type_spec` (graph_builder.rs:1428) created
+    /// the alias's `NodeKind::Type` node with `start_line == 0` (the
+    /// `NodeEntry::new` default) because the call site passed `None` for the
+    /// span. The fixture places both alias declarations past line 1 so a
+    /// missing span surfaces deterministically as `start_line == 0`.
+    #[test]
+    fn test_go_type_alias_span_is_line_index_aware() {
+        // Line 1: package main
+        // Line 2: blank
+        // Line 3: // comment
+        // Line 4: type StringAlias = string   (handle_type_alias path)
+        // Line 5: blank
+        // Line 6: type MyInt int             (handle_type_spec fallback path)
+        let source =
+            "package main\n\n// header comment\ntype StringAlias = string\n\ntype MyInt int\n";
+        let tree = parse_go(source);
+        let mut staging = StagingGraph::new();
+        let builder = GoGraphBuilder::new(DEFAULT_SCOPE_DEPTH);
+
+        let result = builder.build_graph(
+            &tree,
+            source.as_bytes(),
+            Path::new("aliases.go"),
+            &mut staging,
+        );
+        assert!(result.is_ok(), "graph build failed: {result:?}");
+
+        let strings = build_string_lookup(&staging);
+
+        // `type StringAlias = string` is parsed as a `type_alias` AST node and
+        // routed through `handle_type_alias`. The alias's qualified name
+        // `main.StringAlias` is stored under the unqualified semantic name
+        // `StringAlias` after `semantic_name_for_node_input` strips the
+        // package prefix.
+        let string_alias = staging
+            .nodes()
+            .find(|node| {
+                node.entry.kind == sqry_core::graph::unified::NodeKind::Type
+                    && strings
+                        .get(&node.entry.name.index())
+                        .is_some_and(|name| name == "StringAlias")
+            })
+            .expect("StringAlias Type node should be staged");
+        // Pre-fix: every type-alias Type node landed with `start_line == 1` and
+        // `start_column == 0` because the call site passed `None` for the span.
+        // After the fix, the line reflects the alias declaration's actual
+        // 1-based source line. The fixture places `type StringAlias = string`
+        // on source line 4.
+        assert_eq!(
+            string_alias.entry.start_line, 4,
+            "StringAlias should start at line 4 (1-based), got start_line={} \
+             start_column={} — handle_type_alias span emission regression?",
+            string_alias.entry.start_line, string_alias.entry.start_column,
+        );
+        // `type_alias` AST nodes start at the alias-name identifier (the
+        // `type` keyword belongs to the enclosing `type_declaration`), so
+        // `start_column` lands on column 5 (1-based UTF-8 column 6) — the
+        // first character of `StringAlias` after the 5-character prefix
+        // "type ". The critical regression-detection property is that the
+        // value is small (a real column) and not a byte offset from the file
+        // start.
+        assert!(
+            string_alias.entry.start_column < 80,
+            "StringAlias start_column={} looks like a byte offset, not a column",
+            string_alias.entry.start_column,
+        );
+        assert_eq!(
+            string_alias.entry.start_column, 5,
+            "StringAlias should start at column 5 (0-based on the wire, 1-based UTF-8: 6), got {}",
+            string_alias.entry.start_column,
+        );
+
+        // `type MyInt int` is parsed as a `type_spec` AST node whose `type`
+        // field is neither `struct_type` nor `interface_type`, so it routes
+        // through the fallback branch of `handle_type_spec`.
+        let my_int = staging
+            .nodes()
+            .find(|node| {
+                node.entry.kind == sqry_core::graph::unified::NodeKind::Type
+                    && strings
+                        .get(&node.entry.name.index())
+                        .is_some_and(|name| name == "MyInt")
+            })
+            .expect("MyInt Type node should be staged");
+        assert_eq!(
+            my_int.entry.start_line, 6,
+            "MyInt should start at line 6 (1-based), got start_line={} \
+             start_column={} — handle_type_spec fallback-branch span emission regression?",
+            my_int.entry.start_line, my_int.entry.start_column,
+        );
+        assert!(
+            my_int.entry.start_column < 80,
+            "MyInt start_column={} looks like a byte offset, not a column",
+            my_int.entry.start_column,
+        );
+        assert_eq!(
+            my_int.entry.start_column, 5,
+            "MyInt should start at column 5 (0-based on the wire, 1-based UTF-8: 6), got {}",
+            my_int.entry.start_column,
+        );
+    }
+
+    #[test]
+    fn test_go_generic_type_parameter_span_is_line_index_aware() {
+        // Regression for the gemini iter-2 BLOCK on the BadLiveware Go-batch
+        // fix: `process_type_parameters` at sqry-lang-go/src/relations/
+        // graph_builder.rs:1274 was emitting `NodeKind::Type` declarations
+        // for Go 1.18+ generic type parameters with `None` for the span,
+        // which forced every parameter onto `(line=0, column=0)` and broke
+        // "Find Definition" navigation onto the parameter declaration site.
+        //
+        // Layout (1-based source lines):
+        //   Line 1: package main
+        //   Line 2: blank
+        //   Line 3: // header comment
+        //   Line 4: type List[T any] struct{}                  -> List.T on line 4
+        //   Line 5: blank
+        //   Line 6: type Map[K comparable, V any] struct{}     -> Map.K, Map.V on line 6
+        let source = "package main\n\
+                      \n\
+                      // header comment\n\
+                      type List[Tparam any] struct{}\n\
+                      \n\
+                      type Mapping[Kparam comparable, Vparam any] struct{}\n";
+        let tree = parse_go(source);
+        let mut staging = StagingGraph::new();
+        let builder = GoGraphBuilder::new(DEFAULT_SCOPE_DEPTH);
+
+        let result = builder.build_graph(
+            &tree,
+            source.as_bytes(),
+            Path::new("generics.go"),
+            &mut staging,
+        );
+        assert!(result.is_ok(), "graph build failed: {result:?}");
+
+        let strings = build_string_lookup(&staging);
+
+        // Type parameters are stored under qualified names like
+        // `main.List.Tparam`. After `semantic_name_for_node_input` strips
+        // the `main.` package prefix and the enclosing type prefix, the
+        // staged semantic names are bare `Tparam`, `Kparam`, `Vparam`.
+        // We pick distinct identifiers (not `T` / `K` / `V`) so the test
+        // is robust against shared synthetic stub Type nodes that other
+        // fixtures may stage with single-letter names.
+        let find_param = |semantic: &str| {
+            staging
+                .nodes()
+                .find(|node| {
+                    node.entry.kind == sqry_core::graph::unified::NodeKind::Type
+                        && strings
+                            .get(&node.entry.name.index())
+                            .is_some_and(|name| name == semantic)
+                })
+                .unwrap_or_else(|| panic!("{semantic} type-parameter node should be staged"))
+        };
+
+        // Tparam: declared on source line 4 at the `Tparam` identifier
+        // inside `type List[Tparam any] struct{}`. `Tparam` sits at
+        // 0-based column 10 (after `type List[`).
+        let tparam = find_param("Tparam");
+        assert_eq!(
+            tparam.entry.start_line, 4,
+            "Tparam should start at line 4 (1-based), got start_line={} \
+             start_column={} — process_type_parameters span emission regression?",
+            tparam.entry.start_line, tparam.entry.start_column,
+        );
+        assert!(
+            tparam.entry.start_column < 80,
+            "Tparam start_column={} looks like a byte offset, not a column",
+            tparam.entry.start_column,
+        );
+        assert_eq!(
+            tparam.entry.start_column, 10,
+            "Tparam should start at column 10 (0-based on the wire, 1-based UTF-8: 11), got {}",
+            tparam.entry.start_column,
+        );
+
+        // Kparam: declared on source line 6 at column 13 (after
+        // `type Mapping[`).
+        let kparam = find_param("Kparam");
+        assert_eq!(
+            kparam.entry.start_line, 6,
+            "Kparam should start at line 6 (1-based), got start_line={} \
+             start_column={} — process_type_parameters span emission regression?",
+            kparam.entry.start_line, kparam.entry.start_column,
+        );
+        assert!(
+            kparam.entry.start_column < 80,
+            "Kparam start_column={} looks like a byte offset, not a column",
+            kparam.entry.start_column,
+        );
+        assert_eq!(
+            kparam.entry.start_column, 13,
+            "Kparam should start at column 13 (0-based on the wire, 1-based UTF-8: 14), got {}",
+            kparam.entry.start_column,
+        );
+
+        // Vparam: same declaration line as Kparam but a different
+        // identifier (column 32, after
+        // `type Mapping[Kparam comparable, `). Critically, Vparam's span
+        // MUST anchor on its own `name_node` rather than reusing Kparam's
+        // span — the `for name_node in ... children_by_field_name("name")`
+        // loop in process_type_parameters iterates over each name in a
+        // shared `Kparam, Vparam any` declaration, so a single shared
+        // span would be wrong for Vparam.
+        let vparam = find_param("Vparam");
+        assert_eq!(
+            vparam.entry.start_line, 6,
+            "Vparam should start at line 6 (1-based), got start_line={} \
+             start_column={} — process_type_parameters span emission regression?",
+            vparam.entry.start_line, vparam.entry.start_column,
+        );
+        assert!(
+            vparam.entry.start_column < 80,
+            "Vparam start_column={} looks like a byte offset, not a column",
+            vparam.entry.start_column,
+        );
+        assert_eq!(
+            vparam.entry.start_column, 32,
+            "Vparam should start at column 32 (0-based on the wire, 1-based UTF-8: 33), got {}",
+            vparam.entry.start_column,
+        );
+        // Vparam's column MUST be strictly greater than Kparam's. If a
+        // future refactor passes a parameter-declaration-level span
+        // instead of the per-name-node span, this property would break
+        // (both would anchor on the same `Kparam, Vparam any`
+        // declaration start).
+        assert!(
+            vparam.entry.start_column > kparam.entry.start_column,
+            "Vparam (col {}) should sit to the right of Kparam (col {}) — \
+             span emission must be per-name, not per-declaration",
+            vparam.entry.start_column,
+            kparam.entry.start_column,
+        );
     }
 }

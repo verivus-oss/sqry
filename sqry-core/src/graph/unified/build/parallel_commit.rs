@@ -1148,6 +1148,33 @@ pub(crate) fn rebuild_indices<G: crate::graph::unified::mutation_target::GraphMu
 /// * The helper does not `bump_epoch()` on the graph — Phase 4d is
 ///   edge-level only; the full pipeline bumps epoch separately.
 ///
+/// # Edge-source-identity invariant (`C_EDGE_MIGRATE`)
+///
+/// Phase 4d does NOT dedup edges by `(source, target, kind)`. Every
+/// `PendingEdge` from every file becomes one `DeltaEdge` with a unique
+/// monotonically increasing `seq` number; the
+/// [`BidirectionalEdgeStore::add_edges_bulk_ordered`] insertion contract
+/// preserves that 1:1 mapping. This is what lets the Cluster C
+/// `C_EDGE_MIGRATE` DAG unit (2026-04-29 BadLiveware Go batch) move the
+/// `TypeOf{Field}` edge source from the struct node to the per-field
+/// `Property` node without touching this helper: the new
+/// Property-sourced edge addresses a distinct `(source, target)` pair
+/// from the legacy struct-sourced edge, and Phase 4d emits both shapes
+/// with no collapsing. Plugins that only emit the new shape (Go after
+/// `C_EDGE_MIGRATE`) therefore produce a clean Property-sourced
+/// `TypeOf{Field}` edge set with no struct-sourced shadows. Plugins
+/// outside Cluster C's scope (`C_OTHER_PLUGINS`) keep emitting the
+/// legacy shape until they migrate; the bulk-insert path treats both
+/// shapes identically.
+///
+/// Determinism: per-file `PendingEdge` order is fixed by the parser
+/// pass, and `pending_edges_to_delta` walks the per-file vectors in
+/// the input order. So `phase4d_bulk_insert_edges` produces a
+/// byte-identical `DeltaEdge` sequence on every fresh rebuild of the
+/// same source tree, which is what guarantees the
+/// `SnapshotReader → SnapshotWriter` round-trip identity required by
+/// the `C_EDGE_MIGRATE` acceptance criteria.
+///
 /// [`BidirectionalEdgeStore::add_edges_bulk_ordered`]: crate::graph::unified::edge::bidirectional::BidirectionalEdgeStore::add_edges_bulk_ordered
 /// [`RebuildGraph`]: crate::graph::unified::rebuild::rebuild_graph::RebuildGraph
 pub(crate) fn phase4d_bulk_insert_edges<
@@ -2176,5 +2203,99 @@ mod tests {
         // Empty input is a no-op on the edge store.
         let empty_final = phase4d_bulk_insert_edges(&mut rebuild, &[]);
         assert_eq!(empty_final, pre_counter + 2, "empty input is a no-op");
+    }
+
+    /// `C_EDGE_MIGRATE` regression: when a Cluster C plugin migrates a
+    /// `TypeOf{Field}` edge's source from a struct node to the per-field
+    /// `Property` node, Phase 4d must NOT collapse the new shape onto
+    /// any sibling edge. Both Property-sourced and struct-sourced
+    /// edges - including a struct-sourced edge over the same target /
+    /// kind tuple - must round-trip into the bulk-insert path with
+    /// distinct `(source, target)` identities and stable seq ordering.
+    ///
+    /// This locks the property the
+    /// `phase4d_bulk_insert_edges` doc-comment promises to plugin
+    /// authors: per-file `PendingEdge` order is preserved 1:1 by
+    /// `pending_edges_to_delta`, and no `(source, target, kind)` dedup
+    /// fires inside Phase 4d. Without this guarantee the migration
+    /// would silently drop the new Property-sourced edges whenever an
+    /// older legacy snapshot mixed both shapes during a partial
+    /// rebuild.
+    #[test]
+    fn phase4d_preserves_property_sourced_typeof_field_edges() {
+        use crate::graph::unified::edge::kind::TypeOfContext;
+
+        // Synthetic NodeIds standing in for `main.SelectorSource` (struct),
+        // `main.SelectorSource.NeedTags` (Property), and `bool` (target type).
+        let struct_id = NodeId::new(10, 1);
+        let property_id = NodeId::new(11, 1);
+        let bool_id = NodeId::new(12, 1);
+
+        let typeof_field_kind = EdgeKind::TypeOf {
+            context: Some(TypeOfContext::Field),
+            index: Some(0),
+            name: None,
+        };
+
+        // Two PendingEdges over the same (target, kind) discriminator
+        // but different sources - the post-migration Property-sourced
+        // shape and a hypothetical legacy struct-sourced shadow that
+        // could appear during a partial rebuild. Phase 4d must keep
+        // both.
+        let per_file_edges = vec![vec![
+            PendingEdge {
+                source: property_id,
+                target: bool_id,
+                kind: typeof_field_kind.clone(),
+                file: FileId::new(0),
+                spans: vec![],
+            },
+            PendingEdge {
+                source: struct_id,
+                target: bool_id,
+                kind: typeof_field_kind.clone(),
+                file: FileId::new(0),
+                spans: vec![],
+            },
+        ]];
+
+        let (deltas, final_seq) = pending_edges_to_delta(&per_file_edges, 500);
+
+        // No dedup: both edges land in the per-file delta vector with
+        // distinct seq numbers, in input order.
+        assert_eq!(deltas.len(), 1);
+        assert_eq!(deltas[0].len(), 2);
+        assert_eq!(final_seq, 502);
+
+        assert_eq!(deltas[0][0].source, property_id);
+        assert_eq!(deltas[0][0].target, bool_id);
+        assert_eq!(deltas[0][0].seq, 500);
+        assert!(matches!(
+            deltas[0][0].kind,
+            EdgeKind::TypeOf {
+                context: Some(TypeOfContext::Field),
+                ..
+            }
+        ));
+
+        assert_eq!(deltas[0][1].source, struct_id);
+        assert_eq!(deltas[0][1].target, bool_id);
+        assert_eq!(deltas[0][1].seq, 501);
+
+        // Determinism re-check: re-running the conversion against the
+        // same input produces an identical DeltaEdge sequence (same
+        // sources, same targets, same kinds, same seq numbers when
+        // re-anchored to the same `seq_start`). This is the property
+        // the SnapshotReader → SnapshotWriter byte-identity round-trip
+        // assertion relies on for fresh-rebuild reproducibility.
+        let (deltas_again, final_seq_again) = pending_edges_to_delta(&per_file_edges, 500);
+        assert_eq!(final_seq_again, final_seq);
+        assert_eq!(deltas_again.len(), deltas.len());
+        assert_eq!(deltas_again[0].len(), deltas[0].len());
+        for (a, b) in deltas[0].iter().zip(deltas_again[0].iter()) {
+            assert_eq!(a.source, b.source);
+            assert_eq!(a.target, b.target);
+            assert_eq!(a.seq, b.seq);
+        }
     }
 }

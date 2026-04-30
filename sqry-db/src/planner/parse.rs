@@ -32,6 +32,7 @@
 //! step        = "kind:" nodekind                          → .scan(kind)
 //!             | "visibility:" ("public" | "private")      → .scan_with(…)
 //!             | "name:" name_pattern                      → .filter(MatchesName)
+//!             | "returns:" type_name                      → .filter(Returns)
 //!             | "in:" path_glob                           → .filter(InFile)
 //!             | "scope:" scopekind                        → .filter(InScope)
 //!             | "has:" ("caller" | "callee")              → .filter(HasCaller|HasCallee)
@@ -223,11 +224,84 @@ impl<'a> Parser<'a> {
                 Ok(apply_visibility(builder, vis))
             }
             "name" => {
+                // `name:<value>` — literal-exact / glob contract.
+                //
+                // **Semantics (B1_ALIGN, locked).**
+                //
+                // - **Literal value (no `*`, `?`, `[`).** `name:Foo`
+                //   matches every indexable graph node whose interned
+                //   `entry.name` or `entry.qualified_name` equals `Foo`
+                //   byte-for-byte, case-sensitive. This path is
+                //   contract-bound to the CLI `--exact <literal>`
+                //   shorthand: both route through
+                //   [`sqry_core::graph::unified::concurrent::graph::GraphSnapshot::find_by_exact_name`]
+                //   and return the same set on any fixture.
+                //
+                // - **Glob value (contains `*`, `?`, or `[`).**
+                //   [`Self::parse_string_pattern`] promotes the pattern
+                //   to [`MatchMode::Glob`]; the executor then matches
+                //   nodes whose simple or qualified name satisfies the
+                //   glob (e.g. `name:parse_*` matches `parse_expr`,
+                //   `parse_stmt`). The CLI `--exact` shorthand does
+                //   **not** accept glob meta — it treats every
+                //   character as a literal — so the
+                //   exact-set-equality contract above does not extend
+                //   to glob values. This is intentional: the CLI
+                //   `--exact` flag is a literal-only convenience, and
+                //   glob lookups belong to the structured planner.
+                //
+                // Synthetic placeholder nodes (Go-plugin
+                // `<field:operand.field>` shadows and `<ident>@<offset>`
+                // per-binding-site Variables; see `C_SUPPRESS` and
+                // [`crate::query::QueryDb`] docs for the full taxonomy)
+                // are excluded on **both** the literal and glob paths,
+                // gated by
+                // [`sqry_core::graph::unified::concurrent::graph::GraphSnapshot::is_node_synthetic`]
+                // inside `entry_name_matches` / `scan_match`.
+                //
+                // **No substring or regex form.** A future regex form
+                // would land as a separate `name~` operator with its
+                // own grammar branch and IR variant — mirroring the
+                // `references:` / `references ~= /…/` split. There is
+                // no implicit substring fallback; users wanting regex
+                // name matching today should use `sqry search <regex>`
+                // (regex over interned strings; synthetic-visible) or
+                // wait for `name~` to land.
+                //
+                // **Precedence vs `name~` (future).** When `name~`
+                // lands, it will be parsed as a distinct token and
+                // produce a distinct IR predicate; `name:` keeps the
+                // literal-exact / glob split documented above
+                // unchanged. Folding the two into a single token with
+                // a "smart" mode is explicitly out of scope.
                 self.expect_byte(b':', "':' after 'name'")?;
                 let pat = self.parse_string_pattern()?;
-                // `name:` attaches to an existing NodeScan when possible so the
-                // scan uses the pre-built by-kind index directly.
+                // `name:` attaches to an existing NodeScan when possible so
+                // the scan uses the pre-built by-kind index directly. When
+                // the chain is empty, it starts a fresh `NodeScan` carrying
+                // only the name pattern so `name:Foo` is a valid standalone
+                // query (otherwise the chain would fail context-free
+                // validation in `compile.rs`).
                 Ok(apply_name_pattern(builder, pat))
+            }
+            "returns" => {
+                // `returns:<TypeName>` — selects nodes whose outgoing
+                // `EdgeKind::TypeOf { context: Some(TypeOfContext::Return), .. }`
+                // edges target a node whose interned name equals `<TypeName>`
+                // by byte-exact, case-sensitive comparison.
+                //
+                // The value parser is `parse_bare_or_quoted` (not
+                // `parse_string_pattern`) so glob meta-characters like `*`,
+                // `?`, and `[` are taken as literal name bytes rather than
+                // promoted to a glob. This keeps the contract identical to
+                // the IR docstring on `Predicate::Returns`: exact match only.
+                // A future `returns~:` regex form would land as a separate
+                // grammar branch and IR variant, mirroring how `references`
+                // already pairs `references:` (literal) with
+                // `references ~= /…/` (regex).
+                self.expect_byte(b':', "':' after 'returns'")?;
+                let type_name = self.parse_bare_or_quoted()?;
+                Ok(builder.filter(Predicate::Returns(type_name)))
             }
             "in" => {
                 self.expect_byte(b':', "':' after 'in'")?;
@@ -700,12 +774,32 @@ fn apply_visibility(builder: QueryBuilder, visibility: Visibility) -> QueryBuild
     builder.scan_with(ScanFilters::new().with_visibility(visibility))
 }
 
-/// Merge a name pattern into the current builder, preferring to fold it into
-/// an existing trailing [`NodeScan`] so the scan uses the pre-built by-kind
-/// index. Falls back to a separate `MatchesName` filter step if the builder
-/// does not end in a scan.
+/// Merge a name pattern into the current builder.
+///
+/// Preference order:
+///
+/// 1. **Empty builder** (`name:Foo` standalone): start a fresh
+///    [`PlanNode::NodeScan`] carrying only the name pattern. This makes
+///    `name:Foo` a valid context-free first step (otherwise `compile.rs`
+///    would reject the chain as starting with a `Filter`).
+/// 2. **Trailing `NodeScan` with no existing name pattern**
+///    (`kind:function name:Foo`): fold into the trailing scan so the
+///    executor walks the pre-built by-kind index directly and applies
+///    the name predicate inside `run_scan`.
+/// 3. **Anything else**: fall back to a separate
+///    [`Predicate::MatchesName`] filter step. The executor's
+///    `entry_name_matches` honours the same byte-exact, synthetic-aware
+///    contract documented around the `name:` step in
+///    [`Parser::parse_step`].
 fn apply_name_pattern(builder: QueryBuilder, pattern: StringPattern) -> QueryBuilder {
     let steps = builder_steps(&builder);
+    if steps.is_empty() {
+        return builder.scan_with(ScanFilters {
+            kind: None,
+            visibility: None,
+            name_pattern: Some(pattern),
+        });
+    }
     if let Some(existing) = steps.last()
         && let PlanNode::NodeScan {
             kind,
@@ -1054,6 +1148,99 @@ mod tests {
     fn parse_empty_query_errors_on_build() {
         let err = parse_query("").unwrap_err();
         assert!(matches!(err, ParseError::Build(_)));
+    }
+
+    #[test]
+    fn parse_returns_predicate_basic() {
+        let plan = parse_query("kind:function returns:error").expect("parse");
+        let PlanNode::Chain { steps } = plan.root else {
+            panic!("chain");
+        };
+        assert_eq!(steps.len(), 2);
+        match &steps[1] {
+            PlanNode::Filter {
+                predicate: Predicate::Returns(name),
+            } => {
+                assert_eq!(name, "error");
+            }
+            other => panic!("expected Filter(Returns), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_returns_does_not_collide_with_name_predicate() {
+        // `name:Foo returns:Bar` must produce two distinct predicate variants
+        // — `name:` folds into the leading NodeScan (single step), and
+        // `returns:` lands as a Filter step on top.
+        let plan = parse_query("kind:function name:Foo returns:Bar").expect("parse");
+        let PlanNode::Chain { steps } = plan.root else {
+            panic!("chain");
+        };
+        assert_eq!(steps.len(), 2);
+        match &steps[0] {
+            PlanNode::NodeScan {
+                kind: Some(NodeKind::Function),
+                name_pattern: Some(pat),
+                ..
+            } => {
+                assert_eq!(pat.raw, "Foo");
+            }
+            other => panic!("expected leading NodeScan with name_pattern, got {other:?}"),
+        }
+        match &steps[1] {
+            PlanNode::Filter {
+                predicate: Predicate::Returns(name),
+            } => {
+                assert_eq!(name, "Bar");
+            }
+            other => panic!("expected Filter(Returns), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_returns_takes_value_byte_exact_no_glob_promotion() {
+        // `returns:` keeps glob meta as literal name bytes (the spec says
+        // exact match only; future `returns~:` would handle regex).
+        let plan = parse_query("kind:function returns:Result*").expect("parse");
+        let PlanNode::Chain { steps } = plan.root else {
+            panic!("chain");
+        };
+        match &steps[1] {
+            PlanNode::Filter {
+                predicate: Predicate::Returns(name),
+            } => {
+                assert_eq!(name, "Result*");
+            }
+            other => panic!("expected Filter(Returns), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_returns_quoted_string_value() {
+        let plan = parse_query(r#"kind:function returns:"std::io::Error""#).expect("parse");
+        let PlanNode::Chain { steps } = plan.root else {
+            panic!("chain");
+        };
+        match &steps[1] {
+            PlanNode::Filter {
+                predicate: Predicate::Returns(name),
+            } => {
+                assert_eq!(name, "std::io::Error");
+            }
+            other => panic!("expected Filter(Returns), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_returns_missing_value_is_an_error() {
+        let err = parse_query("kind:function returns:").unwrap_err();
+        // Missing value yields `parse_bare_or_quoted` failure or end-of-input
+        // depending on whitespace; both surface as parse errors rather than
+        // silently producing an empty `Returns("")` predicate.
+        assert!(matches!(
+            err,
+            ParseError::UnexpectedChar { .. } | ParseError::UnexpectedEnd { .. }
+        ));
     }
 
     #[test]

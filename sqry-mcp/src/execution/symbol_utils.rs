@@ -93,7 +93,7 @@ pub(crate) fn get_classpath_provenance_for_node(
                 is_direct: cp.is_direct_dependency,
                 jar_path: Some(cp.jar_path.clone()),
             }),
-            NodeMetadata::Macro(_) => None,
+            NodeMetadata::Macro(_) | NodeMetadata::Synthetic => None,
         };
     }
 

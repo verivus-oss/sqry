@@ -733,7 +733,8 @@ fn validate_predicate(predicate: &Predicate) -> Result<(), BuildError> {
         | Predicate::IsUnused
         | Predicate::InFile(_)
         | Predicate::InScope(_)
-        | Predicate::MatchesName(_) => Ok(()),
+        | Predicate::MatchesName(_)
+        | Predicate::Returns(_) => Ok(()),
 
         Predicate::Callers(v)
         | Predicate::Callees(v)

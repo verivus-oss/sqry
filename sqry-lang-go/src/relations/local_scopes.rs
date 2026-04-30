@@ -11,11 +11,36 @@
 //! Shadowing is allowed: a nested scope can redeclare a variable with the
 //! same name as an outer scope.
 
+use sqry_core::graph::GraphResult;
 use sqry_core::graph::local_scopes::{self, ScopeId, ScopeKindTrait, ScopeTree};
+use sqry_core::graph::unified::NodeMetadataStore;
 use sqry_core::graph::unified::build::helper::GraphBuildHelper;
 use sqry_core::graph::unified::node::NodeId;
-use sqry_core::graph::{GraphResult, Span};
 use tree_sitter::Node;
+
+use crate::relations::graph_builder::{span_from_byte_range, span_from_node};
+
+/// C_SUPPRESS: flag a freshly-staged Variable node as synthetic via
+/// the metadata-store bit.
+///
+/// Companion to the `add_synthetic_variable` helper in
+/// `sqry-lang-go/src/relations/graph_builder.rs` — same dual-channel
+/// contract (metadata bit + structural name-shape fallback). The
+/// per-binding-site Variable nodes this module emits all carry the
+/// `<ident>@<offset>` shape that
+/// [`sqry_core::graph::unified::storage::arena::NodeEntry::is_synthetic_placeholder_name`]
+/// recognises, so the user-facing surfaces (`find_by_pattern`,
+/// MCP `semantic_search` / `relation_query`, CLI `search --exact`)
+/// suppress these nodes today via the structural fallback. Setting
+/// the metadata bit here is the canonical channel — it lights up the
+/// authoritative
+/// [`sqry_core::graph::unified::storage::metadata::NodeMetadataStore::is_synthetic`]
+/// check once the staging-to-graph metadata wire-through is plumbed.
+fn flag_synthetic(helper: &mut GraphBuildHelper, node_id: NodeId) {
+    let mut store = NodeMetadataStore::new();
+    store.mark_synthetic(node_id);
+    helper.staging_mut().merge_macro_metadata(&store);
+}
 
 // ============================================================================
 // Go-specific ScopeKind
@@ -608,9 +633,14 @@ pub(crate) fn handle_identifier_for_reference(
             let target_id = if let Some(node_id) = binding.node_id {
                 node_id
             } else {
-                let span = Span::from_bytes(binding.decl_start_byte, binding.decl_end_byte);
+                let span =
+                    span_from_byte_range(content, binding.decl_start_byte, binding.decl_end_byte);
                 let qualified_var = format!("{identifier}@{}", binding.decl_start_byte);
+                // C_SUPPRESS: per-binding-site declaration-target
+                // Variable. Marked synthetic so it does not leak into
+                // user-facing search surfaces.
                 let var_id = helper.add_variable(&qualified_var, Some(span));
+                flag_synthetic(helper, var_id);
                 scope_tree.attach_node_id(identifier, binding.decl_start_byte, var_id);
                 var_id
             };
@@ -629,12 +659,18 @@ fn add_reference_edge(
     target_id: NodeId,
     helper: &mut GraphBuildHelper,
 ) {
-    let usage_span = Span::from_bytes(usage_node.start_byte(), usage_node.end_byte());
+    let usage_span = span_from_node(usage_node);
+    // C_SUPPRESS: per-binding-site usage-source Variable. Same dual-channel
+    // synthetic-flag treatment as the declaration-target node above —
+    // the metadata bit is the canonical channel, and the structural
+    // name shape (`<ident>@<offset>`) is the fallback recognised by
+    // NodeEntry::is_synthetic_placeholder_name today.
     let usage_id = helper.add_node(
         &format!("{identifier}@{}", usage_node.start_byte()),
         Some(usage_span),
         sqry_core::graph::unified::node::NodeKind::Variable,
     );
+    flag_synthetic(helper, usage_id);
     helper.add_reference_edge(usage_id, target_id);
 }
 

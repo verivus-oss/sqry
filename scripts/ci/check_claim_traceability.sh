@@ -53,7 +53,8 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-MANIFEST="${REPO_ROOT}/docs/development/workspace-aware-cross-repo/claims.toml"
+PRIVATE_MANIFEST="${REPO_ROOT}/docs/development/workspace-aware-cross-repo/claims.toml"
+PUBLIC_MANIFEST="${REPO_ROOT}/docs/claim-traceability.toml"
 
 DOC_GLOBS=(
   "README.md"
@@ -62,8 +63,12 @@ DOC_GLOBS=(
   "docs/marketing"
 )
 
-if [[ ! -f "${MANIFEST}" ]]; then
-  echo "error: manifest not found: ${MANIFEST}" >&2
+if [[ -f "${PRIVATE_MANIFEST}" ]]; then
+  MANIFEST="${PRIVATE_MANIFEST}"
+elif [[ -f "${PUBLIC_MANIFEST}" ]]; then
+  MANIFEST="${PUBLIC_MANIFEST}"
+else
+  echo "error: manifest not found: ${PRIVATE_MANIFEST} or ${PUBLIC_MANIFEST}" >&2
   exit 2
 fi
 

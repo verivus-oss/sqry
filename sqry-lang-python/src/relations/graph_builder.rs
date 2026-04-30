@@ -4,6 +4,7 @@ use sqry_core::graph::unified::StagingGraph;
 use sqry_core::graph::unified::build::GraphBuildHelper;
 use sqry_core::graph::unified::build::helper::CalleeKindHint;
 use sqry_core::graph::unified::edge::FfiConvention;
+use sqry_core::graph::unified::edge::kind::TypeOfContext;
 use sqry_core::graph::unified::node::NodeId as UnifiedNodeId;
 use sqry_core::graph::{GraphBuilder, GraphBuilderError, GraphResult, Language, Span};
 use tree_sitter::{Node, Tree};
@@ -242,8 +243,16 @@ fn walk_tree_for_graph(
                 // Check if this is a property (has @property decorator)
                 let is_property = has_property_decorator(node, content);
 
-                // Extract return type annotation for signature
+                // Extract return type annotation for signature (normalized — strips
+                // generics/unions/quotes for human-readable display).
                 let return_type = extract_return_type_annotation(node, content);
+
+                // Extract byte-exact source text of the return-type annotation for
+                // the `TypeOf { context: Return }` edge consumed by `returns:<Type>`
+                // queries. This text is intentionally NOT normalized — `Optional[int]`,
+                // `List[Dict[str, int]]`, `pd.DataFrame`, `"User"` are all preserved
+                // verbatim so byte-exact predicates work as documented.
+                let return_type_source = extract_return_type_source_text(node, content);
 
                 // Add function/method/property node
                 let function_id = if is_property && call_context.is_method {
@@ -295,6 +304,39 @@ fn walk_tree_for_graph(
                         )
                     }
                 };
+
+                // Emit `TypeOf { context: Return }` edge for the return type
+                // annotation when present. Property nodes (Python `@property`) and
+                // un-annotated functions get no edge — `extract_return_type_source_text`
+                // returns `None` for `def foo():` (no `-> Type`).
+                //
+                // The type-text is byte-exact source from the annotation node so
+                // `returns:Optional[int]`, `returns:pd.DataFrame`, etc. work as
+                // documented. A paired Reference edge is also emitted to keep
+                // typeof/reference-edge invariants in sync with C# / Go / Kotlin /
+                // TypeScript plugins.
+                //
+                // The synthesized Type node is anchored at the return-type
+                // annotation's span (mirroring the Rust precedent in
+                // `sqry-lang-rust/src/relations/graph_builder.rs`) so downstream
+                // consumers (LSP `textDocument/documentSymbol`, MCP
+                // `get_document_symbols`) report a concrete source location
+                // rather than line 0.
+                if !(is_property && call_context.is_method)
+                    && let Some(annotation_text) = return_type_source.as_deref()
+                    && let Some(return_type_node) = node.child_by_field_name("return_type")
+                {
+                    let type_span = span_from_node(return_type_node);
+                    let type_id = helper.add_type(annotation_text, Some(type_span));
+                    helper.add_typeof_edge_with_context(
+                        function_id,
+                        type_id,
+                        Some(TypeOfContext::Return),
+                        Some(0),
+                        Some(call_context.qualified_name.as_str()),
+                    );
+                    helper.add_reference_edge(function_id, type_id);
+                }
 
                 // Check for HTTP route decorators (Flask/FastAPI)
                 if let Some((http_method, route_path)) = extract_route_decorator_info(node, content)
@@ -1615,6 +1657,34 @@ fn find_containing_scope(node: Node<'_>, content: &[u8], ast_graph: &ASTGraph) -
 fn extract_return_type_annotation(func_node: Node<'_>, content: &[u8]) -> Option<String> {
     let return_type_node = func_node.child_by_field_name("return_type")?;
     extract_type_from_node(return_type_node, content)
+}
+
+/// Extract the byte-exact source text of a function's `-> Type` annotation.
+///
+/// Unlike [`extract_return_type_annotation`], this returns the raw annotation
+/// text verbatim — no quote stripping, no union flattening, no generic-base
+/// extraction. This is the form consumed by `returns:<TypeName>` predicates,
+/// which match the byte-exact qualified name of the target Type node.
+///
+/// Returns `None` when the function has no `-> Type` annotation (e.g.
+/// `def foo():`), in which case no Return edge is emitted.
+///
+/// Examples (input → returned text):
+/// - `def foo() -> int:` → `Some("int")`
+/// - `def foo() -> Optional[int]:` → `Some("Optional[int]")`
+/// - `def foo() -> List[Dict[str, int]]:` → `Some("List[Dict[str, int]]")`
+/// - `def foo() -> pd.DataFrame:` → `Some("pd.DataFrame")`
+/// - `async def foo() -> AsyncIterator[int]:` → `Some("AsyncIterator[int]")`
+/// - `def foo() -> "User":` → `Some("\"User\"")`
+/// - `def foo():` → `None`
+fn extract_return_type_source_text(func_node: Node<'_>, content: &[u8]) -> Option<String> {
+    let return_type_node = func_node.child_by_field_name("return_type")?;
+    let text = return_type_node.utf8_text(content).ok()?.trim();
+    if text.is_empty() {
+        None
+    } else {
+        Some(text.to_string())
+    }
 }
 
 /// Process function parameters to create `TypeOf` and Reference edges for type hints.

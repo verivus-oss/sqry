@@ -31,8 +31,8 @@ Commands:
 Arguments:
   [PATTERN]
           Search pattern (shorthand for 'search' command)
-          
-          Supports regex patterns by default. Use --exact for literal matching.
+
+          Treated as a regex by default. Invalid regex returns an error. Use `--exact` for byte-for-byte literal matching against the interned symbol name (same contract as the planner's `name:<literal>` predicate; glob meta is matched as literal characters).
 
   [PATH]
           Search path (defaults to current directory)
@@ -52,7 +52,9 @@ Options:
           Case-insensitive search
 
   -x, --exact
-          Exact match (disable regex)
+          Exact (literal-only) match against interned symbol name (disables regex).
+
+          Applies to search mode (top-level shorthand and `sqry search`). Contract-bound to the structural query planner's `name:<literal>` predicate (B1_ALIGN): `sqry --exact NeedTags .` and `sqry query 'name:NeedTags' .` return identical sets — both look up the pattern against `entry.name` / `entry.qualified_name` byte-for-byte (case-sensitive) and exclude synthetic placeholder nodes. `--exact` does not accept glob meta (`*`, `?`, `[`); they are matched as literal characters. For glob matching against names use `sqry query 'name:parse_*'` instead. For regex matching, omit `--exact` and `sqry search` will treat the pattern as a regex over interned strings.
 
   -c, --count
           Show count only (number of matches)

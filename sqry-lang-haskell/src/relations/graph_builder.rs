@@ -824,7 +824,6 @@ fn strip_backticks(name: &str) -> String {
 }
 
 /// Convert a tree-sitter node to a Span
-#[allow(dead_code)] // Utility function reserved for future use
 fn span_from_node(node: Node<'_>) -> Span {
     Span::from_bytes(node.start_byte(), node.end_byte())
 }
@@ -1350,6 +1349,7 @@ fn process_data_type(
                 constructors_node,
                 content,
                 data_type_id,
+                &qualified_name,
                 helper,
                 &mut ref_seen,
             );
@@ -1359,6 +1359,7 @@ fn process_data_type(
                 constructors_node,
                 content,
                 data_type_id,
+                &qualified_name,
                 helper,
                 &mut ref_seen,
             );
@@ -1369,10 +1370,18 @@ fn process_data_type(
 
 /// Process regular data constructors (record, prefix, infix).
 /// `ref_seen` is shared across all constructors of the same data type.
+///
+/// `data_type_qualified_name` is the package-qualified name of the
+/// enclosing data type (e.g. `MyModule.Person`) — passed through so
+/// `process_record_fields` can mint the per-field `Constant` qualified
+/// names as `<Module>.<TypeName>.<FieldName>` (Cluster C /
+/// `C_OTHER_PLUGINS`, mirrors the Java/Kotlin/Dart/classpath/Go
+/// cross-language norm).
 fn process_data_constructors(
     constructors_node: Node<'_>,
     content: &[u8],
     data_type_id: NodeId,
+    data_type_qualified_name: &str,
     helper: &mut GraphBuildHelper,
     ref_seen: &mut std::collections::HashSet<String>,
 ) {
@@ -1385,7 +1394,14 @@ fn process_data_constructors(
         if let Some(ctor_node) = data_ctor.child_by_field_name("constructor") {
             match ctor_node.kind() {
                 "record" => {
-                    process_record_fields(ctor_node, content, data_type_id, helper, ref_seen);
+                    process_record_fields(
+                        ctor_node,
+                        content,
+                        data_type_id,
+                        data_type_qualified_name,
+                        helper,
+                        ref_seen,
+                    );
                 }
                 "prefix" => {
                     process_prefix_constructor(ctor_node, content, data_type_id, helper, ref_seen);
@@ -1400,10 +1416,47 @@ fn process_data_constructors(
 }
 
 /// Process record fields: `{ name :: String, age :: Int }` or `{ x, y :: Int }`
+///
+/// Cluster C / `C_OTHER_PLUGINS` (BadLiveware Go-batch DAG, 2026-04-29):
+/// every named Haskell record field is materialised as a
+/// `NodeKind::Constant` node, parented to the enclosing data-type node
+/// via `Defines` + `Contains` edges. The qualified-name format is
+/// `<Module>.<TypeName>.<FieldName>` (or `<TypeName>.<FieldName>` when
+/// the file has no module header), matching the
+/// Java/Kotlin/Dart/classpath/Go cross-language norm.
+///
+/// **Why `Constant` and not `Property`:** Haskell record fields are
+/// immutable by language definition (the `data`/`newtype` syntax has
+/// no mutation), so we mirror the Java convention of emitting
+/// `NodeKind::Constant` for `final` fields. The audit document
+/// (`docs/development/public-issue-triage/cluster_c_field_audit.md`)
+/// records this recommendation explicitly.
+///
+/// The `TypeOf{Field}` edge's source is also migrated from the data-type
+/// node to the new `Constant` node (mirroring Go's `C_EDGE_MIGRATE`
+/// pattern). Aggregate "all fields of this data type" queries continue
+/// to resolve via the `Defines` / `Contains` parenting; only the edge
+/// source identity changes. The `TypeOfContext::Field` discriminator,
+/// the `field_index`, and the `field_name` metadata are unchanged.
+///
+/// Visibility defaults to `None`. Haskell's per-symbol visibility is
+/// driven by the module's export list, which is not yet plumbed through
+/// to record-field emission; tightening visibility to honour
+/// `module Foo (Bar(field)) where ...` exports is left to a follow-up
+/// using the existing `ExportMap` plumbing.
+///
+/// **Anonymous record fields** (the `field_index`-only branch below,
+/// `x :: Int` with no `name` child — currently a tree-sitter quirk on
+/// malformed input) are deliberately skipped for `Constant` emission:
+/// without a stable field name we cannot synthesise a qualified name
+/// that resolves from CLI / MCP / LSP queries. The legacy
+/// `TypeOf{Field}` edge for those positions still fires so the
+/// type-flow graph stays complete; only the per-field node is omitted.
 fn process_record_fields(
     record_node: Node<'_>,
     content: &[u8],
     data_type_id: NodeId,
+    data_type_qualified_name: &str,
     helper: &mut GraphBuildHelper,
     ref_seen: &mut std::collections::HashSet<String>,
 ) {
@@ -1432,16 +1485,20 @@ fn process_record_fields(
             continue;
         };
 
-        // Extract all field names (handles `x, y :: Int`)
+        // Extract all field-name AST nodes (handles `x, y :: Int` — each
+        // name is its own child of the `field` node). We keep the
+        // `Node` (not just the text) so each Constant gets a span
+        // pointing at its own identifier.
         let mut name_cursor = child.walk();
-        let names: Vec<String> = child
+        let name_nodes: Vec<Node<'_>> = child
             .children_by_field_name("name", &mut name_cursor)
-            .filter_map(|n| n.utf8_text(content).ok().map(|t| t.trim().to_string()))
-            .filter(|n| !n.is_empty())
             .collect();
 
-        if names.is_empty() {
-            // Field without explicit name — use index
+        if name_nodes.is_empty() {
+            // Field without explicit name — emit only the legacy
+            // `TypeOf{Field}` edge keyed by `field_index`. No Constant
+            // node is materialised because there is no stable name to
+            // qualify it with (see function-level doc comment).
             let type_id = helper.add_type(&type_text, None);
             helper.add_typeof_edge_with_context(
                 data_type_id,
@@ -1451,23 +1508,58 @@ fn process_record_fields(
                 None,
             );
             field_index += 1;
+
+            // References edges still source from the data type for
+            // anonymous-field positions — the data type is the only
+            // anchor we have.
+            emit_references_edges_dedup(data_type_id, type_node, None, content, helper, ref_seen);
         } else {
-            // One edge per field name
-            for name in &names {
+            // One Constant + one TypeOf{Field} edge per declared name.
+            for name_node in &name_nodes {
+                let Ok(name_text) = name_node.utf8_text(content) else {
+                    field_index += 1;
+                    continue;
+                };
+                let name = name_text.trim();
+                if name.is_empty() {
+                    field_index += 1;
+                    continue;
+                }
+
+                let qualified_field_name = format!("{data_type_qualified_name}.{name}");
+                let constant_id = helper.add_constant_with_static_and_visibility(
+                    &qualified_field_name,
+                    Some(span_from_node(*name_node)),
+                    false, // Haskell record fields have no class-level `static`.
+                    None,  // Visibility comes from the module export list — out of scope.
+                );
+                helper.add_defines_edge(data_type_id, constant_id);
+                helper.add_contains_edge(data_type_id, constant_id);
+
                 let type_id = helper.add_type(&type_text, None);
                 helper.add_typeof_edge_with_context(
-                    data_type_id,
+                    constant_id,
                     type_id,
                     Some(TypeOfContext::Field),
                     Some(field_index),
                     Some(name),
                 );
+
+                // References edges sourced at the Constant so the
+                // field is the queryable anchor for "what types does
+                // this record field reference".
+                emit_references_edges_dedup(
+                    constant_id,
+                    type_node,
+                    None,
+                    content,
+                    helper,
+                    ref_seen,
+                );
+
                 field_index += 1;
             }
         }
-
-        // References edges with cross-field deduplication
-        emit_references_edges_dedup(data_type_id, type_node, None, content, helper, ref_seen);
     }
 }
 
@@ -1542,6 +1634,7 @@ fn process_gadt_constructors(
     gadt_node: Node<'_>,
     content: &[u8],
     data_type_id: NodeId,
+    data_type_qualified_name: &str,
     helper: &mut GraphBuildHelper,
     ref_seen: &mut std::collections::HashSet<String>,
 ) {
@@ -1554,7 +1647,14 @@ fn process_gadt_constructors(
         if let Some(type_node) = ctor.child_by_field_name("type") {
             // For record GADT constructors, process record fields
             if type_node.kind() == "record" {
-                process_record_fields(type_node, content, data_type_id, helper, ref_seen);
+                process_record_fields(
+                    type_node,
+                    content,
+                    data_type_id,
+                    data_type_qualified_name,
+                    helper,
+                    ref_seen,
+                );
             } else {
                 // GADT: `Lit :: Int -> Expr Int`
                 // The type field may be a `prefix` node wrapping a `function` node.
@@ -1632,7 +1732,14 @@ fn process_newtype(
         if field_node.kind() == "record" {
             // Record-style newtype: `newtype X = X { unX :: Int }`
             let mut ref_seen = std::collections::HashSet::new();
-            process_record_fields(field_node, content, newtype_type_id, helper, &mut ref_seen);
+            process_record_fields(
+                field_node,
+                content,
+                newtype_type_id,
+                &qualified_name,
+                helper,
+                &mut ref_seen,
+            );
         } else {
             // Simple newtype: `newtype Wrapped = Wrapped Int`
             // The `field` node wraps a type. Try extracting the type text directly.
@@ -1645,23 +1752,55 @@ fn process_newtype(
                 .and_then(|t| extract_type_text(t, content))
                 .or_else(|| extract_type_text(field_node, content));
 
-            let field_name = field_node
-                .child_by_field_name("name")
+            let name_node = field_node.child_by_field_name("name");
+            let field_name = name_node
                 .and_then(|n| n.utf8_text(content).ok())
-                .map(|t| t.trim().to_string());
+                .map(|t| t.trim().to_string())
+                .filter(|n| !n.is_empty());
 
             if let Some(type_text) = field_type {
-                let type_id = helper.add_type(&type_text, None);
-                helper.add_typeof_edge_with_context(
-                    newtype_type_id,
-                    type_id,
-                    Some(TypeOfContext::Field),
-                    Some(0),
-                    field_name.as_deref(),
-                );
-                // References edges from newtype to wrapped type constructors
-                let ref_node = type_ast_node.unwrap_or(field_node);
-                emit_references_edges(newtype_type_id, ref_node, None, content, helper);
+                // Cluster C / `C_OTHER_PLUGINS`: when the simple-newtype
+                // form carries a field name (e.g. record-style sugar
+                // `newtype Wrapper = Wrapper { unwrap :: Int }` that
+                // surfaced through this branch), emit a Constant for it
+                // and source the TypeOf{Field} edge from the Constant.
+                // For positional newtype fields (`newtype Wrapped =
+                // Wrapped Int`) keep the legacy data-type-sourced edge
+                // — there is no name to anchor a per-field node on.
+                if let (Some(name), Some(name_node)) = (field_name.as_deref(), name_node) {
+                    let qualified_field_name = format!("{qualified_name}.{name}");
+                    let constant_id = helper.add_constant_with_static_and_visibility(
+                        &qualified_field_name,
+                        Some(span_from_node(name_node)),
+                        false,
+                        None,
+                    );
+                    helper.add_defines_edge(newtype_type_id, constant_id);
+                    helper.add_contains_edge(newtype_type_id, constant_id);
+
+                    let type_id = helper.add_type(&type_text, None);
+                    helper.add_typeof_edge_with_context(
+                        constant_id,
+                        type_id,
+                        Some(TypeOfContext::Field),
+                        Some(0),
+                        Some(name),
+                    );
+                    let ref_node = type_ast_node.unwrap_or(field_node);
+                    emit_references_edges(constant_id, ref_node, None, content, helper);
+                } else {
+                    let type_id = helper.add_type(&type_text, None);
+                    helper.add_typeof_edge_with_context(
+                        newtype_type_id,
+                        type_id,
+                        Some(TypeOfContext::Field),
+                        Some(0),
+                        field_name.as_deref(),
+                    );
+                    // References edges from newtype to wrapped type constructors
+                    let ref_node = type_ast_node.unwrap_or(field_node);
+                    emit_references_edges(newtype_type_id, ref_node, None, content, helper);
+                }
             }
         }
     }

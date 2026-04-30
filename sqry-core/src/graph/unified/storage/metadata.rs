@@ -85,11 +85,36 @@ pub enum NodeMetadata {
     Macro(MacroNodeMetadata),
     /// JVM classpath provenance metadata.
     Classpath(ClasspathNodeMetadata),
+    /// Synthetic placeholder node marker (C_SUPPRESS).
+    ///
+    /// Identifies internal-use-only nodes that language plugins emit as
+    /// shadows / scaffolding for binding-plane analysis (e.g. the Go
+    /// plugin's `<field:operand.field>` field-access placeholders and the
+    /// `name@<offset>` per-binding-site Variable nodes from the local-scope
+    /// resolver). These nodes must be suppressed from user-facing search
+    /// surfaces (`sqry search --exact`, MCP `semantic_search`,
+    /// `relation_query`, etc.) but remain reachable to internal callers
+    /// (binding plane, scope/alias analysis) via the explicit
+    /// `include_synthetic` opt-in path.
+    ///
+    /// Carries no payload — presence in the metadata store at a given
+    /// `NodeId` IS the flag.
+    ///
+    /// Wire format: serializes with `kind == NODE_METADATA_SYNTHETIC`
+    /// (discriminant 2) and BOTH `macro_data` and `classpath_data`
+    /// payload fields encoded as `None`. The on-wire shape stays at the
+    /// existing 5-field per-entry layout, so V10 snapshots written before
+    /// this variant existed (which only carry kinds 0 and 1) decode
+    /// without change, and V10 snapshots written after this variant
+    /// exists are decoded by the new reader by dispatching on `kind`.
+    /// The arena layout (`NodeEntry`) is unchanged.
+    Synthetic,
 }
 
 /// Discriminant values for `NodeMetadata` wire format.
 const NODE_METADATA_MACRO: u8 = 0;
 const NODE_METADATA_CLASSPATH: u8 = 1;
+const NODE_METADATA_SYNTHETIC: u8 = 2;
 
 /// Sparse metadata store keyed by full `NodeId` (index + generation).
 ///
@@ -153,6 +178,18 @@ impl Serialize for NodeMetadataStore {
                     macro_data: None,
                     classpath_data: Some(c.clone()),
                 },
+                // C_SUPPRESS: Synthetic flag has no payload. Wire shape
+                // stays at the existing 5-field layout — both Option
+                // payload fields are `None`, only `kind` distinguishes
+                // the variant. Old V10 snapshots only carry kinds 0 and
+                // 1, so they continue to decode unchanged.
+                NodeMetadata::Synthetic => NodeMetadataEntryV7 {
+                    index,
+                    generation,
+                    kind: NODE_METADATA_SYNTHETIC,
+                    macro_data: None,
+                    classpath_data: None,
+                },
             })
             .collect();
         entries.serialize(serializer)
@@ -169,15 +206,21 @@ impl<'de> Deserialize<'de> for NodeMetadataStore {
         let entries: Vec<NodeMetadataEntryV7> = Vec::deserialize(deserializer)?;
         let mut map = HashMap::with_capacity(entries.len());
         for e in entries {
-            let metadata = if e.kind == NODE_METADATA_CLASSPATH {
-                let data = e.classpath_data.ok_or_else(|| {
-                    serde::de::Error::custom("missing classpath_data for Classpath metadata entry")
-                })?;
-                NodeMetadata::Classpath(data)
-            } else {
-                // Default: treat as Macro (covers both explicit 0 and legacy)
-                let data = e.macro_data.unwrap_or_default();
-                NodeMetadata::Macro(data)
+            let metadata = match e.kind {
+                NODE_METADATA_CLASSPATH => {
+                    let data = e.classpath_data.ok_or_else(|| {
+                        serde::de::Error::custom(
+                            "missing classpath_data for Classpath metadata entry",
+                        )
+                    })?;
+                    NodeMetadata::Classpath(data)
+                }
+                NODE_METADATA_SYNTHETIC => NodeMetadata::Synthetic,
+                _ => {
+                    // Default: treat as Macro (covers both explicit 0 and legacy)
+                    let data = e.macro_data.unwrap_or_default();
+                    NodeMetadata::Macro(data)
+                }
             };
             map.insert((e.index, e.generation), metadata);
         }
@@ -200,7 +243,7 @@ impl NodeMetadataStore {
     pub fn get(&self, node_id: NodeId) -> Option<&MacroNodeMetadata> {
         match self.entries.get(&(node_id.index(), node_id.generation()))? {
             NodeMetadata::Macro(m) => Some(m),
-            NodeMetadata::Classpath(_) => None,
+            NodeMetadata::Classpath(_) | NodeMetadata::Synthetic => None,
         }
     }
 
@@ -221,7 +264,7 @@ impl NodeMetadataStore {
             .get_mut(&(node_id.index(), node_id.generation()))?
         {
             NodeMetadata::Macro(m) => Some(m),
-            NodeMetadata::Classpath(_) => None,
+            NodeMetadata::Classpath(_) | NodeMetadata::Synthetic => None,
         }
     }
 
@@ -239,6 +282,43 @@ impl NodeMetadataStore {
     pub fn insert_metadata(&mut self, node_id: NodeId, metadata: NodeMetadata) {
         self.entries
             .insert((node_id.index(), node_id.generation()), metadata);
+    }
+
+    /// Mark a node as synthetic (C_SUPPRESS).
+    ///
+    /// Synthetic nodes are internal placeholders the language plugins
+    /// emit for binding-plane / scope analysis (e.g., the Go plugin's
+    /// `<field:operand.field>` field-access shadows and the
+    /// `name@<offset>` per-binding-site Variable nodes from the local
+    /// scope resolver). They MUST be filtered out of every user-facing
+    /// surface (CLI `search`, MCP `semantic_search` / `relation_query`,
+    /// etc.) but stay reachable to internal binding-plane callers via
+    /// the explicit `include_synthetic` opt-in path on
+    /// [`crate::graph::unified::concurrent::graph::GraphSnapshot::find_by_pattern_with_options`].
+    ///
+    /// If the node already has macro or classpath metadata, calling this
+    /// method REPLACES it with the synthetic marker. Synthetic nodes by
+    /// construction never carry macro/classpath provenance — the Go
+    /// plugin emits them as plain Variable / Property scaffolding —
+    /// so the replacement collision is benign.
+    pub fn mark_synthetic(&mut self, node_id: NodeId) {
+        self.entries.insert(
+            (node_id.index(), node_id.generation()),
+            NodeMetadata::Synthetic,
+        );
+    }
+
+    /// Returns `true` iff the node is flagged as synthetic.
+    ///
+    /// Returns `false` for non-synthetic nodes, missing entries, and
+    /// stale `NodeId` generations. Companion to [`Self::mark_synthetic`];
+    /// see [`NodeMetadata::Synthetic`] for the full semantic contract.
+    #[must_use]
+    pub fn is_synthetic(&self, node_id: NodeId) -> bool {
+        matches!(
+            self.entries.get(&(node_id.index(), node_id.generation())),
+            Some(NodeMetadata::Synthetic)
+        )
     }
 
     /// Get or insert default macro metadata for a node.
@@ -261,6 +341,9 @@ impl NodeMetadataStore {
             NodeMetadata::Classpath(_) => {
                 panic!("get_or_insert_default called on a Classpath metadata entry")
             }
+            NodeMetadata::Synthetic => {
+                panic!("get_or_insert_default called on a Synthetic metadata entry")
+            }
         }
     }
 
@@ -271,7 +354,7 @@ impl NodeMetadataStore {
             .remove(&(node_id.index(), node_id.generation()))?
         {
             NodeMetadata::Macro(m) => Some(m),
-            NodeMetadata::Classpath(_) => None,
+            NodeMetadata::Classpath(_) | NodeMetadata::Synthetic => None,
         }
     }
 
@@ -297,7 +380,7 @@ impl NodeMetadataStore {
     pub fn iter(&self) -> impl Iterator<Item = ((u32, u64), &MacroNodeMetadata)> {
         self.entries.iter().filter_map(|(&k, v)| match v {
             NodeMetadata::Macro(m) => Some((k, m)),
-            NodeMetadata::Classpath(_) => None,
+            NodeMetadata::Classpath(_) | NodeMetadata::Synthetic => None,
         })
     }
 
@@ -380,6 +463,10 @@ impl crate::graph::unified::memory::GraphMemorySize for NodeMetadataStore {
                         + c.jar_path.capacity()
                         + c.fqn.capacity()
                 }
+                // Payload-less marker: only the enum tag itself, which
+                // is already counted by `mem::size_of::<NodeMetadata>()`
+                // in the `base` calculation above.
+                NodeMetadata::Synthetic => 0,
             })
             .sum();
         base + inner
@@ -641,6 +728,7 @@ mod tests {
                 assert!(cp.is_direct_dependency);
             }
             NodeMetadata::Macro(_) => panic!("expected Classpath variant"),
+            NodeMetadata::Synthetic => panic!("expected Classpath variant, got Synthetic"),
         }
     }
 
@@ -761,6 +849,132 @@ mod tests {
         assert!(removed.is_none());
         // The entry is still gone from the store because remove() always removes
         assert!(store.is_empty());
+    }
+
+    // ------------------------------------------------------------------
+    // C_SUPPRESS: NodeMetadata::Synthetic variant
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn synthetic_mark_and_query() {
+        let mut store = NodeMetadataStore::new();
+        let node = NodeId::new(7, 1);
+
+        assert!(!store.is_synthetic(node), "missing entry must report false");
+
+        store.mark_synthetic(node);
+        assert!(store.is_synthetic(node));
+        assert_eq!(store.len(), 1);
+
+        // get() returns None — synthetic carries no MacroNodeMetadata payload.
+        assert!(store.get(node).is_none());
+
+        // get_metadata() returns the typed envelope.
+        assert!(matches!(
+            store.get_metadata(node),
+            Some(NodeMetadata::Synthetic),
+        ));
+
+        // Stale generation must NOT see the synthetic flag.
+        let stale = NodeId::new(7, 2);
+        assert!(!store.is_synthetic(stale));
+    }
+
+    #[test]
+    fn synthetic_replaces_other_variants() {
+        let mut store = NodeMetadataStore::new();
+        let node = NodeId::new(11, 1);
+
+        store.insert(
+            node,
+            MacroNodeMetadata {
+                cfg_condition: Some("test".to_string()),
+                ..Default::default()
+            },
+        );
+        assert!(store.get(node).is_some());
+
+        store.mark_synthetic(node);
+        assert!(store.is_synthetic(node));
+        // The macro payload is replaced — `get` no longer surfaces a MacroNodeMetadata.
+        assert!(store.get(node).is_none());
+        assert_eq!(store.len(), 1);
+    }
+
+    #[test]
+    fn synthetic_postcard_roundtrip_preserves_v10_wire_shape() {
+        // Build a store that mixes all three variants so the postcard
+        // round-trip exercises the `kind` discriminant dispatch end-to-end.
+        let mut store = NodeMetadataStore::new();
+
+        store.insert(
+            NodeId::new(1, 0),
+            MacroNodeMetadata {
+                macro_generated: Some(true),
+                ..Default::default()
+            },
+        );
+        store.insert_metadata(
+            NodeId::new(2, 0),
+            NodeMetadata::Classpath(ClasspathNodeMetadata {
+                coordinates: None,
+                jar_path: "x.jar".to_string(),
+                fqn: "com.example.X".to_string(),
+                is_direct_dependency: true,
+            }),
+        );
+        store.mark_synthetic(NodeId::new(3, 0));
+        store.mark_synthetic(NodeId::new(99, 5));
+
+        let bytes = postcard::to_allocvec(&store).expect("serialize");
+        let decoded: NodeMetadataStore = postcard::from_bytes(&bytes).expect("deserialize");
+
+        assert_eq!(store, decoded);
+        assert_eq!(decoded.len(), 4);
+        assert!(decoded.is_synthetic(NodeId::new(3, 0)));
+        assert!(decoded.is_synthetic(NodeId::new(99, 5)));
+        assert!(matches!(
+            decoded.get_metadata(NodeId::new(2, 0)),
+            Some(NodeMetadata::Classpath(_))
+        ));
+        assert!(matches!(
+            decoded.get_metadata(NodeId::new(1, 0)),
+            Some(NodeMetadata::Macro(_))
+        ));
+    }
+
+    #[test]
+    fn synthetic_v10_legacy_snapshot_decodes_without_synthetic_entries() {
+        // Simulate a "legacy" V10 snapshot written before the Synthetic
+        // variant existed — only kinds 0 and 1 appear on the wire.
+        let mut legacy = NodeMetadataStore::new();
+        legacy.insert(
+            NodeId::new(1, 0),
+            MacroNodeMetadata {
+                macro_generated: Some(true),
+                ..Default::default()
+            },
+        );
+        legacy.insert_metadata(
+            NodeId::new(2, 0),
+            NodeMetadata::Classpath(ClasspathNodeMetadata {
+                coordinates: None,
+                jar_path: "y.jar".to_string(),
+                fqn: "com.example.Y".to_string(),
+                is_direct_dependency: false,
+            }),
+        );
+
+        // Round-trip through the same writer/reader the new code uses;
+        // the legacy fixture has zero synthetic entries because they did
+        // not exist when it was written.
+        let bytes = postcard::to_allocvec(&legacy).expect("serialize");
+        let decoded: NodeMetadataStore = postcard::from_bytes(&bytes).expect("deserialize");
+
+        assert_eq!(legacy, decoded);
+        assert!(!decoded.is_synthetic(NodeId::new(1, 0)));
+        assert!(!decoded.is_synthetic(NodeId::new(2, 0)));
+        assert_eq!(decoded.len(), 2);
     }
 
     #[test]

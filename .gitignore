@@ -90,6 +90,12 @@ flamegraph-*.svg
 *.tmp
 config-provenance.json
 
+# Release evidence: per-DAG fixture replay logs are required artifacts
+# (Evidence Matrix EV15 in the public-issue-triage workflow). Whitelist
+# the specific paths here.
+!docs/development/public-issue-triage/*_fixture_replay.log
+!docs/development/release-execution/**/*_replay.log
+
 # OS-specific
 .DS_Store
 Thumbs.db

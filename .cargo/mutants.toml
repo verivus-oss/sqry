@@ -1,0 +1,61 @@
+# cargo-mutants configuration
+#
+# Wired to `.github/workflows/mutation-gate.yml` (PR-time changed-lines
+# gate + master baseline rotation). Strategy reference:
+# /srv/repos/Verivus_Test_Strategy.md §2.4, §7.1 #7, §7.4 #4.
+#
+# Phase A (warm-up, current): jobs run with `continue-on-error: true`
+# and publish survivor counts as artifacts. The thresholds in §7.1 #7
+# (≥75 % new code / ≥60 % legacy) are reached by ratchet, not by
+# day-one enforcement. Phase B promotion is tracked in
+# docs/reviews/test-strategy-audit-2026-04-30/CATALOGUE.md (P0 #1).
+#
+# Editing rules:
+# - Do not exclude production code. Exclusions here are limited to
+#   build artefacts, fixture sources, and code that cargo-mutants
+#   cannot meaningfully mutate (proc-macro plumbing, generated tree-
+#   sitter bindings, declarative macro bodies the test harness skips).
+# - `additional_cargo_test_args` mirrors what ci.yml passes to
+#   `cargo test --workspace`: `--locked` and `--no-fail-fast`.
+# - `timeout_multiplier` covers slow plugin compile + test cycles. The
+#   per-mutant wall-clock cap is in the workflow (`--timeout 300`).
+# - `minimum_test_timeout` floors the per-mutant timeout to 60 s so
+#   short crates still survive a transient stall without false-killing
+#   a mutant.
+
+# Exclusions are limited to three classes only — build artefacts,
+# fixtures, and generated tree-sitter bindings. Production code, fuzz
+# harnesses, and benchmark crates are intentionally NOT excluded; if
+# cargo-mutants finds surviving mutants there, the catalogue's P0 #1
+# ratchet expects us to address them rather than hide them.
+exclude_globs = [
+    "target/**",
+    "**/target/**",
+    "**/test-fixtures/**",
+    "**/tests/fixtures/**",
+    # Tree-sitter generated bindings (regenerated from grammar.js by
+    # upstream tree-sitter tooling; not meaningfully mutable).
+    "**/sqry-tree-sitter-support/src/grammars_generated/**",
+]
+
+# Skip cargo-mutants over re-export shims and constant tables. These
+# files have low mutation surface area and survivors there carry no
+# semantic signal. Production logic in *_test.rs targets, parsers,
+# planners, graph builders is *not* in this list.
+exclude_re = [
+    # Re-export modules: `pub use crate::foo::*;` style shims.
+    "^pub use ",
+    # Cargo build.rs scripts: build-time only, no runtime semantics.
+    "^build\\.rs$",
+]
+
+# Cargo passthrough.
+additional_cargo_args = ["--locked"]
+additional_cargo_test_args = ["--locked", "--no-fail-fast"]
+
+# Timeouts. cargo-mutants computes a per-mutant timeout as
+# (baseline_test_time × timeout_multiplier), floored at
+# minimum_test_timeout. The workflow's `--timeout 300` is the absolute
+# ceiling.
+timeout_multiplier = 5.0
+minimum_test_timeout = 60

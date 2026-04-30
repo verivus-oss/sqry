@@ -49,9 +49,15 @@ pub fn run_graph(
 ) -> Result<()> {
     let root = PathBuf::from(search_path);
 
-    // Handle Status command early - it checks the unified graph, not the legacy graph
+    // Handle Status command early - it checks the unified graph, not the legacy graph.
+    // Pass the threaded `format` through so that
+    // `sqry graph --format json status` honors the alias contract for the
+    // global `--json` flag (verivus-oss/sqry#79 / verivus-oss/sqry#158).
+    // The per-subcommand `--json` and global `--json` paths continue to
+    // route through `cli.json`; this added input only covers the
+    // `--format json` surface.
     if matches!(operation, GraphOperation::Status) {
-        return super::run_graph_status(cli, search_path);
+        return super::run_graph_status_with_format(cli, search_path, format == "json");
     }
 
     let config = build_graph_load_config(cli);
@@ -271,16 +277,27 @@ pub fn run_graph(
             verbose,
         ),
         GraphOperation::Provenance { symbol, json } => {
+            // Honor both the per-subcommand `--json` flag and the threaded
+            // graph-level `--format json` (resolved upstream by
+            // `resolve_graph_format`). Either one alone — or both together —
+            // must produce JSON. See verivus-oss/sqry#79 / verivus-oss/sqry#158
+            // and the `--format json` regression flagged by the gemini iter-1
+            // review of D_JSON_THREAD.
+            let json_out = *json || format == "json";
             let snapshot = unified_graph.snapshot();
-            provenance::run(&snapshot, symbol, *json)
+            provenance::run(&snapshot, symbol, json_out)
         }
         GraphOperation::Resolve {
             symbol,
             explain,
             json,
         } => {
+            // Same alias contract as `Provenance` above: `--format json`
+            // threaded from the graph parent must produce JSON output even
+            // when the per-subcommand `--json` flag is not set.
+            let json_out = *json || format == "json";
             let snapshot = unified_graph.snapshot();
-            resolve::run(&snapshot, symbol, *explain, *json)
+            resolve::run(&snapshot, symbol, *explain, json_out)
         }
         GraphOperation::Status => {
             unreachable!("Status is handled before loading the unified graph in run_graph")

@@ -55,7 +55,7 @@ pub use graph::run_graph;
 pub use hier_search::run_hier_search;
 pub use history::run_history;
 pub use impact::run_impact;
-pub use index::{run_graph_status, run_index, run_index_status, run_update};
+pub use index::{run_graph_status_with_format, run_index, run_index_status, run_update};
 pub use insights::run_insights;
 pub use planner_query::run_planner_query;
 pub use query::run_query;

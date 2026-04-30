@@ -31,6 +31,9 @@
 
 use std::sync::Arc;
 
+use sqry_core::graph::unified::edge::EdgeKind;
+use sqry_core::graph::unified::edge::kind::TypeOfContext;
+use sqry_core::graph::unified::materialize::find_nodes_by_name;
 use sqry_core::graph::unified::node::NodeId;
 use sqry_db::QueryDb;
 use sqry_db::queries::RelationKey;
@@ -61,9 +64,16 @@ use crate::tools::RelationType;
 /// MCP handlers in [`crate::execution::tools::relations`] and
 /// [`crate::execution::tools::analysis`] call the per-relation wrappers
 /// directly because they need to thread relation-specific keys and
-/// behaviour through different code paths. `Returns` returns an empty
-/// set here because it is not yet modelled as an edge in the unified
-/// graph.
+/// behaviour through different code paths.
+///
+/// `Returns` walks `EdgeKind::TypeOf { context: Some(TypeOfContext::Return), .. }`
+/// edges from the candidate function/method nodes resolved out of `symbol`
+/// and returns the target type-node IDs. This mirrors the planner's
+/// `Predicate::Returns` evaluator at
+/// [`sqry_db::planner::execute`]'s `node_returns_type` for cross-engine
+/// consistency: both surfaces consult the unified-graph edge plane (the
+/// `TypeOf { Return }` edges produced by `B2_PLANNER`'s `GraphBuildHelper`
+/// integration) rather than parsing `NodeEntry.signature` text.
 ///
 /// This function stays in `sqry-mcp` (rather than moving to sqry-db with
 /// the per-query wrappers) because it depends on the MCP-local
@@ -82,8 +92,57 @@ pub(crate) fn relation_endpoints_for_mcp(
         RelationType::Callees => mcp_callees_query(db, &key),
         RelationType::Imports => mcp_imports_query(db, &key),
         RelationType::Exports => mcp_exports_query(db, &key),
-        RelationType::Returns => Arc::new(Vec::new()),
+        RelationType::Returns => returns_targets_for_symbol(db, symbol),
     }
+}
+
+/// Resolve `symbol` to candidate function/method nodes and collect the
+/// target `NodeId`s of every outgoing
+/// `EdgeKind::TypeOf { context: Some(TypeOfContext::Return), .. }` edge.
+///
+/// # Inline snapshot walk vs. derived-query cache
+///
+/// We walk `snapshot.edges().edges_from(...)` directly rather than backing
+/// this with a sqry-db [`DerivedQuery`][sqry_db::query::DerivedQuery]. The
+/// planner's `Predicate::Returns` evaluator at
+/// `sqry_db::planner::execute::node_returns_type` makes the same choice
+/// for the same reason: `Returns` lacks a name-keyed cache entry in
+/// sqry-db today, and adding one is out of scope for `B2_MCP` (the DAG's
+/// `critical_decisions` only require shape parity with
+/// Callers/Callees/Imports/Exports for client-side consistency, not cache
+/// reuse). A future unit can introduce a `ReturnsQuery` derived-query
+/// type and route both this function and the planner through it; at that
+/// point this body becomes a one-liner like `db.get::<ReturnsQuery>(key)`
+/// in the same shape as [`mcp_callers_query`]. Until then the inline walk
+/// keeps the MCP `relation_query relation:returns` surface honest about
+/// the underlying edge plane.
+///
+/// Deduplication preserves first-seen order across candidate nodes so the
+/// surface is deterministic across runs.
+#[must_use]
+fn returns_targets_for_symbol(db: &QueryDb, symbol: &str) -> Arc<Vec<NodeId>> {
+    let snapshot = db.snapshot();
+    let candidates = find_nodes_by_name(snapshot, symbol);
+
+    let mut seen = std::collections::HashSet::new();
+    let mut out: Vec<NodeId> = Vec::new();
+
+    for candidate in candidates {
+        for edge in snapshot.edges().edges_from(candidate) {
+            if matches!(
+                edge.kind,
+                EdgeKind::TypeOf {
+                    context: Some(TypeOfContext::Return),
+                    ..
+                }
+            ) && seen.insert(edge.target)
+            {
+                out.push(edge.target);
+            }
+        }
+    }
+
+    Arc::new(out)
 }
 
 #[cfg(test)]
@@ -95,6 +154,7 @@ mod tests {
 
     use sqry_core::graph::unified::concurrent::{CodeGraph, GraphSnapshot};
     use sqry_core::graph::unified::edge::EdgeKind;
+    use sqry_core::graph::unified::edge::kind::TypeOfContext;
     use sqry_core::graph::unified::node::NodeKind;
     use sqry_core::graph::unified::storage::NodeEntry;
 
@@ -153,7 +213,80 @@ mod tests {
         let callees_set = relation_endpoints_for_mcp(&db, RelationType::Callees, "main");
         assert!(callees_set.contains(&helper_id));
 
+        // `build_caller_graph` has no `TypeOf{Return}` edges, so the Returns
+        // dispatch over an unrelated symbol must still come back empty —
+        // confirming that we did not regress to a "match anything" walk.
         let returns_set = relation_endpoints_for_mcp(&db, RelationType::Returns, "anything");
-        assert!(returns_set.is_empty(), "Returns is not modelled as an edge");
+        assert!(
+            returns_set.is_empty(),
+            "Returns dispatch must yield empty when no TypeOf{{Return}} edges exist"
+        );
+    }
+
+    /// Builds: `parseConfig --TypeOf{Return}--> error_type`. Returns
+    /// `(snapshot, parse_config_id, error_type_id)`.
+    fn build_returns_graph() -> (Arc<GraphSnapshot>, NodeId, NodeId) {
+        let mut graph = CodeGraph::new();
+        let file_id = graph.files_mut().register(Path::new("lib.rs")).unwrap();
+        let parse_name = graph.strings_mut().intern("parseConfig").unwrap();
+        let error_name = graph.strings_mut().intern("error_type").unwrap();
+
+        let parse_id = graph
+            .nodes_mut()
+            .alloc(
+                NodeEntry::new(NodeKind::Function, parse_name, file_id)
+                    .with_qualified_name(parse_name),
+            )
+            .unwrap();
+        let error_id = graph
+            .nodes_mut()
+            .alloc(
+                NodeEntry::new(NodeKind::Type, error_name, file_id).with_qualified_name(error_name),
+            )
+            .unwrap();
+
+        graph.edges_mut().add_edge(
+            parse_id,
+            error_id,
+            EdgeKind::TypeOf {
+                context: Some(TypeOfContext::Return),
+                index: None,
+                name: None,
+            },
+            file_id,
+        );
+
+        // Rebuild auxiliary indices so `find_nodes_by_name` can resolve
+        // the symbol; the production build pipeline does this after every
+        // chunk in `phase4c_rebuild_indices`.
+        graph.rebuild_indices();
+
+        (Arc::new(graph.snapshot()), parse_id, error_id)
+    }
+
+    #[test]
+    fn mcp_dispatch_returns_walks_typeof_return_edges() {
+        let (snapshot, _parse_id, error_id) = build_returns_graph();
+        let db = make_query_db(snapshot);
+
+        let returns_set = relation_endpoints_for_mcp(&db, RelationType::Returns, "parseConfig");
+        assert!(
+            returns_set.contains(&error_id),
+            "Returns dispatch must surface the target of the TypeOf{{Return}} edge \
+             (got {returns_set:?}, expected to contain {error_id:?})",
+        );
+    }
+
+    #[test]
+    fn mcp_dispatch_returns_empty_for_unknown_symbol() {
+        let (snapshot, _parse_id, _error_id) = build_returns_graph();
+        let db = make_query_db(snapshot);
+
+        let returns_set =
+            relation_endpoints_for_mcp(&db, RelationType::Returns, "no_such_function");
+        assert!(
+            returns_set.is_empty(),
+            "Unknown symbols must dispatch to an empty Returns set, not panic or return all targets"
+        );
     }
 }

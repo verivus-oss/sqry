@@ -1,0 +1,278 @@
+# .github/workflows/mutation-gate.yml
+#
+# P0 #1 of docs/reviews/test-strategy-audit-2026-04-30/CATALOGUE.md.
+# Strategy reference: /srv/repos/Verivus_Test_Strategy.md §2.4
+# ("mutation score is a load-bearing gate, not a metric"), §7.1 #7
+# ("mutation testing on changed lines, threshold ≥75 % new code,
+# ≥60 % legacy"), §7.4 #4 ("mutation score is a gate, not a metric").
+#
+# Two jobs:
+#
+#   1. pr-changed-lines — runs `cargo mutants --in-diff` against the
+#      PR's changed Rust lines. Phase A (warm-up): non-blocking;
+#      publishes survivor count as PR step-summary + artifact.
+#      Promotion to blocking gate is tracked in CATALOGUE.md P0 #1.
+#
+#   2. master-baseline — on push to master, runs `cargo mutants` on
+#      a per-crate matrix of three canary crates (sqry-mcp-redaction,
+#      sqry-db, sqry-lang-python) and uploads outcomes as 90-day
+#      artifacts. Establishes the legacy-code baseline survivor count
+#      that the §7.1 #7 "≥60 % legacy" threshold ratchets against.
+#
+# Disk-budget strategy mirrors ci.yml (no target/ cache; aggressive
+# free-disk-space step; CARGO_BUILD_JOBS=2; debug symbols disabled).
+# Mutation runs are wall-clock-capped per mutant via `--timeout 300`
+# (5 min) and per job via `timeout-minutes`.
+#
+# Security note: every `${{ github.event.* }}` and `${{ matrix.* }}`
+# reference is routed through an `env:` block before being read inside
+# a `run:` script, per
+# https://github.blog/security/vulnerability-research/how-to-catch-github-actions-workflow-injections-before-attackers-do/.
+
+name: mutation-gate
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mutation-gate-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+  CARGO_BUILD_JOBS: 2
+
+jobs:
+  # ==========================================================================
+  # 1. pr-changed-lines — Phase A non-blocking ratchet on PR diff
+  # ==========================================================================
+  pr-changed-lines:
+    name: mutation gate (changed lines, warm-up)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout (full history for merge-base diff)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Free disk space
+        run: |
+          set -euo pipefail
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost \
+            "$AGENT_TOOLSDIRECTORY" || true
+          sudo apt-get clean || true
+          df -h /
+
+      - name: Install Rust toolchain (per rust-toolchain.toml)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry (no target/ — disk-budget)
+        # House style (ci.yml): registry-only cache. The cargo-mutants
+        # binary itself is reinstalled per run to keep this in lock-
+        # step with the existing CI cache contract.
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-mutation-gate
+          restore-keys: |
+            ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-
+            ${{ runner.os }}-cargo-
+
+      - name: Install cargo-mutants
+        run: |
+          set -euo pipefail
+          cargo install --locked cargo-mutants
+          cargo mutants --version
+
+      - name: Compute changed-lines diff against PR base
+        env:
+          PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          set -euo pipefail
+          # Reject base refs that are not a normal branch name. GitHub
+          # normalises base.ref to a branch slug, but defence-in-depth
+          # is cheap here.
+          case "$PR_BASE_REF" in
+            ''|*[!a-zA-Z0-9._/-]*)
+              echo "Refusing suspicious base ref: $PR_BASE_REF" >&2
+              exit 1
+              ;;
+          esac
+          git fetch --no-tags --depth=200 origin "$PR_BASE_REF"
+          # cargo-mutants `--in-diff` expects a unified diff. Limit to
+          # Rust files; the tool ignores non-mutable files but the
+          # narrower diff is faster to parse on large PRs.
+          git diff --unified=1 "origin/${PR_BASE_REF}...HEAD" -- '*.rs' \
+            > /tmp/pr.diff
+          echo "Diff size: $(wc -l < /tmp/pr.diff) lines"
+          echo "Rust files touched: $(git diff --name-only "origin/${PR_BASE_REF}...HEAD" -- '*.rs' | wc -l)"
+
+      - name: Skip if no Rust changes in diff
+        id: diff_check
+        run: |
+          set -euo pipefail
+          if [[ ! -s /tmp/pr.diff ]]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            {
+              echo "## Mutation gate"
+              echo
+              echo "_No Rust changes in this PR — gate skipped._"
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run cargo-mutants on changed lines
+        if: steps.diff_check.outputs.skip != 'true'
+        # Phase A: non-blocking. Survivors are reported, not enforced.
+        # Promotion to blocking gate is the second step of P0 #1 in
+        # docs/reviews/test-strategy-audit-2026-04-30/CATALOGUE.md.
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          cargo mutants \
+            --in-diff /tmp/pr.diff \
+            --no-shuffle \
+            --timeout 300 \
+            --output mutants.out \
+            --json
+
+      - name: Render Markdown summary
+        if: always() && steps.diff_check.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          if [[ -f mutants.out/outcomes.json ]]; then
+            python3 scripts/ci/mutants_summary.py mutants.out/outcomes.json \
+              >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo "## Mutation gate"
+              echo
+              echo "_outcomes.json not produced — see job logs._"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload mutants report
+        if: always() && steps.diff_check.outputs.skip != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutants-pr-${{ github.event.pull_request.number }}-${{ github.run_attempt }}
+          path: mutants.out/
+          retention-days: 30
+          if-no-files-found: ignore
+
+  # ==========================================================================
+  # 2. master-baseline — per-crate baseline rotation on push to master
+  # ==========================================================================
+  master-baseline:
+    name: mutation baseline (${{ matrix.crate }})
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        # Three canary crates per CATALOGUE.md P0 #1 step 4:
+        #   a. sqry-mcp-redaction — smallest blast radius, clearest invariants
+        #   b. sqry-db            — pure functions, easy property-test wins
+        #   c. sqry-lang-python   — only plugin with property tests today
+        crate:
+          - sqry-mcp-redaction
+          - sqry-db
+          - sqry-lang-python
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          set -euo pipefail
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost \
+            "$AGENT_TOOLSDIRECTORY" || true
+          sudo apt-get clean || true
+          df -h /
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry (no target/ — disk-budget)
+        # House style (ci.yml): registry-only cache. The cargo-mutants
+        # binary itself is reinstalled per run to keep this in lock-
+        # step with the existing CI cache contract.
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-mutation-baseline-${{ matrix.crate }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-
+            ${{ runner.os }}-cargo-
+
+      - name: Install cargo-mutants
+        run: |
+          set -euo pipefail
+          cargo install --locked cargo-mutants
+          cargo mutants --version
+
+      - name: Run cargo-mutants on ${MUTATION_CRATE}
+        # Phase A: non-blocking. Establishes baseline; subsequent runs
+        # ratchet against it.
+        continue-on-error: true
+        env:
+          MUTATION_CRATE: ${{ matrix.crate }}
+        run: |
+          set -euo pipefail
+          # MUTATION_CRATE is workflow-controlled (matrix list above),
+          # not user-controlled. Routed through env: as a defence-in-
+          # depth precaution against future workflow edits.
+          cargo mutants \
+            --package "$MUTATION_CRATE" \
+            --no-shuffle \
+            --timeout 300 \
+            --output mutants.out \
+            --json
+
+      - name: Render Markdown summary
+        if: always()
+        env:
+          MUTATION_CRATE: ${{ matrix.crate }}
+        run: |
+          set -euo pipefail
+          if [[ -f mutants.out/outcomes.json ]]; then
+            python3 scripts/ci/mutants_summary.py mutants.out/outcomes.json \
+              >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo "## Mutation baseline ($MUTATION_CRATE)"
+              echo
+              echo "_outcomes.json not produced — see job logs._"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload baseline report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutants-baseline-${{ matrix.crate }}-${{ github.sha }}
+          path: mutants.out/
+          retention-days: 90
+          if-no-files-found: ignore

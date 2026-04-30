@@ -1875,6 +1875,17 @@ impl GraphSnapshot {
     /// Performs a simple substring match on node names and qualified names.
     /// Returns all matching node IDs.
     ///
+    /// **Synthetic suppression (C_SUPPRESS):** synthetic placeholder
+    /// nodes — internal scaffolding the language plugins emit for
+    /// binding-plane and scope analysis (e.g. the Go plugin's
+    /// `<field:operand.field>` field-access shadows and the
+    /// `<ident>@<offset>` per-binding-site Variable nodes from the
+    /// local-scope resolver) — are filtered out by default. Internal
+    /// callers that need to reach these nodes (binding plane, scope /
+    /// alias / shadow analysis) use
+    /// [`Self::find_by_pattern_with_options`] with
+    /// `include_synthetic = true`.
+    ///
     /// # Performance
     ///
     /// Optimized to iterate over unique strings in the interner (smaller set)
@@ -1886,9 +1897,46 @@ impl GraphSnapshot {
     ///
     /// # Returns
     ///
-    /// A vector of `NodeIds` for all matching nodes.
+    /// A vector of `NodeIds` for all matching nodes (synthetic
+    /// placeholders excluded).
     #[must_use]
     pub fn find_by_pattern(&self, pattern: &str) -> Vec<crate::graph::unified::node::NodeId> {
+        self.find_by_pattern_with_options(pattern, false)
+    }
+
+    /// Finds nodes matching a pattern with explicit control over synthetic
+    /// placeholder visibility.
+    ///
+    /// `include_synthetic = false` is the default surface used by every
+    /// user-facing caller (CLI `search`, MCP `semantic_search` /
+    /// `pattern_search` / `relation_query`, etc.). Synthetic
+    /// placeholders are suppressed via two parallel checks that must
+    /// agree:
+    ///
+    /// 1. The authoritative `NodeMetadata::Synthetic` bit on the
+    ///    metadata store
+    ///    ([`crate::graph::unified::storage::metadata::NodeMetadataStore::is_synthetic`]).
+    /// 2. The structural name-shape fallback
+    ///    ([`crate::graph::unified::storage::arena::NodeEntry::is_synthetic_placeholder_name`])
+    ///    for V10 snapshots written before the synthetic bit existed
+    ///    and for cross-file unification losers that retained their
+    ///    name but lost their metadata entry.
+    ///
+    /// Either check matching is sufficient to suppress the node. The
+    /// design lives in `docs/development/public-issue-triage/`
+    /// under the C_SUPPRESS unit; see also the rationale in
+    /// [`crate::graph::unified::storage::metadata::NodeMetadata::Synthetic`].
+    ///
+    /// `include_synthetic = true` is **internal-only**. The binding
+    /// plane, scope resolver, and rebuild's coverage gate use this
+    /// path to reach synthetic nodes for their structural integrity
+    /// checks. **No CLI / MCP surface should ever pass `true`.**
+    #[must_use]
+    pub fn find_by_pattern_with_options(
+        &self,
+        pattern: &str,
+        include_synthetic: bool,
+    ) -> Vec<crate::graph::unified::node::NodeId> {
         let mut matches = Vec::new();
 
         // 1. Scan unique strings in interner for matches
@@ -1906,7 +1954,109 @@ impl GraphSnapshot {
         matches.sort_unstable();
         matches.dedup();
 
+        if !include_synthetic {
+            matches.retain(|&node_id| !self.is_node_synthetic(node_id));
+        }
+
         matches
+    }
+
+    /// Finds nodes whose interned simple **or** qualified name equals
+    /// `name` byte-for-byte (case-sensitive).
+    ///
+    /// This is the canonical surface for **exact-name** lookups —
+    /// shared by the CLI `--exact <pattern>` shorthand
+    /// (`sqry-cli/src/commands/search.rs::run_regular_search`) and the
+    /// structural query planner's `name:` predicate
+    /// (`sqry-db/src/planner/parse.rs`,
+    /// `sqry-db/src/planner/execute.rs`). Both surfaces are
+    /// contract-bound (DAG `B1_ALIGN`) to return the same set against
+    /// any fixture: the CLI calls this method directly, while the
+    /// planner uses the same interner + by-name index pair internally
+    /// when scanning, then applies the same synthetic filter.
+    ///
+    /// **Synthetic suppression.** Synthetic placeholder nodes
+    /// (Go-plugin `<field:operand.field>` shadows and
+    /// `<ident>@<offset>` per-binding-site Variables; see
+    /// [`Self::find_by_pattern_with_options`] for the full taxonomy)
+    /// are excluded via [`Self::is_node_synthetic`]. There is **no**
+    /// `include_synthetic = true` variant for the exact-match surface
+    /// because the synthetic name shapes the structural fallback
+    /// recognises (`<…>`, `…@<offset>`) cannot equal a user-typed
+    /// name byte-for-byte; the metadata-bit channel is the only
+    /// realistic leak vector and it is suppressed unconditionally.
+    ///
+    /// # Performance
+    ///
+    /// `O(1)` interner lookup + `O(matches)` filter. If `name` is not
+    /// interned the result is empty without scanning any nodes.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The exact name to look up (no glob, no regex).
+    ///
+    /// # Returns
+    ///
+    /// Sorted, deduplicated `NodeId`s for every non-synthetic node
+    /// whose `entry.name` or `entry.qualified_name` equals `name`.
+    /// Returns an empty vector when `name` is not interned (i.e. no
+    /// node could possibly carry that name).
+    #[must_use]
+    pub fn find_by_exact_name(&self, name: &str) -> Vec<crate::graph::unified::node::NodeId> {
+        // Resolve the input to a StringId. If the interner doesn't know
+        // this string, no node could possibly carry it as a name.
+        let Some(str_id) = self.strings.get(name) else {
+            return Vec::new();
+        };
+
+        // Pull the by-name and by-qualified-name index slices for that
+        // StringId. Both indices are pre-built and slice-shaped.
+        let mut matches: Vec<crate::graph::unified::node::NodeId> = Vec::new();
+        matches.extend_from_slice(self.indices.by_name(str_id));
+        matches.extend_from_slice(self.indices.by_qualified_name(str_id));
+
+        matches.sort_unstable();
+        matches.dedup();
+
+        // Same default-off synthetic filter as `find_by_pattern`. There
+        // is no `include_synthetic` toggle on the exact-match surface
+        // — see the doc comment above for the rationale.
+        matches.retain(|&node_id| !self.is_node_synthetic(node_id));
+
+        matches
+    }
+
+    /// Returns `true` if the node should be treated as a synthetic
+    /// placeholder for user-facing surfaces.
+    ///
+    /// Combines the metadata-store flag and the structural name-shape
+    /// fallback (see [`Self::find_by_pattern_with_options`] for the
+    /// full rationale). Returns `false` for missing nodes (an unknown
+    /// `NodeId` is not "synthetic" — it is "not present").
+    #[must_use]
+    pub fn is_node_synthetic(&self, node_id: crate::graph::unified::node::NodeId) -> bool {
+        // Authoritative check: metadata-store bit (NodeMetadata::Synthetic).
+        if self.macro_metadata.is_synthetic(node_id) {
+            return true;
+        }
+        // Structural fallback: name shape recognised as synthetic.
+        // Required for V10 snapshots written before the bit existed,
+        // for unification losers that lost their metadata entry, and
+        // as defence-in-depth against future plugins forgetting to
+        // flip the bit.
+        let Some(entry) = self.nodes.get(node_id) else {
+            return false;
+        };
+        if entry.is_unified_loser() {
+            // Already invisible for other reasons; do not also flag as synthetic.
+            return false;
+        }
+        let Some(name) = self.strings.resolve(entry.name) else {
+            return false;
+        };
+        crate::graph::unified::storage::arena::NodeEntry::is_synthetic_placeholder_name(
+            name.as_ref(),
+        )
     }
 
     /// Gets all callees of a node (functions called by this node).
@@ -2580,6 +2730,277 @@ mod tests {
         // No matches
         let matches = snapshot.find_by_pattern("nonexistent");
         assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn synthetic_nodes_are_filtered_from_find_by_pattern_default() {
+        // C_SUPPRESS: synthetic placeholder nodes (Go plugin
+        // `<field:operand.field>` shadows + `<ident>@<offset>`
+        // per-binding-site Variables) must NOT surface from
+        // find_by_pattern, but must still be reachable via
+        // find_by_pattern_with_options(_, true).
+        use crate::graph::unified::node::NodeKind;
+        use crate::graph::unified::storage::arena::NodeEntry;
+        use std::path::Path;
+
+        let mut graph = CodeGraph::new();
+        let real_property = graph
+            .strings_mut()
+            .intern("main.SelectorSource.NeedTags")
+            .unwrap();
+        let real_local_var = graph.strings_mut().intern("NeedTags").unwrap();
+        let synthetic_field = graph
+            .strings_mut()
+            .intern("<field:selector.NeedTags>")
+            .unwrap();
+        let synthetic_offset_a = graph.strings_mut().intern("NeedTags@469").unwrap();
+        let synthetic_offset_b = graph.strings_mut().intern("NeedTags@508").unwrap();
+        let file_id = graph.files_mut().register(Path::new("main.go")).unwrap();
+
+        let prop_id = graph
+            .nodes_mut()
+            .alloc(NodeEntry::new(NodeKind::Property, real_property, file_id))
+            .unwrap();
+        let local_var_id = graph
+            .nodes_mut()
+            .alloc(NodeEntry::new(NodeKind::Variable, real_local_var, file_id))
+            .unwrap();
+        let syn_field_id = graph
+            .nodes_mut()
+            .alloc(NodeEntry::new(NodeKind::Variable, synthetic_field, file_id))
+            .unwrap();
+        let syn_a_id = graph
+            .nodes_mut()
+            .alloc(NodeEntry::new(
+                NodeKind::Variable,
+                synthetic_offset_a,
+                file_id,
+            ))
+            .unwrap();
+        let syn_b_id = graph
+            .nodes_mut()
+            .alloc(NodeEntry::new(
+                NodeKind::Variable,
+                synthetic_offset_b,
+                file_id,
+            ))
+            .unwrap();
+
+        graph
+            .indices_mut()
+            .add(prop_id, NodeKind::Property, real_property, None, file_id);
+        graph.indices_mut().add(
+            local_var_id,
+            NodeKind::Variable,
+            real_local_var,
+            None,
+            file_id,
+        );
+        graph.indices_mut().add(
+            syn_field_id,
+            NodeKind::Variable,
+            synthetic_field,
+            None,
+            file_id,
+        );
+        graph.indices_mut().add(
+            syn_a_id,
+            NodeKind::Variable,
+            synthetic_offset_a,
+            None,
+            file_id,
+        );
+        graph.indices_mut().add(
+            syn_b_id,
+            NodeKind::Variable,
+            synthetic_offset_b,
+            None,
+            file_id,
+        );
+
+        // Flag two of them via the metadata-store bit (the canonical
+        // Go-plugin emission path) and leave one (`<field:...>`) only
+        // covered by the structural name-shape fallback to verify both
+        // recognition channels suppress the leak.
+        graph.macro_metadata_mut().mark_synthetic(syn_a_id);
+        graph.macro_metadata_mut().mark_synthetic(syn_b_id);
+
+        let snapshot = graph.snapshot();
+
+        // Default surface (CLI `search --exact`, MCP, LSP): no synthetics.
+        let matches = snapshot.find_by_pattern("NeedTags");
+        assert!(matches.contains(&prop_id), "Property must be surfaced");
+        assert!(
+            matches.contains(&local_var_id),
+            "real local var must be surfaced"
+        );
+        assert!(
+            !matches.contains(&syn_field_id),
+            "<field:...> synthetic must be suppressed (name-shape fallback)"
+        );
+        assert!(
+            !matches.contains(&syn_a_id),
+            "NeedTags@469 must be suppressed (metadata bit)"
+        );
+        assert!(
+            !matches.contains(&syn_b_id),
+            "NeedTags@508 must be suppressed (metadata bit)"
+        );
+        assert_eq!(matches.len(), 2, "exactly Property + local var, no leakage");
+
+        // Internal include-synthetic surface (binding plane, scope analysis):
+        // every node remains reachable.
+        let all_matches = snapshot.find_by_pattern_with_options("NeedTags", true);
+        assert_eq!(
+            all_matches.len(),
+            5,
+            "include_synthetic surfaces everything"
+        );
+        assert!(all_matches.contains(&prop_id));
+        assert!(all_matches.contains(&local_var_id));
+        assert!(all_matches.contains(&syn_field_id));
+        assert!(all_matches.contains(&syn_a_id));
+        assert!(all_matches.contains(&syn_b_id));
+
+        // is_node_synthetic exposed for surface-level filters
+        // (e.g., MCP semantic_search/relation_query post-filters).
+        assert!(snapshot.is_node_synthetic(syn_field_id));
+        assert!(snapshot.is_node_synthetic(syn_a_id));
+        assert!(snapshot.is_node_synthetic(syn_b_id));
+        assert!(!snapshot.is_node_synthetic(prop_id));
+        assert!(!snapshot.is_node_synthetic(local_var_id));
+    }
+
+    #[test]
+    fn find_by_exact_name_aligns_with_planner_name_predicate() {
+        // B1_ALIGN: `find_by_exact_name("NeedTags")` is the canonical
+        // surface for the CLI `--exact NeedTags` shorthand and the
+        // planner's `name:NeedTags` predicate. Both paths must return
+        // the same set against this fixture.
+        use crate::graph::unified::node::NodeKind;
+        use crate::graph::unified::storage::arena::NodeEntry;
+        use std::path::Path;
+
+        let mut graph = CodeGraph::new();
+        // Property nodes carry the package-qualified name as
+        // `entry.name` (Go plugin convention; see `helper.rs`'s
+        // `semantic_name_for_node_input`).
+        let property_qname = graph
+            .strings_mut()
+            .intern("main.SelectorSource.NeedTags")
+            .unwrap();
+        let local_var_name = graph.strings_mut().intern("NeedTags").unwrap();
+        let synthetic_field_name = graph
+            .strings_mut()
+            .intern("<field:selector.NeedTags>")
+            .unwrap();
+        let synthetic_offset_name = graph.strings_mut().intern("NeedTags@469").unwrap();
+        let unrelated_name = graph.strings_mut().intern("NeedTagsHelper").unwrap();
+        let file_id = graph.files_mut().register(Path::new("main.go")).unwrap();
+
+        let prop_id = graph
+            .nodes_mut()
+            .alloc(NodeEntry::new(NodeKind::Property, property_qname, file_id))
+            .unwrap();
+        let local_var_id = graph
+            .nodes_mut()
+            .alloc(NodeEntry::new(NodeKind::Variable, local_var_name, file_id))
+            .unwrap();
+        let syn_field_id = graph
+            .nodes_mut()
+            .alloc(NodeEntry::new(
+                NodeKind::Variable,
+                synthetic_field_name,
+                file_id,
+            ))
+            .unwrap();
+        let syn_offset_id = graph
+            .nodes_mut()
+            .alloc(NodeEntry::new(
+                NodeKind::Variable,
+                synthetic_offset_name,
+                file_id,
+            ))
+            .unwrap();
+        let unrelated_id = graph
+            .nodes_mut()
+            .alloc(NodeEntry::new(NodeKind::Function, unrelated_name, file_id))
+            .unwrap();
+
+        graph
+            .indices_mut()
+            .add(prop_id, NodeKind::Property, property_qname, None, file_id);
+        graph.indices_mut().add(
+            local_var_id,
+            NodeKind::Variable,
+            local_var_name,
+            None,
+            file_id,
+        );
+        graph.indices_mut().add(
+            syn_field_id,
+            NodeKind::Variable,
+            synthetic_field_name,
+            None,
+            file_id,
+        );
+        graph.indices_mut().add(
+            syn_offset_id,
+            NodeKind::Variable,
+            synthetic_offset_name,
+            None,
+            file_id,
+        );
+        graph.indices_mut().add(
+            unrelated_id,
+            NodeKind::Function,
+            unrelated_name,
+            None,
+            file_id,
+        );
+
+        // Mark the offset-suffixed synthetic via the metadata bit so we
+        // exercise both recognition channels in this fixture.
+        graph.macro_metadata_mut().mark_synthetic(syn_offset_id);
+
+        let snapshot = graph.snapshot();
+
+        // Exact-name lookup on "NeedTags" — should pick up only the
+        // local variable (its `entry.name` is exactly "NeedTags"); it
+        // must NOT pick up the Property (qualified name contains but
+        // does not equal "NeedTags") and must NOT pick up either
+        // synthetic placeholder.
+        let exact = snapshot.find_by_exact_name("NeedTags");
+        assert_eq!(
+            exact,
+            vec![local_var_id],
+            "exact match must be byte-for-byte against entry.name / qualified_name and exclude synthetics"
+        );
+
+        // The Property's full qualified name is exact-addressable.
+        let qualified = snapshot.find_by_exact_name("main.SelectorSource.NeedTags");
+        assert_eq!(qualified, vec![prop_id]);
+
+        // Substring-only matches must not surface from exact lookup.
+        assert!(
+            snapshot
+                .find_by_exact_name("NeedTagsHelper")
+                .contains(&unrelated_id)
+        );
+        assert!(
+            !snapshot
+                .find_by_exact_name("NeedTags")
+                .contains(&unrelated_id),
+            "exact 'NeedTags' must not match 'NeedTagsHelper'"
+        );
+
+        // Unknown name short-circuits to an empty vec without
+        // scanning any nodes.
+        assert!(
+            snapshot
+                .find_by_exact_name("ThisStringIsNotInterned")
+                .is_empty()
+        );
     }
 
     #[test]

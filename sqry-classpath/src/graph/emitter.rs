@@ -1499,6 +1499,9 @@ mod tests {
                 assert!(cp.jar_path.contains("guava-33.0.0.jar"));
             }
             NodeMetadata::Macro(_) => panic!("expected Classpath metadata, got Macro"),
+            NodeMetadata::Synthetic => {
+                panic!("expected Classpath metadata, got Synthetic")
+            }
         }
     }
 

@@ -1251,6 +1251,12 @@ fn build_type_alias_edges(
 /// This processes function/method nodes and creates:
 /// - `TypeOf` edges from function to return type with Return context (index 0)
 /// - Reference edges from function to all types in return type annotation
+///
+/// Closures and synthetic-named arrow functions (e.g. `<anon:arrow@42>`) are
+/// intentionally skipped — their return types lack a stable byte-exact spelling
+/// users can search for via `returns:Foo`. Methods (qualified names containing
+/// `.`) are routed through `add_method` so the return-type edge is anchored at
+/// the same Method node that Stage 1 created.
 #[allow(clippy::unnecessary_wraps)]
 fn build_return_type_edges(
     function_node: Node<'_>,
@@ -1263,13 +1269,32 @@ fn build_return_type_edges(
         return Ok(());
     };
 
-    // Get or create function node
-    let function_id = helper.add_function(
-        function_name,
-        Some(span_from_node(function_node)),
-        false,
-        false,
-    );
+    // Skip emission for synthetic-named anonymous functions/arrows. They have
+    // no stable name a user could query against.
+    if function_name.is_empty() || function_name.starts_with("<anon:") {
+        return Ok(());
+    }
+
+    // Get or create the matching node. Methods (qualified names with `.`) must
+    // resolve to the same Method node that Stage 1 created via
+    // `add_method_with_signature`; standalone functions resolve to a Function
+    // node. Mismatching the kind would create a fresh dangling node and the
+    // return edge would never connect to the user-visible function.
+    let function_id = if function_name.contains('.') {
+        helper.add_method(
+            function_name,
+            Some(span_from_node(function_node)),
+            false,
+            false,
+        )
+    } else {
+        helper.add_function(
+            function_name,
+            Some(span_from_node(function_node)),
+            false,
+            false,
+        )
+    };
 
     // Extract full type string for TypeOf edge
     if let Some(type_text) = extract_type_string(return_type_node, content) {
@@ -1938,6 +1963,12 @@ fn walk_ast(
                 is_exported,
             });
 
+            // Register the function-declaration node itself so that
+            // `get_callable_context(function_node.id())` resolves to this
+            // function's own context (not its enclosing scope). This is what
+            // gates return-type edge emission in `walk_for_edges_with_namespaces`.
+            node_to_context.insert(node.id(), context_idx);
+
             // Associate all descendants
             if let Some(body) = node.child_by_field_name("body") {
                 associate_descendants(body, context_idx, node_to_context);
@@ -2002,6 +2033,11 @@ fn walk_ast(
                             visibility: None, // Arrow functions don't have visibility modifiers
                             is_exported,
                         });
+
+                        // Register the arrow_function init node itself so that
+                        // `walk_for_edges_with_namespaces` can resolve it to this
+                        // context when emitting return-type edges.
+                        node_to_context.insert(init.id(), context_idx);
 
                         if let Some(body) = init.child_by_field_name("body") {
                             associate_descendants(body, context_idx, node_to_context);
@@ -2073,6 +2109,12 @@ fn walk_ast(
                 visibility: None, // Standalone arrow functions don't have visibility
                 is_exported,
             });
+
+            // Register the standalone arrow_function node itself so that
+            // `walk_for_edges_with_namespaces` can resolve it to this context
+            // when emitting return-type edges (synthetic-named arrows are
+            // intentionally skipped at the emission site).
+            node_to_context.insert(node.id(), context_idx);
 
             if let Some(body) = node.child_by_field_name("body") {
                 associate_descendants(body, context_idx, node_to_context);

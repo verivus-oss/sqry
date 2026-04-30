@@ -6,7 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
-## [10.0.0](https://github.com/verivus-oss/sqry/compare/v9.0.23...v10.0.0) - 2026-04-27
+## [11.0.0](https://github.com/verivus-oss/sqry/compare/v10.0.4...v11.0.0) - 2026-04-30
+
+### Documentation
+- *(public-issue-triage)* add layer3 b1 codex iter3 review## [10.0.0](https://github.com/verivus-oss/sqry/compare/v9.0.23...v10.0.0) - 2026-04-27
 
 ### Added
 - workspace-aware / cross-repo indexing (DAG 2026-04-26) ([#146](https://github.com/verivus-oss/sqry/pull/146))

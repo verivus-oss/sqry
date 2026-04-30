@@ -583,17 +583,62 @@ fn test_relation_callers_supports_fqn_and_simple_names() {
 
 #[test]
 #[allow(clippy::too_many_lines)] // Regression test suite covers all boolean operators
-fn test_relation_returns_supports_fqn_and_simple_names() {
+fn test_relation_returns_uses_byte_exact_edge_based_contract() {
     init_logging();
-    log::info!("REGRESSION TEST: Relation returns predicate supports FQN + simple names");
+    log::info!(
+        "REGRESSION TEST: Relation returns predicate uses byte-exact edge-based contract \
+         (B2_EXECUTOR contract; substring/signature-text contract retired in Cluster B2)"
+    );
+
+    // Cluster B2 (BadLiveware Go-batch DAG, see
+    // docs/development/public-issue-triage/2026-04-29_badliveware_go_batch_dag.toml) replaced
+    // the legacy `signature.contains(value)` evaluation in
+    // sqry-core/src/query/executor/graph_eval.rs with byte-exact name comparison against
+    // `EdgeKind::TypeOf { context: Some(TypeOfContext::Return) }` edge targets. The
+    // B2_PLUGIN_JAVA sub-unit then added Return-context edge emission to the Java plugin so
+    // `returns:<TypeName>` queries against Java codebases produce real hits. This test locks
+    // both halves of the contract on the Java relation_tracking/return_types fixture: bare
+    // identifiers do NOT substring-match generic instances, and an FQN query DOES match the
+    // methods whose source-text return type matches byte-for-byte.
 
     let project = copy_fixture_dir("tests/fixtures/java/relation_tracking/return_types");
     let project_path = project.path();
 
-    // Build index to populate return type metadata
     sqry_cmd().arg("index").arg(project_path).assert().success();
 
-    // Test FQN query: returns:Optional<User>
+    // Contract 1: bare names like "Optional" no longer match generic instances. Under the
+    // legacy substring contract this returned every Optional<*>-returning method; under the
+    // new byte-exact contract the bare name is compared against the resolved target-node name
+    // directly. No Java method declares its return type as the bare identifier `Optional`,
+    // so the result is empty.
+    let bare_output = sqry_cmd()
+        .arg("--json")
+        .arg("query")
+        .arg("returns:Optional")
+        .arg(project_path)
+        .output()
+        .expect("run returns query with bare name");
+    assert!(
+        bare_output.status.success(),
+        "bare-name returns query exited non-zero: {}",
+        String::from_utf8_lossy(&bare_output.stderr)
+    );
+    let bare_json: Value = serde_json::from_slice(&bare_output.stdout).expect("valid JSON output");
+    let bare_names = extract_symbol_names(&bare_json);
+    assert!(
+        bare_names.is_empty(),
+        "byte-exact `returns:Optional` must not substring-match `Optional<User>` etc.; got: {bare_names:?}"
+    );
+
+    // Contract 2: a byte-exact query like `returns:Optional<User>` matches every Java method
+    // whose declared return-type source-text is exactly `Optional<User>`. Post-B2_PLUGIN_JAVA
+    // the Java plugin emits a `TypeOf { context: Return, index: 0, .. }` edge from the method
+    // node to the type node interned from the source-text annotation. The fixture declares
+    // four such methods: `findUser`, `maybeFind`, `Nested.nestedOptional`, and
+    // `annotatedOptional` (the `java.util.` qualifier on `annotatedOptional` resolves through
+    // the helper's type-interning to the same display name as the unqualified Optional<User>
+    // entries; the qualified node carries the `java::util::Optional<User>` qualified form for
+    // disambiguation while sharing the byte-exact display name used for `returns:` matching).
     let fqn_output = sqry_cmd()
         .arg("--json")
         .arg("query")
@@ -603,128 +648,33 @@ fn test_relation_returns_supports_fqn_and_simple_names() {
         .expect("run returns query with FQN");
     assert!(
         fqn_output.status.success(),
-        "FQN returns query failed: {}",
+        "FQN returns query exited non-zero: {}",
         String::from_utf8_lossy(&fqn_output.stderr)
     );
     let fqn_json: Value = serde_json::from_slice(&fqn_output.stdout).expect("valid JSON output");
-    let fqn_results = fqn_json["results"]
-        .as_array()
-        .expect("results should be array");
     let fqn_names = extract_symbol_names(&fqn_json);
-    let fqn_set: BTreeSet<_> = fqn_names.iter().cloned().collect();
-    assert!(
-        !fqn_set.is_empty(),
-        "FQN returns query should return at least one method"
-    );
-
-    // Test simple query: returns:Optional
-    let simple_output = sqry_cmd()
-        .arg("--json")
-        .arg("query")
-        .arg("returns:Optional")
-        .arg(project_path)
-        .output()
-        .expect("run returns query with simple name");
-    assert!(
-        simple_output.status.success(),
-        "Simple returns query failed: {}",
-        String::from_utf8_lossy(&simple_output.stderr)
-    );
-    let simple_json: Value =
-        serde_json::from_slice(&simple_output.stdout).expect("valid JSON output");
-    let simple_results = simple_json["results"]
-        .as_array()
-        .expect("results should be array");
-    let simple_names = extract_symbol_names(&simple_json);
-    let simple_set: BTreeSet<_> = simple_names.iter().cloned().collect();
-
-    // Verify FQN results: 4 methods returning Optional<User>
-    assert_eq!(
-        fqn_set.len(),
-        4,
-        "FQN query should match exactly 4 methods returning Optional<User>, got: {}",
-        fqn_set.len()
-    );
     assert_eq!(
         fqn_names.len(),
-        fqn_set.len(),
-        "FQN query should not emit duplicate semantic results, got: {fqn_names:?}"
+        4,
+        "byte-exact `returns:Optional<User>` must match exactly the 4 fixture methods that \
+         declare `Optional<User>` (or `java.util.Optional<User>`) as their return type. Got: \
+         {fqn_names:?}"
     );
+    for expected in [
+        "findUser",
+        "maybeFind",
+        "annotatedOptional",
+        "nestedOptional",
+    ] {
+        assert!(
+            fqn_names.iter().any(|n| n == expected),
+            "expected `returns:Optional<User>` to include `{expected}` in the result set; got: {fqn_names:?}"
+        );
+    }
 
-    // Verify simple query returns more matches (all Optional<*> variants)
-    assert_eq!(
-        simple_set.len(),
-        9,
-        "Simple query should match exactly 9 methods returning Optional<*>, got: {}",
-        simple_set.len()
-    );
-    assert_eq!(
-        simple_names.len(),
-        simple_set.len(),
-        "Simple query should not emit duplicate semantic results, got: {simple_names:?}"
-    );
-
-    // HIGH PRIORITY (Codex): Verify FQN results are a subset of simple results
-    assert!(
-        fqn_set.is_subset(&simple_set),
-        "FQN results must be a subset of simple name results. Missing: {:?}",
-        fqn_set.difference(&simple_set).collect::<Vec<_>>()
-    );
-
-    // MEDIUM PRIORITY (Codex): Verify specific fixture methods exist in FQN results
-    // Note: Results use qualified names, so check for the full path
-    assert!(
-        fqn_set.iter().any(|name| name.ends_with("findUser")),
-        "Expected findUser in returns:Optional<User> results, got: {fqn_set:?}"
-    );
-    assert!(
-        fqn_set.iter().any(|name| name.ends_with("maybeFind")),
-        "Expected maybeFind in returns:Optional<User> results, got: {fqn_set:?}"
-    );
-    assert!(
-        fqn_set
-            .iter()
-            .any(|name| name.ends_with("annotatedOptional")),
-        "Expected annotatedOptional in returns:Optional<User> results, got: {fqn_set:?}"
-    );
-
-    // Verify simple query includes additional methods
-    assert!(
-        simple_set.iter().any(|name| name.ends_with("findUser"))
-            && simple_set.iter().any(|name| name.ends_with("maybeFind")),
-        "Expected findUser and maybeFind in simple query results, got: {simple_set:?}"
-    );
-    assert!(
-        simple_set
-            .iter()
-            .any(|name| name.ends_with("nestedOptionals"))
-            || simple_set
-                .iter()
-                .any(|name| name.ends_with("wildcardOptional")),
-        "Expected broader Optional<*> matches in simple query, got: {simple_set:?}"
-    );
-
-    let find_user_result = fqn_results
-        .iter()
-        .find(|result| result["name"].as_str() == Some("findUser"))
-        .expect("findUser should be present");
-    let qualified_name = find_user_result["qualified_name"]
-        .as_str()
-        .expect("qualified_name should be string");
-    assert_eq!(
-        qualified_name, "com.example.relations.ReturnTypes.findUser",
-        "Expected Java-native qualified_name display"
-    );
-    assert!(
-        !qualified_name.contains("::"),
-        "JSON qualified_name should not leak canonical separators: {qualified_name}"
-    );
-    assert_eq!(
-        simple_results.len(),
-        simple_set.len(),
-        "Simple query should not contain duplicate rows, got: {simple_results:?}"
-    );
-
+    // Contract 3: native-qualified `name:` resolution is independent of the returns: contract
+    // and continues to work — locks the cross-cutting qualified-name display path that was
+    // already exercised by this test before the contract change.
     let name_output = sqry_cmd()
         .arg("--json")
         .arg("query")
@@ -745,6 +695,18 @@ fn test_relation_returns_supports_fqn_and_simple_names() {
         name_results.len(),
         1,
         "Expected one nestedOptional match for native-qualified name query, got: {name_results:?}"
+    );
+
+    let qualified_name = name_results[0]["qualified_name"]
+        .as_str()
+        .expect("qualified_name should be string");
+    assert_eq!(
+        qualified_name, "com.example.relations.ReturnTypes.Nested.nestedOptional",
+        "Expected Java-native qualified_name display"
+    );
+    assert!(
+        !qualified_name.contains("::"),
+        "JSON qualified_name should not leak canonical separators: {qualified_name}"
     );
 }
 
@@ -838,13 +800,22 @@ fn test_cpp_phase2_callers_and_returns() {
     assert!(returns_output.status.success());
     let returns_json: Value = serde_json::from_slice(&returns_output.stdout).expect("valid JSON");
     let return_names = extract_symbol_names(&returns_json);
-    // Verify at least some int-returning functions are found
-    // Note: helper may not have return type set due to how C++ function definitions are parsed
+    // Cluster B2's contract change (BadLiveware Go-batch DAG, B2_EXECUTOR) replaced the
+    // legacy substring-against-signature-text evaluation in graph_eval.rs with byte-exact
+    // comparison against `EdgeKind::TypeOf { context: Some(TypeOfContext::Return) }` edge
+    // targets. The C++ plugin does not yet emit Return-context TypeOf edges for its
+    // function/method declarations (only one Parameter-context edge surfaces from the
+    // BadLiveware-style fixture), so under the new contract `returns:int` correctly
+    // returns the empty set rather than substring-matching every signature containing the
+    // word "int". Cluster B2's plugin-emission scope (B2_TESTS) covers Go (verified live);
+    // a subsequent fix unit will add C++ Return-edge emission, after which this assertion
+    // should be flipped to a positive match. This empty-set assertion is the regression
+    // guard that catches accidental fall-back to signature-text matching.
     assert!(
-        return_names
-            .iter()
-            .any(|name| name.contains("save") || name.contains("process")),
-        "expected int-returning functions in results, got: {return_names:?}"
+        return_names.is_empty(),
+        "byte-exact `returns:int` against the C++ fixture must be empty until the C++ plugin \
+         emits `TypeOf {{ Return }}` edges; any non-empty result indicates a regression to \
+         signature-text matching. Got: {return_names:?}"
     );
 }
 
