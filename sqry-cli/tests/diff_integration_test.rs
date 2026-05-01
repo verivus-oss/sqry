@@ -563,18 +563,23 @@ fn test_diff_invalid_base_ref() -> Result<()> {
 #[test]
 fn test_diff_not_a_repo() -> Result<()> {
     let temp_dir = TempDir::new()?;
+    let non_repo_dir = temp_dir.path().join("non-repo");
+    fs::create_dir(&non_repo_dir)?;
 
-    // Try to run diff in non-git directory
+    // Try to run diff in a controlled non-git directory. The ceiling prevents
+    // ambient parent repositories such as /tmp/.git from influencing the test.
     let result = Command::new(common::sqry_bin())
         .args(["diff", "main", "HEAD"])
-        .current_dir(temp_dir.path())
+        .env("GIT_CEILING_DIRECTORIES", temp_dir.path())
+        .current_dir(&non_repo_dir)
         .output()?;
 
     assert!(!result.status.success(), "Expected command to fail");
 
     let stderr = String::from_utf8_lossy(&result.stderr);
+    let normalized_stderr = stderr.to_ascii_lowercase();
     assert!(
-        stderr.contains("Not a git repository") || stderr.contains("not.*git"),
+        normalized_stderr.contains("not a git repository") || normalized_stderr.contains("not git"),
         "Expected 'Not a git repository' error, got: {stderr}"
     );
 

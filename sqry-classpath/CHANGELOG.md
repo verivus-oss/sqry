@@ -6,7 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
-## [11.0.0](https://github.com/verivus-oss/sqry/compare/v10.0.4...v11.0.0) - 2026-04-30
+## [11.0.4](https://github.com/verivus-oss/sqry/compare/v11.0.3...v11.0.4) - 2026-05-01
+
+### Fixed
+- *(release)* harden homebrew workflow and diff repo detection## [11.0.0](https://github.com/verivus-oss/sqry/compare/v10.0.4...v11.0.0) - 2026-04-30
 
 ### Documentation
 - *(public-issue-triage)* add layer3 b1 codex iter3 review## [10.0.0](https://github.com/verivus-oss/sqry/compare/v9.0.23...v10.0.0) - 2026-04-27

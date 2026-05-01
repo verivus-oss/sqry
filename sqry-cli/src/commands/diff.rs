@@ -13,7 +13,8 @@ use sqry_core::graph::diff::{DiffSummary, GraphComparator, NodeChange, NodeLocat
 use sqry_core::graph::unified::build::{BuildConfig, build_unified_graph};
 use std::collections::HashMap;
 use std::fmt::Write as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::Arc;
 
 // ============================================================================
@@ -200,21 +201,58 @@ fn resolve_repo_root(path: Option<&str>, cli: &Cli) -> Result<PathBuf> {
         .canonicalize()
         .context(format!("Failed to resolve path: {}", start_path.display()))?;
 
-    // Walk up to find .git directory
-    let mut current = start_path.as_path();
-    loop {
-        if current.join(".git").exists() {
-            return Ok(current.to_path_buf());
+    let git_start_path = if start_path.is_file() {
+        start_path.parent().unwrap_or(start_path.as_path())
+    } else {
+        start_path.as_path()
+    };
+
+    resolve_repo_root_from_start(git_start_path)
+}
+
+fn resolve_repo_root_from_start(start_path: &Path) -> Result<PathBuf> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(start_path)
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .context("Failed to run git while resolving repository root")?;
+
+    if output.status.success() {
+        let stdout = String::from_utf8(output.stdout)
+            .context("Git returned a non-UTF-8 repository root path")?;
+        let root = stdout.trim();
+        if root.is_empty() {
+            bail!(
+                "Not a git repository (git returned an empty repository root): {}",
+                start_path.display()
+            );
         }
 
-        match current.parent() {
-            Some(parent) => current = parent,
-            None => bail!(
-                "Not a git repository (or any parent up to mount point): {}",
-                start_path.display()
-            ),
-        }
+        return PathBuf::from(root)
+            .canonicalize()
+            .context(format!("Failed to resolve git repository root: {root}"));
     }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = stderr.trim();
+    if stderr.contains("dubious ownership") {
+        bail!(
+            "Not a git repository (git refused to trust a parent repository while resolving {}): {}",
+            start_path.display(),
+            stderr
+        );
+    }
+
+    bail!(
+        "Not a git repository (or any parent up to mount point): {}{}",
+        start_path.display(),
+        if stderr.is_empty() {
+            String::new()
+        } else {
+            format!("\n{stderr}")
+        }
+    )
 }
 
 /// Compute summary statistics from a list of changes

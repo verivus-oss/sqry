@@ -9,7 +9,7 @@ rust-version.workspace = true
 description = "JVM classpath analysis for sqry - bytecode parsing, build system resolution, and graph integration"
 
 [dependencies]
-sqry-core = { version = "11.0.3", path = "../sqry-core" }
+sqry-core = { version = "11.0.4", path = "../sqry-core" }
 anyhow.workspace = true
 thiserror.workspace = true
 log.workspace = true
@@ -34,6 +34,7 @@ sqry-core = { path = "../sqry-core", features = ["test-support"] }
 tempfile.workspace = true
 env_logger.workspace = true
 criterion = "0.8"
+serial_test = "3.0"
 
 [[bench]]
 name = "classpath_bench"

@@ -667,6 +667,7 @@ impl WaitTimeout for std::process::Child {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
     use tempfile::TempDir;
 
     // -----------------------------------------------------------------------
@@ -797,6 +798,7 @@ SQRY_CP:app:org.slf4j:slf4j-api:2.0.9:/path/to/slf4j-api.jar";
     // -----------------------------------------------------------------------
 
     #[test]
+    #[serial]
     fn test_source_jar_path_construction() {
         let tmp = TempDir::new().unwrap();
 
@@ -809,8 +811,7 @@ SQRY_CP:app:org.slf4j:slf4j-api:2.0.9:/path/to/slf4j-api.jar";
         std::fs::write(&source_jar, b"fake jar").unwrap();
 
         // Set GRADLE_USER_HOME so `gradle_cache_dir()` finds our temp dir.
-        // Safety: tests are run with --test-threads=1 for env var isolation,
-        // or this test is self-contained enough that the RAII guard suffices.
+        // The serial attribute prevents concurrent env mutation by sibling tests.
         let _guard = EnvGuard::set("GRADLE_USER_HOME", tmp.path().to_str().unwrap());
 
         let entry = ClasspathEntry {
@@ -825,6 +826,7 @@ SQRY_CP:app:org.slf4j:slf4j-api:2.0.9:/path/to/slf4j-api.jar";
     }
 
     #[test]
+    #[serial]
     fn test_source_jar_not_found() {
         let tmp = TempDir::new().unwrap();
         let _guard = EnvGuard::set("GRADLE_USER_HOME", tmp.path().to_str().unwrap());

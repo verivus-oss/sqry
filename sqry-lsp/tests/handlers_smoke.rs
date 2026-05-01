@@ -56,12 +56,28 @@ fn build_index(project: &Path) {
 }
 
 fn session_for(path: &Path) -> SessionManager {
+    session_for_with_config(path, None)
+}
+
+fn session_for_workspace_folder_mode(path: &Path) -> SessionManager {
+    let config = tempfile::NamedTempFile::new().expect("create LSP config");
+    // Keep temp workspaces rooted at their explicit folder, not an ambient parent .git such as /tmp/.git.
+    fs::write(
+        config.path(),
+        r#"{"sqry":{"projectRootMode":"workspaceFolder"}}"#,
+    )
+    .expect("write LSP config");
+
+    session_for_with_config(path, Some(config.path()))
+}
+
+fn session_for_with_config(path: &Path, config: Option<&Path>) -> SessionManager {
     let options = LspOptions {
         stdio: true,
         socket: None,
         index_root: Some(path.to_path_buf()),
         log_level: "warn".into(),
-        config: None,
+        config: config.map(Path::to_path_buf),
         allow_public_bind: false,
         daemon: false,
         daemon_socket: None,
@@ -192,7 +208,7 @@ fn multi_workspace_index_status_self_heals_corrupt_graph() {
     fs::write(storage.manifest_path(), "{}").expect("write manifest");
     fs::write(storage.snapshot_path(), b"not a sqry snapshot").expect("write corrupt snapshot");
 
-    let session = session_for(project.path());
+    let session = session_for_workspace_folder_mode(project.path());
     session.set_workspace_folders(vec![project.path().to_path_buf()]);
 
     let status =
@@ -216,7 +232,7 @@ fn document_symbols_fall_back_to_content_when_multi_workspace_graph_is_corrupt()
     fs::write(storage.manifest_path(), "{}").expect("write manifest");
     fs::create_dir(storage.snapshot_path()).expect("create invalid snapshot directory");
 
-    let session = session_for(project.path());
+    let session = session_for_workspace_folder_mode(project.path());
     session.set_workspace_folders(vec![project.path().to_path_buf()]);
 
     let symbols = document_symbol_names(&session, &source_path);
@@ -233,7 +249,7 @@ fn rebuild_index_clears_multi_workspace_project_graph_cache() {
     let source_path = project.path().join("lib.rs");
     fs::write(&source_path, "pub fn before_rebuild() {}\n").expect("write fixture");
 
-    let session = session_for(project.path());
+    let session = session_for_workspace_folder_mode(project.path());
     session.set_workspace_folders(vec![project.path().to_path_buf()]);
     let reporter = sqry_core::progress::no_op_reporter();
     index::rebuild_index(&session, project.path(), &reporter, false).expect("initial rebuild");
