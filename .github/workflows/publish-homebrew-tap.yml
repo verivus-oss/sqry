@@ -95,15 +95,19 @@ jobs:
 
       - name: Checkout source repo
         if: steps.resolve.outputs.skip != 'true'
-        uses: actions/checkout@v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 1
 
-      - name: Install ruby (for syntax check)
+      - name: Ensure Ruby is available for syntax check
         if: steps.resolve.outputs.skip != 'true'
-        uses: ruby/setup-ruby@v1
-        with:
-          ruby-version: "3.2"
+        run: |
+          set -euo pipefail
+          if ! command -v ruby >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y ruby
+          fi
+          ruby --version
 
       - name: Render formula
         if: steps.resolve.outputs.skip != 'true'
@@ -125,7 +129,7 @@ jobs:
 
       - name: Checkout tap repo
         if: steps.resolve.outputs.skip != 'true'
-        uses: actions/checkout@v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           repository: verivus-oss/homebrew-sqry
           token: ${{ secrets.HOMEBREW_TAP_PUSH_TOKEN }}
