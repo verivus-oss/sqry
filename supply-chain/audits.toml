@@ -239,6 +239,42 @@ user-id = 6743 # Ed Page (epage)
 start = "2022-03-07"
 end = "2027-02-20"
 
+[[trusted.sqry-daemon]]
+criteria = "safe-to-deploy"
+user-id = 364573 # Verivus OSS Releases (verivusOSS-releases)
+start = "2026-04-30"
+end = "2027-05-01"
+
+[[trusted.sqry-daemon-client]]
+criteria = "safe-to-deploy"
+user-id = 364573 # Verivus OSS Releases (verivusOSS-releases)
+start = "2026-04-30"
+end = "2027-05-01"
+
+[[trusted.sqry-daemon-protocol]]
+criteria = "safe-to-deploy"
+user-id = 364573 # Verivus OSS Releases (verivusOSS-releases)
+start = "2026-04-30"
+end = "2027-05-01"
+
+[[trusted.sqry-db]]
+criteria = "safe-to-deploy"
+user-id = 364573 # Verivus OSS Releases (verivusOSS-releases)
+start = "2026-04-30"
+end = "2027-05-01"
+
+[[trusted.sqry-lang-json]]
+criteria = "safe-to-deploy"
+user-id = 364573 # Verivus OSS Releases (verivusOSS-releases)
+start = "2026-04-30"
+end = "2027-05-01"
+
+[[trusted.sqry-lang-servicenow-xml]]
+criteria = "safe-to-deploy"
+user-id = 364573 # Verivus OSS Releases (verivusOSS-releases)
+start = "2026-04-30"
+end = "2027-05-01"
+
 [[trusted.syn]]
 criteria = "safe-to-deploy"
 user-id = 3618 # David Tolnay (dtolnay)
