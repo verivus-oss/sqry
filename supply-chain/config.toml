@@ -1391,183 +1391,207 @@ version = "0.1.4"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-classpath]]
-version = "11.0.1"
+version = "11.0.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-cli]]
-version = "11.0.1"
+version = "11.0.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-core]]
-version = "11.0.1"
+version = "11.0.3"
+criteria = "safe-to-deploy"
+
+[[exemptions.sqry-daemon]]
+version = "11.0.3"
+criteria = "safe-to-deploy"
+
+[[exemptions.sqry-daemon-client]]
+version = "11.0.3"
+criteria = "safe-to-deploy"
+
+[[exemptions.sqry-daemon-protocol]]
+version = "11.0.3"
+criteria = "safe-to-deploy"
+
+[[exemptions.sqry-db]]
+version = "11.0.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-c]]
-version = "11.0.1"
+version = "11.0.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-cpp]]
-version = "11.0.1"
+version = "11.0.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-csharp]]
-version = "11.0.1"
+version = "11.0.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-css]]
-version = "11.0.1"
+version = "11.0.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-dart]]
-version = "11.0.1"
+version = "11.0.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-elixir]]
-version = "11.0.1"
+version = "11.0.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-go]]
-version = "11.0.1"
+version = "11.0.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-groovy]]
-version = "11.0.1"
+version = "11.0.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-haskell]]
-version = "11.0.1"
+version = "11.0.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-html]]
-version = "11.0.1"
+version = "11.0.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-java]]
-version = "11.0.1"
+version = "11.0.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-javascript]]
-version = "11.0.1"
+version = "11.0.3"
+criteria = "safe-to-deploy"
+
+[[exemptions.sqry-lang-json]]
+version = "11.0.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-kotlin]]
-version = "11.0.1"
+version = "11.0.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-lua]]
-version = "11.0.1"
+version = "11.0.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-oracle-plsql]]
-version = "11.0.1"
+version = "11.0.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-perl]]
-version = "11.0.1"
+version = "11.0.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-php]]
-version = "11.0.1"
+version = "11.0.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-pulumi]]
-version = "11.0.1"
+version = "11.0.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-puppet]]
-version = "11.0.1"
+version = "11.0.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-python]]
-version = "11.0.1"
+version = "11.0.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-r]]
-version = "11.0.1"
+version = "11.0.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-ruby]]
-version = "11.0.1"
+version = "11.0.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-rust]]
-version = "11.0.1"
+version = "11.0.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-salesforce-apex]]
-version = "11.0.1"
+version = "11.0.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-sap-abap]]
-version = "11.0.1"
+version = "11.0.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-scala]]
-version = "11.0.1"
+version = "11.0.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-servicenow-xanadu]]
-version = "11.0.1"
+version = "11.0.3"
+criteria = "safe-to-deploy"
+
+[[exemptions.sqry-lang-servicenow-xml]]
+version = "11.0.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-shell]]
-version = "11.0.1"
+version = "11.0.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-sql]]
-version = "11.0.1"
+version = "11.0.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-support]]
-version = "11.0.1"
+version = "11.0.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-svelte]]
-version = "11.0.1"
+version = "11.0.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-swift]]
-version = "11.0.1"
+version = "11.0.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-terraform]]
-version = "11.0.1"
+version = "11.0.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-typescript]]
-version = "11.0.1"
+version = "11.0.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-vue]]
-version = "11.0.1"
+version = "11.0.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-zig]]
-version = "11.0.1"
+version = "11.0.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lsp]]
-version = "11.0.1"
+version = "11.0.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-mcp]]
-version = "11.0.1"
+version = "11.0.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-mcp-redaction]]
-version = "11.0.1"
+version = "11.0.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-nl]]
-version = "11.0.1"
+version = "11.0.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-plugin-registry]]
-version = "11.0.1"
+version = "11.0.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-tree-sitter-support]]
-version = "11.0.1"
+version = "11.0.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.ssri]]
@@ -1795,7 +1819,7 @@ version = "0.26.8"
 criteria = "safe-to-deploy"
 
 [[exemptions.tree-sitter-abap-sqry]]
-version = "11.0.1"
+version = "11.0.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.tree-sitter-bash]]
@@ -1827,7 +1851,7 @@ version = "0.0.4"
 criteria = "safe-to-deploy"
 
 [[exemptions.tree-sitter-elixir-sqry]]
-version = "11.0.1"
+version = "11.0.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.tree-sitter-go]]
@@ -1835,7 +1859,7 @@ version = "0.23.4"
 criteria = "safe-to-deploy"
 
 [[exemptions.tree-sitter-groovy-sqry]]
-version = "11.0.1"
+version = "11.0.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.tree-sitter-haskell]]
@@ -1863,7 +1887,7 @@ version = "0.23.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.tree-sitter-kotlin-sqry]]
-version = "11.0.1"
+version = "11.0.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.tree-sitter-language]]
@@ -1875,7 +1899,7 @@ version = "0.2.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.tree-sitter-perl-sqry]]
-version = "11.0.1"
+version = "11.0.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.tree-sitter-php]]
@@ -1883,7 +1907,7 @@ version = "0.24.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.tree-sitter-plsql-sqry]]
-version = "11.0.1"
+version = "11.0.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.tree-sitter-puppet]]
@@ -1923,7 +1947,7 @@ version = "2.4.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.tree-sitter-svelte-sqry]]
-version = "11.0.1"
+version = "11.0.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.tree-sitter-swift]]
@@ -1935,7 +1959,7 @@ version = "0.23.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.tree-sitter-vue-sqry]]
-version = "11.0.1"
+version = "11.0.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.tree-sitter-yaml]]
