@@ -5,9 +5,10 @@ name: Publish Homebrew Tap
 # tap is always current; also exposes workflow_dispatch for manual republish
 # and historical backfill.
 #
-# Required secret: HOMEBREW_TAP_PUSH_TOKEN — a fine-grained PAT with
-# `contents:write` on verivus-oss/homebrew-sqry. Configure under
-# Settings -> Secrets and variables -> Actions on the source repository.
+# Required secret: HOMEBREW_TAP_PUSH_TOKEN or PUBLIC_RELEASE_OPERATOR_TOKEN —
+# a fine-grained PAT with `contents:write` on verivus-oss/homebrew-sqry.
+# Configure under Settings -> Secrets and variables -> Actions on the source
+# repository.
 
 on:
   release:
@@ -33,6 +34,7 @@ jobs:
     env:
       SOURCE_REPO: ${{ github.repository }}
       TAP_REPO: verivus-oss/homebrew-sqry
+      TAP_PUSH_TOKEN: ${{ secrets.HOMEBREW_TAP_PUSH_TOKEN || secrets.PUBLIC_RELEASE_OPERATOR_TOKEN }}
     steps:
       - name: Resolve target tag and gating flags
         id: resolve
@@ -127,12 +129,27 @@ jobs:
           set -euo pipefail
           ruby -c Formula/sqry.rb
 
+      - name: Validate tap push credential
+        if: steps.resolve.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ env.TAP_PUSH_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${GH_TOKEN:-}" ]]; then
+            echo "ERROR: configure HOMEBREW_TAP_PUSH_TOKEN or PUBLIC_RELEASE_OPERATOR_TOKEN" >&2
+            exit 1
+          fi
+          if [[ "$(gh api "repos/${TAP_REPO}" --jq '.permissions.push')" != "true" ]]; then
+            echo "ERROR: selected tap credential does not have push access to ${TAP_REPO}" >&2
+            exit 1
+          fi
+
       - name: Checkout tap repo
         if: steps.resolve.outputs.skip != 'true'
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           repository: verivus-oss/homebrew-sqry
-          token: ${{ secrets.HOMEBREW_TAP_PUSH_TOKEN }}
+          token: ${{ env.TAP_PUSH_TOKEN }}
           path: tap-checkout
           ref: main
           fetch-depth: 1
