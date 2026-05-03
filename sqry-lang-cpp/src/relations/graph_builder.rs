@@ -1252,8 +1252,22 @@ fn strip_type_qualifiers(type_text: &str) -> String {
     result.trim().to_string()
 }
 
-/// Process a field declaration inside a class/struct, creating Variable node with `TypeOf` and Reference edges.
-#[allow(clippy::unnecessary_wraps)]
+/// Process a field declaration inside a class/struct, creating `Property` /
+/// `Constant` nodes plus `TypeOf` (with `TypeOfContext::Field` + bare-name)
+/// and `Reference` edges.
+///
+/// Per cross-language-field-emission/02_DESIGN §3.1.1 + §4.1:
+/// - Qualified-name format: `Class.field`. Only the LAST separator is `.`;
+///   the class chain itself keeps `::` (e.g. `demo::Outer::Inner.field`).
+/// - `const` and `constexpr` declarations emit `NodeKind::Constant`; everything
+///   else emits `NodeKind::Property`.
+/// - The `static` keyword sets `is_static = true`. Per design §3.4 only the
+///   `static` keyword controls this — bare `constexpr` does NOT imply static.
+/// - Visibility flows in from `walk_class_body` (defaults: `class` →
+///   `"private"`, `struct` → `"public"`).
+/// - The `TypeOf` edge uses `TypeOfContext::Field` and stores the **bare**
+///   field name in its `name` metadata (not the qualified form).
+#[allow(clippy::unnecessary_wraps, clippy::too_many_lines)]
 fn process_field_declaration(
     node: Node,
     content: &[u8],
@@ -1264,6 +1278,11 @@ fn process_field_declaration(
     // Extract type and field names from the field_declaration
     let mut field_type_text = None;
     let mut field_names = Vec::new();
+    // Modifiers on the declaration itself — used to pick Property vs Constant
+    // and to compute is_static.
+    let mut is_static_kw = false;
+    let mut is_const = false;
+    let mut is_constexpr = false;
 
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
@@ -1292,11 +1311,34 @@ fn process_field_declaration(
                 }
             }
             "type_qualifier" => {
-                // Handle type qualifiers (const, volatile) - may need to combine with following type
-                if field_type_text.is_none()
-                    && let Ok(text) = child.utf8_text(content)
-                {
-                    field_type_text = Some(text.to_string());
+                // Type qualifiers carry semantic information (`const`,
+                // `volatile`, ...) and — for older tree-sitter-cpp grammars —
+                // also `constexpr`. We always inspect the text so the
+                // const/constexpr classification is accurate, and we only
+                // promote it to `field_type_text` as a fallback when no
+                // explicit type child was seen.
+                if let Ok(text) = child.utf8_text(content) {
+                    let trimmed = text.trim();
+                    if trimmed == "const" {
+                        is_const = true;
+                    } else if trimmed == "constexpr" {
+                        is_constexpr = true;
+                    }
+                    if field_type_text.is_none() {
+                        field_type_text = Some(text.to_string());
+                    }
+                }
+            }
+            "storage_class_specifier" => {
+                // `static`, `extern`, `register`, `mutable`, `thread_local`,
+                // and (in newer grammars) `constexpr`.
+                if let Ok(text) = child.utf8_text(content) {
+                    let trimmed = text.trim();
+                    if trimmed == "static" {
+                        is_static_kw = true;
+                    } else if trimmed == "constexpr" {
+                        is_constexpr = true;
+                    }
                 }
             }
             "auto" => {
@@ -1336,27 +1378,50 @@ fn process_field_declaration(
     // If we found a type and at least one field name, create the nodes and edges
     if let Some(type_text) = field_type_text {
         let base_type = strip_type_qualifiers(&type_text);
+        let is_constant = is_const || is_constexpr;
 
         for field_name in field_names {
-            let field_qualified = format!("{class_qualified_name}::{field_name}");
+            // Per design §3.1.1: only the LAST separator migrates to `.`;
+            // the class chain (`namespace::Outer::Inner`) keeps `::`.
+            let field_qualified = format!("{class_qualified_name}.{field_name}");
             let span = span_from_node(node);
 
-            // Create variable node with visibility
-            let var_id = helper.add_node_with_visibility(
-                &field_qualified,
-                Some(span),
-                sqry_core::graph::unified::node::NodeKind::Variable,
-                Some(visibility),
-            );
+            // AC-2 + AC-3 + AC-4: pick the right node kind, propagate
+            // is_static from the `static` keyword, and forward visibility
+            // from the enclosing access specifier.
+            let field_id = if is_constant {
+                helper.add_constant_with_name_static_and_visibility(
+                    &field_name,
+                    &field_qualified,
+                    Some(span),
+                    is_static_kw,
+                    Some(visibility),
+                )
+            } else {
+                helper.add_property_with_name_static_and_visibility(
+                    &field_name,
+                    &field_qualified,
+                    Some(span),
+                    is_static_kw,
+                    Some(visibility),
+                )
+            };
 
             // Create a Type node for the base type (if not primitive)
             let type_id = helper.add_type(&base_type, None);
 
-            // Add TypeOf edge: variable -> type
-            helper.add_typeof_edge(var_id, type_id);
+            // AC-5: TypeOf edge with Field context + bare field name.
+            helper.add_typeof_edge_with_context(
+                field_id,
+                type_id,
+                Some(sqry_core::graph::unified::edge::kind::TypeOfContext::Field),
+                None,
+                Some(&field_name),
+            );
 
-            // Add Reference edge: variable -> type
-            helper.add_reference_edge(var_id, type_id);
+            // Reference edge preserved for backward-compatible "uses type"
+            // queries.
+            helper.add_reference_edge(field_id, type_id);
         }
     }
 
@@ -1506,7 +1571,7 @@ fn extract_declarator_name(node: Node, content: &[u8]) -> Option<String> {
 }
 
 /// Walk a class/struct body, processing field declarations and methods with visibility tracking.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn walk_class_body(
     body_node: Node,
     content: &[u8],
@@ -1536,7 +1601,92 @@ fn walk_class_body(
                 }
             }
             "field_declaration" => {
-                // Process field with current visibility
+                // First, look for nested type declarations (class/struct/union)
+                // as direct children of the field_declaration. tree-sitter-cpp
+                // wraps `class Inner { ... };` and `union { int a; };` shapes
+                // declared inside a class body in a `field_declaration` parent.
+                //
+                // - NAMED nested class/struct (e.g. `class Inner { int x; };`)
+                //   must recurse with the extended class chain so the inner
+                //   field qualifies as `Outer::Inner.x`. Default visibility
+                //   resets to the nested type's own default (struct = public,
+                //   class = private), independent of the OUTER access state.
+                // - ANONYMOUS union/struct/class (e.g. `union { int a; };`)
+                //   injects its members into the enclosing class per C++
+                //   semantics; recurse with the OUTER `class_qualified_name`
+                //   so members emit as `Outer.a` / `Outer.b`. Visibility for
+                //   injected members inherits the OUTER `current_visibility`.
+                let mut handled_nested = false;
+                let mut inner_cursor = child.walk();
+                for inner in child.children(&mut inner_cursor) {
+                    let kind = inner.kind();
+                    if !matches!(
+                        kind,
+                        "class_specifier" | "struct_specifier" | "union_specifier"
+                    ) {
+                        continue;
+                    }
+
+                    let is_struct_or_union = matches!(kind, "struct_specifier" | "union_specifier");
+
+                    if let Some(name_node) = inner.child_by_field_name("name") {
+                        // NAMED nested type: walk its body with extended chain.
+                        if let Ok(inner_name) = name_node.utf8_text(content) {
+                            let inner_name = inner_name.trim();
+                            let nested_qualified = format!("{class_qualified_name}::{inner_name}");
+
+                            if let Some(body) = inner.child_by_field_name("body") {
+                                walk_class_body(
+                                    body,
+                                    content,
+                                    &nested_qualified,
+                                    is_struct_or_union,
+                                    ast_graph,
+                                    helper,
+                                    seen_includes,
+                                    namespace_stack,
+                                    class_stack,
+                                    ffi_registry,
+                                    pure_virtual_registry,
+                                    budget,
+                                )?;
+                                handled_nested = true;
+                            }
+                        }
+                    } else if let Some(body) = inner.child_by_field_name("body") {
+                        // ANONYMOUS nested type: inject members into enclosing
+                        // class. Process direct field_declaration children
+                        // with OUTER qualifier + OUTER visibility so members
+                        // surface as `Outer.member`.
+                        let mut anon_cursor = body.walk();
+                        for anon_child in body.children(&mut anon_cursor) {
+                            if anon_child.kind() == "field_declaration" {
+                                process_field_declaration(
+                                    anon_child,
+                                    content,
+                                    class_qualified_name,
+                                    current_visibility,
+                                    helper,
+                                )?;
+                            }
+                        }
+                        handled_nested = true;
+                    }
+                }
+
+                // Process the field_declaration itself unless we exclusively
+                // handled it as a pure nested type with no instance declarator
+                // (e.g. `class Inner { ... };` has a class_specifier but no
+                // field_identifier). `process_field_declaration` is harmless
+                // when no `field_identifier` / declarator child exists — it
+                // collects an empty `field_names` list and falls through.
+                // We still call it so cases that mix a nested type with an
+                // instance declarator (`class Inner { } member;`) keep
+                // emitting the `Outer.member` Property too. When
+                // `handled_nested` is true and the type child is absent of
+                // declarator children, the function is effectively a no-op
+                // (no field name → no node).
+                let _ = handled_nested;
                 process_field_declaration(
                     child,
                     content,
@@ -2436,7 +2586,8 @@ fn count_arguments(node: Node<'_>) -> usize {
 mod tests {
     use super::*;
     use sqry_core::graph::unified::build::test_helpers::{
-        assert_has_node, assert_has_node_with_kind, collect_call_edges,
+        assert_has_node, assert_has_node_with_kind, assert_has_node_with_kind_exact,
+        collect_call_edges,
     };
     use sqry_core::graph::unified::node::NodeKind;
     use tree_sitter::Parser;
@@ -3106,5 +3257,479 @@ mod tests {
                 "Inner class fields must use parent-qualified FQN 'demo::Outer::Inner'"
             );
         }
+    }
+
+    // ========================================================================
+    // C2_OTHER_CPP — Property/Constant emission for class/struct fields
+    // REQ:R0001, R0002, R0003, R0004, R0005, R0020, R0023
+    // ========================================================================
+    //
+    // These tests assert the post-fix shape of `process_field_declaration`:
+    //   - field qualified names use `Class.field` (last separator migrated to `.`
+    //     per design §3.1.1; class qualifier still uses `::`)
+    //   - non-`const`/`constexpr` fields → NodeKind::Property
+    //   - `const` and `constexpr` fields → NodeKind::Constant
+    //   - `static` keyword → is_static = true
+    //   - visibility from enclosing access specifier; default `"private"`
+    //     for class, `"public"` for struct
+    //   - TypeOf edge emits TypeOfContext::Field with the bare field name
+    //   - legacy `Class::field` qualified-name lookup returns 0 hits
+
+    use sqry_core::graph::unified::build::staging::StagingOp;
+    use sqry_core::graph::unified::edge::kind::{EdgeKind, TypeOfContext};
+
+    /// Locate the staged `AddNode` entry by exact canonical (semantic) name.
+    fn cpp_find_added_node<'a>(
+        staging: &'a StagingGraph,
+        canonical_name: &str,
+    ) -> Option<&'a sqry_core::graph::unified::storage::arena::NodeEntry> {
+        staging.operations().iter().find_map(|op| {
+            if let StagingOp::AddNode { entry, .. } = op
+                && staging.resolve_node_canonical_name(entry) == Some(canonical_name)
+            {
+                Some(entry)
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Locate the staged `AddNode` `NodeId` for a node by exact canonical name + kind.
+    fn cpp_find_added_node_id(
+        staging: &StagingGraph,
+        canonical_name: &str,
+        kind: NodeKind,
+    ) -> Option<sqry_core::graph::unified::NodeId> {
+        staging.operations().iter().find_map(|op| match op {
+            StagingOp::AddNode {
+                entry,
+                expected_id: Some(id),
+            } if entry.kind == kind
+                && staging.resolve_node_canonical_name(entry) == Some(canonical_name) =>
+            {
+                Some(*id)
+            }
+            _ => None,
+        })
+    }
+
+    /// Build the unified graph for a C++ source snippet and return the staged graph.
+    fn build_cpp(source: &str) -> StagingGraph {
+        let tree = parse_cpp(source);
+        let mut staging = StagingGraph::new();
+        let builder = CppGraphBuilder::new();
+        builder
+            .build_graph(
+                &tree,
+                source.as_bytes(),
+                Path::new("test.cpp"),
+                &mut staging,
+            )
+            .expect("build_graph must succeed for the test fixture");
+        staging
+    }
+
+    /// AC-1 + AC-2 + AC-4 (struct default visibility) + AC-5:
+    /// instance struct fields emit Property nodes with `Class.field`
+    /// qualified-name shape, `is_static = false`, visibility = `"public"`
+    /// (struct default), and a `TypeOf` edge using `TypeOfContext::Field` +
+    /// the bare field name.
+    #[test]
+    fn test_struct_field_emits_property_with_field_context() {
+        let source = "struct Point { int x; int y; };";
+        let staging = build_cpp(source);
+
+        // AC-1: dotted Class.field qualified name.
+        assert_has_node_with_kind_exact(&staging, "Point.x", NodeKind::Property);
+        assert_has_node_with_kind_exact(&staging, "Point.y", NodeKind::Property);
+
+        let entry =
+            cpp_find_added_node(&staging, "Point.x").expect("Point.x should be staged as a node");
+        assert_eq!(entry.kind, NodeKind::Property, "x must be Property");
+        assert!(!entry.is_static, "instance field is_static must be false");
+        let vis = staging.resolve_local_string(entry.visibility.expect("visibility id"));
+        assert_eq!(
+            vis,
+            Some("public"),
+            "struct default visibility must be 'public'"
+        );
+        // `span_from_node` packs row/column into `Span::Position`; the helper
+        // then stores them into `start_line`/`start_column`/`end_line`/
+        // `end_column` on the entry (start_byte/end_byte are intentionally
+        // not populated by `add_node_internal`). Assert the packed
+        // line/column range is non-empty so we catch zero-width spans.
+        assert!(entry.end_line > 0, "field end_line must be set (got 0)");
+        assert!(
+            entry.end_line > entry.start_line
+                || (entry.end_line == entry.start_line && entry.end_column > entry.start_column),
+            "field span must be non-empty: [{}:{}..{}:{}]",
+            entry.start_line,
+            entry.start_column,
+            entry.end_line,
+            entry.end_column,
+        );
+
+        // AC-5: TypeOf edge with Field context + bare name "x".
+        let x_id = cpp_find_added_node_id(&staging, "Point.x", NodeKind::Property)
+            .expect("Point.x Property NodeId");
+        let edge = staging.operations().iter().find_map(|op| {
+            if let StagingOp::AddEdge {
+                source: src,
+                kind: EdgeKind::TypeOf { context, name, .. },
+                ..
+            } = op
+                && *src == x_id
+            {
+                Some((*context, *name))
+            } else {
+                None
+            }
+        });
+        let (ctx, name) = edge.expect("TypeOf edge from Point.x should be staged");
+        assert_eq!(
+            ctx,
+            Some(TypeOfContext::Field),
+            "TypeOf edge context must be Field"
+        );
+        let resolved_name = name.and_then(|sid| staging.resolve_local_string(sid));
+        assert_eq!(
+            resolved_name,
+            Some("x"),
+            "TypeOf edge name must be the bare field name 'x'"
+        );
+
+        // AC-1 (negative): old NodeKind::Variable for these names must NOT appear.
+        let stale_variable = staging.nodes().any(|n| {
+            n.entry.kind == NodeKind::Variable
+                && matches!(
+                    staging.resolve_node_name(n.entry),
+                    Some("Point.x" | "Point.y" | "Point::x" | "Point::y")
+                )
+        });
+        assert!(
+            !stale_variable,
+            "Point fields must not be emitted as NodeKind::Variable"
+        );
+    }
+
+    /// AC-4: class default visibility is `"private"`.
+    #[test]
+    fn test_class_field_default_visibility_is_private() {
+        let source = "class Foo { int hidden; };";
+        let staging = build_cpp(source);
+
+        let entry = cpp_find_added_node(&staging, "Foo.hidden")
+            .expect("Foo.hidden should be staged as a node");
+        assert_eq!(entry.kind, NodeKind::Property);
+        let vis = staging.resolve_local_string(entry.visibility.expect("visibility id"));
+        assert_eq!(
+            vis,
+            Some("private"),
+            "class default visibility must be 'private'"
+        );
+    }
+
+    /// AC-4: explicit access specifier overrides the default.
+    #[test]
+    fn test_class_field_respects_explicit_access_specifier() {
+        let source = "class Foo { public: int public_field; protected: int prot_field; };";
+        let staging = build_cpp(source);
+
+        let pub_entry = cpp_find_added_node(&staging, "Foo.public_field")
+            .expect("Foo.public_field should be staged");
+        assert_eq!(
+            staging.resolve_local_string(pub_entry.visibility.expect("vis")),
+            Some("public")
+        );
+
+        let prot_entry = cpp_find_added_node(&staging, "Foo.prot_field")
+            .expect("Foo.prot_field should be staged");
+        assert_eq!(
+            staging.resolve_local_string(prot_entry.visibility.expect("vis")),
+            Some("protected")
+        );
+    }
+
+    /// AC-2 + AC-3: `const` field → Constant; instance const has
+    /// `is_static = false` (no `static` keyword present).
+    #[test]
+    fn test_const_field_emits_constant() {
+        let source = "class Foo { const int kMax = 0; };";
+        let staging = build_cpp(source);
+
+        assert_has_node_with_kind_exact(&staging, "Foo.kMax", NodeKind::Constant);
+        let entry = cpp_find_added_node(&staging, "Foo.kMax").expect("Foo.kMax");
+        assert_eq!(entry.kind, NodeKind::Constant);
+        assert!(
+            !entry.is_static,
+            "const (non-static) field is_static must be false; only `static` keyword sets is_static"
+        );
+    }
+
+    /// AC-2 + AC-3: `constexpr` field → Constant. The `static` flag is
+    /// driven strictly by the `static` keyword (per design §3.4); a bare
+    /// `constexpr` member without `static` must keep `is_static = false`.
+    #[test]
+    fn test_constexpr_field_emits_constant() {
+        let source = "class Foo { constexpr static int kAnswer = 42; };";
+        let staging = build_cpp(source);
+
+        assert_has_node_with_kind_exact(&staging, "Foo.kAnswer", NodeKind::Constant);
+        let entry = cpp_find_added_node(&staging, "Foo.kAnswer").expect("Foo.kAnswer");
+        assert_eq!(entry.kind, NodeKind::Constant);
+        assert!(
+            entry.is_static,
+            "static constexpr member must have is_static = true"
+        );
+    }
+
+    /// AC-3: `static` keyword sets `is_static = true` on a Property
+    /// (non-const non-constexpr).
+    #[test]
+    fn test_static_field_sets_is_static_true() {
+        let source = "class Foo { static int counter; };";
+        let staging = build_cpp(source);
+
+        let entry = cpp_find_added_node(&staging, "Foo.counter").expect("Foo.counter");
+        assert_eq!(entry.kind, NodeKind::Property);
+        assert!(entry.is_static, "static keyword must set is_static = true");
+    }
+
+    /// AC-6: bit-fields (e.g., `int flags : 4;`) emit Property nodes with the
+    /// usual `Class.field` form.
+    #[test]
+    fn test_bitfield_emits_property() {
+        let source = "struct Flags { unsigned int low : 4; unsigned int high : 4; };";
+        let staging = build_cpp(source);
+
+        assert_has_node_with_kind_exact(&staging, "Flags.low", NodeKind::Property);
+        assert_has_node_with_kind_exact(&staging, "Flags.high", NodeKind::Property);
+    }
+
+    /// AC-6: anonymous union — true anonymous unions (no instance name) inject
+    /// their members into the enclosing class per C++ semantics. Members must
+    /// emit as Property nodes under the OUTER class qualifier
+    /// (`Variant.as_int`, `Variant.as_float`), NOT under any synthetic inner
+    /// qualifier — there is no name to qualify by.
+    #[test]
+    fn test_anonymous_union_member_fields_emit_property() {
+        let source = r"
+class Variant {
+public:
+    int tag;
+    union {
+        int as_int;
+        float as_float;
+    };
+};
+";
+        let staging = build_cpp(source);
+
+        // Outer named field is present with the dotted form.
+        assert_has_node_with_kind_exact(&staging, "Variant.tag", NodeKind::Property);
+
+        // Anonymous-union members are injected into the enclosing class and
+        // appear under `Variant.<member>` per C++ semantics (design AC-6).
+        assert_has_node_with_kind_exact(&staging, "Variant.as_int", NodeKind::Property);
+        assert_has_node_with_kind_exact(&staging, "Variant.as_float", NodeKind::Property);
+
+        // Visibility for injected members inherits the OUTER access state
+        // (`public:` here).
+        let as_int = cpp_find_added_node(&staging, "Variant.as_int")
+            .expect("Variant.as_int should be staged");
+        let vis = staging.resolve_local_string(as_int.visibility.expect("visibility id"));
+        assert_eq!(
+            vis,
+            Some("public"),
+            "anonymous-union members must inherit OUTER access (`public:` here)"
+        );
+
+        // Negative: there must be no synthetic anonymous-union qualifier
+        // such as `Variant::.as_int` or members under a bogus inner name.
+        let bogus = staging.nodes().any(|n| {
+            staging
+                .resolve_node_name(n.entry)
+                .is_some_and(|name| name.contains("::.") || name.starts_with("Variant::."))
+        });
+        assert!(
+            !bogus,
+            "anonymous union must not produce a synthetic qualifier"
+        );
+
+        // No stale Variable emission for any of these names.
+        let stale_variable = staging.nodes().any(|n| {
+            n.entry.kind == NodeKind::Variable
+                && matches!(
+                    staging.resolve_node_name(n.entry),
+                    Some("Variant.tag" | "Variant.as_int" | "Variant.as_float")
+                )
+        });
+        assert!(
+            !stale_variable,
+            "anonymous-union members + outer fields must not stay as Variable"
+        );
+    }
+
+    /// AC-6: templated class — `template<class T> struct Box { T value; };`
+    /// emits the field under the bare class name (template-args part is
+    /// stripped for the qualified name; design §4.1 edge cases).
+    #[test]
+    fn test_templated_class_field_emits_property() {
+        let source = r"
+template<class T>
+struct Box {
+    T value;
+};
+";
+        let staging = build_cpp(source);
+
+        assert_has_node_with_kind_exact(&staging, "Box.value", NodeKind::Property);
+        let entry = cpp_find_added_node(&staging, "Box.value").expect("Box.value");
+        assert_eq!(entry.kind, NodeKind::Property);
+        assert!(!entry.is_static);
+    }
+
+    /// AC-6: nested class — both the OUTER field (`Outer.outer_value`) and the
+    /// INNER nested-class fields (`Outer::Inner.x`) must emit as Property
+    /// nodes. `walk_class_body` recurses into a nested
+    /// `field_declaration > class_specifier` and extends the qualifier chain
+    /// with the inner-class name (design AC-6 + §4.1).
+    #[test]
+    fn test_outer_class_field_with_nested_class_present() {
+        let source = r"
+class Outer {
+public:
+    int outer_value;
+    class Inner {
+    public:
+        int x;
+    };
+};
+";
+        let staging = build_cpp(source);
+
+        // AC-6: outer field is emitted under the dotted form.
+        assert_has_node_with_kind_exact(&staging, "Outer.outer_value", NodeKind::Property);
+
+        // AC-6: nested-class field emits under the parent-qualified dotted
+        // form `Outer::Inner.x` (class chain stays `::`, last separator
+        // migrates to `.` per design §3.1.1).
+        assert_has_node_with_kind_exact(&staging, "Outer::Inner.x", NodeKind::Property);
+
+        // Negative legacy lookup: the legacy `Outer::outer_value` form must
+        // not appear (AC-7 + design §3.1.1).
+        let legacy_hits: Vec<_> = staging
+            .nodes()
+            .filter(|n| staging.resolve_node_name(n.entry) == Some("Outer::outer_value"))
+            .collect();
+        assert!(
+            legacy_hits.is_empty(),
+            "legacy `Outer::outer_value` lookup must return 0 hits"
+        );
+
+        // Negative: nested field must not appear under bare `Inner.x` (lost
+        // outer chain) or legacy `Outer::Inner::x` (last separator missed
+        // migration).
+        for legacy in ["Inner.x", "Outer::Inner::x", "Outer.Inner.x"] {
+            let hits: Vec<_> = staging
+                .nodes()
+                .filter(|n| staging.resolve_node_name(n.entry) == Some(legacy))
+                .collect();
+            assert!(
+                hits.is_empty(),
+                "nested-class field `{legacy}` must not appear; expected only `Outer::Inner.x`"
+            );
+        }
+    }
+
+    /// AC-6: nested struct inside a class — nested struct fields qualify as
+    /// `Outer::Inner.y`. Default struct visibility is `public`, regardless
+    /// of the OUTER access state.
+    #[test]
+    fn test_outer_class_with_nested_struct_emits_inner_field() {
+        let source = r"
+class Outer {
+private:
+    struct Inner {
+        int y;
+    };
+};
+";
+        let staging = build_cpp(source);
+
+        assert_has_node_with_kind_exact(&staging, "Outer::Inner.y", NodeKind::Property);
+
+        let entry = cpp_find_added_node(&staging, "Outer::Inner.y")
+            .expect("Outer::Inner.y should be staged");
+        let vis = staging.resolve_local_string(entry.visibility.expect("visibility id"));
+        assert_eq!(
+            vis,
+            Some("public"),
+            "nested struct field default visibility must be 'public' \
+             regardless of OUTER access state"
+        );
+    }
+
+    /// Staging-level smoke: post-fix, no staged node for a class field uses
+    /// the legacy `Class::field` qualified-name shape. This is a
+    /// fast-feedback companion to the AC-7 contract test — the authoritative
+    /// AC-7 assertion runs against a finalized `GraphSnapshot` via
+    /// `find_nodes_by_name` in
+    /// `tests/integration_tests.rs::test_legacy_double_colon_field_lookup_returns_zero_via_snapshot`
+    /// (design §4.1).
+    #[test]
+    fn test_legacy_double_colon_field_lookup_returns_zero() {
+        let source = r"
+class Foo {
+public:
+    int bar;
+    static int baz;
+    const int qux = 0;
+};
+struct Quux {
+    int corge;
+};
+";
+        let staging = build_cpp(source);
+
+        // Positive: dotted form must be present for every field.
+        assert_has_node_with_kind_exact(&staging, "Foo.bar", NodeKind::Property);
+        assert_has_node_with_kind_exact(&staging, "Foo.baz", NodeKind::Property);
+        assert_has_node_with_kind_exact(&staging, "Foo.qux", NodeKind::Constant);
+        assert_has_node_with_kind_exact(&staging, "Quux.corge", NodeKind::Property);
+
+        // Negative: legacy `Class::field` qualified name must not appear for
+        // any of the fields in the fixture.
+        for legacy in ["Foo::bar", "Foo::baz", "Foo::qux", "Quux::corge"] {
+            let hits: Vec<_> = staging
+                .nodes()
+                .filter(|n| staging.resolve_node_name(n.entry) == Some(legacy))
+                .collect();
+            assert!(
+                hits.is_empty(),
+                "legacy lookup for {legacy:?} must return 0 hits, got {} node(s) ({:?})",
+                hits.len(),
+                hits.iter()
+                    .map(|n| (n.entry.kind, staging.resolve_node_name(n.entry)))
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    /// Field inside a class that lives in a namespace must keep the namespace
+    /// chain joined by `::` and only flip the LAST separator to `.`.
+    #[test]
+    fn test_namespaced_class_field_qualified_name() {
+        let source = r"
+namespace demo {
+    class Service {
+    public:
+        int counter;
+    };
+}
+";
+        let staging = build_cpp(source);
+
+        assert_has_node_with_kind_exact(&staging, "demo::Service.counter", NodeKind::Property);
     }
 }

@@ -8,6 +8,7 @@ use sqry_core::graph::GraphBuilder;
 use sqry_core::graph::unified::StagingGraph;
 use sqry_core::graph::unified::build::staging::StagingOp;
 use sqry_core::graph::unified::edge::EdgeKind;
+use sqry_core::graph::unified::edge::kind::TypeOfContext;
 use sqry_lang_java::relations::JavaGraphBuilder;
 use std::path::PathBuf;
 use tree_sitter::Tree;
@@ -146,6 +147,37 @@ fn has_reference_target_contains(edges: &[(String, String)], needle: &str) -> bo
 
 // ========== TypeOf Edge Tests (Phase 1: Fields) ==========
 
+/// Collect all `TypeOf` edges with `(context, name)` resolved to strings.
+///
+/// Used by Field-context lock-in assertions (REQ:R0010, REQ:R0023):
+/// every Java field `TypeOf` edge must carry `Some(TypeOfContext::Field)`
+/// and the bare (unqualified) field identifier as `name`.
+fn collect_typeof_edges(staging: &StagingGraph) -> Vec<(Option<TypeOfContext>, Option<String>)> {
+    let strings = build_string_lookup(staging);
+    staging
+        .operations()
+        .iter()
+        .filter_map(|op| {
+            if let StagingOp::AddEdge { kind, .. } = op
+                && let EdgeKind::TypeOf {
+                    context,
+                    name: name_id,
+                    ..
+                } = kind
+            {
+                let name = name_id.map(|id| {
+                    strings
+                        .get(&id.index())
+                        .cloned()
+                        .unwrap_or_else(|| format!("<string:{}>", id.index()))
+                });
+                return Some((*context, name));
+            }
+            None
+        })
+        .collect()
+}
+
 #[test]
 fn test_field_typeof_edge() {
     let content = r"
@@ -168,6 +200,27 @@ class Service {
     assert!(
         typeof_count >= 1,
         "Expected at least 1 TypeOf edge for field, got {typeof_count}"
+    );
+
+    // REQ:R0010, REQ:R0023 — Field TypeOf edge must carry
+    // `Some(TypeOfContext::Field)` and the bare field name ("repository",
+    // not "Service::repository") so cross-language byte-exact field queries
+    // match the canonical Field-context + bare-name shape that the other
+    // 12 plugins emit.
+    let typeof_edges = collect_typeof_edges(&staging);
+    let field_edge = typeof_edges
+        .iter()
+        .find(|(ctx, _)| *ctx == Some(TypeOfContext::Field));
+    assert!(
+        field_edge.is_some(),
+        "Expected TypeOf edge with Field context, got: {typeof_edges:?}"
+    );
+    let (ctx, name) = field_edge.expect("Field-context TypeOf edge must exist");
+    assert_eq!(*ctx, Some(TypeOfContext::Field));
+    assert_eq!(
+        name.as_deref(),
+        Some("repository"),
+        "Expected bare field name 'repository', got: {name:?}"
     );
 }
 

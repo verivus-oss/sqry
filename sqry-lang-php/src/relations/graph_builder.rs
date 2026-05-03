@@ -30,7 +30,7 @@
 //!   - `@return {Type}` `PHPDoc` annotations for function/method return types
 //!   - `@var {Type}` `PHPDoc` annotations for variable and property declarations
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use sqry_core::graph::unified::build::helper::CalleeKindHint;
@@ -1731,37 +1731,97 @@ fn extract_type_from_node(type_node: &Node, content: &[u8]) -> Option<String> {
 // PHPDoc Annotation Processing (Phase 5)
 // ============================================================================
 
-/// Process `PHPDoc` annotations for `TypeOf` and Reference edges
+/// Process `PHPDoc` annotations for `TypeOf` and Reference edges.
+///
+/// Two-pass walk to make explicit-vs-promoted field collision precedence
+/// (FR-13) deterministic regardless of source order:
+///
+/// 1. **Pass A** — function `PHPDoc`, method `PHPDoc`, and *explicit*
+///    `property_declaration` / `simple_property` emission. Records every
+///    explicit-field `NodeId` in `explicit_field_ids`.
+/// 2. **Pass B** — constructor property promotion. The promoted-side
+///    consults `explicit_field_ids`; when an existing node is in the set,
+///    the promotion path skips kind/visibility/static *and* `TypeOf`
+///    re-emission so the explicit declaration's attributes and declared
+///    type win unambiguously.
+///
+/// This sequencing fixes both FR-13 violations called out by code review:
+/// (a) source-order dependence — explicit declarations now always run
+/// before promotions; (b) duplicate `TypeOf` edges from a promoted
+/// parameter onto an already-typed explicit field.
 fn process_phpdoc_annotations(
     node: Node,
     content: &[u8],
     helper: &mut GraphBuildHelper,
 ) -> GraphResult<()> {
-    // Recursively walk the tree looking for nodes with PHPDoc
+    // Pass A: PHPDoc + explicit property declarations.
+    let mut explicit_field_ids: HashSet<NodeId> = HashSet::new();
+    process_phpdoc_pass_a(node, content, helper, &mut explicit_field_ids)?;
+
+    // Pass B: constructor property promotion. Explicit fields (Pass A
+    // output) win on collision; the explicit_field_ids set is read-only
+    // here, used to gate kind/visibility/static and TypeOf overrides.
+    process_phpdoc_pass_b(node, content, helper, &explicit_field_ids);
+
+    Ok(())
+}
+
+/// Pass A — recursive walk that emits PHPDoc-derived edges and explicit
+/// property nodes. Newly created explicit-field `NodeId`s are tracked in
+/// `explicit_field_ids` so Pass B can preserve their attributes.
+fn process_phpdoc_pass_a(
+    node: Node,
+    content: &[u8],
+    helper: &mut GraphBuildHelper,
+    explicit_field_ids: &mut HashSet<NodeId>,
+) -> GraphResult<()> {
     match node.kind() {
         "function_definition" => {
             process_function_phpdoc(node, content, helper)?;
         }
         "method_declaration" => {
+            // Method-level PHPDoc only in Pass A; constructor promotion
+            // is deferred to Pass B so explicit declarations always win.
             process_method_phpdoc(node, content, helper)?;
         }
-        "property_declaration" => {
-            process_property_phpdoc(node, content, helper)?;
-        }
-        "simple_property" => {
-            // Simple property declarations (e.g., inside property groups)
-            process_property_phpdoc(node, content, helper)?;
+        "property_declaration" | "simple_property" => {
+            // Unconditional emission (PHPDoc gate removed). Property
+            // declarations inside class_declaration / trait_declaration /
+            // interface_declaration become Property or Constant nodes
+            // with qualified name `Class.prop`.
+            let emitted = process_property_declaration(node, content, helper);
+            explicit_field_ids.extend(emitted);
         }
         _ => {}
     }
 
-    // Recurse into children
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        process_phpdoc_annotations(child, content, helper)?;
+        process_phpdoc_pass_a(child, content, helper, explicit_field_ids)?;
     }
 
     Ok(())
+}
+
+/// Pass B — recursive walk that emits constructor-promoted Property /
+/// Constant nodes. Reads `explicit_field_ids` (populated by Pass A) to
+/// skip kind/visibility/static *and* `TypeOf` re-emission whenever an
+/// explicit declaration owns the qualified name. Per cross-language field
+/// emission design §4.6.
+fn process_phpdoc_pass_b(
+    node: Node,
+    content: &[u8],
+    helper: &mut GraphBuildHelper,
+    explicit_field_ids: &HashSet<NodeId>,
+) {
+    if node.kind() == "method_declaration" {
+        process_constructor_promotion(node, content, helper, explicit_field_ids);
+    }
+
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        process_phpdoc_pass_b(child, content, helper, explicit_field_ids);
+    }
 }
 
 /// Process `PHPDoc` for function definitions
@@ -1945,83 +2005,360 @@ fn process_method_phpdoc(
     Ok(())
 }
 
-/// Process `PHPDoc` for property declarations
-#[allow(clippy::unnecessary_wraps)]
-fn process_property_phpdoc(
+/// Process a `property_declaration` (or legacy `simple_property`) inside a
+/// class / trait / interface body and emit Property or Constant nodes with
+/// `Class.prop` qualified names.
+///
+/// Returns the `NodeId` of every explicit field emitted by this call.
+/// Pass A collects these into the explicit-field set so Pass B
+/// (constructor promotion) can recognize the explicit declaration as
+/// owner of the qualified name and refrain from overwriting attributes
+/// or re-emitting `TypeOf` edges (FR-13).
+///
+/// Cross-language field emission contract (DAG U10 / `C2_OTHER_PHP`):
+/// - `PHPDoc` gate removed: emission is unconditional.
+/// - Visibility from `visibility_modifier` (default `"public"` when absent;
+///   PHP semantics).
+/// - `static_modifier` → `is_static = true`.
+/// - `readonly_modifier` (PHP 8.1+) → `Constant`; otherwise `Property`.
+/// - Native PHP 7.4+ `type` field → primary `TypeOf` target.
+/// - `PHPDoc` `@var` is enrichment fallback only when no native type is present.
+/// - `TypeOf` edge uses `TypeOfContext::Field` and bare property name.
+/// - Span anchored on the declaration node.
+fn process_property_declaration(
     prop_node: Node,
     content: &[u8],
     helper: &mut GraphBuildHelper,
-) -> GraphResult<()> {
-    // Extract PHPDoc comment
-    let Some(phpdoc_text) = extract_phpdoc_comment(prop_node, content) else {
-        return Ok(());
+) -> Vec<NodeId> {
+    // Find the enclosing owner (class / trait / interface). Without an owner
+    // we have no qualified-name prefix and emit nothing — matches the
+    // "no emission outside class/trait/interface" AC.
+    let Some(owner_name) = enclosing_class_or_trait_name(prop_node, content) else {
+        return Vec::new();
     };
 
-    // Parse PHPDoc tags
-    let tags = parse_phpdoc_tags(&phpdoc_text);
+    // Modifier extraction.
+    let mods = extract_property_modifiers(prop_node, content);
 
-    // Only process @var tags for properties
-    let Some(var_type) = &tags.var_type else {
-        return Ok(());
+    // Native PHP 7.4+ type annotation lives on the `type` field of
+    // `property_declaration`.
+    let native_type = prop_node
+        .child_by_field_name("type")
+        .and_then(|t| extract_type_from_node(&t, content));
+
+    // PHPDoc @var as enrichment fallback only when no native type present.
+    let phpdoc_var_type = if native_type.is_none() {
+        extract_phpdoc_comment(prop_node, content)
+            .as_deref()
+            .and_then(|c| parse_phpdoc_tags(c).var_type)
+    } else {
+        None
     };
 
-    // Get property name(s)
-    let property_names = extract_property_names(prop_node, content);
+    let primary_type = native_type.clone().or_else(|| phpdoc_var_type.clone());
 
-    if property_names.is_empty() {
-        // Fallback: if we can't extract names, use a generic property identifier
-        // This ensures we still create edges for the type information
-        let generic_name = format!("property_{:?}", prop_node.id());
-        let prop_node_id = helper.add_variable(&generic_name, None);
-
-        // Create TypeOf edge: variable -> type
-        let canonical_type = canonical_type_string(var_type);
-        let type_node_id = helper.add_type(&canonical_type, None);
-        helper.add_typeof_edge_with_context(
-            prop_node_id,
-            type_node_id,
-            Some(TypeOfContext::Variable),
-            None,
-            Some(&generic_name),
-        );
-
-        // Create Reference edges: variable -> each referenced type
-        let type_names = extract_type_names(var_type);
-        for type_name in type_names {
-            let ref_type_id = helper.add_type(&type_name, None);
-            helper.add_reference_edge(prop_node_id, ref_type_id);
-        }
-
-        return Ok(());
+    let prop_names = extract_property_element_names(prop_node, content);
+    if prop_names.is_empty() {
+        return Vec::new();
     }
 
-    // Process each property name
-    for prop_name in property_names {
-        // Get or create property node
-        // Note: For now we treat properties as simple variables
-        // Full property tracking may be added in future phases
-        let prop_node_id = helper.add_variable(&prop_name, None);
+    let span = span_from_node(prop_node);
+    let mut emitted = Vec::with_capacity(prop_names.len());
 
-        // Create TypeOf edge: variable -> type
-        let canonical_type = canonical_type_string(var_type);
-        let type_node_id = helper.add_type(&canonical_type, None);
-        helper.add_typeof_edge_with_context(
-            prop_node_id,
-            type_node_id,
-            Some(TypeOfContext::Variable),
-            None,
-            Some(&prop_name),
-        );
+    for prop_name in prop_names {
+        let qualified_name = format!("{owner_name}.{prop_name}");
+        let visibility = mods.visibility.as_deref().unwrap_or("public");
 
-        // Create Reference edges: variable -> each referenced type
-        let type_names = extract_type_names(var_type);
-        for type_name in type_names {
-            let ref_type_id = helper.add_type(&type_name, None);
-            helper.add_reference_edge(prop_node_id, ref_type_id);
+        let node_id = if mods.is_readonly {
+            helper.add_constant_with_name_static_and_visibility(
+                &prop_name,
+                &qualified_name,
+                Some(span),
+                mods.is_static,
+                Some(visibility),
+            )
+        } else {
+            helper.add_property_with_name_static_and_visibility(
+                &prop_name,
+                &qualified_name,
+                Some(span),
+                mods.is_static,
+                Some(visibility),
+            )
+        };
+
+        if let Some(type_str) = primary_type.as_deref() {
+            emit_field_type_edges(helper, node_id, &prop_name, type_str);
+        }
+
+        emitted.push(node_id);
+    }
+
+    emitted
+}
+
+/// Walk a `method_declaration` whose name is `__construct` and emit
+/// Property / Constant nodes for each `property_promotion_parameter` on the
+/// enclosing class.
+///
+/// Collision precedence (FR-13 / AC-8). The two-pass `process_phpdoc_annotations`
+/// driver guarantees explicit `property_declaration` nodes are emitted in
+/// Pass A before this Pass-B walker runs. `explicit_field_ids` carries
+/// every `NodeId` Pass A created; when the promoted side lands on a
+/// qualified name owned by an explicit declaration we:
+///
+/// - skip kind / visibility / static / readonly emission entirely
+///   (the explicit declaration's attributes are authoritative); and
+/// - skip `TypeOf` re-emission so the explicit declaration's declared
+///   type is the only one bound to the field `NodeId` — even when the
+///   promoted parameter's annotated type would differ.
+///
+/// Only when the qualified name is *not* in `explicit_field_ids` does
+/// this walker create a new Property/Constant node from the promoted
+/// parameter's modifiers and emit its `TypeOf` edges.
+fn process_constructor_promotion(
+    method_node: Node,
+    content: &[u8],
+    helper: &mut GraphBuildHelper,
+    explicit_field_ids: &HashSet<NodeId>,
+) {
+    // Constructor identification: name == "__construct".
+    let Some(name_node) = method_node.child_by_field_name("name") else {
+        return;
+    };
+    let Ok(method_name) = name_node.utf8_text(content) else {
+        return;
+    };
+    if method_name.trim() != "__construct" {
+        return;
+    }
+
+    let Some(owner_name) = enclosing_class_or_trait_name(method_node, content) else {
+        return;
+    };
+
+    let Some(params_node) = method_node.child_by_field_name("parameters") else {
+        return;
+    };
+
+    let mut cursor = params_node.walk();
+    for param in params_node.children(&mut cursor) {
+        if param.kind() != "property_promotion_parameter" {
+            continue;
+        }
+
+        // Promotion-parameter modifiers + name.
+        let visibility = param
+            .child_by_field_name("visibility")
+            .and_then(|v| v.utf8_text(content).ok())
+            .map(|s| s.trim().to_string());
+        let is_readonly = param.child_by_field_name("readonly").is_some()
+            || direct_child_of_kind(param, "readonly_modifier").is_some();
+        // Static is illegal on promotion parameters — PHP rejects it — but
+        // honour the bool field for shape-parity with the property path.
+        let is_static = false;
+        let native_type = param
+            .child_by_field_name("type")
+            .and_then(|t| extract_type_from_node(&t, content));
+
+        let Some(prop_name) = promoted_param_name(param, content) else {
+            continue;
+        };
+
+        let qualified_name = format!("{owner_name}.{prop_name}");
+        let span = span_from_node(param);
+
+        // FR-13 collision precedence: any prior node sharing this
+        // qualified name belongs to an explicit declaration emitted in
+        // Pass A (the two-pass driver enforces that ordering). Explicit
+        // declarations are authoritative — we touch nothing here.
+        if let Some(existing_id) = helper.get_node(&qualified_name) {
+            if explicit_field_ids.contains(&existing_id) {
+                // Explicit declaration owns this name. Skip both
+                // attribute mutation *and* TypeOf re-emission so we
+                // never bind a second (possibly conflicting) field
+                // type to the same NodeId.
+                continue;
+            }
+            // No explicit owner: the existing node was created by an
+            // earlier promoted parameter (rare — same qualified name
+            // appearing twice in one promotion list, or another plugin
+            // path). Re-emit type information defensively only when
+            // there is one to add; never overwrite kind/visibility.
+            if let Some(t) = native_type {
+                emit_field_type_edges(helper, existing_id, &prop_name, &t);
+            }
+            continue;
+        }
+
+        let visibility_ref = visibility.as_deref().unwrap_or("public");
+        let node_id = if is_readonly {
+            helper.add_constant_with_name_static_and_visibility(
+                &prop_name,
+                &qualified_name,
+                Some(span),
+                is_static,
+                Some(visibility_ref),
+            )
+        } else {
+            helper.add_property_with_name_static_and_visibility(
+                &prop_name,
+                &qualified_name,
+                Some(span),
+                is_static,
+                Some(visibility_ref),
+            )
+        };
+
+        if let Some(type_str) = native_type {
+            emit_field_type_edges(helper, node_id, &prop_name, &type_str);
+        }
+    }
+}
+
+/// Aggregate of the property modifiers we care about for emission.
+struct PropertyModifiers {
+    visibility: Option<String>,
+    is_static: bool,
+    is_readonly: bool,
+}
+
+/// Walk direct children of a `property_declaration` collecting the modifier
+/// set. Both explicit `var` (legacy public) and missing-modifier cases fall
+/// through to the caller's `unwrap_or("public")` default.
+fn extract_property_modifiers(prop_node: Node, content: &[u8]) -> PropertyModifiers {
+    let mut visibility: Option<String> = None;
+    let mut is_static = false;
+    let mut is_readonly = false;
+
+    let mut cursor = prop_node.walk();
+    for child in prop_node.children(&mut cursor) {
+        match child.kind() {
+            "visibility_modifier" => {
+                if let Ok(text) = child.utf8_text(content) {
+                    visibility = Some(text.trim().to_string());
+                }
+            }
+            "var_modifier" => {
+                // `var` is the legacy spelling of `public` — treat
+                // identically. Per design §4.4 / AC-2.
+                if visibility.is_none() {
+                    visibility = Some("public".to_string());
+                }
+            }
+            "static_modifier" => {
+                is_static = true;
+            }
+            "readonly_modifier" => {
+                is_readonly = true;
+            }
+            _ => {}
         }
     }
 
-    Ok(())
+    PropertyModifiers {
+        visibility,
+        is_static,
+        is_readonly,
+    }
+}
+
+/// Extract bare property names from a `property_declaration` by walking its
+/// `property_element` children. Strips the leading `$` PHP variable sigil so
+/// the qualified name matches the cross-language `Class.prop` convention.
+fn extract_property_element_names(prop_node: Node, content: &[u8]) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut cursor = prop_node.walk();
+    for child in prop_node.children(&mut cursor) {
+        if child.kind() != "property_element" {
+            continue;
+        }
+        if let Some(var_node) = child.child_by_field_name("name")
+            && let Some(name) = strip_dollar_from_variable(var_node, content)
+        {
+            names.push(name);
+        }
+    }
+    names
+}
+
+/// Pull the bare identifier from a `property_promotion_parameter`'s `name`
+/// field (the `variable_name`).
+fn promoted_param_name(param: Node, content: &[u8]) -> Option<String> {
+    let name_field = param.child_by_field_name("name")?;
+    // `by_ref` indirection is rare in promotion; honour both shapes.
+    let var_node = if name_field.kind() == "variable_name" {
+        name_field
+    } else {
+        // Search child for variable_name.
+        let mut cursor = name_field.walk();
+        name_field
+            .children(&mut cursor)
+            .find(|c| c.kind() == "variable_name")?
+    };
+    strip_dollar_from_variable(var_node, content)
+}
+
+/// Read a `variable_name` node and return its bare identifier (no leading `$`).
+fn strip_dollar_from_variable(var_node: Node, content: &[u8]) -> Option<String> {
+    if let Some(name_node) = var_node.child_by_field_name("name")
+        && let Ok(text) = name_node.utf8_text(content)
+    {
+        return Some(text.trim().to_string());
+    }
+    var_node
+        .utf8_text(content)
+        .ok()
+        .map(|s| s.trim().trim_start_matches('$').to_string())
+}
+
+/// Find the first direct child with the given kind, if any.
+fn direct_child_of_kind<'a>(node: Node<'a>, kind: &str) -> Option<Node<'a>> {
+    let mut cursor = node.walk();
+    node.children(&mut cursor).find(|c| c.kind() == kind)
+}
+
+/// Emit the Field-context `TypeOf` edge plus referenced-type Reference
+/// edges for a property/constant node.
+fn emit_field_type_edges(
+    helper: &mut GraphBuildHelper,
+    node_id: NodeId,
+    prop_name: &str,
+    type_str: &str,
+) {
+    let canonical_type = canonical_type_string(type_str);
+    let type_node_id = helper.add_type(&canonical_type, None);
+    helper.add_typeof_edge_with_context(
+        node_id,
+        type_node_id,
+        Some(TypeOfContext::Field),
+        None,
+        Some(prop_name),
+    );
+
+    for ref_type_name in extract_type_names(type_str) {
+        let ref_type_id = helper.add_type(&ref_type_name, None);
+        helper.add_reference_edge(node_id, ref_type_id);
+    }
+}
+
+/// Walk up the AST to find the enclosing class, trait, or interface's name.
+/// Returns `None` for top-level declarations or anonymous classes.
+fn enclosing_class_or_trait_name(node: Node, content: &[u8]) -> Option<String> {
+    let mut current = node;
+    while let Some(parent) = current.parent() {
+        if matches!(
+            parent.kind(),
+            "class_declaration" | "trait_declaration" | "interface_declaration"
+        ) {
+            return parent
+                .child_by_field_name("name")
+                .and_then(|n| n.utf8_text(content).ok())
+                .map(|s| s.trim().to_string());
+        }
+        current = parent;
+    }
+    None
 }
 
 /// Extract parameter names and indices from a function/method declaration
@@ -2095,51 +2432,6 @@ fn get_enclosing_class_name(node: Node, content: &[u8]) -> GraphResult<Option<St
     }
 
     Ok(None)
-}
-
-/// Extract property names from a property declaration
-fn extract_property_names(prop_node: Node, content: &[u8]) -> Vec<String> {
-    let mut names = Vec::new();
-
-    match prop_node.kind() {
-        "property_declaration" => {
-            // Extract all variable names from the property declaration
-            // PHP properties can be: property_initializer or simple_property children
-            let mut cursor = prop_node.walk();
-            for child in prop_node.children(&mut cursor) {
-                match child.kind() {
-                    "property_initializer" => {
-                        // Property with initializer: $name = value
-                        if let Some(var_node) = child.child_by_field_name("name")
-                            && let Ok(var_text) = var_node.utf8_text(content)
-                        {
-                            names.push(var_text.trim().to_string());
-                        }
-                    }
-                    "simple_property" => {
-                        // Simple property without initializer: $name
-                        if let Some(var_node) = child.child_by_field_name("name")
-                            && let Ok(var_text) = var_node.utf8_text(content)
-                        {
-                            names.push(var_text.trim().to_string());
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-        "simple_property" => {
-            // Handle simple property declarations directly
-            if let Some(var_node) = prop_node.child_by_field_name("name")
-                && let Ok(var_text) = var_node.utf8_text(content)
-            {
-                names.push(var_text.trim().to_string());
-            }
-        }
-        _ => {}
-    }
-
-    names
 }
 
 // ============================================================================
@@ -2559,4 +2851,518 @@ fn php_ffi_library_simple_name(library_path: &str) -> String {
     }
 
     filename.to_string()
+}
+
+// ============================================================================
+// Field emission tests (REQ:R0001..R0007, R0013, R0023)
+// ============================================================================
+
+#[cfg(test)]
+mod field_emission_tests {
+    //! Tests for unconditional Property/Constant emission from PHP class /
+    //! trait / interface property declarations and constructor-promotion
+    //! parameters (DAG U10 / `C2_OTHER_PHP`).
+    //!
+    //! These tests assert the post-fix contract:
+    //! - `PHPDoc` gate removed: Property/Constant emitted regardless of @var.
+    //! - Qualified name `Class.prop` (dot separator per design §3.1).
+    //! - Visibility from `visibility_modifier`; default "public" when absent.
+    //! - `static_modifier` → `is_static = true`.
+    //! - `readonly` (PHP 8.1+) → `Constant`; otherwise `Property`.
+    //! - Native PHP 7.4+ type → primary; `PHPDoc` `@var` is enrichment fallback
+    //!   only when no native type is present.
+    //! - `TypeOf` edge uses `TypeOfContext::Field` and bare field-name metadata.
+    //! - Constructor `property_promotion_parameter` emits a Property on the class.
+    //! - Collision precedence: explicit declaration wins; promoted dedupes via
+    //!   `helper.get_node` and only fills `None` attributes.
+    //! - Span anchored on the property/promotion declaration node.
+    use sqry_core::graph::GraphBuilder;
+    use sqry_core::graph::unified::build::staging::{StagingGraph, StagingOp};
+    use sqry_core::graph::unified::build::test_helpers::{
+        build_node_name_lookup, build_string_lookup, count_nodes_by_kind,
+    };
+    use sqry_core::graph::unified::edge::EdgeKind;
+    use sqry_core::graph::unified::edge::kind::TypeOfContext;
+    use sqry_core::graph::unified::node::NodeKind;
+    use std::path::Path;
+    use tree_sitter::Parser;
+
+    use super::PhpGraphBuilder;
+
+    fn parse(source: &str) -> tree_sitter::Tree {
+        let mut parser = Parser::new();
+        parser
+            .set_language(&tree_sitter_php::LANGUAGE_PHP.into())
+            .expect("load PHP grammar");
+        parser.parse(source, None).expect("parse PHP source")
+    }
+
+    fn build(source: &str) -> StagingGraph {
+        let tree = parse(source);
+        let mut staging = StagingGraph::new();
+        let builder = PhpGraphBuilder::default();
+        builder
+            .build_graph(
+                &tree,
+                source.as_bytes(),
+                Path::new("test.php"),
+                &mut staging,
+            )
+            .expect("build graph");
+        staging
+    }
+
+    /// Look up a node entry by its qualified-or-bare name, optionally requiring a kind.
+    fn find_node<'a>(
+        staging: &'a StagingGraph,
+        name: &str,
+        kind: Option<NodeKind>,
+    ) -> Option<&'a sqry_core::graph::unified::storage::NodeEntry> {
+        let strings = build_string_lookup(staging);
+        for op in staging.operations() {
+            if let StagingOp::AddNode { entry, .. } = op {
+                if let Some(k) = kind
+                    && entry.kind != k
+                {
+                    continue;
+                }
+                let name_idx = entry.qualified_name.unwrap_or(entry.name).index();
+                if let Some(s) = strings.get(&name_idx)
+                    && s == name
+                {
+                    return Some(entry);
+                }
+            }
+        }
+        None
+    }
+
+    fn count_nodes_named(staging: &StagingGraph, name: &str) -> usize {
+        let strings = build_string_lookup(staging);
+        staging
+            .operations()
+            .iter()
+            .filter(|op| {
+                if let StagingOp::AddNode { entry, .. } = op {
+                    let name_idx = entry.qualified_name.unwrap_or(entry.name).index();
+                    strings.get(&name_idx).is_some_and(|s| s == name)
+                } else {
+                    false
+                }
+            })
+            .count()
+    }
+
+    fn resolve_visibility(
+        staging: &StagingGraph,
+        vis: Option<sqry_core::graph::unified::StringId>,
+    ) -> Option<String> {
+        let strings = build_string_lookup(staging);
+        vis.and_then(|sid| strings.get(&sid.index()).cloned())
+    }
+
+    fn typeof_edges_for_node(
+        staging: &StagingGraph,
+        source_name: &str,
+    ) -> Vec<(Option<TypeOfContext>, Option<String>, String)> {
+        let names = build_node_name_lookup(staging);
+        let strings = build_string_lookup(staging);
+        let mut out = Vec::new();
+        for op in staging.operations() {
+            if let StagingOp::AddEdge {
+                source,
+                target,
+                kind: EdgeKind::TypeOf { context, name, .. },
+                ..
+            } = op
+            {
+                let src = names.get(source).cloned().unwrap_or_default();
+                if src != source_name {
+                    continue;
+                }
+                let edge_name = name.and_then(|sid| strings.get(&sid.index()).cloned());
+                let target_name = names.get(target).cloned().unwrap_or_default();
+                out.push((*context, edge_name, target_name));
+            }
+        }
+        out
+    }
+
+    // -- AC-1: PHPDoc gate removed ------------------------------------------
+
+    #[test]
+    fn req_r0001_property_without_phpdoc_emits_property_node() {
+        let src = "<?php
+class User {
+    public string $name;
+}
+";
+        let staging = build(src);
+        let entry = find_node(&staging, "User.name", Some(NodeKind::Property))
+            .expect("User.name Property must be emitted without @var");
+        assert_eq!(entry.kind, NodeKind::Property);
+    }
+
+    #[test]
+    fn req_r0001_property_with_phpdoc_still_emits_property_node() {
+        let src = "<?php
+class Repo {
+    /** @var string */
+    public string $label;
+}
+";
+        let staging = build(src);
+        find_node(&staging, "Repo.label", Some(NodeKind::Property))
+            .expect("Repo.label Property must be emitted when @var is present");
+    }
+
+    // -- AC-2: qualified name + default visibility --------------------------
+
+    #[test]
+    fn req_r0002_qualified_name_uses_class_dot_prop() {
+        let src = "<?php
+class A { public int $x; }
+class B { public int $x; }
+";
+        let staging = build(src);
+        find_node(&staging, "A.x", Some(NodeKind::Property)).expect("A.x must exist");
+        find_node(&staging, "B.x", Some(NodeKind::Property)).expect("B.x must exist");
+        assert!(
+            find_node(&staging, "x", Some(NodeKind::Property)).is_none(),
+            "no bare 'x' Property node should leak"
+        );
+    }
+
+    #[test]
+    fn req_r0002_visibility_modifiers_round_trip() {
+        let src = "<?php
+class V {
+    public int $a;
+    private int $b;
+    protected int $c;
+    var $d;
+}
+";
+        let staging = build(src);
+        for (name, expected) in [
+            ("V.a", "public"),
+            ("V.b", "private"),
+            ("V.c", "protected"),
+            ("V.d", "public"),
+        ] {
+            let entry = find_node(&staging, name, Some(NodeKind::Property))
+                .unwrap_or_else(|| panic!("missing {name}"));
+            let got = resolve_visibility(&staging, entry.visibility);
+            assert_eq!(
+                got.as_deref(),
+                Some(expected),
+                "{name} visibility should be {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn req_r0002_default_visibility_is_public_when_no_modifier() {
+        // PHP allows readonly/static-only declarations (no explicit visibility).
+        let src = "<?php
+class X { static int $count = 0; }
+";
+        let staging = build(src);
+        let entry =
+            find_node(&staging, "X.count", Some(NodeKind::Property)).expect("X.count must exist");
+        let vis = resolve_visibility(&staging, entry.visibility);
+        assert_eq!(
+            vis.as_deref(),
+            Some("public"),
+            "default visibility is public"
+        );
+    }
+
+    // -- AC-3: static modifier ----------------------------------------------
+
+    #[test]
+    fn req_r0003_static_modifier_sets_is_static() {
+        let src = "<?php
+class S {
+    public static int $count = 0;
+    public int $instance = 0;
+}
+";
+        let staging = build(src);
+        let s_count =
+            find_node(&staging, "S.count", Some(NodeKind::Property)).expect("S.count must exist");
+        assert!(s_count.is_static, "S.count should be static");
+        let s_instance = find_node(&staging, "S.instance", Some(NodeKind::Property))
+            .expect("S.instance must exist");
+        assert!(!s_instance.is_static, "S.instance should not be static");
+    }
+
+    // -- AC-4: readonly → Constant ------------------------------------------
+
+    #[test]
+    fn req_r0004_readonly_emits_constant() {
+        let src = "<?php
+class R {
+    public readonly string $id;
+    public string $name;
+}
+";
+        let staging = build(src);
+        find_node(&staging, "R.id", Some(NodeKind::Constant))
+            .expect("R.id must be Constant (readonly)");
+        find_node(&staging, "R.name", Some(NodeKind::Property))
+            .expect("R.name must be Property (mutable)");
+    }
+
+    // -- AC-5: native type primary, PHPDoc fallback --------------------------
+
+    #[test]
+    fn req_r0005_native_type_takes_precedence_over_phpdoc() {
+        // The PHPDoc parser used by this plugin requires `{...}` around the
+        // type token. Native-type wins regardless: the @var should be
+        // ignored entirely when a PHP-level type is present.
+        let src = "<?php
+class T {
+    /** @var {int} */
+    public string $value;
+}
+";
+        let staging = build(src);
+        let edges = typeof_edges_for_node(&staging, "T.value");
+        assert!(
+            !edges.is_empty(),
+            "T.value should have at least one TypeOf edge"
+        );
+        let has_string = edges.iter().any(|(_, _, t)| t == "string");
+        assert!(
+            has_string,
+            "native type 'string' should be the primary TypeOf target, got {edges:?}"
+        );
+        let has_int = edges.iter().any(|(_, _, t)| t == "int");
+        assert!(
+            !has_int,
+            "PHPDoc @var must not appear as TypeOf when native type wins, got {edges:?}"
+        );
+    }
+
+    #[test]
+    fn req_r0005_phpdoc_fallback_when_no_native_type() {
+        // PHPDoc parser requires `{...}` braces around the type identifier.
+        let src = "<?php
+class T {
+    /** @var {SomeUserType} */
+    public $value;
+}
+";
+        let staging = build(src);
+        let edges = typeof_edges_for_node(&staging, "T.value");
+        assert!(
+            edges.iter().any(|(_, _, t)| t == "SomeUserType"),
+            "PHPDoc @var should provide TypeOf when no native type, got {edges:?}"
+        );
+    }
+
+    // -- AC-6: TypeOfContext::Field + bare edge name ------------------------
+
+    #[test]
+    fn req_r0006_typeof_uses_field_context_and_bare_name() {
+        let src = "<?php
+class C {
+    public string $title;
+}
+";
+        let staging = build(src);
+        let edges = typeof_edges_for_node(&staging, "C.title");
+        assert!(!edges.is_empty(), "C.title should have a TypeOf edge");
+        for (ctx, name, _) in &edges {
+            assert_eq!(*ctx, Some(TypeOfContext::Field), "context must be Field");
+            assert_eq!(
+                name.as_deref(),
+                Some("title"),
+                "edge name must be the bare property name"
+            );
+        }
+    }
+
+    // -- AC-7: constructor promotion ----------------------------------------
+
+    #[test]
+    fn req_r0007_constructor_promotion_emits_property_on_class() {
+        let src = "<?php
+class P {
+    public function __construct(public int $x, private readonly string $y) {}
+}
+";
+        let staging = build(src);
+        let x = find_node(&staging, "P.x", Some(NodeKind::Property))
+            .expect("promoted P.x must be a Property");
+        assert_eq!(
+            resolve_visibility(&staging, x.visibility).as_deref(),
+            Some("public"),
+            "promoted $x visibility"
+        );
+        let y = find_node(&staging, "P.y", Some(NodeKind::Constant))
+            .expect("promoted readonly P.y must be a Constant");
+        assert_eq!(
+            resolve_visibility(&staging, y.visibility).as_deref(),
+            Some("private"),
+            "promoted $y visibility"
+        );
+    }
+
+    // -- AC-8: collision precedence (explicit wins, promoted dedupes) -------
+
+    #[test]
+    fn req_r0013_explicit_declaration_wins_over_promotion() {
+        let src = "<?php
+class D {
+    public int $x;
+    public function __construct(public int $x) {}
+}
+";
+        let staging = build(src);
+        let n = count_nodes_named(&staging, "D.x");
+        assert_eq!(
+            n, 1,
+            "exactly one D.x node when explicit decl + promotion collide, got {n}"
+        );
+        // Should remain a Property (not switched to anything else).
+        find_node(&staging, "D.x", Some(NodeKind::Property))
+            .expect("D.x must be Property (explicit declaration wins)");
+    }
+
+    /// Constructor appears BEFORE the explicit property declaration. The
+    /// explicit declaration must still win on every dimension —
+    /// kind/visibility/static — and its declared `int` type must be the
+    /// only `TypeOf` target bound to `A.x` (the promoted `string` is
+    /// suppressed). Locks in FR-13 against source-order regression.
+    #[test]
+    fn req_r0013_explicit_wins_when_ctor_appears_before_property_decl() {
+        let src = "<?php
+class A {
+    public function __construct(public string $x) {}
+    public int $x;
+}
+";
+        let staging = build(src);
+        let n = count_nodes_named(&staging, "A.x");
+        assert_eq!(
+            n, 1,
+            "exactly one A.x node regardless of ctor-vs-decl source order, got {n}"
+        );
+        find_node(&staging, "A.x", Some(NodeKind::Property))
+            .expect("A.x must be Property (explicit declaration wins)");
+
+        // TypeOf edges: only the explicit `int` should appear; the
+        // promoted `string` must NOT be re-emitted onto the explicit
+        // node.
+        let edges = typeof_edges_for_node(&staging, "A.x");
+        let target_types: Vec<&str> = edges.iter().map(|(_, _, target)| target.as_str()).collect();
+        assert!(
+            target_types.contains(&"int"),
+            "explicit `int` TypeOf must be present, got {target_types:?}",
+        );
+        assert!(
+            !target_types.contains(&"string"),
+            "promoted `string` TypeOf must NOT be emitted; explicit type wins (got {target_types:?})",
+        );
+    }
+
+    /// Mirror of the above with explicit property declaration appearing
+    /// BEFORE the constructor. Same outcome required: single Property
+    /// node with explicit attributes, only the explicit `int` `TypeOf`.
+    #[test]
+    fn req_r0013_explicit_wins_when_property_decl_appears_before_ctor() {
+        let src = "<?php
+class B {
+    public int $x;
+    public function __construct(public string $x) {}
+}
+";
+        let staging = build(src);
+        let n = count_nodes_named(&staging, "B.x");
+        assert_eq!(
+            n, 1,
+            "exactly one B.x node regardless of decl-vs-ctor source order, got {n}"
+        );
+        find_node(&staging, "B.x", Some(NodeKind::Property))
+            .expect("B.x must be Property (explicit declaration wins)");
+
+        let edges = typeof_edges_for_node(&staging, "B.x");
+        let target_types: Vec<&str> = edges.iter().map(|(_, _, target)| target.as_str()).collect();
+        assert!(
+            target_types.contains(&"int"),
+            "explicit `int` TypeOf must be present, got {target_types:?}",
+        );
+        assert!(
+            !target_types.contains(&"string"),
+            "promoted `string` TypeOf must NOT be emitted; explicit type wins (got {target_types:?})",
+        );
+    }
+
+    // -- AC-9: span set from declaration node -------------------------------
+
+    #[test]
+    fn req_r0023_span_anchored_on_declaration() {
+        let src = "<?php
+class W {
+
+    public string $marker;
+}
+";
+        let staging = build(src);
+        let entry =
+            find_node(&staging, "W.marker", Some(NodeKind::Property)).expect("W.marker must exist");
+        // Source layout (0-based): row 0 `<?php`, row 1 `class W {`, row 2
+        // blank, row 3 `    public string $marker;`. Helper rebases line
+        // numbers to 1-based via `saturating_add(1)`, so row 3 → 4.
+        // (Note: `add_node_internal` only stores line/column from a
+        // position-only Span, so `end_byte` stays at the default zero —
+        // we anchor span correctness on the line numbers and column
+        // extent instead.)
+        assert_eq!(
+            entry.start_line, 4,
+            "span start line should match declaration"
+        );
+        assert_eq!(entry.end_line, 4, "span end line should match declaration");
+        assert_eq!(
+            entry.start_column, 4,
+            "span start column should match indentation of `public`"
+        );
+        assert!(
+            entry.end_column > entry.start_column,
+            "span end column must extend past start (got start={}, end={})",
+            entry.start_column,
+            entry.end_column,
+        );
+    }
+
+    // -- Trait + interface coverage -----------------------------------------
+
+    #[test]
+    fn req_r0001_trait_property_emitted() {
+        let src = "<?php
+trait Loggable {
+    protected ?string $logTag;
+}
+";
+        let staging = build(src);
+        let entry = find_node(&staging, "Loggable.logTag", Some(NodeKind::Property))
+            .expect("trait property must be emitted");
+        let vis = resolve_visibility(&staging, entry.visibility);
+        assert_eq!(vis.as_deref(), Some("protected"));
+    }
+
+    #[test]
+    fn no_emission_outside_class_or_trait_or_interface() {
+        // Plain global variables are not class properties; the walker must not
+        // emit Property/Constant for them.
+        let src = "<?php
+$x = 1;
+function f() { $y = 2; }
+";
+        let staging = build(src);
+        assert_eq!(count_nodes_by_kind(&staging, NodeKind::Property), 0);
+        assert_eq!(count_nodes_by_kind(&staging, NodeKind::Constant), 0);
+    }
 }

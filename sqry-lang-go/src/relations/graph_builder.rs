@@ -39,7 +39,7 @@ use crate::relations::local_scopes;
 
 const DEFAULT_SCOPE_DEPTH: usize = 4;
 
-/// Add a Variable node and immediately flag it synthetic (C_SUPPRESS).
+/// Add a Variable node and immediately flag it synthetic (`C_SUPPRESS`).
 ///
 /// Used at every Go-plugin emission site that creates a placeholder
 /// Variable for binding-plane / scope analysis instead of a real
@@ -298,8 +298,52 @@ fn handle_function_declaration(
 
     // Process parameters and returns for TypeOf/Reference edges
     let func_name = format!("{}.{}", ast_graph.package, function_context.name);
-    process_function_parameters(node, &func_name, content, helper, &ast_graph.package);
-    process_function_returns(node, &func_name, content, helper, &ast_graph.package);
+
+    // Sub-fix 1 (REQ:R0025 / U16 / GFTP-1..GFTP-4): emit per-type-parameter
+    // Type nodes for generic top-level functions (Go 1.18+).
+    //
+    // Before this call landed, `process_type_parameters` was reached only
+    // from `handle_type_alias` and `handle_type_spec`, leaving generic
+    // functions like `func Map[T any](xs []T) []T` with zero declaration
+    // nodes for `T` — `name:T` returned the bare-stub Reference Type that
+    // `process_function_parameters` synthesizes, but with no span and no
+    // qualifier. The routine below produces `main.Map.T` (qualified Type
+    // node, anchored on the parameter identifier) plus the constraint
+    // pipeline (`Constraint` TypeOf edge to `any`, References to nested
+    // constraint types).
+    //
+    // The routine is a no-op when the function has no type-parameter list
+    // (its early return on `child_by_field_name("type_parameters")`),
+    // so non-generic functions are unaffected.
+    process_type_parameters(
+        node,
+        &function_context.name,
+        content,
+        helper,
+        &ast_graph.package,
+    );
+
+    // Build the function-scope type-param map so parameter and return
+    // walkers qualify bare references like `T` to `main.Map.T` rather than
+    // staging anonymous Type stubs. Empty for non-generic functions.
+    let type_params =
+        extract_type_parameter_names(node, content, &ast_graph.package, &function_context.name);
+    process_function_parameters(
+        node,
+        &func_name,
+        content,
+        helper,
+        &ast_graph.package,
+        &type_params,
+    );
+    process_function_returns(
+        node,
+        &func_name,
+        content,
+        helper,
+        &ast_graph.package,
+        &type_params,
+    );
 
     walk_function_body_for_calls(
         node,
@@ -333,19 +377,48 @@ fn handle_method_declaration(
         );
     }
 
-    // Process parameters and returns for TypeOf/Reference edges
-    let method_name = if let Some(receiver) = &method_context.receiver_type {
-        format!(
-            "{}.{}.{}",
-            ast_graph.package,
-            receiver.trim_start_matches('*'),
-            method_context.name
-        )
+    // Process parameters and returns for TypeOf/Reference edges.
+    //
+    // Sub-fix 2 (REQ:R0025 / U16 / GFTP-5): the receiver of a method on a
+    // generic type carries the type-spec's existing type-parameter list
+    // (e.g. `(l *List[E])` re-uses the `E` declared by `type List[E any]`).
+    // Methods in current Go (1.18-1.23) MUST NOT declare their own type
+    // parameters — only top-level functions can — so the receiver's `[E]`
+    // is always a *use* of an existing declaration, never a fresh one.
+    //
+    // We strip both the pointer prefix `*` and the type-argument suffix
+    // `[E]` to recover the bare receiver-type name (`List`), build the
+    // qualified method name `<package>.<RecvType>.<MethodName>`
+    // (`main.List.Push`), then thread the receiver type-spec's
+    // type-parameter map (`{ "E" -> "main.List.E" }`) into the parameter
+    // and return walkers so a parameter such as `v E` resolves to the
+    // existing `main.List.E` Type node rather than a bare stub.
+    let receiver_text = method_context.receiver_type.as_deref();
+    let receiver_base = receiver_text.map(strip_receiver_modifiers);
+    let method_name = if let Some(base) = receiver_base {
+        format!("{}.{}.{}", ast_graph.package, base, method_context.name)
     } else {
         format!("{}.{}", ast_graph.package, method_context.name)
     };
-    process_function_parameters(node, &method_name, content, helper, &ast_graph.package);
-    process_function_returns(node, &method_name, content, helper, &ast_graph.package);
+    let receiver_type_params = receiver_text
+        .map(|recv| extract_receiver_type_param_map(node, content, recv, &ast_graph.package))
+        .unwrap_or_default();
+    process_function_parameters(
+        node,
+        &method_name,
+        content,
+        helper,
+        &ast_graph.package,
+        &receiver_type_params,
+    );
+    process_function_returns(
+        node,
+        &method_name,
+        content,
+        helper,
+        &ast_graph.package,
+        &receiver_type_params,
+    );
 
     walk_function_body_for_calls(
         node,
@@ -790,10 +863,20 @@ struct FunctionContext {
 impl FunctionContext {
     fn qualified_name(&self) -> String {
         if let Some(ref receiver) = self.receiver_type {
+            // Apply the same `strip_receiver_modifiers` canonicalization used
+            // by `add_method_export_edge_unified` and
+            // `extract_receiver_type_param_map` so body call edges, exports,
+            // and parameter / return references all share one canonical
+            // qualified name. Without this, `func (l *List[E]) Push(v E)`
+            // would resolve body callees and intra-function call sources
+            // through `main.List[E].Push` while exports / parameter
+            // references target `main.List.Push`, splitting the method
+            // across two NodeIds (sub-fix 2 follow-up of U16 / REQ:R0025 /
+            // GFTP-5).
             format!(
                 "{}.{}.{}",
                 self.package,
-                receiver.trim_start_matches('*'),
+                strip_receiver_modifiers(receiver),
                 self.name
             )
         } else {
@@ -1108,6 +1191,108 @@ fn extract_parameter_bindings(node: Node, content: &[u8]) -> HashMap<String, Str
     bindings
 }
 
+/// Strip receiver-type lexical modifiers to recover the bare type name.
+///
+/// Used by `handle_method_declaration` to build a stable, generic-aware
+/// qualified method name. A receiver such as `*List[E]` parses out as the
+/// raw text `"*List[E]"`; the qualified method name we want is
+/// `<package>.List.Push`, not `<package>.List[E].Push`. The strip is:
+///
+/// 1. Drop the leading `*` (pointer receiver).
+/// 2. Drop everything from the first `[` onward (type-argument suffix).
+///
+/// Sub-fix 2 of U16 / REQ:R0025 / GFTP-5: aligns the method qualifier with
+/// the type-spec qualifier so calls into `add_function` from
+/// `create_parameter_edges` / `create_return_edges` resolve to the same
+/// canonical method node regardless of receiver-side type-argument syntax.
+fn strip_receiver_modifiers(receiver: &str) -> &str {
+    let without_pointer = receiver.trim_start_matches('*');
+    match without_pointer.find('[') {
+        Some(idx) => &without_pointer[..idx],
+        None => without_pointer,
+    }
+}
+
+/// Build the receiver-bound type-parameter map for a method declaration.
+///
+/// For a receiver such as `(l *List[E])`, the AST chain is:
+/// `parameter_list -> parameter_declaration -> type=pointer_type ->
+/// generic_type{ type=List, type_arguments=[type_identifier "E"] }`.
+///
+/// We walk that chain, collect the `type_arguments` identifiers (`["E"]`),
+/// strip the receiver modifiers via `strip_receiver_modifiers` to get the
+/// receiver-type bare name (`"List"`), and produce
+/// `{ "E" -> "<package>.List.E" }`. The map is consumed transitively by
+/// `extract_all_type_names_from_go_type_with_params` inside the parameter
+/// and return walkers so a parameter such as `v E` resolves to the
+/// existing `main.List.E` Type node from the type-spec path.
+///
+/// Returns an empty map when the receiver carries no type-argument list
+/// (non-generic receiver) — equivalent to the pre-fix `empty_type_params`
+/// behaviour at every other call site.
+///
+/// Sub-fix 2 of U16 / REQ:R0025 / GFTP-5.
+fn extract_receiver_type_param_map(
+    method_node: Node,
+    content: &[u8],
+    receiver_text: &str,
+    package: &str,
+) -> HashMap<String, String> {
+    let mut params = HashMap::new();
+    let receiver_base = strip_receiver_modifiers(receiver_text);
+    if receiver_base.is_empty() {
+        return params;
+    }
+
+    let Some(receiver_node) = method_node.child_by_field_name("receiver") else {
+        return params;
+    };
+
+    // Find the parameter_declaration that carries the receiver type.
+    let mut receiver_cursor = receiver_node.walk();
+    for child in receiver_node.children(&mut receiver_cursor) {
+        if child.kind() != "parameter_declaration" {
+            continue;
+        }
+        let Some(mut type_node) = child.child_by_field_name("type") else {
+            continue;
+        };
+        // Drill through pointer_type to the inner type.
+        if type_node.kind() == "pointer_type"
+            && let Some(inner) = type_node.named_child(0)
+        {
+            type_node = inner;
+        }
+        if type_node.kind() != "generic_type" {
+            continue;
+        }
+        let Some(args_node) = type_node.child_by_field_name("type_arguments") else {
+            continue;
+        };
+
+        // tree-sitter-go wraps each argument inside `type_arguments` in a
+        // `type_elem` node (its only child being the actual type).
+        // Receiver-side type arguments on a generic method always re-use
+        // the receiver's existing type-parameter identifiers, so we drill
+        // through `type_elem` and accept the inner `type_identifier`.
+        let mut args_cursor = args_node.walk();
+        for arg in args_node.named_children(&mut args_cursor) {
+            let inner = if arg.kind() == "type_elem" {
+                arg.named_child(0).unwrap_or(arg)
+            } else {
+                arg
+            };
+            if inner.kind() == "type_identifier"
+                && let Ok(name) = inner.utf8_text(content)
+            {
+                let qualified = format!("{package}.{receiver_base}.{name}");
+                params.insert(name.to_string(), qualified);
+            }
+        }
+    }
+    params
+}
+
 #[allow(dead_code)]
 fn extract_receiver_type(node: Node, content: &[u8]) -> Option<String> {
     let receiver_node = node.child_by_field_name("receiver")?;
@@ -1377,8 +1562,20 @@ fn add_method_export_edge_unified(
 ) {
     let from_id = helper.add_module(package, None);
 
+    // Use the same `strip_receiver_modifiers` discipline as
+    // `handle_method_declaration` so the exported method node and the
+    // method node staged by `process_function_parameters` share one
+    // canonical qualified name (sub-fix 2 of U16 / REQ:R0025 / GFTP-5).
+    // Without this, `func (l *List[E]) Push(v E)` would export
+    // `main.List[E].Push` while parameter / return edges target
+    // `main.List.Push`, splitting the same method across two nodes.
     let symbol_qualified = if let Some(receiver) = receiver_type {
-        format!("{}.{}.{}", package, receiver.trim_start_matches('*'), name)
+        format!(
+            "{}.{}.{}",
+            package,
+            strip_receiver_modifiers(receiver),
+            name
+        )
     } else {
         format!("{package}.{name}")
     };
@@ -2179,13 +2376,26 @@ fn process_single_var_spec(
     }
 }
 
-/// Process function/method parameters to create `TypeOf` and Reference edges
+/// Process function/method parameters to create `TypeOf` and Reference edges.
+///
+/// `type_params` is the externally-supplied bare-name → qualified-name map
+/// (e.g. `{ "T" -> "main.Map.T", "E" -> "main.List.E" }`). For non-generic
+/// functions and methods on non-generic receivers it is empty; for generic
+/// functions it is built from the function's own `type_parameters` AST list
+/// in `handle_function_declaration`; for methods it is built from the
+/// receiver type-spec's type-parameter list in `handle_method_declaration`
+/// (sub-fix 2 of U16 / REQ:R0025 / GFTP-5).
+///
+/// The map is consumed transitively by
+/// `extract_all_type_names_from_go_type_with_params`, which qualifies bare
+/// `type_identifier` references that match a declared type-parameter name.
 fn process_function_parameters(
     func_node: Node,
     func_name: &str,
     content: &[u8],
     helper: &mut GraphBuildHelper,
     package: &str,
+    type_params: &HashMap<String, String>,
 ) {
     let Some(params_node) = func_node.child_by_field_name("parameters") else {
         return;
@@ -2193,9 +2403,6 @@ fn process_function_parameters(
 
     let mut cursor = params_node.walk();
     let mut param_index = 0;
-
-    // Regular functions don't have type parameters in scope (only generic types/interfaces do)
-    let empty_type_params = HashMap::new();
 
     for param_decl in params_node.named_children(&mut cursor) {
         if param_decl.kind() == "parameter_declaration" {
@@ -2206,7 +2413,7 @@ fn process_function_parameters(
                 content,
                 helper,
                 package,
-                &empty_type_params,
+                type_params,
             );
 
             // Count how many names this param has (e.g., "a, b int" is 2 params)
@@ -2222,7 +2429,7 @@ fn process_function_parameters(
                 content,
                 helper,
                 package,
-                &empty_type_params,
+                type_params,
             );
             param_index += 1;
         }
@@ -2249,7 +2456,15 @@ fn process_single_parameter(
         .filter_map(|n| n.utf8_text(content).ok())
         .collect();
 
-    let type_text = type_node.utf8_text(content).unwrap_or("").to_string();
+    let raw_type_text = type_node.utf8_text(content).unwrap_or("").to_string();
+    // Sub-fix 2 follow-up of U16 / REQ:R0025 / GFTP-5: canonicalize the
+    // `TypeOf{Parameter}` target through the receiver-bound `type_params`
+    // map. Without this, a parameter `v E` on `func (l *List[E]) Push(v E)`
+    // would emit `TypeOf{Parameter}: main.List.Push -> E` to a bare stub
+    // even though `Reference: main.List.Push -> main.List.E` correctly
+    // qualifies the same type — that split contradicts the receiver
+    // type-param resolution contract.
+    let type_text = canonicalize_type_text_with_params(&raw_type_text, type_params);
     let referenced_types =
         extract_all_type_names_from_go_type_with_params(type_node, content, type_params);
 
@@ -2299,7 +2514,12 @@ fn process_variadic_parameter(
         .and_then(|n| n.utf8_text(content).ok());
 
     // Variadic type "...T" becomes slice type "[]T" for TypeOf
-    let type_text = format!("[]{}", type_node.utf8_text(content).unwrap_or(""));
+    let raw_inner = type_node.utf8_text(content).unwrap_or("");
+    // Sub-fix 2 follow-up of U16 / REQ:R0025 / GFTP-5: canonicalize the
+    // variadic element-type lexeme through the receiver-bound `type_params`
+    // map before wrapping it in `[]`, mirroring the non-variadic path.
+    let canonical_inner = canonicalize_type_text_with_params(raw_inner, type_params);
+    let type_text = format!("[]{canonical_inner}");
 
     // Referenced types come from the element type
     let referenced_types =
@@ -2314,6 +2534,39 @@ fn process_variadic_parameter(
         helper,
         package,
     );
+}
+
+/// Canonicalize a Go type lexeme through a `type_params` map (bare-name →
+/// qualified-name).
+///
+/// Used by parameter / return / receiver-bound type-text emission paths so
+/// that a bare type-parameter identifier such as `E` resolves to its
+/// canonical declared form (e.g. `main.List.E`) before it is fed into
+/// `helper.add_type` / `add_typeof_edge_with_context`. Without this
+/// canonicalization, `func (l *List[E]) Push(v E)` would emit a
+/// `TypeOf{Parameter}: main.List.Push -> E` edge to a bare-stub Type node,
+/// while the parallel `Reference` edge correctly targets the existing
+/// `main.List.E` declaration node — splitting one logical type across two
+/// `NodeIds`.
+///
+/// Conservative behaviour: only exact-string matches against `type_params`
+/// keys are substituted. Compound types (`[]E`, `*E`, `map[K]V`,
+/// `func(T) U`, etc.) are left as-is — a structural rewrite of the entire
+/// type expression would risk silent semantic drift, and the
+/// `extract_all_type_names_from_go_type_with_params` walker already
+/// produces fully-qualified `Reference` edges for the inner names. For
+/// those compound shapes the `TypeOf` edge stays on the lexeme as written
+/// (matching the pre-fix behaviour for non-generic compound types), and
+/// the canonical `Reference` edge supplies the resolved target.
+///
+/// Sub-fix 2 follow-up of U16 / REQ:R0025 / GFTP-5.
+fn canonicalize_type_text_with_params(raw: &str, type_params: &HashMap<String, String>) -> String {
+    let trimmed = raw.trim();
+    if let Some(qualified) = type_params.get(trimmed) {
+        qualified.clone()
+    } else {
+        raw.to_string()
+    }
 }
 
 fn create_parameter_edges(
@@ -2346,20 +2599,22 @@ fn create_parameter_edges(
     }
 }
 
-/// Process function/method return types to create `TypeOf` and Reference edges
+/// Process function/method return types to create `TypeOf` and Reference edges.
+///
+/// `type_params` is the externally-supplied bare-name → qualified-name map
+/// — see `process_function_parameters` doc-comment for the construction
+/// rule (sub-fix 2 of U16 / REQ:R0025 / GFTP-5).
 fn process_function_returns(
     func_node: Node,
     func_name: &str,
     content: &[u8],
     helper: &mut GraphBuildHelper,
     package: &str,
+    type_params: &HashMap<String, String>,
 ) {
     let Some(result_node) = func_node.child_by_field_name("result") else {
         return; // No return type (void function)
     };
-
-    // Regular functions don't have type parameters in scope (only generic types/interfaces do)
-    let empty_type_params = HashMap::new();
 
     match result_node.kind() {
         "parameter_list" => {
@@ -2374,7 +2629,7 @@ fn process_function_returns(
                         content,
                         helper,
                         package,
-                        &empty_type_params,
+                        type_params,
                     );
                 }
             }
@@ -2388,7 +2643,7 @@ fn process_function_returns(
                 content,
                 helper,
                 package,
-                &empty_type_params,
+                type_params,
             );
         }
     }
@@ -2427,7 +2682,12 @@ fn process_single_return_type(
     package: &str,
     type_params: &HashMap<String, String>,
 ) {
-    let type_text = type_node.utf8_text(content).unwrap_or("").to_string();
+    let raw_type_text = type_node.utf8_text(content).unwrap_or("").to_string();
+    // Sub-fix 2 follow-up of U16 / REQ:R0025 / GFTP-5: mirror the parameter
+    // path's `canonicalize_type_text_with_params` substitution so the
+    // `TypeOf{Return}` edge target tracks the canonical receiver-bound Type
+    // node when the return-type lexeme is a bare type-parameter identifier.
+    let type_text = canonicalize_type_text_with_params(&raw_type_text, type_params);
     let referenced_types =
         extract_all_type_names_from_go_type_with_params(type_node, content, type_params);
 
@@ -2578,7 +2838,7 @@ fn process_single_struct_field(
 /// Static: always `false`. Go has no class-level statics for struct fields.
 ///
 /// Note: the Property emission is unconditional. Cluster C of the
-/// 2026-04-29 BadLiveware Go batch DAG (see
+/// 2026-04-29 `BadLiveware` Go batch DAG (see
 /// `docs/development/public-issue-triage/2026-04-29_badliveware_go_batch_dag.toml`,
 /// `[units.C_PROPERTY_EMIT]`) requires every struct field to land as a
 /// first-class graph node; there is no feature flag.
@@ -2599,7 +2859,7 @@ fn process_single_struct_field(
 /// Property emission for anonymous-struct fields entirely, because there
 /// is no stable qualified name we could synthesise that would also be
 /// resolvable from CLI / MCP / LSP queries (matching the documented
-/// `failure_modes` choice in the C_PROPERTY_EMIT DAG unit).
+/// `failure_modes` choice in the `C_PROPERTY_EMIT` DAG unit).
 #[allow(clippy::too_many_arguments)]
 fn emit_struct_field_node_and_edges(
     struct_name: &str,
@@ -2898,7 +3158,7 @@ fn process_method_parameters(
 
 /// Process field access using `GraphBuildHelper`.
 ///
-/// **C_EDGE_MIGRATE behaviour.** When the operand is a parameter or
+/// **`C_EDGE_MIGRATE` behaviour.** When the operand is a parameter or
 /// receiver whose declared type maps onto a known package-qualified
 /// struct name, the emitted `References` edge targets the field's
 /// `Property` node directly (qualified name
@@ -2927,7 +3187,7 @@ fn process_method_parameters(
 /// sees both old-shape and new-shape edges during a partial rebuild"
 /// is guarded only because the resolved + unresolved cases now address
 /// distinct target nodes by qualified name. The placeholder fallback is
-/// covered by C_SUPPRESS, which marks these synthetic Variable nodes
+/// covered by `C_SUPPRESS`, which marks these synthetic Variable nodes
 /// for filtering from user-facing surfaces.
 fn process_field_access_unified(
     node: Node,
@@ -4144,7 +4404,7 @@ mod tests {
     /// and `GraphBuildHelper::add_node_internal` then off-by-ones the line to 1).
     /// `start_column` ended up as a byte offset, not a 1-based UTF-8 column.
     ///
-    /// The fixture mirrors BadLiveware's `main.go` repro. `parseConfig` is the
+    /// The fixture mirrors `BadLiveware`'s `main.go` repro. `parseConfig` is the
     /// fifth top-level declaration and starts on line 8. The "p" of
     /// `parseConfig` is the first character after `   func ` (8 chars), so the
     /// 1-based UTF-8 column of the function-declaration node's first byte is 4
@@ -4201,8 +4461,8 @@ mod tests {
     /// Regression test for the codex-flagged span-emission gap on Go
     /// `type` aliases / `type_spec` non-struct/non-interface declarations.
     ///
-    /// Before the fix, `handle_type_alias` (graph_builder.rs:368) and the
-    /// fallback branch of `handle_type_spec` (graph_builder.rs:1428) created
+    /// Before the fix, `handle_type_alias` (`graph_builder.rs:368`) and the
+    /// fallback branch of `handle_type_spec` (`graph_builder.rs:1428`) created
     /// the alias's `NodeKind::Type` node with `start_line == 0` (the
     /// `NodeEntry::new` default) because the call site passed `None` for the
     /// span. The fixture places both alias declarations past line 1 so a

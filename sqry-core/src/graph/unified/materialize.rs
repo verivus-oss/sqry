@@ -75,10 +75,33 @@ pub fn display_entry_qualified_name(
 
 /// Resolve one symbol query into ordered candidate seeds.
 ///
-/// Uses `FileScope::Any` and `ResolutionMode::AllowSuffixCandidates` to produce
-/// the broadest set of matches suitable for graph traversal entry points.
+/// Uses exact lookup first, then falls back to `FileScope::Any` and
+/// `ResolutionMode::AllowSuffixCandidates` when there are no exact matches.
+/// This keeps qualified display keys deterministic while preserving broad
+/// suffix lookup for traversal entry points that receive abbreviated names.
+/// Dot- and Ruby-`#` qualified display names try the graph-canonical `::`
+/// form only when the literal display lookup has no candidates. This preserves
+/// exact display keys such as Kotlin `function.T` when a Rust
+/// `function::T` also exists.
 #[must_use]
 pub fn find_nodes_by_name(snapshot: &GraphSnapshot, name: &str) -> Vec<NodeId> {
+    let exact_matches = snapshot.find_by_exact_name(name);
+    if !exact_matches.is_empty() {
+        return exact_matches;
+    }
+
+    let mut matches = find_nodes_by_graph_name(snapshot, name);
+    if matches.is_empty()
+        && let Some(canonical_name) = display_name_to_graph_fallback(name)
+    {
+        matches.extend(find_nodes_by_graph_name(snapshot, &canonical_name));
+        matches.sort_unstable();
+        matches.dedup();
+    }
+    matches
+}
+
+fn find_nodes_by_graph_name(snapshot: &GraphSnapshot, name: &str) -> Vec<NodeId> {
     match snapshot.find_symbol_candidates(&SymbolQuery {
         symbol: name,
         file_scope: FileScope::Any,
@@ -86,6 +109,20 @@ pub fn find_nodes_by_name(snapshot: &GraphSnapshot, name: &str) -> Vec<NodeId> {
     }) {
         SymbolCandidateOutcome::Candidates(matches) => matches,
         SymbolCandidateOutcome::NotFound | SymbolCandidateOutcome::FileNotIndexed => Vec::new(),
+    }
+}
+
+fn display_name_to_graph_fallback(name: &str) -> Option<String> {
+    if name.contains("::") {
+        return None;
+    }
+
+    if name.contains('#') {
+        Some(name.replace('#', "::"))
+    } else if name.contains('.') {
+        Some(name.replace('.', "::"))
+    } else {
+        None
     }
 }
 

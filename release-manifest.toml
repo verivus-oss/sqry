@@ -178,6 +178,50 @@ public = [
     "sqry-vscode/",
 ]
 
+[selection.fixtures]
+required_public = [
+    "test-fixtures/cross-language-typeparams/csharp/Generics.cs",
+    "test-fixtures/cross-language-typeparams/go/generics.go",
+    "test-fixtures/cross-language-typeparams/java/Generics.java",
+    "test-fixtures/cross-language-typeparams/kotlin/Generics.kt",
+    "test-fixtures/cross-language-typeparams/rust/generics.rs",
+    "test-fixtures/cross-language-typeparams/typescript/generics.ts",
+    "test-fixtures/cross-language/abap/fields.abap",
+    "test-fixtures/cross-language/abap/realistic.abap",
+    "test-fixtures/cross-language/apex/Fields.cls",
+    "test-fixtures/cross-language/apex/realistic.cls",
+    "test-fixtures/cross-language/cpp/fields.cpp",
+    "test-fixtures/cross-language/cpp/realistic.cpp",
+    "test-fixtures/cross-language/csharp/Fields.cs",
+    "test-fixtures/cross-language/csharp/realistic.cs",
+    "test-fixtures/cross-language/ffi/bindings.rs",
+    "test-fixtures/cross-language/ffi/cgo_bindings.go",
+    "test-fixtures/cross-language/ffi/math.c",
+    "test-fixtures/cross-language/http/client.js",
+    "test-fixtures/cross-language/http/server.py",
+    "test-fixtures/cross-language/http/server_go.go",
+    "test-fixtures/cross-language/http/server_java.java",
+    "test-fixtures/cross-language/http/server_ts.ts",
+    "test-fixtures/cross-language/java/fields.java",
+    "test-fixtures/cross-language/java/realistic.java",
+    "test-fixtures/cross-language/javascript/fields.js",
+    "test-fixtures/cross-language/javascript/realistic.js",
+    "test-fixtures/cross-language/php/Fields.php",
+    "test-fixtures/cross-language/php/realistic.php",
+    "test-fixtures/cross-language/ruby/fields.rb",
+    "test-fixtures/cross-language/ruby/realistic.rb",
+    "test-fixtures/cross-language/rust/fields.rs",
+    "test-fixtures/cross-language/rust/realistic.rs",
+    "test-fixtures/cross-language/scala/Fields.scala",
+    "test-fixtures/cross-language/scala/realistic.scala",
+    "test-fixtures/cross-language/swift/Fields.swift",
+    "test-fixtures/cross-language/swift/realistic.swift",
+    "test-fixtures/cross-language/typescript/fields.ts",
+    "test-fixtures/cross-language/typescript/realistic.ts",
+    "test-fixtures/cross-language/zig/fields.zig",
+    "test-fixtures/cross-language/zig/realistic.zig",
+]
+
 [sanitization.forbidden_patterns]
 strings = [
     "verivus-oss",
@@ -201,7 +245,8 @@ path_patterns = [
 allowed_extensions = [
     ".rs", ".toml", ".lock", ".md", ".txt", ".yml", ".yaml",
     ".json", ".js", ".cjs", ".ts", ".py", ".dart", ".go", ".java", ".swift", ".sql",
-    ".css", ".html", ".sh", ".ps1", ".c", ".h", ".cc", ".hh", ".scm",
+    ".css", ".html", ".sh", ".ps1", ".c", ".h", ".cc", ".hh", ".cpp", ".cs",
+    ".kt", ".php", ".rb", ".scala", ".zig", ".abap", ".cls", ".scm",
 ]
 allowed_dotfiles = [".gitignore", ".gitattributes", ".cargo", ".editorconfig"]
 	allowed_basenames = [

@@ -467,14 +467,14 @@ impl GraphSnapshot {
         let outcome = match primary {
             // Successful resolution short-circuits before the dot-norm fallback.
             SymbolResolutionOutcome::Resolved(_) | SymbolResolutionOutcome::Ambiguous(_) => primary,
-            // Dot-normalized fallback: a user passing
-            // `pkg.subpkg.fn` against a graph that internally stores
-            // `pkg::subpkg::fn` (Go, Python, Java, etc.) lands here. We
-            // only attempt the rewrite when the symbol has dots and no
-            // existing `::`, to avoid shadowing native-form symbols.
+            // Display-normalized fallback: a user passing `pkg.subpkg.fn`
+            // or Ruby-style `Class#field` against a graph that internally
+            // stores `pkg::subpkg::fn` / `Class::field` lands here. We only
+            // attempt the rewrite when the symbol has display separators and
+            // no existing `::`, to avoid shadowing native-form symbols.
             SymbolResolutionOutcome::NotFound | SymbolResolutionOutcome::FileNotIndexed => {
-                if symbol.contains('.') && !symbol.contains("::") {
-                    let normalized = symbol.replace('.', "::");
+                if !symbol.contains("::") && (symbol.contains('.') || symbol.contains('#')) {
+                    let normalized = symbol.replace(['.', '#'], "::");
                     self.resolve_symbol(&SymbolQuery {
                         symbol: &normalized,
                         file_scope,
@@ -856,6 +856,17 @@ fn display_ruby_qualified_name(qualified: &str, kind: NodeKind, is_static: bool)
             replace_last_separator(qualified, if is_static { "." } else { "#" }, false)
         }
         NodeKind::Variable if should_display_ruby_member_variable(qualified) => {
+            replace_last_separator(qualified, "#", false)
+        }
+        // Ruby `attr_reader` (Constant) / `attr_writer` / `attr_accessor`
+        // (Property) declarations canonicalize to `Class::attr` for graph
+        // identity but render as `Class#attr` per design §3.1.3 (the Ruby
+        // RDoc / YARD instance-method idiom). Static-side attrs (rare —
+        // e.g. `class << self; attr_accessor :x; end`) keep `::` to mirror
+        // the singleton-method case handled by NodeKind::Method above.
+        NodeKind::Property | NodeKind::Constant
+            if !is_static && should_display_ruby_member_variable(qualified) =>
+        {
             replace_last_separator(qualified, "#", false)
         }
         _ => qualified.to_string(),
@@ -1798,6 +1809,65 @@ mod tests {
             false,
         );
         assert_eq!(display, "Admin::Users::Controller::@@count");
+    }
+
+    // REQ:R0017 + cross-language-field-emission/02_DESIGN §3.1.3:
+    // Ruby `attr_accessor` / `attr_writer` declarations canonicalize as
+    // `Class::attr` (Property) but render as `Class#attr` per the RDoc /
+    // YARD instance-method idiom. Mirrors the NodeKind::Method instance
+    // arm above.
+    #[test]
+    fn test_display_graph_qualified_name_ruby_property_renders_as_instance_member() {
+        let display = display_graph_qualified_name(
+            Language::Ruby,
+            "Counter::name",
+            NodeKind::Property,
+            false,
+        );
+        assert_eq!(display, "Counter#name");
+    }
+
+    // REQ:R0017 + cross-language-field-emission/02_DESIGN §3.1.3:
+    // Ruby `attr_reader` declarations land on `NodeKind::Constant` in the
+    // graph but, when the suffix is lowercase (i.e. an attribute name, not
+    // a Ruby SCREAMING_SNAKE_CASE constant), they must render as
+    // `Class#attr` to match the Property arm. Uppercase suffixes preserve
+    // the existing `Class::CONSTANT` carve-out — see the
+    // `should_display_ruby_member_variable` ascii_uppercase guard above.
+    #[test]
+    fn test_display_graph_qualified_name_ruby_constant_lowercase_renders_as_instance_member() {
+        let display = display_graph_qualified_name(
+            Language::Ruby,
+            "Counter::name",
+            NodeKind::Constant,
+            false,
+        );
+        assert_eq!(display, "Counter#name");
+    }
+
+    // REQ:R0017 carve-out: a true `NodeKind::Constant` whose suffix begins
+    // with an uppercase character (Ruby SCREAMING_SNAKE_CASE) keeps the
+    // canonical `Class::CONSTANT` form. The lowercase-suffix arm above
+    // must not regress this case.
+    #[test]
+    fn test_display_graph_qualified_name_ruby_constant_uppercase_stays_canonical() {
+        let display = display_graph_qualified_name(
+            Language::Ruby,
+            "Counter::CONSTANT",
+            NodeKind::Constant,
+            false,
+        );
+        assert_eq!(display, "Counter::CONSTANT");
+    }
+
+    // REQ:R0017 static-side carve-out: when `is_static` is true (e.g.
+    // `class << self; attr_accessor :x; end`), a Property must keep the
+    // singleton `::` separator to mirror the singleton-method arm.
+    #[test]
+    fn test_display_graph_qualified_name_ruby_static_property_stays_canonical() {
+        let display =
+            display_graph_qualified_name(Language::Ruby, "Counter::name", NodeKind::Property, true);
+        assert_eq!(display, "Counter::name");
     }
 
     #[test]

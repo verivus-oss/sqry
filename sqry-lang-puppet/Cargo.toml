@@ -9,7 +9,7 @@ rust-version.workspace = true
 description = "Puppet language plugin for sqry"
 
 [dependencies]
-sqry-core = { version = "12.0.3", path = "../sqry-core" }
+sqry-core = { version = "12.1.2", path = "../sqry-core" }
 anyhow.workspace = true
 thiserror.workspace = true
 tree-sitter.workspace = true

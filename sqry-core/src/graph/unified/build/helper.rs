@@ -197,7 +197,7 @@ impl<'a> GraphBuildHelper<'a> {
     /// Exposed for plugin call sites that need to forward typed
     /// metadata into the staging buffer alongside their normal `add_*`
     /// node-creation flow — for example, the Go plugin's
-    /// `add_synthetic_variable` helper (C_SUPPRESS) which calls
+    /// `add_synthetic_variable` helper (`C_SUPPRESS`) which calls
     /// [`StagingGraph::merge_macro_metadata`] to record a
     /// `NodeMetadata::Synthetic` flag on the freshly-staged Variable
     /// node so the suppression contract on
@@ -519,6 +519,31 @@ impl<'a> GraphBuildHelper<'a> {
         )
     }
 
+    /// Add a constant node with an explicit simple semantic name.
+    ///
+    /// Use this when the graph identity must keep a language-specific
+    /// qualified form but the searchable symbol name is the bare declaration
+    /// name.
+    pub fn add_constant_with_name_static_and_visibility(
+        &mut self,
+        name: &str,
+        qualified_name: &str,
+        span: Option<Span>,
+        is_static: bool,
+        visibility: Option<&str>,
+    ) -> NodeId {
+        let attrs: &[(&str, bool)] = if is_static { &[("static", true)] } else { &[] };
+        self.add_node_internal_with_name(
+            name,
+            qualified_name,
+            span,
+            NodeKind::Constant,
+            attrs,
+            visibility,
+            None,
+        )
+    }
+
     /// Add a property node with static and visibility attributes.
     pub fn add_property_with_static_and_visibility(
         &mut self,
@@ -529,6 +554,31 @@ impl<'a> GraphBuildHelper<'a> {
     ) -> NodeId {
         let attrs: &[(&str, bool)] = if is_static { &[("static", true)] } else { &[] };
         self.add_node_internal(
+            qualified_name,
+            span,
+            NodeKind::Property,
+            attrs,
+            visibility,
+            None,
+        )
+    }
+
+    /// Add a property node with an explicit simple semantic name.
+    ///
+    /// Use this when the graph identity must keep a language-specific
+    /// qualified form but the searchable symbol name is the bare declaration
+    /// name.
+    pub fn add_property_with_name_static_and_visibility(
+        &mut self,
+        name: &str,
+        qualified_name: &str,
+        span: Option<Span>,
+        is_static: bool,
+        visibility: Option<&str>,
+    ) -> NodeId {
+        let attrs: &[(&str, bool)] = if is_static { &[("static", true)] } else { &[] };
+        self.add_node_internal_with_name(
+            name,
             qualified_name,
             span,
             NodeKind::Property,
@@ -716,6 +766,50 @@ impl<'a> GraphBuildHelper<'a> {
         let canonical_qualified_name =
             canonicalize_graph_qualified_name(self.language, qualified_name);
         let semantic_name = semantic_name_for_node_input(qualified_name, &canonical_qualified_name);
+        self.add_node_internal_with_canonical_name(
+            &semantic_name,
+            &canonical_qualified_name,
+            span,
+            kind,
+            attributes,
+            visibility,
+            signature,
+        )
+    }
+
+    fn add_node_internal_with_name(
+        &mut self,
+        semantic_name: &str,
+        qualified_name: &str,
+        span: Option<Span>,
+        kind: NodeKind,
+        attributes: &[(&str, bool)],
+        visibility: Option<&str>,
+        signature: Option<&str>,
+    ) -> NodeId {
+        let canonical_qualified_name =
+            canonicalize_graph_qualified_name(self.language, qualified_name);
+        self.add_node_internal_with_canonical_name(
+            semantic_name,
+            &canonical_qualified_name,
+            span,
+            kind,
+            attributes,
+            visibility,
+            signature,
+        )
+    }
+
+    fn add_node_internal_with_canonical_name(
+        &mut self,
+        semantic_name: &str,
+        canonical_qualified_name: &str,
+        span: Option<Span>,
+        kind: NodeKind,
+        attributes: &[(&str, bool)],
+        visibility: Option<&str>,
+        signature: Option<&str>,
+    ) -> NodeId {
         let mut is_async = false;
         let mut is_static = false;
         let mut is_unsafe = false;
@@ -731,7 +825,7 @@ impl<'a> GraphBuildHelper<'a> {
         // Check cache first
         if let Some(&id) = self
             .node_cache
-            .get(&(canonical_qualified_name.clone(), kind))
+            .get(&(canonical_qualified_name.to_string(), kind))
         {
             let visibility_id = visibility.map(|vis| self.intern(vis));
             let signature_id = signature.map(|sig| self.intern(sig));
@@ -747,12 +841,12 @@ impl<'a> GraphBuildHelper<'a> {
             return id;
         }
 
-        let name_id = self.intern(&semantic_name);
+        let name_id = self.intern(semantic_name);
 
         // Create node entry
         let mut entry = NodeEntry::new(kind, name_id, self.file_id);
         if semantic_name != canonical_qualified_name {
-            let qualified_name_id = self.intern(&canonical_qualified_name);
+            let qualified_name_id = self.intern(canonical_qualified_name);
             entry = entry.with_qualified_name(qualified_name_id);
         }
 
@@ -793,7 +887,7 @@ impl<'a> GraphBuildHelper<'a> {
 
         // Cache for deduplication
         self.node_cache
-            .insert((canonical_qualified_name, kind), node_id);
+            .insert((canonical_qualified_name.to_string(), kind), node_id);
 
         node_id
     }

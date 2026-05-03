@@ -1423,7 +1423,8 @@ fn process_jsdoc_annotations(
             process_variable_jsdoc(node, content, helper)?;
         }
         "class_declaration" | "class" => {
-            process_class_fields_jsdoc(node, content, helper)?;
+            process_class_fields(node, content, helper)?;
+            process_constructor_this_assignments(node, content, helper)?;
         }
         _ => {}
     }
@@ -1727,124 +1728,302 @@ fn process_variable_jsdoc(
     Ok(())
 }
 
-/// Process `JSDoc` @type annotations for class fields
-fn process_class_fields_jsdoc(
-    class_node: Node,
+/// Resolve the class name for a `class_declaration` or `class` expression node.
+///
+/// For named classes: reads the `name` field child.
+/// For anonymous class expressions: falls back to the binding identifier when
+/// the class is assigned to a `variable_declarator` or `assignment_expression`
+/// (mirrors the historic behaviour of `process_class_fields_jsdoc`).
+///
+/// Returns `None` for anonymous classes that are not bound to an identifier
+/// (e.g. immediately invoked or passed as an argument). Callers must skip
+/// emission in that case to avoid creating ill-formed `Class.field` names.
+fn resolve_class_name_for_fields(
+    class_node: Node<'_>,
     content: &[u8],
-    helper: &mut GraphBuildHelper,
-) -> GraphResult<()> {
-    // Get class name - handle both named and anonymous classes
-    let class_name = if let Some(name_node) = class_node.child_by_field_name("name") {
-        // Named class
-        name_node
+) -> GraphResult<Option<String>> {
+    if let Some(name_node) = class_node.child_by_field_name("name") {
+        let name = name_node
             .utf8_text(content)
             .map_err(|_| GraphBuilderError::ParseError {
                 span: span_from_node(class_node),
                 reason: "failed to read class name".to_string(),
             })?
             .trim()
-            .to_string()
-    } else {
-        // Anonymous class expression - try to find variable assignment
-        // Example: const MyClass = class { ... }
-        if let Some(parent) = class_node.parent() {
-            if parent.kind() == "variable_declarator" {
-                // Get variable name
-                if let Some(name_node) = parent.child_by_field_name("name")
-                    && let Ok(var_name) = name_node.utf8_text(content)
-                {
-                    let var_name = var_name.trim().to_string();
-                    if var_name.is_empty() {
-                        return Ok(());
-                    }
-                    var_name
-                } else {
-                    return Ok(());
-                }
-            } else if parent.kind() == "assignment_expression" {
-                // Assignment: SomeClass = class { ... }
-                if let Some(left) = parent.child_by_field_name("left")
-                    && let Ok(assign_name) = left.utf8_text(content)
-                {
-                    let assign_name = assign_name.trim().to_string();
-                    if assign_name.is_empty() {
-                        return Ok(());
-                    }
-                    assign_name
-                } else {
-                    return Ok(());
-                }
-            } else {
-                // Anonymous class not assigned - skip
-                return Ok(());
-            }
-        } else {
-            return Ok(());
+            .to_string();
+        if name.is_empty() {
+            return Ok(None);
         }
-    };
-
-    if class_name.is_empty() {
-        return Ok(());
+        return Ok(Some(name));
     }
 
-    // Find class body
+    // Anonymous class expression — try to find the binding identifier.
+    let Some(parent) = class_node.parent() else {
+        return Ok(None);
+    };
+
+    match parent.kind() {
+        "variable_declarator" => {
+            if let Some(name_node) = parent.child_by_field_name("name")
+                && let Ok(var_name) = name_node.utf8_text(content)
+            {
+                let var_name = var_name.trim().to_string();
+                if var_name.is_empty() {
+                    return Ok(None);
+                }
+                return Ok(Some(var_name));
+            }
+            Ok(None)
+        }
+        "assignment_expression" => {
+            if let Some(left) = parent.child_by_field_name("left")
+                && let Ok(assign_name) = left.utf8_text(content)
+            {
+                let assign_name = assign_name.trim().to_string();
+                if assign_name.is_empty() {
+                    return Ok(None);
+                }
+                return Ok(Some(assign_name));
+            }
+            Ok(None)
+        }
+        _ => Ok(None),
+    }
+}
+
+/// Emit Property nodes for every `field_definition` in a class body, and
+/// optionally enrich them with `TypeOf{Field}` + `References` edges when a
+/// `JSDoc` `@type` annotation is present (REQ:R0001..R0006, R0008, R0023).
+///
+/// Replaces the historic JSDoc-gated `process_class_fields_jsdoc` function:
+/// emission is now unconditional. `JSDoc`, when present, is treated as
+/// enrichment for the type edge rather than a gate.
+///
+/// AC mapping:
+/// - AC-1 unconditional Property emission on every `field_definition`
+/// - AC-2 span sourced from the field-definition node
+/// - AC-3 `static` modifier → `is_static = true`
+/// - AC-4 `private_property_identifier` (`#name`) → visibility = "private"
+/// - AC-5 `TypeOf` edge name = bare field name (not `Class.field`)
+/// - AC-7 `JSDoc` `@type` is preserved as enrichment, not a gate
+fn process_class_fields(
+    class_node: Node<'_>,
+    content: &[u8],
+    helper: &mut GraphBuildHelper,
+) -> GraphResult<()> {
+    let Some(class_name) = resolve_class_name_for_fields(class_node, content)? else {
+        return Ok(());
+    };
+
     let Some(body_node) = class_node.child_by_field_name("body") else {
         return Ok(());
     };
 
-    // Iterate through field definitions
     let mut cursor = body_node.walk();
     for child in body_node.children(&mut cursor) {
-        if child.kind() == "field_definition" {
-            // Extract JSDoc for this field
-            if let Some(jsdoc_text) = extract_jsdoc_comment(child, content) {
-                let tags = parse_jsdoc_tags(&jsdoc_text);
+        if child.kind() != "field_definition" {
+            continue;
+        }
+        emit_class_field_node(child, content, helper, &class_name)?;
+    }
 
-                // Only process if there's a @type annotation
-                if let Some(type_annotation) = &tags.type_annotation {
-                    // Get field name
-                    if let Some(name_node) = child.child_by_field_name("property") {
-                        let field_name = name_node
-                            .utf8_text(content)
-                            .map_err(|_| GraphBuilderError::ParseError {
-                                span: span_from_node(child),
-                                reason: "failed to read field name".to_string(),
-                            })?
-                            .trim()
-                            .to_string();
+    Ok(())
+}
 
-                        if !field_name.is_empty() {
-                            // Create qualified field name: ClassName.fieldName
-                            let qualified_name = format!("{class_name}.{field_name}");
+/// Emit a single class field as a Property node and (when `JSDoc` `@type` is
+/// present) the corresponding `TypeOf{Field}` + Reference edges.
+fn emit_class_field_node(
+    field_node: Node<'_>,
+    content: &[u8],
+    helper: &mut GraphBuildHelper,
+    class_name: &str,
+) -> GraphResult<()> {
+    // Field name lives under the `property` field for `field_definition` in
+    // tree-sitter-javascript. The child node is either an identifier or a
+    // `private_property_identifier` (the `#name` form).
+    let Some(name_node) = field_node.child_by_field_name("property") else {
+        return Ok(());
+    };
 
-                            // Get or create field node
-                            let field_node_id = helper.add_variable(&qualified_name, None);
+    let raw_name = name_node
+        .utf8_text(content)
+        .map_err(|_| GraphBuilderError::ParseError {
+            span: span_from_node(field_node),
+            reason: "failed to read field name".to_string(),
+        })?
+        .trim()
+        .to_string();
 
-                            // Create TypeOf edge
-                            let canonical_type = canonical_type_string(type_annotation);
-                            let type_node_id = helper.add_type(&canonical_type, None);
-                            helper.add_typeof_edge_with_context(
-                                field_node_id,
-                                type_node_id,
-                                Some(TypeOfContext::Field),
-                                None,
-                                None,
-                            );
+    if raw_name.is_empty() {
+        return Ok(());
+    }
 
-                            // Create Reference edges
-                            let type_names = extract_type_names(type_annotation);
-                            for type_name in type_names {
-                                let ref_type_id = helper.add_type(&type_name, None);
-                                helper.add_reference_edge(field_node_id, ref_type_id);
-                            }
-                        }
-                    }
-                }
+    let is_hash_private = name_node.kind() == "private_property_identifier";
+
+    // Scan modifier-like direct children. tree-sitter-javascript surfaces
+    // `static` as an anonymous keyword child of `field_definition`; there is
+    // no accessibility-modifier surface in the JS grammar (visibility is
+    // inferred from the `#`-prefix only).
+    let mut is_static = false;
+    let mut mod_cursor = field_node.walk();
+    for modifier in field_node.children(&mut mod_cursor) {
+        if modifier.kind() == "static" {
+            is_static = true;
+        }
+    }
+
+    // Per design §3.3 + AC-4: JS field visibility is syntactic.
+    // `#`-prefix → "private"; otherwise → "public". Underscore-prefix
+    // naming heuristics (e.g. `_foo`) are deliberately NOT applied at the
+    // field call site — the field contract is grammar-level, not
+    // naming-convention-based.
+    let visibility: Option<&str> = if is_hash_private {
+        Some("private")
+    } else {
+        Some("public")
+    };
+
+    let qualified_name = format!("{class_name}.{raw_name}");
+    let span = Some(span_from_node(field_node));
+
+    let field_id = helper.add_property_with_static_and_visibility(
+        &qualified_name,
+        span,
+        is_static,
+        visibility,
+    );
+
+    // JSDoc `@type` is now enrichment, not a gate. When present, emit the
+    // `TypeOf{Field}` edge with the BARE field name (AC-5) and add
+    // Reference edges for every named type appearing in the annotation.
+    if let Some(jsdoc_text) = extract_jsdoc_comment(field_node, content) {
+        let tags = parse_jsdoc_tags(&jsdoc_text);
+        if let Some(type_annotation) = &tags.type_annotation {
+            let canonical_type = canonical_type_string(type_annotation);
+            let type_node_id = helper.add_type(&canonical_type, None);
+            helper.add_typeof_edge_with_context(
+                field_id,
+                type_node_id,
+                Some(TypeOfContext::Field),
+                None,
+                Some(&raw_name),
+            );
+
+            let type_names = extract_type_names(type_annotation);
+            for type_name in type_names {
+                let ref_type_id = helper.add_type(&type_name, None);
+                helper.add_reference_edge(field_id, ref_type_id);
             }
         }
     }
 
     Ok(())
+}
+
+/// Walk a class body and, for every constructor body, emit Property nodes
+/// for each `this.<identifier> = ...` assignment encountered (AC-6).
+///
+/// The walker recurses through all assignment expressions in the constructor
+/// body — including those inside nested arrow functions (which inherit
+/// `this`). Non-`this` assignments, `this.x.y = ...` deep paths, and
+/// computed `this[expr] = ...` accesses are skipped.
+///
+/// Deduplication with explicit field declarations (FR-13) is handled by the
+/// helper's `node_cache`: an existing `Property` with the same canonical
+/// qualified name is returned without creating a duplicate node.
+fn process_constructor_this_assignments(
+    class_node: Node<'_>,
+    content: &[u8],
+    helper: &mut GraphBuildHelper,
+) -> GraphResult<()> {
+    let Some(class_name) = resolve_class_name_for_fields(class_node, content)? else {
+        return Ok(());
+    };
+
+    let Some(body_node) = class_node.child_by_field_name("body") else {
+        return Ok(());
+    };
+
+    let mut cursor = body_node.walk();
+    for child in body_node.children(&mut cursor) {
+        if child.kind() != "method_definition" {
+            continue;
+        }
+
+        // Only process the constructor — `this.x = ...` in other methods is
+        // not necessarily a field declaration site (it may shadow or
+        // mutate). Constructor-time assignments are the standard
+        // class-field discovery surface.
+        let Some(name_node) = child.child_by_field_name("name") else {
+            continue;
+        };
+        let Ok(method_name) = name_node.utf8_text(content) else {
+            continue;
+        };
+        if method_name.trim() != "constructor" {
+            continue;
+        }
+
+        let Some(method_body) = child.child_by_field_name("body") else {
+            continue;
+        };
+
+        walk_for_this_assignments(method_body, content, helper, &class_name);
+    }
+
+    Ok(())
+}
+
+/// Recursively scan a subtree for `assignment_expression` nodes whose left
+/// side is `this.<identifier>` and emit Property nodes for the corresponding
+/// `Class.<identifier>` qualified names.
+fn walk_for_this_assignments(
+    node: Node<'_>,
+    content: &[u8],
+    helper: &mut GraphBuildHelper,
+    class_name: &str,
+) {
+    if node.kind() == "assignment_expression"
+        && let Some(left) = node.child_by_field_name("left")
+        && left.kind() == "member_expression"
+        && let Some(object) = left.child_by_field_name("object")
+        && object.kind() == "this"
+        && let Some(property) = left.child_by_field_name("property")
+        && property.kind() == "property_identifier"
+        && let Ok(field_name) = property.utf8_text(content)
+    {
+        let field_name = field_name.trim();
+        if !field_name.is_empty() {
+            let qualified_name = format!("{class_name}.{field_name}");
+            // Span sourced from the `this.<name>` member expression so the
+            // node carries a useful location even when the explicit-field
+            // path did not run.
+            // Per design §3.3 + AC-4: JS field visibility is syntactic.
+            // `this.<name>` discovered fields lack a `#`-prefix surface
+            // (the property_identifier branch only matches non-private
+            // identifiers — private-instance access uses
+            // `private_property_identifier` and is filtered out above),
+            // so they default to "public".
+            let _ = helper.add_property_with_static_and_visibility(
+                &qualified_name,
+                Some(span_from_node(left)),
+                false,
+                Some("public"),
+            );
+        }
+    }
+
+    // Recurse into all children. Nested arrow functions are intentionally
+    // walked because they inherit `this`. Non-arrow nested functions also
+    // recurse, but `this` inside them is rebound so a `this.x = ...` there
+    // would be misattributed; this is a known limitation that mirrors the
+    // best-effort behaviour of class-field discovery elsewhere in the
+    // ecosystem (the JS grammar offers no static way to distinguish at
+    // tree-walk time without full scope analysis).
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        walk_for_this_assignments(child, content, helper, class_name);
+    }
 }
 
 /// Helper: Get enclosing class name for a method

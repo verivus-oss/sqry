@@ -22,12 +22,17 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+#[cfg(unix)]
 use anyhow::anyhow;
 use sqry_core::query::executor::QueryExecutor;
 use tokio_util::sync::CancellationToken;
 
-use crate::config::{DaemonConfig, ENV_SOCKET_PATH};
-use crate::error::{DaemonError, DaemonResult};
+use crate::config::DaemonConfig;
+#[cfg(unix)]
+use crate::config::ENV_SOCKET_PATH;
+#[cfg(unix)]
+use crate::error::DaemonError;
+use crate::error::DaemonResult;
 use crate::rebuild::RebuildDispatcher;
 use crate::workspace::{WorkspaceBuilder, WorkspaceManager};
 

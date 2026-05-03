@@ -85,6 +85,7 @@ use sqry_core::graph::unified::bind::scope::arena::ScopeKind;
 use sqry_core::graph::unified::concurrent::GraphSnapshot;
 use sqry_core::graph::unified::edge::kind::{EdgeKind, TypeOfContext};
 use sqry_core::graph::unified::edge::store::StoreEdgeRef;
+use sqry_core::graph::unified::materialize::display_entry_qualified_name;
 use sqry_core::graph::unified::node::id::NodeId;
 use sqry_core::graph::unified::node::kind::NodeKind;
 use sqry_core::graph::unified::storage::arena::NodeEntry;
@@ -370,7 +371,7 @@ impl<'db> PlanExecutor<'db> {
 
     /// Apply scan-time predicates to a single node.
     ///
-    /// **B1_ALIGN contract.** When `compiled_name` is present, the name
+    /// **`B1_ALIGN` contract.** When `compiled_name` is present, the name
     /// match is checked against **both** `entry.name` and
     /// `entry.qualified_name` (mirroring
     /// [`sqry_core::graph::unified::concurrent::graph::GraphSnapshot::find_by_exact_name`]),
@@ -400,25 +401,12 @@ impl<'db> PlanExecutor<'db> {
             return false;
         }
         if let Some(pattern) = compiled_name {
-            // Check `entry.name` first (most common hit), then fall
-            // back to `entry.qualified_name` so a step like
+            // Check `entry.name` first (most common hit), then
+            // `entry.qualified_name` plus its language-aware display alias so a step like
             // `name:main.SelectorSource.NeedTags` matches Property
             // nodes whose simple name is the bare field but whose
             // qualified name carries the package + receiver prefix.
-            let mut matched = false;
-            if let Some(name) = self.snapshot.strings().resolve(entry.name)
-                && pattern.matches(name.as_ref())
-            {
-                matched = true;
-            }
-            if !matched
-                && let Some(sid) = entry.qualified_name
-                && let Some(qname) = self.snapshot.strings().resolve(sid)
-                && pattern.matches(qname.as_ref())
-            {
-                matched = true;
-            }
-            if !matched {
+            if !entry_name_or_display_matches(&self.snapshot, entry, pattern) {
                 return false;
             }
             // B1_ALIGN: synthetic placeholders are invisible to the
@@ -703,7 +691,7 @@ impl<'db> PlanExecutor<'db> {
     /// context type edges, or if every such edge targets a different name.
     ///
     /// This routes through `snapshot.edges().edges_from(...)` directly rather
-    /// than the relation-query DerivedQuery cache: `Predicate::Returns`
+    /// than the relation-query `DerivedQuery` cache: `Predicate::Returns`
     /// lands as a fresh predicate without sqry-db backing in this unit
     /// (`B2_PLANNER`); a future unit can add a `ReturnsQuery` derived query
     /// for cache reuse, but the dispatch surface stays edge-based here so
@@ -985,11 +973,11 @@ fn entry_in_scope(snapshot: &GraphSnapshot, node_id: NodeId, kind: ScopeKind) ->
 
 /// Filter-time `name:` predicate.
 ///
-/// **B1_ALIGN contract.** Mirrors
+/// **`B1_ALIGN` contract.** Mirrors
 /// [`sqry_core::graph::unified::concurrent::graph::GraphSnapshot::find_by_exact_name`]
 /// (and the `--exact` CLI shorthand): matches `entry.name` or
-/// `entry.qualified_name`, then suppresses synthetic placeholder
-/// nodes via
+/// `entry.qualified_name` or their user-facing display aliases, then
+/// suppresses synthetic placeholder nodes via
 /// [`sqry_core::graph::unified::concurrent::graph::GraphSnapshot::is_node_synthetic`]
 /// so the planner's `name:` predicate returns the same set as
 /// `--exact` against any fixture.
@@ -999,23 +987,42 @@ fn entry_name_matches(
     entry: &NodeEntry,
     pattern: &CompiledStringPattern,
 ) -> bool {
-    let name_matches = snapshot
-        .strings()
-        .resolve(entry.name)
-        .is_some_and(|s| pattern.matches(s.as_ref()));
-    let qname_matches = || {
-        entry
-            .qualified_name
-            .and_then(|sid| snapshot.strings().resolve(sid))
-            .is_some_and(|s| pattern.matches(s.as_ref()))
-    };
-    if !(name_matches || qname_matches()) {
+    if !entry_name_or_display_matches(snapshot, entry, pattern) {
         return false;
     }
     // B1_ALIGN: synthetic placeholder nodes are invisible to the
     // `name:` surface (locked by C_SUPPRESS in
     // `sqry-core/src/graph/unified/concurrent/graph.rs`).
     !snapshot.is_node_synthetic(node_id)
+}
+
+fn entry_name_or_display_matches(
+    snapshot: &GraphSnapshot,
+    entry: &NodeEntry,
+    pattern: &CompiledStringPattern,
+) -> bool {
+    let simple_name = snapshot.strings().resolve(entry.name);
+    if simple_name
+        .as_ref()
+        .is_some_and(|name| pattern.matches(name.as_ref()))
+    {
+        return true;
+    }
+
+    let Some(qualified_name) = entry
+        .qualified_name
+        .and_then(|sid| snapshot.strings().resolve(sid))
+    else {
+        return false;
+    };
+    if pattern.matches(qualified_name.as_ref()) {
+        return true;
+    }
+
+    let fallback_name = simple_name.as_deref().unwrap_or_default();
+    let display_name =
+        display_entry_qualified_name(entry, snapshot.strings(), snapshot.files(), fallback_name);
+    display_name != qualified_name.as_ref() && pattern.matches(&display_name)
 }
 
 // ============================================================================

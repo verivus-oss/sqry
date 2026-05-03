@@ -1433,6 +1433,14 @@ fn walk_tree_for_graph_with_context(
                 let qualified_name = class_name.to_string();
                 let class_id = helper.add_class(&qualified_name, Some(span));
 
+                // REQ:R0027 — emit per-type-parameter Type nodes for
+                // generic class declarations. Qualified name shape is
+                // `<ClassName>.<ParamName>` (canonicalised to `::`
+                // downstream). Variance modifiers (`<in T>` / `<out T>`)
+                // and `where`-clause constraints at class level are
+                // handled by `process_type_parameter_declarations`.
+                process_type_parameter_declarations(node, content, &qualified_name, helper);
+
                 // Export class if not private or internal
                 // In Kotlin, default visibility is public, so we export unless explicitly private/internal
                 if !KotlinGraphBuilder::is_private_or_internal(&node, content) {
@@ -1553,6 +1561,24 @@ fn walk_tree_for_graph_with_context(
                     helper,
                     content,
                 )?;
+
+                // REQ:R0027 — emit per-type-parameter Type nodes for
+                // generic function declarations. Qualified name shape:
+                //   * top-level fun: `<func>.<ParamName>`
+                //   * member fun:    `<Class>.<func>.<ParamName>`
+                // (`context.qualified_name` already encodes the
+                // `<Class>.<func>` shape; canonicalisation rewrites the
+                // `.` separators to `::` downstream.)
+                //
+                // `inline fun <reified T>` and variance markers on
+                // function-type-parameters do not occur in vanilla
+                // Kotlin grammar — variance is class-only — but reified
+                // is preserved here as a base node (attribute deferred
+                // per design §4.15). `where T : A, T : B` clauses are
+                // collected from the function-declaration's
+                // `type_constraints` child by
+                // `process_type_parameter_declarations`.
+                process_type_parameter_declarations(node, content, &context.qualified_name, helper);
             }
         }
         "primary_constructor" => {
@@ -2492,6 +2518,238 @@ fn is_named_argument_label(node: Node) -> bool {
         }
     }
     false
+}
+
+/// Emit per-type-parameter `Type` nodes for a generic Kotlin
+/// declaration (class or function) and `TypeOf{Constraint}` edges for
+/// inline bounds and `where`-clause constraints.
+///
+/// Tree-sitter-kotlin grammar shape (no field names — children are
+/// positional / kind-based):
+///
+/// ```text
+/// type_parameters: '<' commaSep1(type_parameter) '>'
+/// type_parameter:  type_parameter_modifiers? type_identifier (':' type)?
+/// type_parameter_modifiers: (annotation | reification_modifier | variance_modifier)+
+/// type_constraints: 'where' commaSep1(type_constraint)
+/// type_constraint:  annotation* type_identifier ':' type
+/// ```
+///
+/// Per design §4.15: `reified` and variance (`in` / `out`) modifiers
+/// emit only the base Type node — the modifier-as-attribute extension
+/// is deferred. The base node is sufficient for "find generic
+/// type-parameter declarations" semantic queries.
+///
+/// The qualified name shape is `<parent>.<ParamName>`; the caller
+/// provides `parent_qualified_name`:
+///
+/// * top-level `fun <T> id(...)` →  `id`
+/// * member   `class Box { fun <T> wrap(...) }` →  `Box.wrap`
+/// * class    `class Container<T>` →  `Container`
+///
+/// `canonicalize_graph_qualified_name` later rewrites the `.`
+/// separators to `::` for graph-internal storage.
+fn process_type_parameter_declarations(
+    decl_node: Node,
+    content: &[u8],
+    parent_qualified_name: &str,
+    helper: &mut GraphBuildHelper,
+) {
+    // 1. Iterate the `type_parameters` child (declaration-site `<T, U>`).
+    let mut decl_cursor = decl_node.walk();
+    let params_node = decl_node
+        .children(&mut decl_cursor)
+        .find(|child| child.kind() == "type_parameters");
+
+    // Map from type-parameter identifier text → Type-node id, so that
+    // a `where T : A` clause can attach the constraint edge to the
+    // already-emitted parameter node rather than synthesising a new one.
+    let mut param_ids: HashMap<String, sqry_core::graph::unified::node::NodeId> = HashMap::new();
+
+    if let Some(params_node) = params_node {
+        let mut cursor = params_node.walk();
+        for param_node in params_node.children(&mut cursor) {
+            if param_node.kind() != "type_parameter" {
+                continue;
+            }
+
+            let Some(name_node) = first_type_parameter_name_node(param_node) else {
+                continue;
+            };
+            let Ok(param_name) = name_node.utf8_text(content) else {
+                continue;
+            };
+
+            let qualified_param = format!("{parent_qualified_name}.{param_name}");
+            let span = Span::from_node(&name_node);
+            let param_id = helper.add_type(&qualified_param, Some(span));
+            param_ids.insert(param_name.to_string(), param_id);
+
+            // Inline bound: `<T : Number>`. The bound type is the first
+            // named child after the `:` token.
+            if let Some(bound_node) = first_type_parameter_bound_node(param_node) {
+                emit_type_parameter_constraint(bound_node, content, param_id, helper);
+            }
+        }
+    }
+
+    // 2. `where T : A, T : B` — function-declaration / class-declaration
+    //    `type_constraints` child. Each `type_constraint` produces one
+    //    Constraint edge, attached to the matching declaration-site
+    //    type-parameter node when one exists. (When the where-clause
+    //    references a parameter that wasn't declared in `<...>` — which
+    //    is invalid Kotlin but defensively tolerated — the constraint
+    //    is silently dropped rather than synthesising a stub.)
+    let mut decl_cursor2 = decl_node.walk();
+    for child in decl_node.children(&mut decl_cursor2) {
+        if child.kind() != "type_constraints" {
+            continue;
+        }
+        let mut tc_cursor = child.walk();
+        for tc in child.children(&mut tc_cursor) {
+            if tc.kind() != "type_constraint" {
+                continue;
+            }
+            // First named child is the type-parameter identifier;
+            // subsequent type-typed children form the bound.
+            let mut named: Vec<Node> = Vec::new();
+            let mut tc_inner = tc.walk();
+            for c in tc.children(&mut tc_inner) {
+                if c.is_named() && c.kind() != "annotation" {
+                    named.push(c);
+                }
+            }
+            if named.len() < 2 {
+                continue;
+            }
+            let Ok(param_name) = named[0].utf8_text(content) else {
+                continue;
+            };
+            let Some(&param_id) = param_ids.get(param_name) else {
+                continue;
+            };
+            emit_type_parameter_constraint(named[1], content, param_id, helper);
+        }
+    }
+}
+
+/// Pick the parameter-name `type_identifier` child of a `type_parameter`
+/// node — skipping past any leading modifiers (annotations, `reified`,
+/// `in`, `out`).
+fn first_type_parameter_name_node(param_node: Node<'_>) -> Option<Node<'_>> {
+    let mut cursor = param_node.walk();
+    param_node
+        .children(&mut cursor)
+        .find(|child| child.kind() == "type_identifier")
+}
+
+/// Find the bound-type node of a `type_parameter`. The grammar lists
+/// the bound as any type-typed named child appearing AFTER the
+/// parameter-name `type_identifier`. Returns `None` when the parameter
+/// is unbounded (`<T>` rather than `<T : Bound>`).
+fn first_type_parameter_bound_node(param_node: Node<'_>) -> Option<Node<'_>> {
+    let mut cursor = param_node.walk();
+    let mut seen_name = false;
+    for child in param_node.children(&mut cursor) {
+        if !child.is_named() {
+            continue;
+        }
+        if !seen_name {
+            if child.kind() == "type_identifier" {
+                seen_name = true;
+            }
+            continue;
+        }
+        // Any type-typed named child after the name identifier is the
+        // bound (`user_type`, `nullable_type`, `function_type`,
+        // `parenthesized_type`, or another `type_identifier`).
+        if matches!(
+            child.kind(),
+            "user_type"
+                | "nullable_type"
+                | "function_type"
+                | "parenthesized_type"
+                | "not_nullable_type"
+                | "type_identifier"
+        ) {
+            return Some(child);
+        }
+    }
+    None
+}
+
+/// Emit a single `TypeOf{Constraint}` edge from the type-parameter
+/// node to the bound type.
+///
+/// The constraint target is created via `helper.add_type(name, None)`:
+/// like Java's `emit_type_bound_constraints`, the target is a synthetic
+/// reference stub that may be referenced from many distinct
+/// type-parameter declarations and therefore has no single source span.
+/// Cross-file unification (Phase 4c-prime) collapses these stubs into
+/// the canonical declaration when one exists.
+fn emit_type_parameter_constraint(
+    bound_node: Node,
+    content: &[u8],
+    param_id: sqry_core::graph::unified::node::NodeId,
+    helper: &mut GraphBuildHelper,
+) {
+    let bound_name = extract_bound_type_base_name(bound_node, content);
+    if bound_name.is_empty() {
+        return;
+    }
+    let constraint_id = helper.add_type(&bound_name, None);
+    helper.add_typeof_edge_with_context(
+        param_id,
+        constraint_id,
+        Some(TypeOfContext::Constraint),
+        None,
+        None,
+    );
+}
+
+/// Extract the base type name from a constraint bound, stripping any
+/// generic type arguments and nullable markers. Mirrors Java's
+/// `extract_bound_type_base_name` but adapted for the Kotlin grammar:
+///
+/// * `user_type` → walk to the first `type_identifier` (drops type
+///   arguments such as `Comparable<T>` → `Comparable`).
+/// * `nullable_type` → unwrap to inner type.
+/// * `type_identifier` → raw text.
+/// * other type kinds (`function_type`, `parenthesized_type`,
+///   `not_nullable_type`) fall back to raw text.
+fn extract_bound_type_base_name(type_node: Node, content: &[u8]) -> String {
+    match type_node.kind() {
+        "user_type" => {
+            let mut cursor = type_node.walk();
+            for child in type_node.children(&mut cursor) {
+                if child.kind() == "type_identifier" {
+                    return child.utf8_text(content).unwrap_or("").trim().to_string();
+                }
+                if child.kind() == "user_type" {
+                    return extract_bound_type_base_name(child, content);
+                }
+            }
+            type_node
+                .utf8_text(content)
+                .unwrap_or("")
+                .trim()
+                .to_string()
+        }
+        "nullable_type" => {
+            let mut cursor = type_node.walk();
+            for child in type_node.children(&mut cursor) {
+                if child.is_named() {
+                    return extract_bound_type_base_name(child, content);
+                }
+            }
+            String::new()
+        }
+        _ => type_node
+            .utf8_text(content)
+            .unwrap_or("")
+            .trim()
+            .to_string(),
+    }
 }
 
 #[cfg(test)]

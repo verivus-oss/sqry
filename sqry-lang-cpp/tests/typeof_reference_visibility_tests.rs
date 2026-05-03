@@ -26,7 +26,14 @@ fn parse_cpp(source: &str) -> tree_sitter::Tree {
 
 use sqry_core::graph::unified::{NodeEntry, NodeId, StringId};
 
-/// Helper to count typeof edges in staged operations
+/// Helper to count typeof edges in staged operations.
+///
+/// Counts every `EdgeKind::TypeOf` regardless of the `(context, index, name)`
+/// metadata triple. Free-variable typings emit `(None, None, None)` while the
+/// post-U07 class/struct field migration emits
+/// `(Some(TypeOfContext::Field), None, Some(<bare-name>))`. Both shapes are
+/// part of the U07 cross-language field-emission contract and both must be
+/// counted by visibility/typeof regression tests.
 fn count_typeof_edges(staging: &StagingGraph) -> usize {
     staging
         .operations()
@@ -35,11 +42,7 @@ fn count_typeof_edges(staging: &StagingGraph) -> usize {
             matches!(
                 op,
                 StagingOp::AddEdge {
-                    kind: EdgeKind::TypeOf {
-                        context: None,
-                        index: None,
-                        name: None
-                    },
+                    kind: EdgeKind::TypeOf { .. },
                     ..
                 }
             )
@@ -84,7 +87,12 @@ fn get_node_name(entry: &NodeEntry, string_map: &HashMap<StringId, String>) -> O
     string_map.get(&entry.name).cloned()
 }
 
-/// Collect (source, target) pairs for `TypeOf` edges
+/// Collect (source, target) pairs for `TypeOf` edges.
+///
+/// Captures every `EdgeKind::TypeOf` regardless of the
+/// `(context, index, name)` triple so that both free-variable typings
+/// (`(None, None, None)`) and post-U07 class/struct field typings
+/// (`(Some(TypeOfContext::Field), None, Some(<bare-name>))`) are returned.
 fn collect_typeof_edges(staging: &StagingGraph) -> Vec<(String, String)> {
     let string_map = build_string_map(staging);
     let mut node_names: HashMap<NodeId, String> = HashMap::new();
@@ -103,12 +111,7 @@ fn collect_typeof_edges(staging: &StagingGraph) -> Vec<(String, String)> {
         .iter()
         .filter_map(|op| {
             if let StagingOp::AddEdge {
-                kind:
-                    EdgeKind::TypeOf {
-                        context: None,
-                        index: None,
-                        name: None,
-                    },
+                kind: EdgeKind::TypeOf { .. },
                 source,
                 target,
                 ..
@@ -139,12 +142,24 @@ fn find_function_visibility(staging: &StagingGraph, name: &str) -> Option<String
     None
 }
 
-/// Find variable visibility
+/// Find variable / field visibility.
+///
+/// Accepts `NodeKind::Variable`, `NodeKind::Property`, and `NodeKind::Constant`.
+/// Per the U07 cross-language field-emission contract
+/// (`docs/development/cross-language-field-emission/02_DESIGN` §3.1.1, §4.1),
+/// C++ class/struct fields now emit `Property` (mutable fields) or `Constant`
+/// (`const` / `constexpr` fields) instead of `Variable`. Free-variable
+/// declarations at file scope still emit `Variable`. This helper inspects
+/// all three node kinds so visibility regressions can be asserted across the
+/// migrated surface.
 fn find_variable_visibility(staging: &StagingGraph, name: &str) -> Option<String> {
     let strings = build_string_map(staging);
     for op in staging.operations() {
         if let StagingOp::AddNode { entry, .. } = op
-            && entry.kind == NodeKind::Variable
+            && matches!(
+                entry.kind,
+                NodeKind::Variable | NodeKind::Property | NodeKind::Constant
+            )
         {
             let node_name = strings.get(&entry.name);
             if node_name.is_some_and(|n| n.contains(name) || n.ends_with(name)) {

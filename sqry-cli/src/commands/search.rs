@@ -308,10 +308,12 @@ fn run_regular_search(cli: &Cli, pattern: &str, search_path: &str) -> Result<Vec
         // `name:` step). Both surfaces route through
         // `GraphSnapshot::find_by_exact_name` for literal patterns, so
         // `sqry --exact NeedTags .` and `sqry query 'name:NeedTags' .`
-        // return identical sets — exact byte-for-byte match against
-        // interned `entry.name` / `entry.qualified_name`, synthetic
-        // placeholders excluded. `--exact` does not accept glob meta;
-        // for glob behaviour use `sqry query 'name:parse_*'` instead.
+        // return identical sets. The lookup first checks interned
+        // `entry.name` / `entry.qualified_name` byte-for-byte, then falls
+        // also checks native dot- and Ruby-`#` qualified display form as
+        // graph-canonical `::`. Synthetic placeholders are
+        // excluded. `--exact` does not accept glob meta; for glob behaviour
+        // use `sqry query 'name:parse_*'` instead.
         //
         // Reachable here only when `cli.exact` is true, because
         // `build_pattern_regex` returns `Ok(Some(_))` for every

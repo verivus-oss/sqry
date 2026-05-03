@@ -231,8 +231,13 @@ impl<'a> Parser<'a> {
                 // - **Literal value (no `*`, `?`, `[`).** `name:Foo`
                 //   matches every indexable graph node whose interned
                 //   `entry.name` or `entry.qualified_name` equals `Foo`
-                //   byte-for-byte, case-sensitive. This path is
-                //   contract-bound to the CLI `--exact <literal>`
+                //   byte-for-byte, case-sensitive. If `Foo` is dot- or
+                //   Ruby-`#` qualified, the shared exact-name resolver also
+                //   checks the graph-canonical `::` rewrite so user-facing
+                //   display names like `Class.field` / `Class#field` can
+                //   resolve to canonical graph names like `Class::field`.
+                //   This path
+                //   is contract-bound to the CLI `--exact <literal>`
                 //   shorthand: both route through
                 //   [`sqry_core::graph::unified::concurrent::graph::GraphSnapshot::find_by_exact_name`]
                 //   and return the same set on any fixture.
@@ -1251,6 +1256,81 @@ mod tests {
                 assert_eq!(expected, "integer");
             }
             other => panic!("expected UnexpectedChar, got {other:?}"),
+        }
+    }
+
+    /// REQ:R0014 — `take_value_word` lock-in: dot-qualified `name:` value.
+    ///
+    /// `name:Foo.bar` must fold into the leading `NodeScan` as a single
+    /// literal `name_pattern` carrying the full dotted string `Foo.bar`. This
+    /// freezes today's `take_value_word` behaviour so that field-emission
+    /// units (U06 Ruby, U11 Rust, U07 C++) can rely on dot-qualified lookups
+    /// resolving via the planner's `Predicate::MatchesName` filter.
+    #[test]
+    fn parses_dot_qualified_name() {
+        let plan = parse_query("name:Foo.bar").expect("parse");
+        let PlanNode::Chain { steps } = plan.root else {
+            panic!("expected Chain root");
+        };
+        assert_eq!(steps.len(), 1);
+        match &steps[0] {
+            PlanNode::NodeScan {
+                name_pattern: Some(pat),
+                ..
+            } => {
+                assert_eq!(pat.raw, "Foo.bar");
+            }
+            other => panic!("expected NodeScan with name_pattern, got {other:?}"),
+        }
+    }
+
+    /// REQ:R0014 — `take_value_word` lock-in: Rust `::`-qualified `name:` value.
+    ///
+    /// `name:my_crate::Counter::count` must fold into the leading `NodeScan`
+    /// as a single literal `name_pattern` carrying the full `::`-separated
+    /// string. U11 (Rust field emission) emits `crate::Struct::field` style
+    /// qualified names; this test guards that the planner's value-word reader
+    /// keeps `::` as part of a single token rather than splitting on `:`.
+    #[test]
+    fn parses_rust_qualified_name_with_double_colon() {
+        let plan = parse_query("name:my_crate::Counter::count").expect("parse");
+        let PlanNode::Chain { steps } = plan.root else {
+            panic!("expected Chain root");
+        };
+        assert_eq!(steps.len(), 1);
+        match &steps[0] {
+            PlanNode::NodeScan {
+                name_pattern: Some(pat),
+                ..
+            } => {
+                assert_eq!(pat.raw, "my_crate::Counter::count");
+            }
+            other => panic!("expected NodeScan with name_pattern, got {other:?}"),
+        }
+    }
+
+    /// REQ:R0014 — `take_value_word` lock-in: Ruby `#`-separated `name:` value.
+    ///
+    /// `name:Counter#increment` must fold into the leading `NodeScan` as a
+    /// single literal `name_pattern` carrying the full `Class#method` string.
+    /// U06 (Ruby field emission) uses `#` as the canonical instance-method
+    /// separator; this test guards that the planner's value-word reader does
+    /// not treat `#` as a comment or whitespace marker.
+    #[test]
+    fn parses_ruby_instance_method_separator() {
+        let plan = parse_query("name:Counter#increment").expect("parse");
+        let PlanNode::Chain { steps } = plan.root else {
+            panic!("expected Chain root");
+        };
+        assert_eq!(steps.len(), 1);
+        match &steps[0] {
+            PlanNode::NodeScan {
+                name_pattern: Some(pat),
+                ..
+            } => {
+                assert_eq!(pat.raw, "Counter#increment");
+            }
+            other => panic!("expected NodeScan with name_pattern, got {other:?}"),
         }
     }
 }

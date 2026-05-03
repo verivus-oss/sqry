@@ -304,10 +304,11 @@ fn walk_tree_for_graph(
 
                 // Export if not private (Scala members are public by default)
                 let is_public_type = !is_private(node, content);
+                let parent_kind = node.kind();
                 if is_public_type {
                     export_from_file_module(helper, node_id);
                     // Only process member exports for public classes/objects/traits
-                    process_member_exports(node, content, &qualified_name, helper);
+                    process_member_exports(node, content, &qualified_name, helper, parent_kind);
                 }
 
                 // Process constructor parameters for case classes
@@ -315,6 +316,16 @@ fn walk_tree_for_graph(
                 if node.kind() == "class_definition" {
                     let _ = process_function_parameters_typeof(node, node_id, content, helper);
                     let _ = process_function_return_typeof(node, node_id, content, helper);
+
+                    // Emit Property/Constant nodes per case-class / explicit val/var
+                    // ctor parameter (REQ:R0023, design §4.4).
+                    process_class_parameter_fields(
+                        node,
+                        content,
+                        &qualified_name,
+                        helper,
+                        is_case_class(node),
+                    );
                 }
 
                 // Extract inheritance/implementation from extends_clause
@@ -731,16 +742,54 @@ fn is_private(node: Node, content: &[u8]) -> bool {
 }
 
 /// Check if a node has a specific modifier.
+///
+/// Walks the `modifiers` child looking for a leaf whose kind matches
+/// `modifier` (e.g. `"private"`, `"protected"`, `"lazy"`). This handles
+/// the structural form emitted by tree-sitter-scala 0.25:
+///
+/// ```text
+/// modifiers
+///   access_modifier
+///     private
+///     access_qualifier   // optional, for `private[Foo]`
+///       [
+///       identifier
+///       ]
+///   lazy
+/// ```
+///
+/// Scoped privates like `private[Foo]` therefore collapse to just
+/// `private` for visibility purposes — matching the design AC-3 contract.
 fn has_modifier(node: Node, modifier: &str, content: &[u8]) -> bool {
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        if child.kind() == "modifiers" {
-            // In Scala, the modifiers node directly contains the text
-            if let Ok(text) = child.utf8_text(content) {
-                // Check if the modifier text contains the target modifier
-                return text.split_whitespace().any(|word| word == modifier);
-            }
+        if child.kind() == "modifiers" && modifiers_contain(child, modifier, content) {
+            return true;
         }
+    }
+    false
+}
+
+/// Recursively scan a `modifiers` subtree for a leaf node whose kind
+/// equals `modifier`. Falls back to whitespace-tokenised text matching
+/// for grammar variants that emit modifiers as raw text (e.g. older
+/// tree-sitter-scala releases).
+fn modifiers_contain(node: Node, modifier: &str, content: &[u8]) -> bool {
+    if node.kind() == modifier {
+        return true;
+    }
+    let mut cursor = node.walk();
+    let mut child_count = 0;
+    for child in node.children(&mut cursor) {
+        child_count += 1;
+        if modifiers_contain(child, modifier, content) {
+            return true;
+        }
+    }
+    if child_count == 0
+        && let Ok(text) = node.utf8_text(content)
+    {
+        return text.split_whitespace().any(|word| word == modifier);
     }
     false
 }
@@ -1027,12 +1076,15 @@ fn export_from_file_module(
 /// In Scala:
 /// - Methods and fields are public by default unless marked `private`
 /// - Trait methods are also public by default
+/// - Members of a top-level / nested `object` are static (singleton members)
 fn process_member_exports(
     type_node: Node,
     content: &[u8],
     type_qualified_name: &str,
     helper: &mut GraphBuildHelper,
+    parent_kind: &str,
 ) {
+    let in_object_scope = parent_kind == "object_definition";
     // Find the body node (template_body for Scala)
     let body_node = if let Some(body) = type_node.child_by_field_name("body") {
         body
@@ -1079,12 +1131,15 @@ fn process_member_exports(
             "val_definition" | "var_definition" => {
                 // Extract field name from pattern (may have multiple bindings)
                 let is_public = !is_private(child, content);
+                let visibility = get_visibility(child, content);
                 extract_and_export_field_names(
                     child,
                     content,
                     type_qualified_name,
                     helper,
                     is_public,
+                    in_object_scope,
+                    visibility,
                 );
             }
             _ => {}
@@ -1342,13 +1397,21 @@ fn process_field_typeof_edges(
 }
 
 /// Extract and export field names from val/var definitions.
-/// Handles patterns like: `val x = 1` or `var (a, b) = (1, 2)`
+/// Handles patterns like: `val x = 1` or `var (a, b) = (1, 2)`.
+///
+/// Emits `Constant` for `val` / `lazy val` and `Property` for `var`,
+/// threading `is_static` (true when the enclosing scope is a top-level
+/// or nested `object_definition`) and the resolved `visibility`
+/// (`"private"` / `"protected"` / `"public"`) into the staged node.
+#[allow(clippy::too_many_arguments)]
 fn extract_and_export_field_names(
     field_node: Node,
     content: &[u8],
     type_qualified_name: &str,
     helper: &mut GraphBuildHelper,
     is_public: bool,
+    is_static: bool,
+    visibility: Option<&'static str>,
 ) {
     // Look for identifier in the pattern
     let mut cursor = field_node.walk();
@@ -1359,11 +1422,22 @@ fn extract_and_export_field_names(
             let qualified_name = format!("{type_qualified_name}.{field_name}");
             let span = span_from_node(child);
 
-            // Use constant for val (immutable), variable for var (mutable)
+            // Use constant for val (immutable), property for var (mutable).
+            // `lazy val` still parses as `val_definition`, so it lands here too.
             let field_id = if field_node.kind() == "val_definition" {
-                helper.add_constant(&qualified_name, Some(span))
+                helper.add_constant_with_static_and_visibility(
+                    &qualified_name,
+                    Some(span),
+                    is_static,
+                    visibility,
+                )
             } else {
-                helper.add_variable(&qualified_name, Some(span))
+                helper.add_property_with_static_and_visibility(
+                    &qualified_name,
+                    Some(span),
+                    is_static,
+                    visibility,
+                )
             };
 
             // Export only public fields
@@ -1374,6 +1448,112 @@ fn extract_and_export_field_names(
             // Process TypeOf and Reference edges for the field (both public and private)
             let _ = process_field_typeof_edges(field_node, field_id, field_name, content, helper);
         }
+    }
+}
+
+/// Detect whether a `class_definition` is a Scala `case class`.
+///
+/// Tree-sitter-scala emits a leading `case` keyword child for case classes.
+fn is_case_class(class_node: Node) -> bool {
+    let mut cursor = class_node.walk();
+    class_node
+        .children(&mut cursor)
+        .any(|child| child.kind() == "case")
+}
+
+/// Emit Property/Constant nodes for class constructor parameters that are
+/// fields (case-class parameters and explicit `val`/`var` parameters).
+///
+/// Per Scala semantics:
+/// - `case class Foo(x: T)`        → `Foo.x` is a public `val` field (Constant).
+/// - `case class Foo(var y: T)`    → `Foo.y` is a public `var` field (Property).
+/// - `class Foo(val x: T)`         → `Foo.x` is a public `val` field (Constant).
+/// - `class Foo(var x: T)`         → `Foo.x` is a public `var` field (Property).
+/// - `class Foo(x: T)`             → plain ctor param, no field emitted.
+///
+/// Visibility is read from the parameter's own modifiers when present;
+/// otherwise it defaults to `"public"`. `is_static` is always `false` because
+/// constructor parameters live on the instance, not the companion.
+// `has_val_kw` / `has_var_kw` mirror Scala's first-class `val` / `var`
+// keywords; the names are domain-meaningful and intentionally parallel.
+#[allow(clippy::similar_names)]
+fn process_class_parameter_fields(
+    class_node: Node,
+    content: &[u8],
+    type_qualified_name: &str,
+    helper: &mut GraphBuildHelper,
+    is_case: bool,
+) {
+    // Find the class_parameters node (cf. process_function_parameters_typeof).
+    let params_node = class_node.child_by_field_name("parameters").or_else(|| {
+        let mut cursor = class_node.walk();
+        class_node
+            .children(&mut cursor)
+            .find(|c| matches!(c.kind(), "class_parameters" | "parameters"))
+    });
+    let Some(params_node) = params_node else {
+        return;
+    };
+
+    let mut cursor = params_node.walk();
+    for param in params_node.children(&mut cursor) {
+        if param.kind() != "class_parameter" {
+            continue;
+        }
+
+        // Detect explicit `val` / `var` keyword children.
+        let mut has_val_kw = false;
+        let mut has_var_kw = false;
+        let mut pcursor = param.walk();
+        for c in param.children(&mut pcursor) {
+            match c.kind() {
+                "val" => has_val_kw = true,
+                "var" => has_var_kw = true,
+                _ => {}
+            }
+        }
+
+        let is_field = has_val_kw || has_var_kw || is_case;
+        if !is_field {
+            continue;
+        }
+
+        // Resolve param name
+        let name_node = param.child_by_field_name("name").or_else(|| {
+            let mut nc = param.walk();
+            param.children(&mut nc).find(|c| c.kind() == "identifier")
+        });
+        let Some(name_node) = name_node else { continue };
+        let Ok(field_name) = name_node.utf8_text(content) else {
+            continue;
+        };
+
+        let qualified_name = format!("{type_qualified_name}.{field_name}");
+        let span = span_from_node(name_node);
+        let visibility = get_visibility(param, content);
+        // Mutable parameter → Property; otherwise Constant (case-class default
+        // is val, and explicit `val` lands here too).
+        let field_id = if has_var_kw {
+            helper.add_property_with_static_and_visibility(
+                &qualified_name,
+                Some(span),
+                false,
+                visibility,
+            )
+        } else {
+            helper.add_constant_with_static_and_visibility(
+                &qualified_name,
+                Some(span),
+                false,
+                visibility,
+            )
+        };
+
+        // Emit TypeOf{Field} + Reference edges for the constructor field.
+        // Mirrors the body-position field handling in
+        // `extract_and_export_field_names` so case-class params and explicit
+        // `val`/`var` ctor fields get the same edge contract (REQ:R0003).
+        let _ = process_field_typeof_edges(param, field_id, field_name, content, helper);
     }
 }
 
@@ -2323,5 +2503,380 @@ mod tests {
                 "All export edges should use ExportKind::Direct"
             );
         }
+    }
+
+    // ========================================================================
+    // C2_OTHER_SCALA — Property/Constant emission for class fields
+    // (REQ:R0001, R0003, R0004, R0005, R0023)
+    // ========================================================================
+
+    use sqry_core::graph::unified::build::staging::StagingOp;
+    use sqry_core::graph::unified::node::NodeKind;
+    use std::collections::HashMap;
+
+    fn build_string_lookup_local(staging: &StagingGraph) -> HashMap<u32, String> {
+        let mut lookup = HashMap::new();
+        for op in staging.operations() {
+            if let StagingOp::InternString { local_id, value } = op {
+                lookup.insert(local_id.index(), value.clone());
+            }
+        }
+        lookup
+    }
+
+    /// Find a node by canonical qualified name (with `::` separator for Scala),
+    /// returning (kind, `is_static`, visibility).
+    fn find_field_node(
+        staging: &StagingGraph,
+        qualified_dotted: &str,
+    ) -> Option<(NodeKind, bool, Option<String>)> {
+        let strings = build_string_lookup_local(staging);
+        // Scala canonicalizes `.` -> `::`
+        let canonical = qualified_dotted.replace('.', "::");
+        let bare = qualified_dotted
+            .split('.')
+            .next_back()
+            .unwrap_or(qualified_dotted);
+        for op in staging.operations() {
+            if let StagingOp::AddNode { entry, .. } = op {
+                if !matches!(
+                    entry.kind,
+                    NodeKind::Property | NodeKind::Constant | NodeKind::Variable
+                ) {
+                    continue;
+                }
+                let qname = entry
+                    .qualified_name
+                    .and_then(|id| strings.get(&id.index()).cloned());
+                let name = strings
+                    .get(&entry.name.index())
+                    .cloned()
+                    .unwrap_or_default();
+                let matches = qname.as_deref() == Some(canonical.as_str())
+                    || (qname.is_none() && name == canonical)
+                    || (qname.is_none() && name == bare && !qualified_dotted.contains('.'));
+                if matches {
+                    let vis = entry
+                        .visibility
+                        .and_then(|id| strings.get(&id.index()).cloned());
+                    return Some((entry.kind, entry.is_static, vis));
+                }
+            }
+        }
+        None
+    }
+
+    fn build_for(source: &str) -> StagingGraph {
+        let tree = parse_scala(source);
+        let mut staging = StagingGraph::new();
+        let builder = ScalaGraphBuilder::new();
+        builder
+            .build_graph(
+                &tree,
+                source.as_bytes(),
+                Path::new("test.scala"),
+                &mut staging,
+            )
+            .expect("scala build_graph failed");
+        staging
+    }
+
+    #[test]
+    fn test_class_val_emits_constant_public_not_static() {
+        // REQ:R0001 R0003 R0005 — `val` → Constant, vis=public, is_static=false
+        let staging = build_for("class Foo { val x = 0 }");
+        let (kind, is_static, vis) =
+            find_field_node(&staging, "Foo.x").expect("Foo.x field node missing");
+        assert_eq!(kind, NodeKind::Constant);
+        assert!(!is_static, "class instance val must not be static");
+        assert_eq!(vis.as_deref(), Some("public"));
+    }
+
+    #[test]
+    fn test_class_var_emits_property_public_not_static() {
+        // REQ:R0001 R0023 — `var` → Property
+        let staging = build_for("class Foo { var y = \"\" }");
+        let (kind, is_static, vis) =
+            find_field_node(&staging, "Foo.y").expect("Foo.y field node missing");
+        assert_eq!(kind, NodeKind::Property);
+        assert!(!is_static);
+        assert_eq!(vis.as_deref(), Some("public"));
+    }
+
+    #[test]
+    fn test_top_level_object_val_is_static_constant() {
+        // REQ:R0004 — top-level `object` members are static
+        let staging = build_for("object Foo { val x = 0 }");
+        let (kind, is_static, vis) =
+            find_field_node(&staging, "Foo.x").expect("Foo.x field node missing");
+        assert_eq!(kind, NodeKind::Constant);
+        assert!(is_static, "top-level object val must be static");
+        assert_eq!(vis.as_deref(), Some("public"));
+    }
+
+    #[test]
+    fn test_top_level_object_var_is_static_property() {
+        // REQ:R0004 R0023 — top-level `object` `var` is static Property
+        let staging = build_for("object Foo { var y = 0 }");
+        let (kind, is_static, _vis) =
+            find_field_node(&staging, "Foo.y").expect("Foo.y field node missing");
+        assert_eq!(kind, NodeKind::Property);
+        assert!(is_static);
+    }
+
+    #[test]
+    fn test_companion_object_val_is_static() {
+        // REQ:R0004 — nested companion `object` inside a class → static members
+        let staging =
+            build_for("class Foo { val instance_x = 0 }\nobject Foo { val companion_x = 1 }");
+        let (_, is_inst_static, _) =
+            find_field_node(&staging, "Foo.instance_x").expect("Foo.instance_x field node missing");
+        assert!(!is_inst_static, "instance member must not be static");
+        let (_, is_comp_static, _) = find_field_node(&staging, "Foo.companion_x")
+            .expect("Foo.companion_x field node missing");
+        assert!(is_comp_static, "companion-object member must be static");
+    }
+
+    #[test]
+    fn test_nested_object_inside_class_val_is_static() {
+        // REQ:R0004 — Scala 3 nested object form
+        let staging = build_for("class Outer { object Inner { val z = 0 } }");
+        // Nested object members are still static-like singletons
+        let (_, is_static, _) =
+            find_field_node(&staging, "Inner.z").expect("Inner.z field node missing");
+        assert!(is_static, "nested object member must be static");
+    }
+
+    #[test]
+    fn test_private_val_visibility() {
+        // REQ:R0005 — `private val` → vis=Some("private")
+        let staging = build_for("class Foo { private val x = 0 }");
+        let (kind, _is_static, vis) =
+            find_field_node(&staging, "Foo.x").expect("Foo.x field node missing");
+        assert_eq!(kind, NodeKind::Constant);
+        assert_eq!(vis.as_deref(), Some("private"));
+    }
+
+    #[test]
+    fn test_protected_val_visibility() {
+        // REQ:R0005 — `protected val` → vis=Some("protected")
+        let staging = build_for("class Foo { protected val x = 0 }");
+        let (_kind, _is_static, vis) =
+            find_field_node(&staging, "Foo.x").expect("Foo.x field node missing");
+        assert_eq!(vis.as_deref(), Some("protected"));
+    }
+
+    #[test]
+    fn test_private_scoped_val_visibility() {
+        // REQ:R0005 — `private[X] val` → "private" (scoped private collapses to private)
+        let staging = build_for("class Foo { private[scope] val x = 0 }");
+        let (_kind, _is_static, vis) =
+            find_field_node(&staging, "Foo.x").expect("Foo.x field node missing");
+        assert_eq!(
+            vis.as_deref(),
+            Some("private"),
+            "private[X] must surface as private visibility"
+        );
+    }
+
+    #[test]
+    fn test_lazy_val_emits_constant() {
+        // REQ:R0001 — `lazy val` is still immutable → Constant
+        let staging = build_for("class Foo { lazy val x = 0 }");
+        let (kind, _is_static, _vis) =
+            find_field_node(&staging, "Foo.x").expect("Foo.x field node missing");
+        assert_eq!(kind, NodeKind::Constant);
+    }
+
+    #[test]
+    fn test_case_class_parameters_emit_constant_per_param() {
+        // REQ:R0001 R0023 — case class params default to `val` Constants
+        let staging = build_for("case class Foo(x: Int, y: String)");
+        let (kind_x, _, vis_x) =
+            find_field_node(&staging, "Foo.x").expect("Foo.x case-class param missing");
+        let (kind_y, _, vis_y) =
+            find_field_node(&staging, "Foo.y").expect("Foo.y case-class param missing");
+        assert_eq!(kind_x, NodeKind::Constant);
+        assert_eq!(kind_y, NodeKind::Constant);
+        assert_eq!(vis_x.as_deref(), Some("public"));
+        assert_eq!(vis_y.as_deref(), Some("public"));
+    }
+
+    #[test]
+    fn test_case_class_var_parameter_emits_property() {
+        // REQ:R0023 — case class `var` param → Property
+        let staging = build_for("case class Foo(var y: String)");
+        let (kind, _, vis) = find_field_node(&staging, "Foo.y").expect("Foo.y missing");
+        assert_eq!(kind, NodeKind::Property);
+        assert_eq!(vis.as_deref(), Some("public"));
+    }
+
+    #[test]
+    fn test_non_case_class_constructor_param_is_not_field() {
+        // Non-case class without explicit val/var: ctor param, NOT a field
+        let staging = build_for("class Foo(x: Int)");
+        // x must NOT be present as a Property/Constant/Variable named Foo.x
+        assert!(
+            find_field_node(&staging, "Foo.x").is_none(),
+            "plain ctor param must not produce a field node"
+        );
+    }
+
+    #[test]
+    fn test_non_case_class_val_constructor_param_is_field() {
+        // `class Foo(val x: Int)` → Constant field
+        let staging = build_for("class Foo(val x: Int)");
+        let (kind, _, vis) = find_field_node(&staging, "Foo.x")
+            .expect("explicit `val x` ctor param must be a field");
+        assert_eq!(kind, NodeKind::Constant);
+        assert_eq!(vis.as_deref(), Some("public"));
+    }
+
+    #[test]
+    fn test_non_case_class_var_constructor_param_is_property_field() {
+        // `class Foo(var x: Int)` → Property field
+        let staging = build_for("class Foo(var x: Int)");
+        let (kind, _, vis) =
+            find_field_node(&staging, "Foo.x").expect("`var x` ctor param must be a field");
+        assert_eq!(kind, NodeKind::Property);
+        assert_eq!(vis.as_deref(), Some("public"));
+    }
+
+    // ========================================================================
+    // C2_OTHER_SCALA — TypeOf{Field} edges for constructor / case-class fields
+    // (REQ:R0003 — constructor field nodes must carry the same TypeOf{Field}
+    //  + bare-name edge contract as body-position fields)
+    // ========================================================================
+
+    /// Find the staged `NodeId` of a Property/Constant/Variable field whose
+    /// canonical (`::`-separated) qualified name matches `qualified_dotted`.
+    fn find_field_node_id(staging: &StagingGraph, qualified_dotted: &str) -> Option<NodeId> {
+        let strings = build_string_lookup_local(staging);
+        let canonical = qualified_dotted.replace('.', "::");
+        for op in staging.operations() {
+            if let StagingOp::AddNode {
+                entry,
+                expected_id: Some(id),
+            } = op
+            {
+                if !matches!(
+                    entry.kind,
+                    NodeKind::Property | NodeKind::Constant | NodeKind::Variable
+                ) {
+                    continue;
+                }
+                let qname = entry
+                    .qualified_name
+                    .and_then(|sid| strings.get(&sid.index()).cloned());
+                if qname.as_deref() == Some(canonical.as_str()) {
+                    return Some(*id);
+                }
+            }
+        }
+        None
+    }
+
+    /// Collect all `TypeOf{Field}` edges originating from `field_id`,
+    /// returning `(target_type_text, bare_name)` tuples.
+    fn collect_field_typeof_edges(
+        staging: &StagingGraph,
+        field_id: NodeId,
+    ) -> Vec<(String, Option<String>)> {
+        let strings = build_string_lookup_local(staging);
+        let mut node_name: HashMap<u32, String> = HashMap::new();
+        for op in staging.operations() {
+            if let StagingOp::AddNode {
+                entry,
+                expected_id: Some(id),
+            } = op
+            {
+                let name_idx = entry.name.index();
+                if let Some(name) = strings.get(&name_idx) {
+                    node_name.insert(id.index(), name.clone());
+                }
+            }
+        }
+        let mut out = Vec::new();
+        for op in staging.operations() {
+            if let StagingOp::AddEdge {
+                source,
+                target,
+                kind:
+                    sqry_core::graph::unified::EdgeKind::TypeOf {
+                        context: Some(TypeOfContext::Field),
+                        index: _,
+                        name,
+                    },
+                ..
+            } = op
+            {
+                if source.index() != field_id.index() {
+                    continue;
+                }
+                let target_name = node_name.get(&target.index()).cloned().unwrap_or_default();
+                let bare = name.and_then(|sid| strings.get(&sid.index()).cloned());
+                out.push((target_name, bare));
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn test_case_class_typed_param_emits_typeof_field_edge() {
+        // REQ:R0003 — `case class Foo(x: Int)` → 1 TypeOf{Field} edge
+        // Foo::x → Int with bare `name = "x"`.
+        let staging = build_for("case class Foo(x: Int)");
+        let field_id =
+            find_field_node_id(&staging, "Foo.x").expect("Foo.x case-class field missing");
+        let edges = collect_field_typeof_edges(&staging, field_id);
+        assert_eq!(
+            edges.len(),
+            1,
+            "expected exactly one TypeOf{{Field}} edge for case-class param, got: {edges:?}"
+        );
+        let (target, bare) = &edges[0];
+        assert_eq!(target, "Int", "TypeOf target must be Int");
+        assert_eq!(
+            bare.as_deref(),
+            Some("x"),
+            "bare name on TypeOf edge must be the field's local name"
+        );
+    }
+
+    #[test]
+    fn test_class_val_constructor_param_emits_typeof_field_edge() {
+        // REQ:R0003 — `class Foo(val x: String)` → TypeOf{Field} Foo::x → String
+        // with bare `name = "x"`.
+        let staging = build_for("class Foo(val x: String)");
+        let field_id = find_field_node_id(&staging, "Foo.x").expect("Foo.x val ctor field missing");
+        let edges = collect_field_typeof_edges(&staging, field_id);
+        assert_eq!(
+            edges.len(),
+            1,
+            "expected exactly one TypeOf{{Field}} edge for `val` ctor param, got: {edges:?}"
+        );
+        let (target, bare) = &edges[0];
+        assert_eq!(target, "String");
+        assert_eq!(bare.as_deref(), Some("x"));
+    }
+
+    #[test]
+    fn test_class_var_constructor_param_emits_typeof_field_edge() {
+        // REQ:R0003 — `class Foo(var y: List[Int])` → TypeOf{Field} edge
+        // Foo::y → List[Int] with bare `name = "y"`.
+        let staging = build_for("class Foo(var y: List[Int])");
+        let field_id = find_field_node_id(&staging, "Foo.y").expect("Foo.y var ctor field missing");
+        let edges = collect_field_typeof_edges(&staging, field_id);
+        assert_eq!(
+            edges.len(),
+            1,
+            "expected exactly one TypeOf{{Field}} edge for `var` ctor param, got: {edges:?}"
+        );
+        let (target, bare) = &edges[0];
+        assert_eq!(
+            target, "List[Int]",
+            "TypeOf target must capture the full Scala type string"
+        );
+        assert_eq!(bare.as_deref(), Some("y"));
     }
 }

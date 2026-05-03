@@ -28,6 +28,7 @@ use std::{
 };
 
 use sqry_core::graph::unified::edge::kind::TypeOfContext;
+use sqry_core::graph::unified::resolution::canonicalize_graph_qualified_name;
 use sqry_core::graph::unified::{GraphBuildHelper, NodeId, StagingGraph};
 use sqry_core::graph::{GraphBuilder, GraphBuilderError, GraphResult, Language, Span};
 use tree_sitter::{Node, Tree};
@@ -670,12 +671,34 @@ fn process_typeof_edges(
 
         match node.kind() {
             "variable_declaration" => {
-                handle_variable_declaration(node, content, helper)?;
+                // Container-level `const`/`var` declarations whose direct parent
+                // is a container body (struct/union/enum/opaque) are emitted
+                // exclusively by the container-member path
+                // (`handle_container_member_decl`) under the qualified
+                // `Container.Name` form with the appropriate
+                // Property/Constant kind. Routing them through
+                // `handle_variable_declaration` here as well would dual-emit
+                // them as bare `NodeKind::Variable` under the un-qualified
+                // member name, conflicting with the kind+attribute+qualified-
+                // name design intent. Function-local `var`/`const` declarations
+                // (parent is `block`/`function_body`/etc.) continue through
+                // `handle_variable_declaration` and remain `NodeKind::Variable`.
+                if !is_container_member_var_decl(node) {
+                    handle_variable_declaration(node, content, helper)?;
+                }
             }
             "function_declaration" => {
                 handle_function_typeof_edges(node, content, helper)?;
             }
-            "struct_declaration" | "union_declaration" | "enum_declaration" => {
+            "struct_declaration" | "union_declaration" | "enum_declaration"
+            | "opaque_declaration" => {
+                // Opaque containers carry no `container_field` children but
+                // may still hold `const`/`var` member declarations. They must
+                // be dispatched here because the parent guard
+                // (`is_container_member_var_decl`) suppresses the bare
+                // `NodeKind::Variable` emission for `opaque_declaration`
+                // parents — without this dispatch the container-level
+                // `const` would vanish from the graph entirely.
                 handle_container_fields(node, content, helper)?;
             }
             _ => {}
@@ -689,6 +712,26 @@ fn process_typeof_edges(
     }
 
     Ok(())
+}
+
+/// Returns `true` when a `variable_declaration` node sits directly inside a
+/// container body (struct/union/enum/opaque) and must therefore be emitted
+/// exclusively by `handle_container_member_decl` under the qualified
+/// `Container.Name` form. Used by `process_typeof_edges` to suppress the
+/// dual-emission bug where the same node would otherwise be staged once as a
+/// bare `NodeKind::Variable` and again as the qualified Property/Constant.
+///
+/// Function-local `var`/`const` declarations are *not* container members —
+/// their parent is a `block` / `function_body` (or wrapper) node, never a
+/// `*_declaration` container — and continue to be staged as `NodeKind::Variable`
+/// by `handle_variable_declaration`.
+fn is_container_member_var_decl(node: Node<'_>) -> bool {
+    matches!(
+        node.parent().map(|p| p.kind()),
+        Some(
+            "struct_declaration" | "union_declaration" | "enum_declaration" | "opaque_declaration"
+        )
+    )
 }
 
 /// Handle `TypeOf` edges for variable/constant declarations.
@@ -852,11 +895,23 @@ fn handle_container_fields(
     });
 
     if let Some(container_name) = container_name {
-        // Process container fields
+        // Process container fields and container-level const declarations.
         let mut cursor = container_node.walk();
         for child in container_node.children(&mut cursor) {
-            if child.kind() == "container_field" {
-                handle_container_field(child, content, helper, &container_name)?;
+            match child.kind() {
+                "container_field" => {
+                    handle_container_field(child, content, helper, &container_name)?;
+                }
+                // Container-level const/var declarations (e.g. `const ORIGIN = …;`
+                // inside a struct body) appear as `variable_declaration` AST
+                // children of the container. Emit them under the qualified
+                // `Container.Name` form with the appropriate Property/Constant
+                // kind so they bind to the enclosing container rather than
+                // collide with module-level variable declarations.
+                "variable_declaration" => {
+                    handle_container_member_decl(child, content, helper, &container_name)?;
+                }
+                _ => {}
             }
         }
     }
@@ -865,6 +920,11 @@ fn handle_container_fields(
 }
 
 /// Handle `TypeOf` edge for a single container field.
+///
+/// Emits a `NodeKind::Property` node with `is_static = false` and
+/// `visibility = None` (Zig has no member-level visibility). The edge call
+/// site preserves the cross-language `TypeOfContext::Field` + bare-name
+/// metadata contract.
 #[allow(clippy::unnecessary_wraps)]
 fn handle_container_field(
     field_node: Node,
@@ -879,12 +939,20 @@ fn handle_container_field(
     if let (Some(name), Some(type_node)) = (field_name, type_node) {
         let qualified_name = format!("{container_name}.{name}");
 
-        // Get or create field node
-        let field_id = if let Some(id) = helper.get_node(&qualified_name) {
+        // Get or create the field node. The dotted source-form qualified
+        // name is canonicalised to `Container::field` before the cache
+        // probe so the fast path actually fires (the helper's underlying
+        // node cache is keyed on the canonical `::` form via
+        // `add_node_internal`/`canonicalize_graph_qualified_name`).
+        // Without this canonicalisation the `get_node` probe would always
+        // miss and dedupe would only happen via `add_node_internal`'s
+        // canonical-cache `update_node_entry` round-trip.
+        let cache_key = canonicalize_graph_qualified_name(Language::Zig, &qualified_name);
+        let field_id = if let Some(id) = helper.get_node(&cache_key) {
             id
         } else {
             let span = Span::from_bytes(field_node.start_byte(), field_node.end_byte());
-            helper.add_variable(&qualified_name, Some(span))
+            helper.add_property_with_static_and_visibility(&qualified_name, Some(span), false, None)
         };
 
         // Extract full type string for TypeOf edge
@@ -904,6 +972,76 @@ fn handle_container_field(
         for type_name in type_names {
             let type_id = helper.add_type(&type_name, None);
             helper.add_reference_edge(field_id, type_id);
+        }
+    }
+
+    Ok(())
+}
+
+/// Handle a container-level `const` (or `var`) declaration nested directly
+/// inside a struct/union/enum body — e.g. `struct { const ORIGIN = …; }`.
+///
+/// Container-level `const` → `NodeKind::Constant` with `is_static = true`.
+/// Container-level `var`   → `NodeKind::Property` with `is_static = false`
+/// (rare in practice; included for completeness so non-`const` storage
+/// still binds under the container rather than collapsing to a module
+/// variable).
+///
+/// Both shapes use the qualified `Container.Name` form. Edge metadata
+/// matches the field path (`TypeOfContext::Field` + bare name).
+#[allow(clippy::unnecessary_wraps)]
+fn handle_container_member_decl(
+    decl_node: Node,
+    content: &[u8],
+    helper: &mut GraphBuildHelper,
+    container_name: &str,
+) -> GraphResult<()> {
+    let Some(name) = extract_variable_name(decl_node, content) else {
+        return Ok(());
+    };
+    // A container-level decl must carry an explicit type annotation or a
+    // type-alias expression to participate in the field/TypeOf contract;
+    // otherwise we have nothing meaningful to emit beyond the bare node.
+    let type_node = find_type_annotation_in_var_decl(decl_node)
+        .or_else(|| find_type_alias_expression(decl_node));
+
+    let is_const = decl_node
+        .children(&mut decl_node.walk())
+        .any(|c| c.kind() == "const");
+
+    let qualified_name = format!("{container_name}.{name}");
+
+    // Canonicalise to `Container::Name` before probing the helper's node
+    // cache (which is keyed on canonical form via `add_node_internal`).
+    // See the matching comment in `handle_container_field`.
+    let cache_key = canonicalize_graph_qualified_name(Language::Zig, &qualified_name);
+    let member_id = if let Some(id) = helper.get_node(&cache_key) {
+        id
+    } else {
+        let span = Span::from_bytes(decl_node.start_byte(), decl_node.end_byte());
+        if is_const {
+            helper.add_constant_with_static_and_visibility(&qualified_name, Some(span), true, None)
+        } else {
+            helper.add_property_with_static_and_visibility(&qualified_name, Some(span), false, None)
+        }
+    };
+
+    if let Some(type_node) = type_node {
+        if let Ok(type_str) = type_node.utf8_text(content) {
+            let type_id = helper.add_type(type_str.trim(), None);
+            helper.add_typeof_edge_with_context(
+                member_id,
+                type_id,
+                Some(TypeOfContext::Field),
+                None,
+                Some(&name),
+            );
+        }
+
+        let type_names = extract_type_names_from_zig_type(type_node, content);
+        for type_name in type_names {
+            let type_id = helper.add_type(&type_name, None);
+            helper.add_reference_edge(member_id, type_id);
         }
     }
 
@@ -1921,5 +2059,596 @@ pub const PublicContainer = struct {
             !export_edges.is_empty(),
             "Expected at least one export edge (PublicContainer)"
         );
+    }
+
+    // ========================================================================
+    // C2_OTHER_ZIG — Property/Constant emission for container fields
+    // REQ:R0001, R0002, R0003, R0004, R0005, R0023
+    // ========================================================================
+
+    /// Helper: locate a staged `AddNode` operation by exact canonical name.
+    fn find_added_node<'a>(
+        staging: &'a StagingGraph,
+        canonical_name: &str,
+    ) -> Option<&'a sqry_core::graph::unified::storage::arena::NodeEntry> {
+        staging.operations().iter().find_map(|op| {
+            if let StagingOp::AddNode { entry, .. } = op
+                && staging.resolve_node_canonical_name(entry) == Some(canonical_name)
+            {
+                Some(entry)
+            } else {
+                None
+            }
+        })
+    }
+
+    /// AC-1 + AC-5: instance struct fields emit Property nodes whose
+    /// canonical qualified name is `Container::field` (the helper-layer
+    /// `canonicalize_graph_qualified_name` normalizes the source-form
+    /// `Container.field` we pass in), with `is_static = false` and
+    /// `visibility = None`. Span must be set (non-zero byte range).
+    #[test]
+    fn test_container_field_emits_property_with_attrs() {
+        let source = r"
+const Point = struct {
+    x: i32,
+    y: i32,
+};
+        ";
+        let (tree, content) = parse_zig(source);
+        let mut staging = StagingGraph::new();
+        let builder = ZigGraphBuilder::default();
+        builder
+            .build_graph(&tree, &content, Path::new("test.zig"), &mut staging)
+            .unwrap();
+
+        // AC-1: Property kind under canonical qualified name `Container::field`
+        // (canonicalize_graph_qualified_name normalizes Zig `.` -> `::`).
+        assert_has_node_with_kind_exact(&staging, "Point::x", NodeKind::Property);
+        assert_has_node_with_kind_exact(&staging, "Point::y", NodeKind::Property);
+
+        // AC-5: attribute shape on the staged entry.
+        let x_entry =
+            find_added_node(&staging, "Point::x").expect("Point::x should be staged as a node");
+        assert_eq!(x_entry.kind, NodeKind::Property, "x must be Property");
+        assert!(
+            !x_entry.is_static,
+            "instance field is_static must be false (got true)"
+        );
+        assert!(
+            x_entry.visibility.is_none(),
+            "Zig has no member-level visibility — visibility must be None"
+        );
+        // `Span::from_bytes` packs bytes into `Position::column` with
+        // `line = 0`; `add_node_internal` then stores
+        // `start_line = saturating_add(0, 1) = 1`, `start_column = start_byte`,
+        // `end_line = 1`, `end_column = end_byte`. Pin exact byte bounds
+        // anchored to the fixture string so the assertion fails loudly
+        // both on zero-width spans and on accidental drift in which AST
+        // node we hand to `Span::from_bytes` (e.g. swapping the
+        // `container_field` node for the surrounding `field_list`).
+        let field_text = "x: i32";
+        let expected_start = u32::try_from(source.find(field_text).expect("x: i32 in fixture"))
+            .expect("byte offset fits in u32");
+        let expected_end = expected_start + u32::try_from(field_text.len()).unwrap();
+        assert_eq!(x_entry.start_line, 1, "Span line packing → start_line == 1");
+        assert_eq!(x_entry.end_line, 1, "Span line packing → end_line == 1");
+        assert_eq!(
+            x_entry.start_column, expected_start,
+            "field span start_column must match `x: i32` start byte"
+        );
+        assert_eq!(
+            x_entry.end_column, expected_end,
+            "field span end_column must match `x: i32` end byte (tree-sitter \
+             container_field excludes the trailing comma)"
+        );
+        assert!(
+            x_entry.end_column > x_entry.start_column,
+            "field span must be non-empty (end_column > start_column); \
+             got start={} end={}",
+            x_entry.start_column,
+            x_entry.end_column,
+        );
+
+        // Old NodeKind::Variable for these qualified names must NOT appear.
+        let stale_variable = staging.nodes().any(|n| {
+            n.entry.kind == NodeKind::Variable
+                && matches!(
+                    staging.resolve_node_name(n.entry),
+                    Some("Point::x" | "Point::y")
+                )
+        });
+        assert!(
+            !stale_variable,
+            "Point::x/Point::y must not be emitted as NodeKind::Variable any more"
+        );
+    }
+
+    /// AC-2 + AC-5: container-level `const` declarations inside a struct body
+    /// emit Constant nodes with `is_static = true`, `visibility = None`, and
+    /// the `Container::X` canonical qualified-name shape.
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn test_container_level_const_emits_constant_static_true() {
+        let source = r"
+const Point = struct {
+    x: i32,
+    const ORIGIN: i32 = 0;
+};
+        ";
+        let (tree, content) = parse_zig(source);
+        let mut staging = StagingGraph::new();
+        let builder = ZigGraphBuilder::default();
+        builder
+            .build_graph(&tree, &content, Path::new("test.zig"), &mut staging)
+            .unwrap();
+
+        // AC-2: Constant kind under canonical qualified name `Container::X`.
+        assert_has_node_with_kind_exact(&staging, "Point::ORIGIN", NodeKind::Constant);
+
+        let origin_entry = find_added_node(&staging, "Point::ORIGIN")
+            .expect("Point::ORIGIN should be staged as a node");
+        assert_eq!(origin_entry.kind, NodeKind::Constant);
+        assert!(
+            origin_entry.is_static,
+            "container-level const is_static must be true"
+        );
+        assert!(
+            origin_entry.visibility.is_none(),
+            "Zig has no member-level visibility — visibility must be None"
+        );
+        // Pin span byte bounds against the fixture's literal
+        // `const ORIGIN: i32 = 0;` text. The container-level decl path
+        // uses the entire `variable_declaration` node span (statement
+        // including the trailing semicolon).
+        let decl_text = "const ORIGIN: i32 = 0;";
+        let expected_start =
+            u32::try_from(source.find(decl_text).expect("const ORIGIN in fixture"))
+                .expect("byte offset fits in u32");
+        let expected_end = expected_start + u32::try_from(decl_text.len()).unwrap();
+        assert_eq!(
+            origin_entry.start_line, 1,
+            "Span line packing → start_line == 1"
+        );
+        assert_eq!(
+            origin_entry.end_line, 1,
+            "Span line packing → end_line == 1"
+        );
+        assert_eq!(
+            origin_entry.start_column, expected_start,
+            "container-const span start_column must match `const ORIGIN: i32 = 0;` start byte"
+        );
+        assert_eq!(
+            origin_entry.end_column, expected_end,
+            "container-const span end_column must match the trailing-`;` end byte \
+             (variable_declaration spans the full statement)"
+        );
+        assert!(
+            origin_entry.end_column > origin_entry.start_column,
+            "constant span must be non-empty (end_column > start_column); \
+             got start={} end={}",
+            origin_entry.start_column,
+            origin_entry.end_column,
+        );
+
+        // Regression for codex feedback (dual-emission suppression):
+        // ORIGIN must NOT also appear as a bare `NodeKind::Variable` under
+        // the un-qualified name "ORIGIN". The container-level path is the
+        // sole emission site for container `const`s.
+        let stale_bare_origin_variable = staging.nodes().any(|n| {
+            n.entry.kind == NodeKind::Variable
+                && (staging.resolve_node_canonical_name(n.entry) == Some("ORIGIN")
+                    || staging.resolve_node_name(n.entry) == Some("ORIGIN"))
+        });
+        assert!(
+            !stale_bare_origin_variable,
+            "container-level const ORIGIN must not be dual-emitted as a bare \
+             NodeKind::Variable named \"ORIGIN\""
+        );
+
+        // Belt-and-braces: the planner-equivalent name lookup
+        // (find_added_node by either bare or canonical name) must not
+        // surface a `NodeKind::Variable` shadow of ORIGIN.
+        let bare_origin_node_count = staging
+            .operations()
+            .iter()
+            .filter(|op| {
+                matches!(op, StagingOp::AddNode { entry, .. }
+                if entry.kind == NodeKind::Variable
+                    && (staging.resolve_node_canonical_name(entry) == Some("ORIGIN")
+                        || staging.resolve_node_name(entry) == Some("ORIGIN")))
+            })
+            .count();
+        assert_eq!(
+            bare_origin_node_count, 0,
+            "no bare-name Variable ORIGIN AddNode op may be staged \
+             (got {bare_origin_node_count})"
+        );
+
+        // The TypeOf edge emitted for ORIGIN must use Field context, not
+        // Variable context — the container-member path is the sole
+        // emitter and uses `TypeOfContext::Field` to match the field
+        // contract.
+        let origin_id = staging
+            .operations()
+            .iter()
+            .find_map(|op| match op {
+                StagingOp::AddNode {
+                    entry,
+                    expected_id: Some(id),
+                } if staging.resolve_node_canonical_name(entry) == Some("Point::ORIGIN")
+                    && entry.kind == NodeKind::Constant =>
+                {
+                    Some(*id)
+                }
+                _ => None,
+            })
+            .expect("Point::ORIGIN Constant node must be staged");
+
+        let mut origin_typeof_contexts: Vec<Option<TypeOfContext>> = staging
+            .operations()
+            .iter()
+            .filter_map(|op| {
+                if let StagingOp::AddEdge {
+                    source,
+                    kind: EdgeKind::TypeOf { context, .. },
+                    ..
+                } = op
+                    && *source == origin_id
+                {
+                    Some(*context)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        origin_typeof_contexts.sort_by_key(|c| match c {
+            Some(TypeOfContext::Field) => 0,
+            Some(TypeOfContext::Variable) => 1,
+            _ => 2,
+        });
+        assert!(
+            !origin_typeof_contexts.is_empty(),
+            "ORIGIN must have at least one TypeOf edge"
+        );
+        for context in &origin_typeof_contexts {
+            assert_eq!(
+                *context,
+                Some(TypeOfContext::Field),
+                "every TypeOf edge from ORIGIN must use TypeOfContext::Field, \
+                 never TypeOfContext::Variable (saw {context:?})",
+            );
+        }
+    }
+
+    /// AC-4: `TypeOf` edge metadata is unchanged. Specifically the edge
+    /// carries `TypeOfContext::Field` and the bare field name (not the
+    /// qualified form), and the edge's source `NodeId` is the (now-Property)
+    /// field node.
+    #[test]
+    fn test_container_field_typeof_edge_metadata_unchanged() {
+        let source = r"
+const Point = struct {
+    x: i32,
+};
+        ";
+        let (tree, content) = parse_zig(source);
+        let mut staging = StagingGraph::new();
+        let builder = ZigGraphBuilder::default();
+        builder
+            .build_graph(&tree, &content, Path::new("test.zig"), &mut staging)
+            .unwrap();
+
+        // Find the Property node id for Point::x (canonical form).
+        let x_id = staging
+            .operations()
+            .iter()
+            .find_map(|op| match op {
+                StagingOp::AddNode {
+                    entry,
+                    expected_id: Some(id),
+                } if staging.resolve_node_canonical_name(entry) == Some("Point::x")
+                    && entry.kind == NodeKind::Property =>
+                {
+                    Some(*id)
+                }
+                _ => None,
+            })
+            .expect("Point::x Property node must be staged");
+
+        // Look for the TypeOf edge with Field context + bare name "x".
+        let edge = staging.operations().iter().find_map(|op| {
+            if let StagingOp::AddEdge {
+                source,
+                kind: EdgeKind::TypeOf { context, name, .. },
+                ..
+            } = op
+                && *source == x_id
+            {
+                Some((*context, *name))
+            } else {
+                None
+            }
+        });
+
+        let (ctx, name) = edge.expect("TypeOf edge from Point::x should be staged");
+        assert_eq!(
+            ctx,
+            Some(TypeOfContext::Field),
+            "TypeOf edge context must be Field"
+        );
+        let resolved_name = name.and_then(|sid| staging.resolve_local_string(sid));
+        assert_eq!(
+            resolved_name,
+            Some("x"),
+            "TypeOf edge name must be the bare field name 'x' (not qualified)"
+        );
+    }
+
+    /// AC-3: dedupe pattern preserved — within a single `build_graph`
+    /// invocation, the `process_typeof_edges` DFS may visit a container
+    /// node multiple times (e.g., a `struct_declaration` reachable both as
+    /// a child of its enclosing `variable_declaration` and through other
+    /// traversal entries). Dedupe is two-layered:
+    ///
+    /// 1. `handle_container_field` / `handle_container_member_decl` first
+    ///    canonicalise `Container.field` → `Container::field` and probe
+    ///    `helper.get_node` (canonical-form fast path). On a hit no
+    ///    further node-allocating work runs.
+    /// 2. On miss, `add_property_with_static_and_visibility` /
+    ///    `add_constant_with_static_and_visibility` end up in
+    ///    `add_node_internal`, whose own cache is keyed on
+    ///    (canonical-name, kind) and short-circuits via
+    ///    `update_node_entry` rather than staging a second `AddNode`.
+    ///
+    /// A two-field struct yields exactly one `AddNode` op per field; the
+    /// test also asserts no duplicate `Point::ORIGIN` Constant node is
+    /// staged when the body mixes fields and a container-level const.
+    #[test]
+    fn test_container_field_dedupes_via_get_node() {
+        let source = r"
+const Point = struct {
+    x: i32,
+    y: i32,
+    const ORIGIN: i32 = 0;
+};
+        ";
+        let (tree, content) = parse_zig(source);
+        let mut staging = StagingGraph::new();
+        let builder = ZigGraphBuilder::default();
+        builder
+            .build_graph(&tree, &content, Path::new("test.zig"), &mut staging)
+            .unwrap();
+
+        for canonical in ["Point::x", "Point::y", "Point::ORIGIN"] {
+            let count = staging
+                .operations()
+                .iter()
+                .filter(|op| {
+                    matches!(op, StagingOp::AddNode { entry, .. }
+                    if staging.resolve_node_canonical_name(entry) == Some(canonical))
+                })
+                .count();
+            assert_eq!(
+                count, 1,
+                "{canonical} must be staged exactly once after a single build_graph pass — \
+                 the canonical-form get_node fast path (and add_node_internal's \
+                 canonical-cache fallback) must collapse duplicate visits; \
+                 got {count} AddNode ops"
+            );
+        }
+    }
+
+    /// Regression for codex feedback (parent-container guard):
+    /// genuine function-local `var`/`const` declarations must continue to
+    /// be emitted as `NodeKind::Variable` under their bare un-qualified
+    /// name (the existing pre-Property contract for fn-locals). The
+    /// dual-emission suppression in `process_typeof_edges` only applies
+    /// when the `variable_declaration`'s parent is a container body;
+    /// function-locals must not be collateral damage.
+    ///
+    /// The fixture deliberately keeps each binding on a clean
+    /// `<keyword> name: Type = value;` line and avoids assignment
+    /// statements (which the tree-sitter grammar also exposes as
+    /// `variable_declaration` AST nodes; that quirk is unrelated to
+    /// this guard).
+    #[test]
+    fn test_function_local_var_const_still_emit_variable() {
+        let source = r"
+fn run() void {
+    var counter: i32 = 0;
+    const limit: i32 = 10;
+}
+        ";
+        let (tree, content) = parse_zig(source);
+        let mut staging = StagingGraph::new();
+        let builder = ZigGraphBuilder::default();
+        builder
+            .build_graph(&tree, &content, Path::new("test.zig"), &mut staging)
+            .unwrap();
+
+        // Both the function-local `var` and the function-local `const`
+        // must survive as `NodeKind::Variable` under their bare names.
+        // (Function-local `const` is intentionally Variable, not
+        // Constant: only container-level `const` becomes Constant per
+        // the new container-member path.)
+        for local in ["counter", "limit"] {
+            let local_variable_count = staging
+                .operations()
+                .iter()
+                .filter(|op| {
+                    matches!(op, StagingOp::AddNode { entry, .. }
+                    if entry.kind == NodeKind::Variable
+                        && (staging.resolve_node_canonical_name(entry) == Some(local)
+                            || staging.resolve_node_name(entry) == Some(local)))
+                })
+                .count();
+            assert!(
+                local_variable_count >= 1,
+                "function-local `{local}` must remain a NodeKind::Variable \
+                 under its bare name (got {local_variable_count} AddNode ops)"
+            );
+        }
+
+        // Negative side of the guard: function-local var/const decls
+        // must NOT be promoted to Constant or Property — only
+        // container-level `const`/`var` decls take the qualified
+        // Property/Constant path.
+        let stale_local_constant_or_property = staging.nodes().any(|n| {
+            matches!(n.entry.kind, NodeKind::Constant | NodeKind::Property)
+                && (staging.resolve_node_canonical_name(n.entry) == Some("limit")
+                    || staging.resolve_node_name(n.entry) == Some("limit")
+                    || staging.resolve_node_canonical_name(n.entry) == Some("counter")
+                    || staging.resolve_node_name(n.entry) == Some("counter"))
+        });
+        assert!(
+            !stale_local_constant_or_property,
+            "function-local var/const must NOT be emitted as Constant or Property"
+        );
+    }
+
+    /// Union and tagged-union (union(enum)) container fields must also emit
+    /// Property nodes — Zig treats union members exactly like struct members.
+    #[test]
+    fn test_union_field_emits_property() {
+        let source = r"
+const Tagged = union(enum) {
+    a: i32,
+    b: f64,
+};
+        ";
+        let (tree, content) = parse_zig(source);
+        let mut staging = StagingGraph::new();
+        let builder = ZigGraphBuilder::default();
+        builder
+            .build_graph(&tree, &content, Path::new("test.zig"), &mut staging)
+            .unwrap();
+
+        assert_has_node_with_kind_exact(&staging, "Tagged::a", NodeKind::Property);
+        assert_has_node_with_kind_exact(&staging, "Tagged::b", NodeKind::Property);
+    }
+
+    /// Regression: container-level `const` declarations nested inside an
+    /// `opaque { ... }` body must be emitted under the qualified
+    /// `Container::Name` form as `NodeKind::Constant` (`is_static` = true,
+    /// visibility = None), and must NOT be dual-emitted as a bare
+    /// `NodeKind::Variable` under the un-qualified name. The `TypeOf`
+    /// edge from the constant must use `TypeOfContext::Field`.
+    ///
+    /// Without `opaque_declaration` in the `process_typeof_edges` dispatch
+    /// arm, the parent-guard (`is_container_member_var_decl`) suppressed
+    /// the bare Variable emission while no container-fields walk was
+    /// invoked for the opaque body — net effect: `X` vanished from the
+    /// graph entirely. This test pins both the container-member emission
+    /// and the absence of a stale bare-Variable shadow.
+    ///
+    /// Refs: REQ:R0001..R0005, R0023.
+    #[test]
+    fn test_opaque_container_level_const_emits_constant() {
+        let source = r"
+pub const O = opaque {
+    const X: i32 = 1;
+};
+        ";
+        let (tree, content) = parse_zig(source);
+        let mut staging = StagingGraph::new();
+        let builder = ZigGraphBuilder::default();
+        builder
+            .build_graph(&tree, &content, Path::new("test.zig"), &mut staging)
+            .unwrap();
+
+        // AC: Constant kind under canonical qualified name `O::X`.
+        assert_has_node_with_kind_exact(&staging, "O::X", NodeKind::Constant);
+
+        let x_entry = find_added_node(&staging, "O::X").expect("O::X should be staged as a node");
+        assert_eq!(x_entry.kind, NodeKind::Constant);
+        assert!(
+            x_entry.is_static,
+            "container-level const inside opaque must have is_static = true"
+        );
+        assert!(
+            x_entry.visibility.is_none(),
+            "Zig has no member-level visibility — visibility must be None"
+        );
+
+        // No bare-name `NodeKind::Variable` shadow of X may exist:
+        // the parent-guard correctly suppresses
+        // `handle_variable_declaration` for opaque-parented vars, and the
+        // container-member path is now the sole emitter.
+        let stale_bare_x_variable = staging.nodes().any(|n| {
+            n.entry.kind == NodeKind::Variable
+                && (staging.resolve_node_canonical_name(n.entry) == Some("X")
+                    || staging.resolve_node_name(n.entry) == Some("X"))
+        });
+        assert!(
+            !stale_bare_x_variable,
+            "container-level const X inside opaque must not be dual-emitted as a \
+             bare NodeKind::Variable named \"X\""
+        );
+
+        let bare_x_node_count = staging
+            .operations()
+            .iter()
+            .filter(|op| {
+                matches!(op, StagingOp::AddNode { entry, .. }
+                if entry.kind == NodeKind::Variable
+                    && (staging.resolve_node_canonical_name(entry) == Some("X")
+                        || staging.resolve_node_name(entry) == Some("X")))
+            })
+            .count();
+        assert_eq!(
+            bare_x_node_count, 0,
+            "no bare-name Variable X AddNode op may be staged \
+             (got {bare_x_node_count})"
+        );
+
+        // Every TypeOf edge from O::X must use `TypeOfContext::Field`,
+        // matching the field-path contract used by the container-member
+        // emission site.
+        let x_id = staging
+            .operations()
+            .iter()
+            .find_map(|op| match op {
+                StagingOp::AddNode {
+                    entry,
+                    expected_id: Some(id),
+                } if staging.resolve_node_canonical_name(entry) == Some("O::X")
+                    && entry.kind == NodeKind::Constant =>
+                {
+                    Some(*id)
+                }
+                _ => None,
+            })
+            .expect("O::X Constant node must be staged");
+
+        let x_typeof_contexts: Vec<Option<TypeOfContext>> = staging
+            .operations()
+            .iter()
+            .filter_map(|op| {
+                if let StagingOp::AddEdge {
+                    source,
+                    kind: EdgeKind::TypeOf { context, .. },
+                    ..
+                } = op
+                    && *source == x_id
+                {
+                    Some(*context)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert!(
+            !x_typeof_contexts.is_empty(),
+            "O::X must have at least one TypeOf edge (from `: i32` annotation)"
+        );
+        for context in &x_typeof_contexts {
+            assert_eq!(
+                *context,
+                Some(TypeOfContext::Field),
+                "every TypeOf edge from O::X must use TypeOfContext::Field, \
+                 never TypeOfContext::Variable (saw {context:?})",
+            );
+        }
     }
 }

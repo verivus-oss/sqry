@@ -679,17 +679,66 @@ fn extract_typeof_and_reference_edges(
     let decls = type_extractor::extract_type_declarations(content_str);
 
     for decl in &decls {
-        // Create a variable node for this declaration
-        let source_id = helper.add_variable(&decl.var_name, None);
+        // Branch on whether this declaration is a class attribute
+        // (DATA / CLASS-DATA / CONSTANTS inside a CLASS DEFINITION block)
+        // or a genuine local / report-level declaration.
+        //
+        // Class attributes:
+        //   - Use the qualified name `Class.attr` so cross-file resolution
+        //     can find them via the unified-graph qualifier convention.
+        //     sqry-core canonicalizes `.` to `::` for ABAP, so the stored
+        //     qualified_name is `Class::attr`.
+        //   - Emit a Property (mutable) or Constant (immutable) node with
+        //     visibility + static-ness preserved.
+        //   - Tag the TypeOf edge as Field so query engines distinguish
+        //     class-level state from method-local variables.
+        //
+        // Locals / report-level declarations:
+        //   - Keep the original Variable node + TypeOfContext::Variable
+        //     edge so existing semantics remain unchanged.
+        // For class attributes, the node carries the qualified name
+        // (`Class.attr`) so cross-file resolution can find it, but the
+        // TypeOf edge's `name` metadata MUST be the bare field name per
+        // the cross-language-field-emission universal contract (see
+        // 02_DESIGN §4.9). For locals/report-level declarations both
+        // node and edge names are bare.
+        let (source_id, edge_name_label, edge_context) = if decl.is_class_attribute {
+            let qualified_name = match decl.enclosing_class.as_deref() {
+                Some(class) => format!("{class}.{}", decl.var_name),
+                None => decl.var_name.clone(),
+            };
+            let visibility = decl.visibility.as_deref();
+            let id = if decl.is_immutable {
+                helper.add_constant_with_static_and_visibility(
+                    &qualified_name,
+                    decl.span,
+                    decl.is_static,
+                    visibility,
+                )
+            } else {
+                helper.add_property_with_static_and_visibility(
+                    &qualified_name,
+                    decl.span,
+                    decl.is_static,
+                    visibility,
+                )
+            };
+            (id, decl.var_name.clone(), TypeOfContext::Field)
+        } else {
+            let id = helper.add_variable(&decl.var_name, decl.span);
+            (id, decl.var_name.clone(), TypeOfContext::Variable)
+        };
 
-        // TypeOf edge: source variable -> type node
+        // TypeOf edge: source -> type node, tagged with the appropriate
+        // context (Field for class attributes, Variable for locals) and
+        // the BARE field/variable name as edge metadata.
         let target_id = helper.add_type(&decl.type_name, None);
         helper.add_typeof_edge_with_context(
             source_id,
             target_id,
-            Some(TypeOfContext::Variable),
+            Some(edge_context),
             None,
-            Some(&decl.var_name),
+            Some(&edge_name_label),
         );
 
         // References edges for non-builtin types
@@ -2317,5 +2366,325 @@ TYPE-POOLS slis.
 
         let imports = collect_import_edges(&staging);
         assert_eq!(imports.len(), 2, "Expected 2 import edges");
+    }
+
+    // ====================================================================
+    // C2_OTHER_ABAP — class-attribute Property/Constant emission (FAILING ACs)
+    // REQ:R0001..R0005, R0009, R0023
+    //
+    // ABAP qualified names canonicalize `.` to `::` in sqry-core
+    // (see resolution::native_delimiters), so look-ups use `Class::attr`.
+    // ====================================================================
+
+    use sqry_core::graph::unified::build::staging::StagingOp;
+    use sqry_core::graph::unified::build::test_helpers::build_string_lookup;
+    use sqry_core::graph::unified::edge::EdgeKind;
+    use sqry_core::graph::unified::node::NodeKind;
+    use sqry_core::graph::unified::storage::NodeEntry;
+
+    fn find_node<'a>(
+        staging: &'a StagingGraph,
+        canonical_name: &str,
+        kind: NodeKind,
+    ) -> Option<&'a NodeEntry> {
+        let strings = build_string_lookup(staging);
+        for op in staging.operations() {
+            if let StagingOp::AddNode { entry, .. } = op {
+                if entry.kind != kind {
+                    continue;
+                }
+                let name_idx = entry.qualified_name.unwrap_or(entry.name).index();
+                if let Some(s) = strings.get(&name_idx)
+                    && s == canonical_name
+                {
+                    return Some(entry);
+                }
+            }
+        }
+        None
+    }
+
+    fn resolve_visibility(staging: &StagingGraph, entry: &NodeEntry) -> Option<String> {
+        let strings = build_string_lookup(staging);
+        entry
+            .visibility
+            .and_then(|sid| strings.get(&sid.index()).cloned())
+    }
+
+    fn typeof_contexts_for_named_source(
+        staging: &StagingGraph,
+        canonical_source_name: &str,
+    ) -> Vec<Option<TypeOfContext>> {
+        let strings = build_string_lookup(staging);
+        let mut id_to_name = std::collections::HashMap::new();
+        for op in staging.operations() {
+            if let StagingOp::AddNode {
+                entry,
+                expected_id: Some(id),
+            } = op
+            {
+                let name_idx = entry.qualified_name.unwrap_or(entry.name).index();
+                if let Some(s) = strings.get(&name_idx) {
+                    id_to_name.insert(*id, s.clone());
+                }
+            }
+        }
+        let mut out = Vec::new();
+        for op in staging.operations() {
+            if let StagingOp::AddEdge {
+                source,
+                kind: EdgeKind::TypeOf { context, .. },
+                ..
+            } = op
+                && id_to_name.get(source).map(String::as_str) == Some(canonical_source_name)
+            {
+                out.push(*context);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn req_r0001_class_data_emits_property_with_qualified_name() {
+        let source = r"
+CLASS zcl_foo DEFINITION PUBLIC.
+  PUBLIC SECTION.
+    DATA: gv_x TYPE i.
+ENDCLASS.
+";
+        let tree = parse_abap(source);
+        let mut staging = StagingGraph::new();
+        let builder = AbapGraphBuilder;
+        let file = PathBuf::from("zcl_foo.abap");
+        builder
+            .build_graph(&tree, source.as_bytes(), &file, &mut staging)
+            .unwrap();
+
+        let entry = find_node(&staging, "zcl_foo::gv_x", NodeKind::Property)
+            .expect("zcl_foo::gv_x Property must be emitted for DATA in CLASS DEFINITION");
+        assert!(!entry.is_static, "DATA must be instance (not static)");
+        assert_eq!(
+            resolve_visibility(&staging, entry).as_deref(),
+            Some("public"),
+            "PUBLIC SECTION DATA must carry public visibility"
+        );
+
+        let contexts = typeof_contexts_for_named_source(&staging, "zcl_foo::gv_x");
+        assert!(
+            contexts.contains(&Some(TypeOfContext::Field)),
+            "TypeOf edge from class attribute must use TypeOfContext::Field, got {contexts:?}"
+        );
+    }
+
+    #[test]
+    fn req_r0002_class_data_static_protected_section() {
+        let source = r"
+CLASS zcl_foo DEFINITION PUBLIC.
+  PROTECTED SECTION.
+    CLASS-DATA: gv_y TYPE i.
+ENDCLASS.
+";
+        let tree = parse_abap(source);
+        let mut staging = StagingGraph::new();
+        let builder = AbapGraphBuilder;
+        let file = PathBuf::from("zcl_foo.abap");
+        builder
+            .build_graph(&tree, source.as_bytes(), &file, &mut staging)
+            .unwrap();
+
+        let entry = find_node(&staging, "zcl_foo::gv_y", NodeKind::Property)
+            .expect("zcl_foo::gv_y Property must be emitted for CLASS-DATA");
+        assert!(entry.is_static, "CLASS-DATA must be static");
+        assert_eq!(
+            resolve_visibility(&staging, entry).as_deref(),
+            Some("protected")
+        );
+    }
+
+    #[test]
+    fn req_r0004_constants_inside_class_emit_constant_node() {
+        let source = r"
+CLASS zcl_foo DEFINITION PUBLIC.
+  PUBLIC SECTION.
+    CONSTANTS: c_max TYPE i VALUE 100.
+ENDCLASS.
+";
+        let tree = parse_abap(source);
+        let mut staging = StagingGraph::new();
+        let builder = AbapGraphBuilder;
+        let file = PathBuf::from("zcl_foo.abap");
+        builder
+            .build_graph(&tree, source.as_bytes(), &file, &mut staging)
+            .unwrap();
+
+        let entry = find_node(&staging, "zcl_foo::c_max", NodeKind::Constant)
+            .expect("zcl_foo::c_max must be a Constant node");
+        assert_eq!(
+            resolve_visibility(&staging, entry).as_deref(),
+            Some("public")
+        );
+        assert!(
+            find_node(&staging, "zcl_foo::c_max", NodeKind::Property).is_none(),
+            "CONSTANTS must not also emit a Property"
+        );
+        let contexts = typeof_contexts_for_named_source(&staging, "zcl_foo::c_max");
+        assert!(
+            contexts.contains(&Some(TypeOfContext::Field)),
+            "Constant attribute TypeOf edge must use Field context, got {contexts:?}"
+        );
+    }
+
+    #[test]
+    fn req_r0004_read_only_data_emits_constant_node() {
+        let source = r"
+CLASS zcl_foo DEFINITION PUBLIC.
+  PUBLIC SECTION.
+    DATA: gv_label TYPE string READ-ONLY.
+ENDCLASS.
+";
+        let tree = parse_abap(source);
+        let mut staging = StagingGraph::new();
+        let builder = AbapGraphBuilder;
+        let file = PathBuf::from("zcl_foo.abap");
+        builder
+            .build_graph(&tree, source.as_bytes(), &file, &mut staging)
+            .unwrap();
+
+        find_node(&staging, "zcl_foo::gv_label", NodeKind::Constant)
+            .expect("READ-ONLY DATA must emit a Constant, not a Property");
+        assert!(
+            find_node(&staging, "zcl_foo::gv_label", NodeKind::Property).is_none(),
+            "READ-ONLY DATA must not also emit a Property"
+        );
+    }
+
+    #[test]
+    fn req_r0009_top_level_data_remains_variable() {
+        let source = "DATA lv_total TYPE i.\n";
+        let tree = parse_abap(source);
+        let mut staging = StagingGraph::new();
+        let builder = AbapGraphBuilder;
+        let file = PathBuf::from("ztest.abap");
+        builder
+            .build_graph(&tree, source.as_bytes(), &file, &mut staging)
+            .unwrap();
+
+        find_node(&staging, "lv_total", NodeKind::Variable)
+            .expect("top-level DATA must remain a Variable node");
+        assert!(
+            find_node(&staging, "lv_total", NodeKind::Property).is_none(),
+            "top-level DATA must not emit Property"
+        );
+
+        let contexts = typeof_contexts_for_named_source(&staging, "lv_total");
+        assert!(
+            contexts.contains(&Some(TypeOfContext::Variable)),
+            "top-level DATA TypeOf edge must use Variable context, got {contexts:?}"
+        );
+        assert!(
+            contexts.iter().all(|c| *c != Some(TypeOfContext::Field)),
+            "top-level DATA must not produce Field-context TypeOf edges"
+        );
+    }
+
+    fn typeof_edge_names_for_named_source(
+        staging: &StagingGraph,
+        canonical_source_name: &str,
+    ) -> Vec<Option<String>> {
+        let strings = build_string_lookup(staging);
+        let mut id_to_name = std::collections::HashMap::new();
+        for op in staging.operations() {
+            if let StagingOp::AddNode {
+                entry,
+                expected_id: Some(id),
+            } = op
+            {
+                let name_idx = entry.qualified_name.unwrap_or(entry.name).index();
+                if let Some(s) = strings.get(&name_idx) {
+                    id_to_name.insert(*id, s.clone());
+                }
+            }
+        }
+        let mut out = Vec::new();
+        for op in staging.operations() {
+            if let StagingOp::AddEdge {
+                source,
+                kind: EdgeKind::TypeOf { name, .. },
+                ..
+            } = op
+                && id_to_name.get(source).map(String::as_str) == Some(canonical_source_name)
+            {
+                let resolved = name.and_then(|sid| strings.get(&sid.index()).cloned());
+                out.push(resolved);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn req_r0001_class_attribute_typeof_edge_name_is_bare() {
+        // Per the cross-language-field-emission universal contract
+        // (02_DESIGN §4.9), the TypeOf edge `name` metadata for a class
+        // attribute MUST be the bare field name (`counter`), NOT the
+        // qualified `Class.counter` form. The node carries the
+        // qualified name; the edge label remains bare.
+        let source = r"
+CLASS zcl_foo DEFINITION PUBLIC.
+  PUBLIC SECTION.
+    DATA: counter TYPE i.
+ENDCLASS.
+";
+        let tree = parse_abap(source);
+        let mut staging = StagingGraph::new();
+        let builder = AbapGraphBuilder;
+        let file = PathBuf::from("zcl_foo.abap");
+        builder
+            .build_graph(&tree, source.as_bytes(), &file, &mut staging)
+            .unwrap();
+
+        let names = typeof_edge_names_for_named_source(&staging, "zcl_foo::counter");
+        assert!(
+            names.contains(&Some("counter".to_string())),
+            "TypeOf edge name for class attribute must be the bare field name, got {names:?}"
+        );
+        assert!(
+            !names.contains(&Some("zcl_foo.counter".to_string())),
+            "TypeOf edge name must NOT be qualified Class.field form, got {names:?}"
+        );
+        assert!(
+            !names.contains(&Some("zcl_foo::counter".to_string())),
+            "TypeOf edge name must NOT be qualified Class::field form, got {names:?}"
+        );
+    }
+
+    #[test]
+    fn req_r0023_inheriting_class_uses_declaring_qualifier() {
+        let source = r"
+CLASS zcl_parent DEFINITION PUBLIC.
+  PUBLIC SECTION.
+    DATA: gv_inherited TYPE i.
+ENDCLASS.
+
+CLASS zcl_child DEFINITION INHERITING FROM zcl_parent.
+  PUBLIC SECTION.
+    DATA: gv_own TYPE string.
+ENDCLASS.
+";
+        let tree = parse_abap(source);
+        let mut staging = StagingGraph::new();
+        let builder = AbapGraphBuilder;
+        let file = PathBuf::from("zcl_child.abap");
+        builder
+            .build_graph(&tree, source.as_bytes(), &file, &mut staging)
+            .unwrap();
+
+        find_node(&staging, "zcl_parent::gv_inherited", NodeKind::Property)
+            .expect("parent attribute uses zcl_parent::* qualifier");
+        find_node(&staging, "zcl_child::gv_own", NodeKind::Property)
+            .expect("subclass attribute uses zcl_child::* qualifier (declaring class)");
+        assert!(
+            find_node(&staging, "zcl_child::gv_inherited", NodeKind::Property).is_none(),
+            "subclass must NOT re-emit inherited attribute under its own qualifier"
+        );
     }
 }

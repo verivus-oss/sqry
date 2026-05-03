@@ -1709,7 +1709,37 @@ fn extract_field_type_edges(node: Node<'_>, content: &[u8], helper: &mut GraphBu
         |class_name| format!("{class_name}.{field_name}"),
     );
 
-    let source_id = helper.add_variable(&qualified_name, Some(span_from_node(&node)));
+    // Per cross-language-field-emission/02_DESIGN §4.7 (REQ:R0001, R0003,
+    // R0004, R0005, R0023): extract `final` / `static` / visibility from
+    // the field declaration's `modifiers` child, then branch on `final` to
+    // choose Constant vs Property. `global` is Apex-specific cross-namespace
+    // visibility and is passed through verbatim ("global"). The downstream
+    // edge call site is unchanged (TypeOfContext::Field + bare field name).
+    let (is_final, is_static) = extract_field_modifiers(node, content);
+    // Per cross-language-field-emission/02_DESIGN §3.3 row 7 (REQ:R0023):
+    // Apex class member fields default to `private` visibility when no
+    // explicit modifier is present. The shared `extract_visibility` helper
+    // returns `None` in that case (and is used unchanged by classes /
+    // methods, whose default-visibility semantics differ from fields).
+    // Apply the field-specific default fill at this call site only so
+    // downstream `visibility:private` queries match implicit fields.
+    let visibility = extract_visibility(node, content).or_else(|| Some("private".to_string()));
+    let span = Some(span_from_node(&node));
+    let source_id = if is_final {
+        helper.add_constant_with_static_and_visibility(
+            &qualified_name,
+            span,
+            is_static,
+            visibility.as_deref(),
+        )
+    } else {
+        helper.add_property_with_static_and_visibility(
+            &qualified_name,
+            span,
+            is_static,
+            visibility.as_deref(),
+        )
+    };
 
     // TypeOf edge
     if let Some(type_str) = extract_type_string(type_n, content) {
@@ -1731,6 +1761,35 @@ fn extract_field_type_edges(node: Node<'_>, content: &[u8], helper: &mut GraphBu
             helper.add_reference_edge(source_id, ref_target);
         }
     }
+}
+
+/// Scan a field declaration's `modifiers` child for `final` and `static`
+/// keywords. Returns `(is_final, is_static)`.
+///
+/// Apex's tree-sitter grammar (tree-sitter-sfapex) places non-visibility
+/// modifiers (`static`, `final`, `abstract`, `virtual`, `transient`,
+/// `webservice`, `with sharing`, etc.) as keyword children of the
+/// `modifiers` node, alongside visibility keywords. We scan only for the
+/// two flags this design requires.
+fn extract_field_modifiers(node: Node<'_>, content: &[u8]) -> (bool, bool) {
+    let mut is_final = false;
+    let mut is_static = false;
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if child.kind() == "modifiers" {
+            let mut mod_cursor = child.walk();
+            for modifier in child.children(&mut mod_cursor) {
+                if let Ok(text) = modifier.utf8_text(content) {
+                    match text.trim().to_lowercase().as_str() {
+                        "final" => is_final = true,
+                        "static" => is_static = true,
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+    (is_final, is_static)
 }
 
 fn extract_local_variable_type_edges(
@@ -3377,6 +3436,313 @@ public class Invoice implements Outer.Payable {
         assert_eq!(
             display_target_name, "Outer.Payable",
             "Apex display interface should be 'Outer.Payable', got: '{display_target_name}'"
+        );
+    }
+
+    // =========================================================================
+    // C2_OTHER_APEX — Property/Constant emission for Apex class fields
+    // REQ:R0001, R0003, R0004, R0005, R0023
+    // =========================================================================
+
+    use sqry_core::graph::unified::build::test_helpers::assert_has_node_with_kind_exact;
+    use sqry_core::graph::unified::storage::arena::NodeEntry;
+
+    /// Locate a staged `AddNode` op by exact canonical (qualified) name.
+    fn find_added_field_node<'a>(
+        staging: &'a StagingGraph,
+        canonical_name: &str,
+    ) -> Option<&'a NodeEntry> {
+        staging.operations().iter().find_map(|op| {
+            if let StagingOp::AddNode { entry, .. } = op
+                && staging.resolve_node_canonical_name(entry) == Some(canonical_name)
+            {
+                Some(entry)
+            } else {
+                None
+            }
+        })
+    }
+
+    /// AC-1 + AC-3: a non-`final` instance field with `public` visibility
+    /// emits a Property node with `is_static = false` and
+    /// `visibility = Some("public")`.
+    #[test]
+    fn test_apex_field_public_emits_property_with_attrs() {
+        let source = r"
+public class Account {
+    public String name;
+}
+";
+        let tree = parse_apex(source);
+        let mut staging = StagingGraph::new();
+        let builder = ApexGraphBuilder;
+        let file = PathBuf::from("Account.cls");
+        builder
+            .build_graph(&tree, source.as_bytes(), &file, &mut staging)
+            .unwrap();
+
+        // AC-1: Property kind under canonical-storage form (Apex uses `::`
+        // internally; the display form is `.` per resolution::native_delimiters).
+        assert_has_node_with_kind_exact(&staging, "Account::name", NodeKind::Property);
+
+        // AC-3: visibility extracted; AC-2: instance field is not static.
+        let entry =
+            find_added_field_node(&staging, "Account::name").expect("Account.name must be staged");
+        assert_eq!(entry.kind, NodeKind::Property);
+        assert!(!entry.is_static, "instance field is_static must be false");
+        let vis = entry
+            .visibility
+            .and_then(|sid| staging.resolve_local_string(sid));
+        assert_eq!(
+            vis,
+            Some("public"),
+            "public field visibility must be Some(\"public\"), got {vis:?}"
+        );
+
+        // The legacy add_variable path must not emit Variable for this field.
+        let stale = staging.nodes().any(|n| {
+            n.entry.kind == NodeKind::Variable
+                && staging.resolve_node_name(n.entry) == Some("Account::name")
+        });
+        assert!(
+            !stale,
+            "Account.name must not still be staged as NodeKind::Variable"
+        );
+    }
+
+    /// AC-1: a `final` instance field emits a Constant node with the
+    /// declared visibility and `is_static = false`.
+    #[test]
+    fn test_apex_final_field_emits_constant() {
+        let source = r"
+public class Limits {
+    private final Integer MAX = 100;
+}
+";
+        let tree = parse_apex(source);
+        let mut staging = StagingGraph::new();
+        let builder = ApexGraphBuilder;
+        let file = PathBuf::from("Limits.cls");
+        builder
+            .build_graph(&tree, source.as_bytes(), &file, &mut staging)
+            .unwrap();
+
+        assert_has_node_with_kind_exact(&staging, "Limits::MAX", NodeKind::Constant);
+
+        let entry = find_added_field_node(&staging, "Limits::MAX")
+            .expect("Limits.MAX must be staged as a node");
+        assert_eq!(entry.kind, NodeKind::Constant);
+        assert!(
+            !entry.is_static,
+            "non-static final field is_static must be false"
+        );
+        let vis = entry
+            .visibility
+            .and_then(|sid| staging.resolve_local_string(sid));
+        assert_eq!(
+            vis,
+            Some("private"),
+            "private field visibility must be Some(\"private\"), got {vis:?}"
+        );
+    }
+
+    /// AC-2: a `static final` field emits a Constant node with
+    /// `is_static = true`.
+    #[test]
+    fn test_apex_static_final_field_emits_static_constant() {
+        let source = r"
+public class Globals {
+    public static final String VERSION = '1.0';
+}
+";
+        let tree = parse_apex(source);
+        let mut staging = StagingGraph::new();
+        let builder = ApexGraphBuilder;
+        let file = PathBuf::from("Globals.cls");
+        builder
+            .build_graph(&tree, source.as_bytes(), &file, &mut staging)
+            .unwrap();
+
+        assert_has_node_with_kind_exact(&staging, "Globals::VERSION", NodeKind::Constant);
+
+        let entry = find_added_field_node(&staging, "Globals::VERSION")
+            .expect("Globals.VERSION must be staged as a node");
+        assert_eq!(entry.kind, NodeKind::Constant);
+        assert!(entry.is_static, "static final field is_static must be true");
+        let vis = entry
+            .visibility
+            .and_then(|sid| staging.resolve_local_string(sid));
+        assert_eq!(vis, Some("public"));
+    }
+
+    /// AC-2: a `static` non-final field emits a Property node with
+    /// `is_static = true`.
+    #[test]
+    fn test_apex_static_field_emits_static_property() {
+        let source = r"
+public class Counter {
+    public static Integer count;
+}
+";
+        let tree = parse_apex(source);
+        let mut staging = StagingGraph::new();
+        let builder = ApexGraphBuilder;
+        let file = PathBuf::from("Counter.cls");
+        builder
+            .build_graph(&tree, source.as_bytes(), &file, &mut staging)
+            .unwrap();
+
+        assert_has_node_with_kind_exact(&staging, "Counter::count", NodeKind::Property);
+
+        let entry = find_added_field_node(&staging, "Counter::count")
+            .expect("Counter.count must be staged as a node");
+        assert_eq!(entry.kind, NodeKind::Property);
+        assert!(
+            entry.is_static,
+            "static non-final field is_static must be true"
+        );
+    }
+
+    /// AC-3: each of the four Apex visibility levels (`public`, `private`,
+    /// `global`, `protected`) is extracted as the literal lowercase string,
+    /// including `global` (Apex-specific cross-namespace visibility).
+    #[test]
+    fn test_apex_field_all_visibility_levels_extracted() {
+        let source = r"
+public class Visibilities {
+    public String pub;
+    private String priv;
+    global String glob;
+    protected String prot;
+}
+";
+        let tree = parse_apex(source);
+        let mut staging = StagingGraph::new();
+        let builder = ApexGraphBuilder;
+        let file = PathBuf::from("Visibilities.cls");
+        builder
+            .build_graph(&tree, source.as_bytes(), &file, &mut staging)
+            .unwrap();
+
+        for (name, expected_vis) in [
+            ("Visibilities::pub", "public"),
+            ("Visibilities::priv", "private"),
+            ("Visibilities::glob", "global"),
+            ("Visibilities::prot", "protected"),
+        ] {
+            assert_has_node_with_kind_exact(&staging, name, NodeKind::Property);
+            let entry =
+                find_added_field_node(&staging, name).unwrap_or_else(|| panic!("{name} missing"));
+            assert_eq!(entry.kind, NodeKind::Property, "{name} must be Property");
+            let vis = entry
+                .visibility
+                .and_then(|sid| staging.resolve_local_string(sid));
+            assert_eq!(
+                vis,
+                Some(expected_vis),
+                "{name} visibility expected Some({expected_vis:?}), got {vis:?}"
+            );
+        }
+    }
+
+    /// AC-3 + §3.3 row 7 (REQ:R0023): a field declared without an explicit
+    /// visibility modifier inside a class still emits a Property node, and
+    /// the field-emission call site fills the missing modifier with
+    /// `Some("private")` to mirror Apex's default class-member visibility.
+    /// This is required so downstream `visibility:private` queries match
+    /// implicit fields. The shared `extract_visibility` helper still returns
+    /// `None` for absent modifiers — the default fill is applied at the
+    /// field call site only, leaving class / method extraction untouched.
+    #[test]
+    fn test_apex_field_default_visibility_is_not_public_or_global() {
+        let source = r"
+public class Defaulter {
+    Integer hidden;
+}
+";
+        let tree = parse_apex(source);
+        let mut staging = StagingGraph::new();
+        let builder = ApexGraphBuilder;
+        let file = PathBuf::from("Defaulter.cls");
+        builder
+            .build_graph(&tree, source.as_bytes(), &file, &mut staging)
+            .unwrap();
+
+        assert_has_node_with_kind_exact(&staging, "Defaulter::hidden", NodeKind::Property);
+
+        let entry = find_added_field_node(&staging, "Defaulter::hidden")
+            .expect("Defaulter.hidden must be staged");
+        let vis = entry
+            .visibility
+            .and_then(|sid| staging.resolve_local_string(sid));
+        assert_eq!(
+            vis,
+            Some("private"),
+            "implicit-default field must be Some(\"private\") per Apex spec; got {vis:?}"
+        );
+    }
+
+    /// AC-4: the `TypeOf` edge from the field node uses
+    /// `TypeOfContext::Field` and the bare field name (not the qualified
+    /// form). Edge source/target `NodeIds` are unchanged from the legacy
+    /// pre-fix shape.
+    #[test]
+    fn test_apex_field_typeof_edge_unchanged() {
+        let source = r"
+public class Account {
+    public String name;
+}
+";
+        let tree = parse_apex(source);
+        let mut staging = StagingGraph::new();
+        let builder = ApexGraphBuilder;
+        let file = PathBuf::from("Account.cls");
+        builder
+            .build_graph(&tree, source.as_bytes(), &file, &mut staging)
+            .unwrap();
+
+        // Find the (now-Property) Account.name node id.
+        let field_id = staging
+            .operations()
+            .iter()
+            .find_map(|op| match op {
+                StagingOp::AddNode {
+                    entry,
+                    expected_id: Some(id),
+                } if staging.resolve_node_canonical_name(entry) == Some("Account::name")
+                    && entry.kind == NodeKind::Property =>
+                {
+                    Some(*id)
+                }
+                _ => None,
+            })
+            .expect("Account.name Property node must be staged");
+
+        let edge_meta = staging.operations().iter().find_map(|op| {
+            if let StagingOp::AddEdge {
+                source,
+                kind: EdgeKind::TypeOf { context, name, .. },
+                ..
+            } = op
+                && *source == field_id
+            {
+                Some((*context, *name))
+            } else {
+                None
+            }
+        });
+
+        let (context, name) = edge_meta.expect("TypeOf edge from Account.name must be staged");
+        assert_eq!(
+            context,
+            Some(TypeOfContext::Field),
+            "TypeOf edge context must be Field"
+        );
+        let resolved_name = name.and_then(|sid| staging.resolve_local_string(sid));
+        assert_eq!(
+            resolved_name,
+            Some("name"),
+            "TypeOf edge name must be the bare field name 'name', got {resolved_name:?}"
         );
     }
 }

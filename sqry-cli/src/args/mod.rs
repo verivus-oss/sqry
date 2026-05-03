@@ -40,10 +40,10 @@ pub struct Cli {
     /// Search pattern (shorthand for 'search' command)
     ///
     /// Treated as a regex by default. Invalid regex returns an error.
-    /// Use `--exact` for byte-for-byte literal matching against the
-    /// interned symbol name (same contract as the planner's
-    /// `name:<literal>` predicate; glob meta is matched as literal
-    /// characters).
+    /// Use `--exact` for literal matching against interned symbol names
+    /// (same contract as the planner's `name:<literal>` predicate; native
+    /// dot- and Ruby-`#` qualified display names also check graph-canonical
+    /// `::`, and glob meta is matched as literal characters).
     #[arg(required = false)]
     pub pattern: Option<String>,
 
@@ -208,14 +208,15 @@ pub struct Cli {
     ///
     /// Applies to search mode (top-level shorthand and `sqry search`).
     /// Contract-bound to the structural query planner's
-    /// `name:<literal>` predicate (B1_ALIGN): `sqry --exact NeedTags .`
+    /// `name:<literal>` predicate (`B1_ALIGN`): `sqry --exact NeedTags .`
     /// and `sqry query 'name:NeedTags' .` return identical sets — both
     /// look up the pattern against `entry.name` / `entry.qualified_name`
-    /// byte-for-byte (case-sensitive) and exclude synthetic placeholder
-    /// nodes. `--exact` does not accept glob meta (`*`, `?`, `[`); they
-    /// are matched as literal characters. For glob matching against
-    /// names use `sqry query 'name:parse_*'` instead. For regex
-    /// matching, omit `--exact` and `sqry search` will treat the
+    /// byte-for-byte and also check dot- and Ruby-`#` qualified display form
+    /// as graph-canonical `::`. Synthetic placeholder nodes are excluded.
+    /// `--exact` does not accept glob meta
+    /// (`*`, `?`, `[`); they are matched as literal characters. For glob
+    /// matching against names use `sqry query 'name:parse_*'` instead. For
+    /// regex matching, omit `--exact` and `sqry search` will treat the
     /// pattern as a regex over interned strings.
     #[arg(long, short = 'x', help_heading = headings::MATCH_BEHAVIOUR, display_order = 10)]
     pub exact: bool,
@@ -294,7 +295,7 @@ pub struct Cli {
     pub debug_cache: bool,
 
     /// Operate against a logical workspace defined by a `.sqry-workspace` or
-    /// `.code-workspace` file (STEP_8).
+    /// `.code-workspace` file (`STEP_8`).
     ///
     /// When set, every subcommand resolves its target through the
     /// `LogicalWorkspace` referenced by `<PATH>`. Path-scoped subcommands
@@ -1893,7 +1894,7 @@ pub enum DaemonAction {
     /// Trigger an in-place graph rebuild for a loaded workspace.
     ///
     /// Sends a `daemon/rebuild` request to the running daemon for the specified
-    /// workspace root. Once wired (CLI_REBUILD_3), the daemon will re-index the
+    /// workspace root. Once wired (`CLI_REBUILD_3`), the daemon will re-index the
     /// workspace and replace the in-memory graph atomically on completion.
     ///
     /// Use `--force` to discard any incremental state and perform a full rebuild
@@ -2238,8 +2239,8 @@ pub enum GraphOperation {
 
     /// Resolve a symbol through the Phase 2 binding plane
     ///
-    /// Loads the snapshot, constructs a BindingPlane facade, runs
-    /// BindingPlane::resolve() for the given symbol, and prints the outcome
+    /// Loads the snapshot, constructs a `BindingPlane` facade, runs
+    /// `BindingPlane::resolve()` for the given symbol, and prints the outcome
     /// along with the list of matched bindings. This is the end-to-end proof
     /// point for the Phase 2 binding plane (FR9).
     ///
@@ -2247,9 +2248,9 @@ pub enum GraphOperation {
     /// binding list, showing every bucket probe, candidate considered, and
     /// the terminal Chose/Ambiguous/Unresolved step.
     ///
-    /// Example: sqry graph resolve my_function
-    /// Example: sqry graph resolve my_function --explain
-    /// Example: sqry graph resolve my_function --explain --json
+    /// Example: sqry graph resolve `my_function`
+    /// Example: sqry graph resolve `my_function` --explain
+    /// Example: sqry graph resolve `my_function` --explain --json
     #[command(alias = "res")]
     Resolve {
         /// Symbol name to resolve (qualified or unqualified).
@@ -3349,7 +3350,7 @@ impl Cli {
     /// `&str`, so a non-UTF-8 workspace path cannot be propagated faithfully —
     /// silently falling back to `"."` (or the top-level `cli.path`) would
     /// violate the documented precedence semantics. Surface the failure
-    /// instead so the operator can supply a UTF-8 path. (STEP_8 codex iter1
+    /// instead so the operator can supply a UTF-8 path. (`STEP_8` codex iter1
     /// fix.)
     pub fn resolve_subcommand_path<'a>(
         &'a self,
@@ -4033,7 +4034,7 @@ mod tests {
                     assert!(sqryd_path.is_none(), "sqryd_path should default to None");
                     assert_eq!(*timeout, 10, "default timeout should be 10");
                 }
-                other => panic!("Expected DaemonAction::Start, got {:?}", other),
+                other => panic!("Expected DaemonAction::Start, got {other:?}"),
             }
         } else {
             panic!("Expected Command::Daemon");
@@ -4050,7 +4051,7 @@ mod tests {
                 DaemonAction::Stop { timeout } => {
                     assert_eq!(*timeout, 30, "timeout should be 30");
                 }
-                other => panic!("Expected DaemonAction::Stop, got {:?}", other),
+                other => panic!("Expected DaemonAction::Stop, got {other:?}"),
             }
         } else {
             panic!("Expected Command::Daemon");
@@ -4067,7 +4068,7 @@ mod tests {
                 DaemonAction::Status { json } => {
                     assert!(*json, "--json flag should be true");
                 }
-                other => panic!("Expected DaemonAction::Status, got {:?}", other),
+                other => panic!("Expected DaemonAction::Status, got {other:?}"),
             }
         } else {
             panic!("Expected Command::Daemon");
@@ -4085,7 +4086,7 @@ mod tests {
                     assert_eq!(*lines, 100, "lines should be 100");
                     assert!(*follow, "--follow flag should be true");
                 }
-                other => panic!("Expected DaemonAction::Logs, got {:?}", other),
+                other => panic!("Expected DaemonAction::Logs, got {other:?}"),
             }
         } else {
             panic!("Expected Command::Daemon");
@@ -4106,7 +4107,7 @@ mod tests {
                         "path should be /some/workspace"
                     );
                 }
-                other => panic!("Expected DaemonAction::Load, got {:?}", other),
+                other => panic!("Expected DaemonAction::Load, got {other:?}"),
             }
         } else {
             panic!("Expected Command::Daemon");

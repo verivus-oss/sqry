@@ -567,3 +567,68 @@ Resource::~Resource() {}
     }
     println!();
 }
+
+// ============================================================================
+// U07 AC-7 — REQ:R0020 — Legacy `Class::field` qualified-name lookup must
+// return ZERO hits via `find_nodes_by_name` against a finalized
+// `GraphSnapshot` (design §4.1; cross-language-field-emission/02_DESIGN AC-7).
+//
+// This test runs the full end-to-end `build_unified_graph` pipeline so the
+// `CodeGraph` is finalized (Phase 4 indices rebuilt, Phase 4c-prime
+// unification applied), then queries `find_nodes_by_name("Foo::bar")`
+// directly — the contract the design pins.
+// ============================================================================
+
+#[test]
+fn test_legacy_double_colon_field_lookup_returns_zero_via_snapshot() {
+    use sqry_core::graph::unified::build::{BuildConfig, build_unified_graph};
+    use sqry_core::graph::unified::find_nodes_by_name;
+    use sqry_core::plugin::PluginManager;
+
+    let dir = TempDir::new().expect("temp dir");
+    let file = dir.path().join("legacy_lookup.cpp");
+    let source = r"
+class Foo {
+public:
+    int bar;
+    static int baz;
+    const int qux = 0;
+};
+struct Quux {
+    int corge;
+};
+";
+    fs::write(&file, source).expect("write fixture");
+
+    let mut plugins = PluginManager::with_plugins(Vec::new());
+    plugins.register_builtin(Box::new(CppPlugin::default()));
+
+    let config = BuildConfig::default();
+    let graph =
+        build_unified_graph(dir.path(), &plugins, &config).expect("build_unified_graph succeeds");
+    let snapshot = graph.snapshot();
+
+    // Positive: dotted form must be present for every field — proves the
+    // pipeline actually staged the fields under the post-fix qualifier.
+    for dotted in ["Foo.bar", "Foo.baz", "Foo.qux", "Quux.corge"] {
+        let hits = find_nodes_by_name(&snapshot, dotted);
+        assert!(
+            !hits.is_empty(),
+            "expected dotted qualifier `{dotted}` to resolve via find_nodes_by_name; \
+             got 0 hits — staging did not emit the post-fix shape"
+        );
+    }
+
+    // Negative (AC-7): legacy `Class::field` MUST return 0 hits via the
+    // snapshot's `find_nodes_by_name` lookup. This is the design contract
+    // — not a staging-level filter.
+    for legacy in ["Foo::bar", "Foo::baz", "Foo::qux", "Quux::corge"] {
+        let hits = find_nodes_by_name(&snapshot, legacy);
+        assert!(
+            hits.is_empty(),
+            "AC-7 violation: find_nodes_by_name({legacy:?}) must return 0 hits, \
+             got {} hit(s) (legacy `Class::field` qualifier survived through finalization)",
+            hits.len()
+        );
+    }
+}

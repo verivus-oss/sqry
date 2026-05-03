@@ -24,6 +24,7 @@ use crate::graph::unified::edge::EdgeKind;
 use crate::graph::unified::edge::bidirectional::BidirectionalEdgeStore;
 use crate::graph::unified::file::FileId;
 use crate::graph::unified::memory::{GraphMemorySize, HASHMAP_ENTRY_OVERHEAD};
+use crate::graph::unified::resolution::display_graph_qualified_name;
 use crate::graph::unified::storage::arena::NodeArena;
 use crate::graph::unified::storage::edge_provenance::{EdgeProvenance, EdgeProvenanceStore};
 use crate::graph::unified::storage::indices::AuxiliaryIndices;
@@ -867,14 +868,14 @@ impl CodeGraph {
     /// * [`NodeMetadataStore`], [`NodeProvenanceStore`], [`ScopeArena`],
     ///   [`AliasTable`], and [`ShadowTable`] have been compacted through
     ///   the [`NodeIdBearing::retain_nodes`] predicate so no
-    ///   tombstoned NodeId survives in any publish-visible store.
+    ///   tombstoned `NodeId` survives in any publish-visible store.
     /// * [`FileRegistry::per_file_nodes`] no longer holds a bucket for
     ///   `file_id`, the lookup slot is recycled, and
     ///   [`FileRegistry::resolve(file_id)`] returns `None`.
     ///
     /// Returns the `Vec<NodeId>` of tombstoned nodes. The returned list
     /// is useful for downstream housekeeping (e.g., resetting per-file
-    /// caches keyed by NodeId) and for tests that need to assert on the
+    /// caches keyed by `NodeId`) and for tests that need to assert on the
     /// exact membership of the tombstone set.
     ///
     /// # Idempotency
@@ -908,7 +909,7 @@ impl CodeGraph {
     /// * Delta filtering is `O(|delta|)` per direction.
     /// * Auxiliary-index compaction is `O(|tombstoned|)` amortised
     ///   because each of the four indices keys its entries by the
-    ///   tombstoned NodeIds directly.
+    ///   tombstoned `NodeIds` directly.
     ///
     /// [`NodeEntry`]: crate::graph::unified::storage::arena::NodeEntry
     /// [`NodeEntry.file`]: crate::graph::unified::storage::arena::NodeEntry::file
@@ -1875,7 +1876,7 @@ impl GraphSnapshot {
     /// Performs a simple substring match on node names and qualified names.
     /// Returns all matching node IDs.
     ///
-    /// **Synthetic suppression (C_SUPPRESS):** synthetic placeholder
+    /// **Synthetic suppression (`C_SUPPRESS`):** synthetic placeholder
     /// nodes — internal scaffolding the language plugins emit for
     /// binding-plane and scope analysis (e.g. the Go plugin's
     /// `<field:operand.field>` field-access shadows and the
@@ -1924,7 +1925,7 @@ impl GraphSnapshot {
     ///
     /// Either check matching is sufficient to suppress the node. The
     /// design lives in `docs/development/public-issue-triage/`
-    /// under the C_SUPPRESS unit; see also the rationale in
+    /// under the `C_SUPPRESS` unit; see also the rationale in
     /// [`crate::graph::unified::storage::metadata::NodeMetadata::Synthetic`].
     ///
     /// `include_synthetic = true` is **internal-only**. The binding
@@ -1961,8 +1962,9 @@ impl GraphSnapshot {
         matches
     }
 
-    /// Finds nodes whose interned simple **or** qualified name equals
-    /// `name` byte-for-byte (case-sensitive).
+    /// Finds nodes whose interned simple **or** qualified name equals `name`,
+    /// accepting dot- and Ruby-`#` qualified display form as a fallback for
+    /// graph-canonical `::` qualified names.
     ///
     /// This is the canonical surface for **exact-name** lookups —
     /// shared by the CLI `--exact <pattern>` shorthand
@@ -1986,10 +1988,19 @@ impl GraphSnapshot {
     /// name byte-for-byte; the metadata-bit channel is the only
     /// realistic leak vector and it is suppressed unconditionally.
     ///
+    /// **Display fallback.** Exact lookup checks the literal input. When the
+    /// input is qualified, language-aware display candidates win over raw
+    /// canonical matches. This keeps native Rust `identity::T` from also
+    /// returning a TypeScript type parameter whose internal canonical form is
+    /// `identity::T` but whose display form is `identity.T`. If neither
+    /// display nor literal lookup finds candidates, dot- and Ruby-`#`
+    /// qualified inputs also check the graph-canonical `::` rewrite.
+    ///
     /// # Performance
     ///
     /// `O(1)` interner lookup + `O(matches)` filter. If `name` is not
-    /// interned the result is empty without scanning any nodes.
+    /// interned the resolver still tries a native-display to graph-canonical
+    /// `::` fallback for user-facing qualified names before returning empty.
     ///
     /// # Arguments
     ///
@@ -1998,31 +2009,75 @@ impl GraphSnapshot {
     /// # Returns
     ///
     /// Sorted, deduplicated `NodeId`s for every non-synthetic node
-    /// whose `entry.name` or `entry.qualified_name` equals `name`.
-    /// Returns an empty vector when `name` is not interned (i.e. no
-    /// node could possibly carry that name).
+    /// whose `entry.name`, `entry.qualified_name`, or language-aware display
+    /// name equals `name`, or matches for the graph-canonical `::` rewrite
+    /// when the user supplied a dot- or Ruby-`#` qualified name that had no
+    /// literal or display candidates.
     #[must_use]
     pub fn find_by_exact_name(&self, name: &str) -> Vec<crate::graph::unified::node::NodeId> {
-        // Resolve the input to a StringId. If the interner doesn't know
-        // this string, no node could possibly carry it as a name.
+        let is_qualified = name.contains('.') || name.contains('#') || name.contains("::");
+        if !is_qualified {
+            // Bare name lookup: the interned `by_name` index covers
+            // every language and is O(1); no display scan is needed.
+            return self.find_by_exact_interned_name(name);
+        }
+        // Qualified name: each plugin stores its native form
+        // (PHP `Ledger.promotedField`, Rust `Ledger::promotedField`,
+        // Ruby `Ledger#promotedField`). Scan computed display names so
+        // a single dotted user query resolves to all language matches,
+        // then fall back to the interned form (and the graph-canonical
+        // `::` rewrite) when display yields nothing.
+        let mut exact_matches = self.find_by_exact_display_name(name);
+        if exact_matches.is_empty() {
+            exact_matches = self.find_by_exact_interned_name(name);
+            if exact_matches.is_empty() && !name.contains("::") {
+                let canonical = name.replace(['.', '#'], "::");
+                exact_matches.extend(self.find_by_exact_interned_name(&canonical));
+                exact_matches.sort_unstable();
+                exact_matches.dedup();
+            }
+        }
+        exact_matches
+    }
+
+    fn find_by_exact_display_name(&self, name: &str) -> Vec<crate::graph::unified::node::NodeId> {
+        let mut matches = self
+            .iter_nodes()
+            .filter(|(node_id, _)| !self.is_node_synthetic(*node_id))
+            .filter_map(|(node_id, entry)| {
+                let qualified = entry
+                    .qualified_name
+                    .and_then(|sid| self.strings.resolve(sid))?;
+                let display = self.files.language_for_file(entry.file).map_or_else(
+                    || qualified.to_string(),
+                    |language| {
+                        display_graph_qualified_name(
+                            language,
+                            qualified.as_ref(),
+                            entry.kind,
+                            entry.is_static,
+                        )
+                    },
+                );
+                (display == name).then_some(node_id)
+            })
+            .collect::<Vec<_>>();
+        matches.sort_unstable();
+        matches.dedup();
+        matches
+    }
+
+    fn find_by_exact_interned_name(&self, name: &str) -> Vec<crate::graph::unified::node::NodeId> {
         let Some(str_id) = self.strings.get(name) else {
             return Vec::new();
         };
 
-        // Pull the by-name and by-qualified-name index slices for that
-        // StringId. Both indices are pre-built and slice-shaped.
         let mut matches: Vec<crate::graph::unified::node::NodeId> = Vec::new();
         matches.extend_from_slice(self.indices.by_name(str_id));
         matches.extend_from_slice(self.indices.by_qualified_name(str_id));
-
         matches.sort_unstable();
         matches.dedup();
-
-        // Same default-off synthetic filter as `find_by_pattern`. There
-        // is no `include_synthetic` toggle on the exact-match surface
-        // — see the doc comment above for the rationale.
         matches.retain(|&node_id| !self.is_node_synthetic(node_id));
-
         matches
     }
 
@@ -2372,8 +2427,8 @@ mod tests {
     }
 
     /// Exact-byte regression for the iter2 fix of CodeGraph.confidence
-    /// accounting: adding a ConfidenceMetadata entry with known inner
-    /// Vec<String> capacities must increase heap_bytes() by exactly the sum
+    /// accounting: adding a `ConfidenceMetadata` entry with known inner
+    /// Vec<String> capacities must increase `heap_bytes()` by exactly the sum
     /// of those capacities plus Vec<String> slot overhead.
     #[test]
     fn test_codegraph_heap_bytes_counts_confidence_inner_strings() {
@@ -2872,6 +2927,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn find_by_exact_name_aligns_with_planner_name_predicate() {
         // B1_ALIGN: `find_by_exact_name("NeedTags")` is the canonical
         // surface for the CLI `--exact NeedTags` shorthand and the
@@ -2896,6 +2952,11 @@ mod tests {
             .unwrap();
         let synthetic_offset_name = graph.strings_mut().intern("NeedTags@469").unwrap();
         let unrelated_name = graph.strings_mut().intern("NeedTagsHelper").unwrap();
+        let display_fallback_name = graph.strings_mut().intern("Other").unwrap();
+        let display_fallback_qname = graph
+            .strings_mut()
+            .intern("main::SelectorSource::Other")
+            .unwrap();
         let file_id = graph.files_mut().register(Path::new("main.go")).unwrap();
 
         let prop_id = graph
@@ -2925,6 +2986,13 @@ mod tests {
         let unrelated_id = graph
             .nodes_mut()
             .alloc(NodeEntry::new(NodeKind::Function, unrelated_name, file_id))
+            .unwrap();
+        let display_fallback_id = graph
+            .nodes_mut()
+            .alloc(
+                NodeEntry::new(NodeKind::Property, display_fallback_name, file_id)
+                    .with_qualified_name(display_fallback_qname),
+            )
             .unwrap();
 
         graph
@@ -2958,6 +3026,13 @@ mod tests {
             None,
             file_id,
         );
+        graph.indices_mut().add(
+            display_fallback_id,
+            NodeKind::Property,
+            display_fallback_name,
+            Some(display_fallback_qname),
+            file_id,
+        );
 
         // Mark the offset-suffixed synthetic via the metadata bit so we
         // exercise both recognition channels in this fixture.
@@ -2980,6 +3055,11 @@ mod tests {
         // The Property's full qualified name is exact-addressable.
         let qualified = snapshot.find_by_exact_name("main.SelectorSource.NeedTags");
         assert_eq!(qualified, vec![prop_id]);
+
+        // Dot-qualified display form falls back to graph-canonical `::` only
+        // when the exact dot string was absent.
+        let display_fallback = snapshot.find_by_exact_name("main.SelectorSource.Other");
+        assert_eq!(display_fallback, vec![display_fallback_id]);
 
         // Substring-only matches must not surface from exact lookup.
         assert!(

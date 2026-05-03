@@ -78,7 +78,7 @@ impl GraphBuilder for RubyGraphBuilder {
         apply_controller_dsl_hooks(&ast_graph, &mut helper);
 
         // Phase: Process YARD annotations for TypeOf and Reference edges
-        process_yard_annotations(tree.root_node(), content, &mut helper)?;
+        process_yard_annotations(tree.root_node(), content, &ast_graph, &mut helper)?;
 
         Ok(())
     }
@@ -177,6 +177,7 @@ impl RubyContext {
 struct ASTGraph {
     contexts: Vec<RubyContext>,
     node_to_context: HashMap<usize, usize>,
+    attr_visibility: HashMap<usize, Visibility>,
     /// Scopes (namespaces) that have `extend FFI::Library` - used for FFI edge emission
     ffi_enabled_scopes: HashSet<Vec<String>>,
     #[allow(dead_code)] // Reserved for Rails controller DSL analysis
@@ -190,6 +191,7 @@ impl ASTGraph {
         Ok(Self {
             contexts: builder.contexts,
             node_to_context: builder.node_to_context,
+            attr_visibility: builder.attr_visibility,
             ffi_enabled_scopes: builder.ffi_enabled_scopes,
             controller_dsl_hooks: builder.controller_dsl_hooks,
         })
@@ -204,6 +206,13 @@ impl ASTGraph {
         self.node_to_context
             .get(&node.id())
             .and_then(|idx| self.contexts.get(*idx))
+    }
+
+    fn attr_visibility_for_node(&self, node: &Node<'_>) -> Visibility {
+        self.attr_visibility
+            .get(&node.id())
+            .copied()
+            .unwrap_or(Visibility::Public)
     }
 }
 
@@ -917,6 +926,7 @@ fn is_require_statement(node: Node<'_>, content: &[u8]) -> bool {
 struct ContextBuilder<'a> {
     contexts: Vec<RubyContext>,
     node_to_context: HashMap<usize, usize>,
+    attr_visibility: HashMap<usize, Visibility>,
     namespace: Vec<String>,
     visibility_stack: Vec<Visibility>,
     ffi_enabled_scopes: HashSet<Vec<String>>,
@@ -939,6 +949,7 @@ impl<'a> ContextBuilder<'a> {
         Ok(Self {
             contexts: Vec::new(),
             node_to_context: HashMap::new(),
+            attr_visibility: HashMap::new(),
             namespace: Vec::new(),
             visibility_stack: vec![Visibility::Public],
             ffi_enabled_scopes: HashSet::new(),
@@ -966,6 +977,7 @@ impl<'a> ContextBuilder<'a> {
             "command" | "command_call" | "call" => {
                 self.detect_ffi_extend(node)?;
                 self.detect_controller_dsl(node)?;
+                self.record_attr_visibility(node);
                 self.adjust_visibility(node)?;
                 self.walk_children(node)?;
             }
@@ -1362,6 +1374,19 @@ impl<'a> ContextBuilder<'a> {
         }
 
         Ok(())
+    }
+
+    fn record_attr_visibility(&mut self, node: Node<'a>) {
+        if !is_attr_call(node, self.content) {
+            return;
+        }
+
+        let visibility = self
+            .visibility_stack
+            .last()
+            .copied()
+            .unwrap_or(Visibility::Public);
+        self.attr_visibility.insert(node.id(), visibility);
     }
 
     fn walk_children(&mut self, node: Node<'a>) -> Result<(), String> {
@@ -2365,6 +2390,7 @@ fn normalize_path(path: &std::path::Path) -> std::path::PathBuf {
 fn process_yard_annotations(
     node: Node,
     content: &[u8],
+    ast_graph: &ASTGraph,
     helper: &mut GraphBuildHelper,
 ) -> GraphResult<()> {
     match node.kind() {
@@ -2377,7 +2403,7 @@ fn process_yard_annotations(
         "call" | "command" | "command_call" => {
             // Check if this is an attr_reader/attr_writer/attr_accessor call
             if is_attr_call(node, content) {
-                process_attr_yard(node, content, helper)?;
+                process_attr_yard(node, content, ast_graph, helper)?;
             }
         }
         "assignment" => {
@@ -2392,7 +2418,7 @@ fn process_yard_annotations(
     // Recurse into children
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        process_yard_annotations(child, content, helper)?;
+        process_yard_annotations(child, content, ast_graph, helper)?;
     }
 
     Ok(())
@@ -2576,68 +2602,129 @@ fn process_singleton_method_yard(
     Ok(())
 }
 
-/// Process YARD for `attr_reader/attr_writer/attr_accessor` declarations
+/// Process `attr_reader` / `attr_writer` / `attr_accessor` declarations.
+///
+/// Emission is **unconditional** per the cross-language field-emission
+/// contract (DAG U06 / `C2_OTHER_RUBY`, design §4.5):
+///
+/// - `attr_reader`                    → `NodeKind::Constant`
+/// - `attr_writer` / `attr_accessor`  → `NodeKind::Property`
+/// - Qualified name retains the Ruby `Class#attr` idiom (§3.1.3); the
+///   shared canonicalizer rewrites `#` → `::` for graph identity, but
+///   the builder seam still spells `#` to match Ruby source intent and
+///   the planner U15 lock-in test.
+/// - `is_static = false`; visibility follows Ruby method visibility scope:
+///   `public` by default, then `private` / `protected` after visibility
+///   commands in the enclosing class/module body.
+/// - YARD `@return [Type]` is preserved purely as **type enrichment**
+///   for the `TypeOf{Field}` edge (with `TypeOfContext::Field` and the
+///   bare attr name as edge metadata) and for `References` edges to
+///   nested type identifiers; its absence does **not** suppress node
+///   emission.
 #[allow(clippy::unnecessary_wraps)]
 fn process_attr_yard(
     attr_node: Node,
     content: &[u8],
+    ast_graph: &ASTGraph,
     helper: &mut GraphBuildHelper,
 ) -> GraphResult<()> {
-    // Extract YARD comment
-    let Some(yard_text) = extract_yard_comment(attr_node, content) else {
+    // Determine the attr_* variant so we can branch the NodeKind. The
+    // `is_attr_call` check at the call site has already guaranteed this is
+    // one of attr_reader/attr_writer/attr_accessor, so a missing/unknown
+    // method name here is a no-op (defensive).
+    let Some(method_name) = attr_method_name(attr_node, content) else {
         return Ok(());
     };
+    let is_reader = method_name == "attr_reader";
 
-    // Parse YARD tags
-    let tags = parse_yard_tags(&yard_text);
-
-    // Only process @return tags for attr declarations
-    let Some(var_type) = &tags.returns else {
-        return Ok(());
-    };
-
-    // Extract attribute names from the call arguments
+    // Extract attribute names from the call arguments. Empty argument lists
+    // (syntactically invalid but still parseable) emit nothing.
     let attr_names = extract_attr_names(attr_node, content);
-
     if attr_names.is_empty() {
         return Ok(());
     }
 
-    // Find the class name
+    // Find the enclosing class/module namespace (may be None at top level).
     let class_name = get_enclosing_class_name(attr_node, content);
 
-    // Process each attribute name
+    // Extract optional YARD type-tag for enrichment. Absence is fine — node
+    // emission proceeds either way.
+    let yard_return = extract_yard_comment(attr_node, content)
+        .map(|yard_text| parse_yard_tags(&yard_text))
+        .and_then(|tags| tags.returns);
+
+    // Span anchored on the attr_* call node so the field-emission edges and
+    // node carry useful source coordinates (was None pre-fix).
+    let span = span_from_node(attr_node);
+    let visibility = ast_graph.attr_visibility_for_node(&attr_node).as_str();
+
     for attr_name in attr_names {
-        // Create qualified name for the attribute
+        // Build the qualified name in the Ruby `Class#attr` idiom. The
+        // helper canonicalizes `#` → `::` internally; passing `#` keeps
+        // the design §3.1.3 deviation visible at this seam.
         let qualified_name = if let Some(ref class) = class_name {
             format!("{class}#{attr_name}")
         } else {
             attr_name.clone()
         };
 
-        // Create variable node for the attribute
-        let attr_node_id = helper.add_variable(&qualified_name, None);
+        // Branch the node kind on the attr_* method. is_static is always
+        // false (attr_* are instance members); visibility follows the active
+        // Ruby accessor-method visibility scope.
+        let attr_node_id = if is_reader {
+            helper.add_constant_with_static_and_visibility(
+                &qualified_name,
+                Some(span),
+                false,
+                Some(visibility),
+            )
+        } else {
+            helper.add_property_with_static_and_visibility(
+                &qualified_name,
+                Some(span),
+                false,
+                Some(visibility),
+            )
+        };
 
-        // Create TypeOf edge: variable -> type
-        let canonical_type = canonical_type_string(var_type);
-        let type_node_id = helper.add_type(&canonical_type, None);
-        helper.add_typeof_edge_with_context(
-            attr_node_id,
-            type_node_id,
-            Some(TypeOfContext::Field),
-            None,
-            Some(&attr_name),
-        );
+        // YARD type-tag enrichment is opportunistic: if present, emit the
+        // TypeOf{Field} edge with bare attr name + Field context, plus
+        // References for any nested identifiers in the type expression.
+        if let Some(var_type) = &yard_return {
+            let canonical_type = canonical_type_string(var_type);
+            let type_node_id = helper.add_type(&canonical_type, None);
+            helper.add_typeof_edge_with_context(
+                attr_node_id,
+                type_node_id,
+                Some(TypeOfContext::Field),
+                None,
+                Some(&attr_name),
+            );
 
-        // Create Reference edges: variable -> each referenced type
-        let type_names = extract_type_names(var_type);
-        for type_name in type_names {
-            let ref_type_id = helper.add_type(&type_name, None);
-            helper.add_reference_edge(attr_node_id, ref_type_id);
+            for type_name in extract_type_names(var_type) {
+                let ref_type_id = helper.add_type(&type_name, None);
+                helper.add_reference_edge(attr_node_id, ref_type_id);
+            }
         }
     }
 
     Ok(())
+}
+
+/// Resolve the method name of an `attr_*` `call/command/command_call` node so
+/// the caller can branch the emitted `NodeKind` (reader → Constant,
+/// writer/accessor → Property).
+fn attr_method_name(node: Node, content: &[u8]) -> Option<String> {
+    let raw = match node.kind() {
+        "command" => node
+            .child_by_field_name("name")
+            .and_then(|n| n.utf8_text(content).ok()),
+        "call" | "command_call" => node
+            .child_by_field_name("method")
+            .and_then(|n| n.utf8_text(content).ok()),
+        _ => None,
+    }?;
+    Some(raw.trim().to_string())
 }
 
 /// Process YARD for instance variable assignments
@@ -2846,5 +2933,386 @@ fn get_enclosing_class_name(node: Node, content: &[u8]) -> Option<String> {
         None
     } else {
         Some(namespace_parts.join("::"))
+    }
+}
+
+#[cfg(test)]
+mod field_emission_tests {
+    //! Tests for unconditional Property/Constant emission from Ruby
+    //! `attr_reader` / `attr_writer` / `attr_accessor` invocations
+    //! (DAG U06 / `C2_OTHER_RUBY`).
+    //!
+    //! Post-fix contract:
+    //! - YARD gate removed: emission is unconditional on `attr_*`.
+    //! - `attr_reader` -> `Constant`; `attr_writer` / `attr_accessor` -> `Property`.
+    //! - Qualified name retains the Ruby `Class#attr` idiom (per design §3.1.3 +
+    //!   planner U15 lock-in test). The shared canonicalizer rewrites `#` to
+    //!   `::` for graph identity, but the builder still passes `Class#attr`.
+    //! - YARD `@return [Type]` survives as enrichment for the `TypeOf{Field}`
+    //!   edge (with `TypeOfContext::Field` and the bare attr name as edge
+    //!   metadata), NOT as the emission gate.
+    //! - `is_static = false`; visibility follows Ruby accessor-method scope:
+    //!   `public` by default, then `private` / `protected` after visibility
+    //!   commands in the enclosing class/module body.
+
+    use sqry_core::graph::GraphBuilder;
+    use sqry_core::graph::unified::build::staging::{StagingGraph, StagingOp};
+    use sqry_core::graph::unified::build::test_helpers::{
+        build_node_name_lookup, build_string_lookup,
+    };
+    use sqry_core::graph::unified::edge::EdgeKind;
+    use sqry_core::graph::unified::edge::kind::TypeOfContext;
+    use sqry_core::graph::unified::node::NodeKind;
+    use std::path::Path;
+    use tree_sitter::Parser;
+
+    use super::RubyGraphBuilder;
+
+    fn parse(source: &str) -> tree_sitter::Tree {
+        let mut parser = Parser::new();
+        parser
+            .set_language(&tree_sitter_ruby::LANGUAGE.into())
+            .expect("load Ruby grammar");
+        parser.parse(source, None).expect("parse Ruby source")
+    }
+
+    fn build(source: &str) -> StagingGraph {
+        let tree = parse(source);
+        let mut staging = StagingGraph::new();
+        let builder = RubyGraphBuilder::default();
+        builder
+            .build_graph(&tree, source.as_bytes(), Path::new("test.rb"), &mut staging)
+            .expect("build graph");
+        staging
+    }
+
+    /// Look up a node entry by its qualified-or-bare canonical name, optionally
+    /// requiring a kind. Note: Ruby canonicalization rewrites `#` -> `::`, so
+    /// a builder-side `User#name` becomes `User::name` here.
+    fn find_node<'a>(
+        staging: &'a StagingGraph,
+        name: &str,
+        kind: Option<NodeKind>,
+    ) -> Option<&'a sqry_core::graph::unified::storage::NodeEntry> {
+        let strings = build_string_lookup(staging);
+        for op in staging.operations() {
+            if let StagingOp::AddNode { entry, .. } = op {
+                if let Some(k) = kind
+                    && entry.kind != k
+                {
+                    continue;
+                }
+                let name_idx = entry.qualified_name.unwrap_or(entry.name).index();
+                if let Some(s) = strings.get(&name_idx)
+                    && s == name
+                {
+                    return Some(entry);
+                }
+            }
+        }
+        None
+    }
+
+    fn count_nodes_named(staging: &StagingGraph, name: &str) -> usize {
+        let strings = build_string_lookup(staging);
+        staging
+            .operations()
+            .iter()
+            .filter(|op| {
+                if let StagingOp::AddNode { entry, .. } = op {
+                    let name_idx = entry.qualified_name.unwrap_or(entry.name).index();
+                    strings.get(&name_idx).is_some_and(|s| s == name)
+                } else {
+                    false
+                }
+            })
+            .count()
+    }
+
+    fn visibility(
+        staging: &StagingGraph,
+        entry: &sqry_core::graph::unified::storage::NodeEntry,
+    ) -> Option<String> {
+        let strings = build_string_lookup(staging);
+        entry
+            .visibility
+            .and_then(|visibility_id| strings.get(&visibility_id.index()).cloned())
+    }
+
+    fn typeof_edges_for_node(
+        staging: &StagingGraph,
+        source_name: &str,
+    ) -> Vec<(Option<TypeOfContext>, Option<String>, String)> {
+        let names = build_node_name_lookup(staging);
+        let strings = build_string_lookup(staging);
+        let mut out = Vec::new();
+        for op in staging.operations() {
+            if let StagingOp::AddEdge {
+                source,
+                target,
+                kind: EdgeKind::TypeOf { context, name, .. },
+                ..
+            } = op
+            {
+                let src = names.get(source).cloned().unwrap_or_default();
+                if src != source_name {
+                    continue;
+                }
+                let edge_name = name.and_then(|sid| strings.get(&sid.index()).cloned());
+                let target_name = names.get(target).cloned().unwrap_or_default();
+                out.push((*context, edge_name, target_name));
+            }
+        }
+        out
+    }
+
+    // -- AC-1: YARD gate removed -------------------------------------------
+
+    #[test]
+    fn req_r0001_attr_accessor_without_yard_emits_property_node() {
+        let src = "class Foo\n  attr_accessor :x\nend\n";
+        let staging = build(src);
+        find_node(&staging, "Foo::x", Some(NodeKind::Property))
+            .expect("Foo#x Property must be emitted without YARD");
+    }
+
+    #[test]
+    fn req_r0001_attr_reader_without_yard_emits_constant_node() {
+        let src = "class Foo\n  attr_reader :y\nend\n";
+        let staging = build(src);
+        find_node(&staging, "Foo::y", Some(NodeKind::Constant))
+            .expect("Foo#y Constant must be emitted without YARD");
+    }
+
+    #[test]
+    fn req_r0001_attr_writer_without_yard_emits_property_node() {
+        let src = "class Foo\n  attr_writer :z\nend\n";
+        let staging = build(src);
+        find_node(&staging, "Foo::z", Some(NodeKind::Property))
+            .expect("Foo#z Property must be emitted without YARD");
+    }
+
+    #[test]
+    fn req_r0001_attr_with_yard_still_emits() {
+        let src = "class Foo\n  # @return [String]\n  attr_reader :y\nend\n";
+        let staging = build(src);
+        find_node(&staging, "Foo::y", Some(NodeKind::Constant))
+            .expect("Foo#y Constant must be emitted when YARD is present too");
+    }
+
+    // -- AC-2: kind branching by attr_* method -----------------------------
+
+    #[test]
+    fn req_r0023_attr_reader_branches_to_constant() {
+        let src = "class Bar\n  attr_reader :name\nend\n";
+        let staging = build(src);
+        let entry = find_node(&staging, "Bar::name", Some(NodeKind::Constant))
+            .expect("attr_reader must produce Constant");
+        assert_eq!(entry.kind, NodeKind::Constant);
+        assert!(
+            find_node(&staging, "Bar::name", Some(NodeKind::Property)).is_none(),
+            "attr_reader must NOT also produce a Property"
+        );
+    }
+
+    #[test]
+    fn req_r0023_attr_writer_branches_to_property() {
+        let src = "class Bar\n  attr_writer :name\nend\n";
+        let staging = build(src);
+        let entry = find_node(&staging, "Bar::name", Some(NodeKind::Property))
+            .expect("attr_writer must produce Property");
+        assert_eq!(entry.kind, NodeKind::Property);
+        assert!(
+            find_node(&staging, "Bar::name", Some(NodeKind::Constant)).is_none(),
+            "attr_writer must NOT also produce a Constant"
+        );
+    }
+
+    #[test]
+    fn req_r0023_attr_accessor_branches_to_property() {
+        let src = "class Bar\n  attr_accessor :name\nend\n";
+        let staging = build(src);
+        let entry = find_node(&staging, "Bar::name", Some(NodeKind::Property))
+            .expect("attr_accessor must produce Property");
+        assert_eq!(entry.kind, NodeKind::Property);
+        assert!(
+            find_node(&staging, "Bar::name", Some(NodeKind::Constant)).is_none(),
+            "attr_accessor must NOT also produce a Constant"
+        );
+    }
+
+    #[test]
+    fn req_r0023_attr_accessor_emits_one_per_argument() {
+        let src = "class Multi\n  attr_accessor :a, :b, :c\nend\n";
+        let staging = build(src);
+        find_node(&staging, "Multi::a", Some(NodeKind::Property))
+            .expect("Multi#a Property must exist");
+        find_node(&staging, "Multi::b", Some(NodeKind::Property))
+            .expect("Multi#b Property must exist");
+        find_node(&staging, "Multi::c", Some(NodeKind::Property))
+            .expect("Multi#c Property must exist");
+        // Each name appears exactly once (no Variable shadow from old path).
+        assert_eq!(count_nodes_named(&staging, "Multi::a"), 1);
+        assert_eq!(count_nodes_named(&staging, "Multi::b"), 1);
+        assert_eq!(count_nodes_named(&staging, "Multi::c"), 1);
+    }
+
+    // -- AC-3: qualified name retains Ruby `#` idiom -----------------------
+
+    #[test]
+    fn req_r0017_qualified_name_uses_ruby_hash_idiom() {
+        // Builder passes "Foo#x"; canonicalizer rewrites `#` -> `::` for graph
+        // identity (verified by canonical lookup below). The `#` form is the
+        // user-facing source-level idiom that the planner U15 lock-in test
+        // accepts as a literal name pattern. Any escape from this contract
+        // (e.g. switching to `.` or `::` at the builder seam) breaks the §3.1.3
+        // deviation.
+        let src = "class Foo\n  attr_accessor :x\nend\n";
+        let staging = build(src);
+        // Canonical form (post-canonicalize) is `Foo::x`.
+        find_node(&staging, "Foo::x", Some(NodeKind::Property))
+            .expect("canonical Foo::x must exist");
+        // The bare attr name must NOT leak as the canonical identity.
+        assert!(
+            find_node(&staging, "x", Some(NodeKind::Property)).is_none(),
+            "bare 'x' must not be the qualified name (would collide across classes)"
+        );
+    }
+
+    // -- AC-4: YARD type-tag preserved as TypeOf{Field} enrichment ---------
+
+    #[test]
+    fn req_r0006_yard_type_tag_drives_typeof_field_edge() {
+        let src = "class User\n  # @return [String]\n  attr_reader :name\nend\n";
+        let staging = build(src);
+        let edges = typeof_edges_for_node(&staging, "User::name");
+        assert!(
+            !edges.is_empty(),
+            "User#name should have a TypeOf edge from YARD @return"
+        );
+        let has_string = edges.iter().any(|(_, _, t)| t == "String");
+        assert!(
+            has_string,
+            "YARD @return [String] should produce a TypeOf target 'String', got {edges:?}"
+        );
+    }
+
+    #[test]
+    fn req_r0006_typeof_uses_field_context_and_bare_name() {
+        let src = "class C\n  # @return [String]\n  attr_accessor :title\nend\n";
+        let staging = build(src);
+        let edges = typeof_edges_for_node(&staging, "C::title");
+        assert!(!edges.is_empty(), "C#title should have a TypeOf edge");
+        for (ctx, name, _) in &edges {
+            assert_eq!(*ctx, Some(TypeOfContext::Field), "context must be Field");
+            assert_eq!(
+                name.as_deref(),
+                Some("title"),
+                "edge name must be the bare attr name"
+            );
+        }
+    }
+
+    #[test]
+    fn req_r0006_no_yard_means_no_typeof_edge_but_node_emitted() {
+        // Node emission is unconditional; type enrichment is opportunistic.
+        let src = "class C\n  attr_accessor :untyped\nend\n";
+        let staging = build(src);
+        find_node(&staging, "C::untyped", Some(NodeKind::Property))
+            .expect("Property must emit even without YARD type tag");
+        let edges = typeof_edges_for_node(&staging, "C::untyped");
+        assert!(
+            edges.is_empty(),
+            "no YARD => no TypeOf{{Field}} enrichment edge, got {edges:?}"
+        );
+    }
+
+    // -- AC-5 + design §4.5: visibility scope propagates, is_static is false --
+
+    #[test]
+    fn req_r0023_attr_node_visibility_defaults_to_public() {
+        let src = "class V\n  attr_accessor :x\nend\n";
+        let staging = build(src);
+        let entry =
+            find_node(&staging, "V::x", Some(NodeKind::Property)).expect("V#x Property must exist");
+        assert_eq!(
+            visibility(&staging, entry).as_deref(),
+            Some("public"),
+            "Ruby attr_* nodes default to public visibility"
+        );
+    }
+
+    #[test]
+    fn req_r0023_attr_node_visibility_tracks_private_and_protected_scope() {
+        let src = "class V\n  private\n  attr_accessor :hidden\n  protected\n  attr_reader :guarded\nend\n";
+        let staging = build(src);
+        let hidden = find_node(&staging, "V::hidden", Some(NodeKind::Property))
+            .expect("V#hidden Property must exist");
+        let guarded = find_node(&staging, "V::guarded", Some(NodeKind::Constant))
+            .expect("V#guarded Constant must exist");
+        assert_eq!(
+            visibility(&staging, hidden).as_deref(),
+            Some("private"),
+            "Ruby attr_* nodes must inherit private visibility scope"
+        );
+        assert_eq!(
+            visibility(&staging, guarded).as_deref(),
+            Some("protected"),
+            "Ruby attr_reader nodes must inherit protected visibility scope"
+        );
+    }
+
+    #[test]
+    fn req_r0023_attr_node_is_not_static() {
+        let src = "class S\n  attr_reader :y\nend\n";
+        let staging = build(src);
+        let entry =
+            find_node(&staging, "S::y", Some(NodeKind::Constant)).expect("S#y Constant must exist");
+        assert!(
+            !entry.is_static,
+            "attr_* nodes must have is_static=false (always instance per design §4.5)"
+        );
+    }
+
+    // -- design §3.1.3 + cross-class collision guard -----------------------
+
+    #[test]
+    fn req_r0017_same_attr_name_across_classes_distinct_nodes() {
+        let src = "class A\n  attr_accessor :x\nend\nclass B\n  attr_accessor :x\nend\n";
+        let staging = build(src);
+        find_node(&staging, "A::x", Some(NodeKind::Property)).expect("A#x Property must exist");
+        find_node(&staging, "B::x", Some(NodeKind::Property)).expect("B#x Property must exist");
+        assert!(
+            find_node(&staging, "x", Some(NodeKind::Property)).is_none(),
+            "bare 'x' must not exist; qualified names disambiguate cross-class"
+        );
+    }
+
+    // -- nested namespace -------------------------------------------------
+
+    #[test]
+    fn req_r0017_nested_module_class_qualifies_attr() {
+        let src = "module M\n  class Inner\n    attr_accessor :n\n  end\nend\n";
+        let staging = build(src);
+        find_node(&staging, "M::Inner::n", Some(NodeKind::Property))
+            .expect("M::Inner#n Property must exist with full namespace");
+    }
+
+    // -- string-form arg + command_call form (regression) -----------------
+
+    #[test]
+    fn req_r0001_attr_reader_string_argument_emits_constant() {
+        let src = "class User\n  attr_reader \"username\"\nend\n";
+        let staging = build(src);
+        find_node(&staging, "User::username", Some(NodeKind::Constant))
+            .expect("attr_reader with string arg must emit Constant");
+    }
+
+    #[test]
+    fn req_r0001_attr_accessor_command_call_form_emits_property() {
+        let src = "class Service\n  self.attr_accessor :logger\nend\n";
+        let staging = build(src);
+        find_node(&staging, "Service::logger", Some(NodeKind::Property))
+            .expect("self.attr_accessor command_call must emit Property");
     }
 }

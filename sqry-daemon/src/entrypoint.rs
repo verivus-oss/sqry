@@ -96,11 +96,14 @@ use crate::{
     lifecycle::{
         log_rotate::install_tracing,
         notify::{is_under_systemd, notify_ready},
-        pidfile::{PidfileLock, acquire_pidfile_lock},
+        pidfile::acquire_pidfile_lock,
         signals::install_signal_handlers,
         units::InstallOptions,
     },
 };
+
+#[cfg(unix)]
+use crate::lifecycle::pidfile::PidfileLock;
 
 // ---------------------------------------------------------------------------
 // Environment variable names for FD-inheritance protocol (§C.3.2)

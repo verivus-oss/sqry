@@ -50,7 +50,9 @@
 
 use tokio_util::sync::CancellationToken;
 
-use crate::error::{DaemonError, DaemonResult};
+#[cfg(unix)]
+use crate::error::DaemonError;
+use crate::error::DaemonResult;
 
 /// RAII guard that keeps the signal-listener tasks alive.
 ///

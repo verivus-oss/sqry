@@ -513,6 +513,11 @@ fn walk_tree_for_edges(
                     namespace_stack,
                 );
 
+                // Emit per-type-parameter Type nodes + where-clause
+                // Constraint edges (REQ:R0028 / U19 AC-1, AC-2, AC-3,
+                // AC-4, AC-5).
+                process_type_parameter_declarations(node, content, &qualified_class, helper);
+
                 // Export class if it has public or internal visibility
                 if should_export(node, content)
                     && let Some(class_id) = node_map.get(&qualified_class)
@@ -562,6 +567,11 @@ fn walk_tree_for_edges(
                     namespace_stack,
                 );
 
+                // Emit per-type-parameter Type nodes + where-clause
+                // Constraint edges (REQ:R0028 / U19 AC-1, AC-2, AC-3,
+                // AC-4, AC-5).
+                process_type_parameter_declarations(node, content, &qualified_interface, helper);
+
                 // Export interface if it has public or internal visibility
                 if should_export(node, content)
                     && let Some(interface_id) = node_map.get(&qualified_interface)
@@ -569,7 +579,15 @@ fn walk_tree_for_edges(
                     export_from_file_module(helper, *interface_id);
                 }
 
-                // Process interface method exports
+                // Process interface method exports and recurse into the
+                // interface body so generic interface methods reach the
+                // method_declaration arm of this walker (REQ:R0028 / U19
+                // AC-1: interface-method type-parameters + where-clause
+                // Constraint edges). The interface name is pushed onto
+                // class_stack for the duration of the body walk so the
+                // method walker builds the correct
+                // `<namespace>.<InterfaceName>.<MethodName>.<ParamName>`
+                // qualified name.
                 if let Some(body) = node.child_by_field_name("body") {
                     process_interface_member_exports(
                         body,
@@ -578,9 +596,24 @@ fn walk_tree_for_edges(
                         helper,
                         node_map,
                     );
+
+                    class_stack.push(interface_name.to_string());
+                    let mut cursor = body.walk();
+                    for child in body.children(&mut cursor) {
+                        walk_tree_for_edges(
+                            child,
+                            content,
+                            ast_graph,
+                            helper,
+                            node_map,
+                            namespace_stack,
+                            class_stack,
+                            scope_tree,
+                        )?;
+                    }
+                    class_stack.pop();
                 }
 
-                // Interfaces don't contain classes, so no need to push to class_stack
                 return Ok(());
             }
         }
@@ -614,6 +647,11 @@ fn walk_tree_for_edges(
 
                 process_method_parameters(node, &qualified_name, content, helper);
                 process_method_return_type(node, &qualified_name, content, helper);
+
+                // Emit per-type-parameter Type nodes + where-clause
+                // Constraint edges for generic methods (REQ:R0028 /
+                // U19 AC-1, AC-2, AC-3, AC-4).
+                process_type_parameter_declarations(node, content, &qualified_name, helper);
             }
         }
         "local_declaration_statement" => {
@@ -1258,8 +1296,20 @@ fn process_class_member_exports(
                 }
             }
             "field_declaration" | "property_declaration" => {
-                // Export field/property if it has public or internal visibility
+                // Export field/property if it has public or internal
+                // visibility. Re-emit through the same Property/Constant
+                // discrimination as the typeof pass so the helper's
+                // (qualified_name + kind) dedup key collapses to one node
+                // (REQ:R0001, R0003, R0004, R0005, R0018, R0019).
                 if should_export(child, content) {
+                    let is_property = child.kind() == "property_declaration";
+                    let is_const = !is_property && has_modifier(child, content, "const");
+                    let is_readonly = !is_property && has_modifier(child, content, "readonly");
+                    let is_static = is_const || has_modifier(child, content, "static");
+                    let visibility = extract_field_visibility(child, content);
+                    let get_only = is_property && is_get_only_property(child);
+                    let emit_constant = is_const || is_readonly || get_only;
+
                     // Fields and properties can have multiple declarators
                     let mut field_cursor = child.walk();
                     for field_child in child.children(&mut field_cursor) {
@@ -1271,8 +1321,21 @@ fn process_class_member_exports(
                             let span =
                                 Span::from_bytes(field_child.start_byte(), field_child.end_byte());
 
-                            // Create variable node and export it
-                            let field_id = helper.add_variable(&qualified_name, Some(span));
+                            let field_id = if emit_constant {
+                                helper.add_constant_with_static_and_visibility(
+                                    &qualified_name,
+                                    Some(span),
+                                    is_static,
+                                    Some(visibility),
+                                )
+                            } else {
+                                helper.add_property_with_static_and_visibility(
+                                    &qualified_name,
+                                    Some(span),
+                                    is_static,
+                                    Some(visibility),
+                                )
+                            };
                             export_from_file_module(helper, field_id);
                         } else if field_child.kind() == "identifier"
                             && let Ok(prop_name) = field_child.utf8_text(content)
@@ -1281,8 +1344,21 @@ fn process_class_member_exports(
                             let qualified_name = format!("{class_qualified_name}.{prop_name}");
                             let span = Span::from_bytes(child.start_byte(), child.end_byte());
 
-                            // Create variable node for property and export it
-                            let prop_id = helper.add_variable(&qualified_name, Some(span));
+                            let prop_id = if emit_constant {
+                                helper.add_constant_with_static_and_visibility(
+                                    &qualified_name,
+                                    Some(span),
+                                    is_static,
+                                    Some(visibility),
+                                )
+                            } else {
+                                helper.add_property_with_static_and_visibility(
+                                    &qualified_name,
+                                    Some(span),
+                                    is_static,
+                                    Some(visibility),
+                                )
+                            };
                             export_from_file_module(helper, prop_id);
                         }
                     }
@@ -1663,17 +1739,45 @@ fn process_field_declaration(
 
             let span = Span::from_bytes(child.start_byte(), child.end_byte());
 
-            // Create variable node for the field
-            let field_id = helper.add_variable(&qualified_name, Some(span));
+            // Branch on `readonly` / `const` / `static` modifiers (REQ:R0001,
+            // R0003, R0004, R0005, R0018, R0019). C# semantics:
+            //   - `const` is implicitly static and immutable -> Constant.
+            //   - `readonly` -> Constant (immutable post-construction).
+            //   - otherwise mutable field -> Property.
+            // Visibility comes from the accessibility modifier; the C# default
+            // for a class member is `private` (REQ:R0023). `internal` is a
+            // first-class accessibility level and is passed through verbatim.
+            let is_const = has_modifier(node, content, "const");
+            let is_readonly = has_modifier(node, content, "readonly");
+            let is_static = is_const || has_modifier(node, content, "static");
+            let visibility = extract_field_visibility(node, content);
 
-            // Create TypeOf edge with full type signature and Field context
+            let field_id = if is_const || is_readonly {
+                helper.add_constant_with_static_and_visibility(
+                    &qualified_name,
+                    Some(span),
+                    is_static,
+                    Some(visibility),
+                )
+            } else {
+                helper.add_property_with_static_and_visibility(
+                    &qualified_name,
+                    Some(span),
+                    is_static,
+                    Some(visibility),
+                )
+            };
+
+            // Create TypeOf edge with full type signature, Field context, and
+            // the bare field name (REQ:R0023 / AC-4). Cross-language byte-exact
+            // `field:<name>` planner queries depend on the unqualified form.
             let type_id = helper.add_type(&type_text, None);
             helper.add_typeof_edge_with_context(
                 field_id,
                 type_id,
                 Some(TypeOfContext::Field),
                 None,
-                Some(&qualified_name),
+                Some(field_name),
             );
 
             // Create Reference edges for all nested types
@@ -1744,18 +1848,50 @@ fn process_property_declaration(
 
     let span = Span::from_bytes(node.start_byte(), node.end_byte());
 
-    // Create variable node for the property
-    let prop_id = helper.add_variable(&qualified_name, Some(span));
+    // Branch on modifiers + accessor shape (REQ:R0001, R0003, R0004, R0005,
+    // R0018, R0019). C# property semantics:
+    //   - `const` is illegal on properties (rejected by the compiler).
+    //   - `readonly` is illegal on properties.
+    //   - A get-only auto-property (`{ get; }` with no setter and no body) is
+    //     externally immutable -> Constant.
+    //   - Computed get-only properties (`{ get { ... } }`) and
+    //     expression-bodied properties (`=> expr`) are computed callable
+    //     surfaces; their backing storage (if any) is mutable from the
+    //     implementation side, so they emit Property, not Constant.
+    //   - Property with any setter (or `init`) -> Property.
+    // Visibility comes from the accessibility modifier; the default for a
+    // class member is `private` (REQ:R0023). `internal` is passed through.
+    let is_static = has_modifier(node, content, "static");
+    let visibility = extract_field_visibility(node, content);
+    let get_only = is_get_only_property(node);
 
-    // Create TypeOf edge with full type signature and Field context
-    // (Properties are treated as fields for TypeOf context)
+    let prop_id = if get_only {
+        helper.add_constant_with_static_and_visibility(
+            &qualified_name,
+            Some(span),
+            is_static,
+            Some(visibility),
+        )
+    } else {
+        helper.add_property_with_static_and_visibility(
+            &qualified_name,
+            Some(span),
+            is_static,
+            Some(visibility),
+        )
+    };
+
+    // Create TypeOf edge with full type signature, Field context, and the bare
+    // property name (REQ:R0023 / AC-4). Cross-language byte-exact
+    // `field:<name>` planner queries depend on the unqualified form.
+    // (Properties are treated as fields for TypeOf context.)
     let type_id = helper.add_type(&type_text, None);
     helper.add_typeof_edge_with_context(
         prop_id,
         type_id,
         Some(TypeOfContext::Field),
         None,
-        Some(&qualified_name),
+        Some(prop_name),
     );
 
     // Create Reference edges for all nested types
@@ -1763,6 +1899,108 @@ fn process_property_declaration(
         let ref_type_id = helper.add_type(type_name, None);
         helper.add_reference_edge(prop_id, ref_type_id);
     }
+}
+
+/// Extract the accessibility modifier from a field/property declaration.
+///
+/// C# class members default to `private` when no accessibility modifier is
+/// present (REQ:R0023). `internal` is a first-class accessibility level and is
+/// passed through verbatim. `protected internal` (more accessible than either
+/// alone) is normalized to the canonical two-word form.
+fn extract_field_visibility(node: Node, content: &[u8]) -> &'static str {
+    let has_protected = has_modifier(node, content, "protected");
+    let has_internal = has_modifier(node, content, "internal");
+    if has_protected && has_internal {
+        "protected internal"
+    } else if has_modifier(node, content, "public") {
+        "public"
+    } else if has_protected {
+        "protected"
+    } else if has_internal {
+        "internal"
+    } else if has_modifier(node, content, "private") {
+        "private"
+    } else {
+        // C# class-member default.
+        "private"
+    }
+}
+
+/// Determine whether a property declaration is a true get-only
+/// auto-implemented property (`{ get; }`), as distinct from a computed
+/// getter or an expression-bodied property.
+///
+/// Returns `true` only for:
+///   - An `accessor_list` containing exactly one `get` accessor with NO body
+///     (i.e. `get;`) and no `set;` / `init;` accessor. This is C#'s
+///     auto-implemented immutable property, externally indistinguishable from
+///     a `readonly` field.
+///
+/// Returns `false` for:
+///   - `{ get { ... } }` — computed body. The backing storage (if any) is
+///     mutable from the implementation's perspective; the surface is a
+///     callable, not an immutable value.
+///   - `T X => expr;` (`arrow_expression_clause`) — expression-bodied
+///     properties are computed getters, same rationale as above.
+///   - Any property with a `set` or `init` accessor.
+///   - Any property without an `accessor_list` (defensive default).
+fn is_get_only_property(node: Node) -> bool {
+    // Expression-bodied property: `T X => expr;` is a computed getter, NOT
+    // an auto-implemented immutable property. Reject before scanning the
+    // accessor list.
+    if node
+        .children(&mut node.walk())
+        .any(|child| child.kind() == "arrow_expression_clause")
+    {
+        return false;
+    }
+
+    let Some(accessor_list) = node
+        .children(&mut node.walk())
+        .find(|child| child.kind() == "accessor_list")
+    else {
+        // No accessor list and no expression body -> not classifiable as a
+        // get-only auto-property; default to mutable.
+        return false;
+    };
+
+    let mut has_auto_get = false;
+    let mut has_set_like = false;
+    for accessor in accessor_list.children(&mut accessor_list.walk()) {
+        if accessor.kind() != "accessor_declaration" {
+            continue;
+        }
+
+        // Determine the accessor keyword and whether it has a body. An
+        // auto-implemented accessor terminates immediately with `;` (no
+        // `block` and no `arrow_expression_clause` child). A computed
+        // accessor carries a `block` (`get { ... }`) or
+        // `arrow_expression_clause` (`get => expr`).
+        let mut keyword: Option<&str> = None;
+        let mut has_body = false;
+        for tok in accessor.children(&mut accessor.walk()) {
+            match tok.kind() {
+                "get" | "set" | "init" => keyword = Some(tok.kind()),
+                "block" | "arrow_expression_clause" => has_body = true,
+                _ => {}
+            }
+        }
+
+        match keyword {
+            Some("get") => {
+                if has_body {
+                    // Computed getter — disqualifies the property from being
+                    // a get-only auto-property.
+                    return false;
+                }
+                has_auto_get = true;
+            }
+            Some("set" | "init") => has_set_like = true,
+            _ => {}
+        }
+    }
+
+    has_auto_get && !has_set_like
 }
 /// Process method parameters to create `TypeOf` and Reference edges.
 ///
@@ -1912,5 +2150,289 @@ fn process_method_return_type(
     for type_name in &all_type_names {
         let ref_type_id = helper.add_type(type_name, None);
         helper.add_reference_edge(method_id, ref_type_id);
+    }
+}
+
+// ============================================================================
+// Generic Type Parameter Emission (REQ:R0028 / U19 — C2_GEN_TP_CSHARP)
+// ============================================================================
+
+/// Emit per-type-parameter `Type` nodes and `TypeOf{Constraint}` edges
+/// for a C# generic declaration (class, interface, or method).
+///
+/// Handles all three shapes that carry a `type_parameter_list` child on
+/// tree-sitter-c-sharp declarations:
+///
+/// 1. `class_declaration`     → `<namespace>.<ClassName>.<ParamName>`
+/// 2. `interface_declaration` → `<namespace>.<InterfaceName>.<ParamName>`
+/// 3. `method_declaration`    → `<namespace>.<ClassName>.<MethodName>.<ParamName>`
+///
+/// Tree-sitter-c-sharp grammar shape:
+///
+/// ```text
+/// type_parameter_list:
+///   '<' commaSep1(type_parameter) '>'
+/// type_parameter:
+///   repeat(attribute_list)
+///   optional('in' | 'out')      // variance — emit base node, attribute deferred
+///   name: identifier
+/// type_parameter_constraints_clause:
+///   'where' identifier ':' commaSep1(type_parameter_constraint)
+/// type_parameter_constraint:
+///   class_constraint  ('class')
+///   | struct_constraint ('struct')
+///   | unmanaged ('unmanaged')
+///   | notnull ('notnull')
+///   | constructor_constraint ('new()')
+///   | type: <named-type>
+/// ```
+///
+/// In the live tree-sitter-c-sharp 0.23.x grammar `class`/`struct`/
+/// `unmanaged`/`notnull` arrive as **unnamed** keyword children of the
+/// `type_parameter_constraint` node (not as separate named rules).
+/// `constructor_constraint` is named. The bound type itself comes
+/// through the `type` field on `type_parameter_constraint` and may be
+/// an `identifier`, `qualified_name`, `generic_name`, or
+/// `nullable_type` etc. — handled by `extract_constraint_base_type_name`.
+///
+/// AC-5: variance modifiers (`in`/`out`) are recorded on the parameter
+/// only via the base Type-node emission. The variance attribute itself
+/// is deferred to a future `EdgeKind` extension.
+fn process_type_parameter_declarations(
+    decl_node: Node,
+    content: &[u8],
+    parent_qualified_name: &str,
+    helper: &mut GraphBuildHelper,
+) {
+    // type_parameter_list is an unnamed-position child of the
+    // declaration (no `type_parameters` field name in c-sharp grammar).
+    let mut decl_cursor = decl_node.walk();
+    let Some(params_node) = decl_node
+        .children(&mut decl_cursor)
+        .find(|c| c.kind() == "type_parameter_list")
+    else {
+        return;
+    };
+
+    // Map parameter-name -> NodeId so where-clauses can target the
+    // right parameter Type node by identifier match.
+    let mut param_ids: HashMap<String, sqry_core::graph::unified::node::NodeId> = HashMap::new();
+
+    let mut params_cursor = params_node.walk();
+    for param_node in params_node.children(&mut params_cursor) {
+        if param_node.kind() != "type_parameter" {
+            continue;
+        }
+
+        // Parameter name lives under the `name` field.
+        let Some(name_node) = param_node.child_by_field_name("name") else {
+            continue;
+        };
+        let Ok(param_name) = name_node.utf8_text(content) else {
+            continue;
+        };
+
+        let qualified_param = format!("{parent_qualified_name}.{param_name}");
+        let span = Span::from_bytes(name_node.start_byte(), name_node.end_byte());
+        // AC-2: span anchored on the parameter identifier so
+        // "Find Definition" / hover navigation lands on the declaration
+        // site rather than the synthetic `(0, 0)` sentinel.
+        let param_id = helper.add_type(&qualified_param, Some(span));
+        param_ids.insert(param_name.to_string(), param_id);
+    }
+
+    // AC-3 / AC-4: walk every `type_parameter_constraints_clause`
+    // sibling on the same declaration node and emit one
+    // `TypeOf{Constraint}` edge per constraint entry.
+    let mut clause_cursor = decl_node.walk();
+    for clause_node in decl_node.children(&mut clause_cursor) {
+        if clause_node.kind() != "type_parameter_constraints_clause" {
+            continue;
+        }
+        emit_type_parameter_constraint_clause(clause_node, content, &param_ids, helper);
+    }
+}
+
+/// Emit `TypeOf{Constraint}` edges for one
+/// `type_parameter_constraints_clause`.
+///
+/// The clause shape is:
+/// ```text
+/// type_parameter_constraints_clause:
+///   'where' identifier ':' commaSep1(type_parameter_constraint)
+/// ```
+///
+/// The leading `identifier` child (after the `where` keyword) names the
+/// type parameter being constrained. We match it against the parameter
+/// IDs collected during the `type_parameter_list` walk; an unknown
+/// parameter is skipped silently (defensive — the grammar guarantees
+/// it matches one of the declared parameters).
+fn emit_type_parameter_constraint_clause(
+    clause_node: Node,
+    content: &[u8],
+    param_ids: &HashMap<String, sqry_core::graph::unified::node::NodeId>,
+    helper: &mut GraphBuildHelper,
+) {
+    // The first named child is the parameter identifier (the `where`
+    // keyword and `:` are unnamed). Subsequent named children are
+    // `type_parameter_constraint` nodes.
+    let mut cursor = clause_node.walk();
+    let mut named_children = clause_node
+        .children(&mut cursor)
+        .filter(tree_sitter::Node::is_named);
+
+    let Some(param_id_node) = named_children.next() else {
+        return;
+    };
+    if param_id_node.kind() != "identifier" {
+        return;
+    }
+    let Ok(param_name) = param_id_node.utf8_text(content) else {
+        return;
+    };
+    let Some(&param_id) = param_ids.get(param_name) else {
+        // Constraint clause references a parameter we did not emit —
+        // skip silently. (Should not happen for well-formed C#.)
+        return;
+    };
+
+    for constraint_node in named_children {
+        if constraint_node.kind() != "type_parameter_constraint" {
+            continue;
+        }
+        let Some(constraint_target_name) = extract_constraint_target_name(constraint_node, content)
+        else {
+            continue;
+        };
+        let constraint_id = helper.add_type(&constraint_target_name, None);
+        helper.add_typeof_edge_with_context(
+            param_id,
+            constraint_id,
+            Some(TypeOfContext::Constraint),
+            None,
+            None,
+        );
+    }
+}
+
+/// Extract the constraint target identifier from a single
+/// `type_parameter_constraint` node.
+///
+/// Constraint shapes recognised:
+///
+/// - **Synthetic keywords**: `class`, `struct`, `unmanaged`, `notnull`
+///   appear as **unnamed** keyword children → return the keyword text
+///   verbatim. These become interned synthetic Type nodes named
+///   exactly `class` / `struct` / `unmanaged` / `notnull`.
+/// - **`constructor_constraint`** (`new()`) is a named child → return
+///   the literal string `"new()"` as the synthetic target name.
+/// - **Named-type bound** (`where T : IFoo`, `where T : Comparable<T>`):
+///   the `type` field carries an `identifier`, `qualified_name`,
+///   `generic_name`, or `nullable_type` — return the base name with
+///   any generic argument list stripped (so `Comparable<T>` becomes
+///   `Comparable`). Cross-file unification (Phase 4c-prime) collapses
+///   the synthetic stub into the canonical declaration when one exists.
+fn extract_constraint_target_name(constraint_node: Node, content: &[u8]) -> Option<String> {
+    // Iterate all children: first check for the named `constructor_constraint`,
+    // then the `type` field, then fall back to unnamed keyword tokens.
+    let mut cursor = constraint_node.walk();
+    let mut had_named_constructor = false;
+    let mut keyword_token: Option<&'static str> = None;
+
+    for child in constraint_node.children(&mut cursor) {
+        match child.kind() {
+            "constructor_constraint" => {
+                had_named_constructor = true;
+            }
+            "class" if !child.is_named() => {
+                keyword_token = Some("class");
+            }
+            "struct" if !child.is_named() => {
+                keyword_token = Some("struct");
+            }
+            "unmanaged" if !child.is_named() => {
+                keyword_token = Some("unmanaged");
+            }
+            "notnull" if !child.is_named() => {
+                keyword_token = Some("notnull");
+            }
+            _ => {}
+        }
+    }
+
+    if had_named_constructor {
+        return Some("new()".to_string());
+    }
+    if let Some(kw) = keyword_token {
+        return Some(kw.to_string());
+    }
+
+    // Otherwise the bound is a named type carried by the `type` field
+    // (identifier, qualified_name, generic_name, nullable_type, ...).
+    let type_node = constraint_node.child_by_field_name("type")?;
+    Some(extract_constraint_base_type_name(type_node, content))
+}
+
+/// Extract the base name from a constraint bound type, stripping any
+/// generic type-argument list.
+///
+/// `where T : Comparable<T>` should produce a `Comparable` Type node
+/// (not `Comparable<T>`), matching the Java implementation's behaviour
+/// in `extract_bound_type_base_name`. This lets cross-file unification
+/// collapse the synthetic stub into the canonical `Comparable`
+/// declaration when one exists in the same workspace.
+fn extract_constraint_base_type_name(type_node: Node, content: &[u8]) -> String {
+    match type_node.kind() {
+        "generic_name" => {
+            // `generic_name` has shape: identifier type_argument_list.
+            // Take the leading identifier as the base name.
+            let mut cursor = type_node.walk();
+            for child in type_node.children(&mut cursor) {
+                if matches!(child.kind(), "identifier" | "qualified_name") {
+                    return extract_constraint_base_type_name(child, content);
+                }
+            }
+            type_node.utf8_text(content).unwrap_or_default().to_string()
+        }
+        "qualified_name" => {
+            // `qualified_name` may end in a `generic_name` (e.g.
+            // `System.Collections.Generic.IEnumerable<T>`). Recurse into
+            // the trailing child to strip the type-argument list while
+            // preserving the dotted prefix.
+            let mut cursor = type_node.walk();
+            let children: Vec<_> = type_node
+                .children(&mut cursor)
+                .filter(tree_sitter::Node::is_named)
+                .collect();
+            // Last named child is the leaf: identifier or generic_name.
+            if let Some(last) = children.last()
+                && last.kind() == "generic_name"
+            {
+                // Reconstruct dotted prefix + stripped leaf base.
+                let prefix_segments: Vec<String> = children
+                    .iter()
+                    .take(children.len() - 1)
+                    .filter_map(|c| c.utf8_text(content).ok().map(str::to_string))
+                    .collect();
+                let leaf_base = extract_constraint_base_type_name(*last, content);
+                if prefix_segments.is_empty() {
+                    return leaf_base;
+                }
+                return format!("{}.{}", prefix_segments.join("."), leaf_base);
+            }
+            type_node.utf8_text(content).unwrap_or_default().to_string()
+        }
+        "nullable_type" => {
+            // `T?` — strip the trailing `?` by recursing into the inner
+            // type (first named child).
+            let mut cursor = type_node.walk();
+            for child in type_node.children(&mut cursor) {
+                if child.is_named() {
+                    return extract_constraint_base_type_name(child, content);
+                }
+            }
+            type_node.utf8_text(content).unwrap_or_default().to_string()
+        }
+        _ => type_node.utf8_text(content).unwrap_or_default().to_string(),
     }
 }

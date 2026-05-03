@@ -1501,6 +1501,15 @@ fn process_property_typeof_edges(
     // FIX M-1 (Iteration 3): Pair each pattern with its adjacent type_annotation.
     // Swift can have multiple property bindings where each has its own type annotation.
     // Collect pattern+type pairs by iterating children and tracking adjacent nodes.
+    //
+    // C2_OTHER_SWIFT (REQ:R0001,R0003,R0004,R0005,R0023):
+    // - Branch on `value_binding_pattern` (`let` vs `var`) to emit
+    //   Constant vs Property under `Owner.field`.
+    // - Read `modifiers` for `static`/`class` (→ is_static = true) and
+    //   `visibility_modifier` (→ visibility string). Default visibility
+    //   is "internal" — Swift's implicit access level for instance
+    //   members. Tuple destructuring (`let (a, b) = ...`) recurses into
+    //   nested `pattern` children to capture every bound name.
 
     struct Binding<'a> {
         names: Vec<(String, Node<'a>)>,
@@ -1508,25 +1517,108 @@ fn process_property_typeof_edges(
         referenced_types: Vec<String>,
     }
 
+    // ---- Phase A: extract is_let / is_static / visibility from this declaration ----
+    let mut is_let = true; // Swift declarations always have either let or var; default to let if absent.
+    let mut is_static = false;
+    // Swift default visibility for instance members is `internal`. Only
+    // overridden by an explicit access-control modifier.
+    let mut visibility: &str = "internal";
+
+    let mut decl_cursor = node.walk();
+    for child in node.children(&mut decl_cursor) {
+        match child.kind() {
+            "value_binding_pattern" => {
+                // `value_binding_pattern` has a single keyword child whose
+                // kind is either `let` or `var`.
+                let mut vbp_cursor = child.walk();
+                for vbp_child in child.children(&mut vbp_cursor) {
+                    match vbp_child.kind() {
+                        "let" => is_let = true,
+                        "var" => is_let = false,
+                        _ => {}
+                    }
+                }
+            }
+            "modifiers" => {
+                let mut mod_cursor = child.walk();
+                for mod_child in child.children(&mut mod_cursor) {
+                    match mod_child.kind() {
+                        "visibility_modifier" => {
+                            // Visibility kind is the first identifier child:
+                            // public / internal / fileprivate / private / open.
+                            //
+                            // Per Swift spec, setter access can be lower than
+                            // property access via the `(set)` form
+                            // (`private(set)`, `fileprivate(set)`,
+                            // `internal(set)`). Those modifiers restrict the
+                            // setter only — the property's overall visibility
+                            // is governed by a separate bare access modifier
+                            // (e.g. `public private(set) var limited: Int`
+                            // remains a `public` property with a private
+                            // setter). We don't model setter visibility
+                            // separately yet, so SKIP `(set)` forms here and
+                            // fall back to the bare modifier.
+                            //
+                            // Tree-sitter-swift accepts whitespace inside the
+                            // parentheses (`private( set )`, `private ( set )`,
+                            // etc.), so a source-text `contains("(set)")`
+                            // check is not robust. Instead, walk the
+                            // `visibility_modifier`'s children structurally and
+                            // detect the `set` token by node kind or trimmed
+                            // text — this is whitespace-agnostic.
+                            let mut setter_cursor = mod_child.walk();
+                            let is_setter_access =
+                                mod_child.children(&mut setter_cursor).any(|c| {
+                                    c.kind() == "set"
+                                        || c.utf8_text(content)
+                                            .map(|t| t.trim() == "set")
+                                            .unwrap_or(false)
+                                });
+                            if is_setter_access {
+                                continue;
+                            }
+                            let mut vis_cursor = mod_child.walk();
+                            for vis_child in mod_child.children(&mut vis_cursor) {
+                                match vis_child.kind() {
+                                    "public" => visibility = "public",
+                                    "internal" => visibility = "internal",
+                                    "fileprivate" => visibility = "fileprivate",
+                                    "private" => visibility = "private",
+                                    "open" => visibility = "open",
+                                    _ => {}
+                                }
+                            }
+                        }
+                        "property_modifier" => {
+                            // `static` and `class` (class-level overridable) both
+                            // mark the property as type-level rather than instance-level.
+                            let mut pm_cursor = mod_child.walk();
+                            for pm_child in mod_child.children(&mut pm_cursor) {
+                                if matches!(pm_child.kind(), "static" | "class") {
+                                    is_static = true;
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // ---- Phase B: pair patterns with type annotations as before ----
     let mut bindings: Vec<Binding> = Vec::new();
-    let mut current_names = Vec::new();
+    let mut current_names: Vec<(String, Node)> = Vec::new();
     let mut pending_type: Option<Node> = None;
 
-    // Iterate through children to pair patterns with type annotations
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         match child.kind() {
             "pattern" | "pattern_binding" => {
-                // Extract names from this pattern
-                let mut pattern_cursor = child.walk();
-                for pattern_child in child.children(&mut pattern_cursor) {
-                    if (pattern_child.kind() == "simple_identifier"
-                        || pattern_child.kind() == "name")
-                        && let Ok(name) = pattern_child.utf8_text(content)
-                    {
-                        current_names.push((name.to_string(), pattern_child));
-                    }
-                }
+                // Recurse into nested patterns to support tuple destructuring
+                // (`let (a, b) = (1, 2)` → AST: pattern[(] pattern[a] [,] pattern[b] [)]).
+                collect_pattern_names(child, content, &mut current_names);
             }
             "type_annotation" => {
                 // Found a type annotation - store it as pending
@@ -1593,19 +1685,50 @@ fn process_property_typeof_edges(
                 crate::relations::extract_type_names_from_swift_type(type_node, content);
 
             bindings.push(Binding {
-                names: current_names,
+                names: current_names.clone(),
                 type_text,
                 referenced_types,
             });
+            current_names.clear();
         }
     }
 
-    // Create TypeOf and Reference edges for each binding
+    // ---- Phase C: emit Property/Constant nodes + edges ----
+    //
+    // A property name appears in exactly one of two places:
+    //   (a) inside a `Binding` (the declaration has a type annotation), or
+    //   (b) leftover in `current_names` (no type annotation, e.g. tuple
+    //       destructuring `let (a, b) = (1, 2)`).
+    //
+    // In case (a) we emit the property node + TypeOf + Reference edges.
+    // In case (b) we emit the property node only (no type info to bind).
+
+    // Helper closure: emit a Property or Constant node based on `is_let`.
+    let emit_node = |helper: &mut GraphBuildHelper,
+                     qualified_property_name: &str,
+                     name_node: &Node|
+     -> sqry_core::graph::unified::node::NodeId {
+        if is_let {
+            helper.add_constant_with_static_and_visibility(
+                qualified_property_name,
+                Some(node_to_span(name_node)),
+                is_static,
+                Some(visibility),
+            )
+        } else {
+            helper.add_property_with_static_and_visibility(
+                qualified_property_name,
+                Some(node_to_span(name_node)),
+                is_static,
+                Some(visibility),
+            )
+        }
+    };
+
     for binding in bindings {
         for (property_name, name_node) in binding.names {
             let qualified_property_name = format!("{qualified_owner}.{property_name}");
-            let property_id =
-                helper.add_variable(&qualified_property_name, Some(node_to_span(&name_node)));
+            let property_id = emit_node(helper, &qualified_property_name, &name_node);
 
             let type_id = helper.add_type(&binding.type_text, None);
             helper.add_typeof_edge_with_context(
@@ -1620,6 +1743,35 @@ fn process_property_typeof_edges(
                 let ref_type_id = helper.add_type(ref_type_name, None);
                 helper.add_reference_edge(property_id, ref_type_id);
             }
+        }
+    }
+
+    // Names without a binding type (e.g. `let (a, b) = (1, 2)` or `var x = 0`)
+    // still need a Property/Constant node so downstream consumers can find them.
+    for (property_name, name_node) in current_names {
+        let qualified_property_name = format!("{qualified_owner}.{property_name}");
+        let _ = emit_node(helper, &qualified_property_name, &name_node);
+    }
+}
+
+/// Recursively collect identifier names from a Swift `pattern` or
+/// `pattern_binding` subtree. Handles flat patterns (`let x: Int`),
+/// tuple destructuring (`let (a, b)`), and nested tuples
+/// (`let (a, (b, c))`).
+fn collect_pattern_names<'a>(pattern: Node<'a>, content: &[u8], out: &mut Vec<(String, Node<'a>)>) {
+    let mut cursor = pattern.walk();
+    for child in pattern.children(&mut cursor) {
+        match child.kind() {
+            "simple_identifier" | "name" => {
+                if let Ok(name) = child.utf8_text(content) {
+                    out.push((name.to_string(), child));
+                }
+            }
+            // Recurse into nested patterns produced by tuple destructuring.
+            "pattern" | "pattern_binding" | "tuple_pattern" => {
+                collect_pattern_names(child, content, out);
+            }
+            _ => {}
         }
     }
 }
@@ -3049,6 +3201,337 @@ class InternalClass {}
         assert_eq!(
             export_count, 4,
             "Should export public and internal symbols (not private)"
+        );
+    }
+
+    // ========================================================================
+    // C2_OTHER_SWIFT — Property/Constant emission for `let`/`var` properties
+    // REQ:R0001, R0003, R0004, R0005, R0023
+    // ========================================================================
+
+    use sqry_core::graph::unified::node::NodeKind;
+
+    /// Locate a staged `AddNode` op by exact canonical (qualified) name.
+    fn find_staged_node<'a>(
+        staging: &'a StagingGraph,
+        canonical_name: &str,
+    ) -> Option<&'a sqry_core::graph::unified::storage::arena::NodeEntry> {
+        staging.operations().iter().find_map(|op| {
+            if let StagingOp::AddNode { entry, .. } = op
+                && staging.resolve_node_canonical_name(entry) == Some(canonical_name)
+            {
+                Some(entry)
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Resolve a node's visibility string through the staging interner.
+    fn visibility_of(
+        staging: &StagingGraph,
+        entry: &sqry_core::graph::unified::storage::arena::NodeEntry,
+    ) -> Option<String> {
+        entry
+            .visibility
+            .and_then(|sid| staging.resolve_local_string(sid).map(str::to_string))
+    }
+
+    fn build_swift(source: &str) -> StagingGraph {
+        let tree = parse_swift(source);
+        let mut staging = StagingGraph::new();
+        let builder = SwiftGraphBuilder::default();
+        builder
+            .build_graph(
+                &tree,
+                source.as_bytes(),
+                &PathBuf::from("test.swift"),
+                &mut staging,
+            )
+            .expect("build graph");
+        staging
+    }
+
+    /// AC-1 (let half) + AC-3 (default visibility): an instance `let` property
+    /// emits `NodeKind::Constant` under `Container.field`, with
+    /// `is_static = false` and `visibility = Some("internal")` (Swift's
+    /// implicit default for instance members).
+    #[test]
+    fn test_let_property_emits_constant_with_internal_default() {
+        let source = r"
+class C {
+    let x: Int = 0
+}
+";
+        let staging = build_swift(source);
+        let entry = find_staged_node(&staging, "C::x").expect("C::x must be staged");
+        assert_eq!(entry.kind, NodeKind::Constant, "let → Constant");
+        assert!(!entry.is_static, "instance let must not be static");
+        assert_eq!(
+            visibility_of(&staging, entry).as_deref(),
+            Some("internal"),
+            "Swift default visibility is internal (not None, not public)"
+        );
+        // Old NodeKind::Variable for C.x must NOT appear.
+        let stale = staging.operations().iter().any(|op| {
+            matches!(op, StagingOp::AddNode { entry, .. }
+                if entry.kind == NodeKind::Variable
+                    && staging.resolve_node_canonical_name(entry) == Some("C::x"))
+        });
+        assert!(
+            !stale,
+            "C.x must no longer be emitted as NodeKind::Variable"
+        );
+    }
+
+    /// AC-1 (var half) + AC-3 (default visibility): an instance `var` property
+    /// emits `NodeKind::Property` with `is_static = false` and
+    /// `visibility = Some("internal")`.
+    #[test]
+    fn test_var_property_emits_property_with_internal_default() {
+        let source = r#"
+class C {
+    var y: String = ""
+}
+"#;
+        let staging = build_swift(source);
+        let entry = find_staged_node(&staging, "C::y").expect("C.y must be staged");
+        assert_eq!(entry.kind, NodeKind::Property, "var → Property");
+        assert!(!entry.is_static, "instance var must not be static");
+        assert_eq!(
+            visibility_of(&staging, entry).as_deref(),
+            Some("internal"),
+            "Swift default visibility is internal"
+        );
+    }
+
+    /// AC-2: `static` modifier on a `let` flips `is_static = true`. The
+    /// kind stays `Constant` because the binding is `let`.
+    #[test]
+    fn test_static_let_emits_constant_static_true() {
+        let source = r"
+class C {
+    public static let z: Int = 0
+}
+";
+        let staging = build_swift(source);
+        let entry = find_staged_node(&staging, "C::z").expect("C.z must be staged");
+        assert_eq!(entry.kind, NodeKind::Constant);
+        assert!(entry.is_static, "static let must have is_static = true");
+        assert_eq!(visibility_of(&staging, entry).as_deref(), Some("public"));
+    }
+
+    /// AC-2: `class` modifier (used in classes for class-level overridable
+    /// statics) flips `is_static = true` on a `var`. Kind stays `Property`.
+    /// Note: Swift `class` type properties are computed-only — stored type
+    /// properties must use `static`. The fixture therefore uses a computed
+    /// `class var` form, which is the only valid way to exercise the
+    /// `class`-modifier branch.
+    #[test]
+    fn test_class_var_emits_property_static_true() {
+        let source = r#"
+class C {
+    open class var w: String { return "" }
+}
+"#;
+        let staging = build_swift(source);
+        let entry = find_staged_node(&staging, "C::w").expect("C.w must be staged");
+        assert_eq!(entry.kind, NodeKind::Property);
+        assert!(entry.is_static, "class var must have is_static = true");
+        assert_eq!(visibility_of(&staging, entry).as_deref(), Some("open"));
+    }
+
+    /// AC-3: each Swift access-control modifier maps verbatim onto the node
+    /// `visibility` field — `public`, `internal`, `fileprivate`, `private`,
+    /// `open`. Implicit default → `internal`.
+    #[test]
+    fn test_visibility_modifier_round_trip() {
+        let source = r"
+class C {
+    public let p: Int = 0
+    internal let i: Int = 0
+    fileprivate let fp: Int = 0
+    private let pr: Int = 0
+    open let o: Int = 0
+    let d: Int = 0
+}
+";
+        let staging = build_swift(source);
+        for (qn, expected) in [
+            ("C::p", Some("public")),
+            ("C::i", Some("internal")),
+            ("C::fp", Some("fileprivate")),
+            ("C::pr", Some("private")),
+            ("C::o", Some("open")),
+            ("C::d", Some("internal")),
+        ] {
+            let entry =
+                find_staged_node(&staging, qn).unwrap_or_else(|| panic!("{qn} must be staged"));
+            assert_eq!(
+                visibility_of(&staging, entry).as_deref(),
+                expected,
+                "{qn} visibility mismatch"
+            );
+        }
+    }
+
+    /// AC-3 regression: a setter-access modifier (`private(set)`,
+    /// `fileprivate(set)`, `internal(set)`) lowers the SETTER's visibility
+    /// only — the property's overall visibility comes from the bare
+    /// access modifier that appears alongside it. `public private(set) var`
+    /// must emit visibility = `public`, NOT `private`.
+    #[test]
+    fn test_setter_access_modifier_does_not_override_visibility() {
+        let source = r"
+class C {
+    public private(set) var limited: Int = 0
+    internal fileprivate(set) var halfOpen: Int = 0
+    public internal(set) var nearlyPublic: Int = 0
+}
+";
+        let staging = build_swift(source);
+        for (qn, expected) in [
+            ("C::limited", Some("public")),
+            ("C::halfOpen", Some("internal")),
+            ("C::nearlyPublic", Some("public")),
+        ] {
+            let entry =
+                find_staged_node(&staging, qn).unwrap_or_else(|| panic!("{qn} must be staged"));
+            assert_eq!(entry.kind, NodeKind::Property);
+            assert_eq!(
+                visibility_of(&staging, entry).as_deref(),
+                expected,
+                "{qn} visibility must come from the bare access modifier, not the (set) form"
+            );
+        }
+    }
+
+    /// AC-3 regression (whitespace variants): tree-sitter-swift accepts
+    /// whitespace inside the setter-access parentheses (`private( set )`,
+    /// `private ( set )`, `internal( set )`, etc.). The previous
+    /// `mod_text.contains("(set)")` text-substring check missed these forms
+    /// and incorrectly took `private`/`internal` as the property's visibility
+    /// instead of the bare modifier (`public`). The structural child-walk
+    /// detects the `set` token regardless of internal whitespace.
+    #[test]
+    fn test_setter_access_modifier_whitespace_variants_skipped() {
+        let source = r"
+class C {
+    public private ( set ) var oddly_spaced: Int = 0
+    public internal( set ) var oddBraces: Int = 0
+    public fileprivate (set) var leadingSpace: Int = 0
+}
+";
+        let staging = build_swift(source);
+        for (qn, expected) in [
+            ("C::oddly_spaced", Some("public")),
+            ("C::oddBraces", Some("public")),
+            ("C::leadingSpace", Some("public")),
+        ] {
+            let entry =
+                find_staged_node(&staging, qn).unwrap_or_else(|| panic!("{qn} must be staged"));
+            assert_eq!(entry.kind, NodeKind::Property);
+            assert_eq!(
+                visibility_of(&staging, entry).as_deref(),
+                expected,
+                "{qn} visibility must come from the bare access modifier even when the (set) form has internal whitespace"
+            );
+        }
+    }
+
+    /// AC-4: tuple destructuring `let (a, b) = (1, 2)` emits one
+    /// `Constant` node per pattern name (`C.a` and `C.b`).
+    #[test]
+    fn test_tuple_destructuring_emits_one_node_per_name() {
+        let source = r"
+class C {
+    let (a, b) = (1, 2)
+}
+";
+        let staging = build_swift(source);
+        let a = find_staged_node(&staging, "C::a").expect("C.a must be staged");
+        let b = find_staged_node(&staging, "C::b").expect("C.b must be staged");
+        assert_eq!(a.kind, NodeKind::Constant, "tuple-bound let → Constant");
+        assert_eq!(b.kind, NodeKind::Constant, "tuple-bound let → Constant");
+        assert!(!a.is_static);
+        assert!(!b.is_static);
+        // Old NodeKind::Variable for these names must NOT appear.
+        let stale = staging.operations().iter().any(|op| {
+            matches!(op, StagingOp::AddNode { entry, .. }
+            if entry.kind == NodeKind::Variable
+                && matches!(
+                    staging.resolve_node_canonical_name(entry),
+                    Some("C::a" | "C::b")
+                ))
+        });
+        assert!(
+            !stale,
+            "tuple-destructured names must not emit NodeKind::Variable"
+        );
+    }
+
+    /// AC-4 (var half): `var (a, b) = (1, 2)` emits one `Property` per name.
+    #[test]
+    fn test_tuple_destructuring_var_emits_property_per_name() {
+        let source = r"
+class C {
+    var (m, n) = (1, 2)
+}
+";
+        let staging = build_swift(source);
+        let m = find_staged_node(&staging, "C::m").expect("C.m must be staged");
+        let n = find_staged_node(&staging, "C::n").expect("C.n must be staged");
+        assert_eq!(m.kind, NodeKind::Property);
+        assert_eq!(n.kind, NodeKind::Property);
+    }
+
+    /// AC-5 (regression): the existing `TypeOf` edge with `TypeOfContext::Field`
+    /// and the bare property name is preserved across the helper swap. The
+    /// edge's source `NodeId` must point at the new Property/Constant node.
+    #[test]
+    fn test_property_typeof_edge_metadata_preserved() {
+        let source = r"
+class C {
+    let x: Int = 0
+}
+";
+        let staging = build_swift(source);
+        let x_id = staging
+            .operations()
+            .iter()
+            .find_map(|op| match op {
+                StagingOp::AddNode {
+                    entry,
+                    expected_id: Some(id),
+                } if staging.resolve_node_canonical_name(entry) == Some("C::x")
+                    && entry.kind == NodeKind::Constant =>
+                {
+                    Some(*id)
+                }
+                _ => None,
+            })
+            .expect("C.x Constant node must be staged");
+
+        let typeof_edge = staging.operations().iter().find_map(|op| {
+            if let StagingOp::AddEdge {
+                source,
+                kind: EdgeKind::TypeOf { context, name, .. },
+                ..
+            } = op
+                && *source == x_id
+            {
+                Some((*context, *name))
+            } else {
+                None
+            }
+        });
+        let (context, name) = typeof_edge.expect("TypeOf edge from C.x must be staged");
+        assert_eq!(context, Some(TypeOfContext::Field));
+        let resolved_name = name.and_then(|sid| staging.resolve_local_string(sid));
+        assert_eq!(
+            resolved_name,
+            Some("x"),
+            "TypeOf edge name must be the bare field name (not qualified)"
         );
     }
 }

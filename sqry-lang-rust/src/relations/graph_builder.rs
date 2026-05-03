@@ -937,6 +937,12 @@ fn walk_tree_for_staging(
 
                 // NEW: Extract trait bounds from type parameters and where clauses
                 build_trait_bound_reference_edges(node, content, helper, item_id)?;
+
+                // Emit per-type-parameter Type nodes + Constraint edges
+                // (REQ:R0029 / U20 AC-1, AC-2, AC-3, AC-4). Lifetimes
+                // stay on the existing LifetimeConstraint pipeline
+                // (AC-5).
+                process_type_parameter_declarations(node, content, &qualified_name, helper);
             }
 
             // Process children (this includes parameter types and function body)
@@ -1099,6 +1105,12 @@ fn walk_tree_for_staging(
                             process_lifetime_extraction(&lifetime_result, helper);
                         }
                     }
+
+                    // Emit per-type-parameter Type nodes + Constraint
+                    // edges (REQ:R0029 / U20 AC-1, AC-2, AC-3, AC-4).
+                    // Lifetimes stay on the existing
+                    // LifetimeConstraint pipeline (AC-5).
+                    process_type_parameter_declarations(node, content, &qualified, helper);
                 }
             }
         }
@@ -1523,6 +1535,28 @@ fn walk_tree_for_staging(
                 // Get or create the type node (may already exist from struct/enum definition)
                 let type_id = helper.add_struct(&qualified, Some(span));
                 build_trait_bound_reference_edges(node, content, helper, type_id)?;
+
+                // Emit per-type-parameter Type nodes + Constraint
+                // edges (REQ:R0029 / U20 AC-1, AC-2, AC-3, AC-4) for
+                // the impl block. The owner qualified name is the
+                // base impl-type identifier with any generic
+                // arguments stripped, so `impl<T> Foo<T>` produces
+                // `Foo::T` rather than `Foo<T>::T`.
+                let base_owner = extract_all_type_names_from_rust_type(type_node, content)
+                    .first()
+                    .cloned()
+                    .map_or_else(
+                        || qualified.clone(),
+                        |base| {
+                            qualify_item_name(
+                                node,
+                                &base,
+                                content,
+                                build_ctx.file_module_path.as_deref(),
+                            )
+                        },
+                    );
+                process_type_parameter_declarations(node, content, &base_owner, helper);
             }
 
             // Process children
@@ -1589,13 +1623,24 @@ fn walk_tree_for_staging(
             }
         }
         "field_declaration" => {
-            // NEW: Create TypeOf and Reference edges for named struct/enum fields
-            build_field_typeof_edges(node, content, helper)?;
+            // U11 (REQ:R0001..R0005, R0021..R0023): emit Property nodes with
+            // qualified names `{module_path}::{Struct}::{field}` (Rust :: retained
+            // per design §3.1.2) + per-field visibility (§3.3 row 6) + TypeOf edges
+            // carrying TypeOfContext::Field + bare field name. Covers named struct
+            // fields and enum struct-variant fields.
+            build_field_typeof_edges(node, content, helper, build_ctx.file_module_path.as_deref())?;
         }
         "ordered_field_declaration_list" => {
-            // NEW: Create TypeOf and Reference edges for tuple struct/enum variant fields
-            // Example: struct Point(i32, i32); or enum Result { Ok(T), Err(E) }
-            build_tuple_field_typeof_edges(node, content, helper)?;
+            // U11 (REQ:R0022): tuple-struct field collision resolved via
+            // qualified Property names `{module_path}::{Struct}::{index}`.
+            // Covers tuple structs (`struct Point(i32, i32);`) and enum
+            // tuple-variants (`enum Foo { Bar(i32) }`).
+            build_tuple_field_typeof_edges(
+                node,
+                content,
+                helper,
+                build_ctx.file_module_path.as_deref(),
+            )?;
         }
         "identifier" => {
             local_scopes::handle_identifier_for_reference(node, content, scope_tree, helper);
@@ -3159,61 +3204,258 @@ fn build_parameter_typeof_edges(
     Ok(())
 }
 
-/// Build `TypeOf` edges for struct/enum field declarations with type annotations.
+/// Resolve the qualified container name for a struct/enum-variant field.
 ///
-/// Creates Variable nodes for fields and `TypeOf` + Reference edges to their types.
+/// Walks ancestors starting at the parent of `field_or_list_node` (which is
+/// expected to be a `field_declaration_list` or `ordered_field_declaration_list`)
+/// and returns the qualified name of the immediately enclosing container:
+///
+/// * named struct field — parent chain `field_declaration_list → struct_item`
+///   yields `{module_path}::{Struct}` (per `qualify_item_name`).
+/// * tuple struct field — parent chain `ordered_field_declaration_list →
+///   struct_item` yields `{module_path}::{Struct}`.
+/// * enum struct/tuple variant field — the immediate field-list parent is an
+///   `enum_variant`; we walk one further to its `enum_variant_list → enum_item`
+///   ancestor and return `{module_path}::{Enum}::{Variant}` (per design §4.6
+///   AC-4 / AC-5; Rust `::` retained per §3.1.2).
+///
+/// Returns `None` for unanchored / unsupported AST shapes (defensive — should
+/// not happen for grammar-valid Rust source).
+fn resolve_field_container_qualified_name(
+    field_or_list_node: Node<'_>,
+    content: &[u8],
+    file_module_path: Option<&str>,
+) -> Option<String> {
+    let parent = field_or_list_node.parent()?;
+
+    match parent.kind() {
+        // Named-struct case: parent is field_declaration_list,
+        // grandparent is either struct_item or enum_variant.
+        "field_declaration_list" => {
+            let grand = parent.parent()?;
+            qualified_name_for_container(grand, content, file_module_path)
+        }
+        // Tuple-struct / tuple-variant case: parent is the
+        // ordered_field_declaration_list's parent — i.e., struct_item or
+        // enum_variant directly.
+        "struct_item" | "enum_variant" => {
+            qualified_name_for_container(parent, content, file_module_path)
+        }
+        _ => None,
+    }
+}
+
+fn qualified_name_for_container(
+    node: Node<'_>,
+    content: &[u8],
+    file_module_path: Option<&str>,
+) -> Option<String> {
+    match node.kind() {
+        // U11 follow-up: `union_item` is treated identically to `struct_item`
+        // for field qualification — its `field_declaration_list` carries
+        // ordinary `field_declaration` children whose qualified name must be
+        // `{module_path}::{UnionName}::{field}` (Rust `::` retained per
+        // design §3.1.2). Without this arm, union fields fell through to the
+        // bare-name fallback and reintroduced the bare-name collision class
+        // U11 was meant to remove (REQ:R0001..R0005, R0023).
+        "struct_item" | "enum_item" | "union_item" => {
+            let name_node = node.child_by_field_name("name")?;
+            let name = name_node.utf8_text(content).ok()?.trim();
+            if name.is_empty() {
+                return None;
+            }
+            let qualified = qualify_item_name(node, name, content, file_module_path);
+            if qualified.is_empty() {
+                None
+            } else {
+                Some(qualified)
+            }
+        }
+        "enum_variant" => {
+            // Variant qualified name = {Enum}::{Variant} (with module prefix).
+            let variant_name_node = node.child_by_field_name("name")?;
+            let variant_name = variant_name_node.utf8_text(content).ok()?.trim();
+            if variant_name.is_empty() {
+                return None;
+            }
+            // Walk up: enum_variant → enum_variant_list → enum_item.
+            let variant_list = node.parent()?;
+            if variant_list.kind() != "enum_variant_list" {
+                return None;
+            }
+            let enum_item = variant_list.parent()?;
+            if enum_item.kind() != "enum_item" {
+                return None;
+            }
+            let enum_name_node = enum_item.child_by_field_name("name")?;
+            let enum_name = enum_name_node.utf8_text(content).ok()?.trim();
+            if enum_name.is_empty() {
+                return None;
+            }
+            let enum_qualified = qualify_item_name(enum_item, enum_name, content, file_module_path);
+            if enum_qualified.is_empty() {
+                None
+            } else {
+                // Rust `::` retained per design §3.1.2.
+                Some(format!("{enum_qualified}::{variant_name}"))
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Per-field visibility per design §3.3 row 6.
+///
+/// | Source              | Visibility string |
+/// |---------------------|-------------------|
+/// | `pub`               | `"public"`        |
+/// | `pub(crate)`        | `"crate"`         |
+/// | `pub(super)`        | `"super"`         |
+/// | `pub(in <path>)`    | `"in:<path>"`     |
+/// | absent (default)    | `"private"`       |
+///
+/// The `pub(in path)` form preserves the path so downstream consumers can
+/// disambiguate; the return type carries an owned String for that case.
+enum FieldVisibility {
+    Static(&'static str),
+    Owned(String),
+}
+
+impl FieldVisibility {
+    fn as_str(&self) -> &str {
+        match self {
+            FieldVisibility::Static(s) => s,
+            FieldVisibility::Owned(s) => s.as_str(),
+        }
+    }
+}
+
+fn classify_visibility_modifier_text(raw: &str) -> FieldVisibility {
+    // Whitespace-collapse so `pub ( crate )` is recognized identically to
+    // `pub(crate)`. The grammar typically emits the dense form, but parser
+    // recovery occasionally inserts whitespace.
+    let collapsed: String = raw.split_whitespace().collect();
+
+    if collapsed == "pub" {
+        FieldVisibility::Static("public")
+    } else if collapsed == "pub(crate)" {
+        FieldVisibility::Static("crate")
+    } else if collapsed == "pub(super)" {
+        FieldVisibility::Static("super")
+    } else if let Some(rest) = collapsed.strip_prefix("pub(in") {
+        let inner = rest.trim_end_matches(')').trim();
+        if inner.is_empty() {
+            FieldVisibility::Static("private")
+        } else {
+            FieldVisibility::Owned(format!("in:{inner}"))
+        }
+    } else {
+        FieldVisibility::Static("private")
+    }
+}
+
+fn extract_field_visibility(node: Node<'_>, content: &[u8]) -> FieldVisibility {
+    let mut cursor = node.walk();
+    let Some(vis_node) = node
+        .children(&mut cursor)
+        .find(|child| child.kind() == "visibility_modifier")
+    else {
+        return FieldVisibility::Static("private");
+    };
+
+    let Ok(vis_text_raw) = vis_node.utf8_text(content) else {
+        return FieldVisibility::Static("private");
+    };
+
+    classify_visibility_modifier_text(vis_text_raw.trim())
+}
+
+/// Build the qualified Property node + `TypeOf{Field}` edge for a named
+/// struct / enum-struct-variant field.
 ///
 /// # Example
 ///
 /// ```rust,ignore
-/// struct Service {
-///     repository: UserRepository,
+/// pub struct Service {
+///     pub repository: UserRepository,
 ///     cache: Arc<RwLock<HashMap<String, User>>>,
 /// }
 /// ```
 ///
 /// Creates:
-/// - Variable nodes: "repository", "cache"
-/// - `TypeOf` edges: repository → `UserRepository`, cache → Arc
-/// - Reference edges: All extracted types
+/// - Property nodes: `Service::repository` (visibility = `"public"`),
+///   `Service::cache` (visibility = `"private"`).
+/// - `TypeOf{Field, name="repository"}` edge: `Service::repository → UserRepository`.
+/// - Reference edges to all extracted nested types.
 #[allow(clippy::unnecessary_wraps)]
 fn build_field_typeof_edges(
     node: Node<'_>,
     content: &[u8],
     helper: &mut GraphBuildHelper,
+    file_module_path: Option<&str>,
 ) -> GraphResult<()> {
-    // Extract field name
+    // Extract field name.
     let Some(name_node) = node.child_by_field_name("name") else {
         return Ok(());
     };
 
-    // Extract type annotation
+    let Ok(field_name_raw) = name_node.utf8_text(content) else {
+        return Ok(());
+    };
+    let field_name = field_name_raw.trim();
+    if field_name.is_empty() {
+        return Ok(());
+    }
+
+    let span = span_from_node(name_node);
+
+    // Resolve enclosing struct / enum-variant qualified name (Rust `::`
+    // retained per design §3.1.2). If the container can't be resolved
+    // (defensive guard for malformed AST), fall back to bare-name emission so
+    // we don't drop the field entirely.
+    let qualified_field_name =
+        resolve_field_container_qualified_name(node, content, file_module_path).map_or_else(
+            || field_name.to_string(),
+            |container| format!("{container}::{field_name}"),
+        );
+
+    // Visibility per design §3.3 row 6.
+    let visibility = extract_field_visibility(node, content);
+
+    // Property node: is_static = false (Rust struct fields are never
+    // associated; design §3.4 row 6).
+    let field_id = helper.add_property_with_static_and_visibility(
+        &qualified_field_name,
+        Some(span),
+        false,
+        Some(visibility.as_str()),
+    );
+
+    // Extract type annotation; absence is allowed (e.g. parse error recovery)
+    // and means we still emit the Property node but no TypeOf/Reference edges.
     let Some(type_node) = node.child_by_field_name("type") else {
         return Ok(());
     };
 
-    let Ok(field_name) = name_node.utf8_text(content) else {
-        return Ok(());
-    };
-
-    let span = span_from_node(name_node);
-
-    // Create Variable node for field
-    let field_id = helper.add_variable(field_name.trim(), Some(span));
-
-    // Extract type names
     let type_names = extract_all_type_names_from_rust_type(type_node, content);
-
     if type_names.is_empty() {
         return Ok(());
     }
 
-    // TypeOf edge to primary type
+    // TypeOf{Field, name=BARE} edge to the primary (first) type. The edge
+    // metadata uses the BARE field name; the node uses the qualified name
+    // (REQ:R0003 + cross-language norm — see design §3.5).
     let primary_type = &type_names[0];
     let type_id = helper.add_type(primary_type.as_str(), Some(span));
-    helper.add_typeof_edge(field_id, type_id);
+    helper.add_typeof_edge_with_context(
+        field_id,
+        type_id,
+        Some(TypeOfContext::Field),
+        None,
+        Some(field_name),
+    );
 
-    // Reference edges to all types
+    // Reference edges to every extracted type (preserves prior behavior).
     for type_name in &type_names {
         let type_id = helper.add_type(type_name.as_str(), Some(span));
         helper.add_reference_edge(field_id, type_id);
@@ -3222,66 +3464,92 @@ fn build_field_typeof_edges(
     Ok(())
 }
 
-/// Build `TypeOf` edges for tuple struct/enum variant fields.
+/// Build qualified Property nodes + `TypeOf{Field}` edges for a tuple
+/// struct's / enum tuple-variant's `ordered_field_declaration_list`.
 ///
-/// Tuple fields don't have explicit names, so we create synthetic field names
-/// based on their index (0, 1, 2, etc.). The children of `ordered_field_declaration_list`
-/// are the type nodes directly (not field nodes with a "type" field).
-///
-/// # Example
-///
-/// ```rust,ignore
-/// struct Point(i32, i32);
-/// enum Result<T, E> {
-///     Ok(T),
-///     Err(E),
-/// }
-/// ```
+/// Tuple-struct collision is resolved by anchoring each synthetic name on
+/// the enclosing struct/variant qualified name (REQ:R0022): `Point(i32, i32)`
+/// and `Vec(i32, i32)` produce four distinct `NodeIds` `Point::0`, `Point::1`,
+/// `Vec::0`, `Vec::1` instead of the prior bare `0` / `1` collision.
 ///
 /// AST structure:
 /// ```text
 /// ordered_field_declaration_list
-///   primitive_type (i32)
-///   primitive_type (i32)
+///   visibility_modifier?  primitive_type (i32)
+///   visibility_modifier?  primitive_type (i32)
 /// ```
 ///
-/// Creates:
-/// - Variable nodes: "0", "1" (for Point fields)
-/// - `TypeOf` edges: 0 → i32, 1 → i32
-/// - Reference edges: 0 → i32, 1 → i32
+/// In tree-sitter-rust the `visibility_modifier` for an ordered field is a
+/// preceding sibling at the same level — not a child of the type node — so
+/// we walk all children and attach the most recently seen modifier to the
+/// next type-bearing child.
 #[allow(clippy::unnecessary_wraps)]
 fn build_tuple_field_typeof_edges(
     node: Node<'_>,
     content: &[u8],
     helper: &mut GraphBuildHelper,
+    file_module_path: Option<&str>,
 ) -> GraphResult<()> {
+    // Resolve enclosing struct / enum-variant qualified name. If unresolvable,
+    // emit bare names so we don't drop the fields entirely (defensive).
+    let container = resolve_field_container_qualified_name(node, content, file_module_path);
+
     let mut cursor = node.walk();
+    let mut pending_visibility: Option<FieldVisibility> = None;
+    let mut field_index: usize = 0;
 
-    // Each named child is a type node directly (not a field with a "type" field)
-    for (field_index, child) in node.named_children(&mut cursor).enumerate() {
+    for child in node.named_children(&mut cursor) {
+        if child.kind() == "visibility_modifier" {
+            let raw = child.utf8_text(content).unwrap_or("").trim();
+            pending_visibility = Some(classify_visibility_modifier_text(raw));
+            continue;
+        }
+
+        // Skip attribute_item (and related non-type children); only treat the
+        // remaining named children as type slots for tuple fields.
+        if child.kind() == "attribute_item" {
+            continue;
+        }
+
         let span = span_from_node(child);
+        let bare_name = field_index.to_string();
 
-        // Create synthetic field name using index
-        let field_name = field_index.to_string();
+        let qualified_field_name = match &container {
+            Some(c) => format!("{c}::{bare_name}"),
+            None => bare_name.clone(),
+        };
 
-        // Create Variable node for tuple field
-        let field_id = helper.add_variable(&field_name, Some(span));
+        let visibility = pending_visibility
+            .take()
+            .unwrap_or(FieldVisibility::Static("private"));
 
-        // Extract type names from the child node (which is the type itself)
+        let field_id = helper.add_property_with_static_and_visibility(
+            &qualified_field_name,
+            Some(span),
+            false,
+            Some(visibility.as_str()),
+        );
+
         let type_names = extract_all_type_names_from_rust_type(child, content);
-
         if !type_names.is_empty() {
-            // TypeOf edge to primary type
+            // TypeOf{Field, name=BARE_INDEX} edge to the primary type.
             let primary_type = &type_names[0];
             let type_id = helper.add_type(primary_type.as_str(), Some(span));
-            helper.add_typeof_edge(field_id, type_id);
+            helper.add_typeof_edge_with_context(
+                field_id,
+                type_id,
+                Some(TypeOfContext::Field),
+                None,
+                Some(&bare_name),
+            );
 
-            // Reference edges to all types
             for type_name in &type_names {
                 let type_id = helper.add_type(type_name.as_str(), Some(span));
                 helper.add_reference_edge(field_id, type_id);
             }
         }
+
+        field_index += 1;
     }
 
     Ok(())
@@ -3518,6 +3786,472 @@ fn extract_trait_names_from_bounds(
     }
 
     Ok(())
+}
+
+// ============================================================================
+// Generic Type Parameter Emission (REQ:R0029 / U20 — C2_GEN_TP_RUST)
+// ============================================================================
+
+/// Emit per-type-parameter `Type` nodes and `TypeOf{Constraint}` edges
+/// for a Rust generic declaration (`function_item`, `trait_item`, or
+/// `impl_item`).
+///
+/// Per design §3.1.2 the qualified-name form is
+/// `<crate_path>::<DeclName>::<ParamName>` with `::` retained as Rust's
+/// native path-segment separator (different from C# / Kotlin / Java
+/// where the native source separator is `.` and gets canonicalised).
+///
+/// Tree-sitter-rust grammar shape (relevant fragments):
+///
+/// ```text
+/// type_parameters:
+///   '<' commaSep1(type_parameter | lifetime_parameter | const_parameter) '>'
+/// type_parameter:
+///   name: type_identifier
+///   bound: trait_bounds                  // optional, inline bounds
+///   default: ...                         // optional default
+/// const_parameter:
+///   'const' name: identifier ':' type: <type>
+/// lifetime_parameter:
+///   lifetime: lifetime
+/// where_clause:
+///   'where' commaSep1(where_predicate)
+/// where_predicate:
+///   left: type_identifier | scoped_type_identifier | lifetime | ...
+///   bounds: trait_bounds
+/// ```
+///
+/// Per AC-5 lifetime parameters are deliberately NOT emitted as `Type`
+/// nodes — they remain on the `LifetimeConstraint` pipeline driven by
+/// `lifetime_extractor`. Per AC-6 higher-ranked trait bounds
+/// (`for<'a> Fn(&'a u32)`) are reference-only and out of scope here.
+///
+/// Per AC-4 const generic parameters (`const N: usize`) emit a base
+/// `Type` node and one `Constraint` edge to the declared underlying
+/// type (`usize`); the `const_generic` attribute itself is deferred
+/// to a future `EdgeKind` extension.
+fn process_type_parameter_declarations(
+    decl_node: Node<'_>,
+    content: &[u8],
+    parent_qualified_name: &str,
+    helper: &mut GraphBuildHelper,
+) {
+    let Some(params_node) = decl_node.child_by_field_name("type_parameters") else {
+        return;
+    };
+
+    // Map parameter name -> NodeId so where-clause predicates can
+    // target the right parameter Type node by identifier match.
+    let mut param_ids: HashMap<String, NodeId> = HashMap::new();
+
+    let mut params_cursor = params_node.walk();
+    for param_node in params_node.named_children(&mut params_cursor) {
+        match param_node.kind() {
+            "type_parameter" => {
+                emit_type_parameter_node(
+                    param_node,
+                    content,
+                    parent_qualified_name,
+                    helper,
+                    &mut param_ids,
+                );
+            }
+            "const_parameter" => {
+                emit_const_parameter_node(
+                    param_node,
+                    content,
+                    parent_qualified_name,
+                    helper,
+                    &mut param_ids,
+                );
+            }
+            // AC-5: lifetime_parameter is NOT migrated — handled by
+            // the existing LifetimeConstraint pipeline. Deliberately
+            // skip without emitting a Type node.
+            _ => {}
+        }
+    }
+
+    // AC-3: walk where_clause siblings on the same declaration and
+    // emit Constraint edges per where_predicate matching one of the
+    // collected parameter names.
+    let mut clause_cursor = decl_node.walk();
+    for child in decl_node.named_children(&mut clause_cursor) {
+        if child.kind() == "where_clause" {
+            emit_where_clause_constraints(child, content, &param_ids, helper);
+        }
+    }
+}
+
+/// Emit one `type_parameter` node + inline-bound Constraint edges.
+fn emit_type_parameter_node(
+    param_node: Node<'_>,
+    content: &[u8],
+    parent_qualified_name: &str,
+    helper: &mut GraphBuildHelper,
+    param_ids: &mut HashMap<String, NodeId>,
+) {
+    // Tree-sitter-rust exposes the parameter identifier as the first
+    // named child of `type_parameter` (a `type_identifier` node). The
+    // grammar does not provide a `name` field here.
+    let mut cursor = param_node.walk();
+    let mut name_node: Option<Node<'_>> = None;
+    let mut bound_node: Option<Node<'_>> = None;
+    for child in param_node.named_children(&mut cursor) {
+        match child.kind() {
+            "type_identifier" if name_node.is_none() => {
+                name_node = Some(child);
+            }
+            "trait_bounds" => {
+                bound_node = Some(child);
+            }
+            _ => {}
+        }
+    }
+    let Some(name_node) = name_node else {
+        return;
+    };
+    let Ok(param_name) = name_node.utf8_text(content) else {
+        return;
+    };
+    let param_name = param_name.trim();
+    if param_name.is_empty() {
+        return;
+    }
+
+    // AC-2: qualified name uses `::` separator (Rust-native).
+    let qualified = format!("{parent_qualified_name}::{param_name}");
+    // Span anchored on the parameter identifier so LSP / MCP report a
+    // concrete source location for "Find Definition" / hover.
+    let span = span_from_node(name_node);
+    let param_id = helper.add_type(&qualified, Some(span));
+    param_ids.insert(param_name.to_string(), param_id);
+
+    // AC-3: inline bounds (`T: Clone + Send`).
+    if let Some(bounds) = bound_node {
+        emit_constraint_edges_from_bounds(bounds, content, param_id, helper);
+    }
+}
+
+/// Emit one `const_parameter` node + Constraint edge to its declared
+/// underlying type. AC-4.
+fn emit_const_parameter_node(
+    param_node: Node<'_>,
+    content: &[u8],
+    parent_qualified_name: &str,
+    helper: &mut GraphBuildHelper,
+    param_ids: &mut HashMap<String, NodeId>,
+) {
+    // Tree-sitter-rust grammar: const_parameter has `name` and `type`
+    // fields.
+    let Some(name_node) = param_node.child_by_field_name("name") else {
+        return;
+    };
+    let Ok(param_name) = name_node.utf8_text(content) else {
+        return;
+    };
+    let param_name = param_name.trim();
+    if param_name.is_empty() {
+        return;
+    }
+
+    let qualified = format!("{parent_qualified_name}::{param_name}");
+    let span = span_from_node(name_node);
+    let param_id = helper.add_type(&qualified, Some(span));
+    param_ids.insert(param_name.to_string(), param_id);
+
+    // AC-4: emit a Constraint edge to the declared underlying type.
+    if let Some(type_node) = param_node.child_by_field_name("type") {
+        let type_names = extract_all_type_names_from_rust_type(type_node, content);
+        let type_span = span_from_node(type_node);
+        for type_name in type_names {
+            let type_id = helper.add_type(&type_name, Some(type_span));
+            helper.add_typeof_edge_with_context(
+                param_id,
+                type_id,
+                Some(TypeOfContext::Constraint),
+                None,
+                None,
+            );
+        }
+    }
+}
+
+/// Walk a `where_clause` node and emit Constraint edges for each
+/// `where_predicate` whose `left` field names one of the parameters
+/// collected during type-parameter emission.
+///
+/// Lifetime predicates (`'a: 'b`) and predicates targeting unknown
+/// names are skipped silently — the lifetime predicate flow stays on
+/// the existing `LifetimeExtractor` pipeline (AC-5).
+fn emit_where_clause_constraints(
+    where_clause: Node<'_>,
+    content: &[u8],
+    param_ids: &HashMap<String, NodeId>,
+    helper: &mut GraphBuildHelper,
+) {
+    let mut cursor = where_clause.walk();
+    for predicate in where_clause.named_children(&mut cursor) {
+        if predicate.kind() != "where_predicate" {
+            continue;
+        }
+        let Some(left_node) = predicate.child_by_field_name("left") else {
+            continue;
+        };
+        // Only emit Constraint edges when the predicate targets a
+        // type identifier that matches one of our parameter names.
+        // Scoped paths (`Self::Item`), associated types, and lifetime
+        // predicates fall through.
+        if left_node.kind() != "type_identifier" {
+            continue;
+        }
+        let Ok(left_name) = left_node.utf8_text(content) else {
+            continue;
+        };
+        let left_name = left_name.trim();
+        let Some(&param_id) = param_ids.get(left_name) else {
+            continue;
+        };
+        let Some(bounds_node) = predicate.child_by_field_name("bounds") else {
+            continue;
+        };
+        emit_constraint_edges_from_bounds(bounds_node, content, param_id, helper);
+    }
+}
+
+/// Emit one `TypeOf{Constraint}` edge per trait bound in a
+/// `trait_bounds` node.
+///
+/// Reuses `extract_constraint_type_names_from_rust_type` for bound-name
+/// extraction so generic trait bounds (`Iterator<Item = T>`,
+/// `Fn(u32) -> u32`) decompose into their constituent type names. Unlike
+/// the Reference-edge extractor, this variant skips
+/// `higher_ranked_trait_bound` subtrees so HRTBs (e.g. `for<'a> Fn(&'a u32)`)
+/// never leak Constraint edges (AC-6: HRTBs reference-only). The
+/// existing Reference-edge pipeline still emits References for HRTB
+/// constituents elsewhere.
+fn emit_constraint_edges_from_bounds(
+    bounds_node: Node<'_>,
+    content: &[u8],
+    param_id: NodeId,
+    helper: &mut GraphBuildHelper,
+) {
+    let span = span_from_node(bounds_node);
+    let trait_names = extract_constraint_type_names_from_rust_type(bounds_node, content);
+    for trait_name in trait_names {
+        let trait_id = helper.add_type(&trait_name, Some(span));
+        helper.add_typeof_edge_with_context(
+            param_id,
+            trait_id,
+            Some(TypeOfContext::Constraint),
+            None,
+            None,
+        );
+    }
+}
+
+/// Constraint-pipeline variant of `extract_all_type_names_from_rust_type`
+/// that excludes `higher_ranked_trait_bound` subtrees.
+///
+/// AC-6 mandates that HRTBs (`for<'a> Fn(&'a T)`) on type-parameter
+/// bounds remain reference-only — a `T: for<'a> Fn(&'a u32)` bound
+/// must NOT emit `TypeOf{Constraint}` edges from `T` to `Fn` or `u32`.
+/// The Reference-edge pipeline (`extract_all_type_names_from_rust_type`)
+/// still recurses into HRTB nodes, so References on HRTB constituents
+/// are unaffected.
+///
+/// Other shapes — generic types, function types, `trait_bounds` (the
+/// `+`-separated list itself), tuples, references, arrays, etc. — are
+/// extracted exactly as the Reference variant does.
+//
+// Match arms for distinct AST node kinds (`tuple_type` / `bounded_type` /
+// `trait_bounds` vs `dynamic_type` / `abstract_type`) are kept separate
+// so the per-arm comments document each shape, even though the bodies
+// happen to be identical.
+#[allow(clippy::too_many_lines, clippy::match_same_arms)]
+fn extract_constraint_type_names_from_rust_type(
+    type_node: Node<'_>,
+    content: &[u8],
+) -> Vec<String> {
+    // Skip HRTBs entirely — AC-6 keeps them reference-only.
+    if type_node.kind() == "higher_ranked_trait_bound" {
+        return Vec::new();
+    }
+
+    match type_node.kind() {
+        // Base case: simple type identifier
+        "type_identifier" | "primitive_type" => {
+            if let Ok(text) = type_node.utf8_text(content) {
+                vec![text.trim().to_string()]
+            } else {
+                Vec::new()
+            }
+        }
+
+        // Generic types: Vec<T>, HashMap<K, V>, Iterator<Item = T>
+        "generic_type" => {
+            let mut types = Vec::new();
+            if let Some(base_type) = type_node.child_by_field_name("type") {
+                types.extend(extract_constraint_type_names_from_rust_type(
+                    base_type, content,
+                ));
+            }
+            if let Some(type_args) = type_node.child_by_field_name("type_arguments") {
+                let mut cursor = type_args.walk();
+                for child in type_args.named_children(&mut cursor) {
+                    types.extend(extract_constraint_type_names_from_rust_type(child, content));
+                }
+            }
+            types
+        }
+
+        // Reference types: &T, &mut T
+        "reference_type" => {
+            let mut cursor = type_node.walk();
+            for child in type_node.named_children(&mut cursor) {
+                if child.kind() != "lifetime" && child.kind() != "mutable_specifier" {
+                    return extract_constraint_type_names_from_rust_type(child, content);
+                }
+            }
+            Vec::new()
+        }
+
+        // Pointer types: *const T, *mut T
+        "pointer_type" => {
+            if let Some(inner_type) = type_node.child_by_field_name("type") {
+                extract_constraint_type_names_from_rust_type(inner_type, content)
+            } else {
+                Vec::new()
+            }
+        }
+
+        // Array types: [T; N]
+        "array_type" => {
+            if let Some(element_type) = type_node.child_by_field_name("element") {
+                extract_constraint_type_names_from_rust_type(element_type, content)
+            } else {
+                Vec::new()
+            }
+        }
+
+        // Trait-bound list (`Display + Clone + Send`), tuples, bounded types.
+        // Iteration applies the HRTB-skipping rule to each child individually,
+        // so `T: Clone + for<'a> Fn(&'a u32)` keeps `Clone` while dropping the
+        // HRTB subtree.
+        "tuple_type" | "bounded_type" | "trait_bounds" => {
+            let mut types = Vec::new();
+            let mut cursor = type_node.walk();
+            for child in type_node.named_children(&mut cursor) {
+                types.extend(extract_constraint_type_names_from_rust_type(child, content));
+            }
+            types
+        }
+
+        // Function types: `Fn(T) -> U`, `FnMut(T) -> U`, `FnOnce(T) -> U`,
+        // bare `fn(T) -> U`. Mirror the Reference extractor: emit the trait
+        // name (or synthetic `fn` marker) and recurse into parameters /
+        // return type, with HRTB-skipping carried through recursion.
+        "function_type" => {
+            let mut types = Vec::new();
+            let has_trait = if let Some(trait_node) = type_node.child_by_field_name("trait") {
+                types.extend(extract_constraint_type_names_from_rust_type(
+                    trait_node, content,
+                ));
+                true
+            } else {
+                false
+            };
+            if !has_trait {
+                types.insert(0, "fn".to_string());
+            }
+            if let Some(parameters) = type_node.child_by_field_name("parameters") {
+                let mut cursor = parameters.walk();
+                for param in parameters.named_children(&mut cursor) {
+                    types.extend(extract_constraint_type_names_from_rust_type(param, content));
+                }
+            }
+            if let Some(return_type) = type_node.child_by_field_name("return_type") {
+                types.extend(extract_constraint_type_names_from_rust_type(
+                    return_type,
+                    content,
+                ));
+            }
+            types
+        }
+
+        // Dynamic/impl trait wrappers: `dyn Trait`, `impl Trait`.
+        "dynamic_type" | "abstract_type" => {
+            let mut types = Vec::new();
+            let mut cursor = type_node.walk();
+            for child in type_node.named_children(&mut cursor) {
+                types.extend(extract_constraint_type_names_from_rust_type(child, content));
+            }
+            types
+        }
+
+        // Removed-trait wrapper: `?Sized`. Recurse to surface the inner
+        // trait identifier.
+        "removed_trait_bound" => {
+            let mut types = Vec::new();
+            if let Some(type_node_inner) = type_node.child_by_field_name("type") {
+                types.extend(extract_constraint_type_names_from_rust_type(
+                    type_node_inner,
+                    content,
+                ));
+            }
+            types
+        }
+
+        // Type aliases inside bounds: extract the alias.
+        "type_binding" => {
+            let mut types = Vec::new();
+            if let Some(alias_node) = type_node.child_by_field_name("alias") {
+                types.extend(extract_constraint_type_names_from_rust_type(
+                    alias_node, content,
+                ));
+            }
+            types
+        }
+
+        // Scoped type identifiers: `std::Vec`, `<T as Iterator>::Item`.
+        "scoped_type_identifier" => {
+            let mut types = Vec::new();
+            if let Some(name_node) = type_node.child_by_field_name("name")
+                && let Ok(text) = name_node.utf8_text(content)
+            {
+                types.push(text.trim().to_string());
+            }
+            if let Some(path_node) = type_node.child_by_field_name("path") {
+                types.extend(extract_constraint_type_names_from_rust_type(
+                    path_node, content,
+                ));
+            }
+            types
+        }
+
+        // Bracketed types: `<T as Iterator>` qualified-path prefixes.
+        "bracketed_type" => {
+            let mut types = Vec::new();
+            let mut cursor = type_node.walk();
+            for child in type_node.named_children(&mut cursor) {
+                types.extend(extract_constraint_type_names_from_rust_type(child, content));
+            }
+            types
+        }
+
+        // Skip non-type leaves.
+        "unit_type" | "never_type" | "lifetime" | "mutable_specifier" | "self" => Vec::new(),
+
+        // Fall through: recurse into named children, preserving HRTB skip.
+        _ => {
+            let mut types = Vec::new();
+            let mut cursor = type_node.walk();
+            for child in type_node.named_children(&mut cursor) {
+                types.extend(extract_constraint_type_names_from_rust_type(child, content));
+            }
+            types
+        }
+    }
 }
 
 /// Qualify a simple item name with surrounding module context.

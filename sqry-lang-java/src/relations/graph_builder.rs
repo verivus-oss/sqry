@@ -622,6 +622,11 @@ fn handle_type_declaration(
         process_interface_extends(node, content, package.as_deref(), class_node_id, helper);
     }
 
+    // REQ:R0026 — emit per-type-parameter Type nodes for generic
+    // class / interface declarations. Qualified name shape is
+    // `<package>.<ClassName>.<ParamName>` (e.g. `com.example.Box.T`).
+    process_type_parameter_declarations(node, content, &qualified_name, helper);
+
     if let Some(body_node) = node.child_by_field_name("body") {
         let is_interface = node.kind() == "interface_declaration";
         process_class_member_exports(body_node, content, &qualified_name, helper, is_interface);
@@ -743,8 +748,22 @@ fn add_field_typeof_edges(ast_graph: &ASTGraph, helper: &mut GraphBuildHelper) {
         // Create class node for the type
         let type_id = helper.add_class(type_fqn, None);
 
-        // Create TypeOf edge from field to its type
-        helper.add_typeof_edge(field_id, type_id);
+        // Create TypeOf edge from field to its type with Field context + bare
+        // field name. Aligns Java with the cross-language Field-context +
+        // bare-name edge contract (REQ:R0010, REQ:R0023). The
+        // `field_types` key is qualified (`OuterClass::InnerClass::fieldName`);
+        // the edge `name` carries the unqualified field identifier so byte-exact
+        // `field:<name>` planner queries match consistently across plugins.
+        let bare_name = field_name
+            .rsplit_once("::")
+            .map_or(field_name.as_str(), |(_, simple)| simple);
+        helper.add_typeof_edge_with_context(
+            field_id,
+            type_id,
+            Some(TypeOfContext::Field),
+            None,
+            Some(bare_name),
+        );
     }
 }
 
@@ -1478,6 +1497,16 @@ fn handle_method_declaration_parameters(
             &ast_graph.import_map,
             scope_tree,
         );
+
+        // REQ:R0026 — emit per-type-parameter Type nodes for generic
+        // method / constructor declarations. Qualified name shape is
+        // `<enclosing-method-qname>.<ParamName>`. For a generic method
+        // `<T> foo(T t)` in `com.example.Util` this is
+        // `com.example.Util.foo.T`; for a generic constructor
+        // `<T> Foo(T x)` in `com.example.Foo` the enclosing-method qname
+        // ends in `.<init>` so the param qname is
+        // `com.example.Foo.<init>.T`.
+        process_type_parameter_declarations(node, content, qualified_method_name, helper);
     }
 }
 
@@ -3539,5 +3568,159 @@ fn extract_string_content(string_node: Node, content: &[u8]) -> Option<String> {
         Some(trimmed[1..trimmed.len() - 1].to_string())
     } else {
         None
+    }
+}
+
+/// Emit per-type-parameter `Type` nodes for a generic Java declaration
+/// (class, interface, method, or constructor) and `TypeOf{Constraint}`
+/// edges for each `extends`-bound type.
+///
+/// Handles all four shapes that carry a `type_parameters` field on
+/// tree-sitter-java declarations:
+///
+/// 1. `class_declaration`     → `<package>.<ClassName>.<ParamName>`
+/// 2. `interface_declaration` → `<package>.<InterfaceName>.<ParamName>`
+/// 3. `method_declaration`    → `<package>.<ClassName>.<MethodName>.<ParamName>`
+/// 4. `constructor_declaration` → `<package>.<ClassName>.<init>.<ParamName>`
+///    (the `<init>` segment comes from `extract_constructor_context`)
+///
+/// Tree-sitter-java grammar shape:
+///
+/// ```text
+/// type_parameters: '<' commaSep1(type_parameter) '>'
+/// type_parameter:  repeat(_annotation) type_identifier optional(type_bound)
+/// type_bound:      'extends' _type ('&' _type)*
+/// ```
+///
+/// Bounded wildcards (`<? extends T>`) appear inside use-site type
+/// arguments — NOT as `type_parameter` children — and are therefore
+/// correctly ignored here (REQ:R0026 AC-6).
+fn process_type_parameter_declarations(
+    decl_node: Node,
+    content: &[u8],
+    parent_qualified_name: &str,
+    helper: &mut GraphBuildHelper,
+) {
+    let Some(params_node) = decl_node.child_by_field_name("type_parameters") else {
+        return;
+    };
+
+    let mut cursor = params_node.walk();
+    for param_node in params_node.children(&mut cursor) {
+        if param_node.kind() != "type_parameter" {
+            continue;
+        }
+
+        // The parameter identifier is an unnamed `type_identifier` child
+        // (the grammar aliases `identifier` -> `type_identifier`).
+        // Multiple `type_identifier` children must not exist per the
+        // grammar — but defensively pick the first one.
+        let Some(name_node) = first_type_parameter_name_node(param_node) else {
+            continue;
+        };
+        let Ok(param_name) = name_node.utf8_text(content) else {
+            continue;
+        };
+
+        let qualified_param = format!("{parent_qualified_name}.{param_name}");
+        let span = Span::from_bytes(name_node.start_byte(), name_node.end_byte());
+        // AC-2: `helper.add_type(qualified_name, Some(span_from_node(name_node)))`.
+        // Span MUST be `Some(...)` — anchored on the parameter identifier so
+        // "Find Definition" / hover navigation lands on the declaration site
+        // rather than the synthetic `(0, 0)` sentinel.
+        let param_id = helper.add_type(&qualified_param, Some(span));
+
+        // AC-3: one `TypeOf{Constraint}` edge per bound type
+        // (`<T extends A & B>` → two edges, one each to A and B).
+        if let Some(bound_node) = param_node
+            .children(&mut param_node.walk())
+            .find(|c| c.kind() == "type_bound")
+        {
+            emit_type_bound_constraints(bound_node, content, param_id, helper);
+        }
+    }
+}
+
+/// Find the parameter-name `type_identifier` child of a `type_parameter`
+/// node. The tree-sitter-java grammar aliases `identifier` to
+/// `type_identifier` for this position; both spellings are accepted
+/// defensively across grammar minor versions.
+fn first_type_parameter_name_node(param_node: Node<'_>) -> Option<Node<'_>> {
+    let mut cursor = param_node.walk();
+    for child in param_node.children(&mut cursor) {
+        if matches!(child.kind(), "type_identifier" | "identifier") {
+            return Some(child);
+        }
+    }
+    None
+}
+
+/// Emit one `TypeOf{Constraint}` edge per bound type in a `type_bound`
+/// node. `<T extends A & B & C>` produces three edges, one each to A,
+/// B, and C.
+///
+/// The constraint target node is created via `helper.add_type(name, None)`:
+/// like the Go implementation's `process_type_constraint`, the target is
+/// a synthetic reference stub that may be referenced from many distinct
+/// type-parameter declarations and therefore has no single source span.
+/// Cross-file unification (Phase 4c-prime) collapses these stubs into
+/// the canonical declaration when one exists.
+fn emit_type_bound_constraints(
+    bound_node: Node,
+    content: &[u8],
+    param_id: sqry_core::graph::unified::node::NodeId,
+    helper: &mut GraphBuildHelper,
+) {
+    let mut cursor = bound_node.walk();
+    for child in bound_node.children(&mut cursor) {
+        // Skip the literal `extends` and `&` tokens; iterate only over
+        // the named `_type` children (type_identifier, generic_type,
+        // scoped_type_identifier, etc.).
+        if !child.is_named() {
+            continue;
+        }
+        let bound_name = extract_bound_type_base_name(child, content);
+        if bound_name.is_empty() {
+            continue;
+        }
+        let constraint_id = helper.add_type(&bound_name, None);
+        helper.add_typeof_edge_with_context(
+            param_id,
+            constraint_id,
+            Some(TypeOfContext::Constraint),
+            None,
+            None,
+        );
+    }
+}
+
+/// Extract the base type name from a constraint bound, stripping any
+/// generic type arguments.
+///
+/// Java's `extract_type_name` falls back to the whole node text when a
+/// `generic_type` lacks a `name` child field — but the tree-sitter-java
+/// `generic_type` rule is positional, not field-based. As a result a
+/// recursive bound like `<T extends Comparable<T>>` would otherwise
+/// emit a `Comparable<T>` Type node instead of a clean `Comparable`
+/// reference. This helper unwraps those positional children:
+///
+/// - `generic_type`: take the first named child (a `type_identifier`
+///   or `scoped_type_identifier`) and recurse to strip nested generics.
+/// - `scoped_type_identifier`: keep the full dotted text
+///   (e.g. `java.io.Serializable`) — canonicalised downstream.
+/// - everything else: the raw text (typically a bare `type_identifier`).
+fn extract_bound_type_base_name(type_node: Node, content: &[u8]) -> String {
+    match type_node.kind() {
+        "generic_type" => {
+            let mut cursor = type_node.walk();
+            for child in type_node.children(&mut cursor) {
+                if matches!(child.kind(), "type_identifier" | "scoped_type_identifier") {
+                    return extract_bound_type_base_name(child, content);
+                }
+            }
+            extract_identifier(type_node, content)
+        }
+        "scoped_type_identifier" => extract_full_identifier(type_node, content),
+        _ => extract_identifier(type_node, content),
     }
 }

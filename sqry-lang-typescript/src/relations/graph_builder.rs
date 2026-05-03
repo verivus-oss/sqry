@@ -194,17 +194,54 @@ fn walk_for_edges_with_namespaces(
         // Class inheritance and interface implementation
         "class_declaration" | "class" => {
             build_class_oop_edges(node, content, helper);
-            // Process class fields for TypeOf edges
+            // Resolve the class identifier — fall back to a synthetic anonymous
+            // name so qualified-name composition is always well-defined.
+            let class_name = node
+                .child_by_field_name("name")
+                .and_then(|n| n.utf8_text(content).ok())
+                .map_or_else(
+                    || SyntheticNameBuilder::from_node(&node, content, "class"),
+                    |s| s.trim().to_string(),
+                );
+            // Process class fields (Property/Constant emission with class-stack
+            // qualified names) and constructor-parameter promotion for the
+            // `Class.field` short-name surface (REQ:R0001..R0005, R0007).
             if let Some(body) = node.child_by_field_name("body") {
-                build_field_type_edges(body, content, helper)?;
+                build_field_type_edges(body, content, helper, Some(&class_name), false)?;
+                promote_ctor_parameters_for_class(body, content, helper, &class_name)?;
             }
+            // Emit per-type-parameter Type nodes for generic classes
+            // (REQ:R0030 / U21 AC-1, AC-2, AC-3, AC-5). Use a
+            // namespace-qualified container name so a class declared
+            // inside `namespace N { ... }` produces `N.Box.T`, not the
+            // ambiguous bare `Box.T` (post-canonicalisation: `N::Box::T`).
+            let qualified_class = namespace_qualified_container_name(node, content, &class_name);
+            process_type_parameter_declarations(node, content, &qualified_class, helper);
         }
         // Interface inheritance
         "interface_declaration" => {
             build_interface_inheritance_edges(node, content, helper);
-            // Process interface properties for TypeOf edges
-            if let Some(body) = node.child_by_field_name("body") {
-                build_field_type_edges(body, content, helper)?;
+            let interface_name = node
+                .child_by_field_name("name")
+                .and_then(|n| n.utf8_text(content).ok())
+                .map(|s| s.trim().to_string());
+            // Process interface properties for TypeOf edges with `Interface.prop`
+            // qualified names. Interfaces have no accessibility_modifier, no
+            // static, and no constructor parameters — handler short-circuits
+            // those branches via `is_interface = true`.
+            if let Some(body) = node.child_by_field_name("body")
+                && let Some(name) = interface_name.as_deref()
+            {
+                build_field_type_edges(body, content, helper, Some(name), true)?;
+            }
+            // Emit per-type-parameter Type nodes for generic interfaces
+            // (REQ:R0030 / U21 AC-1, AC-2, AC-3). Use a namespace-qualified
+            // container name so an interface declared inside
+            // `namespace N { ... }` produces `N.IFoo.T`, not the
+            // ambiguous bare `IFoo.T`.
+            if let Some(name) = interface_name.as_deref() {
+                let qualified_iface = namespace_qualified_container_name(node, content, name);
+                process_type_parameter_declarations(node, content, &qualified_iface, helper);
             }
         }
         // Variable declarations (non-export)
@@ -214,10 +251,32 @@ fn walk_for_edges_with_namespaces(
         // Type alias declarations - extract referenced types
         "type_alias_declaration" => {
             build_type_alias_edges(node, content, helper)?;
+            // Emit per-type-parameter Type nodes for generic type-alias
+            // declarations + mapped-type binder Type nodes (REQ:R0030 /
+            // U21 AC-1, AC-2, AC-3, AC-4).
+            if let Some(name_node) = node.child_by_field_name("name") {
+                let alias_name = name_node
+                    .utf8_text(content)
+                    .map(|s| s.trim().to_string())
+                    .unwrap_or_default();
+                if !alias_name.is_empty() {
+                    // Namespace-qualify so `namespace N { type Wrapper<T> = T[] }`
+                    // emits `N.Wrapper.T` (and the mapped-type binder
+                    // `N.Wrapper.K`), not the namespace-naked form.
+                    let qualified_alias =
+                        namespace_qualified_container_name(node, content, &alias_name);
+                    process_type_parameter_declarations(node, content, &qualified_alias, helper);
+                    process_mapped_type_binders(node, content, &qualified_alias, helper);
+                }
+            }
         }
-        // Function and method declarations - process parameters and return types for type annotations
+        // Function and method declarations - process parameters and return types for type annotations.
+        // `method_signature` covers interface method signatures (`get<T>(): T`),
+        // which carry a `type_parameters` field but are distinct from
+        // `method_definition` (class member with body). See REQ:R0030 / U21.
         "function_declaration"
         | "method_definition"
+        | "method_signature"
         | "function_signature"
         | "arrow_function"
         | "function_expression" => {
@@ -233,19 +292,44 @@ fn walk_for_edges_with_namespaces(
                     build_return_type_edges(node, &context.qualified_name, content, helper)?;
                 }
             }
+
+            // Emit per-type-parameter Type nodes for generic
+            // function/method declarations (REQ:R0030 / U21 AC-1, AC-2,
+            // AC-3, AC-5). Only declared functions/methods carry a
+            // user-visible name suitable for qualified-name composition;
+            // anonymous arrow_function / function_expression nodes are
+            // skipped.
+            //
+            // `method_signature` (interface methods like `wrap<T>(): T`)
+            // does not get a `CallContext` from `walk_ast` (interfaces
+            // don't push class scopes there), so resolve its qualified
+            // name explicitly via `compute_callable_qname` which walks
+            // ancestors to find the enclosing interface (or class) and
+            // namespace stack.
+            if matches!(
+                node.kind(),
+                "function_declaration"
+                    | "method_definition"
+                    | "method_signature"
+                    | "function_signature"
+            ) {
+                let parent_qname_owned = ast_graph
+                    .get_callable_context(node.id())
+                    .map(|ctx| ctx.qualified_name.clone())
+                    .or_else(|| compute_callable_qname(node, content));
+                if let Some(parent_qname) = parent_qname_owned
+                    && !parent_qname.is_empty()
+                    && !parent_qname.starts_with("<anon:")
+                {
+                    process_type_parameter_declarations(node, content, &parent_qname, helper);
+                }
+            }
         }
         "enum_declaration" => {
-            if let Some(name_node) = node.child_by_field_name("name") {
-                let name = name_node
-                    .utf8_text(content)
-                    .map_err(|_| GraphBuilderError::ParseError {
-                        span: span_from_node(node),
-                        reason: "failed to read enum name".to_string(),
-                    })?
-                    .trim()
-                    .to_string();
-                helper.add_enum(&name, Some(span_from_node(node)));
-            }
+            // Emit the enum container node and qualified-name members.
+            // For `const enum`, members are emitted as Constant; otherwise
+            // Property (per AC-2 of the U08 acceptance set, FR-13/FR-24).
+            build_enum_and_members(node, content, helper)?;
         }
         "identifier" => {
             local_scopes::handle_identifier_for_reference(node, content, scope_tree, helper);
@@ -1324,55 +1408,396 @@ fn build_return_type_edges(
 /// - `TypeOf` edges from field to type with Field context
 /// - Reference edges from field to all types in type annotation
 fn build_field_type_edges(
-    class_body_node: Node<'_>,
+    body_node: Node<'_>,
     content: &[u8],
     helper: &mut GraphBuildHelper,
+    parent_name: Option<&str>,
+    is_interface: bool,
 ) -> GraphResult<()> {
-    let mut cursor = class_body_node.walk();
+    let mut cursor = body_node.walk();
 
-    for child in class_body_node.children(&mut cursor) {
+    for child in body_node.children(&mut cursor) {
         match child.kind() {
             "public_field_definition" | "property_signature" | "field_definition" => {
-                // Get field name
-                let Some(name_node) = child.child_by_field_name("name") else {
-                    continue;
-                };
+                emit_field_node(child, content, helper, parent_name, is_interface)?;
+            }
+            _ => {}
+        }
+    }
 
-                let name = name_node
-                    .utf8_text(content)
-                    .map_err(|_| GraphBuilderError::ParseError {
-                        span: span_from_node(child),
-                        reason: "failed to read field name".to_string(),
-                    })?
-                    .trim()
-                    .to_string();
+    Ok(())
+}
 
-                // Create or get field variable node
-                let field_id = helper.add_variable(&name, Some(span_from_node(child)));
+/// Emit a single class/interface field node.
+///
+/// Selects `Property` vs `Constant` based on the `readonly` modifier (per
+/// AC-2 / FR-13). Constructs the qualified name as `Parent.field` from the
+/// class-stack-tracked `parent_name` (canonicalized to `Parent::field` by
+/// the helper layer for TypeScript). Visibility is sourced from
+/// `accessibility_modifier` or — when the identifier is a
+/// `private_property_identifier` (`#name`) — forced to `"private"`.
+///
+/// Interfaces have no `accessibility_modifier`, no `static`, and no
+/// constructor parameters; the handler short-circuits those branches when
+/// `is_interface = true`.
+fn emit_field_node(
+    field_node: Node<'_>,
+    content: &[u8],
+    helper: &mut GraphBuildHelper,
+    parent_name: Option<&str>,
+    is_interface: bool,
+) -> GraphResult<()> {
+    let Some(name_node) = field_node.child_by_field_name("name") else {
+        return Ok(());
+    };
 
-                // Check for type annotation
-                if let Some(type_node) = child.child_by_field_name("type") {
-                    // Extract full type string for TypeOf edge
-                    if let Some(type_text) = extract_type_string(type_node, content) {
-                        let type_id = helper.add_type(&type_text, Some(span_from_node(type_node)));
-                        helper.add_typeof_edge_with_context(
-                            field_id,
-                            type_id,
-                            Some(TypeOfContext::Field),
-                            None,
-                            Some(&name),
-                        );
-                    }
+    let raw_name = name_node
+        .utf8_text(content)
+        .map_err(|_| GraphBuilderError::ParseError {
+            span: span_from_node(field_node),
+            reason: "failed to read field name".to_string(),
+        })?
+        .trim()
+        .to_string();
 
-                    // Extract all types for Reference edges
-                    let all_types = extract_all_type_names_from_annotation(type_node, content);
-                    for type_name in all_types {
-                        let type_id = helper.add_type(&type_name, Some(span_from_node(type_node)));
-                        helper.add_reference_edge(field_id, type_id);
+    if raw_name.is_empty() {
+        return Ok(());
+    }
+
+    let is_hash_private = name_node.kind() == "private_property_identifier";
+
+    // Scan modifier tokens. Tree-sitter-typescript surfaces `static`,
+    // `readonly`, and `accessibility_modifier` as direct children of
+    // `public_field_definition`; interfaces (`property_signature`) only
+    // surface `readonly`.
+    let mut is_static = false;
+    let mut is_readonly = false;
+    let mut explicit_visibility: Option<String> = None;
+    let mut mod_cursor = field_node.walk();
+    for modifier in field_node.children(&mut mod_cursor) {
+        match modifier.kind() {
+            "static" if !is_interface => is_static = true,
+            "readonly" => is_readonly = true,
+            "accessibility_modifier" if !is_interface => {
+                if let Ok(text) = modifier.utf8_text(content) {
+                    let trimmed = text.trim();
+                    if !trimmed.is_empty() {
+                        explicit_visibility = Some(trimmed.to_string());
                     }
                 }
             }
             _ => {}
+        }
+    }
+
+    // `#name` short-circuits visibility to "private" regardless of any
+    // accessibility_modifier (TypeScript grammar does not co-emit one with
+    // a private_property_identifier, but be defensive).
+    let visibility: Option<&str> = if is_hash_private {
+        Some("private")
+    } else {
+        explicit_visibility.as_deref()
+    };
+
+    let qualified_name = match parent_name {
+        Some(parent) => format!("{parent}.{raw_name}"),
+        None => raw_name.clone(),
+    };
+
+    let span = Some(span_from_node(field_node));
+
+    let field_id = if is_readonly {
+        helper.add_constant_with_static_and_visibility(&qualified_name, span, is_static, visibility)
+    } else {
+        helper.add_property_with_static_and_visibility(&qualified_name, span, is_static, visibility)
+    };
+
+    // Type annotation → TypeOf(Field) + Reference edges. The TypeOf edge
+    // carries the BARE field name (AC-5) so set-membership queries on the
+    // short name remain consistent across languages.
+    if let Some(type_node) = field_node.child_by_field_name("type") {
+        if let Some(type_text) = extract_type_string(type_node, content) {
+            let type_id = helper.add_type(&type_text, Some(span_from_node(type_node)));
+            helper.add_typeof_edge_with_context(
+                field_id,
+                type_id,
+                Some(TypeOfContext::Field),
+                None,
+                Some(&raw_name),
+            );
+        }
+
+        let all_types = extract_all_type_names_from_annotation(type_node, content);
+        for type_name in all_types {
+            let type_id = helper.add_type(&type_name, Some(span_from_node(type_node)));
+            helper.add_reference_edge(field_id, type_id);
+        }
+    }
+
+    Ok(())
+}
+
+/// Promote constructor parameters with parameter modifiers
+/// (`public` / `private` / `protected` / `readonly`) into class fields.
+///
+/// TypeScript's "parameter properties" sugar (`constructor(public x: T)`)
+/// declares both a constructor parameter AND a class field. This walker
+/// emits the corresponding `Class.x` Property/Constant nodes.
+///
+/// Precedence (FR-13, AC-7): the explicit field declaration always wins.
+/// If `helper.get_node` already maps the qualified name to an existing
+/// node (the explicit field was emitted by `build_field_type_edges`), no
+/// new node is created. The promoted-param branch never overrides the
+/// existing visibility / kind. Note that the helper's
+/// `update_node_entry` semantics already prevent visibility downgrades —
+/// visibility is only filled when `entry.visibility.is_none()` — so
+/// the explicit-field-wins guarantee holds even without the
+/// pre-check, but the pre-check eliminates wasted node-cache thrash and
+/// makes the precedence rule explicit at the call site.
+///
+/// Rejected (AC-8 corner case 6): `rest_pattern` parameters
+/// (`...args: T[]`) never promote — TypeScript's grammar disallows
+/// modifiers on rest parameters in practice, and even if a modifier
+/// appears, the spec rejects it (no node, no panic).
+fn promote_ctor_parameters_for_class(
+    body_node: Node<'_>,
+    content: &[u8],
+    helper: &mut GraphBuildHelper,
+    class_name: &str,
+) -> GraphResult<()> {
+    let mut cursor = body_node.walk();
+
+    for child in body_node.children(&mut cursor) {
+        if child.kind() != "method_definition" {
+            continue;
+        }
+
+        let Some(name_node) = child.child_by_field_name("name") else {
+            continue;
+        };
+        let Ok(method_name) = name_node.utf8_text(content) else {
+            continue;
+        };
+        if method_name.trim() != "constructor" {
+            continue;
+        }
+
+        let Some(params_node) = child.child_by_field_name("parameters") else {
+            continue;
+        };
+
+        let mut param_cursor = params_node.walk();
+        for param in params_node.children(&mut param_cursor) {
+            // Only `required_parameter` / `optional_parameter` can carry
+            // accessibility / readonly modifiers in TS. Anything else
+            // (commas, parens, rest_pattern wrappers) is skipped.
+            if !matches!(param.kind(), "required_parameter" | "optional_parameter") {
+                continue;
+            }
+
+            promote_one_ctor_parameter(param, content, helper, class_name)?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Process a single `required_parameter` / `optional_parameter` for
+/// constructor-parameter-promotion. See `promote_ctor_parameters_for_class`
+/// for the FR-13 / AC-7 / AC-8 rules.
+//
+// Returns `GraphResult<()>` to keep the `?`-friendly call signature
+// shared by neighboring helpers; current early-exit branches all yield
+// `Ok`, but the surface intentionally mirrors the rest of the
+// constructor-promotion pipeline.
+#[allow(clippy::unnecessary_wraps)]
+fn promote_one_ctor_parameter(
+    param: Node<'_>,
+    content: &[u8],
+    helper: &mut GraphBuildHelper,
+    class_name: &str,
+) -> GraphResult<()> {
+    let mut is_readonly = false;
+    let mut visibility: Option<String> = None;
+    let mut type_node: Option<Node<'_>> = None;
+    let mut has_rest = false;
+
+    let mut cursor = param.walk();
+    for child in param.children(&mut cursor) {
+        match child.kind() {
+            "accessibility_modifier" => {
+                if let Ok(text) = child.utf8_text(content) {
+                    let trimmed = text.trim();
+                    if !trimmed.is_empty() {
+                        visibility = Some(trimmed.to_string());
+                    }
+                }
+            }
+            "readonly" => is_readonly = true,
+            "rest_pattern" => has_rest = true,
+            "type_annotation" => type_node = Some(child),
+            _ => {}
+        }
+    }
+
+    // AC-8 corner case 6: rest parameters never promote.
+    if has_rest {
+        return Ok(());
+    }
+
+    // No promotion unless at least one parameter modifier is present.
+    if visibility.is_none() && !is_readonly {
+        return Ok(());
+    }
+
+    // The parameter's name comes from its `pattern` field (the
+    // tree-sitter-typescript grammar models `required_parameter` /
+    // `optional_parameter` with an explicit `pattern` field). Walking
+    // for direct `identifier` children is unsafe: a defaulted parameter
+    // such as `constructor(public y: U = fallback)` has the default
+    // expression's identifier (`fallback`) as a direct child, which
+    // would overwrite the real parameter name.
+    //
+    // Only promote when the pattern is an `identifier` node — other
+    // patterns (`object_pattern`, `array_pattern`, etc.) are not
+    // promotable as a single class field.
+    let Some(pattern_node) = param.child_by_field_name("pattern") else {
+        return Ok(());
+    };
+    if pattern_node.kind() != "identifier" {
+        return Ok(());
+    }
+    let name_node = pattern_node;
+    let Ok(raw_name) = name_node.utf8_text(content) else {
+        return Ok(());
+    };
+    let raw_name = raw_name.trim();
+    if raw_name.is_empty() {
+        return Ok(());
+    }
+
+    let qualified_name = format!("{class_name}.{raw_name}");
+
+    // FR-13 / AC-7 explicit-field-wins precedence: short-circuit if any
+    // node with this qualified name already exists. The explicit-field
+    // handler ran first (build_field_type_edges precedes ctor-promotion
+    // in the class arm), so any pre-existing node was created by the
+    // explicit declaration.
+    //
+    // The helper's node cache is keyed by *canonical* qualified name, so
+    // we canonicalize the lookup probe to match. For TypeScript this
+    // turns `Person.name` -> `Person::name`; without this step the
+    // probe would always miss and the promoted-param branch would
+    // always create a duplicate node, defeating FR-13.
+    let canonical_probe = sqry_core::graph::unified::resolution::canonicalize_graph_qualified_name(
+        Language::TypeScript,
+        &qualified_name,
+    );
+    if helper.get_node(&canonical_probe).is_some() {
+        return Ok(());
+    }
+
+    let span = Some(span_from_node(param));
+    let visibility_ref = visibility.as_deref();
+    let field_id = if is_readonly {
+        helper.add_constant_with_static_and_visibility(&qualified_name, span, false, visibility_ref)
+    } else {
+        helper.add_property_with_static_and_visibility(&qualified_name, span, false, visibility_ref)
+    };
+
+    // Mirror the explicit-field TypeOf(Field) + Reference edges so the
+    // promoted node is indistinguishable from a directly declared field
+    // for downstream queries.
+    if let Some(type_node) = type_node {
+        if let Some(type_text) = extract_type_string(type_node, content) {
+            let type_id = helper.add_type(&type_text, Some(span_from_node(type_node)));
+            helper.add_typeof_edge_with_context(
+                field_id,
+                type_id,
+                Some(TypeOfContext::Field),
+                None,
+                Some(raw_name),
+            );
+        }
+        let all_types = extract_all_type_names_from_annotation(type_node, content);
+        for type_name in all_types {
+            let type_id = helper.add_type(&type_name, Some(span_from_node(type_node)));
+            helper.add_reference_edge(field_id, type_id);
+        }
+    }
+
+    Ok(())
+}
+
+/// Emit the enum container node and its members.
+///
+/// `const enum Colors { Red = 1 }` → members are `Constant`.
+/// `enum Plain { A = 1 }` → members are `Property` (per AC-2 "otherwise
+/// Property").
+///
+/// Member qualified names follow the `Enum.Member` form, which is
+/// canonicalized to `Enum::Member` by the helper layer for TypeScript.
+fn build_enum_and_members(
+    enum_node: Node<'_>,
+    content: &[u8],
+    helper: &mut GraphBuildHelper,
+) -> GraphResult<()> {
+    let Some(name_node) = enum_node.child_by_field_name("name") else {
+        return Ok(());
+    };
+    let enum_name = name_node
+        .utf8_text(content)
+        .map_err(|_| GraphBuilderError::ParseError {
+            span: span_from_node(enum_node),
+            reason: "failed to read enum name".to_string(),
+        })?
+        .trim()
+        .to_string();
+    if enum_name.is_empty() {
+        return Ok(());
+    }
+
+    helper.add_enum(&enum_name, Some(span_from_node(enum_node)));
+
+    // `const enum Colors { ... }` carries a leading `const` keyword child.
+    let mut is_const = false;
+    let mut cursor = enum_node.walk();
+    for child in enum_node.children(&mut cursor) {
+        if child.kind() == "const" {
+            is_const = true;
+            break;
+        }
+    }
+
+    let Some(body) = enum_node.child_by_field_name("body") else {
+        return Ok(());
+    };
+    let mut body_cursor = body.walk();
+    for member in body.children(&mut body_cursor) {
+        // tree-sitter-typescript represents enum members as either
+        // `enum_assignment` (with `= value`) or a bare
+        // `property_identifier`.
+        let member_name_node = match member.kind() {
+            "enum_assignment" => member.child_by_field_name("name"),
+            "property_identifier" => Some(member),
+            _ => None,
+        };
+        let Some(member_name_node) = member_name_node else {
+            continue;
+        };
+        let Ok(member_name) = member_name_node.utf8_text(content) else {
+            continue;
+        };
+        let member_name = member_name.trim();
+        if member_name.is_empty() {
+            continue;
+        }
+        let qualified = format!("{enum_name}.{member_name}");
+        let span = Some(span_from_node(member));
+        if is_const {
+            helper.add_constant_with_static_and_visibility(&qualified, span, false, None);
+        } else {
+            helper.add_property_with_static_and_visibility(&qualified, span, false, None);
         }
     }
 
@@ -2854,4 +3279,312 @@ fn extract_visibility(node: Node<'_>, content: &[u8]) -> Option<String> {
         }
     }
     None
+}
+
+// ============================================================================
+// Generic Type Parameter Emission (REQ:R0030 / U21 — C2_GEN_TP_TS)
+// ============================================================================
+//
+// Emits per-type-parameter `Type` nodes for generic TypeScript declarations
+// of the five shapes that carry a `type_parameters` field on
+// tree-sitter-typescript 0.23.x:
+//
+//   - `function_declaration`    → `<FunctionName>::<ParamName>`
+//   - `method_definition`       → `<ClassName>::<MethodName>::<ParamName>`
+//   - `function_signature`      → `<FunctionName>::<ParamName>`
+//   - `class_declaration`       → `<ClassName>::<ParamName>`
+//   - `interface_declaration`   → `<InterfaceName>::<ParamName>`
+//   - `type_alias_declaration`  → `<TypeAlias>::<ParamName>`
+//
+// Tree-sitter grammar shape:
+//
+// ```text
+// type_parameters: '<' commaSep1(type_parameter) '>'
+// type_parameter:
+//   name:       type_identifier
+//   constraint: optional(constraint)        // <T extends X>
+//   value:      optional(default_type)      // <T = X>
+// constraint: 'extends' type
+// default_type: '=' type
+// ```
+//
+// AC-3: `extends` constraints emit `TypeOf{Constraint}` edges; defaults
+// (`<T = number>`) emit `References` edges to the default type.
+//
+// AC-5: variadic tuples like `<T extends unknown[]>` go through the same
+// path; the constraint type's source text is taken verbatim (so
+// `unknown[]`, `[A, B, ...C]`, etc. become synthetic Type nodes named
+// after their textual form). Cross-file unification (Phase 4c-prime)
+// can collapse the synthetic stub into the canonical declaration when
+// one exists.
+//
+// AC-6: conditional types (`type R<T> = T extends X ? Y : Z`) are
+// handled correctly without special-casing here. The generic-parameter
+// list of `R` carries `<T>` only — `T extends X` lives inside the body
+// of a `conditional_type` node within the `value` field, which is
+// processed by `build_type_alias_edges` via
+// `extract_all_type_names_from_annotation` and emits References edges
+// only. `process_type_parameter_declarations` walks the
+// `type_parameters` field exclusively, so it never touches the
+// conditional path and never emits a spurious Constraint edge for
+// `R::T`.
+
+/// Walk ancestors of `node` collecting enclosing TypeScript namespace
+/// names (deepest-last in source order, so they appear outermost-first
+/// when joined). Used to namespace-qualify class / interface /
+/// type-alias names emitted by the U21 (REQ:R0030) generic
+/// type-parameter pipeline.
+///
+/// Function and method declarations already receive a namespace-aware
+/// qualified name via `ASTGraph::get_callable_context` (the `walk_ast`
+/// pass pushes namespace names onto its own `scope_stack`); the
+/// container declarations did not have an equivalent and dropped the
+/// namespace base, producing `Box::T` instead of `N::Box::T`. This
+/// helper restores parity by reading the namespace stack straight from
+/// the AST.
+///
+/// Tree-sitter-typescript spells namespace declarations as one of
+/// `namespace_declaration`, `module_declaration`, `internal_module`, or
+/// `module` (the last covers the deprecated `module` keyword). Each of
+/// these carries its name under the `name` field as either an
+/// `identifier` or a `nested_identifier` (for `namespace A.B { ... }`).
+/// `nested_identifier` UTF-8 text already contains the dotted path, so
+/// we keep it verbatim.
+fn collect_namespace_prefix(node: Node<'_>, content: &[u8]) -> Vec<String> {
+    let mut prefixes: Vec<String> = Vec::new();
+    let mut current = node.parent();
+    while let Some(parent) = current {
+        if matches!(
+            parent.kind(),
+            "namespace_declaration" | "module_declaration" | "internal_module" | "module"
+        ) && let Some(name_node) = parent.child_by_field_name("name")
+            && let Ok(name) = name_node.utf8_text(content)
+        {
+            let trimmed = name.trim();
+            if !trimmed.is_empty() {
+                prefixes.push(trimmed.to_string());
+            }
+        }
+        current = parent.parent();
+    }
+    // Outermost-first.
+    prefixes.reverse();
+    prefixes
+}
+
+/// Build a namespace-qualified container name for a class /
+/// interface / type-alias declaration. When `node` sits inside one or
+/// more enclosing namespaces, the result is `N1.N2...Nk.<local_name>`;
+/// otherwise it is just `<local_name>`. The `.` separator is the same
+/// one `walk_ast` uses on its `scope_stack` (graph canonicalisation
+/// rewrites it to `::`).
+fn namespace_qualified_container_name(node: Node<'_>, content: &[u8], local_name: &str) -> String {
+    let prefixes = collect_namespace_prefix(node, content);
+    if prefixes.is_empty() {
+        local_name.to_string()
+    } else {
+        format!("{}.{}", prefixes.join("."), local_name)
+    }
+}
+
+/// Best-effort fallback qualified-name resolver for callable nodes
+/// that `ASTGraph` does not register in its callable-context table —
+/// notably `method_signature` (interface methods) — and for cases where
+/// the lookup misses for any reason.
+///
+/// Walks up the AST collecting namespace declarations and the nearest
+/// enclosing class / interface / type-alias as a method/function
+/// container, then appends the local name. Anonymous nodes are skipped.
+/// The resulting separator is `.` (matching `walk_ast`); graph
+/// canonicalisation rewrites it to `::`.
+fn compute_callable_qname(node: Node<'_>, content: &[u8]) -> Option<String> {
+    let local_name = node
+        .child_by_field_name("name")
+        .and_then(|n| n.utf8_text(content).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())?;
+
+    let mut segments: Vec<String> = collect_namespace_prefix(node, content);
+
+    let mut current = node.parent();
+    while let Some(parent) = current {
+        if matches!(
+            parent.kind(),
+            "class_declaration" | "class" | "interface_declaration" | "type_alias_declaration"
+        ) && let Some(name_node) = parent.child_by_field_name("name")
+            && let Ok(name) = name_node.utf8_text(content)
+        {
+            let trimmed = name.trim();
+            if !trimmed.is_empty() {
+                segments.push(trimmed.to_string());
+                break;
+            }
+        }
+        current = parent.parent();
+    }
+
+    segments.push(local_name);
+    Some(segments.join("."))
+}
+
+/// Emit per-type-parameter `Type` nodes and `TypeOf{Constraint}` /
+/// `References` edges for a generic TypeScript declaration.
+fn process_type_parameter_declarations(
+    decl_node: Node<'_>,
+    content: &[u8],
+    parent_qualified_name: &str,
+    helper: &mut GraphBuildHelper,
+) {
+    let Some(params_node) = decl_node.child_by_field_name("type_parameters") else {
+        return;
+    };
+
+    let mut cursor = params_node.walk();
+    for param_node in params_node.children(&mut cursor) {
+        if param_node.kind() != "type_parameter" {
+            continue;
+        }
+
+        // Parameter name lives under the `name` field.
+        let Some(name_node) = param_node.child_by_field_name("name") else {
+            continue;
+        };
+        let Ok(param_name) = name_node.utf8_text(content) else {
+            continue;
+        };
+
+        // AC-2: qualified name `<Parent>.<Param>` — the canonicaliser
+        // rewrites the source `.` separator to graph-internal `::`.
+        let qualified_param = format!("{parent_qualified_name}.{param_name}");
+        // AC-2: span anchored on the parameter identifier so
+        // "Find Definition" / hover navigation lands on the declaration
+        // site rather than the synthetic `(0, 0)` sentinel.
+        let param_id = helper.add_type(&qualified_param, Some(span_from_node(name_node)));
+
+        // AC-3 / AC-5: `extends` constraint → TypeOf{Constraint} edge.
+        if let Some(constraint_node) = param_node.child_by_field_name("constraint") {
+            emit_type_parameter_constraint_edges(constraint_node, content, param_id, helper);
+        }
+
+        // AC-3: default-type (`<T = X>`) → References edge.
+        if let Some(default_node) = param_node.child_by_field_name("value") {
+            emit_type_parameter_default_edges(default_node, content, param_id, helper);
+        }
+    }
+}
+
+/// Emit `TypeOf{Constraint}` edges for the `constraint` child of a
+/// `type_parameter`.
+///
+/// The grammar shape is `constraint: 'extends' type`. The `type` child
+/// can be any TypeScript type expression — a named identifier, a
+/// generic-instantiation (`Comparable<T>`), an array type
+/// (`unknown[]`), a tuple type (`[A, B]`), etc. We take the verbatim
+/// source-text spelling of the bound as the synthetic Type node name
+/// so that searches like `kind:type name:unknown[]` find the
+/// constraint. Cross-file unification will collapse the synthetic stub
+/// into the canonical declaration when one exists in the workspace.
+fn emit_type_parameter_constraint_edges(
+    constraint_node: Node<'_>,
+    content: &[u8],
+    param_id: sqry_core::graph::unified::NodeId,
+    helper: &mut GraphBuildHelper,
+) {
+    // The `constraint` node has exactly one named `type` child.
+    let mut cursor = constraint_node.walk();
+    for child in constraint_node.children(&mut cursor) {
+        if !child.is_named() {
+            continue;
+        }
+        let Ok(type_text) = child.utf8_text(content) else {
+            continue;
+        };
+        let trimmed = type_text.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let constraint_id = helper.add_type(trimmed, Some(span_from_node(child)));
+        helper.add_typeof_edge_with_context(
+            param_id,
+            constraint_id,
+            Some(TypeOfContext::Constraint),
+            None,
+            None,
+        );
+    }
+}
+
+/// Emit `References` edges for the `value` (default-type) child of a
+/// `type_parameter`.
+///
+/// The grammar shape is `default_type: '=' type`. The default value
+/// becomes a Reference edge from the parameter to the default Type
+/// node — symmetric with how `build_type_alias_edges` records type
+/// references on the right-hand side of a type alias.
+fn emit_type_parameter_default_edges(
+    default_node: Node<'_>,
+    content: &[u8],
+    param_id: sqry_core::graph::unified::NodeId,
+    helper: &mut GraphBuildHelper,
+) {
+    let mut cursor = default_node.walk();
+    for child in default_node.children(&mut cursor) {
+        if !child.is_named() {
+            continue;
+        }
+        let Ok(type_text) = child.utf8_text(content) else {
+            continue;
+        };
+        let trimmed = type_text.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let default_id = helper.add_type(trimmed, Some(span_from_node(child)));
+        helper.add_reference_edge(param_id, default_id);
+    }
+}
+
+/// Walk a `type_alias_declaration` body searching for
+/// `mapped_type_clause` nodes and emit a `Type` node for each binder
+/// (the `K` in `[K in keyof T]`).
+///
+/// AC-4: mapped-type binders are scoped to the enclosing type-alias,
+/// so the qualified name is `<TypeAlias>::<BinderName>`. Span is
+/// anchored on the binder identifier itself.
+fn process_mapped_type_binders(
+    type_alias_node: Node<'_>,
+    content: &[u8],
+    parent_qualified_name: &str,
+    helper: &mut GraphBuildHelper,
+) {
+    let Some(value_node) = type_alias_node.child_by_field_name("value") else {
+        return;
+    };
+    walk_for_mapped_binders(value_node, content, parent_qualified_name, helper);
+}
+
+/// Recursive descent through type-alias values looking for
+/// `mapped_type_clause` nodes. Mapped types can nest inside
+/// intersection / union / conditional types, so we walk the whole
+/// subtree rather than only inspecting the top-level value child.
+fn walk_for_mapped_binders(
+    node: Node<'_>,
+    content: &[u8],
+    parent_qualified_name: &str,
+    helper: &mut GraphBuildHelper,
+) {
+    if node.kind() == "mapped_type_clause"
+        && let Some(name_node) = node.child_by_field_name("name")
+        && let Ok(binder_name) = name_node.utf8_text(content)
+    {
+        let trimmed = binder_name.trim();
+        if !trimmed.is_empty() {
+            let qualified_binder = format!("{parent_qualified_name}.{trimmed}");
+            helper.add_type(&qualified_binder, Some(span_from_node(name_node)));
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        walk_for_mapped_binders(child, content, parent_qualified_name, helper);
+    }
 }

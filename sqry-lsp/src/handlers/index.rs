@@ -44,10 +44,11 @@ pub(crate) fn perf_log(msg: &str) {
 use sqry_core::graph::node::Language;
 use sqry_core::graph::unified::build::BuildConfig;
 use sqry_core::graph::unified::concurrent::CodeGraph;
-use sqry_core::graph::unified::persistence::GraphStorage;
+use sqry_core::graph::unified::persistence::{GraphStorage, load_from_path};
 use sqry_core::graph::unified::{EdgeKind, NodeKind};
 use sqry_core::json_response::IndexStatus;
 use sqry_core::progress::{IndexProgress, ProgressReporter, SharedReporter};
+use sqry_core::workspace::Classification;
 use sqry_plugin_registry::create_plugin_manager;
 
 use crate::handlers::LspHandlerError;
@@ -301,6 +302,43 @@ fn member_folder_aggregate_status(session: &SessionManager, target: &Path) -> In
     IndexStatus::aggregate(target.to_path_buf(), aggregate)
 }
 
+fn load_status_graph(
+    session: &SessionManager,
+    target: &Path,
+    graph_storage: &GraphStorage,
+) -> Result<CodeGraph> {
+    match load_from_path(
+        graph_storage.snapshot_path(),
+        Some(session.executor().plugin_manager()),
+    ) {
+        Ok(graph) => Ok(graph),
+        Err(load_error) => {
+            log::warn!(
+                "Graph load failed for index status at '{}' ({load_error}), auto-rebuilding index",
+                target.display()
+            );
+            let plugins = create_plugin_manager();
+            let config = BuildConfig::default();
+            let (graph, _build_result) = sqry_core::graph::unified::build::build_and_persist_graph(
+                target,
+                &plugins,
+                &config,
+                "lsp:index_status_auto_rebuild",
+            )
+            .with_context(|| {
+                format!(
+                    "auto-rebuild failed for {} (original error: {})",
+                    target.display(),
+                    load_error
+                )
+            })?;
+            session.clear_graph_cache();
+            session.clear_project_graph_cache_for_path(target);
+            Ok(graph)
+        }
+    }
+}
+
 /// Fetch the current index status for the requested path.
 ///
 /// Uses the unified graph (`.sqry/graph/`) for status information.
@@ -375,11 +413,10 @@ pub fn index_status(session: &SessionManager, path: Option<&str>) -> Result<Inde
         return Ok(IndexStatus::not_found());
     }
 
-    // Use session's cached graph
+    // Load the requested source-root graph directly so index status remains
+    // bounded by `resolve_path()` even when ambient ancestor git metadata exists.
     let load_start = Instant::now();
-    let graph = session
-        .graph_for_path(&target)?
-        .ok_or_else(|| anyhow::anyhow!("graph exists but could not be loaded"))?;
+    let graph = load_status_graph(session, &target, &graph_storage)?;
 
     perf_log(&format!(
         "index_status graph load took {elapsed:?}",
@@ -777,28 +814,24 @@ pub fn list_files_by_language(
     params: SqryListFilesByLanguageParams,
 ) -> Result<SqryListFilesByLanguageResult> {
     let target = session.resolve_path(params.path.as_deref())?;
-    let storage = GraphStorage::new(&target);
-    let query_lang = params.language.to_lowercase();
+    let language = params.language;
+    let query_lang = language.to_lowercase();
     let limit = params
         .limit
         .unwrap_or(DEFAULT_LIST_LIMIT)
         .min(MAX_LIST_LIMIT);
     let offset = params.offset.unwrap_or(0);
 
-    if !storage.exists() {
-        return Ok(SqryListFilesByLanguageResult {
-            language: params.language,
-            files: vec![],
-            total: 0,
-            offset,
-            limit,
-            has_more: false,
-        });
+    match session.classify_path(&target) {
+        Classification::Source => {}
+        Classification::Member { .. } | Classification::Excluded | Classification::Unknown => {
+            return Ok(empty_files_by_language_result(language, offset, limit));
+        }
     }
 
-    let graph = session
-        .graph_for_path(&target)?
-        .ok_or_else(|| anyhow::anyhow!("graph exists but could not be loaded"))?;
+    let Some(graph) = session.graph_for_path(&target)? else {
+        return Ok(empty_files_by_language_result(language, offset, limit));
+    };
 
     // Collect files matching the requested language
     let mut files: Vec<String> = graph
@@ -818,7 +851,7 @@ pub fn list_files_by_language(
     let has_more = offset + paginated.len() < total;
 
     Ok(SqryListFilesByLanguageResult {
-        language: params.language,
+        language,
         files: paginated,
         total,
         offset,
@@ -963,6 +996,21 @@ fn empty_cross_language_relations(limit: usize) -> SqryListCrossLanguageRelation
         limit,
         has_more: false,
         overflow: None,
+    }
+}
+
+fn empty_files_by_language_result(
+    language: String,
+    offset: usize,
+    limit: usize,
+) -> SqryListFilesByLanguageResult {
+    SqryListFilesByLanguageResult {
+        language,
+        files: vec![],
+        total: 0,
+        offset,
+        limit,
+        has_more: false,
     }
 }
 
