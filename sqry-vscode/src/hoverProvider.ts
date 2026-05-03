@@ -44,14 +44,18 @@ export class SqryHoverProvider implements vscode.HoverProvider, vscode.Disposabl
 
     try {
       const workspace = vscode.workspace.getWorkspaceFolder(document.uri);
-      if (!workspace || token.isCancellationRequested) return null;
+      if (!workspace || token.isCancellationRequested) {
+        return null;
+      }
 
       const [callerResult, calleeResult] = await Promise.all([
         this.client.runQuery(`callers:${symbolName}`, workspace),
         this.client.runQuery(`callees:${symbolName}`, workspace),
       ]);
 
-      if (token.isCancellationRequested) return null;
+      if (token.isCancellationRequested) {
+        return null;
+      }
 
       const callerCount = callerResult?.symbols?.length ?? 0;
       const calleeCount = calleeResult?.symbols?.length ?? 0;
@@ -74,7 +78,9 @@ export class SqryHoverProvider implements vscode.HoverProvider, vscode.Disposabl
     position: vscode.Position,
   ): Promise<string | null> {
     const wordRange = document.getWordRangeAtPosition(position);
-    if (!wordRange) return null;
+    if (!wordRange) {
+      return null;
+    }
     return document.getText(wordRange);
   }
 

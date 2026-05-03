@@ -12,6 +12,7 @@ use crate::types::{
     DisambiguationOption, ExtractedEntities, Intent, TranslationResponse, ValidationStatus,
 };
 use crate::validator;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
@@ -43,6 +44,30 @@ pub struct TranslatorConfig {
     pub default_limit: u32,
     /// Languages to restrict searches to (affects cache key generation).
     pub languages: Vec<String>,
+    /// Optional override for the resolved model directory (NL02 resolver chain entry).
+    ///
+    /// When set, the resolver short-circuits the rest of the lookup chain and uses
+    /// this path directly. Distinct from the legacy [`Self::model_dir`] field, which
+    /// remains in place for backward compatibility.
+    pub model_dir_override: Option<PathBuf>,
+    /// Permit loading a model whose checksums cannot be verified.
+    ///
+    /// Defaults to `false`. NL04 enforces strict integrity by default; this flag is
+    /// the operator escape hatch for development workflows.
+    pub allow_unverified_model: bool,
+    /// Permit fetching the model from the network when not present locally.
+    ///
+    /// Defaults to `false`. NL03 wires the gated downloader behind this flag.
+    pub allow_model_download: bool,
+    /// Optional cache directory for downloaded model artifacts.
+    ///
+    /// Defaults to `None`, in which case NL03 selects a platform-appropriate cache root.
+    pub model_cache_dir: Option<PathBuf>,
+    /// Optional override for the classifier worker pool size.
+    ///
+    /// Defaults to `None`. NL07 resolves this to the `SQRY_NL_CLASSIFIER_POOL_SIZE`
+    /// environment variable, falling back to `2` workers.
+    pub classifier_pool_size: Option<usize>,
 }
 
 impl Default for TranslatorConfig {
@@ -58,19 +83,32 @@ impl Default for TranslatorConfig {
             }),
             default_limit: DEFAULT_RESULT_LIMIT,
             languages: Vec::new(),
+            model_dir_override: None,
+            allow_unverified_model: false,
+            allow_model_download: false,
+            model_cache_dir: None,
+            classifier_pool_size: None,
         }
     }
 }
 
 /// The main Translator struct that provides the `translate()` API.
+///
+/// `Debug` is implemented manually because the inner classifier pool
+/// (`ort::Session`-bearing) does not implement `Debug`. The manual
+/// impl renders enough state for daemon `LoadedWorkspace` /
+/// `WorkspaceManager` debug output without dumping model internals.
 pub struct Translator {
     config: TranslatorConfig,
     /// Translation counter for stats
     translations: AtomicU64,
     /// Translation cache for repeated queries (Step 7)
     cache: Option<TranslationCache>,
+    /// NL07 — bounded pool of `N` independently-loaded classifier
+    /// sessions. `None` when the resolver chain produced no model
+    /// directory (rule-based fallback only).
     #[cfg(feature = "classifier")]
-    classifier: Option<crate::classifier::IntentClassifier>,
+    classifier_pool: Option<crate::classifier::ClassifierPool>,
 }
 
 impl Translator {
@@ -81,13 +119,100 @@ impl Translator {
     /// Returns an error if the classifier fails to load (when classifier feature is enabled).
     pub fn new(config: TranslatorConfig) -> NlResult<Self> {
         #[cfg(feature = "classifier")]
-        let classifier = if let Some(model_dir) = &config.model_dir {
-            use std::path::Path;
-            Some(crate::classifier::IntentClassifier::load(Path::new(
-                model_dir,
-            ))?)
-        } else {
-            None
+        let classifier_pool = {
+            use crate::classifier::{
+                BAKED_MANIFEST, ClassifierPool, RealDirs, ResolverLevel, TrustMode,
+                ensure_model_in_cache, resolve_model_dir, resolve_pool_size,
+            };
+            use std::ffi::OsString;
+            use std::path::{Path, PathBuf};
+
+            // NL02 5-level resolver:
+            // 1. CLI / programmatic override
+            // 2. Legacy `TranslatorConfig::model_dir`
+            // 3. SQRY_NL_MODEL_DIR env var
+            // 4. XDG cache dir / sqry/models
+            // 5. <exe-dir>/models
+            let cli_override: Option<&Path> = config.model_dir_override.as_deref();
+            let legacy_path: Option<&Path> = config.model_dir.as_deref().map(Path::new);
+            let env_value: Option<OsString> = std::env::var_os("SQRY_NL_MODEL_DIR");
+            let env_ref = env_value.as_deref();
+            let exe = std::env::current_exe().ok();
+            let exe_ref = exe.as_deref();
+
+            let resolved =
+                resolve_model_dir(cli_override, legacy_path, env_ref, &RealDirs, exe_ref);
+
+            // NL03 gated downloader path. Only fires when:
+            //   1. The resolver missed every level (no on-disk model anywhere
+            //      sqry knows to look), AND
+            //   2. The operator opted in via `allow_model_download = true`.
+            // The download path lands the model under our managed cache
+            // directory — structurally equivalent to a Level 4 (XDG) hit,
+            // so the resulting trust mode is `Trusted`.
+            let resolved: Option<(PathBuf, ResolverLevel)> = match resolved {
+                Some(hit) => Some(hit),
+                None if config.allow_model_download => {
+                    let cache_dir: PathBuf = config
+                        .model_cache_dir
+                        .clone()
+                        .or_else(|| dirs::cache_dir().map(|p| p.join("sqry/models")))
+                        .ok_or_else(|| {
+                            crate::error::NlError::Config(
+                                "no platform cache_dir available for model download".to_string(),
+                            )
+                        })?;
+                    let dir = ensure_model_in_cache(&cache_dir, &BAKED_MANIFEST, true)?;
+                    Some((dir, ResolverLevel::XdgCache))
+                }
+                None => None,
+            };
+
+            match resolved {
+                Some((model_dir, level)) => {
+                    let trust_mode = TrustMode::from(level);
+                    // FR-14: Custom mode means integrity is rooted in
+                    // a user-supplied `manifest.json`. Emit a single
+                    // loud warn at Translator init time so the operator
+                    // is aware their model directory is the trust root.
+                    if matches!(trust_mode, TrustMode::Custom) {
+                        tracing::warn!(
+                            target: "sqry_nl::classifier",
+                            model_dir = %model_dir.display(),
+                            resolver_level = ?level,
+                            "Loading NL classifier under custom trust mode — \
+                             integrity rooted in user-supplied manifest.json. \
+                             For trusted defaults use the XDG cache or the \
+                             binary-adjacent install location."
+                        );
+                    }
+
+                    // NL07: build a pool of N independently-loaded
+                    // classifier sessions. The closure below is invoked
+                    // exactly N times by `ClassifierPool::new` — that
+                    // is the load-counter invariant the
+                    // `n_concurrent_translates_use_n_distinct_sessions`
+                    // integration test asserts.
+                    let pool_size = resolve_pool_size(config.classifier_pool_size);
+                    tracing::info!(
+                        target: "sqry_nl::classifier",
+                        model_dir = %model_dir.display(),
+                        pool_size,
+                        "Initialising NL classifier pool"
+                    );
+                    let model_dir_for_loader = model_dir.clone();
+                    let pool = ClassifierPool::new(pool_size, move || {
+                        crate::classifier::IntentClassifier::load(
+                            &model_dir_for_loader,
+                            config.allow_unverified_model,
+                            trust_mode,
+                        )
+                        .map_err(crate::error::NlError::from)
+                    })?;
+                    Some(pool)
+                }
+                None => None,
+            }
         };
 
         // Initialize cache if configured
@@ -101,7 +226,7 @@ impl Translator {
             translations: AtomicU64::new(0),
             cache,
             #[cfg(feature = "classifier")]
-            classifier,
+            classifier_pool,
         })
     }
 
@@ -130,14 +255,30 @@ impl Translator {
     ///
     /// # Note
     ///
-    /// This method requires `&mut self` when the classifier feature is enabled.
+    /// NL07: this method now only needs `&self` because the classifier
+    /// is held inside a [`crate::classifier::ClassifierPool`] (each
+    /// pool slot wraps the underlying session in an
+    /// `Arc<parking_lot::Mutex<_>>`). The `&mut self` signature is
+    /// preserved for backwards compatibility with the pre-NL07 public
+    /// API. Concurrent callers can use [`Self::translate_shared`] to
+    /// drop the redundant `mut` requirement.
     pub fn translate(&mut self, input: &str) -> TranslationResponse {
+        self.translate_shared(input)
+    }
+
+    /// Translate without requiring `&mut self`.
+    ///
+    /// Functionally identical to [`Self::translate`]; exposed because
+    /// the underlying pool architecture supports concurrent shared
+    /// access. Use this from multi-threaded callers (daemon, LSP) so
+    /// they don't need to hold a `&mut Translator` across calls.
+    pub fn translate_shared(&self, input: &str) -> TranslationResponse {
         self.translations.fetch_add(1, Ordering::Relaxed);
         self.translate_impl(input)
     }
 
     /// Internal translation implementation.
-    fn translate_impl(&mut self, input: &str) -> TranslationResponse {
+    fn translate_impl(&self, input: &str) -> TranslationResponse {
         let start_time = Instant::now();
 
         // Create cache key from input and context
@@ -292,17 +433,37 @@ impl Translator {
     }
 
     /// Classify the intent of the query.
+    ///
+    /// NL07: dispatches through the classifier pool. The pool guard
+    /// holds one of `N` loaded sessions for the duration of this call;
+    /// the slot is automatically returned on guard drop, including any
+    /// panic during `classify`.
     #[allow(clippy::unused_self)] // Uses self when classifier feature is enabled.
-    fn classify_intent(&mut self, text: &str, entities: &ExtractedEntities) -> (Intent, f32) {
+    fn classify_intent(&self, text: &str, entities: &ExtractedEntities) -> (Intent, f32) {
         #[cfg(feature = "classifier")]
-        if let Some(ref mut classifier) = self.classifier {
+        if let Some(ref pool) = self.classifier_pool {
+            // Acquire blocks the current thread until a slot is free.
+            // Async callers MUST wrap this in `spawn_blocking` — the
+            // pool is sync by design (no tokio dependency in sqry-nl).
+            let guard = pool.acquire();
+            let mut classifier = guard.classifier().lock();
             match classifier.classify(text) {
                 Ok(result) => return (result.intent, result.confidence),
                 Err(e) => {
-                    // Log and fall back to rules
-                    eprintln!("Classifier failed, using fallback: {e}");
+                    // Log and fall back to rules. The guard's `Drop`
+                    // returns the slot regardless of the classify
+                    // outcome, so this fallback is panic-safe.
+                    tracing::warn!(
+                        target: "sqry_nl::classifier",
+                        error = %e,
+                        "Classifier failed, using rule-based fallback"
+                    );
                 }
             }
+            // Explicit drop so the pool slot is back in the channel
+            // before we run the rule-based fallback below.
+            drop(classifier);
+            drop(guard);
         }
 
         // Fallback: rule-based classification
@@ -679,6 +840,18 @@ impl Translator {
         if let Some(ref cache) = self.cache {
             cache.clear();
         }
+    }
+}
+
+impl std::fmt::Debug for Translator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut debug = f.debug_struct("Translator");
+        debug
+            .field("translations", &self.translations.load(Ordering::Relaxed))
+            .field("cache_enabled", &self.cache.is_some());
+        #[cfg(feature = "classifier")]
+        debug.field("classifier_pool", &self.classifier_pool);
+        debug.finish()
     }
 }
 

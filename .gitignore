@@ -172,6 +172,10 @@ hf_cache/
 *.onnx
 **/models/*.onnx
 models/
+!sqry-nl/models/
+sqry-nl/models/*
+!sqry-nl/models/checksums.json
+!sqry-nl/models/manifest.json
 
 # SonarQube local dev tooling
 .scannerwork/

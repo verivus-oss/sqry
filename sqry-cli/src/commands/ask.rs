@@ -3,12 +3,29 @@
 //! Translates natural language descriptions into sqry commands using
 //! the sqry-nl translation pipeline.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use colored::Colorize;
 use std::io::{self, Write};
 
 use crate::args::Cli;
 use crate::output::OutputStreams;
+
+/// Return true when an environment variable is set to a truthy value.
+///
+/// Recognises `1`, `true`, `yes`, `on` (case-insensitive) — anything else is
+/// treated as off. Unset variables return false.
+fn env_flag_truthy(name: &str) -> bool {
+    match std::env::var(name) {
+        Ok(v) => {
+            let v = v.trim();
+            v.eq_ignore_ascii_case("1")
+                || v.eq_ignore_ascii_case("true")
+                || v.eq_ignore_ascii_case("yes")
+                || v.eq_ignore_ascii_case("on")
+        }
+        Err(_) => false,
+    }
+}
 
 /// Configuration for response handling behavior.
 struct ResponseConfig<'a> {
@@ -384,6 +401,7 @@ fn handle_reject_response(
 ///
 /// # Errors
 /// Returns an error if translation fails, output cannot be written, or execution fails.
+#[allow(clippy::fn_params_excessive_bools, clippy::too_many_arguments)]
 pub fn run_ask(
     cli: &Cli,
     query: &str,
@@ -391,20 +409,45 @@ pub fn run_ask(
     auto_execute: bool,
     dry_run: bool,
     threshold: f32,
+    model_dir_override: Option<&std::path::Path>,
+    allow_unverified_model_flag: bool,
+    allow_model_download_flag: bool,
 ) -> Result<()> {
     use sqry_nl::{TranslationResponse, Translator, TranslatorConfig};
 
     let mut streams = OutputStreams::with_pager(cli.pager_config());
 
-    // Create translator with configured thresholds
+    // Honour env-var overrides for the trust toggles (FR-14): a CLI flag
+    // *or* the matching env var being set turns the option on.
+    let allow_unverified_model =
+        allow_unverified_model_flag || env_flag_truthy("SQRY_NL_ALLOW_UNVERIFIED_MODEL");
+    let allow_model_download =
+        allow_model_download_flag || env_flag_truthy("SQRY_NL_ALLOW_DOWNLOAD");
+
+    // Create translator with configured thresholds and resolver inputs.
     let translator_config = TranslatorConfig {
         execute_threshold: threshold,
         confirm_threshold: threshold * 0.75, // Confirm threshold at 75% of execute
+        model_dir_override: model_dir_override.map(std::path::Path::to_path_buf),
+        allow_unverified_model,
+        allow_model_download,
         ..Default::default()
     };
 
-    let mut translator = Translator::new(translator_config)
-        .context("Failed to initialize natural language translator")?;
+    // NL08: detect the OnnxRuntimeMissing variant before wrapping in
+    // anyhow context so the CLI main loop can surface a multi-line
+    // platform-specific install hint and exit with code 65.
+    let mut translator = match Translator::new(translator_config) {
+        Ok(t) => t,
+        Err(sqry_nl::NlError::OnnxRuntimeMissing { hint }) => {
+            return Err(crate::error::CliError::OnnxRuntimeMissing { hint }.into());
+        }
+        Err(e) => {
+            return Err(
+                anyhow::Error::new(e).context("Failed to initialize natural language translator")
+            );
+        }
+    };
 
     // Translate the query
     let response = translator.translate(query);

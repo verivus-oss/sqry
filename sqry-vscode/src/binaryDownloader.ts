@@ -208,9 +208,8 @@ export async function downloadWithProgress(
     if (proxyUrl) {
       try {
         // Dynamic require to allow the module to load even without the dep
-        // eslint-disable-next-line @typescript-eslint/no-var-requires
-        const { HttpsProxyAgent } = require("https-proxy-agent");
-        requestOptions.agent = new HttpsProxyAgent(proxyUrl);
+        const proxyAgentModule = require("https-proxy-agent");
+        requestOptions.agent = new proxyAgentModule.HttpsProxyAgent(proxyUrl);
       } catch {
         // Fall through without proxy if agent creation fails
       }

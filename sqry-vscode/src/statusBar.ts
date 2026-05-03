@@ -253,16 +253,26 @@ export class SqryStatusBar implements vscode.Disposable {
   }
 
   private buildTooltip(status?: SqryIndexStatus): string {
-    if (!status) return "sqry";
+    if (!status) {
+      return "sqry";
+    }
     const parts = ["sqry"];
-    if (status.symbol_count !== undefined) parts.push(`${status.symbol_count} symbols`);
-    if (status.file_count !== undefined) parts.push(`${status.file_count} files`);
-    if (status.age_seconds !== undefined) parts.push(`indexed ${this.formatAge(status.age_seconds)}`);
+    if (status.symbol_count !== undefined) {
+      parts.push(`${status.symbol_count} symbols`);
+    }
+    if (status.file_count !== undefined) {
+      parts.push(`${status.file_count} files`);
+    }
+    if (status.age_seconds !== undefined) {
+      parts.push(`indexed ${this.formatAge(status.age_seconds)}`);
+    }
     return parts.join(" | ");
   }
 
   private formatAge(seconds: number): string {
-    if (seconds < 60) return "just now";
+    if (seconds < 60) {
+      return "just now";
+    }
     if (seconds < 3600) {
       const m = Math.floor(seconds / 60);
       return `${m}m ago`;

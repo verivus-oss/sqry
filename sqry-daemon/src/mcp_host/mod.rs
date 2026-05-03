@@ -34,6 +34,7 @@
 pub mod error_map;
 
 use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -48,15 +49,21 @@ use serde_json::Value;
 use sqry_core::project::ProjectRootMode;
 use sqry_core::query::executor::QueryExecutor;
 use sqry_mcp::daemon_adapter::WorkspaceContext;
-use sqry_mcp::daemon_adapter::dispatch::dispatch_by_name;
+use sqry_mcp::daemon_adapter::dispatch::{dispatch_by_name, dispatch_sqry_ask};
+use sqry_mcp::daemon_params::params_to_sqry_ask_args;
+use sqry_mcp::execution::build_translator_config_for_path;
+use sqry_mcp::tool_args::SqryAskParams;
 use sqry_mcp::tools_schema;
+use sqry_nl::{Translator, TranslatorConfig};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::sync::CancellationToken;
 
 use crate::error::DaemonError;
 use crate::ipc::tool_core::{self, ExecuteVerdict};
-use crate::workspace::{WorkspaceBuilder, WorkspaceKey, WorkspaceManager};
-use error_map::{daemon_err_to_mcp, daemon_err_to_mcp_with_tool};
+use crate::workspace::{LoadedWorkspace, WorkspaceBuilder, WorkspaceKey, WorkspaceManager};
+use error_map::{daemon_err_to_mcp, daemon_err_to_mcp_with_tool, try_onnx_runtime_missing_to_mcp};
+
+const INITIAL_WORKING_SET_BYTES: u64 = 2 * 1024 * 1024;
 
 /// rmcp `ServerHandler` backing the daemon-hosted MCP surface.
 ///
@@ -269,6 +276,17 @@ impl ServerHandler for DaemonMcpHandler {
             return self.handle_rebuild_index(&path, &args_value).await;
         }
 
+        // NL07: `sqry_ask` requires the per-workspace
+        // `Arc<Translator>` cached on `LoadedWorkspace.nl_translator`.
+        // The standard `dispatch_by_name` path cannot reach that cell
+        // (its `WorkspaceContext` is ephemeral and only carries
+        // `(workspace_root, graph, executor)`), so the daemon MCP
+        // host owns the routing. See `dispatch_sqry_ask` in
+        // sqry-mcp/src/daemon_adapter/dispatch.rs.
+        if name == "sqry_ask" {
+            return self.handle_sqry_ask(&args_value).await;
+        }
+
         // Extract the `path` argument — every one of the remaining 14
         // daemon-supported Args types carries a path field.
         let path = extract_path_arg(&args_value).ok_or_else(|| {
@@ -337,6 +355,154 @@ impl ServerHandler for DaemonMcpHandler {
 }
 
 impl DaemonMcpHandler {
+    /// NL07 — handle the `sqry_ask` MCP tool against the daemon's
+    /// per-workspace cached `Arc<Translator>`.
+    ///
+    /// Steps:
+    ///
+    /// 1. Resolve the workspace key from the request's `path`
+    ///    argument (matching how the standard `dispatch_by_name` path
+    ///    canonicalises a workspace root in `tool_core::resolve_path`).
+    /// 2. Look up [`LoadedWorkspace`] via
+    ///    [`WorkspaceManager::lookup`]. If the workspace is not
+    ///    loaded, lazily load it through the registered
+    ///    [`WorkspaceBuilder`] — the same admission-controlled path
+    ///    the JSON-RPC `tools/*` tools use for graph queries.
+    /// 3. Lazily initialise the per-workspace translator via
+    ///    [`OnceCell::get_or_try_init`]. Initialisation cost (loading
+    ///    `N` ONNX sessions in the [`sqry_nl::classifier::ClassifierPool`])
+    ///    is paid exactly once per workspace lifetime.
+    /// 4. Dispatch to
+    ///    [`sqry_mcp::daemon_adapter::dispatch::dispatch_sqry_ask`]
+    ///    inside [`tokio::task::spawn_blocking`] because the pool's
+    ///    `acquire()` is sync.
+    ///
+    /// # Errors
+    ///
+    /// - `DaemonError::InvalidArgument` for malformed params.
+    /// - `DaemonError::WorkspaceBuildFailed` when initial workspace
+    ///   load or translator construction fails.
+    /// - `DaemonError::Internal` for `spawn_blocking` join errors and
+    ///   for any error propagated from `dispatch_sqry_ask`.
+    ///
+    /// All errors are mapped through `daemon_err_to_mcp_with_tool`
+    /// so the MCP envelope carries `details.tool = "sqry_ask"`.
+    async fn handle_sqry_ask(&self, args_value: &Value) -> Result<CallToolResult, McpError> {
+        // Parse once through the same params converter used by the
+        // daemon dispatch helper. This preserves standalone parity for
+        // query validation, default `path = "."`, strict bool/string
+        // typing, and the NL02/NL03/NL04 model/trust parameters.
+        let ask_args = params_to_sqry_ask_args(args_value.clone()).map_err(|e| {
+            daemon_err_to_mcp_with_tool(
+                DaemonError::InvalidArgument {
+                    reason: format!("sqry_ask: invalid arguments: {e}"),
+                },
+                "sqry_ask",
+            )
+        })?;
+        let path = ask_args.path.clone();
+
+        // Canonicalise the path so workspace lookup uses the same key
+        // shape as `dispatch_by_name` / `tool_core`. A relative `path`
+        // resolves against the daemon process CWD.
+        let canonical_root = std::fs::canonicalize(&path).map_err(|e| {
+            daemon_err_to_mcp_with_tool(
+                DaemonError::InvalidArgument {
+                    reason: format!("sqry_ask: cannot canonicalize path {path:?}: {e}"),
+                },
+                "sqry_ask",
+            )
+        })?;
+        let key = WorkspaceKey::new(canonical_root.clone(), ProjectRootMode::default(), 0);
+
+        let (loaded, translator) = self
+            .load_workspace_and_translator_for_sqry_ask(key, canonical_root.clone(), ask_args)
+            .await?;
+
+        // Build a minimal WorkspaceContext for the dispatch helper.
+        // `dispatch_sqry_ask` receives it for symmetry with
+        // `dispatch_by_name`; the executor inside resolves its own
+        // workspace via `engine_for_workspace`.
+        let wctx = WorkspaceContext {
+            workspace_root: canonical_root.clone(),
+            graph: loaded.graph.load_full(),
+            executor: Arc::clone(&self.tool_executor),
+        };
+
+        let payload =
+            Self::dispatch_sqry_ask_blocking(wctx, Arc::clone(&translator), args_value.clone())
+                .await?;
+
+        // Wire-format parity with the 14 query tools that route
+        // through `classify_and_execute` — both `content[0].text` and
+        // `structured_content` carry the same payload.
+        let text_payload =
+            serde_json::to_string_pretty(&payload).unwrap_or_else(|_| payload.to_string());
+        Ok(CallToolResult {
+            content: vec![Content::text(text_payload)],
+            structured_content: Some(payload),
+            is_error: None,
+            meta: None,
+        })
+    }
+
+    /// Load the `sqry_ask` workspace and initialise its per-workspace translator.
+    ///
+    /// # Errors
+    ///
+    /// Returns an MCP error when workspace load fails, translator construction fails,
+    /// or the blocking task cannot be joined.
+    async fn load_workspace_and_translator_for_sqry_ask(
+        &self,
+        key: WorkspaceKey,
+        canonical_root: PathBuf,
+        ask_args: SqryAskParams,
+    ) -> Result<(Arc<LoadedWorkspace>, Arc<Translator>), McpError> {
+        let manager = Arc::clone(&self.manager);
+        let builder = Arc::clone(&self.workspace_builder);
+
+        tokio::task::spawn_blocking(move || {
+            load_workspace_and_translator_for_sqry_ask_blocking(
+                &manager,
+                builder.as_ref(),
+                &key,
+                canonical_root.as_path(),
+                &ask_args,
+            )
+        })
+        .await
+        .map_err(|join_err| {
+            daemon_err_to_mcp_with_tool(
+                DaemonError::Internal(anyhow::anyhow!("spawn_blocking join: {join_err}")),
+                "sqry_ask",
+            )
+        })?
+        .map_err(map_sqry_ask_translator_init_error)
+    }
+
+    /// Dispatch `sqry_ask` without blocking the daemon runtime.
+    ///
+    /// # Errors
+    ///
+    /// Returns an MCP error when dispatch fails or the blocking task cannot be joined.
+    async fn dispatch_sqry_ask_blocking(
+        wctx: WorkspaceContext,
+        translator: Arc<Translator>,
+        args_value: Value,
+    ) -> Result<Value, McpError> {
+        tokio::task::spawn_blocking(move || dispatch_sqry_ask(&wctx, &translator, &args_value))
+            .await
+            .map_err(|join_err| {
+                daemon_err_to_mcp_with_tool(
+                    DaemonError::Internal(anyhow::anyhow!(
+                        "sqry_ask: spawn_blocking join: {join_err}"
+                    )),
+                    "sqry_ask",
+                )
+            })?
+            .map_err(map_sqry_ask_dispatch_error)
+    }
+
     /// Handle `rebuild_index` with full response-shape parity against
     /// standalone `sqry-mcp::execution::execute_rebuild_index`.
     ///
@@ -432,18 +598,7 @@ impl DaemonMcpHandler {
             self.manager.unload(&key);
         }
 
-        // Conservative initial working-set estimate matching
-        // `daemon_load::working_set_estimate_for_initial` — the raw
-        // 2 MiB floor scaled by `WORKING_SET_MULTIPLIER` (1.5x) so
-        // admission accounting is consistent across both transports.
-        const INITIAL_WORKING_SET_BYTES: u64 = 2 * 1024 * 1024;
-        #[allow(
-            clippy::cast_possible_truncation,
-            clippy::cast_sign_loss,
-            clippy::cast_precision_loss
-        )]
-        let working_set_estimate =
-            (INITIAL_WORKING_SET_BYTES as f64 * crate::config::WORKING_SET_MULTIPLIER) as u64;
+        let working_set_estimate = initial_working_set_estimate();
 
         let manager = Arc::clone(&self.manager);
         let builder = Arc::clone(&self.workspace_builder);
@@ -501,12 +656,91 @@ impl DaemonMcpHandler {
     }
 }
 
+/// Estimate the admission working set for initial daemon-hosted tool loads.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+#[must_use]
+fn initial_working_set_estimate() -> u64 {
+    (INITIAL_WORKING_SET_BYTES as f64 * crate::config::WORKING_SET_MULTIPLIER) as u64
+}
+
+fn load_workspace_and_translator_for_sqry_ask_blocking(
+    manager: &Arc<WorkspaceManager>,
+    builder: &dyn WorkspaceBuilder,
+    key: &WorkspaceKey,
+    canonical_root: &Path,
+    ask_args: &SqryAskParams,
+) -> Result<(Arc<LoadedWorkspace>, Arc<Translator>), DaemonError> {
+    let working_set_estimate = initial_working_set_estimate();
+    let _graph = manager.get_or_load(key, builder, working_set_estimate)?;
+    let loaded = manager
+        .lookup(key)
+        .ok_or_else(|| DaemonError::WorkspaceBuildFailed {
+            root: canonical_root.to_path_buf(),
+            reason: "sqry_ask: workspace was loaded but disappeared from manager".to_string(),
+        })?;
+
+    let translator = loaded
+        .nl_translator
+        .get_or_try_init(|| build_translator_for_sqry_ask(canonical_root, ask_args))?
+        .clone();
+
+    Ok((loaded, translator))
+}
+
+fn build_translator_for_sqry_ask(
+    scoped_path: &Path,
+    args: &SqryAskParams,
+) -> Result<Arc<Translator>, DaemonError> {
+    let cfg = build_daemon_sqry_ask_translator_config(scoped_path, args);
+    match Translator::new(cfg) {
+        Ok(translator) => Ok(Arc::new(translator)),
+        Err(nl_err @ sqry_nl::NlError::OnnxRuntimeMissing { .. }) => {
+            Err(DaemonError::Internal(anyhow::Error::new(nl_err)))
+        }
+        Err(err) => Err(DaemonError::WorkspaceBuildFailed {
+            root: scoped_path.to_path_buf(),
+            reason: format!("sqry_ask: translator init failed: {err}"),
+        }),
+    }
+}
+
+fn map_sqry_ask_translator_init_error(err: DaemonError) -> McpError {
+    if let DaemonError::Internal(ref any_err) = err
+        && let Some(nl_err) = any_err.downcast_ref::<sqry_nl::NlError>()
+        && let Some(mcp_err) = try_onnx_runtime_missing_to_mcp(nl_err)
+    {
+        return mcp_err;
+    }
+    daemon_err_to_mcp_with_tool(err, "sqry_ask")
+}
+
+fn map_sqry_ask_dispatch_error(err: anyhow::Error) -> McpError {
+    if let Some(nl_err) = err.downcast_ref::<sqry_nl::NlError>()
+        && let Some(mcp_err) = try_onnx_runtime_missing_to_mcp(nl_err)
+    {
+        return mcp_err;
+    }
+    daemon_err_to_mcp_with_tool(DaemonError::Internal(err), "sqry_ask")
+}
+
 /// Extract the `path` argument from tool args. Only valid for the 15
 /// daemon-supported tool types — do NOT extend to the full 34-tool
 /// standalone inventory without auditing which tool types carry a
 /// `path` field.
 fn extract_path_arg(args: &Value) -> Option<String> {
     args.as_object()?.get("path")?.as_str().map(String::from)
+}
+
+#[must_use]
+fn build_daemon_sqry_ask_translator_config(
+    scoped_path: &Path,
+    args: &SqryAskParams,
+) -> TranslatorConfig {
+    build_translator_config_for_path(scoped_path, args)
 }
 
 /// Render a path as a forward-slash string for JSON wire output,
@@ -734,6 +968,39 @@ mod tests {
         assert_eq!(extract_path_arg(&v), None);
         let v = serde_json::json!([1, 2, 3]);
         assert_eq!(extract_path_arg(&v), None);
+    }
+
+    #[test]
+    fn daemon_sqry_ask_translator_config_preserves_model_and_trust_params() {
+        let args = SqryAskParams {
+            query: "find call sites".to_string(),
+            path: ".".to_string(),
+            execute: false,
+            model_dir: Some("sqry-nl-models".to_string()),
+            allow_unverified_model: true,
+            allow_model_download: true,
+        };
+
+        let cfg = build_daemon_sqry_ask_translator_config(std::path::Path::new("workspace"), &args);
+
+        assert_eq!(
+            cfg.model_dir_override.as_deref(),
+            Some(std::path::Path::new("sqry-nl-models")),
+            "daemon sqry_ask must thread request model_dir into TranslatorConfig"
+        );
+        assert!(
+            cfg.allow_unverified_model,
+            "daemon sqry_ask must thread allow_unverified_model into TranslatorConfig"
+        );
+        assert!(
+            cfg.allow_model_download,
+            "daemon sqry_ask must thread allow_model_download into TranslatorConfig"
+        );
+        assert_eq!(
+            cfg.working_directory.as_deref(),
+            Some("workspace"),
+            "daemon sqry_ask must scope TranslatorConfig to the canonical request path"
+        );
     }
 
     #[test]

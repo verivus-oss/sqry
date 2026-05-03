@@ -16,6 +16,8 @@
  * host or proxy every transitive `vscode` import. The activation site
  * in `extension.ts` calls this exact function once at startup.
  */
+import * as fs from "node:fs";
+import * as path from "node:path";
 import { expect } from "chai";
 
 import {
@@ -284,10 +286,6 @@ describe("STEP_12 — extension.ts re-exports the shared helper", () => {
     // We import only the type/value shape, never the activation
     // function itself (which pulls in `vscode`).
     //
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const fs = require("node:fs") as typeof import("node:fs");
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const path = require("node:path") as typeof import("node:path");
     const extensionSource = fs.readFileSync(
       path.resolve(__dirname, "../src/extension.ts"),
       "utf8",

@@ -1556,9 +1556,15 @@ async function handleError(error: unknown): Promise<void> {
     message = "Unknown error";
   }
 
-  if (await handleBinaryError(message)) return;
-  if (await handleTimeoutError(message)) return;
-  if (await handleQueryError(message)) return;
+  if (await handleBinaryError(message)) {
+    return;
+  }
+  if (await handleTimeoutError(message)) {
+    return;
+  }
+  if (await handleQueryError(message)) {
+    return;
+  }
 
   await vscode.window.showErrorMessage(`sqry error: ${message}`);
 }

@@ -854,6 +854,25 @@ pub struct SqryAskParams {
     /// Whether to execute the translated command and return results
     #[serde(default)]
     pub execute: bool,
+
+    /// Optional override for the intent-classifier model directory.
+    ///
+    /// When set, takes precedence over `SQRY_NL_MODEL_DIR`, the XDG cache
+    /// (`<cache>/sqry/models`), and the next-to-binary fallback. The
+    /// directory must contain a `manifest.json` to count as a hit.
+    #[serde(default)]
+    pub model_dir: Option<String>,
+
+    /// Permit loading a classifier whose checksums cannot be verified.
+    ///
+    /// Defaults to `false`. Operator escape hatch for development workflows.
+    #[serde(default)]
+    pub allow_unverified_model: bool,
+
+    /// Permit fetching the classifier model from the network when not
+    /// present locally. Defaults to `false`.
+    #[serde(default)]
+    pub allow_model_download: bool,
 }
 
 // NOTE: Validation is performed in validation.rs via validate_sqry_ask_args().

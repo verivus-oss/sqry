@@ -61,7 +61,6 @@
 // Public modules
 pub mod assembler;
 pub mod cache;
-#[cfg(feature = "classifier")]
 pub mod classifier;
 pub mod error;
 pub mod extractor;
@@ -72,6 +71,8 @@ pub mod validator;
 
 // Re-exports for convenience
 pub use cache::{CacheConfig, CacheStats};
+#[cfg(feature = "classifier")]
+pub use classifier::onnx_runtime_install_hint;
 pub use error::{NlError, NlResult};
 pub use translator::{Translator, TranslatorConfig};
 pub use types::{

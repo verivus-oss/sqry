@@ -3,6 +3,10 @@ use std::fmt;
 
 const KIND_VALIDATION: &str = "validation_error";
 const KIND_DEADLINE_EXCEEDED: &str = "deadline_exceeded";
+/// NL08 — code returned in the structured MCP envelope for the
+/// "ONNX Runtime not installed" condition. Wire-stable; consumers may
+/// pattern-match on this string.
+pub const CODE_ONNX_RUNTIME_MISSING: &str = "ONNX_RUNTIME_MISSING";
 
 #[derive(Debug, Clone)]
 pub struct RpcError {
@@ -37,6 +41,41 @@ impl RpcError {
             retryable: false,
             retry_after_ms: None,
             details: Some(data),
+        }
+    }
+
+    /// NL08: ONNX Runtime missing — produces the structured MCP
+    /// envelope `{ code: "ONNX_RUNTIME_MISSING", message: <hint>,
+    /// retriable: false }` that every NL08-aware client can pattern
+    /// match against. The wire envelope is rendered by
+    /// [`crate::server::rpc_error_to_mcp`] (server.rs) by reading the
+    /// `details` field below — the envelope's three top-level fields
+    /// `code` / `message` / `retriable` live INSIDE `details` because
+    /// the existing server-wide envelope shape (`kind` / `retryable` /
+    /// `retry_after_ms` / `details`) reserves those names. Per the
+    /// NL08 design (DAG `[units.NL08]`) the user-facing 3-field
+    /// envelope is what consumers parse; this implementation places it
+    /// in `details` while keeping the existing server-wide envelope
+    /// structurally intact for parity with other tools.
+    #[must_use]
+    pub fn onnx_runtime_missing(hint: impl Into<String>) -> Self {
+        let hint_str = hint.into();
+        let mut detail_map = Map::new();
+        detail_map.insert(
+            "code".to_string(),
+            Value::String(CODE_ONNX_RUNTIME_MISSING.to_string()),
+        );
+        detail_map.insert("message".to_string(), Value::String(hint_str.clone()));
+        detail_map.insert("retriable".to_string(), Value::Bool(false));
+        Self {
+            // -32603 (Internal error) — the daemon-side mapping uses
+            // the same code so wire parity holds across both surfaces.
+            code: -32603,
+            message: format!("ONNX Runtime not found: {hint_str}"),
+            kind: CODE_ONNX_RUNTIME_MISSING.to_string(),
+            retryable: false,
+            retry_after_ms: None,
+            details: Some(Value::Object(detail_map)),
         }
     }
 

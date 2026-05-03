@@ -1303,6 +1303,29 @@ pub enum Command {
         /// require confirmation, even with --auto-execute.
         #[arg(long, default_value = "0.85", help_heading = headings::NL_CONFIGURATION, display_order = 30)]
         threshold: f32,
+
+        /// Override the intent-classifier model directory (NL02 resolver level 1).
+        ///
+        /// Bypasses the legacy `model_dir` config field, the
+        /// `SQRY_NL_MODEL_DIR` environment variable, the XDG cache, and
+        /// the next-to-binary fallback. The directory must contain a
+        /// `manifest.json`; otherwise this candidate is skipped.
+        #[arg(long, value_name = "PATH", help_heading = headings::NL_CONFIGURATION, display_order = 40)]
+        model_dir: Option<std::path::PathBuf>,
+
+        /// Allow loading a classifier whose checksums cannot be verified.
+        ///
+        /// Defaults to `false`. Also honoured via the
+        /// `SQRY_NL_ALLOW_UNVERIFIED_MODEL=1` environment variable.
+        #[arg(long, help_heading = headings::NL_CONFIGURATION, display_order = 50)]
+        allow_unverified_model: bool,
+
+        /// Permit fetching the classifier model from the network when not present locally.
+        ///
+        /// Defaults to `false`. Also honoured via the
+        /// `SQRY_NL_ALLOW_DOWNLOAD=1` environment variable.
+        #[arg(long, help_heading = headings::NL_CONFIGURATION, display_order = 60)]
+        allow_model_download: bool,
     },
 
     /// View usage insights and manage local diagnostics

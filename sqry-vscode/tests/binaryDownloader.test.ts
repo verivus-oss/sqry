@@ -3,9 +3,9 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { expect } from "chai";
+import proxyquireModule from "proxyquire";
 
-// eslint-disable-next-line @typescript-eslint/no-var-requires
-const proxyquire = require("proxyquire").noCallThru();
+const proxyquire = proxyquireModule.noCallThru();
 
 // Minimal vscode stub for modules that import vscode
 const vscodeStub = {
@@ -304,15 +304,13 @@ describe("binaryDownloader", () => {
     it("keeps the current provenance identity synchronized with the public workflow control surface", () => {
       const mod = loadModule();
       const repoRoot = path.resolve(__dirname, "..", "..");
-      const publicWorkflow = path.join(
-        repoRoot,
-        ".github",
-        "workflows-public",
-        "release-distribute.yml",
-      );
+      const publicWorkflowCandidates = [
+        path.join(repoRoot, ".github", "workflows-public", "release-distribute.yml"),
+        path.join(repoRoot, ".github", "workflows", "release-distribute.yml"),
+      ];
       const identities = mod.getCertificateIdentityCandidates("8.0.2");
 
-      expect(fs.existsSync(publicWorkflow)).to.equal(
+      expect(publicWorkflowCandidates.some((candidate) => fs.existsSync(candidate))).to.equal(
         true,
         "current public release workflow control surface must exist",
       );

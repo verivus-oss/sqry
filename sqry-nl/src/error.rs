@@ -21,7 +21,7 @@ pub enum NlError {
 
     /// Intent classification failed
     #[error("Classification failed: {0}")]
-    Classifier(#[from] ClassifierError),
+    Classifier(ClassifierError),
 
     /// Command assembly failed
     #[error("Assembly failed: {0}")]
@@ -42,6 +42,83 @@ pub enum NlError {
     /// I/O error
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+
+    /// Resolved model directory does not exist on disk.
+    #[error("Model directory not found: {0}")]
+    ModelDirNotFound(String),
+
+    /// Checksum of an on-disk model file does not match the manifest.
+    #[error("Model file checksum mismatch for {file}: expected {expected}, got {actual}")]
+    ChecksumMismatch {
+        file: String,
+        expected: String,
+        actual: String,
+    },
+
+    /// `checksums.json` (or equivalent integrity manifest) is absent from the model directory.
+    #[error("Model checksums file is missing from model directory")]
+    ChecksumsMissing,
+
+    /// A file referenced by the integrity manifest is missing from the model directory.
+    #[error("File listed in checksums is missing from model directory: {0}")]
+    ChecksummedFileMissing(String),
+
+    /// ONNX Runtime shared library could not be loaded at runtime.
+    #[error("ONNX Runtime is not available: {hint}")]
+    OnnxRuntimeMissing {
+        /// Operator-facing remediation hint (populated in NL08).
+        hint: String,
+    },
+
+    /// Top-level manifest SHA-256 does not match the expected pinned value.
+    ///
+    /// Raised by NL03's downloader when the streaming SHA-256 computed over
+    /// the freshly downloaded archive bytes does not match the
+    /// `manifest.json.sha256` value baked into the binary. Always fatal —
+    /// there is no `--allow-unverified-model` opt-out for tampering on a
+    /// trusted-mode payload.
+    #[error("Model manifest SHA-256 mismatch for {file}: expected {expected}, got {actual}")]
+    ManifestSha256Mismatch {
+        /// The archive file name from the manifest (e.g.
+        /// `sqry-models-v1.0.0.tar.gz`).
+        file: String,
+        /// SHA-256 hex from the trusted baked-in manifest.
+        expected: String,
+        /// SHA-256 hex computed over the on-the-wire bytes.
+        actual: String,
+    },
+
+    /// Model manifest could not be parsed as JSON.
+    #[error("Model manifest parse failed: {0}")]
+    ManifestParseFailed(#[from] serde_json::Error),
+
+    /// Network download was attempted but `allow_model_download` is `false`.
+    #[error("Model download is disabled by configuration")]
+    DownloadDisabled,
+
+    /// Network download failed (transport, HTTP status, or post-fetch I/O).
+    #[error("Model download failed: {0}")]
+    DownloadFailed(String),
+}
+
+// Manual `From<ClassifierError>` impl: replaces the previous `#[from]`
+// derive on `NlError::Classifier`. The special case here promotes
+// `ClassifierError::OnnxRuntimeMissing { hint }` to the top-level
+// `NlError::OnnxRuntimeMissing { hint }` variant so every consumer
+// (CLI, MCP, LSP, daemon) can pattern-match on a single, stable
+// wire-facing variant instead of having to dig into nested
+// classifier-specific error structures.
+//
+// All other `ClassifierError` variants pass through unchanged into
+// `NlError::Classifier(_)`. This preserves the `?` ergonomics that
+// the previous `#[from]` derive provided.
+impl From<ClassifierError> for NlError {
+    fn from(err: ClassifierError) -> Self {
+        match err {
+            ClassifierError::OnnxRuntimeMissing { hint } => NlError::OnnxRuntimeMissing { hint },
+            other => NlError::Classifier(other),
+        }
+    }
 }
 
 /// Errors from the preprocessing stage.
@@ -95,9 +172,27 @@ pub enum ClassifierError {
     #[error("Model not found at: {0}")]
     ModelNotFound(String),
 
-    /// Model checksum mismatch
-    #[error("Model checksum mismatch: expected {expected}, got {actual}")]
-    ChecksumMismatch { expected: String, actual: String },
+    /// Model checksum mismatch on a present file (tampering).
+    ///
+    /// NL04: ALWAYS fatal regardless of `allow_unverified`. Mirrors the
+    /// shape of [`NlError::ChecksumMismatch`] so the boundary between
+    /// the classifier-internal error and the top-level NL error stays
+    /// clean.
+    #[error("Model checksum mismatch for {file}: expected {expected}, got {actual}")]
+    ChecksumMismatch {
+        file: String,
+        expected: String,
+        actual: String,
+    },
+
+    /// `checksums.json` is absent from the model directory (strict mode).
+    #[error("Model checksums file is missing from model directory")]
+    ChecksumsMissing,
+
+    /// A file referenced by the integrity manifest is missing from disk
+    /// (strict mode).
+    #[error("File listed in checksums is missing from model directory: {0}")]
+    ChecksummedFileMissing(String),
 
     /// Tokenization failed
     #[error("Tokenization failed: {0}")]
@@ -106,6 +201,38 @@ pub enum ClassifierError {
     /// ONNX Runtime error
     #[error("ONNX Runtime error: {0}")]
     OnnxError(String),
+
+    /// Custom-mode local manifest cannot anchor `checksums.json`.
+    ///
+    /// Raised when a custom model directory's `manifest.json` is
+    /// missing, malformed, or lacks `files["checksums.json"]`. This is
+    /// distinct from missing `checksums.json` itself: the operator
+    /// escape hatch can downgrade missing checksums, but it must not
+    /// silently remove the custom-mode manifest trust anchor.
+    #[error("Model manifest integrity anchor invalid: {0}")]
+    ManifestAnchorInvalid(String),
+
+    /// ONNX Runtime shared library could not be loaded.
+    ///
+    /// Raised by [`crate::classifier::IntentClassifier::load`] when the
+    /// `ort` crate's `Session::builder()` chain fails (or panics) due to
+    /// `libonnxruntime` being absent on the host. The `hint` field
+    /// carries a platform-aware remediation string (apt / brew / .dll
+    /// download URL) baked at compile time. NL08 surfaces this variant
+    /// across CLI / MCP / LSP / daemon as an actionable diagnostic
+    /// rather than the opaque `OnnxError(...)` string the lower-level
+    /// crate would otherwise produce.
+    ///
+    /// Always converted to [`NlError::OnnxRuntimeMissing`] at the
+    /// `From<ClassifierError>` boundary — the top-level error variant
+    /// is the wire-facing name.
+    #[error("ONNX Runtime is not available: {hint}")]
+    OnnxRuntimeMissing {
+        /// Operator-facing remediation hint (platform-specific install
+        /// instructions). Populated by
+        /// [`crate::classifier::model::onnx_runtime_install_hint`].
+        hint: String,
+    },
 
     /// Model version incompatible
     #[error("Model version {model_version} incompatible with sqry-nl {crate_version}")]

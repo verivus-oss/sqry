@@ -471,6 +471,21 @@ pub struct SqryAskParams {
     pub query: String,
     #[serde(default)]
     pub path: Option<String>,
+    /// Optional override for the intent-classifier model directory.
+    ///
+    /// Highest-priority entry in the NL02 5-level resolver chain. The
+    /// directory must contain a `manifest.json`; otherwise this candidate
+    /// is skipped.
+    #[serde(default)]
+    pub model_dir: Option<String>,
+    /// Permit loading a classifier whose checksums cannot be verified.
+    /// Defaults to `false`.
+    #[serde(default)]
+    pub allow_unverified_model: bool,
+    /// Permit fetching the classifier model from the network.
+    /// Defaults to `false`.
+    #[serde(default)]
+    pub allow_model_download: bool,
 }
 
 /// Disambiguation option when query is ambiguous

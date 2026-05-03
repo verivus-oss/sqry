@@ -1504,10 +1504,34 @@ pub fn validate_sqry_ask_args(args: &Value) -> Result<super::params::SqryAskPara
         None => false,
     };
 
+    let model_dir = match args.get("model_dir") {
+        Some(v) if v.is_string() => Some(v.as_str().unwrap().to_string()),
+        Some(v) if v.is_null() => None,
+        Some(_) => bail!("model_dir must be a string"),
+        None => None,
+    };
+
+    let allow_unverified_model = match args.get("allow_unverified_model") {
+        Some(v) if v.is_boolean() => v.as_bool().unwrap_or(false),
+        Some(v) if v.is_null() => false,
+        Some(_) => bail!("allow_unverified_model must be a boolean"),
+        None => false,
+    };
+
+    let allow_model_download = match args.get("allow_model_download") {
+        Some(v) if v.is_boolean() => v.as_bool().unwrap_or(false),
+        Some(v) if v.is_null() => false,
+        Some(_) => bail!("allow_model_download must be a boolean"),
+        None => false,
+    };
+
     Ok(super::params::SqryAskParams {
         query: query.to_string(),
         path: path.to_string(),
         execute,
+        model_dir,
+        allow_unverified_model,
+        allow_model_download,
     })
 }
 

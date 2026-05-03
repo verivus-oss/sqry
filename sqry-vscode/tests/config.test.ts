@@ -1,7 +1,8 @@
 import { expect } from "chai";
 import * as path from "node:path";
-// eslint-disable-next-line @typescript-eslint/no-var-requires
-const proxyquire = require("proxyquire").noCallThru();
+import proxyquireModule from "proxyquire";
+
+const proxyquire = proxyquireModule.noCallThru();
 
 const HOME = "/home/tester";
 

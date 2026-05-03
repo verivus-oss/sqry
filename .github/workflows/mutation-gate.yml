@@ -49,6 +49,7 @@ env:
   CARGO_PROFILE_DEV_DEBUG: 0
   CARGO_PROFILE_TEST_DEBUG: 0
   CARGO_BUILD_JOBS: 2
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   # ==========================================================================
@@ -61,7 +62,7 @@ jobs:
     timeout-minutes: 90
     steps:
       - name: Checkout (full history for merge-base diff)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
@@ -82,7 +83,7 @@ jobs:
         # House style (ci.yml): registry-only cache. The cargo-mutants
         # binary itself is reinstalled per run to keep this in lock-
         # step with the existing CI cache contract.
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry/index/
@@ -197,7 +198,7 @@ jobs:
           - sqry-lang-python
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Free disk space
         run: |
@@ -216,7 +217,7 @@ jobs:
         # House style (ci.yml): registry-only cache. The cargo-mutants
         # binary itself is reinstalled per run to keep this in lock-
         # step with the existing CI cache contract.
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry/index/

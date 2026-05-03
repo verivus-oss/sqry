@@ -9,16 +9,16 @@ rust-version.workspace = true
 description = "Vue language plugin for sqry"
 
 [dependencies]
-sqry-core = { version = "11.0.4", path = "../sqry-core" }
+sqry-core = { version = "12.0.3", path = "../sqry-core" }
 anyhow.workspace = true
 tree-sitter.workspace = true
-tree-sitter-vue-sqry = { version = "11.0.4", path = "../crates/tree-sitter-vue-sqry" }
+tree-sitter-vue-sqry = { version = "12.0.3", path = "../crates/tree-sitter-vue-sqry" }
 tree-sitter-javascript.workspace = true
 tree-sitter-typescript.workspace = true
 streaming-iterator.workspace = true
-sqry-lang-support = { version = "11.0.4", path = "../sqry-lang-support" }
-sqry-lang-javascript = { version = "11.0.4", path = "../sqry-lang-javascript" }
-sqry-lang-typescript = { version = "11.0.4", path = "../sqry-lang-typescript" }
+sqry-lang-support = { version = "12.0.3", path = "../sqry-lang-support" }
+sqry-lang-javascript = { version = "12.0.3", path = "../sqry-lang-javascript" }
+sqry-lang-typescript = { version = "12.0.3", path = "../sqry-lang-typescript" }
 regex.workspace = true
 
 [dev-dependencies]

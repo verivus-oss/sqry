@@ -1,7 +1,8 @@
 import { expect } from "chai";
+import * as nodePath from "node:path";
+import proxyquireModule from "proxyquire";
 
-// eslint-disable-next-line @typescript-eslint/no-var-requires
-const proxyquire = require("proxyquire").noCallThru();
+const proxyquire = proxyquireModule.noCallThru();
 
 class ThemeIcon {
   constructor(public id: string) {}
@@ -65,7 +66,7 @@ const vscodeStub = {
 
 const { SearchPanel } = proxyquire("../src/searchPanel", {
   vscode: vscodeStub,
-  "node:path": require("node:path"),
+  "node:path": nodePath,
 }) as { SearchPanel: typeof import("../src/searchPanel").SearchPanel };
 
 function makePanel(): any {

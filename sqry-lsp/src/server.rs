@@ -2086,7 +2086,50 @@ impl Drop for HandlerGuard {
     }
 }
 
+/// NL08 — public wrapper around `map_error` for integration tests.
+///
+/// Production code routes errors via the private `map_error` only;
+/// integration tests in `sqry-lsp/tests/` use this thin wrapper so
+/// they can assert the produced `RpcError` shape (code, message,
+/// `data` payload) without instantiating a full `tower_lsp::Client`
+/// and exchanging bytes over a stdio transport.
+///
+/// NL08 review iter-1: gated behind `cfg(any(test, feature =
+/// "test-helpers"))` so the test shim does not leak into the
+/// published crate API. `#[doc(hidden)]` alone hid it from rustdoc
+/// but did not prevent downstream consumers from importing it; the
+/// cfg gate makes the symbol genuinely private outside of test
+/// builds. Integration tests under `sqry-lsp/tests/` see the crate
+/// root compiled WITHOUT `cfg(test)` (only the integration-test
+/// binary is `cfg(test)`), so the `test-helpers` feature must be
+/// enabled in `[dev-dependencies]` for those tests to compile.
+#[cfg(any(test, feature = "test-helpers"))]
+#[must_use]
+pub fn map_error_public_for_tests(err: anyhow::Error) -> RpcError {
+    map_error(err)
+}
+
 fn map_error(err: anyhow::Error) -> RpcError {
+    // NL08: detect `NlError::OnnxRuntimeMissing` first so it keeps a
+    // platform-aware install hint in the LSP error response. We probe
+    // the anyhow source chain via `downcast_ref` (no consumption) so
+    // the existing fall-through QueryError / LspHandlerError downcast
+    // paths still see the original error if no match.
+    if let Some(nl_err) = err.downcast_ref::<sqry_nl::NlError>()
+        && let sqry_nl::NlError::OnnxRuntimeMissing { hint } = nl_err
+    {
+        // ErrorCode::InternalError = -32603, matches MCP/daemon
+        // mapping. The hint flows through `message` per design §8.
+        return RpcError {
+            code: ErrorCode::InternalError,
+            message: format!("ONNX Runtime not found: {hint}").into(),
+            data: Some(serde_json::json!({
+                "code": "ONNX_RUNTIME_MISSING",
+                "message": hint,
+                "retriable": false,
+            })),
+        };
+    }
     match err.downcast::<QueryError>() {
         Ok(query_err) => RpcError::invalid_params(query_err.to_string()),
         Err(other) => match other.downcast::<LspHandlerError>() {

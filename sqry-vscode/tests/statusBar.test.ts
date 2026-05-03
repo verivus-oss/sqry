@@ -1,7 +1,7 @@
 import { expect } from "chai";
+import proxyquireModule from "proxyquire";
 
-// eslint-disable-next-line @typescript-eslint/no-var-requires
-const proxyquire = require("proxyquire").noCallThru();
+const proxyquire = proxyquireModule.noCallThru();
 
 // Minimal vscode stub for statusBar module
 const vscodeStub = {

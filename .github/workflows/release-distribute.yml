@@ -21,6 +21,9 @@ permissions:
   id-token: write
   attestations: write
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 concurrency:
   group: release-distribute-${{ github.event.client_payload.tag || github.event.inputs.tag }}
   cancel-in-progress: false

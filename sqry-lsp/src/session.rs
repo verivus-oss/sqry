@@ -3,6 +3,7 @@ use crate::config::{ConfigDiff, SessionConfig};
 use crate::documents::{DocumentSnapshot, DocumentStore, compute_line_offsets};
 use crate::file_types::classify_file;
 use anyhow::{Context, Result, anyhow};
+use once_cell::sync::OnceCell;
 use parking_lot::RwLock;
 use ropey::Rope;
 use sqry_core::graph::unified::concurrent::CodeGraph;
@@ -13,6 +14,7 @@ use sqry_core::plugin::PluginManager;
 use sqry_core::project::{Project, ProjectManager};
 use sqry_core::query::QueryExecutor;
 use sqry_core::workspace::{Classification, HeuristicVerdict, LogicalWorkspace, MemberReason};
+use sqry_nl::Translator;
 use sqry_plugin_registry::create_plugin_manager;
 use std::collections::HashMap;
 use std::env;
@@ -45,6 +47,60 @@ pub struct SessionManager {
     /// pre-Step-4 single-root behaviour until `initialize()` resolves
     /// the real workspace.
     logical_workspace: Arc<RwLock<Arc<LogicalWorkspace>>>,
+
+    /// NL07 — lazily-initialised, per-session
+    /// [`sqry_nl::Translator`] backing the LSP `sqry/ask` handler.
+    ///
+    /// Init cost is heavy (loads `N` ONNX classifier sessions through
+    /// the [`sqry_nl::classifier::ClassifierPool`]) so the LSP defers
+    /// it to the first `sqry/ask` request. Subsequent requests
+    /// receive a cheap `Arc<Translator>` clone.
+    ///
+    /// One translator per `SessionManager` (i.e. per LSP server
+    /// process / `tower_lsp` instance) keeps the pool's RSS bounded
+    /// to a single workspace's worth of model weights even when many
+    /// concurrent `sqry/ask` requests fan in from the editor.
+    nl_translator: Arc<OnceCell<Arc<Translator>>>,
+
+    /// NL07 — config snapshot captured at the first
+    /// `get_or_init_translator` call.
+    ///
+    /// Only the fields that materially change translator behaviour
+    /// (`model_dir_override`, `allow_unverified_model`,
+    /// `allow_model_download`) are retained, so subsequent calls with
+    /// drifted values can emit a `tracing::warn!` documenting that the
+    /// **first config wins** by `OnceCell` semantics. The cell is
+    /// initialised in lockstep with `nl_translator`, so anyone
+    /// observing a non-empty `nl_translator` is guaranteed to see the
+    /// matching cached config here.
+    nl_translator_meta: Arc<OnceCell<CachedTranslatorMeta>>,
+}
+
+/// NL07 — minimal config snapshot kept alongside the cached
+/// `Arc<Translator>` so [`SessionManager::get_or_init_translator`] can
+/// detect later callers passing a drifted [`sqry_nl::TranslatorConfig`].
+///
+/// We intentionally keep ONLY the fields that change translator-load
+/// semantics — `model_dir_override`, `allow_unverified_model`,
+/// `allow_model_download`. `working_directory`, `classifier_pool_size`,
+/// and the trust-mode preset are derived from the FIRST caller's
+/// environment; carrying them here would invite drift between this
+/// snapshot and the live `Translator`'s internal state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CachedTranslatorMeta {
+    model_dir_override: Option<PathBuf>,
+    allow_unverified_model: bool,
+    allow_model_download: bool,
+}
+
+impl CachedTranslatorMeta {
+    fn from_config(cfg: &sqry_nl::TranslatorConfig) -> Self {
+        Self {
+            model_dir_override: cfg.model_dir_override.clone(),
+            allow_unverified_model: cfg.allow_unverified_model,
+            allow_model_download: cfg.allow_model_download,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -194,7 +250,115 @@ impl SessionManager {
             graph_cache: Arc::new(RwLock::new(None)),
             project_manager,
             logical_workspace,
+            nl_translator: Arc::new(OnceCell::new()),
+            nl_translator_meta: Arc::new(OnceCell::new()),
         }
+    }
+
+    /// NL07 — lazily get-or-build the per-session
+    /// [`sqry_nl::Translator`].
+    ///
+    /// # FIRST CONFIG WINS (LOUD)
+    ///
+    /// **Only the FIRST caller's `config` is honoured.** The
+    /// `Arc<Translator>` returned by this method is cached in an
+    /// `OnceCell` for the lifetime of the `SessionManager`; every
+    /// subsequent caller receives a cheap `Arc::clone` of that same
+    /// translator, irrespective of the `config` they pass.
+    ///
+    /// In particular, the following fields drift silently after the
+    /// first call:
+    ///
+    /// - `model_dir_override`
+    /// - `allow_unverified_model`
+    /// - `allow_model_download`
+    /// - `classifier_pool_size`
+    /// - `working_directory`
+    /// - All trust-mode / resolver-level toggles
+    ///
+    /// When this method detects that a later caller passed a
+    /// trust-affecting field different from the cached value, it emits
+    /// a `tracing::warn!(target: "sqry_lsp::session", ...)` so the
+    /// drift is auditable in logs. The drift does NOT fail the request
+    /// — the cached translator continues to serve.
+    ///
+    /// To use a different translator config, the LSP server must be
+    /// restarted: there is no in-process re-init path by design,
+    /// because mid-session model swaps would invalidate inflight
+    /// `sqry/ask` calls and create races with the per-session
+    /// classifier pool's pre-loaded ONNX sessions.
+    ///
+    /// First call pays the heavy classifier-pool init cost
+    /// (`N` ONNX session loads). Subsequent calls return a cheap
+    /// `Arc::clone`. Failures from `Translator::new` propagate as
+    /// `anyhow::Error` so the LSP `sqry/ask` handler can surface
+    /// them through its existing error path.
+    ///
+    /// Concurrent first-callers race through `OnceCell::get_or_try_init` —
+    /// only the first loader runs; the rest re-use its result.
+    ///
+    /// # Errors
+    ///
+    /// Propagates any [`sqry_nl::NlError`] from
+    /// [`sqry_nl::Translator::new`] (model not found, integrity
+    /// failure, ONNX init error). Wrapped in `anyhow::Error` for
+    /// uniform LSP-handler error handling.
+    pub fn get_or_init_translator(
+        &self,
+        config: sqry_nl::TranslatorConfig,
+    ) -> Result<Arc<Translator>> {
+        let incoming_meta = CachedTranslatorMeta::from_config(&config);
+        let translator = self
+            .nl_translator
+            .get_or_try_init(|| -> Result<Arc<Translator>> {
+                // NL08: preserve `NlError::OnnxRuntimeMissing` as a
+                // typed anyhow source so the LSP `map_error` path can
+                // downcast and surface a hint-bearing error response.
+                // Wrapping the raw `NlError` into anyhow keeps the
+                // existing `?` ergonomics while keeping the variant
+                // discriminant intact for downstream pattern matching.
+                let t = match Translator::new(config) {
+                    Ok(t) => t,
+                    Err(nl_err @ sqry_nl::NlError::OnnxRuntimeMissing { .. }) => {
+                        return Err(anyhow::Error::new(nl_err));
+                    }
+                    Err(other) => {
+                        return Err(
+                            anyhow::Error::new(other).context("failed to create translator")
+                        );
+                    }
+                };
+                Ok(Arc::new(t))
+            })
+            .cloned()?;
+
+        // Lockstep cell: on the first call (the same call that set
+        // `nl_translator`), record the trust-affecting config snapshot.
+        // On every subsequent call, compare the incoming config against
+        // the cached snapshot and warn on drift.
+        //
+        // `set` only succeeds on the first init; later callers fall
+        // through to the `get` branch where we do the drift compare.
+        if self.nl_translator_meta.set(incoming_meta.clone()).is_err()
+            && let Some(cached) = self.nl_translator_meta.get()
+            && cached != &incoming_meta
+        {
+            log::warn!(
+                target: "sqry_lsp::session",
+                "ignoring later sqry/ask request's `model_dir`/`allow_unverified_model`/`allow_model_download` — \
+                 translator already initialized with previous values; restart the LSP server to use a different config \
+                 (cached: model_dir={cached_md:?}, allow_unverified_model={cached_au}, allow_model_download={cached_ad}; \
+                 requested: model_dir={req_md:?}, allow_unverified_model={req_au}, allow_model_download={req_ad})",
+                cached_md = cached.model_dir_override,
+                cached_au = cached.allow_unverified_model,
+                cached_ad = cached.allow_model_download,
+                req_md = incoming_meta.model_dir_override,
+                req_au = incoming_meta.allow_unverified_model,
+                req_ad = incoming_meta.allow_model_download,
+            );
+        }
+
+        Ok(translator)
     }
 
     #[must_use]
@@ -519,8 +683,18 @@ impl SessionManager {
             return Ok(Some(graph.clone()));
         }
 
-        // Load from disk and cache at session level for single-root mode
+        // Load from disk and cache at session level for single-root mode.
+        // The resolved LogicalWorkspace is the routing-gate proof for this
+        // classifier-free compatibility path; multi-root callers use
+        // graph_for_path() and project_for_path().
+        let logical_workspace = self.logical_workspace();
         let root = self.current_index_root();
+        log::debug!(
+            "Loading single-root graph from '{}' (workspace_id={}, source_roots={})",
+            root.display(),
+            logical_workspace.workspace_id().as_short_hex(),
+            logical_workspace.source_roots().len()
+        );
         let storage = GraphStorage::new(&root);
         if !storage.exists() {
             // No manifest → no complete index → return None

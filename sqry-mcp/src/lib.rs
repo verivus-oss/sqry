@@ -82,7 +82,7 @@ pub mod tool_args {
         DirectCallersArgs, ExportGraphArgs, FindCyclesArgs, FindUnusedArgs, GitVersionRef,
         IsNodeInCycleArgs, PaginationArgs, RelationQueryArgs, RelationType, SearchFilters,
         SemanticDiffArgs, SemanticDiffFilters, SemanticSearchArgs, ShowDependenciesArgs,
-        SubgraphArgs, TracePathArgs, UnusedScope, WorkspaceStatusArgs,
+        SqryAskParams, SubgraphArgs, TracePathArgs, UnusedScope, WorkspaceStatusArgs,
     };
 }
 
@@ -96,7 +96,7 @@ pub mod tool_handlers {
         execute_complexity_metrics, execute_dependency_impact, execute_direct_callees,
         execute_direct_callers, execute_export_graph, execute_find_cycles, execute_find_unused,
         execute_get_dependencies, execute_is_node_in_cycle, execute_relation_query,
-        execute_semantic_diff, execute_subgraph, execute_trace_path,
+        execute_semantic_diff, execute_sqry_ask, execute_subgraph, execute_trace_path,
     };
     pub use crate::tools::execute_workspace_status;
 }

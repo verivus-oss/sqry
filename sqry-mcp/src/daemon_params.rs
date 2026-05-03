@@ -497,6 +497,32 @@ pub fn params_to_dependency_impact_args(params: Value) -> Result<DependencyImpac
     })
 }
 
+/// `sqry_ask` (NL07): JSON → [`crate::tools::params::SqryAskParams`].
+///
+/// Unlike the other 14 daemon-routed tools, `sqry_ask` does not have a
+/// post-validation `*Args` lowering — the executor consumes
+/// [`crate::tools::params::SqryAskParams`] directly. This converter
+/// performs the same struct-shape deserialise + bounds checks the
+/// rmcp `SqryServer::sqry_ask` path runs before dispatch, returning
+/// the canonical `RpcError` on failure.
+pub fn params_to_sqry_ask_args(
+    params: Value,
+) -> Result<crate::tools::params::SqryAskParams, RpcError> {
+    let parsed: crate::tools::params::SqryAskParams = deserialise_params(params)?;
+    if parsed.query.trim().is_empty() {
+        return Err(RpcError::validation(
+            "sqry_ask: `query` must not be empty".to_string(),
+        ));
+    }
+    if parsed.query.len() > 4096 {
+        return Err(RpcError::validation(format!(
+            "sqry_ask: `query` exceeds 4096-character cap (got {} chars)",
+            parsed.query.len()
+        )));
+    }
+    Ok(parsed)
+}
+
 /// `show_dependencies`: JSON → [`ShowDependenciesArgs`].
 pub fn params_to_show_dependencies_args(params: Value) -> Result<ShowDependenciesArgs, RpcError> {
     let params: ShowDependenciesParams = deserialise_params(params)?;

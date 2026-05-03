@@ -42,6 +42,7 @@ use std::path::Path;
 
 use rmcp::ErrorData as McpError;
 use serde_json::{Value, json};
+use sqry_nl::NlError;
 
 use crate::error::DaemonError;
 
@@ -53,6 +54,62 @@ const KIND_VALIDATION_ERROR: &str = "validation_error";
 const KIND_WORKSPACE_NOT_READY: &str = "workspace_not_ready";
 const KIND_WORKSPACE_STALE_EXPIRED: &str = "workspace_stale_expired";
 const KIND_INTERNAL: &str = "internal";
+/// NL08 — kind tag for the ONNX-Runtime-missing condition. Mirrored
+/// across daemon-host and standalone sqry-mcp envelopes.
+pub(crate) const KIND_ONNX_RUNTIME_MISSING: &str = "ONNX_RUNTIME_MISSING";
+
+/// NL08 — convert an [`NlError::OnnxRuntimeMissing`] to a canonical
+/// MCP envelope using `internal_error` (-32603) per the design (DAG
+/// `[units.NL08]` + design §8). Mirrors the standalone sqry-mcp
+/// `RpcError::onnx_runtime_missing` envelope shape so daemon-hosted
+/// and standalone responses parse the same way.
+///
+/// Returns `Some(McpError)` when the input is the missing-dylib
+/// variant; returns `None` otherwise so the caller can fall through to
+/// the generic `daemon_err_to_mcp` mapping (typically wrapped as
+/// `WorkspaceBuildFailed`).
+#[must_use]
+pub fn try_onnx_runtime_missing_to_mcp(err: &NlError) -> Option<McpError> {
+    match err {
+        NlError::OnnxRuntimeMissing { hint } => Some(onnx_runtime_missing_mcp(hint)),
+        _ => None,
+    }
+}
+
+/// Build the canonical MCP envelope for the missing-dylib condition.
+///
+/// Wire shape (placed inside `details`, mirroring the rest of the
+/// daemon's 4-key envelope):
+///
+/// ```json
+/// {
+///   "kind": "ONNX_RUNTIME_MISSING",
+///   "retryable": false,
+///   "retry_after_ms": null,
+///   "details": {
+///     "code": "ONNX_RUNTIME_MISSING",
+///     "message": "<hint>",
+///     "retriable": false
+///   }
+/// }
+/// ```
+///
+/// `McpError::internal_error` carries IPC code -32603, matching the
+/// daemon's existing internal-error code per design §8.
+#[must_use]
+pub fn onnx_runtime_missing_mcp(hint: &str) -> McpError {
+    let data = json!({
+        "kind": KIND_ONNX_RUNTIME_MISSING,
+        "retryable": false,
+        "retry_after_ms": Value::Null,
+        "details": {
+            "code": KIND_ONNX_RUNTIME_MISSING,
+            "message": hint,
+            "retriable": false,
+        },
+    });
+    McpError::internal_error(format!("ONNX Runtime not found: {hint}"), Some(data))
+}
 
 /// Build the canonical `ToolTimeout` MCP envelope — single source of
 /// truth. `tool_name` is `None` when called without call-site context

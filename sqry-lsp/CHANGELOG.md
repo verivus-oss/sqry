@@ -6,7 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
-## [11.0.4](https://github.com/verivus-oss/sqry/compare/v11.0.3...v11.0.4) - 2026-05-01
+## [12.0.3](https://github.com/verivus-oss/sqry/compare/v12.0.2...v12.0.3) - 2026-05-03
+
+### Other
+- update Cargo.toml dependencies
+## [12.0.2](https://github.com/verivus-oss/sqry/compare/v12.0.1...v12.0.2) - 2026-05-03
+
+### Other
+- update Cargo.toml dependencies
+## [12.0.1](https://github.com/verivus-oss/sqry/compare/v11.0.4...v12.0.1) - 2026-05-03
+
+### Fixed
+- *(lsp)* make single-root graph routing explicit## [12.0.0](https://github.com/verivus-oss/sqry/compare/v11.0.4...v12.0.0) - 2026-05-02
+
+### Added
+- *(nl)* surface ONNX Runtime missing as actionable platform hint across CLI/MCP/LSP/daemon- *(nl)* classifier pool + daemon sqry_ask tool + LSP wiring + perf bounds- *(nl)* add 5-level model_dir resolver and wire --model-dir override
+### Fixed
+- *(nl)* tighten ort dylib detection and gate LSP map_error test seam behind feature- *(nl)* hoist Translator init off tokio worker; tighten LSP perf test; warn on LSP config drift- *(nl)* replace placeholder NL07 tests with real harnesses; use scopeguard for pool panic-safety## [11.0.4](https://github.com/verivus-oss/sqry/compare/v11.0.3...v11.0.4) - 2026-05-01
 
 ### Fixed
 - *(release)* harden homebrew workflow and diff repo detection## [11.0.3](https://github.com/verivus-oss/sqry/compare/v11.0.2...v11.0.3) - 2026-05-01

@@ -8,6 +8,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::Result;
@@ -168,14 +169,18 @@ pub fn execute_sqry_ask(args: &SqryAskParams) -> Result<ToolExecution<NlTranslat
         path = %args.path,
         scoped_path = %scoped_path.display(),
         workspace = %workspace_root.display(),
-        "Executing sqry_ask tool"
+        "Executing sqry_ask tool (standalone path — building translator per-call)"
     );
 
-    // Create translator with configuration scoped to the requested path
-    let mut translator = build_translator(&scoped_path)?;
+    // Create translator with configuration scoped to the requested path.
+    // Standalone path (non-daemon, non-LSP) builds a fresh translator
+    // per call — there is no per-process cache here. The daemon and LSP
+    // surfaces use `execute_sqry_ask_with_translator` to share a
+    // long-lived `Arc<Translator>` (NL07).
+    let translator = build_translator(&scoped_path, args)?;
 
-    // Translate the query
-    let response = translator.translate(&args.query);
+    // Translate the query — `translate_shared` does not require &mut.
+    let response = translator.translate_shared(&args.query);
 
     // Convert to MCP response, augmenting commands with path scope if needed
     let mut data = build_translation_data(response, &scoped_path, workspace_root);
@@ -234,14 +239,161 @@ pub fn execute_sqry_ask(args: &SqryAskParams) -> Result<ToolExecution<NlTranslat
     })
 }
 
-fn build_translator(scoped_path: &Path) -> Result<Translator> {
-    let config = TranslatorConfig {
+/// NL07 daemon/LSP path: execute `sqry_ask` against a pre-built,
+/// per-process [`sqry_nl::Translator`] held in an [`Arc`].
+///
+/// The daemon caches the translator on `LoadedWorkspace` (lazy
+/// `OnceCell<Arc<Translator>>`) so the classifier pool's N model
+/// sessions are loaded exactly once per workspace lifetime — not once
+/// per `sqry_ask` call. The LSP holds an analogous cell on
+/// `SessionManager`.
+///
+/// Behavioural parity with [`execute_sqry_ask`]:
+/// - Same workspace canonicalisation (`canonicalize_in_workspace`).
+/// - Same path-augmentation contract for the rendered command.
+/// - Same response shape (Execute / Confirm / Disambiguate / Reject).
+/// - Optional `args.execute` runs the translated command in
+///   `workspace_root` exactly as the standalone path does.
+///
+/// # Errors
+///
+/// Returns the same set of errors as [`execute_sqry_ask`] for
+/// workspace resolution / canonicalisation. Translator construction
+/// errors do NOT surface here — those happened earlier when the
+/// caller (daemon `mcp_host` / LSP session) populated the `OnceCell`.
+///
+/// # Concurrency
+///
+/// Safe to call from multiple threads concurrently against the SAME
+/// `Arc<Translator>`. The classifier pool serialises individual
+/// inference calls per slot but fans out across `N` slots for
+/// parallel translates. Async callers MUST wrap this in
+/// [`tokio::task::spawn_blocking`] because pool acquire is sync.
+pub fn execute_sqry_ask_with_translator(
+    translator: Arc<Translator>,
+    args: &SqryAskParams,
+) -> Result<ToolExecution<NlTranslationData>> {
+    let start = Instant::now();
+    let workspace_path = resolve_workspace_path(&args.path);
+    let engine = engine_for_workspace(workspace_path.as_ref())?;
+    let workspace_root = engine.workspace_root();
+
+    let scoped_path = canonicalize_in_workspace(&args.path, workspace_root)?;
+
+    tracing::debug!(
+        query = %args.query,
+        path = %args.path,
+        scoped_path = %scoped_path.display(),
+        workspace = %workspace_root.display(),
+        "Executing sqry_ask tool (daemon/LSP path — shared translator)"
+    );
+
+    // Translate using the caller-provided translator. The pool inside
+    // the translator manages slot acquisition + release.
+    let response = translator.translate_shared(&args.query);
+
+    let mut data = build_translation_data(response, &scoped_path, workspace_root);
+
+    // Optional execute side-effect — same contract as
+    // `execute_sqry_ask`. Daemon/LSP callers should generally pass
+    // `execute=false`; the agent decides whether to run.
+    if args.execute
+        && let Some(cmd_str) = &data.command
+    {
+        tracing::debug!(command = %cmd_str, "Executing translated sqry command (shared-translator path)");
+        let parts: Vec<&str> = cmd_str.split_whitespace().collect();
+        if !parts.is_empty() {
+            let bin = parts[0];
+            let cmd_args = &parts[1..];
+            let output = Command::new(bin)
+                .args(cmd_args)
+                .current_dir(workspace_root)
+                .output();
+            match output {
+                Ok(out) => {
+                    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+                    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+                    if out.status.success() {
+                        data.execution_output = Some(stdout);
+                    } else {
+                        data.execution_output = Some(format!("Error: {stderr}\n{stdout}"));
+                    }
+                }
+                Err(e) => {
+                    data.execution_output = Some(format!("Failed to execute command: {e}"));
+                }
+            }
+        }
+    }
+
+    Ok(ToolExecution {
+        data,
+        used_index: false,
+        used_graph: false,
+        graph_metadata: None,
+        execution_ms: duration_to_ms(start.elapsed()),
+        next_page_token: None,
+        total: Some(1),
+        truncated: Some(false),
+        candidates_scanned: None,
+        workspace_path: crate::execution::symbol_utils::path_to_forward_slash(workspace_root),
+    })
+}
+
+/// Build a `TranslatorConfig` scoped to a workspace path + caller args.
+///
+/// Public so the daemon `mcp_host` can mint a fresh translator inside
+/// the `OnceCell` initialiser without duplicating the env-var/toggle
+/// resolution logic.
+#[must_use]
+pub fn build_translator_config_for_path(
+    scoped_path: &Path,
+    args: &SqryAskParams,
+) -> TranslatorConfig {
+    let allow_unverified_model =
+        args.allow_unverified_model || env_flag_truthy("SQRY_NL_ALLOW_UNVERIFIED_MODEL");
+    let allow_model_download =
+        args.allow_model_download || env_flag_truthy("SQRY_NL_ALLOW_DOWNLOAD");
+    TranslatorConfig {
         working_directory: Some(crate::execution::symbol_utils::path_to_forward_slash(
             scoped_path,
         )),
+        model_dir_override: args.model_dir.as_ref().map(PathBuf::from),
+        allow_unverified_model,
+        allow_model_download,
         ..TranslatorConfig::default()
-    };
-    Ok(Translator::new(config)?)
+    }
+}
+
+fn env_flag_truthy(name: &str) -> bool {
+    match std::env::var(name) {
+        Ok(v) => {
+            let v = v.trim();
+            v.eq_ignore_ascii_case("1")
+                || v.eq_ignore_ascii_case("true")
+                || v.eq_ignore_ascii_case("yes")
+                || v.eq_ignore_ascii_case("on")
+        }
+        Err(_) => false,
+    }
+}
+
+fn build_translator(scoped_path: &Path, args: &SqryAskParams) -> Result<Translator> {
+    let config = build_translator_config_for_path(scoped_path, args);
+    match Translator::new(config) {
+        Ok(t) => Ok(t),
+        // NL08: surface ONNX-Runtime-missing as the structured
+        // `RpcError::onnx_runtime_missing` so the server-side
+        // `execute_tool_with_timeout` can render the canonical
+        // `{ code: "ONNX_RUNTIME_MISSING", message, retriable: false }`
+        // envelope inside the MCP error payload via downcast. Other
+        // failures fall through as plain anyhow (mapped to a generic
+        // internal error by the server).
+        Err(sqry_nl::NlError::OnnxRuntimeMissing { hint }) => Err(anyhow::Error::new(
+            crate::error::RpcError::onnx_runtime_missing(hint),
+        )),
+        Err(e) => Err(anyhow::Error::new(e)),
+    }
 }
 
 fn build_translation_data(
@@ -533,6 +685,9 @@ mod tests {
             query: "find public functions".to_string(),
             path: ".".to_string(),
             execute: false,
+            model_dir: None,
+            allow_unverified_model: false,
+            allow_model_download: false,
         };
 
         let result = execute_sqry_ask(&args);
@@ -574,6 +729,9 @@ mod tests {
                 query: query.to_string(),
                 path: ".".to_string(),
                 execute: false,
+                model_dir: None,
+                allow_unverified_model: false,
+                allow_model_download: false,
             };
 
             let result = execute_sqry_ask(&args);
@@ -613,6 +771,9 @@ mod tests {
             query: "find functions".to_string(),
             path: ".".to_string(),
             execute: false,
+            model_dir: None,
+            allow_unverified_model: false,
+            allow_model_download: false,
         };
         assert!(execute_sqry_ask(&args).is_ok());
 
@@ -621,6 +782,9 @@ mod tests {
             query: "find functions".to_string(),
             path: "/etc/passwd".to_string(),
             execute: false,
+            model_dir: None,
+            allow_unverified_model: false,
+            allow_model_download: false,
         };
         // This should fail due to path canonicalization
         assert!(execute_sqry_ask(&args_bad).is_err());

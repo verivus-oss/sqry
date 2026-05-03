@@ -6,7 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
-## [7.2.0](https://github.com/verivus-oss/sqry/compare/v7.1.4...v7.2.0) - 2026-04-06
+## [12.0.3](https://github.com/verivus-oss/sqry/compare/v12.0.2...v12.0.3) - 2026-05-03
+
+### Other
+- update Cargo.toml dependencies
+## [12.0.2](https://github.com/verivus-oss/sqry/compare/v11.0.4...v12.0.2) - 2026-05-03
+
+### Fixed
+- *(nl)* make integrity tests clean-checkout safe## [12.0.1](https://github.com/verivus-oss/sqry/compare/v12.0.0...v12.0.1) - 2026-05-03
+
+### Other
+- update Cargo.toml dependencies
+## [12.0.0](https://github.com/verivus-oss/sqry/compare/v11.0.4...v12.0.0) - 2026-05-02
+
+### Added
+- *(nl)* surface ONNX Runtime missing as actionable platform hint across CLI/MCP/LSP/daemon- *(nl)* classifier pool + daemon sqry_ask tool + LSP wiring + perf bounds- *(nl)* add SharedClassifier wrapper for concurrent IntentClassifier access- [**breaking**] strict integrity by default for NL classifier loader
+- *(nl)* gated model auto-download with manifest sha256 verify- *(nl)* add 5-level model_dir resolver and wire --model-dir override
+### Fixed
+- *(nl)* harden classifier trust and daemon config- *(nl)* tighten ort dylib detection and gate LSP map_error test seam behind feature- *(nl)* replace placeholder NL07 tests with real harnesses; use scopeguard for pool panic-safety- *(nl)* regenerate checksums.json — version.txt hash drift fix- *(nl)* warn when custom-mode anchor skipped; add Display for TrustMode/ResolverLevel- *(nl)* add ureq connect/read timeouts to model downloader## [7.2.0](https://github.com/verivus-oss/sqry/compare/v7.1.4...v7.2.0) - 2026-04-06
 
 ### Added
 - *(graph)* add path enumeration mode with SCC pruning strategy to BFS kernel

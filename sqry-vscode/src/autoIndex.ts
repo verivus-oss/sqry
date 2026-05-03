@@ -159,7 +159,6 @@ export class AutoIndexManager {
         continue;
       }
       enqueued += 1;
-      // eslint-disable-next-line no-await-in-loop -- sequential by design (see jsdoc above).
       await runner(root);
     }
     return { inspected: total, enqueued, excluded, nonMissing };

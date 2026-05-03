@@ -428,10 +428,21 @@ impl SqryServer {
 
                     Ok(response)
                 }
-                Ok(Ok(Err(anyhow_err))) => Err(McpError::internal_error(
-                    redact_error(anyhow_err.to_string()),
-                    None,
-                )),
+                Ok(Ok(Err(anyhow_err))) => {
+                    // NL08: structured tool errors (e.g.
+                    // `RpcError::onnx_runtime_missing`) are surfaced
+                    // through the canonical envelope rather than the
+                    // opaque internal-error fallback, so MCP clients
+                    // can pattern-match on `details.code`.
+                    if let Some(rpc_err) = anyhow_err.downcast_ref::<RpcError>() {
+                        Err(rpc_error_to_mcp(rpc_err.clone()))
+                    } else {
+                        Err(McpError::internal_error(
+                            redact_error(anyhow_err.to_string()),
+                            None,
+                        ))
+                    }
+                }
                 Ok(Err(join_err)) => Err(McpError::internal_error(
                     redact_error(format!("Task panicked: {join_err}")),
                     None,
