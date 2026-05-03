@@ -432,6 +432,22 @@ jobs:
           chmod +x dist/sqry-linux-x86_64
           ./dist/sqry-linux-x86_64 --version
           ./dist/sqry-linux-x86_64 index --help >/dev/null
+          classpath_smoke_dir="$(mktemp -d)"
+          trap 'rm -rf "$classpath_smoke_dir"' EXIT
+          printf 'class Smoke {}\n' > "$classpath_smoke_dir/Smoke.java"
+          : > "$classpath_smoke_dir/classpath.txt"
+          classpath_output="$(
+            ./dist/sqry-linux-x86_64 index \
+              --force \
+              --classpath \
+              --classpath-file "$classpath_smoke_dir/classpath.txt" \
+              "$classpath_smoke_dir" 2>&1
+          )"
+          if grep -Fq "requires the 'jvm-classpath' feature" <<<"$classpath_output"; then
+            echo "FATAL: public sqry binary was built without the jvm-classpath feature" >&2
+            printf '%s\n' "$classpath_output" >&2
+            exit 1
+          fi
 
       - name: Smoke test Linux arm64 (QEMU)
         continue-on-error: true
