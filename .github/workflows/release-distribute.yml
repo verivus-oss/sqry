@@ -335,18 +335,19 @@ jobs:
           )
           BINS=("sqry-cli" "sqry-lsp" "sqry-mcp" "sqry-daemon")
           BIN_NAMES=("sqry" "sqry-lsp" "sqry-mcp" "sqryd")
+          SQRY_CLI_RELEASE_FEATURES=(--features sqry-cli/jvm-classpath)
 
           for target in "${TARGETS[@]}"; do
             echo "=== Building for $target ==="
             if [[ "$target" == "x86_64-unknown-linux-gnu" ]]; then
-              "$CARGO_BIN" build --release --target "$target" -p sqry-cli -p sqry-lsp -p sqry-mcp -p sqry-daemon
+              "$CARGO_BIN" build --release --target "$target" -p sqry-cli -p sqry-lsp -p sqry-mcp -p sqry-daemon "${SQRY_CLI_RELEASE_FEATURES[@]}"
             elif [[ "$target" == "x86_64-pc-windows-gnu" ]]; then
               printf '#!/bin/bash\nargs=()\nfor arg in "$@"; do\n  if [[ "$arg" =~ ^/STACK:([0-9]+)$ ]]; then\n    args+=("-Wl,--stack,${BASH_REMATCH[1]}")\n  else\n    args+=("$arg")\n  fi\ndone\nexec x86_64-w64-mingw32-gcc "${args[@]}"\n' > /tmp/mingw-linker-wrapper.sh
               chmod +x /tmp/mingw-linker-wrapper.sh
               CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=/tmp/mingw-linker-wrapper.sh \
-                "$CARGO_BIN" build --release --target "$target" -p sqry-cli -p sqry-lsp -p sqry-mcp -p sqry-daemon
+                "$CARGO_BIN" build --release --target "$target" -p sqry-cli -p sqry-lsp -p sqry-mcp -p sqry-daemon "${SQRY_CLI_RELEASE_FEATURES[@]}"
             else
-              "$CARGO_BIN" zigbuild --release --target "$target" -p sqry-cli -p sqry-lsp -p sqry-mcp -p sqry-daemon
+              "$CARGO_BIN" zigbuild --release --target "$target" -p sqry-cli -p sqry-lsp -p sqry-mcp -p sqry-daemon "${SQRY_CLI_RELEASE_FEATURES[@]}"
             fi
 
             EXT=""
