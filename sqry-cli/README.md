@@ -197,4 +197,4 @@ cargo run --package sqry-cli -- main src/
 
 MIT - See [LICENSE](../LICENSE)
 
-**Version**: 13.0.0
+**Version**: 13.0.1
