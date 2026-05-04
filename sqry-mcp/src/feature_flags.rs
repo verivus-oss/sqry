@@ -110,7 +110,11 @@ impl FeatureFlags {
             // Structural planner tool (DB13, always enabled — requires unified graph)
             | "sqry_query"
             // Workspace identity / status surface (`STEP_7`, always enabled).
-            | "workspace_status" => true,
+            | "workspace_status"
+            // Macro expand-cache status (always enabled — registered
+            // handler at `server.rs:1198-1207`, documented surface in
+            // `sqry-mcp/README.md:255` and `docs/FEATURE_LIST.md:132,207`).
+            | "expand_cache_status" => true,
             _ => false,
         }
     }
@@ -203,6 +207,26 @@ mod tests {
         let reason = flags.disabled_reason("trace_path");
         assert!(reason.is_some());
         assert!(reason.unwrap().contains("SQRY_MCP_ENABLE_GRAPH=true"));
+    }
+
+    /// C091 — `expand_cache_status` must be unconditionally enabled at
+    /// runtime so the registered handler at `server.rs:1198-1207`
+    /// matches the documented surface in `sqry-mcp/README.md:255` and
+    /// `docs/FEATURE_LIST.md:132,207`. No env var should be required.
+    #[test]
+    fn expand_cache_status_is_unconditionally_enabled() {
+        let flags = FeatureFlags::default();
+        assert!(
+            flags.is_tool_enabled("expand_cache_status"),
+            "expand_cache_status must be enabled by default (no env vars)"
+        );
+        // And via from_env() with no relevant env vars set — the
+        // tool is in the always-on allow-list, not gated by any flag.
+        let env_flags = FeatureFlags::from_env();
+        assert!(
+            env_flags.is_tool_enabled("expand_cache_status"),
+            "expand_cache_status must be enabled via from_env() with no env overrides"
+        );
     }
 
     #[test]

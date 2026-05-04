@@ -19,6 +19,7 @@ fn new_session(root: &Path) -> sqry_lsp::session::SessionManager {
         allow_public_bind: false,
         daemon: false,
         daemon_socket: None,
+        workspace: None,
     };
     sqry_lsp::session::SessionManager::new(options)
 }

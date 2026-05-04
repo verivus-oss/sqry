@@ -136,6 +136,25 @@ export SQRY_WORKSPACE_ROOT=/home/user/project
 let config = RedactionConfig::from_env();
 ```
 
+The full set of environment overrides (read by `RedactionConfig::from_env` /
+`from_preset_with_env` in `sqry-mcp-redaction/src/config.rs`):
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `SQRY_REDACTION_PRESET` | `standard` | Selects base preset: `none`, `minimal`, `standard`, `strict`. Unknown values fall back to `standard`. |
+| `SQRY_REDACTION_MAX_DEPTH` | `128` | Maximum walker recursion depth for nested JSON. Clamped to `[8, 512]`. Values nested beyond this are dropped to prevent stack-overflow attacks. |
+| `SQRY_REDACT_PATHS` | preset value (`true` for `minimal`/`standard`/`strict`) | Toggles redaction of absolute filesystem paths (`/home/...`, `C:\...`). `1`/`true` enables, `0`/`false` disables. |
+| `SQRY_REDACT_WORKSPACE` | preset value (`true` for `minimal`/`standard`/`strict`) | Toggles redaction of the `workspace_path` / workspace-root field. |
+| `SQRY_REDACT_URIS` | preset value (`true` for `minimal`/`standard`/`strict`) | Toggles redaction of `file://` URIs. |
+| `SQRY_REDACT_CODE` | preset value (`false` for `minimal`, `true` for `standard`/`strict`) | Toggles redaction of `code` / source-snippet context fields. |
+| `SQRY_REDACT_DOCS` | preset value (`false` for `minimal`/`standard`, `true` for `strict`) | Toggles redaction of documentation/comment string fields. |
+| `SQRY_REDACT_PATTERNS` | preset value (`true` for `minimal`/`standard`/`strict`) | Toggles pattern detection of paths embedded inside arbitrary string values. |
+| `SQRY_HASH_FILENAMES` | preset value (`true` only for `strict`) | When enabled, replaces filenames with a salted hash (e.g. `[a1b2c3d4]/src/main.rs`) instead of full redaction. |
+| `SQRY_HASH_SALT` | unset | Salt string mixed into filename hashing. Empty string normalized to `None`. Length capped at 256 chars. |
+| `SQRY_WORKSPACE_ROOT` | unset | Absolute path used to convert absolute paths into workspace-relative form before redaction. |
+| `SQRY_WHITELIST_FIELDS` | preset list | Comma-separated extra field names to add to the whitelist (these fields are preserved, not redacted). Appended to the preset's built-in whitelist. |
+| `SQRY_PRESERVE_PATHS` | unset | Comma-separated JSONPath expressions; matched values are preserved verbatim regardless of other rules. |
+
 ## API Reference
 
 ### Redactor

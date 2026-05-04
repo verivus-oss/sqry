@@ -48,6 +48,7 @@ fn make_session(index_root: PathBuf) -> SessionManager {
         allow_public_bind: false,
         daemon: false,
         daemon_socket: None,
+        workspace: None,
     })
 }
 

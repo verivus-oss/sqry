@@ -83,6 +83,7 @@ pub fn execute(
                     "cli:watch",
                     progress,
                     Some(&classpath_opts),
+                    None,
                 )?;
             }
         } else {
@@ -95,7 +96,10 @@ pub fn execute(
 
     // Create watcher
     let watcher = FileWatcher::new(&root_path)?;
-    let debounce_duration = debounce.map_or(Duration::from_millis(500), Duration::from_millis);
+    // C004: platform-aware debounce default (matches the CLI help text).
+    // The `SQRY_LIMITS__WATCH__DEBOUNCE_MS` env override wins over the
+    // platform default but is itself overridden by an explicit `--debounce`.
+    let debounce_duration = debounce.map_or_else(default_watch_debounce, Duration::from_millis);
 
     println!("🔍 Watch mode started");
     println!("📂 Monitoring: {}", root_path.display());
@@ -145,6 +149,7 @@ pub fn execute(
             "cli:watch",
             progress.clone(),
             Some(&classpath_opts),
+            None,
         );
         match build_result {
             Ok(_build_result) => {
@@ -261,7 +266,29 @@ fn build_and_persist_watch_iteration(
         build_command,
         progress,
         None,
+        None,
     )
+}
+
+/// Compute the default debounce duration for the file watcher.
+///
+/// Resolution order (highest priority first):
+///
+/// 1. `SQRY_LIMITS__WATCH__DEBOUNCE_MS` env var (parsed as u64 milliseconds).
+/// 2. Platform-specific default: 400 ms on macOS (`FSEvents` coalescing
+///    latency), 100 ms on Linux/Windows (inotify / `ReadDirectoryChangesW`
+///    react more quickly so a tighter debounce keeps interactivity).
+fn default_watch_debounce() -> Duration {
+    if let Ok(raw) = std::env::var("SQRY_LIMITS__WATCH__DEBOUNCE_MS")
+        && let Ok(ms) = raw.trim().parse::<u64>()
+    {
+        return Duration::from_millis(ms);
+    }
+    if cfg!(target_os = "macos") {
+        Duration::from_millis(400)
+    } else {
+        Duration::from_millis(100)
+    }
 }
 
 /// Resolve path argument to absolute `PathBuf`
@@ -273,6 +300,48 @@ fn resolve_path(path: Option<String>) -> Result<PathBuf> {
         path.canonicalize().context("Failed to resolve path")
     } else {
         anyhow::bail!("Path does not exist: {}", path.display());
+    }
+}
+
+#[cfg(test)]
+mod debounce_tests {
+    use super::default_watch_debounce;
+    use std::time::Duration;
+
+    /// Serialise the env-mutating debounce tests so the two tests do not
+    /// race on `SQRY_LIMITS__WATCH__DEBOUNCE_MS`. `cargo test` parallelises
+    /// by default; without this guard the platform-default test would
+    /// observe the override test's set/unset window and flap.
+    static ENV_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn default_watch_debounce_honours_env_override() {
+        // C004: explicit env override wins over platform default. Use a
+        // sentinel value (777ms) that can't collide with either platform
+        // default (100 / 400). Reset after the assertion to avoid leaking
+        // process state into other tests.
+        let _guard = ENV_GUARD.lock().unwrap_or_else(|p| p.into_inner());
+        unsafe {
+            std::env::set_var("SQRY_LIMITS__WATCH__DEBOUNCE_MS", "777");
+        }
+        assert_eq!(default_watch_debounce(), Duration::from_millis(777));
+        unsafe {
+            std::env::remove_var("SQRY_LIMITS__WATCH__DEBOUNCE_MS");
+        }
+    }
+
+    #[test]
+    fn default_watch_debounce_falls_back_to_platform_default() {
+        let _guard = ENV_GUARD.lock().unwrap_or_else(|p| p.into_inner());
+        unsafe {
+            std::env::remove_var("SQRY_LIMITS__WATCH__DEBOUNCE_MS");
+        }
+        let expected = if cfg!(target_os = "macos") {
+            Duration::from_millis(400)
+        } else {
+            Duration::from_millis(100)
+        };
+        assert_eq!(default_watch_debounce(), expected);
     }
 }
 

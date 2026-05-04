@@ -216,7 +216,7 @@ Use `standard` or `strict` when sending responses to external/hosted LLM provide
 
 ## Features
 
-### Tool Catalog (34 tools)
+### Tool Catalog (36 tools)
 
 | Category | Tool | Purpose |
 |----------|------|---------|
@@ -253,6 +253,8 @@ Use `standard` or `strict` when sending responses to external/hosted LLM provide
 | Navigation | `get_document_symbols` | Symbols in a file |
 | Navigation | `get_workspace_symbols` | Workspace symbol search |
 | Introspection | `expand_cache_status` | Macro expansion cache status (Rust) |
+| Introspection | `workspace_status` | Workspace identity, root, and load state |
+| Planner | `sqry_query` | Structural query planner (text DSL) |
 | Natural Language | `sqry_ask` | NL → sqry command translation |
 
 See [User Guide](USER_GUIDE.md#available-tools) for full parameters and examples.
@@ -292,6 +294,8 @@ Disable specific tool groups via environment variables:
 | `SQRY_MCP_ENABLE_DEPENDENCY_IMPACT` | `dependency_impact` |
 | `SQRY_MCP_ENABLE_SQRY_ASK` | `sqry_ask` |
 
+These 6 env toggles gate 7 tools (the `SQRY_MCP_ENABLE_GRAPH` toggle controls BOTH `trace_path` and `subgraph` per `feature_flags.rs:73`; `show_dependencies` is always-on per `feature_flags.rs:86`); the other **29** tools are unconditionally enabled at runtime.
+
 ### rmcp-Based Rust Implementation
 
 **Benefits**:
@@ -309,10 +313,14 @@ Disable specific tool groups via environment variables:
 
 | Variable | Purpose | Default |
 |----------|---------|---------|
-| `SQRY_MCP_WORKSPACE_ROOT` | Workspace root directory | Current directory |
+| `SQRY_MCP_WORKSPACE_ROOT` | Workspace root directory (primary security boundary) | Current directory |
+| `SQRY_WORKSPACE_ROOT` | Workspace root fallback. Resolution priority: `--workspace` arg → `SQRY_MCP_WORKSPACE_ROOT` → `SQRY_WORKSPACE_ROOT` → CWD (`path_resolver.rs:280-287`). | unset |
 | `SQRY_MCP_TIMEOUT_MS` | Per-operation timeout | `60000` (60s) |
 | `SQRY_MCP_INDEX_TIMEOUT_MS` | Index rebuild timeout | `600000` (10min) |
 | `SQRY_MCP_MAX_OUTPUT_BYTES` | Output size limit | `50000` (50KB) |
+| `SQRY_MCP_RETRY_DELAY_MS` | Retry delay for exceeded deadlines | `500` (ms) |
+| `SQRY_MCP_MAX_CROSS_LANG_EDGES` | Max edges for cross-language analysis | `50000` |
+| `SQRY_FORCE_STANDALONE` | Forces standalone fallback when daemon unreachable; `1`/`true` skips the daemon workspace conflict check (`engine.rs:674`). | `0` (disabled) |
 | `SQRY_REDACTION_PRESET` | Response redaction level | `minimal` |
 | `SQRY_INCLUDE_HIGH_COST` | Include high-cost plugins | `0` (disabled) |
 | `SQRY_MCP_ENGINE_CACHE_CAPACITY` | Max cached workspace engines | `5` |
@@ -474,11 +482,11 @@ cargo run -q -p sqry-mcp -- --list-tools
 
 ### Adding New Tools
 
-1. Add tool definition to `src/tools.rs`
-2. Implement tool handler in `src/handlers/`
-3. Add CLI invocation logic
-4. Add integration tests to `tests/`
-5. Update documentation
+1. Add a `#[tool(...)]` annotated method to `impl SqryServer` in `sqry-mcp/src/server.rs`; rmcp registers the schema automatically.
+2. If the tool needs a complex param/return type, define the structs in `sqry-mcp/src/tools/params.rs`.
+3. Add the tool name to the runtime allow-list in `sqry-mcp/src/feature_flags.rs::is_tool_enabled` so it is not filtered out at startup.
+4. Add integration tests to `tests/`.
+5. Update documentation.
 
 ### Debugging
 
@@ -511,5 +519,5 @@ MIT - See root LICENSE file
 ---
 
 **Last Updated**: 2026-05-04
-**Version**: 12.1.6
+**Version**: 13.0.0 (36 tools)
 **Tested With**: sqry v4.8.2, Claude Desktop, Windsurf, Claude Code, Codex, Gemini CLI

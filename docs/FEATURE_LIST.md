@@ -134,7 +134,7 @@ Indexing behavior highlights:
 
 ## MCP Tools (Model Context Protocol)
 
-sqry provides 34 MCP tools for AI/LLM integration:
+sqry provides **36 MCP tools** for AI/LLM integration:
 
 ### MCP Response Redaction
 
@@ -149,7 +149,8 @@ sqry provides 34 MCP tools for AI/LLM integration:
 | `semantic_search` | Advanced semantic code search with filters and pagination |
 | `hierarchical_search` | RAG-optimized search with file/container/symbol grouping |
 | `search_similar` | Find symbols similar to a reference symbol using fuzzy matching |
-| `pattern_search` | Wildcard pattern search across symbols |
+| `pattern_search` | Substring pattern match on symbol names |
+| `sqry_query` | Run a structured planner query (`kind:function has:caller:main` syntax) directly against the graph |
 
 ### Code Understanding
 
@@ -196,6 +197,7 @@ sqry provides 34 MCP tools for AI/LLM integration:
 | `get_graph_stats` | Get graph statistics |
 | `get_insights` | Get codebase health indicators |
 | `complexity_metrics` | Get cyclomatic complexity metrics |
+| `workspace_status` | Report logical workspace identity, source roots, and per-root index status |
 
 ### Index & Diff
 
@@ -285,7 +287,7 @@ sqry-lsp provides IDE integration with standard LSP capabilities and custom sqry
 
 ### Custom sqry LSP Endpoints
 
-These endpoints are available via `workspace/executeCommand`:
+These endpoints are exposed as direct JSON-RPC custom methods (i.e., the method name appears as the JSON-RPC `method` field). They are NOT invoked through `workspace/executeCommand`. The 4 `sqry.*` command-style actions handled by `workspace/executeCommand` are listed separately under §Code Actions.
 
 #### Search & Query
 
@@ -302,9 +304,10 @@ These endpoints are available via `workspace/executeCommand`:
 |----------|-------------|
 | `sqry/explainSymbol` | Explain symbol with context |
 | `sqry/similarSymbols` | Find similar symbols via fuzzy matching |
-| `sqry/relation` | Query relationships (callers, callees, imports, exports, returns) |
+| `sqry/references` | Query relationships (callers, callees, imports, exports, returns). Params: `{ relation: RelationKind, target: string, path?: string, limit?: usize }`. Returns `{ relation, results: SqrySearchItem[], total, truncated, used_index }`. |
 | `sqry/directCallers` | Find direct callers |
 | `sqry/directCallees` | Find direct callees |
+| `sqry/batchCallerCalleeCount` | Batch-count direct callers and callees for a list of symbols. Params: `{ symbols: SymbolRef[], path?: string }`. Returns `{ counts: { name, callers, callees }[] }`. |
 
 #### Graph Operations
 
@@ -337,6 +340,7 @@ These endpoints are available via `workspace/executeCommand`:
 | `sqry/listFilesByLanguage` | List files filtered by language |
 | `sqry/listCrossLanguageRelations` | List cross-language edges |
 | `sqry/indexStatus` | Get index metadata and status |
+| `sqry/workspaceStatus` | Report logical workspace identity (`workspace_id_short`, `workspace_id_full`), source roots, and per-root aggregate index status. Params: `{ workspace_id?: string }` (optional client-side sanity-check value). Returns `SqryWorkspaceStatusResult` (flattens `WorkspaceStatusInfo`). |
 | `sqry.index` | Rebuild semantic index with progress |
 
 #### Diff & Comparison

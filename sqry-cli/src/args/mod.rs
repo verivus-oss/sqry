@@ -52,7 +52,7 @@ pub struct Cli {
     pub path: Option<String>,
 
     /// Output format as JSON
-    #[arg(long, short = 'j', global = true, group = "output_format", help_heading = headings::COMMON_OPTIONS, display_order = 10)]
+    #[arg(long, short = 'j', global = true, hide_long_help = true, group = "output_format", help_heading = headings::COMMON_OPTIONS, display_order = 10)]
     pub json: bool,
 
     /// Output format as CSV (comma-separated values)
@@ -60,20 +60,20 @@ pub struct Cli {
     /// RFC 4180 compliant CSV output. Use with --headers to include column names.
     /// By default, formula-triggering characters are prefixed with single quote
     /// for Excel/LibreOffice safety. Use --raw-csv to disable this protection.
-    #[arg(long, global = true, group = "output_format", help_heading = headings::COMMON_OPTIONS, display_order = 12)]
+    #[arg(long, global = true, hide_long_help = true, group = "output_format", help_heading = headings::COMMON_OPTIONS, display_order = 12)]
     pub csv: bool,
 
     /// Output format as TSV (tab-separated values)
     ///
     /// Tab-delimited output for easy Unix pipeline processing.
     /// Newlines and tabs in field values are replaced with spaces.
-    #[arg(long, global = true, group = "output_format", help_heading = headings::COMMON_OPTIONS, display_order = 13)]
+    #[arg(long, global = true, hide_long_help = true, group = "output_format", help_heading = headings::COMMON_OPTIONS, display_order = 13)]
     pub tsv: bool,
 
     /// Include header row in CSV/TSV output
     ///
     /// Requires --csv or --tsv to be specified.
-    #[arg(long, global = true, help_heading = headings::OUTPUT_CONTROL, display_order = 11)]
+    #[arg(long, global = true, hide_long_help = true, help_heading = headings::OUTPUT_CONTROL, display_order = 11)]
     pub headers: bool,
 
     /// Columns to include in CSV/TSV output (comma-separated)
@@ -84,7 +84,7 @@ pub struct Cli {
     /// Example: --columns name,file,line
     ///
     /// Requires --csv or --tsv to be specified.
-    #[arg(long, global = true, value_name = "COLUMNS", help_heading = headings::OUTPUT_CONTROL, display_order = 12)]
+    #[arg(long, global = true, hide_long_help = true, value_name = "COLUMNS", help_heading = headings::OUTPUT_CONTROL, display_order = 12)]
     pub columns: Option<String>,
 
     /// Output raw CSV without formula injection protection
@@ -95,12 +95,12 @@ pub struct Cli {
     /// processing where raw values are needed.
     ///
     /// Requires --csv or --tsv to be specified.
-    #[arg(long, global = true, help_heading = headings::OUTPUT_CONTROL, display_order = 13)]
+    #[arg(long, global = true, hide_long_help = true, help_heading = headings::OUTPUT_CONTROL, display_order = 13)]
     pub raw_csv: bool,
 
     /// Show code context around matches (number of lines before/after)
     #[arg(
-        long, short = 'p', global = true, value_name = "LINES",
+        long, short = 'p', global = true, hide_long_help = true, value_name = "LINES",
         default_missing_value = "3", num_args = 0..=1,
         help_heading = headings::OUTPUT_CONTROL, display_order = 14,
         long_help = "Show code context around matches (number of lines before/after)\n\n\
@@ -116,7 +116,7 @@ pub struct Cli {
     pub preview: Option<usize>,
 
     /// Disable colored output
-    #[arg(long, global = true, help_heading = headings::COMMON_OPTIONS, display_order = 14)]
+    #[arg(long, global = true, hide_long_help = true, help_heading = headings::COMMON_OPTIONS, display_order = 14)]
     pub no_color: bool,
 
     /// Select output color theme (default, dark, light, none)
@@ -125,6 +125,7 @@ pub struct Cli {
         value_enum,
         default_value = "default",
         global = true,
+        hide_long_help = true,
         help_heading = headings::COMMON_OPTIONS,
         display_order = 15
     )]
@@ -135,6 +136,7 @@ pub struct Cli {
         long,
         value_enum,
         global = true,
+        hide_long_help = true,
         help_heading = headings::OUTPUT_CONTROL,
         display_order = 16
     )]
@@ -150,6 +152,7 @@ pub struct Cli {
     #[arg(
         long,
         global = true,
+        hide_long_help = true,
         conflicts_with = "no_pager",
         help_heading = headings::OUTPUT_CONTROL,
         display_order = 17
@@ -163,6 +166,7 @@ pub struct Cli {
     #[arg(
         long,
         global = true,
+        hide_long_help = true,
         conflicts_with = "pager",
         help_heading = headings::OUTPUT_CONTROL,
         display_order = 18
@@ -180,6 +184,7 @@ pub struct Cli {
         long,
         value_name = "COMMAND",
         global = true,
+        hide_long_help = true,
         help_heading = headings::OUTPUT_CONTROL,
         display_order = 19
     )]
@@ -266,7 +271,7 @@ pub struct Cli {
     /// Allow fuzzy matching for query field names (opt-in).
     /// Applies typo correction to field names (e.g., "knd" → "kind").
     /// Ambiguous corrections are rejected with an error.
-    #[arg(long, global = true, help_heading = headings::SEARCH_MODES_FUZZY, display_order = 52)]
+    #[arg(long, global = true, hide_long_help = true, help_heading = headings::SEARCH_MODES_FUZZY, display_order = 52)]
     pub fuzzy_fields: bool,
 
     /// Maximum edit distance for fuzzy field correction
@@ -274,6 +279,7 @@ pub struct Cli {
         long,
         default_value_t = 2,
         global = true,
+        hide_long_help = true,
         help_heading = headings::SEARCH_MODES_FUZZY,
         display_order = 53
     )]
@@ -283,15 +289,15 @@ pub struct Cli {
     ///
     /// Limits the output to a manageable size for downstream consumers.
     /// Defaults: search=100, query=1000, fuzzy=50
-    #[arg(long, global = true, help_heading = headings::OUTPUT_CONTROL, display_order = 20)]
+    #[arg(long, global = true, hide_long_help = true, help_heading = headings::OUTPUT_CONTROL, display_order = 20)]
     pub limit: Option<usize>,
 
     /// List enabled languages and exit
-    #[arg(long, global = true, help_heading = headings::COMMON_OPTIONS, display_order = 30)]
+    #[arg(long, global = true, hide_long_help = true, help_heading = headings::COMMON_OPTIONS, display_order = 30)]
     pub list_languages: bool,
 
     /// Print cache telemetry to stderr after the command completes
-    #[arg(long, global = true, help_heading = headings::COMMON_OPTIONS, display_order = 40)]
+    #[arg(long, global = true, hide_long_help = true, help_heading = headings::COMMON_OPTIONS, display_order = 40)]
     pub debug_cache: bool,
 
     /// Operate against a logical workspace defined by a `.sqry-workspace` or
@@ -315,6 +321,7 @@ pub struct Cli {
         id = "global_workspace_path",
         long = "workspace",
         global = true,
+        hide_long_help = true,
         value_name = "PATH",
         env = "SQRY_WORKSPACE_FILE",
         help_heading = headings::COMMON_OPTIONS,
@@ -326,7 +333,7 @@ pub struct Cli {
     ///
     /// Helpful for disambiguating relation queries (callers/callees) where
     /// multiple namespaces define the same method name.
-    #[arg(long, global = true, help_heading = headings::OUTPUT_CONTROL, display_order = 30)]
+    #[arg(long, global = true, hide_long_help = true, help_heading = headings::OUTPUT_CONTROL, display_order = 30)]
     pub qualified_names: bool,
 
     // ===== Index Validation Flags (P1-14) =====
@@ -336,7 +343,7 @@ pub struct Cli {
     /// - off: Skip validation entirely (fastest)
     /// - warn: Log warnings but continue (default)
     /// - fail: Abort on validation errors
-    #[arg(long, value_enum, default_value = "warn", global = true, help_heading = headings::INDEX_CONFIGURATION, display_order = 40)]
+    #[arg(long, value_enum, default_value = "warn", global = true, hide_long_help = true, help_heading = headings::INDEX_CONFIGURATION, display_order = 40)]
     pub validate: ValidationMode,
 
     /// Automatically rebuild index if validation fails
@@ -344,7 +351,11 @@ pub struct Cli {
     /// When set, if index validation fails in strict mode, sqry will
     /// automatically rebuild the index once and retry. Useful for
     /// recovering from transient corruption without manual intervention.
-    #[arg(long, requires = "validate", global = true, help_heading = headings::INDEX_CONFIGURATION, display_order = 41)]
+    ///
+    /// Requires `--validate` to be set to either `warn` or `fail`; the
+    /// rebuild is only triggered when validation actually evaluates the
+    /// index. With `--validate off` the flag is a no-op.
+    #[arg(long, global = true, hide_long_help = true, help_heading = headings::INDEX_CONFIGURATION, display_order = 41)]
     pub auto_rebuild: bool,
 
     /// Maximum ratio of dangling references before rebuild (0.0-1.0)
@@ -352,7 +363,7 @@ pub struct Cli {
     /// Sets the threshold for dangling reference errors during validation.
     /// Default: 0.05 (5%). If more than this ratio of symbols have dangling
     /// references, validation will fail in strict mode.
-    #[arg(long, value_name = "RATIO", global = true, help_heading = headings::INDEX_CONFIGURATION, display_order = 42)]
+    #[arg(long, value_name = "RATIO", global = true, hide_long_help = true, help_heading = headings::INDEX_CONFIGURATION, display_order = 42)]
     pub threshold_dangling_refs: Option<f64>,
 
     /// Maximum ratio of orphaned files before rebuild (0.0-1.0)
@@ -360,7 +371,7 @@ pub struct Cli {
     /// Sets the threshold for orphaned file errors during validation.
     /// Default: 0.20 (20%). If more than this ratio of indexed files are
     /// orphaned (no longer exist on disk), validation will fail.
-    #[arg(long, value_name = "RATIO", global = true, help_heading = headings::INDEX_CONFIGURATION, display_order = 43)]
+    #[arg(long, value_name = "RATIO", global = true, hide_long_help = true, help_heading = headings::INDEX_CONFIGURATION, display_order = 43)]
     pub threshold_orphaned_files: Option<f64>,
 
     /// Maximum ratio of ID gaps before warning (0.0-1.0)
@@ -368,7 +379,7 @@ pub struct Cli {
     /// Sets the threshold for ID gap warnings during validation.
     /// Default: 0.10 (10%). If more than this ratio of symbol IDs have gaps,
     /// validation will warn or fail depending on strictness.
-    #[arg(long, value_name = "RATIO", global = true, help_heading = headings::INDEX_CONFIGURATION, display_order = 44)]
+    #[arg(long, value_name = "RATIO", global = true, hide_long_help = true, help_heading = headings::INDEX_CONFIGURATION, display_order = 44)]
     pub threshold_id_gaps: Option<f64>,
 
     // ===== Hybrid Search Flags =====
@@ -844,14 +855,6 @@ pub enum Command {
         #[arg(long = "cache-dir", help_heading = headings::ADVANCED_CONFIGURATION, display_order = 10)]
         cache_dir: Option<String>,
 
-        /// Disable index compression (P1-12: Index Compression).
-        ///
-        /// By default, indexes are compressed with zstd for faster load times
-        /// and reduced disk space. Use this flag to store uncompressed indexes
-        /// (useful for debugging or compatibility testing).
-        #[arg(long, help_heading = headings::ADVANCED_CONFIGURATION, display_order = 20)]
-        no_compress: bool,
-
         /// Metrics export format for validation status (json or prometheus).
         ///
         /// Used with --status --json to export validation metrics in different
@@ -1193,13 +1196,14 @@ pub enum Command {
 
     /// Generate shell completions
     ///
-    /// Generate shell completion scripts for bash, zsh, fish, or `PowerShell`.
+    /// Generate shell completion scripts for bash, zsh, fish, `PowerShell`, or elvish.
     /// Install by redirecting output to the appropriate location for your shell.
     ///
     /// Examples:
     ///   sqry completions bash > /`etc/bash_completion.d/sqry`
     ///   sqry completions zsh > ~/.zfunc/_sqry
     ///   sqry completions fish > ~/.config/fish/completions/sqry.fish
+    ///   sqry completions elvish > ~/.config/elvish/lib/sqry.elv
     #[command(display_order = 45, verbatim_doc_comment)]
     Completions(CompletionsCommand),
 
@@ -1318,14 +1322,14 @@ pub enum Command {
         ///
         /// Defaults to `false`. Also honoured via the
         /// `SQRY_NL_ALLOW_UNVERIFIED_MODEL=1` environment variable.
-        #[arg(long, help_heading = headings::NL_CONFIGURATION, display_order = 50)]
+        #[arg(long, env = "SQRY_NL_ALLOW_UNVERIFIED_MODEL", help_heading = headings::NL_CONFIGURATION, display_order = 50)]
         allow_unverified_model: bool,
 
         /// Permit fetching the classifier model from the network when not present locally.
         ///
         /// Defaults to `false`. Also honoured via the
         /// `SQRY_NL_ALLOW_DOWNLOAD=1` environment variable.
-        #[arg(long, help_heading = headings::NL_CONFIGURATION, display_order = 60)]
+        #[arg(long, env = "SQRY_NL_ALLOW_DOWNLOAD", help_heading = headings::NL_CONFIGURATION, display_order = 60)]
         allow_model_download: bool,
     },
 
@@ -1344,8 +1348,10 @@ pub enum Command {
     ///   sqry insights prune --older 90d       # Clean up old data
     ///
     /// Privacy: All data is stored locally. No network calls are made
-    /// unless you explicitly use --share (which generates a file, not
-    /// a network request).
+    /// unless you explicitly invoke the `share` subcommand (which generates
+    /// a file, not a network request). The `share` subcommand is gated
+    /// behind the `insights-share` Cargo feature; it is omitted from the
+    /// CLI surface when the feature is not enabled.
     #[command(display_order = 62, verbatim_doc_comment)]
     Insights {
         #[command(subcommand)]
@@ -3212,6 +3218,7 @@ pub enum Shell {
     Bash,
     Zsh,
     Fish,
+    #[value(name = "powershell")]
     PowerShell,
     Elvish,
 }

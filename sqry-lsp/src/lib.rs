@@ -808,6 +808,7 @@ mod tests {
             allow_public_bind: false,
             daemon: false,
             daemon_socket: None,
+            workspace: None,
         }
     }
 
@@ -963,6 +964,7 @@ mod tests {
             allow_public_bind: false,
             daemon: true,
             daemon_socket: Some(absent_socket),
+            workspace: None,
         };
 
         let result = super::run_daemon_client_mode(&options).await;
@@ -1134,6 +1136,7 @@ mod tests {
             allow_public_bind: false,
             daemon: true,
             daemon_socket: Some(absent_socket),
+            workspace: None,
         };
 
         let result = super::run_daemon_client_mode(&options).await;

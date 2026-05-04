@@ -317,10 +317,11 @@ fn env_var_alone_resolves_for_query_subcommand() {
 #[serial]
 fn help_text_advertises_env_var_binding() {
     // Cosmetic / discoverability check: clap renders `[env: SQRY_WORKSPACE_FILE=...]`
-    // in help output so users discover the env var. This is independent from
-    // the resolution-layer assertions above.
+    // in short help (`-h`) so users discover the env var. The audit's C085
+    // hides global flags from long `--help` to keep subcommand help concise;
+    // short help retains them for discoverability.
     sqry_cmd_clean_env()
-        .args(["--help"])
+        .args(["-h"])
         .assert()
         .success()
         .stdout(predicate::str::contains("--workspace"))

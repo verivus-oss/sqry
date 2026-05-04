@@ -100,6 +100,7 @@ fn make_session_with_member_and_excluded() -> (SessionManager, PathBuf, PathBuf,
         allow_public_bind: false,
         daemon: false,
         daemon_socket: None,
+        workspace: None,
     };
     let session = SessionManager::new(opts);
     session.set_logical_workspace(Arc::new(ws));

@@ -42,7 +42,7 @@ sqry is useful when you need to search by code **structure**: finding all caller
 - **Graph analysis**: trace paths between symbols, find cycles, detect unused code
 - **Structured queries**: combine predicates with boolean logic (`kind:function AND lang:rust AND async:true`)
 - **Cross-language detection**: FFI linking (Rust<>C/C++), HTTP route matching (JS/TS<>Python/Java/Go)
-- **AI assistant integration**: MCP server with 34 tools, LSP server for editors
+- **AI assistant integration**: MCP server with 36 tools, LSP server for editors
 
 ### When NOT to use sqry
 
@@ -177,6 +177,29 @@ The same plugin-selection flags also apply to `sqry update` and `sqry watch`.
 `--enable-language` and `--disable-language` remain accepted compatibility
 aliases for `--enable-plugin` and `--disable-plugin`.
 
+#### Plugin-tiering environment variables
+
+The CLI flags above also have environment-variable equivalents, useful for CI
+pipelines and shell sessions where you want a stable default without retyping
+flags on every `sqry` invocation. Per-invocation CLI flags always win over
+environment defaults.
+
+- `SQRY_INCLUDE_HIGH_COST=1` — include every `HighWallClock` plugin in the
+  default fast path. Equivalent to passing `--include-high-cost`.
+  Example: `SQRY_INCLUDE_HIGH_COST=1 sqry index`.
+- `SQRY_EXCLUDE_HIGH_COST=1` — force the fast path even when
+  `SQRY_INCLUDE_HIGH_COST=1` is set elsewhere. Equivalent to
+  `--exclude-high-cost` and useful for overriding a CI-wide default in a
+  single job. Example: `SQRY_EXCLUDE_HIGH_COST=1 sqry index`.
+- `SQRY_ENABLE_PLUGINS=json,servicenow-xml` — comma-separated list of plugin
+  IDs to opt back into the fast path one at a time. Equivalent to repeating
+  `--enable-plugin <id>`. Example:
+  `SQRY_ENABLE_PLUGINS=json sqry index`.
+- `SQRY_DISABLE_PLUGINS=json,servicenow-xml` — comma-separated list of plugin
+  IDs to drop from the active set even when they would otherwise be on.
+  Equivalent to repeating `--disable-plugin <id>`. Example:
+  `SQRY_DISABLE_PLUGINS=servicenow-xml sqry index`.
+
 #### Upgrade-rebuild requirement
 
 When sqry's in-format graph semantics change between releases (for example
@@ -197,8 +220,8 @@ sqry index --enable-macro-expansion
 sqry index --enable-macro-expansion --cfg 'feature="serde"'
 
 # Search with macro filters
-sqry query "kind:function" --cfg-filter 'feature="serde"' --include-generated
-sqry query "kind:function" --macro-boundaries
+sqry search "Handler" --cfg-filter 'feature="serde"' --include-generated
+sqry search "process_" --macro-boundaries
 ```
 
 ### JVM Classpath Analysis
@@ -502,7 +525,7 @@ Each language plugin lives in its own crate (`sqry-lang-*`) and implements the `
 
 ## MCP Server (AI Assistant Integration)
 
-sqry includes an MCP server with 34 JSON-RPC tools for AI assistants (Claude, Codex, Gemini, Cursor, Windsurf):
+sqry includes an MCP server with 36 JSON-RPC tools for AI assistants (Claude, Codex, Gemini, Cursor, Windsurf):
 
 ```bash
 # Start MCP server (stdio transport)
@@ -526,7 +549,7 @@ For sensitive repositories, use [sqry-mcp-redaction](sqry-mcp-redaction/README.m
 sqry lsp --stdio        # Start LSP server (stdio mode)
 ```
 
-Supports hover, definition, references, call hierarchy, document/workspace symbols, code actions, and 27 custom sqry methods. Works with VS Code, Neovim, Helix, and any LSP 3.17 client. Socket mode available for shared instances.
+Supports hover, definition, references, call hierarchy, document/workspace symbols, code actions, and 29 custom sqry methods. Works with VS Code, Neovim, Helix, and any LSP 3.17 client. Socket mode available for shared instances.
 
 See `sqry-lsp/` for configuration details.
 
@@ -689,7 +712,7 @@ sqry/
 ├── sqry-core/              # Core library (graph, symbols, search, plugin system)
 ├── sqry-cli/               # CLI binary ('sqry')
 ├── sqry-lsp/               # LSP server
-├── sqry-mcp/               # MCP server (34 tools for AI assistants)
+├── sqry-mcp/               # MCP server (36 tools for AI assistants)
 ├── sqry-daemon/            # Daemon binary + library (sqryd)
 ├── sqry-daemon-protocol/   # Wire types and framing (free functions, envelope types)
 ├── sqry-daemon-client/     # Client library (shim mode, management API)
@@ -713,7 +736,7 @@ sqry/
 | AST awareness | Yes | No | Yes | Yes |
 | Relation queries | Yes (28 langs) | No | No | Yes |
 | Local/offline | Yes | Yes | Yes | No |
-| MCP server | Yes (34 tools) | No | No | No |
+| MCP server | Yes (36 tools) | No | No | No |
 | LSP server | Yes | No | No | Yes |
 | Cost | Free (MIT) | Free | Free | Paid |
 

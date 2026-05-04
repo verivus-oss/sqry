@@ -365,7 +365,16 @@ fn run_daemon_status(json: bool) -> Result<()> {
     // Check connectivity first so we can give a clean exit-1 without async machinery.
     if !try_connect_sync(&socket_path)? {
         if json {
-            println!("{{}}");
+            // Use serde_json to produce a properly-escaped JSON error envelope —
+            // raw string interpolation can produce invalid JSON for socket paths
+            // that contain quotes or backslashes (e.g. Windows paths).
+            println!(
+                "{}",
+                serde_json::json!({
+                    "error": "daemon_unreachable",
+                    "socket": socket_path.display().to_string(),
+                })
+            );
         } else {
             eprintln!(
                 "sqry: daemon is not running (socket {})",

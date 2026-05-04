@@ -1,6 +1,6 @@
 # sqry Quick Start Guide - by Verivus
 
-**Version**: 12.1.6
+**Version**: 13.0.0
 **Rust**: 1.90+ (Edition 2024)
 
 ---
@@ -254,7 +254,7 @@ sqry batch commands.txt
 
 ## MCP Server (AI Assistant Integration)
 
-sqry includes a Model Context Protocol server with 34 tools for AI assistants:
+sqry includes a Model Context Protocol server with **36 tools** for AI assistants:
 
 ```bash
 # Start MCP server (stdio transport)

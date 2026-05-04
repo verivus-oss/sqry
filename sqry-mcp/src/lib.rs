@@ -38,6 +38,9 @@ pub mod execution;
 #[allow(dead_code)]
 mod feature_flags;
 pub mod mcp_config;
+/// Output truncation cap module — enforces `SQRY_MCP_MAX_OUTPUT_BYTES`
+/// (default 50 000) at the `success_result` boundary in `server.rs`.
+pub mod output_caps;
 mod pagination;
 #[allow(dead_code)]
 mod path_resolver;
@@ -128,4 +131,19 @@ pub mod test_setup {
     pub use crate::engine::init_engine_cache;
     pub use crate::execution::{init_subgraph_cache, init_trace_path_cache};
     pub use crate::path_resolver::init_discovery_cache;
+}
+
+/// Iter2-B C029c — test-helper surface gated behind `feature = "test-helpers"`.
+///
+/// Exposes `SqryServer::new_for_tests` and
+/// `SqryServer::build_success_result_for_tests` so integration tests in
+/// `tests/output_caps_truncation_via_dispatch.rs` can drive the actual
+/// `success_result` boundary that all `#[tool]`-decorated handlers route
+/// through. This is strictly additive — the default build (the binary
+/// shipped to users) does not enable this feature and therefore has no
+/// new public surface.
+#[cfg(feature = "test-helpers")]
+pub mod server_test_helpers {
+    pub use crate::server::SqryServer;
+    pub use rmcp::model::CallToolResult;
 }

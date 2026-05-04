@@ -417,6 +417,7 @@ pub(crate) fn build_and_persist_with_optional_classpath(
     build_command: &str,
     progress: SharedReporter,
     classpath_opts: Option<&ClasspathCliOptions<'_>>,
+    cache_dir: Option<&Path>,
 ) -> Result<BuildResult> {
     #[cfg(feature = "jvm-classpath")]
     let classpath_result = if let Some(classpath_opts) = classpath_opts.filter(|opts| opts.enabled)
@@ -447,6 +448,21 @@ pub(crate) fn build_and_persist_with_optional_classpath(
         inject_classpath_into_graph(&mut graph, classpath_result)?;
     }
 
+    // C001b-core: when `--cache-dir <DIR>` is supplied, persist a hash-index
+    // snapshot covering every file the freshly built graph references. The
+    // graph build itself is NOT short-circuited (the unified builder does not
+    // yet support merging cached file segments), so the new graph is always
+    // complete; this side-channel snapshot is what `sqry update` and the
+    // forthcoming incremental-merge API will pick up next time.
+    if let Some(dir) = cache_dir
+        && let Err(err) = persist_hash_index_snapshot(&graph, dir)
+    {
+        log::warn!(
+            "failed to persist hash index to {} ({err}); cache snapshot skipped",
+            dir.display()
+        );
+    }
+
     let (_graph, build_result) = sqry_core::graph::unified::build::persist_and_analyze_graph(
         graph,
         root_path,
@@ -461,9 +477,113 @@ pub(crate) fn build_and_persist_with_optional_classpath(
     Ok(build_result)
 }
 
-// format_validation_prometheus removed
-// format_validation_summary removed
-// validation_warning_count removed
+/// Persist a fresh `HashIndex` capturing every parsed file from `graph` to
+/// `cache_dir`. Read-side load + short-circuit is deferred (audit row
+/// C001b-core); this is the save half of the pair.
+fn persist_hash_index_snapshot(
+    graph: &sqry_core::graph::unified::CodeGraph,
+    cache_dir: &Path,
+) -> Result<()> {
+    use sqry_core::indexing::incremental::{FileHash, HashIndex};
+
+    let mut index = HashIndex::new();
+    let mut hashed = 0usize;
+    let mut skipped = 0usize;
+    for (_file_id, path) in graph.files().iter() {
+        let path_ref: &Path = path.as_ref();
+        match FileHash::compute(path_ref) {
+            Ok(hash) => {
+                index.update(path_ref.to_path_buf(), hash);
+                hashed += 1;
+            }
+            Err(err) => {
+                log::trace!(
+                    "skipping hash for {} during cache snapshot: {err}",
+                    path_ref.display()
+                );
+                skipped += 1;
+            }
+        }
+    }
+    index.save(cache_dir)?;
+    log::debug!(
+        "Persisted hash index snapshot to {}: {hashed} files hashed, {skipped} skipped",
+        cache_dir.display()
+    );
+    Ok(())
+}
+
+/// Convert an [`IndexStatus`] snapshot into Prometheus / `OpenMetrics`-shaped
+/// text so `sqry index --status --metrics-format prometheus` emits a payload
+/// that monitoring systems can scrape.
+///
+/// The original (pre-v2.0) implementation operated against
+/// `sqry_core::symbols::ValidationReport`, which the unified-graph migration
+/// removed; this restoration projects the equivalent gauges from the surviving
+/// [`IndexStatus`] surface (existence, freshness, node/file/relation counts).
+fn format_validation_prometheus(status: &IndexStatus) -> String {
+    use std::fmt::Write as _;
+
+    let mut output = String::new();
+
+    output.push_str("# HELP sqry_index_exists Whether the unified graph index exists on disk\n");
+    output.push_str("# TYPE sqry_index_exists gauge\n");
+    let _ = writeln!(output, "sqry_index_exists {}", u8::from(status.exists));
+
+    output.push_str("# HELP sqry_index_supports_fuzzy Whether fuzzy search is enabled\n");
+    output.push_str("# TYPE sqry_index_supports_fuzzy gauge\n");
+    let _ = writeln!(
+        output,
+        "sqry_index_supports_fuzzy {}",
+        u8::from(status.supports_fuzzy)
+    );
+
+    output
+        .push_str("# HELP sqry_index_supports_relations Whether relation queries are supported\n");
+    output.push_str("# TYPE sqry_index_supports_relations gauge\n");
+    let _ = writeln!(
+        output,
+        "sqry_index_supports_relations {}",
+        u8::from(status.supports_relations)
+    );
+
+    if let Some(symbols) = status.symbol_count {
+        output.push_str("# HELP sqry_index_symbol_count Total number of indexed symbols\n");
+        output.push_str("# TYPE sqry_index_symbol_count gauge\n");
+        let _ = writeln!(output, "sqry_index_symbol_count {symbols}");
+    }
+
+    if let Some(files) = status.file_count {
+        output.push_str("# HELP sqry_index_file_count Total number of indexed source files\n");
+        output.push_str("# TYPE sqry_index_file_count gauge\n");
+        let _ = writeln!(output, "sqry_index_file_count {files}");
+    }
+
+    if let Some(age) = status.age_seconds {
+        output.push_str("# HELP sqry_index_age_seconds Index age in seconds since creation\n");
+        output.push_str("# TYPE sqry_index_age_seconds gauge\n");
+        let _ = writeln!(output, "sqry_index_age_seconds {age}");
+    }
+
+    if let Some(stale) = status.stale {
+        output.push_str("# HELP sqry_index_stale Whether the index is considered stale\n");
+        output.push_str("# TYPE sqry_index_stale gauge\n");
+        let _ = writeln!(output, "sqry_index_stale {}", u8::from(stale));
+    }
+
+    if let Some(relations) = status.cross_language_relation_count {
+        output.push_str(
+            "# HELP sqry_index_cross_language_relation_count Total cross-language relations\n",
+        );
+        output.push_str("# TYPE sqry_index_cross_language_relation_count gauge\n");
+        let _ = writeln!(
+            output,
+            "sqry_index_cross_language_relation_count {relations}"
+        );
+    }
+
+    output
+}
 
 /// Run index build command
 ///
@@ -495,9 +615,8 @@ pub fn run_index(
     force: bool,
     threads: Option<usize>,
     add_to_gitignore: bool,
-    _no_incremental: bool,
-    _cache_dir: Option<&str>,
-    _no_compress: bool,
+    no_incremental: bool,
+    cache_dir: Option<&str>,
     enable_macro_expansion: bool,
     cfg_flags: &[String],
     expand_cache: Option<&std::path::Path>,
@@ -518,7 +637,9 @@ pub fn run_index(
 
     // Check if graph already exists
     let storage = GraphStorage::new(root_path);
-    if storage.exists() && !force {
+    // C001a: `--no-incremental` forces a full rebuild even when a snapshot
+    // exists, so the early-exit gate honours it alongside `--force`.
+    if storage.exists() && !force && !no_incremental {
         println!("Index already exists at {}", storage.graph_dir().display());
         println!("Use --force to rebuild, or run 'sqry update' to update incrementally");
         return Ok(());
@@ -549,6 +670,9 @@ pub fn run_index(
         build_system,
         force_classpath,
     };
+    // C001b: surface `--cache-dir` to the build pipeline so the post-parse
+    // hash-index snapshot lands in the operator-supplied directory.
+    let cache_dir_path = cache_dir.map(Path::new);
     let build_result = step_runner.step("Build unified graph", || -> Result<_> {
         build_and_persist_with_optional_classpath(
             root_path,
@@ -557,6 +681,7 @@ pub fn run_index(
             "cli:index",
             progress.clone(),
             Some(&classpath_opts),
+            cache_dir_path,
         )
     })?;
 
@@ -873,7 +998,7 @@ pub fn run_update(
     threads: Option<usize>,
     show_stats: bool,
     _no_incremental: bool,
-    _cache_dir: Option<&str>,
+    cache_dir: Option<&str>,
     classpath: bool,
     _no_classpath: bool,
     classpath_depth: crate::args::ClasspathDepthArg,
@@ -926,6 +1051,7 @@ pub fn run_update(
         build_system,
         force_classpath,
     };
+    let cache_dir_path = cache_dir.map(Path::new);
     let build_result = step_runner.step("Update unified graph", || -> Result<_> {
         build_and_persist_with_optional_classpath(
             root_path,
@@ -934,6 +1060,7 @@ pub fn run_update(
             "cli:update",
             progress.clone(),
             Some(&classpath_opts),
+            cache_dir_path,
         )
     })?;
 
@@ -984,9 +1111,23 @@ pub fn run_update(
 pub fn run_index_status(
     cli: &Cli,
     path: &str,
-    _metrics_format: crate::args::MetricsFormat,
+    metrics_format: crate::args::MetricsFormat,
 ) -> Result<()> {
-    // Redirect to graph status as legacy index is removed.
+    use crate::args::MetricsFormat;
+
+    // Prometheus output bypasses the JSON / text branch and emits an
+    // OpenMetrics-shaped scrape payload built from the current IndexStatus.
+    if matches!(metrics_format, MetricsFormat::Prometheus) {
+        let root_path = Path::new(path);
+        let storage = GraphStorage::new(root_path);
+        let status = build_graph_status(&storage)?;
+        let mut streams = crate::output::OutputStreams::with_pager(cli.pager_config());
+        let body = format_validation_prometheus(&status);
+        streams.write_result(&body)?;
+        return streams.finish_checked();
+    }
+
+    // JSON / text path: defer to the unified graph status renderer.
     // Programmatic consumers of `run_index_status` only express JSON intent
     // through `cli.json`, so do not synthesize an extra override here.
     run_graph_status_with_format(cli, path, false)
@@ -1127,7 +1268,6 @@ mod tests {
             false,
             false,
             None,
-            false, // no_compress
             false, // enable_macro_expansion
             &[],  // cfg_flags
             None, // expand_cache
@@ -1167,7 +1307,6 @@ mod tests {
             false,
             false,
             None,
-            false, // no_compress
             false, // enable_macro_expansion
             &[],   // cfg_flags
             None,  // expand_cache
@@ -1189,7 +1328,6 @@ mod tests {
             false,
             false,
             None,
-            false, // no_compress
             false, // enable_macro_expansion
             &[],   // cfg_flags
             None,  // expand_cache
@@ -1211,7 +1349,6 @@ mod tests {
             false,
             false,
             None,
-            false, // no_compress
             false, // enable_macro_expansion
             &[],   // cfg_flags
             None,  // expand_cache
@@ -1302,7 +1439,6 @@ mod tests {
             false,
             false,
             None,
-            false, // no_compress
             false, // enable_macro_expansion
             &[],   // cfg_flags
             None,  // expand_cache
@@ -1358,7 +1494,6 @@ mod tests {
             false,
             false,
             None,
-            false, // no_compress
             false, // enable_macro_expansion
             &[],   // cfg_flags
             None,  // expand_cache
@@ -1387,6 +1522,153 @@ mod tests {
             false,
         );
         assert!(result.is_ok());
+    }
+    }
+
+    large_stack_test! {
+    #[test]
+    fn test_no_incremental_triggers_full_rebuild_when_snapshot_exists() {
+        // C001a: `sqry index --no-incremental` must rebuild the graph even
+        // when `.sqry/graph/snapshot.sqry` already exists (without `--force`).
+        use crate::args::Cli;
+        use clap::Parser;
+
+        let tmp = TempDir::new().unwrap();
+        let file_path = tmp.path().join("rebuild.rs");
+        fs::write(&file_path, "fn original() {}").unwrap();
+
+        let cli = Cli::parse_from(["sqry", "index"]);
+
+        // Initial build with one symbol.
+        run_index(
+            &cli,
+            tmp.path().to_str().unwrap(),
+            false,
+            None,
+            false,
+            false,
+            None,
+            false,
+            &[],
+            None,
+            false,
+            false,
+            crate::args::ClasspathDepthArg::Full,
+            None,
+            None,
+            false,
+        )
+        .expect("initial build should succeed");
+
+        let storage = GraphStorage::new(tmp.path());
+        assert!(storage.exists(), "snapshot must exist after initial build");
+        let initial_node_count = storage.load_manifest().unwrap().node_count;
+
+        // Add a second symbol and re-run with `--no-incremental` (force = false).
+        // Without C001a, run_index would early-exit because the snapshot
+        // already exists; the new symbol would not appear in the manifest.
+        fs::write(&file_path, "fn original() {}\nfn added_symbol() {}").unwrap();
+
+        run_index(
+            &cli,
+            tmp.path().to_str().unwrap(),
+            false, // force = false
+            None,
+            false,
+            true,  // no_incremental = true ← drives the full-rebuild path
+            None,
+            false,
+            &[],
+            None,
+            false,
+            false,
+            crate::args::ClasspathDepthArg::Full,
+            None,
+            None,
+            false,
+        )
+        .expect("--no-incremental must rebuild even when snapshot exists");
+
+        let post_rebuild_node_count = storage.load_manifest().unwrap().node_count;
+        assert!(
+            post_rebuild_node_count > initial_node_count,
+            "--no-incremental should rebuild and pick up the new symbol \
+             (initial={initial_node_count}, post={post_rebuild_node_count})"
+        );
+    }
+    }
+
+    #[test]
+    fn format_validation_prometheus_emits_openmetrics_shape() {
+        // C001d-a: the restored Prometheus formatter must emit HELP/TYPE
+        // metadata plus the gauge sample lines for every populated field.
+        let mut status = IndexStatus::not_found();
+        status.exists = true;
+        status.path = Some("/tmp/example/.sqry/graph".into());
+        status.age_seconds = Some(42);
+        status.symbol_count = Some(123);
+        status.file_count = Some(11);
+        status.supports_relations = true;
+        status.cross_language_relation_count = Some(9);
+        status.stale = Some(false);
+
+        let body = format_validation_prometheus(&status);
+
+        assert!(body.contains("# HELP sqry_index_exists"));
+        assert!(body.contains("# TYPE sqry_index_exists gauge"));
+        assert!(body.contains("\nsqry_index_exists 1\n"));
+        assert!(body.contains("\nsqry_index_supports_relations 1\n"));
+        assert!(body.contains("\nsqry_index_symbol_count 123\n"));
+        assert!(body.contains("\nsqry_index_file_count 11\n"));
+        assert!(body.contains("\nsqry_index_age_seconds 42\n"));
+        assert!(body.contains("\nsqry_index_stale 0\n"));
+        assert!(body.contains("\nsqry_index_cross_language_relation_count 9\n"));
+    }
+
+    large_stack_test! {
+    #[test]
+    fn run_index_status_prometheus_format_is_accepted() {
+        // C001d-b: invoking `run_index_status` with `MetricsFormat::Prometheus`
+        // must succeed (formerly the value was silently dropped via a `_`
+        // prefix; now it routes through the restored formatter).
+        use crate::args::{Cli, MetricsFormat};
+        use clap::Parser;
+
+        let tmp = TempDir::new().unwrap();
+        let file_path = tmp.path().join("metrics.rs");
+        fs::write(&file_path, "fn metric_target() {}").unwrap();
+
+        let cli = Cli::parse_from(["sqry", "index"]);
+        run_index(
+            &cli,
+            tmp.path().to_str().unwrap(),
+            false,
+            None,
+            false,
+            false,
+            None,
+            false,
+            &[],
+            None,
+            false,
+            false,
+            crate::args::ClasspathDepthArg::Full,
+            None,
+            None,
+            false,
+        )
+        .expect("initial build for prometheus test must succeed");
+
+        let cli_json = Cli::parse_from(["sqry", "--json"]);
+        let result = run_index_status(
+            &cli_json,
+            tmp.path().to_str().unwrap(),
+            MetricsFormat::Prometheus,
+        );
+        assert!(
+            result.is_ok(),
+            "--metrics-format prometheus must succeed: {result:?}"
+        );
     }
     }
 

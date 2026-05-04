@@ -209,8 +209,16 @@ impl SessionManager {
     /// (an empty folder list never canonicalizes anything).
     #[must_use]
     pub fn new(options: LspOptions) -> Self {
-        let root =
-            resolve_root_path(options.index_root.clone()).unwrap_or_else(|_| PathBuf::from("."));
+        // C094c: `--workspace <PATH>` (forwarded from the CLI dispatcher
+        // via `LspOptions.workspace`) wins over the legacy `--index-root`
+        // fallback. Both values are filesystem paths; the resolver
+        // canonicalises whichever wins so downstream comparisons stay
+        // platform-stable.
+        let root_override = options
+            .workspace
+            .clone()
+            .or_else(|| options.index_root.clone());
+        let root = resolve_root_path(root_override).unwrap_or_else(|_| PathBuf::from("."));
         let executor = Arc::new(QueryExecutor::with_plugin_manager(build_plugin_manager()));
         let config = SessionConfig::from_options(&options).unwrap_or_else(|err| {
             log::warn!("failed to load initial configuration: {err}");
@@ -1755,6 +1763,7 @@ mod tests {
             allow_public_bind: false,
             daemon: false,
             daemon_socket: None,
+            workspace: None,
         })
     }
 

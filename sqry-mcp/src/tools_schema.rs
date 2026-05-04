@@ -1,13 +1,14 @@
 //! Daemon-hosted MCP tool surface.
 //!
 //! The sqryd daemon hosts a 16-tool MCP subset via the shim byte-pump
-//! transport. Standalone `sqry-mcp` (no daemon) exposes 34 tools via
+//! transport. Standalone `sqry-mcp` (no daemon) exposes the full
+//! 36-tool runtime MCP standalone surface via
 //! [`crate::server::SqryServer::get_filtered_tools`]. These two are
-//! intentionally NOT identical — 18 standalone-only tools are
+//! intentionally NOT identical — 20 standalone-only tools are
 //! unavailable when connecting through the daemon (per Codex iter-0 B3:
 //! "the daemon-hosted MCP surface is finally honest").
 //!
-//! Users wanting the full 34-tool inventory continue to invoke
+//! Users wanting the full 36-tool inventory continue to invoke
 //! `sqry-mcp` without `--daemon`.
 
 /// Names of the 16 tools that the daemon MCP host exposes via
@@ -116,11 +117,27 @@ mod tests {
         );
     }
 
+    /// C045 — exact-gap pin between the standalone and daemon tool
+    /// surfaces. With C091 enabling `expand_cache_status` at runtime,
+    /// the standalone inventory is **36 tools** and the daemon subset
+    /// is **16 tools** (per `DAEMON_SUPPORTED_TOOL_NAMES`), giving a
+    /// strict gap of **20 standalone-only tools**.
+    ///
+    /// This constant is the canonical CI guard: any change to either
+    /// `DAEMON_SUPPORTED_TOOL_NAMES` or the rmcp-registered standalone
+    /// tools that would change the gap MUST update this pin in the
+    /// same PR. The
+    /// [`daemon_supported_tool_names_is_strict_subset_of_standalone`]
+    /// test asserts the live measurement matches this constant.
+    pub const EXPECTED_STANDALONE_ONLY_COUNT: usize = 20;
+
     /// Every `DAEMON_SUPPORTED_TOOL_NAMES` entry must appear in the
     /// standalone `SqryServer::get_filtered_tools()` inventory — the
-    /// daemon subset is a STRICT subset of the standalone 34-tool
+    /// daemon subset is a STRICT subset of the standalone 36-tool
     /// surface. Also verifies the standalone inventory is strictly
-    /// larger (the 19 standalone-only tools).
+    /// larger by exactly [`EXPECTED_STANDALONE_ONLY_COUNT`] (= 20)
+    /// tools — the strict gap is pinned to guard against silent
+    /// drift on either side of the partition.
     #[test]
     fn daemon_supported_tool_names_is_strict_subset_of_standalone() {
         use crate::feature_flags::FeatureFlags;
@@ -139,11 +156,26 @@ mod tests {
                  SqryServer::get_filtered_tools)"
             );
         }
-        // Standalone has strictly more tools (the 19 standalone-only set).
+        // Standalone has strictly more tools (the standalone-only set).
         assert!(
             standalone_names.len() > DAEMON_SUPPORTED_TOOL_NAMES.len(),
             "standalone inventory ({} tools) must be strictly larger than daemon subset ({} tools) — \
              otherwise the daemon-subset rationale is broken",
+            standalone_names.len(),
+            DAEMON_SUPPORTED_TOOL_NAMES.len()
+        );
+        // C045 — pin the exact gap. If this fails: either the rmcp
+        // tool registry or DAEMON_SUPPORTED_TOOL_NAMES changed; update
+        // EXPECTED_STANDALONE_ONLY_COUNT and the matching documentation
+        // (sqry-mcp/README.md, docs/FEATURE_LIST.md, README.md) in the
+        // same PR.
+        let actual_gap = standalone_names.len() - DAEMON_SUPPORTED_TOOL_NAMES.len();
+        assert_eq!(
+            actual_gap,
+            EXPECTED_STANDALONE_ONLY_COUNT,
+            "standalone-only tool count drift: expected {EXPECTED_STANDALONE_ONLY_COUNT} \
+             standalone-only tools, found {actual_gap} (standalone={}, daemon={}). \
+             Update EXPECTED_STANDALONE_ONLY_COUNT and matching docs in the same PR.",
             standalone_names.len(),
             DAEMON_SUPPORTED_TOOL_NAMES.len()
         );

@@ -21,6 +21,7 @@ fn options_with_socket(addr: &str) -> LspOptions {
         allow_public_bind: false,
         daemon: false,
         daemon_socket: None,
+        workspace: None,
     }
 }
 
@@ -35,6 +36,7 @@ fn options_with_socket_and_suppression(addr: &str, allow_suppress: bool) -> LspO
         allow_public_bind: allow_suppress,
         daemon: false,
         daemon_socket: None,
+        workspace: None,
     }
 }
 
@@ -87,6 +89,7 @@ fn default_uses_stdio() {
         allow_public_bind: false,
         daemon: false,
         daemon_socket: None,
+        workspace: None,
     };
     assert!(opts.use_stdio());
     assert!(opts.socket.is_none());
@@ -103,6 +106,7 @@ fn explicit_stdio_flag() {
         allow_public_bind: false,
         daemon: false,
         daemon_socket: None,
+        workspace: None,
     };
     assert!(opts.use_stdio());
 }
@@ -119,6 +123,7 @@ fn recommended_secure_configuration() {
         allow_public_bind: false,
         daemon: false,
         daemon_socket: None,
+        workspace: None,
     };
 
     assert!(!opts.use_stdio());

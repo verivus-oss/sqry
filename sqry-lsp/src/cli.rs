@@ -109,6 +109,21 @@ pub struct LspOptions {
     ///    client meet without user intervention.
     #[arg(long, requires = "daemon", value_name = "PATH")]
     pub daemon_socket: Option<PathBuf>,
+
+    /// Workspace root forwarded from the global `sqry --workspace <PATH>`
+    /// flag (C094a).
+    ///
+    /// When present, this value takes precedence over `index_root` during
+    /// LSP root resolution: it is the canonical source of truth that the
+    /// `sqry-cli` dispatcher already resolved against the global
+    /// `--workspace` flag and `SQRY_WORKSPACE_FILE` environment override
+    /// (see `sqry-cli/src/main.rs`). The standalone `sqry-lsp` binary does
+    /// not surface this as its own clap arg; it is populated by the CLI
+    /// dispatcher (via `LspOptions { workspace: cli.workspace.clone(), .. }`)
+    /// and by daemon-hosted session construction in
+    /// `sqry-lsp/src/handlers/workspace_status.rs`.
+    #[arg(skip)]
+    pub workspace: Option<PathBuf>,
 }
 
 impl LspOptions {
@@ -160,6 +175,10 @@ impl LspOptions {
             // directly) it does not try to connect to itself.
             daemon: false,
             daemon_socket: None,
+            // C094a: `workspace` is sourced from the cli dispatcher's
+            // global `--workspace` flag; daemon-hosted sessions start
+            // with no workspace override.
+            workspace: None,
         }
     }
 }
@@ -179,6 +198,7 @@ mod tests {
             allow_public_bind: false,
             daemon: false,
             daemon_socket: None,
+            workspace: None,
         };
 
         assert!(opts.use_stdio());
@@ -195,6 +215,7 @@ mod tests {
             allow_public_bind: false,
             daemon: false,
             daemon_socket: None,
+            workspace: None,
         };
 
         assert!(!opts.use_stdio());
@@ -211,6 +232,7 @@ mod tests {
             allow_public_bind: false,
             daemon: false,
             daemon_socket: None,
+            workspace: None,
         };
 
         assert!(!opts.allow_public_bind);
@@ -227,6 +249,7 @@ mod tests {
             allow_public_bind: true,
             daemon: false,
             daemon_socket: None,
+            workspace: None,
         };
 
         assert!(opts.allow_public_bind);

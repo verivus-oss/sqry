@@ -81,6 +81,7 @@ fn session_for_with_config(path: &Path, config: Option<&Path>) -> SessionManager
         allow_public_bind: false,
         daemon: false,
         daemon_socket: None,
+        workspace: None,
     };
     SessionManager::new(options)
 }

@@ -101,6 +101,7 @@ fn options_with_index_root(root: Option<&std::path::Path>) -> LspOptions {
         allow_public_bind: false,
         daemon: false,
         daemon_socket: None,
+        workspace: None,
     }
 }
 

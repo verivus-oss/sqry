@@ -9,12 +9,13 @@ use crate::output::{
 use anyhow::{Context, Result};
 use regex::RegexBuilder;
 use sqry_core::graph::unified::concurrent::CodeGraph;
-use sqry_core::graph::unified::node::NodeKind;
+use sqry_core::graph::unified::node::{NodeId, NodeKind};
+use sqry_core::graph::unified::storage::metadata::MacroNodeMetadata;
 use sqry_core::json_response::{Filters, FuzzyFilters, Stats, StreamEvent};
 use sqry_core::search::fuzzy::{CandidateGenerator, FuzzyConfig};
 use sqry_core::search::matcher::{FuzzyMatcher, MatchAlgorithm, MatchConfig};
 use sqry_core::search::trigram::TrigramIndex;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -39,6 +40,143 @@ fn apply_search_filters(cli: &Cli, symbols: &mut Vec<DisplaySymbol>) {
                 .is_some_and(|ext| matches_language(ext, lang))
         });
     }
+}
+
+/// Operator selections for the macro-boundary CLI flags.
+///
+/// `--cfg-filter` / `--include-generated` / `--macro-boundaries` are bundled
+/// into a single struct so the filter pipeline takes one parameter instead
+/// of three positional booleans. The struct is `Copy` to keep the call sites
+/// cheap.
+#[derive(Debug, Clone, Copy)]
+struct MacroBoundaryFlags<'a> {
+    cfg_filter: Option<&'a str>,
+    include_generated: bool,
+    macro_boundaries: bool,
+}
+
+/// Decide whether a single candidate `NodeId` survives the macro-boundary
+/// filter. The decision is sourced **directly** from the live
+/// `NodeMetadataStore` — never from environment variables and never from
+/// the `DisplaySymbol::metadata` HashMap — so the filter contract is the
+/// same regardless of how the candidate set was produced (regex scan,
+/// trigram fuzzy, exact lookup, etc.).
+///
+/// Rules:
+/// - When `include_generated` is `false`, drop nodes whose macro metadata
+///   reports `macro_generated == Some(true)`.
+/// - When `cfg_filter` is `Some(predicate)`, drop nodes whose macro
+///   metadata reports a `cfg_condition` that does not equal `predicate`.
+///   Nodes with no metadata or no `cfg_condition` are treated as "no cfg"
+///   and are dropped — `--cfg-filter` is an inclusive predicate, not a
+///   speculative one.
+/// - When `cfg_filter` is `None`, no cfg filter is applied; nodes are kept
+///   regardless of `cfg_condition`.
+fn macro_boundary_keeps_node(
+    metadata: Option<&MacroNodeMetadata>,
+    flags: MacroBoundaryFlags<'_>,
+) -> bool {
+    if !flags.include_generated && metadata.is_some_and(|m| m.macro_generated == Some(true)) {
+        return false;
+    }
+    if let Some(filter) = flags.cfg_filter {
+        let actual = metadata.and_then(|m| m.cfg_condition.as_deref());
+        if actual != Some(filter) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Apply the macro-boundary filter to a candidate `NodeId` set, consulting
+/// the graph's [`NodeMetadataStore`] for each id. Returns the surviving
+/// node ids (order preserved).
+///
+/// This is the production filter pipeline for `--cfg-filter` and
+/// `--include-generated`. It is exercised directly by the unit tests in
+/// this module via a hand-crafted [`CodeGraph`] so the filter's
+/// metadata-store contract is observed end-to-end without indexing real
+/// source.
+fn filter_nodes_by_macro_boundary(
+    graph: &CodeGraph,
+    candidates: Vec<NodeId>,
+    flags: MacroBoundaryFlags<'_>,
+) -> Vec<NodeId> {
+    if flags.include_generated && flags.cfg_filter.is_none() {
+        return candidates;
+    }
+    let store = graph.macro_metadata();
+    candidates
+        .into_iter()
+        .filter(|node_id| macro_boundary_keeps_node(store.get(*node_id), flags))
+        .collect()
+}
+
+/// Populate `DisplaySymbol::metadata` with macro-boundary provenance keys
+/// pulled from the graph's [`NodeMetadataStore`]. Keys are only inserted
+/// when the underlying metadata is present, keeping non-macro symbols free
+/// of empty-string clutter in JSON output.
+fn enrich_with_macro_metadata(symbol: &mut DisplaySymbol, metadata: Option<&MacroNodeMetadata>) {
+    let Some(meta) = metadata else { return };
+    if let Some(true) = meta.macro_generated {
+        symbol
+            .metadata
+            .insert("macro_generated".to_string(), "true".to_string());
+    }
+    if let Some(cfg) = meta.cfg_condition.as_deref() {
+        symbol
+            .metadata
+            .insert("cfg_condition".to_string(), cfg.to_string());
+    }
+    if let Some(source) = meta.macro_source.as_deref() {
+        symbol
+            .metadata
+            .insert("macro_source".to_string(), source.to_string());
+    }
+}
+
+/// Group results by macro expansion source when `--macro-boundaries` is
+/// active. Symbols that share a `macro_source` are emitted in adjacent
+/// runs, with a `macro_boundary_group` metadata key recording the group
+/// identifier so JSON consumers can re-segment without reparsing the
+/// source string. Symbols without a `macro_source` are placed in a
+/// terminal "no-macro" group identified by the empty key, preserving
+/// determinism.
+fn group_results_by_macro_source(symbols: Vec<DisplaySymbol>) -> Vec<DisplaySymbol> {
+    // BTreeMap gives us a deterministic, alphabetic group order which makes
+    // the boundary output reproducible across runs and JSON snapshots.
+    let mut grouped: BTreeMap<String, Vec<DisplaySymbol>> = BTreeMap::new();
+    for mut symbol in symbols {
+        let key = symbol
+            .metadata
+            .get("macro_source")
+            .cloned()
+            .unwrap_or_default();
+        symbol
+            .metadata
+            .insert("macro_boundary_group".to_string(), key.clone());
+        grouped.entry(key).or_default().push(symbol);
+    }
+    grouped.into_values().flatten().collect()
+}
+
+/// Scored variant of [`group_results_by_macro_source`] for the JSON
+/// streaming path: groups `(DisplaySymbol, score)` pairs by `macro_source`
+/// while preserving each pair's score.
+fn group_scored_results_by_macro_source(symbols: Vec<ScoredSymbol>) -> Vec<ScoredSymbol> {
+    let mut grouped: BTreeMap<String, Vec<ScoredSymbol>> = BTreeMap::new();
+    for (mut symbol, score) in symbols {
+        let key = symbol
+            .metadata
+            .get("macro_source")
+            .cloned()
+            .unwrap_or_default();
+        symbol
+            .metadata
+            .insert("macro_boundary_group".to_string(), key.clone());
+        grouped.entry(key).or_default().push((symbol, score));
+    }
+    grouped.into_values().flatten().collect()
 }
 
 /// Build search metadata for output formatting.
@@ -76,26 +214,52 @@ fn build_search_metadata(
 /// Run symbol search command.
 /// P2-3 Step 2e: Language filtering uses `file_path()` without index context - allowed
 ///
+/// `cfg_filter`, `include_generated`, and `macro_boundaries` (C002a) thread
+/// the macro-boundary CLI flags through to the search engine so that
+/// `--cfg-filter`, `--include-generated`, and `--macro-boundaries` actually
+/// influence which macro-generated symbols appear in the result set rather
+/// than being silently dropped at the dispatch boundary.
+///
 /// # Errors
 /// Returns an error if search execution fails or output cannot be written.
-pub fn run_search(cli: &Cli, pattern: &str, search_path: &str) -> Result<()> {
+pub fn run_search(
+    cli: &Cli,
+    pattern: &str,
+    search_path: &str,
+    cfg_filter: Option<&str>,
+    include_generated: bool,
+    macro_boundaries: bool,
+) -> Result<()> {
+    let macro_flags = MacroBoundaryFlags {
+        cfg_filter,
+        include_generated,
+        macro_boundaries,
+    };
     // Handle JSON streaming mode separately (fuzzy only, enforced by clap)
     if cli.json_stream {
-        return run_json_stream_search(cli, pattern, search_path);
+        return run_json_stream_search(cli, pattern, search_path, macro_flags);
     }
 
     let start_time = Instant::now();
 
     // Branch based on search mode, capturing index age and scope info if available
     let (mut all_symbols, index_age_seconds, scope_info) = if cli.fuzzy {
-        let (scored_symbols, age, scope) = run_fuzzy_search(cli, pattern, search_path)?;
+        let (scored_symbols, age, scope) =
+            run_fuzzy_search(cli, pattern, search_path, macro_flags)?;
         let symbols = scored_symbols.into_iter().map(|(s, _)| s).collect();
         (symbols, Some(age), Some(scope))
     } else {
-        (run_regular_search(cli, pattern, search_path)?, None, None)
+        (
+            run_regular_search(cli, pattern, search_path, macro_flags)?,
+            None,
+            None,
+        )
     };
 
     apply_search_filters(cli, &mut all_symbols);
+    if macro_flags.macro_boundaries {
+        all_symbols = group_results_by_macro_source(all_symbols);
+    }
 
     // Handle count-only mode
     if cli.count {
@@ -273,7 +437,12 @@ fn matches_language(ext: &str, lang: &str) -> bool {
 }
 
 /// Run regular (non-fuzzy) symbol search
-fn run_regular_search(cli: &Cli, pattern: &str, search_path: &str) -> Result<Vec<DisplaySymbol>> {
+fn run_regular_search(
+    cli: &Cli,
+    pattern: &str,
+    search_path: &str,
+    macro_flags: MacroBoundaryFlags<'_>,
+) -> Result<Vec<DisplaySymbol>> {
     // Load unified graph
     let search_path_path = Path::new(search_path);
     let index_location = find_nearest_index(search_path_path);
@@ -329,6 +498,14 @@ fn run_regular_search(cli: &Cli, pattern: &str, search_path: &str) -> Result<Vec
     // Deduplicate node IDs
     matches.sort_unstable();
     matches.dedup();
+
+    // Macro-boundary filter: drop candidates whose graph metadata violates
+    // `--cfg-filter` / `--include-generated` BEFORE conversion to
+    // DisplaySymbol. Filtering at the NodeId layer keeps the production
+    // contract identical regardless of the conversion path and lets the
+    // unit tests in this module observe the filter on a synthetic graph
+    // without exercising the trigram/regex front end.
+    let matches = filter_nodes_by_macro_boundary(&graph, matches, macro_flags);
 
     // Convert to DisplaySymbols
     let mut all_symbols = Vec::with_capacity(matches.len());
@@ -387,7 +564,7 @@ fn convert_node_to_display_symbol(
         .and_then(|id| strings.resolve(id))
         .map_or_else(|| name.clone(), |s| s.to_string());
 
-    Some(DisplaySymbol {
+    let mut symbol = DisplaySymbol {
         name,
         qualified_name,
         kind: node_kind_to_string(entry.kind).to_string(),
@@ -399,7 +576,14 @@ fn convert_node_to_display_symbol(
         metadata,
         caller_identity: None,
         callee_identity: None,
-    })
+    };
+
+    // Surface macro-boundary provenance (macro_generated, cfg_condition,
+    // macro_source) from the graph's NodeMetadataStore so JSON consumers
+    // and `--macro-boundaries` grouping have a canonical key set to read.
+    enrich_with_macro_metadata(&mut symbol, graph.macro_metadata().get(node_id));
+
+    Some(symbol)
 }
 
 /// Convert `NodeKind` to lowercase string for display.
@@ -510,6 +694,7 @@ fn run_fuzzy_search(
     cli: &Cli,
     pattern: &str,
     search_path: &str,
+    macro_flags: MacroBoundaryFlags<'_>,
 ) -> Result<(Vec<ScoredSymbol>, u64, FuzzySearchScopeInfo)> {
     let search_path_path = Path::new(search_path);
 
@@ -588,6 +773,10 @@ fn run_fuzzy_search(
         node_ids.sort_unstable();
         node_ids.dedup();
 
+        // Macro-boundary filter at the NodeId layer (same contract as the
+        // regex/exact path in `run_regular_search`).
+        let node_ids = filter_nodes_by_macro_boundary(&graph, node_ids, macro_flags);
+
         for node_id in node_ids {
             if let Some(symbol) = convert_node_to_display_symbol(&graph, node_id) {
                 // We need to keep the score to sort.
@@ -627,11 +816,21 @@ fn filter_fuzzy_results_by_scope(
     });
 }
 
-fn run_json_stream_search(cli: &Cli, pattern: &str, search_path: &str) -> Result<()> {
-    let (mut symbols, age_seconds, scope_info) = run_fuzzy_search(cli, pattern, search_path)?;
+fn run_json_stream_search(
+    cli: &Cli,
+    pattern: &str,
+    search_path: &str,
+    macro_flags: MacroBoundaryFlags<'_>,
+) -> Result<()> {
+    let (mut symbols, age_seconds, scope_info) =
+        run_fuzzy_search(cli, pattern, search_path, macro_flags)?;
 
     // Apply kind/language filters (same semantics as the non-streaming path).
     apply_scored_search_filters(cli, &mut symbols);
+
+    if macro_flags.macro_boundaries {
+        symbols = group_scored_results_by_macro_source(symbols);
+    }
 
     let limit = cli.limit.unwrap_or(50);
     let mut count = 0;
@@ -811,5 +1010,215 @@ mod tests {
         assert!(matches_language("snjs", "ServiceNow-Xanadu"));
         assert!(matches_language("snjs", "servicenow-xanadu-js"));
         assert!(!matches_language("js", "servicenow"));
+    }
+
+    // ------------------------------------------------------------------
+    // Macro-boundary filter tests.
+    //
+    // These exercise the production filter pipeline directly against a
+    // hand-crafted `CodeGraph` + `NodeMetadataStore`. The tests deliberately
+    // do NOT go through the indexing pipeline (no parsing, no plugin
+    // dispatch) — they isolate the filter contract so a regression in
+    // `filter_nodes_by_macro_boundary` / `enrich_with_macro_metadata` /
+    // `group_results_by_macro_source` is caught regardless of whether any
+    // upstream Rust plugin happens to populate `macro_generated` for a
+    // given indexed symbol today.
+    // ------------------------------------------------------------------
+
+    use sqry_core::graph::unified::NodeEntry;
+    use sqry_core::graph::unified::concurrent::CodeGraph;
+    use sqry_core::graph::unified::node::NodeKind;
+    use sqry_core::graph::unified::storage::metadata::MacroNodeMetadata;
+
+    /// Test-graph builder. Allocates a single node with the given name in
+    /// `test.rs` and returns the resulting `NodeId` so callers can attach
+    /// metadata via `graph.macro_metadata_mut().insert(...)`.
+    fn add_test_node(graph: &mut CodeGraph, name: &str) -> NodeId {
+        let name_id = graph.strings_mut().intern(name).expect("intern name");
+        let file_id = graph
+            .files_mut()
+            .register_with_language(Path::new("/synth/test.rs"), None)
+            .expect("register file");
+        let entry = NodeEntry::new(NodeKind::Function, name_id, file_id);
+        let node_id = graph.nodes_mut().alloc(entry).expect("alloc node");
+        graph
+            .indices_mut()
+            .add(node_id, NodeKind::Function, name_id, None, file_id);
+        node_id
+    }
+
+    fn macro_metadata(
+        generated: bool,
+        cfg: Option<&str>,
+        source: Option<&str>,
+    ) -> MacroNodeMetadata {
+        MacroNodeMetadata {
+            macro_generated: Some(generated),
+            macro_source: source.map(str::to_string),
+            cfg_condition: cfg.map(str::to_string),
+            cfg_active: None,
+            proc_macro_kind: None,
+            expansion_cached: None,
+            unresolved_attributes: Vec::new(),
+        }
+    }
+
+    /// `--include-generated` absent ⇒ a node whose graph metadata reports
+    /// `macro_generated == Some(true)` is dropped by
+    /// `filter_nodes_by_macro_boundary`. This is the structural unit test
+    /// the audit calls for: the filter consults the live
+    /// `NodeMetadataStore`, not the `DisplaySymbol::metadata` HashMap, and
+    /// not an env var.
+    #[test]
+    fn run_search_drops_macro_generated_when_include_generated_false() {
+        let mut graph = CodeGraph::new();
+        let user = add_test_node(&mut graph, "user_defined");
+        let derived = add_test_node(&mut graph, "derived_by_macro");
+        graph
+            .macro_metadata_mut()
+            .insert(derived, macro_metadata(true, None, Some("derive_Debug")));
+
+        let flags = MacroBoundaryFlags {
+            cfg_filter: None,
+            include_generated: false,
+            macro_boundaries: false,
+        };
+        let kept = filter_nodes_by_macro_boundary(&graph, vec![user, derived], flags);
+        assert_eq!(kept, vec![user], "macro_generated node must be dropped");
+    }
+
+    /// `--include-generated` set ⇒ macro-generated nodes survive the
+    /// filter, and `convert_node_to_display_symbol` surfaces the
+    /// `macro_generated` / `macro_source` provenance into
+    /// `DisplaySymbol::metadata` so JSON consumers see it.
+    #[test]
+    fn run_search_keeps_macro_generated_when_include_generated_true() {
+        let mut graph = CodeGraph::new();
+        let user = add_test_node(&mut graph, "user_defined");
+        let derived = add_test_node(&mut graph, "derived_by_macro");
+        graph
+            .macro_metadata_mut()
+            .insert(derived, macro_metadata(true, None, Some("derive_Debug")));
+
+        let flags = MacroBoundaryFlags {
+            cfg_filter: None,
+            include_generated: true,
+            macro_boundaries: false,
+        };
+        let kept = filter_nodes_by_macro_boundary(&graph, vec![user, derived], flags);
+        assert_eq!(kept, vec![user, derived]);
+
+        // Conversion path enriches the DisplaySymbol metadata HashMap with
+        // the underlying provenance so JSON callers can read it.
+        let symbol = convert_node_to_display_symbol(&graph, derived).expect("convert derived node");
+        assert_eq!(
+            symbol.metadata.get("macro_generated").map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            symbol.metadata.get("macro_source").map(String::as_str),
+            Some("derive_Debug")
+        );
+    }
+
+    /// `--cfg-filter alpha` ⇒ only nodes whose metadata reports
+    /// `cfg_condition == Some("alpha")` survive. Nodes without metadata
+    /// (or with a different cfg) are dropped.
+    #[test]
+    fn run_search_filters_by_cfg_condition() {
+        let mut graph = CodeGraph::new();
+        let always = add_test_node(&mut graph, "always_present");
+        let alpha = add_test_node(&mut graph, "alpha_only");
+        let beta = add_test_node(&mut graph, "beta_only");
+        graph.macro_metadata_mut().insert(
+            alpha,
+            macro_metadata(false, Some("feature = \"alpha\""), None),
+        );
+        graph.macro_metadata_mut().insert(
+            beta,
+            macro_metadata(false, Some("feature = \"beta\""), None),
+        );
+
+        let flags = MacroBoundaryFlags {
+            cfg_filter: Some("feature = \"alpha\""),
+            include_generated: true,
+            macro_boundaries: false,
+        };
+        let kept = filter_nodes_by_macro_boundary(&graph, vec![always, alpha, beta], flags);
+        assert_eq!(
+            kept,
+            vec![alpha],
+            "only nodes whose cfg_condition matches the filter survive"
+        );
+    }
+
+    /// `--macro-boundaries` ⇒ results are reordered so symbols sharing a
+    /// `macro_source` appear in adjacent runs, and each surviving symbol
+    /// carries a `macro_boundary_group` metadata key matching its source.
+    #[test]
+    fn run_search_groups_results_by_macro_source_when_macro_boundaries() {
+        let mut graph = CodeGraph::new();
+        let plain = add_test_node(&mut graph, "plain_fn");
+        let from_serde = add_test_node(&mut graph, "from_serde");
+        let from_log = add_test_node(&mut graph, "from_log");
+        let from_serde_2 = add_test_node(&mut graph, "from_serde_2");
+        graph.macro_metadata_mut().insert(
+            from_serde,
+            macro_metadata(true, None, Some("serde::Serialize")),
+        );
+        graph
+            .macro_metadata_mut()
+            .insert(from_log, macro_metadata(true, None, Some("log::info")));
+        graph.macro_metadata_mut().insert(
+            from_serde_2,
+            macro_metadata(true, None, Some("serde::Serialize")),
+        );
+
+        let symbols: Vec<DisplaySymbol> = [plain, from_serde, from_log, from_serde_2]
+            .into_iter()
+            .map(|nid| convert_node_to_display_symbol(&graph, nid).expect("convert node"))
+            .collect();
+
+        let grouped = group_results_by_macro_source(symbols);
+
+        // Each grouped symbol carries the boundary group key.
+        for sym in &grouped {
+            assert!(
+                sym.metadata.contains_key("macro_boundary_group"),
+                "missing macro_boundary_group on {}",
+                sym.name
+            );
+        }
+
+        // Symbols sharing a macro_source are now adjacent. Collect the
+        // group key sequence and verify each unique key forms a contiguous
+        // run.
+        let keys: Vec<&str> = grouped
+            .iter()
+            .map(|s| s.metadata["macro_boundary_group"].as_str())
+            .collect();
+        let mut seen_starts = std::collections::HashMap::<&str, (usize, usize)>::new();
+        for (i, k) in keys.iter().enumerate() {
+            seen_starts
+                .entry(k)
+                .and_modify(|(_, last)| *last = i)
+                .or_insert((i, i));
+        }
+        for (k, (first, last)) in &seen_starts {
+            // Every index between first and last must carry the same key.
+            for i in *first..=*last {
+                assert_eq!(keys[i], *k, "group `{k}` is not contiguous in {keys:?}");
+            }
+        }
+
+        // The serde group must contain both serde-sourced symbols.
+        let serde_count = grouped
+            .iter()
+            .filter(|s| {
+                s.metadata.get("macro_boundary_group").map(String::as_str)
+                    == Some("serde::Serialize")
+            })
+            .count();
+        assert_eq!(serde_count, 2, "serde group should contain 2 symbols");
     }
 }

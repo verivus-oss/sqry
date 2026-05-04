@@ -13,7 +13,7 @@ name = "sqry_lang_salesforce_apex"
 path = "src/lib.rs"
 
 [dependencies]
-sqry-core = { version = "12.1.6", path = "../sqry-core" }
+sqry-core = { version = "13.0.0", path = "../sqry-core" }
 tree-sitter = { workspace = true }
 tree-sitter-sfapex = "2.4"
 streaming-iterator = { workspace = true }

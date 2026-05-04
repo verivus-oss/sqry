@@ -452,7 +452,6 @@ fn run() -> Result<()> {
             add_to_gitignore,
             no_incremental,
             cache_dir,
-            no_compress,
             metrics_format,
             enable_macro_expansion,
             cfg_flags,
@@ -473,7 +472,6 @@ fn run() -> Result<()> {
             *add_to_gitignore,
             *no_incremental,
             cache_dir.as_deref(),
-            *no_compress,
             *metrics_format,
             *enable_macro_expansion,
             cfg_flags,
@@ -510,7 +508,15 @@ fn run() -> Result<()> {
         }
 
         Some(Command::Lsp { options }) => {
-            sqry_lsp::run(options.clone()).context("LSP command failed")?;
+            // C094b: forward the global `--workspace <PATH>` flag (or its
+            // `SQRY_WORKSPACE_FILE` env equivalent) into the LSP session so
+            // root resolution honours the operator's explicit workspace
+            // selection, ahead of the legacy `--index-root` fallback.
+            let mut lsp_options = options.clone();
+            if lsp_options.workspace.is_none() {
+                lsp_options.workspace.clone_from(&cli.workspace);
+            }
+            sqry_lsp::run(lsp_options).context("LSP command failed")?;
         }
 
         // Update command
@@ -943,7 +949,6 @@ fn list_enabled_languages(cli: &Cli) -> Result<()> {
     Ok(())
 }
 
-#[allow(dead_code)] // Macro boundary fields used when search filtering is wired up
 struct SearchCommandArgs<'a> {
     cli: &'a Cli,
     pattern: &'a str,
@@ -968,7 +973,16 @@ fn handle_search_command(args: &SearchCommandArgs<'_>) -> Result<()> {
         std::process::exit(code);
     }
 
-    let result = commands::run_search(args.cli, args.pattern, search_path);
+    // C002b: forward the macro-boundary flags (formerly extracted then
+    // discarded) into the search engine.
+    let result = commands::run_search(
+        args.cli,
+        args.pattern,
+        search_path,
+        args.cfg_filter,
+        args.include_generated,
+        args.macro_boundaries,
+    );
 
     // Record in history (after execution, regardless of result)
     // Pass expanded argv (without program name) to capture what actually ran
@@ -1144,7 +1158,6 @@ fn validate_index_if_requested(
                     false,
                     None,
                     false,
-                    false,
                     &[],
                     None,
                     false,
@@ -1191,7 +1204,6 @@ fn handle_index_command(
     add_to_gitignore: bool,
     no_incremental: bool,
     cache_dir: Option<&str>,
-    no_compress: bool,
     metrics_format: crate::args::MetricsFormat,
     enable_macro_expansion: bool,
     cfg_flags: &[String],
@@ -1226,7 +1238,6 @@ fn handle_index_command(
             add_to_gitignore,
             no_incremental,
             cache_dir,
-            no_compress,
             enable_macro_expansion,
             cfg_flags,
             expand_cache.map(std::path::Path::new),
@@ -1304,8 +1315,11 @@ fn handle_config_alias_action(action: &args::ConfigAliasAction) -> Result<()> {
 
 fn handle_no_command(cli: &Cli, history_argv: &[String]) -> Result<()> {
     if let Some(pattern) = &cli.pattern {
-        // Run search with pattern shorthand
-        let result = commands::run_search(cli, pattern, cli.search_path());
+        // Run search with pattern shorthand. The top-level shorthand path
+        // does not parse the per-subcommand `--cfg-filter` /
+        // `--include-generated` / `--macro-boundaries` flags, so pass the
+        // documented defaults explicitly (None / false / false).
+        let result = commands::run_search(cli, pattern, cli.search_path(), None, false, false);
 
         // Record in history (expanded argv captures what actually ran)
         record_history(cli.search_path(), "search", history_argv, result.is_ok());

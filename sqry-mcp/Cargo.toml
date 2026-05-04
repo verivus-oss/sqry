@@ -23,6 +23,15 @@ path = "src/main.rs"
 default = []
 # Enable MiniLM-L6-v2 ONNX intent classifier for sqry_ask (adds ~57MB, requires ONNX Runtime)
 nl-classifier = ["sqry-nl/classifier"]
+# Iter2-B C029c — exposes `SqryServer::new_for_tests` and
+# `SqryServer::build_success_result_for_tests` so integration tests can
+# drive the actual `success_result` boundary that
+# `SQRY_MCP_MAX_OUTPUT_BYTES` enforces. Activated through the
+# `[dev-dependencies] sqry-mcp = { path = ".", features = ["test-helpers"] }`
+# self-dep below — required because integration-test binaries see the crate
+# root compiled WITHOUT `cfg(test)`, so a bare `cfg(test)` gate is not
+# sufficient to expose a test-only public surface.
+test-helpers = []
 
 [dependencies]
 tokio = { version = "1.0", features = ["full"] }
@@ -32,11 +41,11 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tracing = "0.1"
 tracing-subscriber = "0.3"
-sqry-core = { version = "12.1.6", path = "../sqry-core" }
-sqry-db = { version = "12.1.6", path = "../sqry-db" }
-sqry-plugin-registry = { version = "12.1.6", path = "../sqry-plugin-registry" }
-sqry-nl = { version = "12.1.6", path = "../sqry-nl", default-features = false }
-sqry-mcp-redaction = { version = "12.1.6", path = "../sqry-mcp-redaction" }
+sqry-core = { version = "13.0.0", path = "../sqry-core" }
+sqry-db = { version = "13.0.0", path = "../sqry-db" }
+sqry-plugin-registry = { version = "13.0.0", path = "../sqry-plugin-registry" }
+sqry-nl = { version = "13.0.0", path = "../sqry-nl", default-features = false }
+sqry-mcp-redaction = { version = "13.0.0", path = "../sqry-mcp-redaction" }
 
 # MCP SDK for protocol compliance
 rmcp = { version = "0.16", features = ["server", "transport-io"] }
@@ -59,7 +68,7 @@ lru = "0.16"
 # Phase 8c U12 — shim-mode client for `--daemon` / `--daemon-socket`.
 # sqry-daemon-client is a leaf on the dep graph (no sqry-daemon server
 # dep); no cycle is introduced. Verify with `cargo tree -p sqry-mcp`.
-sqry-daemon-client = { version = "12.1.6", path = "../sqry-daemon-client" }
+sqry-daemon-client = { version = "13.0.0", path = "../sqry-daemon-client" }
 
 # Task 12 U1 — `which` resolves the sqryd binary via PATH lookup (tier 3
 # of the resolution order: SQRYD_PATH env > sibling > which). Pinned to
@@ -90,6 +99,14 @@ criterion = { version = "0.8", features = ["html_reports"] }
 approx = "0.5"
 walkdir = "2"
 sqry-lang-rust = { path = "../sqry-lang-rust" }
+# Iter2-B C029c — self-dep with `test-helpers` feature so the
+# integration test `tests/output_caps_truncation_via_dispatch.rs` can
+# import `SqryServer::new_for_tests` + `build_success_result_for_tests`.
+# Integration-test binaries see the crate root WITHOUT `cfg(test)`,
+# so a `cfg(test)` gate alone is not enough — the feature gate on the
+# function definition + the `pub use` re-export in `lib.rs` must both
+# be active for that compilation unit.
+sqry-mcp = { path = ".", features = ["test-helpers"] }
 # STEP_7 MAJOR 2 fix coverage: integration test
 # `tests/workspace_status_multi_root.rs` asserts that
 # `mcp__sqry__workspace_status` mirrors the LSP `sqry/workspaceStatus`

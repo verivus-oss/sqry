@@ -90,6 +90,7 @@ mod tests {
             allow_public_bind: false,
             daemon: false,
             daemon_socket: None,
+            workspace: None,
         })
     }
 

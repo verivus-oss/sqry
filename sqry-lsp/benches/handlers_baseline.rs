@@ -44,6 +44,7 @@ fn session_for(root: &Path) -> SessionManager {
         allow_public_bind: false,
         daemon: false,
         daemon_socket: None,
+        workspace: None,
     };
     SessionManager::new(options)
 }

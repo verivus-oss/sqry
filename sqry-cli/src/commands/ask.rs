@@ -703,8 +703,11 @@ fn execute_generated_command(command: &str, path: &str, cli: &Cli) -> Result<()>
         }
         "search" => {
             let parsed = parse_generated_command(command)?;
-            // For search, just use the primary pattern
-            super::run_search(cli, &parsed.primary, path)?;
+            // For search, just use the primary pattern. The NL-translated
+            // search path does not synthesize macro-boundary flags, so pass
+            // the documented defaults (`None` / `false` / `false`) for
+            // C002a's three new params.
+            super::run_search(cli, &parsed.primary, path, None, false, false)?;
         }
         "graph" => {
             // Graph commands need more parsing

@@ -597,7 +597,10 @@ fn test_root_help_taxonomy_headings() {
     init_logging();
     log::info!("Testing root help contains Phase 1 taxonomy headings");
 
-    let output = sqry_cmd().arg("--help").output().unwrap();
+    // Use short help (`-h`); audit C085 hides global flags from long
+    // `--help` to keep subcommand help concise. Short help retains the
+    // full taxonomy for discoverability.
+    let output = sqry_cmd().arg("-h").output().unwrap();
 
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
@@ -637,7 +640,8 @@ fn test_root_help_flags_under_correct_headings() {
     init_logging();
     log::info!("Testing root help flags appear under correct taxonomy headings");
 
-    let output = sqry_cmd().arg("--help").output().unwrap();
+    // Short help (`-h`) — see `test_root_help_taxonomy_headings` for rationale.
+    let output = sqry_cmd().arg("-h").output().unwrap();
 
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
@@ -1051,7 +1055,9 @@ fn test_search_help_taxonomy_headings() {
     init_logging();
     log::info!("Testing search help contains Phase 2.2+ taxonomy headings");
 
-    let output = sqry_cmd().arg("search").arg("--help").output().unwrap();
+    // Use short help (`-h`); audit C085 hides global flags from long
+    // `--help` so inherited headings only show in `-h`.
+    let output = sqry_cmd().arg("search").arg("-h").output().unwrap();
 
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();

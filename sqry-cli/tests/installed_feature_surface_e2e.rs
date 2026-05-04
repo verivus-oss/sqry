@@ -335,8 +335,9 @@ fn installed_cli_feature_surface_matrix() {
         "daemon status stderr must explain why it failed\nstderr:\n{stderr}"
     );
 
-    // `daemon status --json` should still exit 1 in the no-daemon case
-    // but emit `{}` on stdout per the documented contract.
+    // `daemon status --json` exits 1 when the daemon is unreachable and
+    // emits a structured error envelope per audit row C083a:
+    // `{"error": "daemon_unreachable", "socket": "<path>"}`.
     let daemon_status_json = run(project.path(), ["daemon", "status", "--json"]);
     assert!(
         !daemon_status_json.status.success(),
@@ -345,9 +346,15 @@ fn installed_cli_feature_surface_matrix() {
         String::from_utf8_lossy(&daemon_status_json.stderr)
     );
     let stdout = String::from_utf8_lossy(&daemon_status_json.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|err| {
+        panic!("daemon status --json must emit valid JSON; got {stdout:?} ({err})")
+    });
     assert_eq!(
-        stdout.trim(),
-        "{}",
-        "daemon status --json with no daemon must emit `{{}}` on stdout, got: {stdout}"
+        parsed["error"], "daemon_unreachable",
+        "daemon status --json must report `error: daemon_unreachable`; got: {stdout}"
+    );
+    assert!(
+        parsed["socket"].is_string() && !parsed["socket"].as_str().unwrap_or_default().is_empty(),
+        "daemon status --json must include a non-empty `socket` field; got: {stdout}"
     );
 }

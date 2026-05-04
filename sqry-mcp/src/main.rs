@@ -20,6 +20,12 @@ mod error;
 mod execution;
 mod feature_flags;
 mod mcp_config;
+// Output truncation cap module — enforces `SQRY_MCP_MAX_OUTPUT_BYTES`
+// (default 50 000) at the `success_result` boundary in `server.rs`.
+// Both the lib and bin targets compile this file independently; the
+// lib re-exports it as `pub mod output_caps;` so integration tests can
+// import directly via `sqry_mcp::output_caps`.
+pub mod output_caps;
 mod pagination;
 mod path_resolver;
 mod prompts;

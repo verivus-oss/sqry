@@ -61,6 +61,7 @@ fn test_lsp_options(index_root: PathBuf) -> LspOptions {
         allow_public_bind: false,
         daemon: false,
         daemon_socket: None,
+        workspace: None,
     }
 }
 

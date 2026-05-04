@@ -50,14 +50,15 @@ use tower_lsp::lsp_types::{
     CallHierarchyServerCapability, CodeActionKind, CodeActionOptions, CodeActionParams,
     CodeActionProviderCapability, CodeActionResponse, DidChangeConfigurationParams,
     DidChangeTextDocumentParams, DidChangeWorkspaceFoldersParams, DidCloseTextDocumentParams,
-    DidOpenTextDocumentParams, DocumentSymbolParams, DocumentSymbolResponse, ExecuteCommandParams,
-    GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverParams, HoverProviderCapability,
-    InitializeParams, InitializeResult, InitializedParams, Location, MessageType, NumberOrString,
-    OneOf, ProgressParams, ProgressParamsValue, ReferenceParams, ServerCapabilities, ServerInfo,
-    SymbolInformation, TextDocumentSyncCapability, TextDocumentSyncKind, TextDocumentSyncOptions,
-    WorkDoneProgress, WorkDoneProgressBegin, WorkDoneProgressCreateParams, WorkDoneProgressEnd,
-    WorkDoneProgressOptions, WorkDoneProgressReport, WorkspaceFoldersServerCapabilities,
-    WorkspaceServerCapabilities, WorkspaceSymbolOptions, WorkspaceSymbolParams,
+    DidOpenTextDocumentParams, DocumentSymbolParams, DocumentSymbolResponse, ExecuteCommandOptions,
+    ExecuteCommandParams, GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverParams,
+    HoverProviderCapability, InitializeParams, InitializeResult, InitializedParams, Location,
+    MessageType, NumberOrString, OneOf, ProgressParams, ProgressParamsValue, ReferenceParams,
+    ServerCapabilities, ServerInfo, SymbolInformation, TextDocumentSyncCapability,
+    TextDocumentSyncKind, TextDocumentSyncOptions, WorkDoneProgress, WorkDoneProgressBegin,
+    WorkDoneProgressCreateParams, WorkDoneProgressEnd, WorkDoneProgressOptions,
+    WorkDoneProgressReport, WorkspaceFoldersServerCapabilities, WorkspaceServerCapabilities,
+    WorkspaceSymbolOptions, WorkspaceSymbolParams,
 };
 use tower_lsp::{Client, LanguageServer};
 
@@ -1196,6 +1197,27 @@ impl LanguageServer for SqryLanguageServer {
                         tower_lsp::lsp_types::WorkDoneProgressOptions::default(),
                 },
             )),
+            // C073a (cli-help-impl-alignment-2026-05-04, audit A095/A096/A097/A098/A099):
+            // Advertise `workspace/executeCommand` for the four `sqry.*`
+            // command-style actions handled by
+            // `crate::handlers::execute_command::handle` and dispatched by
+            // `Self::execute_command` (`:1885`). The four command names match
+            // the constants in `crate::handlers::code_action`
+            // (`COMMAND_SHOW_CALLERS` / `COMMAND_SHOW_REFERENCES` /
+            // `COMMAND_EXPLAIN_SYMBOL`) plus the "sqry.index" command used by
+            // the `executeCommand` handler. Without this advertisement, LSP
+            // clients (per LSP 3.17 §workspace_executeCommand) will not route
+            // `workspace/executeCommand` requests to the server even though
+            // the dispatcher is wired.
+            execute_command_provider: Some(ExecuteCommandOptions {
+                commands: vec![
+                    "sqry.index".into(),
+                    "sqry.showCallers".into(),
+                    "sqry.showReferences".into(),
+                    "sqry.explainSymbol".into(),
+                ],
+                work_done_progress_options: WorkDoneProgressOptions::default(),
+            }),
             ..ServerCapabilities::default()
         };
         let server_info = Some(ServerInfo {
@@ -2817,6 +2839,7 @@ mod tests {
             allow_public_bind: false,
             daemon: false,
             daemon_socket: None,
+            workspace: None,
         };
         let session = SessionManager::new(options);
         let (service, mut socket) = crate::build_sqry_service(session);

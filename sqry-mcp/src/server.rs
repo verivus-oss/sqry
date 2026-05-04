@@ -470,10 +470,57 @@ impl SqryServer {
     }
 
     /// Build a successful `CallToolResult` from JSON value.
+    ///
+    /// Serialises `value` with pretty-printed JSON, then enforces the
+    /// `SQRY_MCP_MAX_OUTPUT_BYTES` byte-cap (default 50 000) via
+    /// [`crate::output_caps::truncate_response`]. Truncated payloads
+    /// have a fixed marker appended so consumers detect the cut
+    /// deterministically. Single-site cap enforcement guarantees every
+    /// `#[tool]`-annotated handler is covered uniformly.
     fn success_result(value: &serde_json::Value) -> CallToolResult {
-        CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string()),
-        )])
+        let serialised = serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string());
+        let capped = crate::output_caps::truncate_response(
+            &serialised,
+            crate::output_caps::max_output_bytes(),
+        );
+        CallToolResult::success(vec![Content::text(capped.into_owned())])
+    }
+
+    /// Iter2-B C029c — test-helper: drive the canonical `success_result`
+    /// dispatch boundary directly with a pre-built `serde_json::Value`.
+    ///
+    /// Gated behind `feature = "test-helpers"` so the production binary
+    /// surface is unchanged. Integration tests in `tests/` can opt in via
+    /// the `sqry-mcp = { path = ".", features = ["test-helpers"] }`
+    /// dev-dep self-reference. This exists so the
+    /// `output_caps_truncation_via_dispatch.rs` integration test can
+    /// observe the actual `CallToolResult` shape that every
+    /// `#[tool]`-decorated handler emits — i.e. the same code path the
+    /// `SQRY_MCP_MAX_OUTPUT_BYTES` cap is enforced through, not just the
+    /// helper-level `truncate_response` covered by
+    /// `output_caps_truncation_smoke.rs`.
+    #[cfg(feature = "test-helpers")]
+    #[doc(hidden)]
+    #[allow(dead_code)] // Used by integration tests via `sqry_mcp::server_test_helpers`
+    pub fn build_success_result_for_tests(value: &serde_json::Value) -> CallToolResult {
+        // Calls the private `success_result` to guarantee the test
+        // exercises the production code path verbatim — no parallel
+        // implementation, no helper-only test surface.
+        Self::success_result(value)
+    }
+
+    /// Iter2-B C029c — test-helper: minimal `SqryServer` constructor
+    /// equivalent to `Self::new(FeatureFlags::default())`. Preserved as
+    /// a separate symbol so test code documents its intent explicitly
+    /// and the helper signature stays stable across `FeatureFlags`
+    /// refactors.
+    ///
+    /// Gated behind `feature = "test-helpers"`.
+    #[cfg(feature = "test-helpers")]
+    #[doc(hidden)]
+    #[allow(dead_code)] // Used by integration tests via `sqry_mcp::server_test_helpers`
+    pub fn new_for_tests() -> Self {
+        Self::new(FeatureFlags::default())
     }
 }
 
