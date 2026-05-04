@@ -41,7 +41,7 @@ pub(crate) struct ClasspathCliOptions<'a> {
 pub(crate) fn run_classpath_pipeline_only(
     root_path: &Path,
     classpath_opts: &ClasspathCliOptions<'_>,
-) -> Result<sqry_classpath::pipeline::ClasspathPipelineResult> {
+) -> Result<Option<sqry_classpath::pipeline::ClasspathPipelineResult>> {
     use sqry_classpath::pipeline::{ClasspathConfig, ClasspathDepth};
 
     let depth = match classpath_opts.depth {
@@ -58,13 +58,25 @@ pub(crate) fn run_classpath_pipeline_only(
     };
 
     println!("Running JVM classpath analysis...");
-    let result = sqry_classpath::pipeline::run_classpath_pipeline(root_path, &config)
-        .context("Classpath pipeline failed")?;
-    println!(
-        "  Classpath: {} JARs scanned, {} classes parsed",
-        result.jars_scanned, result.classes_parsed
-    );
-    Ok(result)
+    match sqry_classpath::pipeline::run_classpath_pipeline(root_path, &config) {
+        Ok(result) => {
+            println!(
+                "  Classpath: {} JARs scanned, {} classes parsed",
+                result.jars_scanned, result.classes_parsed
+            );
+            Ok(Some(result))
+        }
+        Err(sqry_classpath::ClasspathError::DetectionFailed(message))
+            if classpath_opts.build_system.is_none() && classpath_opts.classpath_file.is_none() =>
+        {
+            eprintln!(
+                "WARNING: --classpath requested, but no JVM build system was detected; \
+                 skipping classpath analysis. {message}"
+            );
+            Ok(None)
+        }
+        Err(error) => Err(error).context("Classpath pipeline failed"),
+    }
 }
 
 #[cfg(feature = "jvm-classpath")]
@@ -168,7 +180,7 @@ fn create_workspace_classpath_import_edges(
                 .unwrap_or(import_name.as_str());
             if let Some(targets) = package_index.get(package_name) {
                 let filtered_targets =
-                    filter_scope_targets(targets.iter().copied().collect(), &resolved.allowed_jars);
+                    filter_scope_targets(targets.to_vec(), &resolved.allowed_jars);
                 let grouped_targets = group_targets_by_fqn(filtered_targets);
                 for target_group in grouped_targets.into_values() {
                     let reduced = prefer_direct_targets(
@@ -379,9 +391,9 @@ fn filter_scope_targets<'a>(
 }
 
 #[cfg(feature = "jvm-classpath")]
-fn group_targets_by_fqn<'a>(
-    targets: Vec<&'a sqry_classpath::graph::emitter::ClasspathNodeRef>,
-) -> std::collections::HashMap<String, Vec<&'a sqry_classpath::graph::emitter::ClasspathNodeRef>> {
+fn group_targets_by_fqn(
+    targets: Vec<&sqry_classpath::graph::emitter::ClasspathNodeRef>,
+) -> std::collections::HashMap<String, Vec<&sqry_classpath::graph::emitter::ClasspathNodeRef>> {
     let mut grouped = std::collections::HashMap::new();
     for target in targets {
         grouped
@@ -409,7 +421,7 @@ pub(crate) fn build_and_persist_with_optional_classpath(
     #[cfg(feature = "jvm-classpath")]
     let classpath_result = if let Some(classpath_opts) = classpath_opts.filter(|opts| opts.enabled)
     {
-        Some(run_classpath_pipeline_only(root_path, classpath_opts)?)
+        run_classpath_pipeline_only(root_path, classpath_opts)?
     } else {
         None
     };
@@ -1079,6 +1091,23 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
+    #[cfg(feature = "jvm-classpath")]
+    #[test]
+    fn classpath_auto_detection_miss_skips_pipeline() {
+        let tmp_cli_workspace = TempDir::new().unwrap();
+        let classpath_opts = ClasspathCliOptions {
+            enabled: true,
+            depth: crate::args::ClasspathDepthArg::Full,
+            classpath_file: None,
+            build_system: None,
+            force_classpath: true,
+        };
+
+        let result = run_classpath_pipeline_only(tmp_cli_workspace.path(), &classpath_opts)
+            .expect("missing JVM build system should be a non-fatal skip");
+        assert!(result.is_none());
+    }
+
     large_stack_test! {
     #[test]
     fn test_run_index_basic() {
@@ -1449,7 +1478,7 @@ mod tests {
     #[cfg(feature = "jvm-classpath")]
     #[test]
     fn test_filter_scope_targets_excludes_out_of_scope_jars() {
-        let targets = vec![
+        let targets = [
             sqry_classpath::graph::emitter::ClasspathNodeRef {
                 node_id: sqry_core::graph::unified::node::NodeId::new(1, 0),
                 fqn: "com.example.Foo".to_string(),
@@ -1475,7 +1504,7 @@ mod tests {
     fn test_prefer_direct_targets_exact_import_direct_wins() {
         use sqry_classpath::graph::provenance::{ClasspathProvenance, ClasspathScope};
 
-        let targets = vec![
+        let targets = [
             sqry_classpath::graph::emitter::ClasspathNodeRef {
                 node_id: sqry_core::graph::unified::node::NodeId::new(1, 0),
                 fqn: "com.example.Foo".to_string(),
@@ -1530,7 +1559,7 @@ mod tests {
 
         // Wildcard imports group by FQN first, then each group goes through
         // prefer_direct_targets. Simulate one FQN group with two candidates.
-        let targets = vec![
+        let targets = [
             sqry_classpath::graph::emitter::ClasspathNodeRef {
                 node_id: sqry_core::graph::unified::node::NodeId::new(10, 0),
                 fqn: "com.example.Bar".to_string(),
@@ -1589,7 +1618,7 @@ mod tests {
 
         // Two direct jars with the same FQN: true ambiguity, should remain
         // ambiguous (both returned).
-        let targets = vec![
+        let targets = [
             sqry_classpath::graph::emitter::ClasspathNodeRef {
                 node_id: sqry_core::graph::unified::node::NodeId::new(20, 0),
                 fqn: "com.example.Baz".to_string(),

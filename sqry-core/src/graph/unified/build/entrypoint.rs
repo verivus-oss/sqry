@@ -87,6 +87,12 @@ pub struct AnalysisStrategySummary {
 /// `SQRY_STAGING_MEMORY_LIMIT_MB` or [`BuildConfig::staging_memory_limit`].
 const DEFAULT_STAGING_MEMORY_LIMIT: usize = 512 * 1024 * 1024;
 
+const BYTES_PER_MIB: usize = 1024 * 1024;
+const INDEX_WORKER_STACK_SIZE_ENV: &str = "SQRY_INDEX_WORKER_STACK_MB";
+const DEFAULT_INDEX_WORKER_STACK_SIZE_MB: usize = 32;
+const MIN_INDEX_WORKER_STACK_SIZE_MB: usize = 8;
+const MAX_INDEX_WORKER_STACK_SIZE_MB: usize = 256;
+
 /// Directory names skipped by default when discovering first-party source files.
 ///
 /// These are dependency, build output, editor cache, or CI runner cache roots
@@ -184,8 +190,27 @@ fn create_thread_pool(config: &BuildConfig) -> Result<rayon::ThreadPool> {
         builder = builder.num_threads(n);
     }
     builder
+        .stack_size(index_worker_stack_size_bytes())
         .build()
-        .context("Failed to create rayon thread pool for parallel indexing")
+        .context("Failed to create rayon thread pool for graph indexing")
+}
+
+#[must_use]
+fn index_worker_stack_size_bytes() -> usize {
+    let env_value = std::env::var(INDEX_WORKER_STACK_SIZE_ENV).ok();
+    index_worker_stack_size_bytes_from_value(env_value.as_deref())
+}
+
+#[must_use]
+fn index_worker_stack_size_bytes_from_value(value: Option<&str>) -> usize {
+    let size_mb = value
+        .and_then(|raw| raw.trim().parse::<usize>().ok())
+        .unwrap_or(DEFAULT_INDEX_WORKER_STACK_SIZE_MB)
+        .clamp(
+            MIN_INDEX_WORKER_STACK_SIZE_MB,
+            MAX_INDEX_WORKER_STACK_SIZE_MB,
+        );
+    size_mb * BYTES_PER_MIB
 }
 
 /// Compute chunk boundaries for memory-bounded parallel parse batches.
@@ -1022,18 +1047,13 @@ pub fn persist_and_analyze_graph(
     });
     let analysis_start = std::time::Instant::now();
 
-    let analyses = if let Some(thread_count) = config.num_threads {
-        rayon::ThreadPoolBuilder::new()
-            .num_threads(thread_count)
-            .build()
-            .context("Failed to create rayon thread pool for graph analysis")?
-            .install(|| {
-                GraphAnalyses::build_all_from_adjacency_with_budget(adjacency, &config.label_budget)
-            })
-    } else {
-        GraphAnalyses::build_all_from_adjacency_with_budget(adjacency, &config.label_budget)
-    }
-    .context("Failed to build graph analyses")?;
+    let analysis_pool = create_thread_pool(config)
+        .context("Failed to create rayon thread pool for graph analysis")?;
+    let analyses = analysis_pool
+        .install(|| {
+            GraphAnalyses::build_all_from_adjacency_with_budget(adjacency, &config.label_budget)
+        })
+        .context("Failed to build graph analyses")?;
 
     progress.report(IndexProgress::StageCompleted {
         stage_name: "Computing graph analyses",
@@ -1673,6 +1693,42 @@ mod tests {
 
     const RUST_TEST_EXTENSIONS: &[&str] = &["rs"];
     const FILENAME_MATCH_EXTENSIONS: &[&str] = &["rmd", "bash_profile"];
+
+    #[test]
+    fn index_worker_stack_size_uses_default_without_override() {
+        assert_eq!(
+            index_worker_stack_size_bytes_from_value(None),
+            DEFAULT_INDEX_WORKER_STACK_SIZE_MB * BYTES_PER_MIB
+        );
+    }
+
+    #[test]
+    fn index_worker_stack_size_honors_valid_override() {
+        assert_eq!(
+            index_worker_stack_size_bytes_from_value(Some("64")),
+            64 * BYTES_PER_MIB
+        );
+    }
+
+    #[test]
+    fn index_worker_stack_size_clamps_override_bounds() {
+        assert_eq!(
+            index_worker_stack_size_bytes_from_value(Some("1")),
+            MIN_INDEX_WORKER_STACK_SIZE_MB * BYTES_PER_MIB
+        );
+        assert_eq!(
+            index_worker_stack_size_bytes_from_value(Some("9999")),
+            MAX_INDEX_WORKER_STACK_SIZE_MB * BYTES_PER_MIB
+        );
+    }
+
+    #[test]
+    fn index_worker_stack_size_ignores_invalid_override() {
+        assert_eq!(
+            index_worker_stack_size_bytes_from_value(Some("not-a-number")),
+            DEFAULT_INDEX_WORKER_STACK_SIZE_MB * BYTES_PER_MIB
+        );
+    }
 
     /// Test helper: commit a single parsed file to a graph using the serial path.
     ///

@@ -10,7 +10,7 @@ description = "Salsa-style incremental computation engine for sqry semantic code
 
 [dependencies]
 anyhow.workspace = true
-sqry-core = { version = "12.1.2", path = "../sqry-core" }
+sqry-core = { version = "12.1.6", path = "../sqry-core" }
 parking_lot.workspace = true
 smallvec.workspace = true
 log.workspace = true

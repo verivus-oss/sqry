@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+## [12.1.6](https://github.com/verivus-oss/sqry/compare/v12.1.2...v12.1.6) - 2026-05-04
+
+### Fixed
+- *(index)* stabilize large high-cost graph rebuilds## [12.1.5](https://github.com/verivus-oss/sqry/compare/v12.1.2...v12.1.5) - 2026-05-03
+
+### Fixed
+- *(cli)* include jvm classpath in default build## [12.1.4](https://github.com/verivus-oss/sqry/compare/v12.1.3...v12.1.4) - 2026-05-03
+
+### Other
+- update Cargo.lock dependencies
+## [12.1.3](https://github.com/verivus-oss/sqry/compare/v12.1.2...v12.1.3) - 2026-05-03
+
+### Other
+- update Cargo.lock dependencies
 ## [12.1.2](https://github.com/verivus-oss/sqry/compare/v12.1.1...v12.1.2) - 2026-05-03
 
 ### Other

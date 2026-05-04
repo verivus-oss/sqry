@@ -182,6 +182,19 @@ impl CondensationDag {
                 None => false, // overflow means threshold*scc_count > usize::MAX > cond_edge_count
             };
 
+        // Each SCC contributes at least one outgoing and one incoming base
+        // interval. If that floor already exceeds the configured budget, the
+        // label build cannot succeed and should not spend minutes discovering
+        // that during wavefront expansion.
+        let budget = if budget_config.budget_per_kind == 0 {
+            usize::MAX
+        } else {
+            budget_config.budget_per_kind
+        };
+        let minimum_label_intervals = minimum_label_interval_count(scc_count);
+        let minimum_budget_exceeded = budget_config.budget_per_kind != 0
+            && minimum_label_intervals > budget_config.budget_per_kind;
+
         // Step 4: Compute 2-hop interval labels
         let mut partial_dag = Self {
             edge_kind: scc.edge_kind.clone(),
@@ -203,6 +216,18 @@ impl CondensationDag {
                 scc.edge_kind,
             );
             // strategy stays DagBfs
+        } else if minimum_budget_exceeded {
+            let message = format!(
+                "2-hop label budget cannot fit {:?}: minimum {} intervals for {} SCCs > {} budget",
+                scc.edge_kind, minimum_label_intervals, scc_count, budget_config.budget_per_kind
+            );
+            match budget_config.on_exceeded {
+                BudgetExceededPolicy::Fail => anyhow::bail!("{message}"),
+                BudgetExceededPolicy::Degrade => {
+                    log::warn!("{message}; degrading to BFS fallback");
+                }
+            }
+            // strategy stays DagBfs
         } else if density_gated {
             log::info!(
                 "Density gate triggered for {:?}: {} cond edges > {} * {} SCCs, skipping labels",
@@ -213,12 +238,6 @@ impl CondensationDag {
             );
             // strategy stays DagBfs
         } else {
-            // budget_per_kind == 0 means unlimited
-            let budget = if budget_config.budget_per_kind == 0 {
-                usize::MAX
-            } else {
-                budget_config.budget_per_kind
-            };
             match super::reachability::compute_2hop_labels(&partial_dag, budget) {
                 Ok((label_out_offsets, label_out_data, label_in_offsets, label_in_data)) => {
                     partial_dag.label_out_offsets = label_out_offsets;
@@ -516,6 +535,11 @@ fn compute_topological_order(
     Ok(topo_order)
 }
 
+#[must_use]
+fn minimum_label_interval_count(scc_count: usize) -> usize {
+    scc_count.saturating_mul(2)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -540,6 +564,15 @@ mod tests {
             ],
             delta_edges: Vec::new(),
             node_count: 4,
+            csr_version: 0,
+        }
+    }
+
+    fn isolated_snapshot(node_count: usize) -> CompactionSnapshot {
+        CompactionSnapshot {
+            csr_edges: Vec::new(),
+            delta_edges: Vec::new(),
+            node_count,
             csr_version: 0,
         }
     }
@@ -594,6 +627,78 @@ mod tests {
         assert!(dag.label_out_data.is_empty());
         assert!(dag.label_in_data.is_empty());
         assert_eq!(dag.strategy, ReachabilityStrategy::DagBfs);
+    }
+
+    #[test]
+    fn test_minimum_label_budget_gate_degrades_before_label_build() {
+        let config = LabelBudgetConfig {
+            budget_per_kind: 7,
+            on_exceeded: BudgetExceededPolicy::Degrade,
+            density_gate_threshold: 0,
+            skip_labels: false,
+        };
+
+        let snapshot = isolated_snapshot(4);
+        let csr = CsrAdjacency::build_from_snapshot(&snapshot).unwrap();
+        let kind = EdgeKind::Calls {
+            argument_count: 0,
+            is_async: false,
+        };
+        let scc = SccData::compute_tarjan(&csr, &kind).unwrap();
+        let dag = CondensationDag::build_with_budget(&scc, &csr, &config).unwrap();
+
+        assert_eq!(dag.strategy, ReachabilityStrategy::DagBfs);
+        assert!(dag.label_out_data.is_empty());
+        assert!(dag.label_in_data.is_empty());
+        assert!(dag.can_reach(0, 0));
+        assert!(!dag.can_reach(0, 1));
+    }
+
+    #[test]
+    fn test_minimum_label_budget_gate_fails_when_policy_is_fail() {
+        let config = LabelBudgetConfig {
+            budget_per_kind: 7,
+            on_exceeded: BudgetExceededPolicy::Fail,
+            density_gate_threshold: 0,
+            skip_labels: false,
+        };
+
+        let snapshot = isolated_snapshot(4);
+        let csr = CsrAdjacency::build_from_snapshot(&snapshot).unwrap();
+        let kind = EdgeKind::Calls {
+            argument_count: 0,
+            is_async: false,
+        };
+        let scc = SccData::compute_tarjan(&csr, &kind).unwrap();
+        let error = CondensationDag::build_with_budget(&scc, &csr, &config)
+            .expect_err("minimum label budget gate should fail");
+
+        assert!(
+            error.to_string().contains("minimum 8 intervals"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn test_minimum_label_budget_gate_allows_exact_floor() {
+        let config = LabelBudgetConfig {
+            budget_per_kind: 8,
+            on_exceeded: BudgetExceededPolicy::Fail,
+            density_gate_threshold: 0,
+            skip_labels: false,
+        };
+
+        let snapshot = isolated_snapshot(4);
+        let csr = CsrAdjacency::build_from_snapshot(&snapshot).unwrap();
+        let kind = EdgeKind::Calls {
+            argument_count: 0,
+            is_async: false,
+        };
+        let scc = SccData::compute_tarjan(&csr, &kind).unwrap();
+        let dag = CondensationDag::build_with_budget(&scc, &csr, &config).unwrap();
+
+        assert_eq!(dag.strategy, ReachabilityStrategy::IntervalLabels);
+        assert_eq!(dag.label_out_data.len() + dag.label_in_data.len(), 8);
     }
 
     #[test]

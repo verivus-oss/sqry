@@ -226,7 +226,7 @@ fn build_and_persist_watch_iteration(
         let should_refresh = classpath_cache.is_none()
             || classpath_inputs_changed(root_path, changes, classpath_opts);
         if should_refresh {
-            *classpath_cache = Some(run_classpath_pipeline_only(root_path, classpath_opts)?);
+            *classpath_cache = run_classpath_pipeline_only(root_path, classpath_opts)?;
         }
 
         let (mut graph, effective_threads) =
@@ -293,7 +293,7 @@ mod tests {
     #[test]
     fn classpath_invalidation_includes_gradle_property_files() {
         let root = std::path::Path::new("/repo");
-        let changes = vec![
+        let changes = [
             FileChange::Modified(root.join("gradle.properties")),
             FileChange::Modified(root.join("gradle/wrapper/gradle-wrapper.properties")),
         ];
