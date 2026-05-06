@@ -214,6 +214,11 @@ impl NodeProvenanceStore {
     /// This is the read side of the Gate 0b `NodeIdBearing` coverage matrix
     /// (A2 §K row K.A10): the tombstone-residue invariant (§F) iterates here
     /// to confirm that no tombstoned `NodeId` outlives a `finalize()` call.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the provenance slot index exceeds `u32::MAX`, which would
+    /// violate the shared `NodeId` slot-index representation.
     pub fn iter_node_ids(&self) -> impl Iterator<Item = NodeId> + '_ {
         self.slots.iter().enumerate().filter_map(|(index, slot)| {
             slot.as_ref().map(|(generation, _provenance)| {
@@ -234,7 +239,7 @@ impl NodeProvenanceStore {
     /// of this store (each slot index corresponds 1:1 to an arena slot index),
     /// so rejected slots are set to `None` rather than removed.
     ///
-    /// `#[allow(dead_code)]` mirrors the NodeIdBearing trait itself: Gate 0b
+    /// `#[allow(dead_code)]` mirrors the `NodeIdBearing` trait itself: Gate 0b
     /// lands the scaffolding and unit tests, Gate 0c adds the production
     /// call site in `RebuildGraph::finalize()`.
     #[allow(dead_code)]

@@ -34,6 +34,7 @@ pub mod relation;
 pub mod scc;
 pub mod type_ids;
 pub mod unused;
+pub mod unused_post_filter;
 
 pub use callees::CalleesQuery;
 pub use callers::CallersQuery;

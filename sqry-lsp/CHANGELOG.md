@@ -6,7 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
-## [13.0.1](https://github.com/verivus-oss/sqry/compare/v13.0.0...v13.0.1) - 2026-05-04
+## [13.0.3](https://github.com/verivus-oss/sqry/compare/v13.0.2...v13.0.3) - 2026-05-06
+
+### Other
+- update Cargo.lock dependencies
+## [13.0.2](https://github.com/verivus-oss/sqry/compare/v13.0.1...v13.0.2) - 2026-05-06
+
+### Fixed
+- *(unused)* apply binding-plane boundary filter## [13.0.1](https://github.com/verivus-oss/sqry/compare/v13.0.0...v13.0.1) - 2026-05-04
 
 ### Other
 - update Cargo.lock dependencies

@@ -1964,6 +1964,10 @@ pub(crate) mod inner {
     }
 
     /// Daemon/SqryServer-shared body for `find_unused`.
+    #[allow(
+        clippy::unnecessary_wraps,
+        reason = "Shared tool-handler contract returns Result for uniform daemon and MCP dispatch."
+    )]
     pub(crate) fn execute_find_unused(
         ctx: &crate::daemon_adapter::WorkspaceContext,
         args: &FindUnusedArgs,
@@ -1986,28 +1990,26 @@ pub(crate) mod inner {
         let db =
             sqry_db::queries::dispatch::make_query_db_cold(Arc::clone(&snapshot), workspace_root);
         let node_count = snapshot.nodes().len();
-        let mcp_may_narrow_further = !args.languages.is_empty()
-            || !args.kinds.is_empty()
-            || matches!(
-                args.scope,
-                UnusedScope::Public | UnusedScope::Private | UnusedScope::Struct
-            );
-        let candidate_cap = if mcp_may_narrow_further {
-            node_count.max(args.max_results)
-        } else {
-            args.max_results
-        };
+        // Boundary filters include MCP language/kind/scope narrowing and the
+        // binding-plane post-filter. Any of them can suppress early raw rows,
+        // so request the full pool and truncate only after all filters run.
+        let candidate_cap = node_count.max(args.max_results);
         let key = sqry_db::queries::UnusedKey {
             scope: mcp_scope_to_core_superset(args.scope),
             max_results: candidate_cap,
         };
-        let unused_ids = db.get::<sqry_db::queries::UnusedQuery>(&key);
+        let raw_unused_ids = db.get::<sqry_db::queries::UnusedQuery>(&key);
+        let unused_ids = sqry_db::queries::unused_post_filter::apply_binding_plane_post_filter(
+            &raw_unused_ids,
+            &snapshot,
+            &db,
+        );
 
         let strings = snapshot.strings();
         let files = snapshot.files();
 
         let mut unused_symbols: Vec<UnusedSymbolData> = Vec::new();
-        for &node_id in unused_ids.iter() {
+        for &node_id in &unused_ids {
             if unused_symbols.len() >= args.max_results {
                 break;
             }

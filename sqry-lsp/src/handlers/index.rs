@@ -1568,8 +1568,9 @@ pub fn list_unused_symbols(
     // widening needed — unlike MCP's `Struct` variant, the LSP contract
     // passes `UnusedScope` verbatim to both the user and sqry-db).
     //
-    // We fetch `limit + 1` rows so the caller can detect truncation
-    // (matches the pre-DB19 contract exactly).
+    // The binding-plane post-filter can suppress raw rows before the LSP
+    // `limit` is applied, so fetch a full raw pool and truncate only after the
+    // post-filter has produced the user-facing candidate list.
     let check_start = Instant::now();
     let snapshot = std::sync::Arc::new(graph.snapshot());
     // PN3 CLIENT_LOAD: opportunistic cold-load from workspace companion file.
@@ -1578,10 +1579,16 @@ pub fn list_unused_symbols(
         std::sync::Arc::clone(&snapshot),
         &workspace_root,
     );
-    let unused_node_ids = db.get::<sqry_db::queries::UnusedQuery>(&sqry_db::queries::UnusedKey {
-        scope,
-        max_results: limit + 1,
-    });
+    let raw_unused_node_ids =
+        db.get::<sqry_db::queries::UnusedQuery>(&sqry_db::queries::UnusedKey {
+            scope,
+            max_results: snapshot.nodes().len().max(limit.saturating_add(1)),
+        });
+    let unused_node_ids = sqry_db::queries::unused_post_filter::apply_binding_plane_post_filter(
+        &raw_unused_node_ids,
+        &snapshot,
+        &db,
+    );
     perf_log(&format!(
         "list_unused_symbols UnusedQuery took {elapsed:?}, found {found}",
         elapsed = check_start.elapsed(),

@@ -19,8 +19,12 @@ use crate::index_discovery::find_nearest_index;
 use crate::output::OutputStreams;
 use anyhow::{Context, Result};
 use serde::Serialize;
+use sqry_core::graph::unified::concurrent::GraphSnapshot;
+use sqry_core::graph::unified::node::id::NodeId;
 use sqry_core::query::UnusedScope;
 use std::collections::HashMap;
+use std::path::Path;
+use std::sync::Arc;
 
 /// Unused symbol for output
 #[derive(Debug, Serialize)]
@@ -56,13 +60,11 @@ struct UnusedByFile {
 /// filtered-out prefixes cannot push valid later matches out of the
 /// window).
 ///
-/// When the user supplies a `--lang` or `--kind` filter, the handler
-/// asks sqry-db for `node_count` rows (an upper bound — `UnusedQuery`
-/// early-breaks once the underlying graph is exhausted) so the
-/// post-filter is the single authoritative gate on what reaches the
-/// user. When neither filter is set, the handler asks for only
-/// `max_results` rows — strictly cheaper. This mirrors the MCP pattern
-/// in [`sqry_mcp::execution::tools::analysis::execute_find_unused`].
+/// The handler asks sqry-db for `node_count` rows (an upper bound; `UnusedQuery`
+/// early-breaks once the underlying graph is exhausted) so the CLI substring
+/// filters and the binding-plane post-filter are the single authoritative
+/// gates on what reaches the user. This mirrors the MCP pattern in
+/// [`sqry_mcp::execution::tools::analysis::execute_find_unused`].
 ///
 /// The `--scope` argument maps one-to-one onto
 /// [`sqry_core::query::UnusedScope`] (the same enum sqry-db consumes),
@@ -106,29 +108,13 @@ pub fn run_unused(
         .context("Failed to load graph. Run 'sqry index' to build the graph.")?;
 
     // Route through sqry-db: `UnusedQuery` is a name-keyed predicate in
-    // the planner taxonomy, cached per-snapshot. The CLI's `--lang` and
-    // `--kind` are free-form substrings, so we ask sqry-db for the full
-    // candidate pool whenever either is set (sqry-db scope still does
-    // the heavy lifting; the post-filter just narrows), and otherwise
-    // ask for just `max_results` rows.
+    // the planner taxonomy, cached per-snapshot. Boundary filters can
+    // suppress raw rows even when the user supplied no `--lang` / `--kind`
+    // filter, so request the full candidate pool and truncate only after all
+    // user-facing filters run.
     let snapshot = std::sync::Arc::new(graph.snapshot());
-    // PN3 CLIENT_LOAD: opportunistic cold-load from workspace companion file.
-    let db = sqry_db::queries::dispatch::make_query_db_cold(
-        std::sync::Arc::clone(&snapshot),
-        &loc.index_root,
-    );
-    let node_count = snapshot.nodes().len();
-    let cli_may_narrow_further = lang_filter.is_some() || kind_filter.is_some();
-    let candidate_cap = if cli_may_narrow_further {
-        node_count.max(max_results)
-    } else {
-        max_results
-    };
-    let key = sqry_db::queries::UnusedKey {
-        scope: unused_scope,
-        max_results: candidate_cap,
-    };
-    let unused_ids = db.get::<sqry_db::queries::UnusedQuery>(&key);
+    let unused_ids =
+        boundary_filtered_unused_ids(&snapshot, &loc.index_root, unused_scope, max_results);
 
     let strings = snapshot.strings();
     let files = snapshot.files();
@@ -136,7 +122,7 @@ pub fn run_unused(
     // Post-filter: apply --lang and --kind substring filters + truncate
     // at max_results.
     let mut unused_symbols: Vec<UnusedSymbol> = Vec::new();
-    for &node_id in unused_ids.iter() {
+    for &node_id in &unused_ids {
         if unused_symbols.len() >= max_results {
             break;
         }
@@ -221,6 +207,27 @@ pub fn run_unused(
     }
 
     Ok(())
+}
+
+fn boundary_filtered_unused_ids(
+    snapshot: &Arc<GraphSnapshot>,
+    index_root: &Path,
+    unused_scope: UnusedScope,
+    max_results: usize,
+) -> Vec<NodeId> {
+    // PN3 CLIENT_LOAD: opportunistic cold-load from workspace companion file.
+    let db = sqry_db::queries::dispatch::make_query_db_cold(Arc::clone(snapshot), index_root);
+    let candidate_cap = snapshot.nodes().len().max(max_results);
+    let key = sqry_db::queries::UnusedKey {
+        scope: unused_scope,
+        max_results: candidate_cap,
+    };
+    let raw_unused_ids = db.get::<sqry_db::queries::UnusedQuery>(&key);
+    sqry_db::queries::unused_post_filter::apply_binding_plane_post_filter(
+        &raw_unused_ids,
+        snapshot,
+        &db,
+    )
 }
 
 /// Format unused symbols as human-readable text

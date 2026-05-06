@@ -56,6 +56,20 @@ use std::{
 use tempfile::TempDir;
 
 // ---------------------------------------------------------------------------
+// Config writer
+// ---------------------------------------------------------------------------
+
+/// Write a minimal daemon config TOML to `config_path`, pointing the socket
+/// to `socket_path`.
+fn write_daemon_config(config_path: &Path, socket_path: &Path) {
+    let contents = format!(
+        "[socket]\npath = {:?}\n",
+        socket_path.to_string_lossy().as_ref()
+    );
+    std::fs::write(config_path, contents).expect("write daemon config TOML");
+}
+
+// ---------------------------------------------------------------------------
 // Binary location helper
 // ---------------------------------------------------------------------------
 
@@ -391,6 +405,9 @@ fn parent_to_grandchild_fd_inheritance_preserves_flock() {
 
     let lockfile = xdg_runtime.join("sqry").join("sqryd.lock");
     let pidfile = xdg_runtime.join("sqry").join("sqryd.pid");
+    let socket_path = xdg_runtime.join("sqry").join("sqryd.sock");
+    let config_path = xdg_runtime.join("daemon.toml");
+    write_daemon_config(&config_path, &socket_path);
 
     // ------------------------------------------------------------------
     // Step 3: Spawn `sqryd start --detach`.
@@ -409,6 +426,7 @@ fn parent_to_grandchild_fd_inheritance_preserves_flock() {
     let mut parent = Command::new(&sqryd_bin)
         .args(["start", "--detach"])
         .env("XDG_RUNTIME_DIR", &xdg_runtime)
+        .env("SQRY_DAEMON_CONFIG", &config_path)
         // Inhibit log output to avoid noise in test output.
         .env("SQRY_DAEMON_LOG_LEVEL", "error")
         .stdin(Stdio::null())
@@ -627,10 +645,14 @@ fn lockfile_inode_survives_grandchild_exit() {
     let tmp = TempDir::new().expect("TempDir::new");
     let xdg_runtime = tmp.path().to_path_buf();
     let lockfile = xdg_runtime.join("sqry").join("sqryd.lock");
+    let socket_path = xdg_runtime.join("sqry").join("sqryd.sock");
+    let config_path = xdg_runtime.join("daemon.toml");
+    write_daemon_config(&config_path, &socket_path);
 
     let mut parent = Command::new(&sqryd_bin)
         .args(["start", "--detach"])
         .env("XDG_RUNTIME_DIR", &xdg_runtime)
+        .env("SQRY_DAEMON_CONFIG", &config_path)
         .env("SQRY_DAEMON_LOG_LEVEL", "error")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
