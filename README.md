@@ -54,14 +54,15 @@ sqry is useful when you need to search by code **structure**: finding all caller
 
 sqry is focused on one thing: local semantic code search via AST analysis.
 
-## What's New In 10.0.1
+## What's New In 13.0.3
 
-- **Workspace-aware multi-repo indexing**: define a logical workspace with a `.sqry-workspace` registry or a VS Code `.code-workspace` `sqry.workspace` block, then query and inspect every source root as one aggregate workspace.
-- **VS Code workspace status is authoritative**: the extension now reads the LSP `sqry/workspaceStatus` aggregate, so healthy multi-root workspaces show indexed source roots instead of a false "not indexed" state.
-- **Daemon workspace management**: `sqry daemon load` warms a workspace in `sqryd`, `sqry daemon rebuild` triggers an in-place rebuild with optional `--force`, and `sqry-mcp --daemon` / `sqry lsp --daemon` auto-start the daemon when needed.
-- **Faster repeated analysis**: derived query caches persist across sessions, graph/MCP/CLI analyses share the `sqry-db` query path, and cold-start queries reuse persisted derived data instead of recomputing every analysis from scratch.
-- **MCP robustness improvements**: session-scoped workspace resolution reduces the need to pass `path` on every tool call; duplicate, dependency, cycle, trace, and semantic-diff tools now share stricter frontier and truncation semantics.
-- **Release distribution improvements**: Homebrew tap publishing is automated from signed release checksums, and VS Code binary provenance now accepts the current `release-distribute.yml` workflow identity with the previous `oss-distribute.yml` identity retained as a legacy fallback.
+- **Accurate unused-code analysis across binding boundaries**: `sqry unused`, LSP analysis, and MCP `find_unused` now gather a full candidate superset before CLI/MCP/LSP filters run, then apply the binding-plane post-filter at the boundary. This prevents visibility, kind, and scope filters from hiding symbols that should still be considered during reachability.
+- **Binding-plane resolution is first-class**: V9 snapshots derive scope, alias, shadow, import, and export tables from the graph, and `sqry graph resolve <symbol> --explain --json` exposes witness-bearing resolution for debugging name lookup.
+- **Derived Analysis DB is the shared query path**: cycle, unused, reachability, entry-point, trace, dependency, subgraph, export, semantic-diff, CLI, and MCP analysis paths now share `sqry-db` query implementations with sharded derived-result caches.
+- **Incremental graph persistence moved to V10**: snapshots now persist the file-segment table used for append-only node allocation and safe per-file reindexing. After upgrading from a pre-V10 release, run `sqry index --force` once so the graph is rebuilt with V10 metadata.
+- **Daemon-backed workflows are production surfaces**: `sqryd` keeps graphs hot across CLI, MCP, and LSP sessions; `sqry daemon load`, `sqry daemon rebuild`, `sqry daemon status`, and `sqry daemon logs` are available, and `sqry-mcp --daemon` / `sqry lsp --daemon` can auto-start the daemon.
+- **Workspace-aware multi-repo indexing remains opt-in and explicit**: define a `.sqry-workspace` registry or a VS Code `.code-workspace` `sqry.workspace` block when you want multiple source roots queried as one logical workspace.
+- **Public release artifacts are signed and complete**: v13.0.3 publishes crates, Linux/macOS/Windows binaries for `sqry`, `sqry-mcp`, `sqry-lsp`, and `sqryd`, checksums, attestations, and the VS Code `.vsix` release asset from the public `release-distribute.yml` workflow.
 
 ## Install
 
@@ -92,7 +93,7 @@ $script = irm https://raw.githubusercontent.com/verivus-oss/sqry/main/scripts/in
 Pinned-release example:
 
 ```powershell
-.\install.ps1 -Component all -Version v4.8.16 -VerifySignatures
+.\install.ps1 -Component all -Version v13.0.3 -VerifySignatures
 ```
 
 Manual fallback:
@@ -630,7 +631,7 @@ sqry daemon logs --follow
 Example `sqry daemon status` output:
 
 ```
-sqryd v10.0.1 -- uptime 2h 14m
+sqryd v13.0.3 -- uptime 2h 14m
 
 Memory: 391 MB / 2048 MB  (peak: 418 MB)
 
@@ -782,4 +783,4 @@ MIT - see [LICENSE](LICENSE)
 
 ---
 
-Developed by [Verivus](https://sqry.dev)
+Developed by [Verivus](https://verivus.com)
