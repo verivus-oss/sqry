@@ -374,6 +374,8 @@ export async function verifyCosignBundle(
   version: string,
   outputChannel: vscode.OutputChannel,
   storageUri: vscode.Uri,
+  assetName?: string,
+  expectedSha256?: string,
 ): Promise<void> {
   // Check if insecure download is allowed (hidden setting)
   const allowInsecure = vscode.workspace.getConfiguration("sqry").get<boolean>("allowInsecureDownload", false);
@@ -395,6 +397,9 @@ export async function verifyCosignBundle(
     const sigstore = await import("sigstore");
     const bundleContent = JSON.parse(fs.readFileSync(bundlePath, "utf-8"));
     const binaryData = fs.readFileSync(binaryPath);
+    if (assetName && expectedSha256) {
+      verifyAttestationSubject(bundleContent, assetName, expectedSha256);
+    }
     const identityCandidates = getCertificateIdentityCandidates(version);
     const proxyUrl = getConfiguredProxyUrl();
     const verifyOptions = buildSigstoreVerifyOptions(storageUri);
@@ -406,19 +411,36 @@ export async function verifyCosignBundle(
       outputChannel.appendLine("[sqry] Reusing VS Code http.proxy setting for Sigstore TUF fetches");
     }
 
-    await verifyCosignBundleWithIdentities(
-      identityCandidates,
-      outputChannel,
-      async (certIdentity) => {
-        await withTemporarySigstoreProxyEnv(proxyUrl, async () => {
-          await sigstore.verify(bundleContent, binaryData, {
-            ...verifyOptions,
-            certificateIssuer: OIDC_ISSUER,
-            certificateIdentityURI: certIdentity,
+    const verifyWithCandidates = async () => {
+      await verifyCosignBundleWithIdentities(
+        identityCandidates,
+        outputChannel,
+        async (certIdentity) => {
+          await withTemporarySigstoreProxyEnv(proxyUrl, async () => {
+            await sigstore.verify(bundleContent, binaryData, {
+              ...verifyOptions,
+              certificateIssuer: OIDC_ISSUER,
+              certificateIdentityURI: certIdentity,
+            });
           });
-        });
-      },
-    );
+        },
+      );
+    };
+
+    try {
+      await verifyWithCandidates();
+    } catch (error) {
+      if (!isRecoverableSigstoreTufError(error)) {
+        throw error;
+      }
+
+      outputChannel.appendLine(
+        "[sqry] Sigstore TUF cache appears stale or corrupt; clearing cache and retrying verification once",
+      );
+      clearSigstoreTufCache(verifyOptions.tufCachePath, outputChannel);
+      fs.mkdirSync(verifyOptions.tufCachePath, { recursive: true });
+      await verifyWithCandidates();
+    }
 
     outputChannel.appendLine("[sqry] Cosign signature verification succeeded - binary provenance confirmed");
   } catch (error) {
@@ -428,6 +450,77 @@ export async function verifyCosignBundle(
       `Cosign verification failed: ${message}`
     );
   }
+}
+
+export function verifyAttestationSubject(
+  bundleContent: unknown,
+  assetName: string,
+  expectedSha256: string,
+): void {
+  const envelope = asRecord(bundleContent)["dsseEnvelope"];
+  if (!isRecord(envelope)) {
+    return;
+  }
+
+  const payload = envelope["payload"];
+  if (typeof payload !== "string") {
+    throw new Error("Sigstore DSSE bundle is missing its payload.");
+  }
+
+  let statement: unknown;
+  try {
+    statement = JSON.parse(Buffer.from(payload, "base64").toString("utf-8"));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Sigstore DSSE payload could not be decoded: ${message}`);
+  }
+
+  const subjects = asRecord(statement)["subject"];
+  if (!Array.isArray(subjects)) {
+    throw new Error("Sigstore DSSE payload is missing its subject list.");
+  }
+
+  const expected = expectedSha256.toLowerCase();
+  for (const subject of subjects) {
+    if (!isRecord(subject) || subject["name"] !== assetName) {
+      continue;
+    }
+    const digest = subject["digest"];
+    if (!isRecord(digest) || typeof digest["sha256"] !== "string") {
+      throw new Error(`Sigstore DSSE subject for ${assetName} is missing a sha256 digest.`);
+    }
+    const actual = digest["sha256"].toLowerCase();
+    if (actual !== expected) {
+      throw new Error(
+        `Sigstore DSSE subject digest mismatch for ${assetName}. Expected: ${expected}, got: ${actual}.`,
+      );
+    }
+    return;
+  }
+
+  throw new Error(`Sigstore DSSE bundle does not attest release asset ${assetName}.`);
+}
+
+export function isRecoverableSigstoreTufError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /root was signed by 0\/\d+ keys|tuf|trusted root/i.test(message);
+}
+
+export function clearSigstoreTufCache(tufCachePath: string, outputChannel: vscode.OutputChannel): void {
+  try {
+    fs.rmSync(tufCachePath, { recursive: true, force: true });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    outputChannel.appendLine(`[sqry] Failed to clear Sigstore TUF cache ${tufCachePath}: ${message}`);
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return isRecord(value) ? value : {};
 }
 
 export function getCertificateIdentityCandidates(version: string): readonly string[] {
@@ -740,7 +833,15 @@ export async function downloadBinary(
         // Step 6: Verify Cosign bundle (MANDATORY)
         outputChannel.appendLine("[sqry] Verifying Cosign signature bundle...");
         try {
-          await verifyCosignBundle(tmpBinaryPath, tmpBundlePath, effectiveVersion, outputChannel, storageUri);
+          await verifyCosignBundle(
+            tmpBinaryPath,
+            tmpBundlePath,
+            effectiveVersion,
+            outputChannel,
+            storageUri,
+            platformInfo.asset,
+            expectedHash,
+          );
         } catch (err) {
           cleanupFile(tmpBinaryPath);
           cleanupFile(tmpBundlePath);

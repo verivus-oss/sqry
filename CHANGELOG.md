@@ -101,6 +101,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **fix(vscode)**: binary auto-download now clears and refreshes the persistent
+  Sigstore TUF cache once when verification fails with a recoverable trust-root
+  error such as `root was signed by 0/3 keys`. The downloader also verifies
+  that the shared DSSE/SLSA release attestation contains a subject for the
+  downloaded asset with the expected SHA256 digest before accepting provenance.
+
 - **fix(graph)**: line-zero reporting for cross-file callees and
   macro-shadowed call targets across all 16 language plugins and all MCP
   tool outputs. Extends `dec44131f` Method/Function cross-kind reuse

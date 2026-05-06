@@ -13,9 +13,9 @@ name = "sqry_lang_oracle_plsql"
 path = "src/lib.rs"
 
 [dependencies]
-sqry-core = { version = "13.0.3", path = "../sqry-core" }
+sqry-core = { version = "13.0.5", path = "../sqry-core" }
 tree-sitter = { workspace = true }
-tree-sitter-plsql-sqry = { version = "13.0.3", path = "../crates/tree-sitter-plsql-sqry" }
+tree-sitter-plsql-sqry = { version = "13.0.5", path = "../crates/tree-sitter-plsql-sqry" }
 streaming-iterator = { workspace = true }
 
 [dev-dependencies]

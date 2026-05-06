@@ -783,4 +783,4 @@ MIT - see [LICENSE](LICENSE)
 
 ---
 
-Developed by [Verivus](https://verivus.com)
+Developed by [Verivus](https://sqry.dev)

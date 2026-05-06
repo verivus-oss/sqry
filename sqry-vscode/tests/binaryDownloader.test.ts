@@ -39,6 +39,18 @@ function loadModule(overrides: Record<string, unknown> = {}) {
   });
 }
 
+function createAttestationBundle(subjects: unknown[]) {
+  const payload = Buffer.from(JSON.stringify({ subject: subjects }), "utf-8").toString("base64");
+  return {
+    mediaType: "application/vnd.dev.sigstore.bundle.v0.3+json",
+    dsseEnvelope: {
+      payload,
+      payloadType: "application/vnd.in-toto+json",
+      signatures: [],
+    },
+  };
+}
+
 describe("binaryDownloader", () => {
   describe("release asset selection", () => {
     it("prefers current checksum manifest name with legacy fallback", () => {
@@ -413,6 +425,74 @@ describe("binaryDownloader", () => {
         expect((error as Error).message).to.contain("@refs/tags/v8.0.2");
         expect((error as Error).message).to.contain("@refs/heads/main");
       }
+    });
+  });
+
+  describe("verifyAttestationSubject()", () => {
+    it("accepts a DSSE subject matching the release asset digest", () => {
+      const mod = loadModule();
+      const bundle = createAttestationBundle([
+        {
+          name: "sqry-linux-x86_64",
+          digest: {
+            sha256: "D14809155BA2475E1A2967E40031E2BF3DC69F3FBA64450B6F5BEFE2F9457D9E",
+          },
+        },
+      ]);
+
+      mod.verifyAttestationSubject(
+        bundle,
+        "sqry-linux-x86_64",
+        "d14809155ba2475e1a2967e40031e2bf3dc69f3fba64450b6f5befe2f9457d9e",
+      );
+    });
+
+    it("rejects a DSSE subject digest mismatch", () => {
+      const mod = loadModule();
+      const bundle = createAttestationBundle([
+        {
+          name: "sqry-linux-x86_64",
+          digest: {
+            sha256: "d14809155ba2475e1a2967e40031e2bf3dc69f3fba64450b6f5befe2f9457d9e",
+          },
+        },
+      ]);
+
+      expect(() => {
+        mod.verifyAttestationSubject(
+          bundle,
+          "sqry-linux-x86_64",
+          "0000000000000000000000000000000000000000000000000000000000000000",
+        );
+      }).to.throw("Sigstore DSSE subject digest mismatch for sqry-linux-x86_64");
+    });
+
+    it("rejects a DSSE bundle that does not cover the requested release asset", () => {
+      const mod = loadModule();
+      const bundle = createAttestationBundle([
+        {
+          name: "sqry-macos-arm64",
+          digest: {
+            sha256: "d14809155ba2475e1a2967e40031e2bf3dc69f3fba64450b6f5befe2f9457d9e",
+          },
+        },
+      ]);
+
+      expect(() => {
+        mod.verifyAttestationSubject(
+          bundle,
+          "sqry-linux-x86_64",
+          "d14809155ba2475e1a2967e40031e2bf3dc69f3fba64450b6f5befe2f9457d9e",
+        );
+      }).to.throw("Sigstore DSSE bundle does not attest release asset sqry-linux-x86_64");
+    });
+  });
+
+  describe("isRecoverableSigstoreTufError()", () => {
+    it("classifies stale TUF root errors as retryable", () => {
+      const mod = loadModule();
+      expect(mod.isRecoverableSigstoreTufError(new Error("root was signed by 0/3 keys"))).to.equal(true);
+      expect(mod.isRecoverableSigstoreTufError(new Error("certificate identity error"))).to.equal(false);
     });
   });
 
