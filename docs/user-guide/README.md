@@ -33,11 +33,28 @@ sqry graph --path . --format json nodes --kind function
 sqry visualize "callers:main" --format mermaid --path .
 ```
 
-## Release Highlights (v10.0.1)
+## Release Highlights (v13.0.3)
 
-The recent v9/v10 release train concentrated on workspace-aware indexing,
-daemon-backed workflows, and faster repeated analysis:
+The current v13.0.3 release train concentrates on correct graph-boundary
+analysis, reusable derived queries, daemon-backed workflows, and explicit
+workspace configuration:
 
+- `sqry unused`, LSP analysis, and MCP `find_unused` now collect a full
+  candidate superset before applying CLI/MCP/LSP filters, then run the
+  binding-plane post-filter at the boundary. This keeps public/struct/member
+  and other narrowing filters from masking symbols that must still participate
+  in reachability.
+- The binding plane is persisted as a V9 snapshot layer with scope, alias,
+  shadow, import, and export tables. Use
+  `sqry graph resolve <symbol> --explain --json` to inspect the witness trace
+  behind a name-resolution result.
+- Derived graph analysis now flows through `sqry-db` for cycle, unused,
+  reachability, entry-point, trace, dependency, subgraph, export, semantic-diff,
+  CLI, and MCP paths. The shared query layer owns sharded caches so repeated
+  analysis does not recompute the same derived facts in every interface.
+- Snapshot format V10 persists the file-segment table used by incremental
+  reindexing. After upgrading from a pre-V10 release, run `sqry index --force`
+  once so the workspace is rebuilt with V10 metadata.
 - Logical workspaces can now be described by `.sqry-workspace` registries or
   VS Code `.code-workspace` `sqry.workspace` blocks. CLI, LSP, MCP, daemon, and
   VS Code all resolve the same source roots and aggregate status.
@@ -48,9 +65,6 @@ daemon-backed workflows, and faster repeated analysis:
 - `sqryd` now supports explicit workspace loading and rebuilds:
   `sqry daemon load <path>` and `sqry daemon rebuild <path> [--force]`.
   `sqry-mcp --daemon` and `sqry lsp --daemon` can auto-start the daemon.
-- Derived query caches persist across sessions. Relation, cycle, unused,
-  dependency-impact, trace, subgraph, export, and semantic-diff paths now share
-  the `sqry-db` dispatch layer, reducing cold-start recomputation.
 - MCP session-scoped workspace resolution uses explicit paths first, then
   file-bearing arguments, MCP roots, the last resolved workspace, and finally
   legacy environment/CWD fallback. In a normal single-repo session, assistants
