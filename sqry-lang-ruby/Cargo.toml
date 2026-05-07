@@ -9,13 +9,13 @@ rust-version.workspace = true
 description = "Ruby language plugin for sqry"
 
 [dependencies]
-sqry-core = { version = "13.0.5", path = "../sqry-core" }
+sqry-core = { version = "13.0.7", path = "../sqry-core" }
 anyhow.workspace = true
 tree-sitter.workspace = true
 tree-sitter-ruby.workspace = true
 streaming-iterator.workspace = true
 once_cell.workspace = true
-sqry-lang-support = { version = "13.0.5", path = "../sqry-lang-support" }
+sqry-lang-support = { version = "13.0.7", path = "../sqry-lang-support" }
 
 [dev-dependencies]
 log.workspace = true

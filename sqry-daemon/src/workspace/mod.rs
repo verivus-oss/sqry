@@ -30,7 +30,9 @@ pub mod status;
 
 pub use admission::{AdmissionState, RetainedEntry, WorkingSetInputs, working_set_estimate};
 pub use builder::{EmptyGraphBuilder, FailingGraphBuilder, RealWorkspaceBuilder, WorkspaceBuilder};
-pub use hook::{NoOpHook, RecordingHook, SharedHook, SqrydHook, noop_hook, spawn_hook};
+pub use hook::{
+    NoOpHook, QueryDbHook, RecordingHook, SharedHook, SqrydHook, noop_hook, spawn_hook,
+};
 pub use loaded::{LoadedWorkspace, PendingRebuild};
 pub(crate) use manager::clone_err;
 pub use manager::{RebuildReservation, ServeVerdict, WorkspaceManager};

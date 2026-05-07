@@ -1181,6 +1181,17 @@ fn create_runtime_dir(cfg: &DaemonConfig) -> DaemonResult<()> {
 ///
 /// Steps 6-10 per §C.3.1.  Factored into a helper so both the
 /// foreground path and the grandchild inner path share the same code.
+///
+/// PF03B: also installs the production [`crate::workspace::QueryDbHook`]
+/// on the freshly-constructed [`WorkspaceManager`] so every successful
+/// publish persists `<workspace_root>/.sqry/graph/derived.sqry` via
+/// `sqry_db::persistence::save_derived` on a background tokio task. The
+/// timeout is taken from `DaemonConfig::rebuild_drain_timeout_ms` so it
+/// matches the documented "single writer is sqryd" contract from
+/// `CLAUDE.md` / the PN3 cold-start design. Failures are absorbed by
+/// `spawn_hook` and never block publish; non-daemon callers (CLI, LSP,
+/// MCP) continue to use the read-only `make_query_db_cold` path with
+/// `load_derived_opportunistic`.
 fn build_daemon_components(
     cfg: Arc<DaemonConfig>,
 ) -> (
@@ -1191,6 +1202,18 @@ fn build_daemon_components(
 ) {
     let plugins = Arc::new(sqry_plugin_registry::create_plugin_manager());
     let manager = WorkspaceManager::new(Arc::clone(&cfg));
+
+    // PF03B: install the production derived-cache writer hook BEFORE the
+    // dispatcher / IPC server start serving requests, so the very first
+    // publish on this daemon process triggers `save_derived`.
+    let query_db_hook =
+        crate::workspace::QueryDbHook::new(Duration::from_millis(cfg.rebuild_drain_timeout_ms));
+    manager.set_hook(query_db_hook as crate::workspace::SharedHook);
+    info!(
+        timeout_ms = cfg.rebuild_drain_timeout_ms,
+        "PF03B: production QueryDbHook installed (post-publish derived-cache writer)"
+    );
+
     let dispatcher =
         RebuildDispatcher::new(Arc::clone(&manager), Arc::clone(&cfg), Arc::clone(&plugins));
     let builder: Arc<dyn crate::workspace::WorkspaceBuilder> =

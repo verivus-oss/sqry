@@ -13,8 +13,8 @@ name = "sqry_lang_servicenow_xml"
 path = "src/lib.rs"
 
 [dependencies]
-sqry-core = { version = "13.0.5", path = "../sqry-core" }
-sqry-lang-servicenow-xanadu = { version = "13.0.5", path = "../sqry-lang-servicenow-xanadu" }
+sqry-core = { version = "13.0.7", path = "../sqry-core" }
+sqry-lang-servicenow-xanadu = { version = "13.0.7", path = "../sqry-lang-servicenow-xanadu" }
 roxmltree = "0.21"
 tree-sitter = { workspace = true }
 tree-sitter-html = { workspace = true }

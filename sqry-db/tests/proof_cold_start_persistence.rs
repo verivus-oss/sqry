@@ -1101,3 +1101,287 @@ fn revision_mismatch_per_entry_skip() {
         "recomputed result must match the original warm value"
     );
 }
+
+// ============================================================================
+// PF04 — make_query_db_cold never writes derived.sqry
+// ============================================================================
+//
+// Proves that the canonical dispatch helper used by CLI, LSP, and MCP
+// (`sqry_db::queries::dispatch::make_query_db_cold`) is a reader-only
+// surface. It may DELETE a stale or corrupt derived-cache file (allowed
+// by the documented opportunistic-load policy), but it must NEVER write
+// or modify a derived-cache file.
+//
+// Spec: docs/reviews/generational-design-analysis/2026-05-07/codex_in_code_verification_2026-05-07T030441Z.md
+// Plan: docs/development/generational-analysis-platform/priority-followups/03_IMPLEMENTATION_PLAN.md (unit PF04)
+//
+// The three scenarios:
+//
+// 1. **Fresh workspace, snapshot present, no derived file** — a real V10
+//    snapshot.sqry is written via `save_to_path`; `make_query_db_cold`
+//    is invoked plus several representative queries. Asserts that no
+//    derived.sqry file appears on disk.
+//
+// 2. **No snapshot.sqry on disk** — the cold-load helper must short-
+//    circuit on the missing snapshot. Asserts no derived.sqry created.
+//
+// 3. **Pre-existing valid derived.sqry** — a writer (the daemon hook in
+//    production, `save_derived` in this test) creates a valid
+//    derived.sqry. `make_query_db_cold` is invoked; the file's bytes
+//    AND modification time must be unchanged after cold-load + queries.
+
+/// PF04 — exhaustive proof that `make_query_db_cold` never writes
+/// (creates or modifies) the derived.sqry companion file.
+#[test]
+#[allow(clippy::similar_names)] // caller/callee + caller_name/callee_name: intentional call-graph terminology
+fn pf04_make_query_db_cold_never_writes_derived_sqry() {
+    use sqry_core::graph::unified::persistence::save_to_path;
+    use sqry_db::queries::dispatch::make_query_db_cold;
+    use std::time::SystemTime;
+
+    // ── Scenario A: snapshot present, no derived file ──────────────────────
+    {
+        let dir = TempDir::new().expect("tempdir");
+        let workspace_root = dir.path();
+        let graph_dir = workspace_root.join(".sqry").join("graph");
+        std::fs::create_dir_all(&graph_dir).expect("mkdir .sqry/graph");
+
+        // Build a minimal real graph and persist it via the canonical V10
+        // snapshot writer. This ensures the on-disk SHA-256 is well-formed
+        // so `load_derived_opportunistic` follows the normal code path
+        // rather than short-circuiting on a missing-file branch.
+        let (snapshot_arc, _file) = build_call_graph();
+        let mut graph_for_save = CodeGraph::new();
+        // Reproduce the same minimal shape; we just need *any* valid graph
+        // on disk. Reusing the snapshot's underlying graph isn't directly
+        // possible because `snapshot()` returns a clone — instead we build
+        // a fresh one identical in structure.
+        {
+            let file = graph_for_save
+                .files_mut()
+                .register_with_language(Path::new("src/lib.rs"), Some(Language::Rust))
+                .expect("register file");
+            let caller_name = graph_for_save
+                .strings_mut()
+                .intern("main")
+                .expect("intern main");
+            let caller = add_node(
+                &mut graph_for_save,
+                NodeEntry::new(NodeKind::Function, caller_name, file)
+                    .with_qualified_name(caller_name)
+                    .with_byte_range(0, 100),
+            );
+            let callee_name = graph_for_save
+                .strings_mut()
+                .intern("helper")
+                .expect("intern helper");
+            let callee = add_node(
+                &mut graph_for_save,
+                NodeEntry::new(NodeKind::Function, callee_name, file)
+                    .with_qualified_name(callee_name)
+                    .with_byte_range(110, 200),
+            );
+            graph_for_save.edges().add_edge(
+                caller,
+                callee,
+                EdgeKind::Calls {
+                    argument_count: 0,
+                    is_async: false,
+                },
+                file,
+            );
+        }
+        let snapshot_path = graph_dir.join("snapshot.sqry");
+        save_to_path(&graph_for_save, &snapshot_path).expect("save snapshot");
+        assert!(snapshot_path.exists(), "scenario A: snapshot must exist");
+
+        let derived_path = graph_dir.join("derived.sqry");
+        assert!(
+            !derived_path.exists(),
+            "scenario A precondition: derived.sqry must not exist before cold-load"
+        );
+
+        // Drive the canonical dispatch helper used by CLI / LSP / MCP.
+        let db = make_query_db_cold(Arc::clone(&snapshot_arc), workspace_root);
+
+        // Drive at least two representative DerivedQuery dispatches so any
+        // would-be writer code path on the read side gets exercised.
+        let _callers = db.get::<CallersQuery>(&RelationKey::exact("main"));
+        let _imports = db.get::<ImportsQuery>(&RelationKey::exact("main"));
+        let _callees = db.get::<CalleesQuery>(&RelationKey::exact("helper"));
+
+        assert!(
+            !derived_path.exists(),
+            "scenario A: make_query_db_cold + queries must NOT create derived.sqry; \
+             reader-only contract violated (file appeared at {})",
+            derived_path.display()
+        );
+    }
+
+    // ── Scenario B: no snapshot.sqry on disk ──────────────────────────────
+    {
+        let dir = TempDir::new().expect("tempdir");
+        let workspace_root = dir.path();
+        // Note: we do NOT create .sqry/graph at all — the helper must
+        // tolerate a fully-absent workspace layout.
+
+        let snapshot_arc = empty_snapshot();
+        let db = make_query_db_cold(Arc::clone(&snapshot_arc), workspace_root);
+
+        // Run a query — even on an empty graph the dispatch must complete
+        // without writing anything.
+        let _callers = db.get::<CallersQuery>(&RelationKey::exact("main"));
+        let _imports = db.get::<ImportsQuery>(&RelationKey::exact("main"));
+
+        let derived_path = workspace_root
+            .join(".sqry")
+            .join("graph")
+            .join("derived.sqry");
+        assert!(
+            !derived_path.exists(),
+            "scenario B: make_query_db_cold against a workspace with no snapshot.sqry \
+             must not create derived.sqry"
+        );
+        // Belt-and-braces: also assert the .sqry directory was not silently
+        // synthesised by the cold-load path.
+        let sqry_dir = workspace_root.join(".sqry");
+        assert!(
+            !sqry_dir.exists(),
+            "scenario B: cold-load must not create the .sqry/ directory either"
+        );
+    }
+
+    // ── Scenario C: pre-existing valid derived.sqry ──────────────────────
+    //
+    // Setup: write a real V10 snapshot, then use `save_derived` (the only
+    // legitimate writer — invoked from the daemon hook in production) to
+    // produce a derived.sqry whose SHA matches the on-disk snapshot.
+    //
+    // Verification: capture the file's bytes + mtime before the
+    // cold-load; invoke `make_query_db_cold`; assert bytes + mtime are
+    // identical afterwards. The opportunistic loader is allowed to READ
+    // and PARSE the file but must never rewrite it.
+    {
+        use sqry_db::persistence::{compute_file_sha256, save_derived};
+
+        let dir = TempDir::new().expect("tempdir");
+        let workspace_root = dir.path();
+        let graph_dir = workspace_root.join(".sqry").join("graph");
+        std::fs::create_dir_all(&graph_dir).expect("mkdir .sqry/graph");
+
+        // Persist a real graph so `load_derived_opportunistic` finds a
+        // matching SHA on disk. This is what unlocks the actual rehydration
+        // path inside `make_query_db_cold` (rather than a NotFound short-
+        // circuit on the snapshot file).
+        let mut graph_for_save = CodeGraph::new();
+        let file = graph_for_save
+            .files_mut()
+            .register_with_language(Path::new("src/lib.rs"), Some(Language::Rust))
+            .expect("register file");
+        let caller_name = graph_for_save
+            .strings_mut()
+            .intern("main")
+            .expect("intern main");
+        let caller = add_node(
+            &mut graph_for_save,
+            NodeEntry::new(NodeKind::Function, caller_name, file)
+                .with_qualified_name(caller_name)
+                .with_byte_range(0, 100),
+        );
+        let callee_name = graph_for_save
+            .strings_mut()
+            .intern("helper")
+            .expect("intern helper");
+        let callee = add_node(
+            &mut graph_for_save,
+            NodeEntry::new(NodeKind::Function, callee_name, file)
+                .with_qualified_name(callee_name)
+                .with_byte_range(110, 200),
+        );
+        graph_for_save.edges().add_edge(
+            caller,
+            callee,
+            EdgeKind::Calls {
+                argument_count: 0,
+                is_async: false,
+            },
+            file,
+        );
+
+        let snapshot_path = graph_dir.join("snapshot.sqry");
+        save_to_path(&graph_for_save, &snapshot_path).expect("save snapshot");
+
+        // Compute the actual SHA the on-disk snapshot has, then write a
+        // derived.sqry keyed on that SHA so the opportunistic loader will
+        // accept it as fresh.
+        let on_disk_sha = compute_file_sha256(&snapshot_path).expect("hash snapshot");
+
+        // Build a cache-warm DB whose snapshot matches the persisted graph
+        // structurally (the cache holds derived results that are valid for
+        // any snapshot with the same SHA — saved separately above).
+        let snapshot_arc = Arc::new(graph_for_save.snapshot());
+        let writer_db = QueryDb::new(Arc::clone(&snapshot_arc), QueryDbConfig::default());
+        // Warm a query so save_derived has at least one entry to persist.
+        let _ = writer_db.get::<CallersQuery>(&RelationKey::exact("main"));
+
+        let derived_path = graph_dir.join("derived.sqry");
+        save_derived(&writer_db, on_disk_sha, &derived_path, workspace_root)
+            .expect("setup: save_derived must succeed");
+        assert!(
+            derived_path.exists(),
+            "scenario C precondition: derived.sqry must exist after setup"
+        );
+
+        // Snapshot the file's bytes + mtime BEFORE the cold-load.
+        let before_bytes = std::fs::read(&derived_path).expect("read derived");
+        let before_meta = std::fs::metadata(&derived_path).expect("metadata derived");
+        let before_mtime = before_meta
+            .modified()
+            .expect("mtime")
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("duration since epoch");
+
+        // Sleep briefly so any (forbidden) rewrite would produce a
+        // distinct mtime on filesystems with second-level granularity.
+        // 1.1s is enough on every supported filesystem.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+
+        // Drive the canonical dispatch helper.
+        let db = make_query_db_cold(Arc::clone(&snapshot_arc), workspace_root);
+
+        // Run multiple queries — even queries that miss the rehydrated
+        // entries (and would warm fresh cache entries in the in-memory DB)
+        // must not trigger a disk write.
+        let _ = db.get::<CallersQuery>(&RelationKey::exact("main"));
+        let _ = db.get::<ImportsQuery>(&RelationKey::exact("main"));
+        let _ = db.get::<CalleesQuery>(&RelationKey::exact("helper"));
+
+        // The file MUST still exist (opportunistic loader does not delete
+        // a fresh, well-formed derived file).
+        assert!(
+            derived_path.exists(),
+            "scenario C: derived.sqry must still exist after cold-load (it was valid)"
+        );
+
+        // Bytes must be byte-for-byte identical.
+        let after_bytes = std::fs::read(&derived_path).expect("read derived after");
+        assert_eq!(
+            before_bytes, after_bytes,
+            "scenario C: derived.sqry bytes must be unchanged by make_query_db_cold + queries; \
+             reader-only contract violated (file was rewritten)"
+        );
+
+        // mtime must be unchanged.
+        let after_meta = std::fs::metadata(&derived_path).expect("metadata derived after");
+        let after_mtime = after_meta
+            .modified()
+            .expect("mtime")
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("duration since epoch");
+        assert_eq!(
+            before_mtime, after_mtime,
+            "scenario C: derived.sqry mtime must be unchanged by make_query_db_cold + queries; \
+             reader-only contract violated (file was touched)"
+        );
+    }
+}

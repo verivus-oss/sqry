@@ -259,3 +259,127 @@ async fn dispatcher_end_to_end_on_rust_small_fixture() {
         status.memory.limit_bytes,
     );
 }
+
+// ---------------------------------------------------------------------------
+// PF03B integration: production QueryDbHook wired through publish path.
+//
+// Verifies that when the daemon installs `QueryDbHook` (matching what
+// `entrypoint::build_daemon_components` does), a publish writes the canonical
+// snapshot, warms useful derived-cache entries, and persists derived.sqry with
+// a SHA bound to that same snapshot identity.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn pf08_pf09_query_db_hook_writes_useful_derived_sqry_after_publish() {
+    use sqry_core::graph::unified::persistence::load_from_path;
+    use sqry_daemon::workspace::{QueryDbHook, SharedHook};
+    use sqry_db::queries::{CalleesQuery, RelationKey};
+    use std::time::Duration;
+
+    let tmp = make_tempdir_fixture();
+    let workspace_root = tmp.path().to_path_buf();
+
+    // Seed a stale snapshot first. PF09 requires the hook to bind the derived
+    // cache to the graph it publishes, not to whatever snapshot happened to be
+    // on disk before publish.
+    let snap_dir = workspace_root.join(".sqry").join("graph");
+    fs::create_dir_all(&snap_dir).expect("create .sqry/graph");
+    let snapshot_path = snap_dir.join("snapshot.sqry");
+    sqry_core::graph::unified::persistence::save_to_path(
+        &sqry_core::graph::CodeGraph::new(),
+        &snapshot_path,
+    )
+    .expect("save stale snapshot.sqry");
+    let stale_sha =
+        sqry_db::persistence::compute_file_sha256(&snapshot_path).expect("hash stale snapshot");
+
+    let config = Arc::new(DaemonConfig::default());
+    let manager = WorkspaceManager::new_without_reaper(Arc::clone(&config));
+
+    // Mirror entrypoint.rs::build_daemon_components — install the
+    // production QueryDbHook with the configured drain timeout.
+    let hook = QueryDbHook::new(Duration::from_millis(config.rebuild_drain_timeout_ms));
+    manager.set_hook(hook as SharedHook);
+
+    let key = WorkspaceKey::new(workspace_root.clone(), ProjectRootMode::WorkspaceFolder, 0);
+    let builder = RealGraphBuilder {
+        plugins: Arc::new(sqry_plugin_registry::create_plugin_manager()),
+        cfg: BuildConfig::default(),
+    };
+    let estimate = working_set_estimate(WorkingSetInputs {
+        new_graph_final_estimate: 1_024 * 1024,
+        staging_overhead: 256 * 1024,
+        interner_snapshot_bytes: 128 * 1024,
+    });
+    let published_graph = manager
+        .get_or_load(&key, &builder, estimate)
+        .expect("publish via real fixture builder must succeed");
+    assert!(
+        published_graph.node_count() > 0,
+        "PF08 fixture graph must be non-empty"
+    );
+
+    // The hook is fire-and-forget; poll for derived.sqry within the
+    // configured timeout window with a small safety margin.
+    let derived = snap_dir.join("derived.sqry");
+    let deadline = std::time::Instant::now()
+        + Duration::from_millis(config.rebuild_drain_timeout_ms.saturating_mul(2).max(2_000));
+    while std::time::Instant::now() < deadline {
+        if derived.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        derived.exists(),
+        "PF03B: production QueryDbHook must write {} after publish",
+        derived.display()
+    );
+
+    let bytes = fs::read(&derived).expect("read derived.sqry");
+    assert!(bytes.len() >= sqry_db::DERIVED_MAGIC.len());
+    assert_eq!(
+        &bytes[..sqry_db::DERIVED_MAGIC.len()],
+        sqry_db::DERIVED_MAGIC,
+        "derived.sqry must start with SQRY_DERIVED_V02 magic bytes",
+    );
+
+    let (header, _tail) =
+        sqry_db::persistence::deserialize_derived_header(&bytes).expect("decode header");
+    assert!(
+        header.entry_count > 0,
+        "PF08: daemon-written derived.sqry must contain useful persisted entries"
+    );
+    let current_sha =
+        sqry_db::persistence::compute_file_sha256(&snapshot_path).expect("hash current snapshot");
+    assert_ne!(
+        header.snapshot_sha256, stale_sha,
+        "PF09: derived header must not retain the stale pre-publish snapshot SHA"
+    );
+    assert_eq!(
+        header.snapshot_sha256, current_sha,
+        "PF09: derived header must match the freshly-published snapshot SHA"
+    );
+
+    let persisted_graph = load_from_path(&snapshot_path, None).expect("load persisted snapshot");
+    let persisted_snapshot = persisted_graph.snapshot();
+    let first_symbol = persisted_snapshot
+        .iter_nodes()
+        .find_map(|(_node_id, node)| persisted_snapshot.strings().resolve(node.name))
+        .expect("fixture has at least one resolvable symbol")
+        .to_string();
+
+    let cold_db = sqry_db::make_query_db_cold(Arc::new(persisted_snapshot), &workspace_root);
+    let before = cold_db.metrics();
+    let _ = cold_db.get::<CalleesQuery>(&RelationKey::exact(first_symbol));
+    let after = cold_db.metrics();
+    assert_eq!(
+        after.cache_misses, before.cache_misses,
+        "PF08: first matching cold query must not recompute"
+    );
+    assert_eq!(
+        after.cache_hits,
+        before.cache_hits + 1,
+        "PF08: first matching cold query must be served from daemon-written derived.sqry"
+    );
+}

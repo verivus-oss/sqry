@@ -638,16 +638,29 @@ fn upconvert_v7_to_v8(v7: GraphSnapshotDataV7) -> GraphSnapshotData {
 ///
 /// This function:
 /// 1. Materializes a `CodeGraph` from the V8 components.
-/// 2. Runs `derive_binding_plane(&mut graph)` to populate `scope_arena`,
+/// 2. Stamps the supplied `fact_epoch` (taken from the source `GraphHeader.fact_epoch`
+///    by V8 callers, or `0` for the V7→V8→V9 chained path because V7 has no
+///    fact-epoch field) onto the materialized graph **before** Phase 4e runs, so
+///    every scope-provenance entry minted by `derive_binding_plane` carries the
+///    real source epoch instead of being silently demoted to `0`.
+/// 3. Runs `derive_binding_plane(&mut graph)` to populate `scope_arena`,
 ///    `alias_table`, `shadow_table`, and `scope_provenance_store`.
-/// 3. Returns a `GraphSnapshotDataV9` ready for validation and `CodeGraph` construction.
+/// 4. Returns a `GraphSnapshotDataV9` ready for validation and `CodeGraph` construction.
 ///
 /// The reverse index on `ScopeProvenanceStore` is built during derivation;
 /// no separate `rebuild_reverse_index` call is required here.
-fn upconvert_v8_to_v9(v8: GraphSnapshotData) -> GraphSnapshotDataV9 {
+///
+/// ## Why a parameter rather than a field on `GraphSnapshotData`
+///
+/// V8's persisted `GraphSnapshotData` shape did not carry the fact epoch — the
+/// epoch lives only on the V8 `GraphHeader`. Callers that have decoded the
+/// V8 header pass `header.fact_epoch()`; the V7 chained call site passes `0`
+/// explicitly because V7 has no header `fact_epoch`. Threading the epoch as an
+/// explicit parameter keeps the V8 on-disk schema unchanged while restoring
+/// correct provenance stamping during inline upconvert.
+fn upconvert_v8_to_v9(v8: GraphSnapshotData, fact_epoch: u64) -> GraphSnapshotDataV9 {
     let node_provenance = v8.node_provenance;
     let edge_provenance = v8.edge_provenance;
-    let fact_epoch = 0; // V8 fact_epoch stamped on header; CodeGraph.fact_epoch defaults to 0 for upconvert
 
     let mut graph = CodeGraph::from_components(
         v8.nodes,
@@ -1435,14 +1448,19 @@ pub fn load_from_bytes(
     reader.read_exact(&mut data_buf)?;
     let mut snapshot_data: GraphSnapshotDataV10 = match format_version {
         FormatVersion::V7 => {
+            // V7 predates `GraphHeader.fact_epoch`; pass `0` explicitly so the
+            // V7 → V8 → V9 chained path is deterministic and matches the
+            // documented "V7 has no fact epoch" contract.
             let v7: GraphSnapshotDataV7 = postcard::from_bytes(&data_buf)?;
             let v8 = upconvert_v7_to_v8(v7);
-            let v9 = upconvert_v8_to_v9(v8);
+            let v9 = upconvert_v8_to_v9(v8, 0);
             upconvert_v9_to_v10(v9)
         }
         FormatVersion::V8 => {
+            // Forward the V8 header epoch so derived scope provenance is
+            // stamped with the real source epoch, not silently demoted to 0.
             let v8: GraphSnapshotData = postcard::from_bytes(&data_buf)?;
-            let v9 = upconvert_v8_to_v9(v8);
+            let v9 = upconvert_v8_to_v9(v8, header.fact_epoch());
             upconvert_v9_to_v10(v9)
         }
         FormatVersion::V9 => {
@@ -1574,14 +1592,19 @@ pub fn load_from_path(
     reader.read_exact(&mut data_buf)?;
     let mut snapshot_data: GraphSnapshotDataV10 = match format_version {
         FormatVersion::V7 => {
+            // V7 predates `GraphHeader.fact_epoch`; pass `0` explicitly so the
+            // V7 → V8 → V9 chained path is deterministic and matches the
+            // documented "V7 has no fact epoch" contract.
             let v7: GraphSnapshotDataV7 = postcard::from_bytes(&data_buf)?;
             let v8 = upconvert_v7_to_v8(v7);
-            let v9 = upconvert_v8_to_v9(v8);
+            let v9 = upconvert_v8_to_v9(v8, 0);
             upconvert_v9_to_v10(v9)
         }
         FormatVersion::V8 => {
+            // Forward the V8 header epoch so derived scope provenance is
+            // stamped with the real source epoch, not silently demoted to 0.
             let v8: GraphSnapshotData = postcard::from_bytes(&data_buf)?;
-            let v9 = upconvert_v8_to_v9(v8);
+            let v9 = upconvert_v8_to_v9(v8, header.fact_epoch());
             upconvert_v9_to_v10(v9)
         }
         FormatVersion::V9 => {
