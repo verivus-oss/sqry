@@ -110,7 +110,7 @@ install_zypper_release_tools() {
     mkdir -p "$RELEASE_TOOLS_ROOT"
     local cache
     cache="$(mktemp -d)"
-    trap 'rm -rf "$cache"' RETURN
+    trap 'rm -rf "${cache:-}"' RETURN
 
     XDG_CACHE_HOME="$cache" zypper --non-interactive download "${MINGW_PACKAGES[@]}"
 
@@ -120,6 +120,8 @@ install_zypper_release_tools() {
     done < <(find "$cache" -name '*.rpm' -print | sort)
 
     install_mingw_wrappers
+    rm -rf "$cache"
+    trap - RETURN
     ok "zypper package extraction complete."
 }
 

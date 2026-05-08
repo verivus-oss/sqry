@@ -1,6 +1,6 @@
 # sqry
 
-[![MCP Registry](https://img.shields.io/badge/MCP-Registry-blue)](https://registry.modelcontextprotocol.io/servers/io.github.verivus-oss/sqry)
+[![MCP Registry](https://img.shields.io/badge/MCP-Registry-blue)](https://registry.modelcontextprotocol.io/v0.1/servers/io.github.verivus-oss%2Fsqry/versions/latest)
 [![crates.io](https://img.shields.io/crates/v/sqry-cli.svg)](https://crates.io/crates/sqry-cli)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
