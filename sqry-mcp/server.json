@@ -3,7 +3,7 @@
   "name": "io.github.verivus-oss/sqry",
   "description": "AST-based semantic code search — understands code structure and relationships across 35 languages.",
   "title": "sqry — Semantic Code Search",
-  "version": "6.0.18",
+  "version": "13.0.11",
   "websiteUrl": "https://github.com/verivus-oss/sqry",
   "repository": {
     "url": "https://github.com/verivus-oss/sqry",
