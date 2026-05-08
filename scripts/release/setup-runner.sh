@@ -125,7 +125,7 @@ install_zypper_release_tools() {
     cache="$(mktemp -d)"
     trap 'rm -rf "${cache:-}"' RETURN
 
-    XDG_CACHE_HOME="$cache" zypper --non-interactive download "${MINGW_PACKAGES[@]}"
+    zypper --pkg-cache-dir "$cache" --non-interactive download "${MINGW_PACKAGES[@]}"
 
     while IFS= read -r rpm; do
         info "Extracting ${rpm##*/}"
