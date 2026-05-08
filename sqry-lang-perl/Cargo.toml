@@ -9,11 +9,11 @@ rust-version.workspace = true
 description = "Perl language plugin for sqry"
 
 [dependencies]
-sqry-core = { version = "13.0.7", path = "../sqry-core" }
+sqry-core = { version = "13.0.11", path = "../sqry-core" }
 anyhow.workspace = true
 log.workspace = true
 tree-sitter.workspace = true
-tree-sitter-perl-sqry = { version = "13.0.7", path = "../crates/tree-sitter-perl-sqry" }
+tree-sitter-perl-sqry = { version = "13.0.11", path = "../crates/tree-sitter-perl-sqry" }
 streaming-iterator.workspace = true
 once_cell.workspace = true
 

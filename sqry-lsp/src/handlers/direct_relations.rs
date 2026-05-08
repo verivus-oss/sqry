@@ -1,6 +1,9 @@
 //! Direct callers/callees handlers for LSP.
 //!
-//! Provides optimized direct relation queries using `CodeGraph` via `execute_on_graph()`.
+//! Provides optimized direct relation queries using `CodeGraph`. SGA06 routes
+//! graph acquisition through [`SessionManager::graph_for_path`] (shared
+//! `FilesystemGraphProvider` pipeline) and runs queries via
+//! `QueryExecutor::execute_on_preloaded_graph`.
 
 use anyhow::{Context, Result};
 use tower_lsp::lsp_types::{Location, Position, Range, Url};
@@ -34,11 +37,21 @@ pub fn execute_direct_callers(
         root.display()
     );
 
-    // Use execute_on_graph with callers: predicate
+    // SGA06 — acquire the graph through the shared provider before running
+    // the callers: predicate via the preloaded executor entrypoint.
+    let Some(graph) = session.graph_for_path(&root)? else {
+        return Ok(SqryDirectCallersResult {
+            symbol: params.symbol.clone(),
+            callers: Vec::new(),
+            total: 0,
+            truncated: false,
+        });
+    };
+
     let query = format!("callers:{}", params.symbol);
     let executor = session.executor();
     let query_results = executor
-        .execute_on_graph(&query, &root)
+        .execute_on_preloaded_graph(graph, &query, &root, None)
         .with_context(|| format!("failed to execute callers query for '{}'", params.symbol))?;
 
     let total_found = query_results.len();
@@ -111,11 +124,21 @@ pub fn execute_direct_callees(
         root.display()
     );
 
-    // Use execute_on_graph with callees: predicate
+    // SGA06 — acquire the graph through the shared provider before running
+    // the callees: predicate via the preloaded executor entrypoint.
+    let Some(graph) = session.graph_for_path(&root)? else {
+        return Ok(SqryDirectCalleesResult {
+            symbol: params.symbol.clone(),
+            callees: Vec::new(),
+            total: 0,
+            truncated: false,
+        });
+    };
+
     let query = format!("callees:{}", params.symbol);
     let executor = session.executor();
     let query_results = executor
-        .execute_on_graph(&query, &root)
+        .execute_on_preloaded_graph(graph, &query, &root, None)
         .with_context(|| format!("failed to execute callees query for '{}'", params.symbol))?;
 
     let total_found = query_results.len();

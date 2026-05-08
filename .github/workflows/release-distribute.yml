@@ -225,7 +225,8 @@ jobs:
           LEDGER_PATH: ${{ steps.ledger.outputs.path }}
         run: |
           set -euo pipefail
-          gh release upload "$TAG" "$LEDGER_PATH" --clobber
+          source scripts/release/github-release-assets.sh
+          gh_release_upload_with_retry "$TAG" "$LEDGER_PATH"
           echo "Uploaded running-state ledger for Stage 5 verification"
 
       - name: Install Rust + targets
@@ -987,12 +988,15 @@ jobs:
           GH_TOKEN: ${{ steps.public-release-auth.outputs.token }}
         run: |
           set -euo pipefail
+          source scripts/release/github-release-assets.sh
           mapfile -d '' release_assets < <(find dist -maxdepth 1 -type f -print0 | sort -z)
           if [[ ${#release_assets[@]} -eq 0 ]]; then
             echo "FATAL: no release asset files found in dist/" >&2
             exit 1
           fi
-          gh release upload "$TAG" "${release_assets[@]}" --clobber
+          for release_asset in "${release_assets[@]}"; do
+            gh_release_upload_with_retry "$TAG" "$release_asset"
+          done
 
       # Phase 6.7: Promote release
       - name: Promote public release from draft
@@ -1086,7 +1090,8 @@ jobs:
           public_ledger_path.write_text(json.dumps(public_ledger, indent=2, sort_keys=True) + "\n", encoding="utf-8")
           PY
           ! rg -n 'verivusai-open|/srv/repos/(internal|external)|staged_origin' "dist/release-ledger-v${VERSION}.json"
-          gh release upload "$TAG" "dist/release-ledger-v${VERSION}.json" --clobber
+          source scripts/release/github-release-assets.sh
+          gh_release_upload_with_retry "$TAG" "dist/release-ledger-v${VERSION}.json"
           gh release edit "$TAG" --draft=false --latest
 
       - name: Persist failed Stage 6 ledger state
@@ -1096,11 +1101,12 @@ jobs:
         run: |
           set -euo pipefail
           if [[ -n "${LEDGER_PATH:-}" && -f "$LEDGER_PATH" ]]; then
+            source scripts/release/github-release-assets.sh
             tmp=$(mktemp)
             jq '
               .stages.stage_6_distribute.status = "failed" |
               .stages.stage_6_distribute.failed_at = (now | todateiso8601)
             ' "$LEDGER_PATH" > "$tmp" && mv "$tmp" "$LEDGER_PATH"
-            GH_TOKEN="${{ secrets.GITHUB_TOKEN }}" gh release upload "$TAG" "$LEDGER_PATH" --clobber || true
+            GH_TOKEN="${{ secrets.GITHUB_TOKEN }}" gh_release_upload_with_retry "$TAG" "$LEDGER_PATH" || true
             echo "Uploaded failed-state ledger"
           fi

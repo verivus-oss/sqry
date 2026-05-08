@@ -23,6 +23,13 @@ path = "src/main.rs"
 default = []
 # Enable MiniLM-L6-v2 ONNX intent classifier for sqry_ask (adds ~57MB, requires ONNX Runtime)
 nl-classifier = ["sqry-nl/classifier"]
+# Forwarding feature for integration tests that need the long-tail
+# enterprise/IaC plugins (apex, abap, servicenow-*, terraform, puppet,
+# pulumi, plsql) gated behind `sqry-plugin-registry/specialty-plugins`
+# after `refactor!: make non-core surfaces opt-in` (commit ecd215385).
+# Off by default. Run gated tests with:
+#   cargo test -p sqry-mcp --features specialty-plugins
+specialty-plugins = ["sqry-plugin-registry/specialty-plugins"]
 # Iter2-B C029c — exposes `SqryServer::new_for_tests` and
 # `SqryServer::build_success_result_for_tests` so integration tests can
 # drive the actual `success_result` boundary that
@@ -34,18 +41,18 @@ nl-classifier = ["sqry-nl/classifier"]
 test-helpers = []
 
 [dependencies]
-tokio = { version = "1.0", features = ["full"] }
+tokio = { version = "1.52", features = ["full"] }
 anyhow = "1.0"
 thiserror.workspace = true
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tracing = "0.1"
 tracing-subscriber = "0.3"
-sqry-core = { version = "13.0.7", path = "../sqry-core" }
-sqry-db = { version = "13.0.7", path = "../sqry-db" }
-sqry-plugin-registry = { version = "13.0.7", path = "../sqry-plugin-registry" }
-sqry-nl = { version = "13.0.7", path = "../sqry-nl", default-features = false }
-sqry-mcp-redaction = { version = "13.0.7", path = "../sqry-mcp-redaction" }
+sqry-core = { version = "13.0.11", path = "../sqry-core" }
+sqry-db = { version = "13.0.11", path = "../sqry-db" }
+sqry-plugin-registry = { version = "13.0.11", path = "../sqry-plugin-registry" }
+sqry-nl = { version = "13.0.11", path = "../sqry-nl", default-features = false }
+sqry-mcp-redaction = { version = "13.0.11", path = "../sqry-mcp-redaction" }
 
 # MCP SDK for protocol compliance
 rmcp = { version = "0.16", features = ["server", "transport-io"] }
@@ -53,22 +60,22 @@ rmcp = { version = "0.16", features = ["server", "transport-io"] }
 # JSON schema derivation for parameter types (must match rmcp's version)
 schemars = "1"
 parking_lot.workspace = true
-once_cell = "1.19"
+once_cell = "1.21"
 hdrhistogram = { version = "7.5", default-features = false, features = ["sync"] }
 url = "2.5"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 sha2.workspace = true
 hex.workspace = true
 base64 = "0.22"
-tempfile = "3.10"
+tempfile = "3.27"
 indexmap = "2"
 rayon.workspace = true
-lru = "0.16"
+lru = "0.18"
 
 # Phase 8c U12 — shim-mode client for `--daemon` / `--daemon-socket`.
 # sqry-daemon-client is a leaf on the dep graph (no sqry-daemon server
 # dep); no cycle is introduced. Verify with `cargo tree -p sqry-mcp`.
-sqry-daemon-client = { version = "13.0.7", path = "../sqry-daemon-client" }
+sqry-daemon-client = { version = "13.0.11", path = "../sqry-daemon-client" }
 
 # Task 12 U1 — `which` resolves the sqryd binary via PATH lookup (tier 3
 # of the resolution order: SQRYD_PATH env > sibling > which). Pinned to
@@ -92,9 +99,9 @@ libc = "0.2"
 libc = "0.2"
 
 [dev-dependencies]
-tempfile = "3.10"
+tempfile = "3.27"
 log.workspace = true
-serial_test = "3.0"
+serial_test = "3.4"
 criterion = { version = "0.8", features = ["html_reports"] }
 approx = "0.5"
 walkdir = "2"

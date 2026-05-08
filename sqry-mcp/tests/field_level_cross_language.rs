@@ -6,6 +6,13 @@
 //! REQ:R0018, REQ:R0019, REQ:R0020, REQ:R0021, REQ:R0022, REQ:R0023,
 //! REQ:R0024.
 
+// Several helpers + imports here are only used by tests that are
+// gated on `specialty-plugins` (FIELD_CASES iterates over apex / abap
+// fixtures gated behind that feature after commit ecd215385). Suppress
+// dead-code warnings under default features so `cargo clippy
+// --all-targets -- -D warnings` stays green.
+#![cfg_attr(not(feature = "specialty-plugins"), allow(dead_code, unused_imports))]
+
 use anyhow::{Context, Result};
 use sqry_core::graph::unified::build::{BuildConfig, build_unified_graph};
 use sqry_core::graph::unified::concurrent::{CodeGraph, GraphSnapshot};
@@ -476,6 +483,13 @@ fn assert_strict_bare_collision_is_ambiguous(snapshot: &GraphSnapshot, case: &Fi
     );
 }
 
+// `FIELD_CASES` includes apex / abap fixtures that depend on plugins
+// gated behind `sqry-plugin-registry/specialty-plugins` after
+// `refactor!: make non-core surfaces opt-in` (commit ecd215385).
+// Without the feature, the indexer skips those languages and the
+// per-case assertions trip. Run with:
+//   cargo test -p sqry-mcp --features specialty-plugins --test field_level_cross_language
+#[cfg(feature = "specialty-plugins")]
 #[test]
 #[allow(clippy::too_many_lines)]
 fn test_req_r0001_r0003_r0004_r0005_field_contract_cross_language() -> Result<()> {
@@ -608,6 +622,7 @@ fn test_req_r0001_r0003_r0004_r0005_field_contract_cross_language() -> Result<()
     Ok(())
 }
 
+#[cfg(feature = "specialty-plugins")]
 #[test]
 fn test_req_r0011_duplicate_bare_field_names_are_qualified() -> Result<()> {
     for case in FIELD_CASES {
@@ -637,9 +652,16 @@ fn test_req_r0011_duplicate_bare_field_names_are_qualified() -> Result<()> {
 
 #[test]
 fn test_req_r0012_mcp_find_unused_excludes_public_typeof_field_roots() -> Result<()> {
+    // Iterate non-specialty cases unconditionally; include apex/abap only
+    // when their plugins are compiled in. Without `specialty-plugins`,
+    // those fixtures produce zero indexed nodes and the assertion holds
+    // vacuously, which is sloppy coverage rather than a real check.
     for case in FIELD_CASES
         .iter()
         .filter(|case| case.public_suffix.is_some())
+        .filter(|case| {
+            cfg!(feature = "specialty-plugins") || !matches!(case.label, "apex" | "abap")
+        })
     {
         let workspace = temp_fixture_root_for(case)?;
         index_mcp_fixture(workspace.path())?;
@@ -668,6 +690,7 @@ fn test_req_r0012_mcp_find_unused_excludes_public_typeof_field_roots() -> Result
     Ok(())
 }
 
+#[cfg(feature = "specialty-plugins")]
 #[test]
 fn test_req_r0011_relation_query_resolves_qualified_field_symbols() -> Result<()> {
     for case in FIELD_CASES {

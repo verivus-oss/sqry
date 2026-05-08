@@ -8,6 +8,44 @@
 //! gets a fresh [`SessionManager`] per connection. Shared session
 //! state is a deferred performance optimisation, not a correctness
 //! requirement.
+//!
+//! # SGA06 — Mode B graph acquisition
+//!
+//! Daemon-hosted LSP runs the same `tower_lsp` service stack as
+//! standalone LSP — it just hosts it on a stream pair owned by the
+//! daemon's shim router instead of the LSP binary's stdio. Crucially,
+//! the [`SessionManager`] passed to [`host_on_streams`] is a
+//! standalone-shaped session (no daemon-side workspace handle); every
+//! graph acquisition therefore goes through the standalone-LSP
+//! [`crate::session::SessionManager::graph`] path, which SGA06
+//! migrated to the shared [`sqry_core::graph::acquisition::FilesystemGraphProvider`].
+//!
+//! That means the daemon-hosted LSP edge intentionally does **not**
+//! call back into the daemon's `DaemonGraphProvider`: the byte-pump
+//! is the LSP wire pump only, and graph reads are local-disk reads
+//! against the workspace's `.sqry/graph/` directory. Two consequences
+//! follow:
+//!
+//! 1. There is no daemon-side bounded reload loop available to LSP
+//!    requests — the daemon's
+//!    [`sqry_core::graph::acquisition::GraphAcquisitionError::Evicted`]
+//!    surface is unreachable here. SGA06 acceptance criterion
+//!    "LSP does not surface `WorkspaceEvicted` for normal read-only
+//!    queries when reload succeeds" is satisfied trivially: the LSP
+//!    shim never observes `WorkspaceEvicted` because it never enters
+//!    the daemon-graph acquisition path.
+//! 2. Self-heal / corrupt-load auto-rebuild is preserved because the
+//!    standalone path's `acquire_session_graph` retains that explicit
+//!    behaviour through the [`sqry_core::graph::acquisition::AutoBuildHook`]
+//!    wired in `session.rs`.
+//!
+//! If a future revision needs daemon-backed graph acquisition for
+//! LSP (e.g. to share a hot graph with the daemon-hosted MCP tools
+//! living in the same workspace), the migration shape is to replace
+//! the standalone session here with a daemon-aware variant that
+//! forwards graph-bearing requests through `sqry-daemon-client` to
+//! the daemon's dispatcher (downstream of SGA05). Today that
+//! indirection has no callers, so we keep the simpler local path.
 
 use anyhow::Result;
 use tokio::io::{AsyncRead, AsyncWrite};

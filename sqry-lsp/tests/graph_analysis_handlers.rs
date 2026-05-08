@@ -6,6 +6,7 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use sqry_core::graph::unified::concurrent::CodeGraph;
 use sqry_core::graph::unified::edge::kind::{EdgeKind, TypeOfContext};
 use sqry_core::graph::unified::node::kind::NodeKind;
@@ -506,6 +507,30 @@ fn build_fixture_graph(root: &Path) -> Result<()> {
     let storage = GraphStorage::new(root);
     fs::create_dir_all(storage.graph_dir())?;
     save_to_path(&graph, storage.snapshot_path())?;
+
+    // SGA06 — the LSP graph acquisition path now routes through
+    // `FilesystemGraphProvider`, which verifies the snapshot SHA-256
+    // against the manifest when one is present. The synthetic fixture
+    // overwrites the snapshot bytes; we must rewrite the manifest's
+    // `snapshot_sha256` to match so the provider's integrity check
+    // succeeds. This preserves the production contract (manifest SHA
+    // is checked) while keeping the synthetic fixture loadable.
+    let snapshot_bytes = fs::read(storage.snapshot_path())?;
+    let new_sha_hex = format!("{:x}", Sha256::digest(&snapshot_bytes));
+    let manifest_path = storage.manifest_path();
+    if manifest_path.exists() {
+        let mut manifest = sqry_core::graph::unified::persistence::Manifest::load(manifest_path)
+            .with_context(|| {
+                format!(
+                    "load manifest at {} for SHA refresh",
+                    manifest_path.display()
+                )
+            })?;
+        manifest.snapshot_sha256 = new_sha_hex;
+        manifest
+            .save(manifest_path)
+            .with_context(|| format!("save refreshed manifest at {}", manifest_path.display()))?;
+    }
     Ok(())
 }
 

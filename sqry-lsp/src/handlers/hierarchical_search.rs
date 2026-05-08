@@ -70,10 +70,24 @@ pub fn execute(
         .max_total_symbols
         .unwrap_or(DEFAULT_MAX_TOTAL_SYMBOLS);
 
-    // Execute search using CodeGraph
+    // SGA06 — acquire the graph through the shared provider, then run the
+    // query via the preloaded executor entrypoint so the LSP read-only
+    // hierarchical-search path uses the same `FilesystemGraphProvider`
+    // pipeline as CLI / standalone MCP.
+    let Some(graph) = session.graph_for_path(&root)? else {
+        return Ok(SqryHierarchicalSearchResult {
+            query: params.query.clone(),
+            files: Vec::new(),
+            total_symbols: 0,
+            total_files: 0,
+            truncated: false,
+        });
+    };
+
+    // Execute search using the preloaded graph
     let executor = session.executor();
     let query_results = executor
-        .execute_on_graph(query, &root)
+        .execute_on_preloaded_graph(graph, query, &root, None)
         .with_context(|| format!("failed to execute sqry query '{query}'"))?;
 
     // Convert QueryResults to MatchData with scores

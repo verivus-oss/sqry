@@ -53,6 +53,11 @@ const KIND_DEADLINE_EXCEEDED: &str = "deadline_exceeded";
 const KIND_VALIDATION_ERROR: &str = "validation_error";
 const KIND_WORKSPACE_NOT_READY: &str = "workspace_not_ready";
 const KIND_WORKSPACE_STALE_EXPIRED: &str = "workspace_stale_expired";
+/// SGA04 Gate-A major #5 — distinct kind tag for the
+/// path-policy / compatibility error class. Mirrors sqry-mcp's
+/// `RpcError::workspace_incompatible_graph` envelope name (a
+/// co-ordinated wire contract).
+const KIND_WORKSPACE_INCOMPATIBLE_GRAPH: &str = "workspace_incompatible_graph";
 const KIND_INTERNAL: &str = "internal";
 /// NL08 — kind tag for the ONNX-Runtime-missing condition. Mirrored
 /// across daemon-host and standalone sqry-mcp envelopes.
@@ -209,6 +214,29 @@ pub fn daemon_err_to_mcp(e: DaemonError) -> McpError {
             McpError::internal_error(
                 format!(
                     "workspace {} stale ({age_hours}h > {cap_hours}h cap)",
+                    root.display()
+                ),
+                Some(data),
+            )
+        }
+
+        // SGA04 Gate-A major #5 — keep `WorkspaceIncompatibleGraph`
+        // distinct from the catch-all so MCP clients receive a
+        // dedicated `kind` tag and the `reason` string is preserved
+        // verbatim in `details.reason` (no collapse to "Internal").
+        DaemonError::WorkspaceIncompatibleGraph { root, reason } => {
+            let data = json!({
+                "kind": KIND_WORKSPACE_INCOMPATIBLE_GRAPH,
+                "retryable": false,
+                "retry_after_ms": Value::Null,
+                "details": {
+                    "root": root.display().to_string(),
+                    "reason": reason.clone(),
+                },
+            });
+            McpError::internal_error(
+                format!(
+                    "workspace {} graph is incompatible with this binary: {reason}",
                     root.display()
                 ),
                 Some(data),

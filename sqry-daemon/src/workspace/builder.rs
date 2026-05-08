@@ -37,6 +37,37 @@ pub trait WorkspaceBuilder: Send + Sync + std::fmt::Debug {
     /// The daemon converts any returned [`DaemonError`] into a Failed
     /// workspace state + JSON-RPC `-32001 workspace_build_failed`.
     fn build(&self, workspace_root: &Path) -> Result<CodeGraph, DaemonError>;
+
+    /// Read-only, persisted-graph rehydrate.
+    ///
+    /// SGA04 (shared graph acquisition, daemon provider): reload an
+    /// existing valid persisted graph from `<workspace_root>/.sqry/graph/`
+    /// **without** running [`Self::build`] — no parse, no plugin
+    /// pipeline, no durable publish. Used by
+    /// [`super::WorkspaceManager::reload_from_disk_read_only`] to fulfil
+    /// the bounded one-shot eviction-reload contract for read-only
+    /// queries (see `docs/development/shared-graph-acquisition/02_DESIGN.md`,
+    /// "Bounded reload rule").
+    ///
+    /// The default impl returns [`DaemonError::WorkspaceBuildFailed`]
+    /// with a reason of `"persisted graph rehydrate not implemented"`.
+    /// Test fakes that don't need the read-only reload path keep that
+    /// behaviour; production code uses [`RealWorkspaceBuilder`] which
+    /// drives `GraphStorage::load_from_path` against the workspace's
+    /// snapshot file.
+    ///
+    /// # Errors
+    ///
+    /// - [`DaemonError::WorkspaceBuildFailed`] when no persisted graph
+    ///   exists, when integrity verification fails, when the snapshot
+    ///   format is incompatible, or when this builder does not support
+    ///   read-only rehydrate.
+    fn load_persisted(&self, workspace_root: &Path) -> Result<CodeGraph, DaemonError> {
+        Err(DaemonError::WorkspaceBuildFailed {
+            root: workspace_root.to_path_buf(),
+            reason: "persisted graph rehydrate not implemented for this builder".to_string(),
+        })
+    }
 }
 
 // Allow calling builders through an `Arc` so they can be shared
@@ -44,6 +75,10 @@ pub trait WorkspaceBuilder: Send + Sync + std::fmt::Debug {
 impl<T: WorkspaceBuilder + ?Sized> WorkspaceBuilder for Arc<T> {
     fn build(&self, workspace_root: &Path) -> Result<CodeGraph, DaemonError> {
         (**self).build(workspace_root)
+    }
+
+    fn load_persisted(&self, workspace_root: &Path) -> Result<CodeGraph, DaemonError> {
+        (**self).load_persisted(workspace_root)
     }
 }
 
@@ -152,6 +187,59 @@ impl WorkspaceBuilder for RealWorkspaceBuilder {
             reason: e.to_string(),
         })
     }
+
+    /// SGA04 read-only persisted-graph rehydrate.
+    ///
+    /// Loads `<workspace_root>/.sqry/graph/snapshot.sqry` via
+    /// [`sqry_core::graph::unified::persistence::load_from_path`] using
+    /// the production [`PluginManager`]. Never invokes the build
+    /// pipeline; never writes any artifact.
+    ///
+    /// [`PluginManager`]: sqry_core::plugin::PluginManager
+    fn load_persisted(&self, workspace_root: &Path) -> Result<CodeGraph, DaemonError> {
+        let storage = sqry_core::graph::unified::persistence::GraphStorage::new(workspace_root);
+        if !storage.exists() {
+            return Err(DaemonError::WorkspaceBuildFailed {
+                root: workspace_root.to_path_buf(),
+                reason: format!(
+                    "no persisted graph artifact at {} (.sqry/graph/manifest.json absent)",
+                    workspace_root.display()
+                ),
+            });
+        }
+        if !storage.snapshot_exists() {
+            return Err(DaemonError::WorkspaceBuildFailed {
+                root: workspace_root.to_path_buf(),
+                reason: format!(
+                    "manifest present but snapshot missing at {}",
+                    storage.snapshot_path().display()
+                ),
+            });
+        }
+        sqry_core::graph::unified::persistence::load_from_path(
+            storage.snapshot_path(),
+            Some(&self.plugins),
+        )
+        .map_err(|e| match e {
+            // SGA04 Major #2 (codex iter2) — preserve the
+            // incompatible-snapshot distinction through the daemon
+            // builder. The dispatcher surfaces this as
+            // JSON-RPC -32005 / `WorkspaceIncompatibleGraph` rather than
+            // the generic -32001 `WorkspaceBuildFailed` (which would
+            // suggest a transient build problem the user could retry).
+            sqry_core::graph::unified::persistence::PersistenceError::IncompatibleVersion {
+                expected,
+                found,
+            } => DaemonError::WorkspaceIncompatibleGraph {
+                root: workspace_root.to_path_buf(),
+                reason: format!("snapshot version mismatch: expected {expected}, found {found}"),
+            },
+            other => DaemonError::WorkspaceBuildFailed {
+                root: workspace_root.to_path_buf(),
+                reason: format!("snapshot load failed: {other}"),
+            },
+        })
+    }
 }
 
 #[cfg(test)]
@@ -187,5 +275,93 @@ mod tests {
             .build(Path::new("/repos/example"))
             .expect("arc-wrapped builder delegates");
         assert_eq!(g.node_count(), 0);
+    }
+
+    /// SGA04 Major #2 (codex iter2) — when the persisted snapshot
+    /// reports an incompatible format version, `load_persisted` must
+    /// return [`DaemonError::WorkspaceIncompatibleGraph`] (which the
+    /// dispatcher exposes as JSON-RPC -32005), **not** the generic
+    /// transient-build [`DaemonError::WorkspaceBuildFailed`] (-32001).
+    /// We hand-craft a snapshot file with the current V10 magic but a
+    /// `GraphHeader.version` of `99` to force
+    /// `PersistenceError::IncompatibleVersion`.
+    #[test]
+    fn real_workspace_builder_load_persisted_incompatible_snapshot_returns_incompatible_graph_error()
+     {
+        use sha2::{Digest, Sha256};
+        use sqry_core::graph::unified::persistence::{
+            BuildProvenance, GraphHeader, GraphStorage, MAGIC_BYTES_V10, MANIFEST_SCHEMA_VERSION,
+            Manifest, PluginSelectionManifest, SNAPSHOT_FORMAT_VERSION,
+        };
+        use std::fs;
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().expect("tempdir");
+        let workspace = tmp.path().to_path_buf();
+        let storage = GraphStorage::new(&workspace);
+        fs::create_dir_all(storage.graph_dir()).expect("graph dir");
+
+        // Build V10-magic + bogus-version-99 header bytes.
+        let mut header = GraphHeader::new(0, 0, 0, 0);
+        header.version = 99;
+        let header_bytes = postcard::to_allocvec(&header).expect("encode header");
+        let mut bytes: Vec<u8> = Vec::with_capacity(14 + 4 + header_bytes.len() + 8);
+        bytes.extend_from_slice(MAGIC_BYTES_V10);
+        #[allow(clippy::cast_possible_truncation)]
+        bytes.extend_from_slice(&(header_bytes.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&header_bytes);
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        fs::write(storage.snapshot_path(), &bytes).expect("write snapshot");
+
+        // Stub manifest pointing at the bogus snapshot SHA so the
+        // GraphStorage `exists()` / `snapshot_exists()` precondition
+        // checks pass and `load_persisted` actually reaches
+        // `load_from_path`.
+        let snapshot_sha256 = format!("{:x}", Sha256::digest(&bytes));
+        let manifest = Manifest {
+            schema_version: MANIFEST_SCHEMA_VERSION,
+            snapshot_format_version: SNAPSHOT_FORMAT_VERSION,
+            built_at: "1970-01-01T00:00:00Z".to_string(),
+            root_path: workspace.to_string_lossy().into_owned(),
+            node_count: 0,
+            edge_count: 0,
+            raw_edge_count: None,
+            snapshot_sha256,
+            build_provenance: BuildProvenance {
+                sqry_version: env!("CARGO_PKG_VERSION").to_string(),
+                build_timestamp: "1970-01-01T00:00:00Z".to_string(),
+                build_command: "test:incompatible-version".to_string(),
+                plugin_hashes: std::collections::HashMap::new(),
+            },
+            file_count: std::collections::HashMap::new(),
+            languages: Vec::new(),
+            config: std::collections::HashMap::new(),
+            confidence: Default::default(),
+            last_indexed_commit: None,
+            plugin_selection: Some(PluginSelectionManifest {
+                active_plugin_ids: Vec::new(),
+                high_cost_mode: None,
+            }),
+        };
+        manifest
+            .save(storage.manifest_path())
+            .expect("save manifest");
+
+        let plugins = Arc::new(sqry_core::plugin::PluginManager::new());
+        let builder = RealWorkspaceBuilder::new(plugins);
+        let err = builder
+            .load_persisted(&workspace)
+            .expect_err("incompatible-version snapshot must fail load_persisted");
+
+        match err {
+            DaemonError::WorkspaceIncompatibleGraph { root, reason } => {
+                assert_eq!(root, workspace);
+                assert!(
+                    reason.contains("snapshot version mismatch") && reason.contains("found 99"),
+                    "expected snapshot version mismatch diagnostic, got {reason:?}"
+                );
+            }
+            other => panic!("expected DaemonError::WorkspaceIncompatibleGraph, got {other:?}"),
+        }
     }
 }

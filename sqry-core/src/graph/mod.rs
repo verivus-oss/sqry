@@ -39,6 +39,7 @@
 //! assert_eq!(py_id.symbol_name(), "authenticate");
 //! ```
 
+pub mod acquisition;
 pub mod body_hash;
 pub mod builder;
 pub mod call_sites;
@@ -87,6 +88,12 @@ pub use unified::GraphSnapshot;
 // Core Type Exports
 // ============================================================================
 
+pub use acquisition::{
+    AcquisitionOperation, AcquisitionSource, AutoBuildHook, FilesystemGraphProvider, GraphAcquirer,
+    GraphAcquisition, GraphAcquisitionError, GraphAcquisitionMetadata, GraphAcquisitionRequest,
+    GraphFreshness, GraphIdentity, MissingGraphPolicy, PathPolicy, PluginSelectionPolicy,
+    PluginSelectionStatus, ReloadOrigin, StalePolicy,
+};
 pub use body_hash::{BodyHash128, HASH_SEED_0, HASH_SEED_1};
 pub use builder::GraphBuilder;
 pub use call_sites::{CallSite, CallSiteExtras, CallSiteMetadata};

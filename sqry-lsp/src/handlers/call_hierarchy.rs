@@ -1,7 +1,10 @@
-//! Call hierarchy handlers using `CodeGraph` via `execute_on_graph()`.
+//! Call hierarchy handlers using `CodeGraph`.
 //!
 //! Provides call hierarchy support for the LSP, finding callers and callees
-//! of functions/methods using the unified `CodeGraph`.
+//! of functions/methods using the unified `CodeGraph`. SGA06 routes graph
+//! acquisition through [`SessionManager::graph_for_path`] (shared
+//! `FilesystemGraphProvider` pipeline) and runs queries via
+//! `QueryExecutor::execute_on_preloaded_graph`.
 
 use crate::handlers::pause_for_test;
 use crate::session::{NodeMatch, SessionManager};
@@ -165,10 +168,24 @@ pub fn incoming(
     // This is important because calls may go to stub nodes (in the caller's file)
     // rather than the real definition. We collect incoming edges from all nodes
     // with the same qualified name.
+    //
+    // SGA06 — acquire the graph through the shared provider before running
+    // the name predicate via the preloaded executor entrypoint.
+    let graph = session
+        .graph_for_path(&workspace_root)
+        .map_err(|e| CallHierarchyError::RelationQueryFailed(e.to_string()))?;
+    let Some(graph) = graph else {
+        return Ok(CallHierarchyResponse {
+            items: Vec::new(),
+            total: 0,
+            is_truncated: false,
+        });
+    };
+
     let executor = session.executor();
     let name_query = format!("name:{}", saved_data.qualified_name);
     let target_results = executor
-        .execute_on_graph(&name_query, &workspace_root)
+        .execute_on_preloaded_graph(graph, &name_query, &workspace_root, None)
         .map_err(|e| CallHierarchyError::RelationQueryFailed(e.to_string()))?;
 
     let graph = target_results.graph();
@@ -227,11 +244,24 @@ pub fn outgoing(
     let max_results = config.call_hierarchy.max_results;
     let include_detail = config.call_hierarchy.include_detail;
 
+    // SGA06 — acquire the graph through the shared provider before running
+    // the name predicate via the preloaded executor entrypoint.
+    let graph = session
+        .graph_for_path(&workspace_root)
+        .map_err(|e| CallHierarchyError::RelationQueryFailed(e.to_string()))?;
+    let Some(graph) = graph else {
+        return Ok(CallHierarchyResponse {
+            items: Vec::new(),
+            total: 0,
+            is_truncated: false,
+        });
+    };
+
     // Find source node by name to get its NodeId
     let executor = session.executor();
     let name_query = format!("name:{}", saved_data.qualified_name);
     let source_results = executor
-        .execute_on_graph(&name_query, &workspace_root)
+        .execute_on_preloaded_graph(graph, &name_query, &workspace_root, None)
         .map_err(|e| CallHierarchyError::RelationQueryFailed(e.to_string()))?;
 
     // Find the matching node by file path

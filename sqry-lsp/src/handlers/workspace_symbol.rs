@@ -225,7 +225,7 @@ fn collect_workspace_symbols(
     let mut all_items = Vec::new();
 
     for root in &search_roots.roots {
-        let Some(results) = run_query(executor.as_ref(), search_query, root) else {
+        let Some(results) = run_query(session, executor.as_ref(), search_query, root) else {
             continue;
         };
 
@@ -246,11 +246,36 @@ fn collect_workspace_symbols(
 }
 
 fn run_query(
+    session: &SessionManager,
     executor: &sqry_core::query::QueryExecutor,
     search_query: &str,
     root: &Path,
 ) -> Option<QueryResults> {
-    match executor.execute_on_graph(search_query, root) {
+    // SGA06 — acquire the graph through the shared `FilesystemGraphProvider`
+    // pipeline before running the workspace-symbol predicate. Each workspace
+    // root produces its own `Arc<CodeGraph>` (or `None` when the index is
+    // missing), so unindexed roots silently skip rather than tripping the
+    // executor's own `get_or_load_graph` fallback.
+    let graph = match session.graph_for_path(root) {
+        Ok(Some(graph)) => graph,
+        Ok(None) => {
+            log::debug!(
+                "workspace/symbol: no graph at {root}, skipping",
+                root = root.display()
+            );
+            return None;
+        }
+        Err(e) => {
+            log::warn!(
+                "workspace/symbol: failed to acquire graph at {root}: {error}",
+                root = root.display(),
+                error = e
+            );
+            return None;
+        }
+    };
+
+    match executor.execute_on_preloaded_graph(graph, search_query, root, None) {
         Ok(result) => Some(result),
         Err(e) => {
             log::warn!(

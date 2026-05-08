@@ -124,12 +124,25 @@ pub const JSONRPC_MEMORY_BUDGET_EXCEEDED: i32 = -32003;
 /// | -32002  | `WorkspaceStaleExpired`| Stale-serve window exceeded `stale_serve_max_age_hours`.       |
 /// | -32003  | `MemoryBudgetExceeded` | Admission cannot fit even after evicting all non-pinned.       |
 /// | -32004  | `WorkspaceEvicted`     | Workspace gone mid-rebuild; caller must re-`get_or_load`.      |
+/// | -32005  | `WorkspaceIncompatibleGraph` | On-disk graph cannot be used by this binary (plugin or format mismatch). |
 /// | -32602  | `InvalidArgument`      | Tool-argument validation failure (JSON-RPC standard).          |
 /// | -32603  | `Internal`             | Catch-all bubbled from `sqry_mcp::daemon_adapter` execution.   |
 /// | n/a     | `AlreadyRunning`       | Another sqryd holds the pidfile lock (Task 9 U1). Exit 75.    |
 /// | n/a     | `AutoStartTimeout`     | `start_detached` socket poll timed out (Task 9 U1). Exit 69.  |
 /// | n/a     | `SignalSetup`          | `tokio::signal` handler install failed (Task 9 U1). Exit 70.  |
 pub const JSONRPC_WORKSPACE_EVICTED: i32 = -32004;
+
+/// JSON-RPC error code: the on-disk graph snapshot or manifest cannot be
+/// loaded safely by this binary. Distinct from `WorkspaceBuildFailed`
+/// because it represents a path-policy / compatibility verdict (unknown
+/// plugin ids, unsupported snapshot format) rather than a transient
+/// build failure — clients react differently (rebuild vs. upgrade vs.
+/// retry).
+///
+/// SGA02 / SGA04 acceptance: "API carries path-policy errors distinctly
+/// from load, stale, eviction, and corruption errors" — adapters must
+/// not collapse this taxonomy class into the generic build-failed code.
+pub const JSONRPC_WORKSPACE_INCOMPATIBLE_GRAPH: i32 = -32005;
 
 /// JSON-RPC 2.0 standard "Invalid params" error code.
 ///
@@ -150,6 +163,30 @@ pub const JSONRPC_INTERNAL_ERROR: i32 = -32603;
 /// of truth. See [`sqry_daemon_protocol::ENVELOPE_VERSION`] for the canonical
 /// definition and bump policy.
 pub use sqry_daemon_protocol::ENVELOPE_VERSION;
+
+// ---------------------------------------------------------------------------
+// SGA07 parity test hooks (test-only re-exports)
+// ---------------------------------------------------------------------------
+
+/// SGA07 parity test hook — snapshot the process-wide counter that the
+/// daemon graph provider bumps on every [`acquire`](workspace::acquirer)
+/// call. Returns the current count without resetting it. Gated on
+/// `#[cfg(any(test, feature = "test-hooks"))]` so the symbol is
+/// unreachable in default release builds.
+#[cfg(any(test, feature = "test-hooks"))]
+#[doc(hidden)]
+pub fn acquire_counter_snapshot() -> usize {
+    workspace::acquirer::acquire_counter_snapshot()
+}
+
+/// SGA07 parity test hook — reset the process-wide acquisition counter
+/// to zero. Returns the previous value so callers can sanity-check a
+/// reset between dispatches. Production code MUST NOT call this.
+#[cfg(any(test, feature = "test-hooks"))]
+#[doc(hidden)]
+pub fn acquire_counter_reset() -> usize {
+    workspace::acquirer::acquire_counter_reset()
+}
 
 // ---------------------------------------------------------------------------
 // Shared test-only ENV_LOCK

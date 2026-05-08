@@ -26,9 +26,25 @@ pub fn execute(session: &SessionManager, params: &SqrySearchParams) -> Result<Sq
         root = root.display()
     );
 
+    // SGA06 — route graph acquisition through `SessionManager::graph_for_path`
+    // so the read-only LSP search path uses the shared
+    // `FilesystemGraphProvider` pipeline instead of re-entering the
+    // executor's own `get_or_load_graph` (which would bypass the SGA-migrated
+    // path-policy / SHA-256 / plugin-compat checks).
+    let Some(graph) = session.graph_for_path(&root)? else {
+        // No snapshot on disk yet — surface an empty, non-truncated result
+        // (the LSP startup filter / auto-build is responsible for indexing).
+        return Ok(SqrySearchResult {
+            results: Vec::new(),
+            total: 0,
+            is_truncated: false,
+            used_index: true,
+        });
+    };
+
     let executor = session.executor();
     let query_results = executor
-        .execute_on_graph(query, &root)
+        .execute_on_preloaded_graph(graph, query, &root, None)
         .with_context(|| format!("failed to execute sqry query '{query}'"))?;
 
     let total = query_results.len();

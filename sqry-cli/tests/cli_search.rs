@@ -1,3 +1,10 @@
+// All tests in this file index a cross-language fixture that includes
+// ABAP sources, which are feature-gated behind `specialty-plugins`
+// after `refactor!: make non-core surfaces opt-in` (commit ecd215385).
+// Run with:
+//   cargo test -p sqry-cli --features specialty-plugins --test cli_search
+#![cfg(feature = "specialty-plugins")]
+
 mod common;
 
 use anyhow::{Context, Result};
@@ -92,6 +99,14 @@ fn has_result(value: &Value, query: &str, expected_kind: &str, file_fragment: &s
     })
 }
 
+// Cross-language fixture includes an `abap/fields.abap` source whose
+// `zcl_ledger.mutable_field` symbol must be present in the qualified
+// search result. ABAP is feature-gated behind `specialty-plugins`
+// after `refactor!: make non-core surfaces opt-in` (commit ecd215385),
+// so a default-feature `sqry index` produces no ABAP nodes and the
+// assertion fails. Run with:
+//   cargo test -p sqry-cli --features specialty-plugins --test cli_search
+#[cfg(feature = "specialty-plugins")]
 #[test]
 fn test_req_r0015_cli_exact_returns_qualified_field_nodes() -> Result<()> {
     let workspace = fixture_workspace()?;

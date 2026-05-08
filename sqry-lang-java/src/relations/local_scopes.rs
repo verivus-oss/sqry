@@ -8,10 +8,16 @@
 //! with Java-specific scope kinds and AST patterns.
 
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::path::Path;
+#[cfg(feature = "jvm-classpath")]
+use std::path::PathBuf;
+use std::sync::Arc;
+#[cfg(feature = "jvm-classpath")]
+use std::sync::{Mutex, OnceLock};
 
+#[cfg(feature = "jvm-classpath")]
 use sqry_classpath::stub::index::ClasspathIndex;
+#[cfg(feature = "jvm-classpath")]
 use sqry_classpath::stub::model::ClassStub;
 use sqry_core::graph::local_scopes::{
     ClassInfo, ClassInfoIndex, ClassMemberInfo, DebugEvent, MemberSource, ScopeKindTrait,
@@ -96,6 +102,7 @@ impl ScopeKindTrait for ScopeKind {
 /// Java-specific scope tree type.
 pub(crate) type JavaScopeTree = ScopeTree<ScopeKind>;
 
+#[cfg(feature = "jvm-classpath")]
 static CLASSPATH_INDEX_CACHE: OnceLock<Mutex<HashMap<PathBuf, Option<Arc<ClasspathIndex>>>>> =
     OnceLock::new();
 
@@ -106,9 +113,31 @@ static CLASSPATH_INDEX_CACHE: OnceLock<Mutex<HashMap<PathBuf, Option<Arc<Classpa
 /// Build a Java scope tree from the given AST root node.
 pub(crate) fn build(root: Node, content: &[u8], file: Option<&Path>) -> GraphResult<JavaScopeTree> {
     let mut scope_tree = ScopeTree::new(content.len());
-    let classpath_index = file.and_then(load_classpath_index_for_file);
-    scope_tree.class_infos =
-        build_class_info_index(&mut scope_tree, root, content, classpath_index.as_deref());
+    #[cfg(not(feature = "jvm-classpath"))]
+    let _ = file;
+    let mut class_infos = build_class_info_index(&mut scope_tree, root, content);
+    #[cfg(feature = "jvm-classpath")]
+    {
+        let classpath_index = file.and_then(load_classpath_index_for_file);
+        if let Some(classpath_index) = classpath_index.as_deref() {
+            let import_map = collect_import_type_map(root, content);
+            hydrate_classpath_infos(
+                root,
+                content,
+                &import_map,
+                &mut class_infos,
+                &mut scope_tree.interner,
+                classpath_index,
+            );
+        } else {
+            seed_well_known_java_types(&mut class_infos);
+        }
+    }
+    #[cfg(not(feature = "jvm-classpath"))]
+    {
+        seed_well_known_java_types(&mut class_infos);
+    }
+    scope_tree.class_infos = class_infos;
     build_scopes_internal(&mut scope_tree, root, content)?;
     scope_tree.rebuild_index();
     bind_declarations_internal(&mut scope_tree, root, content)?;
@@ -121,12 +150,7 @@ pub(crate) fn build(root: Node, content: &[u8], file: Option<&Path>) -> GraphRes
 // Build phase wrappers
 // ============================================================================
 
-fn build_class_info_index(
-    tree: &mut JavaScopeTree,
-    root: Node,
-    content: &[u8],
-    classpath_index: Option<&ClasspathIndex>,
-) -> ClassInfoIndex {
+fn build_class_info_index(tree: &mut JavaScopeTree, root: Node, content: &[u8]) -> ClassInfoIndex {
     let mut index = ClassInfoIndex::default();
     let mut class_stack = Vec::new();
     let mut guard = load_recursion_guard();
@@ -138,19 +162,6 @@ fn build_class_info_index(
         &mut tree.interner,
         &mut guard,
     );
-    let import_map = collect_import_type_map(root, content);
-    if let Some(classpath_index) = classpath_index {
-        hydrate_classpath_infos(
-            root,
-            content,
-            &import_map,
-            &mut index,
-            &mut tree.interner,
-            classpath_index,
-        );
-    } else {
-        seed_well_known_java_types(&mut index);
-    }
     index
 }
 
@@ -186,6 +197,7 @@ fn seed_well_known_java_types(index: &mut ClassInfoIndex) {
     }
 }
 
+#[cfg(feature = "jvm-classpath")]
 fn load_classpath_index_for_file(file: &Path) -> Option<Arc<ClasspathIndex>> {
     let mut current_dir = file.parent();
     while let Some(dir) = current_dir {
@@ -206,12 +218,14 @@ fn load_classpath_index_for_file(file: &Path) -> Option<Arc<ClasspathIndex>> {
     None
 }
 
+#[cfg(feature = "jvm-classpath")]
 fn collect_import_type_map(root: Node, content: &[u8]) -> HashMap<String, String> {
     let mut import_map = HashMap::new();
     collect_import_type_map_recursive(root, content, &mut import_map);
     import_map
 }
 
+#[cfg(feature = "jvm-classpath")]
 fn collect_import_type_map_recursive(
     node: Node,
     content: &[u8],
@@ -235,6 +249,7 @@ fn collect_import_type_map_recursive(
     }
 }
 
+#[cfg(feature = "jvm-classpath")]
 fn extract_import_name(node: Node, content: &[u8]) -> String {
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
@@ -245,6 +260,7 @@ fn extract_import_name(node: Node, content: &[u8]) -> String {
     String::new()
 }
 
+#[cfg(feature = "jvm-classpath")]
 fn hydrate_classpath_infos(
     root: Node,
     content: &[u8],
@@ -269,6 +285,7 @@ fn hydrate_classpath_infos(
     }
 }
 
+#[cfg(feature = "jvm-classpath")]
 fn collect_referenced_base_types(node: Node, content: &[u8], output: &mut HashSet<String>) {
     match node.kind() {
         "class_declaration" | "record_declaration" | "interface_declaration" => {
@@ -297,6 +314,7 @@ fn collect_referenced_base_types(node: Node, content: &[u8], output: &mut HashSe
     }
 }
 
+#[cfg(feature = "jvm-classpath")]
 fn ensure_classpath_info(
     base: &str,
     import_map: &HashMap<String, String>,
@@ -334,6 +352,7 @@ fn ensure_classpath_info(
     visiting.remove(&fqn);
 }
 
+#[cfg(feature = "jvm-classpath")]
 fn collect_classpath_members(
     stub: &ClassStub,
     import_map: &HashMap<String, String>,
@@ -385,6 +404,7 @@ fn collect_classpath_members(
     members
 }
 
+#[cfg(feature = "jvm-classpath")]
 fn lookup_classpath_fqn(
     base: &str,
     import_map: &HashMap<String, String>,

@@ -1461,6 +1461,234 @@ impl WorkspaceManager {
             handle.abort();
         }
     }
+
+    // ---------------------------------------------------------------------
+    // SGA04 — Bounded read-only rehydrate after eviction
+    // ---------------------------------------------------------------------
+
+    /// Read-only rehydrate of an existing persisted graph for `key`.
+    ///
+    /// Implements the daemon side of the bounded one-shot reload rule
+    /// described in `docs/development/shared-graph-acquisition/02_DESIGN.md`.
+    /// Used by [`crate::workspace::acquirer::DaemonGraphProvider`] when
+    /// it observes [`DaemonError::WorkspaceEvicted`] (or an `Unloaded`
+    /// state) for a [`AcquisitionOperation::ReadOnlyQuery`].
+    ///
+    /// Behaviour contract:
+    ///
+    /// 1. Drives the same lifecycle CAS gate as
+    ///    [`Self::get_or_load`] — only one caller can rehydrate per
+    ///    workspace at a time.
+    /// 2. Reserves admission headroom via [`Self::reserve_rebuild`].
+    /// 3. Calls [`WorkspaceBuilder::load_persisted`] to read
+    ///    `<source_root>/.sqry/graph/snapshot.sqry`. Never calls
+    ///    `WorkspaceBuilder::build`, never mutates `.sqry/graph/*`,
+    ///    `.sqry/analysis/*`, or `derived.sqry`, and never invokes the
+    ///    post-publish hook (the snapshot is bit-identical with what
+    ///    the hook would produce — no fresh derived cache to warm).
+    /// 4. Publishes through [`Self::publish_and_retain`] under the
+    ///    standard `workspaces.read()` re-check + cancellation gate
+    ///    so eviction races are caught the same way as `get_or_load`.
+    ///
+    /// `pub(crate)` because the entrypoint is internal to the daemon
+    /// crate; SGA04's public surface is the
+    /// [`crate::workspace::acquirer::DaemonGraphProvider`] adapter.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same set of [`DaemonError`] variants as
+    /// [`Self::get_or_load`]. The caller maps these into the shared
+    /// [`sqry_core::graph::acquisition::GraphAcquisitionError`]
+    /// taxonomy (typically [`GraphAcquisitionError::Evicted`] when the
+    /// reload is the daemon-provider's bounded retry).
+    ///
+    /// [`AcquisitionOperation::ReadOnlyQuery`]: sqry_core::graph::acquisition::AcquisitionOperation::ReadOnlyQuery
+    /// [`GraphAcquisitionError::Evicted`]: sqry_core::graph::acquisition::GraphAcquisitionError::Evicted
+    pub(crate) fn reload_from_disk_read_only(
+        self: &Arc<Self>,
+        key: &WorkspaceKey,
+        builder: &dyn WorkspaceBuilder,
+        working_set_estimate: u64,
+    ) -> Result<Arc<CodeGraph>, DaemonError> {
+        // --- Step 1: cache-hit fast path ---------------------------
+        {
+            let workspaces = self.workspaces.read();
+            if let Some(ws) = workspaces.get(key)
+                && ws.load_state() == WorkspaceState::Loaded
+            {
+                ws.touch();
+                return Ok(ws.graph.load_full());
+            }
+        }
+
+        // --- Step 2: lifecycle CAS gate (mirrors get_or_load) -------
+        let ws = self.get_or_insert_workspace(key);
+        let allowed = [
+            WorkspaceState::Unloaded.as_u8(),
+            WorkspaceState::Failed.as_u8(),
+            WorkspaceState::Evicted.as_u8(),
+        ];
+        let mut acquired_from: Option<WorkspaceState> = None;
+        for prior in allowed {
+            if ws
+                .state
+                .compare_exchange(
+                    prior,
+                    WorkspaceState::Loading.as_u8(),
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
+            {
+                acquired_from = WorkspaceState::from_u8(prior);
+                break;
+            }
+        }
+        let Some(prior_state) = acquired_from else {
+            let current = ws.load_state();
+            if current == WorkspaceState::Loaded {
+                ws.touch();
+                return Ok(ws.graph.load_full());
+            }
+            return Err(DaemonError::WorkspaceBuildFailed {
+                root: key.source_root.clone(),
+                reason: format!("workspace load already in progress ({current})"),
+            });
+        };
+
+        let pre_cancelled = ws.rebuild_cancelled.swap(false, Ordering::AcqRel);
+        if pre_cancelled && prior_state != WorkspaceState::Evicted {
+            ws.rebuild_cancelled.store(true, Ordering::Release);
+            ws.store_state(WorkspaceState::Failed);
+            return Err(DaemonError::WorkspaceBuildFailed {
+                root: key.source_root.clone(),
+                reason: "workspace evicted mid-load".to_string(),
+            });
+        }
+
+        // --- Step 3: arm LoadingGuard for panic / early-return ----
+        let mut loading = LoadingGuard {
+            ws: &ws,
+            key,
+            armed: true,
+        };
+
+        // --- Step 4: reserve admission headroom -------------------
+        let reservation = self.reserve_rebuild(key, working_set_estimate)?;
+
+        // --- Step 5: load_persisted (read-only, no build pipeline)
+        let graph = match builder.load_persisted(&key.source_root) {
+            Ok(g) => g,
+            Err(err) => {
+                drop(reservation);
+                ws.record_failure(clone_err(&err));
+                loading.armed = false;
+                ws.store_state(WorkspaceState::Failed);
+                return Err(err);
+            }
+        };
+
+        // --- Step 6+7: atomic re-check + publish ------------------
+        let workspaces_guard = self.workspaces.read();
+        if ws.rebuild_cancelled.load(Ordering::Acquire) {
+            drop(workspaces_guard);
+            drop(reservation);
+            ws.record_failure(DaemonError::WorkspaceBuildFailed {
+                root: key.source_root.clone(),
+                reason: "workspace evicted mid-reload".to_string(),
+            });
+            loading.armed = false;
+            ws.store_state(WorkspaceState::Failed);
+            return Err(DaemonError::WorkspaceBuildFailed {
+                root: key.source_root.clone(),
+                reason: "workspace evicted mid-reload".to_string(),
+            });
+        }
+        if !workspaces_guard.contains_key(key) {
+            drop(workspaces_guard);
+            drop(reservation);
+            ws.record_failure(DaemonError::WorkspaceBuildFailed {
+                root: key.source_root.clone(),
+                reason: "workspace removed mid-reload".to_string(),
+            });
+            loading.armed = false;
+            ws.store_state(WorkspaceState::Failed);
+            return Err(DaemonError::WorkspaceBuildFailed {
+                root: key.source_root.clone(),
+                reason: "workspace removed mid-reload".to_string(),
+            });
+        }
+
+        let (_token, published_arc) = self.publish_and_retain(reservation, &ws, graph);
+        ws.record_success(std::time::SystemTime::now());
+        ws.store_state(WorkspaceState::Loaded);
+        ws.touch();
+        loading.armed = false;
+        drop(workspaces_guard);
+
+        // No post-publish `SqrydHook::on_publish` dispatch on the
+        // read-only reload path — the snapshot we just loaded is the
+        // SAME bytes the hook would have re-serialised, so the derived
+        // cache must already match it. Firing the hook here would be
+        // redundant work (and on the spec contract: this path "must
+        // not write any artifact").
+
+        Ok(published_arc)
+    }
+
+    /// Test-only: synchronously evict `key` regardless of memory
+    /// pressure.
+    ///
+    /// Used by SGA04 / SGA07 parity tests to drive a workspace from
+    /// `Loaded` into `Evicted` deterministically (the production
+    /// eviction paths are budget-driven and time-sensitive). Behaves
+    /// exactly like the LRU eviction path: graph is swapped out, bytes
+    /// move from `loaded_bytes` into `retained_old`, the entry stays
+    /// in the manager map as a tombstone (matching STEP_6 partial
+    /// eviction reporting).
+    ///
+    /// Returns `true` if the key was present and evicted, `false`
+    /// otherwise.
+    ///
+    /// # Visibility
+    ///
+    /// Marked `#[doc(hidden)]` and named with the `_for_test` suffix
+    /// to advertise "test affordance only" (matching
+    /// [`Self::insert_workspace_in_state_for_test`] /
+    /// [`crate::TestGate`] / [`crate::TestCapture`]). It is **not**
+    /// re-exported through `sqry-daemon`'s public prelude
+    /// (`pub use workspace::{...}` in `lib.rs` does not list it), so
+    /// release / IPC / MCP / HTTP surfaces cannot reach it. Production
+    /// code MUST NOT call this; the canonical eviction entrypoints
+    /// remain [`Self::evict_lru`] and [`Self::unload`].
+    ///
+    /// # Visibility (SGA04 Gate-A blocker fix)
+    ///
+    /// Even though `lib.rs` does not re-export this method, it was
+    /// previously declared `pub fn` on a `pub struct WorkspaceManager`,
+    /// which means callers could reach it through any path that already
+    /// holds a `&WorkspaceManager` — including any public re-export of
+    /// the type. The Codex Gate-A review flagged this as a leak of a
+    /// test-only hook into the release surface.
+    ///
+    /// The fix is a compile-time gate: the entire item is now
+    /// `#[cfg(any(test, feature = "test-hooks"))]`, so default release
+    /// builds (`cargo build -p sqry-daemon`) cannot see the symbol at
+    /// all. SGA07 parity tests that live in the integration-test crate
+    /// (`sqry-daemon/tests/`) opt in via
+    /// `cargo test -p sqry-daemon --features test-hooks --tests`, while
+    /// in-crate `#[cfg(test)] mod tests` blocks reach it through
+    /// `cfg(test)`.
+    #[cfg(any(test, feature = "test-hooks"))]
+    #[doc(hidden)]
+    pub fn evict_for_test(&self, key: &WorkspaceKey) -> bool {
+        let present = self.workspaces.read().contains_key(key);
+        if !present {
+            return false;
+        }
+        self.execute_eviction(key);
+        true
+    }
 }
 
 impl Drop for WorkspaceManager {
@@ -1581,6 +1809,15 @@ pub(crate) fn clone_err(err: &DaemonError) -> DaemonError {
         }
         DaemonError::WorkspaceNotLoaded { root } => {
             DaemonError::WorkspaceNotLoaded { root: root.clone() }
+        }
+        // SGA04 Gate-A major #5 — round-trip the path-policy variant
+        // distinctly. Collapsing it into `WorkspaceBuildFailed` would
+        // re-introduce the exact bug Codex flagged.
+        DaemonError::WorkspaceIncompatibleGraph { root, reason } => {
+            DaemonError::WorkspaceIncompatibleGraph {
+                root: root.clone(),
+                reason: reason.clone(),
+            }
         }
         // Task 8 Phase 8c U5 — tool-dispatch variants surfaced by
         // `tool_core::classify_and_execute` (Phase 8c U6). Each

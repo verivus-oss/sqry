@@ -18,6 +18,7 @@
 //! handling + staleness cap + `-32002` expiry, and the SQRYD_HOOK
 //! `save_derived` wire-in.
 
+pub(crate) mod acquirer;
 pub mod admission;
 pub mod builder;
 pub mod hook;

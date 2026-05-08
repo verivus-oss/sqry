@@ -57,6 +57,19 @@ If `sqry-mcp --daemon` cannot reach a daemon, it auto-starts one unless
 `SQRY_DAEMON_NO_AUTO_START=1` is set. Use `sqry daemon rebuild <path>` to
 refresh a loaded workspace without restarting the assistant session.
 
+Read-only graph acquisition is shared between standalone and daemon-hosted
+modes via the `sqry_core::graph::acquisition::GraphAcquirer` contract
+(Shared Graph Acquisition feature, 2026-05-08). When the daemon classifies
+a workspace as `Evicted` after LRU memory pressure, the 14 read-only
+graph-backed tools (`complexity_metrics`, `dependency_impact`,
+`direct_callees`, `direct_callers`, `export_graph`, `find_cycles`,
+`find_unused`, `is_node_in_cycle`, `relation_query`, `semantic_diff`,
+`semantic_search`, `show_dependencies`, `subgraph`, `trace_path`) attempt
+a single bounded reload from the existing persisted snapshot, so transient
+`WorkspaceEvicted` errors generally disappear without explicit caller
+action. The mutating `rebuild_index` tool deliberately does not use this
+fallback. See `TROUBLESHOOTING.md` for remaining error cases and recovery.
+
 ### 3. Auto-Configure AI Tools
 
 ```bash
@@ -518,6 +531,6 @@ MIT - See root LICENSE file
 
 ---
 
-**Last Updated**: 2026-05-07
-**Version**: 13.0.7 (36 tools)
+**Last Updated**: 2026-05-08
+**Version**: 13.0.11 (36 tools)
 **Tested With**: sqry v4.8.2, Claude Desktop, Windsurf, Claude Code, Codex, Gemini CLI

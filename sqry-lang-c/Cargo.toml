@@ -9,7 +9,7 @@ rust-version.workspace = true
 description = "C language plugin for sqry"
 
 [dependencies]
-sqry-core = { version = "13.0.7", path = "../sqry-core" }
+sqry-core = { version = "13.0.11", path = "../sqry-core" }
 anyhow.workspace = true
 tree-sitter.workspace = true
 tree-sitter-c.workspace = true
@@ -18,8 +18,8 @@ streaming-iterator.workspace = true
 [dev-dependencies]
 log.workspace = true
 sqry-core = { path = "../sqry-core", features = ["test-support"] }
-tempfile = "3.10"
-serial_test = "3.0"
+tempfile = "3.27"
+serial_test = "3.4"
 
 [features]
 default = ["has_relations"]

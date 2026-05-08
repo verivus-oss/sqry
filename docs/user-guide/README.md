@@ -136,7 +136,8 @@ other graph-loading paths reuse the plugin semantics that built the snapshot
 instead of silently drifting to current defaults.
 
 The default write path uses a curated fast path. Plugins marked
-`high_wall_clock` are excluded by default unless you opt back in.
+`high_wall_clock` and optional specialty plugins are excluded by default unless
+you opt back in.
 
 Examples:
 
@@ -144,7 +145,7 @@ Examples:
 # Default fast path
 sqry index .
 
-# Enable all high-cost plugins
+# Enable all compiled non-default plugins
 sqry index --include-high-cost .
 
 # Enable one plugin explicitly
@@ -159,9 +160,9 @@ Notes:
 - `--enable-language` and `--disable-language` remain accepted compatibility aliases for `--enable-plugin` and `--disable-plugin`.
 - For older manifests without `plugin_selection`, sqry preserves legacy
   all-plugins behavior instead of silently applying the fast-path default.
-- Current `high_wall_clock` plugins:
+- Current non-default plugins:
   - `json`
-  - `servicenow-xml`
+  - Optional specialty plugins when compiled with `specialty-plugins`: `apex`, `abap`, `servicenow-xanadu-js`, `servicenow-xml`, `terraform`, `puppet`, `pulumi`
 
 ## Index Discovery
 

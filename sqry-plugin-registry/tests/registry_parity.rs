@@ -3,7 +3,7 @@ use sqry_plugin_registry::{
 };
 
 fn expected_roster() -> Vec<(&'static str, &'static [&'static str])> {
-    vec![
+    let mut roster: Vec<(&'static str, &'static [&'static str])> = vec![
         ("c", &["c", "h"]),
         ("cpp", &["cpp", "cc", "cxx", "hpp", "hh", "hxx"]),
         ("csharp", &["cs", "csx"]),
@@ -36,15 +36,25 @@ fn expected_roster() -> Vec<(&'static str, &'static [&'static str])> {
         ("vue", &["vue"]),
         ("zig", &["zig", "zon"]),
         ("plsql", &["pks", "pkb", "pls", "plb", "prc", "fnc", "trg"]),
-        ("apex", &["cls", "trigger"]),
-        ("abap", &["abap"]),
-        ("servicenow-xanadu-js", &["snjs"]),
-        ("servicenow-xml", &["xml"]),
-        ("terraform", &["tf", "tfvars", "hcl"]),
-        ("puppet", &["pp"]),
-        ("pulumi", &["pulumi.yaml", "pulumi.yml", "pulumi.json"]),
-        ("json", &["json"]),
-    ]
+    ];
+
+    #[cfg(feature = "plugin-apex")]
+    roster.push(("apex", &["cls", "trigger"]));
+    #[cfg(feature = "plugin-abap")]
+    roster.push(("abap", &["abap"]));
+    #[cfg(feature = "plugin-servicenow-xanadu")]
+    roster.push(("servicenow-xanadu-js", &["snjs"]));
+    #[cfg(feature = "plugin-servicenow-xml")]
+    roster.push(("servicenow-xml", &["xml"]));
+    #[cfg(feature = "plugin-terraform")]
+    roster.push(("terraform", &["tf", "tfvars", "hcl"]));
+    #[cfg(feature = "plugin-puppet")]
+    roster.push(("puppet", &["pp"]));
+    #[cfg(feature = "plugin-pulumi")]
+    roster.push(("pulumi", &["pulumi.yaml", "pulumi.yml", "pulumi.json"]));
+
+    roster.push(("json", &["json"]));
+    roster
 }
 
 #[test]
@@ -91,8 +101,20 @@ fn test_default_fast_path_excludes_high_cost_plugins() {
         .map(|plugin| plugin.metadata().id)
         .collect();
 
-    assert_eq!(ids.len(), 35);
+    assert_eq!(
+        ids.len(),
+        expected_roster()
+            .iter()
+            .filter(|(plugin_id, _)| *plugin_id != "json")
+            .filter(|(plugin_id, _)| !plugin_id.starts_with("servicenow-xml"))
+            .filter(|(plugin_id, _)| !matches!(
+                *plugin_id,
+                "apex" | "abap" | "servicenow-xanadu-js" | "terraform" | "puppet" | "pulumi"
+            ))
+            .count()
+    );
     assert!(!ids.contains(&"json"));
+    #[cfg(feature = "plugin-servicenow-xml")]
     assert!(!ids.contains(&"servicenow-xml"));
 }
 
@@ -119,6 +141,7 @@ fn test_exclude_all_high_cost_matches_fast_path_expectation() {
         .expect("exclude-all config should resolve");
 
     assert!(plugin_manager.plugin_by_id("json").is_none());
+    #[cfg(feature = "plugin-servicenow-xml")]
     assert!(plugin_manager.plugin_by_id("servicenow-xml").is_none());
 }
 

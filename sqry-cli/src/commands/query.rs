@@ -8,6 +8,11 @@ use crate::output::{
 };
 use crate::plugin_defaults::{self, PluginSelectionMode};
 use anyhow::{Context, Result, bail};
+use sqry_core::graph::{
+    AcquisitionOperation, AutoBuildHook, FilesystemGraphProvider, GraphAcquirer, GraphAcquisition,
+    GraphAcquisitionError, GraphAcquisitionRequest, MissingGraphPolicy, PathPolicy,
+    PluginSelectionPolicy, PluginSelectionStatus, StalePolicy,
+};
 use sqry_core::query::QueryExecutor;
 use sqry_core::query::parser_new::Parser as QueryParser;
 use sqry_core::query::results::QueryResults;
@@ -21,7 +26,7 @@ use sqry_core::search::fallback::{FallbackConfig, FallbackSearchEngine, SearchRe
 use sqry_core::session::{SessionManager, SessionStats};
 use std::env;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 static QUERY_SESSION: std::sync::LazyLock<Mutex<Option<SessionManager>>> =
@@ -78,6 +83,10 @@ struct QueryExecutionParams<'a> {
     start: Instant,
     query_type: QueryType,
     variables: Option<&'a std::collections::HashMap<String, String>>,
+    /// Provider-acquired graph for the canonical workspace. Threaded into
+    /// the semantic execution path so the executor uses
+    /// `execute_on_preloaded_graph` and avoids a redundant disk load.
+    acquisition: &'a GraphAcquisition,
 }
 
 struct QueryRenderParams<'a> {
@@ -98,6 +107,13 @@ struct HybridQueryParams<'a> {
     start: Instant,
     query_type: QueryType,
     variables: Option<&'a std::collections::HashMap<String, String>>,
+    /// Provider-acquired graph. SGA03 Major #1 (codex iter2): the CLI
+    /// hybrid path threads this `Arc<CodeGraph>` directly into
+    /// [`FallbackSearchEngine::search_with_preloaded_graph`] (and
+    /// siblings) so the semantic attempt runs through
+    /// [`QueryExecutor::execute_on_preloaded_graph`] instead of the
+    /// executor's `execute_on_graph` cache+disk-load path.
+    acquisition: &'a GraphAcquisition,
 }
 
 /// Run a query command to search for symbols using AST-aware predicates
@@ -159,6 +175,22 @@ pub fn run_query(
     } else {
         Some(&parsed_variables)
     };
+
+    // SGA03 Major #3 fix — strict invalid-path validation must run before
+    // pipeline/join dispatch so a malformed path produces an `invalid path`
+    // diagnostic (matching the semantic path) instead of "no pipeline matched"
+    // or a downstream executor error. Pipeline/join queries today reuse the
+    // executor's own graph cache via `execute_join` / `execute_on_graph_with_variables`;
+    // running path validation up-front gives them the same path-policy
+    // semantics as `acquire_graph_for_cli` without needing a full provider
+    // acquisition (the executor's cache load remains the canonical graph
+    // source for those code paths).
+    //
+    // Explain mode is path-independent (it operates on the query string only),
+    // so it deliberately skips this check.
+    if !explain {
+        validate_query_path_strict(Path::new(search_path))?;
+    }
 
     // Check for pipeline queries (base query | stage)
     if let Some(pipeline) = detect_pipeline_query(query_string)? {
@@ -360,7 +392,50 @@ fn run_query_non_session(
     } = *params;
     let search_path_path = Path::new(search_path);
 
-    // Index ancestor discovery: find nearest .sqry-index in directory tree
+    // SGA03 Major #4 — `--text` mode is pure text scanning and must
+    // continue to work on unindexed paths. Skip full graph acquisition
+    // here; the strict path-validation step already ran in `run_query`
+    // before pipeline/join detection, so invalid paths are rejected
+    // up-front in this mode too.
+    if cli.text {
+        return run_query_text_only(streams, params);
+    }
+
+    // SGA03 regression fix — validate query syntax BEFORE full graph
+    // acquisition so that an invalid query string (parse error or
+    // unknown field) is reported as a parse / validation error
+    // (exit 2) rather than being masked by `acquire_graph_for_cli`'s
+    // "no graph found" path-acquisition error (exit 1) when the
+    // search path is a valid but unindexed directory.
+    //
+    // CLI_INTEGRATION.md §4 Exit behavior: invalid query syntax remains
+    // a query-parse failure, not an acquisition failure. Path validation
+    // (in `run_query`) still fires before this probe, so an invalid path
+    // wins over an invalid query — matching the existing precedence
+    // tested in `cli_invalid_path_rejected_before_graph_load`.
+    //
+    // The probe is gated on `QueryClassifier::classify(query) == Semantic`
+    // so it only fires for queries that pre-SGA03 would have produced an
+    // exit-2 parse error anyway. Hybrid- and Text-classified queries keep
+    // their forgiving fallback semantics (e.g. `unknown_field:value`
+    // falling back to a text search at exit 0) — the parse probe must
+    // not regress that behavior.
+    if QueryClassifier::classify(query_string) == QueryType::Semantic {
+        probe_validate_query_syntax(cli, search_path_path, query_string, validation_options)?;
+    }
+
+    // SGA03: route the read-only graph acquisition through
+    // `FilesystemGraphProvider`. The provider canonicalizes the path,
+    // enforces strict path policy (existence + workspace boundary +
+    // symlink-escape rejection), and verifies snapshot integrity *before*
+    // any query work runs. Path errors here precede the index-ancestor
+    // discovery diagnostic, satisfying the SGA03 acceptance criterion that
+    // invalid paths fail before graph load.
+    let acquisition = acquire_graph_for_cli(cli, search_path_path)?;
+
+    // Index ancestor discovery: find nearest .sqry-index in directory tree.
+    // The provider already validated the path; this call only computes the
+    // CLI-specific scope filter (`(query) AND path:...`).
     let resolution = resolve_effective_index_root(search_path_path, query_string);
     let EffectiveIndexResolution {
         index_root: effective_index_root,
@@ -380,6 +455,7 @@ fn run_query_non_session(
         start,
         query_type,
         variables,
+        acquisition: &acquisition,
     };
     let outcome = execute_query_mode(streams, &execution_params)?;
     let render_params = QueryRenderParams {
@@ -405,6 +481,7 @@ fn execute_query_mode(
     let start = params.start;
     let query_type = params.query_type;
     let variables = params.variables;
+    let acquisition = params.acquisition;
 
     if should_use_hybrid_search(cli) {
         let params = HybridQueryParams {
@@ -416,6 +493,7 @@ fn execute_query_mode(
             start,
             query_type,
             variables,
+            acquisition,
         };
         execute_hybrid_query(streams, &params)
     } else {
@@ -426,6 +504,7 @@ fn execute_query_mode(
             validation_options,
             no_parallel,
             variables,
+            acquisition,
         )
     }
 }
@@ -464,6 +543,82 @@ fn render_query_outcome(
     Ok(())
 }
 
+/// SGA03 Major #4 — execute the `--text` (text-only) mode without
+/// acquiring a graph through `FilesystemGraphProvider`.
+///
+/// Text-only search is intentionally unindexed: it ripgrep-scans files
+/// under `search_path` and never consults the graph. Routing it through
+/// `acquire_graph_for_cli` would have made `sqry query --text` fail on
+/// any directory that has not been indexed yet, which is a regression
+/// versus pre-migration behavior.
+///
+/// Strict path validation still ran in `run_query` before we got here,
+/// so non-existent / non-canonicalizable paths have already been
+/// rejected; this function can assume the path is valid.
+fn run_query_text_only(
+    streams: &mut OutputStreams,
+    params: &NonSessionQueryParams<'_>,
+) -> Result<()> {
+    let NonSessionQueryParams {
+        cli,
+        query_string,
+        search_path,
+        ..
+    } = *params;
+    let search_path_path = Path::new(search_path);
+
+    // SGA03 Major #4 (codex iter3): pure `--text` search must not touch the
+    // persisted graph manifest or the plugin selection it implies. Building
+    // an executor through `create_executor_with_plugins_for_cli` would call
+    // `resolve_plugin_selection(.., PluginSelectionMode::ReadOnly)`, which
+    // for any existing `.sqry/graph` resolves the manifest's
+    // `active_plugin_ids` and fails when the persisted ids no longer match
+    // the running binary's registry — even though text mode is a ripgrep
+    // scan that never consults the graph or any plugin field.
+    //
+    // `FallbackSearchEngine::with_config` constructs a default
+    // `QueryExecutor` (no plugin manager, no manifest read), and
+    // `search_text_only` only exercises the text searcher, so neither the
+    // discarded `validation_options` nor `no_parallel` hooks are observable
+    // here. Strict path validation already ran in `run_query` before
+    // dispatching, satisfying the SGA03 invalid-path tightening.
+    let config = build_hybrid_config(cli);
+    let mut engine = FallbackSearchEngine::with_config(config)?;
+
+    let start = Instant::now();
+    let results = engine.search_text_only(query_string, search_path_path)?;
+    let elapsed = start.elapsed();
+
+    match results {
+        SearchResults::Text { matches, .. } => {
+            render_text_results(cli, streams, &matches, elapsed)?;
+        }
+        SearchResults::Semantic { results, .. } => {
+            // `search_text_only` is supposed to return `Text`, but be
+            // defensive — render any semantic results through the standard
+            // formatter so we never silently drop matches.
+            let mut symbols = query_results_to_display_symbols(&results);
+            let stats = SimpleQueryStats { used_index: false };
+            let diagnostics = QueryDiagnostics::Standard {
+                index_info: IndexDiagnosticInfo::default(),
+            };
+            render_semantic_results(
+                cli,
+                streams,
+                query_string,
+                &mut symbols,
+                &stats,
+                elapsed,
+                params.verbose,
+                None,
+                &diagnostics,
+                params.relation_context,
+            )?;
+        }
+    }
+    Ok(())
+}
+
 fn execute_hybrid_query(
     streams: &mut OutputStreams,
     params: &HybridQueryParams<'_>,
@@ -476,6 +631,7 @@ fn execute_hybrid_query(
     let start = params.start;
     let query_type = params.query_type;
     let variables = params.variables;
+    let acquisition = params.acquisition;
 
     // Resolve variables in the query string for hybrid search.
     // FallbackSearchEngine doesn't support variable threading, so we resolve
@@ -508,7 +664,7 @@ fn execute_hybrid_query(
 
     emit_search_mode_diagnostic(cli, streams, query_type, &config)?;
 
-    let results = run_hybrid_search(cli, &mut engine, &effective_query, search_path)?;
+    let results = run_hybrid_search(cli, &mut engine, &effective_query, search_path, acquisition)?;
     let elapsed = start.elapsed();
 
     match results {
@@ -534,14 +690,25 @@ fn execute_semantic_query(
     validation_options: ValidationOptions,
     no_parallel: bool,
     variables: Option<&std::collections::HashMap<String, String>>,
+    acquisition: &GraphAcquisition,
 ) -> Result<QueryExecutionOutcome> {
     let mut executor = create_executor_with_plugins_for_cli(cli, search_path)?
         .with_validation_options(validation_options);
     if no_parallel {
         executor = executor.without_parallel();
     }
-    let query_results =
-        executor.execute_on_graph_with_variables(query_string, search_path, variables)?;
+    // SGA03: execute on the provider-acquired graph rather than re-loading
+    // through `execute_on_graph_with_variables`. The provider already
+    // canonicalized the workspace and verified snapshot integrity; using
+    // `execute_on_preloaded_graph` avoids a redundant disk load and keeps
+    // the executor's process-wide graph_cache untouched (the same contract
+    // daemon callers rely on).
+    let query_results = executor.execute_on_preloaded_graph(
+        Arc::clone(&acquisition.graph),
+        query_string,
+        &acquisition.workspace_root,
+        variables,
+    )?;
     let symbols = query_results_to_display_symbols(&query_results);
     let stats = SimpleQueryStats { used_index: true };
     Ok(QueryExecutionOutcome::Continue(Box::new(QueryExecution {
@@ -575,16 +742,31 @@ fn run_hybrid_search(
     engine: &mut FallbackSearchEngine,
     query_string: &str,
     search_path: &Path,
+    acquisition: &GraphAcquisition,
 ) -> Result<SearchResults> {
     if cli.text {
-        // Force text-only search
+        // Force text-only search — graph is unused on this branch.
         engine.search_text_only(query_string, search_path)
     } else if cli.semantic {
-        // Force semantic-only search
-        engine.search_semantic_only(query_string, search_path)
+        // Force semantic-only search against the provider-acquired graph.
+        // SGA03 Major #1 (codex iter2): `search_semantic_only` re-enters
+        // the executor's cache+disk-load path; the preloaded variant
+        // forwards the acquired `Arc<CodeGraph>` straight to
+        // `execute_on_preloaded_graph`.
+        engine.search_semantic_only_with_preloaded_graph(
+            query_string,
+            Arc::clone(&acquisition.graph),
+            search_path,
+        )
     } else {
-        // Automatic hybrid search with fallback
-        engine.search(query_string, search_path)
+        // Automatic hybrid search with fallback — same provider-acquired
+        // graph is reused for both the semantic attempt and any text
+        // fallback that follows.
+        engine.search_with_preloaded_graph(
+            query_string,
+            Arc::clone(&acquisition.graph),
+            search_path,
+        )
     }
 }
 
@@ -646,6 +828,48 @@ fn run_query_with_session(
     }
 
     let search_path_path = Path::new(search_path);
+
+    // SGA03 regression fix — validate query syntax BEFORE full graph
+    // acquisition so that invalid syntax / unknown fields surface as
+    // parse / validation errors (exit 2) rather than being masked by
+    // a "no graph found" acquisition error (exit 1) when the path is
+    // valid but unindexed. Mirrors the probe in `run_query_non_session`,
+    // including the `Semantic`-only classification gate that preserves
+    // the forgiving Hybrid/Text fallback behavior pinned by
+    // `tests/exit_codes.rs`.
+    if QueryClassifier::classify(query_string) == QueryType::Semantic {
+        probe_validate_query_syntax(
+            cli,
+            search_path_path,
+            query_string,
+            build_validation_options(cli),
+        )?;
+    }
+
+    // SGA03: enforce strict path policy via the shared provider before any
+    // session work runs. Session mode keeps its own warm graph cache, so the
+    // acquired graph is dropped immediately after path validation — the
+    // provider's role here is purely to fail invalid paths before the
+    // session manager loads anything.
+    //
+    // Session mode pins `MissingGraphPolicy::Error` (no auto-build hook) so
+    // the provider runs path-policy validation but does not invoke the CLI
+    // auto-build path used by non-session queries. A typed `NoGraph`
+    // outcome here is intentionally swallowed so the session-specific
+    // "no index found" diagnostic produced by `resolve_session_index` below
+    // stays the canonical user-facing message — that contract is pinned by
+    // `tests/integration_tests.rs::test_query_session_requires_index`.
+    // Any other acquisition error (invalid path, incompatible graph, load
+    // failure) propagates so SGA03's strict path-policy semantics remain
+    // in force.
+    match acquire_graph_for_cli_typed(cli, search_path_path, MissingGraphPolicy::Error)? {
+        Ok(_acquisition) => {}
+        Err(GraphAcquisitionError::NoGraph { .. }) => {
+            // Fall through: `resolve_session_index` below produces the
+            // canonical "no index found" diagnostic.
+        }
+        Err(other) => return Err(map_acquisition_error(other)),
+    }
 
     // Index ancestor discovery for session mode
     let (workspace, relative_scope, is_file_query, is_ancestor) =
@@ -1335,6 +1559,319 @@ pub(crate) fn create_executor_with_plugins_for_cli(
     Ok(QueryExecutor::with_plugin_manager(
         resolved_plugins.plugin_manager,
     ))
+}
+
+/// Strict path-only validation shared by every CLI `sqry query` mode.
+///
+/// SGA03 Major #3 / Major #4 fix — the migration tightened CLI path
+/// handling so non-existent, non-canonicalizable, symlink-escaping, and
+/// outside-workspace paths fail *before* any graph load, pipeline / join
+/// dispatch, or text-only search runs. The provider already enforces this
+/// for the semantic/hybrid graph-load path; this helper duplicates the
+/// path-only portion so:
+///
+/// - Pipeline (`base | aggregation`) and join (`LHS CALLS RHS`) queries
+///   that today route through `run_pipeline_query` / `run_join_query`
+///   share the same strict invalid-path semantics as the regular
+///   semantic path.
+/// - `--text` mode (which deliberately skips full graph acquisition so
+///   it keeps working on unindexed paths) still rejects invalid paths
+///   up-front rather than failing later inside the text scanner with a
+///   less informative diagnostic.
+///
+/// The check is intentionally tighter than `Path::exists`: it requires
+/// canonicalization to succeed, which rejects dangling symlinks and
+/// permission-denied paths at the boundary. A workspace-boundary check
+/// can only be applied once we have a workspace root; for graph-backed
+/// modes that's [`acquire_graph_for_cli`]'s job, while text-only mode
+/// against an unindexed path simply has no workspace to bound.
+/// Parse-only validation probe for the query string.
+///
+/// SGA03 regression fix — strict CLI path validation now runs before query
+/// parsing in `acquire_graph_for_cli`, which means an invalid query string
+/// against an *unindexed-but-valid* path was being masked by the provider's
+/// `NoGraph` acquisition error (exit 1, "no graph found...") instead of
+/// surfacing as a parse / validation error (exit 2).
+///
+/// The CLI integration spec (`docs/.../CLI_INTEGRATION.md` §4 Exit behavior)
+/// requires invalid query syntax to remain a query-parse failure, not an
+/// acquisition failure. This helper runs the executor's full parse and
+/// validate step *without* loading any graph (purely an AST plus
+/// field-registry check), so it can fire on unindexed directories the
+/// same way a regular semantic query would have under the pre-SGA03
+/// behavior.
+///
+/// Path validation already runs in `run_query` before this helper is
+/// invoked, so an invalid *path* still wins over an invalid *query*. If the
+/// path is valid but the directory has no graph, the parse probe reports
+/// the parse error (exit 2); if the parse succeeds, control falls through
+/// to `acquire_graph_for_cli` which reports the missing graph (exit 1).
+///
+/// Returns `Ok(())` when the query is well-formed; otherwise returns the
+/// underlying [`QueryError`] / [`RichQueryError`] so the CLI's existing
+/// error-mapping in `main::handle_run_error` produces exit code 2.
+fn probe_validate_query_syntax(
+    cli: &Cli,
+    search_path: &Path,
+    query_string: &str,
+    validation_options: ValidationOptions,
+) -> Result<()> {
+    // Use the same plugin manager the executor would build for this path
+    // so plugin-contributed query fields validate correctly. Falls back to
+    // the default plugin manager if plugin resolution itself fails — that
+    // failure mode will resurface in `acquire_graph_for_cli` with its
+    // canonical diagnostic and the parse probe should not double-report.
+    let executor = match create_executor_with_plugins_for_cli(cli, search_path) {
+        Ok(executor) => executor.with_validation_options(validation_options),
+        Err(_) => create_executor_with_plugins().with_validation_options(validation_options),
+    };
+    executor.parse_query_ast(query_string).map(|_| ())
+}
+
+fn validate_query_path_strict(search_path: &Path) -> Result<PathBuf> {
+    if !search_path.exists() {
+        bail!(
+            "invalid path {}: path does not exist",
+            search_path.display()
+        );
+    }
+    match search_path.canonicalize() {
+        Ok(canonical) => Ok(canonical),
+        Err(err) => bail!(
+            "invalid path {}: path cannot be canonicalized: {err}",
+            search_path.display()
+        ),
+    }
+}
+
+/// Acquire the read-only graph for `search_path` through the shared
+/// [`FilesystemGraphProvider`].
+///
+/// SGA03 routes CLI `sqry query` graph acquisition through the same provider
+/// the standalone MCP engine uses. The provider owns:
+///
+/// 1. Strict path-policy validation (existence, workspace boundary,
+///    symlink-escape rejection) **before** any disk graph load.
+/// 2. Nearest `.sqry/graph` ancestor discovery (matching the CLI's existing
+///    `find_nearest_index` semantics).
+/// 3. Manifest SHA-256 verification, snapshot deserialization, and plugin
+///    selection compatibility.
+///
+/// CLI `sqry query` is read-only at the snapshot-load layer but preserves the
+/// pre-SGA03 auto-index-on-missing-graph behavior. When no `.sqry/graph`
+/// exists for the resolved workspace, the provider invokes the
+/// [`AutoBuildHook`] installed below, which honors `SQRY_AUTO_INDEX`
+/// (default `true`) and otherwise returns a typed
+/// [`GraphAcquisitionError::NoGraph`] so the CLI surfaces the existing
+/// "No graph found" diagnostic at exit code 1.
+///
+/// `SQRY_AUTO_INDEX=false` (or `=0`) preserves the disabled-mode contract
+/// exercised by `tests/exit_codes.rs::test_exit_code_1_no_graph_with_auto_index_disabled`.
+/// The auto-build hook does **not** broaden any other error class into an
+/// auto-build (see `CLI_INTEGRATION.md §2 Inputs And Flags`). It triggers
+/// only on the no-artifact branch the provider takes when no ancestor
+/// `.sqry/graph` is found.
+pub(crate) fn acquire_graph_for_cli(cli: &Cli, search_path: &Path) -> Result<GraphAcquisition> {
+    acquire_graph_for_cli_with_policy(cli, search_path, MissingGraphPolicy::AutoBuildIfEnabled)
+}
+
+/// Variant of [`acquire_graph_for_cli`] that lets the caller pin the
+/// missing-graph policy explicitly. The user-facing error is rendered by
+/// [`map_acquisition_error`].
+pub(crate) fn acquire_graph_for_cli_with_policy(
+    cli: &Cli,
+    search_path: &Path,
+    missing_graph_policy: MissingGraphPolicy,
+) -> Result<GraphAcquisition> {
+    let (provider, request) =
+        build_cli_provider_and_request(cli, search_path, missing_graph_policy)?;
+    provider.acquire(request).map_err(map_acquisition_error)
+}
+
+/// Typed-error variant for callers that need to discriminate
+/// [`GraphAcquisitionError`] variants before they are rendered to the user
+/// message.
+///
+/// Session mode (`--session`) uses this to swallow `NoGraph` so the
+/// session-specific "no index found" diagnostic from `resolve_session_index`
+/// remains the canonical user message (pinned by
+/// `tests/integration_tests.rs::test_query_session_requires_index`), while
+/// still propagating every other acquisition error (invalid path,
+/// incompatible graph, load failure).
+///
+/// Plugin-selection / configuration failures still surface through the
+/// shared `anyhow::Error` path (they are CLI-config problems, not graph-
+/// acquisition outcomes), so the outer return type is still `Result`. The
+/// inner `Result` is the typed [`GraphAcquisitionError`] for the callers
+/// that need to inspect it.
+pub(crate) fn acquire_graph_for_cli_typed(
+    cli: &Cli,
+    search_path: &Path,
+    missing_graph_policy: MissingGraphPolicy,
+) -> Result<std::result::Result<GraphAcquisition, GraphAcquisitionError>> {
+    let (provider, request) =
+        build_cli_provider_and_request(cli, search_path, missing_graph_policy)?;
+    Ok(provider.acquire(request))
+}
+
+/// Shared provider/request construction for the CLI's filesystem-backed
+/// graph acquisition. Resolves CLI plugin selection (which may surface
+/// `anyhow::Error`-shaped configuration failures), wires the optional
+/// `AutoBuildHook` for [`MissingGraphPolicy::AutoBuildIfEnabled`], and
+/// returns the configured provider plus the read-only `GraphAcquisitionRequest`.
+fn build_cli_provider_and_request(
+    cli: &Cli,
+    search_path: &Path,
+    missing_graph_policy: MissingGraphPolicy,
+) -> Result<(FilesystemGraphProvider, GraphAcquisitionRequest)> {
+    // Resolve the same plugin selection the executor would use; the provider
+    // needs it both for snapshot deserialization and for unknown-plugin-id
+    // detection on the manifest.
+    //
+    // The plugin resolution uses an "effective root" that may not be the same
+    // as the canonical workspace the provider discovers. To preserve current
+    // CLI behavior we resolve plugins against the user-supplied search path
+    // first; if that fails because the workspace cannot be located, the
+    // provider call below will surface the canonical typed error.
+    let plugin_root = find_nearest_index(search_path)
+        .map_or_else(|| search_path.to_path_buf(), |location| location.index_root);
+    let resolved_plugins = plugin_defaults::resolve_plugin_selection(
+        cli,
+        &plugin_root,
+        PluginSelectionMode::ReadOnly,
+    )?;
+    let mut provider = FilesystemGraphProvider::new(Arc::new(resolved_plugins.plugin_manager));
+
+    // Only attach the auto-build hook for `AutoBuildIfEnabled` callers.
+    // Session-mode callers pass `Error` so missing graphs surface as a typed
+    // `NoGraph` error and the session-specific "no index found" diagnostic
+    // can run.
+    if matches!(missing_graph_policy, MissingGraphPolicy::AutoBuildIfEnabled) {
+        // Resolve a second plugin manager with the same selection so the
+        // auto-build hook can move an `Arc<PluginManager>` into a `'static`
+        // closure without giving up the provider's manager. `PluginManager`
+        // is not `Clone`; both managers carry identical selection because
+        // `resolve_plugin_selection(ReadOnly)` is deterministic for the
+        // same (cli, plugin_root) inputs and there is no `.sqry/graph` to
+        // invalidate here (we're on the missing-artifact branch).
+        let hook_plugins = plugin_defaults::resolve_plugin_selection(
+            cli,
+            &plugin_root,
+            PluginSelectionMode::ReadOnly,
+        )?;
+        let hook_plugin_manager = Arc::new(hook_plugins.plugin_manager);
+
+        let auto_build_hook: AutoBuildHook = Arc::new(move |canonical_request: &Path| {
+            // Mirror `Engine::ensure_graph` (Gate A iter 1): `SQRY_AUTO_INDEX`
+            // gate first; if disabled, surface `NoGraph` so the CLI's
+            // existing `map_acquisition_error` produces "No graph found ..."
+            // (preserving the pre-SGA03 exit-1 contract). Do NOT broaden
+            // auto-index semantics — only the no-artifact branch reaches
+            // this hook.
+            if !is_auto_index_enabled() {
+                return Err(GraphAcquisitionError::NoGraph {
+                    workspace_root: canonical_request.to_path_buf(),
+                });
+            }
+
+            log::info!(
+                "No graph found at {}, auto-building index",
+                canonical_request.display()
+            );
+
+            let config = sqry_core::graph::unified::build::BuildConfig::default();
+            let (graph, _build_result) = sqry_core::graph::unified::build::build_and_persist_graph(
+                canonical_request,
+                &hook_plugin_manager,
+                &config,
+                "cli:auto_index",
+            )
+            .map_err(|e| GraphAcquisitionError::BuildFailed {
+                workspace_root: canonical_request.to_path_buf(),
+                reason: format!("{e}"),
+            })?;
+            Ok(Arc::new(graph))
+        });
+
+        provider = provider.with_auto_build_hook(auto_build_hook);
+    }
+
+    let request = GraphAcquisitionRequest {
+        requested_path: search_path.to_path_buf(),
+        operation: AcquisitionOperation::ReadOnlyQuery,
+        path_policy: PathPolicy::default(),
+        missing_graph_policy,
+        stale_policy: StalePolicy::default(),
+        plugin_selection_policy: PluginSelectionPolicy::default(),
+        tool_name: Some("sqry_query"),
+    };
+    Ok((provider, request))
+}
+
+/// Returns `true` when CLI auto-indexing is enabled (the default).
+///
+/// Mirrors `sqry-mcp::engine::is_auto_index_enabled`: `SQRY_AUTO_INDEX=false`
+/// or `SQRY_AUTO_INDEX=0` disables auto-indexing; any other value (including
+/// unset) enables it. Kept local to the CLI to avoid pulling sqry-mcp into
+/// the CLI's dependency graph.
+fn is_auto_index_enabled() -> bool {
+    match std::env::var("SQRY_AUTO_INDEX") {
+        Ok(val) => val != "false" && val != "0",
+        Err(_) => true,
+    }
+}
+
+/// Map a typed [`GraphAcquisitionError`] into an `anyhow::Error` while
+/// preserving the variant identity so CLI diagnostics can distinguish path
+/// errors from incompatible-graph errors.
+fn map_acquisition_error(err: GraphAcquisitionError) -> anyhow::Error {
+    match err {
+        GraphAcquisitionError::InvalidPath { path, reason } => {
+            anyhow::anyhow!("invalid path {}: {}", path.display(), reason)
+        }
+        GraphAcquisitionError::NoGraph { workspace_root } => {
+            anyhow::anyhow!(
+                "No graph found for {}. Run `sqry index {}` first.",
+                workspace_root.display(),
+                workspace_root.display()
+            )
+        }
+        GraphAcquisitionError::IncompatibleGraph {
+            source_root,
+            status,
+        } => match status {
+            PluginSelectionStatus::IncompatibleUnknownPluginIds { unknown_plugin_ids } => {
+                anyhow::anyhow!(
+                    "Incompatible graph at {}: manifest references plugin ids unknown to this binary: {}. \
+                     Rebuild the index with `sqry index {} --force` after upgrading sqry.",
+                    source_root.display(),
+                    unknown_plugin_ids.join(", "),
+                    source_root.display()
+                )
+            }
+            PluginSelectionStatus::IncompatibleSnapshotFormat { reason } => anyhow::anyhow!(
+                "Incompatible graph at {}: {}. Run `sqry index {} --force` to rebuild.",
+                source_root.display(),
+                reason,
+                source_root.display()
+            ),
+            PluginSelectionStatus::Exact => {
+                anyhow::anyhow!(
+                    "Incompatible graph at {} (no detail); rerun `sqry index --force`",
+                    source_root.display()
+                )
+            }
+        },
+        GraphAcquisitionError::LoadFailed {
+            source_root,
+            reason,
+        } => anyhow::anyhow!(
+            "Failed to load graph at {}: {}",
+            source_root.display(),
+            reason
+        ),
+        other => anyhow::anyhow!("graph acquisition failed: {other}"),
+    }
 }
 
 fn u64_to_f64_lossy(value: u64) -> f64 {

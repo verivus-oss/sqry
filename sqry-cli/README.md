@@ -151,6 +151,18 @@ sqry query "(kind:function OR kind:method) AND lang:go AND name~=/error/"
 sqry query "kind:function" --explain
 ```
 
+### Behavior change: strict invalid-path handling
+
+`sqry query` now rejects malformed paths before any graph load runs. Non-existent paths,
+paths that cannot be canonicalized (dangling symlinks, permission-denied directories), and
+paths that — after canonicalization — escape the workspace root via symlinks are returned
+as `invalid path: ...` errors before pipeline (`base | aggregation`), join (`LHS CALLS RHS`),
+or semantic execution begins. `--text` mode still skips graph acquisition so it continues
+to work on unindexed paths, but it now applies the same up-front existence /
+canonicalization check so a typo'd path fails with the same diagnostic that the semantic
+modes produce. Scripts that previously relied on a missing path falling through to a
+zero-result success exit must check the path before invoking `sqry query`.
+
 ## Output Formats
 
 ```bash
@@ -197,4 +209,4 @@ cargo run --package sqry-cli -- main src/
 
 MIT - See [LICENSE](../LICENSE)
 
-**Version**: 13.0.7
+**Version**: 13.0.11

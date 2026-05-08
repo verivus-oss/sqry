@@ -44,7 +44,7 @@ pub(crate) fn perf_log(msg: &str) {
 use sqry_core::graph::node::Language;
 use sqry_core::graph::unified::build::BuildConfig;
 use sqry_core::graph::unified::concurrent::CodeGraph;
-use sqry_core::graph::unified::persistence::{GraphStorage, load_from_path};
+use sqry_core::graph::unified::persistence::GraphStorage;
 use sqry_core::graph::unified::{EdgeKind, NodeKind};
 use sqry_core::json_response::IndexStatus;
 use sqry_core::progress::{IndexProgress, ProgressReporter, SharedReporter};
@@ -305,36 +305,37 @@ fn member_folder_aggregate_status(session: &SessionManager, target: &Path) -> In
 fn load_status_graph(
     session: &SessionManager,
     target: &Path,
-    graph_storage: &GraphStorage,
-) -> Result<CodeGraph> {
-    match load_from_path(
-        graph_storage.snapshot_path(),
-        Some(session.executor().plugin_manager()),
-    ) {
+    _graph_storage: &GraphStorage,
+) -> Result<std::sync::Arc<CodeGraph>> {
+    // SGA06 — route the index-status graph load through the shared
+    // FilesystemGraphProvider via `acquire_session_graph`. The provider
+    // applies the canonical path-policy / plugin-selection / SHA-256
+    // integrity checks, and the caller-side self-heal preserves the
+    // historic LSP behaviour: a corrupt snapshot is auto-rebuilt and
+    // the session caches are cleared.
+    match crate::session::acquire_session_graph(target, "lsp:index_status") {
         Ok(graph) => Ok(graph),
-        Err(load_error) => {
-            log::warn!(
-                "Graph load failed for index status at '{}' ({load_error}), auto-rebuilding index",
-                target.display()
-            );
-            let plugins = create_plugin_manager();
-            let config = BuildConfig::default();
-            let (graph, _build_result) = sqry_core::graph::unified::build::build_and_persist_graph(
-                target,
-                &plugins,
-                &config,
-                "lsp:index_status_auto_rebuild",
-            )
-            .with_context(|| {
+        Err(err) => {
+            // The acquisition path returns `BuildFailed` when the auto-build
+            // hook (or the corrupt-load self-heal branch) itself failed.
+            // Otherwise we treat the error as a hard failure surfaced to
+            // the LSP client.
+            if matches!(
+                err,
+                sqry_core::graph::acquisition::GraphAcquisitionError::BuildFailed { .. }
+            ) {
+                // Make sure stale caches are cleared so the next request
+                // re-runs through the provider rather than returning a stale
+                // `Arc<CodeGraph>`.
+                session.clear_graph_cache();
+                session.clear_project_graph_cache_for_path(target);
+            }
+            Err(crate::session::map_acquisition_error_for_lsp(err, target)).with_context(|| {
                 format!(
-                    "auto-rebuild failed for {} (original error: {})",
-                    target.display(),
-                    load_error
+                    "index status graph acquisition failed for {}",
+                    target.display()
                 )
-            })?;
-            session.clear_graph_cache();
-            session.clear_project_graph_cache_for_path(target);
-            Ok(graph)
+            })
         }
     }
 }
@@ -416,7 +417,8 @@ pub fn index_status(session: &SessionManager, path: Option<&str>) -> Result<Inde
     // Load the requested source-root graph directly so index status remains
     // bounded by `resolve_path()` even when ambient ancestor git metadata exists.
     let load_start = Instant::now();
-    let graph = load_status_graph(session, &target, &graph_storage)?;
+    let graph_arc = load_status_graph(session, &target, &graph_storage)?;
+    let graph: &CodeGraph = &graph_arc;
 
     perf_log(&format!(
         "index_status graph load took {elapsed:?}",
@@ -426,7 +428,7 @@ pub fn index_status(session: &SessionManager, path: Option<&str>) -> Result<Inde
     // Get stats from the graph
     let symbol_count = graph.node_count();
     let file_count = graph.files().len();
-    let languages = collect_languages_from_graph(&graph);
+    let languages = collect_languages_from_graph(graph);
 
     // Get file metadata for timestamp
     let metadata = std::fs::metadata(graph_storage.snapshot_path())
@@ -450,9 +452,9 @@ pub fn index_status(session: &SessionManager, path: Option<&str>) -> Result<Inde
     let datetime = chrono::DateTime::<chrono::Utc>::from(created);
 
     // Compute grouped counts for tree view grouping
-    let symbol_counts_by_kind = compute_symbol_counts_from_graph(&graph);
-    let file_counts_by_language = compute_file_counts_from_graph(&graph);
-    let (cross_language_count, relation_counts_by_pair) = compute_cross_language_stats(&graph);
+    let symbol_counts_by_kind = compute_symbol_counts_from_graph(graph);
+    let file_counts_by_language = compute_file_counts_from_graph(graph);
+    let (cross_language_count, relation_counts_by_pair) = compute_cross_language_stats(graph);
 
     let builder = IndexStatus::from_index(
         graph_storage.snapshot_path().display().to_string(),

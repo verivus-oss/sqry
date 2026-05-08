@@ -27,6 +27,8 @@
 //! exercises the production code path with the production
 //! `SessionManager`.
 
+#![cfg(feature = "classifier-tests")]
+
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Barrier;

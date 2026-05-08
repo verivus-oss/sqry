@@ -23,9 +23,22 @@ pub fn execute(session: &SessionManager, params: SqryRelationParams) -> Result<S
     let root = session.resolve_path(path.as_deref())?;
     let query = build_relation_query(relation, &target)?;
 
+    // SGA06 — acquire the graph through the shared `FilesystemGraphProvider`
+    // and run the relation predicate via the preloaded executor entrypoint
+    // so this read-only request honours the same pipeline as CLI/MCP.
+    let Some(graph) = session.graph_for_path(&root)? else {
+        return Ok(SqryRelationResult {
+            relation,
+            results: Vec::new(),
+            total: 0,
+            is_truncated: false,
+            used_index: true,
+        });
+    };
+
     let executor = session.executor();
     let query_results = executor
-        .execute_on_graph(&query, &root)
+        .execute_on_preloaded_graph(graph, &query, &root, None)
         .with_context(|| format!("failed to execute relation query '{query}'"))?;
 
     let total = query_results.len();

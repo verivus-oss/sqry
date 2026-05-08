@@ -7,6 +7,7 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+exclude = ["training/**"]
 
 [dependencies]
 # Core dependencies from workspace
@@ -25,21 +26,21 @@ sha2 = "0.10"
 # Platform-appropriate cache/config directory discovery (NL02 resolver).
 dirs = "6.0"
 
-# ONNX Runtime for inference (optional - enabled by default)
+# ONNX Runtime for inference (optional; enabled with the `classifier` feature)
 # Exact-pin the known-good prerelease line until newer ort releases are validated
 # against this workspace and local install flows.
 ort = { version = "=2.0.0-rc.11", default-features = false, features = ["std", "ndarray", "load-dynamic"], optional = true }
 
-# HuggingFace tokenizers (optional - enabled by default)
+# HuggingFace tokenizers (optional; enabled with the `classifier` feature)
 # Version 0.21.4 matches Python tokenizers for tokenizer.json compatibility
-tokenizers = { version = "0.21.4", optional = true }
+tokenizers = { version = "0.23.1", optional = true }
 
 # NL03 gated downloader stack — only pulled when `classifier` is enabled.
 # - ureq: blocking HTTP client (no tokio); rustls-tls keeps the build hermetic
 #   and avoids pulling system OpenSSL.
 # - flate2 / tar: streaming gzip + tar extraction for the verified archive.
 ureq   = { version = "2.10", default-features = false, features = ["tls"], optional = true }
-flate2 = { version = "1.0",  optional = true }
+flate2 = { version = "1.1",  optional = true }
 tar    = { version = "0.4",  optional = true }
 
 # NL07 classifier-pool concurrency primitives — only pulled when
@@ -50,20 +51,20 @@ crossbeam-channel = { workspace = true, optional = true }
 scopeguard = { version = "1", optional = true }
 
 [dev-dependencies]
-tempfile = "3.10"
+tempfile = "3.27"
 criterion = { version = "0.8", features = ["html_reports"] }
-toml = "1.0"
-flate2 = "1.0"
+toml = "1.1"
+flate2 = "1.1"
 tar = "0.4"
 
 # NL07 perf measurement — Linux-only, dev-only. Used by the
 # concurrent-load test to assert per-classifier RSS delta stays within
 # the NFR-2 envelope.
 [target.'cfg(target_os = "linux")'.dev-dependencies]
-procfs = "0.16"
+procfs = "0.18"
 
 [features]
-default = ["classifier"]
+default = []
 # Enable the MiniLM-L6-v2 intent classifier (requires ONNX Runtime).
 # Pulls in the NL03 gated downloader stack (ureq + flate2 + tar) — these
 # are required because trusted-mode XDG cache hits are structurally

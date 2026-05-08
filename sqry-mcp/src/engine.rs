@@ -6,6 +6,10 @@ use sqry_core::graph::unified::concurrent::CodeGraph;
 use sqry_core::graph::unified::persistence::{
     GraphStorage, Manifest, load_from_bytes, verify_snapshot_bytes,
 };
+use sqry_core::graph::{
+    AcquisitionOperation, FilesystemGraphProvider, GraphAcquirer, GraphAcquisitionError,
+    GraphAcquisitionRequest, MissingGraphPolicy, PathPolicy, PluginSelectionPolicy, StalePolicy,
+};
 use sqry_core::plugin::PluginManager;
 use sqry_core::query::QueryExecutor;
 use sqry_plugin_registry::create_plugin_manager;
@@ -143,17 +147,35 @@ impl Engine {
         build_plugin_manager()
     }
 
+    /// Return the in-memory cached graph, if one has already been loaded by a
+    /// prior `ensure_graph` (or legacy `graph`) call.
+    ///
+    /// SGA03 Major #2 fix — this is the cached-graph fast path that
+    /// `ensure_graph` consults before falling back to provider-backed disk
+    /// loads. It performs no I/O and never touches disk; therefore it is safe
+    /// to call before any path/integrity validation has run.
+    #[must_use]
+    pub fn cached_graph(&self) -> Option<Arc<CodeGraph>> {
+        let cache = self.graph_cache.read();
+        cache.as_ref().map(Arc::clone)
+    }
+
     /// Returns the unified graph if available.
     ///
     /// The unified graph is loaded from `.sqry/graph/snapshot.sqry` if it exists.
     /// This provides access to `GraphSnapshot` for visualization and graph queries.
+    ///
+    /// **SGA03 Major #2 note:** this method still contains the legacy direct
+    /// disk-load path used by tests and a small number of advisory call sites.
+    /// `ensure_graph` no longer routes through here for disk loads — it only
+    /// uses [`Self::cached_graph`] for the in-memory fast path and routes all
+    /// disk-resident graphs through [`FilesystemGraphProvider`] so the
+    /// integrity / plugin-selection / path-policy checks always run.
+    #[allow(dead_code)]
     pub fn graph(&self) -> Option<Arc<CodeGraph>> {
-        {
-            let cache = self.graph_cache.read();
-            if let Some(graph) = cache.as_ref() {
-                tracing::debug!("Returning cached graph");
-                return Some(graph.clone());
-            }
+        if let Some(graph) = self.cached_graph() {
+            tracing::debug!("Returning cached graph");
+            return Some(graph);
         }
 
         let storage = GraphStorage::new(&self.workspace_root);
@@ -244,6 +266,13 @@ impl Engine {
     /// Unlike `graph()` which returns `None` when no snapshot is found,
     /// this method triggers a full build pipeline (graph + snapshot + manifest + analysis).
     ///
+    /// # SGA03 routing
+    ///
+    /// Standalone MCP `ensure_graph` is now a thin wrapper around
+    /// [`FilesystemGraphProvider`] with [`MissingGraphPolicy::AutoBuildIfEnabled`]
+    /// and an auto-build hook that preserves the existing daemon-conflict
+    /// check + `build_and_persist_graph` behavior.
+    ///
     /// # Errors
     ///
     /// Returns an error if:
@@ -251,41 +280,97 @@ impl Engine {
     /// - Graph building fails
     /// - Persistence fails
     pub fn ensure_graph(&self) -> Result<Arc<CodeGraph>> {
-        // Fast path: cached or existing graph
-        if let Some(graph) = self.graph() {
+        // Fast path: in-memory cached graph from a prior provider-backed
+        // acquisition. SGA03 Major #2 — the legacy `graph()` fast path also
+        // serviced fresh disk loads via the old loader, which silently
+        // bypassed the provider's integrity / plugin-selection / path-policy
+        // checks. We now only short-circuit on the in-memory cache here;
+        // every disk-resident graph is routed through the provider below.
+        if let Some(graph) = self.cached_graph() {
             return Ok(graph);
         }
 
-        // Check opt-out
-        if !is_auto_index_enabled() {
-            bail!(
-                "No unified graph found. Auto-indexing is disabled (SQRY_AUTO_INDEX=false). \
-                 Run `sqry index` to create the graph."
+        // Note: `Engine::graph()` (the legacy disk-load path we just removed
+        // from this method) did not run `check_daemon_workspace_conflict`
+        // for fresh disk loads — only the auto-build branch did. We preserve
+        // that behavior: the daemon-conflict check still runs in the
+        // auto-build hook below, but read-only disk loads go straight to the
+        // provider.
+
+        // Build the provider. Construct a fresh plugin manager that mirrors
+        // this Engine's standalone roster — `PluginManager` is not `Clone`,
+        // and a fresh manager is built the same way `Engine::for_workspace`
+        // built the executor's manager, so plugin-selection compatibility
+        // checks line up with the executor that runs the query downstream.
+        let provider_plugins = build_plugin_manager();
+        let workspace_root_for_hook = self.workspace_root.clone();
+        let auto_build_hook: sqry_core::graph::AutoBuildHook = Arc::new(move |_req_path| {
+            // Preserve the existing standalone-MCP auto-build flow:
+            // 1. SQRY_AUTO_INDEX gate
+            // 2. daemon workspace-conflict check (re-run inside the hook
+            //    in case the daemon started between the outer check and
+            //    the auto-build invocation)
+            // 3. build_and_persist_graph with the standalone plugin roster.
+            if !is_auto_index_enabled() {
+                return Err(GraphAcquisitionError::BuildFailed {
+                    workspace_root: workspace_root_for_hook.clone(),
+                    reason: "auto-indexing disabled (SQRY_AUTO_INDEX=false). Run `sqry index` to create the graph.".to_string(),
+                });
+            }
+
+            check_daemon_workspace_conflict(&workspace_root_for_hook).map_err(|e| {
+                GraphAcquisitionError::BuildFailed {
+                    workspace_root: workspace_root_for_hook.clone(),
+                    reason: format!("{e}"),
+                }
+            })?;
+
+            tracing::info!(
+                workspace = %workspace_root_for_hook.display(),
+                "Auto-building graph index (no existing snapshot found)"
             );
+
+            let plugins = create_plugin_manager();
+            let config = sqry_core::graph::unified::build::BuildConfig::default();
+            let (graph, _build_result) = sqry_core::graph::unified::build::build_and_persist_graph(
+                &workspace_root_for_hook,
+                &plugins,
+                &config,
+                "mcp:auto_index",
+            )
+            .map_err(|e| GraphAcquisitionError::BuildFailed {
+                workspace_root: workspace_root_for_hook.clone(),
+                reason: format!("{e}"),
+            })?;
+            Ok(Arc::new(graph))
+        });
+
+        let provider = FilesystemGraphProvider::new(Arc::new(provider_plugins))
+            .with_auto_build_hook(auto_build_hook);
+        let request = GraphAcquisitionRequest {
+            requested_path: self.workspace_root.clone(),
+            operation: AcquisitionOperation::ReadOnlyQuery,
+            // The MCP engine's path was already canonicalized by the caller
+            // (see `canonicalize_in_workspace` in the search tool); the
+            // standalone preflight runs first and the workspace_root passed
+            // here always exists. Keep the strict default.
+            path_policy: PathPolicy::default(),
+            missing_graph_policy: MissingGraphPolicy::AutoBuildIfEnabled,
+            stale_policy: StalePolicy::default(),
+            plugin_selection_policy: PluginSelectionPolicy::default(),
+            tool_name: Some("mcp_ensure_graph"),
+        };
+        let acquisition = provider
+            .acquire(request)
+            .map_err(map_acquisition_error_for_engine)?;
+
+        // Cache the acquired graph in the engine's local cache so subsequent
+        // calls to `graph()` short-circuit the provider entirely.
+        let arc = acquisition.graph;
+        {
+            let mut cache = self.graph_cache.write();
+            *cache = Some(Arc::clone(&arc));
         }
-
-        // Daemon workspace mutual exclusion: bail if sqryd is already managing this workspace.
-        // Must run before the slow build path to avoid concurrent writer corruption.
-        check_daemon_workspace_conflict(&self.workspace_root)?;
-
-        // Slow path: auto-build
-        tracing::info!(
-            workspace = %self.workspace_root.display(),
-            "Auto-building graph index (no existing snapshot found)"
-        );
-
-        let plugins = create_plugin_manager();
-        let config = sqry_core::graph::unified::build::BuildConfig::default();
-        let (graph, _build_result) = sqry_core::graph::unified::build::build_and_persist_graph(
-            &self.workspace_root,
-            &plugins,
-            &config,
-            "mcp:auto_index",
-        )?;
-
-        let arc = Arc::new(graph);
-        let mut cache = self.graph_cache.write();
-        *cache = Some(arc.clone());
         Ok(arc)
     }
 
@@ -293,6 +378,47 @@ impl Engine {
     pub fn clear_graph_cache(&self) {
         let mut cache = self.graph_cache.write();
         *cache = None;
+    }
+}
+
+/// Map a typed [`GraphAcquisitionError`] back into the standalone-MCP
+/// `anyhow::Error` shape so existing CLI/MCP error reporting (which already
+/// renders these strings to the user) continues to work without touching wire
+/// shapes.
+fn map_acquisition_error_for_engine(err: GraphAcquisitionError) -> anyhow::Error {
+    match err {
+        GraphAcquisitionError::InvalidPath { path, reason } => {
+            anyhow::anyhow!("invalid path {}: {}", path.display(), reason)
+        }
+        GraphAcquisitionError::NoGraph { workspace_root } => anyhow::anyhow!(
+            "No unified graph found at {}. Run `sqry index` to create the graph.",
+            workspace_root.display()
+        ),
+        GraphAcquisitionError::IncompatibleGraph {
+            source_root,
+            status,
+        } => anyhow::anyhow!(
+            "Incompatible graph at {}: {:?}. Rebuild the index with `sqry index --force` after upgrading sqry.",
+            source_root.display(),
+            status
+        ),
+        GraphAcquisitionError::LoadFailed {
+            source_root,
+            reason,
+        } => anyhow::anyhow!(
+            "Failed to load graph at {}: {}",
+            source_root.display(),
+            reason
+        ),
+        GraphAcquisitionError::BuildFailed {
+            workspace_root,
+            reason,
+        } => anyhow::anyhow!(
+            "Graph build failed for {}: {}",
+            workspace_root.display(),
+            reason
+        ),
+        other => anyhow::anyhow!("graph acquisition failed: {other}"),
     }
 }
 

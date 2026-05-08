@@ -1,4 +1,18 @@
-//! Basic CLI integration tests
+//! Basic CLI integration tests.
+//!
+//! Tests that load a `.sqry/graph/manifest.json` (the cli-basic
+//! fixture or the workspace's own graph) are gated behind
+//! `specialty-plugins`. Both manifests' `plugin_selection.active_plugin_ids`
+//! reference plugin ids (`abap`, `apex`, `pulumi`, `puppet`,
+//! `servicenow-*`, `terraform`, `plsql`) that were moved behind the
+//! `specialty-plugins` Cargo feature in `refactor!: make non-core
+//! surfaces opt-in` (commit ecd215385). A default-feature `sqry`
+//! binary errors with `unknown plugin ids: ...` when reading those
+//! manifests. The `--version`/`--help`/`--explain` tests don't load
+//! the graph and stay unconditional.
+//!
+//! Run the full set with:
+//!   cargo test -p sqry-cli --features specialty-plugins --test cli_basic_test
 
 mod common;
 use common::sqry_bin;
@@ -6,13 +20,18 @@ use common::sqry_bin;
 use assert_cmd::Command;
 use predicates::prelude::*;
 
+#[cfg(feature = "specialty-plugins")]
 use sqry_core::test_support::verbosity;
+#[cfg(feature = "specialty-plugins")]
 use std::path::PathBuf;
+#[cfg(feature = "specialty-plugins")]
 use std::sync::Once;
 
 // Initialize verbose logging once for all tests in this file
+#[cfg(feature = "specialty-plugins")]
 static INIT: Once = Once::new();
 
+#[cfg(feature = "specialty-plugins")]
 fn init_logging() {
     INIT.call_once(|| {
         verbosity::init(env!("CARGO_PKG_NAME"));
@@ -20,6 +39,7 @@ fn init_logging() {
 }
 
 /// Get the path to the test fixture directory
+#[cfg(feature = "specialty-plugins")]
 fn fixture_path() -> PathBuf {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     // CARGO_MANIFEST_DIR is sqry-cli, parent is sqry repo root
@@ -60,6 +80,7 @@ fn test_query_help() {
         .stdout(predicate::str::contains("query"));
 }
 
+#[cfg(feature = "specialty-plugins")]
 #[test]
 fn test_simple_query() {
     init_logging();
@@ -90,6 +111,7 @@ fn test_query_with_explain() {
         .stderr(predicate::str::contains("Query Plan:"));
 }
 
+#[cfg(feature = "specialty-plugins")]
 #[test]
 fn test_query_with_verbose() {
     let path = sqry_bin();
@@ -106,6 +128,7 @@ fn test_query_with_verbose() {
         .stderr(predicate::str::contains("Query executed"));
 }
 
+#[cfg(feature = "specialty-plugins")]
 #[test]
 fn test_query_syntax_error_exit_code() {
     init_logging();
@@ -127,6 +150,7 @@ fn test_query_syntax_error_exit_code() {
     log::info!("✓ Syntax error correctly returned exit code 2");
 }
 
+#[cfg(feature = "specialty-plugins")]
 #[test]
 fn test_query_invalid_predicate_exit_code() {
     // Test that invalid predicates exit with error code
@@ -143,6 +167,7 @@ fn test_query_invalid_predicate_exit_code() {
         .code(2); // Validation errors return exit code 2
 }
 
+#[cfg(feature = "specialty-plugins")]
 #[test]
 fn test_query_empty_value_exit_code() {
     // Test that empty values exit with error code 2 (user input errors)
@@ -159,6 +184,7 @@ fn test_query_empty_value_exit_code() {
         .code(2); // Parse errors return exit code 2 (user input errors)
 }
 
+#[cfg(feature = "specialty-plugins")]
 #[test]
 fn test_successful_query_exit_code_zero() {
     init_logging();

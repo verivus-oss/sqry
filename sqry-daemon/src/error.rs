@@ -23,12 +23,13 @@
 
 use std::{path::PathBuf, time::SystemTime};
 
+use sqry_core::graph::acquisition::GraphAcquisitionError;
 use thiserror::Error;
 
 use crate::{
     JSONRPC_INTERNAL_ERROR, JSONRPC_INVALID_PARAMS, JSONRPC_MEMORY_BUDGET_EXCEEDED,
     JSONRPC_TOOL_TIMEOUT, JSONRPC_WORKSPACE_BUILD_FAILED, JSONRPC_WORKSPACE_EVICTED,
-    JSONRPC_WORKSPACE_STALE_EXPIRED,
+    JSONRPC_WORKSPACE_INCOMPATIBLE_GRAPH, JSONRPC_WORKSPACE_STALE_EXPIRED,
 };
 
 /// Result alias for daemon operations.
@@ -116,6 +117,21 @@ pub enum DaemonError {
     /// Maps to JSON-RPC `-32004`.
     #[error("workspace {root} is not loaded")]
     WorkspaceNotLoaded { root: PathBuf },
+
+    /// On-disk graph snapshot or manifest is incompatible with this binary
+    /// (unknown plugin ids in the manifest, or a snapshot format the
+    /// runtime cannot parse). SGA02 / SGA04 mandate this stay distinct
+    /// from [`Self::WorkspaceBuildFailed`] so clients can route
+    /// "rebuild" vs. "upgrade binary" vs. "wait" responses correctly.
+    ///
+    /// `reason` is a human-readable rendering of the underlying
+    /// [`sqry_core::graph::acquisition::PluginSelectionStatus`] — the
+    /// `From<GraphAcquisitionError>` impl below preserves the variant
+    /// faithfully so no information is lost on the wire.
+    ///
+    /// Maps to JSON-RPC `-32005`.
+    #[error("workspace {root} graph is incompatible with this binary: {reason}")]
+    WorkspaceIncompatibleGraph { root: PathBuf, reason: String },
 
     /// Tool invocation exceeded [`DaemonConfig::tool_timeout_secs`].
     /// Emitted by `tool_core::classify_and_execute` (Task 8 Phase 8c U6)
@@ -242,6 +258,7 @@ impl DaemonError {
             Self::WorkspaceEvicted { .. } | Self::WorkspaceNotLoaded { .. } => {
                 Some(JSONRPC_WORKSPACE_EVICTED)
             }
+            Self::WorkspaceIncompatibleGraph { .. } => Some(JSONRPC_WORKSPACE_INCOMPATIBLE_GRAPH),
             Self::ToolTimeout { .. } => Some(JSONRPC_TOOL_TIMEOUT),
             Self::InvalidArgument { .. } => Some(JSONRPC_INVALID_PARAMS),
             Self::Internal(_) => Some(JSONRPC_INTERNAL_ERROR),
@@ -290,6 +307,7 @@ impl DaemonError {
             | Self::MemoryBudgetExceeded { .. }
             | Self::WorkspaceEvicted { .. }
             | Self::WorkspaceNotLoaded { .. }
+            | Self::WorkspaceIncompatibleGraph { .. }
             | Self::ToolTimeout { .. }
             | Self::InvalidArgument { .. }
             | Self::Internal(_) => 70,
@@ -352,6 +370,10 @@ impl DaemonError {
                 "root": root,
                 "hint": "use daemon/load to load the workspace before calling daemon/rebuild",
             })),
+            Self::WorkspaceIncompatibleGraph { root, reason } => Some(json!({
+                "root": root,
+                "reason": reason,
+            })),
             // Phase 8c §O canonical 4-key envelope
             // `{kind, retryable, retry_after_ms, details}` matching
             // standalone `sqry-mcp::rpc_error_to_mcp` shape so clients
@@ -399,6 +421,112 @@ impl DaemonError {
     }
 }
 
+// ---------------------------------------------------------------------------
+// SGA04 — `From<GraphAcquisitionError>` for `DaemonError`.
+// ---------------------------------------------------------------------------
+//
+// Maps the transport-neutral acquisition taxonomy into the daemon's
+// existing JSON-RPC-coded error variants. This is the boundary used by
+// SGA05 dispatch wiring to surface acquisition failures through the
+// JSON-RPC / MCP envelopes without losing the InvalidPath / Evicted /
+// StaleExpired / IncompatibleGraph distinctions (per the SGA spec
+// "Adapters must not collapse" rule).
+impl From<GraphAcquisitionError> for DaemonError {
+    fn from(err: GraphAcquisitionError) -> Self {
+        match err {
+            GraphAcquisitionError::InvalidPath { path, reason } => Self::InvalidArgument {
+                reason: format!("invalid path {}: {reason}", path.display()),
+            },
+            GraphAcquisitionError::NoGraph { workspace_root } => Self::WorkspaceBuildFailed {
+                root: workspace_root,
+                reason: "no graph artifact for workspace".to_string(),
+            },
+            GraphAcquisitionError::LoadFailed {
+                source_root,
+                reason,
+            } => Self::WorkspaceBuildFailed {
+                root: source_root,
+                reason: format!("graph load failed: {reason}"),
+            },
+            GraphAcquisitionError::IncompatibleGraph {
+                source_root,
+                status,
+            } => {
+                use sqry_core::graph::acquisition::PluginSelectionStatus;
+                // Format the status losslessly into a user-facing reason
+                // string. `Exact` should never reach this arm — the core
+                // crate only constructs `IncompatibleGraph` for the two
+                // negative verdicts — but we cover it defensively to
+                // keep the conversion total.
+                let reason = match status {
+                    PluginSelectionStatus::IncompatibleUnknownPluginIds { unknown_plugin_ids } => {
+                        format!("unknown plugin ids: [{}]", unknown_plugin_ids.join(", "))
+                    }
+                    PluginSelectionStatus::IncompatibleSnapshotFormat { reason } => {
+                        format!("incompatible snapshot format: {reason}")
+                    }
+                    PluginSelectionStatus::Exact => {
+                        // Defensive: should not happen.
+                        "compatibility verdict reported Exact alongside IncompatibleGraph error"
+                            .to_string()
+                    }
+                };
+                Self::WorkspaceIncompatibleGraph {
+                    root: source_root,
+                    reason,
+                }
+            }
+            GraphAcquisitionError::NotReady {
+                workspace_root,
+                lifecycle,
+            } => Self::WorkspaceBuildFailed {
+                root: workspace_root,
+                reason: format!("workspace not ready (lifecycle={lifecycle})"),
+            },
+            GraphAcquisitionError::Evicted {
+                workspace_root,
+                original_lifecycle,
+                reload_failure,
+            } => {
+                // Preserve original-lifecycle + reload-failure context
+                // by tracing it before collapsing into the daemon's
+                // single-field WorkspaceEvicted variant. The wire shape
+                // for `-32004` is fixed (`{"root": ...}`); diagnostic
+                // detail rides on the daemon log channel.
+                tracing::warn!(
+                    workspace = %workspace_root.display(),
+                    original_lifecycle = %original_lifecycle,
+                    reload_failure = ?reload_failure,
+                    "graph acquisition: workspace evicted, reload failed"
+                );
+                Self::WorkspaceEvicted {
+                    root: workspace_root,
+                }
+            }
+            GraphAcquisitionError::StaleExpired {
+                workspace_root,
+                age_hours,
+            } => Self::WorkspaceStaleExpired {
+                root: workspace_root,
+                age_hours: age_hours.map(|h| h as u64).unwrap_or(0),
+                cap_hours: 0,
+                last_good_at: None,
+                last_error: None,
+            },
+            GraphAcquisitionError::BuildFailed {
+                workspace_root,
+                reason,
+            } => Self::WorkspaceBuildFailed {
+                root: workspace_root,
+                reason,
+            },
+            GraphAcquisitionError::Internal { reason } => {
+                Self::Internal(anyhow::anyhow!("graph acquisition: {reason}"))
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -433,6 +561,96 @@ mod tests {
             root: PathBuf::from("/repo"),
         };
         assert_eq!(evicted.jsonrpc_code(), Some(JSONRPC_WORKSPACE_EVICTED));
+    }
+
+    // -----------------------------------------------------------------
+    // SGA04 Gate-A major #5 — IncompatibleGraph mapping tests
+    // -----------------------------------------------------------------
+    //
+    // The acquisition taxonomy distinguishes path-policy /
+    // compatibility errors from generic build failures so MCP / IPC
+    // clients can react differently (rebuild vs. upgrade vs. retry).
+    // These tests pin that the `From<GraphAcquisitionError>` impl
+    // routes IncompatibleGraph to the dedicated
+    // `WorkspaceIncompatibleGraph` variant — NOT to
+    // `WorkspaceBuildFailed`.
+
+    #[test]
+    fn from_graph_acquisition_incompatible_unknown_plugins_maps_to_incompatible_graph() {
+        use sqry_core::graph::acquisition::{GraphAcquisitionError, PluginSelectionStatus};
+
+        let err = GraphAcquisitionError::IncompatibleGraph {
+            source_root: PathBuf::from("/repo"),
+            status: PluginSelectionStatus::IncompatibleUnknownPluginIds {
+                unknown_plugin_ids: vec!["plugin-a".to_string(), "plugin-b".to_string()],
+            },
+        };
+        let de: DaemonError = err.into();
+        match de {
+            DaemonError::WorkspaceIncompatibleGraph { root, reason } => {
+                assert_eq!(root, PathBuf::from("/repo"));
+                assert!(
+                    reason.contains("plugin-a") && reason.contains("plugin-b"),
+                    "reason must list every unknown plugin id losslessly, got: {reason}"
+                );
+                assert!(
+                    reason.contains("unknown plugin ids"),
+                    "reason must surface the plugin-id verdict, got: {reason}"
+                );
+            }
+            other => panic!(
+                "GraphAcquisitionError::IncompatibleGraph(IncompatibleUnknownPluginIds) \
+                 must map to DaemonError::WorkspaceIncompatibleGraph, got {other:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn from_graph_acquisition_incompatible_snapshot_format_maps_to_incompatible_graph() {
+        use sqry_core::graph::acquisition::{GraphAcquisitionError, PluginSelectionStatus};
+
+        let err = GraphAcquisitionError::IncompatibleGraph {
+            source_root: PathBuf::from("/repo"),
+            status: PluginSelectionStatus::IncompatibleSnapshotFormat {
+                reason: "V99 magic, this binary supports up to V10".to_string(),
+            },
+        };
+        let de: DaemonError = err.into();
+        match de {
+            DaemonError::WorkspaceIncompatibleGraph { root, reason } => {
+                assert_eq!(root, PathBuf::from("/repo"));
+                assert!(
+                    reason.contains("incompatible snapshot format") && reason.contains("V99 magic"),
+                    "reason must preserve the snapshot-format detail, got: {reason}"
+                );
+            }
+            other => panic!(
+                "GraphAcquisitionError::IncompatibleGraph(IncompatibleSnapshotFormat) \
+                 must map to DaemonError::WorkspaceIncompatibleGraph, got {other:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn workspace_incompatible_graph_has_dedicated_jsonrpc_code() {
+        let err = DaemonError::WorkspaceIncompatibleGraph {
+            root: PathBuf::from("/repo"),
+            reason: "unknown plugin ids: [a, b]".to_string(),
+        };
+        assert_eq!(
+            err.jsonrpc_code(),
+            Some(JSONRPC_WORKSPACE_INCOMPATIBLE_GRAPH),
+            "WorkspaceIncompatibleGraph must carry the dedicated -32005 code"
+        );
+        assert_eq!(err.jsonrpc_code(), Some(-32005));
+        // Distinct from -32001.
+        assert_ne!(err.jsonrpc_code(), Some(JSONRPC_WORKSPACE_BUILD_FAILED));
+
+        let data = err
+            .error_data()
+            .expect("WorkspaceIncompatibleGraph must emit error_data");
+        assert_eq!(data["root"], "/repo");
+        assert_eq!(data["reason"], "unknown plugin ids: [a, b]");
     }
 
     #[test]
@@ -677,6 +895,10 @@ mod tests {
             },
             DaemonError::WorkspaceEvicted {
                 root: PathBuf::from("/repo"),
+            },
+            DaemonError::WorkspaceIncompatibleGraph {
+                root: PathBuf::from("/repo"),
+                reason: "unknown plugin ids: [a]".into(),
             },
             DaemonError::ToolTimeout {
                 root: PathBuf::from("/tmp/ws"),

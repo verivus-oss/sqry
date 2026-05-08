@@ -10,6 +10,13 @@
 //! envelope (`kind` / `retryable` / `retry_after_ms` / `details`) so
 //! the NL08 fields live inside `details`. The inner shape is what
 //! NL08-aware MCP clients pattern-match on.
+//!
+//! Gated on `nl-classifier` because the `SQRY_NL_FORCE_ORT_MISSING`
+//! seam fires inside `IntentClassifier::load`, which only exists when
+//! `sqry-nl/classifier` is enabled. Run with:
+//!   cargo test -p sqry-mcp --features nl-classifier --test ask_ort_missing
+
+#![cfg(feature = "nl-classifier")]
 
 use serde_json::Value;
 use sqry_mcp::tool_args::SqryAskParams;

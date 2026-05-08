@@ -164,12 +164,18 @@ pub mod thread_start_hook {
 }
 
 use serde_json::Value;
+use sqry_core::graph::acquisition::{
+    AcquisitionOperation, GraphAcquirer, GraphAcquisition, GraphAcquisitionRequest, GraphFreshness,
+    MissingGraphPolicy, PathPolicy, PluginSelectionPolicy, StalePolicy,
+};
 use sqry_core::project::{ProjectRootMode, absolutize_without_resolution, canonicalize_path};
 use sqry_core::query::executor::QueryExecutor;
 use sqry_mcp::daemon_adapter::WorkspaceContext;
 
 use crate::error::DaemonError;
-use crate::workspace::{ServeVerdict, WorkspaceKey, WorkspaceManager};
+use crate::workspace::{
+    ServeVerdict, WorkspaceBuilder, WorkspaceKey, WorkspaceManager, acquirer::DaemonGraphProvider,
+};
 
 /// Outcome of [`classify_and_execute`]. Callers wrap this in their
 /// transport-specific envelope (JSON-RPC `ResponseEnvelope` or MCP
@@ -201,6 +207,38 @@ pub(crate) enum ExecuteVerdict {
 /// [`DaemonError::InvalidArgument`] so the MCP host (U8) can map the
 /// same precondition failure into a `-32602`/`validation_error` MCP
 /// envelope without going through `MethodError`.
+/// SGA04 building block — public-to-the-crate alias for [`resolve_path`]
+/// so the daemon graph provider (`workspace::acquirer`) can perform
+/// path-policy validation through the SAME canonicaliser the existing
+/// dispatch path uses, without duplicating the absolutise / metadata /
+/// canonicalize ladder.
+///
+/// Path canonicalisation must run before any workspace classification
+/// — see SGA02's `InvalidPath` precedence contract. Returning a
+/// [`DaemonError::InvalidArgument`] keeps the error taxonomy local;
+/// the acquirer maps it into [`sqry_core::graph::acquisition::GraphAcquisitionError::InvalidPath`].
+///
+/// SGA05 will route read-only tool dispatch through the provider; the
+/// existing [`classify_and_execute`] entrypoint stays unchanged in this
+/// DAG unit.
+pub(crate) fn resolve_path_for_acquisition(raw: &Path) -> Result<PathBuf, DaemonError> {
+    resolve_path(raw)
+}
+
+/// SGA04 building block — construct a daemon-side
+/// [`DaemonGraphProvider`] for the supplied manager + builder pair.
+///
+/// SGA05 routes the JSON-RPC `tool_dispatch::classify_and_build`
+/// closure path and the daemon MCP host's `call_tool` graph-backed
+/// arms through [`acquire_and_execute`], which builds a provider
+/// per-request via this helper.
+pub(crate) fn daemon_graph_provider(
+    manager: Arc<WorkspaceManager>,
+    builder: Arc<dyn WorkspaceBuilder>,
+) -> DaemonGraphProvider {
+    DaemonGraphProvider::new(manager, builder)
+}
+
 fn resolve_path(raw: &Path) -> Result<PathBuf, DaemonError> {
     let absolutised =
         absolutize_without_resolution(raw).map_err(|e| DaemonError::InvalidArgument {
@@ -226,8 +264,161 @@ fn resolve_path(raw: &Path) -> Result<PathBuf, DaemonError> {
     }
 }
 
-/// Shared classify + execute + stale-warning pipeline.
+/// SGA05 — shared acquire + execute + stale-warning pipeline backed
+/// by the [`DaemonGraphProvider`].
 ///
+/// Every daemon-hosted read-only tool (the 14 graph-backed tools in
+/// [`sqry_mcp::tools_schema::DAEMON_SUPPORTED_TOOL_NAMES`] minus the
+/// mutating `rebuild_index` and the translation-wrapper `sqry_ask`)
+/// routes through this entrypoint, which:
+///
+/// 1. Builds a per-request [`DaemonGraphProvider`] over the supplied
+///    `manager` + `builder` pair (`tool_name` is forwarded into the
+///    acquisition metadata for diagnostics).
+/// 2. Calls
+///    [`GraphAcquirer::acquire`](sqry_core::graph::acquisition::GraphAcquirer::acquire)
+///    with [`AcquisitionOperation::ReadOnlyQuery`]. The provider
+///    canonicalises the path, classifies the workspace, and — on
+///    eviction — performs the bounded one-shot read-only persisted
+///    rehydrate (per SGA02 §Tool Ownership Boundary and SGA04 contract
+///    guarantees).
+/// 3. Maps the resulting [`GraphAcquisition`] / [`GraphFreshness`]
+///    into the existing [`ExecuteVerdict`]:
+///    - `Fresh` and `Reloaded` both surface as
+///      [`ExecuteVerdict::Fresh`] so the wire envelope stays
+///      byte-compatible (per SGA design §Staleness and Wire
+///      Compatibility — reload metadata is internal-only).
+///    - `Stale` surfaces as [`ExecuteVerdict::Stale`] with the
+///      existing `_stale_warning` rendering preserved.
+/// 4. Maps any [`GraphAcquisitionError`] through the
+///    [`From<GraphAcquisitionError> for DaemonError`] impl so
+///    `WorkspaceEvicted`, `WorkspaceIncompatibleGraph`, `Stale`
+///    expiry, and `InvalidArgument` precedence all preserve their
+///    existing JSON-RPC / MCP envelope shapes.
+/// 5. Runs the user-supplied closure inside
+///    [`tokio::task::spawn_blocking`] with the same
+///    [`tokio::time::timeout`] outer bound used by
+///    [`classify_and_execute`] — CPU-heavy graph traversal does not
+///    tie up tokio workers.
+///
+/// `rebuild_index` MUST NOT call this helper; the mutating rebuild
+/// path drives [`WorkspaceManager::get_or_load`] directly so the
+/// durable rebuild contract owns those semantics. See
+/// `sqry-daemon/src/mcp_host/mod.rs::handle_rebuild_index` and the
+/// `MutatingRebuild` short-circuit inside the
+/// [`DaemonGraphProvider::acquire`] implementation.
+pub(crate) async fn acquire_and_execute<F>(
+    manager: Arc<WorkspaceManager>,
+    builder: Arc<dyn WorkspaceBuilder>,
+    tool_executor: Arc<QueryExecutor>,
+    tool_timeout: Duration,
+    path: &str,
+    tool_name: Option<&'static str>,
+    run: F,
+) -> Result<ExecuteVerdict, DaemonError>
+where
+    F: FnOnce(&WorkspaceContext) -> anyhow::Result<Value> + Send + 'static,
+{
+    // Build a per-request provider (cheap — three Arc clones plus an
+    // Option tag) and acquire the graph through the shared boundary.
+    let mut provider = DaemonGraphProvider::new(manager, builder);
+    if let Some(name) = tool_name {
+        provider = provider.with_tool_name(name);
+    }
+    let request = GraphAcquisitionRequest {
+        requested_path: PathBuf::from(path),
+        operation: AcquisitionOperation::ReadOnlyQuery,
+        // Daemon read-only paths use the in-tree default policies. The
+        // provider already canonicalises through the daemon's
+        // path-policy ladder (`tool_core::resolve_path`); the
+        // `PathPolicy` field on the request is held for symmetry with
+        // the filesystem provider.
+        path_policy: PathPolicy::default(),
+        // The daemon never auto-builds on miss for read-only queries —
+        // the daemon's own admission and dispatch flow owns initial
+        // graph load via `daemon/load`. `Error` here matches the
+        // pre-SGA05 semantics: a workspace that has never been loaded
+        // returns a `NotReady` / `WorkspaceBuildFailed` envelope.
+        missing_graph_policy: MissingGraphPolicy::Error,
+        stale_policy: StalePolicy::default(),
+        plugin_selection_policy: PluginSelectionPolicy::default(),
+        tool_name,
+    };
+    let acquisition: GraphAcquisition = provider.acquire(request).map_err(DaemonError::from)?;
+
+    let canonical_root = acquisition.workspace_root.clone();
+    let graph = Arc::clone(&acquisition.graph);
+    let freshness = acquisition.freshness;
+
+    let wctx = WorkspaceContext {
+        workspace_root: canonical_root.clone(),
+        graph,
+        executor: tool_executor,
+    };
+    let inner = execute_with_timeout(tool_timeout, &canonical_root, wctx, run).await?;
+
+    match freshness {
+        // Fresh and Reloaded both produce the existing fresh response
+        // envelope — reload is an internal recovery, not a wire-shape
+        // change. The lifecycle label flows from the Fresh path; for
+        // Reloaded acquisitions we map to the canonical Loaded state
+        // because the bounded reload restores a Loaded workspace.
+        GraphFreshness::Fresh { lifecycle_label } => {
+            // Decode the daemon provider's lifecycle label back into
+            // the wire-visible `WorkspaceState` so the
+            // `ResponseMeta::fresh_from(state, ...)` envelope
+            // accurately reports `Loaded` vs. `Rebuilding` (the only
+            // two states the underlying `classify_for_serve` Fresh
+            // arm can produce).
+            let state = match lifecycle_label {
+                Some("rebuilding") => crate::workspace::WorkspaceState::Rebuilding,
+                _ => crate::workspace::WorkspaceState::Loaded,
+            };
+            Ok(ExecuteVerdict::Fresh { inner, state })
+        }
+        GraphFreshness::Reloaded { .. } => Ok(ExecuteVerdict::Fresh {
+            inner,
+            state: crate::workspace::WorkspaceState::Loaded,
+        }),
+        GraphFreshness::Stale {
+            last_good_at,
+            last_error,
+            age_hours,
+        } => {
+            // Reconstruct the `last_good_at: SystemTime` and
+            // `age_hours: u64` shape the wire envelope expects.
+            // `GraphFreshness::Stale` carries the RFC3339 string for
+            // transport neutrality; round-trip through chrono so the
+            // existing `render_stale_warning` rendering produces the
+            // same RFC3339 bytes.
+            let parsed_last_good = last_good_at
+                .as_deref()
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .map(|dt| SystemTime::from(dt.with_timezone(&chrono::Utc)));
+            let lg_at = parsed_last_good.unwrap_or_else(SystemTime::now);
+            let age_u64 = age_hours.map(|h| h as u64).unwrap_or(0);
+            let stale_warning =
+                render_stale_warning(&canonical_root, age_u64, lg_at, last_error.as_deref());
+            Ok(ExecuteVerdict::Stale {
+                inner,
+                stale_warning,
+                last_good_at: lg_at,
+                last_error,
+            })
+        }
+    }
+}
+
+/// SGA05 legacy — kept exclusively for the in-crate unit tests in
+/// the `tests` module below, which assert direct
+/// `classify_for_serve` semantics (NotReady, Loading, ToolTimeout,
+/// Internal-from-closure-error) that are easier to express against
+/// `WorkspaceManager` directly than against
+/// [`acquire_and_execute`] (which also runs path canonicalisation +
+/// reload accounting). Production read-only tool dispatch now
+/// routes through [`acquire_and_execute`].
+///
+/// Pipeline:
 /// 1. Canonicalises `path` via [`resolve_path`] into a
 ///    [`DaemonError::InvalidArgument`] on failure.
 /// 2. Classifies the workspace via
@@ -239,6 +430,7 @@ fn resolve_path(raw: &Path) -> Result<PathBuf, DaemonError> {
 /// 5. On outer timeout: drops the [`tokio::task::JoinHandle`] and
 ///    returns [`DaemonError::ToolTimeout`] (OS thread continues;
 ///    result discarded).
+#[allow(dead_code)] // Used by in-crate `mod tests`.
 ///
 /// # Errors
 ///

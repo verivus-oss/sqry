@@ -13,6 +13,13 @@
 //! The seam is gated on `debug_assertions` in `sqry-nl`, so this test
 //! relies on `cargo test` building the `sqry` binary in debug mode
 //! (the default — `cargo test --release` is a separate command).
+//!
+//! Also gated on the `nl-classifier` feature: the seam fires inside
+//! `IntentClassifier::load`, which only exists when sqry-nl's
+//! `classifier` feature is enabled. Run with:
+//!   cargo test -p sqry-cli --features nl-classifier --test ask_ort_missing
+
+#![cfg(feature = "nl-classifier")]
 
 mod common;
 

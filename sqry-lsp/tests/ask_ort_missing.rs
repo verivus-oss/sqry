@@ -12,6 +12,13 @@
 //!
 //! Mirrors the standalone-MCP envelope so an LSP client and a daemon
 //! MCP client see the same wire payload for the same condition.
+//!
+//! Gated on `classifier-tests` because the
+//! `SQRY_NL_FORCE_ORT_MISSING` seam fires inside `IntentClassifier::load`,
+//! which only exists when `sqry-nl/classifier` is enabled. Run with:
+//!   cargo test -p sqry-lsp --features classifier-tests --test ask_ort_missing
+
+#![cfg(feature = "classifier-tests")]
 
 use std::path::PathBuf;
 use std::sync::Arc;

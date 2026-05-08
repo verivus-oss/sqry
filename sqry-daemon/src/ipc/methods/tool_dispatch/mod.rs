@@ -70,6 +70,13 @@ pub(crate) async fn dispatch_tool(
         "semantic_diff" => tools::semantic_diff::handle(ctx, params).await,
         "dependency_impact" => tools::dependency_impact::handle(ctx, params).await,
         "show_dependencies" => tools::show_dependencies::handle(ctx, params).await,
+        // `rebuild_index` is intentionally NOT routed through this
+        // table — it is a mutating workspace-loading operation served
+        // by the daemon MCP host's `handle_rebuild_index` (and the
+        // dedicated `daemon/rebuild` JSON-RPC method). Routing it
+        // through `tool_dispatch` would bypass the explicit
+        // `MutatingRebuild` guard on `DaemonGraphProvider::acquire`,
+        // so the JSON-RPC method table reports it as unknown here.
         other => Err(MethodError::MethodNotFound(other.to_owned())),
     }
 }
@@ -101,20 +108,20 @@ pub(crate) fn rpc_error_to_method_error(e: sqry_mcp::error::RpcError) -> MethodE
 
 /// Shared verdict-handling helper used by every tool wrapper.
 ///
-/// Delegates classify + execute + stale-warning to
-/// [`crate::ipc::tool_core::classify_and_execute`] and wraps the
-/// resulting [`tool_core::ExecuteVerdict`] in a JSON-RPC
+/// SGA05: delegates to [`tool_core::acquire_and_execute`], which
+/// routes graph acquisition through the shared
+/// [`DaemonGraphProvider`](crate::workspace::acquirer::DaemonGraphProvider)
+/// boundary so read-only tool dispatch picks up the bounded one-shot
+/// reload semantics on `WorkspaceEvicted`. The resulting
+/// [`tool_core::ExecuteVerdict`] is wrapped in a JSON-RPC
 /// [`ResponseEnvelope`] with [`ResponseMeta::fresh_from`] /
-/// [`ResponseMeta::stale_from`]. The `run` closure is invoked inside
-/// [`tokio::task::spawn_blocking`] with a
-/// [`tokio::time::timeout(ctx.config.tool_timeout_secs, ...)`] outer
-/// bound (Phase 8c U6 — CPU-heavy work no longer blocks tokio
-/// workers).
+/// [`ResponseMeta::stale_from`] — the wire shape is unchanged.
 ///
 /// The closure must be `Send + 'static` because it crosses a
 /// `spawn_blocking` boundary.
 pub(crate) async fn classify_and_build<T, F>(
     ctx: &HandlerContext,
+    tool_name: &'static str,
     path: &str,
     run: F,
 ) -> Result<Value, MethodError>
@@ -134,11 +141,13 @@ where
     };
 
     let tool_timeout = Duration::from_secs(ctx.config.tool_timeout_secs);
-    let verdict = tool_core::classify_and_execute(
+    let verdict = tool_core::acquire_and_execute(
         Arc::clone(&ctx.manager),
+        Arc::clone(&ctx.workspace_builder),
         Arc::clone(&ctx.tool_executor),
         tool_timeout,
         path,
+        Some(tool_name),
         run_as_value,
     )
     .await

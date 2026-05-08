@@ -31,6 +31,13 @@ harness = false
 # `cfg(test)` (only the test binary itself is `cfg(test)`), so a
 # bare `cfg(test)` gate is not sufficient.
 test-helpers = []
+# Forwarding feature for integration tests that need sqry-nl's
+# ONNX-backed classifier surface (IntentClassifier::load,
+# ClassifierPool, etc). Off by default — `cargo clippy --all-targets`
+# skips gated test files unless this is passed on the command line.
+# Run the gated tests via:
+#   cargo test --features classifier-tests --test concurrent_ask -- --ignored
+classifier-tests = ["sqry-nl/classifier"]
 
 
 [dependencies]
@@ -51,27 +58,27 @@ tracing-subscriber.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-sqry-core = { version = "13.0.7", path = "../sqry-core" }
-sqry-db = { version = "13.0.7", path = "../sqry-db" }
-sqry-nl = { version = "13.0.7", path = "../sqry-nl" }
+sqry-core = { version = "13.0.11", path = "../sqry-core" }
+sqry-db = { version = "13.0.11", path = "../sqry-db" }
+sqry-nl = { version = "13.0.11", path = "../sqry-nl" }
 # NL07 — per-session cached `Arc<Translator>` for the `sqry/ask`
 # handler. `OnceCell::get_or_try_init` is the fallible-lazy-init
 # primitive the standalone-LSP path needs (the daemon path uses the
 # `LoadedWorkspace.nl_translator` cell instead).
 once_cell = { workspace = true }
-sqry-plugin-registry = { version = "13.0.7", path = "../sqry-plugin-registry" }
+sqry-plugin-registry = { version = "13.0.11", path = "../sqry-plugin-registry" }
 # STEP_11_4 iter3 — `collect_macro_expansion_warnings` in
 # `session.rs` calls `sqry_lang_rust::macro_expander::MacroExpander::new`
 # to validate every source root for macro-expansion compatibility, so
 # the production warning producer feeds
 # `WorkspaceIndexStatus.warnings`. No cycle: sqry-lang-rust does not
 # depend on sqry-lsp.
-sqry-lang-rust = { version = "13.0.7", path = "../sqry-lang-rust" }
+sqry-lang-rust = { version = "13.0.11", path = "../sqry-lang-rust" }
 # Phase 8c U11 — `sqry-lsp --daemon` shim client transport. Provides
 # `connect_shim` + `pump_stdio` so this binary can run as a byte-pump
 # shim against a long-lived sqryd daemon. Leaf crate on our dep graph
 # (only pulls in `sqry-daemon-protocol` + `tokio`); no cycle.
-sqry-daemon-client = { version = "13.0.7", path = "../sqry-daemon-client" }
+sqry-daemon-client = { version = "13.0.11", path = "../sqry-daemon-client" }
 # Task 11 U1 — `resolve_sqryd_binary` PATH lookup (used by daemon auto-start in
 # `run_daemon_client_mode`). Version matches the `sqry-cli` dependency so both
 # crates resolve to the same version in the workspace lock-file.
@@ -81,7 +88,7 @@ parking_lot.workspace = true
 ropey = "1.6"
 dashmap = "6.1"
 base64 = "0.22.1"
-uuid = { version = "1.11", features = ["v4"] }
+uuid = { version = "1.23", features = ["v4"] }
 
 [target.'cfg(target_env = "musl")'.dependencies]
 tikv-jemallocator = "0.6"
@@ -97,8 +104,13 @@ tikv-jemalloc-sys = { version = "0.6", features = ["unprefixed_malloc_on_support
 libc = "0.2"
 
 [dev-dependencies]
-assert_cmd = "2.0"
-tempfile = "3.14"
+assert_cmd = "2.2"
+tempfile = "3.27"
+# SGA06 — `tests/graph_analysis_handlers.rs::build_fixture_graph` rewrites
+# the manifest's snapshot SHA-256 after overwriting `snapshot.sqry` with
+# a synthetic graph so the SGA06-migrated `FilesystemGraphProvider`
+# integrity check succeeds. Match the workspace-level pin.
+sha2 = { workspace = true }
 criterion = "0.8"
 tower = { version = "0.4", features = ["buffer", "util"] }
 futures = "0.3"

@@ -6,6 +6,21 @@
 //! caller builds the rmcp `CallToolResult` or sqryd
 //! `ResponseEnvelope`.
 //!
+//! # SGA05 — acquisition boundary contract
+//!
+//! `dispatch_by_name` runs **inside** the `run` closure passed to
+//! `sqry-daemon::ipc::tool_core::acquire_and_execute`, AFTER the
+//! shared `DaemonGraphProvider` has acquired a graph through the
+//! SGA02/SGA04 boundary. It does NOT itself touch
+//! `WorkspaceManager::classify_for_serve` or load any graph — the
+//! provider has already done that, including the bounded one-shot
+//! reload on `WorkspaceEvicted`. Adding a new daemon-supported
+//! read-only tool means (a) registering it here and in
+//! `sqry-daemon/src/ipc/methods/tool_dispatch/mod.rs::dispatch_tool`,
+//! and (b) ensuring its `*_for_daemon` body consumes the
+//! pre-acquired graph from the [`WorkspaceContext`] argument
+//! rather than reloading the workspace on its own.
+//!
 //! Single source of truth for name-keyed tool routing, shared by U8's
 //! MCP host and future Task 10 `DaemonClient` tool paths. Every arm
 //! mirrors the corresponding handler in

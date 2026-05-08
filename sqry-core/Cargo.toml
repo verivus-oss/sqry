@@ -98,15 +98,15 @@ cacache.workspace = true
 sha2.workspace = true
 xxhash-rust = { version = "0.8", features = ["xxh64"] }
 notify = { version = "8.2", default-features = false, features = ["macos_fsevent"] }
-similar = "2.6"  # Fast text diffing for content-based incremental indexing
+similar = "3.1"  # Fast text diffing for content-based incremental indexing
 smallvec = { version = "1.15", features = ["serde"] }  # Inline-allocation for ResolutionStep::Ambiguous candidates
 static_assertions = "1.1"  # Compile-time trait impl assertions for Gate 0b NodeIdBearing coverage matrix (Task 4)
 dhat = { version = "0.3", optional = true }
 loom = { version = "0.7", optional = true }  # Concurrency verification (Steps 28-30)
 hostname = "0.4"  # For lock file hostname field
-uuid = { version = "1.11", features = ["v4"] }  # For unique lock identifiers
+uuid = { version = "1.23", features = ["v4"] }  # For unique lock identifiers
 fs2 = "0.4"  # File locking for concurrent stats updates (P2-8)
-tempfile = "3.13"  # Atomic file writes for uses/insights
+tempfile = "3.27"  # Atomic file writes for uses/insights
 dirs = "6.0"  # Home directory detection for uses config
 libc = "0.2"  # For network filesystem detection on Linux
 
@@ -120,7 +120,7 @@ tree-sitter-cpp.workspace = true
 
 # Test support dependencies (available when running tests or with test-support feature)
 env_logger = { workspace = true, optional = true }
-assert_cmd = { version = "2.0", optional = true }
+assert_cmd = { version = "2.2", optional = true }
 
 # Windows atomic file operations (MoveFileExW for atomic manifest writes)
 [target.'cfg(windows)'.dependencies]
@@ -128,16 +128,16 @@ windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
 
 # Unix process probing for cache lock detection (macOS/BSD)
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.30", features = ["signal"] }
+nix = { version = "0.31", features = ["signal"] }
 
 [dev-dependencies]
-tempfile = "3.13"
+tempfile = "3.27"
 criterion = "0.8"
 filetime = "0.2"
 env_logger.workspace = true
 chrono.workspace = true
 approx = "0.5"
-serial_test = "3.0"
+serial_test = "3.4"
 sqry-core = { path = ".", features = ["test-support"] }
 sqry-lang-rust = { path = "../sqry-lang-rust" }
 sqry-lang-cpp = { path = "../sqry-lang-cpp" }
@@ -159,7 +159,7 @@ sqry-lang-r = { path = "../sqry-lang-r" }
 # OOM vulnerability regression test plugins (BUG-2025-001, BUG-2025-002)
 sqry-lang-groovy = { path = "../sqry-lang-groovy" }
 sqry-lang-svelte = { path = "../sqry-lang-svelte" }
-proptest = "1.5"
+proptest = "1.11"
 httpmock = "0.8"  # Updated to remove async-std (RUSTSEC-2025-0052)
 trybuild = "1.0"  # Gate 0c compile-fail fixtures (Task 4, A2 §H)
 syn = { version = "2", features = ["full", "visit"] }  # Gate 0d iter-2 residue-helper drift guard

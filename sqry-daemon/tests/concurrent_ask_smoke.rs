@@ -82,6 +82,7 @@ fn daemon_supported_tool_names_after_nl07_is_16() {
 // if the daemon framed it differently — and it does not.
 // ---------------------------------------------------------------------------
 
+#[cfg(feature = "classifier-tests")]
 mod live {
     use serde_json::{Value, json};
     use sqry_core::graph::unified::concurrent::CodeGraph;
@@ -268,6 +269,7 @@ mod live {
 // Gate 3: daemon_tools_call_sqry_ask_round_trips
 // ---------------------------------------------------------------------------
 
+#[cfg(feature = "classifier-tests")]
 #[test]
 #[ignore = "live daemon MCP-host round-trip — requires ONNX Runtime dylib + committed model fixtures"]
 fn daemon_tools_call_sqry_ask_round_trips() {
@@ -300,6 +302,7 @@ fn daemon_tools_call_sqry_ask_round_trips() {
 // Gate 2: daemon_serves_k_parallel_ask_calls
 // ---------------------------------------------------------------------------
 
+#[cfg(feature = "classifier-tests")]
 #[test]
 #[ignore = "live daemon MCP-host concurrent round-trip — requires ONNX Runtime dylib + committed model fixtures"]
 fn daemon_serves_k_parallel_ask_calls() {

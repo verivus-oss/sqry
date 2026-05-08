@@ -14,6 +14,7 @@ use common::sqry_bin;
 
 use assert_cmd::Command;
 use predicates::prelude::*;
+#[cfg(feature = "specialty-plugins")]
 use serial_test::serial;
 use std::path::Path;
 use tempfile::TempDir;
@@ -1022,7 +1023,18 @@ class Invalid {
 }
 
 // FIXTURE-BASED RECALL TESTS (ground truth validation)
+//
+// The two `cli_php_fixture_symfony_*` tests below shell out to
+// `sqry index` then `sqry query`. After `refactor!: make non-core
+// surfaces opt-in` (commit ecd215385), `sqry index` writes a manifest
+// that lists the now-feature-gated specialty plugin ids in
+// `plugin_selection.active_plugin_ids`; the subsequent `sqry query`
+// invocation rejects that manifest with `unknown plugin ids: …`.
+// Gated on `specialty-plugins` so that the binary built for these
+// tests includes the listed plugins. Run with:
+//   cargo test -p sqry-cli --features specialty-plugins --test relation_queries_php_cli
 
+#[cfg(feature = "specialty-plugins")]
 #[test]
 #[serial]
 fn cli_php_fixture_symfony_exports_recall() {
@@ -1081,6 +1093,7 @@ fn cli_php_fixture_symfony_exports_recall() {
     );
 }
 
+#[cfg(feature = "specialty-plugins")]
 #[test]
 #[serial]
 fn cli_php_fixture_symfony_callers_recall() {

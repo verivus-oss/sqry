@@ -6,8 +6,12 @@ use anyhow::{Context, Result, anyhow};
 use once_cell::sync::OnceCell;
 use parking_lot::RwLock;
 use ropey::Rope;
+use sqry_core::graph::acquisition::{
+    AcquisitionOperation, AutoBuildHook, FilesystemGraphProvider, GraphAcquirer,
+    GraphAcquisitionError, GraphAcquisitionRequest, MissingGraphPolicy, PathPolicy,
+    PluginSelectionPolicy, StalePolicy,
+};
 use sqry_core::graph::unified::concurrent::CodeGraph;
-use sqry_core::graph::unified::persistence::{GraphStorage, load_from_path};
 use sqry_core::graph::unified::resolution::display_graph_qualified_name;
 use sqry_core::graph::unified::{NodeEntry, NodeKind, StagingGraph, StagingOp, StringId};
 use sqry_core::plugin::PluginManager;
@@ -22,6 +26,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tower_lsp::lsp_types::{Position, Url};
 
 #[derive(Clone)]
@@ -34,6 +39,12 @@ pub struct SessionManager {
     documents: DocumentStore,
     /// Graph cache for single-project mode.
     graph_cache: Arc<RwLock<Option<Arc<CodeGraph>>>>,
+    /// SGA06 — observability counter incremented on every successful return
+    /// from [`Self::graph_for_path`]. Used by the SGA06 parity tests to pin
+    /// that LSP read-only handlers route their graph acquisition through the
+    /// shared `FilesystemGraphProvider` pipeline rather than re-entering the
+    /// executor's own `get_or_load_graph`.
+    graph_for_path_calls: Arc<AtomicU64>,
     /// Project manager for multi-project support (per `PROJECT_ROOT_SPEC.md` Section 9).
     project_manager: Arc<ProjectManager>,
     /// Logical workspace identity owned by the session.
@@ -256,6 +267,7 @@ impl SessionManager {
             config: Arc::new(RwLock::new(config)),
             documents: DocumentStore::new(),
             graph_cache: Arc::new(RwLock::new(None)),
+            graph_for_path_calls: Arc::new(AtomicU64::new(0)),
             project_manager,
             logical_workspace,
             nl_translator: Arc::new(OnceCell::new()),
@@ -642,6 +654,14 @@ impl SessionManager {
     ///
     /// Returns an error if project resolution or graph loading fails.
     pub fn graph_for_path(&self, path: &Path) -> Result<Option<Arc<CodeGraph>>> {
+        // SGA06 — record every observable entry into the shared-acquisition
+        // path so the parity test suite can pin that read-only LSP handlers
+        // (search, callers/callees, relations, hierarchical_search,
+        // batch_counts, call_hierarchy, workspace_symbol) route their graph
+        // acquisition through this method rather than re-entering the
+        // executor's own `get_or_load_graph`.
+        self.graph_for_path_calls.fetch_add(1, Ordering::Relaxed);
+
         // Backward compatibility: In single-root mode (no workspace folders configured),
         // use the legacy graph() which respects the configured index_root setting.
         if self.project_manager.workspace_folders().is_empty() {
@@ -682,19 +702,37 @@ impl SessionManager {
     /// (i.e., when no workspace folders are configured). Prefer `graph_for_path()`
     /// which supports both single-root and multi-project modes.
     ///
+    /// # SGA06 routing
+    ///
+    /// Standalone-LSP graph acquisition is now a thin wrapper around
+    /// [`FilesystemGraphProvider`] with [`MissingGraphPolicy::AutoBuildIfEnabled`]
+    /// and an auto-build hook that reproduces the historic self-heal flow
+    /// (corrupt / `LoadFailed` snapshots trigger an in-place
+    /// `build_and_persist_graph` rebuild). The provider supplies the
+    /// canonical path-policy / plugin-selection / SHA-256 integrity checks
+    /// that previously lived inline.
+    ///
+    /// `MissingGraphPolicy::AutoBuildIfEnabled` matches the pre-SGA06
+    /// behaviour: a missing snapshot returned `None` and the LSP startup
+    /// filter triggered a build via `rebuild_index`. We preserve that
+    /// surface by mapping [`GraphAcquisitionError::NoGraph`] back to
+    /// `Ok(None)`. The auto-build hook is therefore reached only on the
+    /// historic self-heal path (corrupt / partially-written snapshot).
+    ///
     /// # Errors
     ///
     /// Returns an error when the graph cannot be loaded from disk.
     pub fn graph(&self) -> Result<Option<Arc<CodeGraph>>> {
-        // Fast path: check session-level cache first
+        // Fast path: check session-level cache first. SGA06 mirrors the MCP
+        // engine's `cached_graph` pattern — the in-memory cache short-circuits
+        // before any provider I/O.
         if let Some(graph) = self.graph_cache.read().as_ref() {
             return Ok(Some(graph.clone()));
         }
 
-        // Load from disk and cache at session level for single-root mode.
-        // The resolved LogicalWorkspace is the routing-gate proof for this
-        // classifier-free compatibility path; multi-root callers use
-        // graph_for_path() and project_for_path().
+        // Slow path: route every disk-resident graph through the shared
+        // FilesystemGraphProvider so path-policy / plugin-selection /
+        // integrity checks run uniformly across CLI, MCP, and LSP.
         let logical_workspace = self.logical_workspace();
         let root = self.current_index_root();
         log::debug!(
@@ -703,46 +741,25 @@ impl SessionManager {
             logical_workspace.workspace_id().as_short_hex(),
             logical_workspace.source_roots().len()
         );
-        let storage = GraphStorage::new(&root);
-        if !storage.exists() {
-            // No manifest → no complete index → return None
-            // (startup filter should have caught this and triggered build)
-            return Ok(None);
-        }
 
-        match load_from_path(
-            storage.snapshot_path(),
-            Some(self.executor.plugin_manager()),
-        ) {
+        match acquire_session_graph(&root, "lsp:session_graph") {
             Ok(graph) => {
-                let graph = Arc::new(graph);
                 let mut cache = self.graph_cache.write();
                 *cache = Some(graph.clone());
                 Ok(Some(graph))
             }
-            Err(e) => {
-                // Snapshot missing/corrupt — auto-rebuild (Tier 2 self-heal)
-                log::warn!("Graph load failed ({e}), auto-rebuilding index for LSP");
-                let plugins = create_plugin_manager();
-                let config = sqry_core::graph::unified::build::BuildConfig::default();
-                let (new_graph, _build_result) =
-                    sqry_core::graph::unified::build::build_and_persist_graph(
-                        &root,
-                        &plugins,
-                        &config,
-                        "lsp:auto_rebuild",
-                    )
-                    .with_context(|| {
-                        format!(
-                            "auto-rebuild failed for {} (original error: {})",
-                            root.display(),
-                            e
-                        )
-                    })?;
-                let graph = Arc::new(new_graph);
-                let mut cache = self.graph_cache.write();
-                *cache = Some(graph.clone());
-                Ok(Some(graph))
+            Err(GraphAcquisitionError::NoGraph { .. }) => {
+                // No manifest → no complete index → return None
+                // (startup filter should have caught this and triggered build)
+                Ok(None)
+            }
+            Err(err) => {
+                // SGA06 — preserve the visibility of stale / incompatible-graph
+                // diagnostics by surfacing the typed error via anyhow with a
+                // stable variant prefix that downstream LSP `Diagnostic`
+                // pipelines (and the existing log-based diagnostic channel)
+                // can match on.
+                Err(map_acquisition_error_for_lsp(err, &root))
             }
         }
     }
@@ -771,6 +788,21 @@ impl SessionManager {
         let graph = Arc::new(new_graph);
         project.clear_graph_cache();
         Ok(Some(graph))
+    }
+
+    /// SGA06 — return the number of times [`Self::graph_for_path`] has been
+    /// called on this session.
+    ///
+    /// The counter is incremented unconditionally on entry (including the
+    /// session-cache fast path), so it counts every read-only handler that
+    /// passes through the shared-acquisition entry point. Used by the SGA06
+    /// parity tests to assert that LSP read-only handlers route their graph
+    /// acquisition through this method rather than re-entering the
+    /// executor's own `get_or_load_graph`.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn graph_for_path_call_count(&self) -> u64 {
+        self.graph_for_path_calls.load(Ordering::Relaxed)
     }
 
     /// Clear the cached unified graph.
@@ -941,6 +973,181 @@ impl SessionManager {
     #[must_use]
     pub fn plugin_manager(&self) -> PluginManager {
         build_plugin_manager()
+    }
+}
+
+/// SGA06 — acquire a graph for `root` through the shared
+/// [`FilesystemGraphProvider`].
+///
+/// Used by [`SessionManager::graph`] (single-root LSP) and
+/// [`crate::handlers::index::load_status_graph`] (`sqry/indexStatus`) so that
+/// every disk-resident graph load in standalone-LSP mode runs through the
+/// same canonicalize → workspace-discover → manifest-verify → SHA-256 →
+/// plugin-compat → deserialize pipeline that CLI and standalone MCP use.
+///
+/// The provider is configured with [`MissingGraphPolicy::AutoBuildIfEnabled`]
+/// and an auto-build hook that reproduces the historic self-heal flow:
+/// when the snapshot is missing or corrupt, the hook calls
+/// [`build_and_persist_graph`] in place. The caller distinguishes "no
+/// snapshot" from "corrupt snapshot" by inspecting whether
+/// [`GraphAcquisitionError::NoGraph`] surfaces — that variant means the
+/// provider's depth-bounded ancestor walk found no `.sqry/graph`
+/// directory, which is the standalone-LSP "index missing" signal.
+///
+/// `tool_name` is forwarded into [`GraphAcquisitionRequest::tool_name`] so
+/// provider-side observability can attribute the acquisition.
+///
+/// [`build_and_persist_graph`]: sqry_core::graph::unified::build::build_and_persist_graph
+pub(crate) fn acquire_session_graph(
+    root: &Path,
+    tool_name: &'static str,
+) -> Result<Arc<CodeGraph>, GraphAcquisitionError> {
+    let provider_plugins = build_plugin_manager();
+    let auto_build_root = root.to_path_buf();
+    let auto_build_hook: AutoBuildHook = Arc::new(move |_req_path| {
+        log::warn!(
+            "Graph load failed for LSP at '{}', auto-rebuilding index (self-heal)",
+            auto_build_root.display()
+        );
+        let plugins = create_plugin_manager();
+        let config = sqry_core::graph::unified::build::BuildConfig::default();
+        let (graph, _build_result) = sqry_core::graph::unified::build::build_and_persist_graph(
+            &auto_build_root,
+            &plugins,
+            &config,
+            "lsp:auto_rebuild",
+        )
+        .map_err(|e| GraphAcquisitionError::BuildFailed {
+            workspace_root: auto_build_root.clone(),
+            reason: format!("{e}"),
+        })?;
+        Ok(Arc::new(graph))
+    });
+
+    let provider = FilesystemGraphProvider::new(Arc::new(provider_plugins))
+        .with_auto_build_hook(auto_build_hook);
+
+    let request = GraphAcquisitionRequest {
+        requested_path: root.to_path_buf(),
+        operation: AcquisitionOperation::ReadOnlyQuery,
+        path_policy: PathPolicy::default(),
+        // The provider only enters the auto-build branch when *no* graph
+        // artifact is found. For a successfully loaded but corrupt /
+        // load-failed snapshot, the provider returns `LoadFailed` — the
+        // caller handles that branch via `map_acquisition_error_for_lsp`.
+        // The auto-build hook above runs only on the historic self-heal
+        // path, gated behind `LoadFailed`.
+        missing_graph_policy: MissingGraphPolicy::AutoBuildIfEnabled,
+        stale_policy: StalePolicy::default(),
+        plugin_selection_policy: PluginSelectionPolicy::default(),
+        tool_name: Some(tool_name),
+    };
+
+    match provider.acquire(request) {
+        Ok(acquisition) => Ok(acquisition.graph),
+        // Self-heal historic behaviour: a corrupt / load-failed snapshot
+        // triggers an in-place rebuild. SGA06 preserves only this explicit
+        // policy (per the design spec — corrupt-load self-heal is a
+        // documented LSP behaviour, distinct from a clean missing-graph).
+        Err(GraphAcquisitionError::LoadFailed {
+            source_root,
+            reason,
+        }) => {
+            log::warn!(
+                "Graph load failed for LSP at '{}' ({reason}), auto-rebuilding index (self-heal)",
+                source_root.display()
+            );
+            let plugins = create_plugin_manager();
+            let config = sqry_core::graph::unified::build::BuildConfig::default();
+            let (graph, _build_result) = sqry_core::graph::unified::build::build_and_persist_graph(
+                &source_root,
+                &plugins,
+                &config,
+                "lsp:auto_rebuild",
+            )
+            .map_err(|e| GraphAcquisitionError::BuildFailed {
+                workspace_root: source_root.clone(),
+                reason: format!("auto-rebuild after corrupt load failed: {e}"),
+            })?;
+            Ok(Arc::new(graph))
+        }
+        Err(err) => Err(err),
+    }
+}
+
+/// SGA06 — map a typed [`GraphAcquisitionError`] back into the
+/// `anyhow::Error` shape that LSP handlers and the LSP wire layer
+/// already render to clients (server logs / `Diagnostic` messages). The
+/// variant prefix is preserved so existing diagnostic-channel matchers
+/// continue to surface stale / incompatible / evicted classes.
+pub(crate) fn map_acquisition_error_for_lsp(
+    err: GraphAcquisitionError,
+    root: &Path,
+) -> anyhow::Error {
+    match err {
+        GraphAcquisitionError::InvalidPath { path, reason } => {
+            anyhow!("invalid path {}: {}", path.display(), reason)
+        }
+        GraphAcquisitionError::NoGraph { workspace_root } => anyhow!(
+            "No unified graph found at {}. Run `sqry index` to create the graph.",
+            workspace_root.display()
+        ),
+        GraphAcquisitionError::IncompatibleGraph {
+            source_root,
+            status,
+        } => anyhow!(
+            "Incompatible graph at {}: {:?}. Rebuild the index (`sqry index --force`) after upgrading sqry.",
+            source_root.display(),
+            status
+        ),
+        GraphAcquisitionError::LoadFailed {
+            source_root,
+            reason,
+        } => anyhow!(
+            "Failed to load graph at {}: {}",
+            source_root.display(),
+            reason
+        ),
+        GraphAcquisitionError::BuildFailed {
+            workspace_root,
+            reason,
+        } => anyhow!(
+            "Graph auto-rebuild failed for {}: {}",
+            workspace_root.display(),
+            reason
+        ),
+        GraphAcquisitionError::StaleExpired {
+            workspace_root,
+            age_hours,
+        } => anyhow!(
+            "Stale graph for {} (age_hours={:?}) exceeded the configured stale-serve window. Run `sqry index` to rebuild.",
+            workspace_root.display(),
+            age_hours
+        ),
+        // Filesystem provider does not surface NotReady / Evicted; if a
+        // future provider does, fall back to a generic acquisition message
+        // that still records the workspace context for diagnostics.
+        GraphAcquisitionError::NotReady {
+            workspace_root,
+            lifecycle,
+        } => anyhow!(
+            "Workspace at {} is not ready (lifecycle={lifecycle})",
+            workspace_root.display()
+        ),
+        GraphAcquisitionError::Evicted {
+            workspace_root,
+            original_lifecycle,
+            reload_failure,
+        } => anyhow!(
+            "Workspace at {} was evicted (original_lifecycle={original_lifecycle}, reload_failure={reload_failure:?}); reload before retrying. Original LSP root: {}",
+            workspace_root.display(),
+            root.display()
+        ),
+        GraphAcquisitionError::Internal { reason } => anyhow!(
+            "Internal acquisition error for {}: {}",
+            root.display(),
+            reason
+        ),
     }
 }
 

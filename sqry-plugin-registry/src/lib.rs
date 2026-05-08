@@ -12,6 +12,7 @@ use sqry_core::plugin::PluginManager;
 pub enum PluginCostTier {
     Fast,
     HighWallClock,
+    Optional,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -78,9 +79,10 @@ pub struct BuiltinPluginSpec {
 }
 
 macro_rules! builtin_plugin_specs {
-    ($([$id:literal, $tier:expr, $register:expr]),+ $(,)?) => {
+    ($($(#[$meta:meta])* [$id:literal, $tier:expr, $register:expr]),+ $(,)?) => {
         const BUILTIN_PLUGIN_SPECS: &[BuiltinPluginSpec] = &[
             $(
+                $(#[$meta])*
                 BuiltinPluginSpec {
                     id: $id,
                     cost_tier: $tier,
@@ -181,29 +183,39 @@ builtin_plugin_specs!(
     ["plsql", PluginCostTier::Fast, |pm| pm.register_builtin(
         Box::new(sqry_lang_oracle_plsql::OraclePlsqlPlugin::default())
     )],
-    ["apex", PluginCostTier::Fast, |pm| pm.register_builtin(
+    #[cfg(feature = "plugin-apex")]
+    ["apex", PluginCostTier::Optional, |pm| pm.register_builtin(
         Box::new(sqry_lang_salesforce_apex::SalesforceApexPlugin::default())
     )],
-    ["abap", PluginCostTier::Fast, |pm| pm.register_builtin(
+    #[cfg(feature = "plugin-abap")]
+    ["abap", PluginCostTier::Optional, |pm| pm.register_builtin(
         Box::new(sqry_lang_sap_abap::SapAbapPlugin::default())
     )],
-    ["servicenow-xanadu-js", PluginCostTier::Fast, |pm| pm
+    #[cfg(feature = "plugin-servicenow-xanadu")]
+    ["servicenow-xanadu-js", PluginCostTier::Optional, |pm| pm
         .register_builtin(Box::new(
             sqry_lang_servicenow_xanadu::ServiceNowXanaduPlugin::default()
         ))],
-    ["servicenow-xml", PluginCostTier::HighWallClock, |pm| pm
+    #[cfg(feature = "plugin-servicenow-xml")]
+    ["servicenow-xml", PluginCostTier::Optional, |pm| pm
         .register_builtin(Box::new(
             sqry_lang_servicenow_xml::ServiceNowXmlPlugin::default()
         ))],
-    ["terraform", PluginCostTier::Fast, |pm| pm.register_builtin(
-        Box::new(sqry_lang_terraform::TerraformPlugin::default())
-    )],
-    ["puppet", PluginCostTier::Fast, |pm| pm.register_builtin(
-        Box::new(sqry_lang_puppet::PuppetPlugin::default())
-    )],
-    ["pulumi", PluginCostTier::Fast, |pm| pm.register_builtin(
-        Box::new(sqry_lang_pulumi::PulumiPlugin::default())
-    )],
+    #[cfg(feature = "plugin-terraform")]
+    ["terraform", PluginCostTier::Optional, |pm| pm
+        .register_builtin(Box::new(
+            sqry_lang_terraform::TerraformPlugin::default()
+        ))],
+    #[cfg(feature = "plugin-puppet")]
+    ["puppet", PluginCostTier::Optional, |pm| pm
+        .register_builtin(Box::new(
+            sqry_lang_puppet::PuppetPlugin::default()
+        ))],
+    #[cfg(feature = "plugin-pulumi")]
+    ["pulumi", PluginCostTier::Optional, |pm| pm
+        .register_builtin(Box::new(
+            sqry_lang_pulumi::PulumiPlugin::default()
+        ))],
     ["json", PluginCostTier::HighWallClock, |pm| pm
         .register_builtin(Box::new(
             sqry_lang_json::JsonPlugin::new()
@@ -352,13 +364,14 @@ mod tests {
     fn test_default_fast_path_excludes_high_cost_plugins() {
         let pm = create_plugin_manager();
         let plugins = pm.plugins();
+        let expected_len = BUILTIN_PLUGIN_SPECS
+            .iter()
+            .filter(|spec| matches!(spec.cost_tier, PluginCostTier::Fast))
+            .count();
 
-        assert_eq!(
-            plugins.len(),
-            35,
-            "default fast path should exclude 2 plugins"
-        );
+        assert_eq!(plugins.len(), expected_len);
         assert!(pm.plugin_by_id("json").is_none());
+        #[cfg(feature = "plugin-servicenow-xml")]
         assert!(pm.plugin_by_id("servicenow-xml").is_none());
     }
 
@@ -375,6 +388,7 @@ mod tests {
             .expect("include-all config should be valid");
 
         assert!(pm.plugin_by_id("json").is_some());
+        #[cfg(feature = "plugin-servicenow-xml")]
         assert!(pm.plugin_by_id("servicenow-xml").is_some());
     }
 

@@ -1,7 +1,7 @@
 # sqry MCP Server - Troubleshooting Guide - by Verivus
 
-**Version**: 13.0.7
-**Last Updated**: 2026-05-07
+**Version**: 13.0.11
+**Last Updated**: 2026-05-08
 
 Quick solutions to common issues with the sqry MCP server.
 
@@ -14,7 +14,7 @@ Quick solutions to common issues with the sqry MCP server.
 1. **Check sqry CLI**:
    ```bash
    sqry --version
-   # Should output: sqry 13.0.7 or later
+   # Should output: sqry 13.0.11 or later
    ```
 
 2. **Check MCP server binary**:
@@ -324,6 +324,50 @@ Quick solutions to common issues with the sqry MCP server.
    rm -rf .sqry/graph
    sqry index .
    ```
+
+---
+
+## Read-Only Graph Acquisition (Shared Contract)
+
+Since the Shared Graph Acquisition feature (2026-05-08), CLI, standalone
+`sqry-mcp`, daemon-hosted MCP, and `sqry-lsp` route read-only graph access
+through a single shared contract
+(`sqry_core::graph::acquisition::GraphAcquirer`). The behavior described
+below applies to MCP clients connected via `sqry-mcp --daemon`.
+
+### Reload-on-Evicted Behavior
+
+When the daemon classifies a workspace as `Evicted` (LRU memory eviction),
+the 14 read-only graph-backed daemon-hosted MCP tools attempt **one
+bounded reload** from the existing persisted snapshot before failing.
+For most evictions this is transparent — callers do not see
+`WorkspaceEvicted` and the call succeeds.
+
+**Tools covered by reload-on-evicted**:
+`complexity_metrics`, `dependency_impact`, `direct_callees`, `direct_callers`,
+`export_graph`, `find_cycles`, `find_unused`, `is_node_in_cycle`,
+`relation_query`, `semantic_diff`, `semantic_search`, `show_dependencies`,
+`subgraph`, `trace_path`.
+
+**Mutating-tool exception**: `rebuild_index` does **NOT** use the
+read-only reload fallback. Failures on the rebuild path are reported via
+the explicit rebuild flow, not through reload.
+
+### Remaining Error Cases
+
+| Error | IPC Code | Cause | Recovery |
+|-------|---------:|-------|----------|
+| `WorkspaceEvicted` | -32004 | Reload after eviction failed: snapshot missing, corrupt, or no longer plugin-compatible. | `sqry index <root>` to rebuild a missing snapshot; `sqry index --force <root>` for corrupt or incompatible. |
+| `WorkspaceIncompatibleGraph` | -32005 | Persisted snapshot uses an unknown plugin id or an incompatible snapshot format version. Distinct from eviction. | `sqry index --force <root>` to rebuild with the current plugin set / snapshot version. |
+| `WorkspaceStaleExpired` | -32002 | Stale serve window expired. Distinct from eviction. | Trigger a rebuild (`sqry daemon rebuild <root>` or `rebuild_index` MCP tool) or wait for the next scheduled rebuild. |
+
+### Recovery Actions
+
+- **Missing snapshot**: `sqry index <root>` (build from scratch).
+- **Corrupt or incompatible snapshot**: `sqry index --force <root>`.
+- **Stuck workspace state**: `sqry daemon stop && sqry daemon start`.
+- **Repeated evictions**: increase `memory_limit_mb` in `daemon.toml`, or
+  `SQRY_DAEMON_MEMORY_MB`, so the working set fits the budget.
 
 ---
 
@@ -1056,6 +1100,6 @@ When reporting issues, include:
 
 ---
 
-**Last Updated**: 2026-05-07
-**MCP Server Version**: 13.0.7
+**Last Updated**: 2026-05-08
+**MCP Server Version**: 13.0.11
 **Protocol**: MCP 2024-11-05

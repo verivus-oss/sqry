@@ -136,9 +136,15 @@ fn semantic_sort_key(
 pub fn execute_semantic_search(
     args: &SemanticSearchArgs,
 ) -> Result<ToolExecution<SemanticSearchData>> {
-    // SECURITY: Validate path BEFORE loading workspace/engine
-    // This ensures we reject malicious paths even if workspace is invalid
-    // We resolve workspace root for security checking (no validation required)
+    // SECURITY: Validate path BEFORE loading workspace/engine.
+    // SGA03 keeps this preflight in place: the standalone-MCP
+    // `canonicalize_in_workspace` enforces invalid-params for symlink-escape
+    // and outside-workspace paths *before* `engine_for_workspace`.
+    // `Engine::ensure_graph` then routes through `FilesystemGraphProvider`,
+    // which performs its own (compatible) path-policy check before any
+    // disk graph load. The two layers compose without producing different
+    // error variants because the standalone preflight always runs first
+    // when the request originated from MCP.
     let workspace_root_for_security = resolve_workspace_root_for_security()?;
 
     // Check path security before any other operations
@@ -153,6 +159,11 @@ pub fn execute_semantic_search(
     // taking the instant here and threading it into `inner::`.
     let start = Instant::now();
 
+    // SGA03: `engine.ensure_graph()` is now backed by
+    // `FilesystemGraphProvider` with `MissingGraphPolicy::AutoBuildIfEnabled`
+    // and an auto-build hook that retains the existing daemon-conflict
+    // check + `build_and_persist_graph` flow. Wire shape, response
+    // envelope, and `graph_metadata` are unchanged.
     let graph = engine.ensure_graph()?;
     let ctx = crate::daemon_adapter::WorkspaceContext {
         workspace_root,

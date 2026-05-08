@@ -4,6 +4,7 @@
 //! avoiding per-symbol round-trip overhead for `CodeLens`.
 
 use anyhow::{Context, Result};
+use std::sync::Arc;
 use std::time::Instant;
 
 use crate::protocol::{
@@ -40,20 +41,43 @@ pub fn batch_caller_callee_count(
 
     let mut counts = Vec::with_capacity(params.symbols.len());
 
-    for sym_ref in &params.symbols {
-        let callers_query = format!("callers:{}", sym_ref.name);
-        let callers_count = executor
-            .execute_on_graph(&callers_query, &root)
-            .with_context(|| format!("failed to execute callers query for '{}'", sym_ref.name))
-            .map(|results| results.len())
-            .unwrap_or(0);
+    // SGA06 — acquire the graph once through the shared
+    // `FilesystemGraphProvider` pipeline and reuse it for every symbol.
+    // If no snapshot is available, every symbol gets zero counts (mirrors
+    // the previous swallow-error behaviour without re-entering the
+    // executor's own `get_or_load_graph`).
+    let graph = match session.graph_for_path(&root) {
+        Ok(Some(g)) => Some(g),
+        Ok(None) => None,
+        Err(err) => {
+            log::warn!(
+                "batch_caller_callee_count: failed to acquire graph for '{}': {err}",
+                root.display()
+            );
+            None
+        }
+    };
 
-        let callees_query = format!("callees:{}", sym_ref.name);
-        let callees_count = executor
-            .execute_on_graph(&callees_query, &root)
-            .with_context(|| format!("failed to execute callees query for '{}'", sym_ref.name))
-            .map(|results| results.len())
-            .unwrap_or(0);
+    for sym_ref in &params.symbols {
+        let (callers_count, callees_count) = if let Some(ref graph) = graph {
+            let callers_query = format!("callers:{}", sym_ref.name);
+            let callers_count = executor
+                .execute_on_preloaded_graph(Arc::clone(graph), &callers_query, &root, None)
+                .with_context(|| format!("failed to execute callers query for '{}'", sym_ref.name))
+                .map(|results| results.len())
+                .unwrap_or(0);
+
+            let callees_query = format!("callees:{}", sym_ref.name);
+            let callees_count = executor
+                .execute_on_preloaded_graph(Arc::clone(graph), &callees_query, &root, None)
+                .with_context(|| format!("failed to execute callees query for '{}'", sym_ref.name))
+                .map(|results| results.len())
+                .unwrap_or(0);
+
+            (callers_count, callees_count)
+        } else {
+            (0, 0)
+        };
 
         counts.push(SymbolCount {
             name: sym_ref.name.clone(),

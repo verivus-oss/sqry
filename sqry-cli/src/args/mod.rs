@@ -407,14 +407,14 @@ pub struct Cli {
 /// Plugin-selection controls shared by indexing and selected read paths.
 #[derive(Args, Debug, Clone, Default)]
 pub struct PluginSelectionArgs {
-    /// Enable all high-cost plugins.
+    /// Enable all compiled non-default plugins.
     ///
-    /// High-cost plugins are those classified as `high_wall_clock` in the
-    /// shared plugin registry.
+    /// This includes `high_wall_clock` plugins and optional plugins compiled
+    /// into the shared plugin registry.
     #[arg(long, conflicts_with = "exclude_high_cost", help_heading = headings::PLUGIN_SELECTION, display_order = 10)]
     pub include_high_cost: bool,
 
-    /// Exclude all high-cost plugins.
+    /// Exclude all compiled non-default plugins.
     ///
     /// This is mainly useful to override `SQRY_INCLUDE_HIGH_COST=1`.
     #[arg(long, conflicts_with = "include_high_cost", help_heading = headings::PLUGIN_SELECTION, display_order = 20)]
@@ -423,14 +423,14 @@ pub struct PluginSelectionArgs {
     /// Force-enable a plugin by id.
     ///
     /// Repeat this flag to enable multiple plugins. Explicit enable beats the
-    /// global high-cost mode unless the same plugin is also explicitly disabled.
+    /// global include mode unless the same plugin is also explicitly disabled.
     #[arg(long = "enable-plugin", alias = "enable-language", value_name = "ID", help_heading = headings::PLUGIN_SELECTION, display_order = 30)]
     pub enable_plugins: Vec<String>,
 
     /// Force-disable a plugin by id.
     ///
     /// Repeat this flag to disable multiple plugins. Explicit disable wins over
-    /// explicit enable and global high-cost mode.
+    /// explicit enable and global include mode.
     #[arg(long = "disable-plugin", alias = "disable-language", value_name = "ID", help_heading = headings::PLUGIN_SELECTION, display_order = 40)]
     pub disable_plugins: Vec<String>,
 }

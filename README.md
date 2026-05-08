@@ -153,13 +153,13 @@ Primary install methods provide `sqry`, `sqry-mcp`, `sqry-lsp`, and `sqryd`. The
 # Default fast-path index
 sqry index
 
-# Include all high-cost plugins
+# Include all compiled non-default plugins
 sqry index --include-high-cost
 
 # Force the fast path even if SQRY_INCLUDE_HIGH_COST=1 is set
 sqry index --exclude-high-cost
 
-# Include one high-cost plugin explicitly
+# Include one non-default plugin explicitly
 sqry index --enable-plugin json
 
 # Exclude a plugin explicitly
@@ -170,9 +170,15 @@ sqry persists the active plugin set in the unified graph manifest, so later
 `query`, `watch`, `diff`, and graph-loader paths reuse the indexed semantics
 instead of silently reinterpreting the workspace under current defaults.
 
-Currently, the default fast path excludes these high-cost plugins:
+Currently, the default fast path excludes these non-default plugins when they are compiled:
 - `json`
-- `servicenow-xml`
+- optional specialty plugins such as `apex`, `abap`, `servicenow-xanadu-js`, `servicenow-xml`, `terraform`, `puppet`, and `pulumi`
+
+The specialty plugin crates stay archived in-tree and can be compiled with the `specialty-plugins` feature. For example:
+
+```bash
+cargo build -p sqry-cli --features specialty-plugins
+```
 
 The same plugin-selection flags also apply to `sqry update` and `sqry watch`.
 `--enable-language` and `--disable-language` remain accepted compatibility
@@ -185,8 +191,8 @@ pipelines and shell sessions where you want a stable default without retyping
 flags on every `sqry` invocation. Per-invocation CLI flags always win over
 environment defaults.
 
-- `SQRY_INCLUDE_HIGH_COST=1` — include every `HighWallClock` plugin in the
-  default fast path. Equivalent to passing `--include-high-cost`.
+- `SQRY_INCLUDE_HIGH_COST=1` — include every compiled non-default plugin in
+  the default fast path. Equivalent to passing `--include-high-cost`.
   Example: `SQRY_INCLUDE_HIGH_COST=1 sqry index`.
 - `SQRY_EXCLUDE_HIGH_COST=1` — force the fast path even when
   `SQRY_INCLUDE_HIGH_COST=1` is set elsewhere. Equivalent to
@@ -226,6 +232,9 @@ sqry search "process_" --macro-boundaries
 ```
 
 ### JVM Classpath Analysis
+
+JVM classpath analysis is an optional build surface. Build sqry with
+`--features sqry-cli/jvm-classpath` before using the classpath flags:
 
 ```bash
 # Index with automatic wrapper/tool resolution (Gradle: gradlew -> gradle, Maven: mvnw -> mvn)
@@ -718,11 +727,13 @@ sqry/
 ├── sqry-daemon-protocol/   # Wire types and framing (free functions, envelope types)
 ├── sqry-daemon-client/     # Client library (shim mode, management API)
 ├── sqry-db/                # Derived analysis DB + query planner (Phase 3)
-├── sqry-classpath/         # JVM classpath analysis (bytecode, Gradle/Maven/Bazel/sbt)
+├── sqry-classpath/         # Optional JVM classpath analysis
 ├── sqry-nl/                # Natural language query translation
 ├── sqry-plugin-registry/   # Plugin registration
 ├── sqry-mcp-redaction/     # MCP response redaction
-├── sqry-lang-*/            # 37 language plugins
+├── sqry-lang-*/            # Default and optional language plugins
+├── sqry-openai/            # Archived Python OpenAI integration
+├── benchmarks/             # Archived benchmark harness and evidence
 ├── sqry-lang-support/      # Plugin infrastructure
 ├── sqry-tree-sitter-support/ # Tree-sitter helpers
 ├── sqry-test-support/      # Test infrastructure

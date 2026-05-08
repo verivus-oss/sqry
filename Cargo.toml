@@ -66,15 +66,71 @@ members = [
     # extension-classifier-stub surfaces.
     "tests/integration",
 ]
+default-members = [
+    "sqry-core",
+    "sqry-cli",
+    "sqry-mcp",
+    "sqry-lang-rust",
+    "sqry-lang-javascript",
+    "sqry-lang-typescript",
+    "sqry-lang-python",
+    "sqry-lang-go",
+    "sqry-lang-java",
+    "sqry-lang-c",
+    "sqry-lang-cpp",
+    "sqry-lang-csharp",
+    "sqry-lang-php",
+    "sqry-lang-sql",
+    "sqry-lang-kotlin",
+    "sqry-lang-lua",
+    "sqry-lang-ruby",
+    "sqry-lang-swift",
+    "sqry-lang-scala",
+    "sqry-lang-elixir",
+    "sqry-lang-r",
+    "sqry-lang-dart",
+    "sqry-lang-shell",
+    "sqry-lang-html",
+    "sqry-lang-css",
+    "sqry-lang-haskell",
+    "sqry-lang-perl",
+    "sqry-lang-vue",
+    "sqry-lang-svelte",
+    "sqry-lang-groovy",
+    "sqry-lang-zig",
+    "sqry-lang-json",
+    "sqry-lsp",
+    "sqry-lang-support",
+    "sqry-tree-sitter-support",
+    "crates/tree-sitter-vue-sqry",
+    "crates/tree-sitter-svelte-sqry",
+    "crates/tree-sitter-groovy-sqry",
+    "crates/tree-sitter-plsql-sqry",
+    "crates/tree-sitter-kotlin-sqry",
+    "crates/tree-sitter-elixir-sqry",
+    "crates/tree-sitter-perl-sqry",
+    "sqry-lang-oracle-plsql",
+    "sqry-mcp-redaction",
+    "sqry-nl",
+    "sqry-plugin-registry",
+    "sqry-db",
+    "sqry-daemon",
+    "sqry-daemon-client",
+    "sqry-daemon-protocol",
+    "tests/integration",
+]
 exclude = [
     "tools/detection-corpus-validator",  # Standalone utility, not part of workspace
     "tools/graphsync",  # Standalone tool, excluded due to serde-saphyr/smallvec conflict with ort
     "tools/naming-audit",  # Internal-only development tool, not shipped with sqry
     "tools/slopscan",  # Internal-only development tool, not shipped with sqry
+    "sqry-openai",  # Archived Python integration, not default product surface
+    "sqry-nl/training",  # Archived NL model training pipeline
+    "sqry-nl/models",  # Archived NL model metadata/artifacts
 ]
 
 [workspace.package]
-version = "13.0.7"
+version = "13.0.11"
 edition = "2024"
 authors = ["Verivus Pty Ltd"]
 license = "MIT"
@@ -92,13 +148,13 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(disabled)', 'cfg(fuzzing)'
 # Core dependencies
 anyhow = "1.0"
 thiserror = "2.0"
-miette = { version = "7.4", features = ["fancy"] }
+miette = { version = "7.6", features = ["fancy"] }
 tree-sitter = "0.26"
 # Note: tree-sitter 0.26 supports both ABI 14 (0.23.x grammars) and ABI 15 (1.x grammars)
 
 # CLI dependencies
-clap = { version = "4.5", features = ["derive", "env"] }
-colored = "2.1"
+clap = { version = "4.6", features = ["derive", "env"] }
+colored = "3.1"
 
 # Task 9 U15a — Linux-only deps for sqry-daemon lifecycle.
 # sd-notify: sends READY=1/STATUS=/STOPPING=1 to systemd on Type=notify units.
@@ -112,7 +168,7 @@ users = "0.11"
 serde = { version = "1.0", features = ["derive", "rc"] }  # rc enables Arc serialization
 serde_json = "1.0"
 serde_bytes = "0.11"  # Efficient byte slice serialization (P2-8 warm images)
-toml = "1.0"  # TOML parsing for config files (FR-2025-016 Phase 3.2)
+toml = "1.1"  # TOML parsing for config files (FR-2025-016 Phase 3.2)
 postcard = { version = "1", default-features = false, features = ["use-std", "alloc"] }
 hex = "0.4"  # Hex encoding/decoding for hash representations
 
@@ -120,48 +176,48 @@ hex = "0.4"  # Hex encoding/decoding for hash representations
 chrono = { version = "0.4", features = ["serde"] }
 
 # Regex
-regex = "1.11"
+regex = "1.12"
 fancy-regex = "0.13"  # Supports lookahead/lookbehind (FT-C.1)
 
 # Fuzzy string matching
 rapidfuzz = "0.5"
 
 # Search & file handling
-grep = "0.3"
+grep = "0.4"
 grep-regex = "0.1"
 grep-searcher = "0.1"
 ignore = "0.4"
 globset = "0.4"
 walkdir = "2.5"
-tempfile = "3.10"
+tempfile = "3.27"
 
 # Caching & performance
-lru = "0.16"
+lru = "0.18"
 dashmap = "6.1"
 memmap2 = "0.9"
 parking_lot = "0.12"
-smallvec = "1.13"
+smallvec = "1.15"
 semver = "1.0"
-blake3 = "1.5"  # Fast cryptographic hashing for cache keys
+blake3 = "1.8"  # Fast cryptographic hashing for cache keys
 zstd = "0.13.3"   # Fast compression for index files (pinned for reproducibility)
 cacache = { version = "13", default-features = false, features = ["mmap", "tokio-runtime"] }
 
 # Parallel processing
-rayon = "1.10"
+rayon = "1.12"
 crossbeam-queue = "0.3"
 crossbeam-channel = "0.5"
 
 # Lazy static initialization
-once_cell = "1.20"
+once_cell = "1.21"
 sha2 = "0.10"
-zip = { version = "8.5", default-features = false, features = ["deflate"] }
+zip = { version = "8.6", default-features = false, features = ["deflate"] }
 cafebabe = { version = "0.9", features = ["threadsafe"] }  # JVM .class file parser (Track C)
 
 
 # Logging
 log = "0.4"
 env_logger = { version = "0.11", default-features = false, features = ["auto-color", "regex"] }
-tokio = { version = "1.39", features = ["rt-multi-thread", "macros", "signal", "net", "io-std", "io-util", "time"] }
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "signal", "net", "io-std", "io-util", "time"] }
 tower-lsp = "0.20"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }

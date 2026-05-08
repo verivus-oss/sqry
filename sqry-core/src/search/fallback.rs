@@ -8,11 +8,13 @@
 
 use super::classifier::{QueryClassifier, QueryType};
 use super::{Match as TextMatch, SearchConfig, SearchMode, Searcher as TextSearcher};
+use crate::graph::CodeGraph;
 use crate::query::QueryExecutor;
 use crate::query::results::QueryResults;
 use anyhow::{Context, Error, Result, anyhow};
 use log::error;
 use std::path::Path;
+use std::sync::Arc;
 
 /// Configuration for fallback search behavior
 #[derive(Debug, Clone)]
@@ -322,6 +324,43 @@ impl FallbackSearchEngine {
         })
     }
 
+    /// SGA03 Major #1 — semantic-only search against a caller-supplied
+    /// [`CodeGraph`].
+    ///
+    /// Identical contract to [`Self::search_semantic_only`] but routes the
+    /// semantic execution through
+    /// [`QueryExecutor::execute_on_preloaded_graph`] instead of
+    /// [`QueryExecutor::execute_on_graph`]. This is the entrypoint the CLI
+    /// hybrid path uses after the shared `FilesystemGraphProvider` has
+    /// already acquired the workspace graph: re-loading from disk inside
+    /// the executor would bypass the provider's plugin/manifest checks.
+    ///
+    /// `scope_path` is the **search scope** (a directory or file under the
+    /// workspace) — not the workspace root. The executor canonicalises it
+    /// internally before evaluating file-scope predicates, mirroring
+    /// [`QueryExecutor::execute_on_graph_with_variables`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`anyhow::Error`] when query parsing, variable resolution, or
+    /// predicate evaluation fails. Cannot produce a "no graph found" error —
+    /// the graph is always supplied by the caller.
+    pub fn search_semantic_only_with_preloaded_graph(
+        &mut self,
+        query: &str,
+        graph: Arc<CodeGraph>,
+        scope_path: &Path,
+    ) -> Result<SearchResults> {
+        let results = self
+            .query_executor
+            .execute_on_preloaded_graph(graph, query, scope_path, None)?;
+
+        Ok(SearchResults::Semantic {
+            results,
+            mode: SearchModeUsed::SemanticOnly,
+        })
+    }
+
     /// Force text search only (no semantic attempt)
     ///
     /// # Errors
@@ -359,6 +398,42 @@ impl FallbackSearchEngine {
             matches,
             mode: SearchModeUsed::TextOnly,
         })
+    }
+
+    /// SGA03 Major #1 — hybrid auto-classified search against a
+    /// caller-supplied [`CodeGraph`].
+    ///
+    /// Mirrors [`Self::search`] but threads the provider-acquired graph
+    /// into every semantic execution. The text-only branch does not need
+    /// the graph and matches [`Self::search_text_only`] verbatim.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`anyhow::Error`] if either semantic or text search fails
+    /// and no fallback mode can recover.
+    pub fn search_with_preloaded_graph(
+        &mut self,
+        query: &str,
+        graph: Arc<CodeGraph>,
+        scope_path: &Path,
+    ) -> Result<SearchResults> {
+        let query_type = QueryClassifier::classify(query);
+
+        if self.config.show_search_mode {
+            match query_type {
+                QueryType::Semantic => log::debug!("[Semantic search mode]"),
+                QueryType::Text => log::debug!("[Text search mode]"),
+                QueryType::Hybrid => log::debug!("[Hybrid mode: trying semantic first...]"),
+            }
+        }
+
+        match query_type {
+            QueryType::Semantic => {
+                self.search_semantic_only_with_preloaded_graph(query, graph, scope_path)
+            }
+            QueryType::Text => self.search_text_only(query, scope_path),
+            QueryType::Hybrid => self.search_hybrid_with_preloaded_graph(query, graph, scope_path),
+        }
     }
 
     /// Hybrid search: try semantic first, fallback to text if needed
@@ -474,6 +549,110 @@ impl FallbackSearchEngine {
                 Err(e)
             }
         }
+    }
+
+    /// SGA03 Major #1 — hybrid search against a caller-supplied
+    /// [`CodeGraph`].
+    ///
+    /// Functionally identical to [`Self::search_hybrid`] except the
+    /// semantic attempt runs through
+    /// [`QueryExecutor::execute_on_preloaded_graph`] so the
+    /// provider-acquired graph is the single source of truth — the
+    /// executor's process-wide cache is **not** consulted and
+    /// [`crate::graph::unified::persistence::load_from_path`] is **not**
+    /// re-entered. The text-fallback branches reuse the existing
+    /// [`super::Searcher`] verbatim.
+    fn search_hybrid_with_preloaded_graph(
+        &mut self,
+        query: &str,
+        graph: Arc<CodeGraph>,
+        path: &Path,
+    ) -> Result<SearchResults> {
+        let semantic_result = self
+            .query_executor
+            .execute_on_preloaded_graph(graph, query, path, None);
+
+        match semantic_result {
+            Ok(results) if results.len() >= self.config.min_semantic_results => {
+                if self.config.show_search_mode {
+                    log::debug!("[Semantic search: {} results]", results.len());
+                }
+
+                Ok(SearchResults::Semantic {
+                    results,
+                    mode: SearchModeUsed::SemanticSucceeded,
+                })
+            }
+
+            Ok(results) if self.config.fallback_enabled => {
+                if self.config.show_search_mode {
+                    log::debug!(
+                        "[Semantic search: {} results (below threshold {})]",
+                        results.len(),
+                        self.config.min_semantic_results
+                    );
+                    log::debug!("[Falling back to text search...]");
+                }
+
+                self.text_fallback(query, path, SearchModeUsed::SemanticFallbackToText)
+            }
+
+            Ok(results) => Ok(SearchResults::Semantic {
+                results,
+                mode: SearchModeUsed::SemanticOnly,
+            }),
+
+            Err(e) if self.config.fallback_enabled => {
+                if self.config.show_search_mode {
+                    log::debug!("[Semantic search failed: {e}]");
+                    log::debug!("[Falling back to text search...]");
+                }
+
+                self.text_fallback(query, path, SearchModeUsed::SemanticFallbackToText)
+            }
+
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Shared text-fallback path used by hybrid variants. Mirrors the
+    /// inline blocks in [`Self::search_hybrid`] so the preloaded-graph
+    /// hybrid path produces identical text fallbacks.
+    fn text_fallback(
+        &self,
+        query: &str,
+        path: &Path,
+        mode: SearchModeUsed,
+    ) -> Result<SearchResults> {
+        let config = SearchConfig {
+            mode: SearchMode::Regex,
+            case_insensitive: false,
+            include_hidden: false,
+            follow_symlinks: false,
+            max_depth: None,
+            file_types: Vec::new(),
+            exclude_patterns: Vec::new(),
+            before_context: self.config.text_context_lines,
+            after_context: self.config.text_context_lines,
+        };
+
+        let searcher = self
+            .text_searcher()
+            .context("Text search unavailable during fallback")?;
+        let matches = searcher
+            .search(query, &[path], &config)
+            .context("Text search failed during fallback")?;
+
+        let matches = matches
+            .into_iter()
+            .take(self.config.max_text_results)
+            .collect::<Vec<_>>();
+
+        if self.config.show_search_mode {
+            log::debug!("[Text search: {} results]", matches.len());
+        }
+
+        Ok(SearchResults::Text { matches, mode })
     }
 }
 
@@ -592,6 +771,63 @@ fn bar() {
         // Should return empty semantic results (not fallback to text)
         if let Ok(SearchResults::Semantic { results, .. }) = result {
             assert_eq!(results.len(), 0);
+        }
+    }
+
+    /// SGA03 Major #1 (codex iter2) — preloaded-graph entrypoints route
+    /// through `QueryExecutor::execute_on_preloaded_graph`, never through
+    /// the executor's `execute_on_graph` cache+disk-load path.
+    ///
+    /// The proof here is *negative*: pass an empty in-memory `CodeGraph`
+    /// against a `path` whose ancestors contain no `.sqry/graph` artifact.
+    /// If the engine were still using `execute_on_graph`, the executor's
+    /// `get_or_load_graph` would fail with "No graph found. Run `sqry
+    /// index ...`". Because the entrypoint takes the caller's graph
+    /// directly, the call must succeed and return zero semantic matches.
+    #[test]
+    fn semantic_only_with_preloaded_graph_uses_caller_graph() {
+        let dir = TempDir::new().unwrap();
+        // Deliberately *no* `.sqry/graph/...` artifact under `dir`.
+
+        let mut engine = FallbackSearchEngine::new().unwrap();
+        let graph = Arc::new(CodeGraph::new());
+
+        let results = engine
+            .search_semantic_only_with_preloaded_graph("kind:function", graph, dir.path())
+            .expect("preloaded-graph entrypoint must not consult on-disk graph");
+
+        match results {
+            SearchResults::Semantic { results, mode } => {
+                assert_eq!(results.len(), 0, "empty graph yields zero matches");
+                assert_eq!(mode, SearchModeUsed::SemanticOnly);
+            }
+            SearchResults::Text { .. } => {
+                panic!("semantic-only entrypoint must not return text results")
+            }
+        }
+    }
+
+    /// Companion to the above for the hybrid auto-classify entrypoint:
+    /// against an empty preloaded graph + no on-disk artifact, the
+    /// semantic attempt must come back with zero results and (because
+    /// `kind:function` is a Semantic-classified query) the engine must
+    /// not silently downgrade to text fallback.
+    #[test]
+    fn search_with_preloaded_graph_routes_semantic_class_to_preloaded_executor() {
+        let dir = TempDir::new().unwrap();
+        let mut engine = FallbackSearchEngine::new().unwrap();
+        let graph = Arc::new(CodeGraph::new());
+
+        let results = engine
+            .search_with_preloaded_graph("kind:function", graph, dir.path())
+            .expect("preloaded-graph entrypoint must not consult on-disk graph");
+
+        match results {
+            SearchResults::Semantic { results, mode } => {
+                assert_eq!(results.len(), 0);
+                assert_eq!(mode, SearchModeUsed::SemanticOnly);
+            }
+            SearchResults::Text { .. } => panic!("semantic-class query must not fall back to text"),
         }
     }
 }

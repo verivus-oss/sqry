@@ -1,6 +1,8 @@
 //! Integration tests for Java local variable reference tracking.
 
+#[cfg(feature = "jvm-classpath")]
 use sqry_classpath::stub::index::ClasspathIndex;
+#[cfg(feature = "jvm-classpath")]
 use sqry_classpath::stub::model::{AccessFlags, ClassKind, ClassStub, FieldStub};
 use sqry_core::graph::GraphBuilder;
 use sqry_core::graph::unified::StagingGraph;
@@ -972,6 +974,13 @@ fn test_inherited_explicit_unresolved() {
     );
 }
 
+// Exercises sqry-classpath's external classpath base resolution, which
+// is feature-gated behind `jvm-classpath` after `refactor!: make
+// non-core surfaces opt-in` (commit ecd215385). Without the feature
+// the classpath analyser is absent and no external members are
+// recorded. Run with:
+//   cargo test -p sqry-lang-java --features jvm-classpath --test local_variable_reference_tests
+#[cfg(feature = "jvm-classpath")]
 #[test]
 fn test_external_classpath_base_resolution() {
     let temp_dir = tempfile::tempdir().expect("tempdir");

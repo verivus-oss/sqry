@@ -45,7 +45,7 @@ use rmcp::model::{
 };
 use rmcp::service::RequestContext;
 use rmcp::{RoleServer, ServerHandler};
-use serde_json::Value;
+use serde_json::{Value, json};
 use sqry_core::project::ProjectRootMode;
 use sqry_core::query::executor::QueryExecutor;
 use sqry_mcp::daemon_adapter::WorkspaceContext;
@@ -178,6 +178,25 @@ impl DaemonMcpHandler {
     pub fn advertised_tools(&self) -> &[rmcp::model::Tool] {
         &self.tools
     }
+
+    /// SGA04 building block — construct a daemon graph provider over
+    /// this handler's [`WorkspaceManager`] / [`WorkspaceBuilder`] pair.
+    ///
+    /// SGA05 routes read-only MCP tool dispatch through
+    /// [`tool_core::acquire_and_execute`], which builds a provider
+    /// internally per request via `tool_core::daemon_graph_provider`.
+    /// This accessor stays exposed for SGA06 / SGA07 surfaces that
+    /// need to construct a provider explicitly (e.g. LSP integration
+    /// or out-of-band parity probes) without going through the
+    /// dispatch wrapper. `rebuild_index` and `sqry_ask` flows remain
+    /// outside this code path — they own their own load semantics.
+    #[allow(dead_code)] // Reserved for SGA06 / SGA07 surfaces.
+    pub(crate) fn daemon_graph_provider(&self) -> crate::workspace::acquirer::DaemonGraphProvider {
+        tool_core::daemon_graph_provider(
+            Arc::clone(&self.manager),
+            Arc::clone(&self.workspace_builder),
+        )
+    }
 }
 
 impl ServerHandler for DaemonMcpHandler {
@@ -283,6 +302,27 @@ impl ServerHandler for DaemonMcpHandler {
         // `(workspace_root, graph, executor)`), so the daemon MCP
         // host owns the routing. See `dispatch_sqry_ask` in
         // sqry-mcp/src/daemon_adapter/dispatch.rs.
+        //
+        // SGA05 acquisition contract for `sqry_ask`:
+        //
+        //   * Initial workspace admission goes through
+        //     `WorkspaceManager::get_or_load` (see
+        //     `load_workspace_and_translator_for_sqry_ask_blocking`).
+        //     This is the SAME admission path the SGA04 provider
+        //     uses internally on its bounded read-only reload, so
+        //     there is no parallel / bypassing load.
+        //   * Translated graph-backed execution operates against the
+        //     cached `LoadedWorkspace.graph` returned by that admission
+        //     — i.e. the exact `Arc<CodeGraph>` the daemon's
+        //     classification machinery just admitted. There is no
+        //     second graph load.
+        //   * `sqry_ask` is intentionally NOT routed through
+        //     `acquire_and_execute` because its initial-load
+        //     semantics include admission accounting (translator
+        //     init, ONNX session pool) that the read-only acquisition
+        //     contract is specifically not designed to drive (per
+        //     SGA02 §Tool Ownership Boundary). Routing it through
+        //     `ReadOnlyQuery` would conflict with the contract.
         if name == "sqry_ask" {
             return self.handle_sqry_ask(&args_value).await;
         }
@@ -303,15 +343,32 @@ impl ServerHandler for DaemonMcpHandler {
             dispatch_by_name(&name_clone, wctx, &args_clone)
         };
 
-        // Delegate to the shared tool_core pipeline. Error mapping at
-        // the MCP boundary uses `daemon_err_to_mcp_with_tool` so
-        // `details.tool` is populated for `ToolTimeout` without any
-        // post-hoc JSON mutation.
-        let verdict = tool_core::classify_and_execute(
+        // SGA05: route through the shared graph acquirer so `WorkspaceEvicted`
+        // triggers the daemon provider's bounded one-shot read-only reload
+        // before the tool body runs. The `acquire_and_execute` helper preserves
+        // the existing wire envelope shapes — Reloaded acquisitions present as
+        // Fresh on the wire (no new top-level fields), Stale acquisitions
+        // continue to splice `_stale_warning` (existing behaviour). Error
+        // mapping at the MCP boundary still uses
+        // `daemon_err_to_mcp_with_tool` so `details.tool` is populated for
+        // `ToolTimeout` and the canonical 4-key envelope shape is preserved.
+        //
+        // `tool_name` for diagnostics is the inbound MCP method name. Because
+        // the acquirer's `tool_name` field requires a `&'static str`, we map
+        // through the `DAEMON_SUPPORTED_TOOL_NAMES` table to the canonical
+        // 'static literal — which is guaranteed to contain `name` here
+        // because `enabled_tool_names` already gated the request.
+        let static_tool_name: Option<&'static str> = tools_schema::DAEMON_SUPPORTED_TOOL_NAMES
+            .iter()
+            .copied()
+            .find(|&n| n == name.as_str());
+        let verdict = tool_core::acquire_and_execute(
             Arc::clone(&self.manager),
+            Arc::clone(&self.workspace_builder),
             Arc::clone(&self.tool_executor),
             self.tool_timeout,
             &path,
+            static_tool_name,
             run,
         )
         .await
@@ -401,6 +458,7 @@ impl DaemonMcpHandler {
             )
         })?;
         let path = ask_args.path.clone();
+        let original_execute = ask_args.execute;
 
         // Canonicalise the path so workspace lookup uses the same key
         // shape as `dispatch_by_name` / `tool_core`. A relative `path`
@@ -429,9 +487,71 @@ impl DaemonMcpHandler {
             executor: Arc::clone(&self.tool_executor),
         };
 
-        let payload =
-            Self::dispatch_sqry_ask_blocking(wctx, Arc::clone(&translator), args_value.clone())
+        // SGA05 §`sqry_ask` Translated Command Coverage:
+        //
+        // The translator's `Execute`-arm output may be a graph-backed
+        // CLI invocation (e.g. `sqry query "..."`, `sqry graph
+        // direct-callers "<sym>"`). The pre-SGA05 daemon route invoked
+        // `execute_sqry_ask_with_translator` with the caller-supplied
+        // `execute=true`, which inside `sqry-mcp` shells out via
+        // `Command::new(bin)` — bypassing the daemon's shared graph
+        // acquisition pipeline and therefore bypassing the SGA02/SGA04
+        // read-only acquisition contract.
+        //
+        // Fix: always run the translator with `execute=false` here so
+        // we get only the rendered command back, then post-process:
+        //
+        //   * If the translation rendered a daemon-supported
+        //     graph-backed tool AND the caller asked for `execute=true`,
+        //     dispatch through `tool_core::acquire_and_execute` — the
+        //     same pipeline direct MCP tool calls use. The translated
+        //     tool's response is rendered as JSON and spliced into
+        //     `data.executionOutput`, preserving the existing wire shape.
+        //   * If the translation rendered a non-graph-backed command
+        //     (text search, version, help, etc.) and `execute=true`,
+        //     we set `executionOutput` to an explicit "out-of-scope"
+        //     marker rather than shelling out — daemon-hosted
+        //     `sqry_ask` deliberately does NOT execute commands that
+        //     fall outside the SGA02/SGA04 read-only acquisition
+        //     boundary.
+        //   * If the caller did not ask to execute, we leave
+        //     `executionOutput` unset (translation-only response).
+        //
+        // Standalone `sqry-mcp` (no daemon) is unaffected and still
+        // shells out — its execution path is not subject to the daemon
+        // acquisition contract.
+        let translator_only_args = SqryAskParams {
+            execute: false,
+            ..params_to_sqry_ask_args(args_value.clone()).map_err(|e| {
+                daemon_err_to_mcp_with_tool(
+                    DaemonError::InvalidArgument {
+                        reason: format!("sqry_ask: invalid arguments: {e}"),
+                    },
+                    "sqry_ask",
+                )
+            })?
+        };
+        let translator_only_args_value =
+            serde_json::to_value(&translator_only_args).map_err(|e| {
+                daemon_err_to_mcp_with_tool(
+                    DaemonError::Internal(anyhow::anyhow!(
+                        "sqry_ask: re-serialize translator args: {e}"
+                    )),
+                    "sqry_ask",
+                )
+            })?;
+
+        let mut payload = Self::dispatch_sqry_ask_blocking(
+            wctx,
+            Arc::clone(&translator),
+            translator_only_args_value,
+        )
+        .await?;
+
+        if original_execute {
+            self.maybe_run_translated_graph_command(&mut payload, &canonical_root, path.as_str())
                 .await?;
+        }
 
         // Wire-format parity with the 14 query tools that route
         // through `classify_and_execute` — both `content[0].text` and
@@ -444,6 +564,141 @@ impl DaemonMcpHandler {
             is_error: None,
             meta: None,
         })
+    }
+
+    /// Inspect a `sqry_ask` translation payload and, if its rendered
+    /// command maps to one of the daemon-supported graph-backed read-only
+    /// tools, dispatch that tool through
+    /// [`tool_core::acquire_and_execute`] — preserving the SGA05
+    /// acquisition contract end-to-end. The translated tool's JSON
+    /// response is spliced into `data.executionOutput` so existing
+    /// `sqry_ask` consumers see a captured-output string in the same
+    /// shape they did when the pre-SGA05 path shelled out.
+    ///
+    /// Caller-supplied `original_path` is the un-canonicalised `path`
+    /// the `sqry_ask` MCP request carried — re-used here as the
+    /// `path` argument for the translated tool dispatch so the
+    /// shared acquirer canonicalises it through the same path-policy
+    /// ladder it uses for direct tool calls.
+    async fn maybe_run_translated_graph_command(
+        &self,
+        payload: &mut Value,
+        canonical_root: &Path,
+        original_path: &str,
+    ) -> Result<(), McpError> {
+        // Locate the rendered command on the translation payload, if any.
+        let command = payload
+            .get("data")
+            .and_then(|d| d.get("command"))
+            .and_then(|c| c.as_str())
+            .map(str::to_owned);
+        let Some(command) = command else {
+            return Ok(());
+        };
+
+        match parse_translated_graph_command(&command, original_path) {
+            Some((tool_name, mut tool_args)) => {
+                // SGA05: dispatch through the shared acquirer so the
+                // translated tool consumes a graph admitted by the
+                // daemon's read-only acquisition path. The daemon
+                // provider canonicalises the path internally (PathPolicy
+                // default), so we pass the un-canonicalised
+                // `original_path` here exactly as direct tool calls do.
+                ensure_path_arg(&mut tool_args, original_path);
+                let exec_output = self
+                    .dispatch_translated_graph_tool(tool_name, tool_args, original_path)
+                    .await?;
+                splice_execution_output(payload, exec_output);
+                Ok(())
+            }
+            None => {
+                // Not a graph-backed tool we route — refuse to shell
+                // out (per SGA02 §Tool Ownership Boundary) and leave
+                // an explicit marker so callers can distinguish
+                // "we did not run this command" from "command produced
+                // empty output". Out-of-scope translations include
+                // `sqry index --status`, `sqry visualize ...`, and any
+                // future CLI that does not have a daemon-supported
+                // MCP equivalent.
+                let marker = format!(
+                    "[daemon] translated command {command:?} is not a daemon-supported \
+                     graph-backed tool; daemon-hosted sqry_ask does not shell out for \
+                     out-of-scope commands. Route via the daemon's MCP tools (e.g. \
+                     semantic_search) or run the CLI from your client. \
+                     workspace_root={}",
+                    canonical_root.display()
+                );
+                splice_execution_output(payload, marker);
+                Ok(())
+            }
+        }
+    }
+
+    /// SGA05 dispatch seam — given a daemon-supported graph-backed tool
+    /// name and its arguments, route through
+    /// [`tool_core::acquire_and_execute`] and return the rendered JSON
+    /// response as a pretty-printed string. Used by
+    /// [`Self::maybe_run_translated_graph_command`] (production) and
+    /// the SGA07 parity test (`feature = "test-hooks"`).
+    #[doc(hidden)]
+    pub async fn dispatch_translated_graph_tool(
+        &self,
+        tool_name: &'static str,
+        tool_args: Value,
+        path: &str,
+    ) -> Result<String, McpError> {
+        // Authorization: restrict to the same daemon-supported set the
+        // direct-tool path enforces. `rebuild_index` is mutating
+        // (excluded), `sqry_ask` is the wrapper itself (excluded), and
+        // any other unknown name is rejected.
+        if !tools_schema::DAEMON_SUPPORTED_TOOL_NAMES.contains(&tool_name)
+            || tool_name == "rebuild_index"
+            || tool_name == "sqry_ask"
+        {
+            return Err(daemon_err_to_mcp_with_tool(
+                DaemonError::InvalidArgument {
+                    reason: format!(
+                        "sqry_ask translated dispatch: tool {tool_name} is not a \
+                         daemon-supported graph-backed read-only tool"
+                    ),
+                },
+                "sqry_ask",
+            ));
+        }
+
+        let name_clone: &'static str = tool_name;
+        let args_clone = tool_args;
+        let run = move |wctx: &WorkspaceContext| -> anyhow::Result<Value> {
+            dispatch_by_name(name_clone, wctx, &args_clone)
+        };
+
+        let verdict = tool_core::acquire_and_execute(
+            Arc::clone(&self.manager),
+            Arc::clone(&self.workspace_builder),
+            Arc::clone(&self.tool_executor),
+            self.tool_timeout,
+            path,
+            Some(name_clone),
+            run,
+        )
+        .await
+        .map_err(|e| daemon_err_to_mcp_with_tool(e, "sqry_ask"))?;
+
+        let payload = match verdict {
+            ExecuteVerdict::Fresh { inner, .. } => inner,
+            ExecuteVerdict::Stale {
+                mut inner,
+                stale_warning,
+                ..
+            } => {
+                if let Value::Object(ref mut map) = inner {
+                    map.insert("_stale_warning".into(), Value::String(stale_warning));
+                }
+                inner
+            }
+        };
+
+        Ok(serde_json::to_string_pretty(&payload).unwrap_or_else(|_| payload.to_string()))
     }
 
     /// Load the `sqry_ask` workspace and initialise its per-workspace translator.
@@ -741,6 +996,209 @@ fn build_daemon_sqry_ask_translator_config(
     args: &SqryAskParams,
 ) -> TranslatorConfig {
     build_translator_config_for_path(scoped_path, args)
+}
+
+/// SGA05 — parse a translator-rendered CLI command into the
+/// daemon-supported MCP tool name + arguments JSON. Returns `None`
+/// when the command is not a graph-backed read-only tool the daemon
+/// MCP host can dispatch (text search, version, help, visualize, etc.).
+///
+/// Supported shapes (mirrors `sqry-nl::assembler` outputs):
+///
+/// - `sqry query "<expr>" [--limit N] [--language X] [--path "P"]`
+///   → `semantic_search { query, max_results }`. The `query` argument is
+///   the raw expression — `dispatch_by_name` invokes the same planner
+///   parser standalone `sqry-mcp::semantic_search` uses.
+/// - `sqry graph direct-callers "<sym>" [--language X]`
+///   → `direct_callers { symbol, max_results }`.
+/// - `sqry graph direct-callees "<sym>" [--language X]`
+///   → `direct_callees { symbol, max_results }`.
+/// - `sqry graph trace-path "<from>" "<to>" [--max-depth N]`
+///   → `trace_path { from_symbol, to_symbol, max_hops, max_paths }`.
+///
+/// `path_arg` is propagated into every returned args object so the
+/// translated tool dispatch lands on the same workspace root the
+/// outer `sqry_ask` request named.
+fn parse_translated_graph_command(command: &str, path_arg: &str) -> Option<(&'static str, Value)> {
+    let tokens = tokenize_translated_command(command)?;
+    let mut iter = tokens.iter().map(String::as_str);
+    let bin = iter.next()?;
+    if bin != "sqry" {
+        return None;
+    }
+    let sub = iter.next()?;
+    let remaining: Vec<&str> = iter.collect();
+    match sub {
+        "query" => parse_translated_query(&remaining, path_arg),
+        "graph" => parse_translated_graph(&remaining, path_arg),
+        // `search`, `visualize`, `index`, `--version`, `--help`, etc.
+        // are out-of-scope for daemon graph acquisition.
+        _ => None,
+    }
+}
+
+fn parse_translated_query(rest: &[&str], path_arg: &str) -> Option<(&'static str, Value)> {
+    // First positional argument is the query expression.
+    let mut iter = rest.iter().copied().peekable();
+    let query_expr = iter.next()?;
+    let mut max_results: i64 = 100;
+    while let Some(tok) = iter.next() {
+        match tok {
+            "--limit" => {
+                if let Some(v) = iter.next()
+                    && let Ok(n) = v.parse::<i64>()
+                {
+                    max_results = n.clamp(1, 5000);
+                }
+            }
+            // Accept and ignore --language / --path; the daemon path
+            // overrides --path with the canonical request path below.
+            "--language" | "--path" => {
+                let _ = iter.next();
+            }
+            _ => {}
+        }
+    }
+    Some((
+        "semantic_search",
+        json!({
+            "query": query_expr,
+            "path": path_arg,
+            "max_results": max_results,
+            "context_lines": 0,
+            "include_classpath": false,
+        }),
+    ))
+}
+
+fn parse_translated_graph(rest: &[&str], path_arg: &str) -> Option<(&'static str, Value)> {
+    let mut iter = rest.iter().copied();
+    let cmd = iter.next()?;
+    match cmd {
+        "direct-callers" => {
+            let symbol = iter.next()?;
+            Some((
+                "direct_callers",
+                json!({
+                    "symbol": symbol,
+                    "path": path_arg,
+                    "max_results": 100,
+                }),
+            ))
+        }
+        "direct-callees" => {
+            let symbol = iter.next()?;
+            Some((
+                "direct_callees",
+                json!({
+                    "symbol": symbol,
+                    "path": path_arg,
+                    "max_results": 100,
+                }),
+            ))
+        }
+        "trace-path" => {
+            let from = iter.next()?;
+            let to = iter.next()?;
+            let mut max_hops: i64 = 10;
+            while let Some(tok) = iter.next() {
+                if tok == "--max-depth"
+                    && let Some(v) = iter.next()
+                    && let Ok(n) = v.parse::<i64>()
+                {
+                    max_hops = n.clamp(1, 50);
+                }
+            }
+            Some((
+                "trace_path",
+                json!({
+                    "from_symbol": from,
+                    "to_symbol": to,
+                    "path": path_arg,
+                    "max_hops": max_hops,
+                    "max_paths": 5,
+                }),
+            ))
+        }
+        // `graph stats`, `graph cycles`, `graph show-dependencies` — not
+        // emitted by the current translator; reject them so we surface a
+        // clear out-of-scope marker rather than guessing.
+        _ => None,
+    }
+}
+
+/// Tokenize a translator-rendered CLI command string into shell-style
+/// argv components. Strips the surrounding double quotes from quoted
+/// arguments while preserving inner content (the translator escapes
+/// embedded quotes via `\\"`).
+fn tokenize_translated_command(command: &str) -> Option<Vec<String>> {
+    let mut out: Vec<String> = Vec::new();
+    let mut buf = String::new();
+    let mut in_double = false;
+    let mut in_single = false;
+    let mut prev_escape = false;
+    let mut started = false;
+    for c in command.chars() {
+        if prev_escape {
+            buf.push(c);
+            prev_escape = false;
+            started = true;
+            continue;
+        }
+        if c == '\\' && (in_double || in_single) {
+            prev_escape = true;
+            continue;
+        }
+        if c == '"' && !in_single {
+            in_double = !in_double;
+            started = true;
+            continue;
+        }
+        if c == '\'' && !in_double {
+            in_single = !in_single;
+            started = true;
+            continue;
+        }
+        if c.is_whitespace() && !in_double && !in_single {
+            if started {
+                out.push(std::mem::take(&mut buf));
+                started = false;
+            }
+            continue;
+        }
+        buf.push(c);
+        started = true;
+    }
+    if in_double || in_single {
+        return None;
+    }
+    if started {
+        out.push(buf);
+    }
+    if out.is_empty() { None } else { Some(out) }
+}
+
+/// Inject (or override) the `path` field on an args JSON object so the
+/// downstream `acquire_and_execute` call canonicalises the same
+/// workspace root the outer `sqry_ask` request named. Translated
+/// commands carry `--path` only when the translator decides to scope
+/// the rendered CLI; for daemon dispatch we always use the explicit
+/// `sqry_ask` path argument.
+fn ensure_path_arg(args: &mut Value, path_arg: &str) {
+    if let Value::Object(map) = args {
+        map.insert("path".into(), Value::String(path_arg.to_string()));
+    }
+}
+
+/// Splice an `executionOutput` string into a `sqry_ask` translation
+/// payload's `data` object. Preserves byte-compatibility with the
+/// pre-SGA05 wire shape — the camelCase field name matches
+/// `NlTranslationData::execution_output` under
+/// `serde(rename_all = "camelCase")`.
+fn splice_execution_output(payload: &mut Value, output: String) {
+    if let Some(Value::Object(data)) = payload.get_mut("data") {
+        data.insert("executionOutput".into(), Value::String(output));
+    }
 }
 
 /// Render a path as a forward-slash string for JSON wire output,

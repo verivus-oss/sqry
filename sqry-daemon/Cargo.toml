@@ -45,6 +45,15 @@ default = []
 # release artefacts.
 testharness = []
 
+# SGA04 Gate-A blocker fix — gates the public-on-the-type
+# `WorkspaceManager::evict_for_test` helper so it is unreachable in
+# default release builds. SGA07 parity tests that live in
+# `sqry-daemon/tests/` enable this feature explicitly:
+#   cargo test -p sqry-daemon --features test-hooks --tests
+# In-crate `#[cfg(test)] mod tests` paths reach the helper without the
+# feature flag because `cfg(test)` is also part of the gate.
+test-hooks = []
+
 # Task 7 Phase 7c: exposes test-only helpers on LoadedWorkspace +
 # RebuildDispatcher (e.g., set_last_good_at_for_test, post-reservation
 # TestCapture hooks). Automatically enabled by sqry-daemon's own
@@ -52,15 +61,23 @@ testharness = []
 # NOT enable this in production.
 rebuild-internals = []
 
+# Forwarding feature for integration tests that need sqry-nl's
+# ONNX-backed classifier surface (IntentClassifier::load,
+# ClassifierPool, etc). Off by default — `cargo clippy --all-targets`
+# skips gated test files unless this is passed on the command line.
+# Run the gated tests via:
+#   cargo test --features classifier-tests --test concurrent_ask_smoke -- --ignored
+classifier-tests = ["sqry-nl/classifier"]
+
 [dependencies]
 # sqry workspace crates
-sqry-core = { version = "13.0.7", path = "../sqry-core", features = ["rebuild-internals"] }
-sqry-plugin-registry = { version = "13.0.7", path = "../sqry-plugin-registry" }
+sqry-core = { version = "13.0.11", path = "../sqry-core", features = ["rebuild-internals"] }
+sqry-plugin-registry = { version = "13.0.11", path = "../sqry-plugin-registry" }
 # Phase 8c U1: wire types + framing codec extracted into the
 # `sqry-daemon-protocol` leaf crate so shim clients can depend on
 # the wire format without pulling in the full daemon (and creating
 # a `sqry-daemon → sqry-lsp → sqry-daemon` cycle).
-sqry-daemon-protocol = { version = "13.0.7", path = "../sqry-daemon-protocol" }
+sqry-daemon-protocol = { version = "13.0.11", path = "../sqry-daemon-protocol" }
 # Phase 8b Task 7 — the daemon routes 14 MCP tool methods through
 # sqry-mcp's `daemon_adapter::execute_*_for_daemon` wrappers and the
 # shared `build_tool_response` renderer (via `tool_response_json`).
@@ -68,7 +85,7 @@ sqry-daemon-protocol = { version = "13.0.7", path = "../sqry-daemon-protocol" }
 # sqry-mcp-redaction / sqry-plugin-registry — none of which depend on
 # sqry-daemon, so this edge does not create a cycle (verified via
 # `cargo tree -p sqry-daemon`).
-sqry-mcp = { version = "13.0.7", path = "../sqry-mcp" }
+sqry-mcp = { version = "13.0.11", path = "../sqry-mcp" }
 
 # Phase 8c U10 — the daemon hosts an in-process tower_lsp server on
 # each LSP shim byte-pump connection via
@@ -76,7 +93,7 @@ sqry-mcp = { version = "13.0.7", path = "../sqry-mcp" }
 # depends only on sqry-core / sqry-db / sqry-nl /
 # sqry-plugin-registry — none of which depend on sqry-daemon.
 # Confirmed via `cargo tree -p sqry-daemon` post-commit.
-sqry-lsp = { version = "13.0.7", path = "../sqry-lsp" }
+sqry-lsp = { version = "13.0.11", path = "../sqry-lsp" }
 
 # Phase 8c U8 — the daemon hosts an in-process rmcp `ServerHandler`
 # (`mcp_host::DaemonMcpHandler`) on each MCP shim byte-pump connection
@@ -88,7 +105,7 @@ rmcp = { version = "0.16", features = ["server", "transport-io"] }
 # NL07 — the daemon caches one `Arc<Translator>` per workspace on
 # `LoadedWorkspace.nl_translator` (lazy `OnceCell`). `sqry-nl` is a
 # leaf crate from the daemon's POV; no cycle.
-sqry-nl = { version = "13.0.7", path = "../sqry-nl" }
+sqry-nl = { version = "13.0.11", path = "../sqry-nl" }
 
 # PF03A — the production `QueryDbHook` calls `sqry_db::persistence::save_derived`
 # from `sqry-daemon/src/workspace/hook.rs`. sqry-db depends only on sqry-core,
@@ -96,7 +113,7 @@ sqry-nl = { version = "13.0.7", path = "../sqry-nl" }
 # The dependency is unconditional rather than feature-gated because the
 # corrective program (PF03A spec) requires the production hook to be present
 # in every production sqryd build, not opt-in.
-sqry-db = { version = "13.0.7", path = "../sqry-db" }
+sqry-db = { version = "13.0.11", path = "../sqry-db" }
 # NL07 — `OnceCell::get_or_try_init` for fallible lazy init of the
 # per-workspace `Arc<Translator>`. `parking_lot::OnceCell` does not
 # exist; `std::sync::OnceLock` lacks `get_or_try_init`.
@@ -157,7 +174,7 @@ sd-notify = { workspace = true }
 users = { workspace = true }
 
 [dev-dependencies]
-tempfile = "3.10"
+tempfile = "3.27"
 # Phase 8c U15 — MCP host integration tests drive `tools/call` and
 # `tools/list` through an rmcp client (`serve_client` + `Peer` methods).
 # The client feature is NOT needed by the production daemon code (which
@@ -165,9 +182,22 @@ tempfile = "3.10"
 rmcp = { version = "0.16", features = ["client", "transport-io"] }
 # Task 9 U14 — e2e smoke tests use `connect_shim_with_timeouts` to perform
 # the shim handshake and assert `daemon_version` against the live sqryd binary.
-sqry-daemon-client = { version = "13.0.7", path = "../sqry-daemon-client" }
+sqry-daemon-client = { version = "13.0.11", path = "../sqry-daemon-client" }
 # Codex gpt-5.4 iter-1 MINOR fix — integration tests that mutate
 # process-global state (current working directory) must run
 # serialised; `serial_test` mirrors sqry-mcp's existing usage
 # (sqry-mcp/Cargo.toml: serial_test = "3.0").
-serial_test = "3.0"
+serial_test = "3.4"
+# Codex iter2 SGA04 Major #2 — RealWorkspaceBuilder::load_persisted unit
+# test crafts a snapshot file with a bogus header version directly to
+# force `PersistenceError::IncompatibleVersion`. `postcard` encodes the
+# header struct; `sha2` recomputes the snapshot SHA-256 written into the
+# stub manifest so the integrity check passes the way the production
+# loader requires.
+postcard = { workspace = true }
+sha2 = { workspace = true }
+# SGA08 — dogfood regression test invokes the workspace `sqry` CLI
+# binary against a tempdir and parses its JSON output. `assert_cmd` is
+# the canonical helper used by sqry-cli, sqry-lsp, and sqry-core's
+# `test-support` feature for the same purpose.
+assert_cmd = "2.0"

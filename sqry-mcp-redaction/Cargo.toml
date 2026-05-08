@@ -20,7 +20,7 @@ log.workspace = true
 [dev-dependencies]
 serde = { workspace = true }
 sqry-core = { path = "../sqry-core" }
-tempfile = "3.10"
+tempfile = "3.27"
 
 # Benchmarks will be added in a future iteration
 # [[bench]]

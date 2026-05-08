@@ -163,7 +163,7 @@ sqry-nl/
 │   ├── validator/       # Safety validation
 │   ├── cache/           # LRU translation cache
 │   └── error.rs         # Error types
-├── training/            # Python training pipeline
+├── training/            # Archived Python training pipeline (excluded from package builds)
 │   ├── generate_data.py # Training data generation
 │   ├── train_classifier.py
 │   ├── export_onnx.py
@@ -293,13 +293,13 @@ python calibrate.py calibrate \
   --tokenizer models/onnx --data data/eval.json \
   --output models/temperature.json
 
-# 6. Deploy to sqry-nl/models/
+# 6. Stage externally or in the archived sqry-nl/models/ metadata directory
 cp models/onnx/quantized/model_quantized.onnx ../models/intent_classifier.onnx
 cp models/onnx/{config.json,tokenizer.json,checksums.json} ../models/
 cp models/temperature.json ../models/
 ```
 
-See [training/README.md](training/README.md) for detailed instructions.
+See [training/README.md](training/README.md) for archived training instructions.
 
 ## License
 
@@ -309,4 +309,4 @@ MIT License - see [LICENSE](../LICENSE) for details.
 
 - [sqry](../) - Semantic code search CLI
 - [sqry-mcp](../sqry-mcp/) - MCP server with `sqry_ask` tool
-- [sqry-openai](../sqry-openai/) - OpenAI Agents SDK integration
+- [sqry-openai](../sqry-openai/) - archived OpenAI Agents SDK integration
