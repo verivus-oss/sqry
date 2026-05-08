@@ -299,7 +299,7 @@ install_mingw_wrappers() {
 #!/usr/bin/env bash
 set -euo pipefail
 export LD_LIBRARY_PATH="/opt/sqry-release-tools/usr/lib64:${LD_LIBRARY_PATH:-}"
-export WINEDLLPATH="/opt/sqry-release-tools/usr/lib64/wine:${WINEDLLPATH:-}"
+export WINEDLLPATH="/opt/sqry-release-tools/usr/lib64/wine/x86_64-unix:/opt/sqry-release-tools/usr/lib64/wine/x86_64-windows:${WINEDLLPATH:-}"
 exec /opt/sqry-release-tools/usr/bin/wine "$@"
 EOF
     fi
