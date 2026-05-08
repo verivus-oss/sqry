@@ -383,11 +383,11 @@ jobs:
                 exit 1
               fi
 
-              mapfile -t imported_dlls < <(
-                "$objdump_bin" -p "$package_dir"/*.exe \
-                  | awk '/DLL Name:/ { print $3 }' \
-                  | sort -u
-              )
+              imported_dlls_file="${RUNNER_TEMP}/sqry-windows-imported-dlls.txt"
+              "$objdump_bin" -p "$package_dir"/*.exe \
+                | awk '/DLL Name:/ { print $3 }' \
+                | sort -u > "$imported_dlls_file"
+              mapfile -t imported_dlls < "$imported_dlls_file"
               for dll_name in "${imported_dlls[@]}"; do
                 dll_path="$(x86_64-w64-mingw32-gcc -print-file-name="${dll_name}")"
                 if [[ -n "$dll_path" && "$dll_path" != "$dll_name" && -f "$dll_path" ]]; then
@@ -452,14 +452,33 @@ jobs:
           fi
 
       - name: Smoke test Linux arm64 (QEMU)
-        continue-on-error: true
         run: |
+          set -euo pipefail
           chmod +x dist/sqry-linux-arm64
-          qemu-aarch64-static dist/sqry-linux-arm64 --version
+          command -v qemu-aarch64-static >/dev/null
+          aarch64_loader_prefix=""
+          for candidate in \
+            /opt/sqry-release-tools/usr/aarch64-suse-linux/sys-root/lib/ld-linux-aarch64.so.1 \
+            /opt/sqry-release-tools/usr/aarch64-suse-linux/sys-root/lib64/ld-linux-aarch64.so.1 \
+            /usr/aarch64-linux-gnu/lib/ld-linux-aarch64.so.1 \
+            /usr/aarch64-suse-linux/sys-root/lib/ld-linux-aarch64.so.1 \
+            /usr/aarch64-suse-linux/sys-root/lib64/ld-linux-aarch64.so.1
+          do
+            if [[ -e "$candidate" ]]; then
+              aarch64_loader_prefix="$(dirname "$(dirname "$candidate")")"
+              break
+            fi
+          done
+          if [[ -z "$aarch64_loader_prefix" ]]; then
+            echo "FATAL: aarch64 glibc loader not found; cannot smoke-test arm64 binary under qemu" >&2
+            exit 1
+          fi
+          QEMU_LD_PREFIX="$aarch64_loader_prefix" qemu-aarch64-static dist/sqry-linux-arm64 --version
 
       - name: Smoke test Windows package (Wine)
-        continue-on-error: true
         run: |
+          set -euo pipefail
+          command -v wine64 >/dev/null
           package_dir="${RUNNER_TEMP}/sqry-windows-package"
           rm -rf "$package_dir"
           mkdir -p "$package_dir"
