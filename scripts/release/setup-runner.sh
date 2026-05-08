@@ -11,6 +11,8 @@ ZIG_INSTALL_DIR="${ZIG_INSTALL_ROOT}/zig-${ZIG_VERSION}"
 ZIG_SHA256_X86_64="02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239"
 ZIG_SHA256_AARCH64="958ed7d1e00d0ea76590d27666efbf7a932281b3d7ba0c6b01b0ff26498f667f"
 NODE_MAJOR=24
+OPENSUSE_LEAP_AARCH64_GLIBC_RPM_URL="https://download.opensuse.org/distribution/leap/16.0/repo/oss/aarch64/glibc-2.40-160000.4.1.aarch64.rpm"
+OPENSUSE_LEAP_AARCH64_GLIBC_RPM_SHA256="bcca70b763355f8251b6917db5fe425c0700d905828fb17faf33092fc48bca33"
 
 if [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
     export PATH="/home/${SUDO_USER}/.cargo/bin:/usr/local/bin:/opt/zig/current:${PATH}"
@@ -114,6 +116,7 @@ extract_rpm() {
 install_zypper_release_tools() {
     info "Installing release packages with zypper RPM extraction."
     command_exists zypper || err "zypper was not found."
+    command_exists curl || err "curl was not found."
     command_exists rpm2cpio || err "rpm2cpio was not found."
     command_exists cpio || err "cpio was not found."
 
@@ -128,6 +131,14 @@ install_zypper_release_tools() {
         info "Extracting ${rpm##*/}"
         extract_rpm "$rpm"
     done < <(find "$cache" -name '*.rpm' -print | sort)
+
+    local aarch64_glibc_rpm="${cache}/glibc-aarch64.rpm"
+    info "Downloading openSUSE aarch64 glibc runtime RPM."
+    download_with_sha256 \
+        "$OPENSUSE_LEAP_AARCH64_GLIBC_RPM_URL" \
+        "$aarch64_glibc_rpm" \
+        "$OPENSUSE_LEAP_AARCH64_GLIBC_RPM_SHA256"
+    extract_rpm "$aarch64_glibc_rpm"
 
     install_mingw_wrappers
     rm -rf "$cache"
