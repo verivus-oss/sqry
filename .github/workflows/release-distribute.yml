@@ -501,6 +501,25 @@ jobs:
           npm ci
           npx vsce package -o "../dist/sqry-vscode-${VERSION}.vsix"
 
+      - name: Record build environment
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import pathlib
+          import subprocess
+
+          build_environment = {
+              "rust_version": subprocess.check_output(["rustc", "--version"], text=True).strip(),
+              "zig_version": subprocess.check_output(["zig", "version"], text=True).strip(),
+              "runner_os": subprocess.check_output(["uname", "-srm"], text=True).strip(),
+          }
+          pathlib.Path("dist/build-environment.json").write_text(
+              json.dumps(build_environment, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          PY
+
       - name: Upload Stage 6 dist artifact for platform gates
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -804,6 +823,7 @@ jobs:
           set -euo pipefail
           cd dist
           find . -maxdepth 1 -type f \
+            ! -name 'build-environment.json' \
             ! -name 'SHA256SUMS.txt' \
             ! -name 'release-manifest.json' \
             ! -name 'release-artifacts.attestation.json' \
@@ -883,7 +903,7 @@ jobs:
           for path in sorted(dist_dir.iterdir()):
               if not path.is_file():
                   continue
-              if path.name in {"SHA256SUMS.txt", "release-manifest.json", "release-artifacts.attestation.json"}:
+              if path.name in {"build-environment.json", "SHA256SUMS.txt", "release-manifest.json", "release-artifacts.attestation.json"}:
                   continue
               entry = {
                   "sha256": checksums.get(path.name),
@@ -908,11 +928,9 @@ jobs:
               ["date", "-u", "+%Y-%m-%dT%H:%M:%SZ"], text=True
           ).strip()
 
-          build_environment = {
-              "rust_version": subprocess.check_output(["rustc", "--version"], text=True).strip(),
-              "zig_version": subprocess.check_output(["zig", "version"], text=True).strip(),
-              "runner_os": subprocess.check_output(["uname", "-srm"], text=True).strip(),
-          }
+          build_environment = json.loads(
+              (dist_dir / "build-environment.json").read_text(encoding="utf-8")
+          )
           ledger["build_environment"] = build_environment
 
           manifest = {
@@ -1281,7 +1299,9 @@ jobs:
         run: |
           set -euo pipefail
           source scripts/release/github-release-assets.sh
-          mapfile -d '' release_assets < <(find dist -maxdepth 1 -type f -print0 | sort -z)
+          mapfile -d '' release_assets < <(
+            find dist -maxdepth 1 -type f ! -name 'build-environment.json' -print0 | sort -z
+          )
           if [[ ${#release_assets[@]} -eq 0 ]]; then
             echo "FATAL: no release asset files found in dist/" >&2
             exit 1
