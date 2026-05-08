@@ -456,23 +456,18 @@ jobs:
           set -euo pipefail
           chmod +x dist/sqry-linux-arm64
           command -v qemu-aarch64-static >/dev/null
-          aarch64_loader_prefix=""
-          for candidate in \
-            /opt/sqry-release-tools/usr/aarch64-suse-linux/sys-root/lib/ld-linux-aarch64.so.1 \
-            /opt/sqry-release-tools/usr/aarch64-suse-linux/sys-root/lib64/ld-linux-aarch64.so.1 \
-            /usr/aarch64-linux-gnu/lib/ld-linux-aarch64.so.1 \
-            /usr/aarch64-suse-linux/sys-root/lib/ld-linux-aarch64.so.1 \
-            /usr/aarch64-suse-linux/sys-root/lib64/ld-linux-aarch64.so.1
-          do
-            if [[ -e "$candidate" ]]; then
-              aarch64_loader_prefix="$(dirname "$(dirname "$candidate")")"
-              break
-            fi
-          done
-          if [[ -z "$aarch64_loader_prefix" ]]; then
+          aarch64_loader="$(
+            find /opt/sqry-release-tools /usr \
+              -path '*aarch64*' \
+              -name ld-linux-aarch64.so.1 \
+              -print \
+              -quit 2>/dev/null || true
+          )"
+          if [[ -z "$aarch64_loader" ]]; then
             echo "FATAL: aarch64 glibc loader not found; cannot smoke-test arm64 binary under qemu" >&2
             exit 1
           fi
+          aarch64_loader_prefix="$(dirname "$(dirname "$aarch64_loader")")"
           QEMU_LD_PREFIX="$aarch64_loader_prefix" qemu-aarch64-static dist/sqry-linux-arm64 --version
 
       - name: Smoke test Windows package (Wine)

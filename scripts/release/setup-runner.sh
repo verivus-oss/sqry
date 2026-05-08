@@ -62,7 +62,11 @@ command_exists() {
 print_version() {
     local name="$1"
     shift
-    ok "${name} installed: $("$@" 2>&1 | head -1)"
+    local output
+    if ! output="$("$@" 2>&1)"; then
+        err "${name} version check failed: ${output}"
+    fi
+    ok "${name} installed: $(head -1 <<<"$output")"
 }
 
 download_with_sha256() {
@@ -232,7 +236,7 @@ install_cargo_tools() {
             cargo install "$tool"
         fi
     done
-    print_version "cargo-zigbuild" cargo zigbuild --version
+    print_version "cargo-zigbuild" cargo-zigbuild --version
     print_version "release-plz" release-plz --version
 }
 
@@ -251,6 +255,18 @@ install_node() {
         npm list -g @vscode/vsce >/dev/null 2>&1 || npm install -g @vscode/vsce
         print_version "Node.js" node --version
         print_version "npm" npm --version
+        local npm_prefix
+        npm_prefix="$(npm prefix -g 2>/dev/null || npm config get prefix 2>/dev/null || true)"
+        local npm_global_bin=""
+        if [[ -n "$npm_prefix" && "$npm_prefix" != "undefined" ]]; then
+            npm_global_bin="${npm_prefix%/}/bin"
+        fi
+        if [[ -n "$npm_global_bin" ]]; then
+            export PATH="${npm_global_bin}:${PATH}"
+        fi
+        if ! command_exists vsce; then
+            err "vsce executable not found after installing @vscode/vsce"
+        fi
         print_version "@vscode/vsce" vsce --version
     else
         warn "npm is unavailable; VS Code extension publishing/building may fail."
@@ -364,18 +380,7 @@ validate_release_tools() {
     fi
 
     local aarch64_loader=""
-    for candidate in \
-        "${RELEASE_TOOLS_ROOT}/usr/aarch64-suse-linux/sys-root/lib/ld-linux-aarch64.so.1" \
-        "${RELEASE_TOOLS_ROOT}/usr/aarch64-suse-linux/sys-root/lib64/ld-linux-aarch64.so.1" \
-        /usr/aarch64-linux-gnu/lib/ld-linux-aarch64.so.1 \
-        /usr/aarch64-suse-linux/sys-root/lib/ld-linux-aarch64.so.1 \
-        /usr/aarch64-suse-linux/sys-root/lib64/ld-linux-aarch64.so.1
-    do
-        if [[ -e "$candidate" ]]; then
-            aarch64_loader="$candidate"
-            break
-        fi
-    done
+    aarch64_loader="$(find "$RELEASE_TOOLS_ROOT" /usr -path '*aarch64*' -name ld-linux-aarch64.so.1 -print -quit 2>/dev/null || true)"
     [[ -n "$aarch64_loader" ]] || err "aarch64 glibc loader not found; qemu smoke tests cannot run."
     ok "aarch64 qemu loader available: ${aarch64_loader}"
 
