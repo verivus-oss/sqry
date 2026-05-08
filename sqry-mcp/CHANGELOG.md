@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+## [13.0.14](https://github.com/verivus-oss/sqry/compare/v13.0.11...v13.0.14) - 2026-05-08
+
+### Fixed
+- *(mcp)* refresh registry metadata version## [13.0.13](https://github.com/verivus-oss/sqry/compare/v13.0.11...v13.0.13) - 2026-05-08
+
+### Fixed
+- *(mcp)* publish current registry metadata## [13.0.12](https://github.com/verivus-oss/sqry/compare/v13.0.11...v13.0.12) - 2026-05-08
+
+### Other
+- update Cargo.lock dependencies
 ## [13.0.11](https://github.com/verivus-oss/sqry/compare/v13.0.10...v13.0.11) - 2026-05-08
 
 ### Other
