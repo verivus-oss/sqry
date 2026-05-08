@@ -17,6 +17,7 @@ on:
         description: "Release tag (e.g. v6.0.15) - all other values derived from ledger"
 
 permissions:
+  actions: read
   contents: write
   id-token: write
   attestations: write
@@ -29,8 +30,8 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build-and-distribute:
-    name: Build and Distribute
+  build-release-artifacts:
+    name: Build Release Artifacts
     runs-on: [self-hosted, linux, rust, x86_64, workhorse2]
     timeout-minutes: 60
     env:
@@ -470,26 +471,6 @@ jobs:
           aarch64_loader_prefix="$(dirname "$(dirname "$aarch64_loader")")"
           QEMU_LD_PREFIX="$aarch64_loader_prefix" qemu-aarch64-static dist/sqry-linux-arm64 --version
 
-      - name: Smoke test Windows package (Wine)
-        run: |
-          set -euo pipefail
-          command -v wine64 >/dev/null
-          package_dir="${RUNNER_TEMP}/sqry-windows-package"
-          rm -rf "$package_dir"
-          mkdir -p "$package_dir"
-          python3 - <<'PY'
-          import os
-          import pathlib
-          import zipfile
-
-          version = os.environ["VERSION"]
-          archive_path = pathlib.Path(f"dist/sqry-{version}-windows-x86_64.zip")
-          extract_dir = pathlib.Path(os.environ["RUNNER_TEMP"]) / "sqry-windows-package"
-          with zipfile.ZipFile(archive_path) as archive:
-              archive.extractall(extract_dir)
-          PY
-          wine64 "${package_dir}/sqry.exe" --version
-
       # Phase 6.5: VS Code extension
       - name: Verify VS Code extension assets
         run: |
@@ -520,7 +501,304 @@ jobs:
           npm ci
           npx vsce package -o "../dist/sqry-vscode-${VERSION}.vsix"
 
-      # Phase 6.3: Checksums + SLSA attestation
+      - name: Upload Stage 6 dist artifact for platform gates
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sqry-stage6-dist-${{ env.TAG }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Persist failed Stage 6 ledger state
+        if: failure()
+        env:
+          LEDGER_PATH: ${{ steps.ledger.outputs.path }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${LEDGER_PATH:-}" && -f "$LEDGER_PATH" ]]; then
+            source scripts/release/github-release-assets.sh
+            tmp=$(mktemp)
+            jq '
+              .stages.stage_6_distribute.status = "failed" |
+              .stages.stage_6_distribute.failed_at = (now | todateiso8601)
+            ' "$LEDGER_PATH" > "$tmp" && mv "$tmp" "$LEDGER_PATH"
+            GH_TOKEN="${{ secrets.GITHUB_TOKEN }}" gh_release_upload_with_retry "$TAG" "$LEDGER_PATH" || true
+            echo "Uploaded failed-state ledger"
+          fi
+
+  windows-native-smoke:
+    name: Windows Native Smoke
+    needs: build-release-artifacts
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      TAG: ${{ github.event.client_payload.tag || github.event.inputs.tag }}
+      VERSION: ${{ github.event.client_payload.version || '' }}
+    steps:
+      - name: Resolve version from ledger (manual trigger)
+        if: github.event_name == 'workflow_dispatch'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ([string]::IsNullOrWhiteSpace($env:TAG)) {
+            throw "tag input is required for workflow_dispatch"
+          }
+          $ledgerDir = Join-Path $env:RUNNER_TEMP "dispatch-ledger"
+          New-Item -ItemType Directory -Force -Path $ledgerDir | Out-Null
+          gh release download $env:TAG --repo "verivus-oss/sqry" --dir $ledgerDir --pattern "release-ledger-*.json"
+          $ledgerFile = Get-ChildItem -Path $ledgerDir -Filter "release-ledger-*.json" | Select-Object -First 1
+          if ($null -eq $ledgerFile) {
+            throw "no release ledger found for tag $env:TAG"
+          }
+          $ledger = Get-Content -Raw -Path $ledgerFile.FullName | ConvertFrom-Json
+          "VERSION=$($ledger.stages.stage_5_publish.dispatch_payload.version)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Download Stage 6 dist artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: sqry-stage6-dist-${{ env.TAG }}
+          path: dist
+
+      - name: Smoke test Windows package (native)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ([string]::IsNullOrWhiteSpace($env:VERSION)) {
+            throw "VERSION was not resolved"
+          }
+          $archivePath = Join-Path $PWD "dist/sqry-$env:VERSION-windows-x86_64.zip"
+          if (!(Test-Path $archivePath)) {
+            throw "Windows archive is missing: $archivePath"
+          }
+          $extractDir = Join-Path $env:RUNNER_TEMP "sqry-windows-package"
+          Remove-Item -Recurse -Force $extractDir -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path $extractDir | Out-Null
+          Expand-Archive -Path $archivePath -DestinationPath $extractDir -Force
+          foreach ($file in @("sqry.exe", "sqry-lsp.exe", "sqry-mcp.exe", "sqryd.exe", "libstdc++-6.dll", "libgcc_s_seh-1.dll", "libwinpthread-1.dll")) {
+            $path = Join-Path $extractDir $file
+            if (!(Test-Path $path)) {
+              throw "Windows package is missing $file"
+            }
+          }
+          & (Join-Path $extractDir "sqry.exe") --version
+          & (Join-Path $extractDir "sqry.exe") index --help | Out-Null
+
+  macos-native-smoke:
+    name: macOS Native Smoke (${{ matrix.suffix }})
+    needs: build-release-artifacts
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - suffix: macos-x86_64
+            runner: macos-15-intel
+          - suffix: macos-arm64
+            runner: macos-15
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    env:
+      TAG: ${{ github.event.client_payload.tag || github.event.inputs.tag }}
+      VERSION: ${{ github.event.client_payload.version || '' }}
+    steps:
+      - name: Resolve version from ledger (manual trigger)
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$TAG" ]]; then
+            echo "FATAL: tag input is required for workflow_dispatch" >&2
+            exit 1
+          fi
+          ledger_dir="$RUNNER_TEMP/dispatch-ledger"
+          mkdir -p "$ledger_dir"
+          gh release download "$TAG" \
+            --repo "verivus-oss/sqry" \
+            --dir "$ledger_dir" \
+            --pattern "release-ledger-*.json"
+          ledger_file="$(find "$ledger_dir" -name 'release-ledger-*.json' -type f | head -1)"
+          [[ -n "$ledger_file" && -f "$ledger_file" ]] || {
+            echo "FATAL: no release ledger found for tag $TAG" >&2
+            exit 1
+          }
+          echo "VERSION=$(jq -r '.stages.stage_5_publish.dispatch_payload.version' "$ledger_file")" >> "$GITHUB_ENV"
+
+      - name: Download Stage 6 dist artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: sqry-stage6-dist-${{ env.TAG }}
+          path: dist
+
+      - name: Smoke test macOS binary (native)
+        shell: bash
+        env:
+          SUFFIX: ${{ matrix.suffix }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$VERSION" ]]; then
+            echo "FATAL: VERSION was not resolved" >&2
+            exit 1
+          fi
+          binary="dist/sqry-${SUFFIX}"
+          [[ -f "$binary" ]] || {
+            echo "FATAL: macOS binary is missing: $binary" >&2
+            exit 1
+          }
+          chmod +x "$binary"
+          "$binary" --version
+          "$binary" index --help >/dev/null
+
+  publish-distribution:
+    name: Publish Distribution
+    needs: [build-release-artifacts, windows-native-smoke, macos-native-smoke]
+    runs-on: [self-hosted, linux, rust, x86_64, workhorse2]
+    timeout-minutes: 30
+    env:
+      TAG: ${{ github.event.client_payload.tag || github.event.inputs.tag }}
+      VERSION: ${{ github.event.client_payload.version || '' }}
+      EXPECTED_SHA: ${{ github.event.client_payload.sha || '' }}
+      STAGED_ORIGIN: ${{ github.event.client_payload.staged_origin || '' }}
+      STAGED_SHA: ${{ github.event.client_payload.staged_sha || '' }}
+      EXPECTED_DIGEST: ${{ github.event.client_payload.sanitized_tree_sha256 || '' }}
+    steps:
+      - name: Workspace wipe
+        run: |
+          if sudo -n true 2>/dev/null; then
+            sudo rm -rf "$GITHUB_WORKSPACE"
+          else
+            rm -rf "$GITHUB_WORKSPACE"
+          fi
+          mkdir -p "$GITHUB_WORKSPACE"
+
+      - name: Resolve inputs from ledger (manual trigger)
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$TAG" ]]; then
+            echo "FATAL: tag input is required for workflow_dispatch" >&2
+            exit 1
+          fi
+
+          LEDGER_DIR="$RUNNER_TEMP/dispatch-ledger"
+          mkdir -p "$LEDGER_DIR"
+          gh release download "$TAG" \
+            --repo "verivus-oss/sqry" \
+            --dir "$LEDGER_DIR" \
+            --pattern "release-ledger-*.json"
+          LEDGER_FILE=$(find "$LEDGER_DIR" -name 'release-ledger-*.json' -type f | head -1)
+          if [[ -z "$LEDGER_FILE" || ! -f "$LEDGER_FILE" ]]; then
+            echo "FATAL: no release ledger found for tag $TAG" >&2
+            exit 1
+          fi
+
+          DISPATCH=$(jq -r '.stages.stage_5_publish.dispatch_payload // empty' "$LEDGER_FILE")
+          if [[ -z "$DISPATCH" || "$DISPATCH" == "null" ]]; then
+            echo "FATAL: stage_5_publish.dispatch_payload missing from ledger for $TAG" >&2
+            exit 1
+          fi
+
+          echo "VERSION=$(jq -r '.stages.stage_5_publish.dispatch_payload.version' "$LEDGER_FILE")" >> "$GITHUB_ENV"
+          echo "EXPECTED_SHA=$(jq -r '.stages.stage_5_publish.dispatch_payload.sha' "$LEDGER_FILE")" >> "$GITHUB_ENV"
+          echo "STAGED_ORIGIN=$(jq -r '.stages.stage_5_publish.dispatch_payload.staged_origin' "$LEDGER_FILE")" >> "$GITHUB_ENV"
+          echo "STAGED_SHA=$(jq -r '.stages.stage_5_publish.dispatch_payload.staged_sha' "$LEDGER_FILE")" >> "$GITHUB_ENV"
+          echo "EXPECTED_DIGEST=$(jq -r '.stages.stage_5_publish.dispatch_payload.sanitized_tree_sha256' "$LEDGER_FILE")" >> "$GITHUB_ENV"
+          rm -rf "$LEDGER_DIR"
+
+      - name: Validate dispatch payload
+        run: |
+          FAIL=0
+          if [[ -z "$VERSION" ]]; then echo "ERROR: missing version"; FAIL=1; fi
+          if [[ -z "$TAG" ]]; then echo "ERROR: missing tag"; FAIL=1; fi
+          if [[ -z "$EXPECTED_SHA" ]]; then echo "ERROR: missing sha"; FAIL=1; fi
+          if [[ -z "$STAGED_ORIGIN" ]]; then echo "ERROR: missing staged_origin"; FAIL=1; fi
+          if [[ -z "$STAGED_SHA" ]]; then echo "ERROR: missing staged_sha"; FAIL=1; fi
+          if [[ -z "$EXPECTED_DIGEST" ]]; then echo "ERROR: missing sanitized_tree_sha256"; FAIL=1; fi
+          if [[ "$FAIL" -eq 1 ]]; then exit 1; fi
+          if [[ "$STAGED_ORIGIN" != "verivusai-open/sqry" ]]; then
+            echo "FATAL: staged_origin is '$STAGED_ORIGIN', required 'verivusai-open/sqry'" >&2
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ env.EXPECTED_SHA }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download release ledger
+        id: ledger
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          LEDGER_DIR="$RUNNER_TEMP/release-ledger"
+          mkdir -p "$LEDGER_DIR"
+          gh release download "$TAG" --dir "$LEDGER_DIR" --pattern "release-ledger-v${VERSION}.json"
+          LEDGER_PATH="$LEDGER_DIR/release-ledger-v${VERSION}.json"
+          if [[ ! -f "$LEDGER_PATH" ]]; then
+            echo "FATAL: release ledger asset missing for $TAG" >&2
+            exit 1
+          fi
+          echo "path=$LEDGER_PATH" >> "$GITHUB_OUTPUT"
+
+      - name: Verify publish ledger state
+        env:
+          LEDGER_PATH: ${{ steps.ledger.outputs.path }}
+        run: |
+          set -euo pipefail
+          [[ "$(jq -r '.release_path // empty' "$LEDGER_PATH")" == "staged" ]] || {
+            echo "FATAL: release ledger is not a staged release ledger" >&2
+            exit 1
+          }
+          [[ "$(jq -r '.stages.stage_5_publish.status // empty' "$LEDGER_PATH")" == "completed" ]] || {
+            echo "FATAL: stage_5_publish is not completed" >&2
+            exit 1
+          }
+          [[ "$(jq -r '.stages.stage_5_publish.staged_origin // empty' "$LEDGER_PATH")" == "verivusai-open/sqry" ]] || {
+            echo "FATAL: ledger staged_origin is not verivusai-open/sqry" >&2
+            exit 1
+          }
+          ledger_public_sha="$(jq -r '.stages.stage_5_publish.public_commit_sha // empty' "$LEDGER_PATH")"
+          if [[ -n "$ledger_public_sha" && "$ledger_public_sha" != "$EXPECTED_SHA" ]]; then
+            echo "FATAL: ledger public_commit_sha ($ledger_public_sha) does not match expected ($EXPECTED_SHA)" >&2
+            exit 1
+          fi
+          stage6_status="$(jq -r '.stages.stage_6_distribute.status // empty' "$LEDGER_PATH")"
+          [[ "$stage6_status" == "running" ]] || {
+            echo "FATAL: stage_6_distribute status is '$stage6_status', required 'running' after build gate" >&2
+            exit 1
+          }
+
+      - name: Download Stage 6 dist artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: sqry-stage6-dist-${{ env.TAG }}
+          path: dist
+
+      - name: Verify Stage 6 dist artifact set
+        run: |
+          set -euo pipefail
+          required=(
+            "sqry-linux-x86_64"
+            "sqry-linux-arm64"
+            "sqry-macos-x86_64"
+            "sqry-macos-arm64"
+            "sqry-${VERSION}-windows-x86_64.zip"
+            "sqry-vscode-${VERSION}.vsix"
+          )
+          for artifact in "${required[@]}"; do
+            [[ -f "dist/$artifact" ]] || {
+              echo "FATAL: required Stage 6 artifact missing after platform gates: dist/$artifact" >&2
+              exit 1
+            }
+          done
+
       - name: Generate checksums
         run: |
           set -euo pipefail
@@ -558,7 +836,8 @@ jobs:
             exit 0
           fi
           cd sqry-vscode
-          if ! OUTPUT=$(npx vsce publish 2>&1); then
+          npm ci
+          if ! OUTPUT=$(npx vsce publish --packagePath "../dist/sqry-vscode-${VERSION}.vsix" 2>&1); then
             if echo "$OUTPUT" | grep -qi "already exists\|version.*already"; then
               echo "VS Code extension version already published — skipping"
               echo "status=already_published" >> "$GITHUB_OUTPUT"
@@ -996,7 +1275,6 @@ jobs:
             exit 1
           fi
 
-      # Phase 6.4: Upload to GitHub Release
       - name: Upload release assets and ledger
         env:
           GH_TOKEN: ${{ steps.public-release-auth.outputs.token }}
@@ -1012,7 +1290,6 @@ jobs:
             gh_release_upload_with_retry "$TAG" "$release_asset"
           done
 
-      # Phase 6.7: Promote release
       - name: Promote public release from draft
         env:
           GH_TOKEN: ${{ steps.public-release-auth.outputs.token }}
@@ -1047,55 +1324,10 @@ jobs:
               "stages": {
                   "stage_1_pr": pick_fields(stages.get("stage_1_pr", {}), {"status"}),
                   "stage_2_release": pick_fields(stages.get("stage_2_release", {}), {"status"}),
-                  "stage_3_sanitize_and_stage": pick_fields(
-                      stages.get("stage_3_sanitize_and_stage", {}),
-                      {
-                          "status",
-                          "sanitized_tree_sha256",
-                          "hermetic_validation",
-                          "hermetic_validated_at",
-                          "leak_review_gate",
-                          "leak_review_passed_at",
-                          "leak_reviewers",
-                          "completed_at",
-                      },
-                  ),
-                  "stage_4_staged_approval": pick_fields(
-                      stages.get("stage_4_staged_approval", {}),
-                      {
-                          "status",
-                          "approved_at",
-                          "promotion_authorized",
-                          "staged_sha_verified",
-                          "ledger_integrity_verified",
-                          "leak_gate_verified",
-                      },
-                  ),
-                  "stage_5_publish": pick_fields(
-                      stages.get("stage_5_publish", {}),
-                      {
-                          "status",
-                          "started_at",
-                          "failed_at",
-                          "crates",
-                          "public_commit_sha",
-                          "public_release_status",
-                          "published_at",
-                          "completed_at",
-                      },
-                  ),
-                  "stage_6_distribute": pick_fields(
-                      stages.get("stage_6_distribute", {}),
-                      {
-                          "status",
-                          "started_at",
-                          "failed_at",
-                          "binaries",
-                          "vscode_extension",
-                          "public_release_status",
-                          "completed_at",
-                      },
-                  ),
+                  "stage_3_sanitize_and_stage": pick_fields(stages.get("stage_3_sanitize_and_stage", {}), {"status", "sanitized_tree_sha256", "hermetic_validation", "hermetic_validated_at", "leak_review_gate", "leak_review_passed_at", "leak_reviewers", "completed_at"}),
+                  "stage_4_staged_approval": pick_fields(stages.get("stage_4_staged_approval", {}), {"status", "approved_at", "promotion_authorized", "staged_sha_verified", "ledger_integrity_verified", "leak_gate_verified"}),
+                  "stage_5_publish": pick_fields(stages.get("stage_5_publish", {}), {"status", "started_at", "failed_at", "crates", "public_commit_sha", "public_release_status", "published_at", "completed_at"}),
+                  "stage_6_distribute": pick_fields(stages.get("stage_6_distribute", {}), {"status", "started_at", "failed_at", "binaries", "vscode_extension", "public_release_status", "completed_at"}),
               },
               "build_environment": ledger.get("build_environment", {}),
               "finalized": ledger.get("finalized", False),
@@ -1124,3 +1356,30 @@ jobs:
             GH_TOKEN="${{ secrets.GITHUB_TOKEN }}" gh_release_upload_with_retry "$TAG" "$LEDGER_PATH" || true
             echo "Uploaded failed-state ledger"
           fi
+
+  persist-platform-smoke-failure:
+    name: Persist Platform Smoke Failure
+    needs: [build-release-artifacts, windows-native-smoke, macos-native-smoke]
+    if: ${{ always() && (needs.windows-native-smoke.result == 'failure' || needs.macos-native-smoke.result == 'failure') }}
+    runs-on: [self-hosted, linux, rust, x86_64, workhorse2]
+    env:
+      TAG: ${{ github.event.client_payload.tag || github.event.inputs.tag }}
+    steps:
+      - name: Persist failed Stage 6 ledger state
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          ledger_dir="$RUNNER_TEMP/windows-smoke-failed-ledger"
+          rm -rf "$ledger_dir"
+          mkdir -p "$ledger_dir"
+          gh release download "$TAG" --repo "verivus-oss/sqry" --dir "$ledger_dir" --pattern "release-ledger-*.json"
+          ledger_path="$(find "$ledger_dir" -name 'release-ledger-*.json' -type f | head -1)"
+          [[ -n "$ledger_path" && -f "$ledger_path" ]] || exit 0
+          tmp="$(mktemp)"
+          jq '
+            .stages.stage_6_distribute.status = "failed" |
+            .stages.stage_6_distribute.failed_at = (now | todateiso8601)
+          ' "$ledger_path" > "$tmp"
+          mv "$tmp" "$ledger_path"
+          gh release upload "$TAG" "$ledger_path" --repo "verivus-oss/sqry" --clobber
