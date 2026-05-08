@@ -1,0 +1,56 @@
+name: Release Runner Setup Validation
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate public release runner setup
+    runs-on: [self-hosted, Linux, X64, workhorse2]
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Run setup-runner.sh
+        run: |
+          set -euo pipefail
+          sudo -n bash scripts/release/setup-runner.sh
+
+      - name: Validate runtime evidence
+        run: |
+          set -euo pipefail
+          command -v qemu-aarch64-static
+          command -v wine64
+          command -v x86_64-w64-mingw32-gcc
+          command -v x86_64-w64-mingw32-g++
+          objdump_bin="$(x86_64-w64-mingw32-gcc -print-prog-name=objdump)"
+          if [[ -z "$objdump_bin" || ! -x "$objdump_bin" ]]; then
+            echo "FATAL: MinGW objdump does not resolve to an executable Linux tool" >&2
+            exit 1
+          fi
+          case "$objdump_bin" in
+            *.exe)
+              echo "FATAL: MinGW objdump still resolves to a Windows executable: $objdump_bin" >&2
+              exit 1
+              ;;
+          esac
+          "$objdump_bin" --version | head -1
+          wine64 --version
+          for candidate in \
+            /opt/sqry-release-tools/usr/aarch64-suse-linux/sys-root/lib/ld-linux-aarch64.so.1 \
+            /opt/sqry-release-tools/usr/aarch64-suse-linux/sys-root/lib64/ld-linux-aarch64.so.1 \
+            /usr/aarch64-linux-gnu/lib/ld-linux-aarch64.so.1 \
+            /usr/aarch64-suse-linux/sys-root/lib/ld-linux-aarch64.so.1 \
+            /usr/aarch64-suse-linux/sys-root/lib64/ld-linux-aarch64.so.1
+          do
+            if [[ -e "$candidate" ]]; then
+              echo "aarch64 loader: $candidate"
+              exit 0
+            fi
+          done
+          echo "FATAL: no aarch64 loader found in Stage 6 search paths" >&2
+          exit 1
