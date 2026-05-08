@@ -12,6 +12,12 @@ ZIG_SHA256_X86_64="02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93
 ZIG_SHA256_AARCH64="958ed7d1e00d0ea76590d27666efbf7a932281b3d7ba0c6b01b0ff26498f667f"
 NODE_MAJOR=24
 
+if [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
+    export PATH="/home/${SUDO_USER}/.cargo/bin:/usr/local/bin:/opt/zig/current:${PATH}"
+else
+    export PATH="${HOME}/.cargo/bin:/usr/local/bin:/opt/zig/current:${PATH}"
+fi
+
 MACOS_SDK_VERSION="11.3"
 MACOS_SDK_SHA256="cd4f08a75577145b8f05245a2975f7c81401d75e9535dcffbb879ee1deefcbf4"
 MACOS_SDK_ROOT="/opt/macos-sdk"
