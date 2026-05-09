@@ -15,7 +15,6 @@ mod common;
 #[tokio::test(flavor = "current_thread")]
 #[allow(clippy::too_many_lines)] // Telemetry integration test with full setup
 #[allow(clippy::items_after_statements)] // Items near usage for clarity
-#[allow(clippy::items_after_statements)] // Items near usage for clarity
 async fn call_hierarchy_timeout_emits_telemetry_new() -> Result<()> {
     let root = common::fixture_path("sqry-lsp/tests/fixtures/mini-workspace");
     common::ensure_index(&root)?;

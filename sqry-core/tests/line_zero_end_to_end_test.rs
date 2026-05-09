@@ -59,7 +59,7 @@ fn arena_hash(graph: &CodeGraph) -> String {
         hasher.update(entry.start_column.to_le_bytes());
         hasher.update(entry.file.index().to_le_bytes());
     }
-    format!("{:x}", hasher.finalize())
+    hex::encode(hasher.finalize())
 }
 
 /// Assert the build-time arena invariant: for every call-compatible node group

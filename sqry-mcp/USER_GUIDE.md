@@ -1,7 +1,7 @@
 # sqry MCP Server - User Guide - by Verivus
 
-**Version**: 13.0.14
-**Last Updated**: 2026-05-08
+**Version**: 13.0.17
+**Last Updated**: 2026-05-09
 
 Integrate sqry's semantic code search with AI assistants (Codex, Claude Desktop, Windsurf, Cursor, and others) via the Model Context Protocol (MCP).
 
@@ -155,12 +155,16 @@ sqry mcp status
 ```toml
 [mcp_servers.sqry]
 command = "/absolute/path/to/sqry-mcp"
+args = ["--no-daemon"]
 ```
 
 **Important**:
 - `sqry-mcp` resolves Codex requests in this order: explicit `path`,
   file-bearing args, MCP roots for the current session, last-resolved workspace,
   then legacy env/CWD fallback.
+- `sqry mcp setup` includes `--no-daemon` so the global Codex entry stays in
+  isolated standalone mode. Remove it only when you want the default daemon
+  probe/fallback behavior, or use `--daemon` when you want forced daemon mode.
 - The common single-repository session does not require `path` on every tool call.
 - `--workspace-root` is intentionally rejected for Codex to avoid pinning one repository globally.
 
@@ -181,7 +185,7 @@ sqry mcp status
   "mcpServers": {
     "sqry": {
       "command": "/absolute/path/to/sqry-mcp",
-      "args": [],
+      "args": ["--no-daemon"],
       "env": {}
     }
   }
@@ -191,6 +195,9 @@ sqry mcp status
 **Important**:
 - Gemini also supports project settings at `.gemini/settings.json`.
 - `sqry-mcp` uses the same session-scoped resolution order as Codex.
+- `sqry mcp setup` includes `--no-daemon` so the global Gemini entry stays in
+  isolated standalone mode unless you intentionally opt into daemon probing or
+  forced daemon mode.
 - Explicit `path` is mainly needed only when a multi-root Gemini session is ambiguous.
 
 ### Claude Desktop Setup
@@ -208,7 +215,7 @@ sqry mcp status
   "mcpServers": {
     "sqry": {
       "command": "/absolute/path/to/sqry/target/release/sqry-mcp",
-      "args": [],
+      "args": ["--no-daemon"],
       "env": {
         "SQRY_MCP_WORKSPACE_ROOT": "/path/to/your/project"
       }
@@ -889,7 +896,7 @@ ls -la .sqry-index
 **3. Test binary**:
 ```bash
 sqry --version
-# Should output: sqry 13.0.14+
+# Should output: sqry 13.0.17+
 ```
 
 **4. Check logs** (AI assistant specific):
@@ -975,7 +982,7 @@ sqry MCP is production-ready but evolving. Your feedback helps!
 
 ---
 
-**Last Updated**: 2026-05-08
-**MCP Server Version**: 13.0.14
+**Last Updated**: 2026-05-09
+**MCP Server Version**: 13.0.17
 **Protocol**: MCP 2024-11-05 (JSON-RPC 2.0)
-**sqry CLI Required**: 13.0.14+
+**sqry CLI Required**: 13.0.17+

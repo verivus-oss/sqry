@@ -88,10 +88,13 @@ const UREQ_READ_TIMEOUT: Duration = Duration::from_secs(300);
 fn ureq_agent() -> &'static ureq::Agent {
     static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
     AGENT.get_or_init(|| {
-        ureq::AgentBuilder::new()
-            .timeout_connect(UREQ_CONNECT_TIMEOUT)
-            .timeout_read(UREQ_READ_TIMEOUT)
+        ureq::Agent::config_builder()
+            .timeout_connect(Some(UREQ_CONNECT_TIMEOUT))
+            .timeout_recv_response(Some(UREQ_READ_TIMEOUT))
+            .timeout_recv_body(Some(UREQ_READ_TIMEOUT))
+            .http_status_as_error(false)
             .build()
+            .into()
     })
 }
 
@@ -111,14 +114,14 @@ impl Downloader for UreqDownloader {
             .call()
             .map_err(|e| NlError::DownloadFailed(format!("ureq GET {url} failed: {e}")))?;
 
-        if response.status() < 200 || response.status() >= 300 {
+        if response.status().as_u16() < 200 || response.status().as_u16() >= 300 {
             return Err(NlError::DownloadFailed(format!(
                 "HTTP {} from {url}",
-                response.status()
+                response.status().as_u16()
             )));
         }
 
-        let mut reader = response.into_reader();
+        let mut reader = response.into_body().into_reader();
         let written = io::copy(&mut reader, sink)
             .map_err(|e| NlError::DownloadFailed(format!("body copy from {url} failed: {e}")))?;
         Ok(written)

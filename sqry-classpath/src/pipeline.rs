@@ -695,7 +695,7 @@ mod tests {
 
     #[test]
     fn test_deduplicate_jar_paths() {
-        let entries = vec![
+        let entries = [
             ClasspathEntry {
                 jar_path: PathBuf::from("/a.jar"),
                 coordinates: None,

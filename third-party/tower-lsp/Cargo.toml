@@ -79,7 +79,7 @@ features = ["codec"]
 optional = true
 
 [dependencies.tower]
-version = "0.4"
+version = "0.5.3"
 features = ["util"]
 default-features = false
 

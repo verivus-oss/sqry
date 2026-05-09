@@ -252,10 +252,6 @@ macro_rules! sqry_graph_fields {
     };
 }
 
-// The macro name resolves through `$crate::sqry_graph_fields`; re-export
-// for intra-module call sites that prefer the unqualified name.
-pub(crate) use sqry_graph_fields;
-
 // =====================================================================
 // RebuildGraph struct declaration (macro-driven)
 // =====================================================================

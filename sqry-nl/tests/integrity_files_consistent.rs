@@ -17,11 +17,15 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 use sqry_nl::classifier::{BAKED_MANIFEST, IntentClassifier, Manifest, TrustMode};
 
+fn hex_lower(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 /// Compute the lowercase hex sha256 of a byte slice.
 fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
-    format!("{:x}", hasher.finalize())
+    hex_lower(&hasher.finalize())
 }
 
 /// Path to the in-tree committed `sqry-nl/models/` directory.

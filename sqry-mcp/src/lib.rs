@@ -22,7 +22,9 @@ pub mod daemon_shim;
 // integration tests (`use sqry_mcp::daemon_shim::parse_daemon_args;`).
 // The `daemon_shim` module itself is already pub above; these re-exports
 // are a convenience for callers that prefer flat imports.
+pub use daemon_shim::ProbeOutcome;
 pub use daemon_shim::parse_daemon_args;
+pub use daemon_shim::probe_and_run_daemon_shim;
 pub use daemon_shim::resolve_daemon_socket;
 
 #[allow(dead_code)]

@@ -501,7 +501,6 @@ fn estimate_unused_count(snapshot: &sqry_core::graph::unified::concurrent::Graph
 }
 
 /// Execute the `get_insights` tool to provide codebase health metrics.
-#[allow(clippy::too_many_lines)] // Introspection tool handles all graph metadata types
 #[allow(
     clippy::too_many_lines,
     reason = "aggregates multiple health metrics in a single pass; extraction into helpers would obscure the data-flow logic"

@@ -46,7 +46,7 @@ Expected entry:
   "mcpServers": {
     "sqry": {
       "command": "/absolute/path/to/sqry-mcp",
-      "args": [],
+      "args": ["--no-daemon"],
       "env": {}
     }
   }
@@ -56,6 +56,9 @@ Expected entry:
 Notes:
 - Gemini config is global unless you maintain a project-level `.gemini/settings.json`.
 - sqry setup does not pin `SQRY_MCP_WORKSPACE_ROOT` for Gemini by default.
+- sqry setup passes `--no-daemon` to keep Gemini isolated in standalone mode.
+  Remove it only if you want the plain `sqry-mcp` daemon probe/fallback
+  behavior, or replace it with `--daemon` for forced daemon mode.
 - Starting Gemini from the target repository directory still works, but roots-first
   session resolution is preferred whenever Gemini exposes MCP roots.
 
@@ -68,7 +71,7 @@ If you need to configure by hand, add this entry in `~/.gemini/settings.json`:
   "mcpServers": {
     "sqry": {
       "command": "/absolute/path/to/sqry-mcp",
-      "args": [],
+      "args": ["--no-daemon"],
       "env": {}
     }
   }

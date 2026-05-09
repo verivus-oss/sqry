@@ -10,9 +10,7 @@
 
 use rmcp::handler::server::prompt::PromptContext;
 use rmcp::handler::server::router::prompt::{PromptRoute, PromptRouter};
-use rmcp::model::{
-    GetPromptResult, Prompt, PromptArgument, PromptMessage, PromptMessageContent, PromptMessageRole,
-};
+use rmcp::model::{GetPromptResult, Prompt, PromptArgument, PromptMessage, PromptMessageRole};
 
 /// Create the prompt router with all sqry prompts.
 pub fn create_prompt_router<S: Send + Sync + Clone + 'static>() -> PromptRouter<S> {
@@ -26,24 +24,46 @@ pub fn create_prompt_router<S: Send + Sync + Clone + 'static>() -> PromptRouter<
         .with_route(ask_prompt())
 }
 
+fn prompt_argument(
+    name: &str,
+    title: &str,
+    description: impl Into<String>,
+    required: bool,
+) -> PromptArgument {
+    PromptArgument::new(name)
+        .with_title(title)
+        .with_description(description)
+        .with_required(required)
+}
+
+fn prompt_result(description: impl Into<String>, message: String) -> GetPromptResult {
+    GetPromptResult::new(vec![PromptMessage::new_text(
+        PromptMessageRole::User,
+        message,
+    )])
+    .with_description(description)
+}
+
 /// Semantic search prompt - search code by structural meaning (AST-based).
 fn semantic_search_prompt<S: Send + Sync + 'static>() -> PromptRoute<S> {
     let prompt = Prompt::new(
         "semantic_search",
-        Some("Structural code search - find symbols by name/kind/visibility with 100% precision (not embedding similarity)"),
+        Some(
+            "Structural code search - find symbols by name/kind/visibility with 100% precision (not embedding similarity)",
+        ),
         Some(vec![
-            PromptArgument {
-                name: "query".to_string(),
-                title: Some("Search Query".to_string()),
-                description: Some("What to search for (e.g., 'authentication functions', 'public classes', 'database handlers')".to_string()),
-                required: Some(true),
-            },
-            PromptArgument {
-                name: "path".to_string(),
-                title: Some("Path Filter".to_string()),
-                description: Some("Optional directory to limit search (e.g., 'src/auth')".to_string()),
-                required: Some(false),
-            },
+            prompt_argument(
+                "query",
+                "Search Query",
+                "What to search for (e.g., 'authentication functions', 'public classes', 'database handlers')",
+                true,
+            ),
+            prompt_argument(
+                "path",
+                "Path Filter",
+                "Optional directory to limit search (e.g., 'src/auth')",
+                false,
+            ),
         ]),
     );
 
@@ -96,13 +116,7 @@ Both can be combined:
 Use hierarchical_search for RAG-optimized results with file/container grouping."#
     );
 
-    GetPromptResult {
-        description: Some(format!("Search for code matching: {query}")),
-        messages: vec![PromptMessage {
-            role: PromptMessageRole::User,
-            content: PromptMessageContent::Text { text: message },
-        }],
-    }
+    prompt_result(format!("Search for code matching: {query}"), message)
 }
 
 /// Find callers prompt - discover what calls a function.
@@ -110,15 +124,12 @@ fn find_callers_prompt<S: Send + Sync + 'static>() -> PromptRoute<S> {
     let prompt = Prompt::new(
         "find_callers",
         Some("Find all code that calls a specific function or method"),
-        Some(vec![PromptArgument {
-            name: "symbol".to_string(),
-            title: Some("Symbol Name".to_string()),
-            description: Some(
-                "The function or method to find callers for (e.g., 'authenticate', 'User::save')"
-                    .to_string(),
-            ),
-            required: Some(true),
-        }]),
+        Some(vec![prompt_argument(
+            "symbol",
+            "Symbol Name",
+            "The function or method to find callers for (e.g., 'authenticate', 'User::save')",
+            true,
+        )]),
     );
 
     PromptRoute::new_dyn(prompt, |context: PromptContext<'_, S>| {
@@ -148,13 +159,7 @@ This will show all functions/methods that call {symbol}, helping understand:
 - Call patterns in the codebase"#
     );
 
-    GetPromptResult {
-        description: Some(format!("Find all code that calls: {symbol}")),
-        messages: vec![PromptMessage {
-            role: PromptMessageRole::User,
-            content: PromptMessageContent::Text { text: message },
-        }],
-    }
+    prompt_result(format!("Find all code that calls: {symbol}"), message)
 }
 
 /// Find callees prompt - discover what a function calls.
@@ -162,14 +167,12 @@ fn find_callees_prompt<S: Send + Sync + 'static>() -> PromptRoute<S> {
     let prompt = Prompt::new(
         "find_callees",
         Some("Find all functions/methods that a specific function calls"),
-        Some(vec![PromptArgument {
-            name: "symbol".to_string(),
-            title: Some("Symbol Name".to_string()),
-            description: Some(
-                "The function to analyze (e.g., 'process_request', 'main')".to_string(),
-            ),
-            required: Some(true),
-        }]),
+        Some(vec![prompt_argument(
+            "symbol",
+            "Symbol Name",
+            "The function to analyze (e.g., 'process_request', 'main')",
+            true,
+        )]),
     );
 
     PromptRoute::new_dyn(prompt, |context: PromptContext<'_, S>| {
@@ -199,13 +202,7 @@ This will show all functions/methods that {symbol} calls, helping understand:
 - Complexity and coupling"#
     );
 
-    GetPromptResult {
-        description: Some(format!("Find all functions called by: {symbol}")),
-        messages: vec![PromptMessage {
-            role: PromptMessageRole::User,
-            content: PromptMessageContent::Text { text: message },
-        }],
-    }
+    prompt_result(format!("Find all functions called by: {symbol}"), message)
 }
 
 /// Trace path prompt - find call paths between two symbols.
@@ -214,24 +211,18 @@ fn trace_path_prompt<S: Send + Sync + 'static>() -> PromptRoute<S> {
         "trace_path",
         Some("Trace the call path between two functions - how does A eventually call B?"),
         Some(vec![
-            PromptArgument {
-                name: "from".to_string(),
-                title: Some("Starting Function".to_string()),
-                description: Some(
-                    "The function where the path starts (e.g., 'main', 'handle_request')"
-                        .to_string(),
-                ),
-                required: Some(true),
-            },
-            PromptArgument {
-                name: "to".to_string(),
-                title: Some("Target Function".to_string()),
-                description: Some(
-                    "The function where the path ends (e.g., 'database_query', 'send_email')"
-                        .to_string(),
-                ),
-                required: Some(true),
-            },
+            prompt_argument(
+                "from",
+                "Starting Function",
+                "The function where the path starts (e.g., 'main', 'handle_request')",
+                true,
+            ),
+            prompt_argument(
+                "to",
+                "Target Function",
+                "The function where the path ends (e.g., 'database_query', 'send_email')",
+                true,
+            ),
         ]),
     );
 
@@ -270,13 +261,7 @@ This will show the call chain from {from} to {to}, helping understand:
 - Dependencies between subsystems"#
     );
 
-    GetPromptResult {
-        description: Some(format!("Trace call path from {from} to {to}")),
-        messages: vec![PromptMessage {
-            role: PromptMessageRole::User,
-            content: PromptMessageContent::Text { text: message },
-        }],
-    }
+    prompt_result(format!("Trace call path from {from} to {to}"), message)
 }
 
 /// Explain symbol prompt - get detailed information about a symbol.
@@ -285,24 +270,18 @@ fn explain_symbol_prompt<S: Send + Sync + 'static>() -> PromptRoute<S> {
         "explain_symbol",
         Some("Get detailed explanation of a code symbol including its context and relationships"),
         Some(vec![
-            PromptArgument {
-                name: "file".to_string(),
-                title: Some("File Path".to_string()),
-                description: Some(
-                    "Path to the file containing the symbol (e.g., 'src/auth/login.rs')"
-                        .to_string(),
-                ),
-                required: Some(true),
-            },
-            PromptArgument {
-                name: "symbol".to_string(),
-                title: Some("Symbol Name".to_string()),
-                description: Some(
-                    "Name of the symbol to explain (e.g., 'authenticate', 'UserService')"
-                        .to_string(),
-                ),
-                required: Some(true),
-            },
+            prompt_argument(
+                "file",
+                "File Path",
+                "Path to the file containing the symbol (e.g., 'src/auth/login.rs')",
+                true,
+            ),
+            prompt_argument(
+                "symbol",
+                "Symbol Name",
+                "Name of the symbol to explain (e.g., 'authenticate', 'UserService')",
+                true,
+            ),
         ]),
     );
 
@@ -342,13 +321,7 @@ This will provide:
 - Import/export information"#
     );
 
-    GetPromptResult {
-        description: Some(format!("Explain symbol {symbol} in {file}")),
-        messages: vec![PromptMessage {
-            role: PromptMessageRole::User,
-            content: PromptMessageContent::Text { text: message },
-        }],
-    }
+    prompt_result(format!("Explain symbol {symbol} in {file}"), message)
 }
 
 /// Code impact prompt - analyze what would break if a symbol changes.
@@ -356,15 +329,12 @@ fn code_impact_prompt<S: Send + Sync + 'static>() -> PromptRoute<S> {
     let prompt = Prompt::new(
         "code_impact",
         Some("Analyze what code would be affected if a symbol is changed or removed"),
-        Some(vec![PromptArgument {
-            name: "symbol".to_string(),
-            title: Some("Symbol Name".to_string()),
-            description: Some(
-                "The symbol to analyze impact for (e.g., 'UserService', 'validate_input')"
-                    .to_string(),
-            ),
-            required: Some(true),
-        }]),
+        Some(vec![prompt_argument(
+            "symbol",
+            "Symbol Name",
+            "The symbol to analyze impact for (e.g., 'UserService', 'validate_input')",
+            true,
+        )]),
     );
 
     PromptRoute::new_dyn(prompt, |context: PromptContext<'_, S>| {
@@ -396,29 +366,22 @@ This will show:
 - Risk assessment for the change"#
     );
 
-    GetPromptResult {
-        description: Some(format!("Analyze impact of changing: {symbol}")),
-        messages: vec![PromptMessage {
-            role: PromptMessageRole::User,
-            content: PromptMessageContent::Text { text: message },
-        }],
-    }
+    prompt_result(format!("Analyze impact of changing: {symbol}"), message)
 }
 
 /// Natural language ask prompt - query code in plain English.
 fn ask_prompt<S: Send + Sync + 'static>() -> PromptRoute<S> {
     let prompt = Prompt::new(
         "ask",
-        Some("Ask questions about code in natural language - sqry will translate to the right query"),
-        Some(vec![PromptArgument {
-            name: "question".to_string(),
-            title: Some("Question".to_string()),
-            description: Some(
-                "Your question in plain English (e.g., 'who calls the login function?', 'find all database queries')"
-                    .to_string(),
-            ),
-            required: Some(true),
-        }]),
+        Some(
+            "Ask questions about code in natural language - sqry will translate to the right query",
+        ),
+        Some(vec![prompt_argument(
+            "question",
+            "Question",
+            "Your question in plain English (e.g., 'who calls the login function?', 'find all database queries')",
+            true,
+        )]),
     );
 
     PromptRoute::new_dyn(prompt, |context: PromptContext<'_, S>| {
@@ -446,13 +409,7 @@ The sqry_ask tool uses natural language understanding to:
 This is the easiest way to query code - just ask your question naturally!"#
     );
 
-    GetPromptResult {
-        description: Some(format!("Ask: {question}")),
-        messages: vec![PromptMessage {
-            role: PromptMessageRole::User,
-            content: PromptMessageContent::Text { text: message },
-        }],
-    }
+    prompt_result(format!("Ask: {question}"), message)
 }
 
 #[cfg(test)]

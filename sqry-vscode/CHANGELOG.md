@@ -6,6 +6,12 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 
 ## [Unreleased]
 
+## [13.0.15] - 2026-05-09
+
+### Changed
+- Updated extension release metadata and bundled sqry compatibility to
+  `13.0.15`.
+
 ## [10.0.1] - 2026-04-27
 
 ### Fixed

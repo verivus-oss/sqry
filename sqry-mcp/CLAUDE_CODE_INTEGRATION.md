@@ -12,6 +12,8 @@ Claude Code natively supports MCP servers. sqry is configured as a stdio MCP ser
 
 For sqry's auto-setup:
 - `sqry mcp setup --tool claude` writes per-project config with pinned `SQRY_MCP_WORKSPACE_ROOT`
+- The generated entry passes `--no-daemon` so each Claude Code project stays in
+  isolated standalone mode unless you intentionally opt into daemon mode
 - Each project gets its own isolated workspace binding
 - Launch Claude Code from the repository you want to analyze
 
@@ -37,6 +39,7 @@ Add to `.claude.json` in your project root (or `~/.claude.json` for global):
     "sqry": {
       "type": "stdio",
       "command": "sqry-mcp",
+      "args": ["--no-daemon"],
       "env": {
         "SQRY_MCP_WORKSPACE_ROOT": "/path/to/your/project"
       }

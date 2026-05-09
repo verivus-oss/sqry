@@ -24,6 +24,18 @@ use tracing_subscriber::EnvFilter;
 
 mod common;
 
+type TestLspFuture = std::pin::Pin<
+    Box<
+        dyn std::future::Future<
+                Output = std::result::Result<
+                    Option<tower_lsp::jsonrpc::Response>,
+                    tower_lsp::ExitedError,
+                >,
+            > + Send,
+    >,
+>;
+type TestLspBuffer = Buffer<Request, TestLspFuture>;
+
 struct VecWriter(Arc<Mutex<Vec<u8>>>);
 
 impl std::io::Write for VecWriter {
@@ -47,9 +59,7 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for MakeVecWriter {
     }
 }
 
-async fn drive_initialize(
-    buffered: &mut Buffer<tower_lsp::LspService<sqry_lsp::SqryLanguageServer>, Request>,
-) -> Result<()> {
+async fn drive_initialize(buffered: &mut TestLspBuffer) -> Result<()> {
     let initialize = Request::build("initialize")
         .params(serde_json::to_value(InitializeParams::default())?)
         .id(0i64)

@@ -544,7 +544,7 @@ fn compute_source_hash(crate_dir: &Path) -> Result<String> {
     // Include file count to detect additions/deletions
     hasher.update(file_count.to_le_bytes());
 
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(hex::encode(hasher.finalize()))
 }
 
 /// Check if a cached entry is fresh (source hash matches).

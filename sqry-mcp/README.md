@@ -45,7 +45,9 @@ sqry index
 ```
 
 For repeated AI-assistant calls, keep the graph warm in `sqryd` and run MCP as
-a daemon shim:
+a daemon shim. The plain `sqry-mcp` command probes for an already-running daemon
+and falls back to standalone mode, but `--daemon` forces daemon mode and may
+auto-start `sqryd`:
 
 ```bash
 sqry daemon start
@@ -56,6 +58,10 @@ sqry-mcp --daemon
 If `sqry-mcp --daemon` cannot reach a daemon, it auto-starts one unless
 `SQRY_DAEMON_NO_AUTO_START=1` is set. Use `sqry daemon rebuild <path>` to
 refresh a loaded workspace without restarting the assistant session.
+Use `sqry-mcp --no-daemon` for isolated in-process standalone mode with no
+daemon probe; `sqry mcp setup` writes that argument by default for AI-tool
+configs so global assistant entries do not unexpectedly attach to a shared
+daemon.
 
 Read-only graph acquisition is shared between standalone and daemon-hosted
 modes via the `sqry_core::graph::acquisition::GraphAcquirer` contract
@@ -87,6 +93,7 @@ sqry mcp status
 ```toml
 [mcp_servers.sqry]
 command = "/absolute/path/to/sqry-mcp"
+args = ["--no-daemon"]
 ```
 
 Codex now uses session-scoped workspace resolution in `sqry-mcp`: explicit
@@ -105,7 +112,7 @@ the tool resolves the intended source root.
   "mcpServers": {
     "sqry": {
       "command": "/absolute/path/to/sqry-mcp",
-      "args": [],
+      "args": ["--no-daemon"],
       "env": {}
     }
   }
@@ -531,6 +538,6 @@ MIT - See root LICENSE file
 
 ---
 
-**Last Updated**: 2026-05-08
-**Version**: 13.0.14 (36 tools)
+**Last Updated**: 2026-05-09
+**Version**: 13.0.17 (36 tools)
 **Tested With**: sqry v4.8.2, Claude Desktop, Windsurf, Claude Code, Codex, Gemini CLI

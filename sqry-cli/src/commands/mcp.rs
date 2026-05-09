@@ -15,6 +15,8 @@ use serde_json::Value;
 
 use crate::args::{McpCommand, SetupScope, ToolTarget};
 
+const STANDALONE_MCP_ARG: &str = "--no-daemon";
+
 // ---------------------------------------------------------------------------
 // Public entry point
 // ---------------------------------------------------------------------------
@@ -457,6 +459,16 @@ fn run_setup(
 // Claude Code configuration
 // ---------------------------------------------------------------------------
 
+fn standalone_mcp_args_json() -> Value {
+    serde_json::json!([STANDALONE_MCP_ARG])
+}
+
+fn standalone_mcp_args_toml() -> toml_edit::Array {
+    let mut args = toml_edit::Array::new();
+    args.push(STANDALONE_MCP_ARG);
+    args
+}
+
 fn configure_claude(
     binary: &str,
     scope: &SetupScope,
@@ -471,7 +483,7 @@ fn configure_claude(
     let mut entry = serde_json::json!({
         "type": "stdio",
         "command": binary,
-        "args": []
+        "args": standalone_mcp_args_json()
     });
 
     let scope_label;
@@ -621,12 +633,15 @@ fn configure_codex(binary: &str, force: bool, dry_run: bool, backup: bool) -> Re
         println!("Would write to: {}", config_path.display());
         println!("  Section: [mcp_servers.sqry]");
         println!("  command = \"{binary}\"");
+        println!("  args = [\"{STANDALONE_MCP_ARG}\"]");
         return Ok("would configure (global, CWD discovery)".to_string());
     }
 
     if !config_path.exists() {
         // Create minimal config
-        let content = format!("[mcp_servers.sqry]\ncommand = \"{binary}\"\n");
+        let content = format!(
+            "[mcp_servers.sqry]\ncommand = \"{binary}\"\nargs = [\"{STANDALONE_MCP_ARG}\"]\n"
+        );
         atomic_write(&config_path, content.as_bytes(), false)?;
         return Ok("configured (global, CWD discovery) [created new config]".to_string());
     }
@@ -656,6 +671,7 @@ fn configure_codex(binary: &str, force: bool, dry_run: bool, backup: bool) -> Re
     // Create [mcp_servers.sqry] table
     let mut sqry_table = toml_edit::Table::new();
     sqry_table.insert("command", toml_edit::value(binary));
+    sqry_table.insert("args", toml_edit::value(standalone_mcp_args_toml()));
 
     // Remove any existing env section (legacy SQRY_MCP_WORKSPACE_ROOT)
     doc["mcp_servers"]["sqry"] = toml_edit::Item::Table(sqry_table);
@@ -675,7 +691,7 @@ fn configure_gemini(binary: &str, force: bool, dry_run: bool, backup: bool) -> R
 
     let entry = serde_json::json!({
         "command": binary,
-        "args": [],
+        "args": standalone_mcp_args_json(),
         "env": {}
     });
 
@@ -1284,6 +1300,19 @@ mod tests {
         check_mtime(&path, mtime, true).unwrap();
     }
 
+    #[test]
+    fn test_setup_standalone_args_json() {
+        let args = standalone_mcp_args_json();
+        assert_eq!(args, serde_json::json!([STANDALONE_MCP_ARG]));
+    }
+
+    #[test]
+    fn test_setup_standalone_args_toml() {
+        let args = standalone_mcp_args_toml();
+        let rendered = toml_edit::value(args).to_string();
+        assert_eq!(rendered.trim(), "[\"--no-daemon\"]");
+    }
+
     // -- Claude config write tests --
 
     #[test]
@@ -1294,7 +1323,7 @@ mod tests {
         let entry = serde_json::json!({
             "type": "stdio",
             "command": "/usr/bin/sqry-mcp",
-            "args": [],
+            "args": standalone_mcp_args_json(),
             "env": { "SQRY_MCP_WORKSPACE_ROOT": "/my/project" }
         });
 
@@ -1377,7 +1406,7 @@ mod tests {
         let entry = serde_json::json!({
             "type": "stdio",
             "command": "/usr/bin/sqry-mcp",
-            "args": []
+            "args": standalone_mcp_args_json()
         });
 
         write_claude_global_entry(&config_path, &entry, false, false).unwrap();

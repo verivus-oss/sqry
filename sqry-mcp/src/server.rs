@@ -1398,22 +1398,16 @@ impl SqryServer {
 #[tool_handler]
 impl ServerHandler for SqryServer {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            protocol_version: ProtocolVersion::V_2024_11_05,
-            capabilities: ServerCapabilities::builder()
+        ServerInfo::new(
+            ServerCapabilities::builder()
                 .enable_tools()
                 .enable_prompts()
                 .enable_resources()
                 .build(),
-            server_info: Implementation {
-                name: "sqry-mcp".into(),
-                version: env!("CARGO_PKG_VERSION").into(),
-                title: None,
-                description: None,
-                icons: None,
-                website_url: None,
-            },
-            instructions: Some(
+        )
+        .with_protocol_version(ProtocolVersion::V_2024_11_05)
+        .with_server_info(Implementation::new("sqry-mcp", env!("CARGO_PKG_VERSION")))
+        .with_instructions(
                 "MCP server for sqry AST-based semantic code search. \
                  Unlike embedding-based search that treats code as text, \
                  sqry parses code like a compiler to understand structure \
@@ -1441,9 +1435,7 @@ impl ServerHandler for SqryServer {
                  Detailed docs available as resources: \
                  sqry://docs/tool-guide, sqry://docs/query-syntax, \
                  sqry://docs/patterns, sqry://docs/architecture"
-                    .into(),
-            ),
-        }
+        )
     }
 
     /// List available prompts - these appear as `/mcp__sqry__*` commands in Claude Code.
@@ -1453,10 +1445,7 @@ impl ServerHandler for SqryServer {
         _context: RequestContext<RoleServer>,
     ) -> Result<ListPromptsResult, McpError> {
         let prompts = self.prompt_router.list_all();
-        Ok(ListPromptsResult {
-            prompts,
-            ..Default::default()
-        })
+        Ok(ListPromptsResult::with_all_items(prompts))
     }
 
     /// Get a specific prompt by name.
@@ -1475,10 +1464,9 @@ impl ServerHandler for SqryServer {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListResourcesResult, McpError> {
-        Ok(ListResourcesResult {
-            resources: resources::list_resources(),
-            ..Default::default()
-        })
+        Ok(ListResourcesResult::with_all_items(
+            resources::list_resources(),
+        ))
     }
 
     /// Read a documentation resource by URI.
@@ -1488,9 +1476,7 @@ impl ServerHandler for SqryServer {
         _context: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResult, McpError> {
         match resources::read_resource(&request.uri) {
-            Some(contents) => Ok(ReadResourceResult {
-                contents: vec![contents],
-            }),
+            Some(contents) => Ok(ReadResourceResult::new(vec![contents])),
             None => Err(McpError::resource_not_found(
                 format!("unknown resource: {}", request.uri),
                 None,

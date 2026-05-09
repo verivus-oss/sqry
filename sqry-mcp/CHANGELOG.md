@@ -6,7 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
-## [13.0.14](https://github.com/verivus-oss/sqry/compare/v13.0.11...v13.0.14) - 2026-05-08
+## [13.0.17](https://github.com/verivus-oss/sqry/compare/v13.0.16...v13.0.17) - 2026-05-09
+
+### Other
+- update Cargo.toml dependencies
+## [13.0.16](https://github.com/verivus-oss/sqry/compare/v13.0.14...v13.0.16) - 2026-05-09
+
+### Added
+- *(mcp)* add daemon probe fallback and standalone setup
+### Other
+- *(deps)* apply approved dependency upgrade batch## [13.0.15](https://github.com/verivus-oss/sqry/compare/v13.0.14...v13.0.15) - 2026-05-08
+
+### Fixed
+- *(mcp)* refresh registry metadata for v13.0.14## [13.0.14](https://github.com/verivus-oss/sqry/compare/v13.0.11...v13.0.14) - 2026-05-08
 
 ### Fixed
 - *(mcp)* refresh registry metadata version## [13.0.13](https://github.com/verivus-oss/sqry/compare/v13.0.11...v13.0.13) - 2026-05-08

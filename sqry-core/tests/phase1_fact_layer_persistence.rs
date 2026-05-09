@@ -60,7 +60,7 @@ fn t10_sha256_covers_v8_payload() {
     save_to_path(&graph, tmp.path()).unwrap();
 
     let bytes = std::fs::read(tmp.path()).unwrap();
-    let actual_hash = format!("{:x}", Sha256::digest(&bytes));
+    let actual_hash = hex::encode(Sha256::digest(&bytes));
 
     // Verify with the correct hash succeeds
     verify_snapshot_bytes(&bytes, &actual_hash).unwrap();

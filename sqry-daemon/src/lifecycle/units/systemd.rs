@@ -60,7 +60,7 @@ const SQRYD_VERSION: &str = env!("CARGO_PKG_VERSION");
 ///
 /// The unit uses `Type=notify` together with `NotifyAccess=main`.  The daemon
 /// calls [`crate::lifecycle::notify::notify_ready`] (wrapping
-/// `sd_notify::notify(false, &[NotifyState::Ready])`) after `IpcServer::bind`
+/// `sd_notify::notify(&[NotifyState::Ready])`) after `IpcServer::bind`
 /// succeeds.  This causes `systemctl --user start` to block until the daemon
 /// is fully ready, matching the authoritative-ready-signal matrix in §C.3.1
 /// step 15.

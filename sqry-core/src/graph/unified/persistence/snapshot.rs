@@ -1358,7 +1358,7 @@ pub fn verify_snapshot_bytes(data: &[u8], expected_sha256: &str) -> anyhow::Resu
         return Ok(());
     }
 
-    let actual_hash = format!("{:x}", Sha256::digest(data));
+    let actual_hash = hex::encode(Sha256::digest(data));
     if actual_hash != expected_sha256 {
         anyhow::bail!(
             "Snapshot integrity check failed: expected SHA256 {expected_sha256}, got {actual_hash}. \
@@ -2454,7 +2454,7 @@ mod tests {
     fn test_verify_snapshot_bytes_correct_hash() {
         use sha2::{Digest, Sha256};
         let data = b"some graph snapshot data";
-        let correct_hash = format!("{:x}", Sha256::digest(data));
+        let correct_hash = hex::encode(Sha256::digest(data));
         assert!(verify_snapshot_bytes(data, &correct_hash).is_ok());
     }
 

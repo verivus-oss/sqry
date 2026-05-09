@@ -1304,7 +1304,6 @@ pub fn list_duplicate_groups(
 ///
 /// Returns an error when the session cannot resolve the path or when loading
 /// the index fails.
-#[allow(clippy::too_many_lines)] // Index handler covers all query parameter combinations
 #[allow(
     clippy::too_many_lines,
     reason = "cycle detection logic with SCC formatting is inherently verbose"

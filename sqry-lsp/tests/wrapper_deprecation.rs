@@ -35,6 +35,18 @@ use tower_lsp::jsonrpc::Request;
 use tower_lsp::lsp_types::InitializeParams;
 use tracing_subscriber::EnvFilter;
 
+type TestLspFuture = std::pin::Pin<
+    Box<
+        dyn std::future::Future<
+                Output = std::result::Result<
+                    Option<tower_lsp::jsonrpc::Response>,
+                    tower_lsp::ExitedError,
+                >,
+            > + Send,
+    >,
+>;
+type TestLspBuffer = Buffer<Request, TestLspFuture>;
+
 // ---------------------------------------------------------------------------
 // Tracing capture helpers (mirrors the pattern in telemetry_resolution.rs)
 // ---------------------------------------------------------------------------
@@ -115,7 +127,7 @@ fn build_workspace_payload(root: &std::path::Path) -> Value {
 
 /// Send `initialize` + `initialized` with the supplied `initializationOptions`.
 async fn drive_initialize_with_options(
-    buffered: &mut Buffer<tower_lsp::LspService<sqry_lsp::SqryLanguageServer>, Request>,
+    buffered: &mut TestLspBuffer,
     init_options: Option<Value>,
 ) -> Result<()> {
     let params = InitializeParams {

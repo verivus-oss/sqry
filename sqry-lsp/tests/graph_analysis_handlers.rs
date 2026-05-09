@@ -18,6 +18,10 @@ use tower_lsp::lsp_types::{InitializeParams, Location};
 
 mod common;
 
+fn hex_lower(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 #[derive(Debug, Deserialize)]
 struct CircularResultWire {
     cycles: Vec<CycleWire>,
@@ -516,7 +520,7 @@ fn build_fixture_graph(root: &Path) -> Result<()> {
     // succeeds. This preserves the production contract (manifest SHA
     // is checked) while keeping the synthetic fixture loadable.
     let snapshot_bytes = fs::read(storage.snapshot_path())?;
-    let new_sha_hex = format!("{:x}", Sha256::digest(&snapshot_bytes));
+    let new_sha_hex = hex_lower(&Sha256::digest(&snapshot_bytes));
     let manifest_path = storage.manifest_path();
     if manifest_path.exists() {
         let mut manifest = sqry_core::graph::unified::persistence::Manifest::load(manifest_path)

@@ -34,6 +34,18 @@ use tower::buffer::Buffer;
 use tower_lsp::jsonrpc::Request;
 use tower_lsp::lsp_types::{InitializeParams, Url, WorkspaceFolder};
 
+type TestLspFuture = std::pin::Pin<
+    Box<
+        dyn std::future::Future<
+                Output = std::result::Result<
+                    Option<tower_lsp::jsonrpc::Response>,
+                    tower_lsp::ExitedError,
+                >,
+            > + Send,
+    >,
+>;
+type TestLspBuffer = Buffer<Request, TestLspFuture>;
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -104,7 +116,7 @@ fn write_source_code_workspace(dir: &Path, folders: &[(&Path, &str)]) -> PathBuf
 }
 
 async fn drive_initialize_with_workspace_file(
-    buffered: &mut Buffer<tower_lsp::LspService<sqry_lsp::SqryLanguageServer>, Request>,
+    buffered: &mut TestLspBuffer,
     workspace_file: &Path,
     folders: &[(&Path, &str)],
 ) {
@@ -147,10 +159,7 @@ async fn drive_initialize_with_workspace_file(
         .expect("initialized notification succeeds");
 }
 
-async fn custom_request_json(
-    buffered: &mut Buffer<tower_lsp::LspService<sqry_lsp::SqryLanguageServer>, Request>,
-    method: &str,
-) -> serde_json::Value {
+async fn custom_request_json(buffered: &mut TestLspBuffer, method: &str) -> serde_json::Value {
     let request = Request::build(method.to_string())
         .params(json!({}))
         .id(1i64)

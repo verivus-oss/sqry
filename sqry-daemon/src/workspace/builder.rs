@@ -18,6 +18,11 @@ use sqry_core::graph::CodeGraph;
 
 use crate::error::DaemonError;
 
+#[cfg(test)]
+fn hex_lower(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 /// Build a [`CodeGraph`] for the given workspace root.
 ///
 /// Trait object–friendly; [`get_or_load`] and friends accept a
@@ -317,7 +322,7 @@ mod tests {
         // GraphStorage `exists()` / `snapshot_exists()` precondition
         // checks pass and `load_persisted` actually reaches
         // `load_from_path`.
-        let snapshot_sha256 = format!("{:x}", Sha256::digest(&bytes));
+        let snapshot_sha256 = hex_lower(&Sha256::digest(&bytes));
         let manifest = Manifest {
             schema_version: MANIFEST_SCHEMA_VERSION,
             snapshot_format_version: SNAPSHOT_FORMAT_VERSION,

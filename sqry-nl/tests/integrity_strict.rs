@@ -33,6 +33,10 @@ use sqry_nl::classifier::{
     DirsLike, IntentClassifier, Manifest, ResolverLevel, TrustMode, resolve_model_dir,
 };
 use sqry_nl::error::ClassifierError;
+
+fn hex_lower(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
 use tempfile::TempDir;
 
 struct MockDirs(PathBuf);
@@ -107,7 +111,7 @@ impl Fixture {
     fn sha256_hex(bytes: &[u8]) -> String {
         let mut hasher = Sha256::new();
         hasher.update(bytes);
-        format!("{:x}", hasher.finalize())
+        hex_lower(&hasher.finalize())
     }
 
     /// Write the fixture to disk. Computes `checksums.json` from the

@@ -10,7 +10,7 @@ description = "Salsa-style incremental computation engine for sqry semantic code
 
 [dependencies]
 anyhow.workspace = true
-sqry-core = { version = "13.0.14", path = "../sqry-core" }
+sqry-core = { version = "13.0.17", path = "../sqry-core" }
 parking_lot.workspace = true
 smallvec.workspace = true
 log.workspace = true
@@ -26,7 +26,7 @@ strsim = "0.11"
 tempfile.workspace = true
 env_logger.workspace = true
 serde_json.workspace = true
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { version = "0.8", features = ["html_reports"] }
 
 [[bench]]
 name = "fusion_bench"

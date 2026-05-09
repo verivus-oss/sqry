@@ -1322,7 +1322,7 @@ mod tests {
             .and_then(|node_refs| {
                 node_refs
                     .iter()
-                    .find(|node_ref| node_ref.jar_path == PathBuf::from("/jars/direct.jar"))
+                    .find(|node_ref| node_ref.jar_path.as_path() == Path::new("/jars/direct.jar"))
             })
             .map(|node_ref| node_ref.node_id)
             .expect("direct node should exist");

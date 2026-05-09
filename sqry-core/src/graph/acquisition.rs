@@ -180,10 +180,11 @@ impl Default for StalePolicy {
 ///
 /// Unknown plugin ids in a manifest mean the runtime cannot reproduce the
 /// indexed semantics — silent acceptance would hide language coverage loss.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum PluginSelectionPolicy {
     /// Default. Any unknown plugin id in the manifest is a terminal
     /// [`GraphAcquisitionError::IncompatibleGraph`].
+    #[default]
     StrictMatch,
     /// Compatibility opt-in: only the listed unknown plugin ids are tolerated.
     /// Any *other* unknown id still fails. Reserved for future use behind
@@ -192,12 +193,6 @@ pub enum PluginSelectionPolicy {
         /// Unknown plugin ids the caller has explicitly approved.
         allowed: Vec<String>,
     },
-}
-
-impl Default for PluginSelectionPolicy {
-    fn default() -> Self {
-        Self::StrictMatch
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1210,7 +1205,7 @@ mod tests {
 
         let snapshot_sha256 = {
             let bytes = fs::read(storage.snapshot_path()).expect("read snapshot");
-            format!("{:x}", Sha256::digest(&bytes))
+            hex::encode(Sha256::digest(&bytes))
         };
 
         let snapshot = graph.snapshot();
@@ -1433,7 +1428,7 @@ mod tests {
         // Update the manifest's `snapshot_sha256` so the integrity
         // check passes and we exercise the post-integrity version
         // mismatch path (the path the codex review pinpointed).
-        let snapshot_sha256 = format!("{:x}", Sha256::digest(&bytes));
+        let snapshot_sha256 = hex::encode(Sha256::digest(&bytes));
         let mut manifest = Manifest::load(storage.manifest_path()).expect("load manifest");
         manifest.snapshot_sha256 = snapshot_sha256;
         manifest

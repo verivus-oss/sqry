@@ -576,8 +576,7 @@ fn run_standard_bfs(
 // ──────────────────── Path enumeration BFS (stub for Task 4) ────────────────────
 
 /// Path enumeration BFS with path-local cycle detection.
-#[allow(clippy::too_many_lines)] // Kernel query dispatches across all edge kinds
-#[allow(clippy::too_many_lines)] // Complex path-tracking BFS state machine — extraction would obscure the algorithm
+#[allow(clippy::too_many_lines)] // Kernel query dispatches across all edge kinds; complex path-tracking BFS state machine
 fn run_path_bfs(
     snapshot: &GraphSnapshot,
     seeds: &[NodeId],

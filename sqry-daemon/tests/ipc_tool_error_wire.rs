@@ -58,6 +58,13 @@ fn reference_envelope_deadline_exceeded(tool: &str, deadline_ms: u64) -> Value {
 // Test helpers: connect MCP shim on IPC server
 // ---------------------------------------------------------------------------
 
+fn call_tool_request(
+    name: &'static str,
+    arguments: serde_json::Map<String, serde_json::Value>,
+) -> rmcp::model::CallToolRequestParams {
+    rmcp::model::CallToolRequestParams::new(name).with_arguments(arguments)
+}
+
 /// Connect a shim and return rmcp-ready halves after the ShimRegisterAck.
 async fn connect_mcp_shim(
     server: &TestServer,
@@ -377,15 +384,13 @@ async fn invalid_argument_mcp_envelope_outer_parity() {
     // returns `InvalidArgument { reason: "... missing or non-string path ..." }`.
     let call_result = running
         .peer()
-        .call_tool(rmcp::model::CallToolRequestParams {
-            name: "semantic_search".into(),
-            arguments: Some(serde_json::Map::from_iter([
+        .call_tool(call_tool_request(
+            "semantic_search",
+            serde_json::Map::from_iter([
                 ("query".to_string(), json!("kind:function")),
                 // NOTE: deliberately omit "path"
-            ])),
-            meta: None,
-            task: None,
-        })
+            ]),
+        ))
         .await;
 
     match call_result {
@@ -462,18 +467,16 @@ async fn workspace_stale_expired_mcp_envelope() {
 
     let call_result = running
         .peer()
-        .call_tool(rmcp::model::CallToolRequestParams {
-            name: "semantic_search".into(),
-            arguments: Some(serde_json::Map::from_iter([
+        .call_tool(call_tool_request(
+            "semantic_search",
+            serde_json::Map::from_iter([
                 ("query".to_string(), json!("kind:function")),
                 ("path".to_string(), json!(canon.to_string_lossy().as_ref())),
                 ("max_results".to_string(), json!(5)),
                 ("context_lines".to_string(), json!(0)),
                 ("include_classpath".to_string(), json!(false)),
-            ])),
-            meta: None,
-            task: None,
-        })
+            ]),
+        ))
         .await;
 
     match call_result {

@@ -130,13 +130,13 @@ exclude = [
 ]
 
 [workspace.package]
-version = "13.0.14"
+version = "13.0.17"
 edition = "2024"
 authors = ["Verivus Pty Ltd"]
 license = "MIT"
 repository = "https://github.com/verivus-oss/sqry"
 homepage = "https://sqry.dev"
-rust-version = "1.90"  # MINIMUM: Rust 1.90+ Edition 2024 required
+rust-version = "1.94"  # MINIMUM: Rust 1.94+ Edition 2024 required
 
 # Workspace-wide lint configuration
 [workspace.lints.rust]
@@ -161,7 +161,7 @@ colored = "3.1"
 # users: validates POSIX account names in the systemd system-unit generator.
 # Both are declared here so target-gated [target.*.dependencies] in
 # sqry-daemon/Cargo.toml can reference them via `{ workspace = true }`.
-sd-notify = "0.4"
+sd-notify = "0.5"
 users = "0.11"
 
 # Serialization
@@ -177,7 +177,7 @@ chrono = { version = "0.4", features = ["serde"] }
 
 # Regex
 regex = "1.12"
-fancy-regex = "0.13"  # Supports lookahead/lookbehind (FT-C.1)
+fancy-regex = "0.18"  # Supports lookahead/lookbehind (FT-C.1)
 
 # Fuzzy string matching
 rapidfuzz = "0.5"
@@ -209,7 +209,7 @@ crossbeam-channel = "0.5"
 
 # Lazy static initialization
 once_cell = "1.21"
-sha2 = "0.10"
+sha2 = "0.11"
 zip = { version = "8.6", default-features = false, features = ["deflate"] }
 cafebabe = { version = "0.9", features = ["threadsafe"] }  # JVM .class file parser (Track C)
 

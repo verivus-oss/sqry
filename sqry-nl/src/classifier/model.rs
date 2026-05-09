@@ -165,7 +165,11 @@ fn compute_file_hash(path: &Path) -> Result<String, ClassifierError> {
         hasher.update(&buffer[..bytes_read]);
     }
 
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(hex_lower(&hasher.finalize()))
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 // ---------------------------------------------------------------------------

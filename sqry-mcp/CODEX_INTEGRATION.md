@@ -51,11 +51,15 @@ Expected entry:
 ```toml
 [mcp_servers.sqry]
 command = "/absolute/path/to/sqry-mcp"
+args = ["--no-daemon"]
 ```
 
 Notes:
 - Codex config is global.
 - The default setup intentionally avoids pinning `SQRY_MCP_WORKSPACE_ROOT`.
+- The default setup passes `--no-daemon` to keep Codex isolated in standalone
+  mode. Remove it only if you want the plain `sqry-mcp` daemon probe/fallback
+  behavior, or replace it with `--daemon` for forced daemon mode.
 - Starting Codex from the target repository directory still works, but it is no
   longer the primary workspace-selection mechanism when Codex exposes MCP roots.
 
@@ -66,6 +70,7 @@ If you need to configure by hand, add the same entry to `~/.codex/config.toml`:
 ```toml
 [mcp_servers.sqry]
 command = "/absolute/path/to/sqry-mcp"
+args = ["--no-daemon"]
 ```
 
 Then validate:

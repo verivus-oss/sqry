@@ -48,11 +48,19 @@ const HELP_TEXT: &str = r"sqry-mcp - Semantic code search MCP server
 USAGE:
     sqry-mcp [OPTIONS]
 
+DEFAULT BEHAVIOR:
+    With no flags, sqry-mcp probes for a running sqryd daemon and connects
+    as a shim client when one is reachable. If no daemon is found (the common
+    case for first-run / standalone usage), it falls back transparently to
+    in-process standalone mode and serves MCP itself. The daemon path is NOT
+    auto-started in default mode — pass --daemon to opt into auto-start.
+
 OPTIONS:
     -h, --help                   Print this help message
     -V, --version                Print version information
     --list-tools                 List all available tools with their descriptions
-    --daemon                     Connect to a running sqryd daemon as a shim client
+    --daemon                     Force daemon-shim mode (auto-start if not running, no fallback)
+    --no-daemon                  Force in-process standalone mode (skip the daemon probe)
     --daemon-socket <PATH>       Daemon socket path (requires --daemon)
 
 ENVIRONMENT VARIABLES:
@@ -67,7 +75,7 @@ ENVIRONMENT VARIABLES:
     SQRY_MCP_SUBGRAPH_CACHE_SIZE          Subgraph payload cache capacity (default: 128)
     SQRY_MCP_MAX_CROSS_LANG_EDGES         Max edges for cross-language analysis (default: 50000)
     SQRY_REDACTION_PRESET                 Response redaction: none|minimal|standard|strict (default: minimal)
-    SQRYD_SOCKET                          Daemon socket path override for --daemon mode
+    SQRYD_SOCKET                          Daemon socket path override for default probe and --daemon mode
     SQRY_DAEMON_NO_AUTO_START             Set to 1 to disable sqryd auto-start in --daemon mode
     SQRYD_PATH                            Explicit path to sqryd binary for --daemon auto-start
 
@@ -123,10 +131,14 @@ PROTOCOL:
 ///   server. `socket` is `Some` when `--daemon-socket <PATH>` was
 ///   supplied; otherwise [`daemon_shim::resolve_daemon_socket`] determines
 ///   the path at runtime.
+/// - [`CliAction::Standalone`] — `--no-daemon` was passed: skip the
+///   default-mode daemon probe and run the in-process rmcp server
+///   directly.
 /// - [`CliAction::Unknown`] — unrecognised flag: print an error and exit
 ///   with code 1.
-/// - [`CliAction::None`] — no flag given: proceed to the normal rmcp
-///   server loop.
+/// - [`CliAction::None`] — no flag given: probe for a running sqryd
+///   daemon and shim through it when reachable; otherwise fall back to
+///   the in-process rmcp server.
 #[derive(Debug)]
 enum CliAction {
     Help,
@@ -140,6 +152,9 @@ enum CliAction {
     Daemon {
         socket: Option<PathBuf>,
     },
+    /// `--no-daemon` was passed: force in-process standalone mode and
+    /// skip the default-mode daemon probe.
+    Standalone,
     Unknown(String),
     None,
 }
@@ -178,6 +193,24 @@ pub(crate) fn parse_cli_action(args: &[String]) -> CliAction {
         "-V" | "--version" => return CliAction::Version,
         "--list-tools" => return CliAction::ListTools,
         _ => {}
+    }
+
+    // `--no-daemon` is mutually exclusive with `--daemon` / `--daemon-socket`.
+    // Surface the conflict explicitly rather than falling through to the
+    // daemon-flag parser, which would otherwise either silently honour
+    // `--daemon` and ignore `--no-daemon`, or report `--no-daemon` as an
+    // `UnknownInDaemonMode` token without explaining why.
+    if tail.contains(&"--no-daemon") {
+        if tail.contains(&"--daemon") || tail.contains(&"--daemon-socket") {
+            return CliAction::Unknown(
+                "--no-daemon cannot be combined with --daemon or --daemon-socket".to_string(),
+            );
+        }
+        // Any token other than `--no-daemon` is unknown.
+        if let Some(bad) = tail.iter().find(|t| **t != "--no-daemon") {
+            return CliAction::Unknown((*bad).to_string());
+        }
+        return CliAction::Standalone;
     }
 
     // Delegate daemon-flag scanning to daemon_shim (single source of truth).
@@ -254,8 +287,8 @@ fn handle_cli_action_sync(action: &CliAction) -> bool {
             eprintln!("Use --help for usage information");
             std::process::exit(1);
         }
-        // Daemon and None are NOT handled here; the caller dispatches them.
-        CliAction::Daemon { .. } | CliAction::None => false,
+        // Daemon, Standalone, and None are NOT handled here; the caller dispatches them.
+        CliAction::Daemon { .. } | CliAction::Standalone | CliAction::None => false,
     }
 }
 
@@ -400,13 +433,23 @@ async fn main() -> Result<()> {
         .without_time()
         .init();
 
-    // Daemon shim mode — owns stdio end-to-end; skip the normal rmcp
-    // server initialisation entirely.
-    if let CliAction::Daemon { socket } = action {
-        return daemon_shim::run_daemon_shim(socket).await;
+    match action {
+        // Explicit `--daemon`: force daemon-shim mode with auto-start; do
+        // not fall back. Owns stdio end-to-end.
+        CliAction::Daemon { socket } => daemon_shim::run_daemon_shim(socket).await,
+        // Explicit `--no-daemon`: skip the probe and run the in-process
+        // rmcp server directly.
+        CliAction::Standalone => run_rmcp_server().await,
+        // Default: probe for a running daemon, shim through it on
+        // success, fall back to in-process rmcp server otherwise.
+        CliAction::None => match daemon_shim::probe_and_run_daemon_shim(None).await {
+            daemon_shim::ProbeOutcome::Completed => Ok(()),
+            daemon_shim::ProbeOutcome::Unavailable => run_rmcp_server().await,
+            daemon_shim::ProbeOutcome::Failed(e) => Err(e),
+        },
+        // Other variants are dispatched in `handle_cli_action_sync` above.
+        _ => unreachable!("Help/Version/ListTools/Unknown are handled by handle_cli_action_sync"),
     }
-
-    run_rmcp_server().await
 }
 
 #[cfg(test)]
@@ -534,6 +577,82 @@ mod tests {
         match a {
             CliAction::Unknown(msg) => {
                 assert_eq!(msg, "--unknown-flag");
+            }
+            other => panic!("expected Unknown, got: {other:?}"),
+        }
+    }
+
+    /// `--no-daemon` alone produces `CliAction::Standalone`.
+    #[test]
+    fn parse_no_daemon_alone() {
+        let a = parse_cli_action(&args(&["sqry-mcp", "--no-daemon"]));
+        assert!(
+            matches!(a, CliAction::Standalone),
+            "expected Standalone, got: {a:?}"
+        );
+    }
+
+    /// `--no-daemon --daemon` is a conflict and must be rejected.
+    #[test]
+    fn parse_no_daemon_with_daemon_is_unknown() {
+        let a = parse_cli_action(&args(&["sqry-mcp", "--no-daemon", "--daemon"]));
+        match a {
+            CliAction::Unknown(msg) => {
+                assert!(
+                    msg.contains("--no-daemon")
+                        && msg.contains("--daemon")
+                        && msg.contains("cannot be combined"),
+                    "error must explain the conflict; got: {msg}"
+                );
+            }
+            other => panic!("expected Unknown, got: {other:?}"),
+        }
+    }
+
+    /// `--no-daemon --daemon-socket <PATH>` is a conflict — `--daemon-socket`
+    /// already requires `--daemon`, and `--no-daemon` explicitly disables it.
+    #[test]
+    fn parse_no_daemon_with_daemon_socket_is_unknown() {
+        let a = parse_cli_action(&args(&[
+            "sqry-mcp",
+            "--no-daemon",
+            "--daemon-socket",
+            "/x.sock",
+        ]));
+        match a {
+            CliAction::Unknown(msg) => {
+                assert!(
+                    msg.contains("--no-daemon") && msg.contains("cannot be combined"),
+                    "error must explain the conflict; got: {msg}"
+                );
+            }
+            other => panic!("expected Unknown, got: {other:?}"),
+        }
+    }
+
+    /// `--no-daemon` order-independent with conflicting flags.
+    #[test]
+    fn parse_no_daemon_after_daemon_is_unknown() {
+        let a = parse_cli_action(&args(&["sqry-mcp", "--daemon", "--no-daemon"]));
+        match a {
+            CliAction::Unknown(msg) => {
+                assert!(
+                    msg.contains("cannot be combined"),
+                    "error must explain the conflict; got: {msg}"
+                );
+            }
+            other => panic!("expected Unknown, got: {other:?}"),
+        }
+    }
+
+    /// `--no-daemon --bogus` surfaces the unknown trailing token rather than
+    /// silently entering standalone mode.
+    #[test]
+    fn parse_no_daemon_with_unknown_trailing_is_unknown() {
+        let a = parse_cli_action(&args(&["sqry-mcp", "--no-daemon", "--bogus"]));
+        match a {
+            CliAction::Unknown(msg) => {
+                assert_eq!(msg, "--bogus");
             }
             other => panic!("expected Unknown, got: {other:?}"),
         }

@@ -53,6 +53,13 @@ use tokio::net::UnixStream;
 // Helpers
 // ---------------------------------------------------------------------------
 
+fn call_tool_request(
+    name: &'static str,
+    arguments: serde_json::Map<String, serde_json::Value>,
+) -> rmcp::model::CallToolRequestParams {
+    rmcp::model::CallToolRequestParams::new(name).with_arguments(arguments)
+}
+
 /// Connect to the server, perform the MCP shim handshake, and return
 /// the rmcp transport halves. Verifies the ack is accepted.
 async fn connect_mcp_shim(
@@ -198,18 +205,16 @@ async fn mcp_host_tools_call_semantic_search_fresh_verdict() {
 
     let result = running
         .peer()
-        .call_tool(rmcp::model::CallToolRequestParams {
-            name: "semantic_search".into(),
-            arguments: Some(serde_json::Map::from_iter([
+        .call_tool(call_tool_request(
+            "semantic_search",
+            serde_json::Map::from_iter([
                 ("query".to_string(), json!("kind:function")),
                 ("path".to_string(), json!(canon.to_string_lossy().as_ref())),
                 ("max_results".to_string(), json!(5)),
                 ("context_lines".to_string(), json!(0)),
                 ("include_classpath".to_string(), json!(false)),
-            ])),
-            meta: None,
-            task: None,
-        })
+            ]),
+        ))
         .await
         .expect("call_tool must succeed for fresh workspace");
 
@@ -302,18 +307,16 @@ async fn mcp_host_tools_call_stale_splices_warning() {
 
     let result = running
         .peer()
-        .call_tool(rmcp::model::CallToolRequestParams {
-            name: "semantic_search".into(),
-            arguments: Some(serde_json::Map::from_iter([
+        .call_tool(call_tool_request(
+            "semantic_search",
+            serde_json::Map::from_iter([
                 ("query".to_string(), json!("kind:function")),
                 ("path".to_string(), json!(canon.to_string_lossy().as_ref())),
                 ("max_results".to_string(), json!(5)),
                 ("context_lines".to_string(), json!(0)),
                 ("include_classpath".to_string(), json!(false)),
-            ])),
-            meta: None,
-            task: None,
-        })
+            ]),
+        ))
         .await
         .expect("stale workspace call must succeed (not an error result)");
 
@@ -352,18 +355,16 @@ async fn mcp_host_tools_call_notready_returns_mcp_error() {
 
     let call_result = running
         .peer()
-        .call_tool(rmcp::model::CallToolRequestParams {
-            name: "semantic_search".into(),
-            arguments: Some(serde_json::Map::from_iter([
+        .call_tool(call_tool_request(
+            "semantic_search",
+            serde_json::Map::from_iter([
                 ("query".to_string(), json!("kind:function")),
                 ("path".to_string(), json!(canon.to_string_lossy().as_ref())),
                 ("max_results".to_string(), json!(5)),
                 ("context_lines".to_string(), json!(0)),
                 ("include_classpath".to_string(), json!(false)),
-            ])),
-            meta: None,
-            task: None,
-        })
+            ]),
+        ))
         .await;
 
     match call_result {
@@ -462,18 +463,16 @@ async fn mcp_shutdown_during_tool_call() {
     // the main task polls for the server-side barrier.
     let peer = running.peer().clone();
     let call_task = tokio::spawn(async move {
-        peer.call_tool(rmcp::model::CallToolRequestParams {
-            name: "semantic_search".into(),
-            arguments: Some(serde_json::Map::from_iter([
+        peer.call_tool(call_tool_request(
+            "semantic_search",
+            serde_json::Map::from_iter([
                 ("query".to_string(), json!("kind:function")),
                 ("path".to_string(), json!(canon_str)),
                 ("max_results".to_string(), json!(5)),
                 ("context_lines".to_string(), json!(0)),
                 ("include_classpath".to_string(), json!(false)),
-            ])),
-            meta: None,
-            task: None,
-        })
+            ]),
+        ))
         .await
     });
 
@@ -584,18 +583,16 @@ async fn mcp_stale_parity_content_and_structured() {
 
     let result = running
         .peer()
-        .call_tool(rmcp::model::CallToolRequestParams {
-            name: "semantic_search".into(),
-            arguments: Some(serde_json::Map::from_iter([
+        .call_tool(call_tool_request(
+            "semantic_search",
+            serde_json::Map::from_iter([
                 ("query".to_string(), json!("kind:function")),
                 ("path".to_string(), json!(canon.to_string_lossy().as_ref())),
                 ("max_results".to_string(), json!(5)),
                 ("context_lines".to_string(), json!(0)),
                 ("include_classpath".to_string(), json!(false)),
-            ])),
-            meta: None,
-            task: None,
-        })
+            ]),
+        ))
         .await
         .expect("stale workspace call must succeed (not a protocol error)");
 
@@ -684,15 +681,13 @@ async fn mcp_host_rebuild_index_loads_workspace() {
     // Call rebuild_index with force=true (explicit).
     let result = running
         .peer()
-        .call_tool(rmcp::model::CallToolRequestParams {
-            name: "rebuild_index".into(),
-            arguments: Some(serde_json::Map::from_iter([
+        .call_tool(call_tool_request(
+            "rebuild_index",
+            serde_json::Map::from_iter([
                 ("path".to_string(), json!(canon.to_string_lossy().as_ref())),
                 ("force".to_string(), json!(true)),
-            ])),
-            meta: None,
-            task: None,
-        })
+            ]),
+        ))
         .await
         .expect("rebuild_index must succeed for valid directory");
 
@@ -800,15 +795,13 @@ async fn mcp_host_rebuild_index_force_default_is_true() {
     // Call rebuild_index WITHOUT the force argument — must default to true.
     let result = running
         .peer()
-        .call_tool(rmcp::model::CallToolRequestParams {
-            name: "rebuild_index".into(),
-            arguments: Some(serde_json::Map::from_iter([(
+        .call_tool(call_tool_request(
+            "rebuild_index",
+            serde_json::Map::from_iter([(
                 "path".to_string(),
                 json!(canon.to_string_lossy().as_ref()),
-            )])),
-            meta: None,
-            task: None,
-        })
+            )]),
+        ))
         .await
         .expect("rebuild_index must succeed when force is omitted");
 
@@ -850,15 +843,13 @@ async fn mcp_host_rebuild_index_invalid_path_returns_error() {
     // Call rebuild_index with a path that does not exist.
     let result = running
         .peer()
-        .call_tool(rmcp::model::CallToolRequestParams {
-            name: "rebuild_index".into(),
-            arguments: Some(serde_json::Map::from_iter([(
+        .call_tool(call_tool_request(
+            "rebuild_index",
+            serde_json::Map::from_iter([(
                 "path".to_string(),
                 json!("/nonexistent/path/that/does/not/exist"),
-            )])),
-            meta: None,
-            task: None,
-        })
+            )]),
+        ))
         .await;
 
     // The call must fail with an MCP error (not a success).
@@ -895,18 +886,16 @@ async fn mcp_host_rebuild_index_accepts_file_path() {
 
     let result = running
         .peer()
-        .call_tool(rmcp::model::CallToolRequestParams {
-            name: "rebuild_index".into(),
-            arguments: Some(serde_json::Map::from_iter([
+        .call_tool(call_tool_request(
+            "rebuild_index",
+            serde_json::Map::from_iter([
                 (
                     "path".to_string(),
                     json!(canonical_file.to_string_lossy().as_ref()),
                 ),
                 ("force".to_string(), json!(true)),
-            ])),
-            meta: None,
-            task: None,
-        })
+            ]),
+        ))
         .await
         .expect("rebuild_index must accept a file path (standalone parity)");
 
@@ -995,15 +984,10 @@ async fn mcp_host_rebuild_index_defaults_path_to_dot() {
     // Call with `force=true` but NO `path` argument at all.
     let result = running
         .peer()
-        .call_tool(rmcp::model::CallToolRequestParams {
-            name: "rebuild_index".into(),
-            arguments: Some(serde_json::Map::from_iter([(
-                "force".to_string(),
-                json!(true),
-            )])),
-            meta: None,
-            task: None,
-        })
+        .call_tool(call_tool_request(
+            "rebuild_index",
+            serde_json::Map::from_iter([("force".to_string(), json!(true))]),
+        ))
         .await
         .expect("rebuild_index must succeed when path is omitted");
 
@@ -1085,15 +1069,13 @@ async fn mcp_host_rebuild_index_cache_hit_preserves_built_at() {
         .expect("rmcp initialize");
     let cache_hit = running
         .peer()
-        .call_tool(rmcp::model::CallToolRequestParams {
-            name: "rebuild_index".into(),
-            arguments: Some(serde_json::Map::from_iter([
+        .call_tool(call_tool_request(
+            "rebuild_index",
+            serde_json::Map::from_iter([
                 ("path".to_string(), json!(canon.to_string_lossy().as_ref())),
                 ("force".to_string(), json!(false)),
-            ])),
-            meta: None,
-            task: None,
-        })
+            ]),
+        ))
         .await
         .expect("rebuild_index with force=false must succeed on existing index");
     drop(running);
@@ -1156,15 +1138,13 @@ async fn mcp_host_rebuild_index_non_boolean_force_rejected() {
 
     let result = running
         .peer()
-        .call_tool(rmcp::model::CallToolRequestParams {
-            name: "rebuild_index".into(),
-            arguments: Some(serde_json::Map::from_iter([
+        .call_tool(call_tool_request(
+            "rebuild_index",
+            serde_json::Map::from_iter([
                 ("path".to_string(), json!(canon.to_string_lossy().as_ref())),
                 ("force".to_string(), json!("yes")),
-            ])),
-            meta: None,
-            task: None,
-        })
+            ]),
+        ))
         .await;
     assert!(
         result.is_err(),
@@ -1174,15 +1154,10 @@ async fn mcp_host_rebuild_index_non_boolean_force_rejected() {
     // Non-string `path` must also be rejected (typed strictness parity).
     let result_bad_path = running
         .peer()
-        .call_tool(rmcp::model::CallToolRequestParams {
-            name: "rebuild_index".into(),
-            arguments: Some(serde_json::Map::from_iter([(
-                "path".to_string(),
-                json!(42),
-            )])),
-            meta: None,
-            task: None,
-        })
+        .call_tool(call_tool_request(
+            "rebuild_index",
+            serde_json::Map::from_iter([("path".to_string(), json!(42))]),
+        ))
         .await;
     assert!(
         result_bad_path.is_err(),
@@ -1223,15 +1198,13 @@ async fn mcp_host_rebuild_index_cache_hit_unreadable_manifest_errors() {
 
     let result = running
         .peer()
-        .call_tool(rmcp::model::CallToolRequestParams {
-            name: "rebuild_index".into(),
-            arguments: Some(serde_json::Map::from_iter([
+        .call_tool(call_tool_request(
+            "rebuild_index",
+            serde_json::Map::from_iter([
                 ("path".to_string(), json!(canon.to_string_lossy().as_ref())),
                 ("force".to_string(), json!(false)),
-            ])),
-            meta: None,
-            task: None,
-        })
+            ]),
+        ))
         .await;
     assert!(
         result.is_err(),
@@ -1274,18 +1247,16 @@ async fn mcp_host_rebuild_index_symlinked_file_resolves_to_target_parent() {
 
     let result = running
         .peer()
-        .call_tool(rmcp::model::CallToolRequestParams {
-            name: "rebuild_index".into(),
-            arguments: Some(serde_json::Map::from_iter([
+        .call_tool(call_tool_request(
+            "rebuild_index",
+            serde_json::Map::from_iter([
                 (
                     "path".to_string(),
                     json!(symlink_path.to_string_lossy().as_ref()),
                 ),
                 ("force".to_string(), json!(true)),
-            ])),
-            meta: None,
-            task: None,
-        })
+            ]),
+        ))
         .await
         .expect("rebuild_index must accept a symlinked file (standalone parity)");
 

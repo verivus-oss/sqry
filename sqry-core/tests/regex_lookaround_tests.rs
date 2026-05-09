@@ -150,8 +150,8 @@ fn test_validate_regex_variable_length_lookbehind() {
     let registry = FieldRegistry::with_core_fields();
     let validator = Validator::new(registry);
 
-    // Variable-length lookbehind is NOT supported by fancy-regex
-    // This is a known limitation - lookbehind must have constant width
+    // fancy-regex 0.17+ supports variable-length lookbehind via its
+    // default-on variable-lookbehinds feature.
     let condition = Expr::Condition(Condition {
         field: Field::new("name"),
         operator: Operator::Regex,
@@ -163,18 +163,19 @@ fn test_validate_regex_variable_length_lookbehind() {
     });
 
     let result = validator.validate(&condition);
-    // This should fail with a clear error message
+    // This is accepted by fancy-regex 0.18 default features.
     assert!(
-        result.is_err(),
-        "Variable-length lookbehind should be rejected"
+        result.is_ok(),
+        "Variable-length lookbehind should be accepted"
     );
-    if let Err(e) = result {
-        let error_str = format!("{e:?}");
-        assert!(
-            error_str.contains("constant size") || error_str.contains("variable"),
-            "Error should mention constant/variable length: {error_str}"
-        );
-    }
+    let regex =
+        fancy_regex::Regex::new("(?<=async\\s+)\\w+").expect("variable lookbehind compiles");
+    assert!(
+        regex
+            .is_match("async   function_name")
+            .expect("lookbehind match executes"),
+        "Variable-length lookbehind should match after async whitespace"
+    );
 }
 
 #[test]

@@ -8,7 +8,10 @@
 //! envelope shape is itself covered by the round-trip tests in
 //! `sqry-daemon-protocol::protocol::tests`.
 
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use sqry_core::project::ProjectRootMode;
 use sqry_daemon::{
@@ -109,7 +112,7 @@ fn daemon_workspace_status_marks_evicted_per_source_root() {
     let a_status = aggregate
         .source_roots
         .iter()
-        .find(|s| s.source_root == PathBuf::from("/repos/a"))
+        .find(|s| s.source_root.as_path() == Path::new("/repos/a"))
         .expect("a present");
     assert_eq!(
         a_status.state,
@@ -124,7 +127,7 @@ fn daemon_workspace_status_marks_evicted_per_source_root() {
     let b_status = aggregate
         .source_roots
         .iter()
-        .find(|s| s.source_root == PathBuf::from("/repos/b"))
+        .find(|s| s.source_root.as_path() == Path::new("/repos/b"))
         .expect("b present");
     assert_eq!(b_status.state, WorkspaceState::Loaded);
 
@@ -310,7 +313,7 @@ fn daemon_status_workspace_rows_carry_short_and_full_hex() {
     let labelled_row = status
         .workspaces
         .iter()
-        .find(|w| w.index_root == PathBuf::from("/repos/labelled"))
+        .find(|w| w.index_root.as_path() == Path::new("/repos/labelled"))
         .expect("labelled present");
     assert_eq!(
         labelled_row.workspace_id_short.as_deref(),
@@ -326,7 +329,7 @@ fn daemon_status_workspace_rows_carry_short_and_full_hex() {
     let anonymous_row = status
         .workspaces
         .iter()
-        .find(|w| w.index_root == PathBuf::from("/repos/anonymous"))
+        .find(|w| w.index_root.as_path() == Path::new("/repos/anonymous"))
         .expect("anonymous present");
     assert!(
         anonymous_row.workspace_id_short.is_none(),

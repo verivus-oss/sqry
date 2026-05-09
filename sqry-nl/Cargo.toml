@@ -22,7 +22,7 @@ once_cell.workspace = true
 
 # NL-specific dependencies
 unicode-normalization = "0.1"
-sha2 = "0.10"
+sha2 = "0.11"
 # Platform-appropriate cache/config directory discovery (NL02 resolver).
 dirs = "6.0"
 
@@ -36,10 +36,10 @@ ort = { version = "=2.0.0-rc.11", default-features = false, features = ["std", "
 tokenizers = { version = "0.23.1", optional = true }
 
 # NL03 gated downloader stack — only pulled when `classifier` is enabled.
-# - ureq: blocking HTTP client (no tokio); rustls-tls keeps the build hermetic
+# - ureq: blocking HTTP client (no tokio); rustls keeps the build hermetic
 #   and avoids pulling system OpenSSL.
 # - flate2 / tar: streaming gzip + tar extraction for the verified archive.
-ureq   = { version = "2.10", default-features = false, features = ["tls"], optional = true }
+ureq   = { version = "3.3", default-features = false, features = ["rustls"], optional = true }
 flate2 = { version = "1.1",  optional = true }
 tar    = { version = "0.4",  optional = true }
 

@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [13.0.15] - 2026-05-09
+
+### Fixed
+
+- Hardened the staged public release pipeline so Windows and macOS release
+  artifacts are validated on native platform runners before public promotion.
+- Preserved release build-environment metadata across the split Stage 6 build
+  and publish gates so public release manifests can be generated after native
+  smoke validation.
+
 ### Added
 
 - **feat(workspace) [USER-VISIBLE]**: workspace-aware cross-repo analysis is now

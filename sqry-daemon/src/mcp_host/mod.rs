@@ -41,7 +41,7 @@ use std::time::Duration;
 use rmcp::ErrorData as McpError;
 use rmcp::model::{
     CallToolRequestParams, CallToolResult, Content, Implementation, InitializeResult,
-    ListToolsResult, PaginatedRequestParams, ProtocolVersion, ServerCapabilities, ToolsCapability,
+    ListToolsResult, PaginatedRequestParams, ProtocolVersion, ServerCapabilities,
 };
 use rmcp::service::RequestContext;
 use rmcp::{RoleServer, ServerHandler};
@@ -201,27 +201,17 @@ impl DaemonMcpHandler {
 
 impl ServerHandler for DaemonMcpHandler {
     fn get_info(&self) -> InitializeResult {
-        InitializeResult {
-            protocol_version: ProtocolVersion::LATEST,
-            capabilities: ServerCapabilities {
-                tools: Some(ToolsCapability { list_changed: None }),
-                ..Default::default()
-            },
-            server_info: Implementation {
-                name: "sqry-daemon-mcp".into(),
-                version: self.daemon_version.to_owned(),
-                title: None,
-                description: None,
-                icons: None,
-                website_url: None,
-            },
-            instructions: Some(
+        InitializeResult::new(ServerCapabilities::builder().enable_tools().build())
+            .with_protocol_version(ProtocolVersion::LATEST)
+            .with_server_info(Implementation::new(
+                "sqry-daemon-mcp",
+                self.daemon_version.to_owned(),
+            ))
+            .with_instructions(
                 "sqry MCP server (daemon-hosted). Tool calls are served from \
                  the daemon's preloaded workspace state — same behaviour as \
-                 sqry-mcp's standalone mode, zero graph rebuild cost."
-                    .into(),
-            ),
-        }
+                 sqry-mcp's standalone mode, zero graph rebuild cost.",
+            )
     }
 
     async fn list_tools(
@@ -402,12 +392,10 @@ impl ServerHandler for DaemonMcpHandler {
         // daemon-hosted and standalone modes.
         let text_payload =
             serde_json::to_string_pretty(&payload).unwrap_or_else(|_| payload.to_string());
-        Ok(CallToolResult {
-            content: vec![Content::text(text_payload)],
-            structured_content: Some(payload),
-            is_error: None,
-            meta: None,
-        })
+        Ok(call_tool_result_with_text_and_structured(
+            text_payload,
+            payload,
+        ))
     }
 }
 
@@ -558,12 +546,10 @@ impl DaemonMcpHandler {
         // `structured_content` carry the same payload.
         let text_payload =
             serde_json::to_string_pretty(&payload).unwrap_or_else(|_| payload.to_string());
-        Ok(CallToolResult {
-            content: vec![Content::text(text_payload)],
-            structured_content: Some(payload),
-            is_error: None,
-            meta: None,
-        })
+        Ok(call_tool_result_with_text_and_structured(
+            text_payload,
+            payload,
+        ))
     }
 
     /// Inspect a `sqry_ask` translation payload and, if its rendered
@@ -1292,12 +1278,23 @@ fn finalize_rebuild_index_response(
     let payload = sqry_mcp::daemon_adapter::tool_response_json(execution)?;
     let text_payload =
         serde_json::to_string_pretty(&payload).unwrap_or_else(|_| payload.to_string());
-    Ok(CallToolResult {
-        content: vec![Content::text(text_payload)],
-        structured_content: Some(payload),
-        is_error: None,
-        meta: None,
-    })
+    Ok(call_tool_result_with_text_and_structured(
+        text_payload,
+        payload,
+    ))
+}
+
+fn call_tool_result_with_text_and_structured(
+    text_payload: String,
+    payload: Value,
+) -> CallToolResult {
+    let mut result = CallToolResult::structured(payload);
+    debug_assert_eq!(result.is_error, Some(false));
+    // Preserve the pre-rmcp-1.6 daemon wire shape: successful daemon tool
+    // calls omit `isError` and carry pretty JSON in the text content.
+    result.content = vec![Content::text(text_payload)];
+    result.is_error = None;
+    result
 }
 
 /// Host an rmcp `ServerHandler` on raw byte-pump streams.

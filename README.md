@@ -545,7 +545,7 @@ sqry-mcp
 sqry mcp setup
 
 # Or add to ~/.claude.json manually:
-# "mcpServers": { "sqry": { "command": "sqry-mcp", "args": [] } }
+# "mcpServers": { "sqry": { "command": "sqry-mcp", "args": ["--no-daemon"] } }
 ```
 
 The MCP server gives AI assistants structured access to the code graph - exact caller/callee lists, path tracing, cycle detection, etc. - rather than relying on text search or embedding similarity.

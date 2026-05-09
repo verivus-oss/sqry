@@ -61,6 +61,23 @@ const ENV_NO_AUTO_START: &str = "SQRY_DAEMON_NO_AUTO_START";
 /// started it.
 const SQRYD_ALREADY_RUNNING_EXIT_CODE: i32 = 75;
 
+/// Connect-timeout budget for the default-mode probe path.
+///
+/// The probe is a fast best-effort check: when no daemon is running, the
+/// platform UDS / named-pipe connect refuses immediately and we fall back
+/// well before this budget elapses. This timeout only matters when a
+/// process is bound to the path but not accepting (rare). Kept tight so
+/// AI-tooling startup latency stays bounded when the daemon is absent.
+const PROBE_CONNECT_TIMEOUT: Duration = Duration::from_millis(300);
+
+/// Handshake-timeout budget for the default-mode probe path.
+///
+/// Slightly larger than [`PROBE_CONNECT_TIMEOUT`] because the daemon may
+/// be lightly loaded; still well below
+/// [`sqry_daemon_client::DEFAULT_HANDSHAKE_TIMEOUT`] (5 s) since a fall-back
+/// to standalone is cheap relative to blocking the user's MCP startup.
+const PROBE_HANDSHAKE_TIMEOUT: Duration = Duration::from_millis(700);
+
 // ─── Parse result type ────────────────────────────────────────────────────────
 
 /// The result of parsing daemon-specific CLI arguments.
@@ -331,6 +348,107 @@ pub async fn run_daemon_shim(socket: Option<PathBuf>) -> Result<()> {
 
     tracing::info!("sqry-mcp shim pump complete: {bytes_up} bytes up, {bytes_down} bytes down");
     Ok(())
+}
+
+/// Outcome of [`probe_and_run_daemon_shim`].
+///
+/// The default-mode dispatcher in `main.rs` matches on this to decide
+/// whether the daemon path completed (we're done), the daemon was
+/// unreachable (fall back to in-process standalone), or the byte-pump
+/// failed mid-session after stdio was already consumed (we cannot fall
+/// back; surface the error).
+#[derive(Debug)]
+pub enum ProbeOutcome {
+    /// Daemon was reachable and the byte-pump session completed cleanly.
+    /// The caller is done — do NOT also start the standalone server.
+    Completed,
+    /// Daemon unreachable (transport refused / hung), or pre-pump
+    /// handshake failed (version mismatch, rejection, etc.). Stdio is
+    /// still untouched, so the caller can safely fall back to the
+    /// in-process standalone rmcp server.
+    Unavailable,
+    /// Mid-pump failure after stdio was already in use. Falling back to
+    /// standalone is not safe (the editor has already seen partial
+    /// daemon framing); the caller should propagate the error.
+    Failed(anyhow::Error),
+}
+
+/// Probe for a running sqryd daemon and, if reachable, drive the MCP
+/// shim byte-pump. Otherwise return [`ProbeOutcome::Unavailable`] so the
+/// caller can fall back to in-process standalone mode.
+///
+/// This is the entry point for the **default** sqry-mcp invocation
+/// (no flags). Behavior:
+///
+/// 1. Resolve the daemon socket path via [`resolve_daemon_socket`].
+/// 2. Attempt [`sqry_daemon_client::connect_shim_with_timeouts`] with
+///    tight budgets ([`PROBE_CONNECT_TIMEOUT`] / [`PROBE_HANDSHAKE_TIMEOUT`]).
+/// 3. On [`is_connect_failure`]: silently return `Unavailable` — the
+///    common "no daemon running" case must not delay startup or warn.
+/// 4. On any other error (handshake rejected, version mismatch,
+///    EnvelopeVersionMismatch, ShimRejected, etc.): WARN-log and return
+///    `Unavailable` so the user still gets a working MCP session via
+///    the in-process path.
+/// 5. On success: byte-pump stdio → daemon. If the pump errors mid-
+///    session, return `Failed` (cannot fall back; stdio is dirty).
+///
+/// **Auto-start is not attempted in this path** — that's reserved for
+/// the explicit `--daemon` invocation, where the user has signalled
+/// they want the daemon and accept the spawn cost.
+pub async fn probe_and_run_daemon_shim(socket: Option<PathBuf>) -> ProbeOutcome {
+    let socket_path = resolve_daemon_socket(socket.as_deref());
+    tracing::debug!(
+        socket = %socket_path.display(),
+        "sqry-mcp probing for sqryd daemon"
+    );
+
+    let conn = match sqry_daemon_client::connect_shim_with_timeouts(
+        &socket_path,
+        sqry_daemon_client::ShimProtocol::Mcp,
+        std::process::id(),
+        PROBE_CONNECT_TIMEOUT,
+        PROBE_HANDSHAKE_TIMEOUT,
+    )
+    .await
+    {
+        Ok(c) => c,
+        Err(ref e) if is_connect_failure(e) => {
+            // Common case: no daemon running. Silent fall-back; the
+            // standalone path will log its own startup banner.
+            tracing::debug!(
+                socket = %socket_path.display(),
+                "no sqryd daemon reachable; using in-process standalone mode"
+            );
+            return ProbeOutcome::Unavailable;
+        }
+        Err(e) => {
+            // Daemon is present but the handshake failed (version
+            // mismatch, rejection, etc.). WARN so the user knows their
+            // daemon is broken, then fall back so the MCP session still
+            // works.
+            tracing::warn!(
+                socket = %socket_path.display(),
+                error = %e,
+                "sqryd daemon reachable but handshake failed; falling back to in-process standalone mode"
+            );
+            return ProbeOutcome::Unavailable;
+        }
+    };
+
+    tracing::info!(
+        "sqry-mcp shim connected via probe (daemon version {})",
+        conn.daemon_version()
+    );
+
+    match sqry_daemon_client::pump_stdio(conn).await {
+        Ok((bytes_up, bytes_down)) => {
+            tracing::info!(
+                "sqry-mcp shim pump complete: {bytes_up} bytes up, {bytes_down} bytes down"
+            );
+            ProbeOutcome::Completed
+        }
+        Err(e) => ProbeOutcome::Failed(anyhow::anyhow!("daemon byte-pump failed: {e}")),
+    }
 }
 
 /// Returns `true` when the [`sqry_daemon_client::ClientError`] indicates a
@@ -1388,6 +1506,60 @@ mod tests {
         assert!(
             !msg.contains("auto-start suppressed"),
             "auto-start must not have been suppressed; got: {msg}"
+        );
+    }
+
+    // ─── probe_and_run_daemon_shim — default-mode probe ──────────────────────
+
+    /// When the socket path does not exist, the probe must return
+    /// `Unavailable` quickly (within the connect-timeout budget) so the
+    /// caller can fall back to standalone without delay. This is the
+    /// hot path for first-run users without a daemon.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn probe_returns_unavailable_for_absent_socket() {
+        let absent = PathBuf::from("/tmp/sqry_probe_test_no_sock_uvw333/sqryd.sock");
+        let started = std::time::Instant::now();
+        let outcome = probe_and_run_daemon_shim(Some(absent)).await;
+        let elapsed = started.elapsed();
+        assert!(
+            matches!(outcome, ProbeOutcome::Unavailable),
+            "expected Unavailable for absent socket; got: {outcome:?}"
+        );
+        // The connect must refuse synchronously well before the
+        // PROBE_CONNECT_TIMEOUT budget — generous bound for CI
+        // jitter, but still much smaller than the 5 s default.
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "probe should fail fast on absent socket; took {elapsed:?}"
+        );
+    }
+
+    /// When the daemon is reachable but the handshake fails (here: a
+    /// listener that accepts and immediately closes), the probe must
+    /// log a WARN and return `Unavailable` — falling back to standalone
+    /// rather than failing the user's MCP session.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn probe_returns_unavailable_on_protocol_failure() {
+        use tokio::net::UnixListener;
+
+        let tmp = tempfile::NamedTempFile::new().expect("temp file");
+        let sock_path = tmp.path().to_path_buf();
+        drop(tmp);
+
+        let listener = UnixListener::bind(&sock_path).expect("bind listener");
+        tokio::spawn(async move {
+            if let Ok((_stream, _)) = listener.accept().await {
+                // Drop immediately → EOF on the client side, surfaces as
+                // ClientError::ShimAckEof (a non-connect failure).
+            }
+        });
+
+        let outcome = probe_and_run_daemon_shim(Some(sock_path)).await;
+        assert!(
+            matches!(outcome, ProbeOutcome::Unavailable),
+            "expected Unavailable on protocol failure; got: {outcome:?}"
         );
     }
 

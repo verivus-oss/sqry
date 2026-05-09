@@ -52,11 +52,10 @@
 pub fn notify_ready() -> std::io::Result<()> {
     #[cfg(target_os = "linux")]
     {
-        // `sd_notify::notify(false, &[sd_notify::NotifyState::Ready])` sends
-        // "READY=1\n" to $NOTIFY_SOCKET.  The first argument (`unset_env`) is
-        // `false` so the env var remains visible to any child processes that
-        // might also need to notify (e.g. in test harnesses).
-        sd_notify::notify(false, &[sd_notify::NotifyState::Ready])?;
+        // `sd_notify::notify(&[sd_notify::NotifyState::Ready])` sends
+        // "READY=1\n" to $NOTIFY_SOCKET while leaving the environment visible
+        // to any child processes that might also need to notify.
+        sd_notify::notify(&[sd_notify::NotifyState::Ready])?;
     }
     // macOS / Windows: launchd and SCM manage readiness through their own
     // protocols; nothing to do here.
@@ -76,7 +75,7 @@ pub fn notify_ready() -> std::io::Result<()> {
 pub fn notify_status(message: &str) -> std::io::Result<()> {
     #[cfg(target_os = "linux")]
     {
-        sd_notify::notify(false, &[sd_notify::NotifyState::Status(message)])?;
+        sd_notify::notify(&[sd_notify::NotifyState::Status(message)])?;
     }
     // Suppress "unused variable" on non-Linux.
     #[cfg(not(target_os = "linux"))]
@@ -96,7 +95,7 @@ pub fn notify_status(message: &str) -> std::io::Result<()> {
 pub fn notify_stopping() -> std::io::Result<()> {
     #[cfg(target_os = "linux")]
     {
-        sd_notify::notify(false, &[sd_notify::NotifyState::Stopping])?;
+        sd_notify::notify(&[sd_notify::NotifyState::Stopping])?;
     }
     Ok(())
 }
