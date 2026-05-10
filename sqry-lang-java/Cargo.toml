@@ -9,9 +9,9 @@ rust-version.workspace = true
 description = "Java language plugin for sqry"
 
 [dependencies]
-sqry-core = { version = "14.0.3", path = "../sqry-core" }
-sqry-classpath = { version = "14.0.3", path = "../sqry-classpath", optional = true }
-sqry-lang-support = { version = "14.0.3", path = "../sqry-lang-support" }
+sqry-core = { version = "14.0.4", path = "../sqry-core" }
+sqry-classpath = { version = "14.0.4", path = "../sqry-classpath", optional = true }
+sqry-lang-support = { version = "14.0.4", path = "../sqry-lang-support" }
 anyhow.workspace = true
 tree-sitter.workspace = true
 tree-sitter-java = "0.23.4"

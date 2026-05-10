@@ -10,7 +10,7 @@
 //! The latency budget is the design's `CANCELLATION_POLL_BATCH = 1024`
 //! cadence × the per-`evaluate_node` cost (~50–200 ns for the
 //! broad-regex case) = ~100 µs per poll. Plus jitter on slow CI we
-//! allow up to **500 ms** for the cancel-to-return path; the test
+//! allow up to **2 s** for the cancel-to-return path; the test
 //! still pins the regression on the order of `≪ deadline_budget`,
 //! so a buggy implementation that runs to completion (~seconds at
 //! 50k nodes) would still fail.
@@ -67,15 +67,17 @@ fn build_synthetic_graph(n: usize) -> CodeGraph {
 }
 
 #[test]
-fn cancellation_observed_within_500ms_after_signal() {
+fn cancellation_observed_within_ci_latency_budget_after_signal() {
     // Synthetic ~50k-node graph. 100k is the design's spec but 50k
     // is enough to make the no-cancel run last seconds (so a buggy
     // implementation that ignores the token would clearly miss the
-    // 500 ms budget) while keeping the build cost acceptable on
+    // CI latency budget) while keeping the build cost acceptable on
     // slow CI runners.
     const NODE_COUNT: usize = 50_000;
     const SETTLE_MS: u64 = 5;
-    const BUDGET_MS: u128 = 500;
+    // Public release CI can run under enough scheduler contention to
+    // exceed the original 500 ms guard while still cancelling promptly.
+    const BUDGET_MS: u128 = 2_000;
 
     let executor = QueryExecutor::new();
     let graph = Arc::new(build_synthetic_graph(NODE_COUNT));

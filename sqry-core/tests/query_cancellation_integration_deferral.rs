@@ -24,7 +24,7 @@
 #[ignore = "deferred — A_cancellation.md §6 row 2: timeout-then-immediate-call regression. \
             Needs sqry-mcp::SqryServer instance + 50k-node fixture. \
             Cancellation primitive itself is pinned by row 1 in \
-            sqry-core/tests/query_cancellation.rs::cancellation_observed_within_500ms_after_signal."]
+            sqry-core/tests/query_cancellation.rs::cancellation_observed_within_ci_latency_budget_after_signal."]
 fn row2_timeout_then_immediate_call_regression_marker() {
     // Tracker only: see this test's `#[ignore]` reason for the
     // primary cancellation contract that already passes.
