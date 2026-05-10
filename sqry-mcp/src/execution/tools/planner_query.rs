@@ -53,6 +53,22 @@ pub fn execute_sqry_query(params: &SqryQueryParams) -> Result<ToolExecution<Sqry
         parse_query(&params.query).map_err(|err| anyhow::anyhow!("query parse error: {err}"))?;
 
     let snapshot = Arc::new(graph.snapshot());
+
+    // Pre-flight cost gate (`B_cost_gate.md` §B4 + `00_contracts.md`
+    // §3.CC-2). Inspects the planner IR shape against the snapshot's
+    // arena size and rejects unbounded shapes before `execute_plan`
+    // ever scans a node. The MCP boundary downcast at
+    // `sqry-mcp/src/server.rs::execute_tool_with_timeout` (and the
+    // daemon-side equivalent) reshapes `PlannerCostGateError` into
+    // the canonical `RpcError::query_too_broad` envelope —
+    // byte-identical wire shape to the executor-side gate's output.
+    sqry_db::planner::cost_gate::check_plan(
+        &plan,
+        snapshot.nodes().len(),
+        &sqry_db::planner::cost_gate::PlannerCostGateConfig::default(),
+    )
+    .map_err(anyhow::Error::from)?;
+
     let db = make_query_db_cold(Arc::clone(&snapshot), &workspace_root);
 
     let node_ids = execute_plan(&plan, &db);

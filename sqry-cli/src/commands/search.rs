@@ -524,6 +524,25 @@ fn build_pattern_regex(cli: &Cli, pattern: &str) -> Result<Option<regex::Regex>>
         return Ok(None);
     }
 
+    // `B_cost_gate.md` §4 "CLI sqry search (shape-only subset)":
+    // run the anchor / prefix / `min_literal_len` shape check
+    // BEFORE compiling the regex so a pathologically broad pattern
+    // (`.*foo.*`, `.*$`, etc.) is rejected before it can scan the
+    // entire arena.
+    //
+    // The CLI surface has no parsed-query AST so the
+    // scope-coupling rule does not apply; we pass `usize::MAX` for
+    // the node-count argument so the cap is always engaged. The
+    // asymmetry vs the `sqry query` planner-coupled path is
+    // documented in `B_cost_gate.md` §Open question 4 + the
+    // `docs/cli/scaling-large-codebases.md` recovery doc.
+    sqry_core::query::cost_gate::check_regex_pattern_text(
+        pattern,
+        usize::MAX,
+        &sqry_core::query::cost_gate::CostGateConfig::default(),
+    )
+    .map_err(anyhow::Error::from)?;
+
     let regex = RegexBuilder::new(pattern)
         .case_insensitive(cli.ignore_case)
         .build()

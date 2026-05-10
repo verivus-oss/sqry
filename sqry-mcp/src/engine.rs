@@ -397,11 +397,56 @@ fn map_acquisition_error_for_engine(err: GraphAcquisitionError) -> anyhow::Error
         GraphAcquisitionError::IncompatibleGraph {
             source_root,
             status,
-        } => anyhow::anyhow!(
-            "Incompatible graph at {}: {:?}. Rebuild the index with `sqry index --force` after upgrading sqry.",
-            source_root.display(),
-            status
-        ),
+        } => match status {
+            sqry_core::graph::acquisition::PluginSelectionStatus::IncompatibleUnknownPluginIds {
+                unknown_plugin_ids,
+                manifest_path,
+            } => {
+                let suggested = sqry_plugin_registry::missing_features_for(&unknown_plugin_ids);
+                let all_have_features =
+                    sqry_plugin_registry::all_unknown_ids_have_features(&unknown_plugin_ids);
+                let manifest_str = manifest_path
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "<unknown>".to_string());
+                let suggestion = if !suggested.is_empty() {
+                    format!(
+                        "Rebuild this binary with `cargo install --path sqry-cli --features {}` \
+                         or rebuild the index: `sqry index --force {}`.",
+                        suggested.join(","),
+                        source_root.display(),
+                    )
+                } else if all_have_features {
+                    format!(
+                        "Rebuild the index with the binary that produced it: \
+                         `sqry index --force {}`.",
+                        source_root.display(),
+                    )
+                } else {
+                    format!(
+                        "The unknown ids do not match any known feature flag — \
+                         the manifest may be from a newer sqry version. \
+                         Rebuild the index: `sqry index --force {}`.",
+                        source_root.display(),
+                    )
+                };
+                anyhow::anyhow!(
+                    "Incompatible graph at {} — manifest references plugins this binary \
+                     cannot load: {}. Manifest: {}. {}",
+                    source_root.display(),
+                    unknown_plugin_ids.join(", "),
+                    manifest_str,
+                    suggestion,
+                )
+            }
+            other => anyhow::anyhow!(
+                "Incompatible graph at {}: {:?}. Rebuild the index with \
+                 `sqry index --force {}` after upgrading sqry.",
+                source_root.display(),
+                other,
+                source_root.display(),
+            ),
+        },
         GraphAcquisitionError::LoadFailed {
             source_root,
             reason,
@@ -2037,5 +2082,50 @@ mod engine_cache_tests {
             engine.graph().is_none(),
             "Should return None (deserialization fails on garbage data, but integrity check skipped)"
         );
+    }
+
+    /// `map_acquisition_error_for_engine` carries the manifest path and
+    /// the `--features <list>` suggestion through to the user-visible
+    /// `anyhow` error when the unknown plugin id matches a known feature
+    /// gate (cluster-E §E.2).
+    #[test]
+    fn incompatible_graph_carries_feature_hint() {
+        use sqry_core::graph::acquisition::{GraphAcquisitionError, PluginSelectionStatus};
+        let err = GraphAcquisitionError::IncompatibleGraph {
+            source_root: std::path::PathBuf::from("/repo/proj"),
+            status: PluginSelectionStatus::IncompatibleUnknownPluginIds {
+                unknown_plugin_ids: vec!["terraform".to_string()],
+                manifest_path: Some(std::path::PathBuf::from(
+                    "/repo/proj/.sqry/graph/manifest.json",
+                )),
+            },
+        };
+        let rendered = format!("{}", super::map_acquisition_error_for_engine(err));
+        assert!(
+            rendered.contains("/repo/proj"),
+            "must show source root: {rendered}"
+        );
+        assert!(
+            rendered.contains("manifest.json"),
+            "must show manifest path: {rendered}"
+        );
+        // Probe the registry to see whether this binary recognises
+        // `terraform` as a disabled feature-gated plugin. When yes
+        // (default test build) the renderer must surface the
+        // `--features plugin-terraform` suggestion; when no (binary
+        // built with `--features specialty-plugins`) the renderer
+        // falls back to the rebuild-the-index hint.
+        let suggested = sqry_plugin_registry::missing_features_for(&["terraform".to_string()]);
+        if suggested.is_empty() {
+            assert!(
+                rendered.contains("sqry index --force"),
+                "must hint at index rebuild: {rendered}"
+            );
+        } else {
+            assert!(
+                rendered.contains("--features plugin-terraform"),
+                "must suggest the missing feature flag: {rendered}"
+            );
+        }
     }
 }

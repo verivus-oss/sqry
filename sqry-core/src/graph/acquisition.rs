@@ -293,13 +293,23 @@ pub struct GraphIdentity {
 
 /// Compatibility verdict between the manifest plugin set and the runtime.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PluginSelectionStatus {
     /// Every manifest plugin id is supported by this binary.
     Exact,
     /// Manifest references plugin ids the runtime does not know.
+    /// `manifest_path` is set by [`FilesystemGraphProvider`] when the
+    /// status was produced from a persisted manifest; consumers (CLI,
+    /// MCP, daemon) feed both `unknown_plugin_ids` and `manifest_path`
+    /// to `sqry_plugin_registry::missing_features_for` to render an
+    /// actionable diagnostic (cluster-E §E.2).
     IncompatibleUnknownPluginIds {
         /// The unknown ids, in the order they appear in the manifest.
         unknown_plugin_ids: Vec<String>,
+        /// Absolute path to the manifest file that produced the
+        /// unknown ids. `None` for synthetic in-memory manifests
+        /// (unit tests, in-process providers without on-disk state).
+        manifest_path: Option<PathBuf>,
     },
     /// Snapshot format itself cannot be loaded by this binary.
     IncompatibleSnapshotFormat {
@@ -427,12 +437,6 @@ pub enum GraphAcquisitionError {
 // FilesystemGraphProvider (DAG unit SGA03)
 // ---------------------------------------------------------------------------
 
-/// Maximum depth we will walk upward looking for a `.sqry/graph` ancestor.
-///
-/// Mirrors `sqry-cli::index_discovery::MAX_ANCESTOR_DEPTH` exactly so the
-/// provider's discovery contract matches CLI behavior byte-for-byte.
-const MAX_ANCESTOR_DEPTH: usize = 64;
-
 /// Optional fallback hook for [`MissingGraphPolicy::AutoBuildIfEnabled`].
 ///
 /// The provider lives in `sqry-core` and intentionally does not depend on any
@@ -544,45 +548,53 @@ impl FilesystemGraphProvider {
         Ok(canonical)
     }
 
-    /// Step 2 — find the nearest `.sqry/graph` ancestor of `start`.
+    /// Step 2 — find the nearest `.sqry/graph` ancestor of `start`, bounded
+    /// by project markers (cluster-E §E.1).
     ///
-    /// Mirrors `find_nearest_index` semantics: walks up from the start path
-    /// (parent for files), bounded by [`MAX_ANCESTOR_DEPTH`], and returns
-    /// `(workspace_root, ancestor_depth, is_file_scope)`. `None` means no
-    /// graph storage was found within the depth bound.
+    /// Delegates to [`crate::workspace::discover_workspace_root`] so the walk
+    /// terminates at the first ancestor containing any of
+    /// [`crate::workspace::PROJECT_MARKERS`] (`.git`, `Cargo.toml`,
+    /// `package.json`, `pyproject.toml`, `go.mod`). This eliminates the
+    /// "stray `~/.sqry/graph` foot-gun" where a leftover graph at `$HOME`
+    /// was silently picked up for a brand-new project that lacked its
+    /// own graph.
+    ///
+    /// Returns:
+    /// - `Some((root, depth, is_file_scope))` only when a graph exists at or
+    ///   inside the project boundary
+    ///   ([`crate::workspace::WorkspaceRootDiscovery::GraphFound`]).
+    /// - `None` when no graph was found, OR when a graph was found but lives
+    ///   in an *outer* project (the
+    ///   [`crate::workspace::WorkspaceRootDiscovery::BoundaryOnly`] case
+    ///   where the discovered graph does not belong to the same project
+    ///   boundary as `start`). In the BoundaryOnly case the caller path
+    ///   below uses `canonical_request` as the `workspace_root` for
+    ///   [`GraphAcquisitionError::NoGraph`] / `AutoBuildIfEnabled`, which
+    ///   is always inside the right project even if it is deeper than the
+    ///   boundary itself.
     fn find_workspace_root(start: &Path) -> Option<(PathBuf, usize, bool)> {
-        let (mut ancestor_dir, is_file_scope) = if start.is_file() {
-            let parent = start
-                .parent()
-                .map_or_else(|| start.to_path_buf(), Path::to_path_buf);
-            (parent, true)
-        } else {
-            (start.to_path_buf(), false)
-        };
-
-        if ancestor_dir.is_relative()
-            && let Ok(cwd) = std::env::current_dir()
-        {
-            ancestor_dir = cwd.join(&ancestor_dir);
+        match crate::workspace::discover_workspace_root(start) {
+            crate::workspace::WorkspaceRootDiscovery::GraphFound {
+                root,
+                depth,
+                is_file_scope,
+                ..
+            } => Some((root, depth, is_file_scope)),
+            crate::workspace::WorkspaceRootDiscovery::BoundaryOnly { .. }
+            | crate::workspace::WorkspaceRootDiscovery::None => None,
         }
-
-        for depth in 0..MAX_ANCESTOR_DEPTH {
-            let storage = GraphStorage::new(&ancestor_dir);
-            if storage.exists() {
-                return Some((ancestor_dir, depth, is_file_scope));
-            }
-            if !ancestor_dir.pop() {
-                break;
-            }
-        }
-        None
     }
 
     /// Step 4 — compute the plugin-selection compatibility verdict using the
-    /// configured plugin manager and the persisted manifest.
+    /// configured plugin manager and the persisted manifest. `manifest_path`
+    /// (when known) is propagated into the
+    /// [`PluginSelectionStatus::IncompatibleUnknownPluginIds`] variant so
+    /// downstream consumers can render it in the user-facing error
+    /// (cluster-E §E.2).
     fn classify_plugin_selection(
         &self,
         manifest: &Manifest,
+        manifest_path: Option<&Path>,
         policy: &PluginSelectionPolicy,
     ) -> PluginSelectionStatus {
         let Some(persisted) = manifest.plugin_selection.as_ref() else {
@@ -609,6 +621,7 @@ impl FilesystemGraphProvider {
 
         PluginSelectionStatus::IncompatibleUnknownPluginIds {
             unknown_plugin_ids: unknown,
+            manifest_path: manifest_path.map(Path::to_path_buf),
         }
     }
 }
@@ -709,7 +722,11 @@ impl GraphAcquirer for FilesystemGraphProvider {
         let plugin_status = manifest_opt
             .as_ref()
             .map_or(PluginSelectionStatus::Exact, |m| {
-                self.classify_plugin_selection(m, &request.plugin_selection_policy)
+                self.classify_plugin_selection(
+                    m,
+                    Some(storage.manifest_path()),
+                    &request.plugin_selection_policy,
+                )
             });
         if !matches!(plugin_status, PluginSelectionStatus::Exact) {
             return Err(GraphAcquisitionError::IncompatibleGraph {
@@ -1374,10 +1391,19 @@ mod tests {
             .expect_err("manifest with unknown plugin id must fail");
         match err {
             GraphAcquisitionError::IncompatibleGraph { status, .. } => match status {
-                PluginSelectionStatus::IncompatibleUnknownPluginIds { unknown_plugin_ids } => {
+                PluginSelectionStatus::IncompatibleUnknownPluginIds {
+                    unknown_plugin_ids,
+                    manifest_path,
+                } => {
                     assert!(
                         unknown_plugin_ids.iter().any(|id| id.contains("imaginary")),
                         "expected the synthetic id in the diagnostic, got {unknown_plugin_ids:?}"
+                    );
+                    assert!(
+                        manifest_path
+                            .as_ref()
+                            .is_some_and(|p| p.ends_with("manifest.json")),
+                        "manifest_path should point at the on-disk manifest, got {manifest_path:?}"
                     );
                 }
                 other => panic!("expected IncompatibleUnknownPluginIds, got {other:?}"),

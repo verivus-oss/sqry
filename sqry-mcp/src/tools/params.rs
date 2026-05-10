@@ -288,8 +288,21 @@ pub struct ReferenceParams {
     \"context_lines\": 3
 })")]
 pub struct SemanticSearchParams {
-    /// Semantic query expression (supports predicates like `lang:rust`,
-    /// `kind:function`, combinators `AND`/`OR`/`NOT`, and regex `name~=/pat/`).
+    /// Semantic query expression in the **core query parser** grammar:
+    /// predicates `lang:`, `kind:`, `path:`, `name:`, `visibility:`,
+    /// `parent:`, etc., plus combinators `AND` / `OR` / `NOT`, plus
+    /// the inline regex predicate `name~=/regex/`. The regex inside
+    /// `name~=/.../` uses Rust regex syntax.
+    ///
+    /// This is NOT the same as the CLI `sqry search "<pattern>"`
+    /// regex — that is a top-level pattern, not a `name~=` predicate.
+    /// And it is NOT the planner grammar used by `sqry_query` /
+    /// `sqry plan-query`, which does not accept `name~=`.
+    ///
+    /// On workspaces with >50k symbols, every `name~=/regex/` must be
+    /// paired with at least one of `lang:`, `path:`, or `kind:`. The
+    /// cost gate (cluster-B IMP-B) returns `query_too_broad` for
+    /// unpaired regex predicates.
     pub query: String,
 
     #[serde(default = "default_path")]
@@ -317,6 +330,17 @@ pub struct SemanticSearchParams {
 
     #[serde(default)]
     pub pagination: Option<PaginationParams>,
+
+    /// Per-call runtime row budget cap (per `C_budget.md` §C5 +
+    /// `00_contracts.md` §3.CC-2). When set, the executor's
+    /// `evaluate_all` hot loop trips after examining `budget_rows`
+    /// nodes and surfaces the canonical `query_too_broad` envelope
+    /// with `details.source = "runtime_budget"`. `None` (the
+    /// default) defers to the daemon-wide
+    /// `SQRY_TOOL_BUDGET_ROWS` env var or the documented default
+    /// (5_000_000 rows).
+    #[serde(default)]
+    pub budget_rows: Option<u64>,
 }
 
 /// `hierarchical_search` params.
@@ -328,8 +352,18 @@ pub struct SemanticSearchParams {
     \"max_files\": 10
 })")]
 pub struct HierarchicalSearchParams {
-    /// Query expression (supports predicates like `lang:rust`,
-    /// `kind:function`, combinators `AND`/`OR`/`NOT`, and regex `name~=/pat/`).
+    /// Query expression in the **core query parser** grammar (same as
+    /// `semantic_search.query`): predicates `lang:`, `kind:`, `path:`,
+    /// `name:`, `visibility:`, etc., combinators `AND` / `OR` / `NOT`,
+    /// and the inline regex predicate `name~=/regex/` using Rust regex
+    /// syntax.
+    ///
+    /// NOT the planner grammar used by `sqry_query` / `sqry plan-query`,
+    /// which does not accept `name~=`.
+    ///
+    /// On workspaces with >50k symbols, pair `name~=/regex/` with
+    /// `lang:`, `path:`, or `kind:` — see
+    /// `docs/cli/scaling-large-codebases.md`.
     pub query: String,
 
     #[serde(default = "default_path")]
@@ -411,6 +445,11 @@ pub struct HierarchicalSearchParams {
     /// File paths to expand from stubs
     #[serde(default)]
     pub expand_files: Vec<String>,
+
+    /// Per-call runtime row budget cap (per `C_budget.md` §C5).
+    /// See [`SemanticSearchParams::budget_rows`] for the contract.
+    #[serde(default)]
+    pub budget_rows: Option<u64>,
 }
 
 impl HierarchicalSearchParams {
@@ -456,6 +495,16 @@ pub struct RelationQueryParams {
     #[serde(default = "default_page_size_50")]
     #[schemars(range(min = 1, max = 500))]
     pub page_size: i64,
+
+    /// Per-call runtime row budget cap (per `C_budget.md` §C5).
+    /// See [`SemanticSearchParams::budget_rows`] for the contract.
+    /// Currently advisory on this surface — `relation_query`'s
+    /// inner body uses sqry-db planner queries rather than the
+    /// executor's `evaluate_all` hot loop, so the budget does not
+    /// gate this path. Tracked for follow-up under cluster-C's
+    /// deferred-row marker.
+    #[serde(default)]
+    pub budget_rows: Option<u64>,
 }
 
 /// `explain_code` params.
@@ -909,6 +958,16 @@ pub struct SqryQueryParams {
     /// not change execution cost on the server side.
     #[serde(default)]
     pub limit: Option<u64>,
+
+    /// Per-call runtime row budget cap (per `C_budget.md` §C5).
+    /// See [`SemanticSearchParams::budget_rows`] for the contract.
+    /// Currently advisory on this surface — `sqry_query`'s body
+    /// runs through the sqry-db planner rather than the
+    /// executor's `evaluate_all` hot loop, so the budget does not
+    /// gate this path. Tracked for follow-up under cluster-C's
+    /// deferred-row marker.
+    #[serde(default)]
+    pub budget_rows: Option<u64>,
 }
 
 // ============================================================================

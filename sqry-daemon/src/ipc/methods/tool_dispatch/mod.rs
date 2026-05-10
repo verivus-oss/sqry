@@ -126,15 +126,27 @@ pub(crate) async fn classify_and_build<T, F>(
     run: F,
 ) -> Result<Value, MethodError>
 where
-    F: FnOnce(&WorkspaceContext) -> anyhow::Result<ToolExecution<T>> + Send + 'static,
+    // `A_cancellation.md` §A3 + `00_contracts.md` §3.CC-1: typed
+    // run-closure now receives the per-request `&CancellationToken`
+    // alongside the `WorkspaceContext` so deadline-driven cancellation
+    // flows into per-tool inner bodies. The closure is `Send + 'static`
+    // because it crosses a `spawn_blocking` boundary.
+    F: FnOnce(
+            &WorkspaceContext,
+            &sqry_core::query::cancellation::CancellationToken,
+        ) -> anyhow::Result<ToolExecution<T>>
+        + Send
+        + 'static,
     T: serde::Serialize + Send + 'static,
 {
     // Wrap the typed `run` closure to return `serde_json::Value` so it
     // fits the uniform `tool_core` signature. `tool_response_json`
     // runs inside `spawn_blocking` too — it is pure CPU/serialisation
     // work anchored to the same blocking context.
-    let run_as_value = move |wctx: &WorkspaceContext| -> anyhow::Result<Value> {
-        let exec = run(wctx)?;
+    let run_as_value = move |wctx: &WorkspaceContext,
+                             cancel: &sqry_core::query::cancellation::CancellationToken|
+          -> anyhow::Result<Value> {
+        let exec = run(wctx, cancel)?;
         let inner = sqry_mcp::daemon_adapter::tool_response_json(exec)
             .map_err(|e| anyhow::anyhow!("response build: {e:?}"))?;
         Ok(inner)

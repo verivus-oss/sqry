@@ -75,6 +75,17 @@ pub struct QueryExecutor {
 
     /// Validation options for query parsing
     pub(crate) validation_options: crate::query::validator::ValidationOptions,
+
+    /// Pre-flight cost-gate configuration (per `B_cost_gate.md` §2 +
+    /// `00_contracts.md` §3.CC-2 + §3.CC-3). The gate fires inside
+    /// [`Self::execute_evaluate_with`] before `evaluate_all` so a
+    /// rejected query never enters `spawn_blocking`. Default is the
+    /// documented standalone-MCP / daemon-default config (per
+    /// `00_contracts.md` §3.CC-3 the two are byte-identical on a
+    /// fresh install). Daemon callers override via
+    /// [`Self::with_cost_gate_config`] from the per-workspace
+    /// `DaemonConfig`.
+    pub(crate) cost_gate_config: crate::query::cost_gate::CostGateConfig,
 }
 
 impl QueryExecutor {
@@ -88,6 +99,7 @@ impl QueryExecutor {
             result_cache: Arc::new(ResultCache::new(1000)),
             disable_parallel: false,
             validation_options: crate::query::validator::ValidationOptions::default(),
+            cost_gate_config: crate::query::cost_gate::CostGateConfig::default(),
         }
     }
 
@@ -101,6 +113,7 @@ impl QueryExecutor {
             result_cache: Arc::new(ResultCache::new(1000)),
             disable_parallel: false,
             validation_options: crate::query::validator::ValidationOptions::default(),
+            cost_gate_config: crate::query::cost_gate::CostGateConfig::default(),
         }
     }
 
@@ -142,6 +155,21 @@ impl QueryExecutor {
         options: crate::query::validator::ValidationOptions,
     ) -> Self {
         self.validation_options = options;
+        self
+    }
+
+    /// Override the pre-flight cost-gate configuration (per
+    /// `B_cost_gate.md` §B6 + `00_contracts.md` §3.CC-3).
+    /// The daemon installs the per-workspace cap derived from
+    /// `DaemonConfig` here; standalone callers can lower the cap
+    /// for stricter rejection or `None` to disable arena-size
+    /// gating entirely (the shape-only checks still run).
+    #[must_use]
+    pub fn with_cost_gate_config(
+        mut self,
+        config: crate::query::cost_gate::CostGateConfig,
+    ) -> Self {
+        self.cost_gate_config = config;
         self
     }
 
@@ -475,6 +503,28 @@ impl QueryExecutor {
         self.execute_on_graph_with_variables(query, path, None)
     }
 
+    /// Cancellable variant of [`Self::execute_on_graph`].
+    ///
+    /// The supplied `cancel` token is polled by the inner evaluator
+    /// (per-batch in `evaluate_all`, per-iteration in the rayon path
+    /// — see `A_cancellation.md` §3 + `00_contracts.md` §3.CC-1). The
+    /// non-cancellable variant is preserved for LSP/CLI call sites
+    /// that have no per-request token to plumb.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::execute_on_graph`], plus [`crate::query::error::QueryError::Cancelled`]
+    /// (wrapped in `anyhow::Error`) when the token is observed cancelled
+    /// before the evaluator returns its match list.
+    pub fn execute_on_graph_cancellable(
+        &self,
+        query: &str,
+        path: &Path,
+        cancel: &crate::query::cancellation::CancellationToken,
+    ) -> Result<QueryResults> {
+        self.execute_on_graph_with_variables_cancellable(query, path, None, cancel)
+    }
+
     /// Execute query with variable substitution.
     ///
     /// Variables in the query (e.g., `$type`) are replaced with values from
@@ -490,6 +540,34 @@ impl QueryExecutor {
         path: &Path,
         variables: Option<&HashMap<String, String>>,
     ) -> Result<QueryResults> {
+        // Backward-compatible: callers that don't supply a token get a
+        // never-cancelled one. Cost is one Arc<AtomicBool> alloc per
+        // call, O(1) — see `A_cancellation.md` §3.
+        self.execute_on_graph_with_variables_cancellable(
+            query,
+            path,
+            variables,
+            &crate::query::cancellation::CancellationToken::new(),
+        )
+    }
+
+    /// Cancellable variant of [`Self::execute_on_graph_with_variables`].
+    /// See [`Self::execute_on_graph_cancellable`] for the cancellation
+    /// contract.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::execute_on_graph_with_variables`], plus
+    /// [`crate::query::error::QueryError::Cancelled`] (wrapped in
+    /// `anyhow::Error`).
+    pub fn execute_on_graph_with_variables_cancellable(
+        &self,
+        query: &str,
+        path: &Path,
+        variables: Option<&HashMap<String, String>>,
+        cancel: &crate::query::cancellation::CancellationToken,
+    ) -> Result<QueryResults> {
+        let budget = crate::query::budget::QueryBudget::unbounded(cancel.clone());
         let parsed = self.parse_query_ast(query)?;
         let graph = self
             .get_or_load_graph(path)?
@@ -497,7 +575,34 @@ impl QueryExecutor {
 
         let workspace_root = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
 
-        self.execute_evaluate_with(graph, &parsed, &workspace_root, variables)
+        self.execute_evaluate_with(graph, &parsed, &workspace_root, variables, &budget)
+    }
+
+    /// Cancellable + budgeted variant of
+    /// [`Self::execute_on_graph_with_variables`]. See
+    /// [`Self::execute_on_preloaded_graph_with_budget`] for the
+    /// budget contract.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::execute_on_graph_with_variables`], plus
+    /// [`crate::query::budget::BudgetExceeded`] when the row
+    /// budget is exceeded.
+    pub fn execute_on_graph_with_variables_with_budget(
+        &self,
+        query: &str,
+        path: &Path,
+        variables: Option<&HashMap<String, String>>,
+        budget: &crate::query::budget::QueryBudget,
+    ) -> Result<QueryResults> {
+        let parsed = self.parse_query_ast(query)?;
+        let graph = self
+            .get_or_load_graph(path)?
+            .ok_or_else(|| anyhow!("No graph found. Run `sqry index {}` first.", path.display()))?;
+
+        let workspace_root = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+
+        self.execute_evaluate_with(graph, &parsed, &workspace_root, variables, budget)
     }
 
     /// Execute a query against a caller-supplied `CodeGraph`, bypassing the
@@ -528,29 +633,107 @@ impl QueryExecutor {
         workspace_root: &Path,
         variables: Option<&HashMap<String, String>>,
     ) -> Result<QueryResults> {
+        // Backward-compatible: callers that don't supply a token get a
+        // never-cancelled one. Cost is one Arc<AtomicBool> alloc per
+        // call, O(1) — see `A_cancellation.md` §3.
+        self.execute_on_preloaded_graph_cancellable(
+            graph,
+            query,
+            workspace_root,
+            variables,
+            &crate::query::cancellation::CancellationToken::new(),
+        )
+    }
+
+    /// Cancellable variant of [`Self::execute_on_preloaded_graph`].
+    /// See [`Self::execute_on_graph_cancellable`] for the cancellation
+    /// contract; this is the daemon hot-path entrypoint.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::execute_on_preloaded_graph`], plus
+    /// [`crate::query::error::QueryError::Cancelled`] (wrapped in
+    /// `anyhow::Error`).
+    pub fn execute_on_preloaded_graph_cancellable(
+        &self,
+        graph: Arc<CodeGraph>,
+        query: &str,
+        workspace_root: &Path,
+        variables: Option<&HashMap<String, String>>,
+        cancel: &crate::query::cancellation::CancellationToken,
+    ) -> Result<QueryResults> {
+        // The cancellable variant uses an unbounded budget — only
+        // the cooperative cancellation token is in play. Per-tool
+        // budget callers should use
+        // [`Self::execute_on_preloaded_graph_with_budget`] instead.
+        let budget = crate::query::budget::QueryBudget::unbounded(cancel.clone());
         let parsed = self.parse_query_ast(query)?;
         let workspace_root = workspace_root
             .canonicalize()
             .unwrap_or_else(|_| workspace_root.to_path_buf());
 
-        self.execute_evaluate_with(graph, &parsed, &workspace_root, variables)
+        self.execute_evaluate_with(graph, &parsed, &workspace_root, variables, &budget)
+    }
+
+    /// Cancellable + budgeted variant of
+    /// [`Self::execute_on_preloaded_graph`]. Plumbs both the
+    /// per-request cancellation token AND the per-tool runtime row
+    /// budget through to the evaluator so the budget's `tick()`
+    /// hook fires inside `evaluate_all` (per `C_budget.md` §3 +
+    /// `00_contracts.md` §3.CC-2).
+    ///
+    /// `budget.cancel` MUST be the same token the wrapper holds for
+    /// deadline-driven cancellation — `QueryBudget` enforces this
+    /// at construction time via [`crate::query::budget::QueryBudget::new`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::execute_on_preloaded_graph`], plus
+    /// [`crate::query::budget::BudgetExceeded`] (wrapped in
+    /// `anyhow::Error`) when `budget.examined` reaches `budget.max_rows`.
+    pub fn execute_on_preloaded_graph_with_budget(
+        &self,
+        graph: Arc<CodeGraph>,
+        query: &str,
+        workspace_root: &Path,
+        variables: Option<&HashMap<String, String>>,
+        budget: &crate::query::budget::QueryBudget,
+    ) -> Result<QueryResults> {
+        let parsed = self.parse_query_ast(query)?;
+        let workspace_root = workspace_root
+            .canonicalize()
+            .unwrap_or_else(|_| workspace_root.to_path_buf());
+
+        self.execute_evaluate_with(graph, &parsed, &workspace_root, variables, budget)
     }
 
     /// Shared evaluation body for `execute_on_graph_with_variables` and
-    /// `execute_on_preloaded_graph`.
+    /// `execute_on_preloaded_graph` (and their cancellable overloads).
     ///
-    /// Both public entrypoints differ only in how they obtain the
+    /// All public entrypoints differ only in how they obtain the
     /// `Arc<CodeGraph>`; everything from variable resolution through
     /// `evaluate_all` + result assembly is identical and lives here to
     /// guarantee matching semantics.
+    ///
+    /// The `cancel` token is threaded into [`graph_eval::GraphEvalContext`]
+    /// so the inner [`graph_eval::evaluate_all`] hot loop polls it
+    /// cooperatively (per `A_cancellation.md` §3 + `00_contracts.md`
+    /// §3.CC-1). Non-cancellable callers pass a freshly-allocated
+    /// never-cancelled token; the inner loop's `is_cancelled()` poll
+    /// is one cache-warm atomic load per batch and never observes a
+    /// flipped flag in that case.
     fn execute_evaluate_with(
         &self,
         graph: Arc<CodeGraph>,
         parsed: &crate::query::ParsedQuery,
         workspace_root: &Path,
         variables: Option<&HashMap<String, String>>,
+        budget: &crate::query::budget::QueryBudget,
     ) -> Result<QueryResults> {
-        // Resolve variables if provided
+        // Resolve variables if provided. The cost gate inspects the
+        // post-substitution AST shape so a `$var` resolved to
+        // `.*foo.*` is classified as the literal regex, not as a
+        // `Variable` (per `B_cost_gate.md` §2 "Designed shared body").
         let effective_root = if let Some(vars) = variables {
             crate::query::types::resolve_variables(&parsed.ast.root, vars)
                 .map_err(|e| anyhow!("Variable resolution error: {e}"))?
@@ -558,9 +741,30 @@ impl QueryExecutor {
             parsed.ast.root.clone()
         };
 
+        // Pre-flight cost gate (P0-1 mitigation). Single-point
+        // insertion at the shared body covers all 28 callers across
+        // `execute_on_preloaded_graph` (17), `execute_on_graph` (7),
+        // and `execute_on_graph_with_variables` (4) by construction
+        // — including the previously-missed MCP `hierarchical_search`
+        // path. Runs BEFORE `GraphEvalContext::new` / `evaluate_all`
+        // so the executor never starts a rayon scan on a rejected
+        // query, freeing the spawn_blocking pool from broad-shape
+        // load. See `B_cost_gate.md` §2 + `00_contracts.md` §3.CC-2.
+        crate::query::cost_gate::check_query(
+            &effective_root,
+            graph.node_count(),
+            &self.cost_gate_config,
+        )
+        .map_err(anyhow::Error::from)?;
+
+        // Threading both cancel + budget into the evaluator: the
+        // budget owns the cancellation token internally (per
+        // `C_budget.md` §3 + `00_contracts.md` §3.CC-1), so
+        // `with_budget` installs both atomically.
         let mut ctx = graph_eval::GraphEvalContext::new(&graph, &self.plugin_manager)
             .with_workspace_root(workspace_root)
-            .with_parallel_disabled(self.disable_parallel);
+            .with_parallel_disabled(self.disable_parallel)
+            .with_budget(budget.clone());
 
         let matches = graph_eval::evaluate_all(&mut ctx, &effective_root)?;
         let mut results =

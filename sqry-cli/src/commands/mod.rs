@@ -34,6 +34,7 @@ pub mod unused;
 pub mod visualize;
 pub mod watch;
 pub mod workspace;
+pub mod workspace_clean;
 pub mod workspace_status;
 
 pub use alias::{run_alias, save_query_alias, save_search_alias};

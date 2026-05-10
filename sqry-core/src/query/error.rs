@@ -28,6 +28,21 @@ pub enum QueryError {
     /// Execution error
     #[error("Execution error: {0}")]
     Execution(#[from] ExecutionError),
+
+    /// Cooperative cancellation observed inside the query evaluator
+    /// (per `A_cancellation.md` §4 + `00_contracts.md` §3.CC-1).
+    ///
+    /// This variant is constructed by
+    /// [`crate::query::cancellation::CancellationToken::query_check`]
+    /// when an MCP / IPC dispatch wrapper has flipped the per-request
+    /// cancellation flag because the deadline elapsed (or, in the
+    /// future, because an admin cancel IPC arrived). It is distinct
+    /// from [`ExecutionError::Cancelled`], which is reserved for the
+    /// LSP `$/cancelRequest` path. Wrapper boundaries downcast against
+    /// this variant to map to the canonical
+    /// `RpcError::deadline_exceeded` envelope.
+    #[error("query cancelled (cooperative)")]
+    Cancelled,
 }
 
 impl QueryError {
@@ -40,7 +55,7 @@ impl QueryError {
     pub fn exit_code(&self) -> i32 {
         match self {
             QueryError::Lex(_) | QueryError::Parse(_) | QueryError::Validation(_) => 2,
-            QueryError::Execution(_) => 1,
+            QueryError::Execution(_) | QueryError::Cancelled => 1,
         }
     }
 
@@ -103,6 +118,7 @@ impl RichQueryError {
             QueryError::Parse(_) => "sqry::parse",
             QueryError::Validation(_) => "sqry::validation",
             QueryError::Execution(_) => "sqry::execution",
+            QueryError::Cancelled => "sqry::cancelled",
         };
 
         let message = self.error.to_string();
@@ -269,7 +285,7 @@ impl RichQueryError {
                     None,
                 ),
             },
-            QueryError::Execution(_) => (None, None, None),
+            QueryError::Execution(_) | QueryError::Cancelled => (None, None, None),
         }
     }
 
@@ -420,6 +436,9 @@ impl RichQueryError {
                     "Rebuild the index with 'sqry index --force'".to_string()
                 }
             },
+            QueryError::Cancelled => {
+                "Query was cancelled (deadline elapsed or admin cancel)".to_string()
+            }
         }
     }
 }
@@ -431,6 +450,7 @@ impl Diagnostic for RichQueryError {
             QueryError::Parse(_) => Some(Box::new("sqry::parse")),
             QueryError::Validation(_) => Some(Box::new("sqry::validation")),
             QueryError::Execution(_) => Some(Box::new("sqry::execution")),
+            QueryError::Cancelled => Some(Box::new("sqry::cancelled")),
         }
     }
 
@@ -604,7 +624,7 @@ impl Diagnostic for RichQueryError {
                     )]
                 }
             },
-            QueryError::Execution(_) => vec![],
+            QueryError::Execution(_) | QueryError::Cancelled => vec![],
         };
 
         if labels.is_empty() {
@@ -667,6 +687,9 @@ impl Diagnostic for RichQueryError {
                 _ => None,
             },
             QueryError::Execution(_) => None,
+            QueryError::Cancelled => Some(
+                "The query was cancelled because its deadline elapsed; rerun with a tighter scope filter or longer timeout",
+            ),
         };
 
         help_text.map(|s| Box::new(s.to_string()) as Box<dyn std::fmt::Display>)

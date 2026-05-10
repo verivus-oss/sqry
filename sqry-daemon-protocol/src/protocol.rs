@@ -617,24 +617,73 @@ pub struct LoadResult {
     pub state: WorkspaceState,
 }
 
-/// `daemon/rebuild` success result payload.
+/// Status of a `daemon/rebuild` invocation (cluster-G §2.4).
 ///
-/// Serialised under the `result` field of [`ResponseEnvelope`]. Reports
-/// post-rebuild graph statistics and the wall-clock duration of the rebuild.
+/// Distinguishes the four outcomes the dispatcher can produce so a
+/// `--timeout 0` (fire-and-forget) caller can distinguish "started in
+/// the background" from "actually completed in this call". Pre-§2.4
+/// callers received only the `Completed` shape and a missing field
+/// here is interpreted as `Completed` for backward compatibility.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RebuildStatus {
+    /// The rebuild ran to completion in this call. `duration_ms`,
+    /// `nodes`, `edges`, `files_indexed`, and `was_full` are all
+    /// populated.
+    #[default]
+    Completed,
+    /// `--timeout 0` (fire-and-forget): the runner-role was acquired
+    /// and the rebuild is running in the background. The stat fields
+    /// are absent. The caller should poll `daemon/status` to observe
+    /// completion.
+    Started,
+    /// Another runner is active; this request was coalesced into the
+    /// pending lane. The stat fields reflect the runner's *previous*
+    /// publish if known, or are absent.
+    Coalesced,
+    /// Reservation failed before the pipeline started (e.g.
+    /// `MemoryBudgetExceeded`, `WorkspaceOversize`). The stat fields
+    /// are absent.
+    Rejected,
+}
+
+/// `daemon/rebuild` success result payload (schema_version 2 — see
+/// cluster-G §2.4).
+///
+/// Serialised under the `result` field of [`ResponseEnvelope`]. The
+/// stat fields are `Option`-typed because `--timeout 0` callers
+/// receive them populated only when `status == Completed`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RebuildResult {
     /// The canonicalised workspace root path that was rebuilt.
     pub root: std::path::PathBuf,
-    /// Wall-clock time the rebuild took, in milliseconds.
-    pub duration_ms: u64,
-    /// Node count of the freshly published graph.
-    pub nodes: u64,
-    /// Edge count of the freshly published graph.
-    pub edges: u64,
-    /// Number of source files indexed in the freshly published graph.
-    pub files_indexed: u64,
+    /// Outcome of the dispatch. New in cluster-G §2.4. Older clients
+    /// that pre-date the schema bump are tolerated by the
+    /// `#[serde(default)]` here — they read the field as `Completed`
+    /// and continue to work because pre-§2.4 daemons only ever
+    /// produced the completed shape.
+    #[serde(default)]
+    pub status: RebuildStatus,
+    /// Wall-clock time the rebuild took, in milliseconds. Populated
+    /// only when `status == Completed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    /// Node count of the freshly published graph. Populated only
+    /// when `status == Completed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nodes: Option<u64>,
+    /// Edge count of the freshly published graph. Populated only
+    /// when `status == Completed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edges: Option<u64>,
+    /// Number of source files indexed in the freshly published
+    /// graph. Populated only when `status == Completed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files_indexed: Option<u64>,
     /// `true` when the rebuild was a full (non-incremental) rebuild.
-    pub was_full: bool,
+    /// Populated only when `status == Completed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub was_full: Option<bool>,
 }
 
 /// `daemon/cancel_rebuild` success result payload.

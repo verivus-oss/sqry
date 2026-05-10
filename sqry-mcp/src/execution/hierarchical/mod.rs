@@ -283,6 +283,7 @@ fn node_kind_to_string(kind: NodeKind) -> &'static str {
 #[allow(clippy::too_many_lines)] // Pipeline staging is kept in one function for end-to-end clarity.
 pub fn execute_hierarchical_search(
     args: &HierarchicalSearchArgs,
+    cancel: &sqry_core::query::cancellation::CancellationToken,
 ) -> Result<ToolExecution<HierarchicalSearchData>> {
     let start = Instant::now();
 
@@ -313,8 +314,19 @@ pub fn execute_hierarchical_search(
     let executor = engine.executor();
     let query = normalized_query(&args.query)?;
 
+    // `A_cancellation.md` §3 + §A4 + `C_budget.md` §C5: route
+    // through the budgeted+cancellable executor so per-batch
+    // cancellation poll AND per-node row budget both fire inside
+    // `evaluate_all`. The maintainer's reported
+    // `kind:function AND name~=/.*_set$/` query reaches this path
+    // through `hierarchical_search` and was one of the two primary
+    // P0-1 failure modes.
+    let budget = sqry_core::query::budget::QueryBudget::from_per_call_or_env(
+        args.budget_rows,
+        cancel.clone(),
+    );
     let query_results = executor
-        .execute_on_graph(query, &search_root)
+        .execute_on_graph_with_variables_with_budget(query, &search_root, None, &budget)
         .context("Failed to execute semantic query")?;
 
     // Extract scored node IDs (preserves executor relevance ordering)

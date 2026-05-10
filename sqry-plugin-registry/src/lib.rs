@@ -4,8 +4,14 @@
 //! plugin cost-tier metadata, and deterministic plugin-selection resolution.
 
 use std::collections::BTreeSet;
+use std::path::PathBuf;
 
 use sqry_core::plugin::PluginManager;
+
+pub mod feature_table;
+pub use feature_table::{
+    PLUGIN_FEATURE_TABLE, PluginFeatureSpec, all_unknown_ids_have_features, missing_features_for,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -49,22 +55,88 @@ pub struct PluginSelectionResolution {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PluginSelectionError {
+    /// Legacy variant — retained for downstream consumers (LSP, MCP)
+    /// during the migration window. New call sites should use
+    /// [`Self::UnknownPluginIdsCtx`] for richer diagnostics.
+    #[deprecated(note = "use UnknownPluginIdsCtx for richer diagnostics (cluster-E §E.2)")]
     UnknownPluginIds {
         ids: Vec<String>,
         supported_ids: Vec<String>,
+    },
+    /// Manifest references plugin ids the runtime does not know,
+    /// enriched with the manifest path and the Cargo feature flags
+    /// that, if enabled, would register them (cluster-E §E.2).
+    UnknownPluginIdsCtx {
+        /// Unknown plugin ids in the order they appeared in the manifest.
+        ids: Vec<String>,
+        /// Plugin ids this binary recognises.
+        supported_ids: Vec<String>,
+        /// Absolute path to the manifest that produced the unknown
+        /// ids. `None` only on the synthetic in-memory manifest path
+        /// used by unit tests.
+        manifest_path: Option<PathBuf>,
+        /// Cargo feature flags that, if enabled at build time, would
+        /// register the unknown plugin ids. May be empty if the
+        /// unknown ids are not gated by any feature flag (i.e.
+        /// genuinely unknown / typo).
+        suggested_features: Vec<&'static str>,
+        /// `true` iff every unknown id has a corresponding feature
+        /// flag. Drives the "rebuild with --features" suggestion vs
+        /// the "rebuild the index" suggestion.
+        all_unknown_ids_have_features: bool,
     },
 }
 
 impl std::fmt::Display for PluginSelectionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            #[allow(deprecated)]
             Self::UnknownPluginIds { ids, supported_ids } => write!(
                 f,
                 "unknown plugin ids: {} (supported ids: {})",
                 ids.join(", "),
                 supported_ids.join(", ")
             ),
+            Self::UnknownPluginIdsCtx {
+                ids,
+                supported_ids,
+                manifest_path,
+                suggested_features,
+                all_unknown_ids_have_features,
+            } => {
+                writeln!(
+                    f,
+                    "unknown plugin ids: {} (this binary supports: {})",
+                    ids.join(", "),
+                    supported_ids.join(", ")
+                )?;
+                if let Some(p) = manifest_path {
+                    writeln!(f, "  manifest: {}", p.display())?;
+                }
+                if !suggested_features.is_empty() {
+                    writeln!(
+                        f,
+                        "  rebuild this binary with: cargo install --path sqry-cli --features {}",
+                        suggested_features.join(",")
+                    )?;
+                }
+                if *all_unknown_ids_have_features {
+                    write!(
+                        f,
+                        "  …or rebuild the index with the binary that produced it: \
+                         sqry index --force <workspace-root>"
+                    )
+                } else {
+                    write!(
+                        f,
+                        "  the unknown ids do not match any known feature flag — \
+                         the manifest may be from a newer sqry version. Rebuild \
+                         the index: sqry index --force <workspace-root>"
+                    )
+                }
+            }
         }
     }
 }
@@ -343,9 +415,14 @@ fn validate_plugin_ids<'a>(
         return Ok(());
     }
 
-    Err(PluginSelectionError::UnknownPluginIds {
+    let suggested_features = missing_features_for(&unknown_ids);
+    let all_have_features = all_unknown_ids_have_features(&unknown_ids);
+    Err(PluginSelectionError::UnknownPluginIdsCtx {
         ids: unknown_ids,
         supported_ids: supported_ids.into_iter().map(ToString::to_string).collect(),
+        manifest_path: None,
+        suggested_features,
+        all_unknown_ids_have_features: all_have_features,
     })
 }
 
@@ -418,8 +495,43 @@ mod tests {
 
         let err = resolve_plugin_selection(&config).expect_err("selection should fail");
         assert!(
-            matches!(err, PluginSelectionError::UnknownPluginIds { .. }),
+            matches!(err, PluginSelectionError::UnknownPluginIdsCtx { .. }),
             "unexpected error: {err}"
+        );
+    }
+
+    /// `Display` for `UnknownPluginIdsCtx` includes the manifest path and
+    /// the `--features` suggestion when the unknown ids correspond to
+    /// known feature gates (cluster-E §E.2). Pinning this output is the
+    /// load-bearing assertion for the user-facing diagnostic.
+    #[test]
+    fn display_includes_manifest_and_feature_hint() {
+        // Build the variant directly so the test is independent of the
+        // current binary's compile-time feature set.
+        let err = PluginSelectionError::UnknownPluginIdsCtx {
+            ids: vec!["terraform".to_string(), "made-up".to_string()],
+            supported_ids: vec!["rust".to_string(), "go".to_string()],
+            manifest_path: Some(PathBuf::from("/repo/proj/.sqry/graph/manifest.json")),
+            suggested_features: vec!["plugin-terraform"],
+            all_unknown_ids_have_features: false,
+        };
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("terraform"),
+            "must list every unknown id, got: {rendered}"
+        );
+        assert!(
+            rendered.contains("/repo/proj/.sqry/graph/manifest.json"),
+            "must include the manifest path, got: {rendered}"
+        );
+        assert!(
+            rendered.contains("--features plugin-terraform"),
+            "must include the rebuild-with-features suggestion, got: {rendered}"
+        );
+        assert!(
+            rendered.contains("Rebuild the index"),
+            "must include the rebuild-the-index suggestion when not all ids have features, \
+             got: {rendered}"
         );
     }
 

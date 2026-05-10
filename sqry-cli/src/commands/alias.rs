@@ -290,8 +290,7 @@ fn run_import(
 
     let scope = import_scope_from_flags(global);
     let json = read_import_input(file)?;
-    let export: AliasExportFile =
-        serde_json::from_str(&json).context("Failed to parse alias export file")?;
+    let export = parse_alias_export_file(file, &json)?;
     let strategy = import_strategy_from_arg(on_conflict);
 
     if dry_run {
@@ -402,6 +401,36 @@ fn read_import_input(file: &str) -> Result<String> {
     } else {
         fs::read_to_string(file).with_context(|| format!("Failed to read from {file}"))
     }
+}
+
+fn parse_alias_export_file(file: &str, json: &str) -> Result<AliasExportFile> {
+    let trimmed = json.trim_start();
+    let source = if file == "-" { "stdin" } else { file };
+    if trimmed.is_empty() {
+        bail!(
+            "Alias export file '{source}' is empty. Expected the output of `sqry alias export` \
+             (a JSON object with `version`, `exported_at`, and `aliases`)."
+        );
+    }
+    let first = trimmed.as_bytes()[0];
+    if first != b'{' {
+        let shape = match first {
+            b'[' => "a JSON array",
+            b'"' => "a JSON string",
+            b't' | b'f' => "a JSON boolean",
+            b'n' => "JSON null",
+            b'-' | b'0'..=b'9' => "a JSON number",
+            _ => "non-JSON content",
+        };
+        bail!(
+            "Alias export file '{source}' contains {shape}, not a JSON object. \
+             Expected the output of `sqry alias export` (a JSON object with `version`, \
+             `exported_at`, and `aliases`). The file was likely written by another \
+             tool or overwritten before import."
+        );
+    }
+    serde_json::from_str(json)
+        .with_context(|| format!("Failed to parse alias export file '{source}'"))
 }
 
 fn import_strategy_from_arg(on_conflict: ImportConflictArg) -> ImportConflictStrategy {

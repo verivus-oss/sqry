@@ -17,8 +17,8 @@ use crate::ipc::methods::{HandlerContext, MethodError};
 pub(crate) async fn handle(ctx: &HandlerContext, params: Value) -> Result<Value, MethodError> {
     let args = params_to_semantic_search_args(params).map_err(rpc_error_to_method_error)?;
     let path = args.path.clone();
-    classify_and_build(ctx, "semantic_search", &path, move |wctx| {
-        execute_semantic_search_for_daemon(wctx, &args)
+    classify_and_build(ctx, "semantic_search", &path, move |wctx, cancel| {
+        execute_semantic_search_for_daemon(wctx, &args, cancel)
     })
     .await
 }

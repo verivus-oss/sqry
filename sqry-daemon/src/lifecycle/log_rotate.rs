@@ -576,12 +576,52 @@ pub fn install_tracing(
     // Systemd gate (§G.1 m4): skip rolling appender under systemd supervision.
     let under_systemd = crate::lifecycle::notify::is_under_systemd();
 
-    if let (false, Some(log_path)) = (under_systemd, &cfg.log_file) {
+    let resolved_log_path = cfg.log_file.resolve();
+    if let (false, Some(log_path)) = (under_systemd, resolved_log_path) {
         let max_bytes = cfg.log_max_size_mb.saturating_mul(1024 * 1024);
         let keep = cfg.log_keep_rotations;
 
-        let appender = RollingSizeAppender::new(log_path.clone(), max_bytes, keep)
-            .map_err(crate::DaemonError::Io)?;
+        // Cluster-G iter-2: when the resolved log path is unwritable
+        // (e.g. read-only `<runtime_dir>` in restrictive containers,
+        // or an operator-supplied path on a read-only mount), fall
+        // back to stderr-only rather than aborting startup. The
+        // codex iter-1 review flagged that the new `<runtime_dir>/sqryd.log`
+        // default could regress non-systemd operators with a
+        // read-only runtime dir. Emit one stderr WARN so the
+        // operator sees the divergence; the rest of the daemon
+        // logs end up on stderr alongside it.
+        let appender = match RollingSizeAppender::new(log_path.clone(), max_bytes, keep) {
+            Ok(a) => a,
+            Err(e) => {
+                eprintln!(
+                    "sqryd: WARN: cannot open log file {} ({e}); falling back to stderr-only logging. \
+                     Set `log_file` in daemon.toml or `SQRY_DAEMON_LOG_FILE` to a writable path \
+                     (or `log_file = \"stderr\"` to silence this warning).",
+                    log_path.display(),
+                );
+                // Fall through to the stderr-fallback path below by
+                // shadowing the rolling-appender setup. We do this
+                // by jumping to the bottom of the function via a
+                // labeled break-equivalent: re-derive the filter and
+                // install only the stderr layer.
+                let filter =
+                    EnvFilter::try_new(&filter_str).unwrap_or_else(|_| EnvFilter::new("info"));
+                tracing_subscriber::registry()
+                    .with(
+                        fmt::layer()
+                            .compact()
+                            .with_writer(io::stderr)
+                            .with_filter(filter),
+                    )
+                    .try_init()
+                    .map_err(|e| {
+                        crate::DaemonError::Internal(anyhow::anyhow!(
+                            "global tracing/log subscriber already installed: {e}"
+                        ))
+                    })?;
+                return Ok(None);
+            }
+        };
 
         let (non_blocking, guard) = tracing_appender::non_blocking(appender);
 
@@ -1107,7 +1147,7 @@ mod tests {
         );
 
         let cfg = crate::config::DaemonConfig {
-            log_file: Some(log_path.clone()),
+            log_file: crate::config::LogFileSetting::Path(log_path.clone()),
             ..crate::config::DaemonConfig::default()
         };
 
@@ -1120,7 +1160,7 @@ mod tests {
             "install_tracing must not return Ok(Some(WorkerGuard)) under systemd — \
              rolling appender must be skipped when NOTIFY_SOCKET is set; \
              log_file was {:?}",
-            cfg.log_file
+            cfg.log_file.resolve()
         );
 
         // 3. The log file must NOT have been created — unconditional, regardless

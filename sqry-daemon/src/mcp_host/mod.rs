@@ -329,8 +329,18 @@ impl ServerHandler for DaemonMcpHandler {
         // closure crosses `spawn_blocking` inside `tool_core`.
         let name_clone = name.clone();
         let args_clone = args_value.clone();
-        let run = move |wctx: &WorkspaceContext| -> anyhow::Result<Value> {
-            dispatch_by_name(&name_clone, wctx, &args_clone)
+        // `A_cancellation.md` §2 + `00_contracts.md` §3.CC-1: the
+        // daemon's `tool_core::execute_with_timeout` now hands the
+        // closure a borrowed `&CancellationToken` so deadline-driven
+        // cancellation flows into `dispatch_by_name`. The dispatcher
+        // itself only routes the token through tools whose inner body
+        // uses the executor's `*_cancellable` overloads (today:
+        // `semantic_search`); other tools are tracked under IMP-A's
+        // deferred follow-up and silently ignore the token until then.
+        let run = move |wctx: &WorkspaceContext,
+                        cancel: &sqry_core::query::cancellation::CancellationToken|
+              -> anyhow::Result<Value> {
+            dispatch_by_name(&name_clone, wctx, &args_clone, cancel)
         };
 
         // SGA05: route through the shared graph acquirer so `WorkspaceEvicted`
@@ -654,8 +664,12 @@ impl DaemonMcpHandler {
 
         let name_clone: &'static str = tool_name;
         let args_clone = tool_args;
-        let run = move |wctx: &WorkspaceContext| -> anyhow::Result<Value> {
-            dispatch_by_name(name_clone, wctx, &args_clone)
+        // See the parent comment on the daemon's other dispatch site
+        // (~line 333) for the cancellation-routing rationale.
+        let run = move |wctx: &WorkspaceContext,
+                        cancel: &sqry_core::query::cancellation::CancellationToken|
+              -> anyhow::Result<Value> {
+            dispatch_by_name(name_clone, wctx, &args_clone, cancel)
         };
 
         let verdict = tool_core::acquire_and_execute(

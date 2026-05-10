@@ -55,16 +55,15 @@ struct AmbiguousSymbolWireWrapper<'a> {
 ///
 /// JSON output is written to stdout (the same channel as the success
 /// payload) so `--json` consumers can pipe through `jq`. Human output is
-/// written to stderr and lists candidates one per line.
+/// written to stderr and lists candidates one per line, including a
+/// suggested `--in <file>` invocation built from the first candidate.
 pub(crate) fn emit_ambiguous_symbol_error(
     streams: &mut OutputStreams,
     err: &AmbiguousSymbolError,
     json_output: bool,
 ) -> i32 {
-    let message = format!(
-        "Symbol '{}' is ambiguous; specify the qualified name",
-        err.name
-    );
+    let suggested_file = err.candidates.first().map(|c| c.file_path.as_str());
+    let message = build_ambiguity_message(&err.name, err.candidates.len(), suggested_file);
     if json_output {
         let envelope = AmbiguousSymbolWireWrapper {
             error: AmbiguousSymbolEnvelope {
@@ -104,6 +103,30 @@ pub(crate) fn emit_ambiguous_symbol_error(
         let _ = streams.write_diagnostic(&lines.join("\n"));
     }
     AMBIGUOUS_SYMBOL_EXIT_CODE
+}
+
+/// Build the human-readable ambiguity error message.
+///
+/// The previous text — "specify the qualified name" — was the user-visible
+/// half of the bug in verivus-oss/sqry#214: when N candidates share the
+/// same `qualified_name` (e.g., 11 plain-C functions named `do_exit` in 11
+/// files), no qualified name uniquely identifies any of them. The actual
+/// disambiguator is the file the symbol is defined in. This message tells
+/// the operator that, names the flag (`--in <file>`), and includes a
+/// concrete invocation built from the first candidate.
+fn build_ambiguity_message(
+    name: &str,
+    candidate_count: usize,
+    sample_file: Option<&str>,
+) -> String {
+    let mut msg = format!(
+        "Symbol '{name}' is ambiguous ({candidate_count} candidates); pass `--in <file>` \
+         to disambiguate by the file the intended symbol is defined in"
+    );
+    if let Some(file) = sample_file {
+        msg.push_str(&format!(" (e.g., `--in {file}`)"));
+    }
+    msg
 }
 
 /// Emit the `sqry::symbol_not_found` envelope on the active output streams
@@ -356,12 +379,18 @@ fn build_impact_symbols(
 
 /// Run the impact command.
 ///
+/// `in_file` is the optional file-path disambiguator surfaced as `--in
+/// <FILE>` on the CLI; equivalent to the MCP `dependency_impact.file_path`
+/// argument. When set, the resolver is restricted to candidates defined in
+/// that file.
+///
 /// # Errors
 /// Returns an error if the graph cannot be loaded or symbol cannot be found.
 pub fn run_impact(
     cli: &Cli,
     symbol: &str,
     path: Option<&str>,
+    in_file: Option<&str>,
     max_depth: usize,
     max_results: usize,
     include_indirect: bool,
@@ -395,19 +424,33 @@ pub fn run_impact(
     // resolver returns a typed [`SymbolResolveError`] with the full
     // candidate list which we render through the
     // `sqry::ambiguous_symbol` envelope.
+    //
+    // `--in <file>` (verivus-oss/sqry#214) plumbs through as
+    // `FileScope::Path`, restricting the resolver to candidates defined
+    // in the named file. This is the CLI counterpart to the MCP
+    // `dependency_impact.file_path` argument.
     let snapshot = graph.snapshot();
-    let target_node_id =
-        match snapshot.resolve_global_symbol_ambiguity_aware(symbol, FileScope::Any) {
-            Ok(node_id) => node_id,
-            Err(SymbolResolveError::Ambiguous(err)) => {
-                let exit_code = emit_ambiguous_symbol_error(&mut streams, &err, cli.json);
-                std::process::exit(exit_code);
+    let in_file_path = in_file.map(std::path::PathBuf::from);
+    let file_scope = in_file_path
+        .as_deref()
+        .map_or(FileScope::Any, FileScope::Path);
+    let target_node_id = match snapshot.resolve_global_symbol_ambiguity_aware(symbol, file_scope) {
+        Ok(node_id) => node_id,
+        Err(SymbolResolveError::Ambiguous(err)) => {
+            let exit_code = emit_ambiguous_symbol_error(&mut streams, &err, cli.json);
+            std::process::exit(exit_code);
+        }
+        Err(SymbolResolveError::NotFound { name }) => {
+            if let Some(path) = in_file {
+                let _ = streams.write_diagnostic(&format!(
+                    "Error: No definition of '{name}' found in file '{path}'."
+                ));
+                std::process::exit(SYMBOL_NOT_FOUND_EXIT_CODE);
             }
-            Err(SymbolResolveError::NotFound { name }) => {
-                let exit_code = emit_symbol_not_found(&mut streams, &name, cli.json);
-                std::process::exit(exit_code);
-            }
-        };
+            let exit_code = emit_symbol_not_found(&mut streams, &name, cli.json);
+            std::process::exit(exit_code);
+        }
+    };
 
     // BFS to find all dependents (reverse dependency traversal)
     let effective_max_depth = if include_indirect { max_depth } else { 1 };

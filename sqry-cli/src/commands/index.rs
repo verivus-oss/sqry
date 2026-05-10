@@ -626,6 +626,7 @@ pub fn run_index(
     classpath_file: Option<&Path>,
     build_system: Option<&str>,
     force_classpath: bool,
+    allow_nested: bool,
 ) -> Result<()> {
     if let Some(0) = threads {
         anyhow::bail!("--threads must be >= 1");
@@ -643,6 +644,16 @@ pub fn run_index(
         println!("Index already exists at {}", storage.graph_dir().display());
         println!("Use --force to rebuild, or run 'sqry update' to update incrementally");
         return Ok(());
+    }
+
+    // Cluster-E §E.3 — refuse to create a nested `.sqry/` inside an outer
+    // project that already has its own graph. The guard fires only on
+    // *fresh* creation: existing graphs at `root_path` (handled by the
+    // exit-gate above) and `--allow-nested` opt-in are exempt.
+    if !storage.exists()
+        && let Err(e) = sqry_core::workspace::assert_no_ancestor_graph(root_path, allow_nested)
+    {
+        anyhow::bail!("{e}");
     }
 
     // Log macro boundary analysis configuration
@@ -822,8 +833,51 @@ fn finish_progress_bar(progress_bar: Option<&Arc<CliProgressReporter>>) {
 // write_graph_validation removed
 
 fn build_graph_status(storage: &GraphStorage) -> Result<IndexStatus> {
-    if !storage.exists() {
-        return Ok(IndexStatus::not_found());
+    let snapshot_exists = storage.snapshot_path().exists();
+    let manifest_exists = storage.manifest_path().exists();
+
+    match (snapshot_exists, manifest_exists) {
+        (false, false) => return Ok(IndexStatus::not_found()),
+        (true, false) => {
+            // Cluster-G §4.3 — daemon-built snapshot. The daemon's
+            // `QueryDbHook` writes `snapshot.sqry` without a manifest,
+            // so `storage.exists()` (which checks the manifest) would
+            // mis-report "no graph snapshot found". Read the
+            // node/edge counts from the snapshot header instead.
+            let header = match load_header_from_path(storage.snapshot_path()) {
+                Ok(h) => h,
+                Err(e) => {
+                    return Err(anyhow::anyhow!(
+                        "snapshot present at {} but unreadable: {e}",
+                        storage.snapshot_path().display()
+                    ));
+                }
+            };
+            // The snapshot header carries the file count but no
+            // built_at timestamp; surface "unknown" so downstream
+            // renderers can decide what to show.
+            return Ok(IndexStatus::from_index(
+                storage.graph_dir().display().to_string(),
+                "unknown (daemon-built; no manifest)".to_string(),
+                0,
+            )
+            .symbol_count(header.node_count)
+            .file_count_opt(Some(header.file_count))
+            .has_relations(header.edge_count > 0)
+            .has_trigram(false)
+            .build());
+        }
+        (false, true) => {
+            // Manifest without a snapshot — corrupt half-built state.
+            return Err(anyhow::anyhow!(
+                "manifest at {} but no snapshot at {}; rebuild with `sqry index --force`",
+                storage.manifest_path().display(),
+                storage.snapshot_path().display()
+            ));
+        }
+        (true, true) => {
+            // Existing path: both files present, fall through.
+        }
     }
 
     // Load manifest
@@ -1277,6 +1331,7 @@ mod tests {
             None,
             None,
             false,
+            false, // allow_nested
         );
         assert!(result.is_ok());
 
@@ -1316,6 +1371,7 @@ mod tests {
             None,
             None,
             false,
+            false, // allow_nested
         )
         .unwrap();
 
@@ -1337,6 +1393,7 @@ mod tests {
             None,
             None,
             false,
+            false, // allow_nested
         );
         assert!(result.is_ok());
 
@@ -1358,6 +1415,7 @@ mod tests {
             None,
             None,
             false,
+            false, // allow_nested
         );
         assert!(result.is_ok());
     }
@@ -1448,6 +1506,7 @@ mod tests {
             None,
             None,
             false,
+            false, // allow_nested
         )
         .unwrap();
 
@@ -1503,6 +1562,7 @@ mod tests {
             None,
             None,
             false,
+            false, // allow_nested
         )
         .unwrap();
 
@@ -1557,6 +1617,7 @@ mod tests {
             None,
             None,
             false,
+            false, // allow_nested
         )
         .expect("initial build should succeed");
 
@@ -1586,6 +1647,7 @@ mod tests {
             None,
             None,
             false,
+            false, // allow_nested
         )
         .expect("--no-incremental must rebuild even when snapshot exists");
 
@@ -1656,6 +1718,7 @@ mod tests {
             None,
             None,
             false,
+            false, // allow_nested
         )
         .expect("initial build for prometheus test must succeed");
 
@@ -1668,6 +1731,58 @@ mod tests {
         assert!(
             result.is_ok(),
             "--metrics-format prometheus must succeed: {result:?}"
+        );
+    }
+    }
+
+    // Cluster-E §E.3 — `run_index` refuses to create a nested `.sqry/`
+    // when an outer project already has its own graph and the same
+    // project boundary contains both. The recovery message names all
+    // three paths.
+    large_stack_test! {
+    #[test]
+    fn run_index_rejects_nested_creation_without_allow_nested() {
+        use crate::args::Cli;
+        use clap::Parser;
+
+        let tmp = TempDir::new().unwrap();
+        // Outer project: Cargo.toml + .sqry/graph already in place.
+        let proj = tmp.path().join("proj");
+        fs::create_dir_all(proj.join(".sqry").join("graph")).unwrap();
+        fs::write(proj.join("Cargo.toml"), "[package]\n").unwrap();
+        // Inner directory the user mistakenly tries to index.
+        let nested = proj.join("sub");
+        fs::create_dir_all(&nested).unwrap();
+
+        let cli = Cli::parse_from(["sqry", "index"]);
+        let result = run_index(
+            &cli,
+            nested.to_str().unwrap(),
+            false,
+            None,
+            false,
+            false,
+            None,
+            false,
+            &[],
+            None,
+            false,
+            false,
+            crate::args::ClasspathDepthArg::Full,
+            None,
+            None,
+            false,
+            false, // allow_nested = false → guard fires
+        );
+        let err = result.expect_err("nested creation must error without --allow-nested");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("nested .sqry/ index"),
+            "must surface the nested-index recovery text, got: {msg}"
+        );
+        assert!(
+            msg.contains("--allow-nested"),
+            "must hint at the --allow-nested escape hatch, got: {msg}"
         );
     }
     }

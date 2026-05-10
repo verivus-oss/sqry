@@ -84,89 +84,103 @@ use crate::execution::execute_sqry_ask_with_translator;
 ///   `execute_*_for_daemon` wrapper.
 /// - `anyhow::Error::msg("dispatch_by_name: unknown tool name ...")`
 ///   if `name` is not in `DAEMON_SUPPORTED_TOOL_NAMES`.
-pub fn dispatch_by_name(name: &str, wctx: &WorkspaceContext, args_value: &Value) -> Result<Value> {
+pub fn dispatch_by_name(
+    name: &str,
+    wctx: &WorkspaceContext,
+    args_value: &Value,
+    cancel: &sqry_core::query::cancellation::CancellationToken,
+) -> Result<Value> {
+    // `A_cancellation.md` §A2 + §A3 — daemon-hosted MCP dispatch
+    // accepts a per-request `&CancellationToken` so deadline-driven
+    // cancellation flows through the same pass-boundary poll the
+    // standalone path uses. The token is currently propagated only
+    // through tools whose inner body routes through the executor's
+    // `*_cancellable` overloads (semantic_search today; the rest of
+    // the per-tool migration is tracked under IMP-A's deferred
+    // follow-up — see the cluster-A test row 6 deferral marker).
+    let _ = cancel; // suppresses unused-binding warnings on tool arms that
+    // do not yet propagate cancellation.
     match name {
         "semantic_search" => {
-            let args = params_to_semantic_search_args(args_value.clone())
-                .map_err(|e| anyhow!("invalid arguments: {e}"))?;
-            let exec = execute_semantic_search_for_daemon(wctx, &args)?;
+            let args =
+                params_to_semantic_search_args(args_value.clone()).map_err(anyhow::Error::from)?;
+            let exec = execute_semantic_search_for_daemon(wctx, &args, cancel)?;
             tool_response_json(exec).map_err(|e| anyhow!("response build: {e:?}"))
         }
         "relation_query" => {
-            let args = params_to_relation_query_args(args_value.clone())
-                .map_err(|e| anyhow!("invalid arguments: {e}"))?;
+            let args =
+                params_to_relation_query_args(args_value.clone()).map_err(anyhow::Error::from)?;
             let exec = execute_relation_query_for_daemon(wctx, &args)?;
             tool_response_json(exec).map_err(|e| anyhow!("response build: {e:?}"))
         }
         "direct_callers" => {
-            let args = params_to_direct_callers_args(args_value.clone())
-                .map_err(|e| anyhow!("invalid arguments: {e}"))?;
+            let args =
+                params_to_direct_callers_args(args_value.clone()).map_err(anyhow::Error::from)?;
             let exec = execute_direct_callers_for_daemon(wctx, &args)?;
             tool_response_json(exec).map_err(|e| anyhow!("response build: {e:?}"))
         }
         "direct_callees" => {
-            let args = params_to_direct_callees_args(args_value.clone())
-                .map_err(|e| anyhow!("invalid arguments: {e}"))?;
+            let args =
+                params_to_direct_callees_args(args_value.clone()).map_err(anyhow::Error::from)?;
             let exec = execute_direct_callees_for_daemon(wctx, &args)?;
             tool_response_json(exec).map_err(|e| anyhow!("response build: {e:?}"))
         }
         "find_unused" => {
-            let args = params_to_find_unused_args(args_value.clone())
-                .map_err(|e| anyhow!("invalid arguments: {e}"))?;
+            let args =
+                params_to_find_unused_args(args_value.clone()).map_err(anyhow::Error::from)?;
             let exec = execute_find_unused_for_daemon(wctx, &args)?;
             tool_response_json(exec).map_err(|e| anyhow!("response build: {e:?}"))
         }
         "find_cycles" => {
-            let args = params_to_find_cycles_args(args_value.clone())
-                .map_err(|e| anyhow!("invalid arguments: {e}"))?;
+            let args =
+                params_to_find_cycles_args(args_value.clone()).map_err(anyhow::Error::from)?;
             let exec = execute_find_cycles_for_daemon(wctx, &args)?;
             tool_response_json(exec).map_err(|e| anyhow!("response build: {e:?}"))
         }
         "is_node_in_cycle" => {
-            let args = params_to_is_node_in_cycle_args(args_value.clone())
-                .map_err(|e| anyhow!("invalid arguments: {e}"))?;
+            let args =
+                params_to_is_node_in_cycle_args(args_value.clone()).map_err(anyhow::Error::from)?;
             let exec = execute_is_node_in_cycle_for_daemon(wctx, &args)?;
             tool_response_json(exec).map_err(|e| anyhow!("response build: {e:?}"))
         }
         "trace_path" => {
-            let args = params_to_trace_path_args(args_value.clone())
-                .map_err(|e| anyhow!("invalid arguments: {e}"))?;
+            let args =
+                params_to_trace_path_args(args_value.clone()).map_err(anyhow::Error::from)?;
             let exec = execute_trace_path_for_daemon(wctx, &args)?;
             tool_response_json(exec).map_err(|e| anyhow!("response build: {e:?}"))
         }
         "subgraph" => {
-            let args = params_to_subgraph_args(args_value.clone())
-                .map_err(|e| anyhow!("invalid arguments: {e}"))?;
+            let args = params_to_subgraph_args(args_value.clone()).map_err(anyhow::Error::from)?;
             let exec = execute_subgraph_for_daemon(wctx, &args)?;
             tool_response_json(exec).map_err(|e| anyhow!("response build: {e:?}"))
         }
         "export_graph" => {
-            let args = params_to_export_graph_args(args_value.clone())
-                .map_err(|e| anyhow!("invalid arguments: {e}"))?;
+            let args =
+                params_to_export_graph_args(args_value.clone()).map_err(anyhow::Error::from)?;
             let exec = execute_export_graph_for_daemon(wctx, &args)?;
             tool_response_json(exec).map_err(|e| anyhow!("response build: {e:?}"))
         }
         "complexity_metrics" => {
             let args = params_to_complexity_metrics_args(args_value.clone())
-                .map_err(|e| anyhow!("invalid arguments: {e}"))?;
+                .map_err(anyhow::Error::from)?;
             let exec = execute_complexity_metrics_for_daemon(wctx, &args)?;
             tool_response_json(exec).map_err(|e| anyhow!("response build: {e:?}"))
         }
         "semantic_diff" => {
-            let args = params_to_semantic_diff_args(args_value.clone())
-                .map_err(|e| anyhow!("invalid arguments: {e}"))?;
+            let args =
+                params_to_semantic_diff_args(args_value.clone()).map_err(anyhow::Error::from)?;
             let exec = execute_semantic_diff_for_daemon(wctx, &args)?;
             tool_response_json(exec).map_err(|e| anyhow!("response build: {e:?}"))
         }
         "dependency_impact" => {
             let args = params_to_dependency_impact_args(args_value.clone())
-                .map_err(|e| anyhow!("invalid arguments: {e}"))?;
+                .map_err(anyhow::Error::from)?;
             let exec = execute_dependency_impact_for_daemon(wctx, &args)?;
             tool_response_json(exec).map_err(|e| anyhow!("response build: {e:?}"))
         }
         "show_dependencies" => {
             let args = params_to_show_dependencies_args(args_value.clone())
-                .map_err(|e| anyhow!("invalid arguments: {e}"))?;
+                .map_err(anyhow::Error::from)?;
             let exec = execute_show_dependencies_for_daemon(wctx, &args)?;
             tool_response_json(exec).map_err(|e| anyhow!("response build: {e:?}"))
         }
@@ -223,8 +237,7 @@ pub fn dispatch_sqry_ask(
     translator: &Arc<Translator>,
     args_value: &Value,
 ) -> Result<Value> {
-    let args = params_to_sqry_ask_args(args_value.clone())
-        .map_err(|e| anyhow!("invalid arguments: {e}"))?;
+    let args = params_to_sqry_ask_args(args_value.clone()).map_err(anyhow::Error::from)?;
     let exec = execute_sqry_ask_with_translator(Arc::clone(translator), &args)?;
     tool_response_json(exec).map_err(|e| anyhow!("response build: {e:?}"))
 }
@@ -259,7 +272,13 @@ mod tests {
             graph,
             executor,
         };
-        let err = dispatch_by_name("not_a_real_tool", &wctx, &serde_json::json!({})).unwrap_err();
+        let err = dispatch_by_name(
+            "not_a_real_tool",
+            &wctx,
+            &serde_json::json!({}),
+            &sqry_core::query::cancellation::CancellationToken::new(),
+        )
+        .unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("unknown tool name"),
@@ -295,7 +314,13 @@ mod tests {
             graph,
             executor,
         };
-        let err = dispatch_by_name("sqry_ask", &wctx, &serde_json::json!({})).unwrap_err();
+        let err = dispatch_by_name(
+            "sqry_ask",
+            &wctx,
+            &serde_json::json!({}),
+            &sqry_core::query::cancellation::CancellationToken::new(),
+        )
+        .unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("must be handled by the caller"),
@@ -323,7 +348,13 @@ mod tests {
             graph,
             executor,
         };
-        let err = dispatch_by_name("", &wctx, &serde_json::json!({})).unwrap_err();
+        let err = dispatch_by_name(
+            "",
+            &wctx,
+            &serde_json::json!({}),
+            &sqry_core::query::cancellation::CancellationToken::new(),
+        )
+        .unwrap_err();
         assert!(
             err.to_string().contains("unknown tool name"),
             "empty name should error with 'unknown tool name', got: {err}"

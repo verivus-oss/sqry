@@ -718,6 +718,7 @@ mod tests {
             include_file_context: false,
             include_container_context: false,
             expand_files: vec![],
+            budget_rows: None,
         }
     }
 

@@ -247,6 +247,13 @@ fn handle_query_error(query_error: &QueryError, json_output: bool) -> i32 {
             QueryError::Parse(_) => "sqry::parse",
             QueryError::Validation(_) => "sqry::validation",
             QueryError::Execution(_) => "sqry::execution",
+            // Cooperative cancellation surfaced from the query
+            // evaluator (per `A_cancellation.md` §4 + `00_contracts.md`
+            // §3.CC-1). The CLI does not currently install a
+            // cancellation token, but the variant must be exhaustively
+            // matched so adding the foundation does not break the
+            // CLI build.
+            QueryError::Cancelled => "sqry::cancelled",
         };
         write_json_error(&mut streams, code, &query_error.to_string());
     } else {
@@ -462,6 +469,7 @@ fn run() -> Result<()> {
             classpath_file,
             build_system,
             force_classpath,
+            allow_nested,
             ..
         }) => handle_index_command(
             &cli,
@@ -482,6 +490,7 @@ fn run() -> Result<()> {
             classpath_file.as_deref(),
             build_system.as_deref(),
             *force_classpath,
+            *allow_nested,
         )?,
 
         // Analyze command
@@ -835,6 +844,7 @@ fn run() -> Result<()> {
         Some(Command::Impact {
             symbol,
             path,
+            in_file,
             depth,
             limit,
             direct_only,
@@ -844,6 +854,7 @@ fn run() -> Result<()> {
                 &cli,
                 symbol,
                 path.as_deref(),
+                in_file.as_deref(),
                 *depth,
                 *limit,
                 !direct_only,
@@ -1166,6 +1177,9 @@ fn validate_index_if_requested(
                     None,
                     None,
                     false,
+                    // auto-rebuild path always operates on an existing graph at
+                    // `search_path`, so nested-index creation cannot apply.
+                    false,
                 ) {
                     eprintln!("Error: auto-rebuild failed: {err}");
                     return Err(2);
@@ -1214,6 +1228,7 @@ fn handle_index_command(
     classpath_file: Option<&std::path::Path>,
     build_system: Option<&str>,
     force_classpath: bool,
+    allow_nested: bool,
 ) -> Result<()> {
     // STEP_8 precedence: positional `<path>` wins; otherwise fall back to the
     // global `--workspace` / `SQRY_WORKSPACE_FILE`; otherwise `cli.search_path()`.
@@ -1247,6 +1262,7 @@ fn handle_index_command(
             classpath_file,
             build_system,
             force_classpath,
+            allow_nested,
         )
         .context("Index command failed")?;
     }

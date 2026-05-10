@@ -1840,13 +1840,45 @@ fn map_acquisition_error(err: GraphAcquisitionError) -> anyhow::Error {
             source_root,
             status,
         } => match status {
-            PluginSelectionStatus::IncompatibleUnknownPluginIds { unknown_plugin_ids } => {
+            PluginSelectionStatus::IncompatibleUnknownPluginIds {
+                unknown_plugin_ids,
+                manifest_path,
+            } => {
+                let suggested = sqry_plugin_registry::missing_features_for(&unknown_plugin_ids);
+                let all_have_features =
+                    sqry_plugin_registry::all_unknown_ids_have_features(&unknown_plugin_ids);
+                let manifest_str = manifest_path
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "<unknown>".to_string());
+                let suggestion = if !suggested.is_empty() {
+                    format!(
+                        "Rebuild this binary with `cargo install --path sqry-cli --features {}` \
+                         or rebuild the index: `sqry index {} --force`.",
+                        suggested.join(","),
+                        source_root.display(),
+                    )
+                } else if all_have_features {
+                    format!(
+                        "Rebuild the index with the binary that produced it: \
+                         `sqry index {} --force`.",
+                        source_root.display(),
+                    )
+                } else {
+                    format!(
+                        "The unknown ids do not match any known feature flag — \
+                         the manifest may be from a newer sqry version. \
+                         Rebuild the index: `sqry index {} --force`.",
+                        source_root.display(),
+                    )
+                };
                 anyhow::anyhow!(
-                    "Incompatible graph at {}: manifest references plugin ids unknown to this binary: {}. \
-                     Rebuild the index with `sqry index {} --force` after upgrading sqry.",
+                    "Incompatible graph at {} — manifest references plugins this binary \
+                     cannot load: {}. Manifest: {}. {}",
                     source_root.display(),
                     unknown_plugin_ids.join(", "),
-                    source_root.display()
+                    manifest_str,
+                    suggestion,
                 )
             }
             PluginSelectionStatus::IncompatibleSnapshotFormat { reason } => anyhow::anyhow!(
@@ -1861,6 +1893,11 @@ fn map_acquisition_error(err: GraphAcquisitionError) -> anyhow::Error {
                     source_root.display()
                 )
             }
+            other => anyhow::anyhow!(
+                "Incompatible graph at {}: {other:?}. Rebuild with `sqry index {} --force`.",
+                source_root.display(),
+                source_root.display(),
+            ),
         },
         GraphAcquisitionError::LoadFailed {
             source_root,

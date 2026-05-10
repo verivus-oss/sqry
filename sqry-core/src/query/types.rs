@@ -146,6 +146,121 @@ pub enum Expr {
     Join(JoinExpr),
 }
 
+impl Expr {
+    /// Bounded sanitised AST shape summary for diagnostic logging
+    /// (per `C_budget.md` §C4 + `00_contracts.md` §3.CC-2).
+    ///
+    /// Returns a single-line ASCII string ≤256 bytes that names the
+    /// expression's structure (`And(Condition, Condition)`,
+    /// `Or(...)`, `Not(...)`, `Join(...)`, `Condition(field~=)`)
+    /// without leaking values, paths, or regex patterns. Used by
+    /// the budget-exceeded WARN log so operators can grep on
+    /// canonical query shapes without exposing PII or
+    /// secret-bearing literals.
+    ///
+    /// The output is deterministic given the input AST: the same
+    /// query shape always produces the same summary regardless of
+    /// values. Length is bounded at 256 bytes — over-long shapes
+    /// are truncated with a trailing `…`.
+    #[must_use]
+    pub fn shape_summary(&self) -> String {
+        const MAX_LEN: usize = 256;
+        let mut out = String::with_capacity(64);
+        // Recursion depth is the AST's `RecursionLimits` cap so
+        // there's no risk of unbounded recursion even on
+        // pathological input.
+        Self::shape_summary_into(self, &mut out, MAX_LEN);
+        if out.len() > MAX_LEN {
+            // Single-byte UTF-8 truncation safe: every byte we
+            // wrote is plain ASCII (predicate field names are the
+            // only non-literal source and they are validated to
+            // [a-z_.]).
+            out.truncate(MAX_LEN.saturating_sub(3));
+            out.push('\u{2026}');
+        }
+        out
+    }
+
+    fn shape_summary_into(expr: &Expr, out: &mut String, max_len: usize) {
+        if out.len() >= max_len {
+            return;
+        }
+        match expr {
+            Expr::Or(operands) => {
+                out.push_str("Or(");
+                for (i, op) in operands.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    Self::shape_summary_into(op, out, max_len);
+                    if out.len() >= max_len {
+                        break;
+                    }
+                }
+                out.push(')');
+            }
+            Expr::And(operands) => {
+                out.push_str("And(");
+                for (i, op) in operands.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    Self::shape_summary_into(op, out, max_len);
+                    if out.len() >= max_len {
+                        break;
+                    }
+                }
+                out.push(')');
+            }
+            Expr::Not(inner) => {
+                out.push_str("Not(");
+                Self::shape_summary_into(inner, out, max_len);
+                out.push(')');
+            }
+            Expr::Join(j) => {
+                out.push_str("Join(");
+                Self::shape_summary_into(&j.left, out, max_len);
+                out.push(' ');
+                out.push_str(match j.edge {
+                    JoinEdgeKind::Calls => "CALLS",
+                    JoinEdgeKind::Imports => "IMPORTS",
+                    JoinEdgeKind::Inherits => "INHERITS",
+                    JoinEdgeKind::Implements => "IMPLEMENTS",
+                });
+                out.push(' ');
+                Self::shape_summary_into(&j.right, out, max_len);
+                out.push(')');
+            }
+            Expr::Condition(c) => {
+                // field + operator only. Values, regex patterns,
+                // and subquery contents are deliberately elided
+                // — the field name is the diagnostic signal,
+                // values can carry user data.
+                out.push_str(c.field.as_str());
+                out.push_str(match c.operator {
+                    Operator::Equal => ":",
+                    Operator::Regex => "~=",
+                    Operator::Greater => ">",
+                    Operator::Less => "<",
+                    Operator::GreaterEq => ">=",
+                    Operator::LessEq => "<=",
+                });
+                // Replace the actual value with a kind marker so
+                // operators can distinguish a literal/regex/
+                // subquery shape without seeing the value.
+                out.push_str(match c.value {
+                    Value::String(_) => "<str>",
+                    Value::Regex(_) => "<regex>",
+                    Value::Number(_) => "<num>",
+                    Value::Boolean(_) => "<bool>",
+                    Value::Variable(_) => "<var>",
+                    Value::Subquery(_) => "<subquery>",
+                });
+            }
+        }
+    }
+}
+
 /// Edge kind for join queries
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum JoinEdgeKind {

@@ -104,15 +104,19 @@ fn find_sqry_mcp_binary() -> Result<PathBuf> {
 
 /// Detect the workspace root from the current directory.
 ///
-/// Walks up from CWD looking for `.sqry/graph` or `.git`.
+/// Delegates to [`sqry_core::workspace::discover_workspace_root`] so the
+/// walk is bounded by [`sqry_core::workspace::MAX_ANCESTOR_DEPTH`] and
+/// stops at the first project marker
+/// ([`sqry_core::workspace::PROJECT_MARKERS`]) — eliminating the
+/// stray-`~/.sqry/graph` foot-gun (cluster-E §E.1).
 fn detect_workspace_root() -> Option<PathBuf> {
     let cwd = std::env::current_dir().ok()?;
-    let mut dir = cwd.as_path();
-    loop {
-        if dir.join(".sqry/graph").is_dir() || dir.join(".git").exists() {
-            return Some(dir.to_path_buf());
+    match sqry_core::workspace::discover_workspace_root(&cwd) {
+        sqry_core::workspace::WorkspaceRootDiscovery::GraphFound { root, .. } => Some(root),
+        sqry_core::workspace::WorkspaceRootDiscovery::BoundaryOnly { boundary, .. } => {
+            Some(boundary)
         }
-        dir = dir.parent()?;
+        sqry_core::workspace::WorkspaceRootDiscovery::None => None,
     }
 }
 

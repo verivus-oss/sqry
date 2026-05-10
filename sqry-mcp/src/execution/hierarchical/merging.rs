@@ -414,6 +414,7 @@ mod tests {
             auto_merge: true,
             include_file_context: false,
             include_container_context: false,
+            budget_rows: None,
         }
     }
 

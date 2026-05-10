@@ -73,6 +73,24 @@ fn validate_context_lines(value: i64) -> Result<usize, RpcError> {
     validate_usize(value, "context_lines", 0, 20)
 }
 
+/// Cluster-C iter-2: reject `budget_rows: 0` at the daemon-hosted MCP
+/// boundary too. Mirror of `sqry-mcp/src/server.rs::validate_budget_rows`.
+fn validate_budget_rows(value: Option<u64>) -> Result<Option<u64>, RpcError> {
+    match value {
+        Some(0) => Err(RpcError::validation_with_data(
+            "budget_rows must be > 0".to_string(),
+            serde_json::json!({
+                "kind": "validation",
+                "constraint": "range",
+                "field": "budget_rows",
+                "min": 1,
+                "actual": 0,
+            }),
+        )),
+        other => Ok(other),
+    }
+}
+
 fn validate_max_depth(value: i64, max_limit: i64) -> Result<usize, RpcError> {
     validate_usize(value, "max_depth", 1, max_limit)
 }
@@ -178,6 +196,7 @@ pub fn params_to_semantic_search_args(params: Value) -> Result<SemanticSearchArg
         pagination,
         score_min,
         include_classpath: params.include_classpath,
+        budget_rows: validate_budget_rows(params.budget_rows)?,
     })
 }
 

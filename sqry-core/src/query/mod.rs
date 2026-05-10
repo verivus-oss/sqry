@@ -105,8 +105,11 @@ mod repo_filter;
 pub mod unused_config;
 
 // Boolean query language modules
+pub mod budget;
 pub mod builder;
 pub mod cache;
+pub mod cancellation;
+pub mod cost_gate;
 pub mod error;
 pub mod lexer;
 pub mod optimizer;

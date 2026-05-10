@@ -14,7 +14,12 @@ pub use cache::{
     WORKSPACE_STATUS_FILENAME, WorkspaceIndexStatus, WorkspaceWarning, cache_path, read_cache,
     write_cache,
 };
-pub use discovery::{DiscoveryMode, discover_repositories};
+pub use discovery::{
+    ArtifactKind, DiscoveredArtifact, DiscoveryMode, MAX_ANCESTOR_DEPTH, NestedIndexError,
+    PROJECT_MARKERS, RemovalError, SkipReason, SkippedArtifact, WorkspaceCleanReport,
+    WorkspaceRootDiscovery, assert_no_ancestor_graph, discover_repositories,
+    discover_workspace_root,
+};
 pub use error::{WorkspaceError, WorkspaceResult};
 pub use index::{MatchInfo, NodeWithRepo, WorkspaceIndex, WorkspaceStats};
 pub use logical::{

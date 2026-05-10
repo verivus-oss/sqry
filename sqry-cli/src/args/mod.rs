@@ -44,6 +44,14 @@ pub struct Cli {
     /// (same contract as the planner's `name:<literal>` predicate; native
     /// dot- and Ruby-`#` qualified display names also check graph-canonical
     /// `::`, and glob meta is matched as literal characters).
+    ///
+    /// This shorthand routes to `sqry search` (regex / literal). It does
+    /// **not** accept planner predicates like `kind:function` or
+    /// `name~=/regex/`. For anything beyond a single pattern, use
+    /// `sqry search` (regex) or `sqry query` (structural planner).
+    /// On workspaces with >50k symbols, prefer the explicit subcommand
+    /// so you can scope with `--kind` / `--lang` / `path:` — see
+    /// `docs/cli/scaling-large-codebases.md`.
     #[arg(required = false)]
     pub pattern: Option<String>,
 
@@ -486,24 +494,32 @@ pub enum Command {
     #[command(display_order = 30)]
     Visualize(VisualizeCommand),
 
-    /// Search for symbols by pattern (simple pattern matching)
+    /// Search for symbols by name pattern (regex / literal matching)
     ///
-    /// Fast pattern-based search using regex or literal matching.
-    /// Use this for quick searches with simple text patterns.
+    /// Pattern-based search. The pattern is treated as a Rust regex by
+    /// default, or as a byte-literal symbol-name match with `--exact`.
+    /// This is **not** the structural planner — predicates like
+    /// `kind:function`, `lang:rust`, `name~=/.../`, or boolean
+    /// `AND` / `OR` are NOT accepted here. Use `sqry query` for those.
     ///
-    /// For complex queries with boolean logic and AST predicates, use 'query' instead.
+    /// On large workspaces (>50k nodes), narrow with `--lang` /
+    /// `--kind` to keep latency bounded. See
+    /// `docs/cli/scaling-large-codebases.md` for the pairing rule.
     ///
     /// Examples:
-    ///   sqry search "test.*"           # Find symbols matching regex
-    ///   sqry search "test" --save-as find-tests  # Save as alias
-    ///   sqry search "test" --validate fail       # Strict index validation
+    ///   sqry search "test.*"           # regex match on names
+    ///   sqry search "main" --exact     # byte-literal name match
+    ///   sqry search "test" --kind function --lang rust
+    ///   sqry search "test" --save-as find-tests  # save as alias
+    ///   sqry search "test" --validate fail       # strict index validation
     ///
-    /// For kind/language/fuzzy filtering, use the top-level shorthand:
+    /// For kind/language/fuzzy filtering, the top-level shorthand also
+    /// works:
     ///   sqry --kind function "test"    # Filter by kind
     ///   sqry --exact "main"            # Exact match
     ///   sqry --fuzzy "config"          # Fuzzy search
     ///
-    /// See also: 'sqry query' for structured AST-aware queries
+    /// See also: 'sqry query' for structured AST-aware queries.
     #[command(display_order = 1, verbatim_doc_comment)]
     Search {
         /// Search pattern (regex by default; literal byte-exact
@@ -569,30 +585,40 @@ pub enum Command {
         macro_boundaries: bool,
     },
 
-    /// Execute AST-aware query (structured queries with boolean logic)
+    /// Execute a structural AST-aware query (sqry-core query parser)
     ///
-    /// Powerful structured queries using predicates and boolean operators.
-    /// Use this for complex searches that combine multiple criteria.
+    /// Routes through the `sqry-core` query parser. Accepts `kind:`,
+    /// `lang:`, `path:` / `file:`, `name:`, `name~=/regex/`,
+    /// `visibility:`, `async:`, `callers:`, `callees:`, `imports:`,
+    /// `exports:`, plus boolean `AND` / `OR` / `NOT`. This is **not**
+    /// the regex / literal pattern surface — `sqry search` is — and it
+    /// is **not** the planner-DAG grammar; for joins / subqueries /
+    /// fusion use `sqry plan-query` instead. The two grammars are NOT
+    /// predicate-equivalent: the planner does not accept `name~=`.
     ///
-    /// For simple pattern matching, use 'search' instead.
+    /// On large workspaces (>50k nodes), every `name~=/regex/` must be
+    /// paired with at least one of `lang:`, `path:`, or `kind:` to
+    /// avoid the cost gate's `query_too_broad` rejection. See
+    /// `docs/cli/scaling-large-codebases.md`.
     ///
     /// Predicate examples:
-    ///   - kind:function                 # Find functions
-    ///   - name:test                     # Name contains 'test'
-    ///   - lang:rust                     # Rust files only
-    ///   - visibility:public             # Public symbols
-    ///   - async:true                    # Async functions
+    ///   - kind:function                  # Find functions
+    ///   - name:test                      # Name contains 'test'
+    ///   - name~=/_set$/ kind:method      # Regex paired with kind
+    ///   - lang:rust                      # Rust files only
+    ///   - visibility:public              # Public symbols
+    ///   - async:true                     # Async functions
     ///
     /// Boolean logic:
-    ///   - kind:function AND name:test   # Functions with 'test' in name
-    ///   - kind:class OR kind:struct     # All classes or structs
-    ///   - lang:rust AND visibility:public  # Public Rust symbols
+    ///   - kind:function AND name:test    # Functions with 'test' in name
+    ///   - kind:class OR kind:struct      # All classes or structs
+    ///   - lang:rust AND visibility:public # Public Rust symbols
     ///
     /// Relation queries (28 languages with full support):
-    ///   - callers:authenticate          # Who calls authenticate?
-    ///   - callees:processData           # What does processData call?
-    ///   - exports:UserService           # What does `UserService` export?
-    ///   - imports:database              # What imports database?
+    ///   - callers:authenticate           # Who calls authenticate?
+    ///   - callees:processData            # What does processData call?
+    ///   - exports:UserService            # What does UserService export?
+    ///   - imports:database               # What imports database?
     ///
     /// Supported for: C, C++, C#, CSS, Dart, Elixir, Go, Groovy, Haskell, HTML,
     /// Java, JavaScript, Kotlin, Lua, Perl, PHP, Python, R, Ruby, Rust, Scala,
@@ -602,7 +628,7 @@ pub enum Command {
     ///   sqry query "kind:function AND name:test" --save-as test-funcs
     ///   sqry @test-funcs src/
     ///
-    /// See also: 'sqry search' for simple pattern-based searches
+    /// See also: 'sqry search' for regex / literal name matching.
     #[command(display_order = 2, verbatim_doc_comment)]
     Query {
         /// Query expression with predicates.
@@ -923,6 +949,17 @@ pub enum Command {
         /// Force classpath re-resolution (ignore cached classpath).
         #[arg(long, help_heading = headings::ADVANCED_CONFIGURATION, display_order = 45)]
         force_classpath: bool,
+
+        /// Allow creating a nested `.sqry/` index inside an outer
+        /// project that already has one (cluster-E §E.3).
+        ///
+        /// By default `sqry index` refuses to create a second graph
+        /// inside the same project boundary so accidental nested
+        /// artifacts are caught early. Pass this flag when the nested
+        /// directory is intentionally a sub-project with its own
+        /// graph.
+        #[arg(long, help_heading = headings::ADVANCED_CONFIGURATION, display_order = 50)]
+        allow_nested: bool,
 
         #[command(flatten)]
         plugin_selection: PluginSelectionArgs,
@@ -1702,6 +1739,7 @@ pub enum Command {
     ///   sqry impact -d 5 `MyClass`                # Deep analysis (5 levels)
     ///   sqry impact --direct-only func          # Only direct dependents
     ///   sqry impact --show-files func           # Show affected files
+    ///   sqry impact do_exit --in kernel/exit.c  # Disambiguate by file
     #[command(alias = "imp", display_order = 24, verbatim_doc_comment)]
     Impact {
         /// Symbol to analyze.
@@ -1711,6 +1749,12 @@ pub enum Command {
         /// Search path (defaults to current directory).
         #[arg(long, help_heading = headings::SEARCH_INPUT, display_order = 20)]
         path: Option<String>,
+
+        /// File the target symbol is defined in (disambiguator for ambiguous
+        /// names — equivalent to the MCP `dependency_impact.file_path`
+        /// argument). Accepts repo-relative or absolute paths.
+        #[arg(long = "in", help_heading = headings::SEARCH_INPUT, display_order = 25, value_name = "FILE")]
+        in_file: Option<String>,
 
         /// Maximum analysis depth (default: 3).
         #[arg(long, short = 'd', default_value = "3", help_heading = headings::GRAPH_FILTERING, display_order = 10)]
@@ -1923,6 +1967,35 @@ pub enum DaemonAction {
         /// Emit machine-readable JSON output instead of human-readable text.
         #[arg(long)]
         json: bool,
+    },
+    /// Reset a loaded workspace to `Unloaded` state without touching disk.
+    ///
+    /// Cluster-G §3.2 — non-destructive recovery primitive. Drops the
+    /// in-memory graph and refunds admission bytes, but PRESERVES the
+    /// workspace's manager-map entry, `pinned` bit, and `last_error`.
+    /// Files under `<root>/.sqry/` are untouched — destructive cleanup
+    /// is owned by `sqry workspace clean`.
+    ///
+    /// Use this to recover a workspace stuck in `Failed` or `Evicted`
+    /// state (e.g. after a post-build oversize rejection) without
+    /// stopping the daemon and without re-walking gitignore. The next
+    /// `sqry daemon load <path>` is cheap because the prior snapshot
+    /// is still on disk.
+    ///
+    /// Pass `--force` to reset a `pinned` workspace (refused by default).
+    ///
+    /// Mappings:
+    ///
+    ///   Loaded / Failed / Evicted → Unloaded
+    ///   Rebuilding → cancellation dispatched (-32009; retry after 250ms)
+    ///   Loading    → -32008 ResetWhileLoading
+    #[command(verbatim_doc_comment)]
+    Reset {
+        /// Workspace root directory to reset.
+        path: PathBuf,
+        /// Reset even if the workspace is `pinned` in `daemon.toml`.
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -2852,6 +2925,40 @@ pub enum WorkspaceCommand {
         /// Bypass the 60-second aggregate-status cache and force a recompute.
         #[arg(long, help_heading = headings::WORKSPACE_CONFIGURATION, display_order = 20)]
         no_cache: bool,
+    },
+
+    /// Discover and (optionally) remove stale .sqry artifacts under a path
+    ///
+    /// Cluster-E §E.4 — emits a `WorkspaceCleanReport` listing every
+    /// `.sqry/`, `.sqry-cache`, `.sqry-prof`, legacy `.sqry-index`,
+    /// `.sqry-index.user`, and stranded nested-`.sqry/` artifact found
+    /// under the root, classifies each, and prints a dry-run plan.
+    /// Pass `--apply` to actually remove the planned-for-removal set.
+    Clean {
+        /// Root to scan. Defaults to CWD.
+        #[arg(value_name = "ROOT", default_value = ".", help_heading = headings::WORKSPACE_INPUT, display_order = 10)]
+        root: String,
+
+        /// Actually remove the planned artifacts. Without this flag, the
+        /// command prints what *would* be removed and exits without
+        /// touching the filesystem.
+        #[arg(long, help_heading = headings::WORKSPACE_CONFIGURATION, display_order = 10)]
+        apply: bool,
+
+        /// Skip the active-daemon-artifact safety check. Required to
+        /// remove a `.sqry/graph/` that the running daemon currently
+        /// has loaded.
+        #[arg(long, requires = "apply", help_heading = headings::WORKSPACE_CONFIGURATION, display_order = 20)]
+        force: bool,
+
+        /// Also remove `.sqry-index.user` (user-curated state — aliases,
+        /// recent queries). Off by default.
+        #[arg(long, help_heading = headings::WORKSPACE_CONFIGURATION, display_order = 30)]
+        include_user_state: bool,
+
+        /// Emit the report as JSON (the `WorkspaceCleanReport` shape).
+        #[arg(long, help_heading = headings::WORKSPACE_CONFIGURATION, display_order = 40)]
+        json: bool,
     },
 }
 

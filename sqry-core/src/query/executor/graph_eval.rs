@@ -96,18 +96,54 @@ pub struct GraphEvalContext<'a> {
     /// Precomputed subquery result sets, keyed by `(span.start, span.end)`.
     /// Populated by `precompute_subqueries()` before the per-node evaluation loop.
     pub subquery_cache: SubqueryCache,
+    /// Cooperative cancellation token polled by [`evaluate_all`]
+    /// at every [`CANCELLATION_POLL_BATCH`]-node boundary in the
+    /// sequential path and on every iteration in the rayon path
+    /// (per `A_cancellation.md` §3 + `00_contracts.md` §3.CC-1).
+    ///
+    /// Never-cancelled by default — non-cancellable callers
+    /// (`QueryExecutor::execute_on_*`) construct a fresh token
+    /// trampoline. The MCP / IPC dispatch wrappers
+    /// (`A_cancellation.md` §2) install a per-request token whose
+    /// `cancel()` is called when the per-tool deadline elapses, so
+    /// the in-flight `spawn_blocking` thread observes the signal on
+    /// its next pass-boundary poll and short-circuits with
+    /// [`crate::query::error::QueryError::Cancelled`].
+    pub cancellation: crate::query::cancellation::CancellationToken,
+    /// Per-tool runtime row budget (per `C_budget.md` §§1–3 +
+    /// `00_contracts.md` §3.CC-2). [`evaluate_all`] calls
+    /// `budget.tick()` on every per-node iteration; on overflow
+    /// `tick()` writes a [`crate::query::budget::CancellationSource::Budget`]
+    /// tag to the budget's shared atomic state and flips the
+    /// shared cancellation token. The same token is the one in
+    /// the `cancellation` field above — they are the same
+    /// `Arc<AtomicBool>`, so the cooperative-cancellation poll
+    /// path and the budget-overflow path observe the same flag
+    /// regardless of which side cancelled first.
+    ///
+    /// Default budget is unbounded (`u64::MAX`), preserving
+    /// call-site back-compat for LSP / CLI evaluators that have
+    /// no per-tool budget concept yet.
+    pub budget: crate::query::budget::QueryBudget,
 }
 
 impl<'a> GraphEvalContext<'a> {
     /// Creates a new evaluation context.
     #[must_use]
     pub fn new(graph: &'a CodeGraph, plugin_manager: &'a PluginManager) -> Self {
+        // Single never-cancelled token shared between the
+        // cancellation field and the budget. The budget defaults
+        // to unbounded so LSP / CLI evaluators never trip it.
+        let cancellation = crate::query::cancellation::CancellationToken::new();
+        let budget = crate::query::budget::QueryBudget::unbounded(cancellation.clone());
         Self {
             graph,
             plugin_manager,
             workspace_root: None,
             disable_parallel: false,
             subquery_cache: HashMap::new(),
+            cancellation,
+            budget,
         }
     }
 
@@ -122,6 +158,45 @@ impl<'a> GraphEvalContext<'a> {
     #[must_use]
     pub fn with_parallel_disabled(mut self, disabled: bool) -> Self {
         self.disable_parallel = disabled;
+        self
+    }
+
+    /// Installs the cooperative cancellation token polled by
+    /// [`evaluate_all`].
+    ///
+    /// `A_cancellation.md` §3 + `00_contracts.md` §3.CC-1: the token
+    /// is `Arc<AtomicBool>`-backed (re-exported from the build
+    /// pipeline), so cloning into the context is one Arc bump and
+    /// every clone observes the same flag.
+    #[must_use]
+    pub fn with_cancellation(
+        mut self,
+        token: crate::query::cancellation::CancellationToken,
+    ) -> Self {
+        // Cancellation token AND the budget's internal token must
+        // be the same `Arc<AtomicBool>` so a budget overflow
+        // observed by `evaluate_all`'s poll path classifies
+        // through the budget's source tag (and vice versa). Per
+        // `C_budget.md` §3 + `00_contracts.md` §3.CC-1.
+        self.cancellation = token.clone();
+        // Replace the budget with one that wraps the new token,
+        // preserving the previous `max_rows` configuration.
+        let max_rows = self.budget.max_rows;
+        self.budget = crate::query::budget::QueryBudget::new(max_rows, token);
+        self
+    }
+
+    /// Installs the per-tool row budget polled by [`evaluate_all`]
+    /// (per `C_budget.md` §3 + `00_contracts.md` §3.CC-2). The
+    /// supplied `QueryBudget` MUST share the same
+    /// [`crate::query::cancellation::CancellationToken`] as
+    /// [`Self::with_cancellation`] — `with_budget` overwrites the
+    /// `cancellation` field with the budget's token to enforce
+    /// this invariant.
+    #[must_use]
+    pub fn with_budget(mut self, budget: crate::query::budget::QueryBudget) -> Self {
+        self.cancellation = budget.cancel.clone();
+        self.budget = budget;
         self
     }
 
@@ -177,15 +252,60 @@ fn collect_subquery_exprs<'a>(expr: &'a Expr, out: &mut Vec<((usize, usize), &'a
     }
 }
 
+/// Cooperative-cancellation polling cadence for [`evaluate_all`]'s
+/// sequential path: one [`CancellationToken::is_cancelled`] atomic
+/// load per `CANCELLATION_POLL_BATCH` node evaluations.
+///
+/// `A_cancellation.md` §3 — quantitative motivation:
+/// - `evaluate_node` for the canonical broad-regex case
+///   (`name~=/.*_set$/`) costs 50–200 ns per node on x86 (cached
+///   regex + a single short-string match). One `Acquire` atomic load
+///   is 1–3 ns uncontended.
+/// - With a batch of 1024, the per-iteration amortised poll cost is
+///   ~3 ns / 1024 ≈ 0.003 ns ≪ 0.01% of predicate cost.
+/// - Wall-clock per-batch deadline observation latency: 100 ns × 1024
+///   ≈ 100 µs — comfortably below the 60 s tool deadline budget.
+/// - Smaller (e.g. 1) → 3% per-iteration overhead. Larger (e.g.
+///   100 000) → 10 ms cancel latency, fine for deadlines but bad for
+///   future admin-cancel IPCs.
+///
+/// `1024` is the conservative choice. The unit test
+/// `query_cancellation` in `sqry-core/tests/` measures actual
+/// cancel-to-return latency; the value can be tightened to 32–256 or
+/// loosened to 4096 post-implementation if the benchmark shows
+/// headroom.
+///
+/// [`CancellationToken::is_cancelled`]: crate::query::cancellation::CancellationToken::is_cancelled
+pub const CANCELLATION_POLL_BATCH: usize = 1024;
+
 /// Evaluates query against all nodes, returning matching `NodeIds`.
 ///
 /// # Errors
 ///
-/// Returns an error if predicate evaluation fails (e.g., unsupported predicates).
+/// Returns an error if predicate evaluation fails (e.g., unsupported
+/// predicates) or if the context's cancellation token is observed
+/// cancelled (returns
+/// [`crate::query::error::QueryError::Cancelled`] wrapped in
+/// `anyhow::Error`).
 pub fn evaluate_all(ctx: &mut GraphEvalContext, expr: &Expr) -> Result<Vec<NodeId>> {
+    // Cluster-A iter-2 BLOCKER 2: poll the cancellation token BEFORE
+    // `precompute_subqueries`. Subquery precomputation can recurse
+    // through `evaluate_all` for arbitrary relation chains and the
+    // existing per-batch poll fires only inside the scan loop — an
+    // already-cancelled or deadline-cancelled request would otherwise
+    // run an unbounded subquery scan before observing cancellation
+    // (codex iter-1 review).
+    //
+    // Cluster-C iter-2 BLOCKER 1: also CAS-tag External here so the
+    // wire envelope reflects the deadline cancel (rather than getting
+    // reclassified as `runtime_budget` if a tick() ran later).
+    if ctx.budget.cancel.is_cancelled() {
+        ctx.budget.mark_external_cancel();
+        return Err(crate::query::QueryError::Cancelled.into());
+    }
     // Precompute all subquery result sets before the per-node evaluation loop.
-    // This is critical for performance: without precomputation, each subquery
-    // matcher would re-evaluate the full graph for every candidate node (O(N^2)).
+    // Subquery scans recurse through `evaluate_all`, so the budget counter
+    // covers them automatically (per `C_budget.md` §3).
     ctx.precompute_subqueries(expr)?;
 
     let arena = ctx.graph.nodes();
@@ -195,9 +315,43 @@ pub fn evaluate_all(ctx: &mut GraphEvalContext, expr: &Expr) -> Result<Vec<NodeI
     let expr_depth = recursion_limits.effective_expr_depth()?;
     let mut guard = crate::query::security::RecursionGuard::new(expr_depth)?;
 
-    if ctx.disable_parallel {
-        // Sequential evaluation
+    // Per-scan tracing span (per `C_budget.md` §C7). Fields are
+    // populated on close so observability sees the final count on
+    // every exit path (success, budget-exceeded, recursion error,
+    // panic).
+    let _span = tracing::info_span!(
+        "graph_eval.evaluate_all",
+        budget_rows = ctx.budget.max_rows,
+        examined = tracing::field::Empty,
+        matched = tracing::field::Empty,
+        budget_exceeded = tracing::field::Empty,
+    )
+    .entered();
+
+    // Pre-loop cancellation check (`A_cancellation.md` §3 DESIGNED
+    // block). Handles the case where the wrapper deadline has
+    // already fired before this evaluator was even reached — e.g.
+    // when a parse-cache miss took the entire deadline budget.
+    //
+    // Cluster-C iter-2 BLOCKER 1: when an external observer flipped
+    // the cancel token but never CAS-tagged the budget source, mark
+    // External NOW so a subsequent `tick()` overflow cannot CAS
+    // `None → Budget` and reclassify a deadline-cancellation as a
+    // runtime-budget rejection on the wire.
+    if ctx.cancellation.is_cancelled() {
+        ctx.budget.mark_external_cancel();
+        return finalize_span_and_return(ctx, Err(classify_cancel(&ctx.budget)), expr);
+    }
+
+    let result: Result<Vec<NodeId>> = if ctx.disable_parallel {
+        // Sequential evaluation with per-CANCELLATION_POLL_BATCH
+        // cooperative-cancellation poll. Budget tick fires on every
+        // node iteration. On an externally-cancelled token the
+        // typed error is chosen by the budget's source-tag (per
+        // `C_budget.md` §3 Finding 3 fix).
         let mut matches = Vec::new();
+        let mut since_check: usize = 0;
+        let mut bail: Option<anyhow::Error> = None;
         for (id, entry) in arena.iter() {
             // Skip Phase 4c-prime unified-away losers — they remain in
             // the arena as inert duplicates so CSR row_ptr sizing stays
@@ -207,11 +361,42 @@ pub fn evaluate_all(ctx: &mut GraphEvalContext, expr: &Expr) -> Result<Vec<NodeI
             if entry.is_unified_loser() {
                 continue;
             }
-            if evaluate_node(ctx, id, expr, &mut guard)? {
-                matches.push(id);
+            since_check += 1;
+            if since_check >= CANCELLATION_POLL_BATCH {
+                since_check = 0;
+                if ctx.cancellation.is_cancelled() {
+                    // Cluster-C iter-2 BLOCKER 1: ensure External
+                    // wins the source-tag CAS race when the wrapper
+                    // flipped the token but didn't mark the budget.
+                    // No-op when Budget was already CAS'd by a
+                    // concurrent worker's tick().
+                    ctx.budget.mark_external_cancel();
+                    bail = Some(classify_cancel(&ctx.budget));
+                    break;
+                }
+            }
+            // Budget tick — increments shared counter, trips
+            // cancel on overflow. On overflow `tick()` has already
+            // stamped source = Budget before returning, so a
+            // concurrent observer sees the matching tag.
+            if ctx.budget.tick().is_err() {
+                bail = Some(classify_cancel(&ctx.budget));
+                break;
+            }
+            match evaluate_node(ctx, id, expr, &mut guard) {
+                Ok(true) => matches.push(id),
+                Ok(false) => {}
+                Err(e) => {
+                    bail = Some(e);
+                    break;
+                }
             }
         }
-        Ok(matches)
+        if let Some(e) = bail {
+            Err(e)
+        } else {
+            Ok(matches)
+        }
     } else {
         // Parallel evaluation - each thread needs its own guard
         use rayon::prelude::*;
@@ -221,23 +406,149 @@ pub fn evaluate_all(ctx: &mut GraphEvalContext, expr: &Expr) -> Result<Vec<NodeI
             .filter(|(_id, entry)| !entry.is_unified_loser())
             .map(|(id, _)| id)
             .collect();
+
+        // Clone the budget for the rayon workers (cheap — every
+        // field is `Arc`-shared). All workers observe the same
+        // `examined` counter and the same source tag.
+        let budget = ctx.budget.clone();
         let results: Vec<Result<Option<NodeId>>> = node_ids
             .into_par_iter()
             .map(|id| {
+                // Once cancellation is observed, every subsequent
+                // worker funnels through `classify_cancel` for a
+                // deterministic typed error matching the source
+                // tag. Per `C_budget.md` §3 Finding 3 fix.
+                if budget.cancel.is_cancelled() {
+                    // Cluster-C iter-2 BLOCKER 1: same as the
+                    // sequential path — mark External BEFORE
+                    // classify_cancel so a subsequent tick() can't
+                    // reclassify a deadline-cancellation as
+                    // runtime_budget on the wire.
+                    budget.mark_external_cancel();
+                    return Err(classify_cancel(&budget));
+                }
+                if budget.tick().is_err() {
+                    return Err(classify_cancel(&budget));
+                }
                 let mut thread_guard = crate::query::security::RecursionGuard::new(expr_depth)?;
                 evaluate_node(ctx, id, expr, &mut thread_guard)
                     .map(|m| if m { Some(id) } else { None })
             })
             .collect();
 
-        // Check for any errors and collect matches
+        // First-error semantics: collect propagates the first Err
+        // in result-vector order. Because every worker that
+        // observed cancellation funneled through `classify_cancel`,
+        // the emitted variant is consistent with the source tag.
         let mut matches = Vec::new();
+        let mut first_err: Option<anyhow::Error> = None;
         for result in results {
-            if let Some(id) = result? {
-                matches.push(id);
+            match result {
+                Ok(Some(id)) => matches.push(id),
+                Ok(None) => {}
+                Err(e) => {
+                    if first_err.is_none() {
+                        first_err = Some(e);
+                    }
+                }
             }
         }
-        Ok(matches)
+        if let Some(e) = first_err {
+            Err(e)
+        } else {
+            Ok(matches)
+        }
+    };
+
+    finalize_span_and_return(ctx, result, expr)
+}
+
+/// Convert an observed cancellation into the typed error matching
+/// the budget's source tag. Single source of truth for the
+/// sequential and parallel paths so the wrapper-side downcast
+/// always sees the same variant for the same cause.
+///
+/// Source-tag classification rules (per `C_budget.md` §3):
+///
+/// - `Budget` → `BudgetExceeded { examined, limit }` — wrapper
+///   emits `query_too_broad` with `details.source = "runtime_budget"`.
+/// - `External` → `QueryError::Cancelled` — wrapper emits
+///   `deadline_exceeded` (per A §4 / CC-1).
+/// - `None` → can only occur if a worker observes
+///   `is_cancelled()` before the cancelling thread has finished
+///   its source-tag write. Treated as `External` to preserve the
+///   deadline-cancel envelope.
+fn classify_cancel(budget: &crate::query::budget::QueryBudget) -> anyhow::Error {
+    match budget.source() {
+        crate::query::budget::CancellationSource::Budget => {
+            anyhow::Error::from(crate::query::budget::BudgetExceeded {
+                examined: budget.examined.load(std::sync::atomic::Ordering::Relaxed),
+                limit: budget.max_rows,
+                predicate_shape: None,
+            })
+        }
+        crate::query::budget::CancellationSource::External
+        | crate::query::budget::CancellationSource::None => {
+            anyhow::Error::from(crate::query::error::QueryError::Cancelled)
+        }
+    }
+}
+
+/// Populate the per-scan tracing span fields, emit the
+/// budget-exceeded WARN log when relevant, and return the result.
+///
+/// Per `C_budget.md` §4 the WARN log on budget exceedance carries:
+/// the redacted predicate shape (`expr.shape_summary()`), the
+/// `examined` count, and the configured `budget_rows`. The
+/// predicate shape is bounded ≤256 bytes and never contains
+/// values, paths, or regex patterns — operators can grep for
+/// canonical shapes without exposing PII.
+fn finalize_span_and_return(
+    ctx: &GraphEvalContext,
+    result: Result<Vec<NodeId>>,
+    expr: &Expr,
+) -> Result<Vec<NodeId>> {
+    let examined = ctx
+        .budget
+        .examined
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let span = tracing::Span::current();
+    span.record("examined", examined);
+    match result {
+        Ok(m) => {
+            span.record("matched", m.len() as u64);
+            span.record("budget_exceeded", false);
+            Ok(m)
+        }
+        Err(e)
+            if e.downcast_ref::<crate::query::budget::BudgetExceeded>()
+                .is_some() =>
+        {
+            span.record("matched", 0u64);
+            span.record("budget_exceeded", true);
+            let shape = expr.shape_summary();
+            tracing::warn!(
+                examined,
+                budget = ctx.budget.max_rows,
+                predicate = %shape,
+                "query exceeded row budget — cancellation triggered"
+            );
+            // Cluster-C iter-2: attach the sanitised predicate_shape
+            // to the BudgetExceeded payload so the wrapper-side
+            // runtime_budget envelope can surface it (codex iter-1
+            // review). `unwrap` is safe — the matches arm above
+            // confirmed the downcast is `Some`.
+            let mut budget_err = e
+                .downcast::<crate::query::budget::BudgetExceeded>()
+                .expect("matched arm guarantees downcast");
+            budget_err.predicate_shape = Some(shape);
+            Err(anyhow::Error::from(budget_err))
+        }
+        Err(other) => {
+            span.record("matched", 0u64);
+            span.record("budget_exceeded", false);
+            Err(other)
+        }
     }
 }
 

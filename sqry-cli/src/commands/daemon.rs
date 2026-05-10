@@ -72,7 +72,64 @@ pub fn run(_cli: &Cli, action: &DaemonAction) -> Result<()> {
             timeout,
             json,
         } => run_daemon_rebuild(path, *force, *timeout, *json),
+        DaemonAction::Reset { path, force } => run_daemon_reset(path, *force),
     }
+}
+
+// ---------------------------------------------------------------------------
+// reset.
+// ---------------------------------------------------------------------------
+
+/// Send a `daemon/reset` JSON-RPC request for the workspace at `path`.
+/// Cluster-G §3.2 — non-destructive recovery primitive that drops the
+/// in-memory graph + admission bytes but preserves the manager-map
+/// entry. The next `daemon/load` reuses the existing on-disk
+/// snapshot.
+fn run_daemon_reset(path: &Path, force: bool) -> Result<()> {
+    let config = load_daemon_config()?;
+    let socket_path = config.socket_path();
+
+    let canonical = std::fs::canonicalize(path)
+        .with_context(|| format!("failed to canonicalize {}", path.display()))?;
+
+    if !try_connect_sync(&socket_path)? {
+        anyhow::bail!(
+            "daemon is not running (socket {}). Start it with `sqry daemon start`.",
+            socket_path.display()
+        );
+    }
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("failed to build tokio runtime for daemon reset")?;
+
+    rt.block_on(async {
+        let mut client = sqry_daemon_client::DaemonClient::connect(&socket_path)
+            .await
+            .with_context(|| format!("failed to connect to daemon at {}", socket_path.display()))?;
+        let result = client
+            .reset(&canonical, force)
+            .await
+            .with_context(|| format!("daemon/reset for {}", canonical.display()))?;
+        let was_reset = result
+            .get("result")
+            .and_then(|r| r.get("reset"))
+            .and_then(serde_json::Value::as_bool)
+            .or_else(|| result.get("reset").and_then(serde_json::Value::as_bool))
+            .unwrap_or(false);
+        if was_reset {
+            eprintln!("sqry: workspace {} reset", canonical.display());
+        } else {
+            eprintln!(
+                "sqry: workspace {} was not loaded; nothing to reset",
+                canonical.display()
+            );
+        }
+        Ok::<(), anyhow::Error>(())
+    })?;
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -419,26 +476,68 @@ fn run_daemon_status(json: bool) -> Result<()> {
 
 /// Discover the daemon log file path and tail it (or follow it).
 ///
-/// The daemon only writes to a log file when `cfg.log_file` is explicitly
-/// configured. In the default (unconfigured) installation the daemon logs to
-/// stderr, which is captured by systemd or the supervising terminal — there is
-/// no file to tail. `sqry daemon logs` requires an explicit `log_file` setting.
+/// Cluster-G §5.3 changed the default: the daemon now logs to
+/// `<runtime_dir>/sqryd.log` automatically. The opt-out path
+/// (`log_file = "stderr"`) and the "configured-but-missing-yet" path
+/// (daemon just started, file not flushed) both fall back to the
+/// platform-specific journal hint via [`print_log_fallback_hint`]
+/// (cluster-G §5.4).
 fn run_daemon_logs(lines: usize, follow: bool) -> Result<()> {
     let config = load_daemon_config()?;
-    let log_path = resolve_log_path(&config)?;
-
-    if !log_path.exists() {
-        anyhow::bail!(
-            "daemon log file not found at {}. \
-             Is the daemon running? Has it written any log output?",
-            log_path.display()
-        );
-    }
+    let log_path = match resolve_log_path(&config) {
+        Ok(p) if p.exists() => p,
+        Ok(p) => {
+            // Configured but the file does not exist yet (daemon may
+            // have just started, or transient FS issue).
+            eprintln!(
+                "sqry: configured log file {} does not exist yet. \
+                 The daemon may have just started, or is logging to stderr.",
+                p.display()
+            );
+            return print_log_fallback_hint(&config);
+        }
+        Err(_) => return print_log_fallback_hint(&config),
+    };
 
     if follow {
         tail_follow(&log_path, lines)?;
     } else {
         tail_last_n(&log_path, lines)?;
+    }
+    Ok(())
+}
+
+/// Print the platform-specific fallback hint when no log file is
+/// available — either because the operator opted out
+/// (`log_file = "stderr"`), or because the file does not exist yet
+/// (cluster-G §5.4).
+///
+/// Returns `Ok(())` rather than an error so the CLI exits with status
+/// 0; the user already saw the diagnostic on stderr above.
+fn print_log_fallback_hint(config: &sqry_daemon::config::DaemonConfig) -> Result<()> {
+    eprintln!();
+    eprintln!(
+        "Default log location: {}",
+        config.runtime_dir().join("sqryd.log").display()
+    );
+    eprintln!("To configure a custom path, set in $XDG_CONFIG_HOME/sqry/daemon.toml:");
+    eprintln!(
+        "    log_file = \"{}\"",
+        config.runtime_dir().join("sqryd.log").display()
+    );
+    eprintln!("Or via env: SQRY_DAEMON_LOG_FILE=<path>");
+    eprintln!();
+    if cfg!(target_os = "linux") && std::env::var_os("XDG_RUNTIME_DIR").is_some() {
+        eprintln!("If running under systemd --user:");
+        eprintln!("    journalctl --user -u sqryd.service -f");
+    } else if cfg!(target_os = "linux") {
+        eprintln!("If running under systemd:");
+        eprintln!("    journalctl -u sqryd.service -f");
+    } else if cfg!(target_os = "macos") {
+        eprintln!("If running under launchd:");
+        eprintln!("    log stream --predicate 'process == \"sqryd\"'");
+    } else if cfg!(target_os = "windows") {
+        eprintln!("On Windows, use Event Viewer or `Get-WinEvent`.");
     }
     Ok(())
 }
@@ -1102,20 +1201,22 @@ fn load_config_socket_path() -> Option<PathBuf> {
 
 /// Resolve the daemon log file path from `config`.
 ///
-/// Returns `Ok(PathBuf)` when `config.log_file` is `Some`, otherwise returns
-/// an error explaining that the daemon logs to stderr by default and
-/// instructing the user to configure `log_file` in `daemon.toml`.
+/// Cluster-G §5.3 changed the default: a fresh install now resolves to
+/// `<runtime_dir>/sqryd.log`. The error path below only fires when the
+/// operator has explicitly opted out via `log_file = "stderr"` /
+/// `log_file = "-"` (or `SQRY_DAEMON_LOG_FILE=-`). The opted-out
+/// recovery flow lives in [`print_log_fallback_hint`] (cluster-G §5.4).
 ///
-/// Extracted from [`run_daemon_logs`] so the log-file-absent failure path can
+/// Extracted from [`run_daemon_logs`] so the opted-out failure path can
 /// be exercised in unit tests without requiring a real daemon config on disk.
 fn resolve_log_path(config: &sqry_daemon::config::DaemonConfig) -> Result<PathBuf> {
-    match config.log_file.as_ref() {
-        Some(p) => Ok(p.clone()),
+    match config.log_file.resolve() {
+        Some(p) => Ok(p),
         None => {
             anyhow::bail!(
-                "no log file is configured for the daemon.\n\
-                 The daemon writes to stderr by default (captured by systemd or your terminal).\n\
-                 To enable file logging, set `log_file = \"/path/to/sqryd.log\"` in daemon.toml."
+                "log_file = \"stderr\" / \"-\" — the daemon writes only to stderr.\n\
+                 Tail systemd / journald instead (see `sqry daemon logs --help`),\n\
+                 or remove the opt-out so the daemon logs to <runtime_dir>/sqryd.log."
             );
         }
     }
@@ -1553,39 +1654,42 @@ mod tests {
     // resolve_log_path tests.
     // -----------------------------------------------------------------------
 
-    /// When the daemon config has no `log_file` set (the default), `resolve_log_path`
-    /// must return an error with an actionable message instructing the user to
-    /// configure `log_file` in `daemon.toml`.
-    ///
-    /// This directly tests the M-2 fix from iter-0: `run_daemon_logs` must not
-    /// invent a non-existent default log path when the daemon writes to stderr.
+    /// Cluster-G §5.3 changed the default: `DaemonConfig::default()` now
+    /// returns `LogFileSetting::Path(<runtime_dir>/sqryd.log)`, so
+    /// `resolve_log_path` resolves successfully without operator
+    /// configuration. The error path is exercised only when the
+    /// operator explicitly opts out (`log_file = "stderr"`) — see the
+    /// `resolve_log_path_errors_when_log_file_opted_out` test below.
     #[test]
-    fn resolve_log_path_errors_when_log_file_not_configured() {
-        // `DaemonConfig::default()` leaves `log_file` as `None`.
+    fn resolve_log_path_returns_runtime_dir_default_when_unconfigured() {
         let config = sqry_daemon::config::DaemonConfig::default();
+        let result = resolve_log_path(&config).expect("default config must resolve to a path");
         assert!(
-            config.log_file.is_none(),
-            "DaemonConfig::default() must have log_file = None"
+            result.ends_with("sqryd.log"),
+            "default log path should end with sqryd.log, got: {}",
+            result.display()
         );
+    }
+
+    /// Operator opt-out via `log_file = "stderr"` is the only path that
+    /// should still surface the legacy "no log file" error message
+    /// (cluster-G §5.4). The error must reference `stderr` so the user
+    /// knows why no file is available.
+    #[test]
+    fn resolve_log_path_errors_when_log_file_opted_out() {
+        let mut config = sqry_daemon::config::DaemonConfig::default();
+        config.log_file = sqry_daemon::config::LogFileSetting::Special("stderr".to_string());
 
         let result = resolve_log_path(&config);
         assert!(
             result.is_err(),
-            "resolve_log_path must return Err when log_file is None"
+            "resolve_log_path must return Err when log_file is Special"
         );
 
         let err_msg = format!("{}", result.unwrap_err());
         assert!(
-            err_msg.contains("log_file"),
-            "error must mention 'log_file' to guide the user; got:\n{err_msg}"
-        );
-        assert!(
-            err_msg.contains("daemon.toml"),
-            "error must mention 'daemon.toml' to guide the user; got:\n{err_msg}"
-        );
-        assert!(
             err_msg.contains("stderr"),
-            "error must mention 'stderr' to explain the default behaviour; got:\n{err_msg}"
+            "error must mention 'stderr' to explain the opt-out; got:\n{err_msg}"
         );
     }
 

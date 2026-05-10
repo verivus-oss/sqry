@@ -77,6 +77,12 @@ impl IpcServer {
         shutdown: CancellationToken,
     ) -> DaemonResult<Self> {
         let socket_path = config.socket_path();
+        // Cluster-G §5.2 — pre-flight the socket parent directory so a
+        // missing or unwritable parent surfaces as a typed
+        // `DaemonError::SocketSetup` (-32007) with copy-paste recovery
+        // text rather than a generic `EACCES` from the bind syscall.
+        #[cfg(unix)]
+        ensure_socket_parent_writable(&socket_path)?;
         let listener = Listener::bind(&config, &socket_path).await?;
         Ok(Self {
             listener,
@@ -191,6 +197,78 @@ impl IpcServer {
             );
         }
         Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Socket parent directory pre-flight (cluster-G §5.2).
+// ---------------------------------------------------------------------------
+
+/// Ensure the socket path's parent directory exists and is writable
+/// before the daemon attempts to bind. Surfaces a typed
+/// [`DaemonError::SocketSetup`] (`-32007`) with copy-paste recovery
+/// text instead of letting the bind syscall return a generic `EACCES`.
+///
+/// Called from [`IpcServer::bind`] on Unix only. Windows named-pipe
+/// paths (`\\.\pipe\<name>`) have no filesystem parent to validate;
+/// they go through the existing pipe-creation error path.
+#[cfg(unix)]
+fn ensure_socket_parent_writable(socket_path: &Path) -> DaemonResult<()> {
+    let parent = socket_path
+        .parent()
+        .ok_or_else(|| DaemonError::SocketSetup {
+            path: socket_path.to_path_buf(),
+            reason: "socket path has no parent directory".to_string(),
+        })?;
+    if let Err(e) = std::fs::create_dir_all(parent) {
+        return Err(DaemonError::SocketSetup {
+            path: socket_path.to_path_buf(),
+            reason: format!(
+                "cannot create socket parent {}: {e}. \
+                 Hint: set SQRY_DAEMON_SOCKET to a user-writable path \
+                 (e.g. $XDG_RUNTIME_DIR/sqry/sqryd.sock or $TMPDIR/sqryd.sock).",
+                parent.display(),
+            ),
+        });
+    }
+    // Probe writability with a `create_new(true)` open so the call
+    // refuses to follow a pre-existing symlink under the probe path
+    // (cluster-G iter-2 — codex iter-1 review flagged that
+    // `fs::write` follows symlinks and truncates an existing file,
+    // which lets a writable socket parent leak the probe write to an
+    // unrelated location). The probe filename includes pid + nanos
+    // so two daemon-start attempts can't race on the same name.
+    use std::fs::OpenOptions;
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    let probe = parent.join(format!(".sqryd-probe-{}-{nanos:09}", std::process::id()));
+    let probe_outcome = OpenOptions::new().write(true).create_new(true).open(&probe);
+    match probe_outcome {
+        Ok(_file) => {
+            // RAII: drop closes; we then delete. Best-effort delete —
+            // an EACCES here would be unusual after a successful
+            // create, but if it happens, we leave the empty probe
+            // file rather than abort startup.
+            let _ = std::fs::remove_file(&probe);
+            Ok(())
+        }
+        Err(e) => {
+            // SAFETY: getuid() is always safe to call on Unix.
+            let uid: u32 = unsafe { libc::getuid() };
+            Err(DaemonError::SocketSetup {
+                path: socket_path.to_path_buf(),
+                reason: format!(
+                    "socket parent {} is not writable by uid {}: {e}. \
+                     Either change ownership, or set SQRY_DAEMON_SOCKET \
+                     to a directory you own.",
+                    parent.display(),
+                    uid,
+                ),
+            })
+        }
     }
 }
 

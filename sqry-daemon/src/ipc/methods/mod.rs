@@ -20,9 +20,11 @@
 //! [`MethodError`] enum below already carries every variant the tool
 //! methods will need.
 
+pub mod daemon_active_artifacts;
 pub mod daemon_cancel_rebuild;
 pub mod daemon_load;
 pub mod daemon_rebuild;
+pub mod daemon_reset;
 pub mod daemon_status;
 pub mod daemon_stop;
 pub mod daemon_unload;
@@ -293,6 +295,17 @@ pub(crate) async fn dispatch(
         // the requested `workspace_id`. See
         // `daemon_workspace_status` module docs for the contract.
         "daemon/workspaceStatus" => daemon_workspace_status::handle(ctx, req.params).await,
+        // sqry-mcp flakiness P1 (`E_p1_cluster.md` §E.4 + `00_contracts.md`
+        // §3.CC-4): read-only enumeration of `.sqry/graph` directories
+        // belonging to every live workspace. Consumed by
+        // `sqry workspace clean` (cluster E Layer-2) with a 250ms caller
+        // budget; fallback path is `<root>/.sqry/graph/active.lock`.
+        "daemon/active-artifacts" => daemon_active_artifacts::handle(ctx, req.params).await,
+        // Cluster-G §3.2: non-destructive workspace recovery. Drops the
+        // in-memory graph + admission bytes but preserves the manager-
+        // map entry, `pinned` bit, and `last_error`. Files on disk are
+        // never touched (cluster-E §E.4 owns the destructive path).
+        "daemon/reset" => daemon_reset::handle(ctx, req.params).await,
         // Phase 8b Task 7 — the 14 MCP tool methods. Each is gated on
         // `WorkspaceManager::classify_for_serve` inside
         // `tool_dispatch::classify_and_build`; NotReady verdicts surface

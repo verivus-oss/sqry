@@ -267,7 +267,15 @@ impl SqryServer {
     ) -> Result<serde_json::Value, McpError>
     where
         P: Serialize,
-        F: FnOnce() -> anyhow::Result<ToolExecution<T>> + Send + 'static,
+        // `A_cancellation.md` §2 Caller-site changes: the user
+        // closure now receives a borrowed CancellationToken so it
+        // can poll for deadline-driven cancellation and propagate
+        // the token into `inner::execute_*`.
+        F: FnOnce(
+                &sqry_core::query::cancellation::CancellationToken,
+            ) -> anyhow::Result<ToolExecution<T>>
+            + Send
+            + 'static,
         T: Serialize + Send + 'static,
     {
         let resolved_workspace = self
@@ -296,11 +304,18 @@ impl SqryServer {
             self.timeout_ms,
             Some(workspace_root),
             logical_for_redaction,
-            move || {
+            move |cancel| {
+                // Inner-closure trampoline: the wrapper hands us a
+                // borrowed token; we clone (cheap Arc bump) so the
+                // owned clone can be moved into the
+                // `with_workspace_override` inner closure, which
+                // hands the borrowed reference to the user-supplied
+                // `f`.
+                let cancel_inner = cancel.clone();
                 workspace_session::with_workspace_override(
                     Some(resolved_workspace.workspace_root()),
                     logical,
-                    f,
+                    move || f(&cancel_inner),
                 )
             },
         )
@@ -318,7 +333,13 @@ impl SqryServer {
     ) -> Result<serde_json::Value, McpError>
     where
         P: Serialize,
-        F: FnOnce() -> anyhow::Result<ToolExecution<T>> + Send + 'static,
+        // See `execute_tool_for_request` for the cancellation
+        // closure-signature rationale (`A_cancellation.md` §2).
+        F: FnOnce(
+                &sqry_core::query::cancellation::CancellationToken,
+            ) -> anyhow::Result<ToolExecution<T>>
+            + Send
+            + 'static,
         T: Serialize + Send + 'static,
     {
         let resolved_workspace = self
@@ -343,11 +364,12 @@ impl SqryServer {
             timeout_ms,
             Some(workspace_root),
             logical_for_redaction,
-            move || {
+            move |cancel| {
+                let cancel_inner = cancel.clone();
                 workspace_session::with_workspace_override(
                     Some(resolved_workspace.workspace_root()),
                     logical,
-                    f,
+                    move || f(&cancel_inner),
                 )
             },
         )
@@ -380,7 +402,18 @@ impl SqryServer {
         f: F,
     ) -> Result<serde_json::Value, McpError>
     where
-        F: FnOnce() -> anyhow::Result<ToolExecution<T>> + Send + 'static,
+        // Closure receives a borrowed CancellationToken so it can both
+        // observe (poll) and propagate (clone into nested calls). The
+        // wrapper retains ownership and signals via `cancel.cancel()`
+        // when the per-tool deadline elapses, so the in-flight
+        // `spawn_blocking` thread observes the signal on its next
+        // pass-boundary poll inside `evaluate_all` (per
+        // `A_cancellation.md` §2 + `00_contracts.md` §3.CC-1).
+        F: FnOnce(
+                &sqry_core::query::cancellation::CancellationToken,
+            ) -> anyhow::Result<ToolExecution<T>>
+            + Send
+            + 'static,
         T: Serialize + Send + 'static,
     {
         let span = info_span!("tool_execution", tool = tool_name);
@@ -391,8 +424,30 @@ impl SqryServer {
         let redaction_workspace_root = redaction_workspace_root.clone();
         let redaction_logical_workspace = redaction_logical_workspace.clone();
 
+        // Per-request cancellation token: wrapper owns the canonical
+        // clone, closure owns a Send/Clone copy moved into
+        // `spawn_blocking`. Every `cancel.cancel()` on either clone
+        // flips the same `Arc<AtomicBool>` flag so both surfaces
+        // observe the cancellation immediately.
+        let cancel = sqry_core::query::cancellation::CancellationToken::new();
+        let cancel_for_closure = cancel.clone();
+
         async move {
-            let result = timeout(timeout_duration, spawn_blocking(f)).await;
+            let join_handle = spawn_blocking(move || f(&cancel_for_closure));
+            let result = timeout(timeout_duration, join_handle).await;
+
+            // Deadline elapsed → flip the token *before* falling
+            // through so the detached blocking thread observes
+            // cancellation on its next per-batch poll inside
+            // `evaluate_all`. We must NOT await the JoinHandle — per
+            // GT-6 a running `spawn_blocking` task cannot be aborted,
+            // and the contract on the deadline arm is fire-and-forget;
+            // the cooperative-cancellation token is what frees the
+            // blocking-pool slot once the closure body returns.
+            if result.is_err() {
+                cancel.cancel();
+            }
+
             let workspace_scoped_redactor = redactor_clone.as_ref().and_then(|redactor| {
                 Self::redactor_for_workspace(
                     redactor,
@@ -429,6 +484,87 @@ impl SqryServer {
                     Ok(response)
                 }
                 Ok(Ok(Err(anyhow_err))) => {
+                    // `A_cancellation.md` §4: if the closure observed
+                    // the cancellation we just signalled (deadline
+                    // elapsed → token flipped → `evaluate_all`
+                    // short-circuited with
+                    // `QueryError::Cancelled`), surface the canonical
+                    // `RpcError::deadline_exceeded` envelope so the
+                    // wire shape is identical to the wrapper-only
+                    // timeout path. This downcast must run BEFORE
+                    // the existing `RpcError` downcast so the
+                    // cancellation arm is not classified as a
+                    // generic internal error.
+                    if let Some(sqry_core::query::QueryError::Cancelled) =
+                        anyhow_err.downcast_ref::<sqry_core::query::QueryError>()
+                    {
+                        return Err(rpc_error_to_mcp(RpcError::deadline_exceeded(
+                            &tool_name_owned,
+                            timeout_ms,
+                            retry_delay_ms,
+                        )));
+                    }
+                    // `B_cost_gate.md` §3 + `00_contracts.md` §3.CC-2:
+                    // pre-flight cost-gate rejection emerges from
+                    // `execute_evaluate_with` as a `CostGateError`
+                    // wrapped in `anyhow::Error`. Reshape into the
+                    // canonical `RpcError::query_too_broad` envelope
+                    // (4-key wire shape, 7-key `details` payload) so
+                    // the standalone path produces byte-identical
+                    // output to the daemon's `DaemonError::QueryTooBroad`
+                    // arm.
+                    if let Some(gate_err) =
+                        anyhow_err.downcast_ref::<sqry_core::query::cost_gate::CostGateError>()
+                    {
+                        let details = gate_err.to_query_too_broad_details();
+                        let message = gate_err.to_string();
+                        return Err(rpc_error_to_mcp(RpcError::query_too_broad(
+                            message, details,
+                        )));
+                    }
+                    // Planner-side cost gate (`sqry_query`,
+                    // `plan-query`). Distinct error type, identical
+                    // wire envelope.
+                    if let Some(gate_err) = anyhow_err
+                        .downcast_ref::<sqry_db::planner::cost_gate::PlannerCostGateError>(
+                    ) {
+                        let details = gate_err.to_query_too_broad_details();
+                        let message = gate_err.to_string();
+                        return Err(rpc_error_to_mcp(RpcError::query_too_broad(
+                            message, details,
+                        )));
+                    }
+                    // `C_budget.md` §3 + `00_contracts.md` §3.CC-2:
+                    // runtime row-budget exceedance surfaces through
+                    // the canonical `query_too_broad` envelope with
+                    // `details.source = "runtime_budget"` (vs the
+                    // static-gate `details.source = "static_estimate"`).
+                    // Same envelope shape as the static-gate path so
+                    // MCP clients use a single parser regardless of
+                    // which side observed first.
+                    if let Some(budget_err) =
+                        anyhow_err.downcast_ref::<sqry_core::query::budget::BudgetExceeded>()
+                    {
+                        // Cluster-C iter-2: include the sanitised
+                        // `predicate_shape` so the runtime_budget
+                        // envelope is wire-comparable to the
+                        // cluster-B static_estimate envelope.
+                        let details = serde_json::json!({
+                            "source": "runtime_budget",
+                            "kind": sqry_core::query::cost_gate::KIND_QUERY_TOO_BROAD,
+                            "examined": budget_err.examined,
+                            "limit": budget_err.limit,
+                            "predicate_shape": budget_err.predicate_shape.clone(),
+                            "suggested_predicates":
+                                sqry_core::query::cost_gate::SCOPE_FILTER_FIELDS,
+                            "doc_url":
+                                sqry_core::query::cost_gate::QUERY_TOO_BROAD_DOC_URL,
+                        });
+                        return Err(rpc_error_to_mcp(RpcError::query_too_broad(
+                            budget_err.to_string(),
+                            details,
+                        )));
+                    }
                     // NL08: structured tool errors (e.g.
                     // `RpcError::onnx_runtime_missing`) are surfaced
                     // through the canonical envelope rather than the
@@ -550,8 +686,8 @@ impl SqryServer {
 
         let args = convert_semantic_search_params(params.clone()).map_err(rpc_error_to_mcp)?;
         let result = self
-            .execute_tool_for_request("semantic_search", &params, &context, move || {
-                execution::execute_semantic_search(&args)
+            .execute_tool_for_request("semantic_search", &params, &context, move |cancel| {
+                execution::execute_semantic_search(&args, cancel)
             })
             .await?;
 
@@ -575,8 +711,8 @@ impl SqryServer {
 
         let args = convert_hierarchical_search_params(params.clone()).map_err(rpc_error_to_mcp)?;
         let result = self
-            .execute_tool_for_request("hierarchical_search", &params, &context, move || {
-                execution::execute_hierarchical_search(&args)
+            .execute_tool_for_request("hierarchical_search", &params, &context, move |cancel| {
+                execution::execute_hierarchical_search(&args, cancel)
             })
             .await?;
 
@@ -597,7 +733,7 @@ impl SqryServer {
 
         let args = convert_relation_query_params(params.clone()).map_err(rpc_error_to_mcp)?;
         let result = self
-            .execute_tool_for_request("relation_query", &params, &context, move || {
+            .execute_tool_for_request("relation_query", &params, &context, move |_cancel| {
                 execution::execute_relation_query(&args)
             })
             .await?;
@@ -619,7 +755,7 @@ impl SqryServer {
 
         let args = convert_call_hierarchy_params(params.clone()).map_err(rpc_error_to_mcp)?;
         let result = self
-            .execute_tool_for_request("call_hierarchy", &params, &context, move || {
+            .execute_tool_for_request("call_hierarchy", &params, &context, move |_cancel| {
                 execution::execute_call_hierarchy(&args)
             })
             .await?;
@@ -641,7 +777,7 @@ impl SqryServer {
 
         let args = convert_explain_code_params(params.clone());
         let result = self
-            .execute_tool_for_request("explain_code", &params, &context, move || {
+            .execute_tool_for_request("explain_code", &params, &context, move |_cancel| {
                 execution::execute_explain_code(&args)
             })
             .await?;
@@ -663,7 +799,7 @@ impl SqryServer {
 
         let args = convert_search_similar_params(params.clone()).map_err(rpc_error_to_mcp)?;
         let result = self
-            .execute_tool_for_request("search_similar", &params, &context, move || {
+            .execute_tool_for_request("search_similar", &params, &context, move |_cancel| {
                 execution::execute_find_similar(&args)
             })
             .await?;
@@ -688,7 +824,7 @@ impl SqryServer {
 
         let args = convert_show_dependencies_params(params.clone()).map_err(rpc_error_to_mcp)?;
         let result = self
-            .execute_tool_for_request("show_dependencies", &params, &context, move || {
+            .execute_tool_for_request("show_dependencies", &params, &context, move |_cancel| {
                 execution::execute_get_dependencies(&args)
             })
             .await?;
@@ -710,7 +846,7 @@ impl SqryServer {
 
         let args = convert_get_index_status_params(params.clone());
         let result = self
-            .execute_tool_for_request("get_index_status", &params, &context, move || {
+            .execute_tool_for_request("get_index_status", &params, &context, move |_cancel| {
                 execution::execute_index_status(&args)
             })
             .await?;
@@ -735,7 +871,7 @@ impl SqryServer {
 
         let args = convert_workspace_status_params(params.clone());
         let result = self
-            .execute_tool_for_request("workspace_status", &params, &context, move || {
+            .execute_tool_for_request("workspace_status", &params, &context, move |_cancel| {
                 crate::tools::execute_workspace_status(&args)
             })
             .await?;
@@ -767,7 +903,7 @@ impl SqryServer {
                 self.index_timeout_ms,
                 &params,
                 &context,
-                move || execution::execute_rebuild_index(&args),
+                move |_cancel| execution::execute_rebuild_index(&args),
             )
             .await?;
 
@@ -791,7 +927,7 @@ impl SqryServer {
 
         let args = convert_export_graph_params(params.clone()).map_err(rpc_error_to_mcp)?;
         let result = self
-            .execute_tool_for_request("export_graph", &params, &context, move || {
+            .execute_tool_for_request("export_graph", &params, &context, move |_cancel| {
                 execution::execute_export_graph(&args)
             })
             .await?;
@@ -813,7 +949,7 @@ impl SqryServer {
 
         let args = convert_cross_language_edges_params(params.clone()).map_err(rpc_error_to_mcp)?;
         let result = self
-            .execute_tool_for_request("cross_language_edges", &params, &context, move || {
+            .execute_tool_for_request("cross_language_edges", &params, &context, move |_cancel| {
                 execution::execute_cross_language_edges(&args)
             })
             .await?;
@@ -835,7 +971,7 @@ impl SqryServer {
 
         let args = convert_trace_path_params(params.clone()).map_err(rpc_error_to_mcp)?;
         let result = self
-            .execute_tool_for_request("trace_path", &params, &context, move || {
+            .execute_tool_for_request("trace_path", &params, &context, move |_cancel| {
                 execution::execute_trace_path(&args)
             })
             .await?;
@@ -860,7 +996,7 @@ impl SqryServer {
 
         let args = convert_subgraph_params(params.clone()).map_err(rpc_error_to_mcp)?;
         let result = self
-            .execute_tool_for_request("subgraph", &params, &context, move || {
+            .execute_tool_for_request("subgraph", &params, &context, move |_cancel| {
                 execution::execute_subgraph(&args)
             })
             .await?;
@@ -882,7 +1018,7 @@ impl SqryServer {
 
         let args = convert_dependency_impact_params(params.clone()).map_err(rpc_error_to_mcp)?;
         let result = self
-            .execute_tool_for_request("dependency_impact", &params, &context, move || {
+            .execute_tool_for_request("dependency_impact", &params, &context, move |_cancel| {
                 execution::execute_dependency_impact(&args)
             })
             .await?;
@@ -904,7 +1040,7 @@ impl SqryServer {
 
         let args = convert_semantic_diff_params(params.clone()).map_err(rpc_error_to_mcp)?;
         let result = self
-            .execute_tool_for_request("semantic_diff", &params, &context, move || {
+            .execute_tool_for_request("semantic_diff", &params, &context, move |_cancel| {
                 execution::execute_semantic_diff(&args)
             })
             .await?;
@@ -926,7 +1062,7 @@ impl SqryServer {
 
         let args = convert_find_duplicates_params(params.clone()).map_err(rpc_error_to_mcp)?;
         let result = self
-            .execute_tool_for_request("find_duplicates", &params, &context, move || {
+            .execute_tool_for_request("find_duplicates", &params, &context, move |_cancel| {
                 execution::execute_find_duplicates(&args)
             })
             .await?;
@@ -948,7 +1084,7 @@ impl SqryServer {
 
         let args = convert_find_cycles_params(params.clone()).map_err(rpc_error_to_mcp)?;
         let result = self
-            .execute_tool_for_request("find_cycles", &params, &context, move || {
+            .execute_tool_for_request("find_cycles", &params, &context, move |_cancel| {
                 execution::execute_find_cycles(&args)
             })
             .await?;
@@ -970,7 +1106,7 @@ impl SqryServer {
 
         let args = convert_find_unused_params(params.clone()).map_err(rpc_error_to_mcp)?;
         let result = self
-            .execute_tool_for_request("find_unused", &params, &context, move || {
+            .execute_tool_for_request("find_unused", &params, &context, move |_cancel| {
                 execution::execute_find_unused(&args)
             })
             .await?;
@@ -993,7 +1129,7 @@ impl SqryServer {
         // SqryAskParams maps directly to the execution args
         let args = params.clone();
         let result = self
-            .execute_tool_for_request("sqry_ask", &params, &context, move || {
+            .execute_tool_for_request("sqry_ask", &params, &context, move |_cancel| {
                 execution::execute_sqry_ask(&args)
             })
             .await?;
@@ -1015,7 +1151,7 @@ impl SqryServer {
 
         let args = params.clone();
         let result = self
-            .execute_tool_for_request("sqry_query", &params, &context, move || {
+            .execute_tool_for_request("sqry_query", &params, &context, move |_cancel| {
                 execution::execute_sqry_query(&args)
             })
             .await?;
@@ -1044,7 +1180,7 @@ impl SqryServer {
 
         let args = convert_is_node_in_cycle_params(params.clone());
         let result = self
-            .execute_tool_for_request("is_node_in_cycle", &params, &context, move || {
+            .execute_tool_for_request("is_node_in_cycle", &params, &context, move |_cancel| {
                 execution::execute_is_node_in_cycle(&args)
             })
             .await?;
@@ -1069,7 +1205,7 @@ impl SqryServer {
 
         let args = convert_pattern_search_params(params.clone()).map_err(rpc_error_to_mcp)?;
         let result = self
-            .execute_tool_for_request("pattern_search", &params, &context, move || {
+            .execute_tool_for_request("pattern_search", &params, &context, move |_cancel| {
                 execution::execute_pattern_search(&args)
             })
             .await?;
@@ -1094,7 +1230,7 @@ impl SqryServer {
 
         let args = convert_direct_callers_params(params.clone()).map_err(rpc_error_to_mcp)?;
         let result = self
-            .execute_tool_for_request("direct_callers", &params, &context, move || {
+            .execute_tool_for_request("direct_callers", &params, &context, move |_cancel| {
                 execution::execute_direct_callers(&args)
             })
             .await?;
@@ -1119,7 +1255,7 @@ impl SqryServer {
 
         let args = convert_direct_callees_params(params.clone()).map_err(rpc_error_to_mcp)?;
         let result = self
-            .execute_tool_for_request("direct_callees", &params, &context, move || {
+            .execute_tool_for_request("direct_callees", &params, &context, move |_cancel| {
                 execution::execute_direct_callees(&args)
             })
             .await?;
@@ -1145,7 +1281,7 @@ impl SqryServer {
 
         let args = convert_list_files_params(params.clone()).map_err(rpc_error_to_mcp)?;
         let result = self
-            .execute_tool_for_request("list_files", &params, &context, move || {
+            .execute_tool_for_request("list_files", &params, &context, move |_cancel| {
                 execution::execute_list_files(&args)
             })
             .await?;
@@ -1167,7 +1303,7 @@ impl SqryServer {
 
         let args = convert_list_symbols_params(params.clone()).map_err(rpc_error_to_mcp)?;
         let result = self
-            .execute_tool_for_request("list_symbols", &params, &context, move || {
+            .execute_tool_for_request("list_symbols", &params, &context, move |_cancel| {
                 execution::execute_list_symbols(&args)
             })
             .await?;
@@ -1189,7 +1325,7 @@ impl SqryServer {
 
         let args = convert_get_graph_stats_params(params.clone());
         let result = self
-            .execute_tool_for_request("get_graph_stats", &params, &context, move || {
+            .execute_tool_for_request("get_graph_stats", &params, &context, move |_cancel| {
                 execution::execute_get_graph_stats(&args)
             })
             .await?;
@@ -1211,7 +1347,7 @@ impl SqryServer {
 
         let args = convert_get_insights_params(params.clone());
         let result = self
-            .execute_tool_for_request("get_insights", &params, &context, move || {
+            .execute_tool_for_request("get_insights", &params, &context, move |_cancel| {
                 execution::execute_get_insights(&args)
             })
             .await?;
@@ -1233,7 +1369,7 @@ impl SqryServer {
 
         let args = convert_complexity_metrics_params(params.clone()).map_err(rpc_error_to_mcp)?;
         let result = self
-            .execute_tool_for_request("complexity_metrics", &params, &context, move || {
+            .execute_tool_for_request("complexity_metrics", &params, &context, move |_cancel| {
                 execution::execute_complexity_metrics(&args)
             })
             .await?;
@@ -1255,7 +1391,7 @@ impl SqryServer {
 
         let args = convert_expand_cache_status_params(params.clone());
         let result = self
-            .execute_tool_for_request("expand_cache_status", &params, &context, move || {
+            .execute_tool_for_request("expand_cache_status", &params, &context, move |_cancel| {
                 execution::execute_expand_cache_status(&args)
             })
             .await?;
@@ -1284,7 +1420,7 @@ impl SqryServer {
 
         let args = convert_get_definition_params(params.clone());
         let result = self
-            .execute_tool_for_request("get_definition", &params, &context, move || {
+            .execute_tool_for_request("get_definition", &params, &context, move |_cancel| {
                 execution::execute_get_definition(&args)
             })
             .await?;
@@ -1309,7 +1445,7 @@ impl SqryServer {
 
         let args = convert_get_references_params(params.clone()).map_err(rpc_error_to_mcp)?;
         let result = self
-            .execute_tool_for_request("get_references", &params, &context, move || {
+            .execute_tool_for_request("get_references", &params, &context, move |_cancel| {
                 execution::execute_get_references(&args)
             })
             .await?;
@@ -1334,7 +1470,7 @@ impl SqryServer {
 
         let args = convert_get_hover_info_params(params.clone());
         let result = self
-            .execute_tool_for_request("get_hover_info", &params, &context, move || {
+            .execute_tool_for_request("get_hover_info", &params, &context, move |_cancel| {
                 execution::execute_get_hover_info(&args)
             })
             .await?;
@@ -1359,7 +1495,7 @@ impl SqryServer {
 
         let args = convert_get_document_symbols_params(params.clone());
         let result = self
-            .execute_tool_for_request("get_document_symbols", &params, &context, move || {
+            .execute_tool_for_request("get_document_symbols", &params, &context, move |_cancel| {
                 execution::execute_get_document_symbols(&args)
             })
             .await?;
@@ -1385,7 +1521,7 @@ impl SqryServer {
         let args =
             convert_get_workspace_symbols_params(params.clone()).map_err(rpc_error_to_mcp)?;
         let result = self
-            .execute_tool_for_request("get_workspace_symbols", &params, &context, move || {
+            .execute_tool_for_request("get_workspace_symbols", &params, &context, move |_cancel| {
                 execution::execute_get_workspace_symbols(&args)
             })
             .await?;
@@ -1560,6 +1696,28 @@ fn validate_usize(value: i64, field: &str, min: i64, max: i64) -> Result<usize, 
     })
 }
 
+/// Cluster-C iter-2: validate per-call `budget_rows`. The MCP wire
+/// contract (`C_budget.md` §C5) forbids `0` because a budget of zero
+/// would trip on the first row, which is never the operator intent.
+/// Return `RpcError::validation_with_data` (-32602 InvalidParams) so
+/// callers see a typed validation failure instead of falling through
+/// to the env / default path silently.
+fn validate_budget_rows(value: Option<u64>) -> Result<Option<u64>, RpcError> {
+    match value {
+        Some(0) => Err(RpcError::validation_with_data(
+            "budget_rows must be > 0".to_string(),
+            json!({
+                "kind": "validation",
+                "constraint": "range",
+                "field": "budget_rows",
+                "min": 1,
+                "actual": 0,
+            }),
+        )),
+        other => Ok(other),
+    }
+}
+
 /// Validate `max_results` (1..=10,000 for search, 1..=5,000 for relations).
 fn validate_max_results(value: i64, max_limit: i64) -> Result<usize, RpcError> {
     validate_usize(value, "max_results", 1, max_limit)
@@ -1655,6 +1813,7 @@ fn convert_semantic_search_params(
         pagination,
         score_min,
         include_classpath: params.include_classpath,
+        budget_rows: validate_budget_rows(params.budget_rows)?,
     })
 }
 
@@ -1716,6 +1875,7 @@ fn convert_hierarchical_search_params(
         include_file_context: params.include_file_context,
         include_container_context: params.include_container_context,
         expand_files: params.expand_files,
+        budget_rows: validate_budget_rows(params.budget_rows)?,
     })
 }
 

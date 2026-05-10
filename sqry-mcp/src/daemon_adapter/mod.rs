@@ -113,10 +113,11 @@ impl std::fmt::Debug for WorkspaceContext {
 pub fn execute_semantic_search_for_daemon(
     ctx: &WorkspaceContext,
     args: &SemanticSearchArgs,
+    cancel: &sqry_core::query::cancellation::CancellationToken,
 ) -> Result<ToolExecution<SemanticSearchData>> {
     let search_root = canonicalize_in_workspace(&args.path, &ctx.workspace_root)?;
     let start = Instant::now();
-    search_inner::execute_semantic_search(ctx, args, &search_root, start)
+    search_inner::execute_semantic_search(ctx, args, &search_root, start, cancel)
 }
 
 /// Daemon-path wrapper for `relation_query`.

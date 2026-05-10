@@ -94,6 +94,7 @@ fn pf04_mcp_sqry_query_does_not_create_derived_sqry() -> Result<()> {
         query: "kind:function".to_string(),
         path: workspace.to_string_lossy().into_owned(),
         limit: Some(100),
+        budget_rows: None,
     };
     let _result = execute_sqry_query(&params)?;
 

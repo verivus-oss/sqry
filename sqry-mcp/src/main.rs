@@ -415,8 +415,27 @@ async fn run_rmcp_server() -> Result<()> {
 /// dropping the future will stop accepting new JSON-RPC messages and cleanly
 /// close stdin/stdout streams. No state corruption occurs as the loop maintains
 /// no persistent state between messages - each request is handled independently.
-#[tokio::main]
-async fn main() -> Result<()> {
+/// `A_cancellation.md` §5 + GT-6: cap the blocking thread pool at 64
+/// so a storm of timed-out tool calls (which leave their
+/// `spawn_blocking` body running cooperatively until the
+/// CancellationToken signal is observed) cannot exhaust the default
+/// 512-thread cap and queue subsequent calls indefinitely. Mirrors
+/// the sqry-daemon binary's runtime cap. See
+/// `sqry-mcp/tests/semantic_search_timeout_recovery.rs` for the
+/// regression test that pins this contract.
+///
+/// `#[tokio::main]` does not surface `max_blocking_threads` as a
+/// macro attribute, so the runtime is built manually and the
+/// `async fn main` body is dispatched via `block_on`.
+fn main() -> Result<()> {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .max_blocking_threads(64)
+        .build()?;
+    rt.block_on(async_main())
+}
+
+async fn async_main() -> Result<()> {
     // Handle synchronous CLI arguments (--help, --version, --list-tools,
     // unknown flags) before initialising the tracing subscriber.
     let args: Vec<String> = std::env::args().collect();

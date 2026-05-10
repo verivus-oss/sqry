@@ -11,7 +11,7 @@ use crate::ipc::methods::{HandlerContext, MethodError};
 pub(crate) async fn handle(ctx: &HandlerContext, params: Value) -> Result<Value, MethodError> {
     let args = params_to_semantic_diff_args(params).map_err(rpc_error_to_method_error)?;
     let path = args.path.clone();
-    classify_and_build(ctx, "semantic_diff", &path, move |wctx| {
+    classify_and_build(ctx, "semantic_diff", &path, move |wctx, _cancel| {
         execute_semantic_diff_for_daemon(wctx, &args)
     })
     .await

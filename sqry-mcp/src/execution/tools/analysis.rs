@@ -32,13 +32,27 @@ pub const MCP_AMBIGUOUS_SYMBOL_ERROR_CODE: &str = "sqry::ambiguous_symbol";
 /// MCP without leaking transport details into the resolver.
 #[must_use]
 pub fn ambiguous_symbol_envelope_json(err: &AmbiguousSymbolError) -> String {
+    // verivus-oss/sqry#214: the previous "specify the qualified name"
+    // text is unsatisfiable when N candidates share the same
+    // `qualified_name` (e.g., 11 plain-C functions named `do_exit` in 11
+    // files). The actual disambiguator is the file the symbol is defined
+    // in — surfaced as the per-candidate `file_path` field below and
+    // accepted as the `file_path` argument on the MCP tools that hit
+    // this resolver.
+    let sample_file = err.candidates.first().map(|c| c.file_path.as_str());
+    let mut message = format!(
+        "Symbol '{}' is ambiguous ({} candidates); pass the `file_path` argument \
+         to disambiguate by the file the intended symbol is defined in",
+        err.name,
+        err.candidates.len()
+    );
+    if let Some(file) = sample_file {
+        message.push_str(&format!(" (e.g., file_path=\"{file}\")"));
+    }
     let envelope = serde_json::json!({
         "error": {
             "code": MCP_AMBIGUOUS_SYMBOL_ERROR_CODE,
-            "message": format!(
-                "Symbol '{}' is ambiguous; specify the qualified name",
-                err.name
-            ),
+            "message": message,
             "candidates": err.candidates,
             "truncated": err.truncated,
         }
@@ -1798,6 +1812,7 @@ pub(crate) mod inner {
         args: &SemanticDiffArgs,
         start: Instant,
     ) -> Result<ToolExecution<SemanticDiffData>> {
+        use sqry_core::git::resolve_ref_to_commit;
         use sqry_core::graph::unified::build::{BuildConfig, build_unified_graph};
         use sqry_db::{ComparativeQueryDb, DiffOptions};
 
@@ -1810,6 +1825,48 @@ pub(crate) mod inner {
             max_results = args.max_results,
             "Executing semantic_diff tool"
         );
+
+        // Identical-OID fast-path: if both refs resolve to the same commit
+        // (e.g., self-diff against `HEAD`), the diff is provably empty. Skip
+        // worktree creation + per-ref graph builds, which on kernel-scale
+        // repos blow the 120s tool deadline. (verivus-oss/sqry#213)
+        let base_sha = resolve_ref_to_commit(workspace_root, &args.base.git_ref)
+            .map_err(|e| anyhow!("Failed to resolve base ref '{}': {e}", args.base.git_ref))?;
+        let target_sha =
+            resolve_ref_to_commit(workspace_root, &args.target.git_ref).map_err(|e| {
+                anyhow!(
+                    "Failed to resolve target ref '{}': {e}",
+                    args.target.git_ref
+                )
+            })?;
+        if base_sha == target_sha {
+            tracing::debug!(
+                base_ref = %args.base.git_ref,
+                target_ref = %args.target.git_ref,
+                sha = %base_sha,
+                "semantic_diff identical-OID fast-path: emitting empty diff"
+            );
+            return Ok(ToolExecution {
+                data: SemanticDiffData {
+                    base_ref: args.base.git_ref.clone(),
+                    target_ref: args.target.git_ref.clone(),
+                    changes: Vec::new(),
+                    summary: summarise_wire_changes(&[]),
+                    total: 0,
+                },
+                used_index: false,
+                used_graph: false,
+                graph_metadata: None,
+                execution_ms: duration_to_ms(start.elapsed()),
+                next_page_token: None,
+                total: Some(0),
+                truncated: Some(false),
+                candidates_scanned: None,
+                workspace_path: crate::execution::symbol_utils::path_to_forward_slash(
+                    workspace_root,
+                ),
+            });
+        }
 
         // Phase 1: Create git worktrees (one per ref). The manager is RAII: the
         // worktrees are cleaned up when it drops at the end of this function.

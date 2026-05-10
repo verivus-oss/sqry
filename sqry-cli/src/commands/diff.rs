@@ -8,7 +8,7 @@ use crate::plugin_defaults::{self, PluginSelectionMode};
 use anyhow::{Context, Result, bail};
 use colored::Colorize;
 use serde::Serialize;
-use sqry_core::git::WorktreeManager;
+use sqry_core::git::{WorktreeManager, resolve_ref_to_commit};
 use sqry_core::graph::diff::{DiffSummary, GraphComparator, NodeChange, NodeLocation};
 use sqry_core::graph::unified::build::{BuildConfig, build_unified_graph};
 use std::collections::HashMap;
@@ -94,7 +94,30 @@ pub fn run_diff(
     // 1. Validate and resolve repository root
     let root = resolve_repo_root(path, cli)?;
 
-    // 2. Create temporary git worktrees
+    // 2. Identical-OID fast-path: if both refs resolve to the same commit
+    //    (e.g., `sqry diff HEAD HEAD`), the diff is provably empty. Skip
+    //    worktree creation and graph builds, which on kernel-scale repos
+    //    blow the 90s CLI deadline. (verivus-oss/sqry#213)
+    let base_sha = resolve_ref_to_commit(&root, base_ref)
+        .with_context(|| format!("Failed to resolve git ref '{base_ref}'"))?;
+    let target_sha = resolve_ref_to_commit(&root, target_ref)
+        .with_context(|| format!("Failed to resolve git ref '{target_ref}'"))?;
+    if base_sha == target_sha {
+        log::debug!(
+            "Identical-OID fast-path: base_ref={base_ref} target_ref={target_ref} sha={base_sha}; emitting empty diff"
+        );
+        return format_and_output(
+            cli,
+            base_ref,
+            target_ref,
+            Vec::new(),
+            &compute_summary(&[]),
+            0,
+            false,
+        );
+    }
+
+    // 3. Create temporary git worktrees
     let worktree_mgr = WorktreeManager::create(&root, base_ref, target_ref)
         .context("Failed to create git worktrees")?;
 

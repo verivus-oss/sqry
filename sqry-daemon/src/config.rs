@@ -112,6 +112,30 @@ pub const ENV_AUTO_START_READY_TIMEOUT_SECS: &str = "SQRY_DAEMON_AUTO_START_READ
 /// Environment variable that overrides `log_keep_rotations`. Task 9 U2.
 pub const ENV_LOG_KEEP_ROTATIONS: &str = "SQRY_DAEMON_LOG_KEEP_ROTATIONS";
 
+/// Environment variable that overrides `cost_gate_node_limit`.
+///
+/// Source: `B_cost_gate.md` §1 + `00_contracts.md` §3.CC-3. The
+/// pre-flight cost gate consumes this as the arena-size cap above
+/// which prohibitive shapes require scope-filter coupling. Below the
+/// cap, prohibitive shapes pass unconditionally so the gate never
+/// fires on small test fixtures.
+pub const ENV_COST_GATE_NODE_LIMIT: &str = "SQRY_COST_GATE_NODE_LIMIT";
+
+/// Environment variable that overrides `cost_gate_min_prefix`.
+///
+/// Source: `B_cost_gate.md` §1 + `00_contracts.md` §3.CC-3.
+/// Minimum literal-prefix length (extracted via
+/// `regex_syntax::hir::literal::Extractor`) that disqualifies an
+/// anchored regex from the prohibitive class.
+pub const ENV_COST_GATE_MIN_PREFIX: &str = "SQRY_COST_GATE_MIN_PREFIX";
+
+/// Environment variable that overrides `cost_gate_min_literal`.
+///
+/// Source: `B_cost_gate.md` §1 + `00_contracts.md` §3.CC-3.
+/// Minimum `Hir::minimum_len` that disqualifies a regex from the
+/// prohibitive class when no usable literal prefix is present.
+pub const ENV_COST_GATE_MIN_LITERAL: &str = "SQRY_COST_GATE_MIN_LITERAL";
+
 // ---------------------------------------------------------------------------
 // Built-in defaults (match plan §5 Step 3 table).
 // ---------------------------------------------------------------------------
@@ -174,6 +198,21 @@ pub const DEFAULT_AUTO_START_READY_TIMEOUT_SECS: u64 = 10;
 /// the oldest is deleted when a new rotation creates `.6`. Validated range:
 /// `1..=100`.
 pub const DEFAULT_LOG_KEEP_ROTATIONS: u32 = 5;
+
+/// Default arena-size cap for the pre-flight cost gate
+/// (`B_cost_gate.md` §1, `00_contracts.md` §3.CC-3): below 50_000
+/// nodes, prohibitive regex shapes are allowed unconditionally. Above
+/// that, scope-filter coupling is required.
+pub const DEFAULT_COST_GATE_NODE_LIMIT: usize = 50_000;
+/// Default minimum literal-prefix length that disqualifies an
+/// anchored regex from "prohibitive" (`B_cost_gate.md` §1).
+pub const DEFAULT_COST_GATE_MIN_PREFIX: usize = 3;
+/// Default minimum `Hir::minimum_len` that disqualifies a regex when
+/// no usable prefix exists (`B_cost_gate.md` §1).
+// Cluster-B iter-2: align with `sqry_core::query::cost_gate::CostGateConfig::DEFAULT_MIN_LITERAL_LEN = 4`.
+// Earlier the daemon defaulted to 3, leaving a 1-char drift between
+// the in-process executor and daemon-hosted MCP gates.
+pub const DEFAULT_COST_GATE_MIN_LITERAL: usize = 4;
 
 // ---------------------------------------------------------------------------
 // Config structs.
@@ -256,9 +295,19 @@ pub struct DaemonConfig {
     #[serde(default = "default_interner_compaction_threshold")]
     pub interner_compaction_threshold: f32,
 
-    /// Optional structured-log file path.
-    #[serde(default)]
-    pub log_file: Option<PathBuf>,
+    /// Structured-log file destination (cluster-G §5.3).
+    ///
+    /// Defaults to `LogFileSetting::Path(<runtime_dir>/sqryd.log)` so a
+    /// fresh install logs to a tailable file under
+    /// `$XDG_RUNTIME_DIR/sqry/sqryd.log` (Linux/macOS) or
+    /// `%LOCALAPPDATA%\sqry\sqryd.log` (Windows). Operators opt out of
+    /// file logging by setting `log_file = "stderr"` or
+    /// `log_file = "-"` in TOML, or `SQRY_DAEMON_LOG_FILE=-` in the
+    /// environment — both produce `LogFileSetting::Special` and
+    /// disable the rolling appender so the daemon writes only to
+    /// stderr.
+    #[serde(default = "default_log_file_setting")]
+    pub log_file: LogFileSetting,
 
     /// Log verbosity (matches `tracing_subscriber::EnvFilter` syntax).
     #[serde(default = "default_log_level")]
@@ -307,6 +356,31 @@ pub struct DaemonConfig {
     /// lands. Defaults to `false`.
     #[serde(default)]
     pub install_user_service: bool,
+
+    /// Pre-flight cost-gate arena-size cap (per
+    /// `B_cost_gate.md` §1.4 + `00_contracts.md` §3.CC-3). When
+    /// `Some(n)`, prohibitive query shapes (unanchored regex with no
+    /// scope coupling) are rejected once the snapshot's node count
+    /// exceeds `n`. When `None` (or `Some(0)`), the cap is disabled
+    /// and all shapes are allowed regardless of arena size — the gate
+    /// degenerates to a shape-only check. Default
+    /// [`DEFAULT_COST_GATE_NODE_LIMIT`] (`50_000`).
+    #[serde(default = "default_cost_gate_node_limit")]
+    pub cost_gate_node_limit: Option<usize>,
+
+    /// Pre-flight cost-gate minimum literal-prefix length. When `Some(n)`,
+    /// an anchored regex passes the gate iff its longest required
+    /// literal prefix has length ≥ `n`. Default
+    /// [`DEFAULT_COST_GATE_MIN_PREFIX`] (`3`).
+    #[serde(default = "default_cost_gate_min_prefix")]
+    pub cost_gate_min_prefix: Option<usize>,
+
+    /// Pre-flight cost-gate minimum `Hir::minimum_len`. When `Some(n)`,
+    /// a regex with no usable prefix passes the gate iff its
+    /// `Hir::properties().minimum_len()` is ≥ `n`. Default
+    /// [`DEFAULT_COST_GATE_MIN_LITERAL`] (`4`).
+    #[serde(default = "default_cost_gate_min_literal")]
+    pub cost_gate_min_literal: Option<usize>,
 }
 
 impl Default for DaemonConfig {
@@ -323,7 +397,7 @@ impl Default for DaemonConfig {
             tool_timeout_secs: DEFAULT_TOOL_TIMEOUT_SECS,
             max_shim_connections: DEFAULT_MAX_SHIM_CONNECTIONS,
             interner_compaction_threshold: DEFAULT_INTERNER_COMPACTION_THRESHOLD,
-            log_file: None,
+            log_file: default_log_file_setting(),
             log_level: DEFAULT_LOG_LEVEL.to_owned(),
             log_max_size_mb: DEFAULT_LOG_MAX_SIZE_MB,
             socket: SocketConfig::default(),
@@ -331,6 +405,9 @@ impl Default for DaemonConfig {
             auto_start_ready_timeout_secs: DEFAULT_AUTO_START_READY_TIMEOUT_SECS,
             log_keep_rotations: DEFAULT_LOG_KEEP_ROTATIONS,
             install_user_service: false,
+            cost_gate_node_limit: Some(DEFAULT_COST_GATE_NODE_LIMIT),
+            cost_gate_min_prefix: Some(DEFAULT_COST_GATE_MIN_PREFIX),
+            cost_gate_min_literal: Some(DEFAULT_COST_GATE_MIN_LITERAL),
         }
     }
 }
@@ -434,7 +511,17 @@ impl DaemonConfig {
             self.log_level = v.to_string_lossy().into_owned();
         }
         if let Some(v) = env::var_os(ENV_LOG_FILE) {
-            self.log_file = Some(PathBuf::from(v));
+            // `SQRY_DAEMON_LOG_FILE=-` (or `=stderr`) opts out of file
+            // logging — same wire contract as the TOML setting per
+            // cluster-G §5.3. The conversion is the same as the
+            // `LogFileSetting` deserialize path: a literal `"-"` /
+            // `"stderr"` becomes `Special`, anything else becomes a
+            // file path.
+            let s = v.to_string_lossy().into_owned();
+            self.log_file = match s.as_str() {
+                "stderr" | "-" => LogFileSetting::Special(s),
+                _ => LogFileSetting::Path(PathBuf::from(s)),
+            };
         }
         if let Some(v) = env::var_os(ENV_STALE_MAX_AGE_HOURS) {
             let v = v.to_string_lossy().into_owned();
@@ -473,6 +560,40 @@ impl DaemonConfig {
                 path: PathBuf::from(ENV_LOG_KEEP_ROTATIONS),
                 source: anyhow!("{ENV_LOG_KEEP_ROTATIONS}={v:?} must be an unsigned int: {e}"),
             })?;
+        }
+        // Cost-gate config (B_cost_gate.md §1 + 00_contracts.md §3.CC-3).
+        // Each override accepts an unsigned integer; a value of `0` for
+        // `cost_gate_node_limit` is honoured as "cap disabled" via
+        // `Some(0)` (which `cost_gate::check_query` short-circuits on).
+        if let Some(v) = env::var_os(ENV_COST_GATE_NODE_LIMIT) {
+            let v = v.to_string_lossy().into_owned();
+            self.cost_gate_node_limit =
+                Some(v.parse::<usize>().map_err(|e| DaemonError::Config {
+                    path: PathBuf::from(ENV_COST_GATE_NODE_LIMIT),
+                    source: anyhow!(
+                        "{ENV_COST_GATE_NODE_LIMIT}={v:?} must be an unsigned int: {e}"
+                    ),
+                })?);
+        }
+        if let Some(v) = env::var_os(ENV_COST_GATE_MIN_PREFIX) {
+            let v = v.to_string_lossy().into_owned();
+            self.cost_gate_min_prefix =
+                Some(v.parse::<usize>().map_err(|e| DaemonError::Config {
+                    path: PathBuf::from(ENV_COST_GATE_MIN_PREFIX),
+                    source: anyhow!(
+                        "{ENV_COST_GATE_MIN_PREFIX}={v:?} must be an unsigned int: {e}"
+                    ),
+                })?);
+        }
+        if let Some(v) = env::var_os(ENV_COST_GATE_MIN_LITERAL) {
+            let v = v.to_string_lossy().into_owned();
+            self.cost_gate_min_literal =
+                Some(v.parse::<usize>().map_err(|e| DaemonError::Config {
+                    path: PathBuf::from(ENV_COST_GATE_MIN_LITERAL),
+                    source: anyhow!(
+                        "{ENV_COST_GATE_MIN_LITERAL}={v:?} must be an unsigned int: {e}"
+                    ),
+                })?);
         }
         Ok(())
     }
@@ -690,6 +811,182 @@ const fn default_auto_start_ready_timeout_secs() -> u64 {
 const fn default_log_keep_rotations() -> u32 {
     DEFAULT_LOG_KEEP_ROTATIONS
 }
+const fn default_cost_gate_node_limit() -> Option<usize> {
+    Some(DEFAULT_COST_GATE_NODE_LIMIT)
+}
+const fn default_cost_gate_min_prefix() -> Option<usize> {
+    Some(DEFAULT_COST_GATE_MIN_PREFIX)
+}
+const fn default_cost_gate_min_literal() -> Option<usize> {
+    Some(DEFAULT_COST_GATE_MIN_LITERAL)
+}
+
+/// Per-OS default daemon log file path. Returns
+/// `Some(<runtime_dir>/sqryd.log)` on Linux/macOS and
+/// `Some(%LOCALAPPDATA%\sqry\sqryd.log)` on Windows. Operators may
+/// opt out of file logging by setting `LogFileSetting::Special("stderr")`
+/// (or `"-"`, or `SQRY_DAEMON_LOG_FILE=-`).
+///
+/// Source: `G_daemon_control_plane.md` §5.3 + `00_contracts.md` §3.CC-6.
+///
+/// This helper is exposed publicly so cluster-G's Layer-2 work can
+/// migrate `DaemonConfig::log_file` from `Option<PathBuf>` to
+/// [`LogFileSetting`] without re-deriving the per-OS default in two
+/// places.
+///
+/// Implementation note (Codex Layer-1 iter-1 review CC-6 defect 2):
+/// this delegates to the module-private [`runtime_dir`] free function
+/// so the per-user fallback uses the **real** UID (`libc::getuid`)
+/// matching `DaemonConfig::runtime_dir`, the socket path, the
+/// pidfile, and the lockfile. An earlier draft used a sibling helper
+/// that called the *effective* UID syscall instead, which can diverge
+/// from the real UID under setuid setups — that bespoke helper has
+/// been removed.
+#[must_use]
+pub fn default_log_file() -> Option<PathBuf> {
+    Some(runtime_dir().join("sqryd.log"))
+}
+
+/// Default value for [`DaemonConfig::log_file`] when no TOML / env
+/// override is supplied. Returns
+/// `LogFileSetting::Path(<runtime_dir>/sqryd.log)` so a fresh install
+/// has a tailable log without the operator touching `daemon.toml`
+/// (cluster-G §5.3).
+#[must_use]
+pub fn default_log_file_setting() -> LogFileSetting {
+    match default_log_file() {
+        Some(p) => LogFileSetting::Path(p),
+        // `default_log_file` only returns `None` if `runtime_dir()` is
+        // unable to materialise a path (extremely unusual on real
+        // platforms). Falling back to the legacy stderr-only default is
+        // safe and matches the explicit opt-out semantics.
+        None => LogFileSetting::Special("stderr".to_string()),
+    }
+}
+
+/// Cost-gate config snapshot derived from a [`DaemonConfig`]. Layer-2
+/// (`IMP-B`) consumers read this once when the workspace is loaded
+/// and pass it into `cost_gate::check_query` / `check_plan`. Foundation
+/// only owns the type — the gate body lives in `sqry-core/src/query/cost_gate.rs`
+/// (Layer-2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CostGateConfigView {
+    /// Arena-size cap above which prohibitive shapes need scope coupling.
+    /// `None` (or `Some(0)`) disables the cap entirely.
+    pub node_count_threshold: Option<usize>,
+    /// Minimum required literal-prefix length for an anchored regex.
+    pub min_prefix_len: usize,
+    /// Minimum `Hir::minimum_len` for an unanchored regex.
+    pub min_literal_len: usize,
+}
+
+impl CostGateConfigView {
+    /// Build a [`CostGateConfigView`] from the merged daemon config.
+    /// Falls back to the documented defaults when the field is `None`.
+    #[must_use]
+    pub fn from_daemon_config(cfg: &DaemonConfig) -> Self {
+        Self {
+            node_count_threshold: cfg.cost_gate_node_limit,
+            min_prefix_len: cfg
+                .cost_gate_min_prefix
+                .unwrap_or(DEFAULT_COST_GATE_MIN_PREFIX),
+            min_literal_len: cfg
+                .cost_gate_min_literal
+                .unwrap_or(DEFAULT_COST_GATE_MIN_LITERAL),
+        }
+    }
+
+    /// Standalone (non-daemon) default — matches the daemon defaults
+    /// so standalone `sqry-mcp` exhibits identical gate behaviour to
+    /// the daemon-hosted path on a freshly-installed binary.
+    #[must_use]
+    pub const fn standalone_default() -> Self {
+        Self {
+            node_count_threshold: Some(DEFAULT_COST_GATE_NODE_LIMIT),
+            min_prefix_len: DEFAULT_COST_GATE_MIN_PREFIX,
+            min_literal_len: DEFAULT_COST_GATE_MIN_LITERAL,
+        }
+    }
+}
+
+/// Daemon log-file setting: an explicit path **or** the literal
+/// `"stderr"` / `"-"` opt-out token. The opt-out preserves the
+/// pre-G-iter-2 behaviour (logging to stderr only) for operators
+/// who run sqryd under a service manager that captures stderr to
+/// its own journal.
+///
+/// Source: `G_daemon_control_plane.md` §5.3 + `00_contracts.md` §3.CC-6.
+///
+/// This type is added in the Layer-1 foundation pass so consumers
+/// (cluster-G Layer-2) can plumb it through the daemon config without
+/// a forward-reference to a yet-to-land type. The migration of
+/// [`DaemonConfig::log_file`] from `Option<PathBuf>` to this enum
+/// happens in cluster-G Layer-2.
+///
+/// Wire shape: a single TOML string. The deserializer classifies
+/// the canonical opt-out tokens (`"stderr"`, `"-"`) as
+/// [`Self::Special`]; every other string becomes [`Self::Path`].
+/// `#[serde(untagged)]` would silently misclassify the opt-out
+/// tokens as `Path("stderr")` because `PathBuf::from(&str)` always
+/// succeeds — see Codex Layer-1 iter-1 review (CC-6 partially-closed
+/// defect 1). The manual `Deserialize` impl below is the canonical
+/// fix: classify opt-out tokens before falling back to `PathBuf`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LogFileSetting {
+    /// Explicit file path. Default:
+    /// `<runtime_dir>/sqryd.log` on Linux/macOS,
+    /// `%LOCALAPPDATA%\sqry\sqryd.log` on Windows.
+    Path(PathBuf),
+    /// Literal `"stderr"` / `"-"`: log to stderr only (the legacy
+    /// behaviour). Any other string never reaches this variant; the
+    /// deserializer routes unknown values to [`Self::Path`] so
+    /// operators can spell ordinary filenames freely.
+    Special(String),
+}
+
+impl LogFileSetting {
+    /// Materialise the configured setting into the file path the
+    /// rolling appender should target. Returns `None` when the
+    /// operator opted out of file logging (`Special("stderr")` or
+    /// `Special("-")`) — the appender is then disabled and stderr
+    /// receives the structured log stream.
+    #[must_use]
+    pub fn resolve(&self) -> Option<PathBuf> {
+        match self {
+            Self::Path(p) => Some(p.clone()),
+            // The deserializer never produces other `Special` values,
+            // but defend in depth for callers that construct
+            // `LogFileSetting` programmatically — any `Special` means
+            // stderr-only.
+            Self::Special(_) => None,
+        }
+    }
+}
+
+impl serde::Serialize for LogFileSetting {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Path(p) => serializer.serialize_str(&p.to_string_lossy()),
+            Self::Special(s) => serializer.serialize_str(s),
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for LogFileSetting {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // CC-6 deserialization rule: classify the documented opt-out
+        // tokens BEFORE falling back to `PathBuf`. With
+        // `#[serde(untagged)]` and `Path(PathBuf)` listed first, every
+        // string would deserialize as `Path` (because
+        // `PathBuf::from(&str)` is total) and the opt-out semantics
+        // would silently break. This manual impl pins the contract.
+        let s = String::deserialize(deserializer)?;
+        Ok(match s.as_str() {
+            "stderr" | "-" => Self::Special(s),
+            _ => Self::Path(PathBuf::from(s)),
+        })
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Tests.
@@ -718,7 +1015,13 @@ mod tests {
         assert!((cfg.interner_compaction_threshold - 0.5).abs() < f32::EPSILON);
         assert_eq!(cfg.log_level, "info");
         assert_eq!(cfg.log_max_size_mb, 50);
-        assert!(cfg.log_file.is_none());
+        // Cluster-G §5.3: the new default is a file under the runtime
+        // dir, not `Special` / `None`. Operators opt out via
+        // `log_file = "stderr"` or `SQRY_DAEMON_LOG_FILE=-`.
+        assert!(matches!(
+            cfg.log_file,
+            crate::config::LogFileSetting::Path(_)
+        ));
         assert!(cfg.socket.path.is_none());
         assert!(cfg.socket.pipe_name.is_none());
         assert!(cfg.workspaces.is_empty());
@@ -1253,6 +1556,106 @@ mod tests {
         assert!(
             with_false.validate().is_ok(),
             "install_user_service=false must pass validate"
+        );
+    }
+
+    // ─── CC-6 LogFileSetting tests (Codex iter-1 defect 1 regression) ───
+    //
+    // The deserializer MUST classify the documented opt-out tokens
+    // (`"stderr"`, `"-"`) as `Special` BEFORE falling back to
+    // `Path(PathBuf)`. Earlier `#[serde(untagged)]` shape silently
+    // misclassified them because `PathBuf::from(&str)` is total.
+
+    #[test]
+    fn log_file_setting_classifies_stderr_as_special_not_path() {
+        let parsed: LogFileSetting = toml::from_str("v = \"stderr\"")
+            .map(|w: TomlWrapper| w.v)
+            .unwrap();
+        assert!(
+            matches!(parsed, LogFileSetting::Special(ref s) if s == "stderr"),
+            "TOML \"stderr\" must deserialize to Special, got: {parsed:?}"
+        );
+        assert!(
+            parsed.resolve().is_none(),
+            "Special(\"stderr\") must resolve to None (file logging disabled)"
+        );
+    }
+
+    #[test]
+    fn log_file_setting_classifies_dash_as_special_not_path() {
+        let parsed: LogFileSetting = toml::from_str("v = \"-\"")
+            .map(|w: TomlWrapper| w.v)
+            .unwrap();
+        assert!(
+            matches!(parsed, LogFileSetting::Special(ref s) if s == "-"),
+            "TOML \"-\" must deserialize to Special, got: {parsed:?}"
+        );
+        assert!(
+            parsed.resolve().is_none(),
+            "Special(\"-\") must resolve to None"
+        );
+    }
+
+    #[test]
+    fn log_file_setting_classifies_arbitrary_string_as_path() {
+        let parsed: LogFileSetting = toml::from_str("v = \"/var/log/sqryd.log\"")
+            .map(|w: TomlWrapper| w.v)
+            .unwrap();
+        assert!(
+            matches!(parsed, LogFileSetting::Path(ref p) if p == &PathBuf::from("/var/log/sqryd.log")),
+            "TOML \"/var/log/sqryd.log\" must deserialize to Path, got: {parsed:?}"
+        );
+        assert_eq!(parsed.resolve(), Some(PathBuf::from("/var/log/sqryd.log")));
+    }
+
+    #[test]
+    fn log_file_setting_round_trips_through_serde() {
+        // Path round-trip
+        let p = LogFileSetting::Path(PathBuf::from("/tmp/sqryd.log"));
+        let s = serde_json::to_string(&p).unwrap();
+        assert_eq!(s, "\"/tmp/sqryd.log\"");
+        let back: LogFileSetting = serde_json::from_str(&s).unwrap();
+        assert_eq!(back, p);
+
+        // Special round-trip
+        let sp = LogFileSetting::Special("stderr".to_string());
+        let s = serde_json::to_string(&sp).unwrap();
+        assert_eq!(s, "\"stderr\"");
+        let back: LogFileSetting = serde_json::from_str(&s).unwrap();
+        assert_eq!(back, sp);
+    }
+
+    // Wire helper for parsing scalar TOML values in the tests above.
+    // `toml::from_str` requires a top-level table; this tiny wrapper
+    // keeps the tests self-contained without polluting the public API.
+    #[derive(serde::Deserialize)]
+    struct TomlWrapper {
+        v: LogFileSetting,
+    }
+
+    // ─── CC-6 default_log_file UID consistency (defect 2 regression) ───
+    //
+    // `default_log_file()` must derive the per-user fallback from the
+    // SAME helper as `DaemonConfig::runtime_dir()` — `runtime_dir()`
+    // free function — so the log path matches the socket / pid / lock
+    // paths exactly. Pin this by asserting the parent directory of the
+    // default log file equals the canonical `runtime_dir()` result.
+    #[test]
+    fn default_log_file_parent_matches_canonical_runtime_dir() {
+        let log = default_log_file().expect("default_log_file must return Some");
+        let parent = log.parent().expect("log path has no parent").to_path_buf();
+        // Compare against the canonical helper that drives
+        // socket_path / pid_path / lock_path.
+        assert_eq!(
+            parent,
+            runtime_dir(),
+            "default_log_file parent must equal canonical runtime_dir() result; \
+             defect 2 from Codex iter-1 review reintroduced if these diverge"
+        );
+        assert_eq!(
+            log.file_name().and_then(|s| s.to_str()),
+            Some("sqryd.log"),
+            "default log filename must be sqryd.log"
         );
     }
 }

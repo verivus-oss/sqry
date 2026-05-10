@@ -135,6 +135,48 @@ fn run_sqry_diff_json(
 // Test Group A: Basic Functionality
 // ============================================================================
 
+/// Identical-OID fast-path regression guard. (verivus-oss/sqry#213)
+///
+/// Before the fix, `sqry diff HEAD HEAD` against a kernel-scale repo
+/// blew the 90s CLI deadline because both sides materialized full graphs.
+/// The fast-path now resolves both refs to commit SHAs upstream of any
+/// worktree creation; identical SHAs short-circuit to an empty diff.
+///
+/// We can't replicate kernel-scale latency in a unit test, but we can
+/// pin the contract: the result is empty, returns successfully, and
+/// completes well under the deadline even on a one-commit repo.
+#[test]
+fn test_diff_self_compare_short_circuits_to_empty() -> Result<()> {
+    let repo = TestRepo::new()?;
+    repo.write_file("src/main.rs", "fn main() {\n    println!(\"Hello\");\n}\n")?;
+    repo.commit("Initial commit")?;
+
+    let json = run_sqry_diff_json(repo.path(), "HEAD", "HEAD", &[])?;
+
+    let changes = json["changes"].as_array().expect("changes should be array");
+    assert!(
+        changes.is_empty(),
+        "self-diff must return zero changes, got: {changes:?}"
+    );
+    assert_eq!(json["summary"]["added"], 0);
+    assert_eq!(json["summary"]["removed"], 0);
+    assert_eq!(json["summary"]["modified"], 0);
+    assert_eq!(json["summary"]["renamed"], 0);
+    assert_eq!(json["summary"]["signature_changed"], 0);
+    assert_eq!(json["total"], 0);
+    assert_eq!(json["truncated"], false);
+
+    // Same fast-path must fire for two refs that resolve to the same SHA
+    // (here the same commit referenced via different ref forms).
+    let head_sha = repo.current_commit()?;
+    let json2 = run_sqry_diff_json(repo.path(), "HEAD", &head_sha, &[])?;
+    assert!(
+        json2["changes"].as_array().unwrap().is_empty(),
+        "HEAD vs explicit-SHA self-diff must also short-circuit"
+    );
+    Ok(())
+}
+
 #[test]
 fn test_diff_detects_added_function() -> Result<()> {
     let repo = TestRepo::new()?;

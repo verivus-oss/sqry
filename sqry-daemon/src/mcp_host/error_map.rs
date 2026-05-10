@@ -59,6 +59,13 @@ const KIND_WORKSPACE_STALE_EXPIRED: &str = "workspace_stale_expired";
 /// co-ordinated wire contract).
 const KIND_WORKSPACE_INCOMPATIBLE_GRAPH: &str = "workspace_incompatible_graph";
 const KIND_INTERNAL: &str = "internal";
+/// PB-1 — wire-stable kind tag for the cost-gate rejection on the
+/// daemon-hosted MCP path. Mirror of `sqry-mcp::error::KIND_QUERY_TOO_BROAD`
+/// (and `sqry-daemon::error::KIND_QUERY_TOO_BROAD`) for byte-identical
+/// envelopes across the standalone and daemon-hosted MCP transports.
+///
+/// Source: `B_cost_gate.md` §3 + `00_contracts.md` §3.CC-2.
+const KIND_QUERY_TOO_BROAD: &str = "query_too_broad";
 /// NL08 — kind tag for the ONNX-Runtime-missing condition. Mirrored
 /// across daemon-host and standalone sqry-mcp envelopes.
 pub(crate) const KIND_ONNX_RUNTIME_MISSING: &str = "ONNX_RUNTIME_MISSING";
@@ -117,9 +124,22 @@ pub fn onnx_runtime_missing_mcp(hint: &str) -> McpError {
 }
 
 /// Build the canonical `ToolTimeout` MCP envelope — single source of
-/// truth. `tool_name` is `None` when called without call-site context
-/// (the envelope emits `details.tool: null`) and `Some(name)` when
+/// truth, byte-identical to the standalone
+/// `RpcError::deadline_exceeded` envelope (cluster-A iter-2 BLOCKER 1
+/// fix; design pack RC-2 / CC-1).
+///
+/// `tool_name` is `None` when called without call-site context (the
+/// envelope emits `details.tool: null`) and `Some(name)` when
 /// populated by the MCP `call_tool` wrapper.
+///
+/// **Wire-identity contract.** The standalone path's
+/// `RpcError::deadline_exceeded` emits `retry_after_ms = 500` (the
+/// in-process `SqryServer` default) and `details = { tool, deadline_ms }`.
+/// The daemon path keeps the workspace root in the message text for
+/// operator diagnostics but MUST NOT add it to `details` (that would
+/// diverge the wire shape from standalone). The shape is checked by
+/// `mcp_host::error_map::tests` plus the iter-1 `RpcError` parity
+/// tests in `sqry-mcp/src/error.rs`.
 fn mcp_timeout_error(root: &Path, secs: u64, tool_name: Option<&str>) -> McpError {
     let deadline_ms = secs.saturating_mul(1000);
     let tool_value = match tool_name {
@@ -129,11 +149,13 @@ fn mcp_timeout_error(root: &Path, secs: u64, tool_name: Option<&str>) -> McpErro
     let data = json!({
         "kind": KIND_DEADLINE_EXCEEDED,
         "retryable": true,
-        "retry_after_ms": 1000,
+        // 500 ms matches the standalone `SqryServer` default
+        // (`sqry-mcp/src/server.rs:94`). Operators that need a
+        // different value should configure both sides identically.
+        "retry_after_ms": 500,
         "details": {
             "tool": tool_value,
             "deadline_ms": deadline_ms,
-            "root": root.display().to_string(),
         }
     });
     McpError::internal_error(
@@ -163,6 +185,27 @@ pub fn daemon_err_to_mcp(e: DaemonError) -> McpError {
                 "details": { "reason": reason.clone() },
             });
             McpError::invalid_params(format!("invalid argument: {reason}"), Some(data))
+        }
+
+        // Cluster-C iter-3: render the preserved `sqry_mcp::RpcError`
+        // through the same selector the standalone path uses
+        // (`sqry-mcp/src/server.rs::rpc_error_to_mcp`). This produces
+        // a byte-identical wire envelope:
+        //   - code -32602 → `McpError::invalid_params`
+        //   - any other code → `McpError::internal_error`
+        // and the `data` block carries the inner kind/retryable/
+        // retry_after_ms/details verbatim.
+        DaemonError::RpcErrorPreserved(rpc) => {
+            let data = json!({
+                "kind": rpc.kind,
+                "retryable": rpc.retryable,
+                "retry_after_ms": rpc.retry_after_ms,
+                "details": rpc.details,
+            });
+            match rpc.code {
+                -32602 => McpError::invalid_params(rpc.message, Some(data)),
+                _ => McpError::internal_error(rpc.message, Some(data)),
+            }
         }
 
         DaemonError::Internal(err) => {
@@ -243,6 +286,21 @@ pub fn daemon_err_to_mcp(e: DaemonError) -> McpError {
             )
         }
 
+        // PB-1 — pre-flight cost gate rejection. The CC-2 7-key
+        // `details` value is supplied by the caller and round-tripped
+        // verbatim. Wire envelope (kind / retryable / retry_after_ms /
+        // details) is byte-identical to the standalone
+        // `RpcError::query_too_broad` shape.
+        DaemonError::QueryTooBroad { reason, details } => {
+            let data = json!({
+                "kind": KIND_QUERY_TOO_BROAD,
+                "retryable": false,
+                "retry_after_ms": Value::Null,
+                "details": details,
+            });
+            McpError::invalid_params(format!("query rejected: {reason}"), Some(data))
+        }
+
         // Server-lifecycle errors (Config, Io, MemoryBudgetExceeded,
         // WorkspaceEvicted). If these reach MCP the daemon is likely
         // shutting down or the workspace raced; map generically.
@@ -276,6 +334,11 @@ mod tests {
 
     use super::*;
 
+    /// Cluster-A iter-2 BLOCKER 1: the daemon-hosted envelope MUST be
+    /// byte-identical to the standalone `RpcError::deadline_exceeded`
+    /// envelope. The standalone shape is
+    /// `{ kind, retryable, retry_after_ms, details: { tool, deadline_ms } }`
+    /// — no `root` field in `details`. This test pins the shape.
     #[test]
     fn tool_timeout_envelope_has_canonical_shape() {
         let err = DaemonError::ToolTimeout {
@@ -287,11 +350,15 @@ mod tests {
         let data = mcp_err.data.as_ref().unwrap().as_object().unwrap();
         assert_eq!(data["kind"], KIND_DEADLINE_EXCEEDED);
         assert_eq!(data["retryable"], true);
-        assert_eq!(data["retry_after_ms"], 1000);
+        assert_eq!(data["retry_after_ms"], 500);
         let details = data["details"].as_object().unwrap();
         assert!(details["tool"].is_null());
         assert_eq!(details["deadline_ms"], 60_000);
-        assert_eq!(details["root"], "/tmp/ws");
+        // No `root` in details — would diverge from the standalone shape.
+        assert!(
+            !details.contains_key("root"),
+            "details must not include `root`; the standalone envelope omits it"
+        );
     }
 
     #[test]
@@ -304,12 +371,10 @@ mod tests {
         let mcp_err = daemon_err_to_mcp_with_tool(err, "semantic_search");
         let data = mcp_err.data.as_ref().unwrap().as_object().unwrap();
         assert_eq!(data["details"]["tool"], "semantic_search");
-        // Other fields unchanged:
         assert_eq!(data["details"]["deadline_ms"], 60_000);
-        assert_eq!(data["details"]["root"], "/tmp/ws");
         assert_eq!(data["kind"], KIND_DEADLINE_EXCEEDED);
         assert_eq!(data["retryable"], true);
-        assert_eq!(data["retry_after_ms"], 1000);
+        assert_eq!(data["retry_after_ms"], 500);
     }
 
     #[test]
@@ -327,6 +392,41 @@ mod tests {
         // verify the rmcp error code matches so wire parity with
         // sqry-mcp's `rpc_error_to_mcp` is preserved.
         assert_eq!(mcp_err.code.0, -32602);
+    }
+
+    /// Cluster-C iter-3 regression: a typed `RpcError` validation
+    /// failure (e.g. `validate_budget_rows({Some(0)})`) must reach
+    /// the daemon-hosted MCP wire as `invalid_params` (-32602) with
+    /// the standalone path's exact data shape, not as
+    /// `internal_error` (-32603).
+    #[test]
+    fn rpc_error_preserved_validation_emits_invalid_params() {
+        let rpc = sqry_mcp::error::RpcError::validation_with_data(
+            "budget_rows must be > 0".to_string(),
+            json!({
+                "kind": "validation",
+                "constraint": "range",
+                "field": "budget_rows",
+                "min": 1,
+                "actual": 0,
+            }),
+        );
+        let err = DaemonError::RpcErrorPreserved(rpc);
+        let mcp_err = daemon_err_to_mcp(err);
+        // -32602 InvalidParams, NOT -32603 Internal.
+        assert_eq!(mcp_err.code.0, -32602);
+        let data = mcp_err.data.as_ref().unwrap().as_object().unwrap();
+        // RpcError.kind survives through the wrapper.
+        assert_eq!(data["kind"], "validation_error");
+        assert_eq!(data["retryable"], false);
+        assert!(data["retry_after_ms"].is_null());
+        // The structured details from the standalone path round-trip.
+        let details = data["details"].as_object().unwrap();
+        assert_eq!(details["field"], "budget_rows");
+        assert_eq!(details["constraint"], "range");
+        assert_eq!(details["min"], 1);
+        assert_eq!(details["actual"], 0);
+        assert_eq!(mcp_err.message, "budget_rows must be > 0");
     }
 
     #[test]
@@ -448,5 +548,65 @@ mod tests {
             assert_eq!(data["kind"], KIND_INTERNAL);
             assert!(data["details"].is_null());
         }
+    }
+
+    /// `B_cost_gate.md` §6 + `00_contracts.md` §3.CC-2: the daemon
+    /// envelope for a cost-gate rejection MUST be the canonical 4-key
+    /// shape (`kind`, `retryable`, `retry_after_ms`, `details`) with
+    /// `kind == "query_too_broad"`, `retryable == false`,
+    /// `retry_after_ms == null`, and `details` round-tripping the
+    /// caller-supplied CC-2 7-key payload verbatim. Pinning this
+    /// here keeps the standalone (`sqry-mcp::RpcError::query_too_broad`)
+    /// and daemon paths byte-identical on the wire.
+    #[test]
+    fn query_too_broad_envelope_has_canonical_4_key_shape() {
+        let details = serde_json::json!({
+            "source": "static_estimate",
+            "kind": "query_too_broad",
+            "estimated_visited_nodes": 312_487,
+            "limit": 312_487,
+            "predicate_shape": "name~=/.*_set$/",
+            "suggested_predicates": ["kind", "lang", "language", "path", "file"],
+            "doc_url": "https://docs.verivus.dev/sqry/query-cost-gate",
+        });
+        let err = DaemonError::QueryTooBroad {
+            reason: "rejected: predicate `name~=/.*_set$/` is unbounded".into(),
+            details: details.clone(),
+        };
+        let mcp_err = daemon_err_to_mcp(err);
+        let data = mcp_err
+            .data
+            .as_ref()
+            .expect("QueryTooBroad must carry data")
+            .as_object()
+            .expect("data must be a JSON object");
+
+        let keys: std::collections::BTreeSet<&str> = data.keys().map(String::as_str).collect();
+        let expected: std::collections::BTreeSet<&str> =
+            ["kind", "retryable", "retry_after_ms", "details"]
+                .iter()
+                .copied()
+                .collect();
+        assert_eq!(
+            keys, expected,
+            "envelope must have exactly the 4 canonical keys, got: {keys:?}"
+        );
+        assert_eq!(data["kind"], KIND_QUERY_TOO_BROAD);
+        assert_eq!(data["kind"], "query_too_broad");
+        assert_eq!(data["retryable"], false);
+        assert!(data["retry_after_ms"].is_null());
+
+        // `details` must round-trip verbatim — the daemon does not
+        // mutate the caller-supplied CC-2 7-key payload.
+        assert_eq!(data["details"], details);
+        // Quick spot-check on each canonical CC-2 key.
+        assert_eq!(data["details"]["source"], "static_estimate");
+        assert_eq!(data["details"]["kind"], "query_too_broad");
+        assert_eq!(data["details"]["limit"], 312_487);
+        assert!(data["details"]["suggested_predicates"].is_array());
+        assert_eq!(
+            data["details"]["doc_url"],
+            "https://docs.verivus.dev/sqry/query-cost-gate"
+        );
     }
 }

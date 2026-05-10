@@ -799,7 +799,22 @@ impl WorkspaceManager {
         // `publish_and_retain`, releases `workspaces_guard`, and
         // THEN invokes `on_publish` under a disjoint short-lived
         // `self.hook.read()` acquisition.
-        let (_token, published_arc) = self.publish_and_retain(reservation, &ws, graph);
+        //
+        // `G_daemon_control_plane.md` §3.5 caller-migration table —
+        // get_or_load (production caller 1). On post-build oversize,
+        // surface `DaemonError::WorkspaceOversize`; admission bytes
+        // are refunded by the reservation's RAII Drop on early
+        // return.
+        let (_token, published_arc) = match self.publish_and_retain(reservation, &ws, graph) {
+            Ok((token, arc)) => (token, arc),
+            Err(e) => {
+                drop(workspaces_guard);
+                ws.record_failure(clone_err(&e));
+                loading.armed = false;
+                ws.store_state(WorkspaceState::Failed);
+                return Err(e);
+            }
+        };
         ws.record_success(std::time::SystemTime::now());
         ws.store_state(WorkspaceState::Loaded);
         ws.touch();
@@ -934,6 +949,81 @@ impl WorkspaceManager {
         ws.store_state(WorkspaceState::Evicted);
     }
 
+    /// Cluster-G §3.2 — reset a workspace to `Unloaded` *without*
+    /// removing its manager-map entry.
+    ///
+    /// Drops the in-memory graph + admission bytes + retained
+    /// old-graph entries owned by this workspace, but preserves the
+    /// `WorkspaceKey`, `pinned` bit, and `last_error`. Files under
+    /// `<root>/.sqry/` are left untouched — destructive cleanup is
+    /// owned by `sqry workspace clean` (cluster-E IMP-E.4).
+    ///
+    /// Returns `Ok(true)` if the workspace was present and reset,
+    /// `Ok(false)` if not present.
+    ///
+    /// State transitions:
+    ///   `Loaded` / `Failed` / `Evicted` / `Unloaded` → `Unloaded`
+    ///   `Rebuilding` → cancellation dispatched, [`Err(ResetCancellationDispatched)`]
+    ///   `Loading`    → [`Err(ResetWhileLoading)`]
+    ///
+    /// `pinned` workspaces require `force = true` to reset; without
+    /// it, [`Err(WorkspacePinned)`] is returned.
+    ///
+    /// # Errors
+    ///
+    /// - [`DaemonError::WorkspacePinned`] when the workspace is pinned
+    ///   and `force = false`.
+    /// - [`DaemonError::ResetWhileLoading`] when the workspace is
+    ///   currently loading (caller must wait or cancel via the
+    ///   existing `daemon/cancel_rebuild` path).
+    /// - [`DaemonError::ResetCancellationDispatched`] when a rebuild
+    ///   was in flight; the caller should retry after `retry_after_ms`.
+    pub fn reset(self: &Arc<Self>, key: &WorkspaceKey, force: bool) -> Result<bool, DaemonError> {
+        use crate::error::DaemonError;
+        let mut workspaces = self.workspaces.write();
+        let Some(ws) = workspaces.get(key).cloned() else {
+            return Ok(false);
+        };
+        if ws.pinned && !force {
+            return Err(DaemonError::WorkspacePinned {
+                root: key.source_root.clone(),
+            });
+        }
+        let current = ws.load_state();
+        match current {
+            WorkspaceState::Loading => {
+                return Err(DaemonError::ResetWhileLoading {
+                    root: key.source_root.clone(),
+                });
+            }
+            WorkspaceState::Rebuilding => {
+                ws.rebuild_cancelled.store(true, Ordering::Release);
+                drop(workspaces);
+                return Err(DaemonError::ResetCancellationDispatched {
+                    root: key.source_root.clone(),
+                    retry_after_ms: 250,
+                });
+            }
+            _ => {}
+        }
+        // Drop the graph + refund admission bytes via the existing
+        // tombstone helper, then transition to `Unloaded` (preserving
+        // the map entry, `pinned`, and `last_error`).
+        self.evict_to_tombstone_locked(&mut workspaces, key);
+        // Cluster-G iter-2 BLOCKER 1: `evict_to_tombstone_locked`
+        // sets `rebuild_cancelled = true` (`manager.rs:948`). Without
+        // clearing it here, the next `get_or_load` from `Unloaded`
+        // hits the `pre_cancelled && prior_state != Evicted` branch
+        // at `manager.rs:693-704` and fails with `WorkspaceBuildFailed`
+        // ("workspace evicted mid-load") — `daemon reset` would be
+        // unable to recover the workspace it just reset (codex iter-1
+        // review). Clear the flag now so the next reload starts from
+        // a clean cancellation state.
+        ws.rebuild_cancelled.store(false, Ordering::Release);
+        ws.store_state(WorkspaceState::Unloaded);
+        Ok(true)
+    }
+
     /// Find a loaded workspace by its directory path.
     ///
     /// Linear scan over all registered workspaces comparing each workspace's
@@ -1009,6 +1099,49 @@ impl WorkspaceManager {
             },
             workspaces: workspaces_snapshot,
         }
+    }
+
+    /// Enumerate the `.sqry/graph` directories belonging to every
+    /// workspace currently in `state ∈ {Loading, Loaded, Rebuilding}`.
+    ///
+    /// This is the data source for the `daemon/active-artifacts`
+    /// IPC method (per `00_contracts.md` §3.CC-4 + `E_p1_cluster.md`
+    /// §E.4 DPG hand-off). The returned paths are absolute, in stable
+    /// `WorkspaceKey::source_root` order, and include only the
+    /// concrete `.sqry/graph` subdirectory — `<source_root>/.sqry/graph`
+    /// — because that is the path `sqry workspace clean` discovers
+    /// when it walks for stale artifacts.
+    ///
+    /// Read-only, concurrent-safe: takes `self.workspaces.read()`
+    /// for the duration of the iteration; the caller is expected to
+    /// honour the 250 ms response budget so the read lock does not
+    /// stall a concurrent admission write.
+    ///
+    /// `Unloaded`, `Evicted`, and `Failed` states are deliberately
+    /// excluded — those workspaces are not "live" artifacts and may
+    /// be safely cleaned by the operator.
+    #[must_use]
+    pub fn active_artifact_dirs(&self) -> Vec<std::path::PathBuf> {
+        use sqry_daemon_protocol::WorkspaceState;
+
+        let workspaces = self.workspaces.read();
+        let mut out: Vec<std::path::PathBuf> = workspaces
+            .iter()
+            .filter_map(|(key, ws)| {
+                let state = ws.load_state();
+                let live = matches!(
+                    state,
+                    WorkspaceState::Loading | WorkspaceState::Loaded | WorkspaceState::Rebuilding
+                );
+                if live {
+                    Some(key.source_root.join(".sqry").join("graph"))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        out.sort();
+        out
     }
 
     /// Aggregate `daemon/workspaceStatus` snapshot for a single
@@ -1310,7 +1443,7 @@ impl WorkspaceManager {
         reservation: RebuildReservation,
         workspace: &LoadedWorkspace,
         new_graph: CodeGraph,
-    ) -> (OldGraphToken, Arc<CodeGraph>) {
+    ) -> Result<(OldGraphToken, Arc<CodeGraph>), DaemonError> {
         // Compute the new graph's heap bytes before handing it to the
         // ArcSwap — once published, a concurrent reader holds it
         // alive, and measuring after publish race-races with the
@@ -1318,6 +1451,41 @@ impl WorkspaceManager {
         let new_bytes_usize = new_graph.heap_bytes();
         // `usize as u64` is a no-op on 64-bit and a widen on 32-bit.
         let new_bytes = new_bytes_usize as u64;
+
+        // Post-build oversize gate (`G_daemon_control_plane.md` §1.4
+        // + `00_contracts.md` §3.CC-3 admission boundary). Reject
+        // BEFORE any visibility mutation so a ground-truth-too-big
+        // workspace can never enter the serve path. The reservation
+        // drops on early return — bytes are refunded via RAII and no
+        // `OldGraphToken` is allocated.
+        //
+        // Subtract the prior workspace bytes from the projected
+        // total because we will REPLACE this workspace's contribution
+        // (the swap below subtracts `prev_memory_bytes` from
+        // `loaded_bytes` and adds `new_bytes`); only the delta from
+        // the prior contribution counts against the cap, while
+        // every other workspace's loaded contribution and any
+        // retained-old bytes still count.
+        let limit = self.memory_limit_bytes();
+        let prior_workspace_bytes = workspace
+            .memory_bytes
+            .load(std::sync::atomic::Ordering::Acquire) as u64;
+        let projected = {
+            let state = self.admission.lock();
+            state
+                .loaded_bytes
+                .saturating_sub(prior_workspace_bytes)
+                .saturating_add(state.retained_total_bytes())
+                .saturating_add(new_bytes)
+        };
+        if projected > limit {
+            return Err(DaemonError::WorkspaceOversize {
+                root: workspace.key.source_root.clone(),
+                measured_bytes: new_bytes,
+                limit_bytes: limit,
+                current_loaded_bytes: projected.saturating_sub(new_bytes),
+            });
+        }
 
         // Take the reservation by value so this function owns it and
         // the Drop impl fires on any unwind path. `released` stays
@@ -1451,7 +1619,7 @@ impl WorkspaceManager {
         // `NoOpHook` remains the default; Task 9's daemon binary
         // installs the production `QueryDbHook` that wraps
         // `sqry_db::persistence::save_derived` with a timeout.
-        (token, published_arc)
+        Ok((token, published_arc))
     }
 
     /// Release the reaper handle on Drop. Safe to call from any
@@ -1619,7 +1787,24 @@ impl WorkspaceManager {
             });
         }
 
-        let (_token, published_arc) = self.publish_and_retain(reservation, &ws, graph);
+        // `G_daemon_control_plane.md` §3.5 + §3.6 — read-only
+        // reload exemption proof: in steady-state operation this
+        // path cannot observe `WorkspaceOversize` because the
+        // snapshot-on-disk was bounded by a prior successful
+        // publish + the deserialization size cap. Defensive match
+        // arm preserved so a contract violation surfaces as the
+        // typed error rather than silently masquerading as a
+        // success.
+        let (_token, published_arc) = match self.publish_and_retain(reservation, &ws, graph) {
+            Ok((token, arc)) => (token, arc),
+            Err(e) => {
+                drop(workspaces_guard);
+                ws.record_failure(clone_err(&e));
+                loading.armed = false;
+                ws.store_state(WorkspaceState::Failed);
+                return Err(e);
+            }
+        };
         ws.record_success(std::time::SystemTime::now());
         ws.store_state(WorkspaceState::Loaded);
         ws.touch();
@@ -1838,6 +2023,9 @@ pub(crate) fn clone_err(err: &DaemonError) -> DaemonError {
         DaemonError::InvalidArgument { reason } => DaemonError::InvalidArgument {
             reason: reason.clone(),
         },
+        // Cluster-C iter-3: RpcError implements Clone, so this is a
+        // direct deep copy.
+        DaemonError::RpcErrorPreserved(rpc) => DaemonError::RpcErrorPreserved(rpc.clone()),
         DaemonError::Internal(err) => {
             // `anyhow::Error` is not `Clone`; re-create it from its
             // full-chain `Display` form (`{:#}`) so every layer of
@@ -1873,6 +2061,42 @@ pub(crate) fn clone_err(err: &DaemonError) -> DaemonError {
         DaemonError::SignalSetup { source } => DaemonError::WorkspaceBuildFailed {
             root: Path::new("<unknown>").to_path_buf(),
             reason: format!("failed to install signal handlers: {source}"),
+        },
+        // sqry-mcp flakiness P0/P1 admission + recovery variants
+        // (G_daemon_control_plane.md §1.4 / §3.2 / §5.2 +
+        // B_cost_gate.md §3 + 00_contracts.md §3.CC-2 / §3.CC-4).
+        // Each carries cheap Clone-able payload; round-trip in place.
+        DaemonError::WorkspaceOversize {
+            root,
+            measured_bytes,
+            limit_bytes,
+            current_loaded_bytes,
+        } => DaemonError::WorkspaceOversize {
+            root: root.clone(),
+            measured_bytes: *measured_bytes,
+            limit_bytes: *limit_bytes,
+            current_loaded_bytes: *current_loaded_bytes,
+        },
+        DaemonError::WorkspacePinned { root } => {
+            DaemonError::WorkspacePinned { root: root.clone() }
+        }
+        DaemonError::ResetWhileLoading { root } => {
+            DaemonError::ResetWhileLoading { root: root.clone() }
+        }
+        DaemonError::ResetCancellationDispatched {
+            root,
+            retry_after_ms,
+        } => DaemonError::ResetCancellationDispatched {
+            root: root.clone(),
+            retry_after_ms: *retry_after_ms,
+        },
+        DaemonError::SocketSetup { path, reason } => DaemonError::SocketSetup {
+            path: path.clone(),
+            reason: reason.clone(),
+        },
+        DaemonError::QueryTooBroad { reason, details } => DaemonError::QueryTooBroad {
+            reason: reason.clone(),
+            details: details.clone(),
         },
         other @ (DaemonError::Config { .. } | DaemonError::Io(_)) => {
             DaemonError::WorkspaceBuildFailed {
@@ -2195,7 +2419,9 @@ mod tests {
 
         let new_graph = CodeGraph::new();
         let new_bytes = new_graph.heap_bytes() as u64;
-        let (token, _published_arc) = mgr.publish_and_retain(reservation, &ws, new_graph);
+        let (token, _published_arc) = mgr
+            .publish_and_retain(reservation, &ws, new_graph)
+            .expect("publish_and_retain succeeds within memory budget");
 
         let state = mgr.admission.lock();
         assert_eq!(
@@ -2291,7 +2517,8 @@ mod tests {
             .expect("zero-size reservation always fits");
         // Publish-and-retain with a fresh empty graph; the old graph
         // becomes retained.
-        mgr.publish_and_retain(reservation, &ws, CodeGraph::new());
+        mgr.publish_and_retain(reservation, &ws, CodeGraph::new())
+            .expect("publish_and_retain succeeds within memory budget");
         assert_eq!(mgr.admission.lock().retained_old.len(), 1);
 
         // No query holds the old Arc, so the next reap tick frees it.
@@ -2313,7 +2540,8 @@ mod tests {
         let reservation = mgr
             .reserve_rebuild(&ws.key, 0)
             .expect("zero-size reservation always fits");
-        mgr.publish_and_retain(reservation, &ws, CodeGraph::new());
+        mgr.publish_and_retain(reservation, &ws, CodeGraph::new())
+            .expect("publish_and_retain succeeds within memory budget");
 
         // Simulate a slow query holding the retained Arc.
         let held = {
@@ -2391,7 +2619,9 @@ mod tests {
         // Drive the full commit path. After this returns the
         // reservation is already moved into the function, so we can
         // only observe the *absence* of any stray refund.
-        let (_token, _published_arc) = mgr.publish_and_retain(reservation, &ws, CodeGraph::new());
+        let (_token, _published_arc) = mgr
+            .publish_and_retain(reservation, &ws, CodeGraph::new())
+            .expect("publish_and_retain succeeds within memory budget");
         let admission_after = mgr.admission.lock().reserved_bytes;
         assert_eq!(
             admission_after, 0,
@@ -3168,7 +3398,8 @@ mod tests {
         let reservation = mgr
             .reserve_rebuild(&ws.key, 0)
             .expect("zero-size reservation always fits");
-        mgr.publish_and_retain(reservation, &ws, CodeGraph::new());
+        mgr.publish_and_retain(reservation, &ws, CodeGraph::new())
+            .expect("publish_and_retain succeeds within memory budget");
         assert_eq!(mgr.admission.lock().retained_old.len(), 1);
 
         // Reaper ticks every 25 ms; 200 ms is generous.
@@ -3179,5 +3410,125 @@ mod tests {
             }
         }
         panic!("reaper task never freed the entry within 200 ms");
+    }
+
+    // -----------------------------------------------------------------
+    // Cluster-G §3.2 — `WorkspaceManager::reset` tests
+    // -----------------------------------------------------------------
+
+    /// Resetting an unregistered workspace returns `Ok(false)` and is
+    /// a no-op.
+    #[test]
+    fn reset_returns_false_when_workspace_absent() {
+        let mgr = WorkspaceManager::new_without_reaper(make_config());
+        let key = WorkspaceKey::new(
+            PathBuf::from("/repos/example"),
+            ProjectRootMode::GitRoot,
+            0x1,
+        );
+        let reset = mgr.reset(&key, false).expect("reset must succeed");
+        assert!(!reset, "absent workspace should report `false`");
+    }
+
+    /// Resetting a `Loaded` workspace transitions it to `Unloaded` and
+    /// preserves the manager-map entry.
+    #[test]
+    fn reset_loaded_workspace_preserves_entry() {
+        let mgr = WorkspaceManager::new_without_reaper(make_config());
+        let key = WorkspaceKey::new(
+            PathBuf::from("/repos/example"),
+            ProjectRootMode::GitRoot,
+            0x1,
+        );
+        register_workspace(&mgr, &key);
+        // Force the workspace into Loaded for the test.
+        if let Some(ws) = mgr.workspaces.read().get(&key).cloned() {
+            ws.store_state(crate::workspace::state::WorkspaceState::Loaded);
+        }
+
+        let reset = mgr
+            .reset(&key, false)
+            .expect("reset must succeed for Loaded workspace");
+        assert!(reset, "present workspace should report `true`");
+        assert!(
+            mgr.workspaces.read().contains_key(&key),
+            "reset must preserve the manager-map entry"
+        );
+    }
+
+    /// Resetting a `pinned` workspace without `force` returns
+    /// `WorkspacePinned` and leaves the entry alone.
+    #[test]
+    fn reset_pinned_without_force_returns_pinned_error() {
+        let mgr = WorkspaceManager::new_without_reaper(make_config());
+        let key = WorkspaceKey::new(
+            PathBuf::from("/repos/example"),
+            ProjectRootMode::GitRoot,
+            0x1,
+        );
+        // Insert a pinned workspace directly.
+        mgr.workspaces.write().insert(
+            key.clone(),
+            Arc::new(LoadedWorkspace::new(key.clone(), true)),
+        );
+        let err = mgr
+            .reset(&key, false)
+            .expect_err("pinned workspace must reject reset without force");
+        assert!(
+            matches!(err, crate::error::DaemonError::WorkspacePinned { .. }),
+            "expected WorkspacePinned, got {err:?}"
+        );
+    }
+
+    /// `force = true` allows resetting a `pinned` workspace.
+    #[test]
+    fn reset_pinned_with_force_succeeds() {
+        let mgr = WorkspaceManager::new_without_reaper(make_config());
+        let key = WorkspaceKey::new(
+            PathBuf::from("/repos/example"),
+            ProjectRootMode::GitRoot,
+            0x1,
+        );
+        mgr.workspaces.write().insert(
+            key.clone(),
+            Arc::new(LoadedWorkspace::new(key.clone(), true)),
+        );
+        let reset = mgr
+            .reset(&key, true)
+            .expect("force-reset must succeed for pinned workspace");
+        assert!(reset);
+    }
+
+    /// Cluster-G iter-2 BLOCKER 1 regression: after a successful
+    /// `reset`, `rebuild_cancelled` MUST be cleared so the next
+    /// `get_or_load` does not hit the `pre_cancelled && prior_state
+    /// != Evicted` branch and surface `WorkspaceBuildFailed`. Codex
+    /// iter-1 review flagged that `evict_to_tombstone_locked` set
+    /// the flag and `reset` never cleared it, leaving `daemon reset
+    /// → daemon load` permanently broken.
+    #[test]
+    fn reset_clears_rebuild_cancelled_so_next_load_does_not_fail() {
+        let mgr = WorkspaceManager::new_without_reaper(make_config());
+        let key = WorkspaceKey::new(
+            PathBuf::from("/repos/example"),
+            ProjectRootMode::GitRoot,
+            0x1,
+        );
+        register_workspace(&mgr, &key);
+        if let Some(ws) = mgr.workspaces.read().get(&key).cloned() {
+            ws.store_state(crate::workspace::state::WorkspaceState::Loaded);
+        }
+        let _ = mgr.reset(&key, false).expect("reset must succeed");
+        let ws = mgr
+            .workspaces
+            .read()
+            .get(&key)
+            .cloned()
+            .expect("entry preserved");
+        assert!(
+            !ws.rebuild_cancelled.load(Ordering::Acquire),
+            "rebuild_cancelled must be CLEARED after reset; otherwise the next \
+             get_or_load fails with WorkspaceBuildFailed and `daemon reset` is broken"
+        );
     }
 }

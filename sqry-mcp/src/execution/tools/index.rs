@@ -208,6 +208,19 @@ pub fn execute_rebuild_index(args: &RebuildIndexArgs) -> Result<ToolExecution<Re
         });
     }
 
+    // Cluster-E §E.3 — refuse to create a nested `.sqry/` if an outer
+    // project already has its own graph. MCP exposes the `force` field
+    // as the explicit opt-in: the user has already declared intent to
+    // create/rebuild here, so when `force=true` we proceed even if a
+    // parent project graph exists. Without `force`, we surface the
+    // recovery text from `NestedIndexError` so the caller can route to
+    // the correct workspace.
+    if !storage.exists()
+        && let Err(e) = sqry_core::workspace::assert_no_ancestor_graph(&root_path, args.force)
+    {
+        anyhow::bail!("{e}");
+    }
+
     // Build, persist, and analyze using the shared pipeline
     let plugins = create_plugin_manager();
     let build_config = BuildConfig::default();

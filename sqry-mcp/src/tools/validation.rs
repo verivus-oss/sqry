@@ -35,6 +35,11 @@ pub struct SemanticSearchArgs {
     /// Whether to include classpath (external dependency) results.
     /// Defaults to `false` — only workspace results are returned.
     pub include_classpath: bool,
+    /// Per-call runtime row budget cap (per `C_budget.md` §C5 +
+    /// `00_contracts.md` §3.CC-2). `None` defers to the daemon
+    /// `SQRY_TOOL_BUDGET_ROWS` env var or the documented default
+    /// (5_000_000).
+    pub budget_rows: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -328,6 +333,8 @@ pub struct HierarchicalSearchArgs {
     /// File paths to expand (load full details for stubs)
     /// Use this to lazily load specific files from a previous stub response
     pub expand_files: Vec<String>,
+    /// Per-call runtime row budget cap (per `C_budget.md` §C5).
+    pub budget_rows: Option<u64>,
 }
 
 /// Validate `semantic_search` arguments.
@@ -389,6 +396,7 @@ pub fn validate_semantic_search_args(args: &Value) -> Result<SemanticSearchArgs>
         pagination,
         score_min,
         include_classpath,
+        budget_rows: args.get("budget_rows").and_then(|v| v.as_u64()),
     })
 }
 
@@ -1468,6 +1476,7 @@ pub fn validate_hierarchical_search_args(args: &Value) -> Result<HierarchicalSea
         include_file_context,
         include_container_context,
         expand_files,
+        budget_rows: args.get("budget_rows").and_then(|v| v.as_u64()),
     })
 }
 

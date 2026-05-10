@@ -267,6 +267,92 @@ impl DaemonClient {
             .await
     }
 
+    /// Send a `daemon/reset` JSON-RPC request to drop the in-memory
+    /// graph + admission bytes for the workspace at `path`, preserving
+    /// the manager-map entry, `pinned` bit, and `last_error`
+    /// (cluster-G §3.2). Files on disk are NEVER touched.
+    ///
+    /// `force = true` is required to reset a `pinned` workspace.
+    ///
+    /// Returns the raw `daemon/reset` JSON result, which carries
+    /// `{ root, reset }`. `reset = true` when the workspace was
+    /// present and reset; `false` when the path matched no workspace.
+    ///
+    /// # Errors
+    ///
+    /// - [`ClientError::RpcError`] with code `-32004` if the workspace
+    ///   is not loaded.
+    /// - [`ClientError::RpcError`] with code `-32008` if the workspace
+    ///   is currently `Loading`.
+    /// - [`ClientError::RpcError`] with code `-32009` if a rebuild is
+    ///   in flight (the daemon dispatched a cancellation; retry after
+    ///   the `retry_after_ms` field in `error.data`).
+    /// - [`ClientError::RpcError`] with code `-32010` if the workspace
+    ///   is pinned and `force = false`.
+    /// - Propagates other errors from [`Self::send_request`].
+    pub async fn reset(
+        &mut self,
+        path: &Path,
+        force: bool,
+    ) -> Result<serde_json::Value, ClientError> {
+        self.send_request(
+            "daemon/reset",
+            serde_json::json!({ "path": path, "force": force }),
+        )
+        .await
+    }
+
+    /// Send a `daemon/active-artifacts` JSON-RPC request and return
+    /// the list of `.sqry/graph` directories the daemon currently has
+    /// loaded (cluster-E §E.4 hand-off).
+    ///
+    /// The daemon's `WorkspaceManager::active_artifact_dirs` is the
+    /// authoritative source. Read-only and concurrent-safe — callers
+    /// should bound the wall-clock with `tokio::time::timeout` so a
+    /// stalled daemon does not block CLI commands like
+    /// `sqry workspace clean`.
+    ///
+    /// # Errors
+    ///
+    /// Propagates errors from [`Self::send_request`]. Returns
+    /// [`ClientError::SchemaMismatch`] if the daemon response does not
+    /// contain an `artifacts: [PathBuf]` field at the canonical key.
+    pub async fn active_artifacts(&mut self) -> Result<Vec<std::path::PathBuf>, ClientError> {
+        let raw = self
+            .send_request("daemon/active-artifacts", serde_json::json!({}))
+            .await?;
+        // Cluster-E iter-2: strict parse — a malformed response must
+        // produce `SchemaMismatch`, never an empty `Vec`. The codex
+        // iter-1 review flagged that an `unwrap_or_default` here let
+        // `sqry workspace clean --apply` delete a daemon-locked
+        // artifact when the daemon's wire schema drifted.
+        //
+        // Accepted shapes (`send_request` returns the inner `result`
+        // already, but daemon-path callers forward an additional
+        // envelope, so we tolerate both nestings):
+        //   `{ "artifacts": [...] }`
+        //   `{ "result": { "artifacts": [...] } }`
+        //
+        // `serde_json::from_value` on an explicit field shape gives
+        // us a real `serde_json::Error` for `SchemaMismatch` without
+        // pulling in `serde` as a direct dep.
+        #[derive(serde::Deserialize)]
+        struct Body {
+            artifacts: Vec<std::path::PathBuf>,
+        }
+        let body_value = raw
+            .get("result")
+            .cloned()
+            .or_else(|| Some(raw.clone()))
+            .unwrap_or(raw);
+        let body: Body =
+            serde_json::from_value(body_value).map_err(|source| ClientError::SchemaMismatch {
+                method: "daemon/active-artifacts",
+                source,
+            })?;
+        Ok(body.artifacts)
+    }
+
     /// Send a `daemon/rebuild` JSON-RPC request to trigger a rebuild
     /// for the workspace at `path`.
     ///

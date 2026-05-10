@@ -10,15 +10,28 @@ description = "Salsa-style incremental computation engine for sqry semantic code
 
 [dependencies]
 anyhow.workspace = true
-sqry-core = { version = "13.0.17", path = "../sqry-core" }
+sqry-core = { version = "14.0.3", path = "../sqry-core" }
 parking_lot.workspace = true
 smallvec.workspace = true
 log.workspace = true
 postcard.workspace = true
 serde.workspace = true
+# `serde_json` is needed by the planner cost gate's CC-2 envelope
+# helper (`B_cost_gate.md` §B4 + `00_contracts.md` §3.CC-2). Dev
+# already has it; promote to a regular dep so the helper is
+# reachable from non-test consumers (`sqry-mcp` planner_query
+# handler, `sqry-cli` plan-query handler).
+serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 regex.workspace = true
+# `regex-syntax` is already in `Cargo.lock` (v0.8.10) as a transitive
+# dep of `regex`. The planner-side cost gate at
+# `sqry-db/src/planner/cost_gate.rs` (`B_cost_gate.md` §B4) inspects
+# regex patterns via `regex_syntax::parse` so it must be a direct
+# dependency. No-cost addition — same version is already in the
+# build graph.
+regex-syntax = "0.8"
 globset.workspace = true
 strsim = "0.11"
 

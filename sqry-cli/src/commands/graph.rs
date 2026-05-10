@@ -1598,6 +1598,32 @@ struct UnifiedSubGraph {
     edges: Vec<(UnifiedNodeId, UnifiedNodeId, UnifiedEdgeKind)>,
 }
 
+/// Resolve the `module` argument of `sqry graph dependency-tree` into
+/// root NodeIds for the BFS.
+///
+/// Tries symbol-name lookup first (the historical contract — `dependency-tree
+/// SymbolName` walks dependencies of that symbol). Falls back to file-path
+/// lookup so callers can pass an indexed file path and get the dependency
+/// tree of every node defined in that file. Both repo-relative and absolute
+/// paths are accepted via the file registry's path normalization.
+///
+/// This is the fix for verivus-oss/sqry#215, where `kernel/exit.c` and
+/// `/srv/repos/.../kernel/exit.c` both failed despite the indexer knowing
+/// the file (`dependency_impact` candidates surface it under the same key).
+fn resolve_module_arg_unified(snapshot: &UnifiedGraphSnapshot, module: &str) -> Vec<UnifiedNodeId> {
+    let by_name = find_nodes_by_name(snapshot, module);
+    if !by_name.is_empty() {
+        return by_name;
+    }
+    if let Some(file_id) = snapshot.files().get(Path::new(module)) {
+        let nodes_in_file = snapshot.indices().by_file(file_id);
+        if !nodes_in_file.is_empty() {
+            return nodes_in_file.to_vec();
+        }
+    }
+    Vec::new()
+}
+
 /// Show transitive dependencies for a module using the unified graph.
 ///
 /// This function finds all nodes matching the module name, builds a
@@ -1612,10 +1638,17 @@ fn run_dependency_tree_unified(
 ) -> Result<()> {
     let snapshot = graph.snapshot();
 
-    // Find root nodes for this module
-    let root_nodes = find_nodes_by_name(&snapshot, module);
+    // Find root nodes for this module. Accept both symbol-name and
+    // file-path arguments (verivus-oss/sqry#215): the previous version
+    // only tried name lookup and rejected indexed file paths the rest of
+    // the graph surface knows about.
+    let root_nodes = resolve_module_arg_unified(&snapshot, module);
     if root_nodes.is_empty() {
-        bail!("Module '{module}' not found in graph");
+        bail!(
+            "Module '{module}' not found in graph (tried symbol-name lookup and file-path \
+             lookup; pass either a symbol name or a repo-relative or absolute file path \
+             that was indexed)"
+        );
     }
 
     // Build dependency tree via BFS from root nodes

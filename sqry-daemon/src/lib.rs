@@ -144,6 +144,60 @@ pub const JSONRPC_WORKSPACE_EVICTED: i32 = -32004;
 /// not collapse this taxonomy class into the generic build-failed code.
 pub const JSONRPC_WORKSPACE_INCOMPATIBLE_GRAPH: i32 = -32005;
 
+/// JSON-RPC error code: the freshly-built graph exceeds the daemon's
+/// memory budget *by itself* (post-build oversize) — even after every
+/// other workspace would be evicted, the daemon cannot host this
+/// graph. Distinct from `MemoryBudgetExceeded` (`-32003`), which is a
+/// *projected* admission failure on a pre-build estimate.
+///
+/// Source: `G_daemon_control_plane.md` §1.4 (post-build heap check) +
+/// `00_contracts.md` §3.CC-3 (admission boundary with DPA / DPC).
+/// Returned by `WorkspaceManager::publish_and_retain` after the build
+/// completes but before the new graph is exposed to readers.
+pub const JSONRPC_WORKSPACE_OVERSIZE: i32 = -32006;
+
+/// JSON-RPC error code: socket parent directory cannot be created or
+/// is not writable by the daemon's uid. Surfaced before `IpcServer::bind`
+/// so the failure mode is a precise diagnostic instead of a generic
+/// `EACCES` from the eventual bind.
+///
+/// Source: `G_daemon_control_plane.md` §5.2.
+pub const JSONRPC_SOCKET_SETUP: i32 = -32007;
+
+/// JSON-RPC error code: `daemon/reset` was invoked on a workspace
+/// whose state is `Loading` and cannot be safely interrupted yet.
+/// Caller should retry once the load completes.
+///
+/// Source: `G_daemon_control_plane.md` §3.2.
+pub const JSONRPC_RESET_WHILE_LOADING: i32 = -32008;
+
+/// JSON-RPC error code: `daemon/reset` was invoked on a workspace
+/// whose state is `Rebuilding`; cancellation has been dispatched and
+/// the caller is expected to retry after `retry_after_ms` for the
+/// state to settle into `Failed` / `Unloaded` (then a follow-up reset
+/// completes).
+///
+/// Source: `G_daemon_control_plane.md` §3.2.
+pub const JSONRPC_RESET_CANCELLATION_DISPATCHED: i32 = -32009;
+
+/// JSON-RPC error code: `daemon/reset` refused because the targeted
+/// workspace is pinned and the caller did not pass `force = true`.
+/// Pinning is a per-workspace operator override; callers must opt in
+/// explicitly to drop a pinned workspace.
+///
+/// Source: `G_daemon_control_plane.md` §3.2.
+pub const JSONRPC_WORKSPACE_PINNED: i32 = -32010;
+
+/// JSON-RPC error code: pre-flight cost gate rejected a query because
+/// its evaluator cost is structurally unbounded (no scope filter, no
+/// regex anchoring, predicate shape would scan the full arena). Wire
+/// `kind` is always `"query_too_broad"`. Reuses `-32602` per the
+/// existing wire-bridge convention; `kind` is the discriminator
+/// (per `B_cost_gate.md` §3 "Why -32602, not a new -32xxx code").
+///
+/// Source: `B_cost_gate.md` §3 + `00_contracts.md` §3.CC-2.
+pub const JSONRPC_QUERY_TOO_BROAD: i32 = JSONRPC_INVALID_PARAMS;
+
 /// JSON-RPC 2.0 standard "Invalid params" error code.
 ///
 /// Surfaced by `tool_core` argument validation (Phase 8c U6) BEFORE

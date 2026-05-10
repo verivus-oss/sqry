@@ -4,11 +4,8 @@
 //! tree to find the nearest graph index, enabling queries from subdirectories to
 //! automatically use a parent index with appropriate scope filtering.
 
-use sqry_core::graph::unified::persistence::GraphStorage;
+use sqry_core::workspace::{MAX_ANCESTOR_DEPTH, WorkspaceRootDiscovery, discover_workspace_root};
 use std::path::{Path, PathBuf};
-
-/// Maximum depth to traverse upward (security limit).
-const MAX_ANCESTOR_DEPTH: usize = 64;
 
 /// Legacy index file name constant (deprecated).
 pub const INDEX_FILE_NAME: &str = ".sqry-index";
@@ -66,20 +63,31 @@ impl IndexLocation {
     }
 }
 
-/// Find the nearest .sqry-index by walking up from the given path.
+/// Find the nearest unified graph (or legacy `.sqry-index` file) by
+/// walking up from the given path.
 ///
 /// # Algorithm
-/// 1. Canonicalize the start path (resolve symlinks, make absolute)
-/// 2. Check for .sqry-index in current directory
-/// 3. If not found, move to parent and repeat
-/// 4. Stop at filesystem root or `MAX_ANCESTOR_DEPTH`
 ///
-/// # Arguments
-/// * `start` - The directory or file to start searching from
+/// 1. First consult [`discover_workspace_root`] (cluster-E §E.1). The walk
+///    is bounded by [`MAX_ANCESTOR_DEPTH`] and stops at the first project
+///    marker (`.git`, `Cargo.toml`, `package.json`, `pyproject.toml`,
+///    `go.mod`). A graph above the project boundary is discarded — this
+///    eliminates the "stray `~/.sqry/graph`" foot-gun where a leftover
+///    graph at `$HOME` was silently picked up for a brand-new project.
+/// 2. If the discovery returns `BoundaryOnly`, also walk for the legacy
+///    `.sqry-index` file from `start` up to (but not above) the project
+///    boundary, since `discover_workspace_root` already records legacy
+///    `.sqry-index` files but does so without producing an
+///    `IndexLocation`. We keep this fallback path for backward
+///    compatibility with v1 layouts.
 ///
 /// # Returns
-/// * `Some(IndexLocation)` if an index was found
-/// * `None` if no index exists in any ancestor
+///
+/// * `Some(IndexLocation)` if a unified graph (or legacy index) was found
+///   inside the project boundary.
+/// * `None` if no usable index exists in any ancestor below the project
+///   boundary, or if the walk hit [`MAX_ANCESTOR_DEPTH`] without finding
+///   either.
 #[must_use]
 pub fn find_nearest_index(start: &Path) -> Option<IndexLocation> {
     let query_scope = start.to_path_buf();
@@ -89,54 +97,70 @@ pub fn find_nearest_index(start: &Path) -> Option<IndexLocation> {
     let canonical_start = start.canonicalize().unwrap_or_else(|_| start.to_path_buf());
 
     // Determine if input is a file or directory
-    // For file paths, start discovery from the parent directory
-    let (mut ancestor_dir, is_file_query) = if canonical_start.is_file() {
-        let parent = canonical_start
-            .parent()
-            .map_or_else(|| canonical_start.clone(), Path::to_path_buf);
-        (parent, true)
-    } else {
-        (canonical_start, false)
+    let is_file_query = canonical_start.is_file();
+
+    // Step 1: bounded discovery via the shared workspace walker.
+    let (boundary, graph_root, depth_to_graph) = match discover_workspace_root(&canonical_start) {
+        WorkspaceRootDiscovery::GraphFound {
+            root,
+            boundary,
+            depth,
+            ..
+        } => (Some(boundary), Some(root), Some(depth)),
+        WorkspaceRootDiscovery::BoundaryOnly { boundary, .. } => (Some(boundary), None, None),
+        WorkspaceRootDiscovery::None => (None, None, None),
     };
 
-    // Ensure we have an absolute path for traversal
-    if ancestor_dir.is_relative()
+    if let (Some(root), Some(depth)) = (graph_root, depth_to_graph) {
+        // `depth` is measured from the canonicalised start (or its parent for
+        // file inputs). The legacy `is_ancestor` flag fires whenever the
+        // index lives above the *original* request, including the file-input
+        // case (where we walked up from the parent directory).
+        let is_ancestor = depth > 0;
+        return Some(IndexLocation {
+            index_root: root,
+            query_scope: query_scope.canonicalize().unwrap_or(query_scope),
+            is_ancestor,
+            is_file_query,
+            requires_scope_filter: is_ancestor || is_file_query,
+        });
+    }
+
+    // Step 2: legacy `.sqry-index` fallback — walk up from `start` (or its
+    // parent for file inputs) but never above the project boundary.
+    let mut dir: PathBuf = if is_file_query {
+        canonical_start
+            .parent()
+            .map_or_else(|| canonical_start.clone(), Path::to_path_buf)
+    } else {
+        canonical_start.clone()
+    };
+    if dir.is_relative()
         && let Ok(cwd) = std::env::current_dir()
     {
-        ancestor_dir = cwd.join(&ancestor_dir);
+        dir = cwd.join(&dir);
     }
 
     for ancestor_depth in 0..MAX_ANCESTOR_DEPTH {
-        // Check for unified graph format first
-        let storage = GraphStorage::new(&ancestor_dir);
-        if storage.exists() {
-            let is_ancestor = ancestor_depth > 0;
-            return Some(IndexLocation {
-                index_root: ancestor_dir,
-                query_scope: query_scope.canonicalize().unwrap_or(query_scope),
-                is_ancestor,
-                is_file_query,
-                // File queries always need filtering, even when index is in parent
-                requires_scope_filter: is_ancestor || is_file_query,
-            });
-        }
-
-        // Fallback: check for legacy .sqry-index format
-        let legacy_index_path = ancestor_dir.join(INDEX_FILE_NAME);
+        let legacy_index_path = dir.join(INDEX_FILE_NAME);
         if legacy_index_path.exists() && legacy_index_path.is_file() {
             let is_ancestor = ancestor_depth > 0;
             return Some(IndexLocation {
-                index_root: ancestor_dir,
+                index_root: dir,
                 query_scope: query_scope.canonicalize().unwrap_or(query_scope),
                 is_ancestor,
                 is_file_query,
                 requires_scope_filter: is_ancestor || is_file_query,
             });
         }
-
-        // Move to parent directory
-        if !ancestor_dir.pop() {
-            // Reached filesystem root
+        // Stop at the project boundary so a stray legacy index in $HOME is
+        // never picked up for a project that has its own marker.
+        if let Some(b) = boundary.as_ref()
+            && &dir == b
+        {
+            break;
+        }
+        if !dir.pop() {
             break;
         }
     }

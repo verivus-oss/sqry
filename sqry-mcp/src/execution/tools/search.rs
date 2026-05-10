@@ -135,6 +135,7 @@ fn semantic_sort_key(
 
 pub fn execute_semantic_search(
     args: &SemanticSearchArgs,
+    cancel: &sqry_core::query::cancellation::CancellationToken,
 ) -> Result<ToolExecution<SemanticSearchData>> {
     // SECURITY: Validate path BEFORE loading workspace/engine.
     // SGA03 keeps this preflight in place: the standalone-MCP
@@ -170,11 +171,11 @@ pub fn execute_semantic_search(
         graph,
         executor: engine.executor_arc(),
     };
-    inner::execute_semantic_search(&ctx, args, &search_root, start)
+    inner::execute_semantic_search(&ctx, args, &search_root, start, cancel)
 }
 
 pub(crate) mod inner {
-    use super::{NodeId, Result, SemanticSearchArgs, SemanticSearchData, ToolExecution, anyhow};
+    use super::{NodeId, Result, SemanticSearchArgs, SemanticSearchData, ToolExecution};
     use crate::daemon_adapter::WorkspaceContext;
     use crate::execution::symbol_utils::{build_search_hits_from_nodes, filter_node};
     use crate::execution::utils::{duration_to_ms, paginate};
@@ -196,6 +197,7 @@ pub(crate) mod inner {
         args: &SemanticSearchArgs,
         search_root: &Path,
         start: Instant,
+        cancel: &sqry_core::query::cancellation::CancellationToken,
     ) -> Result<ToolExecution<SemanticSearchData>> {
         let query = args.query.trim();
         if query.is_empty() {
@@ -213,10 +215,42 @@ pub(crate) mod inner {
         // Get the graph for filtering
         let snapshot = ctx.graph.snapshot();
 
-        let query_results = ctx
-            .executor
-            .execute_on_preloaded_graph(Arc::clone(&ctx.graph), query, search_root, None)
-            .map_err(|e| anyhow!("Failed to execute query '{query}': {e}"))?;
+        // `A_cancellation.md` §3 + §A4 + `C_budget.md` §C5: route
+        // through the budgeted+cancellable executor so the
+        // in-flight rayon scan inside `evaluate_all` polls the
+        // per-request token at every CANCELLATION_POLL_BATCH-node
+        // boundary AND `tick()`'s every node against the runtime
+        // row budget. When either signal trips, `evaluate_all`
+        // funnels through `classify_cancel` which chooses the
+        // typed error variant from the budget's source-tag.
+        //
+        // The wrapper-side downcast at
+        // `sqry-mcp/src/server.rs::execute_tool_with_timeout`
+        // reshapes `BudgetExceeded` into the canonical
+        // `RpcError::query_too_broad` envelope with
+        // `details.source = "runtime_budget"` (vs the static-gate
+        // `details.source = "static_estimate"` from cluster B),
+        // and `QueryError::Cancelled` into
+        // `RpcError::deadline_exceeded` (cluster A).
+        let budget = sqry_core::query::budget::QueryBudget::from_per_call_or_env(
+            args.budget_rows,
+            cancel.clone(),
+        );
+        // Preserve the typed root error so the wrapper downcast in
+        // `sqry-mcp/src/server.rs::execute_tool_with_timeout` can recover
+        // `QueryError::Cancelled` (→ `deadline_exceeded`) and
+        // `BudgetExceeded` (→ `query_too_broad`). Using `anyhow!` would
+        // rewrap as a string and break both downcasts (cluster-A iter-1
+        // BLOCKER + cluster-C iter-1 BLOCKER 2). The executor already
+        // returns `anyhow::Error`; propagate it verbatim so the typed
+        // root remains the discriminator at the wrapper boundary.
+        let query_results = ctx.executor.execute_on_preloaded_graph_with_budget(
+            Arc::clone(&ctx.graph),
+            query,
+            search_root,
+            None,
+            &budget,
+        )?;
 
         let nodes_searched = query_results.len();
         let elapsed = duration_to_ms(start.elapsed());

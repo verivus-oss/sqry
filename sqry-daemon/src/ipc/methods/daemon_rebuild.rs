@@ -175,11 +175,17 @@ pub(crate) async fn handle(ctx: &HandlerContext, params: Value) -> Result<Value,
     let envelope = ResponseEnvelope {
         result: RebuildResult {
             root: canonical,
-            duration_ms,
-            nodes,
-            edges,
-            files_indexed,
-            was_full: params.force,
+            // Cluster-G §2.4: existing daemon-rebuild path always blocks
+            // until publish, so the only outcome we surface here is
+            // `Completed`. The `Started` / `Coalesced` / `Rejected`
+            // shapes will land alongside the §2.3 `DispatchOutcome`
+            // refactor (deferred — see G follow-up index).
+            status: sqry_daemon_protocol::RebuildStatus::Completed,
+            duration_ms: Some(duration_ms),
+            nodes: Some(nodes),
+            edges: Some(edges),
+            files_indexed: Some(files_indexed),
+            was_full: Some(params.force),
         },
         meta: ResponseMeta::fresh_from(WorkspaceState::Loaded, ctx.daemon_version),
     };

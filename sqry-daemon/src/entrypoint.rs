@@ -274,8 +274,22 @@ pub struct Start {
 /// `err.exit_code()` to a [`std::process::ExitCode`].
 pub fn run() -> DaemonResult<()> {
     let cli = SqrydCli::parse();
+    // `A_cancellation.md` §5 + GT-6: cap the blocking thread pool at
+    // 64 so a storm of timed-out tool calls (which leave their
+    // `spawn_blocking` body running cooperatively until the
+    // CancellationToken signal is observed) cannot exhaust the
+    // default 512-thread cap and queue subsequent calls indefinitely.
+    // 64 is comfortably above the realistic concurrent-call ceiling
+    // for a developer workstation (one IDE + one MCP client per
+    // project, typically ≤ 8 workspaces × 2 protocols = 16) while
+    // still bounding the worst-case memory footprint. The unit test
+    // `blocking_pool_depth_stress` (cluster-A test plan §6 row 3)
+    // measures actual peak depth and the value can be tightened
+    // (32) or loosened (128) post-implementation based on the
+    // measured recovery-vs-burst trade-off.
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
+        .max_blocking_threads(64)
         .build()
         .map_err(DaemonError::Io)?;
 

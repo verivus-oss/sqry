@@ -28,9 +28,21 @@ use thiserror::Error;
 
 use crate::{
     JSONRPC_INTERNAL_ERROR, JSONRPC_INVALID_PARAMS, JSONRPC_MEMORY_BUDGET_EXCEEDED,
-    JSONRPC_TOOL_TIMEOUT, JSONRPC_WORKSPACE_BUILD_FAILED, JSONRPC_WORKSPACE_EVICTED,
-    JSONRPC_WORKSPACE_INCOMPATIBLE_GRAPH, JSONRPC_WORKSPACE_STALE_EXPIRED,
+    JSONRPC_QUERY_TOO_BROAD, JSONRPC_RESET_CANCELLATION_DISPATCHED, JSONRPC_RESET_WHILE_LOADING,
+    JSONRPC_SOCKET_SETUP, JSONRPC_TOOL_TIMEOUT, JSONRPC_WORKSPACE_BUILD_FAILED,
+    JSONRPC_WORKSPACE_EVICTED, JSONRPC_WORKSPACE_INCOMPATIBLE_GRAPH, JSONRPC_WORKSPACE_OVERSIZE,
+    JSONRPC_WORKSPACE_PINNED, JSONRPC_WORKSPACE_STALE_EXPIRED,
 };
+
+/// Wire-stable `kind` tag for the cost-gate rejection on the
+/// daemon-hosted MCP path. Mirror of
+/// [`sqry_mcp::error::KIND_QUERY_TOO_BROAD`][1] for byte-identical
+/// envelopes across the standalone and daemon-hosted MCP transports.
+///
+/// Source: `B_cost_gate.md` §3 + `00_contracts.md` §3.CC-2.
+///
+/// [1]: https://docs.rs/sqry-mcp/latest/sqry_mcp/error/constant.KIND_QUERY_TOO_BROAD.html
+pub const KIND_QUERY_TOO_BROAD: &str = "query_too_broad";
 
 /// Result alias for daemon operations.
 pub type DaemonResult<T> = Result<T, DaemonError>;
@@ -172,6 +184,30 @@ pub enum DaemonError {
     #[error("invalid argument: {reason}")]
     InvalidArgument { reason: String },
 
+    /// Typed `sqry_mcp::error::RpcError` preserved through the
+    /// daemon-hosted MCP path so the wire envelope is byte-identical
+    /// to the standalone MCP response (cluster-C iter-3, codex PR
+    /// review recommendation).
+    ///
+    /// The daemon adapter (`sqry-mcp/src/daemon_adapter/dispatch.rs`)
+    /// previously rewrapped param-parsing failures with
+    /// `anyhow!("invalid arguments: {e}")`, which destroyed the typed
+    /// `RpcError` root before [`crate::ipc::tool_core::execute_with_timeout`]
+    /// could downcast it. The downstream `daemon_err_to_mcp`
+    /// then mapped through `DaemonError::Internal` →
+    /// `McpError::internal_error` (`-32603`) regardless of the
+    /// `RpcError`'s actual `code`. This variant is the dedicated
+    /// pass-through: the inner `RpcError` carries the correct
+    /// `code` (`-32602` for validation failures, etc.), `kind`,
+    /// `retryable`, `retry_after_ms`, and `details`, and
+    /// [`daemon_err_to_mcp`][1] renders them through the same
+    /// `invalid_params` / `internal_error` selector the standalone
+    /// path uses.
+    ///
+    /// [1]: crate::mcp_host::error_map::daemon_err_to_mcp
+    #[error("{0}")]
+    RpcErrorPreserved(sqry_mcp::error::RpcError),
+
     /// Catch-all for errors surfaced by
     /// [`sqry_mcp::daemon_adapter`][1] tool execution that do not map
     /// to a more specific `DaemonError` variant. The wrapped
@@ -236,6 +272,100 @@ pub enum DaemonError {
         #[source]
         source: std::io::Error,
     },
+
+    // ── sqry-mcp flakiness P0-1 / P1 admission + recovery variants ───────
+    /// The freshly-built graph exceeds the daemon's memory budget by
+    /// itself — even if every other workspace were evicted, the
+    /// daemon could not host it. Returned by
+    /// `WorkspaceManager::publish_and_retain` AFTER the build
+    /// completes but BEFORE the new graph is exposed to readers.
+    ///
+    /// Wire code: `-32006`. Distinct from `MemoryBudgetExceeded`
+    /// (`-32003`), which is a *projected* admission failure on a
+    /// pre-build estimate.
+    ///
+    /// Source: `G_daemon_control_plane.md` §1.4 hand-off G4.
+    #[error(
+        "workspace {} oversize: {measured_bytes} > {limit_bytes} (after eviction headroom; current loaded: {current_loaded_bytes})",
+        root.display()
+    )]
+    WorkspaceOversize {
+        root: PathBuf,
+        measured_bytes: u64,
+        limit_bytes: u64,
+        current_loaded_bytes: u64,
+    },
+
+    /// `daemon/reset` was invoked on a pinned workspace and the
+    /// caller did not pass `force = true`. Pinning is the operator
+    /// opt-in for "do not LRU-evict this workspace"; resetting it
+    /// has the same drop-graph effect as eviction and is therefore
+    /// gated behind the same explicit override.
+    ///
+    /// Wire code: `-32010`.
+    ///
+    /// Source: `G_daemon_control_plane.md` §3.2 hand-off G4.
+    #[error("workspace {} is pinned; pass force=true to reset", root.display())]
+    WorkspacePinned { root: PathBuf },
+
+    /// `daemon/reset` was invoked on a workspace whose state is
+    /// `Loading`. Cancelling a load mid-flight is structurally
+    /// unsafe (reservation accounting + admission state would
+    /// drift). Caller must wait for the load to settle (success or
+    /// `Failed`) and retry.
+    ///
+    /// Wire code: `-32008`.
+    ///
+    /// Source: `G_daemon_control_plane.md` §3.2 hand-off G4.
+    #[error("workspace {} is currently loading; retry once load settles", root.display())]
+    ResetWhileLoading { root: PathBuf },
+
+    /// `daemon/reset` was invoked on a workspace whose state is
+    /// `Rebuilding`. The reset has dispatched a cancellation token
+    /// to the runner; the caller should retry after `retry_after_ms`
+    /// for the runner to finish its drain pass and the workspace to
+    /// transition to `Failed` (which is then idempotently reset on
+    /// the next call).
+    ///
+    /// Wire code: `-32009`.
+    ///
+    /// Source: `G_daemon_control_plane.md` §3.2 hand-off G4.
+    #[error(
+        "workspace {} rebuild cancellation dispatched; retry after {retry_after_ms}ms",
+        root.display()
+    )]
+    ResetCancellationDispatched { root: PathBuf, retry_after_ms: u64 },
+
+    /// Socket parent directory cannot be created or is not writable.
+    /// Surfaced before `IpcServer::bind` so the failure mode is
+    /// distinguishable from a generic `EACCES` (which would otherwise
+    /// be wrapped as `Io`).
+    ///
+    /// Wire code: `-32007`. Note this is not normally observed on
+    /// the wire because it fires before the IPC server binds; the
+    /// JSON-RPC mapping exists for the rare case where the daemon
+    /// surface re-emits this through IPC during a hot-reload of the
+    /// socket configuration.
+    ///
+    /// Source: `G_daemon_control_plane.md` §5.2 hand-off G4.
+    #[error("socket setup failed at {}: {reason}", path.display())]
+    SocketSetup { path: PathBuf, reason: String },
+
+    /// Pre-flight cost gate rejected a query (per `B_cost_gate.md`
+    /// §3, daemon-hosted MCP parity arm). The wire envelope mirrors
+    /// the standalone `RpcError::query_too_broad` exactly so MCP
+    /// clients can use a single parser regardless of which transport
+    /// the request flowed through.
+    ///
+    /// Wire code: `-32602` (the existing `invalid_params` slot;
+    /// `kind = "query_too_broad"` is the discriminator).
+    ///
+    /// Source: `B_cost_gate.md` §3 + `00_contracts.md` §3.CC-2.
+    #[error("query rejected by cost gate: {reason}")]
+    QueryTooBroad {
+        reason: String,
+        details: serde_json::Value,
+    },
 }
 
 impl DaemonError {
@@ -261,7 +391,18 @@ impl DaemonError {
             Self::WorkspaceIncompatibleGraph { .. } => Some(JSONRPC_WORKSPACE_INCOMPATIBLE_GRAPH),
             Self::ToolTimeout { .. } => Some(JSONRPC_TOOL_TIMEOUT),
             Self::InvalidArgument { .. } => Some(JSONRPC_INVALID_PARAMS),
+            // Cluster-C iter-3: pass-through preserves the inner
+            // RpcError's JSON-RPC code (typically -32602 for
+            // validation failures emitted by `validate_budget_rows`
+            // and similar validators).
+            Self::RpcErrorPreserved(rpc) => Some(rpc.code),
             Self::Internal(_) => Some(JSONRPC_INTERNAL_ERROR),
+            Self::WorkspaceOversize { .. } => Some(JSONRPC_WORKSPACE_OVERSIZE),
+            Self::WorkspacePinned { .. } => Some(JSONRPC_WORKSPACE_PINNED),
+            Self::ResetWhileLoading { .. } => Some(JSONRPC_RESET_WHILE_LOADING),
+            Self::ResetCancellationDispatched { .. } => Some(JSONRPC_RESET_CANCELLATION_DISPATCHED),
+            Self::SocketSetup { .. } => Some(JSONRPC_SOCKET_SETUP),
+            Self::QueryTooBroad { .. } => Some(JSONRPC_QUERY_TOO_BROAD),
             // Lifecycle errors don't cross the IPC boundary.
             Self::AlreadyRunning { .. }
             | Self::AutoStartTimeout { .. }
@@ -310,7 +451,14 @@ impl DaemonError {
             | Self::WorkspaceIncompatibleGraph { .. }
             | Self::ToolTimeout { .. }
             | Self::InvalidArgument { .. }
-            | Self::Internal(_) => 70,
+            | Self::RpcErrorPreserved(_)
+            | Self::Internal(_)
+            | Self::WorkspaceOversize { .. }
+            | Self::WorkspacePinned { .. }
+            | Self::ResetWhileLoading { .. }
+            | Self::ResetCancellationDispatched { .. }
+            | Self::SocketSetup { .. }
+            | Self::QueryTooBroad { .. } => 70,
         }
     }
 
@@ -380,13 +528,19 @@ impl DaemonError {
             // can handle daemon-path and direct-path errors with a
             // single parser.
             Self::ToolTimeout {
-                root,
+                root: _,
                 secs: _,
                 deadline_ms,
             } => Some(json!({
                 "kind": "deadline_exceeded",
                 "retryable": true,
-                "retry_after_ms": 1000,
+                // Cluster-A iter-2 BLOCKER 1: align `retry_after_ms`
+                // with the standalone `RpcError::deadline_exceeded`
+                // (`SqryServer` default = 500 ms). The IPC envelope
+                // and the MCP-host envelope must agree byte-for-byte
+                // so direct-path callers and rmcp clients see the
+                // same recovery hint.
+                "retry_after_ms": 500,
                 "details": {
                     // `tool` is `null` here; the MCP-path wrapper
                     // `daemon_err_to_mcp` (Phase 8c U8) populates it
@@ -394,7 +548,10 @@ impl DaemonError {
                     // JSON-RPC request.
                     "tool": serde_json::Value::Null,
                     "deadline_ms": deadline_ms,
-                    "root": root.display().to_string(),
+                    // Cluster-A iter-2 BLOCKER 1: `root` removed for
+                    // wire-identity with the standalone envelope.
+                    // The workspace path is still surfaced via the
+                    // `Display` impl on `DaemonError::ToolTimeout`.
                 },
             })),
             Self::InvalidArgument { reason } => Some(json!({
@@ -404,6 +561,16 @@ impl DaemonError {
                 "details": {
                     "reason": reason,
                 },
+            })),
+            // Cluster-C iter-3: preserve the inner RpcError's wire
+            // shape verbatim so the daemon-hosted MCP envelope is
+            // byte-identical to the standalone path's
+            // `rpc_error_to_mcp` output.
+            Self::RpcErrorPreserved(rpc) => Some(json!({
+                "kind": rpc.kind,
+                "retryable": rpc.retryable,
+                "retry_after_ms": rpc.retry_after_ms,
+                "details": rpc.details,
             })),
             Self::Internal(_) => Some(json!({
                 "kind": "internal",
@@ -417,6 +584,51 @@ impl DaemonError {
             Self::AlreadyRunning { .. }
             | Self::AutoStartTimeout { .. }
             | Self::SignalSetup { .. } => None,
+            Self::WorkspaceOversize {
+                root,
+                measured_bytes,
+                limit_bytes,
+                current_loaded_bytes,
+            } => Some(json!({
+                "root": root,
+                "measured_bytes": measured_bytes,
+                "limit_bytes": limit_bytes,
+                "current_loaded_bytes": current_loaded_bytes,
+            })),
+            Self::WorkspacePinned { root } => Some(json!({
+                "root": root,
+                "hint": "pass force=true to reset a pinned workspace",
+            })),
+            Self::ResetWhileLoading { root } => Some(json!({
+                "root": root,
+                "hint": "wait for the load to settle, then retry",
+            })),
+            Self::ResetCancellationDispatched {
+                root,
+                retry_after_ms,
+            } => Some(json!({
+                "root": root,
+                "retry_after_ms": retry_after_ms,
+            })),
+            Self::SocketSetup { path, reason } => Some(json!({
+                "path": path,
+                "reason": reason,
+            })),
+            // Phase 8c §O canonical 4-key envelope. The standalone
+            // `sqry-mcp::RpcError::query_too_broad` envelope shape is
+            // mirrored byte-for-byte (`B_cost_gate.md` §3 +
+            // `00_contracts.md` §3.CC-2). The caller assembles the
+            // CC-2 seven-key `details` value (source, kind, limit,
+            // estimated_visited_nodes / examined / predicate_shape /
+            // suggested_predicates / doc_url) and hands it to this
+            // arm verbatim — this layer only owns the 4-key
+            // envelope.
+            Self::QueryTooBroad { details, .. } => Some(json!({
+                "kind": KIND_QUERY_TOO_BROAD,
+                "retryable": false,
+                "retry_after_ms": serde_json::Value::Null,
+                "details": details,
+            })),
         }
     }
 }
@@ -459,8 +671,28 @@ impl From<GraphAcquisitionError> for DaemonError {
                 // negative verdicts — but we cover it defensively to
                 // keep the conversion total.
                 let reason = match status {
-                    PluginSelectionStatus::IncompatibleUnknownPluginIds { unknown_plugin_ids } => {
-                        format!("unknown plugin ids: [{}]", unknown_plugin_ids.join(", "))
+                    PluginSelectionStatus::IncompatibleUnknownPluginIds {
+                        unknown_plugin_ids,
+                        manifest_path,
+                    } => {
+                        let suggested =
+                            sqry_plugin_registry::missing_features_for(&unknown_plugin_ids);
+                        let mut buf =
+                            format!("unknown plugin ids: [{}]", unknown_plugin_ids.join(", "),);
+                        if let Some(p) = manifest_path.as_ref() {
+                            buf.push_str(&format!(" (manifest: {})", p.display()));
+                        }
+                        if !suggested.is_empty() {
+                            // Cluster-E iter-2: render the full
+                            // copy-paste-ready cargo install command,
+                            // matching the CLI / standalone-MCP shape.
+                            buf.push_str(&format!(
+                                " — rebuild this binary with: \
+                                 cargo install --path sqry-cli --features {}",
+                                suggested.join(","),
+                            ));
+                        }
+                        buf
                     }
                     PluginSelectionStatus::IncompatibleSnapshotFormat { reason } => {
                         format!("incompatible snapshot format: {reason}")
@@ -470,6 +702,7 @@ impl From<GraphAcquisitionError> for DaemonError {
                         "compatibility verdict reported Exact alongside IncompatibleGraph error"
                             .to_string()
                     }
+                    other => format!("unrecognised plugin selection status: {other:?}"),
                 };
                 Self::WorkspaceIncompatibleGraph {
                     root: source_root,
@@ -583,6 +816,7 @@ mod tests {
             source_root: PathBuf::from("/repo"),
             status: PluginSelectionStatus::IncompatibleUnknownPluginIds {
                 unknown_plugin_ids: vec!["plugin-a".to_string(), "plugin-b".to_string()],
+                manifest_path: Some(PathBuf::from("/repo/.sqry/graph/manifest.json")),
             },
         };
         let de: DaemonError = err.into();
@@ -689,9 +923,16 @@ mod tests {
         let data = err.error_data().expect("ToolTimeout must emit data");
         assert_eq!(data["kind"], "deadline_exceeded");
         assert_eq!(data["retryable"], true);
-        assert_eq!(data["retry_after_ms"], 1000);
+        // Cluster-A iter-2 BLOCKER 1: aligned with the standalone
+        // `RpcError::deadline_exceeded` envelope (500 ms).
+        assert_eq!(data["retry_after_ms"], 500);
         assert_eq!(data["details"]["deadline_ms"], 60_000);
-        assert_eq!(data["details"]["root"], "/tmp/workspace");
+        // Cluster-A iter-2 BLOCKER 1: `details.root` removed for
+        // wire-identity with the standalone shape.
+        assert!(
+            data["details"].get("root").is_none(),
+            "details.root must be absent post-iter-2"
+        );
         // Placeholder for the MCP-path wrapper (Phase 8c U8) to
         // overwrite with the inbound method name.
         assert!(data["details"]["tool"].is_null());

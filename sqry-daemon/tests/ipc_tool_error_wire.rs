@@ -33,6 +33,9 @@ use support::ipc::{TestIpcClient, TestServer, expect_error};
 use tempfile::TempDir;
 use tokio::net::UnixStream;
 
+/// Mirrors `SqryServer::default().retry_delay_ms`.
+const STANDALONE_DEFAULT_RETRY_AFTER_MS: u64 = 500;
+
 // ---------------------------------------------------------------------------
 // Helper: reference deadline_exceeded envelope from standalone sqry-mcp
 // ---------------------------------------------------------------------------
@@ -42,9 +45,9 @@ use tokio::net::UnixStream;
 /// (`RpcError::deadline_exceeded` + `rpc_error_to_mcp` at
 /// `sqry-mcp/src/server.rs:1329-1343`). Used by test 2
 /// (`tool_timeout_mcp_envelope_parity`) to assert structural identity
-/// modulo `details.root`.
+/// with the daemon-hosted MCP envelope.
 fn reference_envelope_deadline_exceeded(tool: &str, deadline_ms: u64) -> Value {
-    let err = RpcError::deadline_exceeded(tool, deadline_ms, 1000);
+    let err = RpcError::deadline_exceeded(tool, deadline_ms, STANDALONE_DEFAULT_RETRY_AFTER_MS);
     // Build the same 4-key envelope shape that `rpc_error_to_mcp` emits.
     json!({
         "kind": err.kind,
@@ -219,10 +222,13 @@ async fn tool_timeout_error_data_maps_to_code_32000_and_deadline_exceeded() {
         data["details"]["deadline_ms"], 1000_u64,
         "details.deadline_ms must be secs*1000"
     );
-    assert_eq!(
-        data["details"]["root"],
-        canon.to_str().unwrap(),
-        "details.root must be the workspace path"
+    // Cluster-A iter-2 BLOCKER 1: `details.root` was REMOVED for
+    // byte-identity with the standalone envelope. The workspace
+    // path is still surfaced via the human message.
+    let _ = canon;
+    assert!(
+        data["details"].get("root").is_none(),
+        "details.root must be absent — it would diverge from the standalone shape"
     );
 
     server.stop().await;
@@ -243,7 +249,8 @@ async fn tool_timeout_mcp_envelope_parity() {
         deadline_ms: secs * 1000,
     };
 
-    // Standalone reference: `RpcError::deadline_exceeded` (retry_after=1000ms)
+    // Standalone reference: `RpcError::deadline_exceeded` using
+    // `SqryServer::default().retry_delay_ms` (500 ms).
     let deadline_ms = secs * 1000;
     let reference = reference_envelope_deadline_exceeded("semantic_search", deadline_ms);
 
@@ -251,8 +258,8 @@ async fn tool_timeout_mcp_envelope_parity() {
     let mcp_err = daemon_err_to_mcp_with_tool(daemon_err, "semantic_search");
     let mcp_data = mcp_err.data.as_ref().unwrap();
 
-    // Assert structural identity modulo daemon-only `details.root` key.
-    // Both envelopes must share the canonical 4-key outer shape.
+    // Assert structural identity. Both envelopes must share the
+    // canonical 4-key outer shape.
     let outer_keys_ref: std::collections::BTreeSet<String> =
         reference.as_object().unwrap().keys().cloned().collect();
     let outer_keys_mcp: std::collections::BTreeSet<String> =
@@ -271,15 +278,9 @@ async fn tool_timeout_mcp_envelope_parity() {
         mcp_data["retryable"], reference["retryable"],
         "retryable must match standalone reference"
     );
-    // retry_after_ms may differ (daemon uses 1000, standalone uses configured value).
-    // Assert it is present in both and numeric.
-    assert!(
-        mcp_data["retry_after_ms"].is_number(),
-        "daemon retry_after_ms must be numeric"
-    );
-    assert!(
-        reference["retry_after_ms"].is_number() || reference["retry_after_ms"].is_null(),
-        "standalone retry_after_ms must be numeric or null"
+    assert_eq!(
+        mcp_data["retry_after_ms"], reference["retry_after_ms"],
+        "retry_after_ms must match standalone reference exactly"
     );
 
     // `details.tool` must match (both "semantic_search").
@@ -294,12 +295,13 @@ async fn tool_timeout_mcp_envelope_parity() {
         "details.deadline_ms must match"
     );
 
-    // Daemon-only: `details.root` present.
+    // Cluster-A iter-2 BLOCKER 1: daemon and standalone now share
+    // byte-identical `details` shapes — neither carries `root`.
     assert!(
-        daemon_details.get("root").is_some(),
-        "daemon details must carry extra 'root' key"
+        daemon_details.get("root").is_none(),
+        "daemon details must NOT carry 'root' (cluster-A iter-2 wire-identity fix)"
     );
-    // Standalone: `details.root` absent.
+    // Standalone: `details.root` absent (unchanged).
     assert!(
         ref_details.get("root").is_none(),
         "standalone details must NOT carry 'root' key"
@@ -562,7 +564,14 @@ fn tool_timeout_details_tool_populated() {
     assert_eq!(data["kind"], "deadline_exceeded");
     assert_eq!(data["retryable"], true);
     assert_eq!(data["details"]["deadline_ms"], 60_000_u64);
-    assert_eq!(data["details"]["root"], "/tmp/ws");
+    // Cluster-A iter-2 BLOCKER 1: `details.root` was REMOVED so the
+    // daemon-hosted envelope is byte-identical to the standalone
+    // `RpcError::deadline_exceeded` envelope. The workspace path is
+    // still surfaced via the human message.
+    assert!(
+        data["details"].get("root").is_none(),
+        "details.root must be absent — it would diverge from the standalone shape"
+    );
 
     // Contrast: non-site-aware mapper emits `null` for details.tool.
     let err_null = DaemonError::ToolTimeout {

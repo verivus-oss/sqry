@@ -49,6 +49,7 @@
 //! [`DerivedQuery`]: crate::query::DerivedQuery
 
 pub mod compile;
+pub mod cost_gate;
 pub mod execute;
 pub mod fuse;
 pub mod ir;

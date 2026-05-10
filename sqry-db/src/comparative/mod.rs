@@ -101,6 +101,15 @@ impl ComparativeQueryDb {
     /// hold workspace-relative paths) may use [`Self::diff_default`].
     #[must_use]
     pub fn diff(&self, opts: &DiffOptions) -> DiffOutput {
+        // Defensive fast-path: when both sides point at the literal same
+        // snapshot Arc, the diff is provably empty. Callers that resolve
+        // identical git refs upstream (sqry-cli and sqry-mcp do) avoid
+        // the cost of materializing two snapshots in the first place;
+        // this guard catches in-process callers (tests, SDK users) that
+        // pass the same Arc into `new()` directly. (verivus-oss/sqry#213)
+        if Arc::ptr_eq(&self.old, &self.new) {
+            return DiffOutput::default();
+        }
         diff::compute_diff(&self.old, &self.new, opts)
     }
 
@@ -124,5 +133,24 @@ mod tests {
     fn comparative_query_db_is_send_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<ComparativeQueryDb>();
+    }
+
+    /// `Arc::ptr_eq` fast-path: when both sides are the same `Arc`, `diff`
+    /// must return an empty `DiffOutput` without entering `compute_diff`.
+    /// (verivus-oss/sqry#213)
+    ///
+    /// Building a real `GraphSnapshot` here would require a workspace
+    /// fixture; instead we round-trip through a default-constructed
+    /// snapshot via `CodeGraph::new().snapshot()`, which is the cheapest
+    /// non-trivial snapshot the public API exposes.
+    #[test]
+    fn diff_short_circuits_when_both_sides_share_arc() {
+        use sqry_core::graph::unified::concurrent::CodeGraph;
+        let graph = CodeGraph::new();
+        let snap = Arc::new(graph.snapshot());
+        let cmp = ComparativeQueryDb::new(Arc::clone(&snap), Arc::clone(&snap));
+        let out = cmp.diff(&DiffOptions::default());
+        assert!(out.changes.is_empty(), "expected empty diff on shared Arc");
+        assert_eq!(out.summary, DiffSummary::default());
     }
 }

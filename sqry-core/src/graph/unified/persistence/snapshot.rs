@@ -6,6 +6,7 @@
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Cursor, Read, Write};
 use std::path::Path;
+use tempfile::NamedTempFile;
 
 use serde::{Deserialize, Serialize};
 
@@ -1087,8 +1088,14 @@ fn write_framed_v9(
 }
 
 /// Writes a V10 snapshot with length-prefixed framing.
-fn write_framed_v10(
-    writer: &mut BufWriter<File>,
+///
+/// Generic over any [`Write`] implementor so the function can be
+/// driven by either a `BufWriter<File>` (the legacy direct-write
+/// path used by tests) or a `BufWriter<&mut NamedTempFile>` (the
+/// atomic-write path introduced by `G_daemon_control_plane.md`
+/// §4.2).
+fn write_framed_v10<W: Write>(
+    writer: &mut W,
     header: &GraphHeader,
     snapshot_data: &GraphSnapshotDataV10,
 ) -> Result<(), PersistenceError> {
@@ -1136,18 +1143,94 @@ fn write_framed_v10(
     Ok(())
 }
 
+/// Atomic snapshot writer per `G_daemon_control_plane.md` §4.2 +
+/// `00_contracts.md` §3.CC-4 hand-off G5.
+///
+/// Steps (per the design):
+///
+/// 1. Create a [`NamedTempFile`] in the **same parent directory** as
+///    the destination path so the subsequent `persist`-rename stays
+///    on the same filesystem (cross-FS rename is non-atomic).
+/// 2. Hand the writer to the caller's `write_fn` callback.
+/// 3. `fsync` the data file so a power-loss between rename and
+///    persist cannot leave a zero-length / partial snapshot.
+/// 4. `persist` (atomic rename) into the destination path.
+/// 5. `fsync` the parent directory so the rename itself survives
+///    a power-loss.
+/// 6. Stale-temp cleanup is automatic: [`NamedTempFile::drop`]
+///    unlinks the temp file on every early-return path, so a
+///    callback that errors out leaves no stale file behind.
+///
+/// If the parent directory does not exist, returns an `io::Error`.
+/// The caller is expected to ensure the parent exists (sqry's
+/// `GraphStorage::ensure_dir` does this at index-creation time).
+///
+/// # Errors
+///
+/// Returns [`PersistenceError`] when the temp file cannot be
+/// created, the callback errors, the fsync fails, or the rename
+/// fails. The destination path is never partially-overwritten:
+/// either the new bytes are atomically renamed into place, or
+/// the prior snapshot is left intact.
+fn write_atomic<W>(path: &Path, write_fn: W) -> Result<(), PersistenceError>
+where
+    W: FnOnce(&mut BufWriter<&mut NamedTempFile>) -> Result<(), PersistenceError>,
+{
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mut temp = NamedTempFile::new_in(parent).map_err(PersistenceError::Io)?;
+
+    {
+        let mut writer = BufWriter::new(&mut temp);
+        write_fn(&mut writer)?;
+        writer.flush().map_err(PersistenceError::Io)?;
+    }
+
+    // Step 3 — fsync the data file. The file handle is the inner
+    // `&File` of the NamedTempFile.
+    temp.as_file().sync_all().map_err(PersistenceError::Io)?;
+
+    // Step 4 — atomic rename. `persist_noclobber` would race with
+    // a concurrent writer; we want last-writer-wins semantics for
+    // the snapshot, matching the legacy `File::create` behaviour.
+    temp.persist(path)
+        .map_err(|e| PersistenceError::Io(e.error))?;
+
+    // Step 5 — fsync the parent directory so the rename survives
+    // a power loss. On Windows, opening directories is not
+    // supported by `File::open`; the rename is still atomic but
+    // crash-recovery semantics are weaker. The cfg gate keeps
+    // the build clean.
+    //
+    // Cluster-G iter-2: surface parent-fsync errors instead of
+    // silently swallowing them. The codex iter-1 review flagged
+    // that returning `Ok(())` after an fsync failure overstates
+    // the crash-safety contract on ext4 / btrfs / xfs. Either the
+    // open fails (no fsync was possible) or the sync fails
+    // (durability not guaranteed); both are reported as `Io`.
+    #[cfg(unix)]
+    {
+        let dir = File::open(parent).map_err(PersistenceError::Io)?;
+        dir.sync_all().map_err(PersistenceError::Io)?;
+    }
+
+    Ok(())
+}
+
 /// # Errors
 ///
 /// Returns an error if the file cannot be created or serialization fails.
 pub fn save_to_path(graph: &CodeGraph, path: impl AsRef<Path>) -> Result<(), PersistenceError> {
     let path = path.as_ref();
 
-    // Stamp a monotonic fact epoch BEFORE creating the file (which truncates
-    // the existing snapshot and would lose the previous header).
+    // Stamp a monotonic fact epoch BEFORE creating the temp file
+    // (which inherits the destination's place in the fact-epoch
+    // sequence). The temp file is created in the same parent dir
+    // by `write_atomic` so the subsequent rename stays on-FS and
+    // is atomic.
     let fact_epoch = next_fact_epoch(path);
-
-    let file = File::create(path)?;
-    let mut writer = BufWriter::new(file);
 
     // Get a snapshot of the graph
     let snapshot = graph.snapshot();
@@ -1206,7 +1289,14 @@ pub fn save_to_path(graph: &CodeGraph, path: impl AsRef<Path>) -> Result<(), Per
     header.version = FormatVersion::V10.as_u32();
     header.set_fact_epoch(fact_epoch);
 
-    write_framed_v10(&mut writer, &header, &snapshot_data)
+    // Atomic write per `G_daemon_control_plane.md` §4.2: an
+    // interrupted write leaves the prior snapshot intact rather
+    // than producing a zero-length / corrupted file (which `index
+    // --status` previously misreported as "No graph snapshot
+    // found").
+    write_atomic(path, |writer| {
+        write_framed_v10(writer, &header, &snapshot_data)
+    })
 }
 
 /// Saves a graph to the specified path with config provenance.
@@ -1225,11 +1315,8 @@ pub fn save_to_path_with_provenance(
 ) -> Result<(), PersistenceError> {
     let path = path.as_ref();
 
-    // Stamp a monotonic fact epoch BEFORE creating the file.
+    // Stamp a monotonic fact epoch BEFORE the temp file.
     let fact_epoch = next_fact_epoch(path);
-
-    let file = File::create(path)?;
-    let mut writer = BufWriter::new(file);
 
     // Get a snapshot of the graph
     let snapshot = graph.snapshot();
@@ -1298,7 +1385,10 @@ pub fn save_to_path_with_provenance(
     header.version = FormatVersion::V10.as_u32();
     header.set_fact_epoch(fact_epoch);
 
-    write_framed_v10(&mut writer, &header, &snapshot_data)
+    // Atomic write per `G_daemon_control_plane.md` §4.2.
+    write_atomic(path, |writer| {
+        write_framed_v10(writer, &header, &snapshot_data)
+    })
 }
 
 /// Validates that plugin versions in the graph match current plugin versions.

@@ -56,6 +56,20 @@ pub fn run_workspace(cli: &Cli, action: &WorkspaceCommand) -> Result<()> {
             json,
             no_cache,
         } => crate::commands::workspace_status::run(cli, workspace, *json, *no_cache),
+        WorkspaceCommand::Clean {
+            root,
+            apply,
+            force,
+            include_user_state,
+            json,
+        } => crate::commands::workspace_clean::run(
+            cli,
+            root,
+            *apply,
+            *force,
+            *include_user_state,
+            *json,
+        ),
     }
 }
 

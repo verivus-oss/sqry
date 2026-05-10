@@ -1015,6 +1015,19 @@ impl RebuildDispatcher {
                 let _dropped: Option<PendingRebuild> = lane_guard.take();
                 ws.rebuild_in_flight.store(false, Ordering::Release);
                 sentinel.armed = false;
+                // Cluster-G iter-2 BLOCKER 3: distinguish an eviction
+                // (the eviction path already set state to `Evicted`
+                // under `workspaces.write()` BEFORE flipping the
+                // flag) from a `daemon/reset` cancellation (which
+                // leaves the state as `Rebuilding`). For reset, the
+                // runner is responsible for the post-cancel state
+                // transition — `record_and_transition_on_err` no-ops
+                // on `WorkspaceEvicted`, so without this branch the
+                // workspace would stay stuck in `Rebuilding` forever
+                // (codex iter-1 review).
+                if ws.load_state() == WorkspaceState::Rebuilding {
+                    ws.store_state(WorkspaceState::Unloaded);
+                }
                 return Err(DaemonError::WorkspaceEvicted {
                     root: key.source_root.clone(),
                 });
@@ -1238,8 +1251,27 @@ impl RebuildDispatcher {
                 });
             }
 
+            // `G_daemon_control_plane.md` §3.5 caller-migration —
+            // execute_one_rebuild (production caller 2). On
+            // post-build oversize, propagate the typed error
+            // upstream; the reservation's RAII Drop refunds bytes.
+            //
+            // Cluster-G iter-2 BLOCKER 2: also transition the
+            // workspace to `Failed` so it doesn't stay stuck in
+            // `Rebuilding`. The success branch below handles the
+            // happy-path `Loaded` transition; the error branch
+            // previously only refunded bytes and returned, leaving
+            // the workspace observable as `Rebuilding` forever
+            // (codex iter-1 review — only `daemon reset` could
+            // recover, and the reset path itself was also broken).
             let (_token, published_arc) =
-                self.manager.publish_and_retain(reservation, ws, new_graph);
+                match self.manager.publish_and_retain(reservation, ws, new_graph) {
+                    Ok((token, arc)) => (token, arc),
+                    Err(e) => {
+                        self.record_and_transition_on_err(ws, &e);
+                        return Err(e);
+                    }
+                };
             published_arc
             // workspaces_guard drops at end of this block; eviction
             // can proceed immediately afterward.
@@ -1273,17 +1305,45 @@ impl RebuildDispatcher {
     /// Task 7 Phase 7c helper: update workspace state + bookkeeping on
     /// a rebuild-failure error path.
     ///
-    /// - `WorkspaceEvicted` → NO-OP. The workspace is already in the
-    ///   `Evicted` state (stored by `execute_eviction` under
-    ///   `workspaces.write()`). Writing `Failed` would clobber that;
-    ///   calling `record_failure` would pollute telemetry with a
-    ///   "build failure" for a workspace that was cooperatively
-    ///   removed.
+    /// - `WorkspaceEvicted`:
+    ///   - **State already `Evicted`** → NO-OP. Eviction wrote
+    ///     `Evicted` under `workspaces.write()` BEFORE flipping
+    ///     `rebuild_cancelled`; clobbering it with `Failed` would
+    ///     destroy that contract.
+    ///   - **State still `Rebuilding`** → cluster-G iter-3 fix.
+    ///     This is a `daemon reset` cancellation that fired AFTER
+    ///     the runner's top-of-loop gate but BEFORE the publish
+    ///     recheck (`rebuild.rs:1229`). The runner converts that
+    ///     into `WorkspaceEvicted`, but no eviction actually
+    ///     happened — `WorkspaceManager::reset` only set
+    ///     `rebuild_cancelled = true` and returned
+    ///     `ResetCancellationDispatched`. Without the transition
+    ///     below, the workspace stays stuck in `Rebuilding` and a
+    ///     subsequent `daemon reset` returns
+    ///     `ResetCancellationDispatched` again — operator must
+    ///     `daemon stop && daemon start` to recover.
+    ///
+    ///     We transition to `Unloaded` (the same destination
+    ///     `WorkspaceManager::reset` would have written if reset
+    ///     had won the race against the iteration). The map entry
+    ///     and `pinned` bit are preserved by the in-place
+    ///     `store_state`; the next `daemon reset` (or the caller's
+    ///     retry after the documented `retry_after_ms = 250`) sees
+    ///     `Unloaded` and is a no-op, and `daemon load` then
+    ///     recovers the workspace cheaply.
+    ///
     /// - Any other `DaemonError` → `record_failure` + transition to
     ///   `WorkspaceState::Failed`. This is the entry point to A2
     ///   §G.7's stale-serve flow for that workspace.
     fn record_and_transition_on_err(&self, ws: &LoadedWorkspace, err: &DaemonError) {
         if matches!(err, DaemonError::WorkspaceEvicted { .. }) {
+            // Cluster-G iter-3 BLOCKER 3 fix: differentiate
+            // eviction-path from reset-path cancellations by reading
+            // the state the eviction path would have written. See
+            // doc-comment above for the full rationale.
+            if ws.load_state() == WorkspaceState::Rebuilding {
+                ws.store_state(WorkspaceState::Unloaded);
+            }
             return;
         }
         ws.record_failure(clone_err(err));
@@ -2263,5 +2323,99 @@ mod tests {
         tokio::time::timeout(Duration::from_millis(50), dispatcher.gate_check())
             .await
             .expect("gate_check with hold==0 must return immediately without awaiting");
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Cluster-G iter-3 BLOCKER 3 — `record_and_transition_on_err`
+    // differentiates eviction from in-iteration `daemon reset`
+    // cancellation.
+    // ─────────────────────────────────────────────────────────────────
+
+    /// Eviction path: state was already written to `Evicted` by
+    /// `execute_eviction` under `workspaces.write()` BEFORE the
+    /// rebuild_cancelled flag was flipped. The runner observes
+    /// `WorkspaceEvicted`, calls `record_and_transition_on_err`, and
+    /// the helper must NOT clobber the Evicted state.
+    #[test]
+    fn record_and_transition_on_err_preserves_evicted_state() {
+        let dispatcher = make_dispatcher_for_gate_test();
+        let ws = Arc::new(LoadedWorkspace::new(
+            crate::workspace::state::WorkspaceKey::new(
+                std::path::PathBuf::from("/repo"),
+                sqry_core::project::ProjectRootMode::GitRoot,
+                0x1,
+            ),
+            false,
+        ));
+        ws.store_state(crate::workspace::state::WorkspaceState::Evicted);
+        let err = DaemonError::WorkspaceEvicted {
+            root: std::path::PathBuf::from("/repo"),
+        };
+        dispatcher.record_and_transition_on_err(&ws, &err);
+        assert_eq!(
+            ws.load_state(),
+            crate::workspace::state::WorkspaceState::Evicted,
+            "eviction-path WorkspaceEvicted must NOT transition state"
+        );
+    }
+
+    /// `daemon reset` path (cluster-G iter-3 BLOCKER 3 fix): reset
+    /// fired AFTER the runner's top-of-loop gate but BEFORE the
+    /// publish recheck. The runner converts the cancellation into
+    /// `WorkspaceEvicted` while state is still `Rebuilding` (no
+    /// eviction wrote `Evicted` because no eviction actually
+    /// happened — `WorkspaceManager::reset`'s `Rebuilding` arm only
+    /// flipped `rebuild_cancelled` and returned
+    /// `ResetCancellationDispatched`). The helper MUST transition to
+    /// `Unloaded` so the next `daemon load` recovers the workspace
+    /// (without this fix, the workspace stays stuck in `Rebuilding`
+    /// until `daemon stop && daemon start`).
+    #[test]
+    fn record_and_transition_on_err_unloads_reset_in_iteration_cancel() {
+        let dispatcher = make_dispatcher_for_gate_test();
+        let ws = Arc::new(LoadedWorkspace::new(
+            crate::workspace::state::WorkspaceKey::new(
+                std::path::PathBuf::from("/repo"),
+                sqry_core::project::ProjectRootMode::GitRoot,
+                0x1,
+            ),
+            false,
+        ));
+        // Runner is mid-iteration: state is `Rebuilding` (the
+        // distinguisher between eviction and reset).
+        ws.store_state(crate::workspace::state::WorkspaceState::Rebuilding);
+        let err = DaemonError::WorkspaceEvicted {
+            root: std::path::PathBuf::from("/repo"),
+        };
+        dispatcher.record_and_transition_on_err(&ws, &err);
+        assert_eq!(
+            ws.load_state(),
+            crate::workspace::state::WorkspaceState::Unloaded,
+            "in-iteration reset cancellation must transition Rebuilding → Unloaded; \
+             without this, daemon reset → daemon load cannot recover"
+        );
+    }
+
+    /// Sanity: any other `DaemonError` (e.g. `WorkspaceOversize`,
+    /// `Internal`) → `Failed` regardless of starting state.
+    #[test]
+    fn record_and_transition_on_err_failed_for_non_eviction_errors() {
+        let dispatcher = make_dispatcher_for_gate_test();
+        let ws = Arc::new(LoadedWorkspace::new(
+            crate::workspace::state::WorkspaceKey::new(
+                std::path::PathBuf::from("/repo"),
+                sqry_core::project::ProjectRootMode::GitRoot,
+                0x1,
+            ),
+            false,
+        ));
+        ws.store_state(crate::workspace::state::WorkspaceState::Rebuilding);
+        let err = DaemonError::Internal(anyhow::anyhow!("plugin panic"));
+        dispatcher.record_and_transition_on_err(&ws, &err);
+        assert_eq!(
+            ws.load_state(),
+            crate::workspace::state::WorkspaceState::Failed,
+            "non-eviction errors must transition to Failed"
+        );
     }
 }

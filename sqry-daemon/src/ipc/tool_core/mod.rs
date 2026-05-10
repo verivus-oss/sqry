@@ -317,7 +317,12 @@ pub(crate) async fn acquire_and_execute<F>(
     run: F,
 ) -> Result<ExecuteVerdict, DaemonError>
 where
-    F: FnOnce(&WorkspaceContext) -> anyhow::Result<Value> + Send + 'static,
+    F: FnOnce(
+            &WorkspaceContext,
+            &sqry_core::query::cancellation::CancellationToken,
+        ) -> anyhow::Result<Value>
+        + Send
+        + 'static,
 {
     // Build a per-request provider (cheap — three Arc clones plus an
     // Option tag) and acquire the graph through the shared boundary.
@@ -458,7 +463,12 @@ pub(crate) async fn classify_and_execute<F>(
     run: F,
 ) -> Result<ExecuteVerdict, DaemonError>
 where
-    F: FnOnce(&WorkspaceContext) -> anyhow::Result<Value> + Send + 'static,
+    F: FnOnce(
+            &WorkspaceContext,
+            &sqry_core::query::cancellation::CancellationToken,
+        ) -> anyhow::Result<Value>
+        + Send
+        + 'static,
 {
     // Step 1: canonicalise path.
     let canonical_root = resolve_path(Path::new(path))?;
@@ -523,7 +533,18 @@ async fn execute_with_timeout<F>(
     run: F,
 ) -> Result<Value, DaemonError>
 where
-    F: FnOnce(&WorkspaceContext) -> anyhow::Result<Value> + Send + 'static,
+    // `A_cancellation.md` §2 + `00_contracts.md` §3.CC-1: the daemon
+    // closure receives both the `WorkspaceContext` and a borrowed
+    // per-request `CancellationToken`. The wrapper retains ownership
+    // of the canonical clone and signals on deadline so the in-flight
+    // `spawn_blocking` thread observes the cancellation cooperatively
+    // (per GT-6, a running blocking task cannot be aborted).
+    F: FnOnce(
+            &WorkspaceContext,
+            &sqry_core::query::cancellation::CancellationToken,
+        ) -> anyhow::Result<Value>
+        + Send
+        + 'static,
 {
     // Derive the canonical wire fields BEFORE spawning so the borrow
     // of `canonical_root` does not cross the `.await`.
@@ -541,6 +562,12 @@ where
     // lock + linear scan over an always-empty vector).
     let hook_path = canonical_root.to_path_buf();
 
+    // Per-request cancellation token. Wrapper owns the canonical clone;
+    // closure owns a Send/Clone copy moved into spawn_blocking. Both
+    // observe the same `Arc<AtomicBool>` flag.
+    let cancel = sqry_core::query::cancellation::CancellationToken::new();
+    let cancel_for_closure = cancel.clone();
+
     let join_handle = tokio::task::spawn_blocking(move || {
         // Signal that the real OS thread has started by firing the
         // registered notifier (if any) for the dispatched workspace path.
@@ -549,11 +576,104 @@ where
         // proving the real daemon dispatch path reached `spawn_blocking`
         // and the OS scheduler dispatched it.
         thread_start_hook::notify(&hook_path);
-        run(&wctx)
+        run(&wctx, &cancel_for_closure)
     });
-    match tokio::time::timeout(tool_timeout, join_handle).await {
+    let result = tokio::time::timeout(tool_timeout, join_handle).await;
+
+    // Deadline elapsed → flip the token *before* falling through so
+    // the detached blocking thread observes cancellation on its next
+    // `evaluate_all` per-batch poll. We must NOT await the JoinHandle
+    // here — the contract on the deadline arm is fire-and-forget; the
+    // cooperative-cancellation token is what frees the blocking-pool
+    // slot once the closure body returns. (Mirrors the standalone
+    // `sqry-mcp::SqryServer::execute_tool_with_timeout` deadline path.)
+    if result.is_err() {
+        cancel.cancel();
+    }
+
+    match result {
         Ok(Ok(Ok(value))) => Ok(value),
-        Ok(Ok(Err(err))) => Err(DaemonError::Internal(err)),
+        Ok(Ok(Err(err))) => {
+            // `A_cancellation.md` §4: when the closure returned because
+            // it observed the cancellation we just signalled, surface
+            // the canonical `ToolTimeout` envelope so the wire shape is
+            // identical to the wrapper-only timeout arm. `kind =
+            // "deadline_exceeded"` is preserved across both paths so
+            // MCP clients use a single discriminator regardless of
+            // which side observed first.
+            if let Some(sqry_core::query::QueryError::Cancelled) =
+                err.downcast_ref::<sqry_core::query::QueryError>()
+            {
+                Err(DaemonError::ToolTimeout {
+                    root: root_owned,
+                    secs,
+                    deadline_ms,
+                })
+            } else if let Some(gate_err) =
+                err.downcast_ref::<sqry_core::query::cost_gate::CostGateError>()
+            {
+                // `B_cost_gate.md` §3 + `00_contracts.md` §3.CC-2:
+                // pre-flight cost-gate rejection on the daemon-hosted
+                // MCP path. `DaemonError::QueryTooBroad` carries the
+                // CC-2 7-key `details` payload through to
+                // `daemon_err_to_mcp` which emits the canonical 4-key
+                // envelope (byte-identical to the standalone
+                // `RpcError::query_too_broad` shape).
+                Err(DaemonError::QueryTooBroad {
+                    reason: gate_err.to_string(),
+                    details: gate_err.to_query_too_broad_details(),
+                })
+            } else if let Some(gate_err) =
+                err.downcast_ref::<sqry_db::planner::cost_gate::PlannerCostGateError>()
+            {
+                // Planner-side cost gate (`sqry_query`, `plan-query`).
+                // Distinct error type, identical wire envelope.
+                Err(DaemonError::QueryTooBroad {
+                    reason: gate_err.to_string(),
+                    details: gate_err.to_query_too_broad_details(),
+                })
+            } else if let Some(rpc_err) = err.downcast_ref::<sqry_mcp::error::RpcError>() {
+                // Cluster-C iter-3: a typed `RpcError` propagated up
+                // from the daemon adapter's argument-parsing layer
+                // (`sqry-mcp/src/daemon_adapter/dispatch.rs`). Without
+                // this arm, validation errors like `budget_rows: 0`
+                // fall through to `DaemonError::Internal` and surface
+                // as `McpError::internal_error` (-32603) on the wire,
+                // diverging from the standalone path which emits
+                // `McpError::invalid_params` (-32602). The
+                // `RpcErrorPreserved` variant carries the typed
+                // RpcError through to `daemon_err_to_mcp` so the
+                // wire envelope is byte-identical to standalone.
+                Err(DaemonError::RpcErrorPreserved(rpc_err.clone()))
+            } else if let Some(budget_err) =
+                err.downcast_ref::<sqry_core::query::budget::BudgetExceeded>()
+            {
+                // `C_budget.md` §3 + `00_contracts.md` §3.CC-2:
+                // runtime row-budget exceedance surfaces with
+                // `details.source = "runtime_budget"`. Cluster-C
+                // iter-2: include the sanitised `predicate_shape` so
+                // the daemon-hosted envelope is wire-comparable to
+                // the standalone path and to the cluster-B static
+                // estimate envelope.
+                let details = serde_json::json!({
+                    "source": "runtime_budget",
+                    "kind": sqry_core::query::cost_gate::KIND_QUERY_TOO_BROAD,
+                    "examined": budget_err.examined,
+                    "limit": budget_err.limit,
+                    "predicate_shape": budget_err.predicate_shape.clone(),
+                    "suggested_predicates":
+                        sqry_core::query::cost_gate::SCOPE_FILTER_FIELDS,
+                    "doc_url":
+                        sqry_core::query::cost_gate::QUERY_TOO_BROAD_DOC_URL,
+                });
+                Err(DaemonError::QueryTooBroad {
+                    reason: budget_err.to_string(),
+                    details,
+                })
+            } else {
+                Err(DaemonError::Internal(err))
+            }
+        }
         Ok(Err(join_err)) => Err(DaemonError::Internal(anyhow::anyhow!(
             "spawn_blocking join: {join_err}"
         ))),
@@ -672,9 +792,9 @@ mod tests {
         let manager = test_manager();
         let executor = test_executor();
 
-        let run = |_wctx: &sqry_mcp::daemon_adapter::WorkspaceContext| -> anyhow::Result<Value> {
-            Ok(Value::Null)
-        };
+        let run = |_wctx: &sqry_mcp::daemon_adapter::WorkspaceContext,
+                   _cancel: &sqry_core::query::cancellation::CancellationToken|
+         -> anyhow::Result<Value> { Ok(Value::Null) };
         let err = classify_and_execute(
             manager,
             executor,
@@ -711,9 +831,9 @@ mod tests {
         let key = crate::workspace::WorkspaceKey::new(root.clone(), ProjectRootMode::GitRoot, 0);
         manager.insert_workspace_in_state_for_test(key, crate::workspace::WorkspaceState::Loading);
 
-        let run = |_wctx: &sqry_mcp::daemon_adapter::WorkspaceContext| -> anyhow::Result<Value> {
-            Ok(Value::Null)
-        };
+        let run = |_wctx: &sqry_mcp::daemon_adapter::WorkspaceContext,
+                   _cancel: &sqry_core::query::cancellation::CancellationToken|
+         -> anyhow::Result<Value> { Ok(Value::Null) };
         let err = classify_and_execute(
             manager,
             executor,
@@ -759,7 +879,9 @@ mod tests {
         let key = crate::workspace::WorkspaceKey::new(root.clone(), ProjectRootMode::GitRoot, 0);
         manager.insert_workspace_in_state_for_test(key, crate::workspace::WorkspaceState::Loaded);
 
-        let run = |_wctx: &sqry_mcp::daemon_adapter::WorkspaceContext| -> anyhow::Result<Value> {
+        let run = |_wctx: &sqry_mcp::daemon_adapter::WorkspaceContext,
+                   _cancel: &sqry_core::query::cancellation::CancellationToken|
+         -> anyhow::Result<Value> {
             std::thread::sleep(Duration::from_millis(500));
             Ok(Value::Null)
         };
@@ -801,7 +923,9 @@ mod tests {
         let key = crate::workspace::WorkspaceKey::new(root.clone(), ProjectRootMode::GitRoot, 0);
         manager.insert_workspace_in_state_for_test(key, crate::workspace::WorkspaceState::Loaded);
 
-        let run = |_wctx: &sqry_mcp::daemon_adapter::WorkspaceContext| -> anyhow::Result<Value> {
+        let run = |_wctx: &sqry_mcp::daemon_adapter::WorkspaceContext,
+                   _cancel: &sqry_core::query::cancellation::CancellationToken|
+         -> anyhow::Result<Value> {
             Err(anyhow::anyhow!("synthetic closure failure"))
         };
         let err = classify_and_execute(
@@ -839,9 +963,9 @@ mod tests {
         let key = crate::workspace::WorkspaceKey::new(root.clone(), ProjectRootMode::GitRoot, 0);
         manager.insert_workspace_in_state_for_test(key, crate::workspace::WorkspaceState::Loaded);
 
-        let run = |_wctx: &sqry_mcp::daemon_adapter::WorkspaceContext| -> anyhow::Result<Value> {
-            Ok(serde_json::json!({"hello": "world"}))
-        };
+        let run = |_wctx: &sqry_mcp::daemon_adapter::WorkspaceContext,
+                   _cancel: &sqry_core::query::cancellation::CancellationToken|
+         -> anyhow::Result<Value> { Ok(serde_json::json!({"hello": "world"})) };
         let verdict = classify_and_execute(
             manager,
             executor,

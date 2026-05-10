@@ -50,7 +50,7 @@ pub use nogit::NoGit;
 pub use parser::{parse_diff_name_status, parse_porcelain};
 pub use recency::RecencyIndex;
 pub use subprocess::{SubprocessGit, max_git_output_size};
-pub use worktree::WorktreeManager;
+pub use worktree::{WorktreeManager, resolve_ref_to_commit};
 
 /// Result type for git operations
 pub type Result<T> = StdResult<T, GitError>;

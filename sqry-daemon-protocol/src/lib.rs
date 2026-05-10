@@ -34,7 +34,7 @@ pub mod protocol;
 pub use protocol::{
     CancelRebuildResult, DaemonHello, DaemonHelloResponse, ENVELOPE_VERSION, JsonRpcError,
     JsonRpcId, JsonRpcPayload, JsonRpcRequest, JsonRpcResponse, JsonRpcVersion, LoadResult,
-    LogicalWorkspaceWire, RebuildResult, ResponseEnvelope, ResponseMeta, ShimProtocol,
-    ShimRegister, ShimRegisterAck, SourceRootBinding, WorkspaceId, WorkspaceIndexStatus,
-    WorkspaceSourceRootStatus, WorkspaceState,
+    LogicalWorkspaceWire, RebuildResult, RebuildStatus, ResponseEnvelope, ResponseMeta,
+    ShimProtocol, ShimRegister, ShimRegisterAck, SourceRootBinding, WorkspaceId,
+    WorkspaceIndexStatus, WorkspaceSourceRootStatus, WorkspaceState,
 };

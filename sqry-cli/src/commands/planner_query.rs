@@ -71,6 +71,21 @@ pub fn run_planner_query(cli: &Cli, query: &str, path: Option<&str>, limit: usiz
 
     let plan = parse_query(query).map_err(format_parse_error)?;
     let snapshot = Arc::new(graph.snapshot());
+
+    // Cluster-B iter-2 BLOCKER 1: gate the planner CLI path on the
+    // pre-flight cost check. Without this, `sqry plan-query` accepts
+    // unbounded regex shapes the MCP `sqry_query` path already rejects
+    // (`sqry-mcp/src/execution/tools/planner_query.rs` already calls
+    // `check_plan` before `execute_plan`). Mirror that contract here
+    // so the CLI surface produces the same `PlannerCostGateError` →
+    // `query_too_broad` envelope.
+    sqry_db::planner::cost_gate::check_plan(
+        &plan,
+        snapshot.nodes().len(),
+        &sqry_db::planner::cost_gate::PlannerCostGateConfig::default(),
+    )
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+
     let db = make_query_db_cold(Arc::clone(&snapshot), &location.index_root);
 
     let node_ids = execute_plan(&plan, &db);
