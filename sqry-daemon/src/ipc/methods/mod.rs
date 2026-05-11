@@ -16,6 +16,10 @@
 //!
 //! - `daemon/workspaceStatus` — [`daemon_workspace_status`]
 //!
+//! issue-238 tier-2 (DAEMON_SEARCH_HANDLER) adds:
+//!
+//! - `daemon/search` — [`daemon_search`]
+//!
 //! Phase 8b will add 14 MCP tool methods on the same router; the
 //! [`MethodError`] enum below already carries every variant the tool
 //! methods will need.
@@ -25,6 +29,7 @@ pub mod daemon_cancel_rebuild;
 pub mod daemon_load;
 pub mod daemon_rebuild;
 pub mod daemon_reset;
+pub mod daemon_search;
 pub mod daemon_status;
 pub mod daemon_stop;
 pub mod daemon_unload;
@@ -290,6 +295,10 @@ pub(crate) async fn dispatch(
         "daemon/stop" => daemon_stop::handle(ctx, req.params).await,
         "daemon/rebuild" => daemon_rebuild::handle(ctx, req.params).await,
         "daemon/cancel_rebuild" => daemon_cancel_rebuild::handle(ctx, req.params).await,
+        // issue-238 tier-2 — `daemon/search` routes through the shared
+        // GraphAcquirer boundary so post-eviction reload works. See
+        // `daemon_search` module docs for the parity contract.
+        "daemon/search" => daemon_search::handle(ctx, req.params).await,
         // STEP_6 (workspace-aware-cross-repo): aggregate
         // per-source-root rollup of every WorkspaceKey grouped under
         // the requested `workspace_id`. See

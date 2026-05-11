@@ -21,7 +21,7 @@
 //! `find_all_cycles_graph` call path was removed in DB19 (2026-04-15).
 
 use crate::args::Cli;
-use crate::commands::graph::loader::{GraphLoadConfig, load_unified_graph_for_cli};
+use crate::commands::graph::loader::{GraphLoadConfig, load_unified_graph_for_cli, no_op_reporter};
 use crate::index_discovery::find_nearest_index;
 use crate::output::OutputStreams;
 use anyhow::{Context, Result};
@@ -109,7 +109,7 @@ pub fn run_cycles(
 
     // Load unified graph.
     let config = GraphLoadConfig::default();
-    let graph = load_unified_graph_for_cli(&loc.index_root, &config, cli)
+    let graph = load_unified_graph_for_cli(&loc.index_root, &config, cli, no_op_reporter())
         .context("Failed to load graph. Run 'sqry index' to build the graph.")?;
 
     // Route through sqry-db: `CyclesQuery` is the name-keyed cycle

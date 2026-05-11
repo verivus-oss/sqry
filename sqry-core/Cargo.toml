@@ -128,7 +128,7 @@ tree-sitter-cpp.workspace = true
 
 # Test support dependencies (available when running tests or with test-support feature)
 env_logger = { workspace = true, optional = true }
-assert_cmd = { version = "2.2", optional = true }
+assert_cmd = { version = "2.2.1", optional = true }
 
 # Windows atomic file operations (MoveFileExW for atomic manifest writes)
 [target.'cfg(windows)'.dependencies]
@@ -261,4 +261,8 @@ harness = false
 
 [[bench]]
 name = "query_benchmarks"
+harness = false
+
+[[bench]]
+name = "exact_name_lookup"
 harness = false

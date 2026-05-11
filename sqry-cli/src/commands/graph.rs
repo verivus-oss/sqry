@@ -20,7 +20,7 @@ pub mod resolve;
 
 use crate::args::{Cli, GraphOperation};
 use anyhow::{Context, Result, bail};
-use loader::{GraphLoadConfig, load_unified_graph_for_cli};
+use loader::{GraphLoadConfig, load_unified_graph_for_cli, no_op_reporter};
 use sqry_core::graph::Language;
 // Unified graph types
 use sqry_core::graph::CodeGraph as UnifiedCodeGraph;
@@ -61,8 +61,8 @@ pub fn run_graph(
     }
 
     let config = build_graph_load_config(cli);
-    let unified_graph =
-        load_unified_graph_for_cli(&root, &config, cli).context("Failed to load unified graph")?;
+    let unified_graph = load_unified_graph_for_cli(&root, &config, cli, no_op_reporter())
+        .context("Failed to load unified graph")?;
 
     match operation {
         GraphOperation::Stats {

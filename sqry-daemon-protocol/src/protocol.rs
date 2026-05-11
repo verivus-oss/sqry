@@ -700,6 +700,147 @@ pub struct CancelRebuildResult {
 }
 
 // ---------------------------------------------------------------------------
+// `daemon/search` wire types (verivus-oss/sqry#238 Tier 2).
+//
+// Mirror the relevant arguments of `commands::search::run_search` so the
+// CLI shim at `sqry-cli/src/commands/search.rs` can attempt the daemon
+// path before falling through to in-process load. Field shape follows the
+// established protocol-crate convention: leaf-only (no upstream sqry deps,
+// no tower-lsp types), flat fields rather than nested LSP `Location`
+// wrappers — the CLI converts to `DisplaySymbol` for output formatting,
+// keeping parity at the formatter layer rather than the wire layer.
+// ---------------------------------------------------------------------------
+
+/// `daemon/search` request payload.
+///
+/// Submitted as the `params` field of a [`JsonRpcRequest`] with
+/// `method == "daemon/search"`. Wire-compatible with `--exact`, regex, and
+/// fuzzy search modes; the daemon handler dispatches to the same
+/// `find_by_exact_name` / regex / fuzzy logic the in-process CLI uses
+/// (verifiable by the `DAEMON_SEARCH_TESTS` parity assertions).
+///
+/// Errors: a request whose `search_path` does not resolve to a
+/// daemon-loaded workspace returns `WorkspaceEvicted` (-32004) or
+/// `WorkspaceNotLoaded`; an incompatible plugin selection returns
+/// `WorkspaceIncompatibleGraph` (-32005). The CLI shim treats either as
+/// a soft failure and falls through to the in-process path.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SearchRequest {
+    /// Wire envelope version. Defaults to [`ENVELOPE_VERSION`] for
+    /// forward-compatible serde when the field is absent.
+    #[serde(default = "default_envelope_version")]
+    pub envelope_version: u32,
+    /// Pattern to search for. Interpreted per `mode`.
+    pub pattern: String,
+    /// Workspace root the search should resolve against. The daemon
+    /// normalises and looks this up via `WorkspaceManager`.
+    pub search_path: String,
+    /// Search interpretation mode. Maps to the CLI's `--exact` / `--fuzzy`
+    /// flags; everything else falls into [`SearchMode::Regex`].
+    pub mode: SearchMode,
+    /// Optional kind filter (e.g. `"function"`, `"class"`). Matches
+    /// the in-process `Cli::kind` semantics.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// Optional language filter (e.g. `"rust"`, `"python"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lang: Option<String>,
+    /// Maximum result count. `None` lets the daemon apply its default
+    /// (mirrors `Cli::limit`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+    /// Mirror of the CLI's `--include-generated` flag (default in-process:
+    /// `false` — macro-generated symbols are dropped). When `false` the
+    /// daemon applies the same `filter_nodes_by_macro_boundary` contract
+    /// as `sqry-cli/src/commands/search.rs::run_regular_search` so the
+    /// daemon route does not surface macro-generated symbols the
+    /// in-process path would have dropped.
+    ///
+    /// Serde default is `true` for backward compatibility — a request
+    /// body that omits the field gets the same "no filter" behaviour
+    /// the tier-2 daemon handler shipped with originally (the
+    /// `DAEMON_SEARCH_HANDLER` unit's approved tests rely on that
+    /// default and continue to pass without modification).
+    #[serde(default = "default_include_generated")]
+    pub include_generated: bool,
+}
+
+fn default_envelope_version() -> u32 {
+    ENVELOPE_VERSION
+}
+
+fn default_include_generated() -> bool {
+    // True keeps the pre-`include_generated` wire-shape behaviour: the
+    // daemon returns every candidate, including macro-generated ones.
+    // Callers that need parity with the CLI's default exact search must
+    // set this to `false` so the daemon drops `macro_generated == Some(true)`
+    // nodes before serialising the result set.
+    true
+}
+
+/// Search interpretation mode for [`SearchRequest::mode`].
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SearchMode {
+    /// Regex pattern over interned symbol names. Default behaviour for
+    /// `sqry search <pat>` and `sqry <pat>`.
+    Regex,
+    /// Literal byte-exact symbol-name match (`--exact` / planner
+    /// `name:<literal>` contract).
+    Exact,
+    /// Trigram fuzzy match (`--fuzzy`).
+    Fuzzy,
+}
+
+/// One search hit. Flat shape (no LSP `Location` wrapper) so the protocol
+/// crate stays leaf-only; the CLI shim converts to `DisplaySymbol` for
+/// output formatting.
+///
+/// Line/column semantics match `DisplaySymbol`:
+///   - `start_line` / `end_line` are 1-based
+///   - `start_column` / `end_column` are 0-based byte offsets
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct SearchItem {
+    pub name: String,
+    pub qualified_name: String,
+    pub kind: String,
+    pub language: String,
+    pub file_path: String,
+    pub start_line: u32,
+    pub start_column: u32,
+    pub end_line: u32,
+    pub end_column: u32,
+    /// Fuzzy match score. Absent for regex / exact hits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub score: Option<f32>,
+}
+
+/// `daemon/search` success result payload.
+///
+/// Serialised under the `result` field of [`ResponseEnvelope`]. The CLI
+/// shim reads `total` + `truncated` separately so it can emit the same
+/// "Showing N of M matches" banner the in-process path does.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct SearchResult {
+    /// The hits returned for this query, post-limit.
+    pub items: Vec<SearchItem>,
+    /// Pre-truncation match count. When `truncated == false` this equals
+    /// `items.len()`; when `truncated == true` it is at least `limit + 1`
+    /// (lower-bound sentinel, matching the LSP `list_unused_symbols` /
+    /// `list_circular_dependencies` convention).
+    pub total: u64,
+    /// True when the result was capped by `SearchRequest::limit`.
+    pub truncated: bool,
+    /// Reserved for future cursor-based pagination. Tier-2 always returns
+    /// `None`; clients should not assume any specific format.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
 // JSON-RPC 2.0 envelope types.
 // ---------------------------------------------------------------------------
 
@@ -1018,5 +1159,232 @@ mod tests {
             msg.contains("unknown field"),
             "expected 'unknown field' in error, got: {msg}"
         );
+    }
+
+    // ── daemon/search (verivus-oss/sqry#238 Tier 2) ─────────────────
+
+    #[test]
+    fn search_request_roundtrip_minimal() {
+        let req = SearchRequest {
+            envelope_version: ENVELOPE_VERSION,
+            pattern: "foo".into(),
+            search_path: "/tmp/ws".into(),
+            mode: SearchMode::Exact,
+            kind: None,
+            lang: None,
+            limit: None,
+            include_generated: true,
+        };
+        let wire = serde_json::to_string(&req).expect("serialize");
+        let back: SearchRequest = serde_json::from_str(&wire).expect("deserialize");
+        assert_eq!(back, req);
+    }
+
+    #[test]
+    fn search_request_roundtrip_with_all_filters() {
+        let req = SearchRequest {
+            envelope_version: ENVELOPE_VERSION,
+            pattern: "test_.*".into(),
+            search_path: "/srv/repo".into(),
+            mode: SearchMode::Regex,
+            kind: Some("function".into()),
+            lang: Some("rust".into()),
+            limit: Some(50),
+            include_generated: false,
+        };
+        let wire = serde_json::to_string(&req).expect("serialize");
+        let back: SearchRequest = serde_json::from_str(&wire).expect("deserialize");
+        assert_eq!(back, req);
+    }
+
+    #[test]
+    fn search_request_mode_lowercase_on_wire() {
+        let req = SearchRequest {
+            envelope_version: ENVELOPE_VERSION,
+            pattern: "f".into(),
+            search_path: ".".into(),
+            mode: SearchMode::Fuzzy,
+            kind: None,
+            lang: None,
+            limit: None,
+            include_generated: true,
+        };
+        let wire = serde_json::to_string(&req).expect("serialize");
+        // The `#[serde(rename_all = "lowercase")]` attribute on SearchMode
+        // must surface the variant as `"fuzzy"`, not `"Fuzzy"`.
+        assert!(
+            wire.contains(r#""mode":"fuzzy""#),
+            "expected mode=fuzzy lowercase; got: {wire}"
+        );
+    }
+
+    #[test]
+    fn search_request_rejects_unknown_field() {
+        let wire =
+            r#"{"envelope_version":1,"pattern":"f","search_path":"/","mode":"exact","bogus":true}"#;
+        let err = serde_json::from_str::<SearchRequest>(wire)
+            .expect_err("SearchRequest must reject unknown fields");
+        assert!(
+            err.to_string().contains("unknown field"),
+            "expected unknown-field error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn search_request_include_generated_defaults_when_absent() {
+        // Forward-compat: a request body that predates the
+        // `include_generated` wire field deserialises to the legacy
+        // "no filter" behaviour (`true`), preserving the
+        // `DAEMON_SEARCH_HANDLER` unit's approved tests after the
+        // Codex round-1 CLI shim review fix.
+        let wire = r#"{"pattern":"f","search_path":"/","mode":"exact"}"#;
+        let req: SearchRequest =
+            serde_json::from_str(wire).expect("deserialize w/o include_generated");
+        assert!(req.include_generated);
+    }
+
+    #[test]
+    fn search_request_include_generated_round_trips_when_false() {
+        let wire = r#"{"pattern":"f","search_path":"/","mode":"exact","include_generated":false}"#;
+        let req: SearchRequest =
+            serde_json::from_str(wire).expect("deserialize include_generated=false");
+        assert!(!req.include_generated);
+        // Re-serialise and confirm the field is preserved.
+        let back = serde_json::to_string(&req).expect("serialize");
+        assert!(
+            back.contains(r#""include_generated":false"#),
+            "include_generated=false must survive a round-trip: {back}"
+        );
+    }
+
+    #[test]
+    fn search_request_envelope_version_defaults_when_absent() {
+        // Forward-compat: older clients can omit `envelope_version` and
+        // the daemon defaults it to ENVELOPE_VERSION.
+        let wire = r#"{"pattern":"f","search_path":"/","mode":"exact"}"#;
+        let req: SearchRequest =
+            serde_json::from_str(wire).expect("deserialize w/o envelope_version");
+        assert_eq!(req.envelope_version, ENVELOPE_VERSION);
+    }
+
+    #[test]
+    fn search_result_roundtrip_empty() {
+        let result = SearchResult {
+            items: vec![],
+            total: 0,
+            truncated: false,
+            cursor: None,
+        };
+        let wire = serde_json::to_string(&result).expect("serialize");
+        let back: SearchResult = serde_json::from_str(&wire).expect("deserialize");
+        assert_eq!(back, result);
+    }
+
+    #[test]
+    fn search_result_roundtrip_single_hit() {
+        let result = SearchResult {
+            items: vec![SearchItem {
+                name: "start_kernel".into(),
+                qualified_name: "kernel::start_kernel".into(),
+                kind: "function".into(),
+                language: "c".into(),
+                file_path: "/linux/init/main.c".into(),
+                start_line: 985,
+                start_column: 0,
+                end_line: 1100,
+                end_column: 1,
+                score: None,
+            }],
+            total: 1,
+            truncated: false,
+            cursor: None,
+        };
+        let wire = serde_json::to_string(&result).expect("serialize");
+        let back: SearchResult = serde_json::from_str(&wire).expect("deserialize");
+        assert_eq!(back, result);
+    }
+
+    #[test]
+    fn search_result_roundtrip_truncated_with_score() {
+        let result = SearchResult {
+            items: (0..3)
+                .map(|i| SearchItem {
+                    name: format!("hit_{i}"),
+                    qualified_name: format!("crate::hit_{i}"),
+                    kind: "function".into(),
+                    language: "rust".into(),
+                    file_path: "/repo/src/lib.rs".into(),
+                    start_line: 10 + i,
+                    start_column: 0,
+                    end_line: 12 + i,
+                    end_column: 1,
+                    score: Some(0.5_f32 + (i as f32) * 0.1),
+                })
+                .collect(),
+            total: 101,
+            truncated: true,
+            cursor: None,
+        };
+        let wire = serde_json::to_string(&result).expect("serialize");
+        let back: SearchResult = serde_json::from_str(&wire).expect("deserialize");
+        assert_eq!(back, result);
+    }
+
+    #[test]
+    fn search_item_rejects_unknown_field() {
+        let wire = r#"{"name":"f","qualified_name":"f","kind":"function","language":"rust","file_path":"/","start_line":1,"start_column":0,"end_line":1,"end_column":0,"bogus":1}"#;
+        let err = serde_json::from_str::<SearchItem>(wire)
+            .expect_err("SearchItem must reject unknown fields");
+        assert!(err.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn search_result_rejects_unknown_field() {
+        let wire = r#"{"items":[],"total":0,"truncated":false,"bogus":1}"#;
+        let err = serde_json::from_str::<SearchResult>(wire)
+            .expect_err("SearchResult must reject unknown fields");
+        assert!(err.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn search_result_score_omitted_when_none() {
+        // `skip_serializing_if = "Option::is_none"` on `score` keeps the
+        // wire compact for regex/exact hits where no score is meaningful.
+        let item = SearchItem {
+            name: "f".into(),
+            qualified_name: "f".into(),
+            kind: "function".into(),
+            language: "rust".into(),
+            file_path: "/".into(),
+            start_line: 1,
+            start_column: 0,
+            end_line: 1,
+            end_column: 0,
+            score: None,
+        };
+        let wire = serde_json::to_string(&item).expect("serialize");
+        assert!(
+            !wire.contains("\"score\""),
+            "score must be omitted when None; got: {wire}"
+        );
+    }
+
+    #[test]
+    fn search_result_envelope_wraps_payload() {
+        // SearchResult is intended to ride inside ResponseEnvelope<T>, just
+        // like LoadResult / RebuildResult. Verify the wrap.
+        let envelope = ResponseEnvelope {
+            result: SearchResult {
+                items: vec![],
+                total: 0,
+                truncated: false,
+                cursor: None,
+            },
+            meta: ResponseMeta::management("test"),
+        };
+        let wire = serde_json::to_string(&envelope).expect("serialize");
+        let back: ResponseEnvelope<SearchResult> =
+            serde_json::from_str(&wire).expect("deserialize");
+        assert_eq!(back.result, envelope.result);
     }
 }

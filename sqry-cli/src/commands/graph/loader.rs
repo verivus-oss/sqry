@@ -10,7 +10,11 @@ use anyhow::{Context, Result, bail};
 use sqry_core::graph::CodeGraph;
 use sqry_core::graph::unified::build::{BuildConfig, build_unified_graph_with_progress};
 use sqry_core::graph::unified::persistence::{GraphStorage, load_from_path};
-use sqry_core::progress::{SharedReporter, no_op_reporter};
+// Re-export `no_op_reporter` so callers that want the silent default can
+// pull it from the same import line as `load_unified_graph_for_cli` rather
+// than reaching into `sqry_core::progress` directly.
+pub use sqry_core::progress::no_op_reporter;
+use sqry_core::progress::{ProgressStage, SharedReporter};
 use std::path::Path;
 
 /// Loader configuration derived from CLI flags.
@@ -65,6 +69,12 @@ pub fn load_unified_graph(root: &Path, config: &GraphLoadConfig) -> Result<CodeG
 
 /// CLI-aware graph loader that enforces manifest-backed plugin semantics.
 ///
+/// `progress` selects the reporter for the snapshot-load and source-build
+/// passes. Non-search subcommands pass [`no_op_reporter`] for the pre-#238
+/// silent default; the search path passes
+/// [`crate::progress::PlainProgressReporter::for_search`] so `--verbose` /
+/// `SQRY_LOG=info` surface stage events.
+///
 /// # Errors
 ///
 /// Returns an error if the workspace path is invalid, manifest-selected plugins
@@ -73,6 +83,7 @@ pub fn load_unified_graph_for_cli(
     root: &Path,
     config: &GraphLoadConfig,
     cli: &Cli,
+    progress: SharedReporter,
 ) -> Result<CodeGraph> {
     let resolved_plugins =
         plugin_defaults::resolve_plugin_selection(cli, root, PluginSelectionMode::ReadOnly)?;
@@ -80,7 +91,7 @@ pub fn load_unified_graph_for_cli(
         root,
         config,
         &resolved_plugins.plugin_manager,
-        no_op_reporter(),
+        progress,
     )
 }
 
@@ -133,8 +144,14 @@ fn load_unified_graph_with_progress_and_plugins(
                 "Loading unified graph from snapshot: {}",
                 storage.snapshot_path().display()
             );
+            // Bracket the snapshot load with a stage event so verbose mode
+            // can show "[sqry] load snapshot ... / complete in N ms". Pre-#238
+            // this path was only visible via log::info, which required both
+            // RUST_LOG=info AND a configured logger — invisible to most users.
+            let stage = ProgressStage::start(&progress, "load snapshot");
             match load_from_path(storage.snapshot_path(), Some(plugins)) {
                 Ok(mut graph) => {
+                    stage.finish();
                     log::info!("Loaded graph from snapshot");
 
                     // Restore confidence metadata from manifest if available
@@ -153,8 +170,14 @@ fn load_unified_graph_with_progress_and_plugins(
                     return Ok(graph);
                 }
                 Err(e) => {
-                    // Manifest present but snapshot missing/corrupt → corruption
-                    // Do not silently rebuild; user should run `sqry index --force`
+                    // Manifest present but snapshot missing/corrupt → corruption.
+                    // Finish the stage before bailing so verbose mode emits
+                    // a matched `[sqry] load snapshot complete in N` pair —
+                    // an orphan `... ...` start without a completion would
+                    // break the stream contract documented in the
+                    // PlainProgressReporter tests. Do not silently rebuild;
+                    // the user should run `sqry index --force`.
+                    stage.finish();
                     bail!(
                         "Index at {} is corrupted or incomplete ({}). Run `sqry index --force` to rebuild.",
                         root.display(),

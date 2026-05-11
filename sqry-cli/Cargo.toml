@@ -24,15 +24,16 @@ jvm-classpath = ["dep:sqry-classpath", "sqry-core/jvm-classpath", "sqry-plugin-r
 specialty-plugins = ["sqry-plugin-registry/specialty-plugins"]
 
 [dependencies]
-sqry-core = { version = "14.0.4", path = "../sqry-core", features = ["uses", "insights", "troubleshoot"] }
-sqry-db = { version = "14.0.4", path = "../sqry-db" }
-sqry-daemon = { version = "14.0.4", path = "../sqry-daemon", default-features = false }
-sqry-daemon-client = { version = "14.0.4", path = "../sqry-daemon-client" }
-sqry-lang-rust = { version = "14.0.4", path = "../sqry-lang-rust" }
-sqry-lsp = { version = "14.0.4", path = "../sqry-lsp" }
-sqry-plugin-registry = { version = "14.0.4", path = "../sqry-plugin-registry" }
-sqry-nl = { version = "14.0.4", path = "../sqry-nl", default-features = false }
-sqry-classpath = { version = "14.0.4", path = "../sqry-classpath", optional = true }
+sqry-core = { version = "15.0.1", path = "../sqry-core", features = ["uses", "insights", "troubleshoot"] }
+sqry-db = { version = "15.0.1", path = "../sqry-db" }
+sqry-daemon = { version = "15.0.1", path = "../sqry-daemon", default-features = false }
+sqry-daemon-client = { version = "15.0.1", path = "../sqry-daemon-client" }
+sqry-daemon-protocol = { version = "15.0.1", path = "../sqry-daemon-protocol" }
+sqry-lang-rust = { version = "15.0.1", path = "../sqry-lang-rust" }
+sqry-lsp = { version = "15.0.1", path = "../sqry-lsp" }
+sqry-plugin-registry = { version = "15.0.1", path = "../sqry-plugin-registry" }
+sqry-nl = { version = "15.0.1", path = "../sqry-nl", default-features = false }
+sqry-classpath = { version = "15.0.1", path = "../sqry-classpath", optional = true }
 anyhow.workspace = true
 miette.workspace = true
 once_cell.workspace = true
@@ -77,10 +78,15 @@ libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3.27"
-assert_cmd = "2.2"
+assert_cmd = "2.2.1"
 predicates = "3.1"
 sqry-core = { path = "../sqry-core", features = ["test-support"] }
 postcard.workspace = true
 trycmd = "1.2"
 serial_test = "3.4"
 tree-sitter-rust.workspace = true
+# `sqry-daemon-protocol` itself is a regular dependency (used by the
+# `daemon/search` shim in `commands::search`); the dev-deps entry that
+# served the search-verbose-progress integration test (#238 tier-1 review
+# fix) is no longer needed — Cargo automatically makes regular deps
+# available to integration tests.

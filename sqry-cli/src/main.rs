@@ -372,6 +372,7 @@ fn run() -> Result<()> {
             cfg_filter,
             include_generated,
             macro_boundaries,
+            verbose,
         }) => {
             let args = SearchCommandArgs {
                 cli: &cli,
@@ -385,6 +386,7 @@ fn run() -> Result<()> {
                 cfg_filter: cfg_filter.as_deref(),
                 include_generated: *include_generated,
                 macro_boundaries: *macro_boundaries,
+                verbose: *verbose,
             };
             handle_search_command(&args)?;
         }
@@ -972,6 +974,10 @@ struct SearchCommandArgs<'a> {
     cfg_filter: Option<&'a str>,
     include_generated: bool,
     macro_boundaries: bool,
+    /// Per-subcommand `--verbose` / `-v` flag from `sqry search`. The shorthand
+    /// path threads `cli.verbose` instead; either source enables verbose at the
+    /// run_search call site.
+    verbose: bool,
 }
 
 fn handle_search_command(args: &SearchCommandArgs<'_>) -> Result<()> {
@@ -993,6 +999,7 @@ fn handle_search_command(args: &SearchCommandArgs<'_>) -> Result<()> {
         args.cfg_filter,
         args.include_generated,
         args.macro_boundaries,
+        args.verbose,
     );
 
     // Record in history (after execution, regardless of result)
@@ -1095,7 +1102,7 @@ fn validate_index_if_requested(
     validate: ValidationMode,
     auto_rebuild: bool,
 ) -> Result<(), i32> {
-    use commands::graph::loader::{GraphLoadConfig, load_unified_graph_for_cli};
+    use commands::graph::loader::{GraphLoadConfig, load_unified_graph_for_cli, no_op_reporter};
     use std::path::Path;
 
     const ORPHAN_THRESHOLD: f64 = 0.20;
@@ -1116,7 +1123,7 @@ fn validate_index_if_requested(
 
     // Load the graph from the project root (not the graph directory)
     let config = GraphLoadConfig::default();
-    let Ok(graph) = load_unified_graph_for_cli(search_root, &config, cli) else {
+    let Ok(graph) = load_unified_graph_for_cli(search_root, &config, cli, no_op_reporter()) else {
         // If we can't load the graph, skip validation
         return Ok(());
     };
@@ -1334,8 +1341,18 @@ fn handle_no_command(cli: &Cli, history_argv: &[String]) -> Result<()> {
         // Run search with pattern shorthand. The top-level shorthand path
         // does not parse the per-subcommand `--cfg-filter` /
         // `--include-generated` / `--macro-boundaries` flags, so pass the
-        // documented defaults explicitly (None / false / false).
-        let result = commands::run_search(cli, pattern, cli.search_path(), None, false, false);
+        // documented defaults explicitly (None / false / false). `verbose`
+        // is sourced from the top-level `--verbose` flag on `Cli`; env-driven
+        // enablement (SQRY_LOG / RUST_LOG) is layered inside `run_search`.
+        let result = commands::run_search(
+            cli,
+            pattern,
+            cli.search_path(),
+            None,
+            false,
+            false,
+            cli.verbose,
+        );
 
         // Record in history (expanded argv captures what actually ran)
         record_history(cli.search_path(), "search", history_argv, result.is_ok());

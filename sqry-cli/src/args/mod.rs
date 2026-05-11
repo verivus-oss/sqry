@@ -20,6 +20,11 @@ use std::path::PathBuf;
     about = "Semantic code search tool",
     long_about = "sqry is a semantic code search tool that understands code structure through AST analysis.\n\
                   Find functions, classes, and symbols with precision using AST-aware queries.\n\n\
+                  Search progress:\n  \
+                  sqry <pattern> --verbose emits snapshot-load, lookup, and filter timing to stderr.\n  \
+                  SQRY_LOG=info enables the same progress output without the flag.\n  \
+                  Tier-1 search still loads in-process; when sqryd answers daemon/status, verbose mode notes that daemon-backed search is not yet attached.\n  \
+                  Tier-2 daemon-backed search will attach to sqryd when reachable and fall through to in-process load otherwise.\n\n\
                   Examples:\n  \
                   sqry main              # Search for 'main' in current directory\n  \
                   sqry test src/         # Search for 'test' in src/\n  \
@@ -410,6 +415,18 @@ pub struct Cli {
     /// Maximum text search results
     #[arg(long, default_value = "1000", help_heading = headings::SEARCH_MODES, display_order = 31)]
     pub max_text_results: usize,
+
+    /// Show verbose progress output (stages + timing) to stderr.
+    ///
+    /// Honoured by the top-level shorthand `sqry <pat>` search path. For the
+    /// explicit `sqry search` subcommand, use the per-subcommand `--verbose`
+    /// flag instead — this top-level flag is not propagated to subcommands.
+    ///
+    /// As an env-driven equivalent, set `SQRY_LOG=info` (or `RUST_LOG=info`)
+    /// before invocation; either form enables verbose. Explicit `--verbose`
+    /// wins over env when both agree, and is required when env is unset.
+    #[arg(long, short = 'v', help_heading = headings::OUTPUT_CONTROL, display_order = 50)]
+    pub verbose: bool,
 }
 
 /// Plugin-selection controls shared by indexing and selected read paths.
@@ -512,12 +529,23 @@ pub enum Command {
     ///   sqry search "test" --kind function --lang rust
     ///   sqry search "test" --save-as find-tests  # save as alias
     ///   sqry search "test" --validate fail       # strict index validation
+    ///   sqry search "test" --verbose             # show snapshot-load + lookup timing on stderr
     ///
     /// For kind/language/fuzzy filtering, the top-level shorthand also
     /// works:
     ///   sqry --kind function "test"    # Filter by kind
     ///   sqry --exact "main"            # Exact match
     ///   sqry --fuzzy "config"          # Fuzzy search
+    ///
+    /// Progress and timing visibility:
+    ///   `--verbose` (or `-v`) emits stage events to stderr — `load snapshot`,
+    ///   `exact name lookup` or `regex scan`, `apply filters`. Set
+    ///   `SQRY_LOG=info` for env-driven enablement, or `SQRY_OUTPUT_FORMAT=json`
+    ///   for line-delimited JSON events instead of `[sqry] ...` plain text.
+    ///   In Tier 1, `sqry search` still loads the graph in-process; when sqryd
+    ///   answers `daemon/status`, verbose mode emits one note explaining that
+    ///   daemon-backed search is not yet attached. Tier 2 will attach to sqryd
+    ///   when reachable and fall through to in-process load otherwise.
     ///
     /// See also: 'sqry query' for structured AST-aware queries.
     #[command(display_order = 1, verbatim_doc_comment)]
@@ -583,6 +611,23 @@ pub enum Command {
         /// such as cfg conditions, macro source, and generated-symbol markers.
         #[arg(long, help_heading = headings::OUTPUT_CONTROL, display_order = 40)]
         macro_boundaries: bool,
+
+        /// Show verbose progress output (stages + timing) to stderr.
+        ///
+        /// Emits stage events for snapshot load, exact-name lookup, regex
+        /// scan, fuzzy match, and filter application. Set
+        /// `SQRY_OUTPUT_FORMAT=json` to emit JSON-line events instead of
+        /// `[sqry] ...` plain text.
+        ///
+        /// Tier 1 still uses the in-process search path. When sqryd answers
+        /// `daemon/status`, verbose mode emits one note that daemon-backed
+        /// search is not yet attached; Tier 2 will attach to sqryd when
+        /// reachable and fall through to in-process load otherwise.
+        ///
+        /// As an env-driven equivalent, set `SQRY_LOG=info` (or
+        /// `RUST_LOG=info`) before invocation.
+        #[arg(long, short = 'v', help_heading = headings::OUTPUT_CONTROL, display_order = 50)]
+        verbose: bool,
     },
 
     /// Execute a structural AST-aware query (sqry-core query parser)

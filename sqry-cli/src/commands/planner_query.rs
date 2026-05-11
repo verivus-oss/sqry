@@ -14,7 +14,7 @@
 //! sqry CLI commands use for JSON output.
 
 use crate::args::Cli;
-use crate::commands::graph::loader::{GraphLoadConfig, load_unified_graph_for_cli};
+use crate::commands::graph::loader::{GraphLoadConfig, load_unified_graph_for_cli, no_op_reporter};
 use crate::index_discovery::find_nearest_index;
 use crate::output::OutputStreams;
 use anyhow::{Context, Result};
@@ -66,7 +66,7 @@ pub fn run_planner_query(cli: &Cli, query: &str, path: Option<&str>, limit: usiz
     };
 
     let config = GraphLoadConfig::default();
-    let graph = load_unified_graph_for_cli(&location.index_root, &config, cli)
+    let graph = load_unified_graph_for_cli(&location.index_root, &config, cli, no_op_reporter())
         .context("failed to load graph; run 'sqry index' to rebuild")?;
 
     let plan = parse_query(query).map_err(format_parse_error)?;

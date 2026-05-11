@@ -2380,9 +2380,9 @@ dependencies = [
 
 [[package]]
 name = "nix"
-version = "0.31.2"
+version = "0.31.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5d6d0705320c1e6ba1d912b5e37cf18071b6c2e9b7fa8215a1e8a7651966f5d3"
+checksum = "cf20d2fde8ff38632c426f1165ed7436270b44f199fc55284c38276f9db47c3d"
 dependencies = [
  "bitflags 2.11.1",
  "cfg-if",
@@ -3545,7 +3545,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-classpath"
-version = "14.0.4"
+version = "15.0.1"
 dependencies = [
  "anyhow",
  "cafebabe",
@@ -3569,7 +3569,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-cli"
-version = "14.0.4"
+version = "15.0.1"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -3604,6 +3604,7 @@ dependencies = [
  "sqry-core",
  "sqry-daemon",
  "sqry-daemon-client",
+ "sqry-daemon-protocol",
  "sqry-db",
  "sqry-lang-rust",
  "sqry-lsp",
@@ -3626,7 +3627,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-core"
-version = "14.0.4"
+version = "15.0.1"
 dependencies = [
  "anyhow",
  "approx",
@@ -3722,7 +3723,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-daemon"
-version = "14.0.4"
+version = "15.0.1"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -3735,6 +3736,7 @@ dependencies = [
  "once_cell",
  "parking_lot",
  "postcard",
+ "regex",
  "rmcp",
  "sd-notify",
  "serde",
@@ -3763,7 +3765,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-daemon-client"
-version = "14.0.4"
+version = "15.0.1"
 dependencies = [
  "anyhow",
  "serde",
@@ -3775,7 +3777,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-daemon-protocol"
-version = "14.0.4"
+version = "15.0.1"
 dependencies = [
  "chrono",
  "serde",
@@ -3786,7 +3788,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-db"
-version = "14.0.4"
+version = "15.0.1"
 dependencies = [
  "anyhow",
  "criterion",
@@ -3809,7 +3811,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-integration-tests"
-version = "14.0.4"
+version = "15.0.1"
 dependencies = [
  "serde_json",
  "sqry-core",
@@ -3820,7 +3822,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-c"
-version = "14.0.4"
+version = "15.0.1"
 dependencies = [
  "anyhow",
  "log",
@@ -3834,7 +3836,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-cpp"
-version = "14.0.4"
+version = "15.0.1"
 dependencies = [
  "anyhow",
  "log",
@@ -3848,7 +3850,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-csharp"
-version = "14.0.4"
+version = "15.0.1"
 dependencies = [
  "anyhow",
  "log",
@@ -3862,7 +3864,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-css"
-version = "14.0.4"
+version = "15.0.1"
 dependencies = [
  "anyhow",
  "log",
@@ -3874,7 +3876,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-dart"
-version = "14.0.4"
+version = "15.0.1"
 dependencies = [
  "anyhow",
  "env_logger",
@@ -3888,7 +3890,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-elixir"
-version = "14.0.4"
+version = "15.0.1"
 dependencies = [
  "anyhow",
  "insta",
@@ -3902,7 +3904,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-go"
-version = "14.0.4"
+version = "15.0.1"
 dependencies = [
  "anyhow",
  "criterion",
@@ -3916,7 +3918,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-groovy"
-version = "14.0.4"
+version = "15.0.1"
 dependencies = [
  "anyhow",
  "insta",
@@ -3932,7 +3934,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-haskell"
-version = "14.0.4"
+version = "15.0.1"
 dependencies = [
  "anyhow",
  "log",
@@ -3945,7 +3947,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-html"
-version = "14.0.4"
+version = "15.0.1"
 dependencies = [
  "anyhow",
  "log",
@@ -3957,7 +3959,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-java"
-version = "14.0.4"
+version = "15.0.1"
 dependencies = [
  "anyhow",
  "criterion",
@@ -3976,7 +3978,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-javascript"
-version = "14.0.4"
+version = "15.0.1"
 dependencies = [
  "anyhow",
  "approx",
@@ -3993,7 +3995,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-json"
-version = "14.0.4"
+version = "15.0.1"
 dependencies = [
  "serial_test",
  "sqry-core",
@@ -4003,7 +4005,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-kotlin"
-version = "14.0.4"
+version = "15.0.1"
 dependencies = [
  "anyhow",
  "env_logger",
@@ -4018,7 +4020,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-lua"
-version = "14.0.4"
+version = "15.0.1"
 dependencies = [
  "anyhow",
  "criterion",
@@ -4032,7 +4034,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-oracle-plsql"
-version = "14.0.4"
+version = "15.0.1"
 dependencies = [
  "sqry-core",
  "streaming-iterator",
@@ -4042,7 +4044,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-perl"
-version = "14.0.4"
+version = "15.0.1"
 dependencies = [
  "anyhow",
  "log",
@@ -4056,7 +4058,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-php"
-version = "14.0.4"
+version = "15.0.1"
 dependencies = [
  "anyhow",
  "criterion",
@@ -4074,7 +4076,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-pulumi"
-version = "14.0.4"
+version = "15.0.1"
 dependencies = [
  "anyhow",
  "serde",
@@ -4087,7 +4089,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-puppet"
-version = "14.0.4"
+version = "15.0.1"
 dependencies = [
  "anyhow",
  "serde",
@@ -4101,7 +4103,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-python"
-version = "14.0.4"
+version = "15.0.1"
 dependencies = [
  "anyhow",
  "insta",
@@ -4117,7 +4119,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-r"
-version = "14.0.4"
+version = "15.0.1"
 dependencies = [
  "anyhow",
  "log",
@@ -4130,7 +4132,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-ruby"
-version = "14.0.4"
+version = "15.0.1"
 dependencies = [
  "anyhow",
  "criterion",
@@ -4148,7 +4150,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-rust"
-version = "14.0.4"
+version = "15.0.1"
 dependencies = [
  "anyhow",
  "criterion",
@@ -4168,7 +4170,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-salesforce-apex"
-version = "14.0.4"
+version = "15.0.1"
 dependencies = [
  "anyhow",
  "sqry-core",
@@ -4180,7 +4182,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-sap-abap"
-version = "14.0.4"
+version = "15.0.1"
 dependencies = [
  "sqry-core",
  "streaming-iterator",
@@ -4191,7 +4193,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-scala"
-version = "14.0.4"
+version = "15.0.1"
 dependencies = [
  "anyhow",
  "env_logger",
@@ -4205,7 +4207,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-servicenow-xanadu"
-version = "14.0.4"
+version = "15.0.1"
 dependencies = [
  "anyhow",
  "sqry-core",
@@ -4217,7 +4219,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-servicenow-xml"
-version = "14.0.4"
+version = "15.0.1"
 dependencies = [
  "roxmltree",
  "sqry-core",
@@ -4229,7 +4231,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-shell"
-version = "14.0.4"
+version = "15.0.1"
 dependencies = [
  "anyhow",
  "log",
@@ -4241,7 +4243,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-sql"
-version = "14.0.4"
+version = "15.0.1"
 dependencies = [
  "anyhow",
  "log",
@@ -4254,7 +4256,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-support"
-version = "14.0.4"
+version = "15.0.1"
 dependencies = [
  "sqry-core",
  "tree-sitter",
@@ -4263,7 +4265,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-svelte"
-version = "14.0.4"
+version = "15.0.1"
 dependencies = [
  "anyhow",
  "insta",
@@ -4284,7 +4286,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-swift"
-version = "14.0.4"
+version = "15.0.1"
 dependencies = [
  "anyhow",
  "dashmap",
@@ -4302,7 +4304,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-terraform"
-version = "14.0.4"
+version = "15.0.1"
 dependencies = [
  "anyhow",
  "serde",
@@ -4316,7 +4318,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-typescript"
-version = "14.0.4"
+version = "15.0.1"
 dependencies = [
  "anyhow",
  "log",
@@ -4332,7 +4334,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-vue"
-version = "14.0.4"
+version = "15.0.1"
 dependencies = [
  "anyhow",
  "insta",
@@ -4353,7 +4355,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-zig"
-version = "14.0.4"
+version = "15.0.1"
 dependencies = [
  "anyhow",
  "criterion",
@@ -4366,7 +4368,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lsp"
-version = "14.0.4"
+version = "15.0.1"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -4409,7 +4411,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-mcp"
-version = "14.0.4"
+version = "15.0.1"
 dependencies = [
  "anyhow",
  "approx",
@@ -4454,7 +4456,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-mcp-redaction"
-version = "14.0.4"
+version = "15.0.1"
 dependencies = [
  "log",
  "regex",
@@ -4468,7 +4470,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-nl"
-version = "14.0.4"
+version = "15.0.1"
 dependencies = [
  "criterion",
  "crossbeam-channel",
@@ -4496,7 +4498,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-plugin-registry"
-version = "14.0.4"
+version = "15.0.1"
 dependencies = [
  "sqry-core",
  "sqry-lang-c",
@@ -4540,7 +4542,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-tree-sitter-support"
-version = "14.0.4"
+version = "15.0.1"
 dependencies = [
  "thiserror 2.0.18",
  "tree-sitter",
@@ -5185,7 +5187,7 @@ dependencies = [
 
 [[package]]
 name = "tree-sitter-abap-sqry"
-version = "14.0.4"
+version = "15.0.1"
 dependencies = [
  "cc",
  "sqry-tree-sitter-support",
@@ -5254,7 +5256,7 @@ dependencies = [
 
 [[package]]
 name = "tree-sitter-elixir-sqry"
-version = "14.0.4"
+version = "15.0.1"
 dependencies = [
  "cc",
  "sqry-tree-sitter-support",
@@ -5273,7 +5275,7 @@ dependencies = [
 
 [[package]]
 name = "tree-sitter-groovy-sqry"
-version = "14.0.4"
+version = "15.0.1"
 dependencies = [
  "cc",
  "sqry-tree-sitter-support",
@@ -5342,7 +5344,7 @@ dependencies = [
 
 [[package]]
 name = "tree-sitter-kotlin-sqry"
-version = "14.0.4"
+version = "15.0.1"
 dependencies = [
  "cc",
  "sqry-tree-sitter-support",
@@ -5367,7 +5369,7 @@ dependencies = [
 
 [[package]]
 name = "tree-sitter-perl-sqry"
-version = "14.0.4"
+version = "15.0.1"
 dependencies = [
  "cc",
  "sqry-tree-sitter-support",
@@ -5386,7 +5388,7 @@ dependencies = [
 
 [[package]]
 name = "tree-sitter-plsql-sqry"
-version = "14.0.4"
+version = "15.0.1"
 dependencies = [
  "cc",
  "sqry-tree-sitter-support",
@@ -5475,7 +5477,7 @@ dependencies = [
 
 [[package]]
 name = "tree-sitter-svelte-sqry"
-version = "14.0.4"
+version = "15.0.1"
 dependencies = [
  "cc",
  "sqry-tree-sitter-support",
@@ -5504,7 +5506,7 @@ dependencies = [
 
 [[package]]
 name = "tree-sitter-vue-sqry"
-version = "14.0.4"
+version = "15.0.1"
 dependencies = [
  "cc",
  "sqry-tree-sitter-support",

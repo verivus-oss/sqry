@@ -3,7 +3,7 @@
 //! Provides CLI interface for finding duplicate code in the codebase.
 
 use crate::args::Cli;
-use crate::commands::graph::loader::{GraphLoadConfig, load_unified_graph_for_cli};
+use crate::commands::graph::loader::{GraphLoadConfig, load_unified_graph_for_cli, no_op_reporter};
 use crate::index_discovery::find_nearest_index;
 use crate::output::OutputStreams;
 use anyhow::{Context, Result};
@@ -70,7 +70,7 @@ pub fn run_duplicates(
 
     // Load unified graph
     let graph_config = GraphLoadConfig::default();
-    let graph = load_unified_graph_for_cli(&loc.index_root, &graph_config, cli)
+    let graph = load_unified_graph_for_cli(&loc.index_root, &graph_config, cli, no_op_reporter())
         .context("Failed to load graph. Run 'sqry index' to build the graph.")?;
 
     // Build config

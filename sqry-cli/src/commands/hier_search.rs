@@ -3,7 +3,7 @@
 //! Provides CLI interface for RAG-optimized semantic search with grouping.
 
 use crate::args::Cli;
-use crate::commands::graph::loader::{GraphLoadConfig, load_unified_graph_for_cli};
+use crate::commands::graph::loader::{GraphLoadConfig, load_unified_graph_for_cli, no_op_reporter};
 use crate::index_discovery::find_nearest_index;
 use crate::output::OutputStreams;
 use anyhow::{Context, Result};
@@ -84,7 +84,7 @@ pub fn run_hier_search(
 
     // Load unified graph
     let config = GraphLoadConfig::default();
-    let graph = load_unified_graph_for_cli(&loc.index_root, &config, cli)
+    let graph = load_unified_graph_for_cli(&loc.index_root, &config, cli, no_op_reporter())
         .context("Failed to load graph. Run 'sqry index' to build the graph.")?;
 
     let strings = graph.strings();

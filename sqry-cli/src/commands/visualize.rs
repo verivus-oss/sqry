@@ -1,7 +1,7 @@
 //! Implements the `sqry visualize` command for generating diagrams.
 
 use crate::args::{Cli, DiagramFormatArg, DirectionArg, VisualizeCommand};
-use crate::commands::graph::loader::{GraphLoadConfig, load_unified_graph_for_cli};
+use crate::commands::graph::loader::{GraphLoadConfig, load_unified_graph_for_cli, no_op_reporter};
 use anyhow::{Context, Result, anyhow, bail};
 use sqry_core::graph::unified::GraphSnapshot;
 use sqry_core::graph::unified::edge::{EdgeKind, ExportKind};
@@ -32,7 +32,7 @@ pub fn run_visualize(cli: &Cli, cmd: &VisualizeCommand) -> Result<()> {
     // We use default config (no hidden, no follow symlinks) matching CLI defaults unless specified
     // For visualization, we generally want what's in the snapshot.
     let config = GraphLoadConfig::default();
-    let graph = load_unified_graph_for_cli(root_path, &config, cli)
+    let graph = load_unified_graph_for_cli(root_path, &config, cli, no_op_reporter())
         .context("Failed to load unified graph. Run `sqry index` first.")?;
 
     let snapshot = graph.snapshot();

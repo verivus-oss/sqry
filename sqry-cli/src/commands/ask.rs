@@ -706,8 +706,10 @@ fn execute_generated_command(command: &str, path: &str, cli: &Cli) -> Result<()>
             // For search, just use the primary pattern. The NL-translated
             // search path does not synthesize macro-boundary flags, so pass
             // the documented defaults (`None` / `false` / `false`) for
-            // C002a's three new params.
-            super::run_search(cli, &parsed.primary, path, None, false, false)?;
+            // C002a's three new params. Verbose follows the top-level
+            // `--verbose` flag on `Cli` (env-driven enablement is layered
+            // inside `run_search`).
+            super::run_search(cli, &parsed.primary, path, None, false, false, cli.verbose)?;
         }
         "graph" => {
             // Graph commands need more parsing
