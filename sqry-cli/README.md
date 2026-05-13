@@ -209,4 +209,4 @@ cargo run --package sqry-cli -- main src/
 
 MIT - See [LICENSE](../LICENSE)
 
-**Version**: 15.0.4
+**Version**: 15.0.6
