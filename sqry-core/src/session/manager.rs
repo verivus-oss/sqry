@@ -10,12 +10,13 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 use log::{debug, info};
+use parking_lot::{Condvar, Mutex as PlMutex};
 
 use crate::graph::CodeGraph;
 use crate::graph::unified::persistence::{GraphStorage, load_from_path};
@@ -32,7 +33,16 @@ pub struct SessionManager {
     config: SessionConfig,
     watcher: Arc<Mutex<FileWatcher>>,
     cleanup_handle: Option<JoinHandle<()>>,
-    shutdown: Arc<AtomicBool>,
+    /// `(stop_flag, wakeup_cvar)`: the mutex provides happens-before
+    /// between `stop_worker`'s store and the cleanup loop's read; the
+    /// Condvar guarantees no missed wakeup when `stop_worker` runs
+    /// concurrently with a `cvar.wait_for`. Replaces an earlier
+    /// `AtomicBool` + `thread::park_timeout` protocol that could miss a
+    /// shutdown signal under `Ordering::Relaxed` semantics, causing the
+    /// cleanup thread to sleep for the full `cleanup_interval` after the
+    /// shutdown store — up to one hour in tests that set
+    /// `cleanup_interval = Duration::from_secs(3600)`.
+    shutdown: Arc<(PlMutex<bool>, Condvar)>,
     total_queries: Arc<AtomicU64>,
     cache_hits: Arc<AtomicU64>,
     cache_misses: Arc<AtomicU64>,
@@ -109,7 +119,7 @@ impl SessionManager {
 
         let cache = Arc::new(DashMap::new());
         let watcher = Arc::new(Mutex::new(watcher));
-        let shutdown = Arc::new(AtomicBool::new(false));
+        let shutdown = Arc::new((PlMutex::new(false), Condvar::new()));
 
         let cleanup_interval = config.cleanup_interval;
         let idle_timeout = config.idle_timeout;
@@ -122,7 +132,11 @@ impl SessionManager {
             thread::Builder::new()
                 .name("sqry-session-cleanup".into())
                 .spawn(move || {
-                    while !shutdown_flag.load(Ordering::Relaxed) {
+                    loop {
+                        if *shutdown_flag.0.lock() {
+                            break;
+                        }
+
                         if let Ok(mut guard) = watcher_clone.lock()
                             && let Err(err) = guard.process_events()
                         {
@@ -136,7 +150,18 @@ impl SessionManager {
                             debug!("failed to evict stale sessions: {err}");
                         }
 
-                        thread::park_timeout(cleanup_interval);
+                        // Atomic wait: take the lock, check stop, only
+                        // then suspend on the cvar. `stop_worker` sets
+                        // `*stop = true` under the same lock before
+                        // `notify_all`, so there is no missed-wakeup
+                        // window and no memory-ordering ambiguity.
+                        let mut stop = shutdown_flag.0.lock();
+                        if !*stop {
+                            shutdown_flag.1.wait_for(&mut stop, cleanup_interval);
+                        }
+                        if *stop {
+                            break;
+                        }
                     }
 
                     if let Ok(mut guard) = watcher_clone.lock()
@@ -419,13 +444,16 @@ impl SessionManager {
     }
 
     fn stop_worker(&mut self) {
-        self.shutdown.store(true, Ordering::Relaxed);
+        {
+            let mut stop = self.shutdown.0.lock();
+            *stop = true;
+            self.shutdown.1.notify_all();
+        }
 
-        if let Some(handle) = self.cleanup_handle.take() {
-            handle.thread().unpark();
-            if let Err(err) = handle.join() {
-                debug!("session cleanup thread terminated with error: {err:?}");
-            }
+        if let Some(handle) = self.cleanup_handle.take()
+            && let Err(err) = handle.join()
+        {
+            debug!("session cleanup thread terminated with error: {err:?}");
         }
     }
 

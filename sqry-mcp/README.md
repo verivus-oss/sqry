@@ -538,6 +538,6 @@ MIT - See root LICENSE file
 
 ---
 
-**Last Updated**: 2026-05-11
-**Version**: 15.0.1 (36 tools)
+**Last Updated**: 2026-05-13
+**Version**: 15.0.3 (36 tools)
 **Tested With**: sqry v4.8.2, Claude Desktop, Windsurf, Claude Code, Codex, Gemini CLI
