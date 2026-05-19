@@ -60,26 +60,27 @@ jobs:
           GRYPE_BASE_URL="https://github.com/anchore/grype/releases/download/${GRYPE_VERSION}"
           GRYPE_CHECKSUMS="grype_${GRYPE_VERSION_NUM}_checksums.txt"
           GRYPE_TARBALL="grype_${GRYPE_VERSION_NUM}_linux_amd64.tar.gz"
+          GRYPE_WORKDIR="$(mktemp -d "${RUNNER_TEMP}/grype-install.XXXXXX")"
 
-          download "${GRYPE_BASE_URL}/${GRYPE_CHECKSUMS}" "/tmp/${GRYPE_CHECKSUMS}"
-          download "${GRYPE_BASE_URL}/${GRYPE_CHECKSUMS}.pem" "/tmp/${GRYPE_CHECKSUMS}.pem.b64"
-          download "${GRYPE_BASE_URL}/${GRYPE_CHECKSUMS}.sig" "/tmp/${GRYPE_CHECKSUMS}.sig.b64"
-          base64 -d "/tmp/${GRYPE_CHECKSUMS}.pem.b64" > "/tmp/${GRYPE_CHECKSUMS}.pem"
-          base64 -d "/tmp/${GRYPE_CHECKSUMS}.sig.b64" > "/tmp/${GRYPE_CHECKSUMS}.sig"
+          download "${GRYPE_BASE_URL}/${GRYPE_CHECKSUMS}" "${GRYPE_WORKDIR}/${GRYPE_CHECKSUMS}"
+          download "${GRYPE_BASE_URL}/${GRYPE_CHECKSUMS}.pem" "${GRYPE_WORKDIR}/${GRYPE_CHECKSUMS}.pem.b64"
+          download "${GRYPE_BASE_URL}/${GRYPE_CHECKSUMS}.sig" "${GRYPE_WORKDIR}/${GRYPE_CHECKSUMS}.sig.b64"
+          base64 -d "${GRYPE_WORKDIR}/${GRYPE_CHECKSUMS}.pem.b64" > "${GRYPE_WORKDIR}/${GRYPE_CHECKSUMS}.pem"
+          base64 -d "${GRYPE_WORKDIR}/${GRYPE_CHECKSUMS}.sig.b64" > "${GRYPE_WORKDIR}/${GRYPE_CHECKSUMS}.sig"
 
           cosign verify-blob \
-            --certificate "/tmp/${GRYPE_CHECKSUMS}.pem" \
-            --signature "/tmp/${GRYPE_CHECKSUMS}.sig" \
+            --certificate "${GRYPE_WORKDIR}/${GRYPE_CHECKSUMS}.pem" \
+            --signature "${GRYPE_WORKDIR}/${GRYPE_CHECKSUMS}.sig" \
             --certificate-identity "https://github.com/anchore/grype/.github/workflows/release.yaml@refs/heads/main" \
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-            "/tmp/${GRYPE_CHECKSUMS}"
+            "${GRYPE_WORKDIR}/${GRYPE_CHECKSUMS}"
 
-          download "${GRYPE_BASE_URL}/${GRYPE_TARBALL}" "/tmp/${GRYPE_TARBALL}"
-          grep -F " ${GRYPE_TARBALL}" "/tmp/${GRYPE_CHECKSUMS}" > /tmp/grype.sha256
-          (cd /tmp && sha256sum -c grype.sha256)
+          download "${GRYPE_BASE_URL}/${GRYPE_TARBALL}" "${GRYPE_WORKDIR}/${GRYPE_TARBALL}"
+          grep -F " ${GRYPE_TARBALL}" "${GRYPE_WORKDIR}/${GRYPE_CHECKSUMS}" > "${GRYPE_WORKDIR}/grype.sha256"
+          (cd "${GRYPE_WORKDIR}" && sha256sum -c grype.sha256)
 
-          tar -xzf "/tmp/${GRYPE_TARBALL}" -C /tmp
-          install -m 0755 /tmp/grype "$HOME/.local/bin/grype"
+          tar -xzf "${GRYPE_WORKDIR}/${GRYPE_TARBALL}" -C "${GRYPE_WORKDIR}"
+          install -m 0755 "${GRYPE_WORKDIR}/grype" "$HOME/.local/bin/grype"
 
       - name: Install vexctl (verified)
         shell: bash
@@ -98,25 +99,26 @@ jobs:
           VEXCTL_BASE_URL="https://github.com/openvex/vexctl/releases/download/${VEXCTL_VERSION}"
           VEXCTL_CHECKSUMS="vexctl_checksums.txt"
           VEXCTL_ASSET="vexctl-linux-amd64"
+          VEXCTL_WORKDIR="$(mktemp -d "${RUNNER_TEMP}/vexctl-install.XXXXXX")"
 
-          download "${VEXCTL_BASE_URL}/${VEXCTL_CHECKSUMS}" "/tmp/${VEXCTL_CHECKSUMS}"
-          download "${VEXCTL_BASE_URL}/${VEXCTL_CHECKSUMS}.pem" "/tmp/${VEXCTL_CHECKSUMS}.pem.b64"
-          download "${VEXCTL_BASE_URL}/${VEXCTL_CHECKSUMS}.sig" "/tmp/${VEXCTL_CHECKSUMS}.sig.b64"
-          base64 -d "/tmp/${VEXCTL_CHECKSUMS}.pem.b64" > "/tmp/${VEXCTL_CHECKSUMS}.pem"
-          base64 -d "/tmp/${VEXCTL_CHECKSUMS}.sig.b64" > "/tmp/${VEXCTL_CHECKSUMS}.sig"
+          download "${VEXCTL_BASE_URL}/${VEXCTL_CHECKSUMS}" "${VEXCTL_WORKDIR}/${VEXCTL_CHECKSUMS}"
+          download "${VEXCTL_BASE_URL}/${VEXCTL_CHECKSUMS}.pem" "${VEXCTL_WORKDIR}/${VEXCTL_CHECKSUMS}.pem.b64"
+          download "${VEXCTL_BASE_URL}/${VEXCTL_CHECKSUMS}.sig" "${VEXCTL_WORKDIR}/${VEXCTL_CHECKSUMS}.sig.b64"
+          base64 -d "${VEXCTL_WORKDIR}/${VEXCTL_CHECKSUMS}.pem.b64" > "${VEXCTL_WORKDIR}/${VEXCTL_CHECKSUMS}.pem"
+          base64 -d "${VEXCTL_WORKDIR}/${VEXCTL_CHECKSUMS}.sig.b64" > "${VEXCTL_WORKDIR}/${VEXCTL_CHECKSUMS}.sig"
 
           cosign verify-blob \
-            --certificate "/tmp/${VEXCTL_CHECKSUMS}.pem" \
-            --signature "/tmp/${VEXCTL_CHECKSUMS}.sig" \
+            --certificate "${VEXCTL_WORKDIR}/${VEXCTL_CHECKSUMS}.pem" \
+            --signature "${VEXCTL_WORKDIR}/${VEXCTL_CHECKSUMS}.sig" \
             --certificate-identity "https://github.com/openvex/vexctl/.github/workflows/release.yaml@refs/tags/v0.4.1" \
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-            "/tmp/${VEXCTL_CHECKSUMS}"
+            "${VEXCTL_WORKDIR}/${VEXCTL_CHECKSUMS}"
 
-          download "${VEXCTL_BASE_URL}/${VEXCTL_ASSET}" "/tmp/${VEXCTL_ASSET}"
-          grep -F " ${VEXCTL_ASSET}" "/tmp/${VEXCTL_CHECKSUMS}" > /tmp/vexctl.sha256
-          (cd /tmp && sha256sum -c vexctl.sha256)
+          download "${VEXCTL_BASE_URL}/${VEXCTL_ASSET}" "${VEXCTL_WORKDIR}/${VEXCTL_ASSET}"
+          grep -F " ${VEXCTL_ASSET}" "${VEXCTL_WORKDIR}/${VEXCTL_CHECKSUMS}" > "${VEXCTL_WORKDIR}/vexctl.sha256"
+          (cd "${VEXCTL_WORKDIR}" && sha256sum -c vexctl.sha256)
 
-          install -m 0755 "/tmp/${VEXCTL_ASSET}" "$HOME/.local/bin/vexctl"
+          install -m 0755 "${VEXCTL_WORKDIR}/${VEXCTL_ASSET}" "$HOME/.local/bin/vexctl"
 
       - name: Install Syft (verified; used for SBOM format conversion)
         shell: bash
@@ -136,26 +138,27 @@ jobs:
           SYFT_BASE_URL="https://github.com/anchore/syft/releases/download/${SYFT_VERSION}"
           SYFT_CHECKSUMS="syft_${SYFT_VERSION_NUM}_checksums.txt"
           SYFT_TARBALL="syft_${SYFT_VERSION_NUM}_linux_amd64.tar.gz"
+          SYFT_WORKDIR="$(mktemp -d "${RUNNER_TEMP}/syft-install.XXXXXX")"
 
-          download "${SYFT_BASE_URL}/${SYFT_CHECKSUMS}" "/tmp/${SYFT_CHECKSUMS}"
-          download "${SYFT_BASE_URL}/${SYFT_CHECKSUMS}.pem" "/tmp/${SYFT_CHECKSUMS}.pem.b64"
-          download "${SYFT_BASE_URL}/${SYFT_CHECKSUMS}.sig" "/tmp/${SYFT_CHECKSUMS}.sig.b64"
-          base64 -d "/tmp/${SYFT_CHECKSUMS}.pem.b64" > "/tmp/${SYFT_CHECKSUMS}.pem"
-          base64 -d "/tmp/${SYFT_CHECKSUMS}.sig.b64" > "/tmp/${SYFT_CHECKSUMS}.sig"
+          download "${SYFT_BASE_URL}/${SYFT_CHECKSUMS}" "${SYFT_WORKDIR}/${SYFT_CHECKSUMS}"
+          download "${SYFT_BASE_URL}/${SYFT_CHECKSUMS}.pem" "${SYFT_WORKDIR}/${SYFT_CHECKSUMS}.pem.b64"
+          download "${SYFT_BASE_URL}/${SYFT_CHECKSUMS}.sig" "${SYFT_WORKDIR}/${SYFT_CHECKSUMS}.sig.b64"
+          base64 -d "${SYFT_WORKDIR}/${SYFT_CHECKSUMS}.pem.b64" > "${SYFT_WORKDIR}/${SYFT_CHECKSUMS}.pem"
+          base64 -d "${SYFT_WORKDIR}/${SYFT_CHECKSUMS}.sig.b64" > "${SYFT_WORKDIR}/${SYFT_CHECKSUMS}.sig"
 
           cosign verify-blob \
-            --certificate "/tmp/${SYFT_CHECKSUMS}.pem" \
-            --signature "/tmp/${SYFT_CHECKSUMS}.sig" \
+            --certificate "${SYFT_WORKDIR}/${SYFT_CHECKSUMS}.pem" \
+            --signature "${SYFT_WORKDIR}/${SYFT_CHECKSUMS}.sig" \
             --certificate-identity "https://github.com/anchore/syft/.github/workflows/release.yaml@refs/heads/main" \
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-            "/tmp/${SYFT_CHECKSUMS}"
+            "${SYFT_WORKDIR}/${SYFT_CHECKSUMS}"
 
-          download "${SYFT_BASE_URL}/${SYFT_TARBALL}" "/tmp/${SYFT_TARBALL}"
-          grep -F " ${SYFT_TARBALL}" "/tmp/${SYFT_CHECKSUMS}" > /tmp/syft.sha256
-          (cd /tmp && sha256sum -c syft.sha256)
+          download "${SYFT_BASE_URL}/${SYFT_TARBALL}" "${SYFT_WORKDIR}/${SYFT_TARBALL}"
+          grep -F " ${SYFT_TARBALL}" "${SYFT_WORKDIR}/${SYFT_CHECKSUMS}" > "${SYFT_WORKDIR}/syft.sha256"
+          (cd "${SYFT_WORKDIR}" && sha256sum -c syft.sha256)
 
-          tar -xzf "/tmp/${SYFT_TARBALL}" -C /tmp
-          install -m 0755 /tmp/syft "$HOME/.local/bin/syft"
+          tar -xzf "${SYFT_WORKDIR}/${SYFT_TARBALL}" -C "${SYFT_WORKDIR}"
+          install -m 0755 "${SYFT_WORKDIR}/syft" "$HOME/.local/bin/syft"
 
       - name: Generate SBOMs (CycloneDX)
         run: |
