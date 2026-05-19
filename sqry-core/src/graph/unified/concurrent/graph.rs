@@ -21,11 +21,14 @@ use crate::graph::unified::bind::scope::provenance::{
 use crate::graph::unified::bind::scope::{ScopeArena, ScopeId};
 use crate::graph::unified::bind::shadow::ShadowTable;
 use crate::graph::unified::edge::EdgeKind;
+#[cfg(test)]
+use crate::graph::unified::edge::ResolvedVia;
 use crate::graph::unified::edge::bidirectional::BidirectionalEdgeStore;
 use crate::graph::unified::file::FileId;
 use crate::graph::unified::memory::{GraphMemorySize, HASHMAP_ENTRY_OVERHEAD};
 use crate::graph::unified::resolution::display_graph_qualified_name;
 use crate::graph::unified::storage::arena::NodeArena;
+use crate::graph::unified::storage::c_indirect::CIndirectSideTables;
 use crate::graph::unified::storage::edge_provenance::{EdgeProvenance, EdgeProvenanceStore};
 use crate::graph::unified::storage::indices::AuxiliaryIndices;
 use crate::graph::unified::storage::interner::StringInterner;
@@ -108,6 +111,26 @@ pub struct CodeGraph {
     /// Phase 3 file segment table mapping `FileId` to contiguous node ranges.
     /// Populated during build Phase 3 parallel commit, persisted in V10+ snapshots.
     pub(crate) file_segments: Arc<FileSegmentTable>,
+    /// Phase A (U09): C-only indirect-call resolver side tables.
+    ///
+    /// `None` on non-C workspaces — the parent slot stays unallocated so
+    /// non-C builds incur zero side-table overhead. Populated by Phase 3
+    /// commit (U11) and consumed by `pass5b_c_indirect_resolve` (U12).
+    /// Persisted as the V11 `Option<CIndirectSideTables>` envelope slot
+    /// (DESIGN §10.2); V10 → V11 upconvert sets this to `None`.
+    pub(crate) c_indirect_tables: Option<CIndirectSideTables>,
+    /// Build-time scratch side-channel from the Go plugin (Cluster A
+    /// of the Go T1 implements-and-promotion design).
+    ///
+    /// Populated during Phase 1 plugin parse, merged into the live
+    /// target by Phase 3 commit after NodeId / StringId remap, drained
+    /// by `pass_go_method_set_satisfaction` between Phase 4e and Pass
+    /// 5. Not part of `GraphSnapshot`, not persisted in V10 — see
+    /// 02_DESIGN §6. Held by-value (not `Arc<…>`) because no
+    /// copy-on-write or shared-reader access is required: only the
+    /// rebuild owner mutates, only the pass consumes, then the field
+    /// is reset.
+    pub(crate) go_hints: crate::graph::unified::build::staging::GoHints,
 }
 
 impl CodeGraph {
@@ -140,6 +163,8 @@ impl CodeGraph {
             shadow_table: Arc::new(ShadowTable::new()),
             scope_provenance_store: Arc::new(ScopeProvenanceStore::new()),
             file_segments: Arc::new(FileSegmentTable::new()),
+            c_indirect_tables: None,
+            go_hints: crate::graph::unified::build::staging::GoHints::default(),
         }
     }
 
@@ -173,6 +198,8 @@ impl CodeGraph {
             shadow_table: Arc::new(ShadowTable::new()),
             scope_provenance_store: Arc::new(ScopeProvenanceStore::new()),
             file_segments: Arc::new(FileSegmentTable::new()),
+            c_indirect_tables: None,
+            go_hints: crate::graph::unified::build::staging::GoHints::default(),
         }
     }
 
@@ -208,6 +235,7 @@ impl CodeGraph {
             shadow_table: Arc::clone(&self.shadow_table),
             scope_provenance_store: Arc::clone(&self.scope_provenance_store),
             file_segments: Arc::clone(&self.file_segments),
+            c_indirect_tables: self.c_indirect_tables.clone(),
         }
     }
 
@@ -251,6 +279,78 @@ impl CodeGraph {
     #[must_use]
     pub fn macro_metadata(&self) -> &NodeMetadataStore {
         &self.macro_metadata
+    }
+
+    /// Returns a reference to the C indirect-call side tables, if any.
+    ///
+    /// `None` on non-C workspaces — the slot is allocated lazily and only
+    /// when the C plugin's Phase 1 instrumentation observes content worth
+    /// recording. On loaded snapshots, the V11 envelope's
+    /// `Option<CIndirectSideTables>` field round-trips into this slot
+    /// (DESIGN §10.2); V10 → V11 upconvert always sets the slot to `None`.
+    ///
+    /// `pass5b_c_indirect_resolve` (U12) consumes these tables to rewrite
+    /// synthetic indirect-call `Calls` edges into precise binding-plane /
+    /// type-match candidates.
+    #[inline]
+    #[must_use]
+    pub fn c_indirect_tables(&self) -> Option<&CIndirectSideTables> {
+        self.c_indirect_tables.as_ref()
+    }
+
+    /// Returns a mutable reference to the `Option<CIndirectSideTables>`
+    /// slot, allowing callers to install / replace / clear the side
+    /// tables.
+    ///
+    /// Mirrors the accessor pattern used for [`Self::macro_metadata_mut`]
+    /// but exposes the `Option` directly — the side tables are owned in
+    /// place, not behind an `Arc`. Callers that need to merge incremental
+    /// state into the existing tables typically do:
+    ///
+    /// ```rust,ignore
+    /// let slot = graph.c_indirect_tables_mut();
+    /// let tables = slot.get_or_insert_with(CIndirectSideTables::new);
+    /// tables.bindings_by_field.entry(key).or_default().push(entry);
+    /// ```
+    ///
+    /// Populated by the build pipeline (U11). Read-only consumers should
+    /// use [`Self::c_indirect_tables`] instead.
+    #[inline]
+    pub fn c_indirect_tables_mut(&mut self) -> &mut Option<CIndirectSideTables> {
+        &mut self.c_indirect_tables
+    }
+
+    /// Test-only: strip every Phase-A-introduced piece of state from this
+    /// graph, leaving a graph that is byte-identical (modulo persistence
+    /// header timestamps) to what a pre-Phase-A build would have produced
+    /// on the same fixture.
+    ///
+    /// Specifically:
+    ///
+    /// * Clears the [`CIndirectSideTables`] slot (sets it to `None`).
+    /// * Removes [`NodeFlags::ADDRESS_TAKEN`] and
+    ///   [`NodeFlags::CALLSITE_PROMISCUOUS`] marker bits from every
+    ///   [`StoredEntry`] in the macro-metadata store.
+    /// * Rewrites the `resolved_via` field of every [`EdgeKind::Calls`]
+    ///   edge (across CSR and delta tiers, forward and reverse stores)
+    ///   to [`ResolvedVia::Direct`].
+    ///
+    /// Used exclusively by `sqry-core/tests/snapshot_size_phase_a.rs`
+    /// (U19) to materialize a "Phase-A-free" baseline snapshot for the
+    /// +10% snapshot-size gate. Gated behind `cfg(any(test, feature =
+    /// "test-support"))` so the helper is invisible to production
+    /// builds.
+    ///
+    /// [`NodeFlags::ADDRESS_TAKEN`]: crate::graph::unified::storage::metadata::NodeFlags::ADDRESS_TAKEN
+    /// [`NodeFlags::CALLSITE_PROMISCUOUS`]: crate::graph::unified::storage::metadata::NodeFlags::CALLSITE_PROMISCUOUS
+    /// [`StoredEntry`]: crate::graph::unified::storage::metadata::StoredEntry
+    /// [`EdgeKind::Calls`]: crate::graph::unified::edge::EdgeKind::Calls
+    /// [`ResolvedVia::Direct`]: crate::graph::unified::edge::ResolvedVia::Direct
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn clear_phase_a_state_for_test(&mut self) {
+        *self.c_indirect_tables_mut() = None;
+        self.macro_metadata_mut().clear_phase_a_flags_for_test();
+        self.edges_mut().normalize_calls_resolved_via_for_test();
     }
 
     // ------------------------------------------------------------------
@@ -415,6 +515,17 @@ impl CodeGraph {
     /// Replaces the file segment table.
     pub(crate) fn set_file_segments(&mut self, table: FileSegmentTable) {
         self.file_segments = Arc::new(table);
+    }
+
+    /// Installs the C indirect-call side tables loaded from a V11
+    /// snapshot.
+    ///
+    /// `None` clears the slot (used on V10 → V11 upconvert and on non-C
+    /// workspaces). `Some(...)` carries the live tables onto the freshly
+    /// reconstructed `CodeGraph`. Build-pipeline callers that incrementally
+    /// populate the tables should prefer [`Self::c_indirect_tables_mut`].
+    pub(crate) fn set_c_indirect_tables(&mut self, tables: Option<CIndirectSideTables>) {
+        self.c_indirect_tables = tables;
     }
 
     /// Returns a mutable reference to the file segment table (via `Arc::make_mut`).
@@ -1051,6 +1162,7 @@ impl CodeGraph {
         shadow_table: ShadowTable,
         scope_provenance_store: ScopeProvenanceStore,
         file_segments: FileSegmentTable,
+        go_hints: crate::graph::unified::build::staging::GoHints,
     ) -> Self {
         Self {
             nodes: Arc::new(nodes),
@@ -1069,6 +1181,8 @@ impl CodeGraph {
             shadow_table: Arc::new(shadow_table),
             scope_provenance_store: Arc::new(scope_provenance_store),
             file_segments: Arc::new(file_segments),
+            c_indirect_tables: None,
+            go_hints,
         }
     }
 
@@ -1653,6 +1767,12 @@ pub struct GraphSnapshot {
     scope_provenance_store: Arc<ScopeProvenanceStore>,
     /// Phase 3 file segment table snapshot mapping `FileId` to node ranges.
     file_segments: Arc<FileSegmentTable>,
+    /// Phase A (U09): C indirect-call resolver side tables snapshot.
+    ///
+    /// `None` on non-C workspaces. The snapshot owns its own clone of the
+    /// `Option<CIndirectSideTables>` so concurrent readers see a stable
+    /// view independent of subsequent mutations to the source `CodeGraph`.
+    c_indirect_tables: Option<CIndirectSideTables>,
 }
 
 impl GraphSnapshot {
@@ -1696,6 +1816,16 @@ impl GraphSnapshot {
     #[must_use]
     pub fn macro_metadata(&self) -> &NodeMetadataStore {
         &self.macro_metadata
+    }
+
+    /// Returns a reference to the C indirect-call side tables, if any.
+    ///
+    /// Mirrors [`CodeGraph::c_indirect_tables`]; see that method for
+    /// the contract. Snapshot-level access is read-only.
+    #[inline]
+    #[must_use]
+    pub fn c_indirect_tables(&self) -> Option<&CIndirectSideTables> {
+        self.c_indirect_tables.as_ref()
     }
 
     // ------------------------------------------------------------------
@@ -1914,7 +2044,7 @@ impl GraphSnapshot {
     /// placeholders are suppressed via two parallel checks that must
     /// agree:
     ///
-    /// 1. The authoritative `NodeMetadata::Synthetic` bit on the
+    /// 1. The authoritative `NodeFlags::SYNTHETIC` bit on the
     ///    metadata store
     ///    ([`crate::graph::unified::storage::metadata::NodeMetadataStore::is_synthetic`]).
     /// 2. The structural name-shape fallback
@@ -1926,7 +2056,7 @@ impl GraphSnapshot {
     /// Either check matching is sufficient to suppress the node. The
     /// design lives in `docs/development/public-issue-triage/`
     /// under the `C_SUPPRESS` unit; see also the rationale in
-    /// [`crate::graph::unified::storage::metadata::NodeMetadata::Synthetic`].
+    /// [`crate::graph::unified::storage::metadata::NodeFlags::SYNTHETIC`].
     ///
     /// `include_synthetic = true` is **internal-only**. The binding
     /// plane, scope resolver, and rebuild's coverage gate use this
@@ -2090,7 +2220,7 @@ impl GraphSnapshot {
     /// `NodeId` is not "synthetic" — it is "not present").
     #[must_use]
     pub fn is_node_synthetic(&self, node_id: crate::graph::unified::node::NodeId) -> bool {
-        // Authoritative check: metadata-store bit (NodeMetadata::Synthetic).
+        // Authoritative check: metadata-store bit (NodeFlags::SYNTHETIC).
         if self.macro_metadata.is_synthetic(node_id) {
             return true;
         }
@@ -3118,6 +3248,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file_id,
         );
@@ -3127,6 +3258,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file_id,
         );
@@ -3179,6 +3311,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file_id,
         );
@@ -3188,6 +3321,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file_id,
         );
@@ -3324,6 +3458,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file_id,
         );
@@ -3341,7 +3476,8 @@ mod tests {
             kind,
             EdgeKind::Calls {
                 argument_count: 0,
-                is_async: false
+                is_async: false,
+                resolved_via: ResolvedVia::Direct,
             }
         ));
     }
@@ -3426,6 +3562,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file_id,
         );
@@ -3556,6 +3693,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             a,
         );
@@ -3609,6 +3747,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             a,
         );
@@ -3733,6 +3872,7 @@ mod tests {
                 EdgeKind::Calls {
                     argument_count: 0,
                     is_async: false,
+                    resolved_via: ResolvedVia::Direct,
                 },
                 file_a,
             );
@@ -3742,6 +3882,7 @@ mod tests {
                 EdgeKind::Calls {
                     argument_count: 0,
                     is_async: false,
+                    resolved_via: ResolvedVia::Direct,
                 },
                 file_b,
             );
@@ -3754,6 +3895,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file_a,
         );
@@ -3763,6 +3905,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file_b,
         );
@@ -3837,7 +3980,8 @@ mod tests {
                     e.kind,
                     EdgeKind::Calls {
                         argument_count: 0,
-                        is_async: false
+                        is_async: false,
+                        resolved_via: ResolvedVia::Direct,
                     }
                 )
             })

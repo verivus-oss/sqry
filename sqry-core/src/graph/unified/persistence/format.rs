@@ -59,6 +59,22 @@ pub const MAGIC_BYTES_V9: &[u8; 13] = b"SQRY_GRAPH_V9";
 /// the node arena.
 pub const MAGIC_BYTES_V10: &[u8; 14] = b"SQRY_GRAPH_V10";
 
+/// Phase A (C indirect-call precision) V11 magic bytes.
+///
+/// Emitted by the Phase A snapshot writer (U03) and accepted by the V11
+/// reader. V11 extends V10 with:
+/// - `StoredEntry { typed, flags }` metadata-store wire format (see U02).
+///   The bitset-style `NodeFlags` channel lets a node carry SYNTHETIC,
+///   ADDRESS_TAKEN, and CALLSITE_PROMISCUOUS independently of any
+///   `TypedMetadata::Macro` or `TypedMetadata::Classpath` payload.
+/// - Reserved `c_indirect_tables: Option<_>` slot on the snapshot envelope
+///   for the Phase A C-icall side tables (populated by U09; absent in V10).
+///
+/// V10 snapshots are upconverted to V11 inline on load by mapping the legacy
+/// metadata variants into the new `StoredEntry` shape and setting
+/// `c_indirect_tables` to `None`.
+pub const MAGIC_BYTES_V11: &[u8; 14] = b"SQRY_GRAPH_V11";
+
 /// Legacy V7 numeric version, exposed with a versioned name so the Phase 1 reader
 /// dispatch can cite it explicitly. Equal to [`VERSION`].
 pub const LEGACY_VERSION_V7: u32 = 7;
@@ -84,6 +100,12 @@ pub enum FormatVersion {
     /// snapshots are upconverted to V10 inline on load by rebuilding the
     /// segment table from the node arena.
     V10 = 10,
+    /// V11 — read/write after Phase A C-icall precision (`StoredEntry`
+    /// metadata wire format + reserved `c_indirect_tables` envelope slot).
+    /// V10 snapshots are upconverted to V11 inline on load by mapping the
+    /// legacy `NodeMetadata` variants into `StoredEntry { typed, flags }`
+    /// and setting `c_indirect_tables` to `None`.
+    V11 = 11,
 }
 
 impl FormatVersion {
@@ -95,6 +117,7 @@ impl FormatVersion {
             Self::V8 => MAGIC_BYTES_V8.as_slice(),
             Self::V9 => MAGIC_BYTES_V9.as_slice(),
             Self::V10 => MAGIC_BYTES_V10.as_slice(),
+            Self::V11 => MAGIC_BYTES_V11.as_slice(),
         }
     }
 
@@ -109,7 +132,14 @@ impl FormatVersion {
     /// Returns `None` if the bytes do not match any known format magic.
     #[must_use]
     pub fn from_magic(bytes: &[u8]) -> Option<Self> {
-        // V10 magic is 14 bytes; check it first since it's the longest.
+        // V11 and V10 magics are both 14 bytes. Check V11 first so a buffer
+        // that starts with `SQRY_GRAPH_V11` is not mis-classified as V10 by
+        // a less-strict comparison path.
+        if bytes.len() >= MAGIC_BYTES_V11.len()
+            && bytes[..MAGIC_BYTES_V11.len()] == *MAGIC_BYTES_V11
+        {
+            return Some(Self::V11);
+        }
         if bytes.len() >= MAGIC_BYTES_V10.len()
             && bytes[..MAGIC_BYTES_V10.len()] == *MAGIC_BYTES_V10
         {
@@ -131,8 +161,8 @@ impl FormatVersion {
     }
 }
 
-/// Current writer format version (Phase 3+: V10).
-pub const CURRENT_VERSION: FormatVersion = FormatVersion::V10;
+/// Current writer format version (Phase A C-icall precision+: V11).
+pub const CURRENT_VERSION: FormatVersion = FormatVersion::V11;
 
 /// Header for persisted graph files.
 ///
@@ -544,11 +574,53 @@ mod tests {
         assert_eq!(FormatVersion::V7 as u32, 7);
         assert_eq!(FormatVersion::V8 as u32, 8);
         assert_eq!(FormatVersion::V9 as u32, 9);
+        assert_eq!(FormatVersion::V10 as u32, 10);
+        assert_eq!(FormatVersion::V11 as u32, 11);
     }
 
     #[test]
-    fn current_version_is_v10() {
-        assert_eq!(CURRENT_VERSION, FormatVersion::V10);
+    fn current_version_is_v11() {
+        assert_eq!(CURRENT_VERSION, FormatVersion::V11);
+    }
+
+    #[test]
+    fn phase_a_magic_bytes_v11_is_distinct_and_14_bytes() {
+        assert_eq!(MAGIC_BYTES_V11, b"SQRY_GRAPH_V11");
+        assert_eq!(MAGIC_BYTES_V11.len(), 14);
+        assert_ne!(MAGIC_BYTES_V11, MAGIC_BYTES_V10);
+    }
+
+    #[test]
+    fn phase_a_format_version_from_magic_v11() {
+        assert_eq!(
+            FormatVersion::from_magic(MAGIC_BYTES_V11),
+            Some(FormatVersion::V11),
+        );
+    }
+
+    /// V11 and V10 magics are equal-length (14 bytes). The dispatch tries V11
+    /// FIRST, so a buffer starting with `SQRY_GRAPH_V11` must resolve to
+    /// `FormatVersion::V11`, not V10. Guards against a future refactor that
+    /// re-orders the comparisons and silently routes V11 through the V10
+    /// upconvert path.
+    #[test]
+    fn phase_a_format_version_dispatch_v11_before_v10() {
+        let mut buf = MAGIC_BYTES_V11.to_vec();
+        // Append trailing bytes so the dispatch sees a "real-looking" payload.
+        buf.extend_from_slice(&[0u8; 8]);
+        assert_eq!(FormatVersion::from_magic(&buf), Some(FormatVersion::V11));
+
+        let mut buf10 = MAGIC_BYTES_V10.to_vec();
+        buf10.extend_from_slice(&[0u8; 8]);
+        assert_eq!(FormatVersion::from_magic(&buf10), Some(FormatVersion::V10));
+    }
+
+    #[test]
+    fn phase_a_format_version_v11_magic_round_trip() {
+        let v = FormatVersion::V11;
+        let bytes = v.magic();
+        assert_eq!(bytes, MAGIC_BYTES_V11.as_slice());
+        assert_eq!(FormatVersion::from_magic(bytes), Some(v));
     }
 
     #[test]
@@ -591,7 +663,13 @@ mod tests {
 
     #[test]
     fn phase1_format_version_magic_round_trip() {
-        for version in [FormatVersion::V7, FormatVersion::V8, FormatVersion::V9] {
+        for version in [
+            FormatVersion::V7,
+            FormatVersion::V8,
+            FormatVersion::V9,
+            FormatVersion::V10,
+            FormatVersion::V11,
+        ] {
             let bytes = version.magic();
             assert_eq!(FormatVersion::from_magic(bytes), Some(version));
         }

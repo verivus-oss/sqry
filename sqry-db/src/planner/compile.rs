@@ -29,7 +29,7 @@
 //! # Example
 //!
 //! ```rust
-//! use sqry_core::graph::unified::edge::kind::EdgeKind;
+//! use sqry_core::graph::unified::edge::kind::{EdgeKind, ResolvedVia};
 //! use sqry_core::graph::unified::node::kind::NodeKind;
 //! use sqry_db::planner::{Direction, Predicate, QueryBuilder};
 //!
@@ -41,6 +41,7 @@
 //!         EdgeKind::Calls {
 //!             argument_count: 0,
 //!             is_async: false,
+//!             resolved_via: ResolvedVia::Direct,
 //!         },
 //!         3,
 //!     )
@@ -56,7 +57,7 @@
 //! - Spec: `docs/superpowers/specs/2026-04-12-derived-analysis-db-query-planner-design.md` (§3.2)
 //! - DAG: `docs/superpowers/plans/2026-04-12-phase3-4-combined-implementation-dag.toml` (unit DB10)
 
-use sqry_core::graph::unified::edge::kind::EdgeKind;
+use sqry_core::graph::unified::edge::kind::{EdgeKind, ResolvedVia};
 use sqry_core::graph::unified::node::kind::NodeKind;
 use sqry_core::graph::unified::string::StringId;
 use sqry_core::schema::Visibility;
@@ -243,10 +244,16 @@ pub fn normalize_edge_kind(kind: EdgeKind) -> EdgeKind {
         | EdgeKind::LifetimeConstraint { .. }
         | EdgeKind::FfiCall { .. } => kind,
 
-        // ---- Pure site metadata: zero everything ----
-        EdgeKind::Calls { .. } => EdgeKind::Calls {
+        // ---- Calls: zero pure site metadata; preserve the semantic
+        //      `resolved_via` discriminator (U15, DESIGN §6.3bis Mechanism A).
+        //      Two `Calls` edges that differ only in `resolved_via` must
+        //      normalize to distinct values so the plan-cache key sees a
+        //      different `EdgeKind` and the executor can apply the
+        //      field-equality filter installed by U15.
+        EdgeKind::Calls { resolved_via, .. } => EdgeKind::Calls {
             argument_count: 0,
             is_async: false,
+            resolved_via,
         },
 
         // ---- Mixed: preserve semantic, drop site/StringId ----
@@ -516,6 +523,41 @@ impl QueryBuilder {
             direction,
             edge_kind: Some(normalize_edge_kind(edge_kind)),
             max_depth,
+            resolved_via: None,
+        });
+        self
+    }
+
+    /// Appends a [`PlanNode::EdgeTraversal`] step that additionally filters
+    /// traversed [`EdgeKind::Calls`] edges by their
+    /// [`ResolvedVia`] resolution provenance (U15, DESIGN §6.3bis
+    /// Mechanism B).
+    ///
+    /// Equivalent to [`Self::traverse`] but installs an explicit
+    /// `resolved_via` field on the resulting [`PlanNode::EdgeTraversal`].
+    /// The supplied [`EdgeKind`] is run through [`normalize_edge_kind`]
+    /// exactly as in [`Self::traverse`], so plan hashing remains stable.
+    ///
+    /// Behavior:
+    /// * `resolved_via: Some(_)` — every traversed `Calls` edge whose
+    ///   carried `resolved_via` differs from the supplied value is
+    ///   skipped by the executor. The check runs AFTER the existing
+    ///   discriminant filter; non-`Calls` edge kinds are unaffected.
+    /// * `resolved_via: None` — identical to [`Self::traverse`] (no
+    ///   provenance filter).
+    #[must_use]
+    pub fn traverse_with_resolved_via(
+        mut self,
+        direction: Direction,
+        edge_kind: EdgeKind,
+        resolved_via: Option<ResolvedVia>,
+        max_depth: u32,
+    ) -> Self {
+        self.steps.push(PlanNode::EdgeTraversal {
+            direction,
+            edge_kind: Some(normalize_edge_kind(edge_kind)),
+            max_depth,
+            resolved_via,
         });
         self
     }
@@ -530,8 +572,66 @@ impl QueryBuilder {
             direction,
             edge_kind: None,
             max_depth,
+            resolved_via: None,
         });
         self
+    }
+
+    /// Attempts to fold a [`ResolvedVia`] provenance filter into the
+    /// preceding [`PlanNode::EdgeTraversal`] step (DESIGN §6.3bis
+    /// adjacency-fold rule).
+    ///
+    /// Returns `true` when the last step in the builder is a Calls
+    /// `EdgeTraversal` carrying `resolved_via: None`, in which case the
+    /// outer `resolved_via` field is replaced with `Some(via)` in place
+    /// so the executor's Mechanism-B filter (see [`Self::traverse_with_resolved_via`])
+    /// applies without an extra `PlanNode::Filter` step.
+    ///
+    /// Returns `false` (leaving the builder untouched) when the last
+    /// step is not a Calls `EdgeTraversal`, the edge-kind discriminant
+    /// is something other than [`EdgeKind::Calls`], or the
+    /// EdgeTraversal already carries `resolved_via: Some(_)` — in which
+    /// case the caller is responsible for emitting a
+    /// [`PlanNode::Filter`] with [`Predicate::ResolvedVia`] instead
+    /// (preserving U14's node-scan filter semantics for
+    /// `kind:function resolved_via:binding_plane`-style queries).
+    ///
+    /// The inner [`EdgeKind::Calls`] discriminator is left untouched —
+    /// only the outer `PlanNode::EdgeTraversal.resolved_via` field
+    /// drives the executor filter; the inner field is only consulted by
+    /// plan-hashing (`normalize_edge_kind`).
+    #[must_use]
+    pub fn try_fold_resolved_via(&mut self, via: ResolvedVia) -> bool {
+        let Some(last) = self.steps.last_mut() else {
+            return false;
+        };
+        let PlanNode::EdgeTraversal {
+            edge_kind,
+            resolved_via,
+            ..
+        } = last
+        else {
+            return false;
+        };
+        // Only fold when the EdgeTraversal targets the Calls
+        // discriminant. Non-Calls edge kinds (Imports, References, …)
+        // have no resolved_via concept and the executor filter is a
+        // no-op against them — emitting the Filter form instead keeps
+        // the parser surface honest.
+        if !matches!(edge_kind, Some(EdgeKind::Calls { .. })) {
+            return false;
+        }
+        // Do not overwrite an existing builder-supplied value. The
+        // parser surface only constructs `resolved_via: None` traversals
+        // today, but a `Some(_)` value here means the chain was built
+        // through `traverse_with_resolved_via` and the user is doing
+        // something unusual — fall back to the Filter form so the
+        // observable behavior is "two independent filters".
+        if resolved_via.is_some() {
+            return false;
+        }
+        *resolved_via = Some(via);
+        true
     }
 
     // ------------------------------------------------------------------
@@ -731,6 +831,9 @@ fn validate_predicate(predicate: &Predicate) -> Result<(), BuildError> {
         Predicate::HasCaller
         | Predicate::HasCallee
         | Predicate::IsUnused
+        | Predicate::IsAddressTaken(_)
+        | Predicate::ResolvedVia(_)
+        | Predicate::HasCallsitePromiscuous(_)
         | Predicate::InFile(_)
         | Predicate::InScope(_)
         | Predicate::MatchesName(_)
@@ -854,6 +957,7 @@ mod tests {
             direction: Direction::Forward,
             edge_kind: None,
             max_depth: 1,
+            resolved_via: None,
         });
         let err = b.build().unwrap_err();
         assert!(matches!(
@@ -905,12 +1009,224 @@ mod tests {
         let a = normalize_edge_kind(EdgeKind::Calls {
             argument_count: 7,
             is_async: true,
+            resolved_via: ResolvedVia::Direct,
         });
         let b = normalize_edge_kind(EdgeKind::Calls {
             argument_count: 0,
             is_async: false,
+            resolved_via: ResolvedVia::Direct,
         });
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn normalize_calls_preserves_resolved_via() {
+        // U15 — DESIGN §6.3bis Mechanism A: `normalize_edge_kind` must keep
+        // the `resolved_via` discriminator alongside the existing semantic
+        // discriminators (`TypeOf.context`, `Exports.kind`, ...). Two `Calls`
+        // edges that differ only in `resolved_via` must produce DISTINCT
+        // normalized values so the plan-cache key sees a different
+        // `EdgeKind` and the executor can apply the field-equality filter.
+        let direct = normalize_edge_kind(EdgeKind::Calls {
+            argument_count: 7,
+            is_async: true,
+            resolved_via: ResolvedVia::Direct,
+        });
+        let type_match = normalize_edge_kind(EdgeKind::Calls {
+            argument_count: 7,
+            is_async: true,
+            resolved_via: ResolvedVia::TypeMatch,
+        });
+        let binding_plane = normalize_edge_kind(EdgeKind::Calls {
+            argument_count: 7,
+            is_async: true,
+            resolved_via: ResolvedVia::BindingPlane,
+        });
+        assert_ne!(direct, type_match);
+        assert_ne!(direct, binding_plane);
+        assert_ne!(type_match, binding_plane);
+
+        // Two EdgeTraversal plans differing ONLY in resolved_via must hash
+        // to distinct values — the plan-cache key participates correctly.
+        // We compare via the structural `PartialEq` (PlanNode derives `Eq`
+        // and `Hash` consistently) and also confirm distinct Hash outputs.
+        let plan_some_bp = PlanNode::EdgeTraversal {
+            direction: Direction::Forward,
+            edge_kind: Some(binding_plane.clone()),
+            max_depth: 1,
+            resolved_via: Some(ResolvedVia::BindingPlane),
+        };
+        let plan_some_tm = PlanNode::EdgeTraversal {
+            direction: Direction::Forward,
+            edge_kind: Some(binding_plane.clone()),
+            max_depth: 1,
+            resolved_via: Some(ResolvedVia::TypeMatch),
+        };
+        let plan_none = PlanNode::EdgeTraversal {
+            direction: Direction::Forward,
+            edge_kind: Some(binding_plane.clone()),
+            max_depth: 1,
+            resolved_via: None,
+        };
+        assert_ne!(plan_some_bp, plan_some_tm);
+        assert_ne!(plan_some_bp, plan_none);
+        assert_ne!(plan_some_tm, plan_none);
+
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let h = |p: &PlanNode| {
+            let mut hasher = DefaultHasher::new();
+            p.hash(&mut hasher);
+            hasher.finish()
+        };
+        let h_bp = h(&plan_some_bp);
+        let h_tm = h(&plan_some_tm);
+        let h_none = h(&plan_none);
+        assert_ne!(h_bp, h_tm);
+        assert_ne!(h_bp, h_none);
+        assert_ne!(h_tm, h_none);
+    }
+
+    #[test]
+    fn traverse_default_resolved_via_is_none() {
+        // U15 source-compat: the existing 3-arg `traverse` (called by all
+        // pre-U15 sites) must install `resolved_via: None` so behavior is
+        // unchanged. Documents the invariant that legacy callers do not
+        // get a surprise non-None filter.
+        let plan = QueryBuilder::new()
+            .scan(NodeKind::Function)
+            .traverse(
+                Direction::Forward,
+                EdgeKind::Calls {
+                    argument_count: 0,
+                    is_async: false,
+                    resolved_via: ResolvedVia::Direct,
+                },
+                2,
+            )
+            .build()
+            .expect("plan");
+        let PlanNode::Chain { steps } = &plan.root else {
+            panic!("expected Chain");
+        };
+        let PlanNode::EdgeTraversal { resolved_via, .. } = &steps[1] else {
+            panic!("expected EdgeTraversal");
+        };
+        assert_eq!(*resolved_via, None);
+    }
+
+    #[test]
+    fn traversal_with_resolved_via_builder_installs_field() {
+        // U15 — explicit constructor installs the requested provenance
+        // filter without disturbing the rest of the EdgeTraversal shape.
+        let plan = QueryBuilder::new()
+            .scan(NodeKind::Function)
+            .traverse_with_resolved_via(
+                Direction::Forward,
+                EdgeKind::Calls {
+                    argument_count: 0,
+                    is_async: false,
+                    resolved_via: ResolvedVia::Direct,
+                },
+                Some(ResolvedVia::BindingPlane),
+                3,
+            )
+            .build()
+            .expect("plan");
+        let PlanNode::Chain { steps } = &plan.root else {
+            panic!("expected Chain");
+        };
+        let PlanNode::EdgeTraversal {
+            direction,
+            max_depth,
+            resolved_via,
+            ..
+        } = &steps[1]
+        else {
+            panic!("expected EdgeTraversal");
+        };
+        assert_eq!(*direction, Direction::Forward);
+        assert_eq!(*max_depth, 3);
+        assert_eq!(*resolved_via, Some(ResolvedVia::BindingPlane));
+    }
+
+    #[test]
+    fn traversal_with_resolved_via_fold_rejects_non_calls_last_step() {
+        // try_fold_resolved_via must refuse to install a provenance
+        // filter onto a non-Calls EdgeTraversal — otherwise the
+        // executor filter parameter would be silently no-op'd and the
+        // parser surface would lose the U14 Filter form.
+        let mut b = QueryBuilder::new().scan(NodeKind::Module).traverse(
+            Direction::Forward,
+            EdgeKind::Imports {
+                alias: None,
+                is_wildcard: false,
+            },
+            1,
+        );
+        assert!(
+            !b.try_fold_resolved_via(ResolvedVia::Direct),
+            "fold must reject Imports traversal"
+        );
+    }
+
+    #[test]
+    fn traversal_with_resolved_via_fold_rejects_empty_builder() {
+        // No prior step → no fold target → caller falls back to the
+        // U14 Filter form.
+        let mut b = QueryBuilder::new();
+        assert!(!b.try_fold_resolved_via(ResolvedVia::Direct));
+    }
+
+    #[test]
+    fn traversal_with_resolved_via_fold_preserves_existing_some() {
+        // If the EdgeTraversal already carries a builder-supplied
+        // `resolved_via: Some(_)`, the parser-level fold must NOT
+        // overwrite it — see `try_fold_resolved_via` docs. The
+        // observable behavior is "caller emits an extra Filter step",
+        // matching what users get when chaining
+        // `traverse_with_resolved_via` + `resolved_via:` text.
+        let mut b = QueryBuilder::new()
+            .scan(NodeKind::Function)
+            .traverse_with_resolved_via(
+                Direction::Forward,
+                EdgeKind::Calls {
+                    argument_count: 0,
+                    is_async: false,
+                    resolved_via: ResolvedVia::Direct,
+                },
+                Some(ResolvedVia::TypeMatch),
+                1,
+            );
+        assert!(
+            !b.try_fold_resolved_via(ResolvedVia::BindingPlane),
+            "fold must not overwrite an existing Some(_) value"
+        );
+    }
+
+    #[test]
+    fn traversal_with_resolved_via_fold_installs_on_calls_traversal() {
+        // Happy path: last step is a Calls EdgeTraversal with
+        // resolved_via: None; the fold mutates it in place and returns
+        // true.
+        let mut b = QueryBuilder::new().scan(NodeKind::Function).traverse(
+            Direction::Forward,
+            EdgeKind::Calls {
+                argument_count: 0,
+                is_async: false,
+                resolved_via: ResolvedVia::Direct,
+            },
+            2,
+        );
+        assert!(b.try_fold_resolved_via(ResolvedVia::BindingPlane));
+        let plan = b.build().expect("plan builds");
+        let PlanNode::Chain { steps } = plan.root else {
+            panic!("expected Chain");
+        };
+        let PlanNode::EdgeTraversal { resolved_via, .. } = &steps[1] else {
+            panic!("expected EdgeTraversal");
+        };
+        assert_eq!(*resolved_via, Some(ResolvedVia::BindingPlane));
     }
 
     #[test]
@@ -942,7 +1258,8 @@ mod tests {
             PlanNodeKind::of(&PlanNode::EdgeTraversal {
                 direction: Direction::Forward,
                 edge_kind: None,
-                max_depth: 1
+                max_depth: 1,
+                resolved_via: None,
             }),
             PlanNodeKind::EdgeTraversal
         );

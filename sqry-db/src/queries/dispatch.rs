@@ -273,7 +273,7 @@ mod tests {
     use std::sync::Arc;
 
     use sqry_core::graph::unified::concurrent::CodeGraph;
-    use sqry_core::graph::unified::edge::EdgeKind;
+    use sqry_core::graph::unified::edge::{EdgeKind, ResolvedVia};
     use sqry_core::graph::unified::node::NodeKind;
     use sqry_core::graph::unified::storage::NodeEntry;
 
@@ -314,6 +314,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file_id,
         );

@@ -37,6 +37,8 @@ use std::fmt::Write;
 use crate::graph::node::Language;
 use crate::graph::unified::concurrent::GraphSnapshot;
 use crate::graph::unified::edge::EdgeKind;
+#[cfg(test)]
+use crate::graph::unified::edge::ResolvedVia;
 use crate::graph::unified::node::NodeId;
 use crate::graph::unified::node::kind::NodeKind;
 use crate::graph::unified::storage::arena::NodeEntry;
@@ -203,6 +205,7 @@ pub fn edge_label(
         EdgeKind::Calls {
             argument_count,
             is_async,
+            ..
         } => {
             if *is_async {
                 format!("async call({argument_count})")
@@ -1297,6 +1300,7 @@ impl<'a> UnifiedJsonExporter<'a> {
             EdgeKind::Calls {
                 argument_count,
                 is_async,
+                ..
             } => {
                 edge["argument_count"] = serde_json::Value::Number((*argument_count).into());
                 edge["is_async"] = serde_json::Value::Bool(*is_async);
@@ -1402,11 +1406,13 @@ mod tests {
     fn test_edge_filter_matches_calls() {
         assert!(EdgeFilter::Calls.matches(&EdgeKind::Calls {
             argument_count: 0,
-            is_async: false
+            is_async: false,
+            resolved_via: ResolvedVia::Direct,
         }));
         assert!(EdgeFilter::Calls.matches(&EdgeKind::Calls {
             argument_count: 5,
-            is_async: true
+            is_async: true,
+            resolved_via: ResolvedVia::Direct,
         }));
         assert!(!EdgeFilter::Calls.matches(&EdgeKind::References));
     }
@@ -1444,7 +1450,8 @@ mod tests {
         assert!(EdgeFilter::References.matches(&EdgeKind::References));
         assert!(!EdgeFilter::References.matches(&EdgeKind::Calls {
             argument_count: 0,
-            is_async: false
+            is_async: false,
+            resolved_via: ResolvedVia::Direct,
         }));
     }
 
@@ -1584,6 +1591,7 @@ mod tests {
         let (style, color) = edge_style(&EdgeKind::Calls {
             argument_count: 0,
             is_async: false,
+            resolved_via: ResolvedVia::Direct,
         });
         assert_eq!(style, "solid");
         assert_eq!(color, "#333333");
@@ -1877,6 +1885,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 2,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file_id,
         );
@@ -2183,6 +2192,7 @@ mod tests {
             &EdgeKind::Calls {
                 argument_count: 3,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             &strings,
         );
@@ -2196,6 +2206,7 @@ mod tests {
             &EdgeKind::Calls {
                 argument_count: 2,
                 is_async: true,
+                resolved_via: ResolvedVia::Direct,
             },
             &strings,
         );

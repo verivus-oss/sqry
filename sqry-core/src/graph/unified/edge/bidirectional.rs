@@ -37,6 +37,8 @@ use super::super::node::NodeId;
 use super::super::storage::CsrGraph;
 use super::delta::DeltaEdge;
 use super::kind::EdgeKind;
+#[cfg(test)]
+use super::kind::ResolvedVia;
 use super::store::{EdgeStore, EdgeStoreStats, StoreEdgeRef};
 
 /// Bidirectional edge store with forward and reverse indices.
@@ -65,6 +67,22 @@ impl BidirectionalEdgeStore {
         Self {
             forward: RwLock::new(EdgeStore::new()),
             reverse: RwLock::new(EdgeStore::new()),
+        }
+    }
+
+    /// Construct a `BidirectionalEdgeStore` from already-rehydrated forward
+    /// and reverse `EdgeStore` halves.
+    ///
+    /// Reserved for the V10 → V11 upconvert path in
+    /// [`crate::graph::unified::persistence::legacy_v10`]. `pub(crate)`
+    /// because only that module needs to assemble a bidirectional store
+    /// from out-of-band halves; production code constructs a fresh empty
+    /// store and uses `add_edge_*` so forward / reverse stay in sync.
+    #[must_use]
+    pub(crate) fn from_parts_v10_upconvert(forward: EdgeStore, reverse: EdgeStore) -> Self {
+        Self {
+            forward: RwLock::new(forward),
+            reverse: RwLock::new(reverse),
         }
     }
 
@@ -267,6 +285,25 @@ impl BidirectionalEdgeStore {
     pub fn reset_csr_caches(&mut self) {
         self.forward.get_mut().reset_csr();
         self.reverse.get_mut().reset_csr();
+    }
+
+    /// Test-only: rewrite every [`EdgeKind::Calls`] across both the
+    /// forward and reverse stores so its `resolved_via` field collapses
+    /// to [`ResolvedVia::Direct`].
+    ///
+    /// Used exclusively by `sqry-core/tests/snapshot_size_phase_a.rs`
+    /// (U19) to materialize a "Phase-A-free" baseline edge set for the
+    /// +10% snapshot-size gate.
+    ///
+    /// [`ResolvedVia::Direct`]: crate::graph::unified::edge::ResolvedVia::Direct
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn normalize_calls_resolved_via_for_test(&mut self) {
+        self.forward
+            .get_mut()
+            .normalize_calls_resolved_via_for_test();
+        self.reverse
+            .get_mut()
+            .normalize_calls_resolved_via_for_test();
     }
 
     /// Rewrite every `StringId` payload carried by every committed `EdgeKind`
@@ -594,6 +631,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file,
         );
@@ -623,6 +661,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file,
         );
@@ -632,6 +671,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file,
         );
@@ -661,6 +701,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file,
         );
@@ -670,6 +711,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file,
         );
@@ -679,6 +721,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file,
         );
@@ -721,6 +764,7 @@ mod tests {
                         EdgeKind::Calls {
                             argument_count: 0,
                             is_async: false,
+                            resolved_via: ResolvedVia::Direct,
                         },
                         file,
                     );
@@ -765,7 +809,8 @@ mod tests {
             target,
             &EdgeKind::Calls {
                 argument_count: 0,
-                is_async: false
+                is_async: false,
+                resolved_via: ResolvedVia::Direct,
             }
         ));
 
@@ -775,6 +820,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file,
         );
@@ -784,7 +830,8 @@ mod tests {
             target,
             &EdgeKind::Calls {
                 argument_count: 0,
-                is_async: false
+                is_async: false,
+                resolved_via: ResolvedVia::Direct,
             }
         ));
         assert!(!store.has_edge(source, target, &EdgeKind::References));
@@ -802,6 +849,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file1,
         );
@@ -811,6 +859,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file1,
         );
@@ -820,6 +869,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file2,
         );
@@ -843,6 +893,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file,
         );
@@ -852,6 +903,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file,
         );
@@ -875,6 +927,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file,
         );
@@ -893,6 +946,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             seq,
             DeltaOp::Add,
@@ -1077,6 +1131,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file,
         );

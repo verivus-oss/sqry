@@ -26,11 +26,18 @@ use std::{
 
 use sqry_core::graph::unified::NodeId as UnifiedNodeId;
 use sqry_core::graph::unified::NodeMetadataStore;
+use sqry_core::graph::unified::Receiver as GoReceiverPointerness;
+use sqry_core::graph::unified::build::go_signature::canonicalise_go_signature;
 use sqry_core::graph::unified::build::helper::CalleeKindHint;
 use sqry_core::graph::unified::build::helper::GraphBuildHelper;
-use sqry_core::graph::unified::build::staging::StagingGraph;
+use sqry_core::graph::unified::build::staging::GoMethodReceiverHint;
+use sqry_core::graph::unified::build::staging::{
+    GoEmbeddingHint, GoFunctionSignatureHint, GoMethodSignatureHint, GoNamedTypeConversionHint,
+    GoReceiverCallHint, GoReceiverHintKind, StagingGraph,
+};
 use sqry_core::graph::unified::edge::FfiConvention;
 use sqry_core::graph::unified::edge::kind::TypeOfContext;
+use sqry_core::graph::unified::resolution::canonicalize_graph_qualified_name;
 use sqry_core::graph::{GraphBuilder, GraphBuilderError, GraphResult, Language, NodeId, Span};
 use sqry_lang_support::relations::is_uppercase_export;
 use tree_sitter::{Node, Tree};
@@ -38,6 +45,123 @@ use tree_sitter::{Node, Tree};
 use crate::relations::local_scopes;
 
 const DEFAULT_SCOPE_DEPTH: usize = 4;
+
+/// Compose `pkg.raw` (or pass `raw` through if it already contains a
+/// package separator), then route through `canonicalize_graph_qualified_name`
+/// so the resulting string matches what `helper.add_*` interns into the
+/// `by_qualified_name` index. Used at every `GoHints` qn-emission site so
+/// the post-Phase-4e `pass_go_method_set_satisfaction` can resolve hint
+/// qns against canonical node qns. The pre-G1 plugin emitted dot-separated
+/// hint qns while node qns are `::`-separated (see
+/// `05_TEST_PLAN.md` §7.5).
+fn go_canonical_qn(pkg: &str, raw: &str) -> String {
+    let qualified = if raw.contains('.') {
+        raw.to_string()
+    } else {
+        format!("{pkg}.{raw}")
+    };
+    canonicalize_graph_qualified_name(Language::Go, &qualified)
+}
+
+/// Cluster G1 (T1.3 — 01_SPEC §7 AC-10/AC-11, 05_TEST_PLAN.md):
+/// inspect a `call_expression` AST node for the shape of a same-
+/// package named-type conversion (`T(g)` where `T` is a function-typed
+/// `Type` and `g` is an identifier whose qualified name resolves to a
+/// `Function` / `Method` in the same package). When the shape matches,
+/// emit a `GoNamedTypeConversionHint` with `argument_node` resolved to
+/// the function's NodeId via `helper.ensure_callee` so the post-Phase-4e
+/// `pass_go_method_set_satisfaction`'s signature-comparison predicate
+/// can look up the argument's `GoFunctionSignatureHint`.
+///
+/// Callable from BOTH `emit_go_receiver_and_conversion_hints` (in-body
+/// calls) and `handle_var_declaration` / `handle_const_declaration`
+/// (top-level `var _ = T(g)` / `const _ = T(g)` initializers). The
+/// `callee_override` parameter lets the in-body path reuse the
+/// caller's already-resolved callee NodeId; when `None`, the helper
+/// resolves the target itself via `helper.ensure_callee` against the
+/// canonical target qn.
+///
+/// `pointer_type` (Go-spec `*T(expr)`) is intentionally NOT recognised
+/// here — the existing receiver-call branch in
+/// `emit_go_receiver_and_conversion_hints` handles pointer-form
+/// conversions and the T1.3 spec's same-package scope (gopls v0.19)
+/// covers the `identifier` / `qualified_type` shapes.
+fn try_emit_t1_3_named_type_conversion_hint(
+    call_node: Node,
+    content: &[u8],
+    helper: &mut GraphBuildHelper,
+    package: &str,
+    callee_override: Option<UnifiedNodeId>,
+) {
+    if call_argument_count(call_node) != 1 {
+        return;
+    }
+    let Some(function_node) = call_node.child_by_field_name("function") else {
+        return;
+    };
+    if !matches!(function_node.kind(), "identifier" | "qualified_type") {
+        return;
+    }
+    let Ok(target_text) = function_node.utf8_text(content) else {
+        return;
+    };
+    let target_text = target_text.trim();
+    if target_text.is_empty() {
+        return;
+    }
+    let Some(arg_list) = call_node.child_by_field_name("arguments") else {
+        return;
+    };
+    let arg_node = (0..arg_list.named_child_count()).find_map(|i| {
+        #[allow(clippy::cast_possible_truncation)]
+        arg_list.named_child(i as u32)
+    });
+    let Some(arg_node) = arg_node else {
+        return;
+    };
+
+    let target_qn = go_canonical_qn(package, target_text);
+    // Resolve the conversion target's NodeId. In-body path reuses the
+    // already-computed `callee_method`; top-level path resolves via
+    // `helper.ensure_callee`.
+    let callee_method = callee_override.unwrap_or_else(|| {
+        helper.ensure_callee(
+            &target_qn,
+            span_from_node(function_node),
+            CalleeKindHint::Function,
+        )
+    });
+
+    // Resolve identifier argument to its Function/Method NodeId. Non-
+    // identifier arguments fall back to `callee_method`; the pass
+    // silently drops hints whose `argument_node` has no signature.
+    let resolved_argument_node = if arg_node.kind() == "identifier"
+        && let Ok(arg_text) = arg_node.utf8_text(content)
+        && !arg_text.is_empty()
+    {
+        let arg_qn = if arg_text.contains('.') {
+            arg_text.to_string()
+        } else {
+            format!("{package}.{arg_text}")
+        };
+        helper.ensure_callee(&arg_qn, span_from_node(arg_node), CalleeKindHint::Function)
+    } else {
+        callee_method
+    };
+
+    let target_qn_id = helper.intern(&target_qn);
+    let file_id = helper.file_id();
+    helper
+        .staging_mut()
+        .go_hints_mut()
+        .named_type_conversions
+        .push(GoNamedTypeConversionHint {
+            call_site: callee_method,
+            target_type_qualified_name: target_qn_id,
+            argument_node: resolved_argument_node,
+            file: file_id,
+        });
+}
 
 /// Add a Variable node and immediately flag it synthetic (`C_SUPPRESS`).
 ///
@@ -59,7 +183,7 @@ const DEFAULT_SCOPE_DEPTH: usize = 4;
 /// metadata store at commit time:
 ///
 /// 1. `staging.merge_macro_metadata` records the
-///    `NodeMetadata::Synthetic` bit keyed on the staging-local
+///    `NodeFlags::SYNTHETIC` bit keyed on the staging-local
 ///    `NodeId`. This is the canonical channel — it lights up the
 ///    metadata-store side of the suppression check in
 ///    [`sqry_core::graph::unified::concurrent::graph::GraphSnapshot::is_node_synthetic`]
@@ -181,8 +305,22 @@ impl GraphBuilder for GoGraphBuilder {
         // Build AST context for O(1) function lookups
         let ast_graph = ASTGraph::from_tree(tree, content, self.max_scope_depth);
 
-        // Build local scope tree for variable reference resolution
-        let mut scope_tree = local_scopes::build(tree.root_node(), content)?;
+        // Build local scope tree for variable reference resolution.
+        //
+        // Threading `&mut helper` and the package name through is the
+        // Cluster B1 hook that eagerly materialises `Variable` /
+        // `Parameter` `NodeId`s at every declaration site (short-var
+        // declaration, `var`-spec, function parameter, method
+        // parameter, range loop var, type-switch alias). Each eager
+        // binding node carries `NodeMetadata::Synthetic` so it does
+        // not leak into workspace-symbol search, and is wired into
+        // the scope tree so subsequent use-site resolution
+        // (`handle_identifier_for_reference`) returns the same
+        // pre-staged `NodeId` — the load-bearing prerequisite for
+        // `GoReceiverHintKind::LocalIdent { binding_local }` resolution
+        // in the post-Phase-4e method-set pass.
+        let mut scope_tree =
+            local_scopes::build(tree.root_node(), content, &mut helper, &ast_graph.package)?;
 
         // Track inserted nodes to avoid duplicates
         let mut inserted = HashSet::new();
@@ -194,13 +332,58 @@ impl GraphBuilder for GoGraphBuilder {
             let visibility = visibility_for_identifier(&context.name);
 
             if context.is_method {
-                helper.add_method_with_visibility(
+                let method_node = helper.add_method_with_visibility(
                     &qualified_name,
                     Some(span),
                     false,
                     false,
                     Some(visibility),
                 );
+
+                // Cluster D2.1 (Go T1 implements-and-promotion): emit a
+                // `GoMethodReceiverHint` recovering the syntactic
+                // `*T` vs `T` receiver pointerness lost by
+                // `strip_receiver_modifiers` (line 1237) when it strips
+                // the leading `*` from the canonical qualified-name
+                // shape. The hint feeds Cluster D2's T1.1 method-set
+                // composition and the tightening of D1's bucket
+                // classifier (per docs/development/go-implements-and-
+                // promotion/02_DESIGN.md §4.3).
+                //
+                // Receiver pointerness is observable from the original
+                // receiver text retained in `context.receiver_type`:
+                // leading `*` => Pointer, otherwise => Value. The
+                // `strip_receiver_modifiers` helper strips the same
+                // prefix when composing the canonical qualified name,
+                // so building the receiver qualified name as
+                // `<pkg>.<strip_receiver_modifiers(recv)>` keeps the
+                // post-pass index lookup consistent with every other
+                // emission site (`add_method_export_edge_unified` at
+                // line 1866, `process_function_parameters`).
+                if let Some(receiver_text) = context.receiver_type.as_deref() {
+                    let receiver_base = strip_receiver_modifiers(receiver_text);
+                    if !receiver_base.is_empty() {
+                        let pointerness = if receiver_text.trim_start().starts_with('*') {
+                            GoReceiverPointerness::Pointer
+                        } else {
+                            GoReceiverPointerness::Value
+                        };
+                        // Cluster G1: hint qns must match canonical node
+                        // qns (`::`-separated, package-qualified). See
+                        // `05_TEST_PLAN.md` §7.5.
+                        let receiver_qn = go_canonical_qn(&context.package, receiver_base);
+                        let receiver_qn_id = helper.intern(&receiver_qn);
+                        let file_id = helper.file_id();
+                        helper.staging_mut().go_hints_mut().method_receivers.push(
+                            GoMethodReceiverHint {
+                                method_node,
+                                receiver_type_qualified_name: receiver_qn_id,
+                                receiver_pointerness: pointerness,
+                                file: file_id,
+                            },
+                        );
+                    }
+                }
             } else {
                 helper.add_function_with_visibility(
                     &qualified_name,
@@ -345,6 +528,29 @@ fn handle_function_declaration(
         &type_params,
     );
 
+    // Cluster D3 (Go T1 signature side channel): emit a
+    // `GoFunctionSignatureHint` recording the function's canonical
+    // signature at declaration time. The Function NodeId is recovered
+    // by calling `add_function` with the same qualified name Phase 1
+    // used — `GraphBuildHelper::add_function` is idempotent on the
+    // interned qualified name, so this returns the existing Function
+    // NodeId rather than minting a duplicate. The signature is consumed
+    // by Cluster D3's T1.3 function-signature implementations pass.
+    let canonical_signature = canonical_signature_for_func_like(node, content, &type_params);
+    if !canonical_signature.is_empty() {
+        let function_node = helper.add_function(&func_name, None, false, false);
+        let file_id = helper.file_id();
+        helper
+            .staging_mut()
+            .go_hints_mut()
+            .function_signatures
+            .push(GoFunctionSignatureHint {
+                function_node,
+                canonical_signature,
+                file: file_id,
+            });
+    }
+
     walk_function_body_for_calls(
         node,
         content,
@@ -419,6 +625,37 @@ fn handle_method_declaration(
         &ast_graph.package,
         &receiver_type_params,
     );
+
+    // Cluster D3 (Go T1 signature side channel): emit a
+    // `GoMethodSignatureHint` for this method declaration. The Method
+    // NodeId is recovered via the same idempotent
+    // `add_method_with_visibility` call Phase 1 used (line 216), keyed
+    // on the same interned qualified name. The signature feeds Cluster
+    // D3's tightened T1.1 satisfaction predicate (name + canonical
+    // signature) and is paired with the existing
+    // `GoMethodReceiverHint` pointerness side channel.
+    let canonical_signature =
+        canonical_signature_for_func_like(node, content, &receiver_type_params);
+    if !canonical_signature.is_empty() {
+        let visibility = visibility_for_identifier(&method_context.name);
+        let method_node = helper.add_method_with_visibility(
+            &method_name,
+            Some(span_from_node(node)),
+            false,
+            false,
+            Some(visibility),
+        );
+        let file_id = helper.file_id();
+        helper
+            .staging_mut()
+            .go_hints_mut()
+            .method_signatures
+            .push(GoMethodSignatureHint {
+                method_node,
+                canonical_signature,
+                file: file_id,
+            });
+    }
 
     walk_function_body_for_calls(
         node,
@@ -528,6 +765,38 @@ fn handle_var_declaration(
 
     // Handle TypeOf and Reference edges for var/const declarations
     process_var_typeof_edges(node, content, helper, package);
+
+    // Cluster G1 (T1.3 fix — 01_SPEC §7 AC-10/AC-11): top-level
+    // `var _ = T(g)` / `const _ = T(g)` initializers contain call
+    // expressions that the in-body `walk_function_body_for_calls`
+    // walker never sees. Recursively scan the var-decl subtree for
+    // call_expressions and emit T1.3 conversion hints for each. The
+    // helper is no-op on non-conversion shapes. Same-name in-body
+    // calls are handled by `emit_go_receiver_and_conversion_hints` so
+    // no duplication occurs (in-body calls live inside
+    // `function_declaration` / `method_declaration` subtrees, not
+    // inside `var_declaration` / `const_declaration` subtrees).
+    scan_subtree_for_t1_3_conversions(node, content, helper, package);
+}
+
+/// Cluster G1: walk every descendant `call_expression` in the subtree
+/// rooted at `node` and emit T1.3 named-type-conversion hints. Used by
+/// `handle_var_declaration` (top-level var/const initializers).
+fn scan_subtree_for_t1_3_conversions(
+    node: Node,
+    content: &[u8],
+    helper: &mut GraphBuildHelper,
+    package: &str,
+) {
+    if node.kind() == "call_expression" {
+        try_emit_t1_3_named_type_conversion_hint(node, content, helper, package, None);
+    }
+    for i in 0..node.child_count() {
+        #[allow(clippy::cast_possible_truncation)]
+        if let Some(child) = node.child(i as u32) {
+            scan_subtree_for_t1_3_conversions(child, content, helper, package);
+        }
+    }
 }
 
 fn exported_function_name(node: Node, content: &[u8]) -> Option<String> {
@@ -558,6 +827,7 @@ fn walk_function_body_for_calls(
                 ast_graph,
                 helper,
                 CallSiteModifier::None,
+                Some(scope_tree),
             )?;
             // Continue to recurse - need to find nested calls in arguments like C.puts(C.CString(...))
             // The recursion is safe because child call_expressions will be handled by their own match arm
@@ -645,13 +915,21 @@ fn handle_call_expression(
     ast_graph: &ASTGraph,
     helper: &mut GraphBuildHelper,
     modifier: CallSiteModifier,
+    scope_tree: Option<&local_scopes::GoScopeTree>,
 ) -> GraphResult<()> {
     if detect_http_route_registration(node, content, caller_context, helper) {
         return Ok(());
     }
     let is_ffi = build_ffi_call_edge(node, content, caller_context, ast_graph, helper);
     if !is_ffi {
-        process_call_expression_unified(node, content, caller_context, helper, modifier)?;
+        process_call_expression_unified(
+            node,
+            content,
+            caller_context,
+            helper,
+            modifier,
+            scope_tree,
+        )?;
     }
     Ok(())
 }
@@ -680,6 +958,7 @@ fn handle_go_statement(
                 ast_graph,
                 helper,
                 CallSiteModifier::Goroutine,
+                Some(scope_tree),
             )?;
 
             // Recurse into the call's children only to find nested calls
@@ -723,6 +1002,7 @@ fn handle_defer_statement(
                 ast_graph,
                 helper,
                 CallSiteModifier::Deferred,
+                Some(scope_tree),
             )?;
 
             // Recurse into the call's children only to find nested calls
@@ -1387,6 +1667,7 @@ fn process_call_expression_unified(
     caller_context: &FunctionContext,
     helper: &mut GraphBuildHelper,
     modifier: CallSiteModifier,
+    scope_tree: Option<&local_scopes::GoScopeTree>,
 ) -> GraphResult<()> {
     let Some(function_node) = node.child_by_field_name("function") else {
         return Ok(());
@@ -1411,7 +1692,218 @@ fn process_call_expression_unified(
         call_span,
     );
 
+    // Cluster B2 (Go T1 implements-and-promotion): record side-channel
+    // hints alongside the regular `Calls` emission. The hints feed the
+    // post-Phase-4e `pass_go_method_set_satisfaction`, which uses them
+    // to (a) compute method-set satisfaction for `T(f)` named-type
+    // conversions and (b) shadow `Calls` / `References` over promoted
+    // methods reached via embedded-field receivers. Hint emission is
+    // additive — the pass tolerates false-positive hints (they resolve
+    // to no canonical receiver type and are silently dropped).
+    emit_go_receiver_and_conversion_hints(
+        node,
+        function_node,
+        content,
+        target_id,
+        argument_count,
+        modifier,
+        helper,
+        scope_tree,
+        &caller_context.package,
+    );
+
     Ok(())
+}
+
+/// Cluster B2 hint emitter. Classifies a `call_expression` AST node and
+/// pushes the appropriate combination of [`GoReceiverCallHint`] /
+/// [`GoNamedTypeConversionHint`] entries into the staging buffer.
+///
+/// Classification rules (cf. 02_DESIGN §3.2 lines ~600-744):
+///
+/// * `function_node.kind() == "selector_expression"` → method call.
+///   The operand sub-expression's syntactic shape determines which
+///   `GoReceiverHintKind` variant the hint carries:
+///   - `parenthesized_expression` wrapping a `pointer_type` → `PointerPrefixed`.
+///   - `identifier` → either `LocalIdent` (scope-tree binding hit) or
+///     `TypePrefixed` (no binding, syntactically a type prefix).
+///   - `call_expression` → `CallReturn`.
+///   - other (composite expressions the walker cannot classify) →
+///     hint dropped silently.
+/// * `function_node.kind() == "identifier"` or `"qualified_type"`
+///   AND `argument_count == 1` → speculative named-type conversion
+///   `T(expr)` hint. The pass filters against the actual named-type
+///   table; non-matches are dropped.
+#[allow(clippy::too_many_arguments)]
+fn emit_go_receiver_and_conversion_hints(
+    call_node: Node,
+    function_node: Node,
+    content: &[u8],
+    callee_method: UnifiedNodeId,
+    argument_count: u8,
+    modifier: CallSiteModifier,
+    helper: &mut GraphBuildHelper,
+    scope_tree: Option<&local_scopes::GoScopeTree>,
+    package: &str,
+) {
+    let is_async = matches!(modifier, CallSiteModifier::Goroutine);
+
+    match function_node.kind() {
+        "selector_expression" => {
+            // Receiver method call: `<operand>.<field>(...)`.
+            let Some(operand) = function_node.child_by_field_name("operand") else {
+                return;
+            };
+            let Some(field) = function_node.child_by_field_name("field") else {
+                return;
+            };
+            let Ok(method_name) = field.utf8_text(content) else {
+                return;
+            };
+            if method_name.is_empty() {
+                return;
+            }
+            let Some(receiver_kind) = classify_receiver(operand, content, scope_tree) else {
+                return;
+            };
+            let method_name_id = helper.intern(method_name);
+            let file_id = helper.file_id();
+            // `call_site` is anchored on `callee_method` rather than on a
+            // dedicated CallSite NodeId because the Go plugin's walker
+            // does not stage CallSite nodes for ordinary call_expressions
+            // (the `Calls` edge it emits goes from the caller function
+            // directly to the callee method). The pass walks the
+            // embedding / promotion adjacency starting from
+            // `callee_method` and emits shadow `Calls` edges keyed on
+            // the same caller-side source; `call_site` therefore serves
+            // as a per-call-expression dedup key for that adjacency
+            // walk. (call_node is retained in the signature so future
+            // anchoring can switch to a span-derived NodeId without
+            // changing the call site.)
+            let _ = call_node;
+            helper
+                .staging_mut()
+                .go_hints_mut()
+                .receiver_calls
+                .push(GoReceiverCallHint {
+                    call_site: callee_method,
+                    callee_method,
+                    method_name: method_name_id,
+                    receiver: receiver_kind,
+                    argument_count,
+                    is_async,
+                    file: file_id,
+                });
+        }
+        "identifier" | "qualified_type" => {
+            // Speculative named-type conversion `T(expr)`: delegated
+            // to the standalone helper so the same emission path
+            // is reused by `handle_var_declaration` for top-level
+            // `var _ = T(g)` conversions (Cluster G1 fix per AC-10/AC-11).
+            try_emit_t1_3_named_type_conversion_hint(
+                call_node,
+                content,
+                helper,
+                package,
+                Some(callee_method),
+            );
+        }
+        _ => {
+            // Other shapes (parenthesized expressions wrapping a
+            // pointer_type, call_expression in function position, etc.)
+            // are not currently classified. The pass tolerates missing
+            // hints — it falls back to the regular `Calls` edge
+            // resolution path for those call sites.
+        }
+    }
+}
+
+/// Classify the operand expression of a `selector_expression` into a
+/// [`GoReceiverHintKind`] per 02_DESIGN §3.2.
+///
+/// Returns `None` for shapes the walker cannot classify; the caller
+/// drops the hint silently in that case (the pass tolerates missing
+/// receiver-call hints).
+fn classify_receiver(
+    operand: Node,
+    content: &[u8],
+    scope_tree: Option<&local_scopes::GoScopeTree>,
+) -> Option<GoReceiverHintKind> {
+    match operand.kind() {
+        "parenthesized_expression" => {
+            // `(*T).M()` — receiver is a parenthesised pointer dereference.
+            let mut cursor = operand.walk();
+            for inner in operand.named_children(&mut cursor) {
+                if inner.kind() == "pointer_type" {
+                    let mut p_cursor = inner.walk();
+                    for inner_inner in inner.named_children(&mut p_cursor) {
+                        if matches!(inner_inner.kind(), "type_identifier" | "qualified_type")
+                            && let Ok(t) = inner_inner.utf8_text(content)
+                        {
+                            let trimmed = t.trim();
+                            if !trimmed.is_empty() {
+                                return Some(GoReceiverHintKind::PointerPrefixed {
+                                    type_text: trimmed.to_string(),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+            None
+        }
+        "identifier" => {
+            let text = operand.utf8_text(content).ok()?.trim();
+            if text.is_empty() {
+                return None;
+            }
+            // Try local-binding resolution first. If the scope tree has
+            // a binding for this identifier at the operand's byte
+            // position, treat it as `LocalIdent`; otherwise treat as
+            // `TypePrefixed`. The scope tree's `node_id` attachment
+            // already happened during Cluster B1's eager
+            // materialisation, so the binding lookup is sufficient — no
+            // node creation needed here.
+            if let Some(tree) = scope_tree {
+                let usage_byte = operand.start_byte();
+                if let Some(innermost) = tree.innermost_scope_at(usage_byte) {
+                    let chain = tree.scope_chain(innermost);
+                    if let Some(local_match) = tree.resolve_local_in_chain(text, usage_byte, &chain)
+                        && let Some(node_id) = local_match.node_id
+                    {
+                        return Some(GoReceiverHintKind::LocalIdent {
+                            binding_local: node_id,
+                        });
+                    }
+                }
+            }
+            Some(GoReceiverHintKind::TypePrefixed {
+                type_text: text.to_string(),
+            })
+        }
+        "qualified_type" => {
+            // `pkg.Type.M(...)` — qualified type prefix.
+            let text = operand.utf8_text(content).ok()?.trim();
+            if text.is_empty() {
+                return None;
+            }
+            Some(GoReceiverHintKind::TypePrefixed {
+                type_text: text.to_string(),
+            })
+        }
+        "call_expression" => {
+            // `f().M(...)` — receiver is a function-call return value.
+            let callee_fn = operand.child_by_field_name("function")?;
+            let text = callee_fn.utf8_text(content).ok()?.trim();
+            if text.is_empty() {
+                return None;
+            }
+            Some(GoReceiverHintKind::CallReturn {
+                callee_qn: text.to_string(),
+            })
+        }
+        _ => None,
+    }
 }
 
 fn resolve_callee_qualified_name(
@@ -1880,6 +2372,38 @@ fn handle_type_spec(
                 let ref_type_id = helper.add_type(ref_type_name, None);
                 helper.add_reference_edge(type_id, ref_type_id);
             }
+
+            // Cluster D3 (Go T1 signature side channel): when the
+            // underlying type is a function_type, emit a
+            // `GoFunctionSignatureHint` against the named-type's NodeId
+            // so the T1.3 pass can match candidate functions whose
+            // canonical signature equals the named function-type's
+            // underlying signature. Example:
+            //
+            //     type HandlerFunc func(http.ResponseWriter, *http.Request)
+            //
+            // emits a hint with `function_node = HandlerFunc Type
+            // NodeId` and the canonical signature of
+            // `func(http.ResponseWriter, *http.Request)`. The plugin
+            // does the same canonical normalisation that
+            // `canonicalise_go_signature` runs on bare function
+            // declarations so the two surfaces compare bytewise.
+            if type_node.kind() == "function_type" {
+                let canonical_signature =
+                    canonical_signature_for_func_like(type_node, content, &type_params);
+                if !canonical_signature.is_empty() {
+                    let file_id = helper.file_id();
+                    helper
+                        .staging_mut()
+                        .go_hints_mut()
+                        .function_signatures
+                        .push(GoFunctionSignatureHint {
+                            function_node: type_id,
+                            canonical_signature,
+                            file: file_id,
+                        });
+                }
+            }
         }
     }
 }
@@ -2052,22 +2576,94 @@ fn process_struct_embedding(
             let mut field_cursor = child.walk();
             for field in child.children(&mut field_cursor) {
                 if field.kind() == "field_declaration" {
-                    // An embedded field has no "name" field, only a "type" field
+                    // An embedded field has no "name" field. tree-sitter-go's
+                    // grammar for embeddings:
+                    //   - Value-form (`Inner`): `field_declaration` carries
+                    //     a `type` field pointing at a `type_identifier`
+                    //     (or `qualified_type`).
+                    //   - Pointer-form (`*Inner`): `field_declaration`
+                    //     contains two direct children: a `*` token
+                    //     followed by a `type_identifier`, with NO `type`
+                    //     field set.
+                    // Handle both shapes so Cluster B2's pointerness is
+                    // recoverable for `*Inner` embeddings.
                     let has_name = field.child_by_field_name("name").is_some();
-                    if !has_name
-                        && let Some(type_node) = field.child_by_field_name("type")
+                    if has_name {
+                        continue;
+                    }
+                    // Detect a leading `*` token on the embedded field —
+                    // tree-sitter-go's grammar exposes pointer-embedded
+                    // fields as `* + type_identifier` direct children
+                    // (not a `pointer_type` wrapper), so we scan the
+                    // field's children for the literal `*` token.
+                    let has_pointer_star = {
+                        let mut fc = field.walk();
+                        field.children(&mut fc).any(|fchild| fchild.kind() == "*")
+                    };
+                    let embedded_type_node = field.child_by_field_name("type").or_else(|| {
+                        // Pointer-form fallback: pick up the
+                        // `type_identifier` / `qualified_type` that
+                        // immediately follows the `*` token.
+                        let mut star_seen = false;
+                        let mut found = None;
+                        let mut fc = field.walk();
+                        for fchild in field.children(&mut fc) {
+                            match fchild.kind() {
+                                "*" => {
+                                    star_seen = true;
+                                }
+                                "type_identifier" | "qualified_type" if star_seen => {
+                                    found = Some(fchild);
+                                    break;
+                                }
+                                _ => {}
+                            }
+                        }
+                        found
+                    });
+                    let pointerness = if has_pointer_star
+                        || embedded_type_node.is_some_and(|n| n.kind() == "pointer_type")
+                    {
+                        GoReceiverPointerness::Pointer
+                    } else {
+                        GoReceiverPointerness::Value
+                    };
+                    if let Some(type_node) = embedded_type_node
                         && let Some(embedded_name) = extract_embedded_type_name(type_node, content)
                     {
-                        // Qualify the embedded type name
-                        let parent_qualified = if embedded_name.contains('.') {
-                            // Already qualified (e.g., pkg.Type)
-                            embedded_name.clone()
-                        } else {
-                            // Assume same package
-                            format!("{package}.{embedded_name}")
-                        };
+                        // Qualify the embedded type name and canonicalise
+                        // so the hint qn matches the node qn interned by
+                        // `helper.add_struct` (Cluster G1 fix per
+                        // `05_TEST_PLAN.md` §7.5; `helper.add_struct`
+                        // routes through `canonicalize_graph_qualified_name`
+                        // at helper.rs:766-767 so passing canonical input
+                        // here is idempotent at the node end, and the
+                        // hint-end intern below now matches by StringId).
+                        let parent_qualified = go_canonical_qn(package, &embedded_name);
                         let parent_id = helper.add_struct(&parent_qualified, None);
                         helper.add_inherits_edge(child_id, parent_id);
+
+                        // Cluster B2 (Go T1 implements-and-promotion): push a
+                        // `GoEmbeddingHint` capturing the syntactic
+                        // pointerness so the post-Phase-4e
+                        // `pass_go_method_set_satisfaction` can compute
+                        // value-bucket vs pointer-bucket method sets per Go
+                        // spec §"Method sets". `inner_qualified_name` is
+                        // interned via the build helper so its remap during
+                        // Phase 3 commit goes through the same `StringId`
+                        // remap table as every other edge-side string.
+                        let inner_qn_id = helper.intern(&parent_qualified);
+                        let file_id = helper.file_id();
+                        helper
+                            .staging_mut()
+                            .go_hints_mut()
+                            .embeddings
+                            .push(GoEmbeddingHint {
+                                outer: child_id,
+                                inner_qualified_name: inner_qn_id,
+                                pointerness,
+                                file: file_id,
+                            });
 
                         // Cluster C / C_PROPERTY_EMIT: emit a `Property` node
                         // for the embedded field as well. Go's "embedding" is
@@ -2277,22 +2873,28 @@ fn process_var_declaration_exports_unified(
 /// - `var (x int; y string)` → Grouped declarations
 /// - `var a, b int` → Multi-name declarations
 ///
-/// Only processes package-level declarations (parent is `source_file`).
+/// Process Go `var` / `const` declarations to emit `TypeOf` and
+/// `References` edges.
+///
+/// Originally restricted to package-level declarations (parent is
+/// `source_file`) to avoid leaking per-binding-site variable nodes into
+/// workspace-symbol search. Cluster B1 (Go T1
+/// implements-and-promotion) drops the parent-kind guard so
+/// function-body `var x T` declarations also emit `TypeOf` edges: the
+/// `NodeMetadata::Synthetic` flag (applied below via
+/// [`add_synthetic_variable`] for function-local emissions) keeps the
+/// nodes out of workspace-symbol search, and the per-binding eager
+/// materialisation in `local_scopes.rs` covers the local-identifier
+/// resolution path (`<ident>@<offset>` shape).
 fn process_var_typeof_edges(
     node: Node,
     content: &[u8],
     helper: &mut GraphBuildHelper,
     package: &str,
 ) {
-    // MEDIUM-2 fix: Only process package-level declarations
-    // Check if parent is source_file (package-level)
-    let Some(parent) = node.parent() else {
-        return;
-    };
-    if parent.kind() != "source_file" {
-        // Skip function-local var/const declarations
-        return;
-    }
+    let is_package_level = node
+        .parent()
+        .is_some_and(|parent| parent.kind() == "source_file");
 
     // Collect all var_spec and const_spec nodes (handles both direct and grouped)
     let mut specs = Vec::new();
@@ -2317,7 +2919,7 @@ fn process_var_typeof_edges(
 
     // Process each spec
     for spec in specs {
-        process_single_var_spec(spec, content, helper, package);
+        process_single_var_spec(spec, content, helper, package, is_package_level);
     }
 }
 
@@ -2328,6 +2930,7 @@ fn process_single_var_spec(
     content: &[u8],
     helper: &mut GraphBuildHelper,
     package: &str,
+    is_package_level: bool,
 ) {
     // Extract type annotation if present
     let Some(type_node) = spec.child_by_field_name("type") else {
@@ -2355,11 +2958,35 @@ fn process_single_var_spec(
         // Create qualified variable name
         let qualified_var_name = format!("{package}.{var_name}");
 
-        // Create variable node
-        let var_id = helper.add_variable(&qualified_var_name, Some(span_from_node(name_node)));
+        // Create variable node. Function-body emissions are marked
+        // `NodeMetadata::Synthetic` so they do not leak into
+        // workspace-symbol search; package-level emissions keep the
+        // pre-Cluster-B1 unmarked shape (these are real user-facing
+        // declarations).
+        let var_id = if is_package_level {
+            helper.add_variable(&qualified_var_name, Some(span_from_node(name_node)))
+        } else {
+            add_synthetic_variable(helper, &qualified_var_name, Some(span_from_node(name_node)))
+        };
 
-        // Create type node and TypeOf edge with Variable context
-        let type_id = helper.add_type(&type_name, None);
+        // Create type node and TypeOf edge with Variable context.
+        // Cluster G1 (AC-5 shadow Calls fix per 05_TEST_PLAN.md):
+        // qualify the bare type identifier with the current package
+        // before creating the Type node, so the resulting node's qn
+        // matches the canonical Struct/Interface qn that
+        // `helper.add_struct` / `helper.add_interface` emits for the
+        // same type declaration. Without this, `var o Outer` creates
+        // a Type node with qn `Outer` (unqualified) while the
+        // type's actual Struct node lives at `fx::Outer`, and the
+        // post-Phase-4e `pass_go_method_set::walk_typeof_to_type_node`
+        // can't recover the canonical receiver type for promotion
+        // lookup.
+        let qualified_type_name = if type_name.contains('.') {
+            type_name.clone()
+        } else {
+            format!("{package}.{type_name}")
+        };
+        let type_id = helper.add_type(&qualified_type_name, None);
         helper.add_typeof_edge_with_context(
             var_id,
             type_id,
@@ -2389,6 +3016,178 @@ fn process_single_var_spec(
 /// The map is consumed transitively by
 /// `extract_all_type_names_from_go_type_with_params`, which qualifies bare
 /// `type_identifier` references that match a declared type-parameter name.
+/// Extract a parameter-list AST node's type sequence as a single
+/// comma-separated string suitable for feeding into
+/// [`canonicalise_go_signature`].
+///
+/// Walks the `parameter_list`'s direct children, picking up every
+/// `parameter_declaration` and `variadic_parameter_declaration`. For
+/// shared-type declarations (`a, b int`), the type text is emitted once
+/// per `name` child so the canonical token sequence is `int,int`. Names
+/// are preserved in the emitted text (because the canonical normaliser
+/// strips them as part of rule 2) — the helper does not need to do that
+/// stripping itself. Type-parameter substitution via `type_params` is
+/// applied so receiver-bound generics (`func (l *List[E]) Push(v E)`)
+/// canonicalise to their qualified form.
+///
+/// Returns `None` if the node is not a `parameter_list`; returns
+/// `Some("")` for an empty parameter list `()`.
+fn parameter_list_canonical_text(
+    params_node: Node,
+    content: &[u8],
+    type_params: &HashMap<String, String>,
+) -> Option<String> {
+    if params_node.kind() != "parameter_list" {
+        return None;
+    }
+
+    let mut out_parts: Vec<String> = Vec::new();
+    let mut cursor = params_node.walk();
+    for child in params_node.named_children(&mut cursor) {
+        match child.kind() {
+            "parameter_declaration" => {
+                let Some(type_node) = child.child_by_field_name("type") else {
+                    continue;
+                };
+                let raw = type_node.utf8_text(content).unwrap_or("");
+                let canon = canonicalize_type_text_with_params(raw, type_params);
+                let mut name_cursor = child.walk();
+                let names_count = child
+                    .children_by_field_name("name", &mut name_cursor)
+                    .count();
+                let emit_count = if names_count > 0 { names_count } else { 1 };
+                for _ in 0..emit_count {
+                    out_parts.push(canon.clone());
+                }
+            }
+            "variadic_parameter_declaration" => {
+                let Some(type_node) = child.child_by_field_name("type") else {
+                    continue;
+                };
+                let raw_inner = type_node.utf8_text(content).unwrap_or("");
+                let canon_inner = canonicalize_type_text_with_params(raw_inner, type_params);
+                // Variadic syntax `...T` is preserved by rule 3 in
+                // `canonicalise_go_signature`. We emit the leading
+                // ellipsis so the canonical bytes carry the variadic
+                // discriminator.
+                out_parts.push(format!("...{canon_inner}"));
+            }
+            _ => {}
+        }
+    }
+    Some(out_parts.join(","))
+}
+
+/// Extract the return clause from a function-like AST node as a single
+/// canonical-input string. Three Go shapes are normalised here:
+///
+/// 1. **No return** (`func f()`): no `result` field — returns `""`.
+/// 2. **Single return** (`func f() T`): `result` field is a single
+///    type node — return the type text.
+/// 3. **Multi return** (`func f() (T, U)`): `result` field is a
+///    `parameter_list` — concatenate type tokens with commas and wrap
+///    in parens so the canonical normaliser keeps them grouped.
+///
+/// Named-return shorthand (`func f() (x, y int)`) is handled by the
+/// `parameter_list_canonical_text` path which fans out shared types.
+fn result_clause_canonical_text(
+    func_like_node: Node,
+    content: &[u8],
+    type_params: &HashMap<String, String>,
+) -> String {
+    let Some(result_node) = func_like_node.child_by_field_name("result") else {
+        return String::new();
+    };
+
+    if result_node.kind() == "parameter_list" {
+        // Multi-return form. Build the inner type sequence with the
+        // same shared-type fan-out logic used for parameters, then
+        // wrap in parens so the canonical normaliser sees a tuple.
+        let inner =
+            parameter_list_canonical_text(result_node, content, type_params).unwrap_or_default();
+        if inner.is_empty() {
+            String::new()
+        } else {
+            format!("({inner})")
+        }
+    } else {
+        // Single-type return.
+        let raw = result_node.utf8_text(content).unwrap_or("");
+        canonicalize_type_text_with_params(raw, type_params)
+    }
+}
+
+/// Build the canonical signature for a function-like AST node
+/// (function_declaration, method_declaration, method_elem,
+/// function_type). Concatenates the parameter and result clauses via
+/// the helpers above, then runs the canonical normaliser to collapse
+/// whitespace, erase parameter names, and preserve variadic syntax per
+/// 02_DESIGN §4.1.2.
+///
+/// For method declarations the receiver is **not** included in the
+/// signature — Go method-set comparison treats the receiver as the
+/// "owning type" axis, distinct from the method's own (param, result)
+/// signature. The caller must pass the function-like node whose
+/// `parameters` field excludes the receiver (every Go grammar node
+/// listed above already does this).
+fn canonical_signature_for_func_like(
+    func_like_node: Node,
+    content: &[u8],
+    type_params: &HashMap<String, String>,
+) -> String {
+    let params_text = func_like_node
+        .child_by_field_name("parameters")
+        .and_then(|n| parameter_list_canonical_text(n, content, type_params))
+        .unwrap_or_default();
+    let returns_text = result_clause_canonical_text(func_like_node, content, type_params);
+    canonicalise_go_signature(&params_text, &returns_text)
+}
+
+/// Build the canonical signature for an interface `method_elem` whose
+/// child positions are not exposed via tree-sitter `field_name`s.
+///
+/// The caller has already filtered the method_elem's children into a
+/// `Vec<Node>` of type-shaped positions (everything except the leading
+/// `field_identifier` that names the method). By Go grammar:
+///
+/// - `params_nodes[0]` is the `parameter_list` of parameters (always
+///   present, possibly empty `()`);
+/// - `params_nodes[1]` (if present) is the result clause — either a
+///   `parameter_list` for multi-return or a single type node.
+///
+/// This mirrors the routing in `process_interface_method_elem` exactly
+/// so the signature byte sequence matches what
+/// `canonical_signature_for_func_like` would emit for the same shape
+/// declared as a top-level receiver method.
+fn canonical_signature_for_method_elem(
+    params_nodes: &[Node],
+    content: &[u8],
+    type_params: &HashMap<String, String>,
+) -> String {
+    let params_text = params_nodes
+        .first()
+        .filter(|n| n.kind() == "parameter_list")
+        .and_then(|n| parameter_list_canonical_text(*n, content, type_params))
+        .unwrap_or_default();
+    let returns_text = if let Some(return_node) = params_nodes.get(1) {
+        if return_node.kind() == "parameter_list" {
+            let inner = parameter_list_canonical_text(*return_node, content, type_params)
+                .unwrap_or_default();
+            if inner.is_empty() {
+                String::new()
+            } else {
+                format!("({inner})")
+            }
+        } else {
+            let raw = return_node.utf8_text(content).unwrap_or("");
+            canonicalize_type_text_with_params(raw, type_params)
+        }
+    } else {
+        String::new()
+    };
+    canonicalise_go_signature(&params_text, &returns_text)
+}
+
 fn process_function_parameters(
     func_node: Node,
     func_name: &str,
@@ -3063,6 +3862,57 @@ fn process_interface_method_elem(
 
     // Qualify the method name: Interface.Method
     let qualified_method = format!("{interface_name}.{method_name}");
+
+    // Cluster D3 (Go T1 signature side channel): mint a `Method` node
+    // for this interface method element so the post-Phase-4e
+    // satisfaction pass can discover the interface's method set via
+    // the `<interface_qn>.<method_name>` qualified-name prefix index.
+    // Before D3 the Go plugin only minted Method nodes for receiver-
+    // method declarations and exported interface methods; that meant
+    // unexported interface methods (`Greeting()` on `type Greeter
+    // interface { Greeting() string }`) had no Method node and the
+    // satisfaction predicate would silently miss them. Minting them
+    // here unconditionally is what enables D3's tightened T1.1
+    // predicate (name + canonical signature) to compare interface
+    // methods against candidate methods.
+    //
+    // The accompanying `GoMethodSignatureHint` carries the canonical
+    // signature so the predicate can compare bytes against the
+    // candidate method's signature hint.
+    let visibility = visibility_for_identifier(method_name);
+    let method_node = helper.add_method_with_visibility(
+        &qualified_method,
+        Some(span_from_node(method_elem)),
+        false,
+        false,
+        Some(visibility),
+    );
+
+    // Build a synthetic function-like view of the interface method so
+    // `canonical_signature_for_func_like` can reuse the same
+    // parameter / result extractors. Interface method_elem children do
+    // not carry `parameters` / `result` field names — they are
+    // positional (first parameter_list = parameters; second =
+    // returns). Walk the collected `params_nodes` manually to
+    // canonicalise the signature.
+    let canonical_signature =
+        canonical_signature_for_method_elem(&params_nodes, content, type_params);
+    if !canonical_signature.is_empty() {
+        let file_id = helper.file_id();
+        helper
+            .staging_mut()
+            .go_hints_mut()
+            .method_signatures
+            .push(GoMethodSignatureHint {
+                method_node,
+                canonical_signature,
+                file: file_id,
+            });
+    }
+    // Suppress dead-code warning when the rest of the function does
+    // not consume `method_node` (it remains stored in the graph
+    // arena via `add_method_with_visibility`).
+    let _ = method_node;
 
     // First parameter_list is parameters, second is returns (if present)
     // Or a single type node is the return type
@@ -4696,6 +5546,175 @@ mod tests {
              span emission must be per-name, not per-declaration",
             vparam.entry.start_column,
             kparam.entry.start_column,
+        );
+    }
+
+    // ========================================================================
+    // Cluster B2 (Go T1 implements-and-promotion) — side-channel hint tests
+    // ========================================================================
+
+    /// Cluster B2 acceptance test (per 03_IMPLEMENTATION_PLAN.md): a Go
+    /// file with one value-form embedded struct field produces exactly
+    /// one `GoEmbeddingHint` with `pointerness = Receiver::Value` and
+    /// the canonical embedded type's qualified name.
+    #[test]
+    fn cluster_b2_value_embedding_emits_one_hint() {
+        let source = "package main\n\
+                      \n\
+                      type Inner struct {}\n\
+                      \n\
+                      type Outer struct {\n\
+                      \tInner\n\
+                      }\n";
+        let tree = parse_go(source);
+        let mut staging = StagingGraph::new();
+        let builder = GoGraphBuilder::new(DEFAULT_SCOPE_DEPTH);
+        let result =
+            builder.build_graph(&tree, source.as_bytes(), Path::new("test.go"), &mut staging);
+        assert!(result.is_ok(), "build_graph failed: {result:?}");
+
+        let hints = &staging.go_hints().embeddings;
+        assert_eq!(
+            hints.len(),
+            1,
+            "Expected exactly one GoEmbeddingHint for one embedded field, got {}",
+            hints.len(),
+        );
+        assert_eq!(
+            hints[0].pointerness,
+            GoReceiverPointerness::Value,
+            "Value-form embedding `Inner` must carry pointerness=Value",
+        );
+    }
+
+    /// Pointer-form embedding (`*Inner`) yields a single
+    /// `GoEmbeddingHint` with `pointerness = Receiver::Pointer`.
+    #[test]
+    fn cluster_b2_pointer_embedding_emits_pointer_hint() {
+        let source = "package main\n\
+                      \n\
+                      type Inner struct {}\n\
+                      \n\
+                      type Outer struct {\n\
+                      \t*Inner\n\
+                      }\n";
+        let tree = parse_go(source);
+        let mut staging = StagingGraph::new();
+        let builder = GoGraphBuilder::new(DEFAULT_SCOPE_DEPTH);
+        let result =
+            builder.build_graph(&tree, source.as_bytes(), Path::new("test.go"), &mut staging);
+        assert!(result.is_ok(), "build_graph failed: {result:?}");
+
+        let hints = &staging.go_hints().embeddings;
+        assert_eq!(
+            hints.len(),
+            1,
+            "Expected exactly one GoEmbeddingHint for one embedded field, got {}",
+            hints.len(),
+        );
+        assert_eq!(
+            hints[0].pointerness,
+            GoReceiverPointerness::Pointer,
+            "Pointer-form embedding `*Inner` must carry pointerness=Pointer",
+        );
+    }
+
+    /// Cluster D2.1 (Go T1): a value-receiver method declaration emits
+    /// exactly one `GoMethodReceiverHint` with
+    /// `receiver_pointerness = Receiver::Value` and the canonical
+    /// `<pkg>.<RecvType>` receiver qualified name.
+    #[test]
+    fn cluster_d2_value_receiver_method_emits_value_hint() {
+        let source = "package main\n\
+                      \n\
+                      type Greeter struct{}\n\
+                      func (g Greeter) Hello() {}\n";
+        let tree = parse_go(source);
+        let mut staging = StagingGraph::new();
+        let builder = GoGraphBuilder::new(DEFAULT_SCOPE_DEPTH);
+        let result =
+            builder.build_graph(&tree, source.as_bytes(), Path::new("test.go"), &mut staging);
+        assert!(result.is_ok(), "build_graph failed: {result:?}");
+
+        let hints = &staging.go_hints().method_receivers;
+        assert_eq!(
+            hints.len(),
+            1,
+            "Expected exactly one GoMethodReceiverHint for one method, got {}",
+            hints.len(),
+        );
+        assert_eq!(
+            hints[0].receiver_pointerness,
+            GoReceiverPointerness::Value,
+            "value-receiver method `(g Greeter) Hello()` must carry pointerness=Value",
+        );
+    }
+
+    /// Cluster D2.1 (Go T1): a pointer-receiver method declaration emits
+    /// exactly one `GoMethodReceiverHint` with
+    /// `receiver_pointerness = Receiver::Pointer`. The receiver
+    /// qualified name is the bare `<pkg>.<RecvType>` form, matching
+    /// `strip_receiver_modifiers`'s output so the post-Phase-4e pass
+    /// can look it up against the canonical by-qualified-name index.
+    #[test]
+    fn cluster_d2_pointer_receiver_method_emits_pointer_hint() {
+        let source = "package main\n\
+                      \n\
+                      type Greeter struct{}\n\
+                      func (g *Greeter) Hello() {}\n";
+        let tree = parse_go(source);
+        let mut staging = StagingGraph::new();
+        let builder = GoGraphBuilder::new(DEFAULT_SCOPE_DEPTH);
+        let result =
+            builder.build_graph(&tree, source.as_bytes(), Path::new("test.go"), &mut staging);
+        assert!(result.is_ok(), "build_graph failed: {result:?}");
+
+        let hints = &staging.go_hints().method_receivers;
+        assert_eq!(
+            hints.len(),
+            1,
+            "Expected exactly one GoMethodReceiverHint for one method, got {}",
+            hints.len(),
+        );
+        assert_eq!(
+            hints[0].receiver_pointerness,
+            GoReceiverPointerness::Pointer,
+            "pointer-receiver method `(g *Greeter) Hello()` must carry pointerness=Pointer",
+        );
+    }
+
+    /// Cluster B2 receiver-method-call hints carry the expected
+    /// classification for the four shapes the design enumerates.
+    #[test]
+    fn cluster_b2_local_ident_receiver_emits_hint() {
+        let source = "package main\n\
+                      \n\
+                      type Greeter struct{}\n\
+                      func (g Greeter) Hello() {}\n\
+                      \n\
+                      func use() {\n\
+                      \tvar g Greeter\n\
+                      \tg.Hello()\n\
+                      }\n";
+        let tree = parse_go(source);
+        let mut staging = StagingGraph::new();
+        let builder = GoGraphBuilder::new(DEFAULT_SCOPE_DEPTH);
+        let result =
+            builder.build_graph(&tree, source.as_bytes(), Path::new("test.go"), &mut staging);
+        assert!(result.is_ok(), "build_graph failed: {result:?}");
+
+        let receiver_hints = &staging.go_hints().receiver_calls;
+        // At minimum, the `g.Hello()` call emits one receiver-call hint
+        // classified as `LocalIdent` (Cluster B1's eager binding-site
+        // materialisation makes `g`'s NodeId available for the hint).
+        let local_ident_hits = receiver_hints
+            .iter()
+            .filter(|h| matches!(h.receiver, GoReceiverHintKind::LocalIdent { .. }))
+            .count();
+        assert!(
+            local_ident_hits >= 1,
+            "Expected ≥1 LocalIdent receiver-call hint for `g.Hello()`, \
+             got {local_ident_hits} (all hints = {receiver_hints:?})",
         );
     }
 }

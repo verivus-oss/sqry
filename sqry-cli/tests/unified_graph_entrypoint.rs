@@ -113,6 +113,7 @@ fn edge_metadata_summary(snapshot: &GraphSnapshot, kind: &EdgeKind) -> String {
         EdgeKind::Calls {
             argument_count,
             is_async,
+            ..
         } => format!("calls|argument_count={argument_count}|is_async={is_async}"),
         EdgeKind::References => "references".to_string(),
         EdgeKind::Imports { alias, is_wildcard } => format!(

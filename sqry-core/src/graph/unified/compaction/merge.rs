@@ -40,6 +40,8 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::fmt;
 
+#[cfg(test)]
+use super::super::edge::ResolvedVia;
 use super::super::edge::{DeltaEdge, DeltaOp, EdgeKey, EdgeKind};
 use super::super::file::FileId;
 use super::super::node::NodeId;
@@ -501,6 +503,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             1,
             DeltaOp::Add,
@@ -514,7 +517,8 @@ mod tests {
             merged[0].kind,
             EdgeKind::Calls {
                 argument_count: 0,
-                is_async: false
+                is_async: false,
+                resolved_via: ResolvedVia::Direct,
             }
         );
         assert_eq!(merged[0].seq, 1);
@@ -535,6 +539,7 @@ mod tests {
                 EdgeKind::Calls {
                     argument_count: 0,
                     is_async: false,
+                    resolved_via: ResolvedVia::Direct,
                 },
                 1,
                 DeltaOp::Add,
@@ -545,6 +550,7 @@ mod tests {
                 EdgeKind::Calls {
                     argument_count: 0,
                     is_async: false,
+                    resolved_via: ResolvedVia::Direct,
                 },
                 5,
                 DeltaOp::Add,
@@ -555,6 +561,7 @@ mod tests {
                 EdgeKind::Calls {
                     argument_count: 0,
                     is_async: false,
+                    resolved_via: ResolvedVia::Direct,
                 },
                 3,
                 DeltaOp::Add,
@@ -581,6 +588,7 @@ mod tests {
                 EdgeKind::Calls {
                     argument_count: 0,
                     is_async: false,
+                    resolved_via: ResolvedVia::Direct,
                 },
                 1,
                 DeltaOp::Add,
@@ -591,6 +599,7 @@ mod tests {
                 EdgeKind::Calls {
                     argument_count: 0,
                     is_async: false,
+                    resolved_via: ResolvedVia::Direct,
                 },
                 5,
                 DeltaOp::Remove,
@@ -616,6 +625,7 @@ mod tests {
                 EdgeKind::Calls {
                     argument_count: 0,
                     is_async: false,
+                    resolved_via: ResolvedVia::Direct,
                 },
                 1,
                 DeltaOp::Add,
@@ -626,6 +636,7 @@ mod tests {
                 EdgeKind::Calls {
                     argument_count: 0,
                     is_async: false,
+                    resolved_via: ResolvedVia::Direct,
                 },
                 3,
                 DeltaOp::Remove,
@@ -636,6 +647,7 @@ mod tests {
                 EdgeKind::Calls {
                     argument_count: 0,
                     is_async: false,
+                    resolved_via: ResolvedVia::Direct,
                 },
                 7,
                 DeltaOp::Add,
@@ -662,6 +674,7 @@ mod tests {
                 EdgeKind::Calls {
                     argument_count: 0,
                     is_async: false,
+                    resolved_via: ResolvedVia::Direct,
                 },
                 1,
                 DeltaOp::Add,
@@ -696,6 +709,7 @@ mod tests {
                 EdgeKind::Calls {
                     argument_count: 0,
                     is_async: false,
+                    resolved_via: ResolvedVia::Direct,
                 },
                 1,
                 DeltaOp::Add,
@@ -706,6 +720,7 @@ mod tests {
                 EdgeKind::Calls {
                     argument_count: 0,
                     is_async: false,
+                    resolved_via: ResolvedVia::Direct,
                 },
                 2,
                 DeltaOp::Add,
@@ -727,6 +742,7 @@ mod tests {
                 EdgeKind::Calls {
                     argument_count: 0,
                     is_async: false,
+                    resolved_via: ResolvedVia::Direct,
                 },
                 1,
                 DeltaOp::Add,
@@ -737,6 +753,7 @@ mod tests {
                 EdgeKind::Calls {
                     argument_count: 0,
                     is_async: false,
+                    resolved_via: ResolvedVia::Direct,
                 },
                 2,
                 DeltaOp::Add,
@@ -758,6 +775,7 @@ mod tests {
                 EdgeKind::Calls {
                     argument_count: 0,
                     is_async: false,
+                    resolved_via: ResolvedVia::Direct,
                 },
                 1,
                 DeltaOp::Add,
@@ -768,6 +786,7 @@ mod tests {
                 EdgeKind::Calls {
                     argument_count: 0,
                     is_async: false,
+                    resolved_via: ResolvedVia::Direct,
                 },
                 3,
                 DeltaOp::Remove,
@@ -778,6 +797,7 @@ mod tests {
                 EdgeKind::Calls {
                     argument_count: 0,
                     is_async: false,
+                    resolved_via: ResolvedVia::Direct,
                 },
                 5,
                 DeltaOp::Add,
@@ -789,6 +809,7 @@ mod tests {
                 EdgeKind::Calls {
                     argument_count: 0,
                     is_async: false,
+                    resolved_via: ResolvedVia::Direct,
                 },
                 2,
                 DeltaOp::Add,
@@ -799,6 +820,7 @@ mod tests {
                 EdgeKind::Calls {
                     argument_count: 0,
                     is_async: false,
+                    resolved_via: ResolvedVia::Direct,
                 },
                 4,
                 DeltaOp::Remove,
@@ -874,6 +896,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             42,
             DeltaOp::Add,
@@ -895,6 +918,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             1,
             make_file(1),
@@ -908,6 +932,7 @@ mod tests {
                 EdgeKind::Calls {
                     argument_count: 0,
                     is_async: false,
+                    resolved_via: ResolvedVia::Direct,
                 },
                 5,
                 DeltaOp::Add,
@@ -954,6 +979,7 @@ mod tests {
                     EdgeKind::Calls {
                         argument_count: 0,
                         is_async: false,
+                        resolved_via: ResolvedVia::Direct,
                     },
                     1,
                     DeltaOp::Add,
@@ -965,6 +991,7 @@ mod tests {
                     EdgeKind::Calls {
                         argument_count: 0,
                         is_async: false,
+                        resolved_via: ResolvedVia::Direct,
                     },
                     3,
                     DeltaOp::Add,
@@ -1014,6 +1041,7 @@ mod tests {
                 EdgeKind::Calls {
                     argument_count: 0,
                     is_async: false,
+                    resolved_via: ResolvedVia::Direct,
                 },
                 1,
                 DeltaOp::Add,
@@ -1030,6 +1058,7 @@ mod tests {
                 EdgeKind::Calls {
                     argument_count: 0,
                     is_async: false,
+                    resolved_via: ResolvedVia::Direct,
                 },
                 5,
                 DeltaOp::Remove,
@@ -1063,6 +1092,7 @@ mod tests {
                 EdgeKind::Calls {
                     argument_count: 0,
                     is_async: false,
+                    resolved_via: ResolvedVia::Direct,
                 },
                 3,
                 DeltaOp::Remove,
@@ -1079,6 +1109,7 @@ mod tests {
                 EdgeKind::Calls {
                     argument_count: 0,
                     is_async: false,
+                    resolved_via: ResolvedVia::Direct,
                 },
                 7,
                 DeltaOp::Add,
@@ -1107,6 +1138,7 @@ mod tests {
                 EdgeKind::Calls {
                     argument_count: 0,
                     is_async: false,
+                    resolved_via: ResolvedVia::Direct,
                 },
                 10,
                 DeltaOp::Add,
@@ -1117,6 +1149,7 @@ mod tests {
                 EdgeKind::Calls {
                     argument_count: 0,
                     is_async: false,
+                    resolved_via: ResolvedVia::Direct,
                 },
                 5,
                 DeltaOp::Remove,
@@ -1127,6 +1160,7 @@ mod tests {
                 EdgeKind::Calls {
                     argument_count: 0,
                     is_async: false,
+                    resolved_via: ResolvedVia::Direct,
                 },
                 1,
                 DeltaOp::Add,
@@ -1146,6 +1180,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             1,
             DeltaOp::Add,

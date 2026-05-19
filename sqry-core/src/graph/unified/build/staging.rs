@@ -35,10 +35,13 @@ use std::collections::HashMap;
 
 use std::collections::HashSet;
 
+#[cfg(test)]
+use super::super::edge::ResolvedVia;
 use super::super::edge::{EdgeKind, MqProtocol};
 use super::super::file::FileId;
 use super::super::node::NodeId;
 use super::super::resolution::display_graph_qualified_name;
+use super::super::storage::c_indirect::{BindingSiteKind, IndirectShape, LocalScopeIndex};
 use super::super::storage::{NodeArena, NodeEntry, StringInterner};
 use super::super::string::StringId;
 use super::pass3_intra::PendingEdge;
@@ -99,6 +102,143 @@ pub struct StagingStats {
     pub files_registered: usize,
     /// Number of strings interned.
     pub strings_interned: usize,
+}
+
+// ---------------------------------------------------------------------------
+// C indirect-call precision: per-file staging payload (Phase A, U10).
+// ---------------------------------------------------------------------------
+
+/// Per-file staging payload populated by the C plugin's Phase 1 walkers.
+///
+/// During Phase 1 (parallel parse), the C plugin classifies address-taken
+/// sites, indirect callsites, struct function-pointer field signatures, and
+/// binding-plane entries into this payload. The per-file payload is then
+/// drained during Phase 3 commit (U11) into the workspace-global
+/// [`CIndirectSideTables`](super::super::storage::c_indirect::CIndirectSideTables)
+/// on [`crate::graph::unified::CodeGraph`].
+///
+/// All fields are keyed by **qualified-name strings** rather than `NodeId`s
+/// because the final NodeIds aren't known until after Phase 3 commit +
+/// Phase 4c-prime cross-file unification. U11's drain resolves names →
+/// NodeIds via the unified workspace qualified-name index.
+///
+/// `pending_address_taken_names` carries staging-local [`StringId`]s
+/// (DESIGN §2.5) — the helper interns each name through the standard
+/// per-file staging interner, and U11 resolves the local IDs via the
+/// remap table produced by [`Self::commit_strings`] before looking them
+/// up in the qualified-name index. The remaining payload fields
+/// (`pending_struct_field_signatures`, `pending_bindings`,
+/// `pending_indirect_callsites`) keep their composite qualified-name
+/// strings verbatim because U11 needs the post-unification canonical
+/// names directly, with no remap step in between.
+///
+/// Non-C plugins never construct this payload — the parent
+/// `Option<Box<CIndirectStagingPayload>>` slot on [`StagingGraph`] stays
+/// `None`, keeping the per-file staging buffer's size unchanged for the
+/// other 36 language plugins.
+///
+/// Wire contract: this type is **not** serialised. It is a Phase 1 → Phase
+/// 3 hand-off only. The persisted shape lives on
+/// [`CIndirectSideTables`](super::super::storage::c_indirect::CIndirectSideTables).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct CIndirectStagingPayload {
+    /// Staging-local [`StringId`]s of every function whose address is
+    /// taken anywhere in this file (DESIGN §2.5 pattern table).
+    ///
+    /// Each entry is the local `StringId` returned by the helper's
+    /// standard string interner — interned via the same path as every
+    /// other staging string so U11 can remap local → global IDs through
+    /// the table produced by [`Self::commit_strings`], then resolve each
+    /// global ID to a canonical NodeId via the post-unification
+    /// qualified-name index. The flag is applied via
+    /// [`crate::graph::unified::storage::metadata::NodeFlags::ADDRESS_TAKEN`]
+    /// using `mark_address_taken`.
+    ///
+    /// May contain duplicates within a file (a function can be
+    /// address-taken at multiple sites); U11 deduplicates implicitly via
+    /// idempotent `mark_address_taken` calls. Tests can resolve a
+    /// `StringId` back to its source string via
+    /// [`Self::resolve_local_string`].
+    pub pending_address_taken_names: Vec<StringId>,
+
+    /// Function-pointer field signatures discovered in struct declarations.
+    ///
+    /// Each tuple is `(struct_tag, field_name, signature)`, where
+    /// `signature` is the canonical signature string produced by
+    /// `signature_builder::build_function_signature` (DESIGN §3.1 grammar).
+    /// U11's drain interns each leg and inserts into
+    /// `CIndirectSideTables::struct_field_fnptr`.
+    pub pending_struct_field_signatures: Vec<(String, String, String)>,
+
+    /// Tentative binding entries (designated + positional initializers).
+    ///
+    /// Each entry records a `(struct_tag, field_name) → target_function`
+    /// binding plus the enclosing instance variable name. U11 resolves
+    /// `instance_name` + `target_fn_name` to canonical NodeIds, then
+    /// inserts into `CIndirectSideTables::bindings_by_field`.
+    pub pending_bindings: Vec<PendingBinding>,
+
+    /// Indirect callsites captured during Phase 1.
+    ///
+    /// Each callsite carries the caller's qualified name (resolved to a
+    /// NodeId in U11), use-span (for `LocalScopeIndex::resolve_type`
+    /// lookups in U12's resolver), syntactic shape, argument count, and
+    /// `is_async` flag. U11 drains these into
+    /// `CIndirectSideTables::pending_callsites`.
+    pub pending_indirect_callsites: Vec<PendingIndirectCallsite>,
+
+    /// Per-file block-scope arena (DESIGN §4.1).
+    ///
+    /// The C plugin builds this via `build_local_scope_index`; U11
+    /// transfers it (keyed by `FileId`) into
+    /// `CIndirectSideTables::local_scope_indices`.
+    pub local_scope_index: Option<LocalScopeIndex>,
+}
+
+/// One binding-plane entry staged during Phase 1 (DESIGN §2.5 / §7.1).
+///
+/// Names are kept as strings rather than NodeIds because the final NodeIds
+/// aren't known until after Phase 3 + Phase 4c-prime unification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingBinding {
+    /// Canonical struct tag (e.g. `file_operations`). Matches the qualified
+    /// name used by `helper.add_struct(...)` for the enclosing struct
+    /// declaration.
+    pub struct_tag: String,
+    /// Field name within the struct (e.g. `read`).
+    pub field_name: String,
+    /// Qualified name of the enclosing instance variable (e.g.
+    /// `ext4_file_operations`). Resolved to a NodeId in U11.
+    pub instance_name: String,
+    /// Qualified name of the address-taken target function. Resolved to a
+    /// NodeId in U11.
+    pub target_fn_name: String,
+    /// Designated vs positional initializer (DESIGN §2.5).
+    pub site_kind: BindingSiteKind,
+}
+
+/// One indirect callsite staged during Phase 1 (DESIGN §4.2).
+///
+/// The final `IndirectCallsite` stored on
+/// [`CIndirectSideTables`](super::super::storage::c_indirect::CIndirectSideTables)
+/// uses `caller: NodeId` + `file_id: FileId`; this staging form keeps the
+/// caller's qualified name string (resolved to NodeId in U11) and lets U11
+/// stamp the file_id from the per-file context during drain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingIndirectCallsite {
+    /// Qualified name of the enclosing function/method that issued the call.
+    /// Resolved to a NodeId in U11 via the post-unification qualified-name
+    /// index.
+    pub caller_qualified_name: String,
+    /// Byte range of the callsite expression in the source file.
+    pub use_span: (usize, usize),
+    /// Syntactic shape (pointer-expression vs field-expression call).
+    pub shape: IndirectShape,
+    /// Argument count carried from the Phase 1 `Calls` edge — re-stamped
+    /// on each rewritten precise edge by U12.
+    pub argument_count: u32,
+    /// `is_async` carried from the Phase 1 `Calls` edge.
+    pub is_async: bool,
 }
 
 /// Error during staging commit.
@@ -272,6 +412,301 @@ fn apply_span_to_entry(entry: &mut NodeEntry, span: &crate::graph::node::Span) {
     }
 }
 
+// =======================================================================
+// Go-plugin side-channel hints (Go T1 implements-and-promotion, Cluster A)
+// =======================================================================
+//
+// `GoHints` is a build-time scratch carrier populated by the Go plugin's
+// Phase-1 parser and consumed post-Phase-4e by
+// `pass_go_method_set_satisfaction`. It is **not** part of the graph's
+// persisted state (V10 snapshot is unchanged) — the live build target
+// holds an instance only for the duration of one build, after which the
+// pass drains it.
+//
+// Each hint carries the staging-local `NodeId`s / `StringId`s that the
+// plugin observed. Phase 3's commit path is responsible for remapping
+// those identities to their post-commit global values before flushing
+// the hint set into the live target via
+// [`GraphMutationTarget::go_hints_mut`][crate::graph::unified::mutation_target::GraphMutationTarget::go_hints_mut].
+
+/// Aggregate of all Go-plugin Phase-1 observations the method-set
+/// satisfaction pass needs at run time.
+///
+/// Plugins push into `embeddings`, `named_type_conversions`,
+/// `receiver_calls`, and `method_receivers` during Phase 1 parse; the
+/// pass consumes them after Phase 4e completes.
+#[derive(Debug, Default, Clone)]
+pub struct GoHints {
+    /// Struct embedding observations:
+    /// `outer.<embedded field> : inner_type` per Go spec §"Struct types".
+    pub embeddings: Vec<GoEmbeddingHint>,
+    /// Explicit named-type conversion call sites: `T(expr)` where `T`
+    /// resolves to a named type.
+    pub named_type_conversions: Vec<GoNamedTypeConversionHint>,
+    /// Receiver-method call sites: `recv.M(args)` where `recv` is
+    /// classified by [`GoReceiverHintKind`].
+    pub receiver_calls: Vec<GoReceiverCallHint>,
+    /// Receiver-pointerness side channel for each Go method declaration.
+    /// Recovers the `*T` vs `T` distinction that the Go plugin's
+    /// `strip_receiver_modifiers` collapses out of the canonical
+    /// qualified-name shape. Consumed by Cluster D2 to drive Go-spec
+    /// §"Method sets" value- vs pointer-bucket method-set composition.
+    pub method_receivers: Vec<GoMethodReceiverHint>,
+    /// Canonical signature side channel for each Go method declaration.
+    /// Recovers the parameter+result type sequence at emission time so
+    /// the post-Phase-4e satisfaction pass can compare interface
+    /// method signatures against candidate method signatures byte-for-
+    /// byte. Without this hint the param/return texts would be lost
+    /// behind the Method node's qualified-name shape, exactly as
+    /// pointerness was lost before [`GoMethodReceiverHint`] existed.
+    /// Consumed by Cluster D3's tightened T1.1 satisfaction predicate.
+    pub method_signatures: Vec<GoMethodSignatureHint>,
+    /// Canonical signature side channel for each Go function
+    /// declaration and each named function-type declaration. Drives
+    /// Cluster D3's T1.3 function-signature implementations
+    /// (`Implements(fn → F)` where `F` is a named function type whose
+    /// underlying signature equals `fn`'s signature). The Type-node form
+    /// (named function-type underlying signature) and the
+    /// Function-node form (bare function declaration signature) share
+    /// the same hint struct because both carry the same `(NodeId,
+    /// canonical_signature, FileId)` triple — the consumer
+    /// disambiguates by inspecting the node's kind in the live graph.
+    pub function_signatures: Vec<GoFunctionSignatureHint>,
+}
+
+/// One observed struct embedding.
+///
+/// The pass uses this to build the embedding adjacency graph
+/// (02_DESIGN §4.2 step 1). `pointerness` records whether the embedded
+/// field is `T` (value) or `*T` (pointer) — the Go method-set rules
+/// differ on this.
+#[derive(Debug, Clone, Copy)]
+pub struct GoEmbeddingHint {
+    /// `NodeId` of the outer struct (the one containing the embedded
+    /// field).
+    pub outer: NodeId,
+    /// Interned qualified name of the embedded type, looked up against
+    /// the by-qualified-name index at pass run time.
+    pub inner_qualified_name: StringId,
+    /// Whether the embed is `T` (value) or `*T` (pointer).
+    pub pointerness: crate::graph::unified::mutation_target::Receiver,
+    /// File in which the embedding was observed.
+    pub file: FileId,
+}
+
+/// One observed `T(expr)` named-type conversion call site.
+///
+/// The pass uses this to drive T1.3 function-signature implementations:
+/// when `T` is a named function type, a conversion `T(f)` for a function
+/// `f` whose signature matches `T`'s signature contributes an
+/// `Implements(f → T)` edge.
+#[derive(Debug, Clone, Copy)]
+pub struct GoNamedTypeConversionHint {
+    /// `NodeId` of the call expression (CallSite or equivalent).
+    pub call_site: NodeId,
+    /// Interned qualified name of the target named type `T`.
+    pub target_type_qualified_name: StringId,
+    /// `NodeId` of the argument expression `expr` inside `T(expr)`.
+    pub argument_node: NodeId,
+    /// File in which the conversion was observed.
+    pub file: FileId,
+}
+
+/// One observed `recv.M(args)` receiver-method call.
+///
+/// The pass uses this to shadow `Calls` / `References` edges over
+/// promoted methods (02_DESIGN §4.2 step 5–6). The receiver expression
+/// is classified by [`GoReceiverHintKind`] into one of four resolution
+/// shapes.
+#[derive(Debug, Clone)]
+pub struct GoReceiverCallHint {
+    /// `NodeId` of the call expression.
+    pub call_site: NodeId,
+    /// `NodeId` of the method node the plugin already resolved this
+    /// call to, on the original receiver type. The pass walks
+    /// promotion-chain to mint shadow calls into promoted-method
+    /// shadows.
+    pub callee_method: NodeId,
+    /// Interned method name (e.g. `"M"`).
+    pub method_name: StringId,
+    /// Receiver classification — determines which resolution path the
+    /// pass takes.
+    pub receiver: GoReceiverHintKind,
+    /// Argument count at the call site, mirrors `EdgeKind::Calls
+    /// { argument_count }`.
+    pub argument_count: u8,
+    /// Whether the call expression is awaited (Go: `go func()`-like
+    /// async usage; preserved for parity with `EdgeKind::Calls`).
+    pub is_async: bool,
+    /// File in which the call was observed.
+    pub file: FileId,
+}
+
+/// Receiver-pointerness side channel for one Go method declaration.
+///
+/// Recovers the `*T` vs `T` distinction that the Go plugin's
+/// `strip_receiver_modifiers` (sqry-lang-go/src/relations/graph_builder.rs:1237)
+/// collapses out of the canonical method qualified name. The plugin emits
+/// methods declared with receiver `*T` and methods declared with receiver
+/// `T` under a single canonical qualified-name shape
+/// `<pkg>.<T>.<MethodName>`, which is sufficient for call-resolution but
+/// loses the pointerness signal that the Go method-set rules
+/// (Go spec §"Method sets") rely on:
+///
+/// - `MethodSet(T)` is the set of methods declared with receiver `T`.
+/// - `MethodSet(*T)` is `MethodSet(T)` ∪ methods declared with receiver `*T`.
+///
+/// Cluster D2's T1.1 implicit-interface-satisfaction pass needs this
+/// distinction to compute correct value-bucket vs pointer-bucket method
+/// sets. Without it, D1 conservatively routed every promoted method
+/// through the value bucket; D2's classifier uses this hint to lift
+/// the pointer-only methods out of the value bucket.
+///
+/// The hint is also consumed by D2's tightened shadow-`Calls` /
+/// `References` emission, where it lets the pass distinguish methods
+/// that can be promoted to `S` from methods that can only be promoted
+/// to `*S`.
+#[derive(Debug, Clone, Copy)]
+pub struct GoMethodReceiverHint {
+    /// `NodeId` of the `Method` node minted by the Go plugin's Phase-1
+    /// pass for this method declaration.
+    pub method_node: NodeId,
+    /// Interned qualified name of the receiver type, *without* the
+    /// pointer-prefix and type-argument suffix (i.e. the canonical
+    /// `<pkg>.<T>` form, matching the receiver-side `strip_receiver_modifiers`
+    /// output). Looked up against the by-qualified-name index at pass
+    /// run time to recover the canonical receiver-`Struct` / `Type`
+    /// `NodeId`.
+    pub receiver_type_qualified_name: StringId,
+    /// Whether the method was declared with receiver `*T` (Pointer) or
+    /// `T` (Value). Derived syntactically from the receiver-text's
+    /// leading `*` at hint-emission time.
+    pub receiver_pointerness: crate::graph::unified::mutation_target::Receiver,
+    /// File in which the method was declared.
+    pub file: FileId,
+}
+
+/// Canonical-signature side channel for one Go method declaration.
+///
+/// Recovers the parameter+result lexical sequence collapsed by Cluster
+/// B/C's per-method emission. The plugin records the canonical-signature
+/// bytes computed by
+/// [`canonicalise_go_signature`][crate::graph::unified::build::go_signature::canonicalise_go_signature]
+/// at the receiver-method declaration site (for top-level methods) and
+/// at each `method_elem` inside an interface declaration (for interface
+/// methods). The signature is the same lexical shape the post-Phase-4e
+/// `pass_go_method_set_satisfaction` consumes when comparing a candidate
+/// method against an interface method — keying on canonical bytes
+/// guarantees the comparison is exactly the predicate prescribed by
+/// `docs/development/go-implements-and-promotion/02_DESIGN.md` §4.1.3.
+///
+/// Cluster D3's T1.1 tightened predicate consumes this hint: a method
+/// `m_c` on candidate `C` satisfies interface method `m_I` iff the two
+/// share the same name **and** the same canonical signature. The
+/// previously-shipped Cluster D2 satisfaction predicate (name-only)
+/// remains as a fallback for nodes that lack a signature hint (e.g. unit
+/// test fixtures that mint Method nodes directly without invoking the
+/// plugin); production builds emit a hint for every method node so the
+/// production path always uses the tightened predicate.
+#[derive(Debug, Clone)]
+pub struct GoMethodSignatureHint {
+    /// `NodeId` of the `Method` node the signature describes. For
+    /// top-level method declarations this matches
+    /// [`GoMethodReceiverHint::method_node`]; for interface method
+    /// elements this is the Method node minted inside
+    /// `process_interface_method_elem`.
+    pub method_node: NodeId,
+    /// Canonical signature bytes produced by
+    /// [`canonicalise_go_signature`][crate::graph::unified::build::go_signature::canonicalise_go_signature].
+    /// Stored as a `String` (not `StringId`) because the bytes are
+    /// derived from per-method lexical context and would inflate the
+    /// global interner without measurable lookup-time benefit — the
+    /// satisfaction pass builds an ephemeral `BTreeMap<NodeId, String>`
+    /// and discards it post-pass.
+    pub canonical_signature: String,
+    /// File in which the method was declared.
+    pub file: FileId,
+}
+
+/// Canonical-signature side channel for one Go function declaration or
+/// one named function-type underlying signature.
+///
+/// Drives Cluster D3's T1.3 implementation. Two emission shapes share
+/// this hint:
+///
+/// 1. **Function declarations** (`func foo(x int) error { ... }`):
+///    `function_node` is the `NodeKind::Function` NodeId; the canonical
+///    signature is the function's own param+result. The bare function
+///    becomes a T1.3 candidate when its signature matches a named
+///    function-type's underlying signature.
+/// 2. **Named function types** (`type HandlerFunc func(w
+///    http.ResponseWriter, r *http.Request)`): `function_node` is the
+///    `NodeKind::Type` NodeId for the named type; the canonical
+///    signature is the **underlying** function-type's param+result. The
+///    Type node is the T1.3 *target* of an `Implements(fn → F)` edge.
+///
+/// Both shapes are unioned because the consumer (the T1.3 pass) needs a
+/// single `NodeId → canonical_signature` map keyed by node identity, and
+/// the two NodeKind branches are disambiguated at consumption time by
+/// inspecting `graph.nodes().get(function_node).kind`.
+#[derive(Debug, Clone)]
+pub struct GoFunctionSignatureHint {
+    /// `NodeId` of either a `NodeKind::Function` (bare-function shape)
+    /// or a `NodeKind::Type` (named function-type shape).
+    pub function_node: NodeId,
+    /// Canonical signature bytes — for function declarations, the
+    /// function's own signature; for named function-type declarations,
+    /// the underlying `func(...)` signature.
+    pub canonical_signature: String,
+    /// File in which the declaration was observed.
+    pub file: FileId,
+}
+
+/// Receiver-expression shape, classifying how the pass resolves the
+/// receiver's type at run time.
+///
+/// 02_DESIGN §3.2 enumerates these four shapes verbatim; each carries
+/// just enough information for the pass to walk the right edges.
+#[derive(Debug, Clone)]
+pub enum GoReceiverHintKind {
+    /// `T.M()` — the receiver is a type-prefixed identifier. The pass
+    /// resolves `type_text` to the canonical `Type` `NodeId` via the
+    /// by-qualified-name index.
+    TypePrefixed {
+        /// Source-text form of the type prefix (e.g. `"pkg.Outer"`).
+        type_text: String,
+    },
+    /// `(*T).M()` — pointer-prefixed receiver text. Same resolution
+    /// path as `TypePrefixed`, but the pass treats the resolved type
+    /// under `MethodSet(*T)` instead of `MethodSet(T)`.
+    PointerPrefixed {
+        /// Source-text form of the type prefix without the leading `*`
+        /// (e.g. `"pkg.Outer"`).
+        type_text: String,
+    },
+    /// `o.M()` where `o` is a local binding (short-var declaration,
+    /// `var`-spec, function parameter, method receiver). The pass
+    /// resolves the receiver type by walking the `TypeOf` edge from
+    /// `binding_local` — the load-bearing path for AC-5
+    /// (`var o Outer; o.Greeting()`).
+    ///
+    /// Cluster B1's eager binding-site materialisation is the
+    /// prerequisite that guarantees `binding_local` is non-stub and
+    /// carries a `TypeOf` edge.
+    LocalIdent {
+        /// `NodeId` of the local binding (Variable / Parameter).
+        binding_local: NodeId,
+    },
+    /// `f().M()` — receiver is the return value of another call. The
+    /// pass resolves `callee_qn` to the callee's NodeId, then follows
+    /// the callee's return-type `TypeOf` edge.
+    CallReturn {
+        /// Qualified name of the callee whose return value is the
+        /// receiver.
+        callee_qn: String,
+    },
+}
+
 /// Staging buffer for transactional graph builds.
 ///
 /// Collects all graph mutations in a buffer. Mutations are only
@@ -296,6 +731,23 @@ pub struct StagingGraph {
     ///
     /// Merged into the graph's `NodeMetadataStore` during commit.
     macro_metadata: crate::graph::unified::storage::metadata::NodeMetadataStore,
+    /// C indirect-call precision staging payload (Phase A, U10).
+    ///
+    /// Allocated lazily — non-C plugins leave this `None`, so the per-file
+    /// staging buffer's size is unchanged for the 36 non-C language
+    /// plugins. The C plugin's Phase 1 walkers (U10) populate the payload
+    /// via [`Self::c_indirect_mut`]; Phase 3 commit (U11) drains it via
+    /// [`Self::take_c_indirect`] into the workspace-global
+    /// [`CIndirectSideTables`](super::super::storage::c_indirect::CIndirectSideTables).
+    c_indirect: Option<Box<CIndirectStagingPayload>>,
+    /// Go-plugin side-channel hints (Cluster A foundation).
+    ///
+    /// Populated by the Go plugin's Phase-1 parse via
+    /// [`StagingGraph::go_hints_mut`]; drained by the post-Phase-4e
+    /// `pass_go_method_set_satisfaction` after Phase 3 commit has
+    /// remapped the embedded staging-local `NodeId`s / `StringId`s.
+    /// Plugins for other languages leave this empty.
+    go_hints: GoHints,
 }
 
 impl StagingGraph {
@@ -315,7 +767,30 @@ impl StagingGraph {
             next_node_index: 0,
             confidence: None,
             macro_metadata: crate::graph::unified::storage::metadata::NodeMetadataStore::new(),
+            c_indirect: None,
+            go_hints: GoHints::default(),
         }
+    }
+
+    /// Shared borrow of the Go-plugin side-channel hint buffers
+    /// (Cluster A foundation).
+    ///
+    /// Returns the empty default on non-Go staging graphs. The pass
+    /// reads through this accessor after Phase 3 commit has remapped
+    /// the embedded staging-local identities.
+    #[must_use]
+    pub fn go_hints(&self) -> &GoHints {
+        &self.go_hints
+    }
+
+    /// Mutable borrow of the Go-plugin side-channel hint buffers
+    /// (Cluster A foundation).
+    ///
+    /// Used by the Go plugin's Phase-1 parser to push
+    /// [`GoEmbeddingHint`] / [`GoNamedTypeConversionHint`] /
+    /// [`GoReceiverCallHint`] entries during AST traversal.
+    pub fn go_hints_mut(&mut self) -> &mut GoHints {
+        &mut self.go_hints
     }
 
     /// Approximate memory footprint of this staging buffer in bytes.
@@ -558,6 +1033,44 @@ impl StagingGraph {
         &mut self,
     ) -> crate::graph::unified::storage::metadata::NodeMetadataStore {
         std::mem::take(&mut self.macro_metadata)
+    }
+
+    /// Immutable accessor for the C indirect-call staging payload, if any.
+    ///
+    /// Returns `None` for non-C plugins (the default) or for C files that
+    /// produced no indirect-call instrumentation (e.g. empty translation
+    /// units). Exposed primarily for `sqry-lang-c` integration tests that
+    /// need to inspect the per-file payload after `build_graph` returns.
+    /// Phase 3 commit (U11) consumes the payload via
+    /// [`Self::take_c_indirect`].
+    #[must_use]
+    pub fn c_indirect(&self) -> Option<&CIndirectStagingPayload> {
+        self.c_indirect.as_deref()
+    }
+
+    /// Mutable accessor for the C indirect-call staging payload, lazily
+    /// allocating it on first access.
+    ///
+    /// Non-C plugins never call this — the parent `Option` stays `None`,
+    /// keeping `StagingGraph` size unchanged for the other 36 language
+    /// plugins. The C plugin's Phase 1 walkers (U10) call this via
+    /// [`super::helper::GraphBuildHelper::c_indirect_mut`] to push
+    /// address-taken names, indirect callsites, binding entries, and
+    /// struct function-pointer signatures.
+    #[must_use]
+    pub fn c_indirect_mut(&mut self) -> &mut CIndirectStagingPayload {
+        self.c_indirect
+            .get_or_insert_with(|| Box::new(CIndirectStagingPayload::default()))
+    }
+
+    /// Take the C indirect-call staging payload, leaving `None` behind.
+    ///
+    /// Used by Phase 3 commit (U11) to drain the per-file payload into the
+    /// workspace-global
+    /// [`CIndirectSideTables`](super::super::storage::c_indirect::CIndirectSideTables).
+    #[must_use]
+    pub fn take_c_indirect(&mut self) -> Option<Box<CIndirectStagingPayload>> {
+        self.c_indirect.take()
     }
 
     /// Commit all staged operations to the given arena.
@@ -956,6 +1469,7 @@ impl StagingGraph {
         self.next_node_index = 0;
         self.stats = StagingStats::default();
         self.confidence = None;
+        self.c_indirect = None;
     }
 
     /// Clear the staging buffer after successful commit.
@@ -1179,6 +1693,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file_id,
         );
@@ -1233,6 +1748,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file_id,
         );
@@ -1261,6 +1777,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file_id,
         );
@@ -1292,6 +1809,7 @@ mod tests {
                 kind: EdgeKind::Calls {
                     argument_count: 0,
                     is_async: false,
+                    resolved_via: ResolvedVia::Direct,
                 },
                 file: file_id,
                 spans: vec![],
@@ -1744,6 +2262,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file_id,
         );
@@ -1959,6 +2478,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file_id,
         );
@@ -1995,6 +2515,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 1,
                 is_async: true,
+                resolved_via: ResolvedVia::Direct,
             },
             file_id,
         );
@@ -2008,7 +2529,8 @@ mod tests {
             edges[0].kind,
             EdgeKind::Calls {
                 argument_count: 1,
-                is_async: true
+                is_async: true,
+                resolved_via: ResolvedVia::Direct,
             }
         ));
         assert_eq!(edges[0].file, file_id);
@@ -2042,6 +2564,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file_id,
         );
@@ -2233,6 +2756,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file_id,
         );

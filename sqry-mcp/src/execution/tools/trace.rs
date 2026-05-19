@@ -797,6 +797,8 @@ mod tests {
     use sqry_core::graph::unified::compaction::snapshot_edges;
     use sqry_core::graph::unified::concurrent::CodeGraph;
     use sqry_core::graph::unified::edge::EdgeKind;
+    #[cfg(test)]
+    use sqry_core::graph::unified::edge::ResolvedVia;
     use sqry_core::graph::unified::node::NodeKind;
     use sqry_core::graph::unified::storage::NodeEntry;
     use std::path::Path;
@@ -831,6 +833,7 @@ mod tests {
         let call = EdgeKind::Calls {
             argument_count: 0,
             is_async: false,
+            resolved_via: ResolvedVia::Direct,
         };
 
         // A→B→C→A cycle
@@ -855,6 +858,7 @@ mod tests {
         let call_kind = EdgeKind::Calls {
             argument_count: 0,
             is_async: false,
+            resolved_via: ResolvedVia::Direct,
         };
         let scc = SccData::compute_tarjan(&adjacency, &call_kind).unwrap();
         let dag = CondensationDag::build(&scc, &adjacency).unwrap();
@@ -998,6 +1002,7 @@ mod tests {
         let call = EdgeKind::Calls {
             argument_count: 0,
             is_async: false,
+            resolved_via: ResolvedVia::Direct,
         };
         graph.edges_mut().add_edge(node, node, call, file);
 

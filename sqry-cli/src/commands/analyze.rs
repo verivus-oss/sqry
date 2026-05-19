@@ -267,7 +267,7 @@ mod tests {
         AnalysisIdentity, persist_condensation, persist_scc,
     };
     use sqry_core::graph::unified::analysis::scc::SccData;
-    use sqry_core::graph::unified::edge::EdgeKind;
+    use sqry_core::graph::unified::edge::{EdgeKind, ResolvedVia};
     use sqry_core::graph::unified::persistence::GraphStorage;
     use std::time::Duration;
 
@@ -311,6 +311,7 @@ mod tests {
                 EdgeKind::Calls {
                     argument_count: 0,
                     is_async: false,
+                    resolved_via: ResolvedVia::Direct,
                 },
             ),
             (
@@ -440,6 +441,7 @@ mod tests {
         let calls_kind = EdgeKind::Calls {
             argument_count: 0,
             is_async: false,
+            resolved_via: ResolvedVia::Direct,
         };
         let imports_kind = EdgeKind::Imports {
             alias: None,
@@ -504,6 +506,7 @@ mod tests {
         let calls_kind = EdgeKind::Calls {
             argument_count: 0,
             is_async: false,
+            resolved_via: ResolvedVia::Direct,
         };
         let imports_kind = EdgeKind::Imports {
             alias: None,
@@ -588,6 +591,7 @@ mod tests {
         let calls_kind = EdgeKind::Calls {
             argument_count: 0,
             is_async: false,
+            resolved_via: ResolvedVia::Direct,
         };
         let imports_kind = EdgeKind::Imports {
             alias: None,

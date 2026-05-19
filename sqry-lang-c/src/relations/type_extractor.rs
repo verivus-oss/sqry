@@ -22,6 +22,90 @@
 
 use tree_sitter::Node;
 
+/// Width-alias normalisation table (DESIGN §3.2 / SPEC §3.2.1).
+///
+/// Maps every width-aliased C base-type token to its canonical
+/// equivalence-class representative. The table covers six equivalence
+/// classes:
+///
+/// | Canonical | Source tokens                                                                          |
+/// |-----------|----------------------------------------------------------------------------------------|
+/// | `int`     | `signed int`, `unsigned int`, `int`, `int8_t`, `uint8_t`, `int16_t`, `uint16_t`, `int32_t`, `uint32_t` |
+/// | `long`    | `long`, `int64_t`, `uint64_t`, `size_t`, `ssize_t`, `ptrdiff_t`, `off_t`, `loff_t`     |
+/// | `char`    | `char`, `signed char`, `unsigned char`, `__u8`, `u8`                                   |
+/// | `bool`    | `_Bool`, `bool`                                                                        |
+/// | `float`   | `float`, `__fp16`                                                                      |
+/// | `double`  | `double`, `long double`                                                                |
+///
+/// Normalisation runs over **base type tokens only** — it never sees
+/// declarator structure (pointer depth, array decay, function-pointer
+/// opacity) and never participates in qualifier stripping. Tokens not
+/// listed here pass through unchanged (identity), so non-aliased types
+/// such as `struct foo` or typedef names are unaffected.
+///
+/// Consumed by [`normalize_width_alias`] and (in a follow-up Phase A
+/// unit, U07_SIGNATURE_BUILDER) by the canonical type-signature builder
+/// in `sqry-lang-c/src/relations/signature_builder.rs`. The unit-tests
+/// in `width_alias_tests` exercise every row.
+#[allow(dead_code)] // wired by U07_SIGNATURE_BUILDER in a follow-up commit on this branch
+const WIDTH_ALIAS_TABLE: &[(&str, &str)] = &[
+    // Canonical → `int`
+    ("signed int", "int"),
+    ("unsigned int", "int"),
+    ("int", "int"),
+    ("int8_t", "int"),
+    ("uint8_t", "int"),
+    ("int16_t", "int"),
+    ("uint16_t", "int"),
+    ("int32_t", "int"),
+    ("uint32_t", "int"),
+    // Canonical → `long`
+    ("long", "long"),
+    ("int64_t", "long"),
+    ("uint64_t", "long"),
+    ("size_t", "long"),
+    ("ssize_t", "long"),
+    ("ptrdiff_t", "long"),
+    ("off_t", "long"),
+    ("loff_t", "long"),
+    // Canonical → `char`
+    ("char", "char"),
+    ("signed char", "char"),
+    ("unsigned char", "char"),
+    ("__u8", "char"),
+    ("u8", "char"),
+    // Canonical → `bool`
+    ("_Bool", "bool"),
+    ("bool", "bool"),
+    // Canonical → `float`
+    ("float", "float"),
+    ("__fp16", "float"),
+    // Canonical → `double`
+    ("double", "double"),
+    ("long double", "double"),
+];
+
+/// Normalise a C base-type token to its width-alias canonical form.
+///
+/// Looks `token` up in [`WIDTH_ALIAS_TABLE`]; on a hit returns the
+/// canonical equivalence-class representative, on a miss returns the
+/// input unchanged. The lookup is a linear scan over fewer than 30
+/// entries — measurably cheaper than a `HashMap` round-trip at this
+/// size, and keeps the table `const`-allocatable.
+///
+/// This function operates on base-type tokens only (per DESIGN §3.2);
+/// callers are responsible for stripping qualifiers and declarator
+/// structure before invoking it.
+#[allow(dead_code)] // consumed by U07_SIGNATURE_BUILDER in a follow-up commit on this branch
+pub(crate) fn normalize_width_alias(token: &str) -> &str {
+    for (source, canonical) in WIDTH_ALIAS_TABLE {
+        if *source == token {
+            return canonical;
+        }
+    }
+    token
+}
+
 /// Extract all type names referenced by a C type node.
 ///
 /// This function recursively traverses C type nodes and declarators to extract
@@ -411,5 +495,201 @@ mod tests {
         let types = extract_all_type_names_from_c_type(node, code.as_bytes());
         // Tag names now include struct/union/enum prefix to avoid namespace collisions
         assert_eq!(types, vec!["struct User"]);
+    }
+}
+
+#[cfg(test)]
+mod width_alias_tests {
+    //! TEST:c-icall-precision-015 — every row of `WIDTH_ALIAS_TABLE` plus
+    //! the identity (no-match) case. Verifies SPEC §3.2.1 / DESIGN §3.2
+    //! width-alias equivalence classes.
+    use super::{WIDTH_ALIAS_TABLE, normalize_width_alias};
+
+    // ----- Equivalence class: `int` -----
+
+    #[test]
+    fn normalizes_signed_int_to_int() {
+        assert_eq!(normalize_width_alias("signed int"), "int");
+    }
+
+    #[test]
+    fn normalizes_unsigned_int_to_int() {
+        assert_eq!(normalize_width_alias("unsigned int"), "int");
+    }
+
+    #[test]
+    fn normalizes_int_to_int_identity() {
+        assert_eq!(normalize_width_alias("int"), "int");
+    }
+
+    #[test]
+    fn normalizes_int8_t_to_int() {
+        assert_eq!(normalize_width_alias("int8_t"), "int");
+    }
+
+    #[test]
+    fn normalizes_uint8_t_to_int() {
+        assert_eq!(normalize_width_alias("uint8_t"), "int");
+    }
+
+    #[test]
+    fn normalizes_int16_t_to_int() {
+        assert_eq!(normalize_width_alias("int16_t"), "int");
+    }
+
+    #[test]
+    fn normalizes_uint16_t_to_int() {
+        assert_eq!(normalize_width_alias("uint16_t"), "int");
+    }
+
+    #[test]
+    fn normalizes_int32_t_to_int() {
+        assert_eq!(normalize_width_alias("int32_t"), "int");
+    }
+
+    #[test]
+    fn normalizes_uint32_t_to_int() {
+        assert_eq!(normalize_width_alias("uint32_t"), "int");
+    }
+
+    // ----- Equivalence class: `long` -----
+
+    #[test]
+    fn normalizes_long_to_long_identity() {
+        assert_eq!(normalize_width_alias("long"), "long");
+    }
+
+    #[test]
+    fn normalizes_int64_t_to_long() {
+        assert_eq!(normalize_width_alias("int64_t"), "long");
+    }
+
+    #[test]
+    fn normalizes_uint64_t_to_long() {
+        assert_eq!(normalize_width_alias("uint64_t"), "long");
+    }
+
+    #[test]
+    fn normalizes_size_t_to_long() {
+        assert_eq!(normalize_width_alias("size_t"), "long");
+    }
+
+    #[test]
+    fn normalizes_ssize_t_to_long() {
+        assert_eq!(normalize_width_alias("ssize_t"), "long");
+    }
+
+    #[test]
+    fn normalizes_ptrdiff_t_to_long() {
+        assert_eq!(normalize_width_alias("ptrdiff_t"), "long");
+    }
+
+    #[test]
+    fn normalizes_off_t_to_long() {
+        assert_eq!(normalize_width_alias("off_t"), "long");
+    }
+
+    #[test]
+    fn normalizes_loff_t_to_long() {
+        assert_eq!(normalize_width_alias("loff_t"), "long");
+    }
+
+    // ----- Equivalence class: `char` -----
+
+    #[test]
+    fn normalizes_char_to_char_identity() {
+        assert_eq!(normalize_width_alias("char"), "char");
+    }
+
+    #[test]
+    fn normalizes_signed_char_to_char() {
+        assert_eq!(normalize_width_alias("signed char"), "char");
+    }
+
+    #[test]
+    fn normalizes_unsigned_char_to_char() {
+        assert_eq!(normalize_width_alias("unsigned char"), "char");
+    }
+
+    #[test]
+    fn normalizes_kernel_u8_to_char() {
+        assert_eq!(normalize_width_alias("__u8"), "char");
+    }
+
+    #[test]
+    fn normalizes_u8_to_char() {
+        assert_eq!(normalize_width_alias("u8"), "char");
+    }
+
+    // ----- Equivalence class: `bool` -----
+
+    #[test]
+    fn normalizes_c99_bool_to_bool() {
+        assert_eq!(normalize_width_alias("_Bool"), "bool");
+    }
+
+    #[test]
+    fn normalizes_bool_to_bool_identity() {
+        assert_eq!(normalize_width_alias("bool"), "bool");
+    }
+
+    // ----- Equivalence class: `float` -----
+
+    #[test]
+    fn normalizes_float_to_float_identity() {
+        assert_eq!(normalize_width_alias("float"), "float");
+    }
+
+    #[test]
+    fn normalizes_fp16_to_float() {
+        assert_eq!(normalize_width_alias("__fp16"), "float");
+    }
+
+    // ----- Equivalence class: `double` -----
+
+    #[test]
+    fn normalizes_double_to_double_identity() {
+        assert_eq!(normalize_width_alias("double"), "double");
+    }
+
+    #[test]
+    fn normalizes_long_double_to_double() {
+        assert_eq!(normalize_width_alias("long double"), "double");
+    }
+
+    // ----- Identity / negative case -----
+
+    #[test]
+    fn unknown_token_returns_itself() {
+        assert_eq!(normalize_width_alias("foo"), "foo");
+    }
+
+    #[test]
+    fn unknown_struct_token_returns_itself() {
+        // Real-world non-aliased base tokens (struct tags, typedef
+        // identifiers) must pass through unchanged.
+        assert_eq!(
+            normalize_width_alias("struct file_operations"),
+            "struct file_operations"
+        );
+        assert_eq!(normalize_width_alias("MyTypedef"), "MyTypedef");
+        assert_eq!(normalize_width_alias(""), "");
+    }
+
+    #[test]
+    fn table_covers_every_design_row() {
+        // Guard against accidental row deletion: count source tokens
+        // listed in DESIGN §3.2 and compare against the table length.
+        // 9 (int) + 8 (long) + 5 (char) + 2 (bool) + 2 (float) + 2 (double) = 28.
+        assert_eq!(WIDTH_ALIAS_TABLE.len(), 28);
+    }
+
+    #[test]
+    fn table_canonicals_are_self_normalising() {
+        // Every canonical token must normalise to itself — fundamental
+        // closure property of an equivalence-class projection.
+        for canonical in ["int", "long", "char", "bool", "float", "double"] {
+            assert_eq!(normalize_width_alias(canonical), canonical);
+        }
     }
 }

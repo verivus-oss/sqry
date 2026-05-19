@@ -234,7 +234,7 @@ pub fn my_derive(input: TokenStream) -> TokenStream {
 
         classify_proc_macro(func, source.as_bytes(), func_id, &mut store);
 
-        let meta = store.get(func_id).expect("metadata should be stored");
+        let meta = store.get_macro(func_id).expect("metadata should be stored");
         assert_eq!(meta.proc_macro_kind, Some(ProcMacroFunctionKind::Derive));
         assert_eq!(meta.macro_source.as_deref(), Some("MyDerive"));
     }
@@ -254,7 +254,7 @@ pub fn my_attr(attr: TokenStream, item: TokenStream) -> TokenStream {
 
         classify_proc_macro(func, source.as_bytes(), func_id, &mut store);
 
-        let meta = store.get(func_id).expect("metadata should be stored");
+        let meta = store.get_macro(func_id).expect("metadata should be stored");
         assert_eq!(meta.proc_macro_kind, Some(ProcMacroFunctionKind::Attribute));
     }
 
@@ -273,7 +273,7 @@ pub fn my_macro(input: TokenStream) -> TokenStream {
 
         classify_proc_macro(func, source.as_bytes(), func_id, &mut store);
 
-        let meta = store.get(func_id).expect("metadata should be stored");
+        let meta = store.get_macro(func_id).expect("metadata should be stored");
         assert_eq!(
             meta.proc_macro_kind,
             Some(ProcMacroFunctionKind::FunctionLike)

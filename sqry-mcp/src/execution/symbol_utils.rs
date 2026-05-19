@@ -64,7 +64,7 @@ pub(crate) fn get_macro_metadata_for_node(
 ) -> Option<MacroMetadataResponse> {
     snapshot
         .macro_metadata()
-        .get(node_id)
+        .get_macro(node_id)
         .and_then(macro_metadata_to_response)
 }
 
@@ -82,18 +82,18 @@ pub(crate) fn get_classpath_provenance_for_node(
     snapshot: &GraphSnapshot,
     node_id: NodeId,
 ) -> Option<super::types::ProvenanceData> {
-    use sqry_core::graph::unified::storage::NodeMetadata;
+    use sqry_core::graph::unified::storage::TypedMetadata;
 
     // Strategy 1: Direct metadata lookup.
-    if let Some(metadata) = snapshot.macro_metadata().get_metadata(node_id) {
+    if let Some(metadata) = snapshot.macro_metadata().get_typed(node_id) {
         return match metadata {
-            NodeMetadata::Classpath(cp) => Some(super::types::ProvenanceData {
+            TypedMetadata::Classpath(cp) => Some(super::types::ProvenanceData {
                 source: "classpath",
                 coordinates: cp.coordinates.clone(),
                 is_direct: cp.is_direct_dependency,
                 jar_path: Some(cp.jar_path.clone()),
             }),
-            NodeMetadata::Macro(_) | NodeMetadata::Synthetic => None,
+            TypedMetadata::Macro(_) => None,
         };
     }
 

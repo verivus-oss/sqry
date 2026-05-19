@@ -4,6 +4,8 @@
 //! Consumer crates (LSP, MCP, CLI) convert `TraversalResult` into their
 //! protocol-specific response types.
 
+#[cfg(test)]
+use super::edge::kind::ResolvedVia;
 use super::edge::kind::{EdgeKind, ExportKind};
 use super::materialize::MaterializedNode;
 
@@ -214,6 +216,7 @@ mod tests {
         let edge = EdgeKind::Calls {
             argument_count: 2,
             is_async: true,
+            resolved_via: ResolvedVia::Direct,
         };
         let classified = EdgeClassification::from(&edge);
         assert_eq!(
@@ -594,6 +597,7 @@ mod tests {
         let edge = EdgeKind::Calls {
             argument_count: 0,
             is_async: false,
+            resolved_via: ResolvedVia::Direct,
         };
         let classified = EdgeClassification::from(&edge);
         assert_eq!(

@@ -586,9 +586,20 @@ fn plan_not_in_ka_fields_parses_real_plan() {
         "edge_provenance",
         "scope_provenance_store",
         "file_segments",
+        // Phase A U09 — `c_indirect_tables: Option<CIndirectSideTables>`
+        // joins the exclusion list because the inner maps key on
+        // NodeId/StringId/FileId but do NOT carry NodeId-bearing payloads
+        // onto the publish boundary. See plan §K "Other fields NOT in
+        // K.A" for the documented justification.
+        "c_indirect_tables",
         "fact_epoch",
         "epoch",
         "confidence",
+        // Go T1 implements-and-promotion (Cluster A) — build-time scratch
+        // side-channel that the Go plugin populates and the post-
+        // Phase-4e pass drains before Pass 5; never reaches publish with
+        // un-drained NodeId hints. See 02_DESIGN §3.2 + §6.
+        "go_hints",
     ]
     .iter()
     .map(|s| (*s).to_string())

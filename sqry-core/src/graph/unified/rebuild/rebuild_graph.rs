@@ -93,6 +93,7 @@ use crate::graph::unified::concurrent::CodeGraph;
 use crate::graph::unified::edge::bidirectional::BidirectionalEdgeStore;
 use crate::graph::unified::node::NodeId;
 use crate::graph::unified::storage::arena::NodeArena;
+use crate::graph::unified::storage::c_indirect::CIndirectSideTables;
 use crate::graph::unified::storage::edge_provenance::EdgeProvenanceStore;
 use crate::graph::unified::storage::indices::AuxiliaryIndices;
 use crate::graph::unified::storage::interner::StringInterner;
@@ -163,6 +164,17 @@ macro_rules! sqry_graph_fields {
             pub(crate) shadow_table: ShadowTable,
             pub(crate) scope_provenance_store: ScopeProvenanceStore,
             pub(crate) file_segments: FileSegmentTable,
+            /// Phase A (U09): C indirect-call resolver side tables.
+            /// `None` outside C workspaces; cloned through the rebuild
+            /// pipeline so an in-flight rebuild preserves the side
+            /// tables already committed on the source graph.
+            pub(crate) c_indirect_tables: Option<CIndirectSideTables>,
+            /// Build-time scratch side-channel for the Go plugin's
+            /// post-Phase-4e `pass_go_method_set_satisfaction` (Cluster
+            /// A of the Go T1 implements-and-promotion design). Mirror
+            /// of `CodeGraph::go_hints`; held by value (no Arc) for
+            /// the same rationale as on `CodeGraph`.
+            pub(crate) go_hints: $crate::graph::unified::build::staging::GoHints,
             /// Active tombstone set during finalize steps 2–7.
             /// Populated by `RebuildGraph::remove_file` /
             /// `RebuildGraph::tombstone` (added by Task 4 Step 4) and
@@ -202,6 +214,8 @@ macro_rules! sqry_graph_fields {
             shadow_table,
             scope_provenance_store,
             file_segments,
+            c_indirect_tables,
+            go_hints,
         } = $this;
         RebuildGraph {
             nodes: (**nodes).clone(),
@@ -220,6 +234,8 @@ macro_rules! sqry_graph_fields {
             shadow_table: (**shadow_table).clone(),
             scope_provenance_store: (**scope_provenance_store).clone(),
             file_segments: (**file_segments).clone(),
+            c_indirect_tables: c_indirect_tables.clone(),
+            go_hints: go_hints.clone(),
             tombstones: ::std::collections::HashSet::new(),
             drained_tombstones: ::std::collections::HashSet::new(),
         }
@@ -248,6 +264,8 @@ macro_rules! sqry_graph_fields {
             "shadow_table",
             "scope_provenance_store",
             "file_segments",
+            "c_indirect_tables",
+            "go_hints",
         ]
     };
 }
@@ -732,7 +750,7 @@ impl RebuildGraph {
         // is the point at which the rebuild-local interner becomes
         // immutable (step 1's freeze).
         // ----------------------------------------------------------------
-        let graph = CodeGraph::__assemble_from_rebuild_parts_internal(
+        let mut graph = CodeGraph::__assemble_from_rebuild_parts_internal(
             self.nodes,
             self.edges,
             self.strings,
@@ -749,7 +767,13 @@ impl RebuildGraph {
             self.shadow_table,
             self.scope_provenance_store,
             self.file_segments,
+            self.go_hints,
         );
+        // Phase A (U09): the assembled `CodeGraph` resets
+        // `c_indirect_tables` to `None`. Re-install the rebuild's owned
+        // value so an in-flight rebuild preserves side tables already
+        // committed on the source graph.
+        graph.set_c_indirect_tables(self.c_indirect_tables);
 
         // ----------------------------------------------------------------
         // Steps 13 + 14 — (debug) Publish-boundary invariants.
@@ -1269,8 +1293,8 @@ mod tests {
         assert!(finalized.nodes().get(c).is_none());
         // Step 4 must compact the auxiliary indices in lockstep, so
         // the tombstoned ids do not linger in any index.
-        use crate::graph::unified::storage::metadata::NodeMetadata;
-        let _ = NodeMetadata::Macro(MacroNodeMetadata::default()); // silence unused import warning on some cfgs
+        use crate::graph::unified::storage::metadata::TypedMetadata;
+        let _ = TypedMetadata::Macro(MacroNodeMetadata::default()); // silence unused import warning on some cfgs
         assert!(!finalized.indices().by_kind(NodeKind::Function).contains(&a));
         assert!(!finalized.indices().by_kind(NodeKind::Struct).contains(&c));
     }
@@ -1282,7 +1306,7 @@ mod tests {
         rebuild.tombstone(a);
         let finalized = rebuild.finalize().expect("finalize ok");
         // `a` had macro metadata seeded; after finalize it must be gone.
-        assert!(finalized.macro_metadata().get(a).is_none());
+        assert!(finalized.macro_metadata().get_macro(a).is_none());
     }
 
     #[test]
@@ -2241,6 +2265,8 @@ mod tests {
         // NodeArena first (so the NodeArena arm does not fire), leave
         // the edge that references `a` intact, and tombstone it.
         use crate::graph::unified::edge::kind::EdgeKind;
+        #[cfg(test)]
+        use crate::graph::unified::edge::kind::ResolvedVia;
         let (graph, a, b, _c) = seeded_graph();
         let mut rebuild = graph.clone_for_rebuild();
         // Seed the edge store with an edge that references `a`. This
@@ -2253,6 +2279,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             FileId::new(1),
         );
@@ -2372,7 +2399,7 @@ mod tests {
         Vec<NodeId>,
         Vec<NodeId>,
     ) {
-        use crate::graph::unified::edge::EdgeKind;
+        use crate::graph::unified::edge::{EdgeKind, ResolvedVia};
         use crate::graph::unified::node::NodeKind;
         use crate::graph::unified::storage::arena::NodeEntry;
         use std::path::Path;
@@ -2419,6 +2446,7 @@ mod tests {
                 EdgeKind::Calls {
                     argument_count: 0,
                     is_async: false,
+                    resolved_via: ResolvedVia::Direct,
                 },
                 file_a,
             );
@@ -2428,6 +2456,7 @@ mod tests {
                 EdgeKind::Calls {
                     argument_count: 0,
                     is_async: false,
+                    resolved_via: ResolvedVia::Direct,
                 },
                 file_b,
             );
@@ -2438,6 +2467,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file_a,
         );
@@ -2447,6 +2477,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file_b,
         );

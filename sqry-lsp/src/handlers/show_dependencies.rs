@@ -213,7 +213,7 @@ fn find_symbol_in_file(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sqry_core::graph::unified::edge::EdgeKind;
+    use sqry_core::graph::unified::edge::{EdgeKind, ResolvedVia};
 
     /// Classify an edge kind as a dependency type, returning `None` if not relevant.
     fn classify_dependency_edge(kind: &EdgeKind) -> Option<&'static str> {
@@ -232,6 +232,7 @@ mod tests {
         let kind = EdgeKind::Calls {
             argument_count: 0,
             is_async: false,
+            resolved_via: ResolvedVia::Direct,
         };
         assert_eq!(classify_dependency_edge(&kind), Some("call"));
     }
@@ -241,6 +242,7 @@ mod tests {
         let kind = EdgeKind::Calls {
             argument_count: 2,
             is_async: true,
+            resolved_via: ResolvedVia::Direct,
         };
         assert_eq!(classify_dependency_edge(&kind), Some("call"));
     }

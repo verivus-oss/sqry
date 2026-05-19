@@ -301,7 +301,7 @@ pub fn swap_single_csr(
 
 #[cfg(test)]
 mod tests {
-    use super::super::super::edge::EdgeKind;
+    use super::super::super::edge::{EdgeKind, ResolvedVia};
     use super::super::super::file::FileId;
     use super::super::super::node::NodeId;
     use super::super::checkpoint::CounterCheckpoint;
@@ -319,6 +319,7 @@ mod tests {
                     EdgeKind::Calls {
                         argument_count: 0,
                         is_async: false,
+                        resolved_via: ResolvedVia::Direct,
                     },
                     1,
                     vec![],
@@ -397,6 +398,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             FileId::new(1),
         );
@@ -441,6 +443,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             FileId::new(1),
         );

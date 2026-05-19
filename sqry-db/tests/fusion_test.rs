@@ -7,7 +7,7 @@
 //! These integration tests cover every promised behaviour in the DB11
 //! brief plus realistic mixed batches and serde round-trips.
 
-use sqry_core::graph::unified::edge::kind::EdgeKind;
+use sqry_core::graph::unified::edge::kind::{EdgeKind, ResolvedVia};
 use sqry_core::graph::unified::node::kind::NodeKind;
 use sqry_core::schema::Visibility;
 
@@ -69,8 +69,10 @@ fn traverse_calls() -> PlanNode {
         edge_kind: Some(EdgeKind::Calls {
             argument_count: 0,
             is_async: false,
+            resolved_via: ResolvedVia::Direct,
         }),
         max_depth: 1,
+        resolved_via: None,
     }
 }
 
@@ -881,8 +883,10 @@ fn edge_traversals_with_non_canonical_metadata_do_not_share_when_used_as_prefix_
             edge_kind: Some(EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             }),
             max_depth: 1,
+            resolved_via: None,
         }),
     });
     let p2 = standalone(PlanNode::SetOp {
@@ -893,8 +897,10 @@ fn edge_traversals_with_non_canonical_metadata_do_not_share_when_used_as_prefix_
             edge_kind: Some(EdgeKind::Calls {
                 argument_count: 5, // non-canonical metadata
                 is_async: true,
+                resolved_via: ResolvedVia::Direct,
             }),
             max_depth: 1,
+            resolved_via: None,
         }),
     });
 

@@ -32,6 +32,8 @@ use super::super::node::NodeId;
 use super::super::storage::CsrGraph;
 use super::delta::{DeltaBuffer, DeltaEdge, DeltaOp, EdgeKey};
 use super::kind::EdgeKind;
+#[cfg(test)]
+use super::kind::ResolvedVia;
 
 /// Error returned when edge operations fail.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -179,6 +181,43 @@ impl EdgeStore {
             csr_version: 1,
             delta: DeltaBuffer::new(),
         }
+    }
+
+    /// Construct an `EdgeStore` from raw V10 wire parts.
+    ///
+    /// Reserved for the V10 → V11 upconvert path in
+    /// [`crate::graph::unified::persistence::legacy_v10`]. Mirrors the
+    /// field layout exactly so a V10 snapshot's edge store can be
+    /// rehydrated without going through `add_edge` (which would lose
+    /// the persisted `csr_version` and per-edge sequence numbers).
+    ///
+    /// `pub(crate)` because only the persistence/legacy_v10 module has a
+    /// legitimate reason to construct an `EdgeStore` from out-of-band
+    /// parts; external callers must go through `EdgeStore::new` or
+    /// `with_csr`.
+    #[must_use]
+    pub(crate) fn from_parts_v10_upconvert(
+        csr: Option<CsrGraph>,
+        csr_tombstones: Vec<bool>,
+        csr_version: u64,
+        delta: DeltaBuffer,
+    ) -> Self {
+        Self {
+            csr,
+            csr_tombstones,
+            csr_version,
+            delta,
+        }
+    }
+
+    /// Borrow the CSR tombstone bitmap.
+    ///
+    /// Used by the V11 → V10 test-only translator in
+    /// [`crate::graph::unified::persistence::legacy_v10`] to construct a
+    /// `EdgeStoreV10` mirror without exposing internal fields publicly.
+    #[must_use]
+    pub(crate) fn csr_tombstones_slice(&self) -> &[bool] {
+        &self.csr_tombstones
     }
 
     /// Returns the CSR graph reference, if any.
@@ -1056,6 +1095,38 @@ impl EdgeStore {
         self.csr_tombstones.clear();
         self.csr_version = self.csr_version.wrapping_add(1);
     }
+
+    /// Test-only: rewrite every [`EdgeKind::Calls`] in this store to carry
+    /// `resolved_via = ResolvedVia::Direct`, leaving `argument_count` and
+    /// `is_async` untouched.
+    ///
+    /// Used exclusively by `sqry-core/tests/snapshot_size_phase_a.rs`
+    /// (U19) to materialize a "Phase-A-free" baseline edge set for the
+    /// +10% snapshot-size gate. Walks both the CSR `edge_kind` slice
+    /// (in place) and every `Add` delta still in the delta buffer.
+    ///
+    /// Gated behind `cfg(any(test, feature = "test-support"))` so the
+    /// helper is invisible to production builds. Mutating `EdgeKind`s
+    /// in place is safe because the CSR's structural invariants
+    /// (`row_ptr`, `col_idx`, `edge_seq`) are not touched — only the
+    /// metadata payload of the `Calls` variant changes.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn normalize_calls_resolved_via_for_test(&mut self) {
+        use crate::graph::unified::edge::ResolvedVia;
+
+        if let Some(csr) = self.csr.as_mut() {
+            for k in csr.edge_kind_mut() {
+                if let EdgeKind::Calls { resolved_via, .. } = k {
+                    *resolved_via = ResolvedVia::Direct;
+                }
+            }
+        }
+        for delta in self.delta.iter_mut() {
+            if let EdgeKind::Calls { resolved_via, .. } = &mut delta.kind {
+                *resolved_via = ResolvedVia::Direct;
+            }
+        }
+    }
 }
 
 impl Default for EdgeStore {
@@ -1109,6 +1180,7 @@ mod tests {
                 EdgeKind::Calls {
                     argument_count: 0,
                     is_async: false,
+                    resolved_via: ResolvedVia::Direct,
                 },
                 1,
                 vec![],
@@ -1121,6 +1193,7 @@ mod tests {
                 EdgeKind::Calls {
                     argument_count: 0,
                     is_async: false,
+                    resolved_via: ResolvedVia::Direct,
                 },
                 2,
                 vec![],
@@ -1133,6 +1206,7 @@ mod tests {
                 EdgeKind::Calls {
                     argument_count: 0,
                     is_async: false,
+                    resolved_via: ResolvedVia::Direct,
                 },
                 3,
                 vec![],
@@ -1175,6 +1249,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file,
         );
@@ -1196,6 +1271,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file,
         );
@@ -1205,6 +1281,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file,
         );
@@ -1230,6 +1307,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file,
         );
@@ -1239,6 +1317,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file,
         );
@@ -1248,6 +1327,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file,
         );
@@ -1270,6 +1350,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file,
         );
@@ -1279,6 +1360,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file,
         );
@@ -1293,7 +1375,8 @@ mod tests {
             target,
             &EdgeKind::Calls {
                 argument_count: 0,
-                is_async: false
+                is_async: false,
+                resolved_via: ResolvedVia::Direct,
             }
         ));
     }
@@ -1310,7 +1393,8 @@ mod tests {
             target,
             &EdgeKind::Calls {
                 argument_count: 0,
-                is_async: false
+                is_async: false,
+                resolved_via: ResolvedVia::Direct,
             }
         ));
 
@@ -1320,6 +1404,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file,
         );
@@ -1329,7 +1414,8 @@ mod tests {
             target,
             &EdgeKind::Calls {
                 argument_count: 0,
-                is_async: false
+                is_async: false,
+                resolved_via: ResolvedVia::Direct,
             }
         ));
         assert!(!store.has_edge(source, target, &EdgeKind::References));
@@ -1347,6 +1433,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file1,
         );
@@ -1356,6 +1443,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file2,
         );
@@ -1365,6 +1453,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file1,
         );
@@ -1387,6 +1476,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file,
         );
@@ -1396,6 +1486,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file,
         );
@@ -1433,6 +1524,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file,
         );
@@ -1442,6 +1534,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file,
         );
@@ -1465,6 +1558,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file1,
         );
@@ -1474,6 +1568,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file2,
         );
@@ -1525,6 +1620,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file,
         );
@@ -1534,6 +1630,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file,
         );
@@ -1543,6 +1640,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file,
         );
@@ -1565,6 +1663,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             1,
             DeltaOp::Add,
@@ -1576,6 +1675,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             2,
             DeltaOp::Add,
@@ -1605,6 +1705,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             1,
             DeltaOp::Add,
@@ -1616,6 +1717,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             2,
             DeltaOp::Add,
@@ -1649,6 +1751,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             1,
             DeltaOp::Add,
@@ -1687,6 +1790,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file,
         );
@@ -1696,6 +1800,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file,
         );
@@ -1723,6 +1828,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file,
         );
@@ -1732,6 +1838,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file,
         );
@@ -1741,6 +1848,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file,
         );
@@ -1765,6 +1873,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file,
         );
@@ -1774,6 +1883,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file,
         );
@@ -1798,6 +1908,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             100, // seq = 100
             DeltaOp::Add,
@@ -1809,6 +1920,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             50, // seq = 50
             DeltaOp::Add,
@@ -1890,7 +2002,8 @@ mod tests {
                         e.kind,
                         EdgeKind::Calls {
                             argument_count: 0,
-                            is_async: false
+                            is_async: false,
+                            resolved_via: ResolvedVia::Direct,
                         }
                     )
             }),
@@ -1916,7 +2029,8 @@ mod tests {
                         e.kind,
                         EdgeKind::Calls {
                             argument_count: 0,
-                            is_async: false
+                            is_async: false,
+                            resolved_via: ResolvedVia::Direct,
                         }
                     )
             }),
@@ -1965,6 +2079,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             FileId::new(1),
         );
@@ -1993,6 +2108,7 @@ mod tests {
         EdgeKind::Calls {
             argument_count: arg_count,
             is_async: false,
+            resolved_via: ResolvedVia::Direct,
         }
     }
 

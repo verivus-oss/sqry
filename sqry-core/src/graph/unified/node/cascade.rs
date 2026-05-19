@@ -354,7 +354,7 @@ pub fn cascade_remove_file(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::unified::edge::kind::EdgeKind;
+    use crate::graph::unified::edge::kind::{EdgeKind, ResolvedVia};
 
     fn test_file(id: u32) -> FileId {
         FileId::new(id)
@@ -445,6 +445,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file,
         );
@@ -454,6 +455,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file,
         );
@@ -543,6 +545,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file1,
         );
@@ -552,6 +555,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file1,
         );
@@ -709,6 +713,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file,
         );
@@ -718,6 +723,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file,
         );
@@ -727,6 +733,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file,
         );
@@ -816,6 +823,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file_a,
         );
@@ -885,6 +893,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file,
         );

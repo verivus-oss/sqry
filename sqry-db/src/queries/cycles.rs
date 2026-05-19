@@ -27,7 +27,7 @@
 use std::sync::Arc;
 
 use sqry_core::graph::unified::concurrent::GraphSnapshot;
-use sqry_core::graph::unified::edge::kind::EdgeKind;
+use sqry_core::graph::unified::edge::kind::{EdgeKind, ResolvedVia};
 use sqry_core::graph::unified::node::id::NodeId;
 use sqry_core::query::CircularType;
 
@@ -215,6 +215,7 @@ fn edge_probe_for(circular_type: CircularType) -> EdgeKind {
         CircularType::Calls => EdgeKind::Calls {
             argument_count: 0,
             is_async: false,
+            resolved_via: ResolvedVia::Direct,
         },
         CircularType::Imports | CircularType::Modules => EdgeKind::Imports {
             alias: None,
@@ -372,6 +373,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file,
         );

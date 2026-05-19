@@ -28,6 +28,6 @@ pub use delta::{DeltaBuffer, DeltaBufferStats, DeltaEdge, DeltaOp, EdgeKey};
 pub use id::EdgeId;
 pub use kind::{
     DbQueryType, EdgeKind, ExportKind, FfiConvention, HttpMethod, LifetimeConstraintKind,
-    MacroExpansionKind, MqProtocol, TableWriteOp,
+    MacroExpansionKind, MqProtocol, ResolvedVia, TableWriteOp,
 };
 pub use store::{EdgeStore, EdgeStoreError, EdgeStoreStats, StoreEdgeRef};

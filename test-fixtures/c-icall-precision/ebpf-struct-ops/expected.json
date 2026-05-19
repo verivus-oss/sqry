@@ -1,0 +1,25 @@
+{
+  "fixture": "tcp_cubic_ops.c",
+  "synthetic": true,
+  "note": "Hand-written struct-ops binding fixture shaped like Linux's eBPF tcp_cubic — NOT vendored from upstream. Cross-checks the binding plane against a non-ext4 idiom per DESIGN §13.3.",
+  "instance": "cubictcp",
+  "struct": "tcp_congestion_ops",
+  "expected_bindings": [
+    { "struct": "tcp_congestion_ops", "field": "init",        "target": "cubic_init",            "site_kind": "designated_initializer" },
+    { "struct": "tcp_congestion_ops", "field": "release",     "target": "cubic_release",         "site_kind": "designated_initializer" },
+    { "struct": "tcp_congestion_ops", "field": "ssthresh",    "target": "cubic_recalc_ssthresh", "site_kind": "designated_initializer" },
+    { "struct": "tcp_congestion_ops", "field": "cong_avoid",  "target": "cubic_cong_avoid",      "site_kind": "designated_initializer" },
+    { "struct": "tcp_congestion_ops", "field": "set_state",   "target": "cubic_state",           "site_kind": "designated_initializer" },
+    { "struct": "tcp_congestion_ops", "field": "cwnd_event",  "target": "cubic_cwnd_event",      "site_kind": "designated_initializer" },
+    { "struct": "tcp_congestion_ops", "field": "pkts_acked",  "target": "cubic_acked",           "site_kind": "designated_initializer" }
+  ],
+  "expected_address_taken": [
+    "cubic_init",
+    "cubic_release",
+    "cubic_recalc_ssthresh",
+    "cubic_cong_avoid",
+    "cubic_state",
+    "cubic_cwnd_event",
+    "cubic_acked"
+  ]
+}

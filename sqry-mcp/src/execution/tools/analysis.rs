@@ -2307,7 +2307,7 @@ pub(crate) mod inner {
 mod tests {
     use super::*;
     use sqry_core::graph::unified::concurrent::CodeGraph;
-    use sqry_core::graph::unified::edge::EdgeKind;
+    use sqry_core::graph::unified::edge::{EdgeKind, ResolvedVia};
     use sqry_core::graph::unified::node::NodeKind;
     use sqry_core::graph::unified::storage::NodeEntry;
     use std::path::Path;
@@ -2376,6 +2376,7 @@ mod tests {
         let call_kind = EdgeKind::Calls {
             argument_count: 0,
             is_async: false,
+            resolved_via: ResolvedVia::Direct,
         };
         graph
             .edges_mut()
@@ -3123,6 +3124,7 @@ mod tests {
         let call_kind = EdgeKind::Calls {
             argument_count: 0,
             is_async: false,
+            resolved_via: ResolvedVia::Direct,
         };
         graph
             .edges_mut()
@@ -3175,6 +3177,7 @@ mod tests {
         let call_kind = EdgeKind::Calls {
             argument_count: 0,
             is_async: false,
+            resolved_via: ResolvedVia::Direct,
         };
         graph
             .edges_mut()

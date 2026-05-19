@@ -44,6 +44,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::graph::node::Span;
 use crate::graph::unified::edge::EdgeKind;
+#[cfg(test)]
+use crate::graph::unified::edge::ResolvedVia;
 use crate::graph::unified::node::NodeId;
 
 /// Compressed Sparse Row graph for read-optimized edge storage.
@@ -244,6 +246,56 @@ impl CsrGraph {
     #[must_use]
     pub fn edge_count(&self) -> usize {
         self.col_idx.len()
+    }
+
+    /// Borrow the `row_ptr` slice.
+    ///
+    /// Reserved for the V11 → V10 test-only translator in
+    /// [`crate::graph::unified::persistence::legacy_v10`].
+    #[inline]
+    #[must_use]
+    pub(crate) fn row_ptr_slice(&self) -> &[u32] {
+        &self.row_ptr
+    }
+
+    /// Borrow the `col_idx` slice.
+    ///
+    /// Reserved for the V11 → V10 test-only translator in
+    /// [`crate::graph::unified::persistence::legacy_v10`].
+    #[inline]
+    #[must_use]
+    pub(crate) fn col_idx_slice(&self) -> &[NodeId] {
+        &self.col_idx
+    }
+
+    /// Borrow the `edge_kind` slice.
+    ///
+    /// Reserved for the V11 → V10 test-only translator in
+    /// [`crate::graph::unified::persistence::legacy_v10`].
+    #[inline]
+    #[must_use]
+    pub(crate) fn edge_kind_slice(&self) -> &[EdgeKind] {
+        &self.edge_kind
+    }
+
+    /// Borrow the `edge_seq` slice.
+    ///
+    /// Reserved for the V11 → V10 test-only translator in
+    /// [`crate::graph::unified::persistence::legacy_v10`].
+    #[inline]
+    #[must_use]
+    pub(crate) fn edge_seq_slice(&self) -> &[u64] {
+        &self.edge_seq
+    }
+
+    /// Borrow the `edge_spans` slice.
+    ///
+    /// Reserved for the V11 → V10 test-only translator in
+    /// [`crate::graph::unified::persistence::legacy_v10`].
+    #[inline]
+    #[must_use]
+    pub(crate) fn edge_spans_slice(&self) -> &[Vec<Span>] {
+        &self.edge_spans
     }
 
     /// Returns the out-degree of a node (number of outgoing edges).
@@ -752,6 +804,7 @@ mod tests {
                 EdgeKind::Calls {
                     argument_count: 0,
                     is_async: false,
+                    resolved_via: ResolvedVia::Direct,
                 },
                 1,
                 vec![],
@@ -767,6 +820,7 @@ mod tests {
                 EdgeKind::Calls {
                     argument_count: 0,
                     is_async: false,
+                    resolved_via: ResolvedVia::Direct,
                 },
                 3,
                 vec![],
@@ -790,6 +844,7 @@ mod tests {
                 EdgeKind::Calls {
                     argument_count: 0,
                     is_async: false,
+                    resolved_via: ResolvedVia::Direct,
                 },
                 1,
                 vec![],
@@ -802,6 +857,7 @@ mod tests {
                 EdgeKind::Calls {
                     argument_count: 0,
                     is_async: false,
+                    resolved_via: ResolvedVia::Direct,
                 },
                 2,
                 vec![],
@@ -814,6 +870,7 @@ mod tests {
                 EdgeKind::Calls {
                     argument_count: 0,
                     is_async: false,
+                    resolved_via: ResolvedVia::Direct,
                 },
                 3,
                 vec![],
@@ -826,6 +883,7 @@ mod tests {
                 EdgeKind::Calls {
                     argument_count: 0,
                     is_async: false,
+                    resolved_via: ResolvedVia::Direct,
                 },
                 4,
                 vec![],
@@ -851,6 +909,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             1,
             vec![],
@@ -867,6 +926,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             1,
             vec![],
@@ -884,6 +944,7 @@ mod tests {
                 EdgeKind::Calls {
                     argument_count: 0,
                     is_async: false,
+                    resolved_via: ResolvedVia::Direct,
                 },
                 1,
                 vec![],
@@ -925,6 +986,7 @@ mod tests {
                 EdgeKind::Calls {
                     argument_count: 0,
                     is_async: false,
+                    resolved_via: ResolvedVia::Direct,
                 },
                 1,
                 vec![],
@@ -937,6 +999,7 @@ mod tests {
                 EdgeKind::Calls {
                     argument_count: 0,
                     is_async: false,
+                    resolved_via: ResolvedVia::Direct,
                 },
                 2,
                 vec![],
@@ -949,6 +1012,7 @@ mod tests {
                 EdgeKind::Calls {
                     argument_count: 0,
                     is_async: false,
+                    resolved_via: ResolvedVia::Direct,
                 },
                 3,
                 vec![],
@@ -961,6 +1025,7 @@ mod tests {
                 EdgeKind::Calls {
                     argument_count: 0,
                     is_async: false,
+                    resolved_via: ResolvedVia::Direct,
                 },
                 4,
                 vec![],
@@ -986,6 +1051,7 @@ mod tests {
                 EdgeKind::Calls {
                     argument_count: 0,
                     is_async: false,
+                    resolved_via: ResolvedVia::Direct,
                 },
                 42,
                 vec![],
@@ -1012,6 +1078,7 @@ mod tests {
             vec![EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             }],
             vec![1],
             vec![vec![]],
@@ -1044,10 +1111,12 @@ mod tests {
                 EdgeKind::Calls {
                     argument_count: 0,
                     is_async: false,
+                    resolved_via: ResolvedVia::Direct,
                 },
                 EdgeKind::Calls {
                     argument_count: 0,
                     is_async: false,
+                    resolved_via: ResolvedVia::Direct,
                 },
             ],
             vec![1, 2],
@@ -1067,10 +1136,12 @@ mod tests {
                 EdgeKind::Calls {
                     argument_count: 0,
                     is_async: false,
+                    resolved_via: ResolvedVia::Direct,
                 },
                 EdgeKind::Calls {
                     argument_count: 0,
                     is_async: false,
+                    resolved_via: ResolvedVia::Direct,
                 },
             ],
             vec![1, 2],
@@ -1089,6 +1160,7 @@ mod tests {
             vec![EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             }], // Wrong: only 1 element
             vec![1, 2],
             vec![vec![], vec![]],
@@ -1106,6 +1178,7 @@ mod tests {
             vec![EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             }],
             vec![1],
             vec![vec![]],
@@ -1125,6 +1198,7 @@ mod tests {
                     EdgeKind::Calls {
                         argument_count: 0,
                         is_async: false,
+                        resolved_via: ResolvedVia::Direct,
                     },
                     u64::from(i),
                     vec![],
@@ -1166,6 +1240,7 @@ mod tests {
                 EdgeKind::Calls {
                     argument_count: 0,
                     is_async: false,
+                    resolved_via: ResolvedVia::Direct,
                 },
                 1,
                 vec![],
@@ -1178,6 +1253,7 @@ mod tests {
                 EdgeKind::Calls {
                     argument_count: 0,
                     is_async: false,
+                    resolved_via: ResolvedVia::Direct,
                 },
                 2,
                 vec![],
@@ -1218,6 +1294,7 @@ mod tests {
                 EdgeKind::Calls {
                     argument_count: 0,
                     is_async: false,
+                    resolved_via: ResolvedVia::Direct,
                 },
                 1,
                 vec![],
@@ -1256,6 +1333,7 @@ mod tests {
                 EdgeKind::Calls {
                     argument_count: 0,
                     is_async: false,
+                    resolved_via: ResolvedVia::Direct,
                 },
                 1,
                 vec![],
@@ -1268,6 +1346,7 @@ mod tests {
                 EdgeKind::Calls {
                     argument_count: 0,
                     is_async: false,
+                    resolved_via: ResolvedVia::Direct,
                 },
                 2,
                 vec![],
@@ -1280,6 +1359,7 @@ mod tests {
                 EdgeKind::Calls {
                     argument_count: 0,
                     is_async: false,
+                    resolved_via: ResolvedVia::Direct,
                 },
                 3,
                 vec![],
@@ -1303,6 +1383,7 @@ mod tests {
                 EdgeKind::Calls {
                     argument_count: 0,
                     is_async: false,
+                    resolved_via: ResolvedVia::Direct,
                 },
                 1,
                 vec![],
@@ -1327,6 +1408,7 @@ mod tests {
                 EdgeKind::Calls {
                     argument_count: 0,
                     is_async: false,
+                    resolved_via: ResolvedVia::Direct,
                 },
                 1,
                 vec![],
@@ -1339,6 +1421,7 @@ mod tests {
                 EdgeKind::Calls {
                     argument_count: 0,
                     is_async: false,
+                    resolved_via: ResolvedVia::Direct,
                 },
                 2,
                 vec![],
@@ -1377,6 +1460,7 @@ mod tests {
                 EdgeKind::Calls {
                     argument_count: 2,
                     is_async: false,
+                    resolved_via: ResolvedVia::Direct,
                 },
                 1,
                 vec![span],
@@ -1428,6 +1512,7 @@ mod tests {
                 EdgeKind::Calls {
                     argument_count: 2,
                     is_async: false,
+                    resolved_via: ResolvedVia::Direct,
                 },
                 1,
                 vec![span1, span2],

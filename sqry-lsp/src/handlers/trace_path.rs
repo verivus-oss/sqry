@@ -458,7 +458,8 @@ fn try_load_analysis_data(
 mod tests {
     use super::*;
     use sqry_core::graph::unified::edge::EdgeKind;
-
+    #[cfg(test)]
+    use sqry_core::graph::unified::edge::ResolvedVia;
     // ── edge_confidence ──────────────────────────────────────────────────────
 
     #[test]
@@ -466,6 +467,7 @@ mod tests {
         let kind = EdgeKind::Calls {
             argument_count: 0,
             is_async: false,
+            resolved_via: ResolvedVia::Direct,
         };
         let c = edge_confidence(&kind);
         assert!((c - 1.0).abs() < f64::EPSILON, "expected 1.0, got {c}");
@@ -476,6 +478,7 @@ mod tests {
         let kind = EdgeKind::Calls {
             argument_count: 0,
             is_async: true,
+            resolved_via: ResolvedVia::Direct,
         };
         let c = edge_confidence(&kind);
         assert!((c - 0.9).abs() < f64::EPSILON, "expected 0.9, got {c}");
@@ -534,6 +537,7 @@ mod tests {
         let kind = EdgeKind::Calls {
             argument_count: 0,
             is_async: false,
+            resolved_via: ResolvedVia::Direct,
         };
         assert!(is_followable_edge(&kind, 0.5));
         assert!(is_followable_edge(&kind, 1.0));
@@ -545,6 +549,7 @@ mod tests {
         let kind = EdgeKind::Calls {
             argument_count: 0,
             is_async: true,
+            resolved_via: ResolvedVia::Direct,
         };
         // Kernel assigns confidence 1.0 to all Calls (sync and async)
         // so threshold 0.95 is still followable in the kernel model

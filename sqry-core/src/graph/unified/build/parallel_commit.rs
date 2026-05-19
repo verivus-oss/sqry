@@ -28,15 +28,22 @@ use std::sync::Arc;
 use rayon::prelude::*;
 
 use crate::graph::unified::edge::delta::{DeltaEdge, DeltaOp};
+#[cfg(test)]
+use crate::graph::unified::edge::kind::ResolvedVia;
 use crate::graph::unified::edge::kind::{EdgeKind, MqProtocol};
 use crate::graph::unified::file::FileId;
 use crate::graph::unified::node::NodeId;
 use crate::graph::unified::storage::NodeArena;
 use crate::graph::unified::storage::arena::{NodeEntry, Slot};
+use crate::graph::unified::storage::c_indirect::LocalScopeIndex;
 use crate::graph::unified::string::StringId;
 
 use super::pass3_intra::PendingEdge;
-use super::staging::{StagingGraph, StagingOp};
+use super::staging::{
+    GoEmbeddingHint, GoFunctionSignatureHint, GoMethodReceiverHint, GoMethodSignatureHint,
+    GoNamedTypeConversionHint, GoReceiverCallHint, GoReceiverHintKind, PendingBinding,
+    PendingIndirectCallsite, StagingGraph, StagingOp,
+};
 
 /// Running offsets carried across chunks for deterministic ID assignment.
 ///
@@ -197,6 +204,154 @@ pub struct Phase3Result {
     pub total_strings_written: usize,
     /// Total edges collected across all files.
     pub total_edges_collected: usize,
+    /// Per-chunk drained C indirect-call staging payloads (DESIGN §8.2).
+    ///
+    /// Populated when any file in the chunk staged a
+    /// [`super::staging::CIndirectStagingPayload`] (C plugin Phase 1, U10).
+    /// `None` for chunks containing no C files, keeping the wire-shape
+    /// budget unchanged for non-C workspaces.
+    ///
+    /// Consumed by [`apply_c_indirect_drain`] from `entrypoint.rs` after
+    /// Phase 4c-prime cross-file unification rebuilds the qualified-name
+    /// index — see U11 plumbing for the full Phase 3 → Phase 4 hand-off.
+    pub c_indirect_drain: Option<PhaseCIndirectDrain>,
+}
+
+/// Drained C indirect-call staging payload, resolved to owned `String`s.
+///
+/// The per-file
+/// [`super::staging::CIndirectStagingPayload`] contains:
+///   * `pending_address_taken_names: Vec<StringId>` — staging-local string
+///     ids that we resolve to owned `String`s via `staging.resolve_local_string`
+///     here so the post-4c-prime applier can re-intern through the canonical
+///     interner without holding any staging-graph reference;
+///   * `pending_struct_field_signatures: Vec<(String, String, String)>` —
+///     already owned;
+///   * `pending_bindings: Vec<PendingBinding>` — already owned;
+///   * `pending_indirect_callsites: Vec<PendingIndirectCallsite>` — already
+///     owned (carrier-side stamping of `FileId` happens here so the applier
+///     does not need per-file context);
+///   * `local_scope_index: Option<LocalScopeIndex>` — moved verbatim.
+///
+/// The applier ([`apply_c_indirect_drain`]) interns the owned strings into
+/// the **post-Phase-4a-dedup** graph interner, resolves names to canonical
+/// `NodeId`s via [`crate::graph::unified::storage::indices::AuxiliaryIndices::by_qualified_name`]
+/// (with a `by_name` fallback for languages whose canonical qualified name
+/// equals the semantic name and therefore leaves
+/// [`NodeEntry::qualified_name`] unset — e.g. C, where `cb_alpha` is its
+/// own qualified name), and writes them into
+/// [`CodeGraph::c_indirect_tables_mut`].
+///
+/// Per DESIGN §8.2, this drain bridges the parallel-parse-and-commit
+/// boundary (Phase 3) to the post-unification application step (Phase 4
+/// finalisation, just after Phase 4c-prime returns).
+#[derive(Debug, Default)]
+pub struct PhaseCIndirectDrain {
+    /// Address-taken function qualified-name entries to mark post-unification.
+    ///
+    /// Each entry pairs the bare/qualified function name the C plugin
+    /// captured in `helper.mark_function_address_taken_by_name(...)` with
+    /// the source `FileId` (always a C-language file by construction —
+    /// only the C plugin populates `CIndirectStagingPayload`).
+    ///
+    /// Per DESIGN §8.2 lines 1239-1241: "A pending list of
+    /// `(function_qualified_name, file_id)` for address-taken marks". The
+    /// `file_id` is the *origin* file (where the address-take site lives),
+    /// not the file of the resolved callable target. It is carried so the
+    /// applier can constrain the workspace-global `by_name` fallback in
+    /// [`crate::graph::unified::build::entrypoint::apply_deferred_address_taken_marks`]
+    /// to candidate nodes whose own owning file's language is `C` — a
+    /// non-C namesake (e.g. a Rust `fn cb_alpha`) must NOT be marked by
+    /// the C-scoped contract of SPEC §3.1.2.
+    ///
+    /// Duplicates on `function_qualified_name` are tolerated —
+    /// [`crate::graph::unified::storage::metadata::NodeMetadataStore::mark_address_taken`]
+    /// is idempotent.
+    pub address_taken_names: Vec<DeferredAddressTakenEntry>,
+    /// `(struct_tag, field_name, signature)` triples — DESIGN §3.2.2.
+    ///
+    /// Drained verbatim from the staging payload. The applier interns each
+    /// leg via `graph.strings_mut().intern(...)` and inserts into
+    /// `CIndirectSideTables::struct_field_fnptr`.
+    pub struct_field_signatures: Vec<(String, String, String)>,
+    /// Binding-plane entries (DESIGN §7.1) paired with their origin `FileId`.
+    ///
+    /// The applier resolves `instance_name` and `target_fn_name` to
+    /// canonical `NodeId`s and inserts a [`BindingEntry`] under the
+    /// interned `(struct_tag, field_name)` key in
+    /// `CIndirectSideTables::bindings_by_field`. The `FileId` is the
+    /// origin file (the C TU that staged the binding), retained for the
+    /// same C-language-scoped fallback rationale as
+    /// [`Self::address_taken_names`].
+    pub bindings: Vec<(FileId, PendingBinding)>,
+    /// Indirect callsites paired with their owning `FileId`. The applier
+    /// resolves `caller_qualified_name` to a `NodeId` and pushes an
+    /// [`IndirectCallsite`] onto `CIndirectSideTables::pending_callsites`.
+    /// `FileId` is stamped here from the per-file `FilePlan` so the applier
+    /// does not need per-file context.
+    pub indirect_callsites: Vec<(FileId, PendingIndirectCallsite)>,
+    /// Per-file block-scope arenas (DESIGN §4.1). Moved verbatim into
+    /// `CIndirectSideTables::local_scope_indices` keyed by `FileId`.
+    pub local_scope_indices: Vec<(FileId, LocalScopeIndex)>,
+}
+
+/// One deferred address-taken mark, carrying the origin `FileId`
+/// alongside the qualified function name (DESIGN §8.2 lines 1239-1241).
+///
+/// The origin `FileId` is always a C-language file by construction (only
+/// the C plugin populates `CIndirectStagingPayload`). It is retained on
+/// the drain so the post-unification applier can constrain the
+/// workspace-global `by_name` fallback to candidate nodes whose own
+/// owning file's language is `C` — defending against the SPEC §3.1.2
+/// "Every C `NodeKind::Function`" contract being widened to mark
+/// same-named non-C nodes (e.g. Rust `fn cb_alpha`, Python `def
+/// cb_alpha`) that happen to share a bare name with a C symbol.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeferredAddressTakenEntry {
+    /// Qualified function name as captured by
+    /// `helper.mark_function_address_taken_by_name(...)`.
+    pub function_qualified_name: String,
+    /// Origin C file that staged this address-taken site. Used only as
+    /// metadata for DESIGN §8.2 conformance and provenance — the
+    /// candidate-language filter in the applier compares each
+    /// candidate's owning-file language to `Language::C`, not to this
+    /// `file_id` directly (cross-TU address-takes are legal: a
+    /// `cb_alpha` declared in `a.c` may have its address taken in
+    /// `b.c`).
+    pub file_id: FileId,
+}
+
+impl PhaseCIndirectDrain {
+    /// Returns `true` when every drained vec/map is empty.
+    ///
+    /// Used by the chunk-accumulator in `entrypoint.rs` to skip Phase 4
+    /// application entirely for non-C workspaces, keeping the
+    /// `CodeGraph.c_indirect_tables` slot at its default `None`.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.address_taken_names.is_empty()
+            && self.struct_field_signatures.is_empty()
+            && self.bindings.is_empty()
+            && self.indirect_callsites.is_empty()
+            && self.local_scope_indices.is_empty()
+    }
+
+    /// Merge another drain into this one, taking ownership of its contents.
+    ///
+    /// Used by the chunk-loop in `entrypoint.rs` to accumulate per-chunk
+    /// drains into a single workspace-global drain before invoking
+    /// [`apply_c_indirect_drain`].
+    pub fn merge(&mut self, mut other: PhaseCIndirectDrain) {
+        self.address_taken_names
+            .append(&mut other.address_taken_names);
+        self.struct_field_signatures
+            .append(&mut other.struct_field_signatures);
+        self.bindings.append(&mut other.bindings);
+        self.indirect_callsites
+            .append(&mut other.indirect_callsites);
+        self.local_scope_indices
+            .append(&mut other.local_scope_indices);
+    }
 }
 
 /// Execute Phase 3: parallel commit into disjoint pre-allocated ranges.
@@ -247,6 +402,7 @@ pub(crate) fn phase3_parallel_commit<
             total_nodes_written: 0,
             total_strings_written: 0,
             total_edges_collected: 0,
+            c_indirect_drain: None,
         };
     }
 
@@ -311,10 +467,88 @@ pub(crate) fn phase3_parallel_commit<
     let total_edges_collected: usize = results.iter().map(|r| r.edges.len()).sum();
     let mut per_file_edges = Vec::with_capacity(results.len());
     let mut per_file_node_ids = Vec::with_capacity(results.len());
+
+    // Cluster B3 (Go T1): aggregate per-file remapped Go hints. Each
+    // file's hints have already been remapped through that file's
+    // local→global NodeId / StringId tables inside `commit_single_file`,
+    // so the merge into the live target is a straightforward extend.
+    let mut all_embedding_hints: Vec<GoEmbeddingHint> = Vec::new();
+    let mut all_named_type_conversion_hints: Vec<GoNamedTypeConversionHint> = Vec::new();
+    let mut all_receiver_call_hints: Vec<GoReceiverCallHint> = Vec::new();
+    // Cluster D2.1: receiver-pointerness per Go method declaration. Same
+    // commit-time NodeId / StringId remap discipline as the other three
+    // vectors above; the consumer is Cluster D2's T1.1 pass and D2's
+    // tightening of D1's bucket classifier.
+    let mut all_method_receiver_hints: Vec<GoMethodReceiverHint> = Vec::new();
+    // Cluster D3 (Go T1): canonical signatures per Go method / function
+    // / named function-type declaration. Same remap discipline as the
+    // four hint vectors above. Consumer is the tightened T1.1
+    // satisfaction predicate and the new T1.3 function-signature
+    // implementation pass.
+    let mut all_method_signature_hints: Vec<GoMethodSignatureHint> = Vec::new();
+    let mut all_function_signature_hints: Vec<GoFunctionSignatureHint> = Vec::new();
+
     for r in results {
         per_file_edges.push(r.edges);
         per_file_node_ids.push(r.node_ids);
+        all_embedding_hints.extend(r.embedding_hints);
+        all_named_type_conversion_hints.extend(r.named_type_conversion_hints);
+        all_receiver_call_hints.extend(r.receiver_call_hints);
+        all_method_receiver_hints.extend(r.method_receiver_hints);
+        all_method_signature_hints.extend(r.method_signature_hints);
+        all_function_signature_hints.extend(r.function_signature_hints);
     }
+
+    // Cluster B3 / D2.1 / D3: merge aggregated hints into the live
+    // target. This closes the deferred wire-through noted in Cluster A:
+    // every per-file `StagingGraph::go_hints` now lands in the live
+    // target's `GoHints` buffer during Phase 3, with all NodeId /
+    // StringId references remapped to global identities. The
+    // post-Phase-4e `pass_go_method_set_satisfaction` will drain this
+    // buffer.
+    if !all_embedding_hints.is_empty()
+        || !all_named_type_conversion_hints.is_empty()
+        || !all_receiver_call_hints.is_empty()
+        || !all_method_receiver_hints.is_empty()
+        || !all_method_signature_hints.is_empty()
+        || !all_function_signature_hints.is_empty()
+    {
+        let go_hints = graph.go_hints_mut();
+        go_hints.embeddings.extend(all_embedding_hints);
+        go_hints
+            .named_type_conversions
+            .extend(all_named_type_conversion_hints);
+        go_hints.receiver_calls.extend(all_receiver_call_hints);
+        go_hints.method_receivers.extend(all_method_receiver_hints);
+        go_hints
+            .method_signatures
+            .extend(all_method_signature_hints);
+        go_hints
+            .function_signatures
+            .extend(all_function_signature_hints);
+    }
+
+    // --- C indirect-call drain (DESIGN §8.2 / U11) ---
+    //
+    // Sequentially walk the per-file staging graphs and drain each
+    // `CIndirectStagingPayload` into a single per-chunk
+    // [`PhaseCIndirectDrain`]. Sequential (not parallel) because: (a) the
+    // payloads are typically tiny — even a large C TU stages ~tens of
+    // bindings + ~dozens of callsites — and (b) the address-taken names
+    // need their staging-local `StringId`s resolved to owned strings while
+    // we still hold the source `StagingGraph` reference; once Phase 3
+    // returns, the chunk-local `ParsedFile`s drop and the staged strings
+    // become unrecoverable.
+    //
+    // Local-string resolution: `pending_address_taken_names` contains
+    // staging-local `StringId`s interned by `helper.intern(name)` (see
+    // `helper::mark_function_address_taken_by_name`). The applier needs
+    // the underlying `&str` to re-intern through the **post-dedup** graph
+    // interner, so we resolve here via `staging.resolve_local_string`.
+    // The string already had its `intern` ref-count bumped on stage —
+    // the post-4c-prime applier's re-intern produces the canonical global
+    // `StringId` independent of the staging-local id.
+    let c_indirect_drain = collect_c_indirect_drain(plan, staging_graphs);
 
     Phase3Result {
         per_file_edges,
@@ -322,7 +556,98 @@ pub(crate) fn phase3_parallel_commit<
         total_nodes_written,
         total_strings_written,
         total_edges_collected,
+        c_indirect_drain,
     }
+}
+
+/// Drain per-file C indirect-call staging payloads from the chunk.
+///
+/// Returns `Some(PhaseCIndirectDrain)` when at least one file in the chunk
+/// staged a `CIndirectStagingPayload`; otherwise `None` (non-C workspaces).
+/// Sequential rather than parallel — see commentary in
+/// [`phase3_parallel_commit`] for the rationale.
+fn collect_c_indirect_drain(
+    plan: &ChunkCommitPlan,
+    staging_graphs: &[&StagingGraph],
+) -> Option<PhaseCIndirectDrain> {
+    debug_assert_eq!(plan.file_plans.len(), staging_graphs.len());
+
+    let mut drain = PhaseCIndirectDrain::default();
+
+    for (file_plan, staging) in plan.file_plans.iter().zip(staging_graphs.iter()) {
+        let Some(payload) = staging.c_indirect() else {
+            continue;
+        };
+
+        // Resolve local string ids → owned Strings for address-taken names.
+        // A `None` from `resolve_local_string` would indicate a staging-API
+        // misuse (a non-local id was pushed). Skip with a warn rather than
+        // panic so a buggy plugin can't take down the build pipeline.
+        //
+        // Each captured entry pairs the resolved name with the origin
+        // `file_plan.file_id` (DESIGN §8.2 lines 1239-1241), allowing the
+        // post-unification applier to scope the workspace-global by_name
+        // fallback to C-language nodes.
+        for &local_id in &payload.pending_address_taken_names {
+            match staging.resolve_local_string(local_id) {
+                Some(name) => drain.address_taken_names.push(DeferredAddressTakenEntry {
+                    function_qualified_name: name.to_owned(),
+                    file_id: file_plan.file_id,
+                }),
+                None => log::warn!(
+                    "Phase 3 C-indirect drain: address-taken name local string id \
+                     {:?} did not resolve in staging graph for file {:?} — skipping. \
+                     This indicates the C plugin staged a non-local StringId via \
+                     helper.mark_function_address_taken_by_name.",
+                    local_id,
+                    file_plan.file_id,
+                ),
+            }
+        }
+
+        // `pending_struct_field_signatures` is already `Vec<(String, String, String)>`
+        // — clone the triple set into the drain. We clone (rather than
+        // mutate-take) because `staging` is a `&StagingGraph` shared borrow.
+        drain
+            .struct_field_signatures
+            .extend(payload.pending_struct_field_signatures.iter().cloned());
+
+        // `pending_bindings` is `Vec<PendingBinding>` (owned Strings).
+        // Stamp each binding with its origin `file_plan.file_id` so the
+        // post-unification applier can scope the by_name fallback for
+        // `instance_name` / `target_fn_name` resolution to C-language
+        // nodes (same rationale as `address_taken_names` above).
+        drain.bindings.extend(
+            payload
+                .pending_bindings
+                .iter()
+                .cloned()
+                .map(|b| (file_plan.file_id, b)),
+        );
+
+        // Stamp each indirect callsite with its FileId from the plan, then
+        // append. The applier needs the FileId to construct the persisted
+        // `IndirectCallsite` (which carries `caller: NodeId` + `file_id:
+        // FileId` rather than staging's `caller_qualified_name: String`).
+        drain.indirect_callsites.extend(
+            payload
+                .pending_indirect_callsites
+                .iter()
+                .cloned()
+                .map(|cs| (file_plan.file_id, cs)),
+        );
+
+        // Move the per-file scope index by clone (we hold `&StagingGraph`,
+        // so cannot take). `LocalScopeIndex: Clone` — see
+        // `c_indirect/scope_index.rs:21` documentation header.
+        if let Some(scope_index) = payload.local_scope_index.as_ref() {
+            drain
+                .local_scope_indices
+                .push((file_plan.file_id, scope_index.clone()));
+        }
+    }
+
+    if drain.is_empty() { None } else { Some(drain) }
 }
 
 /// Commit a single file's staging graph into pre-allocated disjoint ranges.
@@ -348,6 +673,36 @@ struct FileCommitResult {
     node_ids: Vec<NodeId>,
     nodes_written: usize,
     strings_written: usize,
+    /// Cluster B3 (Go T1 implements-and-promotion): per-file
+    /// [`GoEmbeddingHint`] / [`GoNamedTypeConversionHint`] /
+    /// [`GoReceiverCallHint`] entries, with their staging-local
+    /// `NodeId` / `StringId` fields remapped to global identities via
+    /// the same tables that drive node + edge commit. The sequential
+    /// post-rayon step in [`phase3_parallel_commit`] aggregates these
+    /// across files and flushes the result into
+    /// [`crate::graph::unified::mutation_target::GraphMutationTarget::go_hints_mut`].
+    ///
+    /// Non-Go staging graphs leave all four vectors empty — no work
+    /// is performed for them.
+    embedding_hints: Vec<GoEmbeddingHint>,
+    named_type_conversion_hints: Vec<GoNamedTypeConversionHint>,
+    receiver_call_hints: Vec<GoReceiverCallHint>,
+    /// Cluster D2.1: per-method receiver-pointerness hints recovered from
+    /// the Go plugin's Phase-1 method emission sites. `method_node` and
+    /// `receiver_type_qualified_name` are remapped via the per-file
+    /// remap tables in the same `commit_single_file` step that drives
+    /// the other three hint vectors.
+    method_receiver_hints: Vec<GoMethodReceiverHint>,
+    /// Cluster D3: canonical-signature hints for Go method declarations
+    /// (top-level methods and interface methods). `method_node` is
+    /// remapped via the per-file node table. `canonical_signature` is a
+    /// plain `String` so no `StringId` remap is needed.
+    method_signature_hints: Vec<GoMethodSignatureHint>,
+    /// Cluster D3: canonical-signature hints for Go function
+    /// declarations and named function-type declarations. `function_node`
+    /// is remapped via the per-file node table; `canonical_signature` is
+    /// plain text.
+    function_signature_hints: Vec<GoFunctionSignatureHint>,
 }
 
 fn commit_single_file(
@@ -368,11 +723,206 @@ fn commit_single_file(
     // --- Step 3: Collect remapped edges with pre-assigned sequence numbers ---
     let edges = collect_edges(ops, plan, &node_remap, &string_remap);
 
+    // --- Step 4 (Cluster B3 / D2.1 / D3): Remap Go side-channel hints ---
+    //
+    // The Go plugin captures staging-local NodeId / StringId values in
+    // GoHints during Phase-1 parse. Both ID spaces are file-local until
+    // Phase 3 writes the file's nodes and strings into the globally
+    // assigned ranges; once node_remap / string_remap exist, every hint
+    // gets the same identity rewrite as a PendingEdge.
+    let RemappedGoHints {
+        embeddings: embedding_hints,
+        named_type_conversions: named_type_conversion_hints,
+        receiver_calls: receiver_call_hints,
+        method_receivers: method_receiver_hints,
+        method_signatures: method_signature_hints,
+        function_signatures: function_signature_hints,
+    } = remap_go_hints(staging, &node_remap, &string_remap, plan);
+
     FileCommitResult {
         edges,
         node_ids,
         nodes_written,
         strings_written,
+        embedding_hints,
+        named_type_conversion_hints,
+        receiver_call_hints,
+        method_receiver_hints,
+        method_signature_hints,
+        function_signature_hints,
+    }
+}
+
+/// Bundle returned by [`remap_go_hints`] so the per-file commit step can
+/// destructure without juggling a tuple of six vectors. Each field
+/// matches its sibling on [`FileCommitResult`].
+struct RemappedGoHints {
+    embeddings: Vec<GoEmbeddingHint>,
+    named_type_conversions: Vec<GoNamedTypeConversionHint>,
+    receiver_calls: Vec<GoReceiverCallHint>,
+    method_receivers: Vec<GoMethodReceiverHint>,
+    method_signatures: Vec<GoMethodSignatureHint>,
+    function_signatures: Vec<GoFunctionSignatureHint>,
+}
+
+/// Remap a `NodeId` through the per-file node-remap table.
+///
+/// Hint construction in the plugin uses staging-local NodeIds (assigned
+/// by `StagingGraph::add_node` / equivalents). After Phase 3 commit the
+/// canonical NodeId for each staged node lives in `node_remap`; the
+/// remap is identity for already-global IDs.
+fn remap_node_id_hint(id: NodeId, node_remap: &HashMap<NodeId, NodeId>) -> NodeId {
+    node_remap.get(&id).copied().unwrap_or(id)
+}
+
+/// Remap a `StringId` through the per-file string-remap table.
+///
+/// Local-tagged staging StringIds are mapped to their global slot ID;
+/// already-global IDs are passed through unchanged.
+fn remap_string_id_hint(id: StringId, string_remap: &HashMap<StringId, StringId>) -> StringId {
+    if id.is_local() {
+        string_remap.get(&id).copied().unwrap_or(id)
+    } else {
+        id
+    }
+}
+
+/// Drain the staging graph's Go hint vectors, remap each entry's
+/// staging-local `NodeId` / `StringId` fields through the per-file
+/// remap tables built by Phase 3 commit, and return four globally-
+/// addressable vectors ready to be merged into the live target.
+///
+/// Non-Go staging graphs return empty vectors with no allocations
+/// beyond the empty `Vec::new()` headers.
+fn remap_go_hints(
+    staging: &StagingGraph,
+    node_remap: &HashMap<NodeId, NodeId>,
+    string_remap: &HashMap<StringId, StringId>,
+    plan: &FilePlan,
+) -> RemappedGoHints {
+    let hints = staging.go_hints();
+    if hints.embeddings.is_empty()
+        && hints.named_type_conversions.is_empty()
+        && hints.receiver_calls.is_empty()
+        && hints.method_receivers.is_empty()
+        && hints.method_signatures.is_empty()
+        && hints.function_signatures.is_empty()
+    {
+        return RemappedGoHints {
+            embeddings: Vec::new(),
+            named_type_conversions: Vec::new(),
+            receiver_calls: Vec::new(),
+            method_receivers: Vec::new(),
+            method_signatures: Vec::new(),
+            function_signatures: Vec::new(),
+        };
+    }
+
+    let embeddings: Vec<GoEmbeddingHint> = hints
+        .embeddings
+        .iter()
+        .map(|h| GoEmbeddingHint {
+            outer: remap_node_id_hint(h.outer, node_remap),
+            inner_qualified_name: remap_string_id_hint(h.inner_qualified_name, string_remap),
+            pointerness: h.pointerness,
+            file: plan.file_id,
+        })
+        .collect();
+
+    let named_type_conversions: Vec<GoNamedTypeConversionHint> = hints
+        .named_type_conversions
+        .iter()
+        .map(|h| GoNamedTypeConversionHint {
+            call_site: remap_node_id_hint(h.call_site, node_remap),
+            target_type_qualified_name: remap_string_id_hint(
+                h.target_type_qualified_name,
+                string_remap,
+            ),
+            argument_node: remap_node_id_hint(h.argument_node, node_remap),
+            file: plan.file_id,
+        })
+        .collect();
+
+    let receiver_calls: Vec<GoReceiverCallHint> = hints
+        .receiver_calls
+        .iter()
+        .map(|h| GoReceiverCallHint {
+            call_site: remap_node_id_hint(h.call_site, node_remap),
+            callee_method: remap_node_id_hint(h.callee_method, node_remap),
+            method_name: remap_string_id_hint(h.method_name, string_remap),
+            receiver: match &h.receiver {
+                GoReceiverHintKind::LocalIdent { binding_local } => {
+                    GoReceiverHintKind::LocalIdent {
+                        binding_local: remap_node_id_hint(*binding_local, node_remap),
+                    }
+                }
+                // The Type-/Pointer-Prefixed and CallReturn variants
+                // carry plain `String` text — no remap required.
+                GoReceiverHintKind::TypePrefixed { type_text } => {
+                    GoReceiverHintKind::TypePrefixed {
+                        type_text: type_text.clone(),
+                    }
+                }
+                GoReceiverHintKind::PointerPrefixed { type_text } => {
+                    GoReceiverHintKind::PointerPrefixed {
+                        type_text: type_text.clone(),
+                    }
+                }
+                GoReceiverHintKind::CallReturn { callee_qn } => GoReceiverHintKind::CallReturn {
+                    callee_qn: callee_qn.clone(),
+                },
+            },
+            argument_count: h.argument_count,
+            is_async: h.is_async,
+            file: plan.file_id,
+        })
+        .collect();
+
+    let method_receivers: Vec<GoMethodReceiverHint> = hints
+        .method_receivers
+        .iter()
+        .map(|h| GoMethodReceiverHint {
+            method_node: remap_node_id_hint(h.method_node, node_remap),
+            receiver_type_qualified_name: remap_string_id_hint(
+                h.receiver_type_qualified_name,
+                string_remap,
+            ),
+            receiver_pointerness: h.receiver_pointerness,
+            file: plan.file_id,
+        })
+        .collect();
+
+    // Cluster D3: method-signature and function-signature hints. Only
+    // the NodeId field requires remap; `canonical_signature` is a plain
+    // `String` produced by `canonicalise_go_signature` and is identity
+    // across the commit boundary.
+    let method_signatures: Vec<GoMethodSignatureHint> = hints
+        .method_signatures
+        .iter()
+        .map(|h| GoMethodSignatureHint {
+            method_node: remap_node_id_hint(h.method_node, node_remap),
+            canonical_signature: h.canonical_signature.clone(),
+            file: plan.file_id,
+        })
+        .collect();
+
+    let function_signatures: Vec<GoFunctionSignatureHint> = hints
+        .function_signatures
+        .iter()
+        .map(|h| GoFunctionSignatureHint {
+            function_node: remap_node_id_hint(h.function_node, node_remap),
+            canonical_signature: h.canonical_signature.clone(),
+            file: plan.file_id,
+        })
+        .collect();
+
+    RemappedGoHints {
+        embeddings,
+        named_type_conversions,
+        receiver_calls,
+        method_receivers,
+        method_signatures,
+        function_signatures,
     }
 }
 
@@ -1332,6 +1882,7 @@ mod tests {
         let mut kind = EdgeKind::Calls {
             argument_count: 3,
             is_async: true,
+            resolved_via: ResolvedVia::Direct,
         };
         remap_edge_kind_string_ids(&mut kind, &remap);
         assert!(matches!(
@@ -1339,6 +1890,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 3,
                 is_async: true,
+                resolved_via: ResolvedVia::Direct,
             }
         ));
     }
@@ -1367,6 +1919,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             FileId::new(0),
         );
@@ -1426,6 +1979,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             FileId::new(0),
         );
@@ -1545,6 +2099,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             FileId::new(0),
         );
@@ -1776,6 +2331,7 @@ mod tests {
                     kind: EdgeKind::Calls {
                         argument_count: 0,
                         is_async: false,
+                        resolved_via: ResolvedVia::Direct,
                     },
                     file: FileId::new(0),
                     spans: vec![],
@@ -1886,6 +2442,7 @@ mod tests {
             kind: EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file: file_b,
             spans: vec![],
@@ -2164,6 +2721,7 @@ mod tests {
                 kind: EdgeKind::Calls {
                     argument_count: 0,
                     is_async: false,
+                    resolved_via: ResolvedVia::Direct,
                 },
                 file,
                 spans: vec![],
@@ -2174,6 +2732,7 @@ mod tests {
                 kind: EdgeKind::Calls {
                     argument_count: 1,
                     is_async: false,
+                    resolved_via: ResolvedVia::Direct,
                 },
                 file,
                 spans: vec![],

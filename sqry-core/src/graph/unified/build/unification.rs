@@ -377,8 +377,8 @@ pub(crate) fn merge_node_into(
 mod tests {
     use super::*;
     use crate::graph::node::{Position, Span};
-    use crate::graph::unified::edge::EdgeKind;
     use crate::graph::unified::edge::bidirectional::BidirectionalEdgeStore;
+    use crate::graph::unified::edge::{EdgeKind, ResolvedVia};
     use crate::graph::unified::file::FileId;
     use crate::graph::unified::node::{NodeId, NodeKind};
     use crate::graph::unified::storage::NodeEntry;
@@ -499,6 +499,7 @@ mod tests {
                 kind: EdgeKind::Calls {
                     argument_count: 0,
                     is_async: false,
+                    resolved_via: ResolvedVia::Direct,
                 },
                 file: FileId::new(0),
                 spans: Vec::new(),
@@ -855,6 +856,7 @@ mod tests {
         let call_kind = EdgeKind::Calls {
             argument_count: 1,
             is_async: false,
+            resolved_via: ResolvedVia::Direct,
         };
         let ref_kind = EdgeKind::References;
 
@@ -952,6 +954,7 @@ mod tests {
         let kind = EdgeKind::Calls {
             argument_count: 0,
             is_async: false,
+            resolved_via: ResolvedVia::Direct,
         };
         store.add_edge_with_spans(a, b, kind.clone(), file, vec![harness_span(1)]);
 

@@ -178,7 +178,7 @@ mod tests {
     use super::*;
     use sqry_core::graph::Language;
     use sqry_core::graph::unified::concurrent::{CodeGraph, GraphSnapshot};
-    use sqry_core::graph::unified::{EdgeKind, FileId, NodeEntry, NodeId, NodeKind};
+    use sqry_core::graph::unified::{EdgeKind, FileId, NodeEntry, NodeId, NodeKind, ResolvedVia};
 
     struct TestGraph {
         graph: CodeGraph,
@@ -238,6 +238,7 @@ mod tests {
                 EdgeKind::Calls {
                     argument_count: 0,
                     is_async: false,
+                    resolved_via: ResolvedVia::Direct,
                 },
                 file_id,
             );

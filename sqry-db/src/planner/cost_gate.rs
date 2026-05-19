@@ -242,9 +242,17 @@ fn check_predicate(
         | Predicate::Implements(v) => check_predicate_value(v, scope_in_scope, node_count, cfg),
         // Existence + attribute predicates are cheap or
         // index-bounded — never prohibitive.
+        //
+        // Phase A (U14) `address_taken` / `callsite_promiscuous` are
+        // O(1) flag lookups against the metadata store; `resolved_via`
+        // is bounded by a node's outgoing `Calls` degree (typically
+        // small). All three remain in the cheap class.
         Predicate::HasCaller
         | Predicate::HasCallee
         | Predicate::IsUnused
+        | Predicate::IsAddressTaken(_)
+        | Predicate::ResolvedVia(_)
+        | Predicate::HasCallsitePromiscuous(_)
         | Predicate::InFile(_)
         | Predicate::InScope(_)
         | Predicate::Returns(_) => Ok(()),

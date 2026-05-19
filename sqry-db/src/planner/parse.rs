@@ -37,6 +37,10 @@
 //!             | "scope:" scopekind                        → .filter(InScope)
 //!             | "has:" ("caller" | "callee")              → .filter(HasCaller|HasCallee)
 //!             | "unused"                                  → .filter(IsUnused)
+//!             | "address_taken" (":" bool)?               → .filter(IsAddressTaken)
+//!             | "resolved_via:" ("direct"|"type_match"|"binding_plane")
+//!                                                         → .filter(ResolvedVia)
+//!             | "callsite_promiscuous" (":" bool)?        → .filter(HasCallsitePromiscuous)
 //!             | relation_key ":" value                    → .filter(<Relation>(value))
 //!             | "references" "~=" regex                   → .filter(References(Regex))
 //!             | "traverse:" direction                       ;
@@ -85,7 +89,7 @@
 use thiserror::Error;
 
 use sqry_core::graph::unified::bind::scope::arena::ScopeKind;
-use sqry_core::graph::unified::edge::kind::{EdgeKind, ExportKind};
+use sqry_core::graph::unified::edge::kind::{EdgeKind, ExportKind, ResolvedVia};
 use sqry_core::graph::unified::node::kind::NodeKind;
 use sqry_core::schema::Visibility;
 
@@ -337,6 +341,63 @@ impl<'a> Parser<'a> {
                 }
             }
             "unused" => Ok(builder.filter(Predicate::IsUnused)),
+            // ----- Phase A (C indirect-call precision) -----
+            //
+            // Spellings locked per DESIGN §11.1:
+            //   address_taken[:true|false]            — bare form => true
+            //   resolved_via:direct|type_match|binding_plane
+            //   callsite_promiscuous[:true|false]     — bare form => true
+            //
+            // The bare forms parallel `unused` (no required value). Any
+            // value other than the locked set is rejected through
+            // `ParseError::UnknownIdent`, mirroring how `has:foo` /
+            // `kind:foo` are rejected today.
+            "address_taken" => {
+                let want = self.parse_optional_bool_value(start, "address_taken")?;
+                Ok(builder.filter(Predicate::IsAddressTaken(want)))
+            }
+            "resolved_via" => {
+                self.expect_byte(b':', "':' after 'resolved_via'")?;
+                let ident_start = self.pos;
+                let ident = self.take_ident()?;
+                let via = match ident.as_str() {
+                    "direct" => ResolvedVia::Direct,
+                    "type_match" => ResolvedVia::TypeMatch,
+                    "binding_plane" => ResolvedVia::BindingPlane,
+                    _ => {
+                        return Err(ParseError::UnknownIdent {
+                            kind: "resolved_via value (expected 'direct', 'type_match', or 'binding_plane')",
+                            value: ident,
+                            offset: ident_start,
+                        });
+                    }
+                };
+                // DESIGN §6.3bis adjacency fold: when the immediately
+                // preceding step is a Calls `EdgeTraversal` carrying
+                // `resolved_via: None`, install the provenance filter
+                // directly on that traversal (one-pass executor filter
+                // via `run_traversal`'s fifth parameter). Otherwise emit
+                // the U14 `Predicate::ResolvedVia` filter form which the
+                // executor handles via `node_has_calls_resolved_via`'s
+                // one-edge-back probe.
+                //
+                // The fold is intentionally conservative: it only
+                // triggers when the preceding step targets the Calls
+                // discriminant AND the EdgeTraversal's `resolved_via`
+                // field is still `None`. See
+                // `QueryBuilder::try_fold_resolved_via` for the full
+                // rule set.
+                let mut builder = builder;
+                if builder.try_fold_resolved_via(via) {
+                    Ok(builder)
+                } else {
+                    Ok(builder.filter(Predicate::ResolvedVia(via)))
+                }
+            }
+            "callsite_promiscuous" => {
+                let want = self.parse_optional_bool_value(start, "callsite_promiscuous")?;
+                Ok(builder.filter(Predicate::HasCallsitePromiscuous(want)))
+            }
             "traverse" => {
                 self.expect_byte(b':', "':' after 'traverse'")?;
                 let (direction, edge_kind, depth) = self.parse_traverse_args()?;
@@ -601,6 +662,59 @@ impl<'a> Parser<'a> {
                 offset: self.pos,
                 expected: "end of query",
             })
+        }
+    }
+
+    /// Parses an optional `:true|:false` suffix for a boolean-flag predicate.
+    ///
+    /// Used by the Phase A C indirect-call predicates (`address_taken`,
+    /// `callsite_promiscuous`) whose grammar mirrors the existing `unused`
+    /// arm — bare keyword evaluates to `true`, an explicit `:true`/`:false`
+    /// selects the polarity, and any other ident value is rejected via
+    /// [`ParseError::UnknownIdent`] paralleling how `kind:foo` is handled.
+    ///
+    /// `keyword` is the step keyword as it appeared on the source side and
+    /// is used to label the `ParseError::UnknownIdent` `kind` field so error
+    /// messages identify which predicate rejected the value. `keyword_start`
+    /// is the byte offset at which the predicate keyword began, retained
+    /// for the error envelope when no `:` follows so the offset points at
+    /// the step (matching the rest of the parser's offset conventions).
+    fn parse_optional_bool_value(
+        &mut self,
+        keyword_start: usize,
+        keyword: &'static str,
+    ) -> Result<bool, ParseError> {
+        // Use raw peek_byte rather than skip_inline_ws here: the existing
+        // `has:` / `kind:` arms keep the `:` glued to the keyword and so
+        // does the spec for `address_taken:true`. A space before `:` is
+        // not part of the locked grammar.
+        if !self.peek_is(b':') {
+            // Bare form — `address_taken` alone => true. Keep the offset
+            // pointing at the keyword start so error sites elsewhere
+            // remain consistent (this path itself does not error).
+            let _ = keyword_start;
+            return Ok(true);
+        }
+        // Consume the ':' and read the bool ident.
+        self.pos += 1;
+        let value_start = self.pos;
+        let ident = self.take_ident()?;
+        match ident.as_str() {
+            "true" => Ok(true),
+            "false" => Ok(false),
+            _ => Err(ParseError::UnknownIdent {
+                kind: match keyword {
+                    "address_taken" => "address_taken value (expected 'true' or 'false')",
+                    "callsite_promiscuous" => {
+                        "callsite_promiscuous value (expected 'true' or 'false')"
+                    }
+                    // Defensive fallback — keeps the helper reusable for
+                    // any future bool-flag predicate the planner adds.
+                    _ => "boolean value (expected 'true' or 'false')",
+                },
+                value: ident,
+                offset: value_start,
+            }),
         }
     }
 
@@ -882,11 +996,24 @@ fn rehydrate_from_steps(steps: &[PlanNode]) -> QueryBuilder {
                 direction,
                 edge_kind,
                 max_depth,
+                resolved_via,
             } => match edge_kind {
                 Some(k) => {
-                    b = b.traverse(*direction, k.clone(), *max_depth);
+                    b = match resolved_via {
+                        Some(_) => b.traverse_with_resolved_via(
+                            *direction,
+                            k.clone(),
+                            *resolved_via,
+                            *max_depth,
+                        ),
+                        None => b.traverse(*direction, k.clone(), *max_depth),
+                    };
                 }
                 None => {
+                    // The text parser never emits `resolved_via: Some(_)`
+                    // alongside a wildcard edge_kind; the U15 builder also
+                    // only installs the field on Calls-specific traversals.
+                    // Fall through to the legacy any-edge path.
                     b = b.traverse_any(*direction, *max_depth);
                 }
             },
@@ -961,6 +1088,7 @@ fn parse_edge_kind(text: &str) -> Option<EdgeKind> {
         "calls" => Some(EdgeKind::Calls {
             argument_count: 0,
             is_async: false,
+            resolved_via: ResolvedVia::Direct,
         }),
         "references" => Some(EdgeKind::References),
         "imports" => Some(EdgeKind::Imports {
@@ -1149,6 +1277,207 @@ mod tests {
         ));
     }
 
+    // ----------------------------------------------------------------
+    // Phase A (C indirect-call precision) — U14 planner predicates.
+    //
+    // Spellings locked per DESIGN §11.1. Every assertion here is part
+    // of the public, user-visible grammar contract — DO NOT widen
+    // these tests to accept additional spellings without also editing
+    // the DESIGN doc.
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn parse_address_taken_true_value() {
+        let plan = parse_query("kind:function address_taken:true").expect("parse");
+        let PlanNode::Chain { steps } = plan.root else {
+            panic!("chain");
+        };
+        assert_eq!(steps.len(), 2);
+        assert!(matches!(
+            steps[1],
+            PlanNode::Filter {
+                predicate: Predicate::IsAddressTaken(true),
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_address_taken_false_value() {
+        let plan = parse_query("kind:function address_taken:false").expect("parse");
+        let PlanNode::Chain { steps } = plan.root else {
+            panic!("chain");
+        };
+        assert_eq!(steps.len(), 2);
+        assert!(matches!(
+            steps[1],
+            PlanNode::Filter {
+                predicate: Predicate::IsAddressTaken(false),
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_address_taken_bare_defaults_to_true() {
+        // DESIGN §11.1: `address_taken:true` (or `address_taken` bare).
+        let plan = parse_query("kind:function address_taken").expect("parse");
+        let PlanNode::Chain { steps } = plan.root else {
+            panic!("chain");
+        };
+        assert_eq!(steps.len(), 2);
+        assert!(matches!(
+            steps[1],
+            PlanNode::Filter {
+                predicate: Predicate::IsAddressTaken(true),
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_address_taken_rejects_non_bool_value() {
+        // Any value other than 'true'/'false' must reject —
+        // mirrors how `kind:foo` / `has:foo` are handled.
+        let err = parse_query("kind:function address_taken:yes").unwrap_err();
+        match err {
+            ParseError::UnknownIdent { kind, value, .. } => {
+                assert!(
+                    kind.starts_with("address_taken value"),
+                    "expected address_taken value error, got {kind:?}"
+                );
+                assert_eq!(value, "yes");
+            }
+            other => panic!("expected UnknownIdent, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_resolved_via_direct() {
+        let plan = parse_query("kind:function resolved_via:direct").expect("parse");
+        let PlanNode::Chain { steps } = plan.root else {
+            panic!("chain");
+        };
+        assert!(matches!(
+            steps[1],
+            PlanNode::Filter {
+                predicate: Predicate::ResolvedVia(ResolvedVia::Direct),
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_resolved_via_type_match() {
+        let plan = parse_query("kind:function resolved_via:type_match").expect("parse");
+        let PlanNode::Chain { steps } = plan.root else {
+            panic!("chain");
+        };
+        assert!(matches!(
+            steps[1],
+            PlanNode::Filter {
+                predicate: Predicate::ResolvedVia(ResolvedVia::TypeMatch),
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_resolved_via_binding_plane() {
+        let plan = parse_query("kind:function resolved_via:binding_plane").expect("parse");
+        let PlanNode::Chain { steps } = plan.root else {
+            panic!("chain");
+        };
+        assert!(matches!(
+            steps[1],
+            PlanNode::Filter {
+                predicate: Predicate::ResolvedVia(ResolvedVia::BindingPlane),
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_resolved_via_rejects_unknown_value() {
+        let err = parse_query("kind:function resolved_via:invalid").unwrap_err();
+        match err {
+            ParseError::UnknownIdent { kind, value, .. } => {
+                assert!(
+                    kind.starts_with("resolved_via value"),
+                    "expected resolved_via value error, got {kind:?}"
+                );
+                assert_eq!(value, "invalid");
+            }
+            other => panic!("expected UnknownIdent, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_resolved_via_rejects_camel_case_value() {
+        // `take_ident` lowercases its input, so a camel-cased value
+        // becomes `bindingplane` which is not in the locked set. This
+        // pins the canonical snake_case spelling.
+        let err = parse_query("kind:function resolved_via:bindingPlane").unwrap_err();
+        match err {
+            ParseError::UnknownIdent { value, .. } => {
+                assert_eq!(value, "bindingplane");
+            }
+            other => panic!("expected UnknownIdent, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_callsite_promiscuous_true_value() {
+        let plan = parse_query("kind:function callsite_promiscuous:true").expect("parse");
+        let PlanNode::Chain { steps } = plan.root else {
+            panic!("chain");
+        };
+        assert!(matches!(
+            steps[1],
+            PlanNode::Filter {
+                predicate: Predicate::HasCallsitePromiscuous(true),
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_callsite_promiscuous_false_value() {
+        let plan = parse_query("kind:function callsite_promiscuous:false").expect("parse");
+        let PlanNode::Chain { steps } = plan.root else {
+            panic!("chain");
+        };
+        assert!(matches!(
+            steps[1],
+            PlanNode::Filter {
+                predicate: Predicate::HasCallsitePromiscuous(false),
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_callsite_promiscuous_bare_defaults_to_true() {
+        // Same shape contract as `address_taken` per DESIGN §11.2.
+        let plan = parse_query("kind:function callsite_promiscuous").expect("parse");
+        let PlanNode::Chain { steps } = plan.root else {
+            panic!("chain");
+        };
+        assert!(matches!(
+            steps[1],
+            PlanNode::Filter {
+                predicate: Predicate::HasCallsitePromiscuous(true),
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_callsite_promiscuous_rejects_numeric_value() {
+        // The grammar accepts only the literal idents `true`/`false`,
+        // not numeric encodings.
+        let err = parse_query("kind:function callsite_promiscuous:1").unwrap_err();
+        // `1` is not an ident-start byte, so `take_ident` fails with
+        // `UnexpectedChar` — that is still a hard parse rejection
+        // (the contract here is "must reject", not a specific error
+        // discriminant).
+        match err {
+            ParseError::UnexpectedChar { .. } | ParseError::UnknownIdent { .. } => {}
+            other => panic!("expected parse rejection, got {other:?}"),
+        }
+    }
+
     #[test]
     fn parse_empty_query_errors_on_build() {
         let err = parse_query("").unwrap_err();
@@ -1331,6 +1660,123 @@ mod tests {
                 assert_eq!(pat.raw, "Counter#increment");
             }
             other => panic!("expected NodeScan with name_pattern, got {other:?}"),
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // U15 iter-1 follow-up — DESIGN §6.3bis adjacency fold for
+    // `resolved_via:X` after a Calls `traverse:` step. These tests pin
+    // the parser-surface contract: the fold is conditional on the
+    // immediately-preceding step being a Calls `EdgeTraversal`, and is
+    // a no-op (i.e. the U14 `Predicate::ResolvedVia` filter form is
+    // emitted) for every other context.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn parser_folds_resolved_via_after_calls_traversal() {
+        // DESIGN §6.3bis lines 1056-1067: when `resolved_via:X` is
+        // adjacent to a Calls traversal, fold into the EdgeTraversal's
+        // outer `resolved_via` field — NO trailing Filter step.
+        let plan =
+            parse_query("kind:function traverse:forward(calls,2) resolved_via:binding_plane")
+                .expect("parse");
+        let PlanNode::Chain { steps } = plan.root else {
+            panic!("expected Chain root");
+        };
+        assert_eq!(
+            steps.len(),
+            2,
+            "fold must consume the Filter step; expected exactly NodeScan + EdgeTraversal, got {steps:?}"
+        );
+        match &steps[1] {
+            PlanNode::EdgeTraversal {
+                edge_kind: Some(EdgeKind::Calls { .. }),
+                resolved_via: Some(ResolvedVia::BindingPlane),
+                max_depth: 2,
+                ..
+            } => {}
+            other => panic!(
+                "expected folded Calls EdgeTraversal with resolved_via=Some(BindingPlane), got {other:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn parser_keeps_resolved_via_as_filter_when_no_calls_traversal_precedes() {
+        // U14 node-scan semantics: when `resolved_via:X` follows a
+        // NodeScan (no Calls traversal), the Filter form is preserved
+        // so the executor's `node_has_calls_resolved_via` one-edge-back
+        // probe still drives the selection.
+        let plan = parse_query("kind:function resolved_via:binding_plane").expect("parse");
+        let PlanNode::Chain { steps } = plan.root else {
+            panic!("expected Chain root");
+        };
+        assert_eq!(steps.len(), 2);
+        match &steps[1] {
+            PlanNode::Filter {
+                predicate: Predicate::ResolvedVia(ResolvedVia::BindingPlane),
+            } => {}
+            other => panic!("expected Filter(ResolvedVia(BindingPlane)), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parser_does_not_fold_resolved_via_into_imports_traversal() {
+        // The fold is Calls-specific: a `resolved_via:X` predicate
+        // adjacent to a non-Calls traversal MUST emit the Filter form
+        // (the executor filter parameter is a no-op for non-Calls edge
+        // kinds anyway, but the parser surface must stay honest).
+        let plan = parse_query("kind:module traverse:forward(imports,1) resolved_via:direct")
+            .expect("parse");
+        let PlanNode::Chain { steps } = plan.root else {
+            panic!("expected Chain root");
+        };
+        assert_eq!(
+            steps.len(),
+            3,
+            "non-Calls traversal must NOT swallow resolved_via filter; got {steps:?}"
+        );
+        match &steps[1] {
+            PlanNode::EdgeTraversal {
+                edge_kind: Some(EdgeKind::Imports { .. }),
+                resolved_via: None,
+                ..
+            } => {}
+            other => panic!("expected unfolded Imports EdgeTraversal, got {other:?}"),
+        }
+        match &steps[2] {
+            PlanNode::Filter {
+                predicate: Predicate::ResolvedVia(ResolvedVia::Direct),
+            } => {}
+            other => panic!("expected trailing Filter(ResolvedVia(Direct)), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parser_fold_targets_three_resolved_via_variants() {
+        // Spot-check that the fold spelling table covers every locked
+        // ResolvedVia value, not just BindingPlane. Direct +
+        // TypeMatch are exercised explicitly because the executor
+        // filter is symmetric across the variants.
+        for (spelling, expected) in [
+            ("direct", ResolvedVia::Direct),
+            ("type_match", ResolvedVia::TypeMatch),
+            ("binding_plane", ResolvedVia::BindingPlane),
+        ] {
+            let src = format!("kind:function traverse:forward(calls,1) resolved_via:{spelling}");
+            let plan = parse_query(&src).unwrap_or_else(|e| panic!("parse {src:?}: {e:?}"));
+            let PlanNode::Chain { steps } = plan.root else {
+                panic!("expected Chain root for {src:?}");
+            };
+            assert_eq!(steps.len(), 2, "fold must drop Filter for {src:?}");
+            match &steps[1] {
+                PlanNode::EdgeTraversal {
+                    edge_kind: Some(EdgeKind::Calls { .. }),
+                    resolved_via: Some(got),
+                    ..
+                } => assert_eq!(*got, expected, "fold target mismatch for {src:?}"),
+                other => panic!("expected folded Calls EdgeTraversal for {src:?}, got {other:?}"),
+            }
         }
     }
 }

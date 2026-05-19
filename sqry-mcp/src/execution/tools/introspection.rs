@@ -1017,7 +1017,7 @@ pub(crate) mod inner {
                 continue;
             }
             // Skip macro-generated symbols — they are compiler output, not human code
-            if let Some(meta) = macro_meta_store.get(node_id)
+            if let Some(meta) = macro_meta_store.get_macro(node_id)
                 && meta.macro_generated == Some(true)
             {
                 continue;
@@ -1646,7 +1646,7 @@ mod tests {
         // Simulate the complexity collection loop with generated-exclusion logic
         let mut metrics = Vec::new();
         for (node_id, entry) in snapshot.iter_nodes() {
-            if let Some(meta) = meta_store.get(node_id)
+            if let Some(meta) = meta_store.get_macro(node_id)
                 && meta.macro_generated == Some(true)
             {
                 continue;

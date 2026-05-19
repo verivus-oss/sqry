@@ -23,7 +23,7 @@
 //! assert_has_import_edge(&staging, "app", "utils");
 //! ```
 
-use super::super::edge::EdgeKind;
+use super::super::edge::{EdgeKind, ResolvedVia};
 use super::super::node::NodeKind;
 use super::staging::{StagingGraph, StagingOp};
 
@@ -235,6 +235,7 @@ pub fn assert_has_call_edge(staging: &StagingGraph, caller: &str, callee: &str) 
                         EdgeKind::Calls {
                             argument_count,
                             is_async,
+                            resolved_via: ResolvedVia::Direct,
                         },
                     ..
                 } = op
@@ -1077,6 +1078,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 2,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             FileId::new(0),
         );
@@ -1151,7 +1153,8 @@ mod tests {
         assert_eq!(
             edge_kind_name(&EdgeKind::Calls {
                 argument_count: 0,
-                is_async: false
+                is_async: false,
+                resolved_via: ResolvedVia::Direct,
             }),
             "Calls"
         );

@@ -33,7 +33,7 @@ use std::sync::Arc;
 
 use sqry_core::graph::Language;
 use sqry_core::graph::unified::concurrent::{CodeGraph, GraphSnapshot};
-use sqry_core::graph::unified::edge::kind::EdgeKind;
+use sqry_core::graph::unified::edge::kind::{EdgeKind, ResolvedVia};
 use sqry_core::graph::unified::node::kind::NodeKind;
 use sqry_core::graph::unified::storage::arena::NodeEntry;
 use sqry_core::query::{CircularType, UnusedScope};
@@ -110,6 +110,7 @@ fn build_call_graph() -> (
         EdgeKind::Calls {
             argument_count: 0,
             is_async: false,
+            resolved_via: ResolvedVia::Direct,
         },
         file,
     );
@@ -1187,6 +1188,7 @@ fn pf04_make_query_db_cold_never_writes_derived_sqry() {
                 EdgeKind::Calls {
                     argument_count: 0,
                     is_async: false,
+                    resolved_via: ResolvedVia::Direct,
                 },
                 file,
             );
@@ -1304,6 +1306,7 @@ fn pf04_make_query_db_cold_never_writes_derived_sqry() {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file,
         );

@@ -3272,6 +3272,7 @@ fn edge_metadata_json(
         UnifiedEdgeKind::Calls {
             argument_count,
             is_async,
+            ..
         } => json!({
             "argument_count": argument_count,
             "is_async": is_async,
@@ -4235,6 +4236,7 @@ fn run_is_in_cycle_unified(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sqry_core::graph::unified::edge::ResolvedVia;
 
     // ==========================================================================
     // parse_language tests
@@ -4544,6 +4546,7 @@ mod tests {
         let kind = UnifiedEdgeKind::Calls {
             argument_count: 2,
             is_async: false,
+            resolved_via: ResolvedVia::Direct,
         };
         assert!(edge_kind_matches_unified(&kind, "calls"));
         assert!(edge_kind_matches_unified(&kind, "Calls"));
@@ -4565,6 +4568,7 @@ mod tests {
         let kind = UnifiedEdgeKind::Calls {
             argument_count: 0,
             is_async: false,
+            resolved_via: ResolvedVia::Direct,
         };
         assert!(!edge_kind_matches_unified(&kind, "imports"));
         assert!(!edge_kind_matches_unified(&kind, "exports"));
@@ -4575,6 +4579,7 @@ mod tests {
         let kind = UnifiedEdgeKind::Calls {
             argument_count: 1,
             is_async: true,
+            resolved_via: ResolvedVia::Direct,
         };
         // "async" should match since the debug output contains "is_async: true"
         assert!(edge_kind_matches_unified(&kind, "async"));
@@ -4723,7 +4728,7 @@ mod tests {
         // An empty language filter must allow every node regardless of language.
         use sqry_core::graph::unified::TraversalStrategy;
         use sqry_core::graph::unified::concurrent::CodeGraph;
-        use sqry_core::graph::unified::edge::EdgeKind;
+        use sqry_core::graph::unified::edge::{EdgeKind, ResolvedVia};
         use sqry_core::graph::unified::node::NodeId;
 
         let graph = CodeGraph::new();
@@ -4740,6 +4745,7 @@ mod tests {
         let edge = EdgeKind::Calls {
             argument_count: 0,
             is_async: false,
+            resolved_via: ResolvedVia::Direct,
         };
         assert!(
             strategy.should_enqueue(node, from, &edge, 1),

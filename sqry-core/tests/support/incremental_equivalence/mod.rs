@@ -412,6 +412,7 @@ fn canonicalize_edge_kind(graph: &CodeGraph, kind: &EdgeKind) -> CanonicalEdgeKi
         EdgeKind::Calls {
             argument_count,
             is_async,
+            ..
         } => CanonicalEdgeKind::Calls {
             argument_count: *argument_count,
             is_async: *is_async,

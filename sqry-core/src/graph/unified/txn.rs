@@ -7,11 +7,12 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
-use crate::graph::node::Language;
-use crate::graph::unified::{CodeGraph, EdgeKind, NodeKind};
-
 use super::edge::EdgeId;
 use super::node::NodeId;
+use crate::graph::node::Language;
+#[cfg(test)]
+use crate::graph::unified::ResolvedVia;
+use crate::graph::unified::{CodeGraph, EdgeKind, NodeKind};
 
 /// RAII transaction wrapper for graph writes.
 ///
@@ -384,6 +385,7 @@ mod tests {
                 EdgeKind::Calls {
                     argument_count: 0,
                     is_async: false,
+                    resolved_via: ResolvedVia::Direct,
                 },
             )
             .expect("add_edge");
@@ -454,6 +456,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
         )
         .expect("add_edge");

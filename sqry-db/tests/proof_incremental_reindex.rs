@@ -37,7 +37,7 @@ use std::sync::Arc;
 
 use sqry_core::graph::Language;
 use sqry_core::graph::unified::concurrent::{CodeGraph, GraphSnapshot};
-use sqry_core::graph::unified::edge::kind::EdgeKind;
+use sqry_core::graph::unified::edge::kind::{EdgeKind, ResolvedVia};
 use sqry_core::graph::unified::node::id::NodeId;
 use sqry_core::graph::unified::node::kind::NodeKind;
 use sqry_core::graph::unified::storage::arena::NodeEntry;
@@ -111,6 +111,7 @@ fn build_fixture() -> (Arc<GraphSnapshot>, NodeId, NodeId, NodeId) {
         EdgeKind::Calls {
             argument_count: 0,
             is_async: false,
+            resolved_via: ResolvedVia::Direct,
         },
         file_b,
     );
@@ -180,6 +181,7 @@ fn simulate_reindex_c_adds_call_to_a(db: &mut QueryDb, fn_a_idx: u32, fn_c_idx: 
         EdgeKind::Calls {
             argument_count: 0,
             is_async: false,
+            resolved_via: ResolvedVia::Direct,
         },
         file_b,
     );
@@ -190,6 +192,7 @@ fn simulate_reindex_c_adds_call_to_a(db: &mut QueryDb, fn_a_idx: u32, fn_c_idx: 
         EdgeKind::Calls {
             argument_count: 0,
             is_async: false,
+            resolved_via: ResolvedVia::Direct,
         },
         file_c,
     );

@@ -43,12 +43,17 @@ use std::path::Path;
 
 use super::super::edge::kind::{LifetimeConstraintKind, MacroExpansionKind, TypeOfContext};
 use super::super::resolution::canonicalize_graph_qualified_name;
-use super::staging::StagingGraph;
+use super::staging::{
+    CIndirectStagingPayload, PendingBinding, PendingIndirectCallsite, StagingGraph,
+};
 use crate::graph::node::{Language, Span};
-use crate::graph::unified::edge::{EdgeKind, ExportKind, FfiConvention, HttpMethod, TableWriteOp};
+use crate::graph::unified::edge::{
+    EdgeKind, ExportKind, FfiConvention, HttpMethod, ResolvedVia, TableWriteOp,
+};
 use crate::graph::unified::file::FileId;
 use crate::graph::unified::node::{NodeId, NodeKind};
 use crate::graph::unified::storage::NodeEntry;
+use crate::graph::unified::storage::c_indirect::{BindingSiteKind, IndirectShape, LocalScopeIndex};
 use crate::graph::unified::string::StringId;
 
 /// Node kinds that represent callable targets and may be used interchangeably
@@ -199,7 +204,7 @@ impl<'a> GraphBuildHelper<'a> {
     /// node-creation flow — for example, the Go plugin's
     /// `add_synthetic_variable` helper (`C_SUPPRESS`) which calls
     /// [`StagingGraph::merge_macro_metadata`] to record a
-    /// `NodeMetadata::Synthetic` flag on the freshly-staged Variable
+    /// `NodeFlags::SYNTHETIC` flag on the freshly-staged Variable
     /// node so the suppression contract on
     /// [`crate::graph::unified::concurrent::graph::GraphSnapshot::find_by_pattern`]
     /// is satisfied via the canonical metadata-bit channel (in addition
@@ -989,6 +994,7 @@ impl<'a> GraphBuildHelper<'a> {
             EdgeKind::Calls {
                 argument_count: 255,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             self.file_id,
             spans,
@@ -1038,6 +1044,7 @@ impl<'a> GraphBuildHelper<'a> {
             EdgeKind::Calls {
                 argument_count,
                 is_async,
+                resolved_via: ResolvedVia::Direct,
             },
             self.file_id,
         );
@@ -1061,6 +1068,7 @@ impl<'a> GraphBuildHelper<'a> {
             EdgeKind::Calls {
                 argument_count,
                 is_async,
+                resolved_via: ResolvedVia::Direct,
             },
             self.file_id,
             spans,
@@ -1546,6 +1554,138 @@ impl<'a> GraphBuildHelper<'a> {
             edges_staged: staging_stats.edges_staged,
         }
     }
+
+    // -----------------------------------------------------------------------
+    // C indirect-call precision staging (Phase A, U10).
+    //
+    // All accessors below route into the per-file `CIndirectStagingPayload`
+    // owned by `StagingGraph`. Non-C plugins never call these — the parent
+    // `Option` on `StagingGraph` stays `None`, so the per-file staging
+    // buffer is unchanged for the other 36 plugins.
+    //
+    // The methods here are intentionally narrow: each one performs a single
+    // push or a single setter. The C plugin's Phase 1 walkers compose them
+    // (see `sqry-lang-c::relations::graph_builder`); U11's Phase 3 commit
+    // consumes the payload via `staging.take_c_indirect()`.
+    // -----------------------------------------------------------------------
+
+    /// Record `target_fn_name` as address-taken on the per-file C indirect
+    /// staging payload (DESIGN §2.5 patterns).
+    ///
+    /// The name is interned through the helper's standard staging
+    /// interner — DESIGN §2.5 specifies a per-file `Vec<StringId>`, so
+    /// each push goes through `self.intern(...)` so the local → global
+    /// `StringId` remap built by `StagingGraph::commit_strings` applies
+    /// uniformly during Phase 3 commit. U11 resolves each global
+    /// `StringId` to its canonical NodeId via the post-unification
+    /// qualified-name index and applies the `NodeFlags::ADDRESS_TAKEN`
+    /// bit. Duplicates within a file are tolerated — `mark_address_taken`
+    /// is idempotent.
+    pub fn mark_function_address_taken_by_name(&mut self, target_fn_name: &str) {
+        let id = self.intern(target_fn_name);
+        self.staging
+            .c_indirect_mut()
+            .pending_address_taken_names
+            .push(id);
+    }
+
+    /// Install the per-file [`LocalScopeIndex`] on the C indirect staging
+    /// payload (DESIGN §4.1).
+    ///
+    /// Called from the top of the C plugin's `build_graph` after running
+    /// the tree-sitter scope-arena builder. U11 transfers the index into
+    /// `CIndirectSideTables::local_scope_indices` keyed by `FileId`.
+    pub fn set_local_scope_index(&mut self, index: LocalScopeIndex) {
+        self.staging.c_indirect_mut().local_scope_index = Some(index);
+    }
+
+    /// Push a [`PendingIndirectCallsite`] onto the per-file C indirect
+    /// staging payload (DESIGN §4.2).
+    ///
+    /// The caller is identified by its qualified name string; U11 resolves
+    /// it to a NodeId after Phase 4c-prime cross-file unification. U12's
+    /// resolver consumes the callsite list in `pass5b_c_indirect_resolve`.
+    pub fn push_indirect_callsite(
+        &mut self,
+        caller_qualified_name: &str,
+        use_span: (usize, usize),
+        shape: IndirectShape,
+        argument_count: u32,
+        is_async: bool,
+    ) {
+        self.staging
+            .c_indirect_mut()
+            .pending_indirect_callsites
+            .push(PendingIndirectCallsite {
+                caller_qualified_name: caller_qualified_name.to_string(),
+                use_span,
+                shape,
+                argument_count,
+                is_async,
+            });
+    }
+
+    /// Push a [`PendingBinding`] onto the per-file C indirect staging
+    /// payload (DESIGN §7.1).
+    ///
+    /// Designated initializer (`{ .field = fn }`) and positional
+    /// initializer (`{ fn1, fn2 }`) sites are both routed through this
+    /// helper, with the `site_kind` discriminator preserved for U12's
+    /// resolver.
+    pub fn push_binding(
+        &mut self,
+        struct_tag: &str,
+        field_name: &str,
+        instance_name: &str,
+        target_fn_name: &str,
+        site_kind: BindingSiteKind,
+    ) {
+        self.staging
+            .c_indirect_mut()
+            .pending_bindings
+            .push(PendingBinding {
+                struct_tag: struct_tag.to_string(),
+                field_name: field_name.to_string(),
+                instance_name: instance_name.to_string(),
+                target_fn_name: target_fn_name.to_string(),
+                site_kind,
+            });
+    }
+
+    /// Push a struct function-pointer field signature onto the per-file C
+    /// indirect staging payload (DESIGN §3.2.2 / §3.7).
+    ///
+    /// The signature follows the DESIGN §3.1 canonical-string grammar.
+    /// U11 interns each leg and inserts into
+    /// `CIndirectSideTables::struct_field_fnptr`.
+    pub fn push_struct_field_fnptr_signature(
+        &mut self,
+        struct_tag: &str,
+        field_name: &str,
+        signature: &str,
+    ) {
+        self.staging
+            .c_indirect_mut()
+            .pending_struct_field_signatures
+            .push((
+                struct_tag.to_string(),
+                field_name.to_string(),
+                signature.to_string(),
+            ));
+    }
+
+    /// Immutable accessor for the C indirect staging payload, if any.
+    ///
+    /// Exposed for tests and for the C plugin's own walkers that need to
+    /// consult prior state (e.g. to suppress duplicate emissions within
+    /// the same file). Returns `None` until at least one
+    /// `mark_function_address_taken_by_name` / `set_local_scope_index` /
+    /// `push_indirect_callsite` / `push_binding` /
+    /// `push_struct_field_fnptr_signature` call has populated the payload.
+    #[must_use]
+    pub fn c_indirect(&self) -> Option<&CIndirectStagingPayload> {
+        self.staging.c_indirect()
+    }
 }
 
 fn semantic_name_for_node_input(original: &str, canonical: &str) -> String {
@@ -1645,6 +1785,7 @@ mod tests {
             Some(EdgeKind::Calls {
                 argument_count,
                 is_async,
+                ..
             }) => {
                 assert_eq!(*argument_count, 255);
                 assert!(!*is_async);
@@ -1835,6 +1976,7 @@ mod tests {
                 EdgeKind::Calls {
                     argument_count,
                     is_async,
+                    ..
                 },
             ..
         } = call_edge.unwrap()
@@ -2051,6 +2193,7 @@ mod tests {
                 EdgeKind::Calls {
                     argument_count,
                     is_async,
+                    ..
                 },
             spans: edge_spans,
             ..

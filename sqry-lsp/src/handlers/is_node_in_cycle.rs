@@ -228,7 +228,8 @@ fn try_load_scc_data(
 mod tests {
     use super::*;
     use sqry_core::graph::unified::edge::EdgeKind;
-
+    #[cfg(test)]
+    use sqry_core::graph::unified::edge::ResolvedVia;
     // ── is_relevant_edge ─────────────────────────────────────────────────────
 
     #[test]
@@ -236,6 +237,7 @@ mod tests {
         let kind = EdgeKind::Calls {
             argument_count: 0,
             is_async: false,
+            resolved_via: ResolvedVia::Direct,
         };
         assert!(is_relevant_edge(&kind, "calls"));
     }
@@ -245,6 +247,7 @@ mod tests {
         let kind = EdgeKind::Calls {
             argument_count: 0,
             is_async: false,
+            resolved_via: ResolvedVia::Direct,
         };
         assert!(!is_relevant_edge(&kind, "imports"));
     }
@@ -272,6 +275,7 @@ mod tests {
         let calls = EdgeKind::Calls {
             argument_count: 0,
             is_async: false,
+            resolved_via: ResolvedVia::Direct,
         };
         let imports = EdgeKind::Imports {
             alias: None,
@@ -292,6 +296,7 @@ mod tests {
         let kind = EdgeKind::Calls {
             argument_count: 0,
             is_async: false,
+            resolved_via: ResolvedVia::Direct,
         };
         assert!(is_relevant_edge(&kind, "modules"));
         // References is not a Calls variant → false

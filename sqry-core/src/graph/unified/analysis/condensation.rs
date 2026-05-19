@@ -6,6 +6,8 @@
 use super::csr::CsrAdjacency;
 use super::scc::SccData;
 use crate::graph::unified::edge::EdgeKind;
+#[cfg(test)]
+use crate::graph::unified::edge::ResolvedVia;
 use crate::graph::unified::node::NodeId;
 use anyhow::Result;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -555,6 +557,7 @@ mod tests {
         let kind = EdgeKind::Calls {
             argument_count: 0,
             is_async: false,
+            resolved_via: ResolvedVia::Direct,
         };
         CompactionSnapshot {
             csr_edges: vec![
@@ -597,6 +600,7 @@ mod tests {
         let kind = EdgeKind::Calls {
             argument_count: 0,
             is_async: false,
+            resolved_via: ResolvedVia::Direct,
         };
         let scc = SccData::compute_tarjan(&csr, &kind).unwrap();
         let result = CondensationDag::build_with_budget(&scc, &csr, &config);
@@ -616,6 +620,7 @@ mod tests {
         let kind = EdgeKind::Calls {
             argument_count: 0,
             is_async: false,
+            resolved_via: ResolvedVia::Direct,
         };
         let scc = SccData::compute_tarjan(&csr, &kind).unwrap();
         let result = CondensationDag::build_with_budget(&scc, &csr, &config);
@@ -643,6 +648,7 @@ mod tests {
         let kind = EdgeKind::Calls {
             argument_count: 0,
             is_async: false,
+            resolved_via: ResolvedVia::Direct,
         };
         let scc = SccData::compute_tarjan(&csr, &kind).unwrap();
         let dag = CondensationDag::build_with_budget(&scc, &csr, &config).unwrap();
@@ -668,6 +674,7 @@ mod tests {
         let kind = EdgeKind::Calls {
             argument_count: 0,
             is_async: false,
+            resolved_via: ResolvedVia::Direct,
         };
         let scc = SccData::compute_tarjan(&csr, &kind).unwrap();
         let error = CondensationDag::build_with_budget(&scc, &csr, &config)
@@ -693,6 +700,7 @@ mod tests {
         let kind = EdgeKind::Calls {
             argument_count: 0,
             is_async: false,
+            resolved_via: ResolvedVia::Direct,
         };
         let scc = SccData::compute_tarjan(&csr, &kind).unwrap();
         let dag = CondensationDag::build_with_budget(&scc, &csr, &config).unwrap();
@@ -715,6 +723,7 @@ mod tests {
         let kind = EdgeKind::Calls {
             argument_count: 0,
             is_async: false,
+            resolved_via: ResolvedVia::Direct,
         };
         let scc = SccData::compute_tarjan(&csr, &kind).unwrap();
         let dag = CondensationDag::build_with_budget(&scc, &csr, &config).unwrap();
@@ -746,6 +755,7 @@ mod tests {
         let kind = EdgeKind::Calls {
             argument_count: 0,
             is_async: false,
+            resolved_via: ResolvedVia::Direct,
         };
         let scc = SccData::compute_tarjan(&csr, &kind).unwrap();
         let dag = CondensationDag::build_with_budget(&scc, &csr, &config).unwrap();
@@ -773,6 +783,7 @@ mod tests {
         let kind = EdgeKind::Calls {
             argument_count: 0,
             is_async: false,
+            resolved_via: ResolvedVia::Direct,
         };
         let scc = SccData::compute_tarjan(&csr, &kind).unwrap();
 
@@ -809,6 +820,7 @@ mod tests {
             edge_kind: EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             scc_count: 2,
             edge_count: 1,
@@ -842,6 +854,7 @@ mod tests {
         let kind = EdgeKind::Calls {
             argument_count: 0,
             is_async: false,
+            resolved_via: ResolvedVia::Direct,
         };
         let scc = SccData::compute_tarjan(&csr, &kind).unwrap();
         let mut dag = CondensationDag::build(&scc, &csr).unwrap();
@@ -862,6 +875,7 @@ mod tests {
         let kind = EdgeKind::Calls {
             argument_count: 0,
             is_async: false,
+            resolved_via: ResolvedVia::Direct,
         };
         CompactionSnapshot {
             csr_edges: vec![
@@ -883,6 +897,7 @@ mod tests {
         let kind = EdgeKind::Calls {
             argument_count: 0,
             is_async: false,
+            resolved_via: ResolvedVia::Direct,
         };
 
         // Dense graph: 6 cross-SCC edges, 4 SCCs. With threshold=1: 6 > 1*4 = true → gated.
@@ -930,6 +945,7 @@ mod tests {
         let kind = EdgeKind::Calls {
             argument_count: 0,
             is_async: false,
+            resolved_via: ResolvedVia::Direct,
         };
         let scc = SccData::compute_tarjan(&csr, &kind).unwrap();
         let dag = CondensationDag::build_with_budget(&scc, &csr, &config).unwrap();

@@ -208,7 +208,7 @@ fn in_process_exact_projection(graph: &CodeGraph, pattern: &str) -> SearchResult
         .into_iter()
         .filter(|nid| {
             store
-                .get(*nid)
+                .get_macro(*nid)
                 .is_none_or(|m| m.macro_generated != Some(true))
         })
         .collect();

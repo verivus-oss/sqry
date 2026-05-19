@@ -33,6 +33,8 @@ use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, RecvError, SendError, Sender, TryRecvError};
 
 use super::super::edge::kind::EdgeKind;
+#[cfg(test)]
+use super::super::edge::kind::ResolvedVia;
 use super::super::file::FileId;
 use super::super::node::{NodeId, NodeKind};
 
@@ -446,6 +448,7 @@ mod tests {
                 kind: EdgeKind::Calls {
                     argument_count: 0,
                     is_async: false,
+                    resolved_via: ResolvedVia::Direct,
                 },
                 file: FileId::new(1),
             })
@@ -458,6 +461,7 @@ mod tests {
                 kind: EdgeKind::Calls {
                     argument_count: 0,
                     is_async: false,
+                    resolved_via: ResolvedVia::Direct,
                 },
                 file: FileId::new(1),
             })

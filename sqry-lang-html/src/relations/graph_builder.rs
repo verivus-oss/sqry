@@ -790,7 +790,7 @@ fn extract_single_attribute(
 mod tests {
     use super::*;
     use sqry_core::graph::unified::build::staging::StagingOp;
-    use sqry_core::graph::unified::edge::EdgeKind;
+    use sqry_core::graph::unified::edge::{EdgeKind, ResolvedVia};
     use sqry_core::graph::unified::node::NodeKind;
     use std::path::PathBuf;
 
@@ -1198,6 +1198,7 @@ mod tests {
                 EdgeKind::Calls {
                     argument_count,
                     is_async,
+                    resolved_via: ResolvedVia::Direct,
                 },
             ..
         } = calls_edges[0]

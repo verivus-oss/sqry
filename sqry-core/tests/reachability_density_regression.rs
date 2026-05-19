@@ -4,7 +4,7 @@ use sqry_core::graph::unified::analysis::condensation::{
 use sqry_core::graph::unified::analysis::csr::CsrAdjacency;
 use sqry_core::graph::unified::analysis::scc::SccData;
 use sqry_core::graph::unified::compaction::{CompactionSnapshot, MergedEdge};
-use sqry_core::graph::unified::edge::EdgeKind;
+use sqry_core::graph::unified::edge::{EdgeKind, ResolvedVia};
 use sqry_core::graph::unified::file::FileId;
 use sqry_core::graph::unified::node::NodeId;
 use std::time::Instant;
@@ -20,6 +20,7 @@ fn test_reachability_density_performance_regression() {
     let kind = EdgeKind::Calls {
         argument_count: 0,
         is_async: false,
+        resolved_via: ResolvedVia::Direct,
     };
 
     let mut edges = Vec::new();

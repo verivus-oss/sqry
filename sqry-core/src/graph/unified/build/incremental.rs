@@ -33,6 +33,8 @@ use std::time::Instant;
 
 use super::super::concurrent::CodeGraph;
 use super::super::edge::EdgeKind;
+#[cfg(test)]
+use super::super::edge::ResolvedVia;
 use super::super::file::FileId;
 use super::super::memory::GraphMemorySize;
 use super::super::mutation_target::GraphMutationTarget;
@@ -48,6 +50,7 @@ use super::parallel_commit::{
     phase4c_prime_unify_cross_file_nodes, phase4d_bulk_insert_edges,
     rebuild_indices as generic_rebuild_indices,
 };
+use super::pass_go_method_set::{GoMethodSetStats, run_go_method_set_satisfaction_generic};
 use super::pass3_intra::PendingEdge;
 use super::pass4_cross::ExportMap;
 use super::pass5_cross_language::{Pass5Stats, link_cross_language_edges_generic};
@@ -828,9 +831,45 @@ pub fn incremental_rebuild(
     let binding_stats: BindingDerivationStats =
         derive_binding_plane_incremental_generic(&mut rebuild_graph);
 
-    // Cancellation boundary between Phase 4e and Pass 5. A dispatcher
-    // cancelling here still pays for sub-steps 7-8 + Phase 4e but
-    // skips Pass 5 and the finalize cost.
+    // Cancellation boundary between Phase 4e and the Go T1 method-set
+    // satisfaction pass. The pass owns its own tombstone-before-emit
+    // step on this plane (02_DESIGN §3.6) so a dispatcher cancelling
+    // here skips both the pass and Pass 5.
+    cancellation.check()?;
+
+    // Go T1 method-set satisfaction pass on the incremental rebuild
+    // plane (Cluster E1 wiring). `changed_files` is `&[PathBuf]` per
+    // the function signature; the rebuild plane's `FileRegistry`
+    // already has every changed path registered (Phase 3e sub-step 4),
+    // so we resolve to `Vec<FileId>` here and pass `Some(slice)` to
+    // signal incremental-mode operation. The pass tombstones prior
+    // pass-owned nodes / edges whose file is in `changed_file_ids`
+    // before emitting the current satisfaction set, ensuring
+    // idempotence and orphan removal (02_DESIGN §3.6, AC-12).
+    let changed_file_ids: Vec<FileId> = changed_files
+        .iter()
+        .filter_map(|p| rebuild_graph.files().get(p))
+        .collect();
+    let go_method_set_stats: GoMethodSetStats =
+        run_go_method_set_satisfaction_generic(&mut rebuild_graph, Some(&changed_file_ids));
+    log::info!(
+        target: "sqry_core::incremental_rebuild",
+        "Go method-set: {} value-form Implements, {} pointer-form Implements, \
+         {} signature Implements, {} promoted methods, {} shadow Calls/References, \
+         changed_go_files={}/{}, elapsed_ms={}",
+        go_method_set_stats.implements_edges_value,
+        go_method_set_stats.implements_edges_pointer,
+        go_method_set_stats.signature_implements_edges,
+        go_method_set_stats.promoted_method_nodes,
+        go_method_set_stats.promoted_back_reference_edges,
+        changed_file_ids.len(),
+        changed_files.len(),
+        go_method_set_stats.elapsed_ms,
+    );
+
+    // Cancellation boundary between the Go T1 pass and Pass 5. A
+    // dispatcher cancelling here still pays for sub-steps 7-8 +
+    // Phase 4e + Go T1 but skips Pass 5 and the finalize cost.
     cancellation.check()?;
 
     // Sub-step 9 — Pass 5 cross-language linking against
@@ -2427,6 +2466,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file_id,
         );
@@ -2438,7 +2478,8 @@ mod tests {
             edge.kind,
             EdgeKind::Calls {
                 argument_count: 0,
-                is_async: false
+                is_async: false,
+                resolved_via: ResolvedVia::Direct,
             }
         ));
     }
@@ -2453,6 +2494,7 @@ mod tests {
                 kind: EdgeKind::Calls {
                     argument_count: 0,
                     is_async: false,
+                    resolved_via: ResolvedVia::Direct,
                 },
                 file: file_id,
                 spans: vec![],
@@ -2470,6 +2512,7 @@ mod tests {
                 kind: EdgeKind::Calls {
                     argument_count: 0,
                     is_async: false,
+                    resolved_via: ResolvedVia::Direct,
                 },
                 file: file_id,
                 spans: vec![],
@@ -2726,6 +2769,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             caller_file,
         );

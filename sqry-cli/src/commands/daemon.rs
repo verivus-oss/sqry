@@ -1261,8 +1261,10 @@ fn poll_until_reachable(socket_path: &Path, timeout: u64) -> Result<()> {
 ///
 /// # Errors
 ///
-/// Only returns `Err` for unexpected I/O errors (not `ConnectionRefused` /
-/// `NotFound`, which are surfaced as `Ok(false)`).
+/// Only returns `Err` for unexpected I/O errors. `ConnectionRefused`,
+/// `NotFound`, and `PermissionDenied` are all surfaced as `Ok(false)` —
+/// any of them mean the daemon is not reachable from this caller (no
+/// listener, no socket file, or kernel/sandbox blocking the connect).
 pub fn try_connect_sync(socket_path: &Path) -> Result<bool> {
     #[cfg(unix)]
     {
@@ -1270,7 +1272,9 @@ pub fn try_connect_sync(socket_path: &Path) -> Result<bool> {
         match UnixStream::connect(socket_path) {
             Ok(_) => Ok(true),
             Err(e) => match e.kind() {
-                std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound => Ok(false),
+                std::io::ErrorKind::ConnectionRefused
+                | std::io::ErrorKind::NotFound
+                | std::io::ErrorKind::PermissionDenied => Ok(false),
                 _ => Err(anyhow::Error::from(e).context(format!(
                     "unexpected error probing socket {}",
                     socket_path.display()

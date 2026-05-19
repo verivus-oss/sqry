@@ -7,13 +7,14 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use sqry_core::graph::unified::concurrent::GraphSnapshot;
-use sqry_core::graph::unified::edge::kind::EdgeKind;
-
 use crate::QueryDb;
 use crate::dependency::record_file_dep;
 use crate::queries::scc::SccQuery;
 use crate::query::DerivedQuery;
+use sqry_core::graph::unified::concurrent::GraphSnapshot;
+use sqry_core::graph::unified::edge::kind::EdgeKind;
+#[cfg(test)]
+use sqry_core::graph::unified::edge::kind::ResolvedVia;
 
 // PN3 cold-start persistence: CachedCondensation is serialized via postcard at
 // cache-insert time. HashMap<u32, Vec<u32>> contains only primitive types.
@@ -129,6 +130,7 @@ mod serde_roundtrip {
             edge_kind: EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
         };
         let bytes = to_allocvec(&original).expect("serialize failed");
@@ -148,6 +150,7 @@ mod serde_roundtrip {
         let original: CondensationKey = EdgeKind::Calls {
             argument_count: 3,
             is_async: true,
+            resolved_via: ResolvedVia::Direct,
         };
         let bytes = to_allocvec(&original).expect("serialize failed");
         let decoded: CondensationKey = from_bytes(&bytes).expect("deserialize failed");

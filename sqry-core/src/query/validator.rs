@@ -47,6 +47,13 @@ const SAFE_FUZZY_FIELDS: &[&str] = &[
     "exports",
     "returns",
     "references",
+    // Phase A C indirect-call precision (U18.1) — fuzzy-correct common typos
+    // like `address_take:`, `resolve_via:`, `callsite_promiscous:` so users on
+    // the `mcp__sqry__semantic_search` surface get the same suggestion
+    // experience the planner-surface (`sqry_query`) already provides via U14.
+    "address_taken",
+    "resolved_via",
+    "callsite_promiscuous",
 ];
 
 /// Semantic validator for query ASTs

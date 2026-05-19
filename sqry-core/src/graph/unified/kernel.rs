@@ -9,6 +9,8 @@ use std::ops::ControlFlow;
 
 use super::concurrent::GraphSnapshot;
 use super::edge::kind::EdgeKind;
+#[cfg(test)]
+use super::edge::kind::ResolvedVia;
 use super::edge::store::StoreEdgeRef;
 use super::materialize::materialize_node;
 use super::node::id::NodeId;
@@ -941,6 +943,7 @@ mod tests {
                 EdgeKind::Calls {
                     argument_count: 0,
                     is_async: false,
+                    resolved_via: ResolvedVia::Direct,
                 },
                 file_id,
             );
@@ -1529,6 +1532,7 @@ mod tests {
         let calls = EdgeKind::Calls {
             argument_count: 0,
             is_async: false,
+            resolved_via: ResolvedVia::Direct,
         };
         assert!(is_followable_edge(&calls, 0.0));
         assert!(is_followable_edge(&calls, 1.0));

@@ -9,6 +9,8 @@ use std::sync::Arc;
 
 use sqry_core::graph::unified::concurrent::GraphSnapshot;
 use sqry_core::graph::unified::edge::kind::EdgeKind;
+#[cfg(test)]
+use sqry_core::graph::unified::edge::kind::ResolvedVia;
 use sqry_core::graph::unified::node::id::NodeId;
 
 use crate::QueryDb;
@@ -98,6 +100,7 @@ mod serde_roundtrip {
             edge_kind: EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
         };
         let bytes = to_allocvec(&original).expect("serialize failed");

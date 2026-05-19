@@ -29,7 +29,7 @@ pub use persistence::{
 pub use scc::SccData;
 
 use crate::graph::unified::compaction::CompactionSnapshot;
-use crate::graph::unified::edge::EdgeKind;
+use crate::graph::unified::edge::{EdgeKind, ResolvedVia};
 use crate::graph::unified::node::NodeId;
 use anyhow::{Context, Result, bail};
 use rayon::prelude::*;
@@ -112,6 +112,7 @@ impl GraphAnalyses {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             EdgeKind::Imports {
                 alias: None,
@@ -602,6 +603,7 @@ mod tests {
         let kind = EdgeKind::Calls {
             argument_count: 0,
             is_async: false,
+            resolved_via: ResolvedVia::Direct,
         };
 
         let edges = vec![
@@ -649,6 +651,7 @@ mod tests {
         let kind = EdgeKind::Calls {
             argument_count: 0,
             is_async: false,
+            resolved_via: ResolvedVia::Direct,
         };
 
         let csr_edges = vec![MergedEdge::new(
@@ -698,6 +701,7 @@ mod tests {
         let kind = EdgeKind::Calls {
             argument_count: 0,
             is_async: false,
+            resolved_via: ResolvedVia::Direct,
         };
         let scc = SccData::compute_tarjan(&csr, &kind).unwrap();
 
@@ -714,6 +718,7 @@ mod tests {
         let kind = EdgeKind::Calls {
             argument_count: 0,
             is_async: false,
+            resolved_via: ResolvedVia::Direct,
         };
 
         let edges = vec![
@@ -733,6 +738,7 @@ mod tests {
         let kind = EdgeKind::Calls {
             argument_count: 0,
             is_async: false,
+            resolved_via: ResolvedVia::Direct,
         };
         let scc = SccData::compute_tarjan(&csr, &kind).unwrap();
 
@@ -757,6 +763,7 @@ mod tests {
         let kind = EdgeKind::Calls {
             argument_count: 0,
             is_async: false,
+            resolved_via: ResolvedVia::Direct,
         };
         let scc = SccData::compute_tarjan(&csr, &kind).unwrap();
         let dag = CondensationDag::build(&scc, &csr).unwrap();
@@ -779,6 +786,7 @@ mod tests {
         let kind = EdgeKind::Calls {
             argument_count: 0,
             is_async: false,
+            resolved_via: ResolvedVia::Direct,
         };
         let scc = SccData::compute_tarjan(&csr, &kind).unwrap();
         let dag = CondensationDag::build(&scc, &csr).unwrap();
@@ -806,6 +814,7 @@ mod tests {
         let kind = EdgeKind::Calls {
             argument_count: 0,
             is_async: false,
+            resolved_via: ResolvedVia::Direct,
         };
         let scc = SccData::compute_tarjan(&csr, &kind).unwrap();
         let dag = CondensationDag::build(&scc, &csr).unwrap();
@@ -866,6 +875,7 @@ mod tests {
         let kind = EdgeKind::Calls {
             argument_count: 0,
             is_async: false,
+            resolved_via: ResolvedVia::Direct,
         };
         let scc = SccData::compute_tarjan(&csr, &kind).unwrap();
         let dag = CondensationDag::build(&scc, &csr).unwrap();
@@ -888,6 +898,7 @@ mod tests {
         let kind = EdgeKind::Calls {
             argument_count: 0,
             is_async: false,
+            resolved_via: ResolvedVia::Direct,
         };
         let scc = SccData::compute_tarjan(&csr, &kind).unwrap();
         let dag = CondensationDag::build(&scc, &csr).unwrap();
@@ -1261,6 +1272,7 @@ mod tests {
         let kind = EdgeKind::Calls {
             argument_count: 0,
             is_async: false,
+            resolved_via: ResolvedVia::Direct,
         };
 
         let edges = vec![

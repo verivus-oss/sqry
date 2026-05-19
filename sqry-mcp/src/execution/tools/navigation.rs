@@ -182,12 +182,12 @@ fn collect_declaration_refs(
 
             // Build provenance if this declaration is in an external (classpath) file
             let provenance = if files.is_external(entry.file) {
-                use sqry_core::graph::unified::storage::NodeMetadata;
+                use sqry_core::graph::unified::storage::TypedMetadata;
                 graph
                     .macro_metadata()
-                    .get_metadata(*node_id)
+                    .get_typed(*node_id)
                     .and_then(|m| match m {
-                        NodeMetadata::Classpath(cp) => {
+                        TypedMetadata::Classpath(cp) => {
                             Some(crate::execution::types::ProvenanceData {
                                 source: "classpath",
                                 coordinates: cp.coordinates.clone(),
@@ -195,7 +195,7 @@ fn collect_declaration_refs(
                                 jar_path: Some(cp.jar_path.clone()),
                             })
                         }
-                        NodeMetadata::Macro(_) | NodeMetadata::Synthetic => None,
+                        TypedMetadata::Macro(_) => None,
                     })
             } else {
                 None
@@ -246,13 +246,13 @@ fn collect_caller_refs(
             // when the source node's span is imprecise or missing.
             // Build provenance for the source node if it's from a classpath file
             let provenance = {
-                use sqry_core::graph::unified::storage::NodeMetadata;
+                use sqry_core::graph::unified::storage::TypedMetadata;
                 if files.is_external(edge_ref.file) {
                     graph
                         .macro_metadata()
-                        .get_metadata(edge_ref.source)
+                        .get_typed(edge_ref.source)
                         .and_then(|m| match m {
-                            NodeMetadata::Classpath(cp) => {
+                            TypedMetadata::Classpath(cp) => {
                                 Some(crate::execution::types::ProvenanceData {
                                     source: "classpath",
                                     coordinates: cp.coordinates.clone(),
@@ -260,7 +260,7 @@ fn collect_caller_refs(
                                     jar_path: Some(cp.jar_path.clone()),
                                 })
                             }
-                            NodeMetadata::Macro(_) | NodeMetadata::Synthetic => None,
+                            TypedMetadata::Macro(_) => None,
                         })
                 } else {
                     None
@@ -545,7 +545,7 @@ pub fn execute_get_document_symbols(
             );
 
             let macro_metadata = macro_meta_store
-                .get(node_id)
+                .get_macro(node_id)
                 .and_then(crate::execution::symbol_utils::macro_metadata_to_response);
 
             let loc = node_location_for_reporting(&graph, node_id, &workspace_root);

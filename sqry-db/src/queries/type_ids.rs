@@ -8,8 +8,9 @@
 //! ## Reserved ranges
 //!
 //! - `0x0000` — invalid / unknown. Must never appear on disk.
-//! - `0x0001..=0x000F` — built-in queries (15 current, saturates).
-//! - `0x0010..=0x0FFF` — reserved for additional built-ins.
+//! - `0x0001..=0x000F` — original built-in queries (15 IDs).
+//! - `0x0010..=0x0FFF` — additional built-ins (Phase A C indirect-call
+//!   precision claims `0x0010` and `0x0011`).
 //! - `0x1000..=0xFFFF` — reserved for downstream / future built-ins.
 
 pub const CALLERS: u32 = 0x0001;
@@ -27,14 +28,18 @@ pub const ENTRY_POINTS: u32 = 0x000C;
 pub const REACHABLE_FROM_ENTRY_POINTS: u32 = 0x000D;
 pub const SCC: u32 = 0x000E;
 pub const CONDENSATION: u32 = 0x000F;
+// Phase A — C indirect-call precision (U13).
+pub const ADDRESS_TAKEN: u32 = 0x0010;
+pub const CALLSITE_PROMISCUOUS: u32 = 0x0011;
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::queries::{
-        CalleesQuery, CallersQuery, CondensationQuery, CyclesQuery, EntryPointsQuery, ExportsQuery,
-        ImplementsQuery, ImportsQuery, IsInCycleQuery, IsNodeUnusedQuery, ReachabilityQuery,
-        ReachableFromEntryPointsQuery, ReferencesQuery, SccQuery, UnusedQuery,
+        AddressTakenQuery, CalleesQuery, CallersQuery, CallsitePromiscuousQuery, CondensationQuery,
+        CyclesQuery, EntryPointsQuery, ExportsQuery, ImplementsQuery, ImportsQuery, IsInCycleQuery,
+        IsNodeUnusedQuery, ReachabilityQuery, ReachableFromEntryPointsQuery, ReferencesQuery,
+        SccQuery, UnusedQuery,
     };
     use crate::query::DerivedQuery;
 
@@ -56,6 +61,8 @@ mod tests {
             ReachableFromEntryPointsQuery::QUERY_TYPE_ID,
             SccQuery::QUERY_TYPE_ID,
             CondensationQuery::QUERY_TYPE_ID,
+            AddressTakenQuery::QUERY_TYPE_ID,
+            CallsitePromiscuousQuery::QUERY_TYPE_ID,
         ];
 
         let mut sorted = ids.clone();
@@ -86,6 +93,11 @@ mod tests {
         );
         assert_eq!(SccQuery::QUERY_TYPE_ID, SCC);
         assert_eq!(CondensationQuery::QUERY_TYPE_ID, CONDENSATION);
+        assert_eq!(AddressTakenQuery::QUERY_TYPE_ID, ADDRESS_TAKEN);
+        assert_eq!(
+            CallsitePromiscuousQuery::QUERY_TYPE_ID,
+            CALLSITE_PROMISCUOUS
+        );
     }
 
     #[test]
@@ -155,6 +167,14 @@ mod tests {
         assert!(
             CondensationQuery::PERSISTENT,
             "CondensationQuery::PERSISTENT must be true"
+        );
+        assert!(
+            AddressTakenQuery::PERSISTENT,
+            "AddressTakenQuery::PERSISTENT must be true"
+        );
+        assert!(
+            CallsitePromiscuousQuery::PERSISTENT,
+            "CallsitePromiscuousQuery::PERSISTENT must be true"
         );
     }
 }

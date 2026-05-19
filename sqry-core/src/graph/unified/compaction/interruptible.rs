@@ -495,7 +495,7 @@ fn merge_winners_global(all_winners: Vec<DeltaEdge>) -> (Vec<MergedEdge>, MergeS
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::unified::edge::{DeltaEdge, DeltaOp, EdgeKind};
+    use crate::graph::unified::edge::{DeltaEdge, DeltaOp, EdgeKind, ResolvedVia};
     use crate::graph::unified::file::FileId;
     use crate::graph::unified::node::NodeId;
 
@@ -506,6 +506,7 @@ mod tests {
             kind: EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             seq,
             op: if is_remove {

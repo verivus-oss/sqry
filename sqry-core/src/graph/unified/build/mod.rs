@@ -65,6 +65,7 @@
 pub mod body_hash;
 pub mod cancellation;
 pub mod entrypoint;
+pub mod go_signature;
 pub mod helper;
 pub mod identity;
 pub mod incremental;
@@ -72,6 +73,8 @@ pub mod parallel_commit;
 pub mod pass3_intra;
 pub mod pass4_cross;
 pub mod pass5_cross_language;
+pub mod pass5b_c_indirect;
+pub mod pass_go_method_set;
 pub mod phase4e_binding;
 pub mod phase4e_incremental;
 pub mod progress;
@@ -147,7 +150,10 @@ pub use pass4_cross::{ExportMap, Pass4Stats, pass4_cross_file};
 pub use pass5_cross_language::{Pass5Stats, link_cross_language_edges};
 pub use progress::GraphBuildProgressTracker;
 pub use reindex::{ReindexStats, allocate_new_segment, reindex_files};
-pub use staging::{StagedEdgeRef, StagedNodeRef, StagingGraph, StagingOp};
+pub use staging::{
+    GoEmbeddingHint, GoHints, GoMethodReceiverHint, GoNamedTypeConversionHint, GoReceiverCallHint,
+    GoReceiverHintKind, StagedEdgeRef, StagedNodeRef, StagingGraph, StagingOp,
+};
 
 // Body hash utilities for duplicate detection
 pub use body_hash::{

@@ -19,7 +19,7 @@
 
 use std::collections::HashMap;
 
-use super::super::edge::EdgeKind;
+use super::super::edge::{EdgeKind, ResolvedVia};
 use super::super::file::FileId;
 use super::super::node::NodeId;
 use crate::graph::node::Span;
@@ -176,6 +176,7 @@ pub fn pass3_intra_edges<S: std::hash::BuildHasher>(
             "call" | "function_call" | "method_call" => EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             _ => EdgeKind::References,
         };
@@ -294,7 +295,8 @@ mod tests {
             edge.kind,
             EdgeKind::Calls {
                 argument_count: 0,
-                is_async: false
+                is_async: false,
+                resolved_via: ResolvedVia::Direct,
             }
         ));
     }
@@ -362,7 +364,8 @@ mod tests {
             result.unresolved[0].kind,
             EdgeKind::Calls {
                 argument_count: 0,
-                is_async: false
+                is_async: false,
+                resolved_via: ResolvedVia::Direct,
             }
         ));
     }

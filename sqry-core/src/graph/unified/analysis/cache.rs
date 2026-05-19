@@ -2,6 +2,8 @@
 
 use super::{CondensationDag, CsrAdjacency, SccData};
 use crate::graph::unified::edge::EdgeKind;
+#[cfg(test)]
+use crate::graph::unified::edge::ResolvedVia;
 use crate::graph::unified::persistence::{GraphStorage, load_from_path};
 use anyhow::Result;
 use std::collections::HashMap;
@@ -158,6 +160,7 @@ mod tests {
         let kind = EdgeKind::Calls {
             argument_count: 0,
             is_async: false,
+            resolved_via: ResolvedVia::Direct,
         };
         graph
             .edges_mut()

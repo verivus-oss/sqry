@@ -313,8 +313,8 @@ impl NodeIdBearing for NodeMetadataStore {
     /// key currently in the metadata map.
     fn all_node_ids(&self) -> Box<dyn Iterator<Item = NodeId> + '_> {
         Box::new(
-            self.iter_all()
-                .map(|((index, generation), _meta)| NodeId::new(index, generation)),
+            self.iter_entries()
+                .map(|((index, generation), _entry)| NodeId::new(index, generation)),
         )
     }
 
@@ -483,11 +483,11 @@ assert_impl_all!(FileRegistry: NodeIdBearing); // K.B1
 
 #[cfg(test)]
 mod tests {
-    use super::super::super::edge::EdgeKind;
+    use super::super::super::edge::{EdgeKind, ResolvedVia};
     use super::super::super::file::FileId;
     use super::super::super::node::NodeKind;
     use super::super::super::storage::arena::NodeEntry;
-    use super::super::super::storage::metadata::{MacroNodeMetadata, NodeMetadata};
+    use super::super::super::storage::metadata::{MacroNodeMetadata, TypedMetadata};
     use super::super::super::string::id::StringId;
     use super::*;
     use std::collections::HashSet;
@@ -545,6 +545,7 @@ mod tests {
         EdgeKind::Calls {
             argument_count: 0,
             is_async: false,
+            resolved_via: ResolvedVia::Direct,
         }
     }
 
@@ -639,7 +640,7 @@ mod tests {
         let a = NodeId::new(1, 1);
         let b = NodeId::new(2, 1);
         store.insert(a, MacroNodeMetadata::default());
-        store.insert_metadata(b, NodeMetadata::Macro(MacroNodeMetadata::default()));
+        store.insert_typed(b, TypedMetadata::Macro(MacroNodeMetadata::default()));
 
         let ids: HashSet<NodeId> = store.all_node_ids().collect();
         assert_eq!(ids, HashSet::from([a, b]));
@@ -656,8 +657,8 @@ mod tests {
         store.retain_nodes(&|id| id == keep);
 
         assert_eq!(store.len(), 1);
-        assert!(store.get(keep).is_some());
-        assert!(store.get(drop).is_none());
+        assert!(store.get_macro(keep).is_some());
+        assert!(store.get_macro(drop).is_none());
     }
 
     // ---- K.A10: NodeProvenanceStore --------------------------------

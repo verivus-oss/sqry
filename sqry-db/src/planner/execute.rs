@@ -83,7 +83,7 @@ use globset::GlobBuilder;
 
 use sqry_core::graph::unified::bind::scope::arena::ScopeKind;
 use sqry_core::graph::unified::concurrent::GraphSnapshot;
-use sqry_core::graph::unified::edge::kind::{EdgeKind, TypeOfContext};
+use sqry_core::graph::unified::edge::kind::{EdgeKind, ResolvedVia, TypeOfContext};
 use sqry_core::graph::unified::edge::store::StoreEdgeRef;
 use sqry_core::graph::unified::materialize::display_entry_qualified_name;
 use sqry_core::graph::unified::node::id::NodeId;
@@ -266,9 +266,16 @@ impl<'db> PlanExecutor<'db> {
                 direction,
                 edge_kind,
                 max_depth,
+                resolved_via,
             } => {
                 let input = input.unwrap_or_else(|| Arc::new(Vec::new()));
-                self.run_traversal(input.as_ref(), *direction, edge_kind.as_ref(), *max_depth)
+                self.run_traversal(
+                    input.as_ref(),
+                    *direction,
+                    edge_kind.as_ref(),
+                    *max_depth,
+                    *resolved_via,
+                )
             }
             PlanNode::Filter { predicate } => {
                 let input = input.unwrap_or_else(|| Arc::new(Vec::new()));
@@ -377,7 +384,7 @@ impl<'db> PlanExecutor<'db> {
     /// [`sqry_core::graph::unified::concurrent::graph::GraphSnapshot::find_by_exact_name`]),
     /// and synthetic placeholder nodes (Go-plugin
     /// `<field:operand.field>` shadows, `<ident>@<offset>`
-    /// per-binding-site Variables, `NodeMetadata::Synthetic`-flagged
+    /// per-binding-site Variables, `NodeFlags::SYNTHETIC`-flagged
     /// nodes) are excluded via
     /// [`sqry_core::graph::unified::concurrent::graph::GraphSnapshot::is_node_synthetic`].
     /// This keeps the planner's `name:` predicate set-equal with the
@@ -425,6 +432,7 @@ impl<'db> PlanExecutor<'db> {
         direction: Direction,
         edge_kind: Option<&EdgeKind>,
         max_depth: u32,
+        resolved_via: Option<ResolvedVia>,
     ) -> Arc<Vec<NodeId>> {
         if max_depth == 0 || input.is_empty() {
             return Arc::new(Vec::new());
@@ -442,6 +450,21 @@ impl<'db> PlanExecutor<'db> {
             for edge in self.neighbours(current, direction) {
                 if let Some(disc) = target_discriminant
                     && std::mem::discriminant(&edge.kind) != disc
+                {
+                    continue;
+                }
+                // U15 — DESIGN §6.3bis Mechanism B: when the plan requested
+                // a specific resolution provenance, skip Calls edges whose
+                // carried `resolved_via` does not match. Non-`Calls` edge
+                // kinds are unaffected by this filter — the planner only
+                // installs `resolved_via: Some(_)` alongside a Calls
+                // discriminant filter.
+                if let Some(want_via) = resolved_via
+                    && let EdgeKind::Calls {
+                        resolved_via: edge_via,
+                        ..
+                    } = &edge.kind
+                    && *edge_via != want_via
                 {
                     continue;
                 }
@@ -532,6 +555,30 @@ impl<'db> PlanExecutor<'db> {
                 self.has_kind(node_id, Direction::Forward, &CALLS_PROBE)
             }
             CompiledPredicate::IsUnused => !self.has_any_inbound_use(node_id),
+
+            // Phase A C indirect-call precision (U14). Address-taken /
+            // callsite-promiscuous are flag-only metadata lookups —
+            // O(1) per node, no edge walk required. The DAG-stipulated
+            // fuse shape (`kind:function address_taken:true` collapses
+            // to a single fused NodeScan when batched against another
+            // plan sharing the same scan prefix) is automatic via the
+            // existing prefix-sharing fuser: this filter step lives in
+            // the Chain tail and never expands the prefix.
+            CompiledPredicate::IsAddressTaken(want) => {
+                self.snapshot.macro_metadata().is_address_taken(node_id) == *want
+            }
+            CompiledPredicate::HasCallsitePromiscuous(want) => {
+                self.snapshot
+                    .macro_metadata()
+                    .is_callsite_promiscuous(node_id)
+                    == *want
+            }
+            // `resolved_via:` outside a Calls-traversal — DESIGN §11.4
+            // non-adjacent fallback. Walk outgoing `Calls` edges and
+            // keep the node iff at least one carries the requested
+            // resolution provenance. U15 lands the adjacent-folding
+            // shape directly onto `PlanNode::EdgeTraversal`.
+            CompiledPredicate::ResolvedVia(via) => self.node_has_calls_resolved_via(node_id, *via),
 
             // DB14: relation predicates dispatch through
             // `QueryDb::get::<...Query>` (or the shared subquery helper) so
@@ -723,6 +770,38 @@ impl<'db> PlanExecutor<'db> {
         false
     }
 
+    /// Phase A (`resolved_via:` non-adjacent filter form). Walks every
+    /// outgoing edge from `node_id` and returns `true` as soon as the
+    /// first `EdgeKind::Calls` edge whose `resolved_via` field matches
+    /// `via` is seen.
+    ///
+    /// The probe is field-equality, not discriminant-equality — `Calls`
+    /// shares a single `EdgeKind` discriminant for every provenance, so
+    /// the existing `has_kind` discriminant-only probe (used by
+    /// `HasCaller` / `HasCallee`) would over-accept here.
+    ///
+    /// Folding into `PlanNode::EdgeTraversal` for the adjacent case
+    /// (`callees:... resolved_via:binding_plane`) lands in U15 — this
+    /// helper handles the non-adjacent form already required by U14's
+    /// integration tests and the planner-grammar surface.
+    fn node_has_calls_resolved_via(&self, node_id: NodeId, via: ResolvedVia) -> bool {
+        for edge in self.snapshot.edges().edges_from(node_id) {
+            if let EdgeKind::Calls {
+                resolved_via: edge_via,
+                ..
+            } = edge.kind
+                && edge_via == via
+            {
+                // Record the file owning the call edge so the
+                // dependency recorder mirrors the data we read, in the
+                // spirit of `node_returns_type`.
+                record_file_dep(edge.file);
+                return true;
+            }
+        }
+        false
+    }
+
     /// Records a file-level dependency for the given node entry.
     ///
     /// Associated function (no `self`) because the body only consults the
@@ -751,6 +830,19 @@ enum CompiledPredicate {
     HasCaller,
     HasCallee,
     IsUnused,
+    /// Phase A C indirect-call precision — node-flag lookup against
+    /// [`GraphSnapshot::macro_metadata().is_address_taken`]. Captures the
+    /// requested polarity so `address_taken:false` is expressible.
+    IsAddressTaken(bool),
+    /// Phase A — outgoing-Calls field probe against
+    /// [`EdgeKind::Calls.resolved_via`]. The candidate node is kept iff at
+    /// least one outgoing `Calls` edge carries the requested provenance.
+    /// Folding adjacent to an `EdgeTraversal` lands in U15 (Mechanism A in
+    /// DESIGN §6.3bis); this filter form is the non-adjacent fallback.
+    ResolvedVia(ResolvedVia),
+    /// Phase A — node-flag lookup against
+    /// [`GraphSnapshot::macro_metadata().is_callsite_promiscuous`].
+    HasCallsitePromiscuous(bool),
     Callers(PredicateValue),
     Callees(PredicateValue),
     Imports(PredicateValue),
@@ -776,6 +868,11 @@ impl CompiledPredicate {
             Predicate::HasCaller => CompiledPredicate::HasCaller,
             Predicate::HasCallee => CompiledPredicate::HasCallee,
             Predicate::IsUnused => CompiledPredicate::IsUnused,
+            Predicate::IsAddressTaken(want) => CompiledPredicate::IsAddressTaken(*want),
+            Predicate::ResolvedVia(via) => CompiledPredicate::ResolvedVia(*via),
+            Predicate::HasCallsitePromiscuous(want) => {
+                CompiledPredicate::HasCallsitePromiscuous(*want)
+            }
             // Relation values keep their raw form — compilation is the
             // DerivedQuery's job.
             Predicate::Callers(v) => CompiledPredicate::Callers(v.clone()),
@@ -913,6 +1010,7 @@ impl CompiledPathPattern {
 const CALLS_PROBE: EdgeKind = EdgeKind::Calls {
     argument_count: 0,
     is_async: false,
+    resolved_via: ResolvedVia::Direct,
 };
 
 // ============================================================================

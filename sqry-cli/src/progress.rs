@@ -11,7 +11,18 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const SLOW_INGEST_WARNING_SECS: u64 = 3;
-const TOTAL_GRAPH_PHASES: u8 = 5;
+// Total number of distinct tracker phases the unified graph build emits
+// via `BuildProgressTracker::start_phase`. As of Phase A + Go T1 these are:
+//   1-3 : Chunked structural indexing (parse / range-plan / semantic commit)
+//   4   : Finalizing graph
+//   5   : Binding plane derivation (Phase 4e)
+//   6   : C indirect-call resolution (Phase A pass 5b)
+//   7   : Go method-set satisfaction (T1.2 / T1.1 / T1.3)
+//   8   : Cross-language linking (Pass 5)
+// The denominator is purely cosmetic — it shapes the "Phase N/{total}"
+// label in the CLI progress reporter. Bump it whenever a new tracker
+// phase is added or removed in `sqry-core/src/graph/unified/build/entrypoint.rs`.
+const TOTAL_GRAPH_PHASES: u8 = 8;
 
 /// CLI progress reporter using indicatif
 pub struct CliProgressReporter {
@@ -955,7 +966,7 @@ mod tests {
                 1,
                 "Chunked structural indexing (parse -> range-plan -> semantic commit)"
             ),
-            "Phase 1-3/5: Chunked structural indexing (parse -> range-plan -> semantic commit)"
+            "Phase 1-3/8: Chunked structural indexing (parse -> range-plan -> semantic commit)"
         );
     }
 }

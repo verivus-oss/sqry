@@ -18,6 +18,56 @@ use serde::{Deserialize, Serialize};
 
 use super::super::string::StringId;
 
+/// Resolution provenance for a `Calls` edge.
+///
+/// Discriminates how the call target was resolved during graph construction.
+/// Introduced by C-icall-precision Phase A (DESIGN §6).
+///
+/// # Semantics
+///
+/// - `Direct` — the call target was resolved by the language plugin from a
+///   syntactic call expression (e.g., `f(x)` where `f` resolves to a single
+///   definition). This is the default and applies to every pre-Phase-A
+///   `Calls` edge (V10 wire compatibility).
+/// - `TypeMatch` — the call target was resolved post-hoc by flat type matching
+///   of indirect-call sites against compatible signatures.
+/// - `BindingPlane` — the call target was resolved via the binding-plane
+///   designated-initializer mechanism (struct-field-of-function-pointer
+///   construction site witnesses).
+///
+/// # Wire compatibility
+///
+/// `ResolvedVia` is the type of the `EdgeKind::Calls.resolved_via` field,
+/// which carries `#[serde(default)]`. Pre-Phase-A `Calls` payloads in
+/// **JSON** (or any key-value format where field absence is expressible)
+/// that omit the field deserialize with `ResolvedVia::Direct` — see test
+/// `calls_edge_json_default_old_wire` below.
+///
+/// **Postcard (the on-disk snapshot format) is positional and does NOT
+/// have a field-absence concept**, so `#[serde(default)]` cannot rescue a
+/// V10-shape postcard `Calls` payload (3 bytes: `[variant, argument_count,
+/// is_async]`). V10 → V11 postcard forward-compat is implemented in
+/// `sqry-core/src/graph/unified/persistence/snapshot.rs::upconvert_v10_to_v11`
+/// via explicit V10 type translation — that is the canonical V10 postcard
+/// reader path, not this serde annotation.
+///
+/// # Why not an `EdgeKind::FfiCall` member
+///
+/// FFI calls are a distinct `EdgeKind` variant (`EdgeKind::FfiCall`) with
+/// their own metadata. `ResolvedVia` discriminates resolution strategy within
+/// the `Calls` variant, not edge-kind identity.
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResolvedVia {
+    /// Resolved directly by the language plugin from a syntactic call.
+    #[default]
+    Direct,
+    /// Resolved by flat type matching of an indirect call against compatible signatures.
+    TypeMatch,
+    /// Resolved via binding-plane designated-initializer witnesses.
+    BindingPlane,
+}
+
 /// Context for `TypeOf` edges (parameter, return, field, variable).
 ///
 /// Indicates where a type reference appears in the code structure.
@@ -234,6 +284,17 @@ pub enum EdgeKind {
         ///
         /// This indicates an *awaited call site*, not merely "inside an async function".
         is_async: bool,
+        /// How this call edge's target was resolved (DESIGN §6).
+        ///
+        /// New in Phase A. `#[serde(default)]` keeps V10 **JSON / key-value**
+        /// wire payloads (which can omit this field) decodable with
+        /// `ResolvedVia::Direct`. Postcard is positional and cannot rescue a
+        /// trailing-field absence — V10 postcard `Calls` bytes are decoded by
+        /// the snapshot persistence layer's explicit V10 reader path
+        /// (`sqry-core/src/graph/unified/persistence/snapshot.rs::upconvert_v10_to_v11`,
+        /// added by U03), NOT by this serde annotation.
+        #[serde(default)]
+        resolved_via: ResolvedVia,
     },
 
     /// A symbol references another (read access).
@@ -695,6 +756,7 @@ impl Default for EdgeKind {
         Self::Calls {
             argument_count: 0,
             is_async: false,
+            resolved_via: ResolvedVia::Direct,
         }
     }
 }
@@ -708,6 +770,7 @@ mod tests {
         EdgeKind::Calls {
             argument_count: 0,
             is_async: false,
+            resolved_via: ResolvedVia::Direct,
         }
     }
 
@@ -757,7 +820,8 @@ mod tests {
         assert!(
             EdgeKind::Calls {
                 argument_count: 5,
-                is_async: true
+                is_async: true,
+                resolved_via: ResolvedVia::Direct,
             }
             .is_call()
         );
@@ -847,7 +911,8 @@ mod tests {
         assert!(
             !EdgeKind::Calls {
                 argument_count: 0,
-                is_async: true
+                is_async: true,
+                resolved_via: ResolvedVia::Direct,
             }
             .is_async()
         );
@@ -875,10 +940,12 @@ mod tests {
         let sync_call = EdgeKind::Calls {
             argument_count: 3,
             is_async: false,
+            resolved_via: ResolvedVia::Direct,
         };
         let async_call = EdgeKind::Calls {
             argument_count: 0,
             is_async: true,
+            resolved_via: ResolvedVia::Direct,
         };
         assert_eq!(sync_call.tag(), "calls");
         assert_eq!(async_call.tag(), "calls");
@@ -936,6 +1003,7 @@ mod tests {
         let calls = EdgeKind::Calls {
             argument_count: 5,
             is_async: true,
+            resolved_via: ResolvedVia::Direct,
         };
         let json = serde_json::to_string(&calls).unwrap();
         let deserialized: EdgeKind = serde_json::from_str(&json).unwrap();
@@ -1320,5 +1388,162 @@ mod tests {
             MacroExpansionKind::default(),
             MacroExpansionKind::Declarative
         );
+    }
+
+    // ========================================================================
+    // ResolvedVia tests (TEST:c-icall-precision-017)
+    //
+    // Cover the four acceptance criteria for U04_RESOLVED_VIA:
+    //   1. ResolvedVia::default() == ResolvedVia::Direct
+    //   2. serde rename_all = "snake_case" produces `direct` / `type_match` /
+    //      `binding_plane` and round-trips for all three variants
+    //   3. `#[serde(default)]` on Calls.resolved_via lets a V10-shape Calls
+    //      payload (without `resolved_via` field) decode into V11 shape with
+    //      `resolved_via == Direct` — covered for **JSON / key-value** formats
+    //      only. Postcard old-wire forward-compat lives in
+    //      `sqry-core/src/graph/unified/persistence/snapshot.rs::upconvert_v10_to_v11`
+    //      (U03's explicit V10 reader path), NOT in this serde annotation.
+    //   4. Full Calls round-trip preserves `resolved_via` non-default values
+    //      end-to-end via JSON and postcard
+    // ========================================================================
+
+    /// `ResolvedVia::default()` must return `Direct` so pre-Phase-A `Calls`
+    /// edges retain their semantic provenance without explicit construction.
+    /// See DESIGN §6.1 and U04 critical decisions in the DAG.
+    #[test]
+    fn calls_edge_resolved_via_default_is_direct() {
+        assert_eq!(ResolvedVia::default(), ResolvedVia::Direct);
+
+        // An `EdgeKind::Calls` value constructed without an explicit
+        // `resolved_via` (via field-default) also yields `Direct`.
+        let kind = EdgeKind::Calls {
+            argument_count: 0,
+            is_async: false,
+            resolved_via: ResolvedVia::default(),
+        };
+        if let EdgeKind::Calls { resolved_via, .. } = kind {
+            assert_eq!(resolved_via, ResolvedVia::Direct);
+        } else {
+            unreachable!("EdgeKind::Calls construction must be reachable");
+        }
+    }
+
+    /// `#[serde(rename_all = "snake_case")]` must produce the three exact wire
+    /// spellings the planner predicate parser depends on
+    /// (`direct` / `type_match` / `binding_plane` — DESIGN §11.2).
+    #[test]
+    fn calls_edge_resolved_via_serde_snake_case_round_trip() {
+        for (variant, wire) in [
+            (ResolvedVia::Direct, "\"direct\""),
+            (ResolvedVia::TypeMatch, "\"type_match\""),
+            (ResolvedVia::BindingPlane, "\"binding_plane\""),
+        ] {
+            let json = serde_json::to_string(&variant).unwrap();
+            assert_eq!(json, wire, "ResolvedVia::{variant:?} serializes to {wire}");
+            let parsed: ResolvedVia = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed, variant, "round-trip for {wire}");
+        }
+    }
+
+    /// `#[serde(default)]` on `EdgeKind::Calls.resolved_via` lets a V10-shape
+    /// Calls payload (no `resolved_via` field) decode into the V11 shape with
+    /// `resolved_via = ResolvedVia::Direct` **for key-value formats like JSON
+    /// where field absence is expressible**. Postcard (the on-disk snapshot
+    /// format) is a positional binary format with no "field absence" concept,
+    /// so `#[serde(default)]` cannot rescue a V10-shape postcard payload —
+    /// V10 postcard bytes for `Calls` end after `is_async` and decoding as
+    /// V11 fails with "Hit the end of buffer, expected more data".
+    ///
+    /// V10 → V11 postcard forward-compat lives in the snapshot persistence
+    /// layer (`sqry-core/src/graph/unified/persistence/snapshot.rs`,
+    /// `upconvert_v10_to_v11`) via explicit V10 type translation, NOT via
+    /// `#[serde(default)]` on this enum. This test is therefore scoped to
+    /// the JSON path only — the formal V11 wire round-trip lives in U06.
+    #[test]
+    fn calls_edge_json_default_old_wire() {
+        // Hand-craft a V10-shape Calls payload via a parallel struct that
+        // serializes to the same wire format as pre-Phase-A `Calls` did.
+        #[derive(Serialize)]
+        #[serde(rename_all = "snake_case")]
+        enum LegacyEdgeKind {
+            #[serde(rename = "calls")]
+            Calls { argument_count: u8, is_async: bool },
+        }
+
+        let legacy = LegacyEdgeKind::Calls {
+            argument_count: 7,
+            is_async: true,
+        };
+
+        // ---- JSON path ----
+        let legacy_json = serde_json::to_string(&legacy).unwrap();
+        // Sanity-check: the legacy payload literally omits `resolved_via`.
+        assert!(!legacy_json.contains("resolved_via"));
+
+        let decoded: EdgeKind = serde_json::from_str(&legacy_json).unwrap();
+        match decoded {
+            EdgeKind::Calls {
+                argument_count,
+                is_async,
+                resolved_via,
+            } => {
+                assert_eq!(argument_count, 7);
+                assert!(is_async);
+                assert_eq!(resolved_via, ResolvedVia::Direct);
+            }
+            other => panic!("expected EdgeKind::Calls, got {other:?}"),
+        }
+    }
+
+    /// Two `Calls` edges that differ only in `resolved_via` must be unequal
+    /// — that's the planner's semantic-discriminator contract (DESIGN §6.3bis
+    /// Mechanism A). Combined with full JSON + postcard round-trip, this also
+    /// confirms `TypeMatch` and `BindingPlane` survive every wire path.
+    #[test]
+    fn calls_edge_resolved_via_distinguishes_variants_round_trip() {
+        let direct = EdgeKind::Calls {
+            argument_count: 2,
+            is_async: true,
+            resolved_via: ResolvedVia::Direct,
+        };
+        let type_match = EdgeKind::Calls {
+            argument_count: 2,
+            is_async: true,
+            resolved_via: ResolvedVia::TypeMatch,
+        };
+        let binding_plane = EdgeKind::Calls {
+            argument_count: 2,
+            is_async: true,
+            resolved_via: ResolvedVia::BindingPlane,
+        };
+
+        // Field-level discrimination — required so the planner's edge-kind
+        // discriminator can fuse / dedup correctly per DESIGN §6.3bis.
+        assert_ne!(direct, type_match);
+        assert_ne!(direct, binding_plane);
+        assert_ne!(type_match, binding_plane);
+        // Same kind tag despite distinct `resolved_via` values.
+        assert_eq!(direct.tag(), "calls");
+        assert_eq!(type_match.tag(), "calls");
+        assert_eq!(binding_plane.tag(), "calls");
+
+        // JSON round-trip preserves every field including `resolved_via`.
+        for edge in [&direct, &type_match, &binding_plane] {
+            let json = serde_json::to_string(edge).unwrap();
+            assert!(
+                json.contains("\"resolved_via\":"),
+                "non-default Calls must emit `resolved_via` on the wire: {json}"
+            );
+            let decoded: EdgeKind = serde_json::from_str(&json).unwrap();
+            assert_eq!(&decoded, edge);
+        }
+
+        // Postcard round-trip is the on-disk graph-snapshot format
+        // (V10+ uses postcard for graph payloads — see persistence::snapshot).
+        for edge in [&direct, &type_match, &binding_plane] {
+            let bytes = postcard::to_allocvec(edge).unwrap();
+            let decoded: EdgeKind = postcard::from_bytes(&bytes).unwrap();
+            assert_eq!(&decoded, edge);
+        }
     }
 }

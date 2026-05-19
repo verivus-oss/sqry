@@ -5,7 +5,7 @@
 
 use sqry_core::graph::Language;
 use sqry_core::graph::unified::concurrent::CodeGraph;
-use sqry_core::graph::unified::edge::EdgeKind;
+use sqry_core::graph::unified::edge::{EdgeKind, ResolvedVia};
 use sqry_core::graph::unified::node::NodeKind;
 use sqry_core::graph::unified::storage::arena::NodeEntry;
 use sqry_core::visualization::unified::{Direction, DotConfig, EdgeFilter, UnifiedDotExporter};
@@ -91,6 +91,7 @@ fn create_sample_graph() -> CodeGraph {
         EdgeKind::Calls {
             argument_count: 0,
             is_async: true,
+            resolved_via: ResolvedVia::Direct,
         },
         js_file,
     );
@@ -100,6 +101,7 @@ fn create_sample_graph() -> CodeGraph {
         EdgeKind::Calls {
             argument_count: 1,
             is_async: false,
+            resolved_via: ResolvedVia::Direct,
         },
         py_file,
     );

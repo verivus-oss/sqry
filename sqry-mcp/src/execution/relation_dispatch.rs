@@ -154,6 +154,8 @@ mod tests {
 
     use sqry_core::graph::unified::concurrent::{CodeGraph, GraphSnapshot};
     use sqry_core::graph::unified::edge::EdgeKind;
+    #[cfg(test)]
+    use sqry_core::graph::unified::edge::ResolvedVia;
     use sqry_core::graph::unified::edge::kind::TypeOfContext;
     use sqry_core::graph::unified::node::NodeKind;
     use sqry_core::graph::unified::storage::NodeEntry;
@@ -195,6 +197,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file_id,
         );

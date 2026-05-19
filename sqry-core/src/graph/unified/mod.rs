@@ -172,7 +172,7 @@ pub use edge::{
     BidirectionalEdgeStore, BidirectionalEdgeStoreStats, DbQueryType, DeltaBuffer,
     DeltaBufferStats, DeltaEdge, DeltaOp, EdgeId, EdgeKey, EdgeKind, EdgeStore, EdgeStoreError,
     EdgeStoreStats, ExportKind, FfiConvention, HttpMethod, LifetimeConstraintKind,
-    MacroExpansionKind, MqProtocol, StoreEdgeRef, TableWriteOp,
+    MacroExpansionKind, MqProtocol, ResolvedVia, StoreEdgeRef, TableWriteOp,
 };
 pub use file::FileId;
 pub use kernel::{
@@ -186,6 +186,12 @@ pub use materialize::{
 };
 pub use memory::{BTREEMAP_ENTRY_OVERHEAD, GraphMemorySize, HASHMAP_ENTRY_OVERHEAD};
 pub use node::{GenerationOverflowError, NodeId, NodeKind};
+// Re-export the public Go-plugin-facing receiver pointerness enum from
+// `mutation_target`. The trait itself stays `pub(crate)` — only the
+// public *data type* used by `GoEmbeddingHint::pointerness` is exposed
+// here so external plugin crates (notably `sqry-lang-go`) can construct
+// hint records during their Phase-1 parse.
+pub use mutation_target::Receiver;
 pub use resolution::{
     FileScope, FileScopeError, NormalizedSymbolQuery, ResolutionMode, ResolvedFileScope,
     SymbolCandidateBucket, SymbolCandidateOutcome, SymbolCandidateSearchWitness,
@@ -193,9 +199,9 @@ pub use resolution::{
 };
 pub use storage::{
     AuxiliaryIndices, ClasspathNodeMetadata, CsrBuilder, CsrError, CsrGraph, CsrStats, EdgeRef,
-    FileRegistry, IndicesStats, InternerStats, MacroNodeMetadata, NodeArena, NodeEntry,
-    NodeMetadata, NodeMetadataStore, ProcMacroFunctionKind, RegistryError, RegistryStats,
-    ResolveError, Slot, SlotState, StringInterner,
+    FileRegistry, IndicesStats, InternerStats, MacroNodeMetadata, NodeArena, NodeEntry, NodeFlags,
+    NodeMetadataStore, ProcMacroFunctionKind, RegistryError, RegistryStats, ResolveError, Slot,
+    SlotState, StoredEntry, StringInterner, TypedMetadata,
 };
 pub use string::StringId;
 pub use traversal::{

@@ -11,6 +11,6 @@ error[E0624]: associated function `__assemble_from_rebuild_parts_internal` is pr
    | |         edges: BidirectionalEdgeStore,
    | |         strings: StringInterner,
 ...  |
-   | |         file_segments: FileSegmentTable,
+   | |         go_hints: crate::graph::unified::build::staging::GoHints,
    | |     ) -> Self {
    | |_____________- private associated function defined here

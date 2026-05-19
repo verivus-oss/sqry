@@ -205,6 +205,10 @@ impl QueryDb {
             .register::<queries::ReachableFromEntryPointsQuery>();
         self.registry.register::<queries::UnusedQuery>();
         self.registry.register::<queries::IsNodeUnusedQuery>();
+        // Phase A — C indirect-call precision (U13).
+        self.registry.register::<queries::AddressTakenQuery>();
+        self.registry
+            .register::<queries::CallsitePromiscuousQuery>();
     }
 
     /// Registers a derived query type for cache routing.
@@ -550,6 +554,9 @@ mod tests {
         db.register::<queries::ReachableFromEntryPointsQuery>();
         db.register::<queries::UnusedQuery>();
         db.register::<queries::IsNodeUnusedQuery>();
+        // Phase A — C indirect-call precision (U13).
+        db.register::<queries::AddressTakenQuery>();
+        db.register::<queries::CallsitePromiscuousQuery>();
 
         assert_eq!(
             db.registry.registered_count(),

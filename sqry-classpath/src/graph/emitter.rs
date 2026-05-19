@@ -34,7 +34,7 @@ use sqry_core::graph::unified::concurrent::CodeGraph;
 use sqry_core::graph::unified::edge::EdgeKind;
 use sqry_core::graph::unified::node::NodeKind;
 use sqry_core::graph::unified::storage::metadata::{
-    ClasspathNodeMetadata, NodeMetadata, NodeMetadataStore,
+    ClasspathNodeMetadata, NodeMetadataStore, TypedMetadata,
 };
 use sqry_core::graph::unified::storage::registry::FileRegistry;
 use sqry_core::graph::unified::storage::{NodeEntry, StringInterner};
@@ -301,16 +301,16 @@ pub fn emit_into_code_graph(
 
     if !id_mapping.is_empty() {
         let remapped_entries: Vec<_> = metadata
-            .iter_all()
-            .map(|((index, generation), value)| {
+            .iter_entries()
+            .map(|((index, generation), entry)| {
                 let node_id = NodeId::new(index, generation);
                 let remapped_id = id_mapping.get(&node_id).copied().unwrap_or(node_id);
-                (remapped_id, value.clone())
+                (remapped_id, entry.clone())
             })
             .collect();
         metadata = NodeMetadataStore::new();
-        for (node_id, value) in remapped_entries {
-            metadata.insert_metadata(node_id, value);
+        for (node_id, entry) in remapped_entries {
+            metadata.insert_entry(node_id, entry);
         }
     }
 
@@ -384,7 +384,7 @@ fn emit_class_stub(
         fqn: stub.fqn.clone(),
         is_direct_dependency: prov.is_some_and(ClasspathProvenance::has_direct_scope),
     };
-    metadata_store.insert_metadata(class_node_id, NodeMetadata::Classpath(cp_meta.clone()));
+    metadata_store.insert_typed(class_node_id, TypedMetadata::Classpath(cp_meta.clone()));
 
     // --- Methods ---
     for method in &stub.methods {
@@ -410,7 +410,7 @@ fn emit_class_stub(
             fqn_to_node,
             fqn_to_nodes,
         );
-        metadata_store.insert_metadata(method_node_id, NodeMetadata::Classpath(cp_meta.clone()));
+        metadata_store.insert_typed(method_node_id, TypedMetadata::Classpath(cp_meta.clone()));
 
         // Class → Method: Defines
         staging.add_edge(class_node_id, method_node_id, EdgeKind::Defines, file_id);
@@ -437,7 +437,7 @@ fn emit_class_stub(
             fqn_to_node,
             fqn_to_nodes,
         );
-        metadata_store.insert_metadata(field_node_id, NodeMetadata::Classpath(cp_meta.clone()));
+        metadata_store.insert_typed(field_node_id, TypedMetadata::Classpath(cp_meta.clone()));
 
         // Class → Field: Defines
         staging.add_edge(class_node_id, field_node_id, EdgeKind::Defines, file_id);
@@ -462,7 +462,7 @@ fn emit_class_stub(
             fqn_to_node,
             fqn_to_nodes,
         );
-        metadata_store.insert_metadata(const_node_id, NodeMetadata::Classpath(cp_meta.clone()));
+        metadata_store.insert_typed(const_node_id, TypedMetadata::Classpath(cp_meta.clone()));
 
         // Class → EnumConstant: Defines
         staging.add_edge(class_node_id, const_node_id, EdgeKind::Defines, file_id);
@@ -487,7 +487,7 @@ fn emit_class_stub(
                 fqn_to_node,
                 fqn_to_nodes,
             );
-            metadata_store.insert_metadata(tp_node_id, NodeMetadata::Classpath(cp_meta.clone()));
+            metadata_store.insert_typed(tp_node_id, TypedMetadata::Classpath(cp_meta.clone()));
 
             // Class → TypeParameter: TypeArgument
             staging.add_edge(class_node_id, tp_node_id, EdgeKind::TypeArgument, file_id);
@@ -513,7 +513,7 @@ fn emit_class_stub(
             fqn_to_node,
             fqn_to_nodes,
         );
-        metadata_store.insert_metadata(lambda_node_id, NodeMetadata::Classpath(cp_meta.clone()));
+        metadata_store.insert_typed(lambda_node_id, TypedMetadata::Classpath(cp_meta.clone()));
 
         // Class → LambdaTarget: Contains
         staging.add_edge(class_node_id, lambda_node_id, EdgeKind::Contains, file_id);
@@ -550,7 +550,7 @@ fn emit_class_stub(
             fqn_to_node,
             fqn_to_nodes,
         );
-        metadata_store.insert_metadata(mod_node_id, NodeMetadata::Classpath(cp_meta.clone()));
+        metadata_store.insert_typed(mod_node_id, TypedMetadata::Classpath(cp_meta.clone()));
 
         // Class → Module: Contains
         staging.add_edge(class_node_id, mod_node_id, EdgeKind::Contains, file_id);
@@ -1370,8 +1370,8 @@ mod tests {
         );
         assert!(
             matches!(
-                graph.macro_metadata().get_metadata(child_id),
-                Some(NodeMetadata::Classpath(_))
+                graph.macro_metadata().get_typed(child_id),
+                Some(TypedMetadata::Classpath(_))
             ),
             "classpath metadata should remain attached after node-id remap"
         );
@@ -1402,9 +1402,9 @@ mod tests {
             AuxiliaryIndices::new(),
             NodeMetadataStore::new(),
         );
-        graph.macro_metadata_mut().insert_metadata(
+        graph.macro_metadata_mut().insert_typed(
             existing_node,
-            NodeMetadata::Classpath(ClasspathNodeMetadata {
+            TypedMetadata::Classpath(ClasspathNodeMetadata {
                 coordinates: Some("group:existing:1.0".to_owned()),
                 jar_path: "/existing.jar".to_owned(),
                 fqn: "existing::node".to_owned(),
@@ -1420,7 +1420,7 @@ mod tests {
             .to_path_buf();
         let existing_meta_before = snapshot_before
             .macro_metadata()
-            .get_metadata(existing_node)
+            .get_typed(existing_node)
             .cloned();
 
         let mut failing_stub = make_stub("com.example.WillFail");
@@ -1453,7 +1453,7 @@ mod tests {
             Some(existing_path_before)
         );
         assert_eq!(
-            graph.macro_metadata().get_metadata(existing_node),
+            graph.macro_metadata().get_typed(existing_node),
             existing_meta_before.as_ref()
         );
     }
@@ -1485,11 +1485,11 @@ mod tests {
             .expect("node should exist");
 
         let metadata = metadata_store
-            .get_metadata(*node_id)
+            .get_typed(*node_id)
             .expect("metadata should be attached");
 
         match metadata {
-            NodeMetadata::Classpath(cp) => {
+            TypedMetadata::Classpath(cp) => {
                 assert_eq!(cp.fqn, "com.google.common.collect.ImmutableList");
                 assert_eq!(
                     cp.coordinates.as_deref(),
@@ -1498,10 +1498,7 @@ mod tests {
                 assert!(cp.is_direct_dependency);
                 assert!(cp.jar_path.contains("guava-33.0.0.jar"));
             }
-            NodeMetadata::Macro(_) => panic!("expected Classpath metadata, got Macro"),
-            NodeMetadata::Synthetic => {
-                panic!("expected Classpath metadata, got Synthetic")
-            }
+            TypedMetadata::Macro(_) => panic!("expected Classpath metadata, got Macro"),
         }
     }
 

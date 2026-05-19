@@ -77,7 +77,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use sqry_core::graph::unified::concurrent::CodeGraph;
-use sqry_core::graph::unified::edge::EdgeKind;
+use sqry_core::graph::unified::edge::{EdgeKind, ResolvedVia};
 use sqry_core::graph::unified::file::FileId;
 use sqry_core::graph::unified::node::{NodeId, NodeKind};
 use sqry_core::graph::unified::publish::assert_publish_bijection;
@@ -171,6 +171,7 @@ fn build_synthetic_rebuild() -> (RebuildGraph, Vec<FileId>, Vec<Vec<NodeId>>) {
                     EdgeKind::Calls {
                         argument_count: 0,
                         is_async: false,
+                        resolved_via: ResolvedVia::Direct,
                     },
                     fid,
                 );
@@ -188,6 +189,7 @@ fn build_synthetic_rebuild() -> (RebuildGraph, Vec<FileId>, Vec<Vec<NodeId>>) {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file_ids[i],
         );

@@ -607,7 +607,9 @@ fn decorated() {}
             .count();
         assert_eq!(callsite_count, 0, "Unknown attrs should not create edges");
 
-        let meta = metadata_store.get(func_id).expect("metadata should exist");
+        let meta = metadata_store
+            .get_macro(func_id)
+            .expect("metadata should exist");
         assert!(
             meta.unresolved_attributes
                 .contains(&"my_custom_attr".to_string()),

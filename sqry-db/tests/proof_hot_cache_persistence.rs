@@ -43,7 +43,7 @@ use std::sync::Arc;
 
 use sqry_core::graph::Language;
 use sqry_core::graph::unified::concurrent::{CodeGraph, GraphSnapshot};
-use sqry_core::graph::unified::edge::kind::EdgeKind;
+use sqry_core::graph::unified::edge::kind::{EdgeKind, ResolvedVia};
 use sqry_core::graph::unified::file::id::FileId;
 use sqry_core::graph::unified::node::id::NodeId;
 use sqry_core::graph::unified::node::kind::NodeKind;
@@ -112,6 +112,7 @@ fn build_3_file_fixture() -> (
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file,
         );
@@ -250,6 +251,7 @@ fn build_fixture() -> (Arc<GraphSnapshot>, Vec<String>) {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file,
         );

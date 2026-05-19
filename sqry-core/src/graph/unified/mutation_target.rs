@@ -95,7 +95,10 @@ use crate::graph::unified::bind::alias::AliasTable;
 use crate::graph::unified::bind::scope::ScopeArena;
 use crate::graph::unified::bind::scope::provenance::ScopeProvenanceStore;
 use crate::graph::unified::bind::shadow::ShadowTable;
+use crate::graph::unified::build::staging::GoHints;
+use crate::graph::unified::edge::EdgeId;
 use crate::graph::unified::edge::bidirectional::BidirectionalEdgeStore;
+use crate::graph::unified::node::NodeId;
 use crate::graph::unified::storage::arena::NodeArena;
 use crate::graph::unified::storage::edge_provenance::EdgeProvenanceStore;
 use crate::graph::unified::storage::indices::AuxiliaryIndices;
@@ -104,6 +107,55 @@ use crate::graph::unified::storage::metadata::NodeMetadataStore;
 use crate::graph::unified::storage::node_provenance::NodeProvenanceStore;
 use crate::graph::unified::storage::registry::FileRegistry;
 use crate::graph::unified::storage::segment::FileSegmentTable;
+
+// =======================================================================
+// Receiver kind and Calls-edge metadata
+// =======================================================================
+//
+// These types are defined here (rather than in the edge module or a Go
+// plugin module) because they form part of the [`GraphMutationTarget`]
+// trait surface — specifically the post-Phase-4d / post-Phase-4e
+// `pass_go_method_set_satisfaction` pass needs an in-arena
+// representation of Go's value-vs-pointer receiver distinction and a
+// projected view of the `EdgeKind::Calls { argument_count, is_async }`
+// payload, without coupling the trait to the full `EdgeKind` enum.
+
+/// Pointer-vs-value receiver kind, per the Go spec §"Method sets".
+///
+/// Carried by the Go plugin's side-channel hints
+/// ([`GoEmbeddingHint`][crate::graph::unified::build::staging::GoEmbeddingHint],
+/// resolved receivers in the method-set pass) and used by the pass to
+/// distinguish `MethodSet(T)` from `MethodSet(*T)` when computing
+/// implicit interface satisfaction and promoted methods.
+///
+/// Public because the Go plugin crate (`sqry-lang-go`) reaches it
+/// through [`StagingGraph::go_hints_mut`][crate::graph::unified::build::staging::StagingGraph::go_hints_mut]
+/// during Phase-1 parse to record the syntactic receiver pointerness
+/// at each emission site. Live constructors outside `sqry-core` land
+/// with Cluster B (Go plugin emission); the variants are exercised in
+/// the Cluster A unit tests via `Receiver::Value`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Receiver {
+    /// `func (t T) M()` — value receiver.
+    Value,
+    /// `func (t *T) M()` — pointer receiver.
+    Pointer,
+}
+
+/// Projected payload of an `EdgeKind::Calls { argument_count, is_async }`
+/// edge, returned by [`GraphMutationTarget::calls_into`].
+///
+/// Decouples the pass from the full `EdgeKind` enum: the pass only needs
+/// the call-site cardinality and async-ness to construct equivalent
+/// shadow `Calls` edges targeting a promoted method.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CallsEdgeMeta {
+    /// Number of arguments at the call site (0..=255).
+    pub argument_count: u8,
+    /// Whether the call expression is directly awaited (`.await` /
+    /// equivalent in the source language).
+    pub is_async: bool,
+}
 
 /// Mutation-plane abstraction over the two graph kinds that the build
 /// pipeline writes into: [`CodeGraph`] (full rebuild) and
@@ -346,6 +398,81 @@ pub(crate) trait GraphMutationTarget {
     /// implementor destructures the owned / Arc-wrapped fields
     /// directly so the two borrows are provably disjoint.
     fn nodes_and_indices_mut(&mut self) -> (&NodeArena, &mut AuxiliaryIndices);
+
+    // ===============================================================
+    // Go-plugin pass extension surface (Go T1 implements-and-promotion,
+    // Cluster A foundation).
+    //
+    // These four accessors are consumed by `pass_go_method_set_
+    // satisfaction` (Clusters C–D) when it materialises synthetic
+    // Method / Type nodes after Phase 4d's bulk-edge-insert and Phase
+    // 4e's binding-plane derivation. None of the existing Pass 1–5
+    // helpers calls them, so they land here under the same
+    // `#[expect(dead_code)]` blanket that already covers other
+    // Phase-3 / Phase-4 pre-staged surfaces; the attribute will be
+    // narrowed when Cluster E wires the new pass into the entrypoint.
+    // ===============================================================
+
+    /// Insert `(qualified_name → NodeId)` entries for `new_nodes` into
+    /// the live by-qualified-name index without rebuilding it from
+    /// scratch.
+    ///
+    /// Used by post-Phase-4d / post-Phase-4e passes (e.g.
+    /// `pass_go_method_set_satisfaction`) that materialise synthetic
+    /// `Method` / `Type` nodes after the regular Phase 4c index rebuild
+    /// has already run, and which therefore must extend the index
+    /// O(`new_nodes`) at a time rather than O(arena).
+    ///
+    /// # Pre-conditions
+    ///
+    /// - Every `NodeId` in `new_nodes` must have been committed via
+    ///   `add_node` / equivalent on this target before the call.
+    /// - Each new node's `(qualified_name, kind)` tuple must either be
+    ///   absent from the index or identical to an existing entry; this
+    ///   method does NOT dedupe.
+    /// - Nodes without a `qualified_name` (i.e., `qualified_name ==
+    ///   None`) are skipped silently — they cannot be inserted into the
+    ///   qualified-name bucket.
+    fn rebuild_qualified_name_index_for_new_nodes(&mut self, new_nodes: &[NodeId]);
+
+    /// Enumerate `(caller_node, edge_id, edge_meta)` triples for every
+    /// existing `EdgeKind::Calls { .. }` edge whose target is `callee`.
+    ///
+    /// Implementations walk the bidirectional edge store's reverse
+    /// adjacency (the CSR + delta merge maintained by
+    /// [`BidirectionalEdgeStore::edges_to`]) and filter for `Calls`
+    /// edges only.
+    ///
+    /// # Returned `EdgeId`
+    ///
+    /// The `EdgeId` carries the call edge's per-result-set identity
+    /// (derived from its `StoreEdgeRef::seq` sequence number) so
+    /// consumers can dedupe shadow emissions. It is **not** an index
+    /// into [`EdgeProvenanceStore`][crate::graph::unified::storage::edge_provenance::EdgeProvenanceStore].
+    /// The `seq` → `EdgeId` projection is stable within a single
+    /// `calls_into` call but not across rebuilds.
+    ///
+    /// Returns an empty vector when `callee` has no incoming `Calls`
+    /// edges or does not exist in the arena.
+    fn calls_into(&self, callee: NodeId) -> Vec<(NodeId, EdgeId, CallsEdgeMeta)>;
+
+    /// Shared borrow of the Go-plugin side-channel hint buffers.
+    ///
+    /// The hint buffers carry Phase-1 plugin observations
+    /// (struct embeddings, named-type conversions, receiver-method
+    /// call sites) that `pass_go_method_set_satisfaction` consumes
+    /// after Phase 4e completes. Hints are build-time scratch state:
+    /// they are populated during Phase 1 parse, merged into the live
+    /// target during Phase 3, consumed by the pass, and reset before
+    /// the next build.
+    fn go_hints(&self) -> &GoHints;
+
+    /// Mutable borrow of the Go-plugin side-channel hint buffers.
+    ///
+    /// Used by Phase 3's parallel-commit path to merge per-file
+    /// [`StagingGraph::go_hints`][crate::graph::unified::build::staging::StagingGraph::go_hints]
+    /// into the live target after NodeId / StringId remapping.
+    fn go_hints_mut(&mut self) -> &mut GoHints;
 }
 
 // =======================================================================
@@ -492,6 +619,79 @@ impl GraphMutationTarget for CodeGraph {
         // borrow of `indices`.
         let Self { nodes, indices, .. } = self;
         (&**nodes, Arc::make_mut(indices))
+    }
+
+    // --- Go-plugin pass extension ---
+
+    fn rebuild_qualified_name_index_for_new_nodes(&mut self, new_nodes: &[NodeId]) {
+        if new_nodes.is_empty() {
+            return;
+        }
+        // Snapshot the per-node (kind, name, qualified_name, file)
+        // tuple before reaching for `indices_mut`, so the `&NodeArena`
+        // borrow does not overlap with the `&mut AuxiliaryIndices`
+        // borrow required by `AuxiliaryIndices::add`.
+        let mut tuples: Vec<(NodeId, _, _, Option<_>, _)> = Vec::with_capacity(new_nodes.len());
+        {
+            let arena: &NodeArena = self.nodes();
+            for nid in new_nodes {
+                if let Some(entry) = arena.get(*nid) {
+                    tuples.push((
+                        *nid,
+                        entry.kind,
+                        entry.name,
+                        entry.qualified_name,
+                        entry.file,
+                    ));
+                }
+            }
+        }
+        let indices = self.indices_mut();
+        for (nid, kind, name, qualified_name, file) in tuples {
+            indices.add(nid, kind, name, qualified_name, file);
+        }
+    }
+
+    fn calls_into(&self, callee: NodeId) -> Vec<(NodeId, EdgeId, CallsEdgeMeta)> {
+        use crate::graph::unified::edge::EdgeKind;
+        let edges_view = self.edges();
+        edges_view
+            .edges_to(callee)
+            .into_iter()
+            .filter_map(|edge_ref| {
+                if let EdgeKind::Calls {
+                    argument_count,
+                    is_async,
+                    ..
+                } = edge_ref.kind
+                {
+                    // Project the per-edge sequence number onto
+                    // `EdgeId`'s 32-bit handle. `seq` is monotonically
+                    // increasing within a snapshot, so the projection
+                    // is collision-free within a single `calls_into`
+                    // result set (the only contract this method makes).
+                    let edge_id = EdgeId::new(u32::try_from(edge_ref.seq).unwrap_or(u32::MAX));
+                    Some((
+                        edge_ref.source,
+                        edge_id,
+                        CallsEdgeMeta {
+                            argument_count,
+                            is_async,
+                        },
+                    ))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    fn go_hints(&self) -> &GoHints {
+        &self.go_hints
+    }
+
+    fn go_hints_mut(&mut self) -> &mut GoHints {
+        &mut self.go_hints
     }
 }
 
@@ -640,5 +840,251 @@ impl GraphMutationTarget for RebuildGraph {
     fn nodes_and_indices_mut(&mut self) -> (&NodeArena, &mut AuxiliaryIndices) {
         let Self { nodes, indices, .. } = self;
         (nodes, indices)
+    }
+
+    // --- Go-plugin pass extension ---
+
+    fn rebuild_qualified_name_index_for_new_nodes(&mut self, new_nodes: &[NodeId]) {
+        // The rebuild plane rebuilds its `AuxiliaryIndices` from
+        // scratch in `RebuildGraph::finalize` step 6 against the
+        // compacted arena, so per-node index extension is unnecessary
+        // here: any node committed via `add_node` on this target will
+        // be re-indexed at finalize time. We mirror `CodeGraph`'s
+        // behaviour all the same — defensive parity in case a future
+        // caller invokes `rebuild_qualified_name_index_for_new_nodes`
+        // mid-rebuild and expects the index to be queryable before
+        // finalize runs.
+        if new_nodes.is_empty() {
+            return;
+        }
+        let mut tuples: Vec<(NodeId, _, _, Option<_>, _)> = Vec::with_capacity(new_nodes.len());
+        for nid in new_nodes {
+            if let Some(entry) = self.nodes.get(*nid) {
+                tuples.push((
+                    *nid,
+                    entry.kind,
+                    entry.name,
+                    entry.qualified_name,
+                    entry.file,
+                ));
+            }
+        }
+        for (nid, kind, name, qualified_name, file) in tuples {
+            self.indices.add(nid, kind, name, qualified_name, file);
+        }
+    }
+
+    fn calls_into(&self, callee: NodeId) -> Vec<(NodeId, EdgeId, CallsEdgeMeta)> {
+        use crate::graph::unified::edge::EdgeKind;
+        self.edges
+            .edges_to(callee)
+            .into_iter()
+            .filter_map(|edge_ref| {
+                if let EdgeKind::Calls {
+                    argument_count,
+                    is_async,
+                    ..
+                } = edge_ref.kind
+                {
+                    let edge_id = EdgeId::new(u32::try_from(edge_ref.seq).unwrap_or(u32::MAX));
+                    Some((
+                        edge_ref.source,
+                        edge_id,
+                        CallsEdgeMeta {
+                            argument_count,
+                            is_async,
+                        },
+                    ))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    fn go_hints(&self) -> &GoHints {
+        &self.go_hints
+    }
+
+    fn go_hints_mut(&mut self) -> &mut GoHints {
+        &mut self.go_hints
+    }
+}
+
+// =======================================================================
+// Unit tests
+// =======================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::graph::unified::concurrent::CodeGraph;
+    use crate::graph::unified::edge::{EdgeKind, ResolvedVia};
+    use crate::graph::unified::file::FileId;
+    use crate::graph::unified::node::NodeId;
+    use crate::graph::unified::node::kind::NodeKind;
+    use crate::graph::unified::storage::NodeEntry;
+
+    /// Helper: build a minimal `NodeEntry` with an interned name +
+    /// qualified name, committed against `graph`.
+    fn make_node(graph: &mut CodeGraph, kind: NodeKind, name: &str, qn: &str) -> NodeId {
+        let name_id = graph.strings_mut().intern(name).expect("intern name");
+        let qn_id = graph
+            .strings_mut()
+            .intern(qn)
+            .expect("intern qualified name");
+        let file = FileId::new(0);
+        let entry = NodeEntry {
+            kind,
+            name: name_id,
+            file,
+            start_byte: 0,
+            end_byte: 0,
+            start_line: 0,
+            start_column: 0,
+            end_line: 0,
+            end_column: 0,
+            signature: None,
+            doc: None,
+            qualified_name: Some(qn_id),
+            visibility: None,
+            is_async: false,
+            is_static: false,
+            body_hash: None,
+            is_unsafe: false,
+        };
+        graph.nodes_mut().alloc(entry).expect("alloc node")
+    }
+
+    #[test]
+    fn rebuild_qualified_name_index_for_new_nodes_inserts_into_live_index() {
+        let mut graph = CodeGraph::new();
+        // Materialise a Method node whose qualified name should
+        // resolve via the by-qualified-name index after the targeted
+        // extension call.
+        let nid = make_node(&mut graph, NodeKind::Method, "M", "pkg.S.M");
+        // Sanity: pre-call lookup must be empty (we never went through
+        // Phase 4c).
+        let qn_id = graph.strings().get("pkg.S.M").expect("qn must be interned");
+        assert!(
+            graph.indices().by_qualified_name(qn_id).is_empty(),
+            "qualified-name bucket must be empty before the targeted update",
+        );
+
+        // Call through the trait surface, exercising the
+        // GraphMutationTarget impl rather than any inherent helper.
+        <CodeGraph as GraphMutationTarget>::rebuild_qualified_name_index_for_new_nodes(
+            &mut graph,
+            &[nid],
+        );
+
+        let bucket = graph.indices().by_qualified_name(qn_id);
+        assert_eq!(
+            bucket,
+            &[nid],
+            "the inserted node must resolve through the by-qualified-name index",
+        );
+    }
+
+    #[test]
+    fn calls_into_returns_calls_edges_with_metadata() {
+        let mut graph = CodeGraph::new();
+        let callee = make_node(&mut graph, NodeKind::Function, "callee", "pkg.callee");
+        let caller_a = make_node(&mut graph, NodeKind::Function, "caller_a", "pkg.caller_a");
+        let caller_b = make_node(&mut graph, NodeKind::Function, "caller_b", "pkg.caller_b");
+        let unrelated = make_node(&mut graph, NodeKind::Function, "noise", "pkg.noise");
+        let file = FileId::new(0);
+
+        // Wire two distinct `Calls` edges into `callee` plus a
+        // `References` edge that must be filtered out.
+        graph.edges().add_edge(
+            caller_a,
+            callee,
+            EdgeKind::Calls {
+                argument_count: 2,
+                is_async: false,
+                resolved_via: ResolvedVia::Direct,
+            },
+            file,
+        );
+        graph.edges().add_edge(
+            caller_b,
+            callee,
+            EdgeKind::Calls {
+                argument_count: 0,
+                is_async: true,
+                resolved_via: ResolvedVia::Direct,
+            },
+            file,
+        );
+        graph
+            .edges()
+            .add_edge(unrelated, callee, EdgeKind::References, file);
+
+        let mut got = <CodeGraph as GraphMutationTarget>::calls_into(&graph, callee);
+        // Order from `edges_to` is not contractual, sort for stable
+        // assertion. The seq projection into `EdgeId` is opaque, so we
+        // only assert that distinct edges yield distinct `EdgeId`s.
+        got.sort_by_key(|(src, _, _)| src.index());
+
+        let calls_only: Vec<(NodeId, CallsEdgeMeta)> =
+            got.iter().map(|(s, _, m)| (*s, *m)).collect();
+        // Sort the expected slice the same way for stable comparison.
+        let mut expected = vec![
+            (
+                caller_a,
+                CallsEdgeMeta {
+                    argument_count: 2,
+                    is_async: false,
+                },
+            ),
+            (
+                caller_b,
+                CallsEdgeMeta {
+                    argument_count: 0,
+                    is_async: true,
+                },
+            ),
+        ];
+        expected.sort_by_key(|(src, _)| src.index());
+        assert_eq!(calls_only, expected);
+
+        // EdgeIds must be distinct between the two Calls edges.
+        assert_ne!(
+            got[0].1, got[1].1,
+            "EdgeId projection must be injective within the returned set"
+        );
+        // The `References` edge must not appear.
+        assert!(
+            !got.iter().any(|(src, _, _)| *src == unrelated),
+            "`calls_into` must filter out non-Calls edges (got References from {unrelated:?})",
+        );
+    }
+
+    #[test]
+    fn go_hints_accessor_pair_round_trips() {
+        let mut graph = CodeGraph::new();
+        assert!(
+            <CodeGraph as GraphMutationTarget>::go_hints(&graph)
+                .embeddings
+                .is_empty(),
+            "fresh CodeGraph must start with empty GoHints",
+        );
+        // Mutate via go_hints_mut, observe via go_hints.
+        let hints = <CodeGraph as GraphMutationTarget>::go_hints_mut(&mut graph);
+        hints
+            .embeddings
+            .push(crate::graph::unified::build::staging::GoEmbeddingHint {
+                outer: NodeId::new(0, 1),
+                inner_qualified_name: crate::graph::unified::StringId::new(0),
+                pointerness: Receiver::Value,
+                file: FileId::new(0),
+            });
+        assert_eq!(
+            <CodeGraph as GraphMutationTarget>::go_hints(&graph)
+                .embeddings
+                .len(),
+            1,
+        );
     }
 }

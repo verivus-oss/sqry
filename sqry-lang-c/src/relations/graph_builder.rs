@@ -3,10 +3,13 @@ use std::path::Path;
 
 use sqry_core::graph::unified::build::helper::CalleeKindHint;
 use sqry_core::graph::unified::edge::kind::TypeOfContext;
+use sqry_core::graph::unified::storage::c_indirect::{BindingSiteKind, IndirectShape};
 use sqry_core::graph::unified::{FfiConvention, GraphBuildHelper, GraphSnapshot, StagingGraph};
 use sqry_core::graph::{CodeEdge, GraphBuilder, GraphBuilderError, GraphResult, Language, Span};
 use tree_sitter::{Node, Tree};
 
+use crate::relations::scope_index::build_local_scope_index;
+use crate::relations::signature_builder::{TypedefChain, build_function_signature};
 use crate::relations::type_extractor::{
     extract_all_type_names_from_c_type, extract_type_specifiers_from_declaration,
 };
@@ -80,6 +83,45 @@ impl GraphBuilder for CGraphBuilder {
         // Build AST graph for call context tracking
         let ast_graph = ASTGraph::from_tree(tree, content, self.max_scope_depth);
 
+        // C indirect-call precision (Phase A, U10) — Phase 1 instrumentation.
+        //
+        // Three additive walks. Each populates a per-file
+        // `CIndirectStagingPayload` slot owned by `StagingGraph`. U11
+        // (Phase 3 commit) drains the payload into the workspace-global
+        // `CIndirectSideTables`; U12 (Pass 5b) consumes it to rewrite
+        // synthetic `Calls` edges into precise binding-plane / type-match
+        // candidates.
+        //
+        // Step 1 — collect every known C function name in the file
+        // (definitions + declarations) into a HashSet used as a predicate
+        // by `classify_address_taken_sites`. DESIGN §2.6.
+        let known_fn_names = collect_known_function_names(tree.root_node(), content);
+
+        // Step 2 — recursive address-taken classifier walker covering the
+        // DESIGN §2.5 pattern table (unary `&` of fn, fn-as-argument,
+        // designated/positional initializer RHS, field/subscript
+        // assignment RHS, return identifier, init_declarator RHS). The
+        // walker calls `helper.mark_function_address_taken_by_name(...)`
+        // for every site whose identifier is in `known_fn_names` AND
+        // (for the four guarded rows — positional init, field-assign,
+        // subscript-assign, init_declarator-RHS) whose destination type
+        // is a function pointer per DESIGN §2.6.
+        let type_permits = build_type_permits(tree.root_node(), content);
+        classify_address_taken_sites(
+            tree.root_node(),
+            content,
+            &mut helper,
+            &known_fn_names,
+            &type_permits,
+        );
+
+        // Step 3 — per-file local scope index (DESIGN §4.1). The block-
+        // scope arena drives U12's `(*fp)(...)` / `fp(...)` resolution by
+        // mapping an identifier at a use-site byte offset to its declared
+        // type token.
+        let scope_index = build_local_scope_index(tree, content);
+        helper.set_local_scope_index(scope_index);
+
         // Two-pass approach for FFI call linking:
         // Pass 1: Collect FFI declarations so calls can be resolved regardless of source order
         let mut ffi_registry = FfiRegistry::new();
@@ -102,6 +144,7 @@ impl GraphBuilder for CGraphBuilder {
             &mut seen_includes,
             &mut exported_symbols,
             &ffi_registry,
+            &type_permits,
         )?;
 
         Ok(())
@@ -434,13 +477,21 @@ fn walk_tree_for_graph(
     seen_includes: &mut HashSet<String>,
     exported_symbols: &mut HashSet<String>,
     ffi_registry: &FfiRegistry,
+    type_permits: &TypePermits,
 ) -> GraphResult<()> {
     match node.kind() {
         "function_definition" => {
             handle_function_node(node, content, ast_graph, helper, exported_symbols);
         }
         "declaration" => {
-            handle_declaration(node, content, ast_graph, helper, exported_symbols);
+            handle_declaration(
+                node,
+                content,
+                ast_graph,
+                helper,
+                exported_symbols,
+                type_permits,
+            );
         }
         "call_expression" => {
             handle_call_expression(node, content, ast_graph, helper, ffi_registry);
@@ -477,6 +528,7 @@ fn walk_tree_for_graph(
             seen_includes,
             exported_symbols,
             ffi_registry,
+            type_permits,
         )?;
     }
 
@@ -539,6 +591,7 @@ fn handle_declaration(
     ast_graph: &ASTGraph,
     helper: &mut GraphBuildHelper,
     exported_symbols: &mut HashSet<String>,
+    type_permits: &TypePermits,
 ) {
     if has_extern_storage_class(node, content) {
         build_ffi_declaration_for_staging(node, content, helper, exported_symbols);
@@ -550,7 +603,7 @@ fn handle_declaration(
         return;
     }
 
-    handle_variable_declaration(node, content, helper, exported_symbols);
+    handle_variable_declaration(node, content, helper, exported_symbols, type_permits);
 
     // Process variable TypeOf/Reference edges for non-function declarations
     process_variable_typeof_edges(node, content, helper);
@@ -572,6 +625,27 @@ fn handle_call_expression(
     let caller_function_id =
         helper.ensure_callee(&caller_qualified, span, CalleeKindHint::Function);
 
+    // C indirect-call precision (Phase A, U10): for `field_expression` /
+    // `pointer_expression` callees, capture a `PendingIndirectCallsite`
+    // alongside today's synthetic stub edge. U12's `pass5b_c_indirect`
+    // rewrites the stub edge into precise candidates resolved via the
+    // binding plane / type-match path. Direct (`identifier`) callees stay
+    // on the existing direct-call path.
+    if let Some(function_node) = node.child_by_field_name("function")
+        && let Some(shape) = classify_indirect_callsite_shape(function_node, content)
+    {
+        let arg_count_u32 = u32::try_from(argument_count).unwrap_or(u32::MAX);
+        helper.push_indirect_callsite(
+            &caller_qualified,
+            (node.start_byte(), node.end_byte()),
+            shape,
+            arg_count_u32,
+            // C `call_expression` has no async-marker concept; the field
+            // exists for parity with `EdgeKind::Calls.is_async`.
+            false,
+        );
+    }
+
     if let Some((ffi_qualified, ffi_convention)) = ffi_registry.get(&target_qualified) {
         let ffi_target_id = helper.ensure_callee(ffi_qualified, span, CalleeKindHint::Function);
         helper.add_ffi_edge(caller_function_id, ffi_target_id, *ffi_convention);
@@ -590,6 +664,83 @@ fn handle_call_expression(
     );
 }
 
+/// Classify an indirect call's callee node into a [`IndirectShape`].
+///
+/// Returns `None` for direct (`identifier`) callees — those stay on the
+/// existing direct-call resolution path. For `field_expression` and
+/// `pointer_expression` callees, returns the shape U12's resolver
+/// dispatches on.
+///
+/// `field_expression` example: `obj->cb(...)` / `obj.cb(...)`. The
+/// receiver is the `argument` field child; the field name is the `field`
+/// child.
+///
+/// `pointer_expression` example: `(*fp)(...)`. The variable name is the
+/// `argument` field child. Bare `fp(...)` (an `identifier` callee whose
+/// declared type is a function pointer) flows through the direct-call
+/// path today; U12 detects it post-hoc via `LocalScopeIndex` lookup, so
+/// it does not produce a `PendingIndirectCallsite` here.
+fn classify_indirect_callsite_shape(
+    function_node: Node<'_>,
+    content: &[u8],
+) -> Option<IndirectShape> {
+    match function_node.kind() {
+        "field_expression" => {
+            let receiver_node = function_node.child_by_field_name("argument")?;
+            let field_node = function_node.child_by_field_name("field")?;
+            let receiver_name = receiver_node.utf8_text(content).ok()?.trim().to_string();
+            let field_name = field_node.utf8_text(content).ok()?.trim().to_string();
+            if receiver_name.is_empty() || field_name.is_empty() {
+                return None;
+            }
+            Some(IndirectShape::FieldExpr {
+                receiver_name,
+                field_name,
+            })
+        }
+        "pointer_expression" => {
+            let argument = function_node.child_by_field_name("argument")?;
+            // The inner argument is typically `identifier` (`(*fp)(...)`)
+            // or a `parenthesized_expression` wrapping one. Walk inward
+            // until we hit an identifier or give up.
+            let var_name = unwrap_pointer_expr_var_name(argument, content)?;
+            Some(IndirectShape::PointerExpr { var_name })
+        }
+        // tree-sitter-c shapes `(*fp)(...)` as
+        // `call_expression { function: parenthesized_expression { pointer_expression { identifier } } }`,
+        // so the call's `function` field is `parenthesized_expression`,
+        // not `pointer_expression`. Unwrap one level and dispatch.
+        "parenthesized_expression" => {
+            let inner = function_node.named_child(0)?;
+            classify_indirect_callsite_shape(inner, content)
+        }
+        _ => None,
+    }
+}
+
+/// Recursively unwrap `parenthesized_expression` / `pointer_expression`
+/// wrappers around the function-pointer variable identifier inside a
+/// `(*fp)(...)` callee shape.
+///
+/// Returns the bare identifier text. Returns `None` if the inner-most
+/// node is not an `identifier` (e.g. `(*(struct ops *)p)(...)` — a cast
+/// expression that U12 does not resolve in Phase A).
+fn unwrap_pointer_expr_var_name(node: Node<'_>, content: &[u8]) -> Option<String> {
+    match node.kind() {
+        "identifier" => {
+            let name = node.utf8_text(content).ok()?.trim().to_string();
+            if name.is_empty() { None } else { Some(name) }
+        }
+        "parenthesized_expression" | "pointer_expression" => {
+            // tree-sitter-c puts the inner expression as the first named
+            // child for both wrapper kinds.
+            let inner = node.named_child(0)?;
+            unwrap_pointer_expr_var_name(inner, content)
+        }
+        _ => None,
+    }
+}
+
 fn module_id_for_file(helper: &mut GraphBuildHelper) -> sqry_core::graph::unified::NodeId {
     let file_name = helper
         .file_path()
@@ -605,6 +756,7 @@ fn handle_variable_declaration(
     content: &[u8],
     helper: &mut GraphBuildHelper,
     exported_symbols: &mut HashSet<String>,
+    type_permits: &TypePermits,
 ) {
     let declarations = extract_declarator_names(node, content);
     if declarations.is_empty() {
@@ -622,6 +774,14 @@ fn handle_variable_declaration(
         None
     };
 
+    // Extract the enclosing struct tag (if any) for binding-plane capture.
+    // For `struct file_operations ops = { ... }`, the tag is
+    // `file_operations`. Returns `None` for non-struct declarations (e.g.
+    // primitive types, unions, or anonymous types), which short-circuits
+    // binding capture without affecting the existing References-edge
+    // path.
+    let struct_tag = extract_enclosing_struct_tag(node, content);
+
     for (name, span) in declarations {
         let var_id = helper.add_variable(&name, Some(span));
         if let Some(module_id) = module_id
@@ -633,8 +793,36 @@ fn handle_variable_declaration(
         // Detect function pointer assignments in designated initializers.
         // Patterns like: `const struct file_operations ops = { .read = my_func, ... };`
         // create References edges from the variable to each assigned function.
-        extract_designated_initializer_targets(node, content, &name, var_id, helper);
+        extract_designated_initializer_targets(
+            node,
+            content,
+            &name,
+            var_id,
+            helper,
+            struct_tag.as_deref(),
+            type_permits,
+        );
     }
+}
+
+/// Extract the struct tag from the type specifier of a declaration node, if
+/// the declared type is `struct <Tag>` (with `<Tag>` named).
+///
+/// Returns `None` for primitive types, anonymous structs, unions, enums,
+/// or typedef-named types. The tag is the bare struct name (e.g.
+/// `"file_operations"` for `struct file_operations`).
+///
+/// Used by `extract_designated_initializer_targets` /
+/// `extract_initializer_list_targets` to attach binding-plane entries to
+/// `(struct_tag, field_name)` keys for U12's resolver.
+fn extract_enclosing_struct_tag(decl_node: Node<'_>, content: &[u8]) -> Option<String> {
+    let type_node = decl_node.child_by_field_name("type")?;
+    if type_node.kind() != "struct_specifier" {
+        return None;
+    }
+    let name_node = type_node.child_by_field_name("name")?;
+    let tag = name_node.utf8_text(content).ok()?.trim().to_string();
+    if tag.is_empty() { None } else { Some(tag) }
 }
 
 /// Extract function pointer targets from designated initializers.
@@ -654,6 +842,8 @@ fn extract_designated_initializer_targets(
     var_name: &str,
     var_id: sqry_core::graph::unified::NodeId,
     helper: &mut GraphBuildHelper,
+    struct_tag: Option<&str>,
+    type_permits: &TypePermits,
 ) {
     // Walk the declaration to find the init_declarator matching this variable
     let mut cursor = decl_node.walk();
@@ -677,7 +867,15 @@ fn extract_designated_initializer_targets(
                 continue;
             }
 
-            extract_initializer_list_targets(init_child, content, var_id, helper);
+            extract_initializer_list_targets(
+                init_child,
+                content,
+                var_name,
+                var_id,
+                helper,
+                struct_tag,
+                type_permits,
+            );
         }
 
         // Found the matching declarator — no need to continue
@@ -686,56 +884,192 @@ fn extract_designated_initializer_targets(
 }
 
 /// Extract function pointer targets from an `initializer_list` node.
+///
+/// Handles both shapes of aggregate initializer (DESIGN §2.5 / §3.1.1):
+///
+/// * **Designated** — `{ .field = function_name }`. Children are
+///   `initializer_pair` nodes; the field name is the leading designator
+///   and the value is the trailing identifier.
+/// * **Positional** — `{ function_name, ... }`. Children are bare
+///   identifiers ordered to match the struct's declared field layout.
+///   The field name is not directly available; the binding is keyed on
+///   `(struct_tag, "<positional>")` (empty `field_name` placeholder)
+///   so U12's resolver can still consume it via the type-match path.
+///
+/// For each function-name target the function additionally:
+///
+/// * pushes a [`PendingBinding`] under `(struct_tag, field_name)` keyed
+///   on `instance_name` (only when `struct_tag` is `Some` and, for
+///   positional slots, when the slot's declared field type is a function
+///   pointer per DESIGN §2.6 row 4).
+///
+/// **Address-taken marks are NOT pushed here** (DESIGN §2.6, U10 iter-3).
+/// The single source of truth for `pending_address_taken_names` is
+/// `classify_address_taken_sites`, which already applies the
+/// fnptr-slot guard via `positional_init_slot_is_fnptr` (pattern 4) and
+/// covers the unguarded designated-pair arm (pattern 3). Re-marking from
+/// this legacy path would bypass that guard for top-level positional
+/// initializers (e.g. `struct S { int x; }; struct S s = { f };` where
+/// the slot is not fnptr) and falsely mark `f` as address-taken.
 fn extract_initializer_list_targets(
     list_node: Node,
     content: &[u8],
+    instance_name: &str,
     var_id: sqry_core::graph::unified::NodeId,
     helper: &mut GraphBuildHelper,
+    struct_tag: Option<&str>,
+    type_permits: &TypePermits,
 ) {
     let mut pair_cursor = list_node.walk();
-    for pair in list_node.children(&mut pair_cursor) {
-        if pair.kind() != "initializer_pair" {
-            continue;
+    // Track the positional index across **named** children that are bare
+    // identifiers (matching the indexing convention of
+    // `classify_address_taken_recursive`'s `initializer_list` arm). Used
+    // to look up the slot's declared field type for the positional
+    // binding-push guard (DESIGN §2.6 row 4).
+    let mut positional_index: usize = 0;
+    for pair in list_node.named_children(&mut pair_cursor) {
+        match pair.kind() {
+            "initializer_pair" => {
+                // Designated initializer: `.field = function_name`.
+                // Designated entries do NOT participate in the positional
+                // index — they consume their slot by name, not order.
+                #[allow(clippy::cast_possible_truncation)]
+                // Graph storage: node/edge index counts fit in u32
+                let child_count = pair.named_child_count() as u32;
+                if child_count < 2 {
+                    continue;
+                }
+
+                let Some(value_node) = pair.named_child(child_count - 1) else {
+                    continue;
+                };
+
+                if value_node.kind() != "identifier" {
+                    continue;
+                }
+
+                let Ok(func_name) = value_node.utf8_text(content) else {
+                    continue;
+                };
+
+                if is_skipped_init_value(func_name) {
+                    continue;
+                }
+
+                let target_id = helper.ensure_callee(
+                    func_name,
+                    span_from_node(value_node),
+                    CalleeKindHint::Function,
+                );
+                helper.add_reference_edge(var_id, target_id);
+
+                // C indirect-call precision (U10): push a designated
+                // `PendingBinding` (when we know the enclosing struct
+                // tag). The address-taken mark is applied by
+                // `classify_address_taken_sites` (pattern 3, unguarded
+                // per SPEC §3.1.1 row 3), not here.
+                if let Some(tag) = struct_tag {
+                    let field_name = extract_designator_field_name(pair, content);
+                    if let Some(field) = field_name {
+                        helper.push_binding(
+                            tag,
+                            &field,
+                            instance_name,
+                            func_name,
+                            BindingSiteKind::DesignatedInitializer,
+                        );
+                    }
+                }
+            }
+            "identifier" => {
+                // Positional initializer slot: `{ function_name, ... }`.
+                let slot_index = positional_index;
+                positional_index += 1;
+
+                let Ok(func_name) = pair.utf8_text(content) else {
+                    continue;
+                };
+                if is_skipped_init_value(func_name) {
+                    continue;
+                }
+
+                // Binding capture only fires when we know the enclosing
+                // struct tag AND the slot's declared field type is a
+                // function pointer (DESIGN §2.6 row 4, SPEC §3.1.1
+                // row 4). Without the guard, top-level
+                // `struct S { int x; }; struct S s = { f };` would push
+                // a `(S, <positional>, s -> f)` binding, which is wrong:
+                // `f` is not bound to a function-pointer slot.
+                //
+                // The field name is a placeholder (`<positional>`)
+                // because tree-sitter-c does not give us the declared
+                // field name from the initializer alone. U12's resolver
+                // consumes positional bindings via the type-match path
+                // (matching the function-pointer signature against the
+                // struct's field-signature table) rather than the
+                // binding-plane key.
+                //
+                // The address-taken mark for this slot is applied by
+                // `classify_address_taken_sites` (pattern 4, guarded by
+                // `positional_init_slot_is_fnptr`), not here.
+                if let Some(tag) = struct_tag
+                    && positional_init_slot_is_fnptr(list_node, slot_index, content, type_permits)
+                {
+                    helper.push_binding(
+                        tag,
+                        "<positional>",
+                        instance_name,
+                        func_name,
+                        BindingSiteKind::PositionalInitializer,
+                    );
+                }
+            }
+            _ => {
+                // Numeric literals, string literals, nested initializer
+                // lists, etc. — not a function reference. These DO
+                // consume a positional slot for layout purposes (the
+                // `_` arm cannot be `initializer_pair` because that's
+                // matched above), so the index advances.
+                positional_index += 1;
+            }
         }
-
-        // The value is typically the last named child (after the designator)
-        // tree-sitter C: initializer_pair has designator(s) then value
-        #[allow(clippy::cast_possible_truncation)]
-        // Graph storage: node/edge index counts fit in u32
-        let child_count = pair.named_child_count() as u32;
-        if child_count < 2 {
-            continue;
-        }
-
-        let Some(value_node) = pair.named_child(child_count - 1) else {
-            continue;
-        };
-
-        // Only process identifier values (function name references)
-        // Skip numeric literals, string literals, nested initializers, etc.
-        if value_node.kind() != "identifier" {
-            continue;
-        }
-
-        let Ok(func_name) = value_node.utf8_text(content) else {
-            continue;
-        };
-
-        // Skip common non-function values (NULL, 0, macros that look like constants)
-        if func_name == "NULL"
-            || func_name == "nullptr"
-            || func_name.chars().all(|c| c.is_uppercase() || c == '_')
-        {
-            continue;
-        }
-
-        let target_id = helper.ensure_callee(
-            func_name,
-            span_from_node(value_node),
-            CalleeKindHint::Function,
-        );
-        helper.add_reference_edge(var_id, target_id);
     }
+}
+
+/// Common skip filter for initializer values: `NULL`, `nullptr`, and
+/// all-uppercase macro-shaped identifiers that look like constants
+/// (e.g. `INT_MAX`, `PAGE_SIZE`).
+fn is_skipped_init_value(text: &str) -> bool {
+    text == "NULL" || text == "nullptr" || text.chars().all(|c| c.is_uppercase() || c == '_')
+}
+
+/// Extract the field name from a designated `initializer_pair`'s
+/// designator.
+///
+/// tree-sitter-c shapes a designated initializer as
+/// `initializer_pair { designator: field_designator(field_identifier), value: <expr> }`.
+/// We pull the field_identifier text. Returns `None` for malformed input
+/// or for designators that are not field designators (e.g. array
+/// subscript designators `[0]`, which don't participate in struct
+/// binding-plane capture).
+fn extract_designator_field_name(pair: Node<'_>, content: &[u8]) -> Option<String> {
+    let mut cursor = pair.walk();
+    for child in pair.named_children(&mut cursor) {
+        if child.kind() == "field_designator" {
+            // field_designator wraps a field_identifier child.
+            let mut inner = child.walk();
+            for id in child.named_children(&mut inner) {
+                if id.kind() == "field_identifier" {
+                    let text = id.utf8_text(content).ok()?.trim().to_string();
+                    if text.is_empty() {
+                        return None;
+                    }
+                    return Some(text);
+                }
+            }
+        }
+    }
+    None
 }
 
 fn extract_declarator_names(node: Node, content: &[u8]) -> Vec<(String, Span)> {
@@ -1899,6 +2233,79 @@ fn process_single_field_declarator(
         let ref_type_id = helper.add_type(ref_type, None);
         helper.add_reference_edge(property_id, ref_type_id);
     }
+
+    // C indirect-call precision (Phase A, U10): if this field is a
+    // function pointer, compute its canonical signature via U07's
+    // declarator-walking signature builder and stage it under
+    // `(struct_tag, field_name)`. U11 interns the three legs and
+    // inserts into `CIndirectSideTables::struct_field_fnptr`; U12 reads
+    // the table to match callsite signatures against struct slots.
+    if is_function_pointer_field_declarator(declarator) {
+        // Phase 1 typedef chain is empty — typedef resolution lives in
+        // U11's post-commit pass that builds the workspace-level chain
+        // from `TypeOf` edges. Phase 1 callers pass an empty chain; U12
+        // re-canonicalises against the workspace chain during
+        // resolution.
+        let typedef_chain = TypedefChain::new();
+        // `build_function_signature` needs the **declaration-shaped**
+        // parent (so `collect_base_tokens` finds the leading
+        // `primitive_type` / `type_identifier`). The bare
+        // `function_declarator` exposes only the parameter list, not
+        // the return type. Walk up to the enclosing `field_declaration`
+        // when available; fall back to passing the declarator directly
+        // (the signature builder degrades to "unknown return type" but
+        // still produces a non-empty parameter shape).
+        let signature_anchor = declarator.parent().unwrap_or(declarator);
+        if let Some(signature) = build_function_signature(signature_anchor, content, &typedef_chain)
+        {
+            helper.push_struct_field_fnptr_signature(struct_name, &field_name, &signature);
+        }
+    }
+}
+
+/// True when `declarator` is a function-pointer field declarator.
+///
+/// tree-sitter-c shapes `int (*op)(int, int)` as
+/// `function_declarator { declarator: parenthesized_declarator {
+/// declarator: pointer_declarator { declarator: field_identifier }},
+/// parameters: parameter_list }`. The key distinguishing feature is the
+/// `pointer_declarator` *inside* the function_declarator's declarator
+/// chain — a plain non-pointer function (e.g. an unusual struct-as-
+/// method field, which C does not really have) lacks the pointer.
+///
+/// Plain pointers (`int *p`), arrays of fn-pointers (`int (*table[1])(int)`),
+/// and non-pointer field declarators are rejected; U12's resolver
+/// handles only the direct fn-pointer slot in Phase A.
+fn is_function_pointer_field_declarator(declarator: Node<'_>) -> bool {
+    if declarator.kind() != "function_declarator" {
+        return false;
+    }
+    let Some(inner) = declarator.child_by_field_name("declarator") else {
+        return false;
+    };
+    inner_contains_pointer_declarator(inner)
+}
+
+/// True when `node` (the inner-declarator chain of a function_declarator)
+/// reaches a `pointer_declarator` before bottoming out at a
+/// `field_identifier` / `identifier`.
+fn inner_contains_pointer_declarator(node: Node<'_>) -> bool {
+    match node.kind() {
+        "pointer_declarator" => true,
+        "parenthesized_declarator" | "field_declarator" => {
+            if let Some(inner) = node.child_by_field_name("declarator") {
+                return inner_contains_pointer_declarator(inner);
+            }
+            let mut cursor = node.walk();
+            for child in node.named_children(&mut cursor) {
+                if inner_contains_pointer_declarator(child) {
+                    return true;
+                }
+            }
+            false
+        }
+        _ => false,
+    }
 }
 
 /// Extract the field name **and** its identifier AST node from a
@@ -2146,5 +2553,737 @@ fn process_single_typedef_declarator(
     for ref_type in &all_types {
         let ref_type_id = helper.add_type(ref_type, None);
         helper.add_reference_edge(typedef_id, ref_type_id);
+    }
+}
+
+// =============================================================================
+// C indirect-call precision (Phase A, U10) — address-taken classifier walkers.
+// =============================================================================
+
+/// Collect every function name *defined* or *declared* in this translation
+/// unit into a `HashSet` for the address-taken classifier (DESIGN §2.6
+/// footnote).
+///
+/// Walks `function_definition` nodes (function bodies) and `declaration`
+/// nodes whose declarator chain bottoms out at a `function_declarator`
+/// (function prototypes). The set is used as a fast predicate by
+/// `classify_address_taken_sites` so that only identifiers that actually
+/// refer to functions trigger an `ADDRESS_TAKEN` mark — `&g_int` (where
+/// `g_int` is a plain variable) is correctly skipped (DESIGN §2.5
+/// `nonfunction_taken` negative case).
+fn collect_known_function_names(root: Node<'_>, content: &[u8]) -> HashSet<String> {
+    let mut names: HashSet<String> = HashSet::new();
+    collect_known_function_names_recursive(root, content, &mut names);
+    names
+}
+
+fn collect_known_function_names_recursive(
+    node: Node<'_>,
+    content: &[u8],
+    names: &mut HashSet<String>,
+) {
+    match node.kind() {
+        "function_definition" => {
+            if let Some(name) = extract_function_name_from_definition(node, content) {
+                names.insert(name);
+            }
+        }
+        "declaration" => {
+            // Prototype shape: `T name(args);` — declarator chain bottoms
+            // out at function_declarator. `T (*name)(args)` (function-
+            // pointer variable) also has a function_declarator at some
+            // depth but is gated by a `pointer_declarator` parent —
+            // those are NOT function declarations and must not enter
+            // the known-fn set.
+            for proto_name in extract_function_prototype_names(node, content) {
+                names.insert(proto_name);
+            }
+        }
+        _ => {}
+    }
+
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        collect_known_function_names_recursive(child, content, names);
+    }
+}
+
+/// Extract the function name from a `function_definition` node.
+fn extract_function_name_from_definition(node: Node<'_>, content: &[u8]) -> Option<String> {
+    let declarator = node.child_by_field_name("declarator")?;
+    extract_name_from_function_declarator(declarator, content)
+}
+
+/// Extract every function-prototype name from a `declaration` node.
+///
+/// Walks the declaration's declarator children. A declarator that is
+/// directly a `function_declarator` (or wrapped only in
+/// `parenthesized_declarator` chains without an intervening
+/// `pointer_declarator`) names a function. A
+/// `pointer_declarator > function_declarator` names a function-pointer
+/// variable, NOT a function — those are excluded so they don't enter
+/// the known-fn set.
+fn extract_function_prototype_names(decl_node: Node<'_>, content: &[u8]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cursor = decl_node.walk();
+    for child in decl_node.children(&mut cursor) {
+        match child.kind() {
+            "function_declarator" => {
+                if let Some(name) = extract_name_from_function_declarator(child, content) {
+                    out.push(name);
+                }
+            }
+            "init_declarator" => {
+                // `T name = init;` — name is a variable, not a function
+                // prototype, so skip. The variable side is handled by
+                // pattern §2.5 init_declarator-RHS in the classifier.
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Walk a declarator chain to find the bottom function_declarator and
+/// extract its identifier name. Skips through `parenthesized_declarator`
+/// wrappers; treats a `pointer_declarator` wrapper as "this is a
+/// function-pointer variable, not a function definition", returning
+/// `None`.
+fn extract_name_from_function_declarator(node: Node<'_>, content: &[u8]) -> Option<String> {
+    match node.kind() {
+        "identifier" => node.utf8_text(content).ok().map(str::to_string),
+        "function_declarator" => {
+            let inner = node.child_by_field_name("declarator")?;
+            extract_name_from_function_declarator(inner, content)
+        }
+        "parenthesized_declarator" => {
+            if let Some(inner) = node.child_by_field_name("declarator") {
+                return extract_name_from_function_declarator(inner, content);
+            }
+            let mut cursor = node.walk();
+            for child in node.named_children(&mut cursor) {
+                if let Some(name) = extract_name_from_function_declarator(child, content) {
+                    return Some(name);
+                }
+            }
+            None
+        }
+        // pointer_declarator → function-pointer variable, not a function
+        // declaration. Refuse to extract a name.
+        "pointer_declarator" => None,
+        _ => None,
+    }
+}
+
+/// Recursive walker covering the DESIGN §2.5 address-taken pattern table.
+///
+/// For every identifier that appears in an address-taken context AND whose
+/// text is in `known_fn_names`, calls
+/// `helper.mark_function_address_taken_by_name(name)`. The walker is
+/// additive — the existing extractor functions
+/// (`extract_designated_initializer_targets`, etc.) still drive binding-
+/// plane capture independently. Duplicate marks within a file are
+/// tolerated (U11's `mark_address_taken` is idempotent on the
+/// `NodeFlags::ADDRESS_TAKEN` bit).
+///
+/// Patterns covered (one match arm each):
+///
+/// 1. `unary_expression { operator: '&', argument: identifier }`
+///    — `&function_name`. **No type guard** (DESIGN §2.6 row 1) —
+///    the syntactic shape `&fn` is sufficient on its own.
+/// 2. `argument_list > identifier` — function passed as a call argument.
+///    Note: the callee position is `call_expression.function`, NOT an
+///    `argument_list` child, so this arm cannot mis-fire on direct calls.
+///    **No type guard** (DESIGN §2.6 row 2).
+/// 3. `initializer_pair { value: identifier }` — designated initializer
+///    RHS. **No type guard** (DESIGN §2.6 row 3): the field name itself
+///    selects the slot, and the struct's signature table (captured during
+///    struct-field processing) already gates whether the slot is fnptr
+///    at the resolution stage. Phase 1 marks unconditionally.
+/// 4. `initializer_list > identifier` — positional initializer slot.
+///    Filters out direct `initializer_pair` children (those are matched
+///    by arm 3) and bare wrapping `parenthesized_expression`. **Type
+///    guard** (DESIGN §2.6 row 4): only marks when the declared field
+///    type at this slot position is a function pointer.
+/// 5. `assignment_expression { left: field_expression | subscript_expression, right: identifier }`
+///    — function-pointer slot assignment via field access or array
+///    subscript. **Type guard** (DESIGN §2.6 rows 5–6): only marks when
+///    the LHS field's declared type (or the LHS array's element type)
+///    is a function pointer.
+/// 6. `return_statement > identifier` — returning a function name.
+///    **No type guard** (DESIGN §2.6 row 7).
+/// 7. `init_declarator { value: identifier }` — initializer-declarator
+///    RHS (`void (*p)() = function_name;`). **Type guard** (DESIGN §2.6
+///    row 8): only marks when the declarator's type is a function
+///    pointer (i.e. the declarator chain contains
+///    `pointer_declarator > function_declarator`).
+fn classify_address_taken_sites(
+    root: Node<'_>,
+    content: &[u8],
+    helper: &mut GraphBuildHelper,
+    known_fn_names: &HashSet<String>,
+    type_permits: &TypePermits,
+) {
+    classify_address_taken_recursive(root, content, helper, known_fn_names, type_permits);
+}
+
+fn classify_address_taken_recursive(
+    node: Node<'_>,
+    content: &[u8],
+    helper: &mut GraphBuildHelper,
+    known_fn_names: &HashSet<String>,
+    type_permits: &TypePermits,
+) {
+    match node.kind() {
+        // Pattern 1: `&function_name`. No type guard.
+        "pointer_expression" | "unary_expression" => {
+            // tree-sitter-c uses `pointer_expression` for `&x` and `*x`;
+            // some grammar versions also surface `unary_expression`. The
+            // operator is the first unnamed child (or accessible via
+            // `child(0)`). For `&`, the argument is the field `argument`
+            // or the first named child.
+            if let Some(op) = node.child(0)
+                && op.utf8_text(content).map(str::trim).unwrap_or("") == "&"
+            {
+                let target = node
+                    .child_by_field_name("argument")
+                    .or_else(|| node.named_child(0));
+                if let Some(arg) = target
+                    && arg.kind() == "identifier"
+                    && let Ok(name) = arg.utf8_text(content)
+                    && known_fn_names.contains(name)
+                {
+                    helper.mark_function_address_taken_by_name(name);
+                }
+            }
+        }
+        // Pattern 2: identifier in argument list. No type guard — passing
+        // a function name in a call argument is itself an address-take
+        // (the function decays to a pointer at the call site).
+        "argument_list" => {
+            let mut cursor = node.walk();
+            for child in node.named_children(&mut cursor) {
+                if child.kind() == "identifier"
+                    && let Ok(name) = child.utf8_text(content)
+                    && known_fn_names.contains(name)
+                {
+                    helper.mark_function_address_taken_by_name(name);
+                }
+            }
+        }
+        // Pattern 3: designated initializer RHS. No type guard — the
+        // `.field = fn` shape is itself a fnptr-slot designator.
+        "initializer_pair" => {
+            #[allow(clippy::cast_possible_truncation)]
+            let child_count = node.named_child_count() as u32;
+            if child_count >= 2
+                && let Some(value) = node.named_child(child_count - 1)
+                && value.kind() == "identifier"
+                && let Ok(name) = value.utf8_text(content)
+                && known_fn_names.contains(name)
+            {
+                helper.mark_function_address_taken_by_name(name);
+            }
+        }
+        // Pattern 4: positional initializer slot (bare identifier child of
+        // initializer_list, not an `initializer_pair`).
+        //
+        // **Type-guarded** (DESIGN §2.6 row 4): per spec, we must verify
+        // that the slot's declared field type is a function pointer.
+        // We walk the AST up to the enclosing `init_declarator` →
+        // `declaration` chain to find the declared variable and its
+        // struct type, then index into `type_permits.struct_field_fnptr`
+        // by `(struct_tag, field_index)`.
+        "initializer_list" => {
+            let mut cursor = node.walk();
+            // We need a positional index across **named** children that
+            // are bare identifiers in this initializer_list. We can't
+            // simply use the AST child index because designated pairs
+            // and bare positional identifiers interleave — but in the
+            // positional-only shape (which is the only shape where this
+            // pattern's guard actually applies), the children are
+            // ordered identifiers / expressions.
+            let mut positional_index: usize = 0;
+            for child in node.named_children(&mut cursor) {
+                if child.kind() == "initializer_pair" {
+                    // Designated entry — does NOT participate in the
+                    // positional index. Pattern 3 handles it.
+                    continue;
+                }
+                let is_identifier = child.kind() == "identifier";
+                if is_identifier
+                    && let Ok(name) = child.utf8_text(content)
+                    && known_fn_names.contains(name)
+                    && positional_init_slot_is_fnptr(node, positional_index, content, type_permits)
+                {
+                    helper.mark_function_address_taken_by_name(name);
+                }
+                positional_index += 1;
+            }
+        }
+        // Pattern 5: `field_expression = identifier` or
+        // `subscript_expression = identifier`.
+        //
+        // **Type-guarded** (DESIGN §2.6 rows 5–6):
+        // * `field_expression`: resolve the receiver back to its struct
+        //   tag via `type_permits.var_struct_tag`, then look up
+        //   `(struct_tag, field_name)` in `type_permits.struct_field_fnptr`.
+        // * `subscript_expression`: look up the array's identifier in
+        //   `type_permits.var_fnptr_array`.
+        "assignment_expression" => {
+            let lhs = node.child_by_field_name("left");
+            let rhs = node.child_by_field_name("right");
+            if let (Some(lhs), Some(rhs)) = (lhs, rhs)
+                && rhs.kind() == "identifier"
+                && let Ok(name) = rhs.utf8_text(content)
+                && known_fn_names.contains(name)
+                && lhs_assignment_target_is_fnptr(lhs, content, type_permits)
+            {
+                helper.mark_function_address_taken_by_name(name);
+            }
+        }
+        // Pattern 6: `return identifier`. No type guard — returning a
+        // bare function name from any function-returning-fnptr context
+        // is itself an address-take. (We don't bother distinguishing
+        // returns-from-fnptr-returning vs returns-from-other since C's
+        // type system funnels it through anyway, and the wider miss
+        // here is rare in practice.)
+        "return_statement" => {
+            let mut cursor = node.walk();
+            for child in node.named_children(&mut cursor) {
+                if child.kind() == "identifier"
+                    && let Ok(name) = child.utf8_text(content)
+                    && known_fn_names.contains(name)
+                {
+                    helper.mark_function_address_taken_by_name(name);
+                }
+            }
+        }
+        // Pattern 7: `init_declarator { value: identifier }`.
+        //
+        // **Type-guarded** (DESIGN §2.6 row 8): the declarator's type
+        // must contain a function-pointer shape, i.e. the declarator
+        // chain (left side of `init_declarator`) must reach a
+        // `pointer_declarator > function_declarator`.
+        "init_declarator" => {
+            if let Some(value) = node.child_by_field_name("value")
+                && value.kind() == "identifier"
+                && let Ok(name) = value.utf8_text(content)
+                && known_fn_names.contains(name)
+                && init_declarator_is_fnptr(node)
+            {
+                helper.mark_function_address_taken_by_name(name);
+            }
+        }
+        _ => {}
+    }
+
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        classify_address_taken_recursive(child, content, helper, known_fn_names, type_permits);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DESIGN §2.6 — type-permits pre-pass
+// ---------------------------------------------------------------------------
+
+/// Function-pointer destination table built once per file (DESIGN §2.6).
+///
+/// Three lookup maps populated by `build_type_permits` in a single walk
+/// over the AST. Consulted by `classify_address_taken_recursive` to gate
+/// the four type-guarded rows (positional initializer, field-expression
+/// assignment, subscript-expression assignment, init-declarator RHS).
+///
+/// The pre-pass is intentionally cheap: it only inspects declaration /
+/// struct-declaration shapes (a small subset of nodes in a typical C
+/// translation unit) and the maps are populated only for declarators
+/// the C type system would actually allow to receive a function pointer.
+#[derive(Debug, Default)]
+struct TypePermits {
+    /// `(struct_tag, field_name) → is_fnptr`. Captures the
+    /// function-pointer-ness of every named struct field across the
+    /// translation unit. Used to gate positional initializer (slot-by-
+    /// position via `struct_field_order`) and `s->f = fn` /
+    /// `s.f = fn` assignments.
+    struct_field_fnptr: HashMap<(String, String), bool>,
+    /// `struct_tag → ordered list of (field_name, is_fnptr)`. Mirrors
+    /// `struct_field_fnptr` but preserves field order so positional
+    /// initializers can index by slot position.
+    struct_field_order: HashMap<String, Vec<(String, bool)>>,
+    /// `var_name → struct_tag`. Set for variables whose declared type is
+    /// `struct <Tag>` with a non-empty tag. Drives the receiver
+    /// resolution for `s->cb = fn` and the positional initializer's
+    /// enclosing-declaration lookup.
+    var_struct_tag: HashMap<String, String>,
+    /// `var_name → true` when the declared type is a function-pointer
+    /// array (e.g. `void (*table[N])();`). Drives the subscript
+    /// assignment guard.
+    var_fnptr_array: HashMap<String, bool>,
+}
+
+/// Walk the AST once and populate the type-permits maps.
+fn build_type_permits(root: Node<'_>, content: &[u8]) -> TypePermits {
+    let mut permits = TypePermits::default();
+    build_type_permits_recursive(root, content, &mut permits);
+    permits
+}
+
+fn build_type_permits_recursive(node: Node<'_>, content: &[u8], permits: &mut TypePermits) {
+    match node.kind() {
+        "struct_specifier" => {
+            // Only struct definitions with a body and a named tag
+            // contribute. `struct Tag {...}` populates the struct-field
+            // maps; bare `struct Tag` references (no body) and anonymous
+            // structs are skipped.
+            if let Some(name_node) = node.child_by_field_name("name")
+                && let Some(body) = node.child_by_field_name("body")
+                && let Ok(tag) = name_node.utf8_text(content)
+            {
+                let tag = tag.trim().to_string();
+                if !tag.is_empty() {
+                    record_struct_fields(body, &tag, content, permits);
+                }
+            }
+        }
+        "declaration" => {
+            record_declaration(node, content, permits);
+        }
+        "parameter_declaration" => {
+            // Function parameters can carry struct-typed receivers
+            // (e.g. `void use_(struct S* s)`) and fnptr arrays. Record
+            // them in the same maps so `s->cb = fn` inside the function
+            // body can resolve through the var → struct-tag lookup.
+            record_parameter(node, content, permits);
+        }
+        _ => {}
+    }
+
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        build_type_permits_recursive(child, content, permits);
+    }
+}
+
+/// Record every field of one `struct Tag { … }` body in both
+/// `struct_field_fnptr` (keyed) and `struct_field_order` (ordered).
+fn record_struct_fields(
+    body: Node<'_>,
+    struct_tag: &str,
+    content: &[u8],
+    permits: &mut TypePermits,
+) {
+    let mut order = Vec::new();
+    let mut cursor = body.walk();
+    for field_decl in body.named_children(&mut cursor) {
+        if field_decl.kind() != "field_declaration" {
+            continue;
+        }
+        // A `field_declaration` can have multiple declarators
+        // (e.g. `int (*f)(int), x;`). Walk every declarator child.
+        let mut inner = field_decl.walk();
+        for child in field_decl.named_children(&mut inner) {
+            if !is_field_declarator_node(child.kind()) {
+                continue;
+            }
+            let Some((field_name, _)) = extract_field_declarator_name_with_node(child, content)
+            else {
+                continue;
+            };
+            let is_fnptr = declarator_is_function_pointer_shape(child);
+            permits
+                .struct_field_fnptr
+                .insert((struct_tag.to_string(), field_name.clone()), is_fnptr);
+            order.push((field_name, is_fnptr));
+        }
+    }
+    if !order.is_empty() {
+        permits
+            .struct_field_order
+            .insert(struct_tag.to_string(), order);
+    }
+}
+
+/// Record per-declaration variable info: struct-type tags + fnptr
+/// arrays. Scalar function pointers like `void (*p)()` are reflected via
+/// `init_declarator_is_fnptr` (consulted directly at the call site), so
+/// we don't need a separate `var_fnptr` map here.
+fn record_declaration(decl: Node<'_>, content: &[u8], permits: &mut TypePermits) {
+    let type_node = decl.child_by_field_name("type");
+    let struct_tag = type_node.and_then(|t| {
+        if t.kind() == "struct_specifier" {
+            t.child_by_field_name("name")
+                .and_then(|n| n.utf8_text(content).ok())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        } else {
+            None
+        }
+    });
+
+    let mut cursor = decl.walk();
+    for child in decl.children(&mut cursor) {
+        match child.kind() {
+            "init_declarator" => {
+                if let Some((name, _)) = extract_declarator_name(child, content) {
+                    if let Some(tag) = &struct_tag {
+                        permits.var_struct_tag.insert(name.clone(), tag.clone());
+                    }
+                    if init_declarator_is_fnptr_array(child) {
+                        permits.var_fnptr_array.insert(name, true);
+                    }
+                }
+            }
+            "declarator"
+            | "array_declarator"
+            | "pointer_declarator"
+            | "function_declarator"
+            | "parenthesized_declarator"
+            | "identifier" => {
+                if let Some((name, _)) = extract_declarator_name(child, content) {
+                    if let Some(tag) = &struct_tag {
+                        permits.var_struct_tag.insert(name.clone(), tag.clone());
+                    }
+                    if bare_declarator_is_fnptr_array(child) {
+                        permits.var_fnptr_array.insert(name, true);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Record a `parameter_declaration` (function parameter) into the
+/// type-permits maps.
+///
+/// Captures two shapes:
+/// * `struct Tag *p` (or `struct Tag p`) → records `p` in
+///   `var_struct_tag`, so `p->field = fn` inside the function body
+///   can resolve the field's declared type.
+/// * `void (*p[N])()` → records `p` in `var_fnptr_array` so
+///   `p[i] = fn` is permitted.
+fn record_parameter(param: Node<'_>, content: &[u8], permits: &mut TypePermits) {
+    let type_node = param.child_by_field_name("type");
+    let struct_tag = type_node.and_then(|t| {
+        if t.kind() == "struct_specifier" {
+            t.child_by_field_name("name")
+                .and_then(|n| n.utf8_text(content).ok())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        } else {
+            None
+        }
+    });
+
+    let Some(decl) = param.child_by_field_name("declarator") else {
+        return;
+    };
+    let Some((name, _)) = extract_declarator_name(decl, content) else {
+        return;
+    };
+    if let Some(tag) = struct_tag {
+        permits.var_struct_tag.insert(name.clone(), tag);
+    }
+    if bare_declarator_is_fnptr_array(decl) {
+        permits.var_fnptr_array.insert(name, true);
+    }
+}
+
+/// True when a struct-field declarator (`field_identifier`, possibly
+/// wrapped in `pointer_declarator`/`function_declarator`/etc.) is a
+/// function-pointer shape (`pointer_declarator > function_declarator`,
+/// in any wrapping order).
+///
+/// Reuses the existing `is_function_pointer_field_declarator` shape
+/// check but additionally peels through `pointer_declarator` /
+/// `parenthesized_declarator` wrappers so a declarator like
+/// `(*name)(args)` (where the outer node is `pointer_declarator`, not
+/// `function_declarator`) still classifies as fnptr.
+fn declarator_is_function_pointer_shape(decl: Node<'_>) -> bool {
+    if is_function_pointer_field_declarator(decl) {
+        return true;
+    }
+    match decl.kind() {
+        "pointer_declarator" | "parenthesized_declarator" | "field_declarator" => {
+            if let Some(inner) = decl.child_by_field_name("declarator")
+                && declarator_is_function_pointer_shape(inner)
+            {
+                return true;
+            }
+            let mut cursor = decl.walk();
+            for child in decl.named_children(&mut cursor) {
+                if declarator_is_function_pointer_shape(child) {
+                    return true;
+                }
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
+/// True when an `init_declarator`'s declarator chain reaches a
+/// `pointer_declarator > function_declarator` shape — i.e. the variable
+/// being declared is a scalar function pointer (`void (*p)() = …;`).
+fn init_declarator_is_fnptr(init: Node<'_>) -> bool {
+    let Some(decl) = init.child_by_field_name("declarator") else {
+        return false;
+    };
+    declarator_is_function_pointer_shape(decl)
+}
+
+/// True when an `init_declarator`'s declarator chain reaches a
+/// `pointer_declarator > array_declarator > function_declarator` shape
+/// — i.e. the variable is a function-pointer array (`void (*t[N])()`).
+fn init_declarator_is_fnptr_array(init: Node<'_>) -> bool {
+    let Some(decl) = init.child_by_field_name("declarator") else {
+        return false;
+    };
+    bare_declarator_is_fnptr_array(decl)
+}
+
+/// True for `function_declarator > parenthesized_declarator >
+/// pointer_declarator > array_declarator > identifier` shapes (the
+/// tree-sitter-c shape of `void (*table[N])(args)`) — i.e. arrays of
+/// function pointers, where assignment `table[i] = fn` is a legitimate
+/// fnptr-slot assignment.
+fn bare_declarator_is_fnptr_array(decl: Node<'_>) -> bool {
+    fn has_array(node: Node<'_>) -> bool {
+        match node.kind() {
+            "array_declarator" => true,
+            "parenthesized_declarator"
+            | "pointer_declarator"
+            | "field_declarator"
+            | "function_declarator" => {
+                if let Some(inner) = node.child_by_field_name("declarator") {
+                    return has_array(inner);
+                }
+                let mut cursor = node.walk();
+                for child in node.named_children(&mut cursor) {
+                    if has_array(child) {
+                        return true;
+                    }
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+    declarator_is_function_pointer_shape(decl) && has_array(decl)
+}
+
+/// True when the slot at `slot_index` (0-based) of `init_list`'s
+/// positional children — i.e. the enclosing declaration's struct type's
+/// `slot_index`-th field — is a function pointer.
+///
+/// Walks up from `init_list` to the enclosing `init_declarator` to find
+/// the declared variable, then looks up its struct tag in
+/// `type_permits.var_struct_tag` and indexes into
+/// `type_permits.struct_field_order`.
+///
+/// Returns `false` (conservative) when:
+/// * there is no enclosing `init_declarator` (e.g. nested initializer
+///   lists, compound literals);
+/// * the declared variable's type tag is not in `var_struct_tag`;
+/// * the slot index is out of range for the struct's field order;
+/// * the struct tag has no recorded field order (anonymous struct).
+fn positional_init_slot_is_fnptr(
+    init_list: Node<'_>,
+    slot_index: usize,
+    content: &[u8],
+    type_permits: &TypePermits,
+) -> bool {
+    let mut node = init_list;
+    while let Some(parent) = node.parent() {
+        if parent.kind() == "init_declarator" {
+            // Find the declared variable name by walking the declarator
+            // chain of this `init_declarator`.
+            let Some(decl) = parent.child_by_field_name("declarator") else {
+                return false;
+            };
+            let Some((var_name, _)) = extract_declarator_name(decl, content) else {
+                return false;
+            };
+            let Some(tag) = type_permits.var_struct_tag.get(&var_name) else {
+                return false;
+            };
+            let Some(fields) = type_permits.struct_field_order.get(tag) else {
+                return false;
+            };
+            return fields
+                .get(slot_index)
+                .map(|(_, is_fnptr)| *is_fnptr)
+                .unwrap_or(false);
+        }
+        // Stop walking up if we leave the declaration entirely (e.g. we
+        // hit a `function_definition` or `translation_unit`) — the
+        // initializer_list isn't part of a top-level variable
+        // declaration, so we can't apply the field-type guard.
+        if matches!(
+            parent.kind(),
+            "function_definition" | "translation_unit" | "compound_statement"
+        ) {
+            return false;
+        }
+        node = parent;
+    }
+    false
+}
+
+/// True when assignment LHS (a `field_expression` or
+/// `subscript_expression`) resolves to a function-pointer destination
+/// (DESIGN §2.6 rows 5–6).
+///
+/// * `field_expression`: resolves the receiver back to its struct tag
+///   via `type_permits.var_struct_tag`, then looks up
+///   `(struct_tag, field_name)` in `type_permits.struct_field_fnptr`.
+///   Returns `true` only when the lookup yields `Some(true)`.
+/// * `subscript_expression`: walks the argument back to a bare
+///   identifier and consults `type_permits.var_fnptr_array`.
+///   Conservative — gives up (returns `false`) for nested or
+///   computed-index shapes.
+fn lhs_assignment_target_is_fnptr(
+    lhs: Node<'_>,
+    content: &[u8],
+    type_permits: &TypePermits,
+) -> bool {
+    match lhs.kind() {
+        "field_expression" => {
+            let field_name = lhs
+                .child_by_field_name("field")
+                .and_then(|n| n.utf8_text(content).ok())
+                .map(str::to_string);
+            let receiver = lhs.child_by_field_name("argument");
+            let receiver_name = receiver.and_then(|n| {
+                if n.kind() == "identifier" {
+                    n.utf8_text(content).ok().map(str::to_string)
+                } else {
+                    None
+                }
+            });
+            if let (Some(field), Some(recv)) = (field_name, receiver_name)
+                && let Some(tag) = type_permits.var_struct_tag.get(&recv)
+                && let Some(&is_fnptr) = type_permits.struct_field_fnptr.get(&(tag.clone(), field))
+            {
+                return is_fnptr;
+            }
+            false
+        }
+        "subscript_expression" => {
+            let arg = lhs.child_by_field_name("argument");
+            if let Some(arg) = arg
+                && arg.kind() == "identifier"
+                && let Ok(name) = arg.utf8_text(content)
+            {
+                return type_permits
+                    .var_fnptr_array
+                    .get(name)
+                    .copied()
+                    .unwrap_or(false);
+            }
+            false
+        }
+        _ => false,
     }
 }

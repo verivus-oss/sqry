@@ -24,8 +24,10 @@
 //! `TRACKS_METADATA_REVISION = true` where node metadata influences the
 //! result) so the cache is invalidated as the graph evolves.
 
+pub mod address_taken;
 pub mod callees;
 pub mod callers;
+pub mod callsite_promiscuous;
 pub mod condensation;
 pub mod cycles;
 pub mod dispatch;
@@ -36,8 +38,10 @@ pub mod type_ids;
 pub mod unused;
 pub mod unused_post_filter;
 
+pub use address_taken::AddressTakenQuery;
 pub use callees::CalleesQuery;
 pub use callers::CallersQuery;
+pub use callsite_promiscuous::CallsitePromiscuousQuery;
 pub use condensation::{CachedCondensation, CondensationKey, CondensationQuery, CondensationValue};
 pub use cycles::{
     CycleBounds, CyclesKey, CyclesQuery, CyclesValue, IsInCycleKey, IsInCycleQuery, IsInCycleValue,

@@ -68,3 +68,59 @@ pub use ir::{
     RegexPattern, SetOperation, StringPattern,
 };
 pub use parse::{ParseError, parse_query};
+
+// U15 iter-1 follow-up — DAG acceptance command
+// `cargo test -p sqry-db planner::traversal_with_resolved_via` must
+// resolve to ≥1 test. The codex iter-1 LOW finding flagged that
+// the previous filter spelling (mod `compile::tests` containing
+// `traverse_with_resolved_via_installs_field`) did not match the
+// `planner::traversal_*` substring — `planner::compile::tests::...`
+// breaks the substring contiguously at `compile::`. This thin
+// re-export module exists ONLY so the DAG filter remains
+// substring-matched against a real test path; the actual test
+// coverage lives in [`compile::tests`] and [`parse::tests`].
+#[cfg(test)]
+mod traversal_with_resolved_via_acceptance {
+    //! DAG acceptance-filter shim. See module-level note above.
+    //!
+    //! Each test in this module duplicates the canonical builder-assertion
+    //! inline (rather than re-invoking a `compile::tests::*` helper via
+    //! direct call) so the assertion stays self-contained and trivially
+    //! re-readable. The full coverage matrix lives in [`compile::tests`]
+    //! and [`parse::tests`]; this shim exists purely so the filter string
+    //! `planner::traversal_with_resolved_via` resolves to test paths
+    //! under `planner::traversal_with_resolved_via_acceptance::*`.
+
+    use sqry_core::graph::unified::edge::kind::{EdgeKind, ResolvedVia};
+    use sqry_core::graph::unified::node::kind::NodeKind;
+
+    use super::{Direction, PlanNode, QueryBuilder};
+
+    /// Mirror of [`compile::tests::traversal_with_resolved_via_builder_installs_field`]
+    /// re-anchored under `planner::traversal_with_resolved_via_*` so the
+    /// DAG acceptance filter binds to a real test path.
+    #[test]
+    fn acceptance_installs_field_via_builder() {
+        let plan = QueryBuilder::new()
+            .scan(NodeKind::Function)
+            .traverse_with_resolved_via(
+                Direction::Forward,
+                EdgeKind::Calls {
+                    argument_count: 0,
+                    is_async: false,
+                    resolved_via: ResolvedVia::Direct,
+                },
+                Some(ResolvedVia::BindingPlane),
+                3,
+            )
+            .build()
+            .expect("plan");
+        let PlanNode::Chain { steps } = &plan.root else {
+            panic!("expected Chain root");
+        };
+        let PlanNode::EdgeTraversal { resolved_via, .. } = &steps[1] else {
+            panic!("expected EdgeTraversal");
+        };
+        assert_eq!(*resolved_via, Some(ResolvedVia::BindingPlane));
+    }
+}

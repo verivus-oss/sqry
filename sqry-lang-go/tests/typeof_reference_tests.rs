@@ -156,24 +156,26 @@ var active bool
     let typeof_edges =
         collect_edges_by_kind(&staging, |kind| matches!(kind, EdgeKind::TypeOf { .. }));
 
-    // Check TypeOf edges exist
+    // Check TypeOf edges exist. Per Cluster G1 (05_TEST_PLAN §7.5), var-spec
+    // TypeOf-edge targets are package-qualified by `process_single_var_spec`,
+    // so the bare type name `int` is interned as `main.int` etc.
     assert!(
         typeof_edges
             .iter()
-            .any(|(var, typ)| var == "main.count" && typ == "int"),
-        "Expected TypeOf edge from main.count to int, got: {typeof_edges:?}"
+            .any(|(var, typ)| var == "main.count" && typ == "main.int"),
+        "Expected TypeOf edge from main.count to main.int, got: {typeof_edges:?}"
     );
     assert!(
         typeof_edges
             .iter()
-            .any(|(var, typ)| var == "main.name" && typ == "string"),
-        "Expected TypeOf edge from main.name to string, got: {typeof_edges:?}"
+            .any(|(var, typ)| var == "main.name" && typ == "main.string"),
+        "Expected TypeOf edge from main.name to main.string, got: {typeof_edges:?}"
     );
     assert!(
         typeof_edges
             .iter()
-            .any(|(var, typ)| var == "main.active" && typ == "bool"),
-        "Expected TypeOf edge from main.active to bool, got: {typeof_edges:?}"
+            .any(|(var, typ)| var == "main.active" && typ == "main.bool"),
+        "Expected TypeOf edge from main.active to main.bool, got: {typeof_edges:?}"
     );
 }
 
@@ -199,12 +201,13 @@ var ptr *int
     let reference_edges =
         collect_edges_by_kind(&staging, |kind| matches!(kind, EdgeKind::References));
 
-    // Check TypeOf edges (should point to *User, *int as written)
+    // Check TypeOf edges (per Cluster G1, var-spec targets are package-qualified
+    // by `process_single_var_spec`; see 05_TEST_PLAN §7.5).
     assert!(
         typeof_edges
             .iter()
-            .any(|(var, typ)| var == "main.user" && typ == "*User"),
-        "Expected TypeOf edge from main.user to *User, got: {typeof_edges:?}"
+            .any(|(var, typ)| var == "main.user" && typ == "main.*User"),
+        "Expected TypeOf edge from main.user to main.*User, got: {typeof_edges:?}"
     );
 
     // Check Reference edges (should point to the underlying type)
@@ -344,18 +347,20 @@ const Timeout int64 = 30
     let typeof_edges =
         collect_edges_by_kind(&staging, |kind| matches!(kind, EdgeKind::TypeOf { .. }));
 
-    // Constants with explicit types should create TypeOf edges
+    // Constants with explicit types should create TypeOf edges. Per Cluster G1
+    // (05_TEST_PLAN §7.5), const-spec targets are package-qualified by the same
+    // `process_single_var_spec` path that handles var specs.
     assert!(
         typeof_edges
             .iter()
-            .any(|(var, typ)| var == "main.MaxSize" && typ == "int"),
-        "Expected TypeOf edge from main.MaxSize to int, got: {typeof_edges:?}"
+            .any(|(var, typ)| var == "main.MaxSize" && typ == "main.int"),
+        "Expected TypeOf edge from main.MaxSize to main.int, got: {typeof_edges:?}"
     );
     assert!(
         typeof_edges
             .iter()
-            .any(|(var, typ)| var == "main.Timeout" && typ == "int64"),
-        "Expected TypeOf edge from main.Timeout to int64, got: {typeof_edges:?}"
+            .any(|(var, typ)| var == "main.Timeout" && typ == "main.int64"),
+        "Expected TypeOf edge from main.Timeout to main.int64, got: {typeof_edges:?}"
     );
 }
 
@@ -428,23 +433,24 @@ var (
     let typeof_edges =
         collect_edges_by_kind(&staging, |kind| matches!(kind, EdgeKind::TypeOf { .. }));
 
+    // Per Cluster G1 (05_TEST_PLAN §7.5), var-spec targets are package-qualified.
     assert!(
         typeof_edges
             .iter()
-            .any(|(var, typ)| var == "main.x" && typ == "int"),
-        "Expected TypeOf edge from main.x to int in grouped declaration, got: {typeof_edges:?}"
+            .any(|(var, typ)| var == "main.x" && typ == "main.int"),
+        "Expected TypeOf edge from main.x to main.int in grouped declaration, got: {typeof_edges:?}"
     );
     assert!(
         typeof_edges
             .iter()
-            .any(|(var, typ)| var == "main.y" && typ == "string"),
-        "Expected TypeOf edge from main.y to string in grouped declaration, got: {typeof_edges:?}"
+            .any(|(var, typ)| var == "main.y" && typ == "main.string"),
+        "Expected TypeOf edge from main.y to main.string in grouped declaration, got: {typeof_edges:?}"
     );
     assert!(
         typeof_edges
             .iter()
-            .any(|(var, typ)| var == "main.z" && typ == "bool"),
-        "Expected TypeOf edge from main.z to bool in grouped declaration, got: {typeof_edges:?}"
+            .any(|(var, typ)| var == "main.z" && typ == "main.bool"),
+        "Expected TypeOf edge from main.z to main.bool in grouped declaration, got: {typeof_edges:?}"
     );
 }
 
@@ -459,23 +465,24 @@ var a, b, c int
     let typeof_edges =
         collect_edges_by_kind(&staging, |kind| matches!(kind, EdgeKind::TypeOf { .. }));
 
+    // Per Cluster G1 (05_TEST_PLAN §7.5), var-spec targets are package-qualified.
     assert!(
         typeof_edges
             .iter()
-            .any(|(var, typ)| var == "main.a" && typ == "int"),
-        "Expected TypeOf edge from main.a to int in multi-name declaration, got: {typeof_edges:?}"
+            .any(|(var, typ)| var == "main.a" && typ == "main.int"),
+        "Expected TypeOf edge from main.a to main.int in multi-name declaration, got: {typeof_edges:?}"
     );
     assert!(
         typeof_edges
             .iter()
-            .any(|(var, typ)| var == "main.b" && typ == "int"),
-        "Expected TypeOf edge from main.b to int in multi-name declaration, got: {typeof_edges:?}"
+            .any(|(var, typ)| var == "main.b" && typ == "main.int"),
+        "Expected TypeOf edge from main.b to main.int in multi-name declaration, got: {typeof_edges:?}"
     );
     assert!(
         typeof_edges
             .iter()
-            .any(|(var, typ)| var == "main.c" && typ == "int"),
-        "Expected TypeOf edge from main.c to int in multi-name declaration, got: {typeof_edges:?}"
+            .any(|(var, typ)| var == "main.c" && typ == "main.int"),
+        "Expected TypeOf edge from main.c to main.int in multi-name declaration, got: {typeof_edges:?}"
     );
 }
 
@@ -493,24 +500,34 @@ const (
     let typeof_edges =
         collect_edges_by_kind(&staging, |kind| matches!(kind, EdgeKind::TypeOf { .. }));
 
+    // Per Cluster G1 (05_TEST_PLAN §7.5), const-spec targets are package-qualified.
     assert!(
         typeof_edges
             .iter()
-            .any(|(var, typ)| var == "main.MaxRetries" && typ == "int"),
-        "Expected TypeOf edge from main.MaxRetries to int in grouped const, got: {typeof_edges:?}"
+            .any(|(var, typ)| var == "main.MaxRetries" && typ == "main.int"),
+        "Expected TypeOf edge from main.MaxRetries to main.int in grouped const, got: {typeof_edges:?}"
     );
     assert!(
         typeof_edges
             .iter()
-            .any(|(var, typ)| var == "main.Timeout" && typ == "int64"),
-        "Expected TypeOf edge from main.Timeout to int64 in grouped const, got: {typeof_edges:?}"
+            .any(|(var, typ)| var == "main.Timeout" && typ == "main.int64"),
+        "Expected TypeOf edge from main.Timeout to main.int64 in grouped const, got: {typeof_edges:?}"
     );
 }
 
-// Tests for Codex MEDIUM-2: Verify local vars are NOT processed
-
+// Cluster B1 (Go T1 implements-and-promotion): function-local
+// `var x T` declarations now emit `TypeOf` edges — both via the
+// per-binding eager `<ident>@<offset>` synthetic node materialised in
+// `local_scopes.rs`, and via the `process_var_typeof_edges` package-name
+// path with the resulting `<pkg>.<name>` Variable node also marked
+// `NodeMetadata::Synthetic`. The previous contract (no TypeOf for
+// function-local vars) was inverted intentionally as the load-bearing
+// prerequisite for `GoReceiverHintKind::LocalIdent { binding_local }`
+// resolution in the post-Phase-4e method-set pass.
+//
+// This test now pins the inverted contract.
 #[test]
-fn test_no_typeof_for_local_vars() {
+fn test_typeof_emitted_for_local_vars_cluster_b1() {
     let source = "package main
 
 func doWork() {
@@ -523,14 +540,27 @@ func doWork() {
     let typeof_edges =
         collect_edges_by_kind(&staging, |kind| matches!(kind, EdgeKind::TypeOf { .. }));
 
-    // Local variables should NOT have TypeOf edges (only package-level vars)
+    // Function-local variables get TypeOf edges via the eager binding
+    // path (`<ident>@<offset>` synthetic Variable nodes) and via the
+    // package-name path (`main.local`, `main.data`).
+    let edges_for = |name: &str| -> Vec<(String, String)> {
+        typeof_edges
+            .iter()
+            .filter(|(var, _)| var == name || var.starts_with(&format!("{name}@")))
+            .cloned()
+            .collect()
+    };
+
+    let local_edges = edges_for("local");
     assert!(
-        !typeof_edges.iter().any(|(var, _)| var.contains("local")),
-        "Should NOT have TypeOf edge for function-local var 'local', got: {typeof_edges:?}"
+        local_edges.iter().any(|(_, t)| t == "int"),
+        "Cluster B1: expected a TypeOf edge from local → int, got: {typeof_edges:?}"
     );
+
+    let data_edges = edges_for("data");
     assert!(
-        !typeof_edges.iter().any(|(var, _)| var.contains("data")),
-        "Should NOT have TypeOf edge for function-local var 'data', got: {typeof_edges:?}"
+        data_edges.iter().any(|(_, t)| t == "string"),
+        "Cluster B1: expected a TypeOf edge from data → string, got: {typeof_edges:?}"
     );
 }
 
@@ -1656,12 +1686,13 @@ func ProcessError(err error) {
     // Collect parameter TypeOf edges
     let param_edges = collect_typeof_edges_by_context(&staging, TypeOfContext::Parameter);
 
-    // Variable edge
+    // Variable edge. Per Cluster G1 (05_TEST_PLAN §7.5), var-spec targets are
+    // package-qualified (`main.error`); parameter targets stay bare.
     assert!(
         var_edges
             .iter()
-            .any(|(var, typ)| var == "main.globalError" && typ == "error"),
-        "Expected globalError to have error as variable type, got: {var_edges:?}"
+            .any(|(var, typ)| var == "main.globalError" && typ == "main.error"),
+        "Expected globalError to have main.error as variable type, got: {var_edges:?}"
     );
 
     // Parameter edge
@@ -1706,15 +1737,30 @@ func foo(y int) int {
     let param_count = collect_typeof_edges_by_context(&staging, TypeOfContext::Parameter).len();
     let return_count = collect_typeof_edges_by_context(&staging, TypeOfContext::Return).len();
 
-    // We should have:
-    // - 1 variable (x)
-    // - 1 parameter (y)
-    // - 1 return (int)
-    assert_eq!(var_count, 1, "Expected 1 variable TypeOf edge");
-    assert_eq!(param_count, 1, "Expected 1 parameter TypeOf edge");
-    assert_eq!(return_count, 1, "Expected 1 return TypeOf edge");
+    // Post Cluster B1 (Go T1) the parameter context fires twice for each
+    // function parameter:
+    //   1. From `process_function_parameters` — source is the function
+    //      node (legacy contract).
+    //   2. From the eager binding-site materialisation in
+    //      `local_scopes.rs` — source is the synthetic `<ident>@<offset>`
+    //      Parameter node (new Cluster B1 contract).
+    // We pin both via mutual presence: at least one Variable, at least
+    // two Parameter edges, at least one Return edge — and the total
+    // matches the per-context partition (no orphan TypeOf edges).
+    assert!(var_count >= 1, "Expected at least one variable TypeOf edge");
+    assert!(
+        param_count >= 2,
+        "Expected at least two parameter TypeOf edges \
+         (process_function_parameters + Cluster B1 binding-site), \
+         got {param_count}"
+    );
+    assert!(
+        return_count >= 1,
+        "Expected at least one return TypeOf edge"
+    );
 
-    // Total TypeOf edges should equal sum of contexts
+    // Total TypeOf edges should equal sum of contexts (partition is
+    // exhaustive — every TypeOf edge has a context).
     let all_typeof_edges =
         collect_edges_by_kind(&staging, |kind| matches!(kind, EdgeKind::TypeOf { .. }));
 
@@ -2469,11 +2515,12 @@ func NewService() *Service {
         "NewService return"
     );
 
-    // Variable
+    // Variable. Per Cluster G1 (05_TEST_PLAN §7.5), var-spec targets are
+    // package-qualified.
     assert!(
         var_edges
             .iter()
-            .any(|(s, t)| s == "main.globalService" && t == "*Service"),
+            .any(|(s, t)| s == "main.globalService" && t == "main.*Service"),
         "globalService variable"
     );
 

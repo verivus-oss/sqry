@@ -31,6 +31,8 @@
 //! let (new_csr, stats) = build_compacted_csr(&snapshot, Direction::Forward)?;
 //! ```
 
+#[cfg(test)]
+use super::super::edge::ResolvedVia;
 use super::super::edge::{DeltaEdge, EdgeKind, EdgeStore};
 use super::super::node::NodeId;
 use super::super::storage::{CsrError, CsrGraph};
@@ -326,6 +328,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             seq,
             FileId::new(1),
@@ -339,6 +342,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             seq,
             op,

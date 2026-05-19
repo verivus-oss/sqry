@@ -480,7 +480,9 @@ mod tests {
             &[],
         );
 
-        let meta = metadata_store.get(mod_id).expect("metadata should exist");
+        let meta = metadata_store
+            .get_macro(mod_id)
+            .expect("metadata should exist");
         assert_eq!(meta.cfg_condition.as_deref(), Some("test"));
         assert_eq!(meta.cfg_active, Some(true));
     }
@@ -510,7 +512,9 @@ fn serde_support() {}
             &["serde".to_string()],
         );
 
-        let meta = metadata_store.get(func_id).expect("metadata should exist");
+        let meta = metadata_store
+            .get_macro(func_id)
+            .expect("metadata should exist");
         assert_eq!(meta.cfg_condition.as_deref(), Some("feature = \"serde\""));
         assert_eq!(meta.cfg_active, Some(true));
     }
@@ -575,7 +579,7 @@ struct MyStruct { x: u32 }
         );
 
         let meta = metadata_store
-            .get(struct_id)
+            .get_macro(struct_id)
             .expect("metadata should exist");
         assert_eq!(meta.cfg_condition.as_deref(), Some("feature = \"serde\""));
         assert_eq!(meta.cfg_active, Some(true));
@@ -630,7 +634,9 @@ mod unix_only {
             &[],
         );
 
-        let meta = metadata_store.get(mod_id).expect("metadata should exist");
+        let meta = metadata_store
+            .get_macro(mod_id)
+            .expect("metadata should exist");
         assert_eq!(meta.cfg_condition.as_deref(), Some("unix"));
         // No active_cfg_flags provided, so cfg_active should be None.
         assert_eq!(meta.cfg_active, None);
@@ -754,7 +760,7 @@ struct Nested { x: u32 }
 
         // Should have metadata set (from the outer cfg_attr).
         let meta = metadata_store
-            .get(struct_id)
+            .get_macro(struct_id)
             .expect("metadata should exist");
         assert!(meta.cfg_condition.is_some());
     }

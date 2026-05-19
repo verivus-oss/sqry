@@ -6,7 +6,7 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
 
 use sqry_core::graph::Language;
 use sqry_core::graph::unified::concurrent::{CodeGraph, GraphSnapshot};
-use sqry_core::graph::unified::edge::kind::EdgeKind;
+use sqry_core::graph::unified::edge::kind::{EdgeKind, ResolvedVia};
 use sqry_core::graph::unified::node::id::NodeId;
 use sqry_core::graph::unified::node::kind::NodeKind;
 use sqry_core::graph::unified::storage::arena::NodeEntry;
@@ -116,8 +116,10 @@ fn traverse_calls() -> PlanNode {
         edge_kind: Some(EdgeKind::Calls {
             argument_count: 0,
             is_async: false,
+            resolved_via: ResolvedVia::Direct,
         }),
         max_depth: 1,
+        resolved_via: None,
     }
 }
 

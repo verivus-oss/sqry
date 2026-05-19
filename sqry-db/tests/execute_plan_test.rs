@@ -24,7 +24,7 @@ use std::sync::Arc;
 
 use sqry_core::graph::Language;
 use sqry_core::graph::unified::concurrent::{CodeGraph, GraphSnapshot};
-use sqry_core::graph::unified::edge::kind::{EdgeKind, ExportKind};
+use sqry_core::graph::unified::edge::kind::{EdgeKind, ExportKind, ResolvedVia};
 use sqry_core::graph::unified::node::id::NodeId;
 use sqry_core::graph::unified::node::kind::NodeKind;
 use sqry_core::graph::unified::storage::arena::NodeEntry;
@@ -192,6 +192,7 @@ impl Fixture {
             EdgeKind::Calls {
                 argument_count: 3,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             bin_file,
         );
@@ -201,6 +202,7 @@ impl Fixture {
             EdgeKind::Calls {
                 argument_count: 1,
                 is_async: true,
+                resolved_via: ResolvedVia::Direct,
             },
             bin_file,
         );
@@ -210,6 +212,7 @@ impl Fixture {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             lib_file,
         );
@@ -422,6 +425,7 @@ fn traverse_forward_calls_reaches_callees_transitively() {
             EdgeKind::Calls {
                 argument_count: 99, // metadata ignored by discriminant match
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             2,
         )
@@ -448,6 +452,7 @@ fn traverse_forward_depth_one_stops_at_first_hop() {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             1,
         )
@@ -471,6 +476,7 @@ fn traverse_reverse_calls_yields_callers() {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             1,
         )
@@ -1023,6 +1029,7 @@ fn zero_depth_traversal_yields_empty_set() {
                 direction: Direction::Forward,
                 edge_kind: None,
                 max_depth: 0,
+                resolved_via: None,
             },
         ],
     });

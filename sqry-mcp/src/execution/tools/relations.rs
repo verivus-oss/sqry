@@ -302,9 +302,12 @@ fn collect_call_relation_via_db(
                 EdgeKind::Calls {
                     argument_count,
                     is_async,
+                    resolved_via,
                 } => Some(json!({
                     "argument_count": argument_count,
                     "is_async": is_async,
+                    "resolved_via": serde_json::to_value(resolved_via)
+                        .unwrap_or(Value::Null),
                 })),
                 _ => None,
             };
@@ -417,9 +420,12 @@ fn collect_call_edges_between(
             EdgeKind::Calls {
                 argument_count,
                 is_async,
+                resolved_via,
             } => Some(json!({
                 "argument_count": argument_count,
                 "is_async": is_async,
+                "resolved_via": serde_json::to_value(resolved_via)
+                    .unwrap_or(Value::Null),
             })),
             _ => None,
         };
@@ -914,6 +920,8 @@ mod tests {
     use super::*;
     use sqry_core::graph::unified::concurrent::CodeGraph;
     use sqry_core::graph::unified::edge::EdgeKind;
+    #[cfg(test)]
+    use sqry_core::graph::unified::edge::ResolvedVia;
     use sqry_core::graph::unified::node::NodeKind;
     use sqry_core::graph::unified::storage::arena::NodeEntry;
     use std::path::{Path, PathBuf};
@@ -945,6 +953,7 @@ mod tests {
         let call_kind = EdgeKind::Calls {
             argument_count: 2,
             is_async: false,
+            resolved_via: ResolvedVia::Direct,
         };
         graph
             .edges_mut()
@@ -1366,6 +1375,7 @@ mod tests {
         let calls = EdgeKind::Calls {
             argument_count: 0,
             is_async: false,
+            resolved_via: ResolvedVia::Direct,
         };
         graph
             .edges_mut()
@@ -1771,6 +1781,7 @@ mod tests {
         let call_kind = EdgeKind::Calls {
             argument_count: 0,
             is_async: false,
+            resolved_via: ResolvedVia::Direct,
         };
         for i in 0..5u32 {
             let nm = graph.strings_mut().intern(&format!("callee_{i}")).unwrap();

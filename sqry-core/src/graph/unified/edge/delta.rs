@@ -26,6 +26,8 @@ use serde::{Deserialize, Serialize};
 use super::super::file::FileId;
 use super::super::node::NodeId;
 use super::kind::EdgeKind;
+#[cfg(test)]
+use super::kind::ResolvedVia;
 use crate::graph::node::Span;
 
 /// Delta operation type.
@@ -560,6 +562,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             seq,
             op,

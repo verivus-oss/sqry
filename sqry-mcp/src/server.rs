@@ -665,7 +665,7 @@ impl SqryServer {
 impl SqryServer {
     /// Search symbols by name, kind, visibility, and language.
     #[tool(
-        description = "Search symbols by name, kind, visibility, and language",
+        description = "Search symbols by name, kind, visibility, and language. Phase A C indirect-call precision (U18.1) adds three C-scoped predicates: `address_taken:true|false`, `resolved_via:direct|type_match|binding_plane`, and `callsite_promiscuous:true|false`. These are populated by the C plugin only; on non-C nodes they evaluate to false. For incremental cache behaviour and structural-IR query authoring, prefer `sqry_query`.",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
     async fn semantic_search(

@@ -17,7 +17,7 @@
 //!   `InvalidInteger`, `Build`
 
 use sqry_core::graph::unified::bind::scope::arena::ScopeKind;
-use sqry_core::graph::unified::edge::kind::EdgeKind;
+use sqry_core::graph::unified::edge::kind::{EdgeKind, ResolvedVia};
 use sqry_core::graph::unified::node::kind::NodeKind;
 use sqry_core::schema::Visibility;
 
@@ -378,6 +378,7 @@ fn traverse_accepts_every_supported_edge_kind() {
             std::mem::discriminant(&EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             }),
         ),
         ("references", std::mem::discriminant(&EdgeKind::References)),
@@ -435,12 +436,14 @@ fn design_doc_example_roundtrips() {
             direction: Direction::Reverse,
             max_depth: 3,
             edge_kind: Some(ek),
+            ..
         } => {
             assert_eq!(
                 std::mem::discriminant(ek),
                 std::mem::discriminant(&EdgeKind::Calls {
                     argument_count: 0,
                     is_async: false,
+                    resolved_via: ResolvedVia::Direct,
                 })
             );
         }

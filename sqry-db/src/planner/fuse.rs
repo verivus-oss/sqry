@@ -779,6 +779,10 @@ fn walk_predicate_for_shared_subtrees(
         Predicate::HasCaller
         | Predicate::HasCallee
         | Predicate::IsUnused
+        // Phase A (U14) leaf predicates — atomic, no nested PlanNode.
+        | Predicate::IsAddressTaken(_)
+        | Predicate::ResolvedVia(_)
+        | Predicate::HasCallsitePromiscuous(_)
         | Predicate::InFile(_)
         | Predicate::InScope(_)
         | Predicate::MatchesName(_)
@@ -967,6 +971,10 @@ fn visit_proper_predicate_subtrees(predicate: &Predicate, visitor: &mut dyn FnMu
         Predicate::HasCaller
         | Predicate::HasCallee
         | Predicate::IsUnused
+        // Phase A (U14) leaf predicates — atomic, no nested PlanNode.
+        | Predicate::IsAddressTaken(_)
+        | Predicate::ResolvedVia(_)
+        | Predicate::HasCallsitePromiscuous(_)
         | Predicate::InFile(_)
         | Predicate::InScope(_)
         | Predicate::MatchesName(_)
@@ -1084,6 +1092,10 @@ fn walk_predicate_for_subqueries(
         Predicate::HasCaller
         | Predicate::HasCallee
         | Predicate::IsUnused
+        // Phase A (U14) leaf predicates — atomic, no nested PlanNode.
+        | Predicate::IsAddressTaken(_)
+        | Predicate::ResolvedVia(_)
+        | Predicate::HasCallsitePromiscuous(_)
         | Predicate::InFile(_)
         | Predicate::InScope(_)
         | Predicate::MatchesName(_)
@@ -1176,6 +1188,7 @@ mod tests {
                     direction: Direction::Forward,
                     edge_kind: None,
                     max_depth: 1,
+                    resolved_via: None,
                 },
             ],
         };

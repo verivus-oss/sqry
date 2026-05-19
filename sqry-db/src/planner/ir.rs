@@ -61,7 +61,7 @@
 use serde::{Deserialize, Serialize};
 
 use sqry_core::graph::unified::bind::scope::arena::ScopeKind;
-use sqry_core::graph::unified::edge::kind::EdgeKind;
+use sqry_core::graph::unified::edge::kind::{EdgeKind, ResolvedVia};
 use sqry_core::graph::unified::node::kind::NodeKind;
 use sqry_core::schema::Visibility;
 
@@ -152,6 +152,15 @@ pub enum PlanNode {
         edge_kind: Option<EdgeKind>,
         /// Maximum hops to follow. Must be `>= 1` to produce any output.
         max_depth: u32,
+        /// Optional resolution-provenance filter applied AFTER the
+        /// discriminant filter (DESIGN §6.3bis Mechanism B). When `Some`,
+        /// the traversal additionally requires every traversed
+        /// [`EdgeKind::Calls`] edge to carry the matching
+        /// [`ResolvedVia`] tag; non-`Calls` edges are unaffected so this
+        /// field is meaningful only when paired with a `Calls`
+        /// `edge_kind`. `None` (the default for every legacy
+        /// construction) preserves pre-U15 behavior.
+        resolved_via: Option<ResolvedVia>,
     },
     /// Narrow the input set with a predicate.
     Filter {
@@ -308,6 +317,45 @@ pub enum Predicate {
     /// True iff the node is not reachable from any entry point.
     IsUnused,
 
+    // --- C indirect-call precision (Phase A) ---
+    //
+    // Surfaces the three Phase-A flags + resolution-provenance variants
+    // described in DESIGN §11.1. The spellings are user-visible and
+    // **locked** per DESIGN §11.1's predicate-spelling table:
+    //
+    //   * `address_taken:true|false` (or bare `address_taken` => true)
+    //   * `resolved_via:direct | type_match | binding_plane`
+    //   * `callsite_promiscuous:true|false` (bare => true)
+    //
+    /// Filters to nodes whose [`NodeFlags::ADDRESS_TAKEN`] bit matches the
+    /// requested polarity (true = flag set; false = flag clear).
+    ///
+    /// Backed by the metadata-store accessor
+    /// `GraphSnapshot::macro_metadata().is_address_taken(node_id)`; the
+    /// cached set is also available through
+    /// [`crate::queries::AddressTakenQuery`] (Tier-2 + Tier-3) for
+    /// callers preferring a derived-query handle.
+    ///
+    /// [`NodeFlags::ADDRESS_TAKEN`]: sqry_core::graph::unified::storage::NodeFlags::ADDRESS_TAKEN
+    IsAddressTaken(bool),
+    /// Filters to nodes which are the source of at least one outgoing
+    /// `EdgeKind::Calls` edge with the requested
+    /// [`ResolvedVia`] resolution provenance.
+    ///
+    /// Two cooperating mechanisms back this predicate (DESIGN §6.3bis):
+    /// non-adjacent occurrences land as this `Filter` step and probe
+    /// outgoing `Calls` edges; occurrences adjacent to a `Calls`
+    /// traversal fold into [`PlanNode::EdgeTraversal`]'s `resolved_via`
+    /// discriminator (U15 — not yet landed at U14).
+    ResolvedVia(ResolvedVia),
+    /// Filters to nodes whose [`NodeFlags::CALLSITE_PROMISCUOUS`] marker
+    /// matches the requested polarity. Mirrors [`Self::IsAddressTaken`]
+    /// — flag-only lookup against
+    /// `GraphSnapshot::macro_metadata().is_callsite_promiscuous`.
+    ///
+    /// [`NodeFlags::CALLSITE_PROMISCUOUS`]: sqry_core::graph::unified::storage::NodeFlags::CALLSITE_PROMISCUOUS
+    HasCallsitePromiscuous(bool),
+
     // --- Value-bearing relation predicates ---
     /// `callers:<value>`: node's callers match the pattern / subquery.
     Callers(PredicateValue),
@@ -379,6 +427,9 @@ impl Predicate {
             Predicate::HasCaller
             | Predicate::HasCallee
             | Predicate::IsUnused
+            | Predicate::IsAddressTaken(_)
+            | Predicate::ResolvedVia(_)
+            | Predicate::HasCallsitePromiscuous(_)
             | Predicate::InFile(_)
             | Predicate::InScope(_)
             | Predicate::MatchesName(_)
@@ -667,6 +718,7 @@ mod tests {
             direction: Direction::Forward,
             edge_kind: None,
             max_depth: 1,
+            resolved_via: None,
         };
         let set = PlanNode::SetOp {
             op: SetOperation::Union,
@@ -697,6 +749,7 @@ mod tests {
             direction: Direction::Reverse,
             edge_kind: None,
             max_depth: 1,
+            resolved_via: None,
         };
         let filter = PlanNode::Filter {
             predicate: Predicate::HasCaller,

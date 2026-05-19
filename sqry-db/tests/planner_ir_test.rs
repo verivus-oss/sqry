@@ -17,7 +17,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 use sqry_core::graph::unified::bind::scope::arena::ScopeKind;
-use sqry_core::graph::unified::edge::kind::EdgeKind;
+use sqry_core::graph::unified::edge::kind::{EdgeKind, ResolvedVia};
 use sqry_core::graph::unified::node::kind::NodeKind;
 use sqry_core::schema::Visibility;
 
@@ -43,8 +43,10 @@ fn plan_node_all_variants_constructible() {
         edge_kind: Some(EdgeKind::Calls {
             argument_count: 0,
             is_async: false,
+            resolved_via: ResolvedVia::Direct,
         }),
         max_depth: 3,
+        resolved_via: None,
     };
 
     let filter = PlanNode::Filter {
@@ -241,8 +243,10 @@ fn deeply_nested_plan_preserves_structure() {
                 edge_kind: Some(EdgeKind::Calls {
                     argument_count: 0,
                     is_async: false,
+                    resolved_via: ResolvedVia::Direct,
                 }),
                 max_depth: 2,
+                resolved_via: None,
             },
         ],
     });
@@ -292,6 +296,7 @@ fn sample_plan() -> QueryPlan {
                     is_wildcard: false,
                 }),
                 max_depth: 5,
+                resolved_via: None,
             },
             PlanNode::SetOp {
                 op: SetOperation::Difference,
@@ -425,6 +430,7 @@ fn is_context_free_matches_design() {
         direction: Direction::Forward,
         edge_kind: None,
         max_depth: 1,
+        resolved_via: None,
     };
     let filter = PlanNode::Filter {
         predicate: Predicate::HasCaller,

@@ -5,7 +5,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use sqry_core::graph::unified::concurrent::CodeGraph;
-use sqry_core::graph::unified::edge::kind::EdgeKind;
+use sqry_core::graph::unified::edge::kind::{EdgeKind, ResolvedVia};
 use sqry_core::graph::unified::node::id::NodeId;
 use sqry_core::graph::unified::node::kind::NodeKind;
 use sqry_core::graph::unified::storage::arena::NodeEntry;
@@ -51,6 +51,7 @@ fn add_call(graph: &mut CodeGraph, source: NodeId, target: NodeId) {
         EdgeKind::Calls {
             argument_count: 0,
             is_async: false,
+            resolved_via: ResolvedVia::Direct,
         },
         file_id,
     );

@@ -155,6 +155,15 @@ public = [
     # mutation-gate.yml summary renderer. Reads cargo-mutants outcomes.json
     # and emits Markdown into GITHUB_STEP_SUMMARY.
     "scripts/ci/mutants_summary.py",
+    # Phase A C indirect-call precision (2026-05-14): build-time perf gate
+    # enforcing SPEC §5.2's amended +30% bench-time budget on the
+    # linux-driver-subset fixture, and fan-out histogram tool consuming
+    # `cargo run --example measure_indirect_fanout` output for cap calibration.
+    # Both are referenced from CI matrix gate §4 of
+    # docs/development/c-semantic-phase-a-icall-precision/03_IMPLEMENTATION_PLAN.
+    "scripts/measure/VERSION",
+    "scripts/measure/check_phase_a_perf_gate.sh",
+    "scripts/measure/icall_fanout_histogram.py",
 ]
 
 [selection.packaging]

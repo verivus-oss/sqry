@@ -25,7 +25,7 @@ use std::hash::{Hash, Hasher};
 use sqry_core::graph::unified::bind::scope::arena::ScopeKind;
 use sqry_core::graph::unified::edge::kind::{
     DbQueryType, EdgeKind, ExportKind, FfiConvention, HttpMethod, LifetimeConstraintKind,
-    MacroExpansionKind, MqProtocol, TableWriteOp, TypeOfContext,
+    MacroExpansionKind, MqProtocol, ResolvedVia, TableWriteOp, TypeOfContext,
 };
 use sqry_core::graph::unified::node::kind::NodeKind;
 use sqry_core::graph::unified::string::StringId;
@@ -94,6 +94,7 @@ fn first_step_traversal_yields_context_free_error() {
         direction: Direction::Forward,
         edge_kind: None,
         max_depth: 1,
+        resolved_via: None,
     });
     let err = QueryBuilder::new().union(bad_plan).build().unwrap_err();
     assert!(matches!(
@@ -113,6 +114,7 @@ fn zero_depth_traversal_rejected() {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             0,
         )
@@ -146,6 +148,7 @@ fn zero_depth_in_nested_setop_operand_rejected() {
                 direction: Direction::Forward,
                 edge_kind: None,
                 max_depth: 0,
+                resolved_via: None,
             },
         ],
     });
@@ -252,6 +255,7 @@ fn multi_step_chain_preserves_order() {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             3,
         )
@@ -289,6 +293,7 @@ fn design_doc_example_builds() {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             3,
         )
@@ -485,6 +490,7 @@ fn calls_metadata_normalisation_yields_identical_plans() {
             EdgeKind::Calls {
                 argument_count: 7,
                 is_async: true,
+                resolved_via: ResolvedVia::Direct,
             },
             2,
         )
@@ -497,6 +503,7 @@ fn calls_metadata_normalisation_yields_identical_plans() {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             2,
         )
@@ -815,6 +822,7 @@ fn normalize_edge_kind_covers_every_metadata_variant() {
         EdgeKind::Calls {
             argument_count: 9,
             is_async: true,
+            resolved_via: ResolvedVia::Direct,
         },
         EdgeKind::Imports {
             alias: Some(StringId::INVALID),
@@ -984,6 +992,7 @@ fn subquery_with_zero_depth_traversal_is_rejected() {
                 direction: Direction::Forward,
                 edge_kind: None,
                 max_depth: 0,
+                resolved_via: None,
             },
         ],
     });
@@ -1331,6 +1340,7 @@ fn semantically_identical_builders_hash_identically() {
             EdgeKind::Calls {
                 argument_count: 4,
                 is_async: true,
+                resolved_via: ResolvedVia::Direct,
             },
             2,
         )
@@ -1344,6 +1354,7 @@ fn semantically_identical_builders_hash_identically() {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             2,
         )

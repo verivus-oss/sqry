@@ -42,7 +42,7 @@ mod tests {
     use super::*;
     use crate::QueryDbConfig;
     use sqry_core::graph::unified::concurrent::CodeGraph;
-    use sqry_core::graph::unified::edge::kind::EdgeKind;
+    use sqry_core::graph::unified::edge::kind::{EdgeKind, ResolvedVia};
     use sqry_core::graph::unified::node::kind::NodeKind;
     use sqry_core::graph::unified::storage::arena::NodeEntry;
     use std::path::Path;
@@ -93,6 +93,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file,
         );
@@ -102,6 +103,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file,
         );

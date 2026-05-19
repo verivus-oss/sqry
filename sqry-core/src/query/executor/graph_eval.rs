@@ -680,6 +680,26 @@ fn evaluate_condition(ctx: &GraphEvalContext, node_id: NodeId, cond: &Condition)
             &cond.operator,
             &cond.value,
         )),
+        // Phase A C indirect-call precision (U18.1): predicate parity with the
+        // planner surface (`sqry_query`). NodeEntry has no `id` field in the
+        // public arena API — anchor `NodeId` is the `node_id` parameter to this
+        // function. `address_taken` / `callsite_promiscuous` are O(1) flag
+        // lookups against `ctx.graph.macro_metadata()`; `resolved_via` walks
+        // outgoing Calls edges anchored at `node_id`. See Phase A 02_DESIGN §11
+        // and 03_IMPLEMENTATION_PLAN §"U18.1".
+        "address_taken" => Ok(match_address_taken(
+            ctx,
+            node_id,
+            &cond.operator,
+            &cond.value,
+        )),
+        "callsite_promiscuous" => Ok(match_callsite_promiscuous(
+            ctx,
+            node_id,
+            &cond.operator,
+            &cond.value,
+        )),
+        "resolved_via" => Ok(match_resolved_via(ctx, node_id, &cond.value)),
         field if is_plugin_field(ctx, field) => Err(anyhow!(
             "Plugin field '{field}' requires metadata not available in graph backend"
         )),
@@ -1104,6 +1124,94 @@ fn value_to_bool(value: &Value) -> Option<bool> {
         },
         _ => None,
     }
+}
+
+// ============================================================================
+// Phase A C indirect-call precision (U18.1)
+//
+// Predicate parity with the planner surface (`sqry_query`). The planner-side
+// queries live in `sqry-db/src/queries/{address_taken,callsite_promiscuous}.rs`
+// and the planner-IR `resolved_via` site filter lives in
+// `sqry-db/src/planner/ir.rs`. The helpers below give the **core-query**
+// executor the same semantic answer. SPEC §3.1.3 + DESIGN §11 / §12.
+// ============================================================================
+
+/// `address_taken:true` / `address_taken:false` — match nodes flagged by the
+/// C plugin's address-taken classifier (DESIGN §6).
+///
+/// Backed by `NodeFlags::ADDRESS_TAKEN` via
+/// [`crate::graph::unified::NodeMetadataStore::is_address_taken`]. O(1) hash
+/// lookup against the per-snapshot metadata store. On non-C nodes the flag is
+/// never set, so this predicate naturally short-circuits to `false`.
+fn match_address_taken(
+    ctx: &GraphEvalContext,
+    node_id: NodeId,
+    operator: &Operator,
+    value: &Value,
+) -> bool {
+    let Some(expected) = value_to_bool(value) else {
+        return false;
+    };
+    match operator {
+        Operator::Equal => ctx.graph.macro_metadata().is_address_taken(node_id) == expected,
+        _ => false,
+    }
+}
+
+/// `callsite_promiscuous:true` / `callsite_promiscuous:false` — match nodes
+/// flagged by the C indirect-call resolver as containing at least one
+/// callsite that exceeded the per-callsite cardinality cap (DESIGN §5.2).
+///
+/// Backed by `NodeFlags::CALLSITE_PROMISCUOUS` via
+/// [`crate::graph::unified::NodeMetadataStore::is_callsite_promiscuous`]. O(1)
+/// hash lookup against the per-snapshot metadata store.
+fn match_callsite_promiscuous(
+    ctx: &GraphEvalContext,
+    node_id: NodeId,
+    operator: &Operator,
+    value: &Value,
+) -> bool {
+    let Some(expected) = value_to_bool(value) else {
+        return false;
+    };
+    match operator {
+        Operator::Equal => ctx.graph.macro_metadata().is_callsite_promiscuous(node_id) == expected,
+        _ => false,
+    }
+}
+
+/// `resolved_via:direct | type_match | binding_plane` — match nodes that have
+/// at least one **outgoing** Calls edge with the requested resolution
+/// provenance (DESIGN §6).
+///
+/// Direction note: we walk OUTGOING edges (`edges_from(node_id)`) — i.e.
+/// "this function makes at least one call resolved via X". This mirrors
+/// [`match_callers`]'s direction convention (callers walks OUTGOING Calls to
+/// answer "does this node call the target?"), so a query like
+/// `resolved_via:type_match AND callers:my_read` matches a caller whose
+/// outgoing Calls edge to `my_read` was resolved by flat type matching.
+///
+/// Edge-level predicate — the field is `indexed: false` in the registry
+/// because there is no flag-or-bitset shortcut: we must walk
+/// `edges_from(node_id)` and inspect each `EdgeKind::Calls { resolved_via, ... }`.
+fn match_resolved_via(ctx: &GraphEvalContext, node_id: NodeId, value: &Value) -> bool {
+    let Some(want_str) = value.as_string() else {
+        return false;
+    };
+    let want = match want_str {
+        "direct" => crate::graph::unified::edge::ResolvedVia::Direct,
+        "type_match" => crate::graph::unified::edge::ResolvedVia::TypeMatch,
+        "binding_plane" => crate::graph::unified::edge::ResolvedVia::BindingPlane,
+        _ => return false, // unknown enum value
+    };
+    for edge in ctx.graph.edges().edges_from(node_id) {
+        if let EdgeKind::Calls { resolved_via, .. } = &edge.kind
+            && *resolved_via == want
+        {
+            return true;
+        }
+    }
+    false
 }
 
 // ============================================================================
@@ -2442,5 +2550,279 @@ mod tests {
             &Operator::Equal,
             &Value::String("error".to_string()),
         ));
+    }
+
+    // ================================================================
+    // Phase A C indirect-call precision (U18.1)
+    //
+    // Predicate parity with the planner surface (`sqry_query`). The three
+    // new graph-eval helpers — `match_address_taken`,
+    // `match_callsite_promiscuous`, `match_resolved_via` — surface the
+    // same three predicates the planner already exposes via U14. SPEC
+    // §3.1.3 + DESIGN §11 / §12.
+    // ================================================================
+
+    use crate::graph::unified::NodeMetadataStore;
+    use crate::graph::unified::edge::ResolvedVia;
+
+    /// Build a tiny graph with two functions `flagged` and `plain`. Caller is
+    /// responsible for setting flags on the returned `NodeId`s post-hoc.
+    /// Returns `(graph, flagged_id, plain_id)`.
+    fn build_two_function_graph() -> (CodeGraph, NodeId, NodeId) {
+        let mut arena = NodeArena::new();
+        let edges = BidirectionalEdgeStore::new();
+        let mut strings = StringInterner::new();
+        let mut files = FileRegistry::new();
+        let mut indices = AuxiliaryIndices::new();
+
+        let flagged_name = strings.intern("flagged").unwrap();
+        let plain_name = strings.intern("plain").unwrap();
+        let file_id = files.register(Path::new("u18_1.c")).unwrap();
+
+        let mk_fn = |arena: &mut NodeArena, name, start: u32, end: u32, line: u32| -> NodeId {
+            arena
+                .alloc(NodeEntry {
+                    kind: NodeKind::Function,
+                    name,
+                    file: file_id,
+                    start_byte: start,
+                    end_byte: end,
+                    start_line: line,
+                    start_column: 0,
+                    end_line: line + 2,
+                    end_column: 0,
+                    signature: None,
+                    doc: None,
+                    qualified_name: None,
+                    visibility: None,
+                    is_async: false,
+                    is_static: false,
+                    is_unsafe: false,
+                    body_hash: None,
+                })
+                .unwrap()
+        };
+
+        let flagged_id = mk_fn(&mut arena, flagged_name, 0, 50, 1);
+        let plain_id = mk_fn(&mut arena, plain_name, 100, 150, 10);
+
+        indices.add(flagged_id, NodeKind::Function, flagged_name, None, file_id);
+        indices.add(plain_id, NodeKind::Function, plain_name, None, file_id);
+
+        let graph = CodeGraph::from_components(
+            arena,
+            edges,
+            strings,
+            files,
+            indices,
+            NodeMetadataStore::new(),
+        );
+        (graph, flagged_id, plain_id)
+    }
+
+    /// `match_address_taken(true)` must return `true` for a node with the
+    /// `NodeFlags::ADDRESS_TAKEN` bit set, and `false` for a sibling without
+    /// it. Inverse predicate (`address_taken:false`) must hold the complement.
+    #[test]
+    fn match_address_taken_returns_true_when_flag_set() {
+        let (mut graph, flagged_id, plain_id) = build_two_function_graph();
+        graph.macro_metadata_mut().mark_address_taken(flagged_id);
+        let pm = PluginManager::new();
+        let ctx = GraphEvalContext::new(&graph, &pm);
+
+        assert!(match_address_taken(
+            &ctx,
+            flagged_id,
+            &Operator::Equal,
+            &Value::Boolean(true)
+        ));
+        assert!(!match_address_taken(
+            &ctx,
+            plain_id,
+            &Operator::Equal,
+            &Value::Boolean(true)
+        ));
+
+        // Inverse: address_taken:false should match `plain` and NOT `flagged`.
+        assert!(match_address_taken(
+            &ctx,
+            plain_id,
+            &Operator::Equal,
+            &Value::Boolean(false)
+        ));
+        assert!(!match_address_taken(
+            &ctx,
+            flagged_id,
+            &Operator::Equal,
+            &Value::Boolean(false)
+        ));
+
+        // String form `"true"` / `"false"` (covers the path through
+        // `value_to_bool`'s string-coercion fallback).
+        assert!(match_address_taken(
+            &ctx,
+            flagged_id,
+            &Operator::Equal,
+            &Value::String("true".to_string())
+        ));
+    }
+
+    /// `match_callsite_promiscuous(true)` returns `true` for nodes with the
+    /// `NodeFlags::CALLSITE_PROMISCUOUS` bit set.
+    #[test]
+    fn match_callsite_promiscuous_returns_true_when_flag_set() {
+        let (mut graph, flagged_id, plain_id) = build_two_function_graph();
+        graph
+            .macro_metadata_mut()
+            .mark_callsite_promiscuous(flagged_id);
+        let pm = PluginManager::new();
+        let ctx = GraphEvalContext::new(&graph, &pm);
+
+        assert!(match_callsite_promiscuous(
+            &ctx,
+            flagged_id,
+            &Operator::Equal,
+            &Value::Boolean(true)
+        ));
+        assert!(!match_callsite_promiscuous(
+            &ctx,
+            plain_id,
+            &Operator::Equal,
+            &Value::Boolean(true)
+        ));
+
+        // ADDRESS_TAKEN and CALLSITE_PROMISCUOUS are independent bits — setting
+        // one must not flip the other. Co-occurrence regression check mirrors
+        // metadata.rs `co_occurrence_macro_and_address_taken`.
+        graph.macro_metadata_mut().mark_address_taken(flagged_id);
+        let ctx = GraphEvalContext::new(&graph, &pm);
+        assert!(match_callsite_promiscuous(
+            &ctx,
+            flagged_id,
+            &Operator::Equal,
+            &Value::Boolean(true)
+        ));
+        assert!(match_address_taken(
+            &ctx,
+            flagged_id,
+            &Operator::Equal,
+            &Value::Boolean(true)
+        ));
+    }
+
+    /// `match_resolved_via` must filter outgoing Calls edges by their
+    /// `ResolvedVia` discriminator. Build a fixture where `caller` has two
+    /// outgoing Calls edges — one `Direct`, one `BindingPlane` — and confirm
+    /// the helper distinguishes both, rejects `TypeMatch`, and rejects
+    /// unknown enum strings.
+    #[test]
+    fn match_resolved_via_filters_calls_edges_by_resolution() {
+        let mut arena = NodeArena::new();
+        let edges = BidirectionalEdgeStore::new();
+        let mut strings = StringInterner::new();
+        let mut files = FileRegistry::new();
+        let mut indices = AuxiliaryIndices::new();
+
+        let caller_name = strings.intern("caller").unwrap();
+        let target_a = strings.intern("target_direct").unwrap();
+        let target_b = strings.intern("target_binding").unwrap();
+        let file_id = files.register(Path::new("u18_1_resolved_via.c")).unwrap();
+
+        let mk_fn = |arena: &mut NodeArena, name, start: u32, end: u32, line: u32| {
+            arena
+                .alloc(NodeEntry {
+                    kind: NodeKind::Function,
+                    name,
+                    file: file_id,
+                    start_byte: start,
+                    end_byte: end,
+                    start_line: line,
+                    start_column: 0,
+                    end_line: line + 2,
+                    end_column: 0,
+                    signature: None,
+                    doc: None,
+                    qualified_name: None,
+                    visibility: None,
+                    is_async: false,
+                    is_static: false,
+                    is_unsafe: false,
+                    body_hash: None,
+                })
+                .unwrap()
+        };
+        let caller_id = mk_fn(&mut arena, caller_name, 0, 50, 1);
+        let target_a_id = mk_fn(&mut arena, target_a, 100, 150, 10);
+        let target_b_id = mk_fn(&mut arena, target_b, 200, 250, 20);
+
+        indices.add(caller_id, NodeKind::Function, caller_name, None, file_id);
+        indices.add(target_a_id, NodeKind::Function, target_a, None, file_id);
+        indices.add(target_b_id, NodeKind::Function, target_b, None, file_id);
+
+        // Two outgoing Calls from caller: one Direct, one BindingPlane.
+        edges.add_edge(
+            caller_id,
+            target_a_id,
+            EdgeKind::Calls {
+                argument_count: 0,
+                is_async: false,
+                resolved_via: ResolvedVia::Direct,
+            },
+            file_id,
+        );
+        edges.add_edge(
+            caller_id,
+            target_b_id,
+            EdgeKind::Calls {
+                argument_count: 0,
+                is_async: false,
+                resolved_via: ResolvedVia::BindingPlane,
+            },
+            file_id,
+        );
+
+        let graph = CodeGraph::from_components(
+            arena,
+            edges,
+            strings,
+            files,
+            indices,
+            NodeMetadataStore::new(),
+        );
+        let pm = PluginManager::new();
+        let ctx = GraphEvalContext::new(&graph, &pm);
+
+        // Direct hits.
+        assert!(match_resolved_via(
+            &ctx,
+            caller_id,
+            &Value::String("direct".to_string())
+        ));
+        // BindingPlane hits.
+        assert!(match_resolved_via(
+            &ctx,
+            caller_id,
+            &Value::String("binding_plane".to_string())
+        ));
+        // TypeMatch must miss — no such edge in the fixture.
+        assert!(!match_resolved_via(
+            &ctx,
+            caller_id,
+            &Value::String("type_match".to_string())
+        ));
+        // Target nodes have no outgoing Calls — every variant must miss.
+        assert!(!match_resolved_via(
+            &ctx,
+            target_a_id,
+            &Value::String("direct".to_string())
+        ));
+        // Unknown enum strings are graceful misses (no panic, no false match).
+        assert!(!match_resolved_via(
+            &ctx,
+            caller_id,
+            &Value::String("not_a_real_variant".to_string())
+        ));
+        // Non-string values are graceful misses (e.g. someone passes a bool).
+        assert!(!match_resolved_via(&ctx, caller_id, &Value::Boolean(true)));
     }
 }

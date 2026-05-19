@@ -16,7 +16,7 @@ use std::time::Instant;
 use anyhow::{Result, bail};
 use serde_json::{Map, Value, json};
 use sqry_core::graph::unified::concurrent::GraphSnapshot;
-use sqry_core::graph::unified::edge::{EdgeKind, StoreEdgeRef};
+use sqry_core::graph::unified::edge::{EdgeKind, ResolvedVia, StoreEdgeRef};
 use sqry_core::graph::unified::materialize::find_nodes_by_name;
 use sqry_core::graph::unified::node::NodeId;
 use sqry_core::graph::unified::node::kind::NodeKind;
@@ -276,9 +276,12 @@ fn call_edge_metadata(edge_kind: &EdgeKind) -> Option<Value> {
         EdgeKind::Calls {
             argument_count,
             is_async,
+            resolved_via,
         } => Some(json!({
             "argument_count": argument_count,
             "is_async": is_async,
+            "resolved_via": serde_json::to_value(resolved_via)
+                .unwrap_or(Value::Null),
         })),
         _ => None,
     }
@@ -401,10 +404,18 @@ fn classify_edge_for_export(
         EdgeKind::Calls {
             argument_count,
             is_async,
+            resolved_via: ResolvedVia::Direct,
         } if args.include_calls => {
+            // U18 iter-2 (codex MEDIUM): emit `resolved_via` on every
+            // Calls-relation `metadata` payload, including this
+            // `export_graph` site. The pattern guard pins this arm to
+            // `ResolvedVia::Direct`, so the wire value is a compile-time
+            // literal — use the snake_case string form that matches
+            // `ResolvedVia`'s `#[serde(rename_all = "snake_case")]`.
             let meta = json!({
                 "argument_count": argument_count,
                 "is_async": is_async,
+                "resolved_via": "direct",
             });
             Some(("calls", Some(meta), true))
         }

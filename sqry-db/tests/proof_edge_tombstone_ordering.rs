@@ -35,7 +35,7 @@ use std::path::PathBuf;
 use sqry_core::graph::Language;
 use sqry_core::graph::unified::build::{allocate_new_segment, reindex_files};
 use sqry_core::graph::unified::concurrent::CodeGraph;
-use sqry_core::graph::unified::edge::kind::EdgeKind;
+use sqry_core::graph::unified::edge::kind::{EdgeKind, ResolvedVia};
 use sqry_core::graph::unified::node::id::NodeId;
 use sqry_core::graph::unified::node::kind::NodeKind;
 use sqry_core::graph::unified::storage::arena::NodeEntry;
@@ -120,6 +120,7 @@ fn build_fixture() -> (CodeGraph, PathBuf, NodeId) {
         EdgeKind::Calls {
             argument_count: 0,
             is_async: false,
+            resolved_via: ResolvedVia::Direct,
         },
         file_a,
     );

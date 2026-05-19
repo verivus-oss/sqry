@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [16.0.0] - 2026-05-19
+
+### Added
+
+- Landed C indirect-call precision Phase A, including graph/schema changes that
+  cargo-semver-checks classifies as public API breaking changes.
+
+### Fixed
+
+- Recovered the release path after the duplicate `v15.0.8` release-plz commit
+  and the failed `v15.0.8` sanitized cargo-vet gate.
+
+## [15.0.8] - 2026-05-17
+
+### Added
+
+- Go implicit implements, promoted methods, and function-signature
+  implementations.
+
 ## [13.0.15] - 2026-05-09
 
 ### Fixed

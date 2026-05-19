@@ -28,6 +28,8 @@
 use std::collections::HashMap;
 
 use super::super::edge::EdgeKind;
+#[cfg(test)]
+use super::super::edge::ResolvedVia;
 use super::super::file::FileId;
 use super::super::node::NodeId;
 use super::super::string::StringId;
@@ -437,6 +439,7 @@ mod tests {
             kind: EdgeKind::Calls {
                 argument_count: 255,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             source_file: file_a,
             line: 0,
@@ -458,7 +461,8 @@ mod tests {
             edge.kind,
             EdgeKind::Calls {
                 argument_count: 255,
-                is_async: false
+                is_async: false,
+                resolved_via: ResolvedVia::Direct,
             }
         ));
     }
@@ -481,6 +485,7 @@ mod tests {
             kind: EdgeKind::Calls {
                 argument_count: 3,
                 is_async: true,
+                resolved_via: ResolvedVia::Direct,
             },
             source_file: file_a,
             line: 10,
@@ -500,7 +505,8 @@ mod tests {
             edge.kind,
             EdgeKind::Calls {
                 argument_count: 3,
-                is_async: true
+                is_async: true,
+                resolved_via: ResolvedVia::Direct,
             }
         ));
     }
@@ -625,6 +631,7 @@ mod tests {
             kind: EdgeKind::Calls {
                 argument_count: 2,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             source_file: file_a,
             line: 0,

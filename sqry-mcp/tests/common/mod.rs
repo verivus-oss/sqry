@@ -461,6 +461,9 @@ impl McpTestClient {
                     "roots": self.roots
                 }
             });
+            // rmcp 1.7 registers stdio peer requests asynchronously; a short
+            // yield keeps the manual test responder from racing that setup.
+            std::thread::sleep(std::time::Duration::from_millis(5));
             writeln!(self.stdin, "{response}")?;
             self.stdin.flush()?;
             return Ok(true);

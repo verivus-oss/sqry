@@ -477,6 +477,31 @@ pub fn core_fields() -> Vec<FieldDescriptor> {
             indexed: false,
             doc: "Return type filter: returns:bool, returns:Optional<User>, etc. Uses substring matching.",
         },
+        // Phase A C indirect-call precision (U18.1): predicate parity with
+        // the planner surface (`sqry_query`). These predicates are populated
+        // by the C plugin only; on non-C nodes they always evaluate to
+        // `false`. See Phase A 01_SPEC §3.1.3 + 02_DESIGN §11 / §12.
+        FieldDescriptor {
+            name: "address_taken",
+            field_type: FieldType::Bool,
+            operators: &[Operator::Equal],
+            indexed: true,
+            doc: "C only: function's address is taken at some site (Phase A SPEC §3.1). Backed by NodeFlags::ADDRESS_TAKEN — O(1) flag lookup.",
+        },
+        FieldDescriptor {
+            name: "resolved_via",
+            field_type: FieldType::Enum(vec!["direct", "type_match", "binding_plane"]),
+            operators: &[Operator::Equal],
+            indexed: false,
+            doc: "C only: how an outgoing Calls edge was resolved (Phase A DESIGN §6). Matches if the node has at least one outgoing Calls edge with the requested provenance.",
+        },
+        FieldDescriptor {
+            name: "callsite_promiscuous",
+            field_type: FieldType::Bool,
+            operators: &[Operator::Equal],
+            indexed: true,
+            doc: "C only: caller contains an indirect callsite that exceeded the per-callsite cardinality cap (Phase A DESIGN §5.2). Backed by NodeFlags::CALLSITE_PROMISCUOUS.",
+        },
     ]
 }
 
@@ -495,13 +520,20 @@ mod tests {
     fn test_with_core_fields() {
         let registry = FieldRegistry::with_core_fields();
         assert!(!registry.is_empty());
-        assert_eq!(registry.len(), 25); // kind, name, path, lang, scope, text, callers, callees, imports, exports, returns, impl, repo, parent, references (P2-33) + scope.type, scope.name, scope.parent, scope.ancestor (P2-34) + duplicates, unused, circular (CD predicates)
+        // 25 baseline (kind, name, path, lang, scope, text, callers, callees,
+        // imports, exports, returns, impl, repo, parent, references (P2-33),
+        // scope.type, scope.name, scope.parent, scope.ancestor (P2-34),
+        // duplicates, unused, circular, async, static, visibility) + 3 Phase A
+        // C-icall predicates (address_taken, resolved_via, callsite_promiscuous)
+        // = 28.
+        assert_eq!(registry.len(), 28);
     }
 
     #[test]
     fn test_default_has_core_fields() {
         let registry = FieldRegistry::default();
-        assert_eq!(registry.len(), 25); // Updated for Sprint 2 relation fields + P2-33 references + P2-34 scope.* fields + CD Static Analysis predicates
+        // 25 baseline + 3 Phase A C-icall predicates (U18.1).
+        assert_eq!(registry.len(), 28);
     }
 
     #[test]
@@ -637,7 +669,7 @@ mod tests {
         let registry = FieldRegistry::with_core_fields();
         let names = registry.field_names();
 
-        assert_eq!(names.len(), 25); // Updated for Sprint 2 + P2-33 references + P2-34 scope.* + CD predicates (impl, duplicates, unused, circular)
+        assert_eq!(names.len(), 28); // Updated for Sprint 2 + P2-33 references + P2-34 scope.* + CD predicates + U18.1 (address_taken, resolved_via, callsite_promiscuous)
         assert!(names.contains(&"kind"));
         assert!(names.contains(&"name"));
         assert!(names.contains(&"path"));
@@ -967,7 +999,7 @@ mod tests {
         let registry = FieldRegistry::with_core_fields();
 
         // Aliases should not be counted as separate fields
-        assert_eq!(registry.len(), 25); // Updated for P2-33 references + P2-34 scope.* + CD predicates
+        assert_eq!(registry.len(), 28); // Updated for P2-33 references + P2-34 scope.* + CD predicates + U18.1 C-icall predicates
 
         // But both aliases and canonical names should be accessible
         assert!(registry.contains("file"));
@@ -1032,5 +1064,72 @@ mod tests {
         assert!(matches!(scope_ancestor.field_type, FieldType::String));
         assert!(scope_ancestor.supports_operator(&Operator::Equal));
         assert!(scope_ancestor.supports_operator(&Operator::Regex));
+    }
+
+    // ── Phase A C indirect-call precision (U18.1) ───────────────────────────
+    //
+    // Predicate parity with the planner surface (`sqry_query`). Verify the
+    // three new descriptors land in the registry with the expected types,
+    // operators, and index flags. SPEC §3.1.3 + DESIGN §11 / §12.
+
+    #[test]
+    fn test_address_taken_field_descriptor() {
+        let registry = FieldRegistry::with_core_fields();
+        let field = registry
+            .get("address_taken")
+            .expect("address_taken field must be registered (U18.1)");
+        assert_eq!(field.name, "address_taken");
+        assert!(matches!(field.field_type, FieldType::Bool));
+        assert!(
+            field.indexed,
+            "address_taken is backed by NodeFlags::ADDRESS_TAKEN — O(1) lookup, marked indexed"
+        );
+        assert!(field.supports_operator(&Operator::Equal));
+        assert!(
+            !field.supports_operator(&Operator::Regex),
+            "Bool predicates do not accept regex"
+        );
+    }
+
+    #[test]
+    fn test_resolved_via_field_descriptor() {
+        let registry = FieldRegistry::with_core_fields();
+        let field = registry
+            .get("resolved_via")
+            .expect("resolved_via field must be registered (U18.1)");
+        assert_eq!(field.name, "resolved_via");
+        match &field.field_type {
+            FieldType::Enum(variants) => {
+                assert!(variants.contains(&"direct"));
+                assert!(variants.contains(&"type_match"));
+                assert!(variants.contains(&"binding_plane"));
+                assert_eq!(
+                    variants.len(),
+                    3,
+                    "resolved_via must mirror ResolvedVia's three variants exactly"
+                );
+            }
+            other => panic!("resolved_via must be FieldType::Enum, got {other:?}"),
+        }
+        assert!(
+            !field.indexed,
+            "resolved_via is edge-level metadata, walked at filter time"
+        );
+        assert!(field.supports_operator(&Operator::Equal));
+    }
+
+    #[test]
+    fn test_callsite_promiscuous_field_descriptor() {
+        let registry = FieldRegistry::with_core_fields();
+        let field = registry
+            .get("callsite_promiscuous")
+            .expect("callsite_promiscuous field must be registered (U18.1)");
+        assert_eq!(field.name, "callsite_promiscuous");
+        assert!(matches!(field.field_type, FieldType::Bool));
+        assert!(
+            field.indexed,
+            "callsite_promiscuous is backed by NodeFlags::CALLSITE_PROMISCUOUS — O(1) lookup"
+        );
+        assert!(field.supports_operator(&Operator::Equal));
     }
 }

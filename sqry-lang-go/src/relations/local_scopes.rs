@@ -15,7 +15,8 @@ use sqry_core::graph::GraphResult;
 use sqry_core::graph::local_scopes::{self, ScopeId, ScopeKindTrait, ScopeTree};
 use sqry_core::graph::unified::NodeMetadataStore;
 use sqry_core::graph::unified::build::helper::GraphBuildHelper;
-use sqry_core::graph::unified::node::NodeId;
+use sqry_core::graph::unified::edge::kind::TypeOfContext;
+use sqry_core::graph::unified::node::{NodeId, NodeKind};
 use tree_sitter::Node;
 
 use crate::relations::graph_builder::{span_from_byte_range, span_from_node};
@@ -93,14 +94,27 @@ pub(crate) type GoScopeTree = ScopeTree<ScopeKind>;
 // ============================================================================
 
 /// Build a scope tree for a Go source file.
-pub(crate) fn build(root: Node, content: &[u8]) -> GraphResult<GoScopeTree> {
+///
+/// `helper` is threaded through the binding pass so the per-binding
+/// `Variable` / `Parameter` `NodeId`s required by the Go T1
+/// implements-and-promotion pass are materialised eagerly at declaration
+/// time (Cluster B1 in
+/// `docs/development/go-implements-and-promotion/03_IMPLEMENTATION_PLAN.md`).
+/// Each eager binding node is marked `NodeMetadata::Synthetic` so it does
+/// not surface in workspace-symbol search.
+pub(crate) fn build(
+    root: Node,
+    content: &[u8],
+    helper: &mut GraphBuildHelper,
+    package: &str,
+) -> GraphResult<GoScopeTree> {
     let content_len = content.len();
     let mut tree = GoScopeTree::new(content_len);
 
     let mut guard = local_scopes::load_recursion_guard();
     build_scopes_recursive(&mut tree, root, content, None, &mut guard)?;
     tree.rebuild_index();
-    bind_declarations_recursive(&mut tree, root, content, &mut guard)?;
+    bind_declarations_recursive(&mut tree, root, content, helper, package, &mut guard)?;
     tree.rebuild_index();
     Ok(tree)
 }
@@ -326,6 +340,8 @@ fn bind_declarations_recursive(
     tree: &mut GoScopeTree,
     node: Node,
     content: &[u8],
+    helper: &mut GraphBuildHelper,
+    package: &str,
     guard: &mut sqry_core::query::security::RecursionGuard,
 ) -> GraphResult<()> {
     guard
@@ -334,25 +350,25 @@ fn bind_declarations_recursive(
 
     match node.kind() {
         "short_var_declaration" => {
-            bind_short_var_declaration(tree, node, content);
+            bind_short_var_declaration(tree, node, content, helper, package);
         }
         "var_declaration" => {
-            bind_var_declaration(tree, node, content);
+            bind_var_declaration(tree, node, content, helper, package);
         }
         "for_statement" => {
-            bind_for_range_variables(tree, node, content);
+            bind_for_range_variables(tree, node, content, helper, package);
         }
         "function_declaration" => {
-            bind_function_parameters(tree, node, content);
+            bind_function_parameters(tree, node, content, helper, package);
         }
         "method_declaration" => {
-            bind_method_parameters(tree, node, content);
+            bind_method_parameters(tree, node, content, helper, package);
         }
         "func_literal" => {
-            bind_func_literal_parameters(tree, node, content);
+            bind_func_literal_parameters(tree, node, content, helper, package);
         }
         "type_switch_statement" => {
-            bind_type_switch_variable(tree, node, content);
+            bind_type_switch_variable(tree, node, content, helper, package);
         }
         _ => {}
     }
@@ -360,7 +376,7 @@ fn bind_declarations_recursive(
     // Recurse into children
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        bind_declarations_recursive(tree, child, content, guard)?;
+        bind_declarations_recursive(tree, child, content, helper, package, guard)?;
     }
 
     guard.exit();
@@ -368,7 +384,13 @@ fn bind_declarations_recursive(
 }
 
 /// Bind variables from `:=` short declarations: `x, y := expr1, expr2`
-fn bind_short_var_declaration(tree: &mut GoScopeTree, node: Node, content: &[u8]) {
+fn bind_short_var_declaration(
+    tree: &mut GoScopeTree,
+    node: Node,
+    content: &[u8],
+    helper: &mut GraphBuildHelper,
+    package: &str,
+) {
     // Only bind function-local short declarations (not package-level)
     if is_package_level(node) {
         return;
@@ -378,14 +400,23 @@ fn bind_short_var_declaration(tree: &mut GoScopeTree, node: Node, content: &[u8]
         return;
     };
 
-    // Left side has the names in an `expression_list`
+    // Left side has the names in an `expression_list`. Short declarations
+    // `x := expr` carry no explicit type annotation — the binding's
+    // `TypeOf` edge is recovered later from the binding plane / pass-side
+    // analysis (Cluster D); B1 only materialises the binding `NodeId`.
     if let Some(left) = node.child_by_field_name("left") {
-        bind_expression_list_names(tree, scope_id, left, node, content);
+        bind_expression_list_names(tree, scope_id, left, node, content, helper, package, None);
     }
 }
 
 /// Bind variables from `var` declarations inside functions.
-fn bind_var_declaration(tree: &mut GoScopeTree, node: Node, content: &[u8]) {
+fn bind_var_declaration(
+    tree: &mut GoScopeTree,
+    node: Node,
+    content: &[u8],
+    helper: &mut GraphBuildHelper,
+    package: &str,
+) {
     if is_package_level(node) {
         return;
     }
@@ -398,15 +429,29 @@ fn bind_var_declaration(tree: &mut GoScopeTree, node: Node, content: &[u8]) {
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         if child.kind() == "var_spec" {
-            bind_var_spec(tree, scope_id, child, content);
+            bind_var_spec(tree, scope_id, child, content, helper, package);
         }
     }
 }
 
 /// Bind names from a single `var_spec` node.
-fn bind_var_spec(tree: &mut GoScopeTree, scope_id: ScopeId, spec: Node, content: &[u8]) {
+fn bind_var_spec(
+    tree: &mut GoScopeTree,
+    scope_id: ScopeId,
+    spec: Node,
+    content: &[u8],
+    helper: &mut GraphBuildHelper,
+    package: &str,
+) {
     let mut cursor = spec.walk();
     let initializer_start = spec.child_by_field_name("value").map(|v| v.start_byte());
+
+    // Extract the optional type annotation text once per spec; multi-name
+    // forms (`var a, b int`) all share the same declared type.
+    let type_text = spec
+        .child_by_field_name("type")
+        .and_then(|t| t.utf8_text(content).ok())
+        .map(|s| s.trim().to_string());
 
     for name_node in spec.children_by_field_name("name", &mut cursor) {
         let name = name_node.utf8_text(content).unwrap_or("");
@@ -419,12 +464,30 @@ fn bind_var_spec(tree: &mut GoScopeTree, scope_id: ScopeId, spec: Node, content:
                 spec.end_byte(),
                 initializer_start,
             );
+            materialise_local_binding(
+                tree,
+                helper,
+                package,
+                name,
+                name_node.start_byte(),
+                name_node.end_byte(),
+                NodeKind::Variable,
+                type_text.as_deref(),
+                TypeOfContext::Variable,
+                content,
+            );
         }
     }
 }
 
 /// Bind for-range loop variables: `for k, v := range expr { ... }`
-fn bind_for_range_variables(tree: &mut GoScopeTree, node: Node, content: &[u8]) {
+fn bind_for_range_variables(
+    tree: &mut GoScopeTree,
+    node: Node,
+    content: &[u8],
+    helper: &mut GraphBuildHelper,
+    package: &str,
+) {
     let Some(scope_id) = tree.innermost_scope_at(node.start_byte()) else {
         return;
     };
@@ -437,7 +500,9 @@ fn bind_for_range_variables(tree: &mut GoScopeTree, node: Node, content: &[u8]) 
             // Use the range_clause as declarator (not the for_statement) so
             // self-reference prevention does not cover the entire loop body.
             if let Some(left) = child.child_by_field_name("left") {
-                bind_expression_list_names(tree, scope_id, left, child, content);
+                bind_expression_list_names(
+                    tree, scope_id, left, child, content, helper, package, None,
+                );
             }
         }
     }
@@ -447,7 +512,13 @@ fn bind_for_range_variables(tree: &mut GoScopeTree, node: Node, content: &[u8]) 
 }
 
 /// Bind function parameters.
-fn bind_function_parameters(tree: &mut GoScopeTree, node: Node, content: &[u8]) {
+fn bind_function_parameters(
+    tree: &mut GoScopeTree,
+    node: Node,
+    content: &[u8],
+    helper: &mut GraphBuildHelper,
+    package: &str,
+) {
     let Some(body) = node.child_by_field_name("body") else {
         return;
     };
@@ -456,12 +527,18 @@ fn bind_function_parameters(tree: &mut GoScopeTree, node: Node, content: &[u8]) 
     };
 
     if let Some(params) = node.child_by_field_name("parameters") {
-        bind_parameter_list(tree, scope_id, params, content);
+        bind_parameter_list(tree, scope_id, params, content, helper, package);
     }
 }
 
 /// Bind method parameters (including receiver).
-fn bind_method_parameters(tree: &mut GoScopeTree, node: Node, content: &[u8]) {
+fn bind_method_parameters(
+    tree: &mut GoScopeTree,
+    node: Node,
+    content: &[u8],
+    helper: &mut GraphBuildHelper,
+    package: &str,
+) {
     let Some(body) = node.child_by_field_name("body") else {
         return;
     };
@@ -471,17 +548,23 @@ fn bind_method_parameters(tree: &mut GoScopeTree, node: Node, content: &[u8]) {
 
     // Bind receiver parameter
     if let Some(receiver) = node.child_by_field_name("receiver") {
-        bind_parameter_list(tree, scope_id, receiver, content);
+        bind_parameter_list(tree, scope_id, receiver, content, helper, package);
     }
 
     // Bind regular parameters
     if let Some(params) = node.child_by_field_name("parameters") {
-        bind_parameter_list(tree, scope_id, params, content);
+        bind_parameter_list(tree, scope_id, params, content, helper, package);
     }
 }
 
 /// Bind function literal parameters.
-fn bind_func_literal_parameters(tree: &mut GoScopeTree, node: Node, content: &[u8]) {
+fn bind_func_literal_parameters(
+    tree: &mut GoScopeTree,
+    node: Node,
+    content: &[u8],
+    helper: &mut GraphBuildHelper,
+    package: &str,
+) {
     let Some(body) = node.child_by_field_name("body") else {
         return;
     };
@@ -490,12 +573,18 @@ fn bind_func_literal_parameters(tree: &mut GoScopeTree, node: Node, content: &[u
     };
 
     if let Some(params) = node.child_by_field_name("parameters") {
-        bind_parameter_list(tree, scope_id, params, content);
+        bind_parameter_list(tree, scope_id, params, content, helper, package);
     }
 }
 
 /// Bind type switch variable: `switch x := expr.(type) { ... }`
-fn bind_type_switch_variable(tree: &mut GoScopeTree, node: Node, content: &[u8]) {
+fn bind_type_switch_variable(
+    tree: &mut GoScopeTree,
+    node: Node,
+    content: &[u8],
+    helper: &mut GraphBuildHelper,
+    package: &str,
+) {
     let Some(scope_id) = tree.innermost_scope_at(node.start_byte()) else {
         return;
     };
@@ -505,7 +594,7 @@ fn bind_type_switch_variable(tree: &mut GoScopeTree, node: Node, content: &[u8])
     for child in node.children(&mut cursor) {
         // The alias is the left side of `:=` in the type switch header
         if child.kind() == "expression_list" {
-            bind_expression_list_names(tree, scope_id, child, node, content);
+            bind_expression_list_names(tree, scope_id, child, node, content, helper, package, None);
         }
     }
 }
@@ -515,12 +604,16 @@ fn bind_type_switch_variable(tree: &mut GoScopeTree, node: Node, content: &[u8])
 // ============================================================================
 
 /// Bind all identifier names from an `expression_list` used by `:=` and `range`.
+#[allow(clippy::too_many_arguments)]
 fn bind_expression_list_names(
     tree: &mut GoScopeTree,
     scope_id: ScopeId,
     list: Node,
     declarator: Node,
     content: &[u8],
+    helper: &mut GraphBuildHelper,
+    package: &str,
+    type_text: Option<&str>,
 ) {
     let mut cursor = list.walk();
     for child in list.children(&mut cursor) {
@@ -535,17 +628,40 @@ fn bind_expression_list_names(
                     declarator.end_byte(),
                     None, // Short declarations don't have separate initializer tracking
                 );
+                materialise_local_binding(
+                    tree,
+                    helper,
+                    package,
+                    name,
+                    child.start_byte(),
+                    child.end_byte(),
+                    NodeKind::Variable,
+                    type_text,
+                    TypeOfContext::Variable,
+                    content,
+                );
             }
         }
     }
 }
 
 /// Bind parameters from a `parameter_list`.
-fn bind_parameter_list(tree: &mut GoScopeTree, scope_id: ScopeId, params: Node, content: &[u8]) {
+fn bind_parameter_list(
+    tree: &mut GoScopeTree,
+    scope_id: ScopeId,
+    params: Node,
+    content: &[u8],
+    helper: &mut GraphBuildHelper,
+    package: &str,
+) {
     let mut cursor = params.walk();
     for child in params.children(&mut cursor) {
         if child.kind() == "parameter_declaration" {
             // parameter_declaration has one or more names and a type
+            let type_text = child
+                .child_by_field_name("type")
+                .and_then(|t| t.utf8_text(content).ok())
+                .map(|s| s.trim().to_string());
             let mut name_cursor = child.walk();
             for name_node in child.children_by_field_name("name", &mut name_cursor) {
                 let name = name_node.utf8_text(content).unwrap_or("");
@@ -557,6 +673,18 @@ fn bind_parameter_list(tree: &mut GoScopeTree, scope_id: ScopeId, params: Node, 
                         name_node.end_byte(),
                         name_node.end_byte(),
                         None,
+                    );
+                    materialise_local_binding(
+                        tree,
+                        helper,
+                        package,
+                        name,
+                        name_node.start_byte(),
+                        name_node.end_byte(),
+                        NodeKind::Parameter,
+                        type_text.as_deref(),
+                        TypeOfContext::Parameter,
+                        content,
                     );
                 }
             }
@@ -573,7 +701,85 @@ fn bind_parameter_list(tree: &mut GoScopeTree, scope_id: ScopeId, params: Node, 
                     name_node.end_byte(),
                     None,
                 );
+                // Variadic `...T` becomes `[]T` at parameter type-binding sites
+                // (mirrors `process_variadic_parameter` in graph_builder.rs).
+                let elem_type = child
+                    .child_by_field_name("type")
+                    .and_then(|t| t.utf8_text(content).ok())
+                    .map(|s| format!("[]{}", s.trim()));
+                materialise_local_binding(
+                    tree,
+                    helper,
+                    package,
+                    name,
+                    name_node.start_byte(),
+                    name_node.end_byte(),
+                    NodeKind::Parameter,
+                    elem_type.as_deref(),
+                    TypeOfContext::Parameter,
+                    content,
+                );
             }
+        }
+    }
+}
+
+/// Eagerly materialise a synthetic binding node for a declaration-site
+/// identifier and attach it to the scope-tree binding so subsequent
+/// identifier-USE resolution returns the same `NodeId`.
+///
+/// This is the Cluster B1 load-bearing primitive that guarantees the
+/// `GoReceiverHintKind::LocalIdent { binding_local }` shape emitted by
+/// the Go plugin's Phase-1 walker references a real, type-annotated node
+/// that the `pass_go_method_set_satisfaction` pass can walk through a
+/// `TypeOf` edge.
+///
+/// The synthetic flag is delivered via the same dual-channel contract as
+/// [`add_synthetic_variable`] in `graph_builder.rs`: the
+/// `NodeMetadata::Synthetic` bit is the canonical channel and the
+/// `<ident>@<offset>` qualified-name shape is the structural fallback
+/// recognised by
+/// [`sqry_core::graph::unified::storage::arena::NodeEntry::is_synthetic_placeholder_name`].
+///
+/// If `type_text` is provided the function additionally emits a
+/// `TypeOf{context}` edge from the binding node to a freshly-staged
+/// `Type` node carrying the declared type text. Plain short-var
+/// declarations (`x := expr`) and range loop variables pass `None` —
+/// their type is recovered post-hoc by the binding plane / pass-side
+/// analysis.
+#[allow(clippy::too_many_arguments)]
+fn materialise_local_binding(
+    tree: &mut GoScopeTree,
+    helper: &mut GraphBuildHelper,
+    _package: &str,
+    name: &str,
+    decl_start_byte: usize,
+    decl_end_byte: usize,
+    kind: NodeKind,
+    type_text: Option<&str>,
+    type_context: TypeOfContext,
+    content: &[u8],
+) {
+    // Mirror the lazy emission path in `handle_identifier_for_reference`
+    // (and `add_reference_edge` below) so eager and lazy binding nodes
+    // carry identical `Span` derivations: full `(line, column)` from
+    // byte offsets via `span_from_byte_range`.
+    let span = span_from_byte_range(content, decl_start_byte, decl_end_byte);
+    let qualified_var = format!("{name}@{}", decl_start_byte);
+    let node_id = helper.add_node(&qualified_var, Some(span), kind);
+    flag_synthetic(helper, node_id);
+    tree.attach_node_id(name, decl_start_byte, node_id);
+    if let Some(type_text) = type_text {
+        let trimmed = type_text.trim();
+        if !trimmed.is_empty() {
+            let type_id = helper.add_type(trimmed, None);
+            helper.add_typeof_edge_with_context(
+                node_id,
+                type_id,
+                Some(type_context),
+                None,
+                Some(name),
+            );
         }
     }
 }

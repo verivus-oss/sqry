@@ -6,6 +6,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+## [16.0.2](https://github.com/verivus-oss/sqry/compare/v16.0.1...v16.0.2) - 2026-05-19
+
+### Other
+- update Cargo.lock dependencies
+## [16.0.1](https://github.com/verivus-oss/sqry/compare/v16.0.0...v16.0.1) - 2026-05-19
+
+### Other
+- update Cargo.lock dependencies
+## [16.0.0](https://github.com/verivus-oss/sqry/compare/v15.0.8...v16.0.0) - 2026-05-19
+
+### Added
+- *(c-icall-precision)* land Phase A## [15.0.8](https://github.com/verivus-oss/sqry/compare/v15.0.7...v15.0.8) - 2026-05-17
+
+### Other
+- update Cargo.lock dependencies
+## [15.0.7](https://github.com/verivus-oss/sqry/compare/v15.0.6...v15.0.7) - 2026-05-13
+
+### Other
+- update Cargo.lock dependencies
 ## [15.0.6](https://github.com/verivus-oss/sqry/compare/v15.0.5...v15.0.6) - 2026-05-13
 
 ### Other

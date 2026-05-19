@@ -300,7 +300,7 @@ impl NodeEntry {
 
     /// Whether this entry is a synthetic placeholder according to its name shape.
     ///
-    /// C_SUPPRESS introduced an explicit `NodeMetadata::Synthetic` flag
+    /// C_SUPPRESS introduced an explicit `NodeFlags::SYNTHETIC` flag
     /// stored in [`crate::graph::unified::storage::metadata::NodeMetadataStore`];
     /// see
     /// [`crate::graph::unified::storage::metadata::NodeMetadataStore::is_synthetic`]

@@ -594,7 +594,7 @@ fn filter_nodes_by_macro_boundary(
     let store = graph.macro_metadata();
     candidates
         .into_iter()
-        .filter(|node_id| macro_boundary_keeps_node(store.get(*node_id), flags))
+        .filter(|node_id| macro_boundary_keeps_node(store.get_macro(*node_id), flags))
         .collect()
 }
 
@@ -1139,7 +1139,7 @@ fn convert_node_to_display_symbol(
     // Surface macro-boundary provenance (macro_generated, cfg_condition,
     // macro_source) from the graph's NodeMetadataStore so JSON consumers
     // and `--macro-boundaries` grouping have a canonical key set to read.
-    enrich_with_macro_metadata(&mut symbol, graph.macro_metadata().get(node_id));
+    enrich_with_macro_metadata(&mut symbol, graph.macro_metadata().get_macro(node_id));
 
     Some(symbol)
 }

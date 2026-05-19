@@ -278,7 +278,7 @@ fn filter_macro_generated_hits(graph: &CodeGraph, hits: Vec<ScoredHit>) -> Vec<S
     hits.into_iter()
         .filter(|hit| {
             store
-                .get(hit.node_id)
+                .get_macro(hit.node_id)
                 .is_none_or(|m| m.macro_generated != Some(true))
         })
         .collect()

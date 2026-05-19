@@ -12,7 +12,9 @@ use serde::{Deserialize, Serialize};
 
 use std::collections::HashMap;
 
-use super::format::{FormatVersion, GraphHeader, MAGIC_BYTES_V9, MAGIC_BYTES_V10, VERSION};
+use super::format::{
+    FormatVersion, GraphHeader, MAGIC_BYTES_V9, MAGIC_BYTES_V10, MAGIC_BYTES_V11, VERSION,
+};
 use super::manifest::ConfigProvenance;
 use crate::config::buffers::max_snapshot_bytes;
 use crate::graph::unified::BidirectionalEdgeStore;
@@ -24,8 +26,8 @@ use crate::graph::unified::build::phase4e_binding::derive_binding_plane;
 use crate::graph::unified::concurrent::CodeGraph;
 use crate::graph::unified::resolution::is_canonical_graph_qualified_name;
 use crate::graph::unified::storage::{
-    AuxiliaryIndices, EdgeProvenanceStore, FileRegistry, FileSegmentTable, NodeArena,
-    NodeMetadataStore, NodeProvenanceStore, StringInterner,
+    AuxiliaryIndices, CIndirectSideTables, EdgeProvenanceStore, FileRegistry, FileSegmentTable,
+    NodeArena, NodeMetadataStore, NodeProvenanceStore, StringInterner,
 };
 use crate::plugin::PluginManager;
 
@@ -200,8 +202,69 @@ struct GraphSnapshotDataV9 {
 ///
 /// Extends [`GraphSnapshotDataV9`] with `file_segments`. On V9 load, the
 /// upconvert function rebuilds the segment table from the node arena.
+///
+/// # Wire-type pinning (U03 codex iter-1 BLOCKER fix)
+///
+/// `edges` and `macro_metadata` reference **versioned V10 mirror types**
+/// in [`super::legacy_v10`] — *not* the live `BidirectionalEdgeStore` /
+/// `NodeMetadataStore`. This pins the V10 postcard layout to pre-U02 /
+/// pre-U04 shapes regardless of how those live types evolve. The V10 →
+/// V11 upconvert ([`upconvert_v10_to_v11`]) translates these mirror
+/// types into the live shapes.
 #[derive(Debug, Serialize, Deserialize)]
 struct GraphSnapshotDataV10 {
+    /// Node storage.
+    nodes: NodeArena,
+    /// Edge storage (forward + reverse) — V10 wire-format mirror.
+    edges: super::legacy_v10::BidirectionalEdgeStoreV10,
+    /// String interner.
+    strings: StringInterner,
+    /// File registry.
+    files: FileRegistry,
+    /// Auxiliary indices.
+    indices: AuxiliaryIndices,
+    /// Sparse macro boundary metadata (keyed by full `NodeId`) — V10
+    /// wire-format mirror (pre-U02 three-variant `NodeMetadata`).
+    macro_metadata: super::legacy_v10::NodeMetadataStoreV10,
+    /// Dense node provenance (Phase 1 fact layer).
+    node_provenance: NodeProvenanceStore,
+    /// Dense edge provenance (Phase 1 fact layer).
+    edge_provenance: EdgeProvenanceStore,
+    /// Phase 2: generational scope arena.
+    scope_arena: ScopeArena,
+    /// Phase 2: alias derivation table.
+    alias_table: AliasTable,
+    /// Phase 2: shadow derivation table.
+    shadow_table: ShadowTable,
+    /// Phase 2: scope provenance store.
+    scope_provenance: ScopeProvenanceStore,
+    /// Phase 3: per-file segment table mapping FileId to node arena ranges.
+    file_segments: FileSegmentTable,
+}
+
+/// Serializable snapshot of the graph state (V11 — Phase A C-icall precision).
+///
+/// Extends [`GraphSnapshotDataV10`] with the
+/// `c_indirect_tables: Option<CIndirectSideTables>` envelope slot. The slot
+/// is gated behind `#[serde(default)]` so V10 snapshots that lack the field
+/// decode it as `None` when piped through the V10 → V11 upconvert; V11
+/// binaries that load a populated variant carry the side-table data
+/// through to the reconstructed `CodeGraph`.
+///
+/// On V10 load, the loader calls [`upconvert_v10_to_v11`] which copies every
+/// V10 field unchanged and sets `c_indirect_tables = None`. The metadata
+/// store wire format (V11 = `StoredEntry { typed, flags }`) is already
+/// emitted by `NodeMetadataStore::serialize` after U02, so V10 → V11 carries
+/// no metadata-store reshape — the field is preserved by value.
+///
+/// **U09 retrofit**: the `c_indirect_tables` slot was previously typed as
+/// the `Option<()>` placeholder; U09 swaps the placeholder for the live
+/// [`CIndirectSideTables`] type. The serde shape was pinned during U03 so
+/// the substitution is a pure type swap: `None` still postcard-encodes as
+/// a single `0x00` discriminant byte (DESIGN §10.2 wire-shape contract,
+/// covered by `storage::c_indirect::tests::option_none_serializes_to_one_byte`).
+#[derive(Debug, Serialize, Deserialize)]
+struct GraphSnapshotDataV11 {
     /// Node storage.
     nodes: NodeArena,
     /// Edge storage (forward + reverse).
@@ -212,7 +275,10 @@ struct GraphSnapshotDataV10 {
     files: FileRegistry,
     /// Auxiliary indices.
     indices: AuxiliaryIndices,
-    /// Sparse macro boundary metadata (keyed by full `NodeId`).
+    /// Sparse metadata store keyed by full `NodeId`.
+    ///
+    /// After U02 the wire format is `Vec<NodeMetadataEntryV11>` —
+    /// `StoredEntry { typed: Option<TypedMetadata>, flags: NodeFlags }`.
     macro_metadata: NodeMetadataStore,
     /// Dense node provenance (Phase 1 fact layer).
     node_provenance: NodeProvenanceStore,
@@ -228,6 +294,17 @@ struct GraphSnapshotDataV10 {
     scope_provenance: ScopeProvenanceStore,
     /// Phase 3: per-file segment table mapping FileId to node arena ranges.
     file_segments: FileSegmentTable,
+    /// Phase A (U09): C indirect-call resolver side tables.
+    ///
+    /// `None` on non-C workspaces and on every V10 → V11 upconvert. When
+    /// `Some(...)`, the inner [`CIndirectSideTables`] is round-tripped
+    /// onto the reconstructed `CodeGraph` via
+    /// `set_c_indirect_tables`. `#[serde(default)]` keeps the
+    /// V10 → V11 upconvert path lossless: V10 snapshots that lack the
+    /// field decode it as `None` (the postcard `0x00` discriminant byte;
+    /// DESIGN §10.2).
+    #[serde(default)]
+    c_indirect_tables: Option<CIndirectSideTables>,
 }
 
 /// V7-shaped snapshot data (pre-Phase-1, no provenance fields).
@@ -503,7 +580,71 @@ fn validate_snapshot_semantics_v9(
     Ok(())
 }
 
+/// Validates snapshot semantics for V11 (same rules as V10, operates on V11 fields).
+///
+/// V11 carries the same resolver-eligibility invariants as V10; the additive
+/// `c_indirect_tables` slot has no resolver-eligibility consequence and is
+/// not checked here.
+fn validate_snapshot_semantics_v11(
+    snapshot_data: &GraphSnapshotDataV11,
+) -> Result<(), PersistenceError> {
+    for (node_id, entry) in snapshot_data.nodes.iter() {
+        if entry.name == crate::graph::unified::string::StringId::INVALID {
+            continue;
+        }
+
+        let file_path = snapshot_data.files.resolve(entry.file).ok_or_else(|| {
+            PersistenceError::ValidationFailed(format!(
+                "resolver-eligible node {node_id:?} has unresolved file id {:?}; run `sqry index` to rebuild",
+                entry.file
+            ))
+        })?;
+
+        let _name = snapshot_data.strings.resolve(entry.name).ok_or_else(|| {
+            PersistenceError::ValidationFailed(format!(
+                "resolver-eligible node {node_id:?} has unresolved name string id {:?}; run `sqry index` to rebuild",
+                entry.name
+            ))
+        })?;
+
+        let Some(qualified_name_id) = entry.qualified_name else {
+            continue;
+        };
+
+        let qualified_name =
+            snapshot_data
+                .strings
+                .resolve(qualified_name_id)
+                .ok_or_else(|| {
+                    PersistenceError::ValidationFailed(format!(
+                        "resolver-eligible node {node_id:?} has unresolved qualified-name string id {qualified_name_id:?}; run `sqry index` to rebuild"
+                    ))
+                })?;
+
+        let language = snapshot_data
+            .files
+            .language_for_file(entry.file)
+            .ok_or_else(|| {
+                PersistenceError::ValidationFailed(format!(
+                    "resolver-eligible node {node_id:?} in '{}' is missing file language metadata; run `sqry index` to rebuild",
+                    file_path.display()
+                ))
+            })?;
+
+        if !is_canonical_graph_qualified_name(language, qualified_name.as_ref()) {
+            return Err(PersistenceError::ValidationFailed(format!(
+                "resolver-eligible node {node_id:?} in '{}' stores non-canonical qualified name '{}'; run `sqry index` to rebuild",
+                file_path.display(),
+                qualified_name
+            )));
+        }
+    }
+
+    Ok(())
+}
+
 /// Validates snapshot semantics for V10 (same rules as V9, operates on V10 fields).
+#[allow(dead_code)] // Preserved as reference; V11 writers bypass this.
 fn validate_snapshot_semantics_v10(
     snapshot_data: &GraphSnapshotDataV10,
 ) -> Result<(), PersistenceError> {
@@ -734,22 +875,43 @@ fn upconvert_v8_to_v9(v8: GraphSnapshotData, fact_epoch: u64) -> GraphSnapshotDa
 }
 
 /// Upconvert a V9 snapshot to V10 by rebuilding the `FileSegmentTable` from
-/// the node arena.
+/// the node arena and translating live edge / metadata stores into V10
+/// wire-format mirror types.
 ///
 /// The segment table maps each `FileId` to its contiguous `(start_slot, slot_count)`
 /// range in the arena. Since V9 does not persist this table, we scan the arena
 /// to derive it: for each file, find the min and max occupied slot indices, then
 /// record `(min, max - min + 1)`.
+///
+/// V9 fields `edges` / `macro_metadata` are currently live types, so we
+/// translate them through the V11 → V10 helpers before stuffing them into
+/// `GraphSnapshotDataV10` (which holds the V10 wire-format mirrors after
+/// U03). This keeps the V7 → V8 → V9 → V10 → V11 chain typeable end-to-end.
 fn upconvert_v9_to_v10(v9: GraphSnapshotDataV9) -> GraphSnapshotDataV10 {
+    use super::legacy_v10::{
+        translate_bidirectional_edge_store_v11_to_v10, translate_metadata_store_v11_to_v10,
+    };
+
     let file_segments = rebuild_file_segments_from_arena(&v9.nodes);
+
+    // Translate live types into V10 wire-format mirrors. The V11 → V10
+    // direction is a structural mirror; the only failure mode for
+    // `translate_metadata_store_v11_to_v10` is a metadata entry whose
+    // `(typed, flags)` combination V10 cannot represent — which by
+    // construction cannot happen on a V9 input (V9 predates `NodeFlags`
+    // entirely, so every entry deserialized through V8 / V9 already
+    // satisfies the V10 invariant).
+    let edges = translate_bidirectional_edge_store_v11_to_v10(&v9.edges);
+    let macro_metadata = translate_metadata_store_v11_to_v10(&v9.macro_metadata)
+        .expect("V9 snapshot carries pre-U02 metadata shapes that always fit V10");
 
     GraphSnapshotDataV10 {
         nodes: v9.nodes,
-        edges: v9.edges,
+        edges,
         strings: v9.strings,
         files: v9.files,
         indices: v9.indices,
-        macro_metadata: v9.macro_metadata,
+        macro_metadata,
         node_provenance: v9.node_provenance,
         edge_provenance: v9.edge_provenance,
         scope_arena: v9.scope_arena,
@@ -758,6 +920,78 @@ fn upconvert_v9_to_v10(v9: GraphSnapshotDataV9) -> GraphSnapshotDataV10 {
         scope_provenance: v9.scope_provenance,
         file_segments,
     }
+}
+
+/// Upconvert a V10 snapshot to V11 by translating the V10 wire-format mirror
+/// types ([`super::legacy_v10::BidirectionalEdgeStoreV10`],
+/// [`super::legacy_v10::NodeMetadataStoreV10`]) into the live (V11) shapes
+/// and stamping the reserved `c_indirect_tables: None` envelope slot.
+///
+/// # Per-element reshape (codex iter-1 BLOCKER fix)
+///
+/// Prior to U03 codex iter-1, this function received a `GraphSnapshotDataV10`
+/// whose `edges` / `macro_metadata` were already typed as the **live**
+/// `BidirectionalEdgeStore` / `NodeMetadataStore`. That arrangement assumed
+/// the V10 postcard bytes happened to share the live serde shape — which is
+/// only true while:
+///
+/// * `EdgeKind::Calls` carries exactly the V10 fields (`argument_count`,
+///   `is_async`). U04 adds `resolved_via`, breaking the assumption.
+/// * `NodeMetadataStore::Deserialize` is the pre-U02 three-variant decoder.
+///   U02 ships a new entry layout with a `flags` byte, breaking it.
+///
+/// To insulate the V10 wire format from those live-type changes, U03 pins
+/// `GraphSnapshotDataV10.edges` to [`super::legacy_v10::BidirectionalEdgeStoreV10`]
+/// and `GraphSnapshotDataV10.macro_metadata` to
+/// [`super::legacy_v10::NodeMetadataStoreV10`]. This function then performs
+/// the explicit translation:
+///
+/// * `legacy_v10::EdgeKindV10::Calls { argument_count, is_async }` →
+///   `EdgeKind::Calls { argument_count, is_async }`. When U04 lands the
+///   `resolved_via: ResolvedVia` field on `EdgeKind::Calls`, the live `Calls`
+///   arm in [`super::legacy_v10::translate_edge_v10_to_v11`] will fail to
+///   compile (missing field) — that compile error is the deliberate
+///   integration anchor. The TODO comment there documents the one-line fix
+///   (stamp `resolved_via: ResolvedVia::Direct`; V10 snapshots predate the
+///   indirect-call resolver so every V10 `Calls` edge is, by construction,
+///   directly resolved).
+/// * `NodeMetadataV10::Macro(m)`     → `StoredEntry { typed: Some(TypedMetadata::Macro(m)), flags: NodeFlags::EMPTY }`
+/// * `NodeMetadataV10::Classpath(c)` → `StoredEntry { typed: Some(TypedMetadata::Classpath(c)), flags: NodeFlags::EMPTY }`
+/// * `NodeMetadataV10::Synthetic`    → `StoredEntry { typed: None, flags: NodeFlags::SYNTHETIC }`
+///
+/// All other fields carry over by value.
+///
+/// # Errors
+///
+/// Returns `PersistenceError::Serialization` if a V10 metadata entry
+/// declares its typed kind but carries no matching payload (corrupt
+/// snapshot).
+fn upconvert_v10_to_v11(
+    v10: GraphSnapshotDataV10,
+) -> Result<GraphSnapshotDataV11, PersistenceError> {
+    use super::legacy_v10::{
+        translate_bidirectional_edge_store_v10_to_v11, translate_metadata_store_v10_to_v11,
+    };
+
+    let edges = translate_bidirectional_edge_store_v10_to_v11(v10.edges);
+    let macro_metadata = translate_metadata_store_v10_to_v11(v10.macro_metadata)?;
+
+    Ok(GraphSnapshotDataV11 {
+        nodes: v10.nodes,
+        edges,
+        strings: v10.strings,
+        files: v10.files,
+        indices: v10.indices,
+        macro_metadata,
+        node_provenance: v10.node_provenance,
+        edge_provenance: v10.edge_provenance,
+        scope_arena: v10.scope_arena,
+        alias_table: v10.alias_table,
+        shadow_table: v10.shadow_table,
+        scope_provenance: v10.scope_provenance,
+        file_segments: v10.file_segments,
+        c_indirect_tables: None,
+    })
 }
 
 /// Rebuilds a `FileSegmentTable` by scanning the node arena.
@@ -808,7 +1042,7 @@ pub fn rebuild_file_segments_from_arena(arena: &NodeArena) -> FileSegmentTable {
 fn read_magic_and_header_len(
     reader: &mut impl Read,
 ) -> Result<(FormatVersion, usize, u64), PersistenceError> {
-    // Read 14 bytes to cover the longest magic (V10 = 14 bytes).
+    // Read 14 bytes to cover the longest magic (V10/V11 = 14 bytes).
     // If the file is shorter, `read_exact` returns an IO error, which is fine —
     // a valid snapshot is always longer than 14 bytes.
     let mut magic = [0u8; 14];
@@ -816,13 +1050,13 @@ fn read_magic_and_header_len(
 
     let format_version =
         FormatVersion::from_magic(&magic).ok_or_else(|| PersistenceError::InvalidMagic {
-            expected: MAGIC_BYTES_V10.to_vec(),
+            expected: MAGIC_BYTES_V11.to_vec(),
             found: magic.to_vec(),
         })?;
 
-    // V10 magic is 14 bytes — all consumed. Read full u32 header length.
+    // V10 and V11 magics are 14 bytes — all consumed. Read full u32 header length.
     // V7-V9 magic is 13 bytes — byte 14 is the first byte of the header length.
-    if format_version == FormatVersion::V10 {
+    if matches!(format_version, FormatVersion::V10 | FormatVersion::V11) {
         let hl = read_u32_le(reader)? as usize;
         Ok((format_version, hl, 18)) // 14 magic + 4 header_len
     } else {
@@ -1094,6 +1328,7 @@ fn write_framed_v9(
 /// path used by tests) or a `BufWriter<&mut NamedTempFile>` (the
 /// atomic-write path introduced by `G_daemon_control_plane.md`
 /// §4.2).
+#[allow(dead_code)] // Preserved for reference; live writers emit V11.
 fn write_framed_v10<W: Write>(
     writer: &mut W,
     header: &GraphHeader,
@@ -1126,6 +1361,60 @@ fn write_framed_v10<W: Write>(
     }
 
     writer.write_all(MAGIC_BYTES_V10)?;
+    writer.write_all(
+        &u32::try_from(header_bytes.len())
+            .map_err(|_| {
+                PersistenceError::ValidationFailed(
+                    "header too large for u32 length prefix".to_string(),
+                )
+            })?
+            .to_le_bytes(),
+    )?;
+    writer.write_all(&header_bytes)?;
+    writer.write_all(&(data_bytes.len() as u64).to_le_bytes())?;
+    writer.write_all(&data_bytes)?;
+
+    writer.flush()?;
+    Ok(())
+}
+
+/// Writes a V11 snapshot with length-prefixed framing.
+///
+/// V11 is the current writer format (Phase A C-icall precision, U03). It
+/// extends V10 with the reserved `c_indirect_tables` envelope slot; the
+/// frame shape (magic + header + data) is identical.
+fn write_framed_v11<W: Write>(
+    writer: &mut W,
+    header: &GraphHeader,
+    snapshot_data: &GraphSnapshotDataV11,
+) -> Result<(), PersistenceError> {
+    debug_assert!(
+        !snapshot_data.strings.is_lookup_stale(),
+        "Cannot serialize StringInterner with stale lookup — \
+         call build_dedup_table() before saving"
+    );
+
+    let header_bytes = postcard::to_allocvec(header)?;
+    let data_bytes = postcard::to_allocvec(snapshot_data)?;
+
+    if header_bytes.len() > MAX_HEADER_BYTES {
+        return Err(PersistenceError::ValidationFailed(format!(
+            "header too large to save: {} bytes exceeds MAX_HEADER_BYTES ({} bytes)",
+            header_bytes.len(),
+            MAX_HEADER_BYTES,
+        )));
+    }
+    let max_data_bytes = max_snapshot_bytes();
+    if data_bytes.len() as u64 > max_data_bytes {
+        return Err(PersistenceError::ValidationFailed(format!(
+            "data section too large to save: {} bytes exceeds limit ({} bytes); \
+             increase SQRY_MAX_SNAPSHOT_BYTES if the codebase legitimately requires a larger snapshot",
+            data_bytes.len(),
+            max_data_bytes,
+        )));
+    }
+
+    writer.write_all(MAGIC_BYTES_V11)?;
     writer.write_all(
         &u32::try_from(header_bytes.len())
             .map_err(|_| {
@@ -1259,7 +1548,14 @@ pub fn save_to_path(graph: &CodeGraph, path: impl AsRef<Path>) -> Result<(), Per
     // Extract Phase 3 file segment table.
     let file_segments = snapshot.file_segments().clone();
 
-    let snapshot_data = GraphSnapshotDataV10 {
+    // Phase A (U09): persist the C indirect-call side tables. `None` on
+    // non-C workspaces — the snapshot accessor returns `Option<&...>` which
+    // we clone into the envelope. The persistence wire-shape contract
+    // (DESIGN §10.2) is `Option<CIndirectSideTables>` with `#[serde(default)]`
+    // gating; legacy V10 snapshots round-trip as `None`.
+    let c_indirect_tables = snapshot.c_indirect_tables().cloned();
+
+    let snapshot_data = GraphSnapshotDataV11 {
         nodes,
         edges,
         strings,
@@ -1273,11 +1569,12 @@ pub fn save_to_path(graph: &CodeGraph, path: impl AsRef<Path>) -> Result<(), Per
         shadow_table,
         scope_provenance,
         file_segments,
+        c_indirect_tables,
     };
 
-    validate_snapshot_semantics_v10(&snapshot_data)?;
+    validate_snapshot_semantics_v11(&snapshot_data)?;
 
-    // Create header — V10 with stamped fact_epoch and correct version tag
+    // Create header — V11 with stamped fact_epoch and correct version tag
     let forward_stats = snapshot_data.edges.stats().forward;
     let total_edges = forward_stats.csr_edge_count + forward_stats.delta_edge_count;
     let mut header = GraphHeader::new(
@@ -1286,7 +1583,7 @@ pub fn save_to_path(graph: &CodeGraph, path: impl AsRef<Path>) -> Result<(), Per
         snapshot_data.strings.len(),
         snapshot_data.files.len(),
     );
-    header.version = FormatVersion::V10.as_u32();
+    header.version = FormatVersion::V11.as_u32();
     header.set_fact_epoch(fact_epoch);
 
     // Atomic write per `G_daemon_control_plane.md` §4.2: an
@@ -1295,7 +1592,7 @@ pub fn save_to_path(graph: &CodeGraph, path: impl AsRef<Path>) -> Result<(), Per
     // --status` previously misreported as "No graph snapshot
     // found").
     write_atomic(path, |writer| {
-        write_framed_v10(writer, &header, &snapshot_data)
+        write_framed_v11(writer, &header, &snapshot_data)
     })
 }
 
@@ -1355,7 +1652,11 @@ pub fn save_to_path_with_provenance(
     // Extract Phase 3 file segment table.
     let file_segments = snapshot.file_segments().clone();
 
-    let snapshot_data = GraphSnapshotDataV10 {
+    // Phase A (U09): persist the C indirect-call side tables. See the
+    // sibling save path's comment for the wire-shape contract.
+    let c_indirect_tables = snapshot.c_indirect_tables().cloned();
+
+    let snapshot_data = GraphSnapshotDataV11 {
         nodes,
         edges,
         strings,
@@ -1369,9 +1670,10 @@ pub fn save_to_path_with_provenance(
         shadow_table,
         scope_provenance,
         file_segments,
+        c_indirect_tables,
     };
 
-    // Create header with provenance, plugin versions, V10 version tag, and fact epoch
+    // Create header with provenance, plugin versions, V11 version tag, and fact epoch
     let forward_stats = snapshot_data.edges.stats().forward;
     let total_edges = forward_stats.csr_edge_count + forward_stats.delta_edge_count;
     let mut header = GraphHeader::with_provenance_and_plugins(
@@ -1382,12 +1684,12 @@ pub fn save_to_path_with_provenance(
         provenance,
         plugin_versions,
     );
-    header.version = FormatVersion::V10.as_u32();
+    header.version = FormatVersion::V11.as_u32();
     header.set_fact_epoch(fact_epoch);
 
     // Atomic write per `G_daemon_control_plane.md` §4.2.
     write_atomic(path, |writer| {
-        write_framed_v10(writer, &header, &snapshot_data)
+        write_framed_v11(writer, &header, &snapshot_data)
     })
 }
 
@@ -1496,14 +1798,15 @@ pub fn load_from_bytes(
     bytes_consumed += header_len as u64;
     let header: GraphHeader = postcard::from_bytes(&header_buf)?;
 
-    // Validate version — accept V7 (legacy), V8, V9 (upconvert), V10 (current)
+    // Validate version — accept V7 (legacy), V8, V9, V10 (upconvert), V11 (current)
     if header.version != VERSION
         && header.version != FormatVersion::V8.as_u32()
         && header.version != FormatVersion::V9.as_u32()
         && header.version != FormatVersion::V10.as_u32()
+        && header.version != FormatVersion::V11.as_u32()
     {
         return Err(PersistenceError::IncompatibleVersion {
-            expected: FormatVersion::V10.as_u32(),
+            expected: FormatVersion::V11.as_u32(),
             found: header.version,
         });
     }
@@ -1536,28 +1839,35 @@ pub fn load_from_bytes(
     // Read and deserialize data, dispatching on detected format version.
     let mut data_buf = vec![0u8; data_len as usize];
     reader.read_exact(&mut data_buf)?;
-    let mut snapshot_data: GraphSnapshotDataV10 = match format_version {
+    let mut snapshot_data: GraphSnapshotDataV11 = match format_version {
         FormatVersion::V7 => {
             // V7 predates `GraphHeader.fact_epoch`; pass `0` explicitly so the
-            // V7 → V8 → V9 chained path is deterministic and matches the
-            // documented "V7 has no fact epoch" contract.
+            // V7 → V8 → V9 → V10 → V11 chained path is deterministic and
+            // matches the documented "V7 has no fact epoch" contract.
             let v7: GraphSnapshotDataV7 = postcard::from_bytes(&data_buf)?;
             let v8 = upconvert_v7_to_v8(v7);
             let v9 = upconvert_v8_to_v9(v8, 0);
-            upconvert_v9_to_v10(v9)
+            let v10 = upconvert_v9_to_v10(v9);
+            upconvert_v10_to_v11(v10)?
         }
         FormatVersion::V8 => {
             // Forward the V8 header epoch so derived scope provenance is
             // stamped with the real source epoch, not silently demoted to 0.
             let v8: GraphSnapshotData = postcard::from_bytes(&data_buf)?;
             let v9 = upconvert_v8_to_v9(v8, header.fact_epoch());
-            upconvert_v9_to_v10(v9)
+            let v10 = upconvert_v9_to_v10(v9);
+            upconvert_v10_to_v11(v10)?
         }
         FormatVersion::V9 => {
             let v9: GraphSnapshotDataV9 = postcard::from_bytes(&data_buf)?;
-            upconvert_v9_to_v10(v9)
+            let v10 = upconvert_v9_to_v10(v9);
+            upconvert_v10_to_v11(v10)?
         }
-        FormatVersion::V10 => postcard::from_bytes(&data_buf)?,
+        FormatVersion::V10 => {
+            let v10: GraphSnapshotDataV10 = postcard::from_bytes(&data_buf)?;
+            upconvert_v10_to_v11(v10)?
+        }
+        FormatVersion::V11 => postcard::from_bytes(&data_buf)?,
     };
 
     // Rebuild the scope-provenance reverse index after deserialization.
@@ -1574,7 +1884,7 @@ pub fn load_from_bytes(
         ));
     }
 
-    validate_snapshot_semantics_v10(&snapshot_data)?;
+    validate_snapshot_semantics_v11(&snapshot_data)?;
 
     let mut graph = CodeGraph::from_components(
         snapshot_data.nodes,
@@ -1594,6 +1904,10 @@ pub fn load_from_bytes(
     graph.set_shadow_table(snapshot_data.shadow_table);
     graph.set_scope_provenance_store(snapshot_data.scope_provenance);
     graph.set_file_segments(snapshot_data.file_segments);
+    // Phase A (U09): route the V11 `Option<CIndirectSideTables>` envelope
+    // slot onto the live `CodeGraph`. V10 → V11 upconverts always carry
+    // `None` here; native V11 snapshots may carry populated tables.
+    graph.set_c_indirect_tables(snapshot_data.c_indirect_tables);
     Ok(graph)
 }
 
@@ -1639,14 +1953,15 @@ pub fn load_from_path(
     bytes_consumed += header_len as u64;
     let header: GraphHeader = postcard::from_bytes(&header_buf)?;
 
-    // Validate version — accept V7 (legacy), V8, V9 (upconvert), V10 (current)
+    // Validate version — accept V7 (legacy), V8, V9, V10 (upconvert), V11 (current)
     if header.version != VERSION
         && header.version != FormatVersion::V8.as_u32()
         && header.version != FormatVersion::V9.as_u32()
         && header.version != FormatVersion::V10.as_u32()
+        && header.version != FormatVersion::V11.as_u32()
     {
         return Err(PersistenceError::IncompatibleVersion {
-            expected: FormatVersion::V10.as_u32(),
+            expected: FormatVersion::V11.as_u32(),
             found: header.version,
         });
     }
@@ -1676,32 +1991,40 @@ pub fn load_from_path(
         ));
     }
 
-    // Read and deserialize data — dispatch on format version.
-    // V7 → V8 → V9 → V10 (chained upconvert); V8 → V9 → V10; V9 → V10; V10 → direct.
+    // Read and deserialize data — dispatch on format version. Each older
+    // format chains through the upconverters: V7 → V8 → V9 → V10 → V11;
+    // V8 → V9 → V10 → V11; V9 → V10 → V11; V10 → V11; V11 → direct.
     let mut data_buf = vec![0u8; data_len as usize];
     reader.read_exact(&mut data_buf)?;
-    let mut snapshot_data: GraphSnapshotDataV10 = match format_version {
+    let mut snapshot_data: GraphSnapshotDataV11 = match format_version {
         FormatVersion::V7 => {
             // V7 predates `GraphHeader.fact_epoch`; pass `0` explicitly so the
-            // V7 → V8 → V9 chained path is deterministic and matches the
-            // documented "V7 has no fact epoch" contract.
+            // chained path is deterministic and matches the documented "V7
+            // has no fact epoch" contract.
             let v7: GraphSnapshotDataV7 = postcard::from_bytes(&data_buf)?;
             let v8 = upconvert_v7_to_v8(v7);
             let v9 = upconvert_v8_to_v9(v8, 0);
-            upconvert_v9_to_v10(v9)
+            let v10 = upconvert_v9_to_v10(v9);
+            upconvert_v10_to_v11(v10)?
         }
         FormatVersion::V8 => {
             // Forward the V8 header epoch so derived scope provenance is
             // stamped with the real source epoch, not silently demoted to 0.
             let v8: GraphSnapshotData = postcard::from_bytes(&data_buf)?;
             let v9 = upconvert_v8_to_v9(v8, header.fact_epoch());
-            upconvert_v9_to_v10(v9)
+            let v10 = upconvert_v9_to_v10(v9);
+            upconvert_v10_to_v11(v10)?
         }
         FormatVersion::V9 => {
             let v9: GraphSnapshotDataV9 = postcard::from_bytes(&data_buf)?;
-            upconvert_v9_to_v10(v9)
+            let v10 = upconvert_v9_to_v10(v9);
+            upconvert_v10_to_v11(v10)?
         }
-        FormatVersion::V10 => postcard::from_bytes(&data_buf)?,
+        FormatVersion::V10 => {
+            let v10: GraphSnapshotDataV10 = postcard::from_bytes(&data_buf)?;
+            upconvert_v10_to_v11(v10)?
+        }
+        FormatVersion::V11 => postcard::from_bytes(&data_buf)?,
     };
 
     // Rebuild the scope-provenance reverse index after deserialization.
@@ -1718,7 +2041,7 @@ pub fn load_from_path(
         ));
     }
 
-    validate_snapshot_semantics_v10(&snapshot_data)?;
+    validate_snapshot_semantics_v11(&snapshot_data)?;
 
     let mut graph = CodeGraph::from_components(
         snapshot_data.nodes,
@@ -1738,6 +2061,10 @@ pub fn load_from_path(
     graph.set_shadow_table(snapshot_data.shadow_table);
     graph.set_scope_provenance_store(snapshot_data.scope_provenance);
     graph.set_file_segments(snapshot_data.file_segments);
+    // Phase A (U09): route the V11 `Option<CIndirectSideTables>` envelope
+    // slot onto the live `CodeGraph`. V10 → V11 upconverts always carry
+    // `None` here; native V11 snapshots may carry populated tables.
+    graph.set_c_indirect_tables(snapshot_data.c_indirect_tables);
     Ok(graph)
 }
 
@@ -1774,14 +2101,15 @@ pub fn validate_snapshot(path: impl AsRef<Path>) -> Result<bool, PersistenceErro
     reader.read_exact(&mut header_buf)?;
     let header: GraphHeader = postcard::from_bytes(&header_buf)?;
 
-    // Validate version — accept V7 (legacy), V8, V9 (upconvert), V10 (current)
+    // Validate version — accept V7 (legacy), V8, V9, V10 (upconvert), V11 (current)
     if header.version != VERSION
         && header.version != FormatVersion::V8.as_u32()
         && header.version != FormatVersion::V9.as_u32()
         && header.version != FormatVersion::V10.as_u32()
+        && header.version != FormatVersion::V11.as_u32()
     {
         return Err(PersistenceError::IncompatibleVersion {
-            expected: FormatVersion::V10.as_u32(),
+            expected: FormatVersion::V11.as_u32(),
             found: header.version,
         });
     }
@@ -1821,14 +2149,15 @@ pub fn load_header_from_path(path: impl AsRef<Path>) -> Result<GraphHeader, Pers
     reader.read_exact(&mut header_buf)?;
     let header: GraphHeader = postcard::from_bytes(&header_buf)?;
 
-    // Validate version — accept V7 (legacy), V8, V9 (upconvert), V10 (current)
+    // Validate version — accept V7 (legacy), V8, V9, V10 (upconvert), V11 (current)
     if header.version != VERSION
         && header.version != FormatVersion::V8.as_u32()
         && header.version != FormatVersion::V9.as_u32()
         && header.version != FormatVersion::V10.as_u32()
+        && header.version != FormatVersion::V11.as_u32()
     {
         return Err(PersistenceError::IncompatibleVersion {
-            expected: FormatVersion::V10.as_u32(),
+            expected: FormatVersion::V11.as_u32(),
             found: header.version,
         });
     }
@@ -2858,7 +3187,7 @@ mod tests {
     fn edge_provenance_first_seen_survives_round_trip() {
         // Edge provenance must also preserve first_seen_epoch across
         // load/save round-trips where edge slot identity is unchanged.
-        use crate::graph::unified::edge::EdgeKind;
+        use crate::graph::unified::edge::{EdgeKind, ResolvedVia};
 
         let mut graph = graph_with_one_node(
             "my_module::caller",
@@ -2882,6 +3211,7 @@ mod tests {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file_id,
         );
@@ -3016,5 +3346,727 @@ mod tests {
              not carry over from the old tenant"
         );
         assert_eq!(prov.last_seen_epoch, epoch2);
+    }
+
+    // ------------------------------------------------------------------
+    // U03 — V11 snapshot bump + V10 → V11 upconvert (DESIGN §10.3)
+    //
+    // Coverage:
+    //   - `u03_upconvert_v10_to_v11_maps_typed_metadata`: every
+    //     `StoredEntry` shape (Macro typed payload, Classpath typed
+    //     payload, synthetic-only flag) round-trips byte-for-byte through
+    //     the envelope upconvert. Per DESIGN §10.3, the per-element
+    //     reshape is owned by `NodeMetadataStore`'s serde impl (U02), so
+    //     this test asserts the envelope upconvert is a no-op on the
+    //     store value itself plus the additive `c_indirect_tables =
+    //     None`.
+    //   - `u03_v11_writer_v11_reader_round_trip`: write a small synthetic
+    //     graph through the V11 writer and read it back. Both magic
+    //     dispatch (V11 arm) and the in-memory shape are exercised.
+    //   - `u03_v10_payload_triggers_upconvert`: write a hand-crafted V10
+    //     payload (using the V10 writer) and read it back through the
+    //     V11 loader — asserts the upconvert path is wired into the
+    //     dispatch and produces a usable `CodeGraph`.
+    //   - `u03_magic_dispatch_routes_v11_buffer_to_v11`: a buffer prefixed
+    //     with `SQRY_GRAPH_V11` resolves to `FormatVersion::V11`, not V10.
+    //     Belt-and-braces over the parallel test in `format.rs`.
+    // ------------------------------------------------------------------
+
+    use crate::graph::unified::storage::{
+        ClasspathNodeMetadata, MacroNodeMetadata, NodeFlags, NodeMetadataStore, StoredEntry,
+        TypedMetadata,
+    };
+
+    /// Build a sample `NodeMetadataStore` carrying one entry of each shape
+    /// the V10 → V11 upconvert needs to handle:
+    ///   - typed-Macro + EMPTY flags (legacy `NodeMetadata::Macro`)
+    ///   - typed-Classpath + EMPTY flags (legacy `NodeMetadata::Classpath`)
+    ///   - no typed payload + SYNTHETIC flag (legacy `NodeMetadata::Synthetic`)
+    fn metadata_store_with_all_legacy_shapes() -> NodeMetadataStore {
+        use crate::graph::unified::node::id::NodeId;
+
+        let mut store = NodeMetadataStore::new();
+
+        let macro_node = NodeId::new(1, 1);
+        let macro_md = MacroNodeMetadata {
+            macro_generated: Some(true),
+            macro_source: Some("vec".to_string()),
+            ..Default::default()
+        };
+        store.insert_entry(
+            macro_node,
+            StoredEntry {
+                typed: Some(TypedMetadata::Macro(macro_md)),
+                flags: NodeFlags::EMPTY,
+            },
+        );
+
+        let classpath_node = NodeId::new(2, 1);
+        let classpath_md = ClasspathNodeMetadata {
+            coordinates: Some("com.google.guava:guava:33.0.0".to_string()),
+            jar_path: "/tmp/guava.jar".to_string(),
+            fqn: "com.google.common.collect.ImmutableList".to_string(),
+            is_direct_dependency: true,
+        };
+        store.insert_entry(
+            classpath_node,
+            StoredEntry {
+                typed: Some(TypedMetadata::Classpath(classpath_md)),
+                flags: NodeFlags::EMPTY,
+            },
+        );
+
+        let synthetic_node = NodeId::new(3, 1);
+        store.insert_entry(
+            synthetic_node,
+            StoredEntry {
+                typed: None,
+                flags: NodeFlags::SYNTHETIC,
+            },
+        );
+
+        store
+    }
+
+    /// Build a tiny `GraphSnapshotDataV10` populated with the three legacy
+    /// metadata shapes. Used to drive the V10 → V11 upconvert + V10-payload
+    /// reader tests.
+    ///
+    /// Translates the live `BidirectionalEdgeStore` / `NodeMetadataStore`
+    /// produced by `CodeGraph::new` into the V10 wire-format mirrors
+    /// ([`super::legacy_v10::BidirectionalEdgeStoreV10`] /
+    /// [`super::legacy_v10::NodeMetadataStoreV10`]) so the test payload
+    /// matches the on-disk V10 shape that
+    /// [`upconvert_v10_to_v11`] now expects.
+    fn build_v10_snapshot_for_upconvert() -> GraphSnapshotDataV10 {
+        use super::super::legacy_v10::{
+            translate_bidirectional_edge_store_v11_to_v10, translate_metadata_store_v11_to_v10,
+        };
+        let graph = CodeGraph::new();
+        let snapshot = graph.snapshot();
+        let live_edges = snapshot.edges().clone();
+        let live_metadata = metadata_store_with_all_legacy_shapes();
+        GraphSnapshotDataV10 {
+            nodes: snapshot.nodes().clone(),
+            edges: translate_bidirectional_edge_store_v11_to_v10(&live_edges),
+            strings: snapshot.strings().clone(),
+            files: snapshot.files().clone(),
+            indices: snapshot.indices().clone(),
+            macro_metadata: translate_metadata_store_v11_to_v10(&live_metadata)
+                .expect("legacy metadata store fits V10 wire format"),
+            node_provenance: NodeProvenanceStore::new(),
+            edge_provenance: EdgeProvenanceStore::new(),
+            scope_arena: snapshot.scope_arena().clone(),
+            alias_table: snapshot.alias_table().clone(),
+            shadow_table: snapshot.shadow_table().clone(),
+            scope_provenance: snapshot.scope_provenance_store().clone(),
+            file_segments: snapshot.file_segments().clone(),
+        }
+    }
+
+    /// V10 → V11 envelope upconvert preserves every metadata-store entry
+    /// and stamps `c_indirect_tables = None`.
+    ///
+    /// Per DESIGN §10.3 the per-entry reshape (legacy `NodeMetadata::Macro`
+    /// → `StoredEntry { typed: Macro, flags: EMPTY }`, ...) is performed by
+    /// `NodeMetadataStore::Deserialize` (landed in U02). The envelope
+    /// upconvert tested here must therefore be a no-op on the value plus
+    /// the additive `c_indirect_tables` slot.
+    #[test]
+    fn u03_upconvert_v10_to_v11_maps_typed_metadata() {
+        use crate::graph::unified::node::id::NodeId;
+
+        let v10 = build_v10_snapshot_for_upconvert();
+        // V10 wire-format metadata uses NodeMetadataStoreV10 — capture the
+        // entries we expect to round-trip before the translate consumes the
+        // value.
+        let v10_entries: Vec<((u32, u64), u8, bool)> = v10
+            .macro_metadata
+            .entries
+            .iter()
+            .map(|e| {
+                (
+                    (e.index, e.generation),
+                    e.kind,
+                    e.macro_data.is_some() || e.classpath_data.is_some(),
+                )
+            })
+            .collect();
+
+        let v11 = upconvert_v10_to_v11(v10).expect("V10 → V11 upconvert");
+
+        // `c_indirect_tables` slot defaulted to None.
+        assert!(
+            v11.c_indirect_tables.is_none(),
+            "c_indirect_tables must default to None on V10 → V11 upconvert"
+        );
+
+        // Every V10 metadata entry round-tripped to a V11 `StoredEntry`.
+        // The captured `v10_entries` tuple is ((index, gen), kind_byte,
+        // has_payload); spot-check counts match and each V10 kind maps to
+        // a V11 entry the live store can resolve.
+        let v11_count = v11.macro_metadata.iter_entries().count();
+        assert_eq!(
+            v11_count,
+            v10_entries.len(),
+            "envelope upconvert must preserve entry count"
+        );
+        for ((index, generation), v10_kind, has_payload) in v10_entries.iter().copied() {
+            let node = NodeId::new(index, generation);
+            let v11_typed = v11.macro_metadata.get_typed(node).cloned();
+            let v11_flags = v11.macro_metadata.get_flags(node);
+            // V10 kind discriminants: 0 Macro / 1 Classpath / 2 Synthetic.
+            match v10_kind {
+                0 => {
+                    assert!(has_payload, "V10 Macro entry must carry macro_data");
+                    assert!(
+                        matches!(v11_typed, Some(TypedMetadata::Macro(_))),
+                        "V10 Macro must upconvert to TypedMetadata::Macro",
+                    );
+                    assert_eq!(v11_flags.bits(), NodeFlags::EMPTY.bits());
+                }
+                1 => {
+                    assert!(has_payload, "V10 Classpath entry must carry classpath_data");
+                    assert!(
+                        matches!(v11_typed, Some(TypedMetadata::Classpath(_))),
+                        "V10 Classpath must upconvert to TypedMetadata::Classpath",
+                    );
+                    assert_eq!(v11_flags.bits(), NodeFlags::EMPTY.bits());
+                }
+                2 => {
+                    assert!(
+                        v11_typed.is_none(),
+                        "V10 Synthetic carries no typed payload"
+                    );
+                    assert!(
+                        v11_flags.contains(NodeFlags::SYNTHETIC),
+                        "V10 Synthetic must surface as the SYNTHETIC flag",
+                    );
+                }
+                other => panic!("unexpected V10 kind discriminant {other}"),
+            }
+        }
+
+        // Spot-check each shape by NodeId. Anchors regression coverage
+        // for the three legacy `NodeMetadata` variants the design calls
+        // out:
+        //   Macro(m)   → typed = Some(Macro(m)), flags = EMPTY
+        //   Classpath(c) → typed = Some(Classpath(c)), flags = EMPTY
+        //   Synthetic  → typed = None,         flags = SYNTHETIC
+        let macro_node = NodeId::new(1, 1);
+        match v11.macro_metadata.get_typed(macro_node) {
+            Some(TypedMetadata::Macro(m)) => {
+                assert_eq!(m.macro_generated, Some(true));
+                assert_eq!(m.macro_source.as_deref(), Some("vec"));
+            }
+            other => panic!("expected Macro typed metadata, got {other:?}"),
+        }
+        assert_eq!(v11.macro_metadata.get_flags(macro_node), NodeFlags::EMPTY);
+
+        let classpath_node = NodeId::new(2, 1);
+        match v11.macro_metadata.get_typed(classpath_node) {
+            Some(TypedMetadata::Classpath(c)) => {
+                assert_eq!(c.jar_path, "/tmp/guava.jar");
+                assert!(c.is_direct_dependency);
+            }
+            other => panic!("expected Classpath typed metadata, got {other:?}"),
+        }
+        assert_eq!(
+            v11.macro_metadata.get_flags(classpath_node),
+            NodeFlags::EMPTY,
+        );
+
+        let synthetic_node = NodeId::new(3, 1);
+        assert!(
+            v11.macro_metadata.get_typed(synthetic_node).is_none(),
+            "synthetic-only entry must carry no typed payload",
+        );
+        assert!(
+            v11.macro_metadata
+                .get_flags(synthetic_node)
+                .contains(NodeFlags::SYNTHETIC),
+            "synthetic-only entry must carry the SYNTHETIC flag",
+        );
+    }
+
+    /// Writing a graph via `save_to_path` (V11 magic) and reading it back
+    /// through `load_from_path` round-trips the graph state and exercises
+    /// the V11 reader-arm dispatch.
+    #[test]
+    fn u03_v11_writer_v11_reader_round_trip() {
+        let mut graph = CodeGraph::new();
+        // Seed a single function so the snapshot has non-trivial content
+        // and the V11 metadata-store wire format gets exercised end-to-end.
+        {
+            let file_id = graph
+                .files_mut()
+                .register_with_language(
+                    std::path::Path::new("/tmp/u03.c"),
+                    Some(crate::graph::node::Language::C),
+                )
+                .expect("register file");
+            let name_id = graph
+                .strings_mut()
+                .intern("u03_target")
+                .expect("intern name");
+            let qname_id = graph
+                .strings_mut()
+                .intern("u03_target")
+                .expect("intern qname");
+            let entry = NodeEntry::new(NodeKind::Function, name_id, file_id)
+                .with_location(1, 0, 1, 10)
+                .with_qualified_name(qname_id);
+            let node_id = graph.nodes_mut().alloc(entry.clone()).expect("alloc node");
+            graph.indices_mut().add(
+                node_id,
+                entry.kind,
+                entry.name,
+                entry.qualified_name,
+                entry.file,
+            );
+        }
+
+        let temp_file = NamedTempFile::new().expect("tempfile");
+        let path = temp_file.path();
+        save_to_path(&graph, path).expect("save_to_path");
+
+        // Verify magic on disk is V11.
+        let raw = std::fs::read(path).expect("read snapshot bytes");
+        assert_eq!(
+            &raw[..MAGIC_BYTES_V11.len()],
+            MAGIC_BYTES_V11.as_slice(),
+            "U03 writer must stamp V11 magic on disk",
+        );
+
+        // Header version must be V11.
+        let header = load_header_from_path(path).expect("load header");
+        assert_eq!(header.version, FormatVersion::V11.as_u32());
+
+        // Loader returns a usable graph (V11 arm in `load_from_path`).
+        let plugins = create_test_plugin_manager();
+        let loaded = load_from_path(path, Some(&plugins)).expect("load V11");
+        let snap = loaded.snapshot();
+        assert_eq!(snap.nodes().len(), 1, "node count must round-trip");
+        // Strings round-trip too (the seed function carries one interned name).
+        assert!(
+            !snap.strings().is_empty(),
+            "interned name must survive V11 round-trip",
+        );
+    }
+
+    /// Hand-craft a V10 payload (V10 magic + V10 envelope, written by the
+    /// legacy V10 writer) and read it back through the V11 loader. Asserts
+    /// the V10 reader arm + `upconvert_v10_to_v11` are wired into dispatch.
+    ///
+    /// Uses `write_framed_v10` directly so this test is independent of any
+    /// future shift in the writer's default magic.
+    #[test]
+    fn u03_v10_payload_triggers_upconvert() {
+        let v10 = build_v10_snapshot_for_upconvert();
+
+        let mut header = GraphHeader::new(0, 0, 0, 0);
+        header.version = FormatVersion::V10.as_u32();
+
+        let temp_file = NamedTempFile::new().expect("tempfile");
+        let path = temp_file.path();
+        {
+            let file = File::create(path).expect("create temp file");
+            let mut writer = BufWriter::new(file);
+            write_framed_v10(&mut writer, &header, &v10).expect("write V10 frame");
+            writer.flush().expect("flush V10");
+        }
+
+        // Magic dispatch sees V10; the V11 loader runs the upconvert.
+        let plugins = create_test_plugin_manager();
+        let loaded = load_from_path(path, Some(&plugins))
+            .expect("V11 loader must accept a V10 payload via upconvert");
+
+        // The loaded graph carries all three legacy metadata shapes in the
+        // new `StoredEntry` representation.
+        use crate::graph::unified::node::id::NodeId;
+        let store = loaded.snapshot().macro_metadata().clone();
+        let macro_node = NodeId::new(1, 1);
+        let classpath_node = NodeId::new(2, 1);
+        let synthetic_node = NodeId::new(3, 1);
+
+        assert!(matches!(
+            store.get_typed(macro_node),
+            Some(TypedMetadata::Macro(_))
+        ));
+        assert!(matches!(
+            store.get_typed(classpath_node),
+            Some(TypedMetadata::Classpath(_))
+        ));
+        assert!(store.get_typed(synthetic_node).is_none());
+        assert!(
+            store
+                .get_flags(synthetic_node)
+                .contains(NodeFlags::SYNTHETIC)
+        );
+    }
+
+    /// Belt-and-braces: a raw buffer prefixed with `SQRY_GRAPH_V11`
+    /// resolves to `FormatVersion::V11`, not V10. Mirrors the
+    /// `phase_a_format_version_dispatch_v11_before_v10` test in `format.rs`
+    /// but anchored to the snapshot module so a refactor of either side
+    /// can't silently regress dispatch ordering.
+    #[test]
+    fn u03_magic_dispatch_routes_v11_buffer_to_v11() {
+        let mut buf = MAGIC_BYTES_V11.to_vec();
+        buf.extend_from_slice(&[0u8; 8]);
+        assert_eq!(
+            FormatVersion::from_magic(&buf),
+            Some(FormatVersion::V11),
+            "buffer prefixed with V11 magic must dispatch to V11",
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // U03 codex iter-1 regression coverage — versioned V10 wire types.
+    //
+    // These tests pin the V10 wire format (`EdgeKindV10`,
+    // `NodeMetadataV10`/`NodeMetadataEntryV10`/`NodeMetadataStoreV10`) so
+    // future live-type changes (U02 `NodeFlags`, U04
+    // `EdgeKind::Calls.resolved_via`, ...) can NOT silently shift the V10
+    // on-disk layout. Every test hand-crafts a V10 frame via the legacy
+    // V10 writer + V10 wire-type translators in
+    // `super::super::legacy_v10`, runs it through `load_from_path`, and
+    // asserts the V11 reader sees the expected live shape after upconvert.
+    // ------------------------------------------------------------------
+
+    /// V10 `Calls` edge with `argument_count=7, is_async=true` round-trips
+    /// through the V10 writer → V10 reader → `upconvert_v10_to_v11` chain
+    /// into a live `EdgeKind::Calls` carrying the same fields.
+    ///
+    /// U04 will add `resolved_via: ResolvedVia` to `EdgeKind::Calls`; the
+    /// `translate_edge_v10_to_v11` Calls arm carries the integration TODO
+    /// that documents the one-line fix at that time (stamp
+    /// `ResolvedVia::Direct`). This test does not assert on `resolved_via`
+    /// today because the field does not yet exist on the live enum; once
+    /// U04 lands, extend this test to assert `ResolvedVia::Direct` for
+    /// any V10 `Calls` edge.
+    #[test]
+    fn u03_v10_calls_edge_postcard_old_wire_roundtrips() {
+        use super::super::legacy_v10::{
+            translate_bidirectional_edge_store_v11_to_v10, translate_metadata_store_v11_to_v10,
+        };
+        use crate::graph::unified::edge::{EdgeKind, ResolvedVia};
+
+        // 1. Build a live graph that carries exactly one Calls edge with
+        //    distinctive (argument_count, is_async) so we can spot-check
+        //    after upconvert.
+        let mut graph = CodeGraph::new();
+        let file_id = graph
+            .files_mut()
+            .register_with_language(
+                std::path::Path::new("/tmp/u03_calls.c"),
+                Some(crate::graph::node::Language::C),
+            )
+            .expect("register file");
+        let caller_name = graph.strings_mut().intern("caller").expect("intern caller");
+        let callee_name = graph.strings_mut().intern("callee").expect("intern callee");
+        let caller_id = graph
+            .nodes_mut()
+            .alloc(NodeEntry::new(NodeKind::Function, caller_name, file_id))
+            .expect("alloc caller");
+        let callee_id = graph
+            .nodes_mut()
+            .alloc(NodeEntry::new(NodeKind::Function, callee_name, file_id))
+            .expect("alloc callee");
+        graph.edges_mut().add_edge(
+            caller_id,
+            callee_id,
+            EdgeKind::Calls {
+                argument_count: 7,
+                is_async: true,
+                resolved_via: ResolvedVia::Direct,
+            },
+            file_id,
+        );
+
+        // 2. Snap live → V10 wire types.
+        let snapshot = graph.snapshot();
+        let v10 = GraphSnapshotDataV10 {
+            nodes: snapshot.nodes().clone(),
+            edges: translate_bidirectional_edge_store_v11_to_v10(snapshot.edges()),
+            strings: snapshot.strings().clone(),
+            files: snapshot.files().clone(),
+            indices: snapshot.indices().clone(),
+            macro_metadata: translate_metadata_store_v11_to_v10(snapshot.macro_metadata())
+                .expect("metadata fits V10 wire"),
+            node_provenance: NodeProvenanceStore::new(),
+            edge_provenance: EdgeProvenanceStore::new(),
+            scope_arena: snapshot.scope_arena().clone(),
+            alias_table: snapshot.alias_table().clone(),
+            shadow_table: snapshot.shadow_table().clone(),
+            scope_provenance: snapshot.scope_provenance_store().clone(),
+            file_segments: snapshot.file_segments().clone(),
+        };
+
+        // 3. Write a V10 frame.
+        let mut header = GraphHeader::new(2, 1, 2, 1);
+        header.version = FormatVersion::V10.as_u32();
+        let temp_file = NamedTempFile::new().expect("tempfile");
+        let path = temp_file.path();
+        {
+            let file = File::create(path).expect("create temp file");
+            let mut writer = BufWriter::new(file);
+            write_framed_v10(&mut writer, &header, &v10).expect("write V10 frame");
+            writer.flush().expect("flush V10");
+        }
+
+        // 4. Read back through the V11 loader. The V10 → V11 upconvert
+        //    must translate the V10 `Calls { argument_count: 7, is_async: true }`
+        //    into a live `EdgeKind::Calls` carrying the same fields.
+        let plugins = create_test_plugin_manager();
+        let loaded =
+            load_from_path(path, Some(&plugins)).expect("V11 loader must accept V10 Calls payload");
+        let loaded_snap = loaded.snapshot();
+        let edges = loaded_snap.edges().edges_from(caller_id);
+        assert_eq!(
+            edges.len(),
+            1,
+            "exactly one Calls edge must survive round-trip"
+        );
+        match &edges[0].kind {
+            EdgeKind::Calls {
+                argument_count,
+                is_async,
+                resolved_via,
+            } => {
+                assert_eq!(
+                    *argument_count, 7,
+                    "argument_count must round-trip from V10 wire"
+                );
+                assert!(*is_async, "is_async must round-trip from V10 wire");
+                assert_eq!(
+                    *resolved_via,
+                    ResolvedVia::Direct,
+                    "V10 Calls edges must upconvert with resolved_via = Direct (V10 predates indirect-call resolver)"
+                );
+            }
+            other => panic!("expected EdgeKind::Calls after upconvert, got {other:?}"),
+        }
+    }
+
+    /// V10 `NodeMetadataV10::Macro` (legacy three-variant enum, no `flags`
+    /// byte on the entry) round-trips through the V10 writer →
+    /// `upconvert_v10_to_v11` into a live
+    /// `StoredEntry { typed: Some(TypedMetadata::Macro(_)), flags: NodeFlags::EMPTY }`.
+    #[test]
+    fn u03_v10_metadata_legacy_macro_postcard_roundtrips() {
+        use super::super::legacy_v10::{
+            LEGACY_V7_KIND_MACRO, NodeMetadataEntryV10, NodeMetadataStoreV10,
+            translate_bidirectional_edge_store_v11_to_v10,
+        };
+        use crate::graph::unified::node::id::NodeId;
+
+        // Hand-craft a V10 metadata store with one legacy Macro entry.
+        let v10_store = NodeMetadataStoreV10 {
+            entries: vec![NodeMetadataEntryV10 {
+                index: 5,
+                generation: 1,
+                kind: LEGACY_V7_KIND_MACRO,
+                macro_data: Some(MacroNodeMetadata {
+                    macro_generated: Some(true),
+                    macro_source: Some("println".to_string()),
+                    ..Default::default()
+                }),
+                classpath_data: None,
+            }],
+        };
+
+        let graph = CodeGraph::new();
+        let snapshot = graph.snapshot();
+        let v10 = GraphSnapshotDataV10 {
+            nodes: snapshot.nodes().clone(),
+            edges: translate_bidirectional_edge_store_v11_to_v10(snapshot.edges()),
+            strings: snapshot.strings().clone(),
+            files: snapshot.files().clone(),
+            indices: snapshot.indices().clone(),
+            macro_metadata: v10_store,
+            node_provenance: NodeProvenanceStore::new(),
+            edge_provenance: EdgeProvenanceStore::new(),
+            scope_arena: snapshot.scope_arena().clone(),
+            alias_table: snapshot.alias_table().clone(),
+            shadow_table: snapshot.shadow_table().clone(),
+            scope_provenance: snapshot.scope_provenance_store().clone(),
+            file_segments: snapshot.file_segments().clone(),
+        };
+
+        let mut header = GraphHeader::new(0, 0, 0, 0);
+        header.version = FormatVersion::V10.as_u32();
+        let temp_file = NamedTempFile::new().expect("tempfile");
+        let path = temp_file.path();
+        {
+            let file = File::create(path).expect("create temp file");
+            let mut writer = BufWriter::new(file);
+            write_framed_v10(&mut writer, &header, &v10).expect("write V10 frame");
+            writer.flush().expect("flush V10");
+        }
+
+        let plugins = create_test_plugin_manager();
+        let loaded = load_from_path(path, Some(&plugins))
+            .expect("V11 loader must accept V10 legacy-Macro metadata payload");
+        let store = loaded.snapshot().macro_metadata().clone();
+        let macro_node = NodeId::new(5, 1);
+        match store.get_typed(macro_node) {
+            Some(TypedMetadata::Macro(m)) => {
+                assert_eq!(m.macro_generated, Some(true));
+                assert_eq!(m.macro_source.as_deref(), Some("println"));
+            }
+            other => panic!("expected TypedMetadata::Macro after V10 upconvert, got {other:?}"),
+        }
+        assert_eq!(
+            store.get_flags(macro_node),
+            NodeFlags::EMPTY,
+            "legacy Macro entry must surface with EMPTY flags after V10 upconvert",
+        );
+    }
+
+    /// V10 `NodeMetadataV10::Classpath` round-trips through the V10
+    /// writer → `upconvert_v10_to_v11` into a live
+    /// `StoredEntry { typed: Some(TypedMetadata::Classpath(_)), flags: NodeFlags::EMPTY }`.
+    #[test]
+    fn u03_v10_metadata_legacy_classpath_postcard_roundtrips() {
+        use super::super::legacy_v10::{
+            LEGACY_V7_KIND_CLASSPATH, NodeMetadataEntryV10, NodeMetadataStoreV10,
+            translate_bidirectional_edge_store_v11_to_v10,
+        };
+        use crate::graph::unified::node::id::NodeId;
+
+        let v10_store = NodeMetadataStoreV10 {
+            entries: vec![NodeMetadataEntryV10 {
+                index: 9,
+                generation: 1,
+                kind: LEGACY_V7_KIND_CLASSPATH,
+                macro_data: None,
+                classpath_data: Some(ClasspathNodeMetadata {
+                    coordinates: Some("org.apache.commons:commons-lang3:3.14".to_string()),
+                    jar_path: "/tmp/commons-lang3.jar".to_string(),
+                    fqn: "org.apache.commons.lang3.StringUtils".to_string(),
+                    is_direct_dependency: false,
+                }),
+            }],
+        };
+
+        let graph = CodeGraph::new();
+        let snapshot = graph.snapshot();
+        let v10 = GraphSnapshotDataV10 {
+            nodes: snapshot.nodes().clone(),
+            edges: translate_bidirectional_edge_store_v11_to_v10(snapshot.edges()),
+            strings: snapshot.strings().clone(),
+            files: snapshot.files().clone(),
+            indices: snapshot.indices().clone(),
+            macro_metadata: v10_store,
+            node_provenance: NodeProvenanceStore::new(),
+            edge_provenance: EdgeProvenanceStore::new(),
+            scope_arena: snapshot.scope_arena().clone(),
+            alias_table: snapshot.alias_table().clone(),
+            shadow_table: snapshot.shadow_table().clone(),
+            scope_provenance: snapshot.scope_provenance_store().clone(),
+            file_segments: snapshot.file_segments().clone(),
+        };
+
+        let mut header = GraphHeader::new(0, 0, 0, 0);
+        header.version = FormatVersion::V10.as_u32();
+        let temp_file = NamedTempFile::new().expect("tempfile");
+        let path = temp_file.path();
+        {
+            let file = File::create(path).expect("create temp file");
+            let mut writer = BufWriter::new(file);
+            write_framed_v10(&mut writer, &header, &v10).expect("write V10 frame");
+            writer.flush().expect("flush V10");
+        }
+
+        let plugins = create_test_plugin_manager();
+        let loaded = load_from_path(path, Some(&plugins))
+            .expect("V11 loader must accept V10 legacy-Classpath metadata payload");
+        let store = loaded.snapshot().macro_metadata().clone();
+        let classpath_node = NodeId::new(9, 1);
+        match store.get_typed(classpath_node) {
+            Some(TypedMetadata::Classpath(c)) => {
+                assert_eq!(c.jar_path, "/tmp/commons-lang3.jar");
+                assert_eq!(c.fqn, "org.apache.commons.lang3.StringUtils");
+                assert!(!c.is_direct_dependency);
+            }
+            other => {
+                panic!("expected TypedMetadata::Classpath after V10 upconvert, got {other:?}")
+            }
+        }
+        assert_eq!(
+            store.get_flags(classpath_node),
+            NodeFlags::EMPTY,
+            "legacy Classpath entry must surface with EMPTY flags after V10 upconvert",
+        );
+    }
+
+    /// V10 `NodeMetadataV10::Synthetic` (unit variant, no payload)
+    /// round-trips through the V10 writer → `upconvert_v10_to_v11` into a
+    /// live `StoredEntry { typed: None, flags: NodeFlags::SYNTHETIC }`.
+    /// This pins the spec-mandated three-variant V10 → V11 mapping for
+    /// the variant U02 deliberately encodes via the new flag channel.
+    #[test]
+    fn u03_v10_metadata_legacy_synthetic_postcard_roundtrips() {
+        use super::super::legacy_v10::{
+            LEGACY_V7_KIND_SYNTHETIC, NodeMetadataEntryV10, NodeMetadataStoreV10,
+            translate_bidirectional_edge_store_v11_to_v10,
+        };
+        use crate::graph::unified::node::id::NodeId;
+
+        let v10_store = NodeMetadataStoreV10 {
+            entries: vec![NodeMetadataEntryV10 {
+                index: 11,
+                generation: 1,
+                kind: LEGACY_V7_KIND_SYNTHETIC,
+                macro_data: None,
+                classpath_data: None,
+            }],
+        };
+
+        let graph = CodeGraph::new();
+        let snapshot = graph.snapshot();
+        let v10 = GraphSnapshotDataV10 {
+            nodes: snapshot.nodes().clone(),
+            edges: translate_bidirectional_edge_store_v11_to_v10(snapshot.edges()),
+            strings: snapshot.strings().clone(),
+            files: snapshot.files().clone(),
+            indices: snapshot.indices().clone(),
+            macro_metadata: v10_store,
+            node_provenance: NodeProvenanceStore::new(),
+            edge_provenance: EdgeProvenanceStore::new(),
+            scope_arena: snapshot.scope_arena().clone(),
+            alias_table: snapshot.alias_table().clone(),
+            shadow_table: snapshot.shadow_table().clone(),
+            scope_provenance: snapshot.scope_provenance_store().clone(),
+            file_segments: snapshot.file_segments().clone(),
+        };
+
+        let mut header = GraphHeader::new(0, 0, 0, 0);
+        header.version = FormatVersion::V10.as_u32();
+        let temp_file = NamedTempFile::new().expect("tempfile");
+        let path = temp_file.path();
+        {
+            let file = File::create(path).expect("create temp file");
+            let mut writer = BufWriter::new(file);
+            write_framed_v10(&mut writer, &header, &v10).expect("write V10 frame");
+            writer.flush().expect("flush V10");
+        }
+
+        let plugins = create_test_plugin_manager();
+        let loaded = load_from_path(path, Some(&plugins))
+            .expect("V11 loader must accept V10 legacy-Synthetic metadata payload");
+        let store = loaded.snapshot().macro_metadata().clone();
+        let synthetic_node = NodeId::new(11, 1);
+        assert!(
+            store.get_typed(synthetic_node).is_none(),
+            "legacy Synthetic carries no typed payload after V10 upconvert",
+        );
+        assert!(
+            store
+                .get_flags(synthetic_node)
+                .contains(NodeFlags::SYNTHETIC),
+            "legacy Synthetic must surface as the SYNTHETIC flag after V10 upconvert",
+        );
     }
 }

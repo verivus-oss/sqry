@@ -16,6 +16,7 @@
 //! - **O(1) edge range**: CSR format for fast edge iteration
 
 pub mod arena;
+pub mod c_indirect;
 pub mod csr;
 pub mod edge_provenance;
 pub mod indices;
@@ -27,13 +28,17 @@ pub mod segment;
 pub mod serde_helpers;
 
 pub use arena::{ArenaError, NodeArena, NodeEntry, Slot, SlotState};
+pub use c_indirect::{
+    BindingEntry, BindingSiteKind, CIndirectSideTables, IndirectCallsite, IndirectShape,
+    LocalDeclaration, LocalScopeIndex, ScopeEntry,
+};
 pub use csr::{CsrBuilder, CsrError, CsrGraph, CsrStats, EdgeRef};
 pub use edge_provenance::{EdgeProvenance, EdgeProvenanceStore};
 pub use indices::{AuxiliaryIndices, IndicesStats};
 pub use interner::{InternError, InternerStats, ResolveError, StringInterner};
 pub use metadata::{
-    ClasspathNodeMetadata, MacroNodeMetadata, NodeMetadata, NodeMetadataStore,
-    ProcMacroFunctionKind,
+    ClasspathNodeMetadata, MacroNodeMetadata, NodeFlags, NodeMetadataStore, ProcMacroFunctionKind,
+    StoredEntry, TypedMetadata,
 };
 pub use node_provenance::{NodeProvenance, NodeProvenanceStore};
 pub use registry::{FileRegistry, RegistryError, RegistryStats};

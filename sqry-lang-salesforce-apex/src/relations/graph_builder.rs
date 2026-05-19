@@ -2130,6 +2130,7 @@ mod tests {
                         EdgeKind::Calls {
                             argument_count,
                             is_async,
+                            ..
                         },
                     ..
                 } = op

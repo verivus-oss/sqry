@@ -8,7 +8,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sqry_core::graph::unified::concurrent::CodeGraph;
-use sqry_core::graph::unified::edge::kind::{EdgeKind, TypeOfContext};
+use sqry_core::graph::unified::edge::kind::{EdgeKind, ResolvedVia, TypeOfContext};
 use sqry_core::graph::unified::node::kind::NodeKind;
 use sqry_core::graph::unified::persistence::{GraphStorage, save_to_path};
 use sqry_core::graph::unified::storage::arena::NodeEntry;
@@ -385,6 +385,7 @@ fn build_fixture_graph(root: &Path) -> Result<()> {
         EdgeKind::Calls {
             argument_count: 0,
             is_async: false,
+            resolved_via: ResolvedVia::Direct,
         },
         main_file,
     );
@@ -395,6 +396,7 @@ fn build_fixture_graph(root: &Path) -> Result<()> {
         EdgeKind::Calls {
             argument_count: 0,
             is_async: false,
+            resolved_via: ResolvedVia::Direct,
         },
         main_file,
     );
@@ -405,6 +407,7 @@ fn build_fixture_graph(root: &Path) -> Result<()> {
         EdgeKind::Calls {
             argument_count: 0,
             is_async: false,
+            resolved_via: ResolvedVia::Direct,
         },
         main_file,
     );
@@ -456,6 +459,7 @@ fn build_fixture_graph(root: &Path) -> Result<()> {
             EdgeKind::Calls {
                 argument_count: 0,
                 is_async: false,
+                resolved_via: ResolvedVia::Direct,
             },
             file,
         );
@@ -467,6 +471,7 @@ fn build_fixture_graph(root: &Path) -> Result<()> {
         EdgeKind::Calls {
             argument_count: 0,
             is_async: false,
+            resolved_via: ResolvedVia::Direct,
         },
         self_loop_file,
     );

@@ -62,7 +62,7 @@ pub use unused::UnusedScope;
 pub use visibility::Visibility;
 
 // Re-export graph types as canonical schema types
-pub use crate::graph::unified::edge::EdgeKind;
+pub use crate::graph::unified::edge::{EdgeKind, ResolvedVia};
 pub use crate::graph::unified::node::NodeKind;
 
 #[cfg(test)]
@@ -83,6 +83,7 @@ mod tests {
         let _ = EdgeKind::Calls {
             argument_count: 0,
             is_async: false,
+            resolved_via: ResolvedVia::Direct,
         };
     }
 

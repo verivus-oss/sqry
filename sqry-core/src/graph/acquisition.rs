@@ -1431,9 +1431,11 @@ mod tests {
 
         // Build a normal manifest+snapshot fixture, then overwrite the
         // snapshot bytes with a hand-crafted file whose magic is the
-        // current V10 magic but whose `GraphHeader.version` is `99` —
-        // outside the accepted set {V7, V8, V9, V10}. `load_from_bytes`
+        // V10 magic but whose `GraphHeader.version` is `99` — outside
+        // the accepted set {V7, V8, V9, V10, V11}. `load_from_bytes`
         // returns `PersistenceError::IncompatibleVersion` for that case.
+        // Using V10 magic + version=99 (rather than V11+99) keeps this
+        // test orthogonal to the writer-magic bump.
         build_test_fixture(&workspace, &["mock-rust"]);
 
         let storage = GraphStorage::new(&workspace);

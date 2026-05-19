@@ -20,7 +20,7 @@
 
 use sqry_core::graph::unified::build::pass4_cross::ExportMap;
 use sqry_core::graph::unified::concurrent::GraphSnapshot;
-use sqry_core::graph::unified::edge::EdgeKind;
+use sqry_core::graph::unified::edge::{EdgeKind, ResolvedVia};
 use sqry_core::graph::unified::file::FileId;
 use sqry_core::graph::unified::node::{NodeId, NodeKind};
 
@@ -151,6 +151,7 @@ fn attempt_cross_crate_resolution(
                     kind: EdgeKind::Calls {
                         argument_count: 255, // unknown
                         is_async: false,
+                        resolved_via: ResolvedVia::Direct,
                     },
                     file: source_file,
                 });
