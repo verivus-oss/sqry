@@ -269,6 +269,12 @@ jobs:
           CARGO_BIN_DIR="$(dirname "$CARGO_BIN")"
           echo "$CARGO_BIN_DIR" >> "$GITHUB_PATH"
           export PATH="$CARGO_BIN_DIR:$PATH"
+          for tool_dir in /usr/local/bin /opt/nodejs/current/bin; do
+            if [[ -d "$tool_dir" ]]; then
+              echo "$tool_dir" >> "$GITHUB_PATH"
+              export PATH="$tool_dir:$PATH"
+            fi
+          done
           if [[ -x /opt/zig/current/zig ]]; then
             echo "/opt/zig/current" >> "$GITHUB_PATH"
             export PATH="/opt/zig/current:$PATH"
