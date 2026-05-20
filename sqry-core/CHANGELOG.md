@@ -6,7 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
-## [16.0.0](https://github.com/verivus-oss/sqry/compare/v15.0.8...v16.0.0) - 2026-05-19
+## [16.0.3](https://github.com/verivus-oss/sqry/compare/v16.0.2...v16.0.3) - 2026-05-20
+
+### Performance
+- *(c-icall-precision)* speed up Pass 5b kernel indexing ([#289](https://github.com/verivus-oss/sqry/pull/289))## [16.0.0](https://github.com/verivus-oss/sqry/compare/v15.0.8...v16.0.0) - 2026-05-19
 
 ### Added
 - *(c-icall-precision)* land Phase A## [15.0.8](https://github.com/verivus-oss/sqry/compare/v15.0.6...v15.0.8) - 2026-05-17

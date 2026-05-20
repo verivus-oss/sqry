@@ -52,6 +52,18 @@ fn main() {
     // SIGPIPE, which causes write errors instead of silent termination.
     reset_sigpipe();
 
+    // Install a `log` backend so `log::info!` / `debug!` calls from anywhere
+    // in the workspace (notably `sqry_core::build` — Pass 5b stats, Pass 5
+    // cross-language stats, graph kernel events) reach stderr when the user
+    // opts in via `SQRY_LOG` or `RUST_LOG`. Without this init the `log`
+    // crate runs with the no-op logger and all events are silently dropped,
+    // which is what made Pass 5b's `Pass 5b end: binding=... typematch=...`
+    // line unreachable from CLI before this change.
+    //
+    // Precedence: SQRY_LOG > RUST_LOG > default `off` (silent). Matches the
+    // documented sqry CLI convention (see `commands/search.rs::verbose_from_env`).
+    init_logging();
+
     // Short-circuit version flags before Clap parsing to avoid "missing required
     // argument" errors on subcommands. Without this, `sqry query --version`
     // would require the `<QUERY>` positional before Clap recognizes the flag.
@@ -69,6 +81,36 @@ fn main() {
     };
 
     std::process::exit(exit_code);
+}
+
+/// Initialise the `log` backend so `log::info!` / `debug!` events from
+/// `sqry_core::build` and other workspace targets reach stderr.
+///
+/// Precedence:
+///   1. `SQRY_LOG` (sqry's documented switch) is read first; its value is
+///      copied into the `env_logger` Builder.
+///   2. Otherwise `RUST_LOG` is honoured directly.
+///   3. Otherwise the default filter is `off` — silent, matches sqry's
+///      "default silent" CLI contract.
+///
+/// The init is idempotent: `try_init` is used so embedded callers (tests,
+/// `sqry-cli` used as a library) that already installed a logger are not
+/// clobbered.
+fn init_logging() {
+    let filter = match (
+        std::env::var("SQRY_LOG").ok(),
+        std::env::var("RUST_LOG").ok(),
+    ) {
+        (Some(v), _) if !v.trim().is_empty() => v,
+        (_, Some(v)) if !v.trim().is_empty() => v,
+        _ => "off".to_string(),
+    };
+    let _ = env_logger::Builder::new()
+        .parse_filters(&filter)
+        .target(env_logger::Target::Stderr)
+        .format_timestamp(None)
+        .format_module_path(false)
+        .try_init();
 }
 
 /// Reset SIGPIPE to default behavior so piping to `head`/`less` exits cleanly.

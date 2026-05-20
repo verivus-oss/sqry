@@ -44,7 +44,9 @@ use std::collections::HashMap;
 
 use crate::graph::node::Span;
 use crate::graph::unified::concurrent::CodeGraph;
+use crate::graph::unified::edge::store::StoreEdgeRef;
 use crate::graph::unified::edge::{EdgeKind, ResolvedVia};
+use crate::graph::unified::file::FileId;
 use crate::graph::unified::node::id::NodeId;
 use crate::graph::unified::storage::c_indirect::{IndirectCallsite, IndirectShape};
 use crate::graph::unified::string::StringId;
@@ -138,26 +140,84 @@ pub fn resolve_c_indirect_calls(graph: &mut CodeGraph) -> Pass5bStats {
     // value to avoid borrowing graph during the per-callsite loop.
     let signature_index = build_address_taken_signature_index(graph);
 
+    // ------------------------------------------------------------------
+    // Two-phase structure (perf fix, 2026-05-20).
+    //
+    // The pre-refactor loop called `graph.edges().edges_from(callsite.caller)`
+    // per callsite inside `rewrite_synthetic_edge`. `edges_from` is
+    // O(|delta|) per call (it rebuilds a per-source LWW map by scanning
+    // the full delta — see store.rs:567 / 677). For corpora the size of
+    // the Linux kernel (≈24M raw edges in delta × hundreds of callsites)
+    // this is O(callsites × |delta|) and dominates the build (1392s of
+    // 1582s total wall on a fresh-clone Linux kernel index).
+    //
+    // The fix splits the loop into:
+    //
+    //   * Phase 5b-a (read): build ONE per-source outgoing-edge map from
+    //     `EdgeStore::all_live_forward_edges()` (O(|csr| + |delta|)
+    //     total), then look each callsite's caller up in the map
+    //     (O(1) amortised per callsite). Stub-finding stays here.
+    //   * Phase 5b-b (write): drain the planned actions and mutate the
+    //     graph. No reads of `graph.edges()` happen in this phase, so
+    //     the precomputed map can never go stale.
+    //
+    // See `bbnty/research/sqry-perf/linux-2026-05-20-v16.0.2-rootcause.md`
+    // for the full root-cause analysis (Codex iter-2 APPROVED).
+    // ------------------------------------------------------------------
+
+    // Phase 5b-a: build the per-source outgoing-edge map once.
+    let outgoing_by_caller: HashMap<NodeId, Vec<StoreEdgeRef>> = graph
+        .edges()
+        .all_live_forward_edges()
+        .into_iter()
+        .fold(HashMap::new(), |mut m, e| {
+            m.entry(e.source).or_default().push(e);
+            m
+        });
+
+    // Phase 5b-a (continued): per-callsite read + decide.
+    let empty_outgoing: Vec<StoreEdgeRef> = Vec::new();
+    let mut planned: Vec<PlannedAction> = Vec::with_capacity(callsites.len());
     for callsite in &callsites {
-        match resolve_one(graph, callsite, &signature_index) {
+        let outgoing = outgoing_by_caller
+            .get(&callsite.caller)
+            .unwrap_or(&empty_outgoing);
+        let action = match resolve_one(graph, callsite, &signature_index) {
             ResolutionOutcome::BindingPlane(targets) => {
-                rewrite_synthetic_edge(graph, callsite, &targets, ResolvedVia::BindingPlane);
                 stats.binding_resolved += 1;
+                build_rewrite_action(
+                    graph,
+                    callsite,
+                    &targets,
+                    ResolvedVia::BindingPlane,
+                    outgoing,
+                )
             }
             ResolutionOutcome::TypeMatch(targets) => {
-                rewrite_synthetic_edge(graph, callsite, &targets, ResolvedVia::TypeMatch);
                 stats.typematch_resolved += 1;
+                build_rewrite_action(graph, callsite, &targets, ResolvedVia::TypeMatch, outgoing)
             }
             ResolutionOutcome::CapExceeded => {
-                graph
-                    .macro_metadata_mut()
-                    .mark_callsite_promiscuous(callsite.caller);
                 stats.cap_exceeded += 1;
+                PlannedAction::MarkPromiscuous {
+                    caller: callsite.caller,
+                }
             }
             ResolutionOutcome::FallbackToStub => {
                 stats.stub_fallback += 1;
+                PlannedAction::Noop
             }
-        }
+        };
+        planned.push(action);
+    }
+
+    // Drop the map before the write phase to release ~|csr|+|delta|
+    // bytes of working memory.
+    drop(outgoing_by_caller);
+
+    // Phase 5b-b: drain planned actions and apply graph mutations.
+    for action in planned {
+        apply_planned_action(graph, action);
     }
 
     log::info!(
@@ -170,6 +230,62 @@ pub fn resolve_c_indirect_calls(graph: &mut CodeGraph) -> Pass5bStats {
     );
 
     stats
+}
+
+/// A planned mutation to apply in Phase 5b-b.
+///
+/// Built during the read phase (5b-a) so the write phase can run with
+/// no reads of `graph.edges()` — eliminating any need to invalidate the
+/// precomputed per-source outgoing-edge map.
+enum PlannedAction {
+    /// Remove the stub edge identified by these coordinates and emit
+    /// one precise `Calls` edge per candidate.
+    Rewrite {
+        caller: NodeId,
+        stub_target: NodeId,
+        stub_kind: EdgeKind,
+        stub_file: FileId,
+        stub_spans: Vec<Span>,
+        new_kind: EdgeKind,
+        candidates: Vec<NodeId>,
+    },
+    /// Mark the caller node as `CALLSITE_PROMISCUOUS`. No edge mutation.
+    MarkPromiscuous { caller: NodeId },
+    /// No graph mutation; only the stats counter advanced in 5b-a.
+    Noop,
+}
+
+fn apply_planned_action(graph: &mut CodeGraph, action: PlannedAction) {
+    match action {
+        PlannedAction::Rewrite {
+            caller,
+            stub_target,
+            stub_kind,
+            stub_file,
+            stub_spans,
+            new_kind,
+            candidates,
+        } => {
+            // Step 2 (DESIGN §4.3): remove the stub.
+            graph
+                .edges_mut()
+                .remove_edge(caller, stub_target, stub_kind, stub_file);
+            // Step 3: emit one precise edge per candidate.
+            for candidate in candidates {
+                graph.edges_mut().add_edge_with_spans(
+                    caller,
+                    candidate,
+                    new_kind.clone(),
+                    stub_file,
+                    stub_spans.clone(),
+                );
+            }
+        }
+        PlannedAction::MarkPromiscuous { caller } => {
+            graph.macro_metadata_mut().mark_callsite_promiscuous(caller);
+        }
+        PlannedAction::Noop => {}
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -302,8 +418,14 @@ fn resolve_one(
 // Internal: edge rewrite (DESIGN §4.3)
 // ---------------------------------------------------------------------------
 
-/// Rewrite a callsite's synthetic stub `Calls` edge into one precise
-/// edge per candidate.
+/// Build the planned mutation for a single callsite's stub rewrite —
+/// read-only over `graph`.
+///
+/// Locates the synthetic stub in the precomputed `outgoing` slice
+/// (Phase 5b-a's per-source outgoing-edge map view of `callsite.caller`).
+/// On match, returns a [`PlannedAction::Rewrite`] capturing the stub
+/// coordinates and the new-edge template; on miss, returns
+/// [`PlannedAction::Noop`] after logging.
 ///
 /// Steps per DESIGN §4.3:
 ///
@@ -311,20 +433,22 @@ fn resolve_one(
 ///    the one `Calls` edge whose target's name matches the callsite
 ///    shape's `field_name` / `var_name` AND whose argument_count
 ///    matches the staged callsite.
-/// 2. Remove it.
-/// 3. For each candidate, emit `Calls { argument_count, is_async,
-///    resolved_via }` from caller → candidate, preserving the original
-///    span (or an empty span vec when the stub had none).
+/// 2. (planned) Remove it. Applied in [`apply_planned_action`].
+/// 3. (planned) Emit `Calls { argument_count, is_async, resolved_via }`
+///    from caller → each candidate, preserving the original span (or
+///    an empty span vec when the stub had none). Applied in
+///    [`apply_planned_action`].
 ///
-/// If no synthetic stub is found, the rewrite is logged and no new
-/// edges are emitted — this is a defensive branch; in practice every
-/// staged `IndirectCallsite` had its stub emitted in Phase 1.
-fn rewrite_synthetic_edge(
-    graph: &mut CodeGraph,
+/// If no synthetic stub is found, the miss is logged and no plan is
+/// emitted — this is a defensive branch; in practice every staged
+/// `IndirectCallsite` had its stub emitted in Phase 1.
+fn build_rewrite_action(
+    graph: &CodeGraph,
     callsite: &IndirectCallsite,
     candidates: &[NodeId],
     resolved_via: ResolvedVia,
-) {
+    outgoing: &[StoreEdgeRef],
+) -> PlannedAction {
     // The stub edge target name is the field name (FieldExpr) or var
     // name (PointerExpr) per `extract_call_target` in
     // sqry-lang-c/src/relations/graph_builder.rs:1385-1417.
@@ -342,8 +466,7 @@ fn rewrite_synthetic_edge(
     // Find the synthetic stub: walk caller's outgoing edges, match
     // Calls{} variant whose target node's name equals
     // stub_target_name AND whose argument_count matches.
-    let outgoing = graph.edges().edges_from(callsite.caller);
-    let stub = outgoing.into_iter().find(|e| {
+    let stub = outgoing.iter().find(|e| {
         let EdgeKind::Calls {
             argument_count,
             is_async,
@@ -385,7 +508,7 @@ fn rewrite_synthetic_edge(
             callsite.shape,
             callsite.use_span,
         );
-        return;
+        return PlannedAction::Noop;
     };
 
     // Preserve original spans (call-site identity) on the rewritten
@@ -393,33 +516,20 @@ fn rewrite_synthetic_edge(
     // construction (helper.rs::add_call_edge_full_with_span uses
     // self.file_id), but we use the stub's recorded file to be
     // robust against future helper refactors.
-    let stub_file = stub.file;
-    let stub_target = stub.target;
-    let stub_spans = stub.spans.clone();
-    let stub_kind = stub.kind.clone();
-
-    // Step 2: remove the stub. The remove_edge API operates on
-    // (source, target, kind, file) and is span-agnostic on the
-    // removal side.
-    graph
-        .edges_mut()
-        .remove_edge(callsite.caller, stub_target, stub_kind, stub_file);
-
-    // Step 3: emit one precise edge per candidate.
     let new_kind = EdgeKind::Calls {
         argument_count: staged_argc_u8,
         is_async: callsite.is_async,
         resolved_via,
     };
-    let spans_template: Vec<Span> = stub_spans;
-    for &candidate in candidates {
-        graph.edges_mut().add_edge_with_spans(
-            callsite.caller,
-            candidate,
-            new_kind.clone(),
-            stub_file,
-            spans_template.clone(),
-        );
+
+    PlannedAction::Rewrite {
+        caller: callsite.caller,
+        stub_target: stub.target,
+        stub_kind: stub.kind.clone(),
+        stub_file: stub.file,
+        stub_spans: stub.spans.clone(),
+        new_kind,
+        candidates: candidates.to_vec(),
     }
 }
 

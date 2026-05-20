@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **perf(c-icall-precision)**: Pass 5b C indirect-call resolution now plans
+  rewrites in a read phase and applies them in a separate write phase, avoiding
+  the prior `O(callsites x edge-delta)` scan pattern during large C/C++
+  indexing runs. On the verified `drivers/net` Linux subset, Phase 6 improved
+  from 20.60s to 1.90s (10.8x faster), and total index wall time improved from
+  31.4s to 13.2s. `SQRY_LOG=info` now also exposes Pass 5b and cross-language
+  build telemetry from the CLI while preserving default-silent output.
+- **chore(release)**: Refreshed the SBOM/VEX staging workflow hash in the
+  sanitization review contract so the staged release path can resume after the
+  isolated tool-download hardening in `v16.0.2`.
+
 ## [16.0.0] - 2026-05-19
 
 ### Added
