@@ -42,5 +42,5 @@ click==8.1.7  # Pin to 8.1.x for typer 0.15.1 compatibility (8.3.x breaks make_m
 rich==13.9.4
 
 # Testing (optional)
-pytest==8.3.4
+pytest==9.0.3
 pytest-cov==6.0.0
