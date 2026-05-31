@@ -1202,6 +1202,11 @@ fn match_resolved_via(ctx: &GraphEvalContext, node_id: NodeId, value: &Value) ->
         "direct" => crate::graph::unified::edge::ResolvedVia::Direct,
         "type_match" => crate::graph::unified::edge::ResolvedVia::TypeMatch,
         "binding_plane" => crate::graph::unified::edge::ResolvedVia::BindingPlane,
+        "virtual_dispatch" => crate::graph::unified::edge::ResolvedVia::VirtualDispatch,
+        "interface_dispatch" => crate::graph::unified::edge::ResolvedVia::InterfaceDispatch,
+        "duck_typed" => crate::graph::unified::edge::ResolvedVia::DuckTyped,
+        "structural" => crate::graph::unified::edge::ResolvedVia::Structural,
+        "promiscuous_elided" => crate::graph::unified::edge::ResolvedVia::PromiscuousElided,
         _ => return false, // unknown enum value
     };
     for edge in ctx.graph.edges().edges_from(node_id) {

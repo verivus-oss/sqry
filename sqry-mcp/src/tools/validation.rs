@@ -3,6 +3,8 @@ use anyhow::{Result, bail, ensure};
 #[cfg(any(test, fuzzing))]
 use serde_json::Value;
 
+use sqry_core::schema::{FrameworkId, ResolvedVia};
+
 #[derive(Debug, Clone, Default)]
 pub struct SearchFilters {
     pub languages: Vec<String>,
@@ -40,6 +42,20 @@ pub struct SemanticSearchArgs {
     /// `SQRY_TOOL_BUDGET_ROWS` env var or the documented default
     /// (5_000_000).
     pub budget_rows: Option<u64>,
+    /// Phase β joint-stub (Plan A) — filter results to nodes carrying
+    /// framework-route metadata for the named framework. Threaded from
+    /// the MCP `framework` param through this validated args struct
+    /// to the executor; the executor overlays it as a
+    /// `Predicate::FrameworkEq` AND filter on the parsed plan.
+    /// `None` means no framework filter is applied (back-compat default).
+    pub framework: Option<FrameworkId>,
+    /// Phase β joint-stub (Plan B) — filter results to nodes whose
+    /// outgoing `Calls` edges include at least one resolution provenance
+    /// in the set. Threaded from the MCP `resolved_via` param through
+    /// this validated args struct to the executor; the executor overlays
+    /// it as a `Predicate::ResolvedViaEq` AND filter on the parsed plan.
+    /// `None` means no resolved-via filter is applied (back-compat default).
+    pub resolved_via: Option<Vec<ResolvedVia>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,6 +87,10 @@ pub struct RelationQueryArgs {
     pub max_depth: usize,
     pub max_results: usize,
     pub pagination: PaginationArgs,
+    /// Phase β joint-stub (Plan A) — see [`SemanticSearchArgs::framework`].
+    pub framework: Option<FrameworkId>,
+    /// Phase β joint-stub (Plan B) — see [`SemanticSearchArgs::resolved_via`].
+    pub resolved_via: Option<Vec<ResolvedVia>>,
 }
 
 #[derive(Debug, Clone)]
@@ -397,6 +417,11 @@ pub fn validate_semantic_search_args(args: &Value) -> Result<SemanticSearchArgs>
         score_min,
         include_classpath,
         budget_rows: args.get("budget_rows").and_then(|v| v.as_u64()),
+        // Phase β joint-stubs: test-only path; back-compat default
+        // is None (no filter), the production rmcp / daemon converters
+        // populate these from the params struct.
+        framework: None,
+        resolved_via: None,
     })
 }
 
@@ -462,6 +487,10 @@ pub fn validate_relation_query_args(args: &Value) -> Result<RelationQueryArgs> {
             .try_into()
             .map_err(|_| anyhow::anyhow!("max_results out of range"))?,
         pagination,
+        // Phase β joint-stubs: test-only path; the production
+        // converters populate these from the params struct.
+        framework: None,
+        resolved_via: None,
     })
 }
 
@@ -1796,6 +1825,10 @@ pub struct DirectCallersArgs {
     pub max_results: usize,
     /// Pagination
     pub pagination: PaginationArgs,
+    /// Phase β joint-stub (Plan A) — see [`SemanticSearchArgs::framework`].
+    pub framework: Option<FrameworkId>,
+    /// Phase β joint-stub (Plan B) — see [`SemanticSearchArgs::resolved_via`].
+    pub resolved_via: Option<Vec<ResolvedVia>>,
 }
 
 /// Arguments for `direct_callees` tool.
@@ -1809,6 +1842,10 @@ pub struct DirectCalleesArgs {
     pub max_results: usize,
     /// Pagination
     pub pagination: PaginationArgs,
+    /// Phase β joint-stub (Plan A) — see [`SemanticSearchArgs::framework`].
+    pub framework: Option<FrameworkId>,
+    /// Phase β joint-stub (Plan B) — see [`SemanticSearchArgs::resolved_via`].
+    pub resolved_via: Option<Vec<ResolvedVia>>,
 }
 
 // ============================================================================

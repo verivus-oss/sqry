@@ -95,12 +95,47 @@ impl DerivedQuery for SccQuery {
 
         // Iterative Tarjan SCC via BidirectionalEdgeStore::edges_from.
         // This works on both CSR and delta buffer edges transparently.
+        //
+        // # Determinism contract
+        //
+        // `EdgeStore::edges_from` documents that delta-buffer iteration uses
+        // `HashMap` order and is non-deterministic both across and within
+        // process runs. The iterative Tarjan loop below MUST therefore:
+        //
+        // 1. Compute each node's outgoing-neighbour list exactly once — at
+        //    the moment the node is first pushed onto the work stack — and
+        //    cache it inside the work-stack frame. Re-querying `edges_from`
+        //    on subsequent iterations of the same frame is the original
+        //    bug: between two queries the `Vec` may be returned in a
+        //    different order, so the cursor `pos` advances over a
+        //    different element than the algorithm intends, mis-targeting
+        //    `lowlink` propagation and producing different SCC results on
+        //    the same input.
+        // 2. Sort each cached neighbour list by `NodeId` (which orders by
+        //    `(index, generation)`) so the algorithm processes edges in a
+        //    canonical order regardless of the underlying `edges_from`
+        //    iteration order on this particular run.
         let mut index_counter = 0u32;
         let mut stack: Vec<NodeId> = Vec::new();
         let mut on_stack: HashSet<NodeId> = HashSet::new();
         let mut indices: HashMap<NodeId, u32> = HashMap::new();
         let mut lowlinks: HashMap<NodeId, u32> = HashMap::new();
         let mut components: Vec<Vec<NodeId>> = Vec::new();
+
+        // Compute the set of outgoing neighbours for `node` filtered to the
+        // requested `EdgeKind` discriminant, sorted by `NodeId` for
+        // determinism. Called exactly once per node-push.
+        let neighbours_of = |node: NodeId| -> Vec<NodeId> {
+            let mut ns: Vec<NodeId> = snapshot
+                .edges()
+                .edges_from(node)
+                .iter()
+                .filter(|e| std::mem::discriminant(&e.kind) == std::mem::discriminant(key))
+                .map(|e| e.target)
+                .collect();
+            ns.sort_unstable();
+            ns
+        };
 
         // Collect all nodes.
         // Gate 0d iter-2 fix: skip unified losers from SCC
@@ -109,6 +144,9 @@ impl DerivedQuery for SccQuery {
         // each be a trivial 1-element SCC, but that's still a
         // publish-visible leak of loser IDs. See
         // `NodeEntry::is_unified_loser`.
+        //
+        // `NodeArena::iter` yields entries in slot order (deterministic
+        // `Vec` walk) so this iteration is already stable.
         let all_nodes: Vec<NodeId> = snapshot
             .nodes()
             .iter()
@@ -116,29 +154,24 @@ impl DerivedQuery for SccQuery {
             .map(|(nid, _)| nid)
             .collect();
 
-        // Iterative Tarjan using an explicit work stack
+        // Iterative Tarjan using an explicit work stack.
+        // Frame layout: (node, cursor into cached neighbours, cached
+        // sorted neighbour list). The cache makes Tarjan order-stable
+        // regardless of `edges_from`'s `HashMap` delta-buffer order.
         for &start in &all_nodes {
             if indices.contains_key(&start) {
                 continue;
             }
 
-            // DFS work stack: (node, neighbor_iterator_position)
-            let mut work: Vec<(NodeId, usize)> = vec![(start, 0)];
+            let mut work: Vec<(NodeId, usize, Vec<NodeId>)> =
+                vec![(start, 0, neighbours_of(start))];
             indices.insert(start, index_counter);
             lowlinks.insert(start, index_counter);
             index_counter += 1;
             stack.push(start);
             on_stack.insert(start);
 
-            while let Some((node, pos)) = work.last_mut() {
-                let neighbors: Vec<NodeId> = snapshot
-                    .edges()
-                    .edges_from(*node)
-                    .iter()
-                    .filter(|e| std::mem::discriminant(&e.kind) == std::mem::discriminant(key))
-                    .map(|e| e.target)
-                    .collect();
-
+            while let Some((node, pos, neighbors)) = work.last_mut() {
                 if *pos < neighbors.len() {
                     let neighbor = neighbors[*pos];
                     *pos += 1;
@@ -149,7 +182,8 @@ impl DerivedQuery for SccQuery {
                         index_counter += 1;
                         stack.push(neighbor);
                         on_stack.insert(neighbor);
-                        work.push((neighbor, 0));
+                        let neighbor_neighbours = neighbours_of(neighbor);
+                        work.push((neighbor, 0, neighbor_neighbours));
                     } else if on_stack.contains(&neighbor) {
                         let node_copy = *node;
                         let neighbor_idx = indices[&neighbor];
@@ -159,7 +193,7 @@ impl DerivedQuery for SccQuery {
                         }
                     }
                 } else {
-                    // All neighbors processed; check if root of SCC
+                    // All neighbours processed; check if root of SCC
                     let node_copy = *node;
                     let node_idx = indices[&node_copy];
                     let node_low = lowlinks[&node_copy];
@@ -179,7 +213,7 @@ impl DerivedQuery for SccQuery {
 
                     // Propagate lowlink to parent
                     work.pop();
-                    if let Some((parent, _)) = work.last() {
+                    if let Some((parent, _, _)) = work.last() {
                         let parent_copy = *parent;
                         let parent_low = lowlinks[&parent_copy];
                         if node_low < parent_low {
@@ -203,6 +237,126 @@ impl DerivedQuery for SccQuery {
             components,
             edge_kind: key.clone(),
         })
+    }
+}
+
+// ============================================================================
+// Determinism regression tests
+// ============================================================================
+
+#[cfg(test)]
+mod determinism_tests {
+    use super::*;
+    use crate::QueryDbConfig;
+    use sqry_core::graph::unified::concurrent::CodeGraph;
+    use sqry_core::graph::unified::node::kind::NodeKind;
+    use sqry_core::graph::unified::storage::arena::NodeEntry;
+    use std::path::Path;
+
+    /// Regression test for a non-determinism bug in `SccQuery::execute` exposed
+    /// by the WS1 differential property harness (proptest counter-example
+    /// seed `cc a8168cea9a32524e5950c6f414a84d72214577aa76365c73a86b4f0248002fbe`).
+    ///
+    /// The original iterative Tarjan loop recomputed `neighbors = edges_from(node)`
+    /// on every iteration of the work-stack while-loop. `EdgeStore::edges_from`
+    /// documents that the delta-buffer portion is returned in `HashMap` order,
+    /// which is non-deterministic across — and within — process runs. Between
+    /// two iterations of the same `(node, pos)` frame the `Vec` could be
+    /// reordered, so `neighbors[pos]` advanced over a different element than
+    /// the algorithm intended, mis-targeting lowlink propagation and producing
+    /// spurious SCCs in acyclic graphs.
+    ///
+    /// The minimal counter-example: 4 Imports edges `{(17,21), (17,23),
+    /// (1,14), (0,22)}`, no cycle possible. Planner produced SCC
+    /// `[NodeId(22), NodeId(1)]`; baseline produced singletons. We use the
+    /// same shape here (4 nodes, no Calls edges, 4 Imports edges all pushed
+    /// through the delta buffer) and assert across 100 invocations on the
+    /// same snapshot that:
+    ///   1. Every invocation returns the same SCC partition.
+    ///   2. Every component is a singleton (no false cycle).
+    ///   3. Per-component member order is stable.
+    #[test]
+    fn scc_is_deterministic_across_repeated_invocations() {
+        let mut graph = CodeGraph::new();
+        let file = graph.files_mut().register(Path::new("lib.rs")).unwrap();
+
+        // Allocate 8 distinct function nodes; we only wire 4 acyclic Imports
+        // edges among them. The exact NodeIds depend on alloc order, but the
+        // graph topology is acyclic regardless.
+        let mut nodes: Vec<NodeId> = Vec::new();
+        for i in 0..8u32 {
+            let name = graph.strings_mut().intern(&format!("sym_{i}")).unwrap();
+            let id = graph
+                .nodes_mut()
+                .alloc(NodeEntry::new(NodeKind::Function, name, file).with_qualified_name(name))
+                .unwrap();
+            nodes.push(id);
+        }
+
+        // Wire 4 acyclic Imports edges. With node alloc ids `n0..n7` these
+        // are: n0→n5, n2→n6, n3→n4, n7→n1. No cycles, even ignoring edge
+        // kinds — every target index differs from every source index in
+        // each edge.
+        let import = EdgeKind::Imports {
+            alias: None,
+            is_wildcard: false,
+        };
+        graph
+            .edges_mut()
+            .add_edge(nodes[0], nodes[5], import.clone(), file);
+        graph
+            .edges_mut()
+            .add_edge(nodes[2], nodes[6], import.clone(), file);
+        graph
+            .edges_mut()
+            .add_edge(nodes[3], nodes[4], import.clone(), file);
+        graph
+            .edges_mut()
+            .add_edge(nodes[7], nodes[1], import.clone(), file);
+
+        let snapshot = Arc::new(graph.snapshot());
+        let db = QueryDb::new(Arc::clone(&snapshot), QueryDbConfig::default());
+
+        // First run is the reference. We bypass the cache (which would
+        // mask non-determinism trivially) by calling `SccQuery::execute`
+        // directly 100 times against the same snapshot.
+        let reference = SccQuery::execute(&import, &db, &snapshot);
+
+        // Sanity: the input has no cycle so every component must be a
+        // singleton. Pre-fix the bug produced a 2-element SCC for this
+        // shape on at least some runs.
+        for component in &reference.components {
+            assert_eq!(
+                component.len(),
+                1,
+                "input is acyclic — every SCC must be a singleton, \
+                 got component {component:?}"
+            );
+        }
+        assert_eq!(
+            reference.components.len(),
+            nodes.len(),
+            "expected one singleton SCC per node ({}), got {}",
+            nodes.len(),
+            reference.components.len(),
+        );
+
+        for run in 0..100 {
+            let result = SccQuery::execute(&import, &db, &snapshot);
+            assert_eq!(
+                result.components, reference.components,
+                "SCC components differ on run {run} — non-deterministic"
+            );
+            assert_eq!(
+                result.node_to_component, reference.node_to_component,
+                "SCC node→component map differs on run {run} — \
+                 non-deterministic"
+            );
+            assert_eq!(
+                result.edge_kind, reference.edge_kind,
+                "SCC edge_kind differs on run {run}",
+            );
+        }
     }
 }
 

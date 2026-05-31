@@ -26,6 +26,7 @@ use std::{
 
 use sqry_core::{
     graph::unified::build::BuildConfig,
+    graph::unified::persistence::{GraphStorage, Manifest},
     project::ProjectRootMode,
     watch::{ChangeSet, GitChangeClass},
 };
@@ -70,6 +71,92 @@ fn make_tempdir_fixture() -> TempDir {
     let tmp = TempDir::new().expect("tempdir");
     copy_fixture_tree(&fixture_source_path(), tmp.path());
     tmp
+}
+
+fn make_tiny_rust_workspace() -> TempDir {
+    let tmp = TempDir::new().expect("tempdir");
+    let src = tmp.path().join("src");
+    fs::create_dir_all(&src).expect("create src dir");
+    fs::write(
+        src.join("lib.rs"),
+        "pub fn alpha() -> u32 { beta() }\npub fn beta() -> u32 { 7 }\n",
+    )
+    .expect("write tiny Rust fixture");
+    fs::write(
+        tmp.path().join("Cargo.toml"),
+        "[package]\nname = \"rebuild-persistence-integrity\"\nversion = \"0.0.0\"\nedition = \"2024\"\n",
+    )
+    .expect("write Cargo.toml");
+    tmp
+}
+
+fn direct_index_workspace(
+    root: &Path,
+    plugins: &sqry_core::plugin::PluginManager,
+) -> sqry_core::graph::unified::build::BuildResult {
+    let cfg = BuildConfig::default();
+    let graph = sqry_core::graph::unified::build::build_unified_graph(root, plugins, &cfg)
+        .expect("direct graph build must succeed");
+    let (_graph, result) = sqry_core::graph::unified::build::persist_and_analyze_graph(
+        graph,
+        root,
+        plugins,
+        &cfg,
+        "test:direct-index",
+        None,
+        sqry_core::progress::no_op_reporter(),
+        1,
+    )
+    .expect("direct graph persistence must succeed");
+    result
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn manifest_snapshot_sha_pair(root: &Path) -> (String, String) {
+    let storage = GraphStorage::new(root);
+    let manifest = Manifest::load(storage.manifest_path()).expect("load manifest");
+    let actual = sqry_db::persistence::compute_file_sha256(storage.snapshot_path())
+        .expect("hash snapshot.sqry");
+    (manifest.snapshot_sha256, hex_lower(&actual))
+}
+
+fn assert_manifest_matches_snapshot(root: &Path) {
+    let (manifest_sha, actual_sha) = manifest_snapshot_sha_pair(root);
+    assert_eq!(
+        manifest_sha, actual_sha,
+        "manifest snapshot_sha256 must match actual snapshot.sqry SHA-256",
+    );
+}
+
+fn assert_filesystem_graph_loads(root: &Path, plugins: &sqry_core::plugin::PluginManager) {
+    let storage = GraphStorage::new(root);
+    let graph = sqry_core::graph::unified::persistence::load_from_path(
+        storage.snapshot_path(),
+        Some(plugins),
+    )
+    .expect("filesystem-backed graph load must succeed");
+    assert!(
+        graph.node_count() > 0,
+        "filesystem-backed graph load must return indexed nodes",
+    );
+}
+
+async fn wait_for_derived_cache(root: &Path) {
+    let derived = root.join(".sqry").join("graph").join("derived.sqry");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        if derived.exists() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!(
+        "timed out waiting for QueryDbHook to write {}",
+        derived.display()
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -139,7 +226,6 @@ async fn dispatcher_end_to_end_on_rust_small_fixture() {
     let initial_graph = manager
         .get_or_load(&key, &builder, initial_estimate)
         .expect("initial load must succeed");
-    let initial_epoch = initial_graph.epoch();
     let initial_node_count = initial_graph.node_count();
     assert!(
         initial_node_count > 0,
@@ -186,13 +272,8 @@ async fn dispatcher_end_to_end_on_rust_small_fixture() {
         .get_or_load(&key, &builder, 0)
         .expect("cache-hit reload");
     assert!(
-        post_incr_graph.epoch() > initial_epoch,
-        "incremental publish must advance the graph epoch (before={initial_epoch}, after={})",
-        post_incr_graph.epoch(),
-    );
-    assert!(
         post_incr_graph.node_count() > initial_node_count,
-        "incremental rebuild must include the newly appended function \
+        "incremental-triggered durable rebuild must include the newly appended function \
          (before={initial_node_count}, after={})",
         post_incr_graph.node_count(),
     );
@@ -261,12 +342,198 @@ async fn dispatcher_end_to_end_on_rust_small_fixture() {
 }
 
 // ---------------------------------------------------------------------------
+// Rebuild persistence integrity regressions.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn direct_index_then_daemon_load_preserves_manifest_snapshot_integrity() {
+    use sqry_daemon::workspace::{QueryDbHook, SharedHook};
+    use std::time::Duration;
+
+    let tmp = make_tiny_rust_workspace();
+    let root = tmp.path().to_path_buf();
+    let plugins = Arc::new(sqry_plugin_registry::create_plugin_manager());
+
+    direct_index_workspace(&root, &plugins);
+    assert_manifest_matches_snapshot(&root);
+    assert_filesystem_graph_loads(&root, &plugins);
+
+    let storage = GraphStorage::new(&root);
+    let before_snapshot = fs::read(storage.snapshot_path()).expect("read snapshot before load");
+    let before_manifest = fs::read(storage.manifest_path()).expect("read manifest before load");
+
+    let config = Arc::new(DaemonConfig::default());
+    let manager = WorkspaceManager::new_without_reaper(Arc::clone(&config));
+    manager.set_hook(QueryDbHook::new(Duration::from_secs(5)) as SharedHook);
+
+    let key = WorkspaceKey::new(root.clone(), ProjectRootMode::WorkspaceFolder, 0);
+    let builder = RealGraphBuilder {
+        plugins: Arc::clone(&plugins),
+        cfg: BuildConfig::default(),
+    };
+    let estimate = working_set_estimate(WorkingSetInputs {
+        new_graph_final_estimate: 1_024 * 1024,
+        staging_overhead: 256 * 1024,
+        interner_snapshot_bytes: 128 * 1024,
+    });
+
+    let graph = manager
+        .get_or_load(&key, &builder, estimate)
+        .expect("daemon load must succeed");
+    assert!(
+        graph.node_count() > 0,
+        "daemon load graph must be non-empty"
+    );
+
+    wait_for_derived_cache(&root).await;
+
+    let after_snapshot = fs::read(storage.snapshot_path()).expect("read snapshot after hook drain");
+    let after_manifest = fs::read(storage.manifest_path()).expect("read manifest after hook drain");
+    assert_eq!(
+        after_manifest, before_manifest,
+        "QueryDbHook must not mutate manifest.json during daemon load",
+    );
+    assert_eq!(
+        after_snapshot, before_snapshot,
+        "QueryDbHook must not mutate canonical snapshot.sqry during daemon load",
+    );
+    assert_manifest_matches_snapshot(&root);
+    assert_filesystem_graph_loads(&root, &plugins);
+}
+
+#[tokio::test]
+async fn direct_index_then_daemon_load_then_force_rebuild_keeps_filesystem_index_coherent() {
+    use sqry_daemon::workspace::{QueryDbHook, SharedHook};
+    use std::time::Duration;
+
+    let tmp = make_tiny_rust_workspace();
+    let root = tmp.path().to_path_buf();
+    let plugins = Arc::new(sqry_plugin_registry::create_plugin_manager());
+
+    direct_index_workspace(&root, &plugins);
+    assert_manifest_matches_snapshot(&root);
+    assert_filesystem_graph_loads(&root, &plugins);
+
+    let config = Arc::new(DaemonConfig::default());
+    let manager = WorkspaceManager::new_without_reaper(Arc::clone(&config));
+    manager.set_hook(QueryDbHook::new(Duration::from_secs(5)) as SharedHook);
+    let dispatcher = RebuildDispatcher::new(
+        Arc::clone(&manager),
+        Arc::clone(&config),
+        Arc::clone(&plugins),
+    );
+    let key = WorkspaceKey::new(root.clone(), ProjectRootMode::WorkspaceFolder, 0);
+    let builder = RealGraphBuilder {
+        plugins: Arc::clone(&plugins),
+        cfg: BuildConfig::default(),
+    };
+    let estimate = working_set_estimate(WorkingSetInputs {
+        new_graph_final_estimate: 1_024 * 1024,
+        staging_overhead: 256 * 1024,
+        interner_snapshot_bytes: 128 * 1024,
+    });
+
+    manager
+        .get_or_load(&key, &builder, estimate)
+        .expect("daemon load must succeed");
+    wait_for_derived_cache(&root).await;
+    assert_manifest_matches_snapshot(&root);
+    assert_filesystem_graph_loads(&root, &plugins);
+
+    let changes = ChangeSet {
+        changed_files: Vec::new(),
+        git_state_changed: true,
+        git_change_class: Some(GitChangeClass::TreeDiverged),
+    };
+    dispatcher
+        .handle_changes(&key, changes)
+        .await
+        .expect("force rebuild must succeed only after durable persistence");
+
+    assert_eq!(
+        dispatcher.last_mode(),
+        Some(RebuildMode::Full),
+        "TreeDiverged force signal must select a full rebuild",
+    );
+    assert_manifest_matches_snapshot(&root);
+    assert_filesystem_graph_loads(&root, &plugins);
+}
+
+#[tokio::test]
+async fn durable_rebuild_persistence_failure_does_not_publish_or_leave_stale_manifest() {
+    let tmp = make_tiny_rust_workspace();
+    let root = tmp.path().to_path_buf();
+    let plugins = Arc::new(sqry_plugin_registry::create_plugin_manager());
+
+    direct_index_workspace(&root, &plugins);
+    let config = Arc::new(DaemonConfig::default());
+    let manager = WorkspaceManager::new_without_reaper(Arc::clone(&config));
+    let dispatcher = RebuildDispatcher::new(
+        Arc::clone(&manager),
+        Arc::clone(&config),
+        Arc::clone(&plugins),
+    );
+    let key = WorkspaceKey::new(root.clone(), ProjectRootMode::WorkspaceFolder, 0);
+    let builder = RealGraphBuilder {
+        plugins: Arc::clone(&plugins),
+        cfg: BuildConfig::default(),
+    };
+    let estimate = working_set_estimate(WorkingSetInputs {
+        new_graph_final_estimate: 1_024 * 1024,
+        staging_overhead: 256 * 1024,
+        interner_snapshot_bytes: 128 * 1024,
+    });
+    let prior_graph = manager
+        .get_or_load(&key, &builder, estimate)
+        .expect("initial daemon load must succeed");
+    let prior_node_count = prior_graph.node_count();
+
+    fs::write(
+        root.join("src").join("new_after_failure.rs"),
+        "pub fn new_after_failure() -> u32 { 9 }\n",
+    )
+    .expect("write new source file");
+
+    let storage = GraphStorage::new(&root);
+    fs::remove_file(storage.snapshot_path()).expect("remove snapshot before failure injection");
+    fs::create_dir(storage.snapshot_path()).expect("replace snapshot path with directory");
+
+    let changes = ChangeSet {
+        changed_files: Vec::new(),
+        git_state_changed: true,
+        git_change_class: Some(GitChangeClass::TreeDiverged),
+    };
+    let err = dispatcher
+        .handle_changes(&key, changes)
+        .await
+        .expect_err("rebuild must fail when durable snapshot persistence fails");
+    assert!(
+        matches!(err, sqry_daemon::DaemonError::WorkspaceBuildFailed { .. }),
+        "durable persistence failure must surface as WorkspaceBuildFailed, got {err:?}",
+    );
+
+    let served_workspace = manager
+        .lookup(&key)
+        .expect("workspace must remain registered after failed rebuild");
+    let served_graph = served_workspace.graph.load_full();
+    assert_eq!(
+        served_graph.node_count(),
+        prior_node_count,
+        "failed durable rebuild must not publish the new graph",
+    );
+    assert!(
+        !storage.manifest_path().exists(),
+        "failed durable rebuild must remove stale manifest before touching snapshot",
+    );
+}
+
+// ---------------------------------------------------------------------------
 // PF03B integration: production QueryDbHook wired through publish path.
 //
 // Verifies that when the daemon installs `QueryDbHook` (matching what
-// `entrypoint::build_daemon_components` does), a publish writes the canonical
-// snapshot, warms useful derived-cache entries, and persists derived.sqry with
-// a SHA bound to that same snapshot identity.
+// `entrypoint::build_daemon_components` does), a publish leaves the canonical
+// snapshot untouched, warms useful derived-cache entries, and persists
+// derived.sqry with a SHA bound to the verified existing snapshot identity.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -278,20 +545,15 @@ async fn pf08_pf09_query_db_hook_writes_useful_derived_sqry_after_publish() {
 
     let tmp = make_tempdir_fixture();
     let workspace_root = tmp.path().to_path_buf();
-
-    // Seed a stale snapshot first. PF09 requires the hook to bind the derived
-    // cache to the graph it publishes, not to whatever snapshot happened to be
-    // on disk before publish.
-    let snap_dir = workspace_root.join(".sqry").join("graph");
-    fs::create_dir_all(&snap_dir).expect("create .sqry/graph");
-    let snapshot_path = snap_dir.join("snapshot.sqry");
-    sqry_core::graph::unified::persistence::save_to_path(
-        &sqry_core::graph::CodeGraph::new(),
-        &snapshot_path,
-    )
-    .expect("save stale snapshot.sqry");
-    let stale_sha =
-        sqry_db::persistence::compute_file_sha256(&snapshot_path).expect("hash stale snapshot");
+    let plugins = Arc::new(sqry_plugin_registry::create_plugin_manager());
+    direct_index_workspace(&workspace_root, &plugins);
+    assert_manifest_matches_snapshot(&workspace_root);
+    let storage = GraphStorage::new(&workspace_root);
+    let snapshot_path = storage.snapshot_path().to_path_buf();
+    let snapshot_before = fs::read(&snapshot_path).expect("read pre-load snapshot");
+    let manifest_sha_before = Manifest::load(storage.manifest_path())
+        .expect("load manifest")
+        .snapshot_sha256;
 
     let config = Arc::new(DaemonConfig::default());
     let manager = WorkspaceManager::new_without_reaper(Arc::clone(&config));
@@ -303,7 +565,7 @@ async fn pf08_pf09_query_db_hook_writes_useful_derived_sqry_after_publish() {
 
     let key = WorkspaceKey::new(workspace_root.clone(), ProjectRootMode::WorkspaceFolder, 0);
     let builder = RealGraphBuilder {
-        plugins: Arc::new(sqry_plugin_registry::create_plugin_manager()),
+        plugins: Arc::clone(&plugins),
         cfg: BuildConfig::default(),
     };
     let estimate = working_set_estimate(WorkingSetInputs {
@@ -321,7 +583,7 @@ async fn pf08_pf09_query_db_hook_writes_useful_derived_sqry_after_publish() {
 
     // The hook is fire-and-forget; poll for derived.sqry within the
     // configured timeout window with a small safety margin.
-    let derived = snap_dir.join("derived.sqry");
+    let derived = storage.graph_dir().join("derived.sqry");
     let deadline = std::time::Instant::now()
         + Duration::from_millis(config.rebuild_drain_timeout_ms.saturating_mul(2).max(2_000));
     while std::time::Instant::now() < deadline {
@@ -334,6 +596,11 @@ async fn pf08_pf09_query_db_hook_writes_useful_derived_sqry_after_publish() {
         derived.exists(),
         "PF03B: production QueryDbHook must write {} after publish",
         derived.display()
+    );
+    let snapshot_after = fs::read(&snapshot_path).expect("read post-load snapshot");
+    assert_eq!(
+        snapshot_after, snapshot_before,
+        "RPI: production QueryDbHook must not mutate canonical snapshot.sqry"
     );
 
     let bytes = fs::read(&derived).expect("read derived.sqry");
@@ -352,13 +619,14 @@ async fn pf08_pf09_query_db_hook_writes_useful_derived_sqry_after_publish() {
     );
     let current_sha =
         sqry_db::persistence::compute_file_sha256(&snapshot_path).expect("hash current snapshot");
-    assert_ne!(
-        header.snapshot_sha256, stale_sha,
-        "PF09: derived header must not retain the stale pre-publish snapshot SHA"
-    );
     assert_eq!(
         header.snapshot_sha256, current_sha,
-        "PF09: derived header must match the freshly-published snapshot SHA"
+        "RPI: derived header must match the verified persisted snapshot SHA"
+    );
+    assert_eq!(
+        hex_lower(&header.snapshot_sha256),
+        manifest_sha_before,
+        "RPI: derived header SHA must match manifest.snapshot_sha256"
     );
 
     let persisted_graph = load_from_path(&snapshot_path, None).expect("load persisted snapshot");

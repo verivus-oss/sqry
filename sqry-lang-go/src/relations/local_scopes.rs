@@ -19,7 +19,9 @@ use sqry_core::graph::unified::edge::kind::TypeOfContext;
 use sqry_core::graph::unified::node::{NodeId, NodeKind};
 use tree_sitter::Node;
 
-use crate::relations::graph_builder::{span_from_byte_range, span_from_node};
+use crate::relations::graph_builder::{
+    is_go_predeclared_type, span_from_byte_range, span_from_node,
+};
 
 /// C_SUPPRESS: flag a freshly-staged Variable node as synthetic via
 /// the metadata-store bit.
@@ -751,7 +753,7 @@ fn bind_parameter_list(
 fn materialise_local_binding(
     tree: &mut GoScopeTree,
     helper: &mut GraphBuildHelper,
-    _package: &str,
+    package: &str,
     name: &str,
     decl_start_byte: usize,
     decl_end_byte: usize,
@@ -772,7 +774,12 @@ fn materialise_local_binding(
     if let Some(type_text) = type_text {
         let trimmed = type_text.trim();
         if !trimmed.is_empty() {
-            let type_id = helper.add_type(trimmed, None);
+            let qualified_type = if should_qualify_local_binding_type(trimmed) {
+                format!("{package}.{trimmed}")
+            } else {
+                trimmed.to_string()
+            };
+            let type_id = helper.add_type(&qualified_type, None);
             helper.add_typeof_edge_with_context(
                 node_id,
                 type_id,
@@ -782,6 +789,19 @@ fn materialise_local_binding(
             );
         }
     }
+}
+
+fn should_qualify_local_binding_type(raw: &str) -> bool {
+    is_plain_go_identifier(raw) && !is_go_predeclared_type(raw)
+}
+
+fn is_plain_go_identifier(raw: &str) -> bool {
+    let mut chars = raw.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
 /// Check if a node is at package level, where the parent is `source_file`.
@@ -1007,4 +1027,22 @@ fn is_name_child_of_param(node: Node, param: Node) -> bool {
         }
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_qualify_local_binding_type;
+
+    #[test]
+    fn qualifies_only_same_package_named_local_binding_types() {
+        assert!(should_qualify_local_binding_type("Outer"));
+        assert!(should_qualify_local_binding_type("_Local"));
+
+        assert!(!should_qualify_local_binding_type("string"));
+        assert!(!should_qualify_local_binding_type("io.Reader"));
+        assert!(!should_qualify_local_binding_type("*Outer"));
+        assert!(!should_qualify_local_binding_type("[]byte"));
+        assert!(!should_qualify_local_binding_type("map[string]int"));
+        assert!(!should_qualify_local_binding_type("Box[T]"));
+    }
 }

@@ -564,6 +564,70 @@ fn regression_ts_http_routes_add_http_route_preserves_existing_http_links() {
 }
 
 #[test]
+fn regression_monorepo_mixed_remove_decorated_then_add_preserves_http_link() {
+    // Pre-fix shape: a 4-op sequence on `monorepo_mixed` (Python server +
+    // JS client) drops the cross-file `HttpRequest{Get}` edge from
+    // `frontend/client.js::listItems` to
+    // `backend/server.py::route::GET::/api/items`.
+    //
+    // The proptest shrunk to: remove three Python `def` blocks on
+    // `backend/server.py` (`remove_item`, `list_items`, `add_item`) while
+    // leaving their `@app.route(...)` decorators behind as orphaned
+    // tokens, then append a brand-new `def harness_new_fn_0()` to the
+    // file. Tree-sitter then re-associates the orphaned route decorators
+    // immediately above the new def with `harness_new_fn_0`, so the
+    // file ends up exposing an `Endpoint` whose qualified name is
+    // `route::GET::/api/items` (the first decorator left dangling) but
+    // whose `Contains` edge points at `harness_new_fn_0`.
+    //
+    // The baseline (full rebuild) and the incremental rebuild agree on
+    // node identity (the `Endpoint` is in the arena either way), so the
+    // node-set diff is empty. They disagreed on cross-file Pass 5 edges:
+    // the full rebuild observes `client.js`'s `fetch("/api/items")` and
+    // re-emits the `HttpRequest{Get}` edge to the surviving endpoint
+    // node, while the incremental candidate dropped it.
+    //
+    // Root cause: Pass 5's `collect_http_requests` looks up each edge's
+    // source via `NodeArena::get(edge_ref.source)`, which enforces a
+    // strict generation match. `BidirectionalEdgeStore::all_live_forward_edges`
+    // emits CSR-backed edges with `source: NodeId::new(slot_idx, 0)` — the
+    // CSR does not store per-slot generations, so the convention is to
+    // hard-code generation 0. After several incremental rebuilds, the
+    // surviving arena slots can hold live nodes whose generations have
+    // advanced past 0 (e.g. when a closure tombstone-and-reparse
+    // re-used a slot under `alloc_range`'s always-append discipline at a
+    // later index, then a subsequent rebuild compacted the arena and the
+    // surviving node ended up in a slot with `generation >= 1`).
+    // Strict `get()` then returns `None`, the edge is skipped, and the
+    // matching endpoint never sees its requester. Fixed by falling back
+    // to a generation-agnostic slot lookup when `get()` misses, and
+    // rewiring the source NodeId to the slot's live generation so the
+    // cross-file edge Pass 5 emits survives finalize step 9 (CSR rebuild
+    // from the compacted delta).
+    run_deterministic_case(
+        "monorepo_mixed",
+        &[
+            EditOp::RemoveFunction {
+                rel_path: "backend/server.py".to_string(),
+                name: "remove_item".to_string(),
+            },
+            EditOp::RemoveFunction {
+                rel_path: "backend/server.py".to_string(),
+                name: "list_items".to_string(),
+            },
+            EditOp::RemoveFunction {
+                rel_path: "backend/server.py".to_string(),
+                name: "add_item".to_string(),
+            },
+            EditOp::AddFunction {
+                rel_path: "backend/server.py".to_string(),
+                name: "harness_new_fn_0".to_string(),
+            },
+        ],
+    );
+}
+
+#[test]
 fn regression_ts_http_routes_newly_resolvable_endpoint_links_unchanged_requester() {
     // Scenario Codex called out as NOT covered by closure widening
     // alone: "unchanged requester + newly-resolvable endpoint".
@@ -614,6 +678,30 @@ export async function fetchBrandNew(): Promise<unknown> {
                 method: "GET".to_string(),
                 path: "/api/brand_new".to_string(),
                 handler: "brandNewHandler".to_string(),
+            },
+        ],
+    );
+}
+
+#[test]
+fn regression_java_enterprise_user_repository_edit_does_not_emit_go_pointer_type() {
+    // Pre-fix shape: the Go method-set satisfaction pass scanned Java
+    // Interface/Type nodes during incremental rebuild. Java's
+    // `implements` handling can create duplicate `UserRepository`
+    // interface-shaped nodes; the Go pass treated those Java nodes as
+    // Go interface-satisfaction candidates and minted a synthetic
+    // `*UserRepository` Type in a different owner file than a full
+    // rebuild. The incremental and baseline semantic node sets then
+    // diverged on `com::example::enterprise::*UserRepository`.
+    run_deterministic_case(
+        "java_enterprise",
+        &[
+            EditOp::AddFunction {
+                rel_path: "UserRepository.java".to_string(),
+                name: "harness_new_fn_0".to_string(),
+            },
+            EditOp::WhitespaceEdit {
+                rel_path: "UserRepository.java".to_string(),
             },
         ],
     );

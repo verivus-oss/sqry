@@ -1814,6 +1814,13 @@ fn convert_semantic_search_params(
         score_min,
         include_classpath: params.include_classpath,
         budget_rows: validate_budget_rows(params.budget_rows)?,
+        // Phase β joint-stubs: thread the framework + resolved_via filter
+        // params from the MCP boundary into the validated args struct.
+        // Downstream Plan A / Plan B PRs read these on the executor side.
+        framework: params.framework.map(Into::into),
+        resolved_via: params
+            .resolved_via
+            .map(|v| v.into_iter().map(Into::into).collect()),
     })
 }
 
@@ -1903,6 +1910,12 @@ fn convert_relation_query_params(
         max_depth,
         max_results,
         pagination,
+        // Phase β joint-stubs: thread MCP filter params through to the
+        // validated args struct.
+        framework: params.framework.map(Into::into),
+        resolved_via: params
+            .resolved_via
+            .map(|v| v.into_iter().map(Into::into).collect()),
     })
 }
 
@@ -2320,6 +2333,11 @@ fn convert_direct_callers_params(
         path: params.path,
         max_results,
         pagination,
+        // Phase β joint-stubs: thread MCP filter params through.
+        framework: params.framework.map(Into::into),
+        resolved_via: params
+            .resolved_via
+            .map(|v| v.into_iter().map(Into::into).collect()),
     })
 }
 
@@ -2334,6 +2352,11 @@ fn convert_direct_callees_params(
         path: params.path,
         max_results,
         pagination,
+        // Phase β joint-stubs: thread MCP filter params through.
+        framework: params.framework.map(Into::into),
+        resolved_via: params
+            .resolved_via
+            .map(|v| v.into_iter().map(Into::into).collect()),
     })
 }
 
@@ -2526,5 +2549,115 @@ mod tests {
         // When deserialized from JSON without a "path" field, serde uses default_path()
         let params: ExpandCacheStatusParams = serde_json::from_str("{}").unwrap();
         assert_eq!(params.path, ".");
+    }
+
+    // ----------------------------------------------------------------------
+    // Phase β joint-stubs — MCP-converter integration coverage for the new
+    // `framework` / `resolved_via` filter params. Pins the param→args
+    // translation so the end-to-end wire path (JSON params → converter →
+    // validated args → executor → planner predicate) stays type-checked
+    // and behaviourally pinned alongside the predicate-evaluation tests in
+    // `sqry-db/tests/phase_beta_predicate_evaluation.rs`.
+    // ----------------------------------------------------------------------
+
+    #[test]
+    fn convert_relation_query_threads_phase_beta_filter_params() {
+        use crate::tools::params::{FrameworkIdParam, RelationTypeParam, ResolvedViaParam};
+        use sqry_core::graph::unified::edge::kind::ResolvedVia;
+        use sqry_core::schema::FrameworkId;
+
+        let params = RelationQueryParams {
+            symbol: "handler".to_string(),
+            relation_type: RelationTypeParam::Callers,
+            path: ".".to_string(),
+            max_depth: 1,
+            max_results: 50,
+            page_token: None,
+            page_size: 50,
+            budget_rows: None,
+            framework: Some(FrameworkIdParam::Flask),
+            resolved_via: Some(vec![
+                ResolvedViaParam::Direct,
+                ResolvedViaParam::VirtualDispatch,
+            ]),
+        };
+
+        let args = convert_relation_query_params(params).expect("convert");
+        assert_eq!(args.framework, Some(FrameworkId::Flask));
+        assert_eq!(
+            args.resolved_via,
+            Some(vec![ResolvedVia::Direct, ResolvedVia::VirtualDispatch]),
+        );
+    }
+
+    #[test]
+    fn convert_relation_query_omits_phase_beta_filter_params_when_absent() {
+        use crate::tools::params::RelationTypeParam;
+
+        let params = RelationQueryParams {
+            symbol: "handler".to_string(),
+            relation_type: RelationTypeParam::Callers,
+            path: ".".to_string(),
+            max_depth: 1,
+            max_results: 50,
+            page_token: None,
+            page_size: 50,
+            budget_rows: None,
+            framework: None,
+            resolved_via: None,
+        };
+
+        let args = convert_relation_query_params(params).expect("convert");
+        assert!(args.framework.is_none());
+        assert!(args.resolved_via.is_none());
+    }
+
+    #[test]
+    fn convert_direct_callers_threads_phase_beta_filter_params() {
+        use crate::tools::params::{FrameworkIdParam, ResolvedViaParam};
+        use sqry_core::graph::unified::edge::kind::ResolvedVia;
+        use sqry_core::schema::FrameworkId;
+
+        let params = DirectCallersParams {
+            symbol: "handler".to_string(),
+            path: ".".to_string(),
+            max_results: 50,
+            pagination: None,
+            framework: Some(FrameworkIdParam::Django),
+            resolved_via: Some(vec![ResolvedViaParam::InterfaceDispatch]),
+        };
+
+        let args = convert_direct_callers_params(params).expect("convert");
+        assert_eq!(args.framework, Some(FrameworkId::Django));
+        assert_eq!(
+            args.resolved_via,
+            Some(vec![ResolvedVia::InterfaceDispatch]),
+        );
+    }
+
+    #[test]
+    fn convert_direct_callees_threads_phase_beta_filter_params() {
+        use crate::tools::params::{FrameworkIdParam, ResolvedViaParam};
+        use sqry_core::graph::unified::edge::kind::ResolvedVia;
+        use sqry_core::schema::FrameworkId;
+
+        let params = DirectCalleesParams {
+            symbol: "handler".to_string(),
+            path: ".".to_string(),
+            max_results: 50,
+            pagination: None,
+            framework: Some(FrameworkIdParam::Spring),
+            resolved_via: Some(vec![
+                ResolvedViaParam::PromiscuousElided,
+                ResolvedViaParam::DuckTyped,
+            ]),
+        };
+
+        let args = convert_direct_callees_params(params).expect("convert");
+        assert_eq!(args.framework, Some(FrameworkId::Spring));
+        assert_eq!(
+            args.resolved_via,
+            Some(vec![ResolvedVia::PromiscuousElided, ResolvedVia::DuckTyped]),
+        );
     }
 }

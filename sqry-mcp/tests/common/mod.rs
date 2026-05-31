@@ -90,11 +90,17 @@ impl McpTestClient {
         // when many tests spawn server processes concurrently.
         // Test binaries live in target/debug/deps/, but the sqry-mcp binary
         // is at target/debug/sqry-mcp, so we check both parent and grandparent.
+        //
+        // Pass `--no-daemon` so a running sqryd on the host does not
+        // hijack standalone-mode tests; see the analogous block in
+        // `new_with_env_and_stderr_mode_internal`.
         let mut command = if let Some(binary) = find_sqry_mcp_binary() {
-            Command::new(binary)
+            let mut cmd = Command::new(binary);
+            cmd.arg("--no-daemon");
+            cmd
         } else {
             let mut cmd = Command::new("cargo");
-            cmd.args(["run", "-p", "sqry-mcp", "--quiet"]);
+            cmd.args(["run", "-p", "sqry-mcp", "--quiet", "--", "--no-daemon"]);
             cmd
         };
         // Use the mini-workspace fixture which has a pre-built graph index,
@@ -237,11 +243,21 @@ impl McpTestClient {
     ) -> Result<Self> {
         // Use the pre-built binary directly instead of cargo run.
         // This avoids cargo lock contention when many tests spawn concurrently.
+        //
+        // Force `--no-daemon` so these standalone-mode tests don't silently
+        // route through a running sqryd (whose `DAEMON_SUPPORTED_TOOL_NAMES`
+        // is a 16-tool subset; tools like `list_files`, `get_index_status`,
+        // `get_references` are not in it and would be rejected with
+        // "unknown tool name"). Daemon-mode integration tests use
+        // `DaemonFixture` in `sqry-mcp/tests/common/daemon_fixture.rs`.
         let (program, args): (std::ffi::OsString, &[&str]) =
             if let Some(binary) = find_sqry_mcp_binary() {
-                (binary.into(), &[])
+                (binary.into(), &["--no-daemon"])
             } else {
-                ("cargo".into(), &["run", "-p", "sqry-mcp", "--quiet"])
+                (
+                    "cargo".into(),
+                    &["run", "-p", "sqry-mcp", "--quiet", "--", "--no-daemon"],
+                )
             };
 
         let mut command = Command::new(program);

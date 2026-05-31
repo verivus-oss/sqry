@@ -75,6 +75,29 @@ pub const MAGIC_BYTES_V10: &[u8; 14] = b"SQRY_GRAPH_V10";
 /// `c_indirect_tables` to `None`.
 pub const MAGIC_BYTES_V11: &[u8; 14] = b"SQRY_GRAPH_V11";
 
+/// Phase β joint-stubs V12 magic bytes.
+///
+/// Emitted by the Phase β joint-stubs writer (this PR) and accepted by the
+/// V12 reader. V12 extends V11 with TWO new snapshot-envelope slots that
+/// carry per-snapshot side tables for the framework-routes (Plan A) and
+/// dispatch-tables (Plan B) work. The shapes themselves are reserved-empty
+/// in this PR; the downstream extractor / resolver PRs populate them.
+///
+/// V12 envelope additions:
+/// - `framework_routes: BTreeMap<NodeId, FrameworkRouteMetadata>` — Plan A
+///   slot. Empty for non-extractor workspaces (and for every V11 → V12
+///   upconvert). Re-attached onto the in-memory
+///   `NodeMetadataStore::framework_routes` field on load.
+/// - `dispatch_tables: DispatchTables` — Plan B slot. Empty for
+///   non-resolver workspaces (and for every V11 → V12 upconvert).
+///   Re-attached onto the in-memory `NodeMetadataStore::dispatch_tables`
+///   field on load.
+///
+/// V11 snapshots are upconverted to V12 inline on load by zero-initialising
+/// the two new envelope slots. No metadata-store reshape is required (V11
+/// metadata-store wire shape is preserved bit-for-bit inside V12 envelopes).
+pub const MAGIC_BYTES_V12: &[u8; 14] = b"SQRY_GRAPH_V12";
+
 /// Legacy V7 numeric version, exposed with a versioned name so the Phase 1 reader
 /// dispatch can cite it explicitly. Equal to [`VERSION`].
 pub const LEGACY_VERSION_V7: u32 = 7;
@@ -106,6 +129,10 @@ pub enum FormatVersion {
     /// legacy `NodeMetadata` variants into `StoredEntry { typed, flags }`
     /// and setting `c_indirect_tables` to `None`.
     V11 = 11,
+    /// V12 — read/write after Phase β joint-stubs. Extends V11 with two new
+    /// envelope slots: `framework_routes` (Plan A) and `dispatch_tables`
+    /// (Plan B). Both are zero-initialised by the V11 → V12 upconvert.
+    V12 = 12,
 }
 
 impl FormatVersion {
@@ -118,6 +145,7 @@ impl FormatVersion {
             Self::V9 => MAGIC_BYTES_V9.as_slice(),
             Self::V10 => MAGIC_BYTES_V10.as_slice(),
             Self::V11 => MAGIC_BYTES_V11.as_slice(),
+            Self::V12 => MAGIC_BYTES_V12.as_slice(),
         }
     }
 
@@ -132,9 +160,14 @@ impl FormatVersion {
     /// Returns `None` if the bytes do not match any known format magic.
     #[must_use]
     pub fn from_magic(bytes: &[u8]) -> Option<Self> {
-        // V11 and V10 magics are both 14 bytes. Check V11 first so a buffer
-        // that starts with `SQRY_GRAPH_V11` is not mis-classified as V10 by
-        // a less-strict comparison path.
+        // V12, V11, and V10 magics are all 14 bytes. Check V12 first, then
+        // V11, then V10 so a longer / newer magic is never mis-classified
+        // as an older one by a less-strict comparison path.
+        if bytes.len() >= MAGIC_BYTES_V12.len()
+            && bytes[..MAGIC_BYTES_V12.len()] == *MAGIC_BYTES_V12
+        {
+            return Some(Self::V12);
+        }
         if bytes.len() >= MAGIC_BYTES_V11.len()
             && bytes[..MAGIC_BYTES_V11.len()] == *MAGIC_BYTES_V11
         {
@@ -161,8 +194,8 @@ impl FormatVersion {
     }
 }
 
-/// Current writer format version (Phase A C-icall precision+: V11).
-pub const CURRENT_VERSION: FormatVersion = FormatVersion::V11;
+/// Current writer format version (Phase β joint-stubs: V12).
+pub const CURRENT_VERSION: FormatVersion = FormatVersion::V12;
 
 /// Header for persisted graph files.
 ///
@@ -576,11 +609,12 @@ mod tests {
         assert_eq!(FormatVersion::V9 as u32, 9);
         assert_eq!(FormatVersion::V10 as u32, 10);
         assert_eq!(FormatVersion::V11 as u32, 11);
+        assert_eq!(FormatVersion::V12 as u32, 12);
     }
 
     #[test]
-    fn current_version_is_v11() {
-        assert_eq!(CURRENT_VERSION, FormatVersion::V11);
+    fn current_version_is_v12() {
+        assert_eq!(CURRENT_VERSION, FormatVersion::V12);
     }
 
     #[test]
@@ -669,10 +703,58 @@ mod tests {
             FormatVersion::V9,
             FormatVersion::V10,
             FormatVersion::V11,
+            FormatVersion::V12,
         ] {
             let bytes = version.magic();
             assert_eq!(FormatVersion::from_magic(bytes), Some(version));
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Phase β joint-stubs: V12 magic + dispatch
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn phase_beta_magic_bytes_v12_is_distinct_and_14_bytes() {
+        assert_eq!(MAGIC_BYTES_V12, b"SQRY_GRAPH_V12");
+        assert_eq!(MAGIC_BYTES_V12.len(), 14);
+        assert_ne!(MAGIC_BYTES_V12, MAGIC_BYTES_V11);
+        assert_ne!(MAGIC_BYTES_V12, MAGIC_BYTES_V10);
+    }
+
+    #[test]
+    fn phase_beta_format_version_from_magic_v12() {
+        assert_eq!(
+            FormatVersion::from_magic(MAGIC_BYTES_V12),
+            Some(FormatVersion::V12),
+        );
+    }
+
+    /// V12, V11, and V10 magics are equal-length (14 bytes). The dispatch
+    /// tries V12 FIRST, then V11, then V10 — so a buffer that starts with
+    /// `SQRY_GRAPH_V12` must resolve to V12, not V11 or V10. Mirrors the
+    /// `phase_a_format_version_dispatch_v11_before_v10` guard.
+    #[test]
+    fn phase_beta_format_version_dispatch_v12_before_v11_v10() {
+        let mut buf = MAGIC_BYTES_V12.to_vec();
+        buf.extend_from_slice(&[0u8; 8]);
+        assert_eq!(FormatVersion::from_magic(&buf), Some(FormatVersion::V12));
+
+        let mut buf11 = MAGIC_BYTES_V11.to_vec();
+        buf11.extend_from_slice(&[0u8; 8]);
+        assert_eq!(FormatVersion::from_magic(&buf11), Some(FormatVersion::V11));
+
+        let mut buf10 = MAGIC_BYTES_V10.to_vec();
+        buf10.extend_from_slice(&[0u8; 8]);
+        assert_eq!(FormatVersion::from_magic(&buf10), Some(FormatVersion::V10));
+    }
+
+    #[test]
+    fn phase_beta_format_version_v12_magic_round_trip() {
+        let v = FormatVersion::V12;
+        let bytes = v.magic();
+        assert_eq!(bytes, MAGIC_BYTES_V12.as_slice());
+        assert_eq!(FormatVersion::from_magic(bytes), Some(v));
     }
 
     #[test]

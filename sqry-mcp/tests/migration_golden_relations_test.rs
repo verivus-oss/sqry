@@ -222,6 +222,8 @@ fn direct_callers_returns_callers_of_helper() -> Result<()> {
         path: workspace_arg(&temp),
         max_results: 100,
         pagination: paging(),
+        framework: None,
+        resolved_via: None,
     };
     let result = execute_direct_callers(&args)?;
 
@@ -252,6 +254,8 @@ fn direct_callees_returns_callees_of_main() -> Result<()> {
         path: workspace_arg(&temp),
         max_results: 100,
         pagination: paging(),
+        framework: None,
+        resolved_via: None,
     };
     let result = execute_direct_callees(&args)?;
 
@@ -284,6 +288,8 @@ fn relation_query_callers_routes_through_sqry_db_with_correct_direction() -> Res
         max_depth: 1,
         max_results: 100,
         pagination: paging(),
+        framework: None,
+        resolved_via: None,
     };
     let result = execute_relation_query(&args)?;
 
@@ -317,6 +323,8 @@ fn relation_query_callees_routes_through_sqry_db_with_correct_direction() -> Res
         max_depth: 1,
         max_results: 100,
         pagination: paging(),
+        framework: None,
+        resolved_via: None,
     };
     let result = execute_relation_query(&args)?;
 
@@ -363,6 +371,8 @@ fn relation_query_imports_remains_node_anchored() -> Result<()> {
         max_depth: 1,
         max_results: 100,
         pagination: paging(),
+        framework: None,
+        resolved_via: None,
     };
     let result = execute_relation_query(&args)?;
     assert_eq!(result.data.relation_type, "imports");
@@ -415,6 +425,8 @@ fn node_ref_surfaces_resolution_source_field() -> Result<()> {
         max_depth: 1,
         max_results: 100,
         pagination: paging(),
+        framework: None,
+        resolved_via: None,
     };
     let result = execute_relation_query(&args)?;
     let json = serde_json::to_value(&result.data)?;
@@ -450,6 +462,8 @@ fn direct_callers_and_relation_query_agree_on_caller_set() -> Result<()> {
         path: workspace_arg(&temp),
         max_results: 100,
         pagination: paging(),
+        framework: None,
+        resolved_via: None,
     })?;
     let relation = execute_relation_query(&RelationQueryArgs {
         symbol: "helper".to_string(),
@@ -458,6 +472,8 @@ fn direct_callers_and_relation_query_agree_on_caller_set() -> Result<()> {
         max_depth: 1,
         max_results: 100,
         pagination: paging(),
+        framework: None,
+        resolved_via: None,
     })?;
 
     let mut direct_names: Vec<String> =
@@ -509,6 +525,8 @@ fn relation_query_callers_max_depth_2_walks_full_chain_in_ambiguous_fixture() ->
         max_depth: 2,
         max_results: 100,
         pagination: paging(),
+        framework: None,
+        resolved_via: None,
     };
     let result = execute_relation_query(&args)?;
 

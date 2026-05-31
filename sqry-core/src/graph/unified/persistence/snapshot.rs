@@ -13,7 +13,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use super::format::{
-    FormatVersion, GraphHeader, MAGIC_BYTES_V9, MAGIC_BYTES_V10, MAGIC_BYTES_V11, VERSION,
+    FormatVersion, GraphHeader, MAGIC_BYTES_V9, MAGIC_BYTES_V10, MAGIC_BYTES_V11, MAGIC_BYTES_V12,
+    VERSION,
 };
 use super::manifest::ConfigProvenance;
 use crate::config::buffers::max_snapshot_bytes;
@@ -26,8 +27,9 @@ use crate::graph::unified::build::phase4e_binding::derive_binding_plane;
 use crate::graph::unified::concurrent::CodeGraph;
 use crate::graph::unified::resolution::is_canonical_graph_qualified_name;
 use crate::graph::unified::storage::{
-    AuxiliaryIndices, CIndirectSideTables, EdgeProvenanceStore, FileRegistry, FileSegmentTable,
-    NodeArena, NodeMetadataStore, NodeProvenanceStore, StringInterner,
+    AuxiliaryIndices, CIndirectSideTables, DispatchTables, EdgeProvenanceStore, FileRegistry,
+    FileSegmentTable, FrameworkRoutesMap, NodeArena, NodeMetadataStore, NodeProvenanceStore,
+    StringInterner,
 };
 use crate::plugin::PluginManager;
 
@@ -305,6 +307,83 @@ struct GraphSnapshotDataV11 {
     /// DESIGN §10.2).
     #[serde(default)]
     c_indirect_tables: Option<CIndirectSideTables>,
+}
+
+/// Serializable snapshot of the graph state (V12 — Phase β joint-stubs).
+///
+/// Extends [`GraphSnapshotDataV11`] with TWO new envelope slots that hold
+/// the Phase β joint-stub side tables: Plan A's per-node framework-route
+/// metadata and Plan B's dispatch-resolution tables. Both slots are
+/// zero-initialised in this PR (no resolver populates them yet); the
+/// downstream feature PRs wire the producers.
+///
+/// # Wire-shape contract
+///
+/// - `framework_routes_table` — flat `Vec<(NodeId, FrameworkRouteMetadata)>`
+///   wire shape. We don't serialize the `BTreeMap` directly because postcard
+///   does not natively support typed-key map encodings; the loader rebuilds
+///   the `BTreeMap` on receipt. Empty `Vec` for non-extractor workspaces.
+/// - `dispatch_tables_table` — postcard-serialized [`DispatchTables`].
+///   Default (empty) for non-resolver workspaces.
+///
+/// Both fields carry `#[serde(default)]` so a V11 → V12 upconvert that
+/// re-serializes legacy data without these slots — or a deserializer fed a
+/// truncated V12 payload — decodes them as empty defaults (DESIGN §10.2
+/// optional-slot wire contract).
+#[derive(Debug, Serialize, Deserialize)]
+struct GraphSnapshotDataV12 {
+    /// Node storage.
+    nodes: NodeArena,
+    /// Edge storage (forward + reverse).
+    edges: BidirectionalEdgeStore,
+    /// String interner.
+    strings: StringInterner,
+    /// File registry.
+    files: FileRegistry,
+    /// Auxiliary indices.
+    indices: AuxiliaryIndices,
+    /// Sparse metadata store keyed by full `NodeId`.
+    ///
+    /// V12 inherits the V11 metadata-store wire shape unchanged — the new
+    /// joint-stub fields ride the envelope slots below, not the metadata
+    /// store's own serde format. This preserves bit-for-bit compatibility
+    /// for the metadata-store payload across the V11 → V12 transition.
+    macro_metadata: NodeMetadataStore,
+    /// Dense node provenance (Phase 1 fact layer).
+    node_provenance: NodeProvenanceStore,
+    /// Dense edge provenance (Phase 1 fact layer).
+    edge_provenance: EdgeProvenanceStore,
+    /// Phase 2: generational scope arena.
+    scope_arena: ScopeArena,
+    /// Phase 2: alias derivation table.
+    alias_table: AliasTable,
+    /// Phase 2: shadow derivation table.
+    shadow_table: ShadowTable,
+    /// Phase 2: scope provenance store.
+    scope_provenance: ScopeProvenanceStore,
+    /// Phase 3: per-file segment table mapping FileId to node arena ranges.
+    file_segments: FileSegmentTable,
+    /// Phase A (U09): C indirect-call resolver side tables. Carried forward
+    /// from V11 unchanged.
+    #[serde(default)]
+    c_indirect_tables: Option<CIndirectSideTables>,
+    /// Plan A joint-stub (V12): per-node framework-route metadata. Empty
+    /// for every V11 → V12 upconvert and for non-extractor workspaces.
+    ///
+    /// Wire shape: `Vec<(NodeId, FrameworkRouteMetadata)>`. The loader
+    /// rebuilds the `BTreeMap` keyed on `NodeId` and reattaches it to the
+    /// metadata store via `NodeMetadataStore::set_framework_routes`.
+    #[serde(default)]
+    framework_routes_table: Vec<(
+        crate::graph::unified::node::id::NodeId,
+        crate::graph::unified::storage::FrameworkRouteMetadata,
+    )>,
+    /// Plan B joint-stub (V12): per-snapshot dispatch-resolution tables.
+    /// Empty (default) for every V11 → V12 upconvert and for non-resolver
+    /// workspaces. Reattached to the metadata store via
+    /// `NodeMetadataStore::set_dispatch_tables`.
+    #[serde(default)]
+    dispatch_tables_table: DispatchTables,
 }
 
 /// V7-shaped snapshot data (pre-Phase-1, no provenance fields).
@@ -585,8 +664,72 @@ fn validate_snapshot_semantics_v9(
 /// V11 carries the same resolver-eligibility invariants as V10; the additive
 /// `c_indirect_tables` slot has no resolver-eligibility consequence and is
 /// not checked here.
+#[allow(dead_code)] // Preserved as reference; V12 writers bypass this.
 fn validate_snapshot_semantics_v11(
     snapshot_data: &GraphSnapshotDataV11,
+) -> Result<(), PersistenceError> {
+    for (node_id, entry) in snapshot_data.nodes.iter() {
+        if entry.name == crate::graph::unified::string::StringId::INVALID {
+            continue;
+        }
+
+        let file_path = snapshot_data.files.resolve(entry.file).ok_or_else(|| {
+            PersistenceError::ValidationFailed(format!(
+                "resolver-eligible node {node_id:?} has unresolved file id {:?}; run `sqry index` to rebuild",
+                entry.file
+            ))
+        })?;
+
+        let _name = snapshot_data.strings.resolve(entry.name).ok_or_else(|| {
+            PersistenceError::ValidationFailed(format!(
+                "resolver-eligible node {node_id:?} has unresolved name string id {:?}; run `sqry index` to rebuild",
+                entry.name
+            ))
+        })?;
+
+        let Some(qualified_name_id) = entry.qualified_name else {
+            continue;
+        };
+
+        let qualified_name =
+            snapshot_data
+                .strings
+                .resolve(qualified_name_id)
+                .ok_or_else(|| {
+                    PersistenceError::ValidationFailed(format!(
+                        "resolver-eligible node {node_id:?} has unresolved qualified-name string id {qualified_name_id:?}; run `sqry index` to rebuild"
+                    ))
+                })?;
+
+        let language = snapshot_data
+            .files
+            .language_for_file(entry.file)
+            .ok_or_else(|| {
+                PersistenceError::ValidationFailed(format!(
+                    "resolver-eligible node {node_id:?} in '{}' is missing file language metadata; run `sqry index` to rebuild",
+                    file_path.display()
+                ))
+            })?;
+
+        if !is_canonical_graph_qualified_name(language, qualified_name.as_ref()) {
+            return Err(PersistenceError::ValidationFailed(format!(
+                "resolver-eligible node {node_id:?} in '{}' stores non-canonical qualified name '{}'; run `sqry index` to rebuild",
+                file_path.display(),
+                qualified_name
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+/// Validates snapshot semantics for V12 (same rules as V11, operates on V12 fields).
+///
+/// V12 carries the same resolver-eligibility invariants as V11; the additive
+/// joint-stub slots (`framework_routes_table`, `dispatch_tables_table`) have
+/// no resolver-eligibility consequence and are not checked here.
+fn validate_snapshot_semantics_v12(
+    snapshot_data: &GraphSnapshotDataV12,
 ) -> Result<(), PersistenceError> {
     for (node_id, entry) in snapshot_data.nodes.iter() {
         if entry.name == crate::graph::unified::string::StringId::INVALID {
@@ -994,6 +1137,99 @@ fn upconvert_v10_to_v11(
     })
 }
 
+/// Extract the Phase β joint-stub side tables from a metadata store into the
+/// V12 envelope wire shapes.
+///
+/// The in-memory `NodeMetadataStore` stores `framework_routes` as a
+/// `BTreeMap<NodeId, FrameworkRouteMetadata>`; the V12 envelope serializes
+/// the same data as a flat `Vec<(NodeId, FrameworkRouteMetadata)>` to keep
+/// postcard's typed-key constraints satisfied. `dispatch_tables` round-trips
+/// verbatim. Both are cloned out of the snapshot — no mutation of the
+/// source store.
+fn extract_phase_beta_side_tables(
+    macro_metadata: &NodeMetadataStore,
+) -> (
+    Vec<(
+        crate::graph::unified::node::id::NodeId,
+        crate::graph::unified::storage::FrameworkRouteMetadata,
+    )>,
+    DispatchTables,
+) {
+    let framework_routes_table: Vec<_> = macro_metadata
+        .framework_routes()
+        .iter()
+        .map(|(&node_id, meta)| (node_id, meta.clone()))
+        .collect();
+    let dispatch_tables_table = macro_metadata.dispatch_tables().clone();
+    (framework_routes_table, dispatch_tables_table)
+}
+
+/// Reattach the Phase β joint-stub envelope slots onto the in-memory
+/// metadata store after V12 deserialization.
+///
+/// The metadata-store custom serde impl doesn't carry the new fields (V11
+/// metadata-store wire compatibility is preserved bit-for-bit). The V12
+/// envelope carries them in dedicated slots; this helper rebuilds the
+/// `BTreeMap` and reattaches both via the store's setter API.
+fn attach_phase_beta_side_tables(
+    macro_metadata: &mut NodeMetadataStore,
+    framework_routes_table: Vec<(
+        crate::graph::unified::node::id::NodeId,
+        crate::graph::unified::storage::FrameworkRouteMetadata,
+    )>,
+    dispatch_tables_table: DispatchTables,
+) {
+    let mut framework_routes = FrameworkRoutesMap::default();
+    for (node_id, meta) in framework_routes_table {
+        framework_routes.insert(node_id, meta);
+    }
+    macro_metadata.set_framework_routes(framework_routes);
+    macro_metadata.set_dispatch_tables(dispatch_tables_table);
+}
+
+/// Upconvert a V11 [`GraphSnapshotDataV11`] to V12 by zero-initialising the
+/// two new joint-stub envelope slots (`framework_routes_table` +
+/// `dispatch_tables_table`).
+///
+/// # Phase β joint-stubs
+///
+/// Plan A's framework-route extractors and Plan B's dispatch-resolver
+/// passes both target V12. The single joint-stub PR adds both envelope
+/// slots so a workspace upgrading from V11 sees a strictly additive
+/// schema bump: every V11 field carries over by value, and the two new
+/// slots come up empty. No metadata-store reshape is needed (the V11
+/// metadata-store wire format is preserved bit-for-bit inside the V12
+/// envelope).
+///
+/// # Errors
+///
+/// Infallible — all V11 fields move by value into the V12 envelope and
+/// the new slots are zero-initialised. The `Result` return is kept for
+/// symmetry with the other upconvert functions in this module, which
+/// may surface translation errors when wire shapes differ across versions.
+fn upconvert_v11_to_v12(
+    v11: GraphSnapshotDataV11,
+) -> Result<GraphSnapshotDataV12, PersistenceError> {
+    Ok(GraphSnapshotDataV12 {
+        nodes: v11.nodes,
+        edges: v11.edges,
+        strings: v11.strings,
+        files: v11.files,
+        indices: v11.indices,
+        macro_metadata: v11.macro_metadata,
+        node_provenance: v11.node_provenance,
+        edge_provenance: v11.edge_provenance,
+        scope_arena: v11.scope_arena,
+        alias_table: v11.alias_table,
+        shadow_table: v11.shadow_table,
+        scope_provenance: v11.scope_provenance,
+        file_segments: v11.file_segments,
+        c_indirect_tables: v11.c_indirect_tables,
+        framework_routes_table: Vec::new(),
+        dispatch_tables_table: DispatchTables::default(),
+    })
+}
+
 /// Rebuilds a `FileSegmentTable` by scanning the node arena.
 ///
 /// For each occupied slot, records the `FileId` and slot index. Then for each
@@ -1042,7 +1278,7 @@ pub fn rebuild_file_segments_from_arena(arena: &NodeArena) -> FileSegmentTable {
 fn read_magic_and_header_len(
     reader: &mut impl Read,
 ) -> Result<(FormatVersion, usize, u64), PersistenceError> {
-    // Read 14 bytes to cover the longest magic (V10/V11 = 14 bytes).
+    // Read 14 bytes to cover the longest magic (V10/V11/V12 = 14 bytes).
     // If the file is shorter, `read_exact` returns an IO error, which is fine —
     // a valid snapshot is always longer than 14 bytes.
     let mut magic = [0u8; 14];
@@ -1050,13 +1286,16 @@ fn read_magic_and_header_len(
 
     let format_version =
         FormatVersion::from_magic(&magic).ok_or_else(|| PersistenceError::InvalidMagic {
-            expected: MAGIC_BYTES_V11.to_vec(),
+            expected: MAGIC_BYTES_V12.to_vec(),
             found: magic.to_vec(),
         })?;
 
-    // V10 and V11 magics are 14 bytes — all consumed. Read full u32 header length.
+    // V10, V11, and V12 magics are 14 bytes — all consumed. Read full u32 header length.
     // V7-V9 magic is 13 bytes — byte 14 is the first byte of the header length.
-    if matches!(format_version, FormatVersion::V10 | FormatVersion::V11) {
+    if matches!(
+        format_version,
+        FormatVersion::V10 | FormatVersion::V11 | FormatVersion::V12
+    ) {
         let hl = read_u32_le(reader)? as usize;
         Ok((format_version, hl, 18)) // 14 magic + 4 header_len
     } else {
@@ -1380,9 +1619,10 @@ fn write_framed_v10<W: Write>(
 
 /// Writes a V11 snapshot with length-prefixed framing.
 ///
-/// V11 is the current writer format (Phase A C-icall precision, U03). It
-/// extends V10 with the reserved `c_indirect_tables` envelope slot; the
-/// frame shape (magic + header + data) is identical.
+/// V11 was the writer format before the Phase β joint-stubs bump to V12.
+/// Retained as a reference path and exercised by the legacy-V11 fixture
+/// tests; the live writer is [`write_framed_v12`].
+#[allow(dead_code)] // Preserved as reference; live writers emit V12.
 fn write_framed_v11<W: Write>(
     writer: &mut W,
     header: &GraphHeader,
@@ -1415,6 +1655,62 @@ fn write_framed_v11<W: Write>(
     }
 
     writer.write_all(MAGIC_BYTES_V11)?;
+    writer.write_all(
+        &u32::try_from(header_bytes.len())
+            .map_err(|_| {
+                PersistenceError::ValidationFailed(
+                    "header too large for u32 length prefix".to_string(),
+                )
+            })?
+            .to_le_bytes(),
+    )?;
+    writer.write_all(&header_bytes)?;
+    writer.write_all(&(data_bytes.len() as u64).to_le_bytes())?;
+    writer.write_all(&data_bytes)?;
+
+    writer.flush()?;
+    Ok(())
+}
+
+/// Writes a V12 snapshot with length-prefixed framing.
+///
+/// V12 is the current writer format (Phase β joint-stubs). It extends V11
+/// with two new envelope slots — `framework_routes_table` (Plan A) and
+/// `dispatch_tables_table` (Plan B). The frame shape (magic + header +
+/// data) is identical to V11; only the data-section postcard payload
+/// differs.
+fn write_framed_v12<W: Write>(
+    writer: &mut W,
+    header: &GraphHeader,
+    snapshot_data: &GraphSnapshotDataV12,
+) -> Result<(), PersistenceError> {
+    debug_assert!(
+        !snapshot_data.strings.is_lookup_stale(),
+        "Cannot serialize StringInterner with stale lookup — \
+         call build_dedup_table() before saving"
+    );
+
+    let header_bytes = postcard::to_allocvec(header)?;
+    let data_bytes = postcard::to_allocvec(snapshot_data)?;
+
+    if header_bytes.len() > MAX_HEADER_BYTES {
+        return Err(PersistenceError::ValidationFailed(format!(
+            "header too large to save: {} bytes exceeds MAX_HEADER_BYTES ({} bytes)",
+            header_bytes.len(),
+            MAX_HEADER_BYTES,
+        )));
+    }
+    let max_data_bytes = max_snapshot_bytes();
+    if data_bytes.len() as u64 > max_data_bytes {
+        return Err(PersistenceError::ValidationFailed(format!(
+            "data section too large to save: {} bytes exceeds limit ({} bytes); \
+             increase SQRY_MAX_SNAPSHOT_BYTES if the codebase legitimately requires a larger snapshot",
+            data_bytes.len(),
+            max_data_bytes,
+        )));
+    }
+
+    writer.write_all(MAGIC_BYTES_V12)?;
     writer.write_all(
         &u32::try_from(header_bytes.len())
             .map_err(|_| {
@@ -1555,7 +1851,13 @@ pub fn save_to_path(graph: &CodeGraph, path: impl AsRef<Path>) -> Result<(), Per
     // gating; legacy V10 snapshots round-trip as `None`.
     let c_indirect_tables = snapshot.c_indirect_tables().cloned();
 
-    let snapshot_data = GraphSnapshotDataV11 {
+    // Phase β joint-stubs (V12): persist the Plan A / Plan B side tables.
+    // Both are empty on V11 → V12 upconverts and on every workspace where
+    // no framework extractor / dispatch resolver has populated them yet.
+    let (framework_routes_table, dispatch_tables_table) =
+        extract_phase_beta_side_tables(snapshot.macro_metadata());
+
+    let snapshot_data = GraphSnapshotDataV12 {
         nodes,
         edges,
         strings,
@@ -1570,11 +1872,13 @@ pub fn save_to_path(graph: &CodeGraph, path: impl AsRef<Path>) -> Result<(), Per
         scope_provenance,
         file_segments,
         c_indirect_tables,
+        framework_routes_table,
+        dispatch_tables_table,
     };
 
-    validate_snapshot_semantics_v11(&snapshot_data)?;
+    validate_snapshot_semantics_v12(&snapshot_data)?;
 
-    // Create header — V11 with stamped fact_epoch and correct version tag
+    // Create header — V12 with stamped fact_epoch and correct version tag
     let forward_stats = snapshot_data.edges.stats().forward;
     let total_edges = forward_stats.csr_edge_count + forward_stats.delta_edge_count;
     let mut header = GraphHeader::new(
@@ -1583,7 +1887,7 @@ pub fn save_to_path(graph: &CodeGraph, path: impl AsRef<Path>) -> Result<(), Per
         snapshot_data.strings.len(),
         snapshot_data.files.len(),
     );
-    header.version = FormatVersion::V11.as_u32();
+    header.version = FormatVersion::V12.as_u32();
     header.set_fact_epoch(fact_epoch);
 
     // Atomic write per `G_daemon_control_plane.md` §4.2: an
@@ -1592,7 +1896,7 @@ pub fn save_to_path(graph: &CodeGraph, path: impl AsRef<Path>) -> Result<(), Per
     // --status` previously misreported as "No graph snapshot
     // found").
     write_atomic(path, |writer| {
-        write_framed_v11(writer, &header, &snapshot_data)
+        write_framed_v12(writer, &header, &snapshot_data)
     })
 }
 
@@ -1656,7 +1960,11 @@ pub fn save_to_path_with_provenance(
     // sibling save path's comment for the wire-shape contract.
     let c_indirect_tables = snapshot.c_indirect_tables().cloned();
 
-    let snapshot_data = GraphSnapshotDataV11 {
+    // Phase β joint-stubs (V12): see the sibling save path's comment.
+    let (framework_routes_table, dispatch_tables_table) =
+        extract_phase_beta_side_tables(snapshot.macro_metadata());
+
+    let snapshot_data = GraphSnapshotDataV12 {
         nodes,
         edges,
         strings,
@@ -1671,9 +1979,11 @@ pub fn save_to_path_with_provenance(
         scope_provenance,
         file_segments,
         c_indirect_tables,
+        framework_routes_table,
+        dispatch_tables_table,
     };
 
-    // Create header with provenance, plugin versions, V11 version tag, and fact epoch
+    // Create header with provenance, plugin versions, V12 version tag, and fact epoch
     let forward_stats = snapshot_data.edges.stats().forward;
     let total_edges = forward_stats.csr_edge_count + forward_stats.delta_edge_count;
     let mut header = GraphHeader::with_provenance_and_plugins(
@@ -1684,12 +1994,12 @@ pub fn save_to_path_with_provenance(
         provenance,
         plugin_versions,
     );
-    header.version = FormatVersion::V11.as_u32();
+    header.version = FormatVersion::V12.as_u32();
     header.set_fact_epoch(fact_epoch);
 
     // Atomic write per `G_daemon_control_plane.md` §4.2.
     write_atomic(path, |writer| {
-        write_framed_v11(writer, &header, &snapshot_data)
+        write_framed_v12(writer, &header, &snapshot_data)
     })
 }
 
@@ -1798,15 +2108,16 @@ pub fn load_from_bytes(
     bytes_consumed += header_len as u64;
     let header: GraphHeader = postcard::from_bytes(&header_buf)?;
 
-    // Validate version — accept V7 (legacy), V8, V9, V10 (upconvert), V11 (current)
+    // Validate version — accept V7 (legacy), V8, V9, V10, V11 (upconvert), V12 (current)
     if header.version != VERSION
         && header.version != FormatVersion::V8.as_u32()
         && header.version != FormatVersion::V9.as_u32()
         && header.version != FormatVersion::V10.as_u32()
         && header.version != FormatVersion::V11.as_u32()
+        && header.version != FormatVersion::V12.as_u32()
     {
         return Err(PersistenceError::IncompatibleVersion {
-            expected: FormatVersion::V11.as_u32(),
+            expected: FormatVersion::V12.as_u32(),
             found: header.version,
         });
     }
@@ -1839,16 +2150,17 @@ pub fn load_from_bytes(
     // Read and deserialize data, dispatching on detected format version.
     let mut data_buf = vec![0u8; data_len as usize];
     reader.read_exact(&mut data_buf)?;
-    let mut snapshot_data: GraphSnapshotDataV11 = match format_version {
+    let mut snapshot_data: GraphSnapshotDataV12 = match format_version {
         FormatVersion::V7 => {
             // V7 predates `GraphHeader.fact_epoch`; pass `0` explicitly so the
-            // V7 → V8 → V9 → V10 → V11 chained path is deterministic and
-            // matches the documented "V7 has no fact epoch" contract.
+            // V7 → V8 → V9 → V10 → V11 → V12 chained path is deterministic
+            // and matches the documented "V7 has no fact epoch" contract.
             let v7: GraphSnapshotDataV7 = postcard::from_bytes(&data_buf)?;
             let v8 = upconvert_v7_to_v8(v7);
             let v9 = upconvert_v8_to_v9(v8, 0);
             let v10 = upconvert_v9_to_v10(v9);
-            upconvert_v10_to_v11(v10)?
+            let v11 = upconvert_v10_to_v11(v10)?;
+            upconvert_v11_to_v12(v11)?
         }
         FormatVersion::V8 => {
             // Forward the V8 header epoch so derived scope provenance is
@@ -1856,18 +2168,25 @@ pub fn load_from_bytes(
             let v8: GraphSnapshotData = postcard::from_bytes(&data_buf)?;
             let v9 = upconvert_v8_to_v9(v8, header.fact_epoch());
             let v10 = upconvert_v9_to_v10(v9);
-            upconvert_v10_to_v11(v10)?
+            let v11 = upconvert_v10_to_v11(v10)?;
+            upconvert_v11_to_v12(v11)?
         }
         FormatVersion::V9 => {
             let v9: GraphSnapshotDataV9 = postcard::from_bytes(&data_buf)?;
             let v10 = upconvert_v9_to_v10(v9);
-            upconvert_v10_to_v11(v10)?
+            let v11 = upconvert_v10_to_v11(v10)?;
+            upconvert_v11_to_v12(v11)?
         }
         FormatVersion::V10 => {
             let v10: GraphSnapshotDataV10 = postcard::from_bytes(&data_buf)?;
-            upconvert_v10_to_v11(v10)?
+            let v11 = upconvert_v10_to_v11(v10)?;
+            upconvert_v11_to_v12(v11)?
         }
-        FormatVersion::V11 => postcard::from_bytes(&data_buf)?,
+        FormatVersion::V11 => {
+            let v11: GraphSnapshotDataV11 = postcard::from_bytes(&data_buf)?;
+            upconvert_v11_to_v12(v11)?
+        }
+        FormatVersion::V12 => postcard::from_bytes(&data_buf)?,
     };
 
     // Rebuild the scope-provenance reverse index after deserialization.
@@ -1884,7 +2203,17 @@ pub fn load_from_bytes(
         ));
     }
 
-    validate_snapshot_semantics_v11(&snapshot_data)?;
+    validate_snapshot_semantics_v12(&snapshot_data)?;
+
+    // Phase β joint-stubs: route the V12 envelope slots onto the in-memory
+    // metadata store. V11 → V12 upconverts always carry empty defaults;
+    // native V12 snapshots may carry populated joint-stub tables once
+    // Plan A's extractors / Plan B's resolvers land.
+    attach_phase_beta_side_tables(
+        &mut snapshot_data.macro_metadata,
+        std::mem::take(&mut snapshot_data.framework_routes_table),
+        std::mem::take(&mut snapshot_data.dispatch_tables_table),
+    );
 
     let mut graph = CodeGraph::from_components(
         snapshot_data.nodes,
@@ -1904,9 +2233,9 @@ pub fn load_from_bytes(
     graph.set_shadow_table(snapshot_data.shadow_table);
     graph.set_scope_provenance_store(snapshot_data.scope_provenance);
     graph.set_file_segments(snapshot_data.file_segments);
-    // Phase A (U09): route the V11 `Option<CIndirectSideTables>` envelope
-    // slot onto the live `CodeGraph`. V10 → V11 upconverts always carry
-    // `None` here; native V11 snapshots may carry populated tables.
+    // Phase A (U09): route the V12 `Option<CIndirectSideTables>` envelope
+    // slot onto the live `CodeGraph`. V10/V11 → V12 upconverts carry the
+    // V11 value unchanged; older upconverts carry `None`.
     graph.set_c_indirect_tables(snapshot_data.c_indirect_tables);
     Ok(graph)
 }
@@ -1959,9 +2288,10 @@ pub fn load_from_path(
         && header.version != FormatVersion::V9.as_u32()
         && header.version != FormatVersion::V10.as_u32()
         && header.version != FormatVersion::V11.as_u32()
+        && header.version != FormatVersion::V12.as_u32()
     {
         return Err(PersistenceError::IncompatibleVersion {
-            expected: FormatVersion::V11.as_u32(),
+            expected: FormatVersion::V12.as_u32(),
             found: header.version,
         });
     }
@@ -1992,11 +2322,11 @@ pub fn load_from_path(
     }
 
     // Read and deserialize data — dispatch on format version. Each older
-    // format chains through the upconverters: V7 → V8 → V9 → V10 → V11;
-    // V8 → V9 → V10 → V11; V9 → V10 → V11; V10 → V11; V11 → direct.
+    // format chains through the upconverters: V7 → V8 → V9 → V10 → V11 → V12;
+    // V8 → V9 → V10 → V11 → V12; ...; V11 → V12; V12 → direct.
     let mut data_buf = vec![0u8; data_len as usize];
     reader.read_exact(&mut data_buf)?;
-    let mut snapshot_data: GraphSnapshotDataV11 = match format_version {
+    let mut snapshot_data: GraphSnapshotDataV12 = match format_version {
         FormatVersion::V7 => {
             // V7 predates `GraphHeader.fact_epoch`; pass `0` explicitly so the
             // chained path is deterministic and matches the documented "V7
@@ -2005,7 +2335,8 @@ pub fn load_from_path(
             let v8 = upconvert_v7_to_v8(v7);
             let v9 = upconvert_v8_to_v9(v8, 0);
             let v10 = upconvert_v9_to_v10(v9);
-            upconvert_v10_to_v11(v10)?
+            let v11 = upconvert_v10_to_v11(v10)?;
+            upconvert_v11_to_v12(v11)?
         }
         FormatVersion::V8 => {
             // Forward the V8 header epoch so derived scope provenance is
@@ -2013,18 +2344,25 @@ pub fn load_from_path(
             let v8: GraphSnapshotData = postcard::from_bytes(&data_buf)?;
             let v9 = upconvert_v8_to_v9(v8, header.fact_epoch());
             let v10 = upconvert_v9_to_v10(v9);
-            upconvert_v10_to_v11(v10)?
+            let v11 = upconvert_v10_to_v11(v10)?;
+            upconvert_v11_to_v12(v11)?
         }
         FormatVersion::V9 => {
             let v9: GraphSnapshotDataV9 = postcard::from_bytes(&data_buf)?;
             let v10 = upconvert_v9_to_v10(v9);
-            upconvert_v10_to_v11(v10)?
+            let v11 = upconvert_v10_to_v11(v10)?;
+            upconvert_v11_to_v12(v11)?
         }
         FormatVersion::V10 => {
             let v10: GraphSnapshotDataV10 = postcard::from_bytes(&data_buf)?;
-            upconvert_v10_to_v11(v10)?
+            let v11 = upconvert_v10_to_v11(v10)?;
+            upconvert_v11_to_v12(v11)?
         }
-        FormatVersion::V11 => postcard::from_bytes(&data_buf)?,
+        FormatVersion::V11 => {
+            let v11: GraphSnapshotDataV11 = postcard::from_bytes(&data_buf)?;
+            upconvert_v11_to_v12(v11)?
+        }
+        FormatVersion::V12 => postcard::from_bytes(&data_buf)?,
     };
 
     // Rebuild the scope-provenance reverse index after deserialization.
@@ -2041,7 +2379,15 @@ pub fn load_from_path(
         ));
     }
 
-    validate_snapshot_semantics_v11(&snapshot_data)?;
+    validate_snapshot_semantics_v12(&snapshot_data)?;
+
+    // Phase β joint-stubs: reattach the V12 envelope slots onto the
+    // in-memory metadata store. V11 → V12 upconverts carry empty defaults.
+    attach_phase_beta_side_tables(
+        &mut snapshot_data.macro_metadata,
+        std::mem::take(&mut snapshot_data.framework_routes_table),
+        std::mem::take(&mut snapshot_data.dispatch_tables_table),
+    );
 
     let mut graph = CodeGraph::from_components(
         snapshot_data.nodes,
@@ -2061,9 +2407,9 @@ pub fn load_from_path(
     graph.set_shadow_table(snapshot_data.shadow_table);
     graph.set_scope_provenance_store(snapshot_data.scope_provenance);
     graph.set_file_segments(snapshot_data.file_segments);
-    // Phase A (U09): route the V11 `Option<CIndirectSideTables>` envelope
-    // slot onto the live `CodeGraph`. V10 → V11 upconverts always carry
-    // `None` here; native V11 snapshots may carry populated tables.
+    // Phase A (U09): route the V12 `Option<CIndirectSideTables>` envelope
+    // slot onto the live `CodeGraph`. Older upconverts carry forward the
+    // value from V11 (or `None` for V10 and older).
     graph.set_c_indirect_tables(snapshot_data.c_indirect_tables);
     Ok(graph)
 }
@@ -2101,15 +2447,16 @@ pub fn validate_snapshot(path: impl AsRef<Path>) -> Result<bool, PersistenceErro
     reader.read_exact(&mut header_buf)?;
     let header: GraphHeader = postcard::from_bytes(&header_buf)?;
 
-    // Validate version — accept V7 (legacy), V8, V9, V10 (upconvert), V11 (current)
+    // Validate version — accept V7 (legacy), V8, V9, V10, V11 (upconvert), V12 (current)
     if header.version != VERSION
         && header.version != FormatVersion::V8.as_u32()
         && header.version != FormatVersion::V9.as_u32()
         && header.version != FormatVersion::V10.as_u32()
         && header.version != FormatVersion::V11.as_u32()
+        && header.version != FormatVersion::V12.as_u32()
     {
         return Err(PersistenceError::IncompatibleVersion {
-            expected: FormatVersion::V11.as_u32(),
+            expected: FormatVersion::V12.as_u32(),
             found: header.version,
         });
     }
@@ -2149,15 +2496,16 @@ pub fn load_header_from_path(path: impl AsRef<Path>) -> Result<GraphHeader, Pers
     reader.read_exact(&mut header_buf)?;
     let header: GraphHeader = postcard::from_bytes(&header_buf)?;
 
-    // Validate version — accept V7 (legacy), V8, V9, V10 (upconvert), V11 (current)
+    // Validate version — accept V7 (legacy), V8, V9, V10, V11 (upconvert), V12 (current)
     if header.version != VERSION
         && header.version != FormatVersion::V8.as_u32()
         && header.version != FormatVersion::V9.as_u32()
         && header.version != FormatVersion::V10.as_u32()
         && header.version != FormatVersion::V11.as_u32()
+        && header.version != FormatVersion::V12.as_u32()
     {
         return Err(PersistenceError::IncompatibleVersion {
-            expected: FormatVersion::V11.as_u32(),
+            expected: FormatVersion::V12.as_u32(),
             found: header.version,
         });
     }
@@ -3589,14 +3937,17 @@ mod tests {
         );
     }
 
-    /// Writing a graph via `save_to_path` (V11 magic) and reading it back
-    /// through `load_from_path` round-trips the graph state and exercises
-    /// the V11 reader-arm dispatch.
+    /// Writing a graph via `save_to_path` (V12 magic, Phase β joint-stubs)
+    /// and reading it back through `load_from_path` round-trips the graph
+    /// state and exercises the V12 reader-arm dispatch.
+    ///
+    /// Originally a V11 round-trip (Phase A C-icall U03); promoted to V12
+    /// when the joint-stubs PR bumped the writer.
     #[test]
-    fn u03_v11_writer_v11_reader_round_trip() {
+    fn u03_current_writer_current_reader_round_trip() {
         let mut graph = CodeGraph::new();
         // Seed a single function so the snapshot has non-trivial content
-        // and the V11 metadata-store wire format gets exercised end-to-end.
+        // and the metadata-store wire format gets exercised end-to-end.
         {
             let file_id = graph
                 .files_mut()
@@ -3630,33 +3981,45 @@ mod tests {
         let path = temp_file.path();
         save_to_path(&graph, path).expect("save_to_path");
 
-        // Verify magic on disk is V11.
+        // Verify magic on disk is V12 (Phase β joint-stubs).
         let raw = std::fs::read(path).expect("read snapshot bytes");
         assert_eq!(
-            &raw[..MAGIC_BYTES_V11.len()],
-            MAGIC_BYTES_V11.as_slice(),
-            "U03 writer must stamp V11 magic on disk",
+            &raw[..MAGIC_BYTES_V12.len()],
+            MAGIC_BYTES_V12.as_slice(),
+            "current writer must stamp V12 magic on disk",
         );
 
-        // Header version must be V11.
+        // Header version must be V12.
         let header = load_header_from_path(path).expect("load header");
-        assert_eq!(header.version, FormatVersion::V11.as_u32());
+        assert_eq!(header.version, FormatVersion::V12.as_u32());
 
-        // Loader returns a usable graph (V11 arm in `load_from_path`).
+        // Loader returns a usable graph (V12 arm in `load_from_path`).
         let plugins = create_test_plugin_manager();
-        let loaded = load_from_path(path, Some(&plugins)).expect("load V11");
+        let loaded = load_from_path(path, Some(&plugins)).expect("load V12");
         let snap = loaded.snapshot();
         assert_eq!(snap.nodes().len(), 1, "node count must round-trip");
         // Strings round-trip too (the seed function carries one interned name).
         assert!(
             !snap.strings().is_empty(),
-            "interned name must survive V11 round-trip",
+            "interned name must survive V12 round-trip",
+        );
+        // Phase β joint-stubs land empty by default — no resolver populates
+        // them today.
+        assert!(
+            snap.macro_metadata().framework_routes().is_empty(),
+            "framework_routes must be empty in the stub",
+        );
+        assert!(
+            snap.macro_metadata().dispatch_tables().is_empty(),
+            "dispatch_tables must be empty in the stub",
         );
     }
 
     /// Hand-craft a V10 payload (V10 magic + V10 envelope, written by the
-    /// legacy V10 writer) and read it back through the V11 loader. Asserts
-    /// the V10 reader arm + `upconvert_v10_to_v11` are wired into dispatch.
+    /// legacy V10 writer) and read it back through the current (V12) loader.
+    /// Asserts the V10 reader arm + the upconvert chain
+    /// `upconvert_v10_to_v11` → `upconvert_v11_to_v12` are wired into
+    /// dispatch.
     ///
     /// Uses `write_framed_v10` directly so this test is independent of any
     /// future shift in the writer's default magic.
@@ -3676,10 +4039,11 @@ mod tests {
             writer.flush().expect("flush V10");
         }
 
-        // Magic dispatch sees V10; the V11 loader runs the upconvert.
+        // Magic dispatch sees V10; the V12 loader chains the upconvert
+        // through V10 → V11 → V12.
         let plugins = create_test_plugin_manager();
         let loaded = load_from_path(path, Some(&plugins))
-            .expect("V11 loader must accept a V10 payload via upconvert");
+            .expect("V12 loader must accept a V10 payload via chained upconvert");
 
         // The loaded graph carries all three legacy metadata shapes in the
         // new `StoredEntry` representation.
@@ -3718,6 +4082,72 @@ mod tests {
             FormatVersion::from_magic(&buf),
             Some(FormatVersion::V11),
             "buffer prefixed with V11 magic must dispatch to V11",
+        );
+    }
+
+    /// Phase β joint-stubs: writing a V11 frame on disk and loading it
+    /// through `load_from_path` exercises the `upconvert_v11_to_v12`
+    /// inline path, returns a usable graph, and zero-initialises both
+    /// joint-stub fields on the in-memory metadata store.
+    #[test]
+    fn phase_beta_v11_payload_upconverts_to_v12() {
+        // Construct a minimal V11 envelope. We reuse the V11 writer (kept
+        // alive behind `#[allow(dead_code)]` for exactly this purpose).
+        let v11 = GraphSnapshotDataV11 {
+            nodes: NodeArena::default(),
+            edges: BidirectionalEdgeStore::default(),
+            strings: StringInterner::new(),
+            files: FileRegistry::default(),
+            indices: AuxiliaryIndices::default(),
+            macro_metadata: NodeMetadataStore::default(),
+            node_provenance: NodeProvenanceStore::default(),
+            edge_provenance: EdgeProvenanceStore::default(),
+            scope_arena: ScopeArena::default(),
+            alias_table: AliasTable::default(),
+            shadow_table: ShadowTable::default(),
+            scope_provenance: ScopeProvenanceStore::default(),
+            file_segments: FileSegmentTable::default(),
+            c_indirect_tables: None,
+        };
+
+        let mut header = GraphHeader::new(0, 0, 0, 0);
+        header.version = FormatVersion::V11.as_u32();
+
+        let temp_file = NamedTempFile::new().expect("tempfile");
+        let path = temp_file.path();
+        {
+            let file = File::create(path).expect("create temp file");
+            let mut writer = BufWriter::new(file);
+            write_framed_v11(&mut writer, &header, &v11).expect("write V11 frame");
+            writer.flush().expect("flush V11");
+        }
+
+        // Magic dispatch sees V11; the V12 loader runs the upconvert.
+        let plugins = create_test_plugin_manager();
+        let loaded = load_from_path(path, Some(&plugins))
+            .expect("V12 loader must accept a V11 payload via upconvert_v11_to_v12");
+        let snap = loaded.snapshot();
+        assert!(
+            snap.macro_metadata().framework_routes().is_empty(),
+            "framework_routes must be empty after V11 → V12 upconvert",
+        );
+        assert!(
+            snap.macro_metadata().dispatch_tables().is_empty(),
+            "dispatch_tables must be empty after V11 → V12 upconvert",
+        );
+    }
+
+    /// Phase β joint-stubs: V12 magic dispatch routes a V12-prefixed buffer
+    /// to `FormatVersion::V12`, not V11 or V10. Mirrors the V11/V10 guards
+    /// for the new format.
+    #[test]
+    fn phase_beta_magic_dispatch_routes_v12_buffer_to_v12() {
+        let mut buf = MAGIC_BYTES_V12.to_vec();
+        buf.extend_from_slice(&[0u8; 8]);
+        assert_eq!(
+            FormatVersion::from_magic(&buf),
+            Some(FormatVersion::V12),
+            "buffer prefixed with V12 magic must dispatch to V12",
         );
     }
 

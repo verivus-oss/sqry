@@ -834,6 +834,9 @@ fn validate_predicate(predicate: &Predicate) -> Result<(), BuildError> {
         | Predicate::IsAddressTaken(_)
         | Predicate::ResolvedVia(_)
         | Predicate::HasCallsitePromiscuous(_)
+        // Phase β joint-stubs — leaf predicates, no nested PlanNode to validate.
+        | Predicate::FrameworkEq(_)
+        | Predicate::ResolvedViaEq(_)
         | Predicate::InFile(_)
         | Predicate::InScope(_)
         | Predicate::MatchesName(_)

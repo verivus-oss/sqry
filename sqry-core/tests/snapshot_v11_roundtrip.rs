@@ -426,6 +426,20 @@ fn assert_v11_surfaces_present(graph: &CodeGraph, context: &str) {
                     );
                     assert!(*is_async, "{context}: BindingPlane edge is_async");
                 }
+                // V12 dispatch-resolver provenances. This fixture
+                // exercises V11 wire compatibility (V11 → V12 upconvert
+                // preserves the 3-variant V11 set untouched); the new
+                // variants are unreachable in the fixture itself but
+                // must be matched exhaustively per V12 contract.
+                ResolvedVia::VirtualDispatch
+                | ResolvedVia::InterfaceDispatch
+                | ResolvedVia::DuckTyped
+                | ResolvedVia::Structural
+                | ResolvedVia::PromiscuousElided => {
+                    panic!(
+                        "{context}: V12 dispatch-resolver provenance unexpectedly present in V11 round-trip fixture: {resolved_via:?}"
+                    );
+                }
             }
         }
     }

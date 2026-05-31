@@ -128,6 +128,8 @@ fn mk_search_args(query: &str, workspace: String) -> SemanticSearchArgs {
         score_min: None,
         include_classpath: false,
         budget_rows: None,
+        framework: None,
+        resolved_via: None,
     }
 }
 
@@ -271,6 +273,9 @@ fn sqry_query_address_taken_predicate_returns_marked_functions() -> Result<()> {
         path: workspace_str.clone(),
         limit: Some(1000),
         budget_rows: None,
+        // Phase β joint-stubs: both filter params default to None (no-op).
+        framework: None,
+        resolved_via: None,
     };
     let planner_result = with_workspace_override(Some(&workspace_root), None, || {
         execute_sqry_query(&planner_params)

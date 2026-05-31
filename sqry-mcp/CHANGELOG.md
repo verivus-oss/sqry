@@ -6,7 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
-## [16.0.6](https://github.com/verivus-oss/sqry/compare/v16.0.5...v16.0.6) - 2026-05-20
+## [17.0.0](https://github.com/verivus-oss/sqry/compare/v16.0.8...v17.0.0) - 2026-05-31
+
+### Other
+- update Cargo.toml dependencies
+## [16.0.8](https://github.com/verivus-oss/sqry/compare/v16.0.6...v16.0.8) - 2026-05-31
+
+### Added
+- *(db)* V12 schema + framework/resolved_via filter predicates ([#323](https://github.com/verivus-oss/sqry/pull/323))
+### Other
+- *(deps)* bump rmcp to 1.7.0 ([#336](https://github.com/verivus-oss/sqry/pull/336))- *(security)* tighten deny.toml bans + sources policy ([#321](https://github.com/verivus-oss/sqry/pull/321))## [16.0.7](https://github.com/verivus-oss/sqry/compare/v16.0.6...v16.0.7) - 2026-05-27
+
+### Fixed
+- *(mcp)* force --no-daemon in McpTestClient spawn paths ([#312](https://github.com/verivus-oss/sqry/pull/312))## [16.0.6](https://github.com/verivus-oss/sqry/compare/v16.0.5...v16.0.6) - 2026-05-20
 
 ### Other
 - update Cargo.lock dependencies

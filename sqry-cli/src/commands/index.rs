@@ -463,16 +463,19 @@ pub(crate) fn build_and_persist_with_optional_classpath(
         );
     }
 
-    let (_graph, build_result) = sqry_core::graph::unified::build::persist_and_analyze_graph(
-        graph,
-        root_path,
-        &resolved_plugins.plugin_manager,
-        build_config,
-        build_command,
-        resolved_plugins.persisted_selection.clone(),
-        progress,
-        effective_threads,
-    )?;
+    let (_graph, build_result) =
+        sqry_core::graph::unified::build::persist_durable_graph_transaction(
+            graph,
+            sqry_core::graph::unified::build::DurableGraphPersistenceRequest {
+                root: root_path,
+                plugins: &resolved_plugins.plugin_manager,
+                config: build_config,
+                build_command,
+                plugin_selection: resolved_plugins.persisted_selection.clone(),
+                progress,
+                effective_threads,
+            },
+        )?;
 
     Ok(build_result)
 }

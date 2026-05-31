@@ -209,8 +209,23 @@ pub(crate) mod inner {
             path = %search_root.display(),
             max_results = args.max_results,
             context_lines = args.context_lines,
+            framework = ?args.framework,
+            resolved_via_filter = ?args.resolved_via,
             "Executing semantic_search tool"
         );
+        // Phase β joint-stubs: framework / resolved_via filter params are
+        // threaded end-to-end (MCP → params → args struct → executor).
+        // The canonical predicate-evaluation path for these filters is
+        // the planner pipeline reached via
+        // `sqry-mcp::execution::tools::planner_query::overlay_phase_beta_filters`
+        // (which appends `Predicate::FrameworkEq` / `Predicate::ResolvedViaEq`
+        // as a trailing `Filter` step — both predicates evaluate fully via
+        // `NodeMetadataStore::framework_route` and outgoing `Calls`
+        // `resolved_via` field probes). The legacy semantic-search
+        // executor's regex-based hot loop does not re-evaluate the
+        // predicates here; the args propagate so daemon-side logging /
+        // future plan-fusion can observe them without breaking ABI.
+        let _ = (&args.framework, &args.resolved_via);
 
         // Get the graph for filtering
         let snapshot = ctx.graph.snapshot();

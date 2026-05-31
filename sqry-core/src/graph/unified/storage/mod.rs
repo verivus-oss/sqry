@@ -18,7 +18,9 @@
 pub mod arena;
 pub mod c_indirect;
 pub mod csr;
+pub mod dispatch_tables;
 pub mod edge_provenance;
+pub mod framework_routes;
 pub mod indices;
 pub mod interner;
 pub mod metadata;
@@ -33,7 +35,14 @@ pub use c_indirect::{
     LocalDeclaration, LocalScopeIndex, ScopeEntry,
 };
 pub use csr::{CsrBuilder, CsrError, CsrGraph, CsrStats, EdgeRef};
+pub use dispatch_tables::{
+    CapHit, DispatchEntry, DispatchTables, GoDispatchEntry, JvmDispatchEntry, PythonDispatchEntry,
+    TsDispatchEntry,
+};
 pub use edge_provenance::{EdgeProvenance, EdgeProvenanceStore};
+pub use framework_routes::{
+    FrameworkId, FrameworkRouteMetadata, FrameworkRoutesMap, PathTemplate, ResolutionStatus,
+};
 pub use indices::{AuxiliaryIndices, IndicesStats};
 pub use interner::{InternError, InternerStats, ResolveError, StringInterner};
 pub use metadata::{

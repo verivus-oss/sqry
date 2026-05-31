@@ -5,7 +5,10 @@
 // through A onto S.
 package fx
 
-import "io"
+import (
+	ext "example.com/ext"
+	"io"
+)
 
 type A = struct {
 	io.Reader
@@ -13,4 +16,12 @@ type A = struct {
 
 type S struct {
 	A
+}
+
+type B = struct {
+	ext.SomeStruct
+}
+
+type T struct {
+	B
 }

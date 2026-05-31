@@ -130,7 +130,7 @@ exclude = [
 ]
 
 [workspace.package]
-version = "16.0.6"
+version = "17.0.0"
 edition = "2024"
 authors = ["Verivus Pty Ltd"]
 license = "MIT"
@@ -193,7 +193,7 @@ tempfile = "3.27"
 
 # Caching & performance
 lru = "0.18"
-dashmap = "6.1"
+dashmap = "6.2.1"
 memmap2 = "0.9"
 parking_lot = "0.12"
 smallvec = "1.15"
@@ -230,7 +230,7 @@ streaming-iterator = "0.1"
 tree-sitter-rust = "0.24.2"
 tree-sitter-javascript = "0.23.1"  # Updated from 0.21.4 due to cc dependency conflict
 tree-sitter-typescript = "0.23.2"
-tree-sitter-python = "0.23.0"     # Updated from 0.21.0 for consistency
+tree-sitter-python = "0.23.6"     # Updated from 0.21.0 for consistency
 tree-sitter-go = "0.23.4"
 tree-sitter-java = "0.23.5"       # Java language support (Tier 1 priority)
 tree-sitter-c = "0.23.4"          # C language support (Tier 1 priority)
@@ -241,7 +241,7 @@ tree-sitter-sequel = "0.3.11"     # SQL language support (PL/pgSQL)
 # tree-sitter-kotlin: vendored as crates/tree-sitter-kotlin-sqry
 tree-sitter-lua = "0.2.0"                # Lua language support (Phase 1 Tier 2)
 tree-sitter-ruby = "0.23.1"       # Ruby language support (Phase 1 Tier 2)
-tree-sitter-swift = "0.7.1"       # Swift language support (Phase 1 Tier 2)
+tree-sitter-swift = "0.7.2"       # Swift language support (Phase 1 Tier 2)
 tree-sitter-scala = "0.25.1"      # Scala language support (Phase 1 Tier 2)
 tree-sitter-r = "1.2.0"           # R language support (Phase 1 Tier 2)
 tree-sitter-hcl = "1.1.0"

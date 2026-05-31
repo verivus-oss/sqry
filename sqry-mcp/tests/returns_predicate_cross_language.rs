@@ -650,6 +650,8 @@ fn mcp_relation_query_returns(root: &Path, symbol: &str) -> Result<McpRelationsV
             offset: 0,
             size: 100,
         },
+        framework: None,
+        resolved_via: None,
     };
     let exec = execute_relation_query(&args)?;
     let data = exec.data;

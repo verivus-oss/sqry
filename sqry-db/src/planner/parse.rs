@@ -364,9 +364,14 @@ impl<'a> Parser<'a> {
                     "direct" => ResolvedVia::Direct,
                     "type_match" => ResolvedVia::TypeMatch,
                     "binding_plane" => ResolvedVia::BindingPlane,
+                    "virtual_dispatch" => ResolvedVia::VirtualDispatch,
+                    "interface_dispatch" => ResolvedVia::InterfaceDispatch,
+                    "duck_typed" => ResolvedVia::DuckTyped,
+                    "structural" => ResolvedVia::Structural,
+                    "promiscuous_elided" => ResolvedVia::PromiscuousElided,
                     _ => {
                         return Err(ParseError::UnknownIdent {
-                            kind: "resolved_via value (expected 'direct', 'type_match', or 'binding_plane')",
+                            kind: "resolved_via value (expected 'direct', 'type_match', 'binding_plane', 'virtual_dispatch', 'interface_dispatch', 'duck_typed', 'structural', or 'promiscuous_elided')",
                             value: ident,
                             offset: ident_start,
                         });
@@ -1753,15 +1758,20 @@ mod tests {
     }
 
     #[test]
-    fn parser_fold_targets_three_resolved_via_variants() {
+    fn parser_fold_targets_eight_resolved_via_variants() {
         // Spot-check that the fold spelling table covers every locked
-        // ResolvedVia value, not just BindingPlane. Direct +
+        // ResolvedVia value across the V12 8-variant set. Direct +
         // TypeMatch are exercised explicitly because the executor
         // filter is symmetric across the variants.
         for (spelling, expected) in [
             ("direct", ResolvedVia::Direct),
             ("type_match", ResolvedVia::TypeMatch),
             ("binding_plane", ResolvedVia::BindingPlane),
+            ("virtual_dispatch", ResolvedVia::VirtualDispatch),
+            ("interface_dispatch", ResolvedVia::InterfaceDispatch),
+            ("duck_typed", ResolvedVia::DuckTyped),
+            ("structural", ResolvedVia::Structural),
+            ("promiscuous_elided", ResolvedVia::PromiscuousElided),
         ] {
             let src = format!("kind:function traverse:forward(calls,1) resolved_via:{spelling}");
             let plan = parse_query(&src).unwrap_or_else(|e| panic!("parse {src:?}: {e:?}"));

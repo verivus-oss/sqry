@@ -1622,7 +1622,10 @@ fn walk_class_body(
                     let kind = inner.kind();
                     if !matches!(
                         kind,
-                        "class_specifier" | "struct_specifier" | "union_specifier"
+                        "class_specifier"
+                            | "struct_specifier"
+                            | "union_specifier"
+                            | "enum_specifier"
                     ) {
                         continue;
                     }
@@ -1630,12 +1633,71 @@ fn walk_class_body(
                     let is_struct_or_union = matches!(kind, "struct_specifier" | "union_specifier");
 
                     if let Some(name_node) = inner.child_by_field_name("name") {
-                        // NAMED nested type: walk its body with extended chain.
+                        // NAMED nested type: emit the type node itself (so it is
+                        // discoverable via `kind:class` / `kind:struct` /
+                        // `kind:enum`), wire its inheritance/implements edges, then
+                        // walk its body with the extended chain so members qualify
+                        // as `Outer::Inner.field`.
+                        //
+                        // Visibility = the enclosing access state (`current_visibility`),
+                        // matching C++ member-access rules for nested types. Nested
+                        // types are NEVER exported at file scope, so no Export edge is
+                        // added here (contrast with the top-level class/struct arm in
+                        // `walk_tree_for_graph`).
                         if let Ok(inner_name) = name_node.utf8_text(content) {
                             let inner_name = inner_name.trim();
                             let nested_qualified = format!("{class_qualified_name}::{inner_name}");
+                            let nested_span = span_from_node(inner);
 
-                            if let Some(body) = inner.child_by_field_name("body") {
+                            // NodeKind: enum → Enum; struct/union → Struct; class → Class.
+                            // (NodeKind has no dedicated Union variant; unions map to
+                            // Struct, consistent with the nested-member walk below.)
+                            match kind {
+                                "enum_specifier" => {
+                                    // Nested enums carry the enclosing access
+                                    // visibility, identical to the nested
+                                    // class/struct path below.
+                                    helper.add_enum_with_visibility(
+                                        &nested_qualified,
+                                        Some(nested_span),
+                                        Some(current_visibility),
+                                    );
+                                }
+                                _ => {
+                                    let nested_id = if is_struct_or_union {
+                                        helper.add_struct_with_visibility(
+                                            &nested_qualified,
+                                            Some(nested_span),
+                                            Some(current_visibility),
+                                        )
+                                    } else {
+                                        helper.add_class_with_visibility(
+                                            &nested_qualified,
+                                            Some(nested_span),
+                                            Some(current_visibility),
+                                        )
+                                    };
+                                    build_inheritance_and_implements_edges(
+                                        inner,
+                                        content,
+                                        &nested_qualified,
+                                        nested_id,
+                                        helper,
+                                        namespace_stack,
+                                        pure_virtual_registry,
+                                    )?;
+                                }
+                            }
+
+                            // Recurse into the body for members. Enums carry no
+                            // field members we model, so only class/struct/union
+                            // bodies are walked. Emitting the node above already
+                            // marks the declaration handled.
+                            if matches!(
+                                kind,
+                                "class_specifier" | "struct_specifier" | "union_specifier"
+                            ) && let Some(body) = inner.child_by_field_name("body")
+                            {
                                 walk_class_body(
                                     body,
                                     content,
@@ -1650,8 +1712,8 @@ fn walk_class_body(
                                     pure_virtual_registry,
                                     budget,
                                 )?;
-                                handled_nested = true;
                             }
+                            handled_nested = true;
                         }
                     } else if let Some(body) = inner.child_by_field_name("body") {
                         // ANONYMOUS nested type: inject members into enclosing
@@ -1797,14 +1859,16 @@ fn walk_tree_for_graph(
                 return Ok(());
             }
         }
-        "class_specifier" | "struct_specifier" => {
-            // Extract class/struct name
+        "class_specifier" | "struct_specifier" | "union_specifier" => {
+            // Extract class/struct/union name
             if let Some(name_node) = node.child_by_field_name("name")
                 && let Ok(class_name) = name_node.utf8_text(content)
             {
                 let class_name = class_name.trim();
                 let span = span_from_node(node);
-                let is_struct = node.kind() == "struct_specifier";
+                // Unions have no dedicated NodeKind variant; they map to Struct,
+                // matching the nested-type handling in `walk_class_body`.
+                let is_struct = matches!(node.kind(), "struct_specifier" | "union_specifier");
 
                 // Build qualified class name
                 let qualified_class =
@@ -2725,6 +2789,133 @@ mod tests {
 
         assert!(result.is_ok());
         assert_has_node_with_kind(&staging, "Person", NodeKind::Class);
+    }
+
+    #[test]
+    fn test_nested_named_types_emit_nodes() {
+        // Regression: nested class/struct/union/enum declared inside a class body
+        // must each emit their OWN type node (previously only their members were
+        // staged, so `kind:class` / `kind:struct` / `kind:enum` could not see
+        // them). Covers doubly-nested chains and namespace-nested chains.
+        let source = r"
+            class Outer {
+            public:
+                class Inner { int z; };
+                struct InnerS { int w; };
+                union InnerU { int i; float f; };
+                enum class InnerE { A, B };
+                class L1 { public: class L2 { int q; }; };
+            };
+            namespace ns {
+                class NsOuter { public: class NsInner { int n; }; };
+            }
+        ";
+        let staging = build_cpp(source);
+
+        // Each nested type emits a node with the `Outer::Inner` qualified shape.
+        assert_has_node_with_kind_exact(&staging, "Outer::Inner", NodeKind::Class);
+        assert_has_node_with_kind_exact(&staging, "Outer::InnerS", NodeKind::Struct);
+        // Unions map to NodeKind::Struct (no dedicated Union variant).
+        assert_has_node_with_kind_exact(&staging, "Outer::InnerU", NodeKind::Struct);
+        assert_has_node_with_kind_exact(&staging, "Outer::InnerE", NodeKind::Enum);
+        // Doubly nested: `Outer::L1` and `Outer::L1::L2`.
+        assert_has_node_with_kind_exact(&staging, "Outer::L1", NodeKind::Class);
+        assert_has_node_with_kind_exact(&staging, "Outer::L1::L2", NodeKind::Class);
+        // Nested inside a namespaced class.
+        assert_has_node_with_kind_exact(&staging, "ns::NsOuter", NodeKind::Class);
+        assert_has_node_with_kind_exact(&staging, "ns::NsOuter::NsInner", NodeKind::Class);
+
+        // Members still qualify under the nested chain (regression guard: the
+        // member-walk behaviour that already worked must be preserved).
+        assert_has_node_with_kind_exact(&staging, "Outer::Inner.z", NodeKind::Property);
+        assert_has_node_with_kind_exact(&staging, "Outer::L1::L2.q", NodeKind::Property);
+        assert_has_node_with_kind_exact(&staging, "ns::NsOuter::NsInner.n", NodeKind::Property);
+    }
+
+    #[test]
+    fn test_nested_enum_carries_enclosing_visibility() {
+        // Nested enums must carry the enclosing access visibility, identical to
+        // the nested class/struct path — not an absent visibility. A nested enum
+        // under `private:` is `private`; under `public:` is `public`.
+        let source = r"
+            class Outer {
+            private:
+                enum class Secret { A, B };
+            public:
+                enum class Pub { X, Y };
+            };
+        ";
+        let staging = build_cpp(source);
+
+        let secret = cpp_find_added_node(&staging, "Outer::Secret")
+            .expect("nested enum Outer::Secret must be staged");
+        assert_eq!(secret.kind, NodeKind::Enum, "Secret must be an Enum node");
+        let secret_vis = staging.resolve_local_string(
+            secret
+                .visibility
+                .expect("nested enum must carry a visibility id"),
+        );
+        assert_eq!(
+            secret_vis,
+            Some("private"),
+            "nested enum under `private:` must be private"
+        );
+
+        let pub_enum = cpp_find_added_node(&staging, "Outer::Pub")
+            .expect("nested enum Outer::Pub must be staged");
+        let pub_vis = staging.resolve_local_string(
+            pub_enum
+                .visibility
+                .expect("nested enum must carry a visibility id"),
+        );
+        assert_eq!(
+            pub_vis,
+            Some("public"),
+            "nested enum under `public:` must be public"
+        );
+    }
+
+    #[test]
+    fn test_nested_class_emits_inheritance_edge() {
+        // Regression: a nested class with a base clause must emit an `Inherits`
+        // edge anchored on the nested class node (previously the nested type was
+        // never registered, so its lineage edge was lost entirely).
+        let source = r"
+            struct Base { virtual ~Base(); };
+            class Outer {
+            public:
+                class Derived : public Base {};
+            };
+        ";
+        let staging = build_cpp(source);
+
+        let derived_id = cpp_find_added_node_id(&staging, "Outer::Derived", NodeKind::Class)
+            .expect("nested Derived class node must be staged");
+
+        let has_inherits = staging.operations().iter().any(|op| {
+            matches!(
+                op,
+                StagingOp::AddEdge {
+                    source: src,
+                    kind: EdgeKind::Inherits,
+                    ..
+                } if *src == derived_id
+            )
+        });
+        assert!(
+            has_inherits,
+            "nested Derived must emit an Inherits edge to its base"
+        );
+    }
+
+    #[test]
+    fn test_top_level_union_emits_struct_node() {
+        // Regression: top-level `union` declarations previously produced no node
+        // (only `class_specifier` / `struct_specifier` were matched). Unions map
+        // to NodeKind::Struct.
+        let source = "union Value { int i; float f; };";
+        let staging = build_cpp(source);
+        assert_has_node_with_kind_exact(&staging, "Value", NodeKind::Struct);
     }
 
     #[test]

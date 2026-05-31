@@ -1514,7 +1514,13 @@ pub fn build_and_persist_graph(
     )
 }
 
-fn inferred_plugin_selection_manifest(
+/// Infer a persisted plugin-selection manifest from the active plugin manager.
+///
+/// This is used by durable graph persistence callers that do not have CLI
+/// plugin-selection arguments available but still need the manifest to record
+/// which built-in plugins participated in the build.
+#[must_use]
+pub fn inferred_plugin_selection_manifest(
     plugins: &PluginManager,
 ) -> Option<crate::graph::unified::persistence::PluginSelectionManifest> {
     let active_plugin_ids = plugins
@@ -1532,6 +1538,24 @@ fn inferred_plugin_selection_manifest(
             high_cost_mode: None,
         },
     )
+}
+
+/// Inputs for the canonical durable graph persistence transaction.
+pub struct DurableGraphPersistenceRequest<'a> {
+    /// Root directory whose `.sqry/` artifacts are being committed.
+    pub root: &'a Path,
+    /// Plugin manager used for language/file-count metadata.
+    pub plugins: &'a PluginManager,
+    /// Build configuration used for analysis budgets and thread-pool sizing.
+    pub config: &'a BuildConfig,
+    /// Provenance string written into the manifest.
+    pub build_command: &'a str,
+    /// Optional plugin-selection metadata written into the manifest.
+    pub plugin_selection: Option<crate::graph::unified::persistence::PluginSelectionManifest>,
+    /// Progress reporter used for compaction, snapshot, and analysis stages.
+    pub progress: SharedReporter,
+    /// Effective worker thread count from the build phase.
+    pub effective_threads: usize,
 }
 
 /// Persist a pre-built graph and run the analysis pipeline.
@@ -1554,6 +1578,37 @@ pub fn persist_and_analyze_graph(
     progress: SharedReporter,
     effective_threads: usize,
 ) -> Result<(CodeGraph, BuildResult)> {
+    persist_durable_graph_transaction(
+        graph,
+        DurableGraphPersistenceRequest {
+            root,
+            plugins,
+            config,
+            build_command,
+            plugin_selection,
+            progress,
+            effective_threads,
+        },
+    )
+}
+
+/// Run the canonical manifest-as-commit-point graph persistence transaction.
+///
+/// Ordering is part of the durability contract:
+///
+/// 1. Remove any stale manifest first.
+/// 2. Compact edges and write the canonical snapshot.
+/// 3. Persist graph analyses for the new identity.
+/// 4. Write `manifest.json` last as the commit point.
+///
+/// # Errors
+///
+/// Returns an error if any persistence, analysis, or manifest write step fails.
+#[allow(clippy::too_many_lines, clippy::needless_pass_by_value)]
+pub fn persist_durable_graph_transaction(
+    graph: CodeGraph,
+    request: DurableGraphPersistenceRequest<'_>,
+) -> Result<(CodeGraph, BuildResult)> {
     use crate::graph::unified::analysis::csr::CsrAdjacency;
     use crate::graph::unified::analysis::{AnalysisIdentity, GraphAnalyses, compute_node_id_hash};
     use crate::graph::unified::compaction::{Direction, build_compacted_csr, snapshot_edges};
@@ -1565,6 +1620,16 @@ pub fn persist_and_analyze_graph(
     use crate::progress::IndexProgress;
     use chrono::Utc;
     use sha2::{Digest, Sha256};
+
+    let DurableGraphPersistenceRequest {
+        root,
+        plugins,
+        config,
+        build_command,
+        plugin_selection,
+        progress,
+        effective_threads,
+    } = request;
 
     // Step 1: Ensure storage directories exist and remove old manifest
     // Removing the manifest BEFORE writing the new snapshot ensures that

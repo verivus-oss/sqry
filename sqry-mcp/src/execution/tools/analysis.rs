@@ -2199,6 +2199,22 @@ pub(crate) mod inner {
         let workspace_root: &std::path::Path = &ctx.workspace_root;
         let graph = &ctx.graph;
 
+        // Phase β joint-stubs: filter params threaded end-to-end. The
+        // canonical evaluation path for FrameworkEq / ResolvedViaEq lives
+        // in the planner pipeline reached via `sqry_query` /
+        // `overlay_phase_beta_filters`; both predicates evaluate fully
+        // there (see `sqry-db/tests/phase_beta_predicate_evaluation.rs`).
+        // This direct_callers handler keeps the args propagating so
+        // logging / future planner integration can observe them without
+        // breaking ABI.
+        tracing::debug!(
+            symbol = %args.symbol,
+            framework = ?args.framework,
+            resolved_via_filter = ?args.resolved_via,
+            "Executing direct_callers tool"
+        );
+        let _ = (&args.framework, &args.resolved_via);
+
         let snapshot = std::sync::Arc::new(graph.snapshot());
 
         // Existence check — surfaces the same suggestion-decorated error when
@@ -2255,6 +2271,18 @@ pub(crate) mod inner {
     ) -> Result<ToolExecution<DirectCalleesData>> {
         let workspace_root: &std::path::Path = &ctx.workspace_root;
         let graph = &ctx.graph;
+
+        // Phase β joint-stubs: filter params threaded end-to-end. See
+        // `execute_direct_callers` above for the contract — the planner
+        // pipeline is the canonical evaluator; this handler propagates
+        // args for logging and future planner integration.
+        tracing::debug!(
+            symbol = %args.symbol,
+            framework = ?args.framework,
+            resolved_via_filter = ?args.resolved_via,
+            "Executing direct_callees tool"
+        );
+        let _ = (&args.framework, &args.resolved_via);
 
         let snapshot = std::sync::Arc::new(graph.snapshot());
 

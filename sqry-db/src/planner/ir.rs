@@ -63,7 +63,7 @@ use serde::{Deserialize, Serialize};
 use sqry_core::graph::unified::bind::scope::arena::ScopeKind;
 use sqry_core::graph::unified::edge::kind::{EdgeKind, ResolvedVia};
 use sqry_core::graph::unified::node::kind::NodeKind;
-use sqry_core::schema::Visibility;
+use sqry_core::schema::{FrameworkId, Visibility};
 
 /// Top-level query plan produced by the compiler.
 ///
@@ -356,6 +356,44 @@ pub enum Predicate {
     /// [`NodeFlags::CALLSITE_PROMISCUOUS`]: sqry_core::graph::unified::storage::NodeFlags::CALLSITE_PROMISCUOUS
     HasCallsitePromiscuous(bool),
 
+    // --- Phase β joint-stubs (Plan A + Plan B coordination) ---
+    //
+    // Both predicates ship in the joint-stubs PR. They parse, compile,
+    // fuse, cost, and evaluate against the empty side-table surface
+    // exposed by `NodeMetadataStore::framework_routes` /
+    // `dispatch_tables`. Plan A / Plan B's downstream PRs will replace
+    // the no-op evaluation with full lookups once the extractors /
+    // resolvers populate the underlying tables.
+    /// Plan A (framework-route extractors): filters to nodes whose
+    /// `NodeMetadataStore::framework_route` entry was tagged by the named
+    /// framework. In the joint-stubs PR no node carries framework
+    /// metadata, so this predicate evaluates to `false` for every
+    /// candidate. The variant exists so the planner / parser / MCP
+    /// filter param can be wired end-to-end and the downstream PR only
+    /// has to swap the executor body.
+    ///
+    /// Text frontend: `framework:<id>` (e.g. `framework:flask`).
+    FrameworkEq(FrameworkId),
+    /// Plan B (dispatch-resolver work): filters to nodes whose outgoing
+    /// `Calls` edges include at least one resolution provenance in the
+    /// requested set. Set-membership form to mirror the MCP
+    /// `resolved_via: Vec<ResolvedVia>` filter param. The existing
+    /// single-value [`Self::ResolvedVia`] predicate stays as the
+    /// canonical text-frontend lowering for one-of-a-kind probes; this
+    /// new variant is reached via the MCP filter path (or a future
+    /// planner-grammar extension that accepts a comma-separated list).
+    ///
+    /// In the joint-stubs PR the executor uses the same outgoing-Calls
+    /// walk as [`Self::ResolvedVia`] but accepts every requested variant
+    /// in the set. Today no `Calls` edge carries any of the new
+    /// resolution-provenance variants Plan B will add (VirtualDispatch,
+    /// InterfaceDispatch, DuckTyped, Structural, PromiscuousElided),
+    /// so the predicate degenerates to the existing 3-variant union
+    /// over `Direct`, `TypeMatch`, `BindingPlane` — exactly the same
+    /// behaviour as the existing `ResolvedVia` predicate when those
+    /// variants are passed in.
+    ResolvedViaEq(Vec<ResolvedVia>),
+
     // --- Value-bearing relation predicates ---
     /// `callers:<value>`: node's callers match the pattern / subquery.
     Callers(PredicateValue),
@@ -430,6 +468,8 @@ impl Predicate {
             | Predicate::IsAddressTaken(_)
             | Predicate::ResolvedVia(_)
             | Predicate::HasCallsitePromiscuous(_)
+            | Predicate::FrameworkEq(_)
+            | Predicate::ResolvedViaEq(_)
             | Predicate::InFile(_)
             | Predicate::InScope(_)
             | Predicate::MatchesName(_)
@@ -769,6 +809,39 @@ mod tests {
         for d in [Direction::Forward, Direction::Reverse, Direction::Both] {
             assert_eq!(d.invert().invert(), d);
         }
+    }
+
+    /// Phase β joint-stubs — both new variants are subquery-free leaf
+    /// predicates. The `has_subquery` accessor must agree so the
+    /// executor's subquery-scratch allocation does not over-provision
+    /// (or, conversely, miss a planned subquery elsewhere in the
+    /// surrounding plan).
+    #[test]
+    fn phase_beta_predicate_variants_have_no_subquery() {
+        let framework = Predicate::FrameworkEq(sqry_core::schema::FrameworkId::Flask);
+        assert!(!framework.has_subquery());
+
+        let resolved_via_eq = Predicate::ResolvedViaEq(vec![
+            ResolvedVia::Direct,
+            ResolvedVia::TypeMatch,
+            ResolvedVia::BindingPlane,
+        ]);
+        assert!(!resolved_via_eq.has_subquery());
+
+        // Nested under a boolean combinator still reports no subquery.
+        let nested = Predicate::And(vec![framework.clone(), resolved_via_eq.clone()]);
+        assert!(!nested.has_subquery());
+
+        // But a sibling subquery still propagates `true`.
+        let with_sub = Predicate::And(vec![
+            framework,
+            Predicate::Callers(PredicateValue::Subquery(Box::new(PlanNode::NodeScan {
+                kind: None,
+                visibility: None,
+                name_pattern: None,
+            }))),
+        ]);
+        assert!(with_sub.has_subquery());
     }
 
     #[test]

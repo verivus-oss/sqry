@@ -65,6 +65,12 @@ workspace configuration:
 - `sqryd` now supports explicit workspace loading and rebuilds:
   `sqry daemon load <path>` and `sqry daemon rebuild <path> [--force]`.
   `sqry-mcp --daemon` and `sqry lsp --daemon` can auto-start the daemon.
+  A successful daemon rebuild commits the durable `.sqry/graph` snapshot,
+  `.sqry/analysis` artifacts, and manifest before publishing the replacement
+  graph in memory; filesystem-backed `sqry query` stays coherent after daemon
+  load and rebuild. The daemon's derived-cache hook writes only
+  `.sqry/graph/derived.sqry` and skips the cache when the persisted
+  manifest/snapshot identity is not already valid.
 - MCP session-scoped workspace resolution uses explicit paths first, then
   file-bearing arguments, MCP roots, the last resolved workspace, and finally
   legacy environment/CWD fallback. In a normal single-repo session, assistants
@@ -87,6 +93,16 @@ sqry graph trace-path main handle_error --path .
 sqry graph dependency-tree module --path .
 sqry impact authenticate --depth 3 --path .
 ```
+
+## History And Provenance
+
+Phase 6 introduces the local history layer for explaining why graph facts exist
+and how retained facts changed across snapshots. The first scaffold is present
+for release-surface visibility; user-facing commands land in later Phase 6
+units.
+
+- [History guide](history.md)
+- [Planned CLI reference](../cli/history.md)
 
 ## MCP Response Redaction
 

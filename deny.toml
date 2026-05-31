@@ -51,15 +51,27 @@ exceptions = []
 
 [bans]
 multiple-versions = "warn"
-wildcards = "allow"
+# Wildcard version requirements (e.g. `foo = "*"`) defeat lockfile-based
+# reproducibility and supply-chain pinning. Tightened from "allow" on
+# 2026-05-27. Intra-workspace `path = "../crate"` deps without an
+# explicit version are cargo's way of saying "follow the workspace
+# member" and are exempted via allow-wildcard-paths; the supply-chain
+# signal we care about is external wildcards.
+wildcards = "deny"
+allow-wildcard-paths = true
 highlight = "simplest-path"
 deny = [
   { crate = "async-std", reason = "Removed per RUSTSEC-2025-0052; sqry uses tokio-based async runtimes only." }
 ]
 
 [sources]
-unknown-registry = "warn"
-unknown-git = "warn"
+# Supply-chain hygiene: any crate must come from crates.io or from a
+# git source explicitly listed in `allow-git` below. Tightened from
+# "warn" on 2026-05-27. New git sources require code review + an
+# allow-git entry; new alternate registries require deny.toml
+# changes here.
+unknown-registry = "deny"
+unknown-git = "deny"
 allow-git = [
   "https://github.com/elixir-lang/tree-sitter-elixir",
   "https://github.com/fwcd/tree-sitter-kotlin",

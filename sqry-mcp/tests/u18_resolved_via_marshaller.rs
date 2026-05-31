@@ -143,6 +143,8 @@ fn direct_callers_response_includes_resolved_via_field_for_calls_edges() -> Resu
         max_depth: 1,
         max_results: 100,
         pagination: paging(),
+        framework: None,
+        resolved_via: None,
     };
     let result = execute_relation_query(&args)?;
 

@@ -27,6 +27,8 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use super::super::node::id::NodeId;
+use super::dispatch_tables::DispatchTables;
+use super::framework_routes::{FrameworkRouteMetadata, FrameworkRoutesMap};
 
 /// Optional metadata for nodes that participate in macro boundary analysis.
 ///
@@ -242,10 +244,24 @@ impl StoredEntry {
 /// a `Vec` of [`NodeMetadataEntryV11`] structs with explicit `index`,
 /// `generation`, `kind`, payload-slots, and `flags`, then reconstruct the
 /// `HashMap` on deserialization.
+///
+/// The Phase β joint-stub fields ([`Self::framework_routes`] +
+/// [`Self::dispatch_tables`]) are **not** carried by the in-store custom
+/// serde impl — they ride the V12 snapshot envelope as separate slots and
+/// are reattached via [`Self::set_framework_routes`] /
+/// [`Self::set_dispatch_tables`] on load. Keeping them outside the entry
+/// wire format preserves V11 metadata-store wire decoding when a V11
+/// snapshot is upconverted in place.
 #[derive(Debug, Clone, Default)]
 pub struct NodeMetadataStore {
     /// Metadata entries keyed by `(NodeId::index(), NodeId::generation())`.
     entries: HashMap<(u32, u64), StoredEntry>,
+    /// Plan A (V12, joint-stubs) — per-node framework-route metadata,
+    /// populated by Phase 4f's framework extractors. Empty in the stub.
+    framework_routes: FrameworkRoutesMap,
+    /// Plan B (V12, joint-stubs) — per-snapshot dispatch-resolution side
+    /// tables, populated by WS2 resolvers. Empty in the stub.
+    dispatch_tables: DispatchTables,
 }
 
 /// Discriminant values for the on-wire `kind` byte.
@@ -335,7 +351,18 @@ impl<'de> Deserialize<'de> for NodeMetadataStore {
             };
             map.insert((e.index, e.generation), stored);
         }
-        Ok(Self { entries: map })
+        // Phase β joint-stubs: `framework_routes` and `dispatch_tables`
+        // are NOT carried through the metadata-store custom serde wire
+        // (V11 metadata-store payloads must continue to decode bit-for-bit
+        // identically). The V12 snapshot envelope carries the new side
+        // tables in dedicated slots and the loader reattaches them via
+        // `Self::set_framework_routes` / `Self::set_dispatch_tables`
+        // after this deserialization completes. Default to empty here.
+        Ok(Self {
+            entries: map,
+            framework_routes: FrameworkRoutesMap::default(),
+            dispatch_tables: DispatchTables::default(),
+        })
     }
 }
 
@@ -627,11 +654,80 @@ impl NodeMetadataStore {
             slot.flags.remove(mask);
         }
     }
+
+    // ---------------------------------------------------------------
+    // Phase β joint-stubs: framework-routes + dispatch-tables
+    // ---------------------------------------------------------------
+    //
+    // The accessors below are the public surface for Plan A's framework
+    // route extractors and Plan B's dispatch resolvers. In this PR they
+    // are read-only-empty by default — no resolver populates them yet.
+    // The setters are used by the V12 snapshot load path to reattach the
+    // envelope slots after the metadata-store entries Vec has been
+    // deserialized.
+
+    /// Read-only access to the framework-route map (Plan A).
+    ///
+    /// Empty in the stub. Populated by Plan A's Phase 4f extractor pass
+    /// in the `feat/framework-route-extractors` downstream PR.
+    #[must_use]
+    pub fn framework_routes(&self) -> &FrameworkRoutesMap {
+        &self.framework_routes
+    }
+
+    /// Mutable access to the framework-route map (Plan A).
+    ///
+    /// Reserved for Phase 4f extractors. The MCP filter / planner predicate
+    /// that ship in this same PR read through [`Self::framework_routes`]
+    /// only.
+    pub fn framework_routes_mut(&mut self) -> &mut FrameworkRoutesMap {
+        &mut self.framework_routes
+    }
+
+    /// Replace the framework-route map wholesale.
+    ///
+    /// Used by the V12 snapshot loader to reattach the envelope slot to
+    /// the in-memory metadata store after entry-vec deserialization.
+    pub fn set_framework_routes(&mut self, routes: FrameworkRoutesMap) {
+        self.framework_routes = routes;
+    }
+
+    /// Lookup helper — returns the route metadata for a node if one was
+    /// recorded by a framework extractor.
+    #[must_use]
+    pub fn framework_route(&self, node_id: NodeId) -> Option<&FrameworkRouteMetadata> {
+        self.framework_routes.get(&node_id)
+    }
+
+    /// Read-only access to the dispatch-tables side store (Plan B).
+    ///
+    /// Empty in the stub. Populated by Plan B's WS2 resolver passes
+    /// (JVM virtual / interface, Go interface, Python duck-typed,
+    /// TypeScript structural, promiscuous-cap elision).
+    #[must_use]
+    pub fn dispatch_tables(&self) -> &DispatchTables {
+        &self.dispatch_tables
+    }
+
+    /// Mutable access to the dispatch-tables side store (Plan B).
+    pub fn dispatch_tables_mut(&mut self) -> &mut DispatchTables {
+        &mut self.dispatch_tables
+    }
+
+    /// Replace the dispatch-tables wholesale.
+    ///
+    /// Used by the V12 snapshot loader to reattach the envelope slot to
+    /// the in-memory metadata store after entry-vec deserialization.
+    pub fn set_dispatch_tables(&mut self, tables: DispatchTables) {
+        self.dispatch_tables = tables;
+    }
 }
 
 impl PartialEq for NodeMetadataStore {
     fn eq(&self, other: &Self) -> bool {
         self.entries == other.entries
+            && self.framework_routes == other.framework_routes
+            && self.dispatch_tables == other.dispatch_tables
     }
 }
 
@@ -669,7 +765,31 @@ impl crate::graph::unified::memory::GraphMemorySize for NodeMetadataStore {
                 }
             })
             .sum();
-        base + inner
+        // Phase β joint-stubs: account for the framework-routes BTreeMap
+        // and the dispatch-tables side store. The stubs are empty by
+        // construction; this code accounts for whatever Plan A / Plan B
+        // populate downstream without needing a second size-impl edit.
+        let framework_routes_bytes = self.framework_routes.len()
+            * (std::mem::size_of::<NodeId>() + std::mem::size_of::<FrameworkRouteMetadata>());
+        // Phase β joint-stubs (V12 DispatchTables shape — Plan B DESIGN
+        // §3.7): five per-plane collections, each contributing
+        // `len * (NodeId + entry-type)` heap bytes. Empty until Plan B's
+        // resolver PRs (`U_WS2_2_*` ...) populate the planes.
+        let dt = &self.dispatch_tables;
+        let dispatch_tables_bytes = dt.jvm_virtual.len()
+            * (std::mem::size_of::<NodeId>()
+                + std::mem::size_of::<super::dispatch_tables::JvmDispatchEntry>())
+            + dt.go_interface.len()
+                * (std::mem::size_of::<NodeId>()
+                    + std::mem::size_of::<super::dispatch_tables::GoDispatchEntry>())
+            + dt.python_duck.len()
+                * (std::mem::size_of::<NodeId>()
+                    + std::mem::size_of::<super::dispatch_tables::PythonDispatchEntry>())
+            + dt.ts_structural.len()
+                * (std::mem::size_of::<NodeId>()
+                    + std::mem::size_of::<super::dispatch_tables::TsDispatchEntry>())
+            + dt.cap_hits.len() * std::mem::size_of::<super::dispatch_tables::CapHit>();
+        base + inner + framework_routes_bytes + dispatch_tables_bytes
     }
 }
 

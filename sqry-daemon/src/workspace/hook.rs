@@ -26,16 +26,17 @@
 //! behaviour pass [`noop_hook`] or any custom impl explicitly into
 //! [`super::WorkspaceManager::set_hook`].
 //!
-//! ### Snapshot SHA timing (PF03A decision A, corrected by PF09)
+//! ### Snapshot SHA timing (PF03A decision A, corrected by RPI)
 //!
-//! [`QueryDbHook::on_publish`] first writes the published graph to the
-//! canonical `<workspace_root>/.sqry/graph/snapshot.sqry` path, then
-//! hashes that file, reloads it, warms a bounded query inventory over the
-//! reloaded snapshot, and saves `derived.sqry` with the same SHA. That
-//! makes the snapshot file the single verified identity source for both
-//! `DerivedHeader.snapshot_sha256` and the persisted query entries.
-//! A stale or missing pre-existing `snapshot.sqry` is overwritten by the
-//! published graph before the derived cache is produced.
+//! [`QueryDbHook::on_publish`] never writes the canonical
+//! `<workspace_root>/.sqry/graph/snapshot.sqry` file. It verifies the
+//! already-persisted manifest/snapshot pair, warms a bounded query inventory
+//! over the published in-memory graph, and saves `derived.sqry` with the
+//! verified persisted snapshot SHA. If the manifest or snapshot is absent,
+//! corrupt, or mismatched, the hook skips derived-cache persistence and logs
+//! a diagnostic. Canonical snapshot, manifest, and analysis artifacts are
+//! owned exclusively by the manifest-as-commit-point graph persistence
+//! transaction.
 //!
 //! ### Async lifetime / ownership (PF03A decision B)
 //!
@@ -249,10 +250,10 @@ impl SqrydHook for QueryDbHook {
     }
 }
 
-/// Body of the production hook: persist the published graph to the canonical
-/// snapshot path, reload that exact on-disk snapshot, warm a bounded inventory
-/// of persistent relation queries, and persist the derived cache via
-/// `save_derived`.
+/// Body of the production hook: verify the existing persisted
+/// manifest/snapshot identity, warm a bounded inventory of persistent
+/// relation queries from the published in-memory graph, and persist only the
+/// derived cache via `save_derived`.
 ///
 /// All filesystem-touching operations run under [`tokio::task::spawn_blocking`]
 /// so the runtime never blocks on synchronous IO.
@@ -273,18 +274,11 @@ fn run_save_derived_blocking(
     graph: &CodeGraph,
     query_db_config: sqry_db::QueryDbConfig,
 ) -> anyhow::Result<()> {
-    let graph_dir = workspace_root.join(".sqry").join("graph");
-    let snapshot_path = graph_dir.join("snapshot.sqry");
-    std::fs::create_dir_all(&graph_dir)?;
+    let Some(sha) = verified_persisted_snapshot_sha(workspace_root)? else {
+        return Ok(());
+    };
 
-    sqry_core::graph::unified::persistence::save_to_path(graph, &snapshot_path)?;
-    let sha = sqry_db::persistence::compute_file_sha256(&snapshot_path).map_err(|io_err| {
-        anyhow::anyhow!("compute_file_sha256({}): {io_err}", snapshot_path.display())
-    })?;
-
-    let persisted_graph =
-        sqry_core::graph::unified::persistence::load_from_path(&snapshot_path, None)?;
-    let snapshot_arc = Arc::new(persisted_graph.snapshot());
+    let snapshot_arc = Arc::new(graph.snapshot());
     let db = sqry_db::QueryDb::new(snapshot_arc, query_db_config);
     let warmed_entries = warm_persistent_queries(&db);
     tracing::debug!(
@@ -297,6 +291,52 @@ fn run_save_derived_blocking(
     sqry_db::persistence::save_derived(&db, sha, &derived_path, workspace_root)?;
 
     Ok(())
+}
+
+fn verified_persisted_snapshot_sha(workspace_root: &Path) -> anyhow::Result<Option<[u8; 32]>> {
+    let storage = sqry_core::graph::unified::persistence::GraphStorage::new(workspace_root);
+    if !storage.manifest_path().exists() {
+        tracing::debug!(
+            workspace = %workspace_root.display(),
+            manifest = %storage.manifest_path().display(),
+            "QueryDbHook: skipping derived-cache save because graph manifest is absent"
+        );
+        return Ok(None);
+    }
+    if !storage.snapshot_path().exists() {
+        tracing::warn!(
+            workspace = %workspace_root.display(),
+            snapshot = %storage.snapshot_path().display(),
+            "QueryDbHook: skipping derived-cache save because graph snapshot is absent"
+        );
+        return Ok(None);
+    }
+
+    let manifest = storage.load_manifest().map_err(|err| {
+        anyhow::anyhow!("load manifest {}: {err}", storage.manifest_path().display())
+    })?;
+    let actual_sha =
+        sqry_db::persistence::compute_file_sha256(storage.snapshot_path()).map_err(|err| {
+            anyhow::anyhow!(
+                "compute_file_sha256({}): {err}",
+                storage.snapshot_path().display()
+            )
+        })?;
+    let actual_hex = actual_sha
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    if manifest.snapshot_sha256 != actual_hex {
+        tracing::warn!(
+            workspace = %workspace_root.display(),
+            manifest_sha = %manifest.snapshot_sha256,
+            actual_sha = %actual_hex,
+            "QueryDbHook: skipping derived-cache save because manifest/snapshot SHA-256 mismatch"
+        );
+        return Ok(None);
+    }
+
+    Ok(Some(actual_sha))
 }
 
 fn warm_persistent_queries(db: &sqry_db::QueryDb) -> usize {
@@ -434,11 +474,11 @@ mod tests {
         assert_eq!(hook.timeout(), Duration::from_millis(50));
     }
 
-    /// PF09 correction: when the canonical snapshot file is absent, the
-    /// hook writes the published graph there first and then binds
-    /// derived.sqry to that freshly-written snapshot identity.
+    /// RPI correction: when the canonical snapshot file is absent, the
+    /// hook skips derived-cache persistence. It must not create
+    /// `snapshot.sqry` as a side effect of publish/load.
     #[tokio::test]
-    async fn pf09_query_db_hook_no_snapshot_file_writes_snapshot_and_derived() {
+    async fn rpi_query_db_hook_no_snapshot_file_skips_derived_without_snapshot_write() {
         let workspace = tempfile::tempdir().expect("tempdir");
         let hook = QueryDbHook::new(Duration::from_secs(2));
         let graph = Arc::new(CodeGraph::new());
@@ -463,13 +503,13 @@ mod tests {
             .join("graph")
             .join("derived.sqry");
         assert!(
-            snapshot.exists(),
-            "PF09: hook must write the published snapshot when it is absent (got {})",
+            !snapshot.exists(),
+            "RPI: hook must not write canonical snapshot.sqry when it is absent (got {})",
             snapshot.display()
         );
         assert!(
-            derived.exists(),
-            "PF09: hook must create derived.sqry after writing snapshot.sqry (got {})",
+            !derived.exists(),
+            "RPI: hook must skip derived.sqry when no coherent persisted graph exists (got {})",
             derived.display()
         );
     }
@@ -504,23 +544,49 @@ mod tests {
         );
     }
 
-    /// PF03A/PF09 end-to-end happy path: with a published graph, the hook
-    /// writes snapshot.sqry and then derived.sqry to canonical paths before
-    /// its timeout fires.
+    /// RPI end-to-end happy path: with a coherent persisted graph, the hook
+    /// writes only derived.sqry before its timeout fires and leaves canonical
+    /// snapshot bytes untouched.
     #[tokio::test]
-    async fn pf03a_query_db_hook_writes_derived_sqry_when_snapshot_present() {
+    async fn rpi_query_db_hook_writes_derived_sqry_when_manifest_snapshot_coherent() {
         let workspace = tempfile::tempdir().expect("tempdir");
-        let snap_dir = workspace.path().join(".sqry").join("graph");
-        std::fs::create_dir_all(&snap_dir).unwrap();
+        std::fs::create_dir_all(workspace.path().join("src")).unwrap();
+        std::fs::write(
+            workspace.path().join("src").join("lib.rs"),
+            "pub fn helper() -> u32 { 42 }\n",
+        )
+        .unwrap();
 
-        let graph_owned = CodeGraph::new();
+        let plugins = sqry_plugin_registry::create_plugin_manager();
+        let cfg = sqry_core::graph::unified::build::BuildConfig::default();
+        let graph_owned =
+            sqry_core::graph::unified::build::build_unified_graph(workspace.path(), &plugins, &cfg)
+                .unwrap();
+        sqry_core::graph::unified::build::persist_and_analyze_graph(
+            graph_owned,
+            workspace.path(),
+            &plugins,
+            &cfg,
+            "test:query-db-hook",
+            None,
+            sqry_core::progress::no_op_reporter(),
+            1,
+        )
+        .unwrap();
+
+        let storage = sqry_core::graph::unified::persistence::GraphStorage::new(workspace.path());
+        let before_snapshot = std::fs::read(storage.snapshot_path()).unwrap();
+
+        let graph_owned =
+            sqry_core::graph::unified::build::build_unified_graph(workspace.path(), &plugins, &cfg)
+                .unwrap();
         let hook = QueryDbHook::new(Duration::from_secs(5));
         let graph = Arc::new(graph_owned);
         hook.on_publish(workspace.path(), graph);
 
         // Poll for the derived file with a generous deadline so slow CI
         // runners don't false-negative.
-        let derived = snap_dir.join("derived.sqry");
+        let derived = storage.graph_dir().join("derived.sqry");
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while std::time::Instant::now() < deadline {
             if derived.exists() {
@@ -530,8 +596,13 @@ mod tests {
         }
         assert!(
             derived.exists(),
-            "PF03A: hook must write derived.sqry to {} within 5s",
+            "RPI: hook must write derived.sqry to {} within 5s",
             derived.display()
+        );
+        let after_snapshot = std::fs::read(storage.snapshot_path()).unwrap();
+        assert_eq!(
+            after_snapshot, before_snapshot,
+            "RPI: hook must not mutate canonical snapshot.sqry while saving derived.sqry"
         );
 
         // Sanity-check the file is non-empty and starts with the derived

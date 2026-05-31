@@ -159,7 +159,11 @@ pub(crate) async fn handle(ctx: &HandlerContext, params: Value) -> Result<Value,
     const POLL_TIMEOUT: Duration = Duration::from_secs(600);
     while ws.rebuild_in_flight.load(Ordering::Acquire) {
         if started.elapsed() > POLL_TIMEOUT {
-            break;
+            return Err(MethodError::Daemon(DaemonError::ToolTimeout {
+                root: canonical,
+                secs: POLL_TIMEOUT.as_secs(),
+                deadline_ms: POLL_TIMEOUT.as_millis() as u64,
+            }));
         }
         tokio::time::sleep(POLL_INTERVAL).await;
     }

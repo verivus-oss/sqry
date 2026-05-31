@@ -1,7 +1,7 @@
 # sqry MCP Server - User Guide - by Verivus
 
-**Version**: 16.0.6
-**Last Updated**: 2026-05-20
+**Version**: 17.0.0
+**Last Updated**: 2026-05-31
 
 Integrate sqry's semantic code search with AI assistants (Codex, Claude Desktop, Windsurf, Cursor, and others) via the Model Context Protocol (MCP).
 
@@ -896,7 +896,7 @@ ls -la .sqry-index
 **3. Test binary**:
 ```bash
 sqry --version
-# Should output: sqry 16.0.6+
+# Should output: sqry 17.0.0+
 ```
 
 **4. Check logs** (AI assistant specific):
@@ -982,7 +982,7 @@ sqry MCP is production-ready but evolving. Your feedback helps!
 
 ---
 
-**Last Updated**: 2026-05-20
-**MCP Server Version**: 16.0.6
+**Last Updated**: 2026-05-31
+**MCP Server Version**: 17.0.0
 **Protocol**: MCP 2024-11-05 (JSON-RPC 2.0)
-**sqry CLI Required**: 16.0.6+
+**sqry CLI Required**: 17.0.0+

@@ -21,7 +21,10 @@ use super::super::string::StringId;
 /// Resolution provenance for a `Calls` edge.
 ///
 /// Discriminates how the call target was resolved during graph construction.
-/// Introduced by C-icall-precision Phase A (DESIGN §6).
+/// Introduced by C-icall-precision Phase A (DESIGN §6); extended in Phase β
+/// joint-stubs (V12) with 5 additional dispatch-resolver provenances Plan B
+/// WS2 populates (`graph-fidelity-planner-correctness-dag.toml` line 221-239,
+/// DESIGN §3.2).
 ///
 /// # Semantics
 ///
@@ -30,17 +33,40 @@ use super::super::string::StringId;
 ///   definition). This is the default and applies to every pre-Phase-A
 ///   `Calls` edge (V10 wire compatibility).
 /// - `TypeMatch` — the call target was resolved post-hoc by flat type matching
-///   of indirect-call sites against compatible signatures.
+///   of indirect-call sites against compatible signatures. (Plan B DESIGN
+///   §3.2 names this `IndirectTypeMatch`; the V11 wire form names it
+///   `TypeMatch` and we keep that name for postcard on-disk stability.)
 /// - `BindingPlane` — the call target was resolved via the binding-plane
 ///   designated-initializer mechanism (struct-field-of-function-pointer
-///   construction site witnesses).
+///   construction site witnesses). (Plan B DESIGN §3.2 names this
+///   `IndirectBindingPlane`; same naming-stability rationale as above.)
+/// - `VirtualDispatch` — JVM virtual / abstract method dispatch resolved
+///   through `Implements`/`Inherits` walks (Plan B `pass5c_jvm_virtual`).
+/// - `InterfaceDispatch` — Go interface dispatch resolved via structural
+///   method-set superset (Plan B `pass5d_go_interface`).
+/// - `DuckTyped` — Python duck-typed dispatch resolved by name+arity match
+///   on unknown-receiver call sites (Plan B `pass5e_python_duck`).
+/// - `Structural` — TypeScript structural dispatch resolved by declared
+///   interface superset (Plan B `pass5f_ts_structural`).
+/// - `PromiscuousElided` — fan-out cap exceeded (`CALLSITE_PROMISCUOUS`);
+///   resolver emitted a diagnostic self-edge instead of N targets.
 ///
-/// # Wire compatibility
+/// # Wire compatibility (V11 → V12)
 ///
-/// `ResolvedVia` is the type of the `EdgeKind::Calls.resolved_via` field,
-/// which carries `#[serde(default)]`. Pre-Phase-A `Calls` payloads in
-/// **JSON** (or any key-value format where field absence is expressible)
-/// that omit the field deserialize with `ResolvedVia::Direct` — see test
+/// `ResolvedVia` is `#[repr(u16)]` with **explicit pinned discriminants**
+/// (0..=7) for V12 on-disk stability. Re-ordering or re-assigning these
+/// values is a snapshot-format breaking change — see Plan B DAG
+/// `critical_decisions` line 233 and DESIGN §3.2 line 239 ("Discriminants
+/// pinned: changing them later breaks V12 snapshots").
+///
+/// The serde `rename_all = "snake_case"` attribute governs JSON / human
+/// wire forms (planner text frontend, MCP filter params): the names emit
+/// as `direct`, `type_match`, `binding_plane`, `virtual_dispatch`,
+/// `interface_dispatch`, `duck_typed`, `structural`, `promiscuous_elided`.
+///
+/// Pre-Phase-A `Calls` payloads in **JSON** that omit the field
+/// deserialize with `ResolvedVia::Direct` (via `#[serde(default)]` on the
+/// `EdgeKind::Calls.resolved_via` field) — see test
 /// `calls_edge_json_default_old_wire` below.
 ///
 /// **Postcard (the on-disk snapshot format) is positional and does NOT
@@ -49,23 +75,67 @@ use super::super::string::StringId;
 /// is_async]`). V10 → V11 postcard forward-compat is implemented in
 /// `sqry-core/src/graph/unified/persistence/snapshot.rs::upconvert_v10_to_v11`
 /// via explicit V10 type translation — that is the canonical V10 postcard
-/// reader path, not this serde annotation.
+/// reader path, not this serde annotation. V11 → V12 inherits this discipline:
+/// pre-V12 `ResolvedVia` payloads only carry variants 0..=2, and the V11
+/// upconvert preserves them unchanged.
 ///
 /// # Why not an `EdgeKind::FfiCall` member
 ///
 /// FFI calls are a distinct `EdgeKind` variant (`EdgeKind::FfiCall`) with
 /// their own metadata. `ResolvedVia` discriminates resolution strategy within
 /// the `Calls` variant, not edge-kind identity.
+#[repr(u16)]
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ResolvedVia {
     /// Resolved directly by the language plugin from a syntactic call.
+    /// Pinned discriminant `0` for V12 on-disk stability.
     #[default]
-    Direct,
+    Direct = 0,
     /// Resolved by flat type matching of an indirect call against compatible signatures.
-    TypeMatch,
+    /// Pinned discriminant `1` for V12 on-disk stability.
+    TypeMatch = 1,
     /// Resolved via binding-plane designated-initializer witnesses.
-    BindingPlane,
+    /// Pinned discriminant `2` for V12 on-disk stability.
+    BindingPlane = 2,
+    /// JVM virtual / abstract method dispatch (Plan B `pass5c_jvm_virtual`).
+    /// Pinned discriminant `3` for V12 on-disk stability.
+    VirtualDispatch = 3,
+    /// Go interface dispatch (Plan B `pass5d_go_interface`).
+    /// Pinned discriminant `4` for V12 on-disk stability.
+    InterfaceDispatch = 4,
+    /// Python duck-typed dispatch (Plan B `pass5e_python_duck`).
+    /// Pinned discriminant `5` for V12 on-disk stability.
+    DuckTyped = 5,
+    /// TypeScript structural dispatch (Plan B `pass5f_ts_structural`).
+    /// Pinned discriminant `6` for V12 on-disk stability.
+    Structural = 6,
+    /// `CALLSITE_PROMISCUOUS` fan-out cap exceeded — resolver emitted a
+    /// diagnostic self-edge instead of N targets. Pinned discriminant `7`
+    /// for V12 on-disk stability.
+    PromiscuousElided = 7,
+}
+
+impl ResolvedVia {
+    /// Returns the pinned `u16` discriminant. Stable across V12 releases.
+    #[must_use]
+    pub const fn as_u16(self) -> u16 {
+        self as u16
+    }
+
+    /// All variants in pinned discriminant order. Convenience for tests
+    /// and downstream consumers that need to enumerate the resolution
+    /// provenance set.
+    pub const ALL: &'static [ResolvedVia] = &[
+        ResolvedVia::Direct,
+        ResolvedVia::TypeMatch,
+        ResolvedVia::BindingPlane,
+        ResolvedVia::VirtualDispatch,
+        ResolvedVia::InterfaceDispatch,
+        ResolvedVia::DuckTyped,
+        ResolvedVia::Structural,
+        ResolvedVia::PromiscuousElided,
+    ];
 }
 
 /// Context for `TypeOf` edges (parameter, return, field, variable).

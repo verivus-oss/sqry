@@ -783,6 +783,9 @@ fn walk_predicate_for_shared_subtrees(
         | Predicate::IsAddressTaken(_)
         | Predicate::ResolvedVia(_)
         | Predicate::HasCallsitePromiscuous(_)
+        // Phase β joint-stubs — atomic leaf predicates with no nested PlanNode.
+        | Predicate::FrameworkEq(_)
+        | Predicate::ResolvedViaEq(_)
         | Predicate::InFile(_)
         | Predicate::InScope(_)
         | Predicate::MatchesName(_)
@@ -975,6 +978,9 @@ fn visit_proper_predicate_subtrees(predicate: &Predicate, visitor: &mut dyn FnMu
         | Predicate::IsAddressTaken(_)
         | Predicate::ResolvedVia(_)
         | Predicate::HasCallsitePromiscuous(_)
+        // Phase β joint-stubs — atomic leaf predicates with no nested PlanNode.
+        | Predicate::FrameworkEq(_)
+        | Predicate::ResolvedViaEq(_)
         | Predicate::InFile(_)
         | Predicate::InScope(_)
         | Predicate::MatchesName(_)
@@ -1096,6 +1102,9 @@ fn walk_predicate_for_subqueries(
         | Predicate::IsAddressTaken(_)
         | Predicate::ResolvedVia(_)
         | Predicate::HasCallsitePromiscuous(_)
+        // Phase β joint-stubs — atomic leaf predicates with no nested PlanNode.
+        | Predicate::FrameworkEq(_)
+        | Predicate::ResolvedViaEq(_)
         | Predicate::InFile(_)
         | Predicate::InScope(_)
         | Predicate::MatchesName(_)

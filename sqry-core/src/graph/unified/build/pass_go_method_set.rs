@@ -263,6 +263,8 @@ pub(crate) fn run_go_method_set_satisfaction_generic<G: GraphMutationTarget>(
             all_promotions.insert(outer, promotion);
         }
 
+        emit_external_embedded_interface_implements(graph, &adjacency, &outer_set, &mut stats);
+
         // Step 4 + 5: Materialise promoted-method nodes + emit
         // structural edges (Contains, Inherits) per §4.2 step 4. Done
         // in a single walk over `all_promotions` to keep the
@@ -954,6 +956,11 @@ fn resolve_inner_type_node<G: GraphMutationTarget>(
             None => continue,
         };
         let candidate_rank = match kind {
+            // Alias nodes can carry their own embedding side-channel
+            // materialised as graph edges (AC-9: `type A = struct {
+            // io.Reader }`). Prefer such a Type over the Struct stub
+            // that may share the same qn after another struct embeds A.
+            NodeKind::Type if has_outgoing_inherits(graph, nid) => 4,
             NodeKind::Struct => 3,
             NodeKind::Interface => 2,
             NodeKind::Type => 1,
@@ -961,8 +968,9 @@ fn resolve_inner_type_node<G: GraphMutationTarget>(
         };
         let replace = match best {
             None => true,
-            Some((_, current_kind)) => {
+            Some((current_node, current_kind)) => {
                 let current_rank = match current_kind {
+                    NodeKind::Type if has_outgoing_inherits(graph, current_node) => 4,
                     NodeKind::Struct => 3,
                     NodeKind::Interface => 2,
                     NodeKind::Type => 1,
@@ -976,6 +984,14 @@ fn resolve_inner_type_node<G: GraphMutationTarget>(
         }
     }
     best.map(|(nid, _)| nid)
+}
+
+fn has_outgoing_inherits<G: GraphMutationTarget>(graph: &G, node: NodeId) -> bool {
+    graph
+        .edges()
+        .edges_from(node)
+        .iter()
+        .any(|edge| matches!(edge.kind, EdgeKind::Inherits))
 }
 
 /// Build the embedding-adjacency map keyed by `outer` NodeId.
@@ -1352,12 +1368,110 @@ fn compute_promotions_for_outer<G: GraphMutationTarget>(
     promotion
 }
 
+fn emit_external_embedded_interface_implements<G: GraphMutationTarget>(
+    graph: &mut G,
+    adjacency: &EmbeddingAdjacency,
+    outer_set: &BTreeSet<NodeId>,
+    stats: &mut GoMethodSetStats,
+) {
+    for &outer in outer_set {
+        let Some(outer_qn) = qualified_name_string(graph, outer) else {
+            continue;
+        };
+        let Some(outer_pkg) = package_prefix(&outer_qn) else {
+            continue;
+        };
+        let edge_file = graph.nodes().get(outer).map(|entry| entry.file);
+        let Some(edge_file) = edge_file else {
+            continue;
+        };
+        let mut visited: BTreeSet<NodeId> = BTreeSet::new();
+        let mut queue: Vec<NodeId> = vec![outer];
+        while let Some(cur) = queue.pop() {
+            if !visited.insert(cur) {
+                continue;
+            }
+            let Some(outgoing) = adjacency.get(&cur) else {
+                continue;
+            };
+            for &(inner, _) in outgoing {
+                queue.push(inner);
+                let Some(interface_node) = interface_companion_for_type(graph, inner) else {
+                    continue;
+                };
+                let Some(interface_qn) = qualified_name_string(graph, interface_node) else {
+                    continue;
+                };
+                if package_prefix(&interface_qn).is_some_and(|pkg| pkg == outer_pkg) {
+                    continue;
+                }
+                if !find_interface_flattened_methods(graph, interface_node).is_empty() {
+                    continue;
+                }
+                if has_implements_edge(graph, outer, interface_node) {
+                    continue;
+                }
+                graph
+                    .edges_mut()
+                    .add_edge(outer, interface_node, EdgeKind::Implements, edge_file);
+                stats.implements_edges_value = stats.implements_edges_value.saturating_add(1);
+            }
+        }
+    }
+}
+
+fn package_prefix(qualified_name: &str) -> Option<&str> {
+    qualified_name
+        .split("::")
+        .next()
+        .filter(|pkg| !pkg.is_empty())
+}
+
+fn interface_companion_for_type<G: GraphMutationTarget>(graph: &G, node: NodeId) -> Option<NodeId> {
+    if matches!(
+        graph.nodes().get(node).map(|entry| entry.kind),
+        Some(NodeKind::Interface)
+    ) && node_is_go_or_language_unknown(graph, node)
+    {
+        return Some(node);
+    }
+    let qn_id = graph.nodes().get(node)?.qualified_name?;
+    graph
+        .indices()
+        .by_qualified_name(qn_id)
+        .iter()
+        .copied()
+        .find(|&candidate| {
+            matches!(
+                graph.nodes().get(candidate).map(|entry| entry.kind),
+                Some(NodeKind::Interface)
+            ) && node_is_go_or_language_unknown(graph, candidate)
+        })
+}
+
+fn has_implements_edge<G: GraphMutationTarget>(graph: &G, source: NodeId, target: NodeId) -> bool {
+    graph
+        .edges()
+        .edges_from(source)
+        .iter()
+        .any(|edge| matches!(edge.kind, EdgeKind::Implements) && edge.target == target)
+}
+
 /// Look up `node_id`'s qualified-name string by resolving its interned
 /// `qualified_name` through the string interner.
 fn qualified_name_string<G: GraphMutationTarget>(graph: &G, node_id: NodeId) -> Option<String> {
     let entry = graph.nodes().get(node_id)?;
     let qn = entry.qualified_name?;
     graph.strings().resolve(qn).map(|arc| arc.to_string())
+}
+
+fn node_is_go_or_language_unknown<G: GraphMutationTarget>(graph: &G, node_id: NodeId) -> bool {
+    graph.nodes().get(node_id).is_some_and(|entry| {
+        !matches!(
+            graph.files().language_for_file(entry.file),
+            Some(language) if language != Language::Go
+        )
+    })
 }
 
 /// AC-9 alias resolver: if `inner` is a `NodeKind::Type` whose underlying
@@ -1445,6 +1559,9 @@ fn find_interface_flattened_methods<G: GraphMutationTarget>(
         if !visited.insert(cur) {
             continue;
         }
+        if !node_is_go_or_language_unknown(graph, cur) {
+            continue;
+        }
         if depth >= MAX_INTERFACE_EMBED_DEPTH {
             continue;
         }
@@ -1463,6 +1580,7 @@ fn find_interface_flattened_methods<G: GraphMutationTarget>(
                     graph.nodes().get(edge.target).map(|e| e.kind),
                     Some(NodeKind::Interface)
                 )
+                && node_is_go_or_language_unknown(graph, edge.target)
             {
                 queue.push((edge.target, depth + 1));
             }
@@ -1492,6 +1610,9 @@ fn find_method_names_of_type<G: GraphMutationTarget>(
             Some(e) => e,
             None => continue,
         };
+        if !node_is_go_or_language_unknown(graph, method_node) {
+            continue;
+        }
         let qn = match entry.qualified_name {
             Some(q) => q,
             None => continue,
@@ -2562,6 +2683,9 @@ fn resolve_qualified_name_to_type_node<G: GraphMutationTarget>(
     let mut best: Option<(NodeId, NodeKind, u8)> = None;
     for &nid in candidates {
         let entry = graph.nodes().get(nid)?;
+        if !node_is_go_or_language_unknown(graph, nid) {
+            continue;
+        }
         let rank = match entry.kind {
             NodeKind::Struct => 3,
             NodeKind::Interface => 2,
@@ -2783,10 +2907,11 @@ fn run_t1_1_satisfaction<G: GraphMutationTarget>(
     }
     let mut pending: Vec<PendingImplements> = Vec::new();
 
-    // Pass-local index for pointer-form Type nodes minted by T1.1.
-    // Mirrors `indices.pointer_type` shape but operates over the
-    // (candidate_node, candidate_short_name_id) key.
-    let mut t1_1_pointer_form: BTreeMap<NodeId, NodeId> = BTreeMap::new();
+    // Pass-local index for pointer-form Type nodes minted by T1.1,
+    // keyed by the canonical pointer qualified-name. The candidate set
+    // can contain a real Struct and a Type stub with the same qn; both
+    // must share one `<pkg>.*<C>` synthetic node.
+    let mut t1_1_pointer_form: BTreeMap<StringId, NodeId> = BTreeMap::new();
 
     for &c in &sorted_candidates {
         let Some(c_methods) = candidate_method_sets.get(&c) else {
@@ -3177,6 +3302,9 @@ fn collect_interface_method_sets<G: GraphMutationTarget>(
     // step below can look up signatures via the same map.
     let mut direct: BTreeMap<NodeId, Vec<(StringId, NodeId)>> = BTreeMap::new();
     for &iface in &interface_nodes {
+        if !node_is_go_or_language_unknown(graph, iface) {
+            continue;
+        }
         let iface_qn = match qualified_name_string(graph, iface) {
             Some(s) => s,
             None => continue,
@@ -3189,6 +3317,9 @@ fn collect_interface_method_sets<G: GraphMutationTarget>(
     // bounded BFS to handle interface-of-interface composition.
     const MAX_INTERFACE_EMBED_DEPTH: usize = 16;
     for &iface in &interface_nodes {
+        if !node_is_go_or_language_unknown(graph, iface) {
+            continue;
+        }
         // Dedupe by `name_id` so embedded interfaces contributing the
         // same method name once each don't blow the entry list up. The
         // signature retained is the one observed first (BFS order from
@@ -3222,7 +3353,9 @@ fn collect_interface_method_sets<G: GraphMutationTarget>(
             for edge_ref in graph.edges().edges_from(cur) {
                 if matches!(edge_ref.kind, EdgeKind::Inherits) {
                     let kind = graph.nodes().get(edge_ref.target).map(|e| e.kind);
-                    if matches!(kind, Some(NodeKind::Interface)) {
+                    if matches!(kind, Some(NodeKind::Interface))
+                        && node_is_go_or_language_unknown(graph, edge_ref.target)
+                    {
                         queue.push(edge_ref.target);
                     }
                 }
@@ -3247,6 +3380,9 @@ fn collect_candidate_types<G: GraphMutationTarget>(graph: &G) -> BTreeSet<NodeId
     let mut out: BTreeSet<NodeId> = BTreeSet::new();
     for kind in [NodeKind::Struct, NodeKind::Interface, NodeKind::Type] {
         for &nid in graph.indices().by_kind(kind) {
+            if !node_is_go_or_language_unknown(graph, nid) {
+                continue;
+            }
             // Exclude synthetic nodes (pointer-form anchors, promoted
             // methods) from the candidate set — they are derived from
             // canonical types and do not introduce new method sets.
@@ -3481,30 +3617,29 @@ fn materialise_pointer_form_for_c<G: GraphMutationTarget>(
     graph: &mut G,
     c: NodeId,
     c_file: FileId,
-    t1_1_pointer_form: &mut BTreeMap<NodeId, NodeId>,
+    t1_1_pointer_form: &mut BTreeMap<StringId, NodeId>,
     indices: &PassLocalIndices,
     newly_created_nodes: &mut Vec<NodeId>,
 ) -> Option<NodeId> {
-    if let Some(&existing) = t1_1_pointer_form.get(&c) {
-        return Some(existing);
-    }
     let c_qn_str = qualified_name_string(graph, c)?;
     let (package_qn, short_name) = split_qn_into_package_and_name(&c_qn_str)?;
     let package_id = graph.strings_mut().intern(&package_qn).ok()?;
     let short_name_id = graph.strings_mut().intern(&short_name).ok()?;
-
-    // Reuse the T1.2 pointer-form anchor if available.
-    if let Some(&shared) = indices.pointer_type.get(&(package_id, short_name_id)) {
-        t1_1_pointer_form.insert(c, shared);
-        return Some(shared);
-    }
-
-    // Cluster G1: canonical-form pointer marker is `::*`. See
-    // 05_TEST_PLAN.md §7.5.
     let ptr_qn = format!("{package_qn}::*{short_name}");
     let interned_qn = graph.strings_mut().intern(&ptr_qn).ok()?;
 
-    // Cluster E2 iter-2 — idempotency against persisted state.
+    if let Some(&existing) = t1_1_pointer_form.get(&interned_qn) {
+        return Some(existing);
+    }
+
+    // Reuse the T1.2 pointer-form anchor if available.
+    if let Some(&shared) = indices.pointer_type.get(&(package_id, short_name_id)) {
+        t1_1_pointer_form.insert(interned_qn, shared);
+        return Some(shared);
+    }
+
+    // Cluster E2 iter-2 — idempotency against persisted state, plus
+    // reuse of plugin-emitted pointer receiver Type anchors.
     //
     // The pass-local `t1_1_pointer_form` and `indices.pointer_type`
     // maps reset on every pass invocation, so an incremental rebuild
@@ -3517,13 +3652,10 @@ fn materialise_pointer_form_for_c<G: GraphMutationTarget>(
     // emissions — codex iter-1 finding 1's pointer-form variant.
     //
     // Consult the global `by_qualified_name` index for an existing
-    // live `*C` of kind Type + Synthetic. If found, reuse its NodeId
-    // and skip the mint. The lookup is a two-scope dance because
-    // `graph.indices()` (immutable) and `graph.macro_metadata_mut()`
-    // (mutable) cannot be held simultaneously through the
-    // `GraphMutationTarget` trait — we collect kind-matched
-    // candidates under the immutable borrow first, then check
-    // synthetic under the mutable metadata borrow.
+    // live `*C` of kind Type. This covers both pass-owned persisted
+    // synthetics and plugin-emitted pointer receiver anchors such as
+    // `func (f *File) Read(...)`. If found, reuse its NodeId and skip
+    // the mint.
     //
     // This is the one D-emission-logic refinement E2 iter-2 makes:
     // it strictly broadens helper idempotency, never narrows or
@@ -3542,15 +3674,9 @@ fn materialise_pointer_form_for_c<G: GraphMutationTarget>(
             })
             .collect()
     };
-    if !kind_matched.is_empty() {
-        let metadata: &NodeMetadataStore = graph.macro_metadata_mut();
-        if let Some(existing) = kind_matched
-            .into_iter()
-            .find(|nid| metadata.is_synthetic(*nid))
-        {
-            t1_1_pointer_form.insert(c, existing);
-            return Some(existing);
-        }
+    if let Some(existing) = kind_matched.into_iter().next() {
+        t1_1_pointer_form.insert(interned_qn, existing);
+        return Some(existing);
     }
 
     let new_id = mint_synthetic_node(graph, NodeKind::Type, &short_name, interned_qn, c_file)?;
@@ -3558,7 +3684,7 @@ fn materialise_pointer_form_for_c<G: GraphMutationTarget>(
         .edges_mut()
         .add_edge(new_id, c, EdgeKind::Inherits, c_file);
     newly_created_nodes.push(new_id);
-    t1_1_pointer_form.insert(c, new_id);
+    t1_1_pointer_form.insert(interned_qn, new_id);
     Some(new_id)
 }
 
@@ -3787,6 +3913,62 @@ mod tests {
         assert_eq!(scoped.promoted_method_nodes, 0);
     }
 
+    #[test]
+    fn entrypoint_ignores_known_non_go_interface_shapes() {
+        let mut graph = CodeGraph::new();
+        let interface_file =
+            register_language_file(&mut graph, "/tmp/UserRepository.java", Language::Java);
+        let impl_file = register_language_file(
+            &mut graph,
+            "/tmp/InMemoryUserRepository.java",
+            Language::Java,
+        );
+
+        let iface = make_qn_node(
+            &mut graph,
+            NodeKind::Interface,
+            "UserRepository",
+            "com.example.enterprise.UserRepository",
+            interface_file,
+        );
+        let _iface_method = make_qn_node(
+            &mut graph,
+            NodeKind::Method,
+            "findAll",
+            "com.example.enterprise.UserRepository.findAll",
+            interface_file,
+        );
+        let duplicate_iface = make_qn_node(
+            &mut graph,
+            NodeKind::Interface,
+            "UserRepository",
+            "com.example.enterprise.UserRepository",
+            impl_file,
+        );
+        let _impl_method = make_qn_node(
+            &mut graph,
+            NodeKind::Method,
+            "findAll",
+            "com.example.enterprise.InMemoryUserRepository.findAll",
+            impl_file,
+        );
+        graph
+            .edges_mut()
+            .add_edge(duplicate_iface, iface, EdgeKind::Implements, impl_file);
+        rebuild_indices(&mut graph);
+
+        let stats = run_go_method_set_satisfaction(&mut graph, None);
+
+        assert_eq!(stats.satisfaction_pairs_examined, 0);
+        assert_eq!(stats.implements_edges_value, 0);
+        assert_eq!(stats.implements_edges_pointer, 0);
+        assert!(
+            qn_strid(&graph, "com.example.enterprise.*UserRepository")
+                .is_none_or(|qn| graph.indices().by_qualified_name(qn).is_empty()),
+            "Go method-set pass must not mint pointer-form synthetic nodes for Java interfaces"
+        );
+    }
+
     // ----- D1 promotion algorithm fixtures -----
 
     /// Fixture-builder helpers. Each test fabricates a minimal CodeGraph
@@ -3808,10 +3990,14 @@ mod tests {
     /// language filter is a no-op there.
     #[allow(dead_code, reason = "Only consumed by Cluster E2 incremental tests.")]
     fn register_go_file(graph: &mut CodeGraph, path: &str) -> FileId {
+        register_language_file(graph, path, Language::Go)
+    }
+
+    fn register_language_file(graph: &mut CodeGraph, path: &str, language: Language) -> FileId {
         graph
             .files_mut()
-            .register_with_language(std::path::Path::new(path), Some(Language::Go))
-            .expect("register Go test file")
+            .register_with_language(std::path::Path::new(path), Some(language))
+            .expect("register language test file")
     }
 
     /// Cluster G1: lookup helper for canonicalisation-aware tests.

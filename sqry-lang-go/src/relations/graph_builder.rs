@@ -63,6 +63,176 @@ fn go_canonical_qn(pkg: &str, raw: &str) -> String {
     canonicalize_graph_qualified_name(Language::Go, &qualified)
 }
 
+fn qualify_go_type_name(package: &str, raw: &str) -> String {
+    if raw.contains('.') {
+        raw.to_string()
+    } else {
+        format!("{package}.{raw}")
+    }
+}
+
+pub(crate) fn is_go_predeclared_type(raw: &str) -> bool {
+    matches!(
+        raw,
+        "any"
+            | "bool"
+            | "byte"
+            | "comparable"
+            | "complex64"
+            | "complex128"
+            | "error"
+            | "float32"
+            | "float64"
+            | "int"
+            | "int8"
+            | "int16"
+            | "int32"
+            | "int64"
+            | "rune"
+            | "string"
+            | "uint"
+            | "uint8"
+            | "uint16"
+            | "uint32"
+            | "uint64"
+            | "uintptr"
+    )
+}
+
+fn is_known_external_interface_embedding(raw: &str, context_node: Node, content: &[u8]) -> bool {
+    let Some((selector, type_name)) = raw.split_once('.') else {
+        return false;
+    };
+    let Some(import_path) = resolve_import_path_for_selector(context_node, content, selector)
+    else {
+        return false;
+    };
+    matches!(import_path.as_str(), "io") && is_known_io_interface(type_name)
+}
+
+fn is_known_io_interface(type_name: &str) -> bool {
+    matches!(
+        type_name,
+        "ByteReader"
+            | "ByteScanner"
+            | "ByteWriter"
+            | "Closer"
+            | "Reader"
+            | "ReaderAt"
+            | "ReaderFrom"
+            | "ReadCloser"
+            | "ReadSeekCloser"
+            | "ReadSeeker"
+            | "ReadWriter"
+            | "ReadWriteCloser"
+            | "ReadWriteSeeker"
+            | "RuneReader"
+            | "RuneScanner"
+            | "Seeker"
+            | "StringWriter"
+            | "Writer"
+            | "WriterAt"
+            | "WriterTo"
+            | "WriteCloser"
+            | "WriteSeeker"
+    )
+}
+
+fn resolve_import_path_for_selector(
+    context_node: Node,
+    content: &[u8],
+    selector: &str,
+) -> Option<String> {
+    let mut root = context_node;
+    while let Some(parent) = root.parent() {
+        root = parent;
+    }
+    if root.kind() != "source_file" {
+        return None;
+    }
+    let mut cursor = root.walk();
+    for child in root.children(&mut cursor) {
+        if child.kind() != "import_declaration" {
+            continue;
+        }
+        if let Some(import_path) = resolve_import_path_in_declaration(child, content, selector) {
+            return Some(import_path);
+        }
+    }
+    None
+}
+
+fn resolve_import_path_in_declaration(
+    import_decl: Node,
+    content: &[u8],
+    selector: &str,
+) -> Option<String> {
+    let mut cursor = import_decl.walk();
+    for child in import_decl.children(&mut cursor) {
+        match child.kind() {
+            "import_spec" => {
+                if let Some(import_path) = resolve_import_spec_selector(child, content, selector) {
+                    return Some(import_path);
+                }
+            }
+            "import_spec_list" => {
+                let mut spec_cursor = child.walk();
+                for spec in child.children(&mut spec_cursor) {
+                    if spec.kind() == "import_spec"
+                        && let Some(import_path) =
+                            resolve_import_spec_selector(spec, content, selector)
+                    {
+                        return Some(import_path);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn resolve_import_spec_selector(
+    import_spec: Node,
+    content: &[u8],
+    selector: &str,
+) -> Option<String> {
+    let mut alias: Option<String> = None;
+    let mut import_path: Option<String> = None;
+    let mut cursor = import_spec.walk();
+    for child in import_spec.children(&mut cursor) {
+        match child.kind() {
+            "package_identifier" | "." | "_" => {
+                alias = child.utf8_text(content).ok().map(|s| s.trim().to_string());
+            }
+            "interpreted_string_literal" | "raw_string_literal" => {
+                import_path = child.utf8_text(content).ok().map(strip_go_string_literal);
+            }
+            _ => {}
+        }
+    }
+    let import_path = import_path?;
+    let effective_selector = alias.unwrap_or_else(|| default_go_import_selector(&import_path));
+    (effective_selector == selector).then_some(import_path)
+}
+
+fn strip_go_string_literal(text: &str) -> String {
+    text.trim()
+        .trim_start_matches('"')
+        .trim_end_matches('"')
+        .trim_start_matches('`')
+        .trim_end_matches('`')
+        .to_string()
+}
+
+fn default_go_import_selector(import_path: &str) -> String {
+    import_path
+        .rsplit('/')
+        .next()
+        .unwrap_or(import_path)
+        .to_string()
+}
+
 /// Cluster G1 (T1.3 — 01_SPEC §7 AC-10/AC-11, 05_TEST_PLAN.md):
 /// inspect a `call_expression` AST node for the shape of a same-
 /// package named-type conversion (`T(g)` where `T` is a function-typed
@@ -736,8 +906,17 @@ fn handle_type_alias(node: Node, content: &[u8], helper: &mut GraphBuildHelper, 
     }
 
     // Create Type node for the target and TypeOf edge with TypeParameter context
-    // (TypeParameter context indicates this is a type-level relationship)
-    let target_id = helper.add_type(&type_string, None);
+    // (TypeParameter context indicates this is a type-level relationship).
+    // Bare named targets (`type A = B`) are package-qualified so alias
+    // resolution can find the same canonical Struct/Interface companion as
+    // normal declarations. Composite literals (`struct { ... }`,
+    // `interface { ... }`, `func(...)`, etc.) remain literal text.
+    let target_type_name = match type_node.kind() {
+        "type_identifier" if is_go_predeclared_type(&type_string) => type_string.clone(),
+        "type_identifier" => qualify_go_type_name(package, &type_string),
+        _ => type_string.clone(),
+    };
+    let target_id = helper.add_type(&target_type_name, None);
     helper.add_typeof_edge_with_context(
         alias_id,
         target_id,
@@ -750,6 +929,25 @@ fn handle_type_alias(node: Node, content: &[u8], helper: &mut GraphBuildHelper, 
     for ref_type_name in &referenced_types {
         let ref_type_id = helper.add_type(ref_type_name, None);
         helper.add_reference_edge(alias_id, ref_type_id);
+    }
+
+    // Phase 2 follow-up for golang/go#66540: a type alias may name an
+    // unnamed struct literal that embeds another type, e.g.
+    // `type A = struct { io.Reader }`. Go promotes methods through that
+    // alias when another struct embeds `A`, so the alias node itself must
+    // participate in the embedding graph. Reuse the same struct-embedding
+    // extractor used for named structs; it emits Inherits, GoEmbeddingHint,
+    // and a Property slot under the alias namespace.
+    if type_node.kind() == "struct_type" {
+        process_struct_embedding(
+            type_node,
+            content,
+            helper,
+            alias_id,
+            package,
+            &qualified_alias,
+        );
+        process_alias_struct_interface_embeddings(type_node, content, helper, alias_id, package);
     }
 }
 
@@ -2703,6 +2901,81 @@ fn process_struct_embedding(
     }
 }
 
+fn process_alias_struct_interface_embeddings(
+    struct_node: Node,
+    content: &[u8],
+    helper: &mut GraphBuildHelper,
+    alias_id: UnifiedNodeId,
+    package: &str,
+) {
+    let mut cursor = struct_node.walk();
+    for child in struct_node.children(&mut cursor) {
+        if child.kind() != "field_declaration_list" {
+            continue;
+        }
+        let mut field_cursor = child.walk();
+        for field in child.children(&mut field_cursor) {
+            if field.kind() != "field_declaration" || field.child_by_field_name("name").is_some() {
+                continue;
+            }
+            let embedded_type_node = field.child_by_field_name("type").or_else(|| {
+                let mut star_seen = false;
+                let mut found = None;
+                let mut fc = field.walk();
+                for fchild in field.children(&mut fc) {
+                    match fchild.kind() {
+                        "*" => star_seen = true,
+                        "type_identifier" | "qualified_type" if star_seen => {
+                            found = Some(fchild);
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+                found
+            });
+            let Some(type_node) = embedded_type_node else {
+                continue;
+            };
+            let Some(embedded_name) = extract_embedded_type_name(type_node, content) else {
+                continue;
+            };
+            // Only known external interface embeddings need this fallback.
+            // Local interfaces have real declarations in the workspace; unknown
+            // external qualified names may be structs, so classifying them as
+            // interfaces would produce false `Implements` edges.
+            if !is_known_external_interface_embedding(&embedded_name, field, content) {
+                continue;
+            }
+            let interface_qn = go_canonical_qn(package, &embedded_name);
+            let interface_id = helper.add_interface(&interface_qn, None);
+            helper.add_inherits_edge(alias_id, interface_id);
+
+            let pointerness = if field
+                .children(&mut field.walk())
+                .any(|fchild| fchild.kind() == "*")
+                || type_node.kind() == "pointer_type"
+            {
+                GoReceiverPointerness::Pointer
+            } else {
+                GoReceiverPointerness::Value
+            };
+            let inner_qn_id = helper.intern(&interface_qn);
+            let file_id = helper.file_id();
+            helper
+                .staging_mut()
+                .go_hints_mut()
+                .embeddings
+                .push(GoEmbeddingHint {
+                    outer: alias_id,
+                    inner_qualified_name: inner_qn_id,
+                    pointerness,
+                    file: file_id,
+                });
+        }
+    }
+}
+
 /// Process interface embedding - detect embedded interfaces and create Inherits edges.
 ///
 /// In Go, an interface can embed other interfaces:
@@ -2981,11 +3254,7 @@ fn process_single_var_spec(
         // post-Phase-4e `pass_go_method_set::walk_typeof_to_type_node`
         // can't recover the canonical receiver type for promotion
         // lookup.
-        let qualified_type_name = if type_name.contains('.') {
-            type_name.clone()
-        } else {
-            format!("{package}.{type_name}")
-        };
+        let qualified_type_name = qualify_go_type_name(package, &type_name);
         let type_id = helper.add_type(&qualified_type_name, None);
         helper.add_typeof_edge_with_context(
             var_id,

@@ -691,14 +691,40 @@ fn collect_http_requests<G: GraphMutationTarget>(
         let Some(url_str) = graph.strings().resolve(*url_id) else {
             continue;
         };
-        let Some(source_entry) = graph.nodes().get(edge_ref.source) else {
-            continue;
+        // Resolve the source's owning file via the arena. CSR-backed edges
+        // are emitted by `all_live_forward_edges` with the source's
+        // generation hard-coded to 0 (CSR is keyed by slot index, not by
+        // generation), so a strict `nodes().get(edge_ref.source)` lookup
+        // misses any source whose arena slot has been re-allocated to a
+        // higher generation by an earlier incremental rebuild — even
+        // though the underlying slot still holds the same live `NodeEntry`
+        // that produced the edge. Fall back to a slot-index lookup that
+        // ignores the generation so cross-language HTTP linking survives
+        // a tombstone-and-re-allocate sweep. This matches the semantic
+        // contract documented at `EdgeStore::all_live_forward_edges`: the
+        // edges it returns are live by construction (CSR tombstones +
+        // delta shadows filtered), so the slot is guaranteed to be
+        // occupied — only the generation is ambiguous.
+        let (source_node, source_file) = match graph.nodes().get(edge_ref.source) {
+            Some(entry) => (edge_ref.source, entry.file),
+            None => {
+                let slot = graph.nodes().slot(edge_ref.source.index());
+                let Some(slot) = slot else { continue };
+                let Some(entry) = slot.get() else { continue };
+                // Rewire the source NodeId to carry the slot's live
+                // generation so downstream consumers (e.g. the
+                // cross-file edge Pass 5 emits) reference a NodeId that
+                // will still be valid after `RebuildGraph::finalize` step
+                // 9 rebuilds the CSR from compacted deltas.
+                let live_source = NodeId::new(edge_ref.source.index(), slot.generation());
+                (live_source, entry.file)
+            }
         };
         requests.push(HttpRequestInfo {
-            source_node: edge_ref.source,
+            source_node,
             method: *method,
             url_path: url_str.to_string(),
-            file_id: source_entry.file,
+            file_id: source_file,
         });
     }
 

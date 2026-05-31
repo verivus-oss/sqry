@@ -6,8 +6,8 @@
 //! internal watchers:
 //!
 //! 1. A **source-tree watcher** (notify, recursive) that monitors non-ignored
-//!    source files and filters out `.git/` internals, editor temporaries, and
-//!    `.gitignore`-excluded paths.
+//!    source files and filters out `.git/` internals, `.sqry/` artifacts,
+//!    editor temporaries, and `.gitignore`-excluded paths.
 //! 2. A [`GitStateWatcher`] that monitors `.git/` internals and classifies
 //!    changes into [`GitChangeClass`] categories so the daemon can decide
 //!    whether a full rebuild is needed.
@@ -419,12 +419,14 @@ impl SourceTreeWatcher {
         git_state_changed: bool,
         last_git_state: Option<&LastIndexedGitState>,
     ) -> Result<ChangeSet> {
-        // 1. Filter out .git/ paths, gitignored paths, and editor temps.
+        // 1. Filter out .git/ paths, sqry internal artifacts, gitignored
+        // paths, and editor temps.
         let filtered: Vec<RawChange> = raw_changes
             .into_iter()
             .filter(|change| {
                 let path = change.path();
                 !is_under_git_dir(path, &self.root)
+                    && !is_under_sqry_dir(path, &self.root)
                     && !self.is_gitignored(path)
                     && !is_editor_temporary(path)
             })
@@ -527,6 +529,12 @@ fn build_gitignore_matcher(root: &Path) -> Gitignore {
 fn is_under_git_dir(path: &Path, root: &Path) -> bool {
     let git_dir = root.join(".git");
     path.starts_with(&git_dir)
+}
+
+/// Returns `true` if `path` is under sqry's internal `.sqry/` directory.
+fn is_under_sqry_dir(path: &Path, root: &Path) -> bool {
+    let sqry_dir = root.join(".sqry");
+    path.starts_with(&sqry_dir)
 }
 
 /// Returns `true` if the path looks like a common editor temporary file.
@@ -766,6 +774,25 @@ mod tests {
         ));
         assert!(!is_under_git_dir(Path::new("/repo/src/main.rs"), root));
         assert!(!is_under_git_dir(Path::new("/repo/.gitignore"), root));
+    }
+
+    // -----------------------------------------------------------------------
+    // Unit tests: is_under_sqry_dir
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn sqry_dir_detection() {
+        let root = Path::new("/repo");
+        assert!(is_under_sqry_dir(
+            Path::new("/repo/.sqry/graph/snapshot.sqry"),
+            root
+        ));
+        assert!(is_under_sqry_dir(
+            Path::new("/repo/.sqry/analysis/adjacency.csr"),
+            root
+        ));
+        assert!(!is_under_sqry_dir(Path::new("/repo/src/main.rs"), root));
+        assert!(!is_under_sqry_dir(Path::new("/repo/.sqry-workspace"), root));
     }
 
     // -----------------------------------------------------------------------

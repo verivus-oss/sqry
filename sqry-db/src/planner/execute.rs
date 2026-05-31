@@ -579,6 +579,35 @@ impl<'db> PlanExecutor<'db> {
             // resolution provenance. U15 lands the adjacent-folding
             // shape directly onto `PlanNode::EdgeTraversal`.
             CompiledPredicate::ResolvedVia(via) => self.node_has_calls_resolved_via(node_id, *via),
+            // Phase β joint-stubs (Plan A): probe the per-node
+            // framework-route side store via
+            // `NodeMetadataStore::framework_route` (O(log n) BTreeMap
+            // lookup). The predicate accepts the node iff a route entry
+            // is recorded for it AND its `framework_id` equals
+            // `framework`. The evaluation logic is complete; node
+            // membership widens as Plan A's downstream Phase 4f
+            // extractors populate the side store. Coverage:
+            // `sqry-db/tests/phase_beta_predicate_evaluation.rs::framework_eq_*`.
+            CompiledPredicate::FrameworkEq(framework) => self
+                .snapshot
+                .macro_metadata()
+                .framework_route(node_id)
+                .is_some_and(|meta| meta.framework_id == *framework),
+            // Phase β joint-stubs (Plan B): set-membership form of
+            // `resolved_via`. Walks outgoing `Calls` edges via
+            // `node_has_calls_resolved_via` and accepts the node iff at
+            // least one edge carries a `resolved_via` value that is a
+            // member of `set` (OR-semantics across the vec). The 8
+            // `ResolvedVia` variants (Direct / TypeMatch / BindingPlane
+            // / VirtualDispatch / InterfaceDispatch / DuckTyped /
+            // Structural / PromiscuousElided) all flow through the same
+            // path; Plan B's downstream resolver passes widen the
+            // matched node set as they emit edges carrying the new
+            // resolution provenances. Coverage:
+            // `sqry-db/tests/phase_beta_predicate_evaluation.rs::resolved_via_eq_*`.
+            CompiledPredicate::ResolvedViaEq(set) => set
+                .iter()
+                .any(|via| self.node_has_calls_resolved_via(node_id, *via)),
 
             // DB14: relation predicates dispatch through
             // `QueryDb::get::<...Query>` (or the shared subquery helper) so
@@ -843,6 +872,24 @@ enum CompiledPredicate {
     /// Phase A — node-flag lookup against
     /// [`GraphSnapshot::macro_metadata().is_callsite_promiscuous`].
     HasCallsitePromiscuous(bool),
+    /// Phase β joint-stubs (Plan A): per-node framework-route lookup.
+    /// Executor probes `NodeMetadataStore::framework_route(node_id)` and
+    /// matches the carried `framework` field against the requested
+    /// `FrameworkId`. Evaluation logic is complete; the side store stays
+    /// empty until Plan A's Phase 4f extractors populate it, at which
+    /// point the matched node set widens without further executor
+    /// changes.
+    FrameworkEq(sqry_core::schema::FrameworkId),
+    /// Phase β joint-stubs (Plan B): set-membership filter over outgoing
+    /// `Calls.resolved_via`. Executor accepts the node iff at least one
+    /// outgoing `Calls` edge carries a provenance in the requested set
+    /// (OR-semantics across the vec). All 8 `ResolvedVia` variants are
+    /// accepted today; `Direct`/`TypeMatch`/`BindingPlane` are populated
+    /// by `pass5b_c_indirect` in production graphs, and Plan B's
+    /// downstream resolver passes (`pass5c_jvm_virtual`,
+    /// `pass5d_go_interface`, `pass5e_python_duck`, `pass5f_ts_structural`,
+    /// promiscuous-cap elision) emit the remaining 5.
+    ResolvedViaEq(Vec<ResolvedVia>),
     Callers(PredicateValue),
     Callees(PredicateValue),
     Imports(PredicateValue),
@@ -873,6 +920,9 @@ impl CompiledPredicate {
             Predicate::HasCallsitePromiscuous(want) => {
                 CompiledPredicate::HasCallsitePromiscuous(*want)
             }
+            // Phase β joint-stubs.
+            Predicate::FrameworkEq(framework) => CompiledPredicate::FrameworkEq(*framework),
+            Predicate::ResolvedViaEq(set) => CompiledPredicate::ResolvedViaEq(set.clone()),
             // Relation values keep their raw form — compilation is the
             // DerivedQuery's job.
             Predicate::Callers(v) => CompiledPredicate::Callers(v.clone()),

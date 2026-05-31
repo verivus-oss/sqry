@@ -119,10 +119,11 @@ pub const SAVE_COMPONENT_GRAPH: &str = "unified graph";
 // Re-exports
 pub use cancellation::CancellationToken;
 pub use entrypoint::{
-    AnalysisStrategySummary, BuildConfig, BuildResult, GRAPH_FILE_PROCESSING_PHASE,
-    build_and_persist_graph, build_and_persist_graph_with_progress, build_unified_graph,
-    build_unified_graph_cancellable, build_unified_graph_with_progress,
-    build_unified_graph_with_progress_cancellable, persist_and_analyze_graph,
+    AnalysisStrategySummary, BuildConfig, BuildResult, DurableGraphPersistenceRequest,
+    GRAPH_FILE_PROCESSING_PHASE, build_and_persist_graph, build_and_persist_graph_with_progress,
+    build_unified_graph, build_unified_graph_cancellable, build_unified_graph_with_progress,
+    build_unified_graph_with_progress_cancellable, inferred_plugin_selection_manifest,
+    persist_and_analyze_graph, persist_durable_graph_transaction,
 };
 pub use helper::{GraphBuildHelper, HelperStats};
 pub use identity::{IdentityIndex, IdentityKey};

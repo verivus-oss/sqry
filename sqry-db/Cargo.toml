@@ -10,7 +10,7 @@ description = "Salsa-style incremental computation engine for sqry semantic code
 
 [dependencies]
 anyhow.workspace = true
-sqry-core = { version = "16.0.6", path = "../sqry-core" }
+sqry-core = { version = "17.0.0", path = "../sqry-core" }
 parking_lot.workspace = true
 smallvec.workspace = true
 log.workspace = true
@@ -35,12 +35,185 @@ regex-syntax = "0.8"
 globset.workspace = true
 strsim = "0.11"
 
+[features]
+# Differential-test baseline: exposes the `baseline` module containing one
+# pure-graph-walk function per registered DerivedQuery. Used as the oracle
+# for the WS1 differential test harness (see DESIGN §2.1). The module is
+# always compiled under `cfg(test)`; this feature lets non-test consumers
+# (notably the integration tests in `sqry-db/tests/baseline_spot_check.rs`)
+# link the same code without enabling `cfg(test)`.
+baseline = []
+
+# WS1 persistence round-trip property test (DAG unit `U_WS1_12_PERSIST_RT`,
+# DESIGN §2.7). Enables `sqry-core/test-support` so the canonical-arena
+# helper (`sqry_core::graph::unified::test_helpers`) is reachable from
+# `[[test]]` targets. Test-only — the helper module is `#[cfg(any(test,
+# feature = "test-support"))]` in `sqry-core`, and is verified to be
+# absent from release `sqry` binaries via the WS1 symbol-leak gate (`nm
+# target/release/sqry | grep -c canonical_arena` returns 0). Activating
+# this feature only affects test builds.
+persistence-roundtrip = ["sqry-core/test-support"]
+
 [dev-dependencies]
 tempfile.workspace = true
 env_logger.workspace = true
 serde_json.workspace = true
 criterion = { version = "0.8", features = ["html_reports"] }
+# Used by WS1 differential property tests. Same major as `sqry-core` (1.11).
+proptest = "1.11"
 
 [[bench]]
 name = "fusion_bench"
 harness = false
+
+# WS1 differential-harness self-test for the well-formed graph generator
+# (DAG unit `U_WS1_3_GRAPH_GEN`). The generator + invariant checker live
+# under `tests/property/`; this `[[test]]` entry binds the cargo test target
+# name `graph_gen_self_test` to the nested file so the verification gate
+# `cargo test -p sqry-db --test graph_gen_self_test` runs the property suite.
+[[test]]
+name = "graph_gen_self_test"
+path = "tests/property/graph_gen_self_test.rs"
+
+# WS1 baseline spot-check requires the `baseline` feature so the test can
+# import `sqry_db::baseline`. Without `required-features`, default-feature
+# builds would fail to resolve the import. See `sqry-db/src/baseline.rs`
+# and DESIGN §2.1.
+[[test]]
+name = "baseline_spot_check"
+required-features = ["baseline"]
+
+# WS1 differential test family — call (callers / callees / references).
+# DAG unit `U_WS1_4_DIFF_CALL`. Requires the `baseline` feature so the test
+# can import `sqry_db::baseline::{callers, callees, references}` as the
+# oracle for the planner's `CallersQuery` / `CalleesQuery` /
+# `ReferencesQuery`. See DESIGN §2.3.
+[[test]]
+name = "diff_call_family"
+path = "tests/property/diff_call_family.rs"
+required-features = ["baseline"]
+
+# WS1 differential test family — structural relations (DAG unit
+# `U_WS1_5_DIFF_STRUCT`, DESIGN §2.3). Diffs the cached `ImportsQuery`,
+# `ExportsQuery`, and `ImplementsQuery` planner outputs against the
+# NodeId-keyed baseline oracle over well-formed proptest graphs. Requires
+# the `baseline` feature so the test can import `sqry_db::baseline`.
+[[test]]
+name = "diff_structural_family"
+path = "tests/property/diff_structural_family.rs"
+required-features = ["baseline"]
+
+# WS1 differential test family — reach (DAG unit `U_WS1_7_DIFF_REACH`).
+# Pins planner output for `ReachabilityQuery`, `EntryPointsQuery`, and
+# `ReachableFromEntryPointsQuery` against the `sqry_db::baseline` oracle.
+# Requires the `baseline` feature to link the integration-test oracle (same
+# rationale as `baseline_spot_check`). See DESIGN §2.3 and the file header
+# for the entry-point-coverage caveat.
+[[test]]
+name = "diff_reach_family"
+path = "tests/property/diff_reach_family.rs"
+required-features = ["baseline"]
+
+# WS1 differential test family for the unused queries (DAG unit
+# `U_WS1_8_DIFF_UNUSED`, DESIGN §2.3). Sweeps `UnusedQuery` and
+# `IsNodeUnusedQuery` against the `sqry_db::baseline` oracle over the
+# well-formed-graph proptest generator. Needs the `baseline` feature so the
+# oracle module is reachable from non-`cfg(test)` linkage (matches
+# `baseline_spot_check`).
+[[test]]
+name = "diff_unused_family"
+path = "tests/property/diff_unused_family.rs"
+required-features = ["baseline"]
+
+# WS1 differential test family for the Phase A C indirect-call precision
+# marker queries (DAG unit `U_WS1_8B_DIFF_CICALL`). Diffs the
+# `AddressTakenQuery` and `CallsitePromiscuousQuery` planner outputs
+# against `sqry_db::baseline::{address_taken, callsite_promiscuous}` over
+# the well-formed-graph proptest generator. Coverage of the underlying
+# `NodeFlags::ADDRESS_TAKEN` / `NodeFlags::CALLSITE_PROMISCUOUS` bits is
+# provided by U_WS1_3B's generator extension (~15% per-node probability
+# per flag); the file's `nodeflags_coverage_is_non_vacuous` companion in
+# `graph_gen_self_test.rs` guards against generator regressions that
+# would silently empty this family.
+[[test]]
+name = "diff_cicall_family"
+path = "tests/property/diff_cicall_family.rs"
+required-features = ["baseline"]
+
+# WS1 differential test family — cycle queries (DAG unit
+# `U_WS1_6_DIFF_CYCLE`, DESIGN §2.3). Diffs `CyclesQuery`,
+# `IsInCycleQuery`, `SccQuery`, and `CondensationQuery` against the
+# `sqry_db::baseline` oracle over the well-formed-graph generator
+# biased to ≥16 live nodes (DAG acceptance: "graph size distribution
+# skewed up to 16–64 nodes for meaningful cycle coverage"). Regression
+# harness for the SCC non-determinism fix shipped on master via
+# PR #316 (squash `53c496c74`) and on WS1 via commit `d7c974ac3`.
+[[test]]
+name = "diff_cycle_family"
+path = "tests/property/diff_cycle_family.rs"
+required-features = ["baseline"]
+
+# WS1 fusion equivalence property test (DAG unit `U_WS1_9_FUSION`,
+# DESIGN §2.4). Proves that, for arbitrary well-formed plans on
+# arbitrary well-formed graphs, the fused execution path
+# (`fuse_single` → `execute_batch`) produces byte-identical results to
+# the unfused path (`execute_plan`), and that `FusionStats` invariants
+# (`scans_eliminated >= 0`, `<= scans_original`, identity with
+# `total_plans - fusion_groups`) hold on every case.
+#
+# Requires the `baseline` feature so the test can call
+# `QueryDbConfig::disable_fusion()`, which is gated behind
+# `cfg(any(test, feature = "baseline"))` to keep the symbol out of
+# release binaries (verification gate: `nm <release-binary> | grep
+# disable_fusion` must return 0). The companion `plan_gen.rs` strategy
+# module is included via `#[path = "plan_gen.rs"] mod plan_gen;` from
+# inside `fusion_equivalence.rs`, NOT as a separate `[[test]]` target —
+# it has no `#[test]` functions of its own.
+[[test]]
+name = "fusion_equivalence"
+path = "tests/property/fusion_equivalence.rs"
+required-features = ["baseline"]
+
+# WS1 cache-invalidation property suite (DAG unit
+# `U_WS1_10_CACHE_INVARIANTS`, DESIGN §2.5). One proptest per registered
+# `DerivedQuery` (17 total) — drives an arbitrary edit through the graph,
+# compares the planner's pre-/post-edit `db.get::<Q>` output, and asserts
+# `result_changed ⇒ oracle::affects_revisions(...)` (no missing
+# invalidation) plus `tier_touches == NONE ⇒ cache_hit_delta` (no
+# spurious invalidation on strict-noop edits). `edit_oracle.rs` is a
+# shared helper included via `#[path]`, not a separate [[test]] entry.
+# The baseline feature is NOT required — this suite compares planner to
+# planner across snapshots, not to the baseline oracle.
+[[test]]
+name = "cache_invariants"
+path = "tests/property/cache_invariants.rs"
+
+# WS1 parser round-trip property test (DAG unit `U_WS1_11_PARSER_RT`,
+# DESIGN §2.6). Property: `parse → format → parse` is the identity on
+# IR for every text query drawn from the documented grammar
+# (`arbitrary_text_query`). Idempotence companion proves that
+# canonical sorted predicate order reaches a fixed point after a
+# single re-parse cycle. Acceptance budget per DAG: default 256 cases
+# (`cargo test --test parser_roundtrip`), PR 10 000 cases
+# (`PROPTEST_CASES=10000`), nightly 100 000 cases. Baseline feature
+# NOT required — the test compares planner-IR to planner-IR, no
+# oracle linkage.
+[[test]]
+name = "parser_roundtrip"
+path = "tests/property/parser_roundtrip.rs"
+
+# WS1 persistence round-trip property test (DAG unit
+# `U_WS1_12_PERSIST_RT`, DESIGN §2.7). Drives arbitrary well-formed
+# `CodeGraph` values through V11 `save_to_path` → `load_from_path` and
+# asserts `canonical_arena(&before) == canonical_arena(&after)`. The
+# canonical-arena helper normalises interner-permutation and arena-slot
+# ordering so the property is a pure semantic-equivalence check (see
+# `sqry-core/src/graph/unified/test_helpers.rs`). Requires the
+# `persistence-roundtrip` feature so the helper is linkable. Per the
+# Phase α orchestrator brief the round-trip runs against `SQRY_GRAPH_V11`
+# (the current master snapshot magic); rebasing onto V12 lands with
+# Plan B's `U_WS2_2_V12_SCHEMA` in Phase β.
+[[test]]
+name = "persistence_roundtrip"
+path = "tests/property/persistence_roundtrip.rs"
+required-features = ["persistence-roundtrip"]

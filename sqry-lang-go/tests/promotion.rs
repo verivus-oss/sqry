@@ -1,14 +1,8 @@
 //! AC-4, AC-5, AC-6, AC-9 integration tests for the Go T1.2 method-set
 //! promotion pass.
 //!
-//! As of Cluster G1, `ac4_ambiguity` and `ac6_pointer_required` run
-//! live (05_TEST_PLAN.md §7.5 RESOLVED). Two remain `#[ignore]`d:
-//!   - `ac5_promoted_queryable` — Cluster G1 follow-up; local var
-//!     TypeOf-edge target plumbing routes to an unqualified Type stub
-//!     instead of the canonical Struct. See `05_TEST_PLAN.md §7.6`.
-//!   - `ac9_alias_embedding` — Phase 2 (alias-of-unnamed-struct
-//!     embedding per `golang/go#66540`, out of T1.1 scope per
-//!     `01_SPEC.md §8`). See `05_TEST_PLAN.md §7.7`.
+//! As of the 2026-05-30 G2 / Phase 2 follow-up, all four promotion
+//! acceptance tests run live.
 
 #[path = "common/mod.rs"]
 mod common;
@@ -87,7 +81,6 @@ fn ac4_ambiguity() {
 /// `fx.Outer.Greeting` method node and back-references its call site
 /// from `fx.use`.
 #[test]
-#[ignore = "Cluster G follow-up — local var TypeOf-edge target plumbing routes to unqualified Type stub instead of canonical Struct; see 05_TEST_PLAN §7.6"]
 fn ac5_promoted_queryable() {
     let graph = common::build_workspace(Path::new("tests/fixtures/go/promote_ac5"));
 
@@ -168,7 +161,6 @@ fn ac6_pointer_required() {
 /// promotes `io.Reader`'s `Read` method onto `S`, so `S` (or `*S`
 /// depending on receiver pointerness) satisfies `io.Reader`.
 #[test]
-#[ignore = "Phase 2 — golang/go#66540 alias-of-unnamed-struct embedding promotion; out of T1.1 scope per 01_SPEC §8; see 05_TEST_PLAN §7.7"]
 fn ac9_alias_embedding() {
     let graph = common::build_workspace(Path::new("tests/fixtures/go/promote_ac9"));
 
@@ -181,5 +173,10 @@ fn ac9_alias_embedding() {
     assert!(
         satisfied,
         "Implements(fx.S → io.Reader) or Implements(fx.*S → io.Reader) must be emitted (type-alias embedding promotion)",
+    );
+    assert!(
+        !has_implements_edge(&graph, "fx.T", "ext.SomeStruct")
+            && !has_implements_edge(&graph, "fx.*T", "ext.SomeStruct"),
+        "unknown external embedded named types must not be reclassified as interfaces",
     );
 }

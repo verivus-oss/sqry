@@ -53,6 +53,13 @@ pub mod planner;
 pub mod queries;
 pub mod query;
 
+// Differential-test oracle. Compiled only under `cfg(test)` (so internal
+// unit tests can use it) or with the `baseline` Cargo feature (so the
+// integration test in `sqry-db/tests/baseline_spot_check.rs` can link it).
+// Never compiled into a release binary — see WS1 DESIGN §2.1.
+#[cfg(any(test, feature = "baseline"))]
+pub mod baseline;
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 

@@ -65,6 +65,29 @@ pub use visibility::Visibility;
 pub use crate::graph::unified::edge::{EdgeKind, ResolvedVia};
 pub use crate::graph::unified::node::NodeKind;
 
+// Phase β joint-stubs (Plan A + Plan B coordination — V12 schema bump).
+//
+// `FrameworkId` is re-exported here so the planner predicate
+// (`sqry-db::planner::Predicate::FrameworkEq`) and the MCP filter parameter
+// (`sqry-mcp::tools::params::*::framework`) can both refer to the canonical
+// schema-level alias rather than reaching into
+// `crate::graph::unified::storage::framework_routes` directly. `ResolvedVia`
+// is already re-exported above (introduced for C-icall Phase A); Plan B's
+// `Predicate::ResolvedViaEq(Vec<ResolvedVia>)` reuses that alias unchanged
+// — see the schema re-export above.
+pub use crate::graph::unified::storage::{
+    CapHit, DispatchEntry, DispatchTables, FrameworkId, FrameworkRouteMetadata, FrameworkRoutesMap,
+    GoDispatchEntry, JvmDispatchEntry, PathTemplate, PythonDispatchEntry, ResolutionStatus,
+    TsDispatchEntry,
+};
+
+// Re-export `HttpMethod` here too — Plan A `FrameworkRouteMetadata.method`
+// reuses the existing graph-side enum already used by `EdgeKind::HttpRequest`
+// (DESIGN §6 line 151), so the schema-level alias keeps downstream MCP /
+// CLI surfaces from having to reach into `graph::unified::edge::kind`
+// directly.
+pub use crate::graph::unified::edge::kind::HttpMethod;
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -122,8 +122,20 @@ pub(crate) mod inner {
             max_depth = args.max_depth,
             max_results = args.max_results,
             path = %args.path,
+            framework = ?args.framework,
+            resolved_via_filter = ?args.resolved_via,
             "Executing relation_query tool"
         );
+        // Phase β joint-stubs: filter params threaded end-to-end. The
+        // canonical evaluation path for `framework` / `resolved_via`
+        // lives in the planner pipeline reached via `sqry_query` /
+        // `overlay_phase_beta_filters` — see
+        // `sqry-db/tests/phase_beta_predicate_evaluation.rs` for
+        // predicate-evaluation coverage. This relation-walk executor
+        // does not re-evaluate the predicates inline; the args propagate
+        // so daemon-side logging / future planner integration can
+        // observe them without breaking ABI.
+        let _ = (&args.framework, &args.resolved_via);
 
         let edges =
             collect_relation_edges_unified(&snapshot, &ctx.workspace_root, args, args.max_results)?;

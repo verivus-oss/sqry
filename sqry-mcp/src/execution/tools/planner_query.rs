@@ -10,6 +10,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 
+use sqry_db::planner::ir::{PlanNode, Predicate};
 use sqry_db::planner::{execute_plan, parse_query};
 use sqry_db::queries::dispatch::make_query_db_cold;
 
@@ -49,8 +50,19 @@ pub fn execute_sqry_query(params: &SqryQueryParams) -> Result<ToolExecution<Sqry
         .ensure_graph()
         .context("unified graph snapshot is required for sqry_query")?;
 
-    let plan =
+    let mut plan =
         parse_query(&params.query).map_err(|err| anyhow::anyhow!("query parse error: {err}"))?;
+
+    // Phase β joint-stubs: overlay the MCP-level `framework` and
+    // `resolved_via` filter params as AND filters on the parsed plan.
+    // The planner compiles / fuses / cost-gates / **evaluates** both
+    // `Predicate::FrameworkEq` and `Predicate::ResolvedViaEq` end-to-end
+    // (`sqry-db/src/planner/execute.rs::check_predicate`); we wrap the
+    // root in a `Chain` that pipes the existing scan output through a
+    // trailing `Filter`. Predicate-evaluation coverage lives in
+    // `sqry-db/tests/phase_beta_predicate_evaluation.rs`; the
+    // overlay-translation tests below pin the params→plan-shape contract.
+    overlay_phase_beta_filters(&mut plan.root, params);
 
     let snapshot = Arc::new(graph.snapshot());
 
@@ -134,4 +146,139 @@ pub fn execute_sqry_query(params: &SqryQueryParams) -> Result<ToolExecution<Sqry
         candidates_scanned: None,
         workspace_path: workspace_root.display().to_string(),
     })
+}
+
+/// Overlay the Phase β joint-stubs `framework` / `resolved_via` MCP filter
+/// params onto a parsed [`PlanNode`] tree as a trailing
+/// [`PlanNode::Filter`] in a [`PlanNode::Chain`].
+///
+/// This is the converter-side wiring codex iter_1 §Check 9 mandated: the
+/// MCP boundary used to drop both fields; this helper ensures they reach
+/// the planner. When the predicate vector is empty (the caller passed
+/// `None` for both, the back-compat default), the plan is left
+/// untouched.
+fn overlay_phase_beta_filters(root: &mut PlanNode, params: &SqryQueryParams) {
+    let mut extra: Vec<Predicate> = Vec::new();
+    if let Some(framework_param) = params.framework {
+        let framework: sqry_core::schema::FrameworkId = framework_param.into();
+        extra.push(Predicate::FrameworkEq(framework));
+    }
+    if let Some(via_params) = &params.resolved_via
+        && !via_params.is_empty()
+    {
+        let set: Vec<sqry_core::schema::ResolvedVia> =
+            via_params.iter().copied().map(Into::into).collect();
+        extra.push(Predicate::ResolvedViaEq(set));
+    }
+    if extra.is_empty() {
+        return;
+    }
+
+    let predicate = if extra.len() == 1 {
+        extra.remove(0)
+    } else {
+        Predicate::And(extra)
+    };
+    let new_filter = PlanNode::Filter { predicate };
+
+    // Replace the root with a Chain containing the existing root then the
+    // new filter. If the root is already a Chain, append to its steps.
+    let owned = std::mem::replace(
+        root,
+        PlanNode::Chain {
+            steps: Vec::with_capacity(0),
+        },
+    );
+    let chain = match owned {
+        PlanNode::Chain { mut steps } => {
+            steps.push(new_filter);
+            PlanNode::Chain { steps }
+        }
+        other => PlanNode::Chain {
+            steps: vec![other, new_filter],
+        },
+    };
+    *root = chain;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::params::{FrameworkIdParam, ResolvedViaParam};
+
+    fn make_params(query: &str) -> SqryQueryParams {
+        SqryQueryParams {
+            query: query.to_string(),
+            path: ".".to_string(),
+            limit: None,
+            budget_rows: None,
+            framework: None,
+            resolved_via: None,
+        }
+    }
+
+    #[test]
+    fn overlay_noop_when_both_params_absent() {
+        let mut plan = parse_query("kind:function").expect("parse");
+        let original = plan.clone();
+        let params = make_params("kind:function");
+        overlay_phase_beta_filters(&mut plan.root, &params);
+        // Plan unchanged.
+        assert_eq!(format!("{:?}", plan), format!("{:?}", original));
+    }
+
+    #[test]
+    fn overlay_appends_framework_eq_predicate() {
+        let mut plan = parse_query("kind:function").expect("parse");
+        let mut params = make_params("kind:function");
+        params.framework = Some(FrameworkIdParam::Flask);
+        overlay_phase_beta_filters(&mut plan.root, &params);
+        // The root must contain a FrameworkEq filter — verify via debug
+        // string match (cheap, no public Plan walker yet).
+        let debug = format!("{:?}", plan.root);
+        assert!(
+            debug.contains("FrameworkEq(Flask)"),
+            "missing FrameworkEq(Flask) in plan: {debug}"
+        );
+    }
+
+    #[test]
+    fn overlay_appends_resolved_via_eq_predicate() {
+        let mut plan = parse_query("kind:function").expect("parse");
+        let mut params = make_params("kind:function");
+        params.resolved_via = Some(vec![
+            ResolvedViaParam::Direct,
+            ResolvedViaParam::VirtualDispatch,
+        ]);
+        overlay_phase_beta_filters(&mut plan.root, &params);
+        let debug = format!("{:?}", plan.root);
+        assert!(
+            debug.contains("ResolvedViaEq("),
+            "missing ResolvedViaEq in plan: {debug}"
+        );
+        assert!(
+            debug.contains("Direct") && debug.contains("VirtualDispatch"),
+            "missing requested variants in plan: {debug}"
+        );
+    }
+
+    #[test]
+    fn overlay_combines_both_with_and() {
+        let mut plan = parse_query("kind:function").expect("parse");
+        let mut params = make_params("kind:function");
+        params.framework = Some(FrameworkIdParam::Spring);
+        params.resolved_via = Some(vec![ResolvedViaParam::VirtualDispatch]);
+        overlay_phase_beta_filters(&mut plan.root, &params);
+        let debug = format!("{:?}", plan.root);
+        // Both predicates must appear; And combinator wraps them.
+        assert!(
+            debug.contains("FrameworkEq(Spring)"),
+            "missing FrameworkEq(Spring): {debug}"
+        );
+        assert!(
+            debug.contains("VirtualDispatch"),
+            "missing VirtualDispatch: {debug}"
+        );
+        assert!(debug.contains("And("), "missing And combinator: {debug}");
+    }
 }

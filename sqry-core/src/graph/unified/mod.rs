@@ -147,6 +147,15 @@ pub mod rebuild;
 #[cfg(all(test, feature = "loom"))]
 pub mod loom_tests;
 
+// Test-only canonical-arena helper for WS1 round-trip property tests
+// (DAG unit `U_WS1_12_PERSIST_RT`, DESIGN §2.7 of
+// `docs/development/graph-fidelity-planner-correctness/02_DESIGN-graph-fidelity-planner-correctness.md`).
+// Gated behind `cfg(any(test, feature = "test-support"))` so the
+// symbols never link into release binaries — verified by the WS1
+// gate `nm target/release/sqry | grep -c canonical_arena` returning 0.
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_helpers;
+
 // Re-exports for convenience
 pub use admission::{
     AdmissionController, AdmissionControllerStats, AdmissionError, BufferStateSnapshot,

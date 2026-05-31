@@ -100,8 +100,9 @@ use sqry_core::graph::{
     CodeGraph, GraphBuilderError,
     unified::{
         build::{
-            BuildConfig, CancellationToken, build_unified_graph_cancellable,
-            compute_reverse_dep_closure, incremental_rebuild,
+            BuildConfig, BuildResult, CancellationToken, DurableGraphPersistenceRequest,
+            build_unified_graph_with_progress_cancellable, compute_reverse_dep_closure,
+            inferred_plugin_selection_manifest, persist_durable_graph_transaction,
         },
         memory::GraphMemorySize,
     },
@@ -138,6 +139,16 @@ pub enum RebuildMode {
     Full,
     /// Run `incremental_rebuild` over the reverse-dep closure.
     Incremental,
+}
+
+struct RebuildGraphOutput {
+    graph: CodeGraph,
+    effective_threads: usize,
+}
+
+struct DurableRebuildOutput {
+    graph: CodeGraph,
+    build_result: BuildResult,
 }
 
 impl RebuildMode {
@@ -1186,7 +1197,7 @@ impl RebuildDispatcher {
         // `rebuild_cancelled = true`, the forwarder flips the token,
         // the pipeline returns `GraphBuilderError::Cancelled` →
         // mapped to `DaemonError::WorkspaceEvicted`.
-        let new_graph: CodeGraph = match self
+        let durable_rebuild: DurableRebuildOutput = match self
             .execute_rebuild(key, ws, &prior_graph, mode, changes)
             .await
         {
@@ -1210,6 +1221,17 @@ impl RebuildDispatcher {
                 return Err(e);
             }
         };
+        let DurableRebuildOutput {
+            graph: new_graph,
+            build_result,
+        } = durable_rebuild;
+        tracing::debug!(
+            workspace = %key.source_root.display(),
+            nodes = build_result.node_count,
+            edges = build_result.edge_count,
+            mode = ?mode,
+            "daemon rebuild durable persistence committed before publish"
+        );
 
         // Task 7 Phase 7c §5e: hold `workspaces.read()` across the
         // final cancellation/membership re-check AND
@@ -1384,7 +1406,7 @@ impl RebuildDispatcher {
         prior: &Arc<CodeGraph>,
         mode: RebuildMode,
         changes: ChangeSet,
-    ) -> Result<CodeGraph, DaemonError> {
+    ) -> Result<DurableRebuildOutput, DaemonError> {
         let root = key.source_root.clone();
         let plugins = Arc::clone(&self.plugins);
         let cfg = self.build_config.clone();
@@ -1425,7 +1447,7 @@ impl RebuildDispatcher {
 
         let token_for_blocking = token.clone();
         let join_result = tokio::task::spawn_blocking(move || {
-            execute_rebuild_blocking(
+            let built = execute_rebuild_blocking(
                 &root,
                 &prior_for_blocking,
                 mode,
@@ -1433,7 +1455,8 @@ impl RebuildDispatcher {
                 &plugins,
                 &cfg,
                 &token_for_blocking,
-            )
+            )?;
+            persist_rebuild_output_blocking(root, built, &plugins, &cfg, mode)
         })
         .await;
 
@@ -1949,10 +1972,16 @@ async fn dispatch_loop_async(
     }
 }
 
-/// Run the appropriate sqry-core entrypoint on the current (blocking)
-/// thread. Factored out of `execute_rebuild` so the blocking closure
-/// is a plain free function — easier to review and easier to mock in
-/// unit tests if future phases need to.
+/// Materialize a complete replacement graph on the current (blocking)
+/// thread. Factored out of `execute_rebuild` so the blocking closure is a
+/// plain free function.
+///
+/// RPI durable-rebuild correction: even an incremental-triggered rebuild
+/// materializes a complete graph before the persistence transaction. The
+/// prior incremental graph output is not currently a safe durable snapshot
+/// source because CSR compaction can observe inconsistent row/edge counts.
+/// Rebuild mode still records the scheduler decision, while durability uses a
+/// complete graph artifact for both memory publish and filesystem commit.
 ///
 /// Task 7 Phase 7c: takes a [`CancellationToken`] that's polled at
 /// every pass boundary. A cancelled token produces
@@ -1963,37 +1992,71 @@ async fn dispatch_loop_async(
 /// `ws.rebuild_cancelled = true`).
 fn execute_rebuild_blocking(
     root: &std::path::Path,
-    prior: &Arc<CodeGraph>,
+    _prior: &Arc<CodeGraph>,
     mode: RebuildMode,
-    changes: ChangeSet,
+    _changes: ChangeSet,
     plugins: &PluginManager,
     cfg: &BuildConfig,
     cancellation: &CancellationToken,
-) -> Result<CodeGraph, DaemonError> {
+) -> Result<RebuildGraphOutput, DaemonError> {
     match mode {
-        RebuildMode::Full => {
-            match build_unified_graph_cancellable(root, plugins, cfg, cancellation) {
-                Ok(graph) => Ok(graph),
-                Err(e) => Err(map_graph_builder_err(e, root.to_path_buf(), "full rebuild")),
+        RebuildMode::Full | RebuildMode::Incremental => {
+            let stage = match mode {
+                RebuildMode::Full => "full rebuild",
+                RebuildMode::Incremental => "incremental-triggered durable full rebuild",
+            };
+            match build_unified_graph_with_progress_cancellable(
+                root,
+                plugins,
+                cfg,
+                sqry_core::progress::no_op_reporter(),
+                cancellation,
+            ) {
+                Ok((graph, effective_threads)) => Ok(RebuildGraphOutput {
+                    graph,
+                    effective_threads,
+                }),
+                Err(e) => Err(map_graph_builder_err(e, root.to_path_buf(), stage)),
             }
         }
-        RebuildMode::Incremental => {
-            let paths: &[PathBuf] = &changes.changed_files;
-
-            // Closure math — resolve paths registered in the graph.
-            // Unresolved paths are handled by
-            // `phase3e_discover_new_file_paths` inside
-            // `incremental_rebuild`.
-            let file_ids: Vec<_> = paths.iter().filter_map(|p| prior.files().get(p)).collect();
-            let closure = compute_reverse_dep_closure(&file_ids, prior.as_ref());
-
-            // Task 7 Phase 7c: real cancellation token from
-            // `LoadedWorkspace::rebuild_cancelled`, wired via the
-            // forwarder spawned in `execute_rebuild`.
-            incremental_rebuild(prior.as_ref(), paths, &closure, plugins, cfg, cancellation)
-                .map_err(|e| map_graph_builder_err(e, root.to_path_buf(), "incremental rebuild"))
-        }
     }
+}
+
+fn persist_rebuild_output_blocking(
+    root: PathBuf,
+    built: RebuildGraphOutput,
+    plugins: &PluginManager,
+    cfg: &BuildConfig,
+    mode: RebuildMode,
+) -> Result<DurableRebuildOutput, DaemonError> {
+    let build_command = match mode {
+        RebuildMode::Full => "daemon:rebuild:full",
+        RebuildMode::Incremental => "daemon:rebuild:incremental",
+    };
+    let RebuildGraphOutput {
+        graph,
+        effective_threads,
+    } = built;
+    persist_durable_graph_transaction(
+        graph,
+        DurableGraphPersistenceRequest {
+            root: &root,
+            plugins,
+            config: cfg,
+            build_command,
+            plugin_selection: inferred_plugin_selection_manifest(plugins),
+            progress: sqry_core::progress::no_op_reporter(),
+            effective_threads,
+        },
+    )
+    .map(|(graph, build_result)| DurableRebuildOutput {
+        graph,
+        build_result,
+    })
+    .map_err(|err| DaemonError::WorkspaceBuildFailed {
+        root,
+        reason: format!("durable graph persistence transaction failed: {err:#}"),
+    })
 }
 
 /// Map a sqry-core [`GraphBuilderError`] to the daemon surface type.

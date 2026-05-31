@@ -95,6 +95,9 @@ fn pf04_mcp_sqry_query_does_not_create_derived_sqry() -> Result<()> {
         path: workspace.to_string_lossy().into_owned(),
         limit: Some(100),
         budget_rows: None,
+        // Phase β joint-stubs: both filter params default to None (no-op).
+        framework: None,
+        resolved_via: None,
     };
     let _result = execute_sqry_query(&params)?;
 

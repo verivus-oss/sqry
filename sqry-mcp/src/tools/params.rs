@@ -113,6 +113,164 @@ impl From<CoreVisibility> for VisibilityParam {
     }
 }
 
+// ============================================================================
+// Phase β joint-stubs: framework + resolved_via filter param wrappers
+// ============================================================================
+//
+// These wrappers expose `sqry_core::schema::FrameworkId` and
+// `sqry_core::schema::ResolvedVia` through the JsonSchema-generating
+// path used by every MCP tool input schema. The wrappers are paper-thin
+// (paper-thin pass-throughs with `From` impls in both directions), matching
+// the established pattern used for `VisibilityParam` / `DuplicateTypeParam`.
+//
+// They are accepted as optional fields on the five tool param structs
+// (`relation_query`, `direct_callers`, `direct_callees`, `semantic_search`,
+// `sqry_query`) in this PR but the fields are **not consumed** by tool
+// execution — Plan A and Plan B's downstream PRs wire each filter into
+// the planner / executor. See the field documentation on each Params struct.
+
+/// MCP-facing framework identifier (Plan A joint-stub).
+///
+/// Wraps [`sqry_core::schema::FrameworkId`] with a JsonSchema derive so the
+/// tool's input schema declares `framework` as a typed enum. Snake-case
+/// serde so the wire form is `"flask"`, `"fast_api"`, ...
+///
+/// Discriminants `0..=18` match `FrameworkId` exactly (the wrapper is a
+/// 1:1 mapping). Variant ordering is appended in lockstep with the core
+/// enum — a new framework MUST be added to both.
+#[allow(clippy::upper_case_acronyms)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum FrameworkIdParam {
+    AspNetCore,
+    Actix,
+    Axum,
+    Chi,
+    Django,
+    Express,
+    FastApi,
+    Fastify,
+    Flask,
+    Gin,
+    Koa,
+    Laravel,
+    NestJs,
+    Rails,
+    Rocket,
+    Sinatra,
+    Spring,
+    Starlette,
+    Symfony,
+}
+
+impl From<FrameworkIdParam> for sqry_core::schema::FrameworkId {
+    fn from(f: FrameworkIdParam) -> Self {
+        use sqry_core::schema::FrameworkId;
+        match f {
+            FrameworkIdParam::AspNetCore => FrameworkId::AspNetCore,
+            FrameworkIdParam::Actix => FrameworkId::Actix,
+            FrameworkIdParam::Axum => FrameworkId::Axum,
+            FrameworkIdParam::Chi => FrameworkId::Chi,
+            FrameworkIdParam::Django => FrameworkId::Django,
+            FrameworkIdParam::Express => FrameworkId::Express,
+            FrameworkIdParam::FastApi => FrameworkId::FastApi,
+            FrameworkIdParam::Fastify => FrameworkId::Fastify,
+            FrameworkIdParam::Flask => FrameworkId::Flask,
+            FrameworkIdParam::Gin => FrameworkId::Gin,
+            FrameworkIdParam::Koa => FrameworkId::Koa,
+            FrameworkIdParam::Laravel => FrameworkId::Laravel,
+            FrameworkIdParam::NestJs => FrameworkId::NestJs,
+            FrameworkIdParam::Rails => FrameworkId::Rails,
+            FrameworkIdParam::Rocket => FrameworkId::Rocket,
+            FrameworkIdParam::Sinatra => FrameworkId::Sinatra,
+            FrameworkIdParam::Spring => FrameworkId::Spring,
+            FrameworkIdParam::Starlette => FrameworkId::Starlette,
+            FrameworkIdParam::Symfony => FrameworkId::Symfony,
+        }
+    }
+}
+
+impl From<sqry_core::schema::FrameworkId> for FrameworkIdParam {
+    fn from(f: sqry_core::schema::FrameworkId) -> Self {
+        use sqry_core::schema::FrameworkId;
+        match f {
+            FrameworkId::AspNetCore => FrameworkIdParam::AspNetCore,
+            FrameworkId::Actix => FrameworkIdParam::Actix,
+            FrameworkId::Axum => FrameworkIdParam::Axum,
+            FrameworkId::Chi => FrameworkIdParam::Chi,
+            FrameworkId::Django => FrameworkIdParam::Django,
+            FrameworkId::Express => FrameworkIdParam::Express,
+            FrameworkId::FastApi => FrameworkIdParam::FastApi,
+            FrameworkId::Fastify => FrameworkIdParam::Fastify,
+            FrameworkId::Flask => FrameworkIdParam::Flask,
+            FrameworkId::Gin => FrameworkIdParam::Gin,
+            FrameworkId::Koa => FrameworkIdParam::Koa,
+            FrameworkId::Laravel => FrameworkIdParam::Laravel,
+            FrameworkId::NestJs => FrameworkIdParam::NestJs,
+            FrameworkId::Rails => FrameworkIdParam::Rails,
+            FrameworkId::Rocket => FrameworkIdParam::Rocket,
+            FrameworkId::Sinatra => FrameworkIdParam::Sinatra,
+            FrameworkId::Spring => FrameworkIdParam::Spring,
+            FrameworkId::Starlette => FrameworkIdParam::Starlette,
+            FrameworkId::Symfony => FrameworkIdParam::Symfony,
+        }
+    }
+}
+
+/// MCP-facing dispatch-resolution provenance (Plan B V12 8-variant form).
+///
+/// Wraps [`sqry_core::schema::ResolvedVia`] with a JsonSchema derive so the
+/// tool's input schema declares `resolved_via` as a typed enum array.
+/// Snake-case serde — wire forms are `"direct"`, `"type_match"`,
+/// `"binding_plane"`, `"virtual_dispatch"`, `"interface_dispatch"`,
+/// `"duck_typed"`, `"structural"`, `"promiscuous_elided"`. Stays in
+/// lockstep with the core enum (Plan B DESIGN §3.2 — pinned discriminants
+/// 0..=7 on the core side).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ResolvedViaParam {
+    Direct,
+    TypeMatch,
+    BindingPlane,
+    VirtualDispatch,
+    InterfaceDispatch,
+    DuckTyped,
+    Structural,
+    PromiscuousElided,
+}
+
+impl From<ResolvedViaParam> for sqry_core::schema::ResolvedVia {
+    fn from(r: ResolvedViaParam) -> Self {
+        use sqry_core::schema::ResolvedVia;
+        match r {
+            ResolvedViaParam::Direct => ResolvedVia::Direct,
+            ResolvedViaParam::TypeMatch => ResolvedVia::TypeMatch,
+            ResolvedViaParam::BindingPlane => ResolvedVia::BindingPlane,
+            ResolvedViaParam::VirtualDispatch => ResolvedVia::VirtualDispatch,
+            ResolvedViaParam::InterfaceDispatch => ResolvedVia::InterfaceDispatch,
+            ResolvedViaParam::DuckTyped => ResolvedVia::DuckTyped,
+            ResolvedViaParam::Structural => ResolvedVia::Structural,
+            ResolvedViaParam::PromiscuousElided => ResolvedVia::PromiscuousElided,
+        }
+    }
+}
+
+impl From<sqry_core::schema::ResolvedVia> for ResolvedViaParam {
+    fn from(r: sqry_core::schema::ResolvedVia) -> Self {
+        use sqry_core::schema::ResolvedVia;
+        match r {
+            ResolvedVia::Direct => ResolvedViaParam::Direct,
+            ResolvedVia::TypeMatch => ResolvedViaParam::TypeMatch,
+            ResolvedVia::BindingPlane => ResolvedViaParam::BindingPlane,
+            ResolvedVia::VirtualDispatch => ResolvedViaParam::VirtualDispatch,
+            ResolvedVia::InterfaceDispatch => ResolvedViaParam::InterfaceDispatch,
+            ResolvedVia::DuckTyped => ResolvedViaParam::DuckTyped,
+            ResolvedVia::Structural => ResolvedViaParam::Structural,
+            ResolvedVia::PromiscuousElided => ResolvedViaParam::PromiscuousElided,
+        }
+    }
+}
+
 /// Pagination parameters.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(default)]
@@ -341,6 +499,32 @@ pub struct SemanticSearchParams {
     /// (5_000_000 rows).
     #[serde(default)]
     pub budget_rows: Option<u64>,
+
+    /// Phase β joint-stub (Plan A) — filter results to nodes carrying
+    /// framework-route metadata for the named framework. Declared in
+    /// **first** position relative to `resolved_via` per the Phase β
+    /// joint-stubs ordering contract.
+    ///
+    /// **Stub:** no extractor populates framework metadata in this PR,
+    /// so a non-`None` value matches zero nodes. Plan A's downstream
+    /// PR (`feat/framework-route-extractors`) wires the planner
+    /// predicate that consumes this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub framework: Option<FrameworkIdParam>,
+
+    /// Phase β joint-stub (Plan B) — filter results to nodes whose
+    /// outgoing `Calls` edges include at least one resolution
+    /// provenance in the given set. Declared in **second** position
+    /// relative to `framework` per the Phase β joint-stubs ordering
+    /// contract.
+    ///
+    /// **Stub:** today the planner accepts the filter and threads it
+    /// through to the executor, but no resolver emits the new
+    /// dispatch-resolution variants Plan B will add (the existing
+    /// 3-variant enum is still in use). Plan B's downstream PR
+    /// (`U_WS2_8_MCP_FILTERS`) wires the predicate end-to-end.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_via: Option<Vec<ResolvedViaParam>>,
 }
 
 /// `hierarchical_search` params.
@@ -505,6 +689,18 @@ pub struct RelationQueryParams {
     /// deferred-row marker.
     #[serde(default)]
     pub budget_rows: Option<u64>,
+
+    /// Phase β joint-stub (Plan A) — framework filter. First in the
+    /// Phase β joint-stubs ordering. See [`SemanticSearchParams::framework`]
+    /// for the contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub framework: Option<FrameworkIdParam>,
+
+    /// Phase β joint-stub (Plan B) — resolved-via set filter. Second in the
+    /// Phase β joint-stubs ordering. See [`SemanticSearchParams::resolved_via`]
+    /// for the contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_via: Option<Vec<ResolvedViaParam>>,
 }
 
 /// `explain_code` params.
@@ -968,6 +1164,24 @@ pub struct SqryQueryParams {
     /// deferred-row marker.
     #[serde(default)]
     pub budget_rows: Option<u64>,
+
+    /// Phase β joint-stub (Plan A) — framework filter. First in the
+    /// Phase β joint-stubs ordering. See [`SemanticSearchParams::framework`]
+    /// for the contract.
+    ///
+    /// On `sqry_query` (the planner-direct surface) this param is
+    /// orthogonal to the `query` text — the planner predicate that will
+    /// consume it (`Predicate::FrameworkEq`) can also be expressed via
+    /// the planner grammar's `framework:<id>` token in Plan A. Both
+    /// surfaces converge on the same IR variant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub framework: Option<FrameworkIdParam>,
+
+    /// Phase β joint-stub (Plan B) — resolved-via set filter. Second in the
+    /// Phase β joint-stubs ordering. See [`SemanticSearchParams::resolved_via`]
+    /// for the contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_via: Option<Vec<ResolvedViaParam>>,
 }
 
 // ============================================================================
@@ -1453,6 +1667,18 @@ pub struct DirectCallersParams {
 
     #[serde(default)]
     pub pagination: Option<PaginationParams>,
+
+    /// Phase β joint-stub (Plan A) — framework filter. First in the
+    /// Phase β joint-stubs ordering. See [`SemanticSearchParams::framework`]
+    /// for the contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub framework: Option<FrameworkIdParam>,
+
+    /// Phase β joint-stub (Plan B) — resolved-via set filter. Second in the
+    /// Phase β joint-stubs ordering. See [`SemanticSearchParams::resolved_via`]
+    /// for the contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_via: Option<Vec<ResolvedViaParam>>,
 }
 
 impl DirectCallersParams {
@@ -1487,6 +1713,18 @@ pub struct DirectCalleesParams {
 
     #[serde(default)]
     pub pagination: Option<PaginationParams>,
+
+    /// Phase β joint-stub (Plan A) — framework filter. First in the
+    /// Phase β joint-stubs ordering. See [`SemanticSearchParams::framework`]
+    /// for the contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub framework: Option<FrameworkIdParam>,
+
+    /// Phase β joint-stub (Plan B) — resolved-via set filter. Second in the
+    /// Phase β joint-stubs ordering. See [`SemanticSearchParams::resolved_via`]
+    /// for the contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_via: Option<Vec<ResolvedViaParam>>,
 }
 
 impl DirectCalleesParams {
@@ -2098,6 +2336,8 @@ mod tests {
             path: ".".to_string(),
             max_results: 100,
             pagination: None,
+            framework: None,
+            resolved_via: None,
         };
         assert!(params.validate().is_ok());
     }
@@ -2109,6 +2349,8 @@ mod tests {
             path: ".".to_string(),
             max_results: 100,
             pagination: None,
+            framework: None,
+            resolved_via: None,
         };
         assert!(params.validate().is_err());
     }
@@ -2120,6 +2362,8 @@ mod tests {
             path: ".".to_string(),
             max_results: 100,
             pagination: None,
+            framework: None,
+            resolved_via: None,
         };
         assert!(params.validate().is_err());
     }
@@ -2135,6 +2379,8 @@ mod tests {
             path: ".".to_string(),
             max_results: 100,
             pagination: None,
+            framework: None,
+            resolved_via: None,
         };
         assert!(params.validate().is_ok());
     }
@@ -2146,6 +2392,8 @@ mod tests {
             path: ".".to_string(),
             max_results: 100,
             pagination: None,
+            framework: None,
+            resolved_via: None,
         };
         assert!(params.validate().is_err());
     }
@@ -2157,7 +2405,170 @@ mod tests {
             path: ".".to_string(),
             max_results: 100,
             pagination: None,
+            framework: None,
+            resolved_via: None,
         };
         assert!(params.validate().is_err());
+    }
+
+    // ========================================================================
+    // Phase β joint-stubs — framework + resolved_via filter parse tests
+    // ========================================================================
+    //
+    // One test per tool, confirming the new optional params parse from
+    // JSON into the matching Params struct and that the field values
+    // round-trip. None of these tests assert behavioural impact —
+    // execution today is a no-op (Plan A / Plan B's downstream PRs wire
+    // the predicates). The contract these tests pin is *shape only*:
+    // - both fields accept `None` (default) and are skipped on serialize
+    // - `framework` accepts the typed `FrameworkIdParam` enum
+    // - `resolved_via` accepts a `Vec<ResolvedViaParam>` set
+    // - declaration order matches the joint-stubs contract: `framework`
+    //   first, `resolved_via` second (verified by serde reading both
+    //   fields independently of source order)
+
+    fn assert_framework_and_resolved_via<'de, P>(json: &'de str, tool: &str)
+    where
+        P: serde::Deserialize<'de>,
+    {
+        let _: P = serde_json::from_str(json)
+            .unwrap_or_else(|err| panic!("Phase β joint-stub params for {tool} must parse: {err}"));
+    }
+
+    #[test]
+    fn phase_beta_semantic_search_accepts_framework_and_resolved_via() {
+        let json = r#"{
+            "query": "kind:function",
+            "framework": "flask",
+            "resolved_via": ["direct", "type_match"]
+        }"#;
+        assert_framework_and_resolved_via::<SemanticSearchParams>(json, "semantic_search");
+        // Round-trip on a struct literal — confirms field-name ordering
+        // declaration matches the joint-stubs contract (framework first,
+        // resolved_via second).
+        let params: SemanticSearchParams = serde_json::from_str(json).unwrap();
+        assert_eq!(params.framework, Some(FrameworkIdParam::Flask));
+        assert_eq!(
+            params.resolved_via,
+            Some(vec![ResolvedViaParam::Direct, ResolvedViaParam::TypeMatch]),
+        );
+    }
+
+    #[test]
+    fn phase_beta_relation_query_accepts_framework_and_resolved_via() {
+        let json = r#"{
+            "symbol": "main",
+            "relation_type": "callers",
+            "framework": "spring",
+            "resolved_via": ["binding_plane"]
+        }"#;
+        assert_framework_and_resolved_via::<RelationQueryParams>(json, "relation_query");
+        let params: RelationQueryParams = serde_json::from_str(json).unwrap();
+        assert_eq!(params.framework, Some(FrameworkIdParam::Spring));
+        assert_eq!(
+            params.resolved_via,
+            Some(vec![ResolvedViaParam::BindingPlane]),
+        );
+    }
+
+    #[test]
+    fn phase_beta_direct_callers_accepts_framework_and_resolved_via() {
+        let json = r#"{
+            "symbol": "main",
+            "framework": "axum",
+            "resolved_via": ["direct"]
+        }"#;
+        assert_framework_and_resolved_via::<DirectCallersParams>(json, "direct_callers");
+        let params: DirectCallersParams = serde_json::from_str(json).unwrap();
+        assert_eq!(params.framework, Some(FrameworkIdParam::Axum));
+        assert_eq!(params.resolved_via, Some(vec![ResolvedViaParam::Direct]),);
+    }
+
+    #[test]
+    fn phase_beta_direct_callees_accepts_framework_and_resolved_via() {
+        let json = r#"{
+            "symbol": "main",
+            "framework": "gin",
+            "resolved_via": ["type_match"]
+        }"#;
+        assert_framework_and_resolved_via::<DirectCalleesParams>(json, "direct_callees");
+        let params: DirectCalleesParams = serde_json::from_str(json).unwrap();
+        assert_eq!(params.framework, Some(FrameworkIdParam::Gin));
+        assert_eq!(params.resolved_via, Some(vec![ResolvedViaParam::TypeMatch]),);
+    }
+
+    #[test]
+    fn phase_beta_sqry_query_accepts_framework_and_resolved_via() {
+        let json = r#"{
+            "query": "kind:function",
+            "framework": "fast_api",
+            "resolved_via": ["direct", "binding_plane"]
+        }"#;
+        assert_framework_and_resolved_via::<SqryQueryParams>(json, "sqry_query");
+        let params: SqryQueryParams = serde_json::from_str(json).unwrap();
+        assert_eq!(params.framework, Some(FrameworkIdParam::FastApi));
+        assert_eq!(
+            params.resolved_via,
+            Some(vec![
+                ResolvedViaParam::Direct,
+                ResolvedViaParam::BindingPlane
+            ]),
+        );
+    }
+
+    /// Phase β joint-stubs: both filter params are optional. Omitting
+    /// them must continue to deserialize cleanly (back-compat for every
+    /// existing MCP client). Tested on each of the 5 tools.
+    #[test]
+    fn phase_beta_filter_params_are_optional_back_compat() {
+        let s: SemanticSearchParams = serde_json::from_str(r#"{"query": "kind:function"}"#)
+            .expect("semantic_search must parse with no framework / resolved_via");
+        assert!(s.framework.is_none() && s.resolved_via.is_none());
+
+        let r: RelationQueryParams =
+            serde_json::from_str(r#"{"symbol": "m", "relation_type": "callers"}"#)
+                .expect("relation_query must parse without filters");
+        assert!(r.framework.is_none() && r.resolved_via.is_none());
+
+        let dc: DirectCallersParams = serde_json::from_str(r#"{"symbol": "m"}"#)
+            .expect("direct_callers must parse without filters");
+        assert!(dc.framework.is_none() && dc.resolved_via.is_none());
+
+        let de: DirectCalleesParams = serde_json::from_str(r#"{"symbol": "m"}"#)
+            .expect("direct_callees must parse without filters");
+        assert!(de.framework.is_none() && de.resolved_via.is_none());
+
+        let q: SqryQueryParams = serde_json::from_str(r#"{"query": "kind:function"}"#)
+            .expect("sqry_query must parse without filters");
+        assert!(q.framework.is_none() && q.resolved_via.is_none());
+    }
+
+    /// Phase β joint-stubs: the wrapper enum round-trips cleanly to the
+    /// canonical core type and back. Locks the From / Into impls.
+    #[test]
+    fn phase_beta_framework_id_param_round_trips_through_core() {
+        for param in [
+            FrameworkIdParam::Flask,
+            FrameworkIdParam::Spring,
+            FrameworkIdParam::AspNetCore,
+            FrameworkIdParam::Symfony,
+        ] {
+            let core: sqry_core::schema::FrameworkId = param.into();
+            let back: FrameworkIdParam = core.into();
+            assert_eq!(param, back);
+        }
+    }
+
+    #[test]
+    fn phase_beta_resolved_via_param_round_trips_through_core() {
+        for param in [
+            ResolvedViaParam::Direct,
+            ResolvedViaParam::TypeMatch,
+            ResolvedViaParam::BindingPlane,
+        ] {
+            let core: sqry_core::schema::ResolvedVia = param.into();
+            let back: ResolvedViaParam = core.into();
+            assert_eq!(param, back);
+        }
     }
 }

@@ -197,6 +197,12 @@ pub fn params_to_semantic_search_args(params: Value) -> Result<SemanticSearchArg
         score_min,
         include_classpath: params.include_classpath,
         budget_rows: validate_budget_rows(params.budget_rows)?,
+        // Phase β joint-stubs: thread MCP filter params through to the
+        // daemon-side args struct. Mirrors `server.rs::convert_semantic_search_params`.
+        framework: params.framework.map(Into::into),
+        resolved_via: params
+            .resolved_via
+            .map(|v| v.into_iter().map(Into::into).collect()),
     })
 }
 
@@ -222,6 +228,11 @@ pub fn params_to_relation_query_args(params: Value) -> Result<RelationQueryArgs,
         max_depth,
         max_results,
         pagination,
+        // Phase β joint-stubs: thread MCP filter params through.
+        framework: params.framework.map(Into::into),
+        resolved_via: params
+            .resolved_via
+            .map(|v| v.into_iter().map(Into::into).collect()),
     })
 }
 
@@ -238,6 +249,11 @@ pub fn params_to_direct_callers_args(params: Value) -> Result<DirectCallersArgs,
         path: params.path,
         max_results,
         pagination,
+        // Phase β joint-stubs: thread MCP filter params through.
+        framework: params.framework.map(Into::into),
+        resolved_via: params
+            .resolved_via
+            .map(|v| v.into_iter().map(Into::into).collect()),
     })
 }
 
@@ -254,6 +270,11 @@ pub fn params_to_direct_callees_args(params: Value) -> Result<DirectCalleesArgs,
         path: params.path,
         max_results,
         pagination,
+        // Phase β joint-stubs: thread MCP filter params through.
+        framework: params.framework.map(Into::into),
+        resolved_via: params
+            .resolved_via
+            .map(|v| v.into_iter().map(Into::into).collect()),
     })
 }
 

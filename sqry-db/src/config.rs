@@ -27,6 +27,37 @@ pub struct QueryDbConfig {
     ///
     /// Default: 1 MiB (1_048_576 bytes = `1 << 20`).
     pub max_entry_size_bytes: usize,
+
+    /// Test-only knob: disables planner fusion. Default: `false` (fusion
+    /// enabled).
+    ///
+    /// **Gating.** The field is compiled only under `cfg(any(test, feature =
+    /// "baseline"))` so production binaries — release `sqry`, `sqry-mcp`,
+    /// `sqry-lsp`, `sqryd` — never carry it. This matches the gating
+    /// strategy used for [`crate::baseline`] (the oracle module for WS1
+    /// differential tests) and keeps production wire-compatibility
+    /// unchanged.
+    ///
+    /// **Semantics.** Currently consulted exclusively by the WS1 fusion
+    /// equivalence property test
+    /// (`sqry-db/tests/property/fusion_equivalence.rs`, DAG unit
+    /// `U_WS1_9_FUSION`). The flag is not yet consulted by production
+    /// planner dispatch paths — the equivalence harness runs the fused
+    /// (`execute_batch` after `fuse_single`) and unfused (`execute_plan`)
+    /// paths side-by-side regardless of this field, and uses
+    /// [`Self::disable_fusion`] only to assemble the comparison-side
+    /// `QueryDb` so future production hookups have a single config
+    /// surface to branch on.
+    ///
+    /// **Why a config field rather than just two test entry points?**
+    /// DAG `critical_decisions` line for `U_WS1_9_FUSION` reads
+    /// "`disable_fusion` exposed as public test-only config" — having the
+    /// knob on `QueryDbConfig` gives WS1 (and any future regression
+    /// harness) a single point of control, and makes accidental
+    /// regression of the field into production builds visible to the
+    /// `nm | grep disable_fusion` verification gate.
+    #[cfg(any(test, feature = "baseline"))]
+    pub fusion_disabled: bool,
 }
 
 impl Default for QueryDbConfig {
@@ -38,6 +69,8 @@ impl Default for QueryDbConfig {
             derived_persistence_filename: "derived.sqry".to_owned(),
             enable_background_compaction: true,
             max_entry_size_bytes: 1 << 20, // 1 MiB
+            #[cfg(any(test, feature = "baseline"))]
+            fusion_disabled: false,
         }
     }
 }
@@ -47,6 +80,24 @@ impl QueryDbConfig {
     #[must_use]
     pub fn builder() -> QueryDbConfigBuilder {
         QueryDbConfigBuilder(Self::default())
+    }
+
+    /// Test-only: returns a copy of this config with planner fusion
+    /// disabled (i.e., [`Self::fusion_disabled`] set to `true`).
+    ///
+    /// Gated behind `cfg(any(test, feature = "baseline"))` to match the
+    /// gating of [`Self::fusion_disabled`] itself; production builds
+    /// (release `sqry`, `sqry-mcp`, `sqry-lsp`, `sqryd`) never carry this
+    /// symbol.
+    ///
+    /// Consumed by `sqry-db/tests/property/fusion_equivalence.rs`
+    /// (`U_WS1_9_FUSION`, DESIGN §2.4). See the field-level docstring on
+    /// [`Self::fusion_disabled`] for end-to-end semantics.
+    #[cfg(any(test, feature = "baseline"))]
+    #[must_use]
+    pub fn disable_fusion(mut self) -> Self {
+        self.fusion_disabled = true;
+        self
     }
 
     /// Creates a config from environment variables, falling back to defaults.

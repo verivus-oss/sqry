@@ -51,6 +51,7 @@
 pub mod compile;
 pub mod cost_gate;
 pub mod execute;
+pub mod format;
 pub mod fuse;
 pub mod ir;
 pub mod parse;
@@ -59,6 +60,7 @@ pub use compile::{
     BuildError, PlanNodeKind, QueryBuilder, QueryPlanExt, ScanFilters, normalize_edge_kind,
 };
 pub use execute::{PlanExecutor, execute_batch, execute_plan};
+pub use format::{format as format_query, format_plan};
 pub use fuse::{
     FusedPlanBatch, FusedTail, FusionGroup, FusionStats, FusionTail, SharedNode, SharedNodeId,
     fuse_plans, fuse_single,

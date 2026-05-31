@@ -253,6 +253,14 @@ fn check_predicate(
         | Predicate::IsAddressTaken(_)
         | Predicate::ResolvedVia(_)
         | Predicate::HasCallsitePromiscuous(_)
+        // Phase β joint-stubs (Plan A + Plan B): both predicates evaluate
+        // against the empty side-table surface in this PR, so they are
+        // strictly cheaper than `ResolvedVia` (which walks outgoing Calls).
+        // They remain in the cheap class once the downstream PRs populate
+        // the tables — framework lookup is a single BTreeMap probe; set
+        // membership over outgoing Calls is bounded by node degree.
+        | Predicate::FrameworkEq(_)
+        | Predicate::ResolvedViaEq(_)
         | Predicate::InFile(_)
         | Predicate::InScope(_)
         | Predicate::Returns(_) => Ok(()),
