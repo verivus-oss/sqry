@@ -51,9 +51,9 @@ pub struct InstallOptions {
     /// Optional user account name.
     ///
     /// - **systemd system unit** (U6): the `%i` template value, validated via
-    ///   `users::get_user_by_name` on Linux. Falls back to `$USER` env if
-    ///   `None`. The generator exits `EX_CONFIG` (78) if the account is
-    ///   unresolvable.
+    ///   the POSIX account database (`getpwnam_r`) on Linux. Falls back to
+    ///   `$USER` env if `None`. The generator exits `EX_CONFIG` (78) if the
+    ///   account is unresolvable.
     /// - **Windows** (U8): the account passed to `sc.exe obj=` and the Task
     ///   Scheduler `UserId`. Defaults to `"LocalSystem"` for the service and
     ///   the current user for the Task Scheduler job if `None`.

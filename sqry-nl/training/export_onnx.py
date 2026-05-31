@@ -20,10 +20,7 @@ from typing import Optional
 import numpy as np
 import torch
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
-from optimum.onnxruntime import ORTModelForSequenceClassification
-from optimum.onnxruntime.configuration import OptimizationConfig, QuantizationConfig
-from optimum.onnxruntime import ORTQuantizer, ORTOptimizer
-from onnxruntime.quantization import QuantFormat, QuantType, QuantizationMode
+from onnxruntime.quantization import QuantType, quantize_dynamic
 import onnx
 import onnxruntime as ort
 import typer
@@ -181,38 +178,32 @@ def evaluate_accuracy(
 
 
 def _optimize_onnx_model(output_dir: Path) -> Path:
-    """Apply ONNX graph optimizations and return optimized directory."""
-    optimizer = ORTOptimizer.from_pretrained(output_dir)
-    optimization_config = OptimizationConfig(
-        optimization_level=99,
-        optimize_for_gpu=False,
-    )
+    """Apply dependency-free ONNX shape inference and return optimized directory."""
+    onnx_path = output_dir / "model.onnx"
     optimized_dir = output_dir / "optimized"
-    optimizer.optimize(
-        save_dir=optimized_dir,
-        optimization_config=optimization_config,
-    )
+    optimized_dir.mkdir(parents=True, exist_ok=True)
+    optimized_path = optimized_dir / "model.onnx"
+
+    model = onnx.load(str(onnx_path))
+    optimized_model = onnx.shape_inference.infer_shapes(model)
+    onnx.checker.check_model(optimized_model)
+    onnx.save(optimized_model, str(optimized_path))
     console.print(f"  Optimized model saved to: {optimized_dir}")
     return optimized_dir
 
 
 def _quantize_onnx_model(output_dir: Path, onnx_path: Path) -> Optional[Path]:
     """Apply int8 quantization and return quantized path."""
-    quantizer = ORTQuantizer.from_pretrained(output_dir)
-    quantization_config = QuantizationConfig(
-        is_static=False,
-        format=QuantFormat.QOperator,
-        mode=QuantizationMode.IntegerOps,
-        per_channel=True,
-        weights_dtype=QuantType.QInt8,
-        operators_to_quantize=["MatMul"],
-    )
     quantized_dir = output_dir / "quantized"
-    quantizer.quantize(
-        save_dir=quantized_dir,
-        quantization_config=quantization_config,
-    )
+    quantized_dir.mkdir(parents=True, exist_ok=True)
     quantized_onnx_path = quantized_dir / "model.onnx"
+    quantize_dynamic(
+        model_input=str(onnx_path),
+        model_output=str(quantized_onnx_path),
+        per_channel=True,
+        weight_type=QuantType.QInt8,
+        op_types_to_quantize=["MatMul"],
+    )
     console.print(f"  Quantized model saved to: {quantized_dir}")
 
     # Report size reduction
@@ -225,6 +216,81 @@ def _quantize_onnx_model(output_dir: Path, onnx_path: Path) -> Optional[Path]:
         console.print(f"  Size reduction: {reduction:.1f}%")
 
     return quantized_onnx_path
+
+
+class SequenceClassifierOnnxWrapper(torch.nn.Module):
+    """Return logits only so the exported ONNX graph has one stable output."""
+
+    def __init__(self, model: AutoModelForSequenceClassification) -> None:
+        super().__init__()
+        self.model = model
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        token_type_ids: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        kwargs = {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+        }
+        if token_type_ids is not None:
+            kwargs["token_type_ids"] = token_type_ids
+        return self.model(**kwargs).logits
+
+
+def _export_onnx_model(
+    pytorch_model: AutoModelForSequenceClassification,
+    tokenizer: AutoTokenizer,
+    output_dir: Path,
+) -> Path:
+    """Export a local Transformers sequence classifier with `torch.onnx`."""
+    pytorch_model.eval()
+    tokenizer.save_pretrained(output_dir)
+
+    sample_inputs = tokenizer(
+        DEFAULT_TEST_TEXTS[0],
+        return_tensors="pt",
+        truncation=True,
+        max_length=128,
+    )
+    input_names = ["input_ids", "attention_mask"]
+    export_args: tuple[torch.Tensor, ...]
+    if "token_type_ids" in sample_inputs:
+        input_names.append("token_type_ids")
+        export_args = (
+            sample_inputs["input_ids"],
+            sample_inputs["attention_mask"],
+            sample_inputs["token_type_ids"],
+        )
+    else:
+        export_args = (
+            sample_inputs["input_ids"],
+            sample_inputs["attention_mask"],
+        )
+
+    dynamic_axes = {
+        name: {0: "batch", 1: "sequence"}
+        for name in input_names
+    }
+    dynamic_axes["logits"] = {0: "batch"}
+    onnx_path = output_dir / "model.onnx"
+    wrapper = SequenceClassifierOnnxWrapper(pytorch_model)
+
+    with torch.no_grad():
+        torch.onnx.export(
+            wrapper,
+            export_args,
+            str(onnx_path),
+            input_names=input_names,
+            output_names=["logits"],
+            dynamic_axes=dynamic_axes,
+            opset_version=17,
+            do_constant_folding=True,
+        )
+
+    return onnx_path
 
 
 def _evaluate_quantized_accuracy(
@@ -299,18 +365,9 @@ def export(
 
         console.print(f"  Loaded model from: {model_dir}")
 
-        # Export to ONNX using optimum
+        # Export to ONNX without the obsolete optimum-onnx dependency path.
         progress.update(task, description="Exporting to ONNX...")
-        onnx_model = ORTModelForSequenceClassification.from_pretrained(
-            model_dir,
-            export=True,
-            local_files_only=True,
-        )
-
-        # Save initial ONNX model
-        onnx_path = output_dir / "model.onnx"
-        onnx_model.save_pretrained(output_dir)
-        tokenizer.save_pretrained(output_dir)
+        onnx_path = _export_onnx_model(pytorch_model, tokenizer, output_dir)
 
         console.print(f"  Exported ONNX model to: {output_dir}")
 

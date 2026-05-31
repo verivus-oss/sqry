@@ -97,6 +97,69 @@ fn find_sqryd_binary() -> Option<PathBuf> {
     None
 }
 
+#[cfg(target_os = "linux")]
+fn current_posix_username() -> Option<String> {
+    let uid = unsafe {
+        // SAFETY: `getuid` has no preconditions and cannot fail.
+        libc::getuid()
+    };
+    let mut passwd_entry = std::mem::MaybeUninit::<libc::passwd>::uninit();
+    let mut result = std::ptr::null_mut();
+    let mut buffer_len = initial_passwd_buffer_len();
+
+    loop {
+        let mut buffer = vec![0_u8; buffer_len];
+        let rc = unsafe {
+            // SAFETY: all out-pointers reference writable storage and the
+            // scratch buffer is valid for its full length during the call.
+            libc::getpwuid_r(
+                uid,
+                passwd_entry.as_mut_ptr(),
+                buffer.as_mut_ptr().cast(),
+                buffer.len(),
+                &mut result,
+            )
+        };
+
+        if rc == 0 {
+            if result.is_null() {
+                return None;
+            }
+            let passwd_entry = unsafe {
+                // SAFETY: POSIX set `result` to `passwd_entry` on success.
+                passwd_entry.assume_init()
+            };
+            let username = unsafe {
+                // SAFETY: `pw_name` is a NUL-terminated C string in `buffer`.
+                std::ffi::CStr::from_ptr(passwd_entry.pw_name)
+            };
+            return username.to_str().ok().map(ToOwned::to_owned);
+        }
+
+        if rc == libc::ERANGE {
+            buffer_len = buffer_len.checked_mul(2)?;
+            if buffer_len > 1_048_576 {
+                return None;
+            }
+            continue;
+        }
+
+        return None;
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn initial_passwd_buffer_len() -> usize {
+    let sysconf_len = unsafe {
+        // SAFETY: `sysconf(_SC_GETPW_R_SIZE_MAX)` has no preconditions.
+        libc::sysconf(libc::_SC_GETPW_R_SIZE_MAX)
+    };
+    usize::try_from(sysconf_len)
+        .ok()
+        .filter(|len| *len > 0)
+        .unwrap_or(16_384)
+}
+
 // ---------------------------------------------------------------------------
 // Linux: install-systemd-user → systemd-analyze verify (or structural check)
 // ---------------------------------------------------------------------------
@@ -243,8 +306,8 @@ fn install_systemd_user_output_parses_as_valid_unit_file() {
     ignore = "install-systemd-system is Linux-only; test skipped on this platform"
 )]
 fn install_systemd_system_output_contains_percent_i_template() {
-    // The entire body of this test uses `users::get_current_username()` and
-    // the `install-systemd-system` subcommand, both of which are Linux-only.
+    // The entire body of this test uses POSIX account lookup and the
+    // `install-systemd-system` subcommand, both of which are Linux-only.
     // All bindings — including the `sqryd` binary lookup — are placed inside a
     // single `#[cfg(target_os = "linux")]` block so that they are erased at
     // compile time on macOS and Windows.  This avoids `unused_variables`
@@ -264,14 +327,12 @@ fn install_systemd_system_output_contains_percent_i_template() {
         };
 
         // We need a valid POSIX account name to pass as --user.
-        // Prefer `users::get_current_username()` (OS lookup, immune to env
+        // Prefer POSIX account lookup (immune to env
         // manipulation) over `$USER` (env var, unreliable in containers / su /
         // sudo contexts).  Fall back to $USER only if the OS lookup fails.
         // Skip the test if neither source can produce a non-empty name.
         let username = {
-            let os_name = users::get_current_username()
-                .and_then(|n| n.into_string().ok())
-                .filter(|n| !n.is_empty());
+            let os_name = current_posix_username().filter(|n| !n.is_empty());
             let env_name = std::env::var("USER").ok().filter(|n| !n.is_empty());
             match os_name.or(env_name) {
                 Some(u) => u,

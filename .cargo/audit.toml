@@ -90,31 +90,9 @@
 # Accepted by: Claude (RR-12 Task #1 Cleanup, 2025-11-23)
 # Expires: 2026-06-01 (re-evaluate with DataFusion/Lance ecosystem updates)
 
-# ============================================================================
-# RUSTSEC-2025-0040: users crate appends root to group listings
-#
-# Crate: users 0.11.0
-# Severity: Low
-# Date: 2025-01-15
-#
-# RATIONALE FOR ACCEPTANCE:
-# users is pulled in by sqry-daemon for local Unix account metadata. sqry does
-# not use group membership decisions as an authorization boundary, and the
-# advisory has no fixed upgrade path. Failing release CI on an unfixable advisory
-# blocks unrelated release repairs without reducing runtime exposure.
-#
-# MITIGATION:
-# - Keep the audit exception explicit and time-boxed.
-# - Re-evaluate if sqry-daemon starts enforcing authorization from Unix groups.
-# - Remove this exception if users publishes a fixed version or is replaced.
-#
-# Accepted by: Codex release get-well, 2026-04-24
-# Expires: 2026-07-24
-
 [advisories]
 ignore = [
     "RUSTSEC-2023-0071",  # rsa: Marvin Attack (not exploitable in sqry context)
     "RUSTSEC-2025-0119",  # number_prefix: unmaintained (low-risk formatting lib)
     "RUSTSEC-2024-0436",  # paste: unmaintained (compile-time proc macro, zero runtime risk)
-    "RUSTSEC-2025-0040",  # users: group listing bug, no fixed upgrade path
 ]

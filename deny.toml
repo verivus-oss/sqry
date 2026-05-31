@@ -11,22 +11,14 @@ db-urls = ["https://github.com/rustsec/advisory-db"]
 unmaintained = "workspace" # Keep failures scoped to direct dependencies until async-std is removed (RUSTSEC-2025-0052)
 yanked = "warn"
 # Ignore list = superset of `.cargo/audit.toml`'s ignore list.
-# - The 4 IDs in .cargo/audit.toml (2023-0071 rsa, 2024-0436 paste,
-#   2025-0040 users group-listing, 2025-0119 number_prefix) appear
-#   here too with a "see audit.toml" pointer; audit.toml is the
-#   canonical record (rationale + expiry).
-# - RUSTSEC-2023-0040 and RUSTSEC-2023-0059 are deny-only entries for
-#   `users` informational advisories; cargo-audit doesn't fail on them
-#   under our settings, but cargo-deny would without these. Original
-#   per-entry comments preserved verbatim below.
+# - The 3 IDs in .cargo/audit.toml (2023-0071 rsa, 2024-0436 paste,
+#   2025-0119 number_prefix) appear here too with a "see audit.toml"
+#   pointer; audit.toml is the canonical record (rationale + expiry).
 # 2026-05-07 reconciliation: added 2023-0071, 2024-0436, 2025-0119 to
 # match audit.toml. No prior entry's rationale was rewritten.
 ignore = [
-  "RUSTSEC-2023-0040", # users: unmaintained, accepted with RUSTSEC-2025-0040 exception
-  "RUSTSEC-2023-0059", # users: unsound advisory, no fixed upgrade path
   "RUSTSEC-2023-0071", # rsa: Marvin Attack (not exploitable in sqry context — see audit.toml)
   "RUSTSEC-2024-0436", # paste: unmaintained proc macro (zero runtime risk — see audit.toml)
-  "RUSTSEC-2025-0040", # users: group listing bug, no fixed upgrade path
   "RUSTSEC-2025-0119", # number_prefix: unmaintained low-risk formatting lib (see audit.toml)
 ]
 

@@ -130,7 +130,7 @@ exclude = [
 ]
 
 [workspace.package]
-version = "17.0.0"
+version = "17.0.1"
 edition = "2024"
 authors = ["Verivus Pty Ltd"]
 license = "MIT"
@@ -158,11 +158,7 @@ colored = "3.1"
 
 # Task 9 U15a — Linux-only deps for sqry-daemon lifecycle.
 # sd-notify: sends READY=1/STATUS=/STOPPING=1 to systemd on Type=notify units.
-# users: validates POSIX account names in the systemd system-unit generator.
-# Both are declared here so target-gated [target.*.dependencies] in
-# sqry-daemon/Cargo.toml can reference them via `{ workspace = true }`.
 sd-notify = "0.5"
-users = "0.11"
 
 # Serialization
 serde = { version = "1.0", features = ["derive", "rc"] }  # rc enables Arc serialization

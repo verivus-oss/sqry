@@ -23,10 +23,10 @@ pip install -r requirements.txt
 
 ### Key Dependencies
 
-- `torch>=2.0.0` - PyTorch for model training
-- `transformers>=4.35.0` - Hugging Face Transformers
-- `optimum[onnxruntime]>=1.14.0` - ONNX export and optimization
-- `onnxruntime>=1.16.0` - ONNX inference runtime
+- `torch>=2.12.0` - PyTorch for model training and ONNX export
+- `transformers>=5.0.0` - Hugging Face Transformers
+- `onnx>=1.21.0` - ONNX model validation and shape inference
+- `onnxruntime>=1.23.2` - ONNX inference runtime and dynamic quantization
 - `netcal>=1.3.0` - Calibration metrics
 
 ## Quick Start

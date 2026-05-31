@@ -9,8 +9,8 @@
 //!   template that is instantiated per-user via `systemctl start sqryd@<user>`.
 //!
 //! Both functions return a `String` containing the full unit-file text.  No OS
-//! API calls are made during generation itself; the `users` crate is only
-//! consulted in `resolve_system_unit_user` which is called before
+//! API calls are made during generation itself; the POSIX account database is
+//! only consulted in `resolve_system_unit_user` which is called before
 //! `generate_system_unit` when the generator is invoked from the
 //! `install-systemd-system` subcommand (Task 10 U10).
 //!
@@ -26,7 +26,7 @@
 //! `install_tracing` path (Task 9 U5) skips the in-process `RollingSizeAppender`.
 //! Both generated unit files embed a comment documenting this contract.
 
-use std::path::PathBuf;
+use std::{ffi::CString, io, mem::MaybeUninit, path::PathBuf, ptr};
 
 use super::InstallOptions;
 use crate::config::DaemonConfig;
@@ -227,7 +227,7 @@ WantedBy=multi-user.target
 /// 3. Error: `EX_CONFIG` (78).
 ///
 /// In all cases the resolved name is validated via
-/// [`users::get_user_by_name`].  If the account is not found on the current
+/// the POSIX account database.  If the account is not found on the current
 /// system, an error is returned — the caller should print the error and exit
 /// with code 78 (`EX_CONFIG`).
 ///
@@ -245,14 +245,15 @@ pub fn resolve_system_unit_user(opts: &InstallOptions) -> Result<String, String>
         })?,
     };
 
-    // Validate the candidate against the system user database.
-    if users::get_user_by_name(candidate.as_str()).is_some() {
-        Ok(candidate)
-    } else {
-        Err(format!(
+    match posix_user_exists(&candidate) {
+        Ok(true) => Ok(candidate),
+        Ok(false) => Err(format!(
             "system-unit user {candidate:?} is not a valid POSIX account on this system; \
              use `sqryd install-systemd-system --user <username>` with a known account name"
-        ))
+        )),
+        Err(error_msg) => Err(format!(
+            "could not validate system-unit user {candidate:?}: {error_msg}"
+        )),
     }
 }
 
@@ -274,6 +275,107 @@ fn resolve_current_exe() -> PathBuf {
 /// Returns the full directive line, e.g. `"MemoryMax=2048M"`.
 fn format_memory_max(memory_limit_mb: u64) -> String {
     format!("MemoryMax={memory_limit_mb}M")
+}
+
+fn posix_user_exists(candidate: &str) -> Result<bool, String> {
+    let candidate = CString::new(candidate)
+        .map_err(|_| "account name contains an interior NUL byte".to_owned())?;
+    let mut passwd_entry = MaybeUninit::<libc::passwd>::uninit();
+    let mut result = ptr::null_mut();
+    let mut buffer_len = initial_passwd_buffer_len();
+
+    loop {
+        let mut buffer = vec![0_u8; buffer_len];
+        let rc = unsafe {
+            // SAFETY: `candidate` is NUL-terminated, `passwd_entry` points to
+            // writable storage, `buffer` is valid for `buffer.len()` bytes, and
+            // `result` is a valid out-pointer for the duration of the call.
+            libc::getpwnam_r(
+                candidate.as_ptr(),
+                passwd_entry.as_mut_ptr(),
+                buffer.as_mut_ptr().cast(),
+                buffer.len(),
+                &mut result,
+            )
+        };
+
+        if rc == 0 {
+            return Ok(!result.is_null());
+        }
+
+        if rc == libc::ERANGE {
+            buffer_len = buffer_len
+                .checked_mul(2)
+                .filter(|next_len| *next_len <= 1_048_576)
+                .ok_or_else(|| "POSIX account lookup buffer exceeded 1 MiB".to_owned())?;
+            continue;
+        }
+
+        return Err(io::Error::from_raw_os_error(rc).to_string());
+    }
+}
+
+fn initial_passwd_buffer_len() -> usize {
+    let sysconf_len = unsafe {
+        // SAFETY: `sysconf(_SC_GETPW_R_SIZE_MAX)` has no preconditions.
+        libc::sysconf(libc::_SC_GETPW_R_SIZE_MAX)
+    };
+    usize::try_from(sysconf_len)
+        .ok()
+        .filter(|len| *len > 0)
+        .unwrap_or(16_384)
+}
+
+#[cfg(test)]
+fn current_posix_username() -> Option<String> {
+    let uid = unsafe {
+        // SAFETY: `getuid` has no preconditions and cannot fail.
+        libc::getuid()
+    };
+    let mut passwd_entry = MaybeUninit::<libc::passwd>::uninit();
+    let mut result = ptr::null_mut();
+    let mut buffer_len = initial_passwd_buffer_len();
+
+    loop {
+        let mut buffer = vec![0_u8; buffer_len];
+        let rc = unsafe {
+            // SAFETY: `passwd_entry`, `buffer`, and `result` are valid writable
+            // locations for `getpwuid_r` to populate during this call.
+            libc::getpwuid_r(
+                uid,
+                passwd_entry.as_mut_ptr(),
+                buffer.as_mut_ptr().cast(),
+                buffer.len(),
+                &mut result,
+            )
+        };
+
+        if rc == 0 {
+            if result.is_null() {
+                return None;
+            }
+            let passwd_entry = unsafe {
+                // SAFETY: POSIX set `result` to `passwd_entry` on success.
+                passwd_entry.assume_init()
+            };
+            let username = unsafe {
+                // SAFETY: `pw_name` is a NUL-terminated C string owned by the
+                // caller-provided buffer until this function returns.
+                std::ffi::CStr::from_ptr(passwd_entry.pw_name)
+            };
+            return username.to_str().ok().map(ToOwned::to_owned);
+        }
+
+        if rc == libc::ERANGE {
+            buffer_len = buffer_len.checked_mul(2)?;
+            if buffer_len > 1_048_576 {
+                return None;
+            }
+            continue;
+        }
+
+        return None;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -549,24 +651,20 @@ mod tests {
     /// A valid user name (the currently running user, which we know exists)
     /// must resolve successfully.
     ///
-    /// We use `users::get_current_username()` to obtain a name that is
+    /// We use the POSIX account database to obtain a name that is
     /// guaranteed to exist, then pass it through `resolve_system_unit_user` to
     /// confirm the lookup path works end-to-end.
     #[test]
     fn systemd_system_unit_resolves_current_user_as_valid() {
-        // Retrieve the current user name from the `users` crate — if that
-        // returns None we skip rather than fail (unusual CI environment).
-        let Some(current_user) = users::get_current_username() else {
-            eprintln!("skip: could not determine current username via users crate");
-            return;
-        };
-        let Some(username_str) = current_user.to_str() else {
-            eprintln!("skip: current username is not valid UTF-8");
+        // Retrieve the current user name; if that returns None we skip rather
+        // than fail (unusual CI environment).
+        let Some(username_str) = current_posix_username() else {
+            eprintln!("skip: could not determine current username via POSIX account lookup");
             return;
         };
 
         let opts = InstallOptions {
-            user: Some(username_str.to_owned()),
+            user: Some(username_str.clone()),
             ..InstallOptions::default()
         };
         let result = resolve_system_unit_user(&opts);
@@ -597,6 +695,25 @@ mod tests {
         );
     }
 
+    /// An account name containing NUL must be rejected before POSIX lookup.
+    #[test]
+    fn systemd_system_unit_rejects_nul_user_name() {
+        let opts = InstallOptions {
+            user: Some("sqryd\0invalid".to_owned()),
+            ..InstallOptions::default()
+        };
+        let result = resolve_system_unit_user(&opts);
+        assert!(
+            result.is_err(),
+            "resolve_system_unit_user must fail for an account containing NUL; got: {result:?}"
+        );
+        let err_msg = result.unwrap_err();
+        assert!(
+            err_msg.contains("interior NUL"),
+            "error message must explain that POSIX lookup rejected an interior NUL; got: {err_msg}"
+        );
+    }
+
     /// When `opts.user` is `None` and `$USER` is set to the current user,
     /// resolution must succeed by falling back to `$USER`.
     ///
@@ -606,12 +723,8 @@ mod tests {
     #[test]
     fn systemd_system_unit_falls_back_to_user_env_var() {
         // Get the current user name to use as the fallback target.
-        let Some(current_user) = users::get_current_username() else {
+        let Some(username_str) = current_posix_username() else {
             eprintln!("skip: could not determine current username");
-            return;
-        };
-        let Some(username_str) = current_user.to_str() else {
-            eprintln!("skip: current username is not valid UTF-8");
             return;
         };
 
@@ -622,7 +735,7 @@ mod tests {
         // SAFETY: ENV_MUTEX ensures no other test mutates $USER concurrently.
         let prior = std::env::var_os("USER");
         unsafe {
-            std::env::set_var("USER", username_str);
+            std::env::set_var("USER", &username_str);
         }
         let opts = InstallOptions::default();
         let result = resolve_system_unit_user(&opts);
