@@ -276,6 +276,7 @@ fn find_unused_returns_unreachable_symbols_via_sqry_db() -> Result<()> {
         kinds: Vec::new(),
         max_results: 100,
         pagination: paging(),
+        exclude_cfg_gated: false,
     };
     let result = execute_find_unused(&args)?;
 
@@ -317,6 +318,7 @@ fn find_unused_scope_filter_narrows_to_functions_only() -> Result<()> {
         kinds: Vec::new(),
         max_results: 100,
         pagination: paging(),
+        exclude_cfg_gated: false,
     };
     let result = execute_find_unused(&args)?;
     assert_eq!(result.data.scope, "function");
@@ -358,6 +360,7 @@ fn find_unused_kind_filter_preserves_mcp_api_surface() -> Result<()> {
         kinds: vec!["struct".to_string()],
         max_results: 100,
         pagination: paging(),
+        exclude_cfg_gated: false,
     };
     let result = execute_find_unused(&args)?;
     let names: Vec<&str> = result
@@ -413,6 +416,7 @@ fn find_unused_struct_scope_includes_traits_and_interfaces() -> Result<()> {
         kinds: Vec::new(),
         max_results: 100,
         pagination: paging(),
+        exclude_cfg_gated: false,
     };
     let result = execute_find_unused(&args)?;
     let names: Vec<&str> = result
@@ -509,6 +513,7 @@ path = "src/lib.rs"
         // fix passes `node_count` to sqry-db whenever MCP may narrow.
         max_results: 1,
         pagination: paging(),
+        exclude_cfg_gated: false,
     };
     let result = execute_find_unused(&args)?;
     let names: Vec<&str> = result

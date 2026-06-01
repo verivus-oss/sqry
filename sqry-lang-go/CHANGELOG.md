@@ -6,7 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
-## [16.0.8](https://github.com/verivus-oss/sqry/compare/v16.0.6...v16.0.8) - 2026-05-31
+## [18.0.2](https://github.com/verivus-oss/sqry/compare/v18.0.1...v18.0.2) - 2026-06-01
+
+### Other
+- update Cargo.toml dependencies
+## [18.0.1](https://github.com/verivus-oss/sqry/compare/v18.0.0...v18.0.1) - 2026-06-01
+
+### Other
+- update Cargo.toml dependencies
+## [18.0.0](https://github.com/verivus-oss/sqry/compare/v17.0.1...v18.0.0) - 2026-06-01
+
+### Added
+- *(go)* T3 — error chains + context propagation + build tags ([#279](https://github.com/verivus-oss/sqry/pull/279))## [16.0.8](https://github.com/verivus-oss/sqry/compare/v16.0.6...v16.0.8) - 2026-05-31
 
 ### Fixed
 - *(daemon)* preserve durable graph artifacts

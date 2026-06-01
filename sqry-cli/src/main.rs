@@ -473,6 +473,17 @@ fn run() -> Result<()> {
                 .context("Plan-query command failed")?;
         }
 
+        // T3.7 Cluster G-ext: context-propagation analysis CLI surface.
+        Some(Command::ContextPropagation {
+            path,
+            scope,
+            mode,
+            limit,
+        }) => {
+            commands::run_context_propagation(&cli, path.as_deref(), scope.as_str(), *mode, *limit)
+                .context("Context-propagation command failed")?;
+        }
+
         // Interactive shell command
         Some(Command::Shell { path }) => {
             commands::run_shell(&cli, path.as_deref().unwrap_or("."))

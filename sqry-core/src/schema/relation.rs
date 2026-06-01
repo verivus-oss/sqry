@@ -54,6 +54,15 @@ pub enum RelationKind {
     ///
     /// Traverses `TypeOf` edges where the source is a function/method.
     Returns,
+
+    /// Find error-chain wrap relationships (T3.6 / Cluster G).
+    ///
+    /// Traverses outbound `EdgeKind::Wraps` edges of any `WrapKind`
+    /// (`ErrorfVerb`, `UnwrapMethod`, `UnwrapMultiMethod`,
+    /// `ErrorsIs`, `ErrorsAs`, `ErrorsAsType`, `ErrorsJoin`). For
+    /// kind-filtered queries use the planner's `wraps:<kind>`
+    /// predicate.
+    Wraps,
 }
 
 impl RelationKind {
@@ -66,6 +75,7 @@ impl RelationKind {
             Self::Imports,
             Self::Exports,
             Self::Returns,
+            Self::Wraps,
         ]
     }
 
@@ -78,6 +88,7 @@ impl RelationKind {
             Self::Imports => "imports",
             Self::Exports => "exports",
             Self::Returns => "returns",
+            Self::Wraps => "wraps",
         }
     }
 
@@ -93,6 +104,7 @@ impl RelationKind {
             "imports" => Some(Self::Imports),
             "exports" => Some(Self::Exports),
             "returns" => Some(Self::Returns),
+            "wraps" => Some(Self::Wraps),
             _ => None,
         }
     }

@@ -327,6 +327,37 @@ pub enum MacroExpansionKind {
     CfgGate,
 }
 
+/// Kind of error-wrapping relationship (T3 — Go error chains).
+///
+/// Distinguishes the seven source-syntax forms that produce a
+/// [`EdgeKind::Wraps`] edge. Each variant identifies the construct that
+/// authored the edge so downstream queries can filter by origin (e.g.
+/// "show me only `%w` format wraps" vs. "show me `Unwrap()` method wraps").
+///
+/// Variant ordering is significant for postcard serialization stability —
+/// add new variants at the end (after `ErrorsJoin`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum WrapKind {
+    /// `fmt.Errorf("...%w...", err)` — `%w` format verb wrapping.
+    #[default]
+    ErrorfVerb,
+    /// `func (e *E) Unwrap() error { return e.inner }` — single-error
+    /// `Unwrap` method.
+    UnwrapMethod,
+    /// `func (e *E) Unwrap() []error { return e.errs }` — multi-error
+    /// `Unwrap` method (Go 1.20+).
+    UnwrapMultiMethod,
+    /// `errors.Is(err, sentinel)` — sentinel-error comparison.
+    ErrorsIs,
+    /// `errors.As(err, &target)` — concrete-type extraction (target by reference).
+    ErrorsAs,
+    /// `errors.AsType[E](err)` — typed extraction (Go 1.26+).
+    ErrorsAsType,
+    /// `errors.Join(errs...)` — variadic joining (Go 1.20+).
+    ErrorsJoin,
+}
+
 /// Enumeration of edge relationship types in the graph.
 ///
 /// Each variant represents a distinct kind of relationship between nodes.
@@ -593,6 +624,34 @@ pub enum EdgeKind {
 
     /// Kotlin sealed class permits a subclass.
     SealedPermit,
+
+    // ==================== T3: Go error chains ====================
+    /// Error-wrapping relationship between a wrapper expression and a
+    /// wrapped error value.
+    ///
+    /// Emitted by Go plugin (T3.6) for `fmt.Errorf("%w", err)`, `Unwrap()`
+    /// method bodies, and the `errors.{Is,As,AsType,Join}` family. The
+    /// `kind` field identifies the source syntax; `chain_position` carries
+    /// the verb index for `%w` and the slice index for `errors.Join` /
+    /// `Unwrap() []error` slice literals (`None` for forms that do not
+    /// have a meaningful position).
+    ///
+    /// Query semantics: NOT included in `callers/callees` results.
+    /// Wrap-chain traversal lands later in T3 (planner `wraps:` predicate
+    /// in Cluster F; `relation_query`/dedicated tooling in Cluster G);
+    /// callers must walk `Wraps` edges explicitly until those surfaces
+    /// land. The MCP `context_propagation` tool (T3.7) is a separate
+    /// derived-cache query over span-resolved propagation chains, NOT
+    /// a wrap-edge traversal surface.
+    Wraps {
+        /// The source-syntax form that authored this edge.
+        kind: WrapKind,
+        /// Optional position within the wrap chain — verb index for
+        /// `%w` (0-based, skipping `%%`), slice index for `Unwrap()
+        /// []error` slice literals and `errors.Join` variadic args,
+        /// `None` for single-value forms.
+        chain_position: Option<u16>,
+    },
 }
 
 impl EdgeKind {
@@ -744,6 +803,7 @@ impl EdgeKind {
             Self::ExtensionReceiver => "extension_receiver",
             Self::CompanionOf => "companion_of",
             Self::SealedPermit => "sealed_permit",
+            Self::Wraps { .. } => "wraps",
         }
     }
 
@@ -810,6 +870,9 @@ impl EdgeKind {
 
             // StringId: 4
             Self::GraphQLOperation { .. } | Self::ProcessExec { .. } => 5,
+
+            // WrapKind: 1 + Option<u16>: 3 = 4
+            Self::Wraps { .. } => 4,
         }
     }
 }
@@ -1457,6 +1520,83 @@ mod tests {
         assert_eq!(
             MacroExpansionKind::default(),
             MacroExpansionKind::Declarative
+        );
+    }
+
+    #[test]
+    fn wraps_edge_serde_roundtrip() {
+        // T3 Cluster A — exercises postcard + serde_json roundtrip across
+        // every WrapKind, with and without chain_position. Variant ordering
+        // is wire-format-significant (postcard encodes enum discriminants by
+        // declaration index); this test pins the seven variants in order.
+        let wrap_kinds = [
+            WrapKind::ErrorfVerb,
+            WrapKind::UnwrapMethod,
+            WrapKind::UnwrapMultiMethod,
+            WrapKind::ErrorsIs,
+            WrapKind::ErrorsAs,
+            WrapKind::ErrorsAsType,
+            WrapKind::ErrorsJoin,
+        ];
+
+        for kind in wrap_kinds {
+            for chain_position in [None, Some(0u16), Some(7u16), Some(u16::MAX)] {
+                let edge = EdgeKind::Wraps {
+                    kind,
+                    chain_position,
+                };
+
+                let bytes = postcard::to_allocvec(&edge).unwrap();
+                let postcard_back: EdgeKind = postcard::from_bytes(&bytes).unwrap();
+                assert_eq!(
+                    edge, postcard_back,
+                    "postcard roundtrip mismatch for kind={kind:?} chain_position={chain_position:?}"
+                );
+
+                let json = serde_json::to_string(&edge).unwrap();
+                let json_back: EdgeKind = serde_json::from_str(&json).unwrap();
+                assert_eq!(
+                    edge, json_back,
+                    "serde_json roundtrip mismatch for kind={kind:?} chain_position={chain_position:?}"
+                );
+                assert!(
+                    json.contains("\"wraps\""),
+                    "JSON encoding must use snake_case tag `wraps`: {json}"
+                );
+                // Pin the inner `WrapKind` snake_case spelling so
+                // removing `#[serde(rename_all = "snake_case")]` from
+                // WrapKind breaks this test. Without these asserts the
+                // roundtrip alone would silently accept PascalCase
+                // (deserialize accepts what serialize emits).
+                let expected_kind_str = match kind {
+                    WrapKind::ErrorfVerb => "errorf_verb",
+                    WrapKind::UnwrapMethod => "unwrap_method",
+                    WrapKind::UnwrapMultiMethod => "unwrap_multi_method",
+                    WrapKind::ErrorsIs => "errors_is",
+                    WrapKind::ErrorsAs => "errors_as",
+                    WrapKind::ErrorsAsType => "errors_as_type",
+                    WrapKind::ErrorsJoin => "errors_join",
+                };
+                assert!(
+                    json.contains(&format!("\"{expected_kind_str}\"")),
+                    "JSON encoding must carry snake_case WrapKind `{expected_kind_str}`: {json}"
+                );
+            }
+        }
+
+        // Default WrapKind must be the first variant (ErrorfVerb) — the
+        // serialization-stability comment on WrapKind requires append-only
+        // variant ordering, and `#[default]` is on ErrorfVerb.
+        assert_eq!(WrapKind::default(), WrapKind::ErrorfVerb);
+
+        // Tag is stable across all variants and chain positions.
+        assert_eq!(
+            EdgeKind::Wraps {
+                kind: WrapKind::ErrorfVerb,
+                chain_position: Some(0),
+            }
+            .tag(),
+            "wraps"
         );
     }
 

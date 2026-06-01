@@ -24,6 +24,7 @@ pub use tools::build_translator_config_for_path;
 pub use tools::{
     execute_call_hierarchy,
     execute_complexity_metrics,
+    execute_context_propagation,
     execute_cross_language_edges,
     execute_dependency_impact,
     execute_direct_callees,

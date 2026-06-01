@@ -29,6 +29,7 @@ pub mod callees;
 pub mod callers;
 pub mod callsite_promiscuous;
 pub mod condensation;
+pub mod context_propagation;
 pub mod cycles;
 pub mod dispatch;
 pub mod reachability;
@@ -43,6 +44,10 @@ pub use callees::CalleesQuery;
 pub use callers::CallersQuery;
 pub use callsite_promiscuous::CallsitePromiscuousQuery;
 pub use condensation::{CachedCondensation, CondensationKey, CondensationQuery, CondensationValue};
+pub use context_propagation::{
+    ContextLeak, ContextLeakSet, ContextMode, ContextModeFilter, ContextPropagationKey,
+    ContextPropagationQuery, ContextScope,
+};
 pub use cycles::{
     CycleBounds, CyclesKey, CyclesQuery, CyclesValue, IsInCycleKey, IsInCycleQuery, IsInCycleValue,
 };

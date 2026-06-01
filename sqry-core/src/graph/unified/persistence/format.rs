@@ -98,6 +98,16 @@ pub const MAGIC_BYTES_V11: &[u8; 14] = b"SQRY_GRAPH_V11";
 /// metadata-store wire shape is preserved bit-for-bit inside V12 envelopes).
 pub const MAGIC_BYTES_V12: &[u8; 14] = b"SQRY_GRAPH_V12";
 
+/// T3 V13 magic bytes.
+///
+/// Emitted by the T3 writer (Cluster A) and accepted by the V13 reader. V13
+/// is shape-identical to V12 — no fields are added or removed from the
+/// snapshot data struct. The bump exists purely so V12 readers reject
+/// snapshots containing the `EdgeKind::Wraps` variant (added in T3) rather
+/// than silently failing to decode an unknown discriminant. V12 snapshots
+/// upconvert to V13 inline on load via an identity-mapping `upconvert_v12_to_v13`.
+pub const MAGIC_BYTES_V13: &[u8; 14] = b"SQRY_GRAPH_V13";
+
 /// Legacy V7 numeric version, exposed with a versioned name so the Phase 1 reader
 /// dispatch can cite it explicitly. Equal to [`VERSION`].
 pub const LEGACY_VERSION_V7: u32 = 7;
@@ -133,6 +143,11 @@ pub enum FormatVersion {
     /// envelope slots: `framework_routes` (Plan A) and `dispatch_tables`
     /// (Plan B). Both are zero-initialised by the V11 → V12 upconvert.
     V12 = 12,
+    /// V13 — read/write after T3 (error chains: `EdgeKind::Wraps`).
+    /// Shape-identical to V12; the bump exists so V12 readers reject snapshots
+    /// containing the new edge variant. V12 snapshots upconvert to V13 inline
+    /// on load via an identity mapping.
+    V13 = 13,
 }
 
 impl FormatVersion {
@@ -146,6 +161,7 @@ impl FormatVersion {
             Self::V10 => MAGIC_BYTES_V10.as_slice(),
             Self::V11 => MAGIC_BYTES_V11.as_slice(),
             Self::V12 => MAGIC_BYTES_V12.as_slice(),
+            Self::V13 => MAGIC_BYTES_V13.as_slice(),
         }
     }
 
@@ -160,9 +176,14 @@ impl FormatVersion {
     /// Returns `None` if the bytes do not match any known format magic.
     #[must_use]
     pub fn from_magic(bytes: &[u8]) -> Option<Self> {
-        // V12, V11, and V10 magics are all 14 bytes. Check V12 first, then
-        // V11, then V10 so a longer / newer magic is never mis-classified
-        // as an older one by a less-strict comparison path.
+        // V13, V12, V11, and V10 magics are all 14 bytes. Check newest first
+        // (V13 → V12 → V11 → V10) so a longer / newer magic is never
+        // mis-classified as an older one by a less-strict comparison path.
+        if bytes.len() >= MAGIC_BYTES_V13.len()
+            && bytes[..MAGIC_BYTES_V13.len()] == *MAGIC_BYTES_V13
+        {
+            return Some(Self::V13);
+        }
         if bytes.len() >= MAGIC_BYTES_V12.len()
             && bytes[..MAGIC_BYTES_V12.len()] == *MAGIC_BYTES_V12
         {
@@ -194,8 +215,8 @@ impl FormatVersion {
     }
 }
 
-/// Current writer format version (Phase β joint-stubs: V12).
-pub const CURRENT_VERSION: FormatVersion = FormatVersion::V12;
+/// Current writer format version (T3 error chains: V13).
+pub const CURRENT_VERSION: FormatVersion = FormatVersion::V13;
 
 /// Header for persisted graph files.
 ///
@@ -610,11 +631,52 @@ mod tests {
         assert_eq!(FormatVersion::V10 as u32, 10);
         assert_eq!(FormatVersion::V11 as u32, 11);
         assert_eq!(FormatVersion::V12 as u32, 12);
+        assert_eq!(FormatVersion::V13 as u32, 13);
     }
 
     #[test]
-    fn current_version_is_v12() {
-        assert_eq!(CURRENT_VERSION, FormatVersion::V12);
+    fn current_version_is_v13() {
+        assert_eq!(CURRENT_VERSION, FormatVersion::V13);
+    }
+
+    #[test]
+    fn t3_magic_bytes_v13_is_distinct_and_14_bytes() {
+        assert_eq!(MAGIC_BYTES_V13, b"SQRY_GRAPH_V13");
+        assert_eq!(MAGIC_BYTES_V13.len(), 14);
+        assert_ne!(MAGIC_BYTES_V13.as_slice(), MAGIC_BYTES_V12.as_slice());
+        assert_ne!(MAGIC_BYTES_V13.as_slice(), MAGIC_BYTES_V10.as_slice());
+    }
+
+    #[test]
+    fn t3_format_version_from_magic_v13() {
+        assert_eq!(
+            FormatVersion::from_magic(MAGIC_BYTES_V13),
+            Some(FormatVersion::V13),
+        );
+    }
+
+    /// V13 and the other 14-byte magics (V12/V11/V10) must each resolve to
+    /// their own version. The dispatch tries V13 FIRST, so a buffer starting
+    /// with `SQRY_GRAPH_V13` must resolve to `FormatVersion::V13`. Guards
+    /// against a future refactor that re-orders the comparisons and silently
+    /// routes V13 through an older upconvert path.
+    #[test]
+    fn t3_format_version_dispatch_v13_before_v12_v11_v10() {
+        let mut buf = MAGIC_BYTES_V13.to_vec();
+        buf.extend_from_slice(&[0u8; 8]);
+        assert_eq!(FormatVersion::from_magic(&buf), Some(FormatVersion::V13));
+
+        let mut buf12 = MAGIC_BYTES_V12.to_vec();
+        buf12.extend_from_slice(&[0u8; 8]);
+        assert_eq!(FormatVersion::from_magic(&buf12), Some(FormatVersion::V12));
+    }
+
+    #[test]
+    fn t3_format_version_v13_magic_round_trip() {
+        let v = FormatVersion::V13;
+        let bytes = v.magic();
+        assert_eq!(bytes, MAGIC_BYTES_V13.as_slice());
+        assert_eq!(FormatVersion::from_magic(bytes), Some(v));
     }
 
     #[test]
@@ -633,7 +695,7 @@ mod tests {
     }
 
     /// V11 and V10 magics are equal-length (14 bytes). The dispatch tries V11
-    /// FIRST, so a buffer starting with `SQRY_GRAPH_V11` must resolve to
+    /// before V10, so a buffer starting with `SQRY_GRAPH_V11` must resolve to
     /// `FormatVersion::V11`, not V10. Guards against a future refactor that
     /// re-orders the comparisons and silently routes V11 through the V10
     /// upconvert path.
@@ -704,6 +766,7 @@ mod tests {
             FormatVersion::V10,
             FormatVersion::V11,
             FormatVersion::V12,
+            FormatVersion::V13,
         ] {
             let bytes = version.magic();
             assert_eq!(FormatVersion::from_magic(bytes), Some(version));

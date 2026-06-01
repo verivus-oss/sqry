@@ -1073,7 +1073,9 @@ fn remap_edge_kind_local_string_ids(kind: &mut EdgeKind, remap: &HashMap<StringI
         | EdgeKind::TypeArgument
         | EdgeKind::ExtensionReceiver
         | EdgeKind::CompanionOf
-        | EdgeKind::SealedPermit => {}
+        | EdgeKind::SealedPermit
+        // T3 Wraps carries WrapKind (Copy) + Option<u16>; no StringId fields.
+        | EdgeKind::Wraps { .. } => {}
     }
 }
 
@@ -1295,7 +1297,9 @@ pub fn remap_edge_kind_string_ids(kind: &mut EdgeKind, remap: &HashMap<StringId,
         | EdgeKind::TypeArgument
         | EdgeKind::ExtensionReceiver
         | EdgeKind::CompanionOf
-        | EdgeKind::SealedPermit => {}
+        | EdgeKind::SealedPermit
+        // T3 Wraps carries WrapKind (Copy) + Option<u16>; no StringId fields.
+        | EdgeKind::Wraps { .. } => {}
     }
 }
 
@@ -1393,7 +1397,7 @@ pub(crate) fn phase4c_prime_unify_cross_file_nodes<
 >(
     graph: &mut G,
     all_edges: &mut [Vec<PendingEdge>],
-) -> UnificationStats {
+) -> (UnificationStats, super::unification::NodeRemapTable) {
     use crate::graph::unified::mutation_target::GraphMutationTarget;
 
     use super::helper::CALL_COMPATIBLE_KINDS;
@@ -1610,7 +1614,129 @@ pub(crate) fn phase4c_prime_unify_cross_file_nodes<
     }
 
     stats.elapsed_ms = start.elapsed().as_millis() as u64;
-    stats
+    // Return the remap alongside the stats so the new Phase 4d-prime
+    // (`phase4d_prime_propagate_staging_metadata`, 02_DESIGN §4.3.e
+    // Changes 2 + 4) can drop loser-keyed metadata before merging the
+    // per-file staging stores into `CodeGraph::macro_metadata`. The
+    // `apply_to_edges` / `apply_to_committed_edges` calls above have
+    // already consumed `remap` for edge retargeting; the returned table
+    // is the same authoritative map used downstream.
+    (stats, remap)
+}
+
+/// Rekey a per-file staging `NodeMetadataStore` from staging-local
+/// `NodeId`s to canonical arena `NodeId`s using the per-file commit
+/// order.
+///
+/// 02_DESIGN §4.3.e Change 1 assumes staging metadata reaches Phase
+/// 4d-prime under the arena NodeIds Phase 3 assigned. In practice
+/// `StagingGraph::add_node` returns `NodeId::new(i, 1)` where `i` is the
+/// staging-local sequential index (see `staging.rs:355`), and plugins
+/// key their `NodeMetadataStore` entries under those staging-local IDs
+/// (see e.g. the Rust plugin's `metadata_store.get_or_insert_default(func_id)`
+/// at `sqry-lang-rust/src/macro_boundaries/proc_macro_classify.rs:84`).
+/// Phase 3 then renumbers those into arena slots; `per_file_node_ids[i]`
+/// is the arena NodeId for staging `NodeId(i, 1)`.
+///
+/// This helper rekeys each metadata entry by index: an entry under
+/// staging `NodeId(i, 1)` is moved to `per_file_node_ids[i]`. Entries
+/// whose staging index is out of bounds or whose generation is not the
+/// staging-canonical `1` are dropped (defensive — should never happen
+/// under the documented `StagingGraph::add_node` contract).
+///
+/// Returns a fresh arena-keyed [`NodeMetadataStore`]. The input is moved
+/// in by value so callers can `take_macro_metadata` and pipe the result
+/// through this helper into the Phase 4d-prime accumulator.
+#[must_use]
+pub(crate) fn rekey_staging_metadata_to_arena(
+    staging_metadata: crate::graph::unified::storage::metadata::NodeMetadataStore,
+    per_file_node_ids: &[crate::graph::unified::node::id::NodeId],
+) -> crate::graph::unified::storage::metadata::NodeMetadataStore {
+    use crate::graph::unified::node::id::NodeId;
+    use crate::graph::unified::storage::metadata::NodeMetadataStore;
+
+    let mut rekeyed = NodeMetadataStore::new();
+    for ((index, generation), entry) in staging_metadata.iter_entries() {
+        // Defensive: staging.add_node always emits generation 1. Drop
+        // any entry that does not match that contract; it cannot
+        // correspond to a Phase 3 commit slot.
+        if generation != 1 {
+            continue;
+        }
+        let idx_usize = index as usize;
+        let Some(&arena_id) = per_file_node_ids.get(idx_usize) else {
+            // Stale key beyond the file's committed range — drop silently.
+            continue;
+        };
+        let _ = NodeId::new(index, generation); // documentation: this was the staging-local id
+        // Re-insert the whole `StoredEntry` (typed payload + flags) so both
+        // `cfg_condition`/macro metadata AND synthetic markers survive the
+        // staging-to-arena rekey.
+        rekeyed.insert_entry(arena_id, entry.clone());
+    }
+    rekeyed
+}
+
+/// Phase 4d-prime — propagate per-file staging `NodeMetadataStore` into
+/// the live graph's `macro_metadata` after Phase 4d (bulk edge insert)
+/// and before Phase 4e (binding-plane derivation).
+///
+/// 02_DESIGN §4.3.e (Changes 4 + 7): the active Phase 3 commit path does
+/// not read `staging.macro_metadata`, and `StagingGraph::take_macro_metadata`
+/// was previously defined but never called — staging metadata never reached
+/// `CodeGraph::macro_metadata`. T3.8's `cfg_condition` cannot ride the Go
+/// plugin's parallel synthetic-flag channel (per-symbol metadata, not a
+/// boolean bit on a known set of placeholders), so this sub-phase wires
+/// the missing path.
+///
+/// For each `(file_id, store)` entry:
+/// 1. Apply the Phase 4c-prime `NodeRemapTable` via
+///    [`NodeRemapTable::apply_to_metadata_store`] so loser-keyed entries
+///    are dropped (per 01_SPEC §5.3.f the spec contract is "losers'
+///    constraints are lost"; the winner's own per-file store carries the
+///    authoritative metadata).
+/// 2. If the store still has entries after the remap, call
+///    [`NodeMetadataStore::merge`] into the graph's authoritative metadata
+///    store.
+///
+/// Returns `true` when at least one entry was merged, `false` when every
+/// staged store was empty or fully consumed by loser-drops. The boolean
+/// is observed by the Phase 3d post-Pass-4d hook on the incremental
+/// rebuild plane; production callers ignore it.
+///
+/// Generic over [`GraphMutationTarget`] so both the full-build
+/// (`build_unified_graph_inner`) and incremental
+/// (`incremental_rebuild` → `phase3d_insert_cross_file_edges`) planes
+/// can call it against `CodeGraph` and `RebuildGraph` respectively.
+///
+/// Runs after Phase 4d (NodeRemapTable produced by 4c is final) and
+/// before Phase 4e (binding-plane synthesis can observe `cfg_condition`
+/// if it later needs to). The Rust plugin's existing `merge_macro_metadata`
+/// call automatically benefits: Rust-side `#[cfg(...)]` strings start
+/// flowing into the live snapshot for the first time as an incidental
+/// fix of an existing latent gap.
+#[must_use]
+pub(crate) fn phase4d_prime_propagate_staging_metadata<G>(
+    graph: &mut G,
+    staged_metadata: Vec<(
+        crate::graph::unified::file::id::FileId,
+        crate::graph::unified::storage::metadata::NodeMetadataStore,
+    )>,
+    remap: &super::unification::NodeRemapTable,
+) -> bool
+where
+    G: crate::graph::unified::mutation_target::GraphMutationTarget,
+{
+    let target = graph.macro_metadata_mut();
+    let mut any_inserted = false;
+    for (_file_id, mut metadata) in staged_metadata {
+        remap.apply_to_metadata_store(&mut metadata);
+        if !metadata.is_empty() {
+            target.merge(&metadata);
+            any_inserted = true;
+        }
+    }
+    any_inserted
 }
 
 /// Convert per-file `PendingEdge` collections to per-file `DeltaEdge` collections
@@ -2448,7 +2574,7 @@ mod tests {
             spans: vec![],
         }]];
 
-        let stats = phase4c_prime_unify_cross_file_nodes(&mut rebuild, &mut all_edges);
+        let (stats, _remap) = phase4c_prime_unify_cross_file_nodes(&mut rebuild, &mut all_edges);
 
         // Stats shape
         assert_eq!(stats.nodes_merged, 1, "exactly one loser was tombstoned");
@@ -2536,7 +2662,7 @@ mod tests {
         graph.rebuild_indices();
 
         let mut all_edges: Vec<Vec<PendingEdge>> = Vec::new();
-        let stats = phase4c_prime_unify_cross_file_nodes(&mut graph, &mut all_edges);
+        let (stats, _remap) = phase4c_prime_unify_cross_file_nodes(&mut graph, &mut all_edges);
 
         assert_eq!(
             stats.nodes_merged, 1,
@@ -2609,7 +2735,7 @@ mod tests {
         graph.rebuild_indices();
 
         let mut all_edges: Vec<Vec<PendingEdge>> = Vec::new();
-        let stats = phase4c_prime_unify_cross_file_nodes(&mut graph, &mut all_edges);
+        let (stats, _remap) = phase4c_prime_unify_cross_file_nodes(&mut graph, &mut all_edges);
 
         assert_eq!(stats.nodes_merged, 1);
 
@@ -2856,5 +2982,223 @@ mod tests {
             assert_eq!(a.target, b.target);
             assert_eq!(a.seq, b.seq);
         }
+    }
+
+    // ----------------------------------------------------------------------
+    // T3 Cluster B (02_DESIGN §4.3.e Change 4): Phase 4d-prime propagation
+    // ----------------------------------------------------------------------
+
+    /// Build a per-file `NodeMetadataStore` carrying one Macro entry with
+    /// a `cfg_condition` so the merge step is non-vacuous.
+    fn macro_store_with(
+        node_id: NodeId,
+        cfg: &str,
+    ) -> crate::graph::unified::storage::metadata::NodeMetadataStore {
+        use crate::graph::unified::storage::metadata::{MacroNodeMetadata, NodeMetadataStore};
+        let mut store = NodeMetadataStore::new();
+        let m = MacroNodeMetadata {
+            cfg_condition: Some(cfg.to_string()),
+            ..Default::default()
+        };
+        store.insert(node_id, m);
+        store
+    }
+
+    #[test]
+    fn phase4d_prime_merges_per_file_metadata_into_graph_macro_metadata() {
+        use super::super::unification::NodeRemapTable;
+        use crate::graph::unified::concurrent::CodeGraph;
+        use crate::graph::unified::mutation_target::GraphMutationTarget;
+
+        let mut graph = CodeGraph::new();
+        let nid_a = NodeId::new(101, 1);
+        let nid_b = NodeId::new(202, 1);
+        let file_a = FileId::new(7);
+        let file_b = FileId::new(8);
+
+        let staged = vec![
+            (file_a, macro_store_with(nid_a, "linux")),
+            (file_b, macro_store_with(nid_b, "darwin")),
+        ];
+
+        let remap = NodeRemapTable::default();
+        let merged = phase4d_prime_propagate_staging_metadata(&mut graph, staged, &remap);
+
+        assert!(
+            merged,
+            "non-empty staged stores must report metadata_changed=true"
+        );
+        assert_eq!(
+            GraphMutationTarget::macro_metadata_mut(&mut graph)
+                .get_macro(nid_a)
+                .and_then(|m| m.cfg_condition.clone()),
+            Some("linux".to_string())
+        );
+        assert_eq!(
+            GraphMutationTarget::macro_metadata_mut(&mut graph)
+                .get_macro(nid_b)
+                .and_then(|m| m.cfg_condition.clone()),
+            Some("darwin".to_string())
+        );
+    }
+
+    #[test]
+    fn phase4d_prime_drops_loser_metadata_before_merge() {
+        // Pins 02_DESIGN §4.3.e Change 3 contract: when the unifier
+        // tombstones a loser, its staged metadata must NOT survive into
+        // the graph (the winner's own per-file store carries the
+        // authoritative cfg_condition; 01_SPEC §5.3.f spec text).
+        use super::super::unification::NodeRemapTable;
+        use crate::graph::unified::concurrent::CodeGraph;
+        use crate::graph::unified::mutation_target::GraphMutationTarget;
+
+        let mut graph = CodeGraph::new();
+        let loser = NodeId::new(101, 1);
+        let winner = NodeId::new(202, 1);
+        let file_loser = FileId::new(7);
+        let file_winner = FileId::new(8);
+
+        // Loser file stages `linux`, winner file stages `darwin`.
+        let staged = vec![
+            (file_loser, macro_store_with(loser, "linux")),
+            (file_winner, macro_store_with(winner, "darwin")),
+        ];
+
+        // Unifier marks `loser → winner`.
+        let mut remap = NodeRemapTable::default();
+        remap.insert(loser, winner);
+
+        let merged = phase4d_prime_propagate_staging_metadata(&mut graph, staged, &remap);
+        assert!(
+            merged,
+            "winner's store still merges so metadata_changed=true"
+        );
+
+        // The winner gets `darwin` from its own file's store. The loser
+        // entry is dropped before merge — it never reaches the graph
+        // under the winner key.
+        assert_eq!(
+            GraphMutationTarget::macro_metadata_mut(&mut graph)
+                .get_macro(winner)
+                .and_then(|m| m.cfg_condition.clone()),
+            Some("darwin".to_string()),
+            "winner's authoritative cfg_condition wins; loser's `linux` is dropped"
+        );
+        assert!(
+            GraphMutationTarget::macro_metadata_mut(&mut graph)
+                .get_macro(loser)
+                .is_none(),
+            "loser key has no metadata in the graph after Phase 4d-prime"
+        );
+    }
+
+    #[test]
+    fn rekey_staging_metadata_to_arena_maps_local_to_arena() {
+        // Stage metadata under staging-local NodeIds (i, 1) for i ∈ {0, 1, 2}
+        // and confirm the rekeyed store carries the same payload under
+        // the corresponding arena NodeIds drawn from per_file_node_ids.
+        use crate::graph::unified::storage::metadata::{MacroNodeMetadata, NodeMetadataStore};
+
+        let mut staging = NodeMetadataStore::new();
+        for (i, cond) in ["linux", "darwin", "windows"].iter().enumerate() {
+            let m = MacroNodeMetadata {
+                cfg_condition: Some((*cond).to_string()),
+                ..Default::default()
+            };
+            staging.insert(NodeId::new(i as u32, 1), m);
+        }
+
+        // Arena NodeIds — note generation 1 (the standard staging.add_node
+        // contract) and arbitrary non-sequential arena slots.
+        let arena_ids = vec![
+            NodeId::new(100, 1),
+            NodeId::new(101, 1),
+            NodeId::new(102, 1),
+        ];
+
+        let rekeyed = rekey_staging_metadata_to_arena(staging, &arena_ids);
+
+        assert_eq!(rekeyed.len(), 3);
+        for (i, cond) in ["linux", "darwin", "windows"].iter().enumerate() {
+            let m = rekeyed
+                .get_macro(arena_ids[i])
+                .expect("arena NodeId carries the remapped entry");
+            assert_eq!(m.cfg_condition.as_deref(), Some(*cond));
+        }
+        // Original staging keys are gone (no longer in the rekeyed store).
+        assert!(rekeyed.get_macro(NodeId::new(0, 1)).is_none());
+    }
+
+    #[test]
+    fn rekey_staging_metadata_drops_out_of_range_keys() {
+        // Staging metadata keyed at index 5 but per_file_node_ids only has
+        // 3 entries: the helper drops the stale key rather than panicking.
+        use crate::graph::unified::storage::metadata::{MacroNodeMetadata, NodeMetadataStore};
+
+        let mut staging = NodeMetadataStore::new();
+        let in_range = MacroNodeMetadata {
+            cfg_condition: Some("good".to_string()),
+            ..Default::default()
+        };
+        staging.insert(NodeId::new(0, 1), in_range);
+
+        let stale = MacroNodeMetadata {
+            cfg_condition: Some("bad".to_string()),
+            ..Default::default()
+        };
+        staging.insert(NodeId::new(5, 1), stale);
+
+        let arena_ids = vec![NodeId::new(100, 1)];
+        let rekeyed = rekey_staging_metadata_to_arena(staging, &arena_ids);
+
+        assert_eq!(rekeyed.len(), 1, "stale out-of-range key dropped");
+        assert_eq!(
+            rekeyed
+                .get_macro(NodeId::new(100, 1))
+                .and_then(|m| m.cfg_condition.clone()),
+            Some("good".to_string())
+        );
+    }
+
+    #[test]
+    fn phase4d_prime_empty_staged_metadata_returns_false() {
+        use super::super::unification::NodeRemapTable;
+        use crate::graph::unified::concurrent::CodeGraph;
+
+        let mut graph = CodeGraph::new();
+        let remap = NodeRemapTable::default();
+        let merged = phase4d_prime_propagate_staging_metadata(&mut graph, Vec::new(), &remap);
+        assert!(!merged, "no staged stores → metadata_changed=false");
+    }
+
+    #[test]
+    fn phase4d_prime_empty_store_after_loser_drop_returns_false() {
+        // Single staged store that is ENTIRELY losers — after
+        // `apply_to_metadata_store` drops them all, the store is empty
+        // and `merge` should not be called.
+        use super::super::unification::NodeRemapTable;
+        use crate::graph::unified::concurrent::CodeGraph;
+        use crate::graph::unified::mutation_target::GraphMutationTarget;
+
+        let mut graph = CodeGraph::new();
+        let loser = NodeId::new(101, 1);
+        let winner = NodeId::new(202, 1);
+        let file_loser = FileId::new(7);
+
+        let staged = vec![(file_loser, macro_store_with(loser, "linux"))];
+
+        let mut remap = NodeRemapTable::default();
+        remap.insert(loser, winner);
+
+        let merged = phase4d_prime_propagate_staging_metadata(&mut graph, staged, &remap);
+
+        assert!(
+            !merged,
+            "store collapsed to empty by loser-drop → no merge → metadata_changed=false"
+        );
+        assert!(
+            GraphMutationTarget::macro_metadata_mut(&mut graph).is_empty(),
+            "graph metadata store stays empty"
+        );
     }
 }

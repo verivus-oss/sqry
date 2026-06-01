@@ -5,6 +5,7 @@
 
 mod analysis;
 mod ask;
+mod context_propagation;
 mod explain;
 mod graph;
 mod index;
@@ -31,6 +32,7 @@ pub use analysis::{
 pub use ask::{
     build_translator_config_for_path, execute_sqry_ask, execute_sqry_ask_with_translator,
 };
+pub use context_propagation::execute_context_propagation;
 pub use explain::execute_explain_code;
 pub use graph::{execute_export_graph, execute_get_dependencies, execute_subgraph};
 pub use index::{execute_index_status, execute_rebuild_index};

@@ -1035,6 +1035,42 @@ impl StagingGraph {
         std::mem::take(&mut self.macro_metadata)
     }
 
+    /// Read-only check whether a staging-local NodeId already carries a
+    /// `NodeMetadata::Synthetic` marker in this staging graph's metadata
+    /// store.
+    ///
+    /// Plugins that emit synthetic placeholders (e.g. the Go plugin's
+    /// `add_synthetic_variable` at `sqry-lang-go/src/relations/graph_builder.rs`)
+    /// merge the marker into `macro_metadata` immediately after staging the
+    /// node. Per-file post-passes (e.g. T3.8's
+    /// `stamp_cfg_condition_for_file` per 02_DESIGN §4.3.d) consult this
+    /// predicate to skip synthetic nodes before stamping language-agnostic
+    /// `cfg_condition` metadata — otherwise the stamp would overwrite the
+    /// synthetic marker via `NodeMetadataStore::insert_metadata`'s
+    /// overwrite semantics and defeat suppression.
+    ///
+    /// This is a read-only proxy onto `NodeMetadataStore::is_synthetic`;
+    /// it never mutates the staging graph.
+    #[must_use]
+    pub fn is_node_synthetic(&self, node_id: crate::graph::unified::node::id::NodeId) -> bool {
+        self.macro_metadata.is_synthetic(node_id)
+    }
+
+    /// Iterator over every staging-local `NodeId` this staging graph has
+    /// allocated via `add_node`, in allocation order.
+    ///
+    /// IDs are sequential `NodeId::new(0, 1) .. NodeId::new(N, 1)` where
+    /// `N` is `node_count_u32()` (see `add_node` at `:355` for the
+    /// invariant). Useful for per-file post-passes that need to walk
+    /// every staged node (e.g. T3.8's `stamp_cfg_condition_for_file`
+    /// per 02_DESIGN §4.3.d).
+    pub fn staged_node_ids(
+        &self,
+    ) -> impl Iterator<Item = crate::graph::unified::node::id::NodeId> + '_ {
+        let n = self.node_count_u32();
+        (0..n).map(|i| crate::graph::unified::node::id::NodeId::new(i, 1))
+    }
+
     /// Immutable accessor for the C indirect-call staging payload, if any.
     ///
     /// Returns `None` for non-C plugins (the default) or for C files that
@@ -1383,7 +1419,9 @@ impl StagingGraph {
             | EdgeKind::TypeArgument
             | EdgeKind::ExtensionReceiver
             | EdgeKind::CompanionOf
-            | EdgeKind::SealedPermit => {
+            | EdgeKind::SealedPermit
+            // T3 Wraps carries WrapKind (Copy) + Option<u16>; no StringId fields.
+            | EdgeKind::Wraps { .. } => {
                 // No StringIds to remap
             }
         }

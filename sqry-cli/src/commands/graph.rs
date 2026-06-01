@@ -3369,6 +3369,13 @@ fn edge_metadata_json(
             "protocol": resolve_string_id(snapshot, *protocol),
             "metadata": metadata.and_then(|id| resolve_string_id(snapshot, id)),
         }),
+        UnifiedEdgeKind::Wraps {
+            kind,
+            chain_position,
+        } => json!({
+            "kind": kind,
+            "chain_position": chain_position,
+        }),
     }
 }
 

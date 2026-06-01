@@ -7,6 +7,7 @@ pub mod batch;
 pub mod cache;
 pub mod completions;
 pub mod config;
+pub mod context_propagation;
 pub mod cycles;
 pub mod daemon;
 pub mod diff;
@@ -47,6 +48,7 @@ pub use config::{
     run_config_alias_list, run_config_alias_remove, run_config_alias_set, run_config_get,
     run_config_init, run_config_set, run_config_show, run_config_validate,
 };
+pub use context_propagation::run_context_propagation;
 pub use cycles::run_cycles;
 pub use diff::run_diff;
 pub use duplicates::run_duplicates;

@@ -9,16 +9,16 @@ rust-version.workspace = true
 description = "Go language plugin for sqry"
 
 [dependencies]
-sqry-core = { version = "17.0.1", path = "../sqry-core" }
-sqry-lang-support = { version = "17.0.1", path = "../sqry-lang-support" }
+sqry-core = { version = "18.0.2", path = "../sqry-core" }
+sqry-lang-support = { version = "18.0.2", path = "../sqry-lang-support" }
 anyhow.workspace = true
+log.workspace = true
 tree-sitter.workspace = true
 tree-sitter-go.workspace = true
 streaming-iterator.workspace = true
 
 [dev-dependencies]
 criterion = "0.8"
-log.workspace = true
 sqry-core = { path = "../sqry-core", features = ["test-support"] }
 
 [features]

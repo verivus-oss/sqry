@@ -225,6 +225,83 @@ pub struct SqryQueryData {
     pub hits: Vec<SqryQueryHit>,
 }
 
+/// Response data for the `context_propagation` MCP tool (T3.7,
+/// Cluster G). Wraps the `ContextLeakSet` returned by
+/// `ContextPropagationQuery` with the request-scope echo and a
+/// `truncated` flag so the client can paginate against
+/// `max_results`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextPropagationData {
+    /// Echo of the request scope (`"global"` or `"file:<path>"`).
+    pub scope: String,
+    /// Echo of the request mode filter (`"all"` /
+    /// `"break_site"` / `"unthreaded_goroutine"` / `"http_handler_leak"`).
+    pub mode: String,
+    /// Total leaks returned by the query before `max_results` truncation.
+    pub total: u64,
+    /// Whether `leaks` was truncated below `total`.
+    pub truncated: bool,
+    /// Flat list of context leaks. The query's classification is
+    /// preserved on each entry's `mode` field so a client can
+    /// filter further without re-running the query.
+    pub leaks: Vec<ContextLeakDto>,
+}
+
+/// One context-propagation leak finding, surfaced through the MCP
+/// `context_propagation` tool. Mirrors
+/// `sqry_db::queries::context_propagation::ContextLeak` (01_SPEC
+/// §5.2.a + 02_DESIGN §2.5) while exposing user-facing names and
+/// the byte-range span shape.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextLeakDto {
+    /// Why this call site is a leak. One of `"break_site"`,
+    /// `"unthreaded_goroutine"`, `"http_handler_leak"`.
+    pub mode: String,
+    /// Caller function's qualified name (or simple name when the
+    /// graph has no qualified form).
+    pub caller: String,
+    /// Callee function's qualified name.
+    pub callee: String,
+    /// Filesystem path of the caller's source file — included as a
+    /// convenience for IDE jump-to. The authoritative location info
+    /// is on `call_span`.
+    pub caller_file: String,
+    /// Source-text range covering the failing call expression. Lines
+    /// are 1-based for IDE friendliness; columns are 0-based byte
+    /// offsets (matching tree-sitter's `Point` shape).
+    pub call_span: ContextLeakSpan,
+    /// NodeId of the caller's `ctx context.Context` parameter when
+    /// the graph plugin emits one. The Go plugin currently leaves
+    /// this `None` (parameter NodeIds are synthetic and not user-
+    /// facing); future plugins may populate it. Serialised as
+    /// `{ "index": u32, "generation": u64 }`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub caller_ctx_param: Option<ContextLeakNodeRef>,
+}
+
+/// 1-based-line, 0-based-byte-column source range, matching the
+/// `Span` shape that the underlying `sqry_db` ContextLeak carries.
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextLeakSpan {
+    pub start_line: u32,
+    pub start_column: u32,
+    pub end_line: u32,
+    pub end_column: u32,
+}
+
+/// Opaque caller-ctx-param NodeId reference. The Go plugin never
+/// populates this today; the struct exists so future plugins can
+/// emit a stable IDE jump-to handle without breaking the wire shape.
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextLeakNodeRef {
+    pub index: u32,
+    pub generation: u64,
+}
+
 /// One matched node's metadata for the `sqry_query` tool response.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]

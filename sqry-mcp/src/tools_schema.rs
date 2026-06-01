@@ -118,10 +118,15 @@ mod tests {
     }
 
     /// C045 — exact-gap pin between the standalone and daemon tool
-    /// surfaces. With C091 enabling `expand_cache_status` at runtime,
-    /// the standalone inventory is **36 tools** and the daemon subset
-    /// is **16 tools** (per `DAEMON_SUPPORTED_TOOL_NAMES`), giving a
-    /// strict gap of **20 standalone-only tools**.
+    /// surfaces. With C091 enabling `expand_cache_status` and T3
+    /// Cluster G adding `context_propagation` at runtime, the
+    /// standalone inventory is **37 tools** and the daemon subset is
+    /// **16 tools** (per `DAEMON_SUPPORTED_TOOL_NAMES`), giving a
+    /// strict gap of **21 standalone-only tools**. `context_propagation`
+    /// is deliberately NOT added to the daemon subset in this iter —
+    /// daemon dispatch wiring requires a lockstep update to
+    /// sqry-daemon's `dispatch_tool` match and the daemon MCP host
+    /// allow-list (Phase 8b/c), which is out of scope for Cluster G.
     ///
     /// This constant is the canonical CI guard: any change to either
     /// `DAEMON_SUPPORTED_TOOL_NAMES` or the rmcp-registered standalone
@@ -129,7 +134,7 @@ mod tests {
     /// same PR. The
     /// [`daemon_supported_tool_names_is_strict_subset_of_standalone`]
     /// test asserts the live measurement matches this constant.
-    pub const EXPECTED_STANDALONE_ONLY_COUNT: usize = 20;
+    pub const EXPECTED_STANDALONE_ONLY_COUNT: usize = 21;
 
     /// Every `DAEMON_SUPPORTED_TOOL_NAMES` entry must appear in the
     /// standalone `SqryServer::get_filtered_tools()` inventory — the

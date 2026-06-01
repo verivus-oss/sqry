@@ -147,6 +147,11 @@ fn convert_filters(filters: Option<SearchFiltersParams>) -> SearchFilters {
         visibility,
         kinds: f.symbol_kind,
         min_score: f.score_min,
+        cfg_condition: f.cfg_condition.map(|cfg| crate::tools::CfgConditionFilter {
+            equals: cfg.equals,
+            matches: cfg.matches,
+            semantic_match: cfg.semantic_match,
+        }),
     }
 }
 
@@ -215,6 +220,7 @@ pub fn params_to_relation_query_args(params: Value) -> Result<RelationQueryArgs,
         RelationTypeParam::Imports => RelationType::Imports,
         RelationTypeParam::Exports => RelationType::Exports,
         RelationTypeParam::Returns => RelationType::Returns,
+        RelationTypeParam::Wraps => RelationType::Wraps,
     };
 
     let pagination = convert_pagination(params.page_token, params.page_size, None)?;
@@ -299,6 +305,7 @@ pub fn params_to_find_unused_args(params: Value) -> Result<FindUnusedArgs, RpcEr
         kinds: params.symbol_kind,
         max_results,
         pagination,
+        exclude_cfg_gated: params.exclude_cfg_gated,
     })
 }
 

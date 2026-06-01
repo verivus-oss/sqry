@@ -105,6 +105,7 @@ fn build_relation_query(kind: RelationKind, target: &str) -> Result<String> {
         RelationKind::Imports => "imports",
         RelationKind::Exports => "exports",
         RelationKind::Returns => "returns",
+        RelationKind::Wraps => "wraps",
     };
 
     Ok(format!("{prefix}:{target}"))

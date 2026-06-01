@@ -109,6 +109,10 @@ impl FeatureFlags {
             | "get_workspace_symbols"
             // Structural planner tool (DB13, always enabled — requires unified graph)
             | "sqry_query"
+            // T3.7 context-propagation leak detector (Cluster G).
+            // Always enabled — requires the unified graph + sqry-db
+            // ContextPropagationQuery (registered at QueryDb::new).
+            | "context_propagation"
             // Workspace identity / status surface (`STEP_7`, always enabled).
             | "workspace_status"
             // Macro expand-cache status (always enabled — registered

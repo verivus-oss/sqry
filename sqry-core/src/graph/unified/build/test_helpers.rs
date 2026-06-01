@@ -894,6 +894,8 @@ fn edge_kind_name(kind: &EdgeKind) -> &'static str {
         EdgeKind::ExtensionReceiver => "ExtensionReceiver",
         EdgeKind::CompanionOf => "CompanionOf",
         EdgeKind::SealedPermit => "SealedPermit",
+        // T3 error chains (Go)
+        EdgeKind::Wraps { .. } => "Wraps",
     }
 }
 

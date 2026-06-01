@@ -34,7 +34,7 @@ use std::sync::Arc;
 use sqry_core::graph::unified::concurrent::CodeGraph;
 use sqry_core::graph::unified::edge::kind::{
     DbQueryType, EdgeKind, ExportKind, FfiConvention, HttpMethod, LifetimeConstraintKind,
-    MacroExpansionKind, MqProtocol, TableWriteOp, TypeOfContext,
+    MacroExpansionKind, MqProtocol, TableWriteOp, TypeOfContext, WrapKind,
 };
 use sqry_core::graph::unified::node::NodeKind;
 
@@ -186,6 +186,10 @@ pub enum CanonicalEdgeKind {
     ExtensionReceiver,
     CompanionOf,
     SealedPermit,
+    Wraps {
+        kind: WrapKind,
+        chain_position: Option<u16>,
+    },
 }
 
 /// Canonical form of [`MqProtocol`] that resolves the `Other(StringId)`
@@ -524,6 +528,13 @@ fn canonicalize_edge_kind(graph: &CodeGraph, kind: &EdgeKind) -> CanonicalEdgeKi
         EdgeKind::ExtensionReceiver => CanonicalEdgeKind::ExtensionReceiver,
         EdgeKind::CompanionOf => CanonicalEdgeKind::CompanionOf,
         EdgeKind::SealedPermit => CanonicalEdgeKind::SealedPermit,
+        EdgeKind::Wraps {
+            kind,
+            chain_position,
+        } => CanonicalEdgeKind::Wraps {
+            kind: *kind,
+            chain_position: *chain_position,
+        },
     }
 }
 

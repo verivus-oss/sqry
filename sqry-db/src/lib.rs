@@ -212,6 +212,8 @@ impl QueryDb {
             .register::<queries::ReachableFromEntryPointsQuery>();
         self.registry.register::<queries::UnusedQuery>();
         self.registry.register::<queries::IsNodeUnusedQuery>();
+        // T3.7 context-propagation leak detection.
+        self.registry.register::<queries::ContextPropagationQuery>();
         // Phase A — C indirect-call precision (U13).
         self.registry.register::<queries::AddressTakenQuery>();
         self.registry

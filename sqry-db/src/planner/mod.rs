@@ -48,6 +48,7 @@
 //!
 //! [`DerivedQuery`]: crate::query::DerivedQuery
 
+pub mod cfg_match;
 pub mod compile;
 pub mod cost_gate;
 pub mod execute;
@@ -56,6 +57,7 @@ pub mod fuse;
 pub mod ir;
 pub mod parse;
 
+pub use cfg_match::{CfgAst, CfgMatcher, matches_stored, parse_stored_cfg};
 pub use compile::{
     BuildError, PlanNodeKind, QueryBuilder, QueryPlanExt, ScanFilters, normalize_edge_kind,
 };

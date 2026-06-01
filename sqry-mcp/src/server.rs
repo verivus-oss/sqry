@@ -1114,6 +1114,29 @@ impl SqryServer {
         Ok(Self::success_result(&result))
     }
 
+    /// Detect Go call sites that leak `context.Context` propagation
+    /// (T3.7, Cluster G).
+    #[tool(
+        description = "Detect Go call-sites that leak context.Context propagation: callers with ctx + ctx-accepting callees where ctx is not threaded. Modes: break_site (sync), unthreaded_goroutine (go f), http_handler_leak (http.HandlerFunc shape).",
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
+    async fn context_propagation(
+        &self,
+        Parameters(params): Parameters<crate::tools::ContextPropagationParams>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        self.ensure_tool_enabled("context_propagation")?;
+
+        let args = convert_context_propagation_params(params.clone()).map_err(rpc_error_to_mcp)?;
+        let result = self
+            .execute_tool_for_request("context_propagation", &params, &context, move |_cancel| {
+                execution::execute_context_propagation(&args)
+            })
+            .await?;
+
+        Ok(Self::success_result(&result))
+    }
+
     /// Translate natural language into sqry query commands.
     #[tool(
         description = "Translate natural language into sqry query commands",
@@ -1789,6 +1812,11 @@ fn convert_filters(filters: Option<SearchFiltersParams>) -> SearchFilters {
         }),
         kinds: f.symbol_kind,
         min_score: f.score_min,
+        cfg_condition: f.cfg_condition.map(|cfg| crate::tools::CfgConditionFilter {
+            equals: cfg.equals,
+            matches: cfg.matches,
+            semantic_match: cfg.semantic_match,
+        }),
     }
 }
 
@@ -1895,6 +1923,7 @@ fn convert_relation_query_params(
         RelationTypeParam::Imports => RelationType::Imports,
         RelationTypeParam::Exports => RelationType::Exports,
         RelationTypeParam::Returns => RelationType::Returns,
+        RelationTypeParam::Wraps => RelationType::Wraps,
     };
 
     let pagination = convert_pagination(params.page_token, params.page_size, None)?;
@@ -2255,6 +2284,24 @@ fn convert_find_cycles_params(params: FindCyclesParams) -> Result<FindCyclesArgs
     })
 }
 
+fn convert_context_propagation_params(
+    params: crate::tools::ContextPropagationParams,
+) -> Result<crate::tools::ContextPropagationArgs, RpcError> {
+    use crate::tools::params::ContextScopeParam;
+    use crate::tools::{ContextPropagationArgs, ContextScopeArg};
+    let max_results = validate_max_results(params.max_results, 5_000)?;
+    let scope = match params.scope {
+        ContextScopeParam::Global => ContextScopeArg::Global,
+        ContextScopeParam::File { path } => ContextScopeArg::File(path),
+    };
+    Ok(ContextPropagationArgs {
+        path: params.path,
+        scope,
+        mode: params.mode.into(),
+        max_results,
+    })
+}
+
 fn convert_find_unused_params(params: FindUnusedParams) -> Result<FindUnusedArgs, RpcError> {
     let pagination = convert_pagination(None, 50, params.pagination.as_ref())?;
 
@@ -2276,6 +2323,7 @@ fn convert_find_unused_params(params: FindUnusedParams) -> Result<FindUnusedArgs
         kinds: params.symbol_kind,
         max_results,
         pagination,
+        exclude_cfg_gated: params.exclude_cfg_gated,
     })
 }
 

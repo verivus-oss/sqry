@@ -501,6 +501,15 @@ fn build_unified_graph_inner(
     };
     // Collect all edges across chunks for Phase 4 bulk insert.
     let mut all_edges: Vec<Vec<PendingEdge>> = Vec::new();
+    // T3 Cluster B (02_DESIGN §4.3.e Change 1): retain per-file staging
+    // `NodeMetadataStore` across chunks so Phase 4d-prime can merge them
+    // into `CodeGraph::macro_metadata` after Phase 4d. Empty stores are
+    // filtered out at take-time to keep this vector proportional to
+    // actually-stamped files.
+    let mut all_staged_metadata: Vec<(
+        crate::graph::unified::file::id::FileId,
+        crate::graph::unified::storage::metadata::NodeMetadataStore,
+    )> = Vec::new();
     // Accumulate per-chunk C indirect-call drains (DESIGN §8.2 / U11).
     // Stays at `default()` (empty) for non-C workspaces — only C plugin
     // Phase 1 walkers (U10) push into the per-file
@@ -684,6 +693,45 @@ fn build_unified_graph_inner(
             }
         }
 
+        // T3 Cluster B (02_DESIGN §4.3.e Change 1): take each file's
+        // staging `NodeMetadataStore` paired with the `FileId` Phase 3
+        // assigned, and rekey it from staging-local NodeIds to canonical
+        // arena NodeIds before adding to the chunked accumulator.
+        // `chunk_parsed.iter_mut()` and `phase3.per_file_node_ids` both
+        // align with `plan.file_plans` (deterministic file order),
+        // matching the FileSegmentTable + per_file_nodes precedent above.
+        // The rekey step is required because `StagingGraph::add_node`
+        // returns sequential staging-local IDs (`staging.rs:355`) but
+        // `CodeGraph::macro_metadata` is keyed under arena IDs — see
+        // `rekey_staging_metadata_to_arena` for the contract.
+        debug_assert_eq!(
+            plan.file_plans.len(),
+            chunk_parsed.len(),
+            "per-chunk file plan / parsed-file vectors must align so Phase 4d-prime sees \
+             the FileId Phase 3 assigned"
+        );
+        debug_assert_eq!(
+            phase3.per_file_node_ids.len(),
+            plan.file_plans.len(),
+            "Phase 3 per-file node ID vector length must match plan length for metadata rekey"
+        );
+        for ((fp, (_path, parsed)), arena_ids) in plan
+            .file_plans
+            .iter()
+            .zip(chunk_parsed.iter_mut())
+            .zip(phase3.per_file_node_ids.iter())
+        {
+            let metadata = parsed.staging.take_macro_metadata();
+            if metadata.is_empty() {
+                continue;
+            }
+            let rekeyed =
+                super::parallel_commit::rekey_staging_metadata_to_arena(metadata, arena_ids);
+            if !rekeyed.is_empty() {
+                all_staged_metadata.push((fp.file_id, rekeyed));
+            }
+        }
+
         // Update global offsets for next chunk
         offsets.node_offset += plan.total_nodes;
         offsets.string_offset += plan.total_strings;
@@ -746,7 +794,8 @@ fn build_unified_graph_inner(
     // merge duplicates into a single canonical node, and rewrite PendingEdge targets.
     // Must run AFTER rebuild_indices (uses by_qualified_name) and BEFORE Phase 4d
     // (operates on PendingEdge, not committed DeltaEdge).
-    let unification_stats = phase4c_prime_unify_cross_file_nodes(&mut graph, &mut all_edges);
+    let (unification_stats, unification_remap) =
+        phase4c_prime_unify_cross_file_nodes(&mut graph, &mut all_edges);
     if unification_stats.nodes_merged > 0 {
         log::info!(
             "Phase 4c-prime: unified {} duplicate nodes ({} candidate groups examined, \
@@ -814,6 +863,20 @@ fn build_unified_graph_inner(
     // seq counter so non-empty graphs advance deterministically.
     let _final_edge_seq = phase4d_bulk_insert_edges(&mut graph, &all_edges);
     tracker.increment_progress(); // 4d done
+
+    // Phase 4d-prime (T3 Cluster B, 02_DESIGN §4.3.e Change 4): propagate
+    // per-file staging `NodeMetadataStore` into `CodeGraph::macro_metadata`
+    // using the Phase 4c-prime `NodeRemapTable` to drop loser-keyed
+    // entries first. Runs after Phase 4d (remap is final) and before
+    // Phase 4e (binding-plane synthesis observes the merged metadata).
+    // The return bool is informational on the full-build plane — no
+    // production caller consumes it.
+    let _staged_metadata_merged = super::parallel_commit::phase4d_prime_propagate_staging_metadata(
+        &mut graph,
+        std::mem::take(&mut all_staged_metadata),
+        &unification_remap,
+    );
+    tracker.increment_progress(); // 4d-prime done
     tracker.complete_phase();
 
     log::info!(

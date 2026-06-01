@@ -43,6 +43,7 @@ use sqry_core::schema::{
 ///   "language": ["rust", "typescript"],
 ///   "symbol_kind": ["function", "method"],
 ///   "visibility": "public",
+///   "cfg_condition": { "semantic_match": "linux" },
 ///   "score_min": 0.5
 /// }
 /// ```
@@ -85,6 +86,34 @@ pub struct SearchFiltersParams {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 0.0, max = 1.0))]
     pub score_min: Option<f64>,
+
+    /// Filter by stored conditional-compilation metadata
+    /// (`macro_metadata.cfg_condition`).
+    ///
+    /// `equals` is byte-exact, `matches` is a Rust regex, and
+    /// `semantic_match` applies the same cross-language cfg comparator used by
+    /// planner `cfg:<flag>` queries.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cfg_condition: Option<CfgConditionFilterParams>,
+}
+
+/// Structured `cfg_condition` filter for search tools.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
+#[serde(default)]
+pub struct CfgConditionFilterParams {
+    /// Byte-exact match against the stored `cfg_condition` string.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub equals: Option<String>,
+
+    /// Rust regex matched against the stored `cfg_condition` string.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub matches: Option<String>,
+
+    /// Cross-language semantic cfg match. A bare flag such as `linux`
+    /// matches Go `linux`, Rust `target_os = "linux"`, and compound
+    /// expressions containing a positive `linux` term.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub semantic_match: Option<String>,
 }
 
 /// Visibility filter.
@@ -294,6 +323,12 @@ pub enum RelationTypeParam {
     Imports,
     Exports,
     Returns,
+    /// T3.6 (Cluster G): outbound `Wraps` edges. Surfaces every
+    /// error-chain wrap relationship (`fmt.Errorf %w`, `Unwrap`,
+    /// `errors.{Is,As,Join}`) from the resolved symbol, irrespective
+    /// of `WrapKind`. For kind-filtered queries use
+    /// `sqry_query "wraps:<kind>"`.
+    Wraps,
 }
 
 impl From<RelationTypeParam> for CoreRelationKind {
@@ -304,6 +339,7 @@ impl From<RelationTypeParam> for CoreRelationKind {
             RelationTypeParam::Imports => CoreRelationKind::Imports,
             RelationTypeParam::Exports => CoreRelationKind::Exports,
             RelationTypeParam::Returns => CoreRelationKind::Returns,
+            RelationTypeParam::Wraps => CoreRelationKind::Wraps,
         }
     }
 }
@@ -316,6 +352,7 @@ impl From<CoreRelationKind> for RelationTypeParam {
             CoreRelationKind::Imports => RelationTypeParam::Imports,
             CoreRelationKind::Exports => RelationTypeParam::Exports,
             CoreRelationKind::Returns => RelationTypeParam::Returns,
+            CoreRelationKind::Wraps => RelationTypeParam::Wraps,
         }
     }
 }
@@ -1355,6 +1392,82 @@ pub struct FindCyclesParams {
     pub pagination: Option<PaginationParams>,
 }
 
+/// `context_propagation` mode filter (T3.7, Cluster G).
+///
+/// Maps directly onto
+/// [`sqry_db::queries::context_propagation::ContextModeFilter`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextModeParam {
+    /// Return every classified leak.
+    #[default]
+    All,
+    /// Only `BreakSite` leaks (sync caller with ctx + ctx-accepting callee).
+    BreakSite,
+    /// Only `UnthreadedGoroutine` leaks (`go callee(...)` paths).
+    UnthreadedGoroutine,
+    /// Only `HttpHandlerLeak` leaks
+    /// (`func(http.ResponseWriter, *http.Request)` callers).
+    HttpHandlerLeak,
+}
+
+impl From<ContextModeParam> for sqry_db::queries::context_propagation::ContextModeFilter {
+    fn from(m: ContextModeParam) -> Self {
+        use sqry_db::queries::context_propagation::ContextModeFilter as Cmf;
+        match m {
+            ContextModeParam::All => Cmf::All,
+            ContextModeParam::BreakSite => Cmf::BreakSite,
+            ContextModeParam::UnthreadedGoroutine => Cmf::UnthreadedGoroutine,
+            ContextModeParam::HttpHandlerLeak => Cmf::HttpHandlerLeak,
+        }
+    }
+}
+
+/// `context_propagation` scope selector (T3.7, Cluster G). Mirrors
+/// the contract in 02_DESIGN §2.5 row 3 (`scope: "global" | "file"`)
+/// while keeping the file path attached on the same value the way
+/// the underlying `sqry_db::queries::context_propagation::ContextScope`
+/// does. Tagged externally for JSON-Schema clarity:
+///
+/// ```json
+/// { "kind": "global" }
+/// { "kind": "file", "path": "src/foo.go" }
+/// ```
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ContextScopeParam {
+    /// Whole-workspace scope (default).
+    #[default]
+    Global,
+    /// Restrict to leaks whose caller function lives in this file.
+    File {
+        /// File path, resolved relative to the workspace root.
+        path: String,
+    },
+}
+
+/// `context_propagation` params (T3.7, Cluster G).
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct ContextPropagationParams {
+    /// Workspace path. Defaults to the current directory if omitted.
+    #[serde(default = "default_path")]
+    pub path: String,
+
+    /// Scope selector. Defaults to `global`. See [`ContextScopeParam`]
+    /// for the wire shape.
+    #[serde(default)]
+    pub scope: ContextScopeParam,
+
+    /// Mode filter. Defaults to `all`.
+    #[serde(default)]
+    pub mode: ContextModeParam,
+
+    /// Maximum number of leak records to return. Defaults to 200.
+    #[serde(default = "default_max_results_200")]
+    #[schemars(range(min = 1, max = 5000))]
+    pub max_results: i64,
+}
+
 /// `find_unused` params.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct FindUnusedParams {
@@ -1379,6 +1492,14 @@ pub struct FindUnusedParams {
 
     #[serde(default)]
     pub pagination: Option<PaginationParams>,
+
+    /// T3.8 (Cluster G): suppress symbols whose `cfg_condition` slot
+    /// is populated. A platform-specific implementation (`//go:build
+    /// linux`, `#[cfg(unix)]`) often looks "unused" on the analyst's
+    /// host but is live on other platforms — set this to `true` to
+    /// exclude that class of finding.
+    #[serde(default)]
+    pub exclude_cfg_gated: bool,
 }
 
 // ============================================================================

@@ -45,7 +45,31 @@ pub struct MacroNodeMetadata {
     /// Qualified name of the macro that generated this symbol.
     pub macro_source: Option<String>,
 
-    /// The cfg predicate string (e.g., `"test"`, `"feature = \"serde\""`)
+    /// The cfg predicate string (e.g., `"test"`, `"feature = \"serde\""`).
+    ///
+    /// **Language-agnostic.** Despite the enclosing struct name
+    /// (`MacroNodeMetadata`), `cfg_condition` is the canonical slot for
+    /// any conditional-compilation guard the language has:
+    ///
+    /// - Rust: `#[cfg(...)]` predicate string from `cfg_analysis`
+    ///   (e.g. `"target_os = \"linux\""`,
+    ///   `"all(target_os = \"linux\", target_arch = \"amd64\")"`).
+    /// - Go: file-level build constraint canonicalised by the
+    ///   Go plugin's `build_constraints` module (e.g. `"linux"`,
+    ///   `"linux && amd64"`, `"!windows"`, `"cgo"`). Per 01_SPEC §3.3
+    ///   and 02_DESIGN §3.3 (T3.8), Go build tags are file-level —
+    ///   every non-synthetic node staged from the same file shares the
+    ///   same `cfg_condition` string.
+    /// - Other languages: equivalent file-level / item-level
+    ///   conditional-compilation guards may use the same slot. The
+    ///   stored string is whatever canonical form the plugin chose;
+    ///   cross-language structural comparison is handled by sqry-db's
+    ///   `cfg_match` comparator (02_DESIGN §5.3.a).
+    ///
+    /// `None` means "no conditional-compilation guard recorded for this
+    /// node" (the default for plain Rust items without `#[cfg]` and Go
+    /// files without `//go:build`, `// +build`, recognised filename
+    /// suffix, or `import "C"`).
     pub cfg_condition: Option<String>,
 
     /// Whether this cfg is active (`None` = unknown, requires external config).

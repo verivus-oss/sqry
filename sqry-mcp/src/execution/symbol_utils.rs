@@ -225,6 +225,7 @@ pub(crate) fn filter_node(
     matches_language_filter_node(snapshot, node_id, filters)
         && matches_visibility_filter_node(snapshot, node_id, filters)
         && matches_kind_filter_node(snapshot, node_id, filters)
+        && matches_cfg_condition_filter_node(snapshot, node_id, filters)
 }
 
 fn matches_language_filter_node(
@@ -293,6 +294,46 @@ fn matches_kind_filter_node(
         .kinds
         .iter()
         .any(|candidate| candidate.eq_ignore_ascii_case(kind))
+}
+
+fn matches_cfg_condition_filter_node(
+    snapshot: &GraphSnapshot,
+    node_id: NodeId,
+    filters: &SearchFilters,
+) -> bool {
+    let Some(cfg_filter) = filters.cfg_condition.as_ref() else {
+        return true;
+    };
+    let Some(stored_cfg) = snapshot
+        .macro_metadata()
+        .get_macro(node_id)
+        .and_then(|metadata| metadata.cfg_condition.as_deref())
+    else {
+        return false;
+    };
+    if cfg_filter
+        .equals
+        .as_deref()
+        .is_some_and(|expected| stored_cfg != expected)
+    {
+        return false;
+    }
+    if let Some(pattern) = cfg_filter.matches.as_deref() {
+        let Ok(regex) = regex::Regex::new(pattern) else {
+            return false;
+        };
+        if !regex.is_match(stored_cfg) {
+            return false;
+        }
+    }
+    if let Some(query) = cfg_filter.semantic_match.as_deref() {
+        let matcher =
+            sqry_db::planner::CfgMatcher::Semantic(sqry_db::planner::parse_stored_cfg(query));
+        if !sqry_db::planner::matches_stored(&matcher, stored_cfg) {
+            return false;
+        }
+    }
+    true
 }
 
 /// Build search hits from node IDs using graph lookups.
@@ -465,9 +506,11 @@ fn node_kind_to_string(kind: NodeKind) -> &'static str {
 mod tests {
     use super::*;
     use sqry_core::graph::Language;
+    use sqry_core::graph::unified::MacroNodeMetadata;
+    use sqry_core::graph::unified::concurrent::{CodeGraph, GraphSnapshot};
     use sqry_core::graph::unified::storage::arena::NodeEntry;
     use sqry_core::graph::unified::storage::interner::StringInterner;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     // ==========================================================================
     // path_to_forward_slash / relative_path_forward_slash tests
@@ -494,6 +537,31 @@ mod tests {
         let entry = NodeEntry::new(NodeKind::Function, name_id, file_id)
             .with_qualified_name(qualified_name_id);
         (entry, strings, files)
+    }
+
+    fn build_cfg_filter_snapshot(cfg_condition: Option<&str>) -> (GraphSnapshot, NodeId) {
+        let mut graph = CodeGraph::new();
+        let file_id = graph
+            .files_mut()
+            .register_with_language(Path::new("main.go"), Some(Language::Go))
+            .expect("register file");
+        let name_id = graph.strings_mut().intern("wrapped").expect("intern name");
+        let node_id = graph
+            .nodes_mut()
+            .alloc(
+                NodeEntry::new(NodeKind::Function, name_id, file_id).with_qualified_name(name_id),
+            )
+            .expect("alloc node");
+        if let Some(cfg) = cfg_condition {
+            graph.macro_metadata_mut().insert(
+                node_id,
+                MacroNodeMetadata {
+                    cfg_condition: Some(cfg.to_string()),
+                    ..Default::default()
+                },
+            );
+        }
+        (graph.snapshot(), node_id)
     }
 
     #[test]
@@ -604,6 +672,46 @@ mod tests {
         assert_eq!(
             display_entry_qualified_name(&entry, &strings, &files, "sin"),
             "ffi::stdcall::MessageBoxA"
+        );
+    }
+
+    #[test]
+    fn filter_node_cfg_condition_supports_exact_regex_and_semantic_match() {
+        let (snapshot, node_id) = build_cfg_filter_snapshot(Some("linux && amd64"));
+        let filters = SearchFilters {
+            cfg_condition: Some(crate::tools::CfgConditionFilter {
+                equals: Some("linux && amd64".to_string()),
+                matches: Some("linux.*amd64".to_string()),
+                semantic_match: Some("linux".to_string()),
+            }),
+            ..Default::default()
+        };
+
+        assert!(
+            filter_node(&snapshot, node_id, &filters),
+            "cfg_condition filter should match exact, regex, and semantic flag containment"
+        );
+    }
+
+    #[test]
+    fn filter_node_cfg_condition_rejects_missing_or_mismatched_metadata() {
+        let (snapshot, node_id) = build_cfg_filter_snapshot(None);
+        let filters = SearchFilters {
+            cfg_condition: Some(crate::tools::CfgConditionFilter {
+                semantic_match: Some("linux".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(
+            !filter_node(&snapshot, node_id, &filters),
+            "cfg_condition filter must reject nodes without cfg metadata"
+        );
+
+        let (snapshot, node_id) = build_cfg_filter_snapshot(Some("!linux"));
+        assert!(
+            !filter_node(&snapshot, node_id, &filters),
+            "semantic cfg filter must not match negated linux"
         );
     }
 

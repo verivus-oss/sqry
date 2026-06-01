@@ -444,6 +444,30 @@ pub enum Predicate {
     /// derived-query backing for this predicate.
     Returns(String),
 
+    // --- T3 Cluster F: conditional-compilation + error-wrap predicates ---
+    /// `cfg:<value>` — true iff the node's `MacroNodeMetadata::cfg_condition`
+    /// satisfies the carried [`crate::planner::cfg_match::CfgMatcher`].
+    ///
+    /// Bare planner tokens (`cfg:linux`) parse to
+    /// [`CfgMatcher::Semantic`] — the cross-language comparator
+    /// matches both Go-stored `"linux"` and Rust-stored
+    /// `"target_os = \"linux\""`. Quoted forms
+    /// (`cfg:"linux && amd64"`, `cfg:"target_os = \"linux\""`)
+    /// parse to [`CfgMatcher::Literal`] and stay byte-exact /
+    /// language-specific per 02_DESIGN §5.3.a + §10.4 (the two
+    /// addressing modes are kept independently observable so users
+    /// can opt in to either).
+    ///
+    /// [`CfgMatcher::Semantic`]: crate::planner::cfg_match::CfgMatcher::Semantic
+    /// [`CfgMatcher::Literal`]: crate::planner::cfg_match::CfgMatcher::Literal
+    CfgCondition(super::cfg_match::CfgMatcher),
+
+    /// `wraps` / `wraps:<wrap-kind>` — true iff the node has at least
+    /// one outbound [`EdgeKind::Wraps`] edge whose `kind` field
+    /// satisfies the carried [`WrapKindFilter`] (T3.6 acceptance
+    /// criterion 9; 02_DESIGN §2.1).
+    Wraps(WrapKindFilter),
+
     // --- Boolean combinators ---
     /// Logical AND over a list of predicates. Empty list is vacuously true.
     And(Vec<Predicate>),
@@ -451,6 +475,23 @@ pub enum Predicate {
     Or(Vec<Predicate>),
     /// Logical NOT of a single predicate.
     Not(Box<Predicate>),
+}
+
+/// Filter applied by [`Predicate::Wraps`] over outbound `Wraps` edges.
+///
+/// `Any` accepts every `Wraps` discriminant (the bare `wraps`
+/// planner predicate); `Kind(k)` keeps only edges with the matching
+/// `WrapKind`. Per 02_DESIGN §2.1 the planner relies on
+/// [`super::compile::normalize_edge_kind`] preserving `WrapKind` for
+/// cache-bucket distinctness, while a second-stage filter at the
+/// executor enforces the actual `kind` comparison.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WrapKindFilter {
+    /// Bare `wraps` — accept every `WrapKind`.
+    Any,
+    /// `wraps:<kind>` — only accept edges with the named kind.
+    Kind(sqry_core::graph::unified::edge::WrapKind),
 }
 
 impl Predicate {
@@ -473,7 +514,9 @@ impl Predicate {
             | Predicate::InFile(_)
             | Predicate::InScope(_)
             | Predicate::MatchesName(_)
-            | Predicate::Returns(_) => false,
+            | Predicate::Returns(_)
+            | Predicate::CfgCondition(_)
+            | Predicate::Wraps(_) => false,
 
             Predicate::Callers(v)
             | Predicate::Callees(v)

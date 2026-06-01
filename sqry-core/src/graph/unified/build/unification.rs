@@ -230,6 +230,58 @@ impl NodeRemapTable {
             }
         }
     }
+
+    /// Drop every loser-keyed entry in `store`.
+    ///
+    /// Phase 4c-prime tombstones each loser's arena slot but keeps the
+    /// loser's `NodeMetadataStore` entry alive at the staging level. The
+    /// winner's own per-file `NodeMetadataStore` (produced by the file
+    /// that actually defines the surviving symbol) already carries the
+    /// authoritative metadata. Per 01_SPEC §5.3.f and 02_DESIGN §4.3.e,
+    /// "losers' constraints are lost" is the documented Phase-1 contract
+    /// for T3 — re-keying loser metadata under the winner would force the
+    /// file-order question with no guarantee that `staged_metadata`
+    /// iteration order aligns with Phase 4c-prime's winner choice.
+    ///
+    /// We therefore **drop** loser entries rather than rewriting them
+    /// under the winner key. Dropping is the only choice consistent with
+    /// all three contracts simultaneously (winner-selection, synthetic
+    /// suppression, and 01_SPEC §5.3.f).
+    ///
+    /// Mirrors [`Self::apply_to_edges`]: no-op on empty table; in-place
+    /// mutation otherwise. Performance: O(n_meta) where n_meta is the
+    /// entry count of `store`.
+    pub fn apply_to_metadata_store(
+        &self,
+        store: &mut crate::graph::unified::storage::metadata::NodeMetadataStore,
+    ) {
+        if self.map.is_empty() {
+            return;
+        }
+
+        // Pass 1: scan for loser keys. Borrow `store` immutably; do not
+        // mutate while iterating. `iter_entries` yields `((u32, u64),
+        // &StoredEntry)` keyed on `(NodeId::index(), NodeId::generation())`
+        // and covers every entry — typed payloads AND synthetic-flag-only
+        // markers — so no loser slips through. Reconstruct the public
+        // `NodeId` via the standard `NodeId::new` ctor used by every other
+        // `NodeIdBearing` impl.
+        let mut losers_to_drop: Vec<NodeId> = Vec::new();
+        for ((index, generation), _entry) in store.iter_entries() {
+            let nid = NodeId::new(index, generation);
+            if self.map.contains_key(&nid) {
+                losers_to_drop.push(nid);
+            }
+        }
+
+        // Pass 2: drop each loser entry. `remove_entry` removes the whole
+        // `StoredEntry` (typed payload + flags). We intentionally do not
+        // re-insert under the winner key — see the doc-comment above for
+        // the spec rationale.
+        for loser in losers_to_drop {
+            store.remove_entry(loser);
+        }
+    }
 }
 
 /// Merge a loser node into a winner node in the arena.
@@ -1005,5 +1057,113 @@ mod tests {
         // Neither loser retains the original edge.
         assert!(store.edges_from(loser_a).is_empty());
         assert!(store.edges_to(loser_b).is_empty());
+    }
+
+    // ----------------------------------------------------------------------
+    // T3 Cluster B (02_DESIGN §4.3.e Change 3): NodeRemapTable::apply_to_metadata_store
+    // ----------------------------------------------------------------------
+
+    #[test]
+    fn apply_to_metadata_store_drops_loser_keys() {
+        use crate::graph::unified::storage::metadata::{
+            MacroNodeMetadata, NodeFlags, NodeMetadataStore, StoredEntry,
+        };
+
+        let loser_a = NodeId::new(101, 1);
+        let loser_b = NodeId::new(102, 1);
+        let winner = NodeId::new(200, 1);
+        let untouched = NodeId::new(300, 1);
+
+        let mut store = NodeMetadataStore::new();
+        let macro_a = MacroNodeMetadata {
+            cfg_condition: Some("linux".to_string()),
+            ..Default::default()
+        };
+        store.insert(loser_a, macro_a);
+
+        let macro_b = MacroNodeMetadata {
+            cfg_condition: Some("darwin".to_string()),
+            ..Default::default()
+        };
+        store.insert(loser_b, macro_b);
+
+        let macro_w = MacroNodeMetadata {
+            cfg_condition: Some("windows".to_string()),
+            ..Default::default()
+        };
+        store.insert(winner, macro_w);
+
+        store.insert_entry(
+            untouched,
+            StoredEntry {
+                typed: None,
+                flags: NodeFlags::SYNTHETIC,
+            },
+        );
+
+        let mut remap = NodeRemapTable::default();
+        remap.insert(loser_a, winner);
+        remap.insert(loser_b, winner);
+
+        remap.apply_to_metadata_store(&mut store);
+
+        // Both losers are dropped — 01_SPEC §5.3.f contract.
+        assert!(
+            store.get_macro(loser_a).is_none(),
+            "loser_a metadata must be dropped"
+        );
+        assert!(
+            store.get_macro(loser_b).is_none(),
+            "loser_b metadata must be dropped"
+        );
+        // Winner's own authoritative metadata is preserved — we never
+        // re-key losers onto the winner.
+        assert_eq!(
+            store
+                .get_macro(winner)
+                .and_then(|m| m.cfg_condition.clone()),
+            Some("windows".to_string()),
+            "winner's authoritative cfg_condition survives unchanged"
+        );
+        // Unrelated entries untouched.
+        assert!(
+            store.is_synthetic(untouched),
+            "non-loser synthetic marker survives"
+        );
+    }
+
+    #[test]
+    fn apply_to_metadata_store_empty_remap_is_noop() {
+        use crate::graph::unified::storage::metadata::{MacroNodeMetadata, NodeMetadataStore};
+
+        let nid = NodeId::new(42, 1);
+        let mut store = NodeMetadataStore::new();
+        let macro_meta = MacroNodeMetadata {
+            cfg_condition: Some("test".to_string()),
+            ..Default::default()
+        };
+        store.insert(nid, macro_meta);
+
+        let remap = NodeRemapTable::default();
+        remap.apply_to_metadata_store(&mut store);
+
+        assert_eq!(
+            store.get_macro(nid).and_then(|m| m.cfg_condition.clone()),
+            Some("test".to_string()),
+            "empty remap must not touch any entry"
+        );
+    }
+
+    #[test]
+    fn apply_to_metadata_store_empty_store_is_noop() {
+        use crate::graph::unified::storage::metadata::NodeMetadataStore;
+
+        let mut store = NodeMetadataStore::new();
+        let mut remap = NodeRemapTable::default();
+        remap.insert(NodeId::new(1, 1), NodeId::new(2, 1));
+
+        remap.apply_to_metadata_store(&mut store);
+
+        assert!(store.is_empty(), "empty store stays empty");
     }
 }

@@ -48,7 +48,7 @@ use super::staging::{
 };
 use crate::graph::node::{Language, Span};
 use crate::graph::unified::edge::{
-    EdgeKind, ExportKind, FfiConvention, HttpMethod, ResolvedVia, TableWriteOp,
+    EdgeKind, ExportKind, FfiConvention, HttpMethod, ResolvedVia, TableWriteOp, WrapKind,
 };
 use crate::graph::unified::file::FileId;
 use crate::graph::unified::node::{NodeId, NodeKind};
@@ -1381,6 +1381,42 @@ impl<'a> GraphBuildHelper<'a> {
     pub fn add_inherits_edge(&mut self, child: NodeId, parent: NodeId) {
         self.staging
             .add_edge(child, parent, EdgeKind::Inherits, self.file_id);
+    }
+
+    /// Add a T3 `Wraps` edge from a wrapper expression to a wrapped error
+    /// value (Go error chains, 02_DESIGN §1.3 / §2.4).
+    ///
+    /// The `kind` discriminates the source-syntax form
+    /// (`fmt.Errorf("%w", err)`, `Unwrap()` method, `errors.{Is,As,AsType,Join}`);
+    /// `chain_position` carries the verb index for `%w` (0-based, skipping
+    /// `%%`) and the slice index for `errors.Join` / `Unwrap() []error`
+    /// slice literals (`None` for single-value forms).
+    ///
+    /// `span` optionally records the source location of the wrap site
+    /// (e.g. the `%w` verb or the `Unwrap()` call expression). Pass `None`
+    /// when the caller cannot resolve a meaningful position. Wraps edges
+    /// route through the existing staging `EdgeStore` exactly like
+    /// [`Self::add_implements_edge`] — Phase 4d-prime is the only new
+    /// pipeline structural change required by T3.
+    pub fn add_wraps_edge(
+        &mut self,
+        source: NodeId,
+        target: NodeId,
+        kind: WrapKind,
+        chain_position: Option<u16>,
+        span: Option<Span>,
+    ) {
+        let spans = span.map(|s| vec![s]).unwrap_or_default();
+        self.staging.add_edge_with_spans(
+            source,
+            target,
+            EdgeKind::Wraps {
+                kind,
+                chain_position,
+            },
+            self.file_id,
+            spans,
+        );
     }
 
     /// Add a contains edge (parent contains child, e.g., class contains method).

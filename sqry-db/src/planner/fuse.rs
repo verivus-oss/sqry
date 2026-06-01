@@ -789,7 +789,9 @@ fn walk_predicate_for_shared_subtrees(
         | Predicate::InFile(_)
         | Predicate::InScope(_)
         | Predicate::MatchesName(_)
-        | Predicate::Returns(_) => {}
+        | Predicate::Returns(_)
+        | Predicate::CfgCondition(_)
+        | Predicate::Wraps(_) => {}
         Predicate::Callers(value)
         | Predicate::Callees(value)
         | Predicate::Imports(value)
@@ -984,7 +986,9 @@ fn visit_proper_predicate_subtrees(predicate: &Predicate, visitor: &mut dyn FnMu
         | Predicate::InFile(_)
         | Predicate::InScope(_)
         | Predicate::MatchesName(_)
-        | Predicate::Returns(_) => {}
+        | Predicate::Returns(_)
+        | Predicate::CfgCondition(_)
+        | Predicate::Wraps(_) => {}
         Predicate::Callers(value)
         | Predicate::Callees(value)
         | Predicate::Imports(value)
@@ -1108,7 +1112,9 @@ fn walk_predicate_for_subqueries(
         | Predicate::InFile(_)
         | Predicate::InScope(_)
         | Predicate::MatchesName(_)
-        | Predicate::Returns(_) => {}
+        | Predicate::Returns(_)
+        | Predicate::CfgCondition(_)
+        | Predicate::Wraps(_) => {}
         Predicate::Callers(v)
         | Predicate::Callees(v)
         | Predicate::Imports(v)

@@ -672,6 +672,7 @@ fn test_req_r0012_mcp_find_unused_excludes_public_typeof_field_roots() -> Result
             kinds: vec!["property".to_string(), "constant".to_string()],
             max_results: 10_000,
             pagination: paging(),
+            exclude_cfg_gated: false,
         };
         let result = execute_find_unused(&args)
             .with_context(|| format!("{} execute_find_unused", case.label))?;

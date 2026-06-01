@@ -123,6 +123,16 @@ impl From<&EdgeKind> for EdgeClassification {
             // ---- Rust-specific ----
             EdgeKind::MacroExpansion { .. } => Self::Reference,
             EdgeKind::LifetimeConstraint { .. } => Self::Reference,
+
+            // ---- T3 error chains (Go) ----
+            // Wraps edges are NOT included in standard callers/callees
+            // results (T3 design §1.3); explicit `Wraps`-aware consumers
+            // walk the edge directly until the Cluster F planner `wraps:`
+            // predicate / Cluster G traversal surfaces land. Mapping to
+            // `Reference` is the closest match in this taxonomy — same
+            // disposition as MacroExpansion / LifetimeConstraint, which
+            // are likewise filtered out of call traversal.
+            EdgeKind::Wraps { .. } => Self::Reference,
         }
     }
 }

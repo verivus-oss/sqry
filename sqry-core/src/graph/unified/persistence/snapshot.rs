@@ -14,7 +14,7 @@ use std::collections::HashMap;
 
 use super::format::{
     FormatVersion, GraphHeader, MAGIC_BYTES_V9, MAGIC_BYTES_V10, MAGIC_BYTES_V11, MAGIC_BYTES_V12,
-    VERSION,
+    MAGIC_BYTES_V13, VERSION,
 };
 use super::manifest::ConfigProvenance;
 use crate::config::buffers::max_snapshot_bytes;
@@ -385,6 +385,20 @@ struct GraphSnapshotDataV12 {
     #[serde(default)]
     dispatch_tables_table: DispatchTables,
 }
+
+/// Serializable snapshot of the graph state (V13 — T3 error chains).
+///
+/// V13 is shape-identical to V12 on the wire — no fields are added or removed.
+/// The version bump exists so that V12 readers reject snapshots whose
+/// `EdgeKind` arena contains the T3 [`crate::graph::unified::edge::EdgeKind::Wraps`]
+/// variant (added in T3 Cluster A) rather than silently failing to decode an
+/// unknown discriminant.
+///
+/// Because the layout is byte-identical, this is a type alias rather than a
+/// duplicated struct; the postcard wire format is therefore guaranteed-equal
+/// by construction (no field-rename drift possible). The corresponding
+/// upconvert ([`upconvert_v12_to_v13`]) is an identity-mapping function.
+type GraphSnapshotDataV13 = GraphSnapshotDataV12;
 
 /// V7-shaped snapshot data (pre-Phase-1, no provenance fields).
 ///
@@ -1230,6 +1244,29 @@ fn upconvert_v11_to_v12(
     })
 }
 
+/// Upconvert a V12 snapshot to V13 (T3 — error chains: `EdgeKind::Wraps`).
+///
+/// V13 is shape-identical to V12 on the wire (see [`GraphSnapshotDataV13`]),
+/// so this is an identity mapping. The function exists as a named upconvert
+/// step so the V12 read path in `load_from_bytes` / `load_from_path` follows
+/// the same chained-ladder pattern as the V7→V8→V9→V10→V11→V12 chain, and so
+/// any future T3-related migration logic has a documented attachment point. A
+/// V12 snapshot predates the `EdgeKind::Wraps` variant, so re-labelling it as
+/// V13 is sound — there are no Wraps edges to translate.
+///
+/// # Errors
+///
+/// Infallible — all V12 fields move by value into the V13 envelope. The
+/// `Result` return is kept for symmetry with the other upconvert functions in
+/// this module, which may surface translation errors when wire shapes differ
+/// across versions.
+#[inline]
+fn upconvert_v12_to_v13(
+    v12: GraphSnapshotDataV12,
+) -> Result<GraphSnapshotDataV13, PersistenceError> {
+    Ok(v12)
+}
+
 /// Rebuilds a `FileSegmentTable` by scanning the node arena.
 ///
 /// For each occupied slot, records the `FileId` and slot index. Then for each
@@ -1286,15 +1323,15 @@ fn read_magic_and_header_len(
 
     let format_version =
         FormatVersion::from_magic(&magic).ok_or_else(|| PersistenceError::InvalidMagic {
-            expected: MAGIC_BYTES_V12.to_vec(),
+            expected: MAGIC_BYTES_V13.to_vec(),
             found: magic.to_vec(),
         })?;
 
-    // V10, V11, and V12 magics are 14 bytes — all consumed. Read full u32 header length.
+    // V10–V13 magics are all 14 bytes — all consumed. Read full u32 header length.
     // V7-V9 magic is 13 bytes — byte 14 is the first byte of the header length.
     if matches!(
         format_version,
-        FormatVersion::V10 | FormatVersion::V11 | FormatVersion::V12
+        FormatVersion::V10 | FormatVersion::V11 | FormatVersion::V12 | FormatVersion::V13
     ) {
         let hl = read_u32_le(reader)? as usize;
         Ok((format_version, hl, 18)) // 14 magic + 4 header_len
@@ -1567,7 +1604,7 @@ fn write_framed_v9(
 /// path used by tests) or a `BufWriter<&mut NamedTempFile>` (the
 /// atomic-write path introduced by `G_daemon_control_plane.md`
 /// §4.2).
-#[allow(dead_code)] // Preserved for reference; live writers emit V11.
+#[allow(dead_code)] // Preserved for reference; live writers emit V13.
 fn write_framed_v10<W: Write>(
     writer: &mut W,
     header: &GraphHeader,
@@ -1674,11 +1711,12 @@ fn write_framed_v11<W: Write>(
 
 /// Writes a V12 snapshot with length-prefixed framing.
 ///
-/// V12 is the current writer format (Phase β joint-stubs). It extends V11
-/// with two new envelope slots — `framework_routes_table` (Plan A) and
-/// `dispatch_tables_table` (Plan B). The frame shape (magic + header +
-/// data) is identical to V11; only the data-section postcard payload
-/// differs.
+/// V12 was the writer format for the Phase β joint-stubs schema. It extends
+/// V11 with two new envelope slots — `framework_routes_table` (Plan A) and
+/// `dispatch_tables_table` (Plan B). It was the live writer before the T3
+/// error-chains bump to V13; retained as a reference path and exercised by
+/// the legacy-V12 fixture tests. The live writer is [`write_framed_v13`].
+#[allow(dead_code)] // Preserved as reference; live writers emit V13.
 fn write_framed_v12<W: Write>(
     writer: &mut W,
     header: &GraphHeader,
@@ -1711,6 +1749,63 @@ fn write_framed_v12<W: Write>(
     }
 
     writer.write_all(MAGIC_BYTES_V12)?;
+    writer.write_all(
+        &u32::try_from(header_bytes.len())
+            .map_err(|_| {
+                PersistenceError::ValidationFailed(
+                    "header too large for u32 length prefix".to_string(),
+                )
+            })?
+            .to_le_bytes(),
+    )?;
+    writer.write_all(&header_bytes)?;
+    writer.write_all(&(data_bytes.len() as u64).to_le_bytes())?;
+    writer.write_all(&data_bytes)?;
+
+    writer.flush()?;
+    Ok(())
+}
+
+/// Writes a V13 snapshot with length-prefixed framing.
+///
+/// V13 is the current writer format (T3 — error chains: `EdgeKind::Wraps`).
+/// It is shape-identical to V12 on the wire (see [`GraphSnapshotDataV13`]);
+/// only the magic-byte prefix differs, so that V12 readers reject snapshots
+/// whose `EdgeKind` arena contains the new `Wraps` variant rather than
+/// silently mis-decoding an unknown discriminant. The frame shape (magic +
+/// header + data) is identical to V12.
+fn write_framed_v13<W: Write>(
+    writer: &mut W,
+    header: &GraphHeader,
+    snapshot_data: &GraphSnapshotDataV13,
+) -> Result<(), PersistenceError> {
+    debug_assert!(
+        !snapshot_data.strings.is_lookup_stale(),
+        "Cannot serialize StringInterner with stale lookup — \
+         call build_dedup_table() before saving"
+    );
+
+    let header_bytes = postcard::to_allocvec(header)?;
+    let data_bytes = postcard::to_allocvec(snapshot_data)?;
+
+    if header_bytes.len() > MAX_HEADER_BYTES {
+        return Err(PersistenceError::ValidationFailed(format!(
+            "header too large to save: {} bytes exceeds MAX_HEADER_BYTES ({} bytes)",
+            header_bytes.len(),
+            MAX_HEADER_BYTES,
+        )));
+    }
+    let max_data_bytes = max_snapshot_bytes();
+    if data_bytes.len() as u64 > max_data_bytes {
+        return Err(PersistenceError::ValidationFailed(format!(
+            "data section too large to save: {} bytes exceeds limit ({} bytes); \
+             increase SQRY_MAX_SNAPSHOT_BYTES if the codebase legitimately requires a larger snapshot",
+            data_bytes.len(),
+            max_data_bytes,
+        )));
+    }
+
+    writer.write_all(MAGIC_BYTES_V13)?;
     writer.write_all(
         &u32::try_from(header_bytes.len())
             .map_err(|_| {
@@ -1878,7 +1973,8 @@ pub fn save_to_path(graph: &CodeGraph, path: impl AsRef<Path>) -> Result<(), Per
 
     validate_snapshot_semantics_v12(&snapshot_data)?;
 
-    // Create header — V12 with stamped fact_epoch and correct version tag
+    // Create header — V13 with stamped fact_epoch and correct version tag.
+    // V13 is shape-identical to V12, so the V12 validator accepts it.
     let forward_stats = snapshot_data.edges.stats().forward;
     let total_edges = forward_stats.csr_edge_count + forward_stats.delta_edge_count;
     let mut header = GraphHeader::new(
@@ -1887,7 +1983,7 @@ pub fn save_to_path(graph: &CodeGraph, path: impl AsRef<Path>) -> Result<(), Per
         snapshot_data.strings.len(),
         snapshot_data.files.len(),
     );
-    header.version = FormatVersion::V12.as_u32();
+    header.version = FormatVersion::V13.as_u32();
     header.set_fact_epoch(fact_epoch);
 
     // Atomic write per `G_daemon_control_plane.md` §4.2: an
@@ -1896,7 +1992,7 @@ pub fn save_to_path(graph: &CodeGraph, path: impl AsRef<Path>) -> Result<(), Per
     // --status` previously misreported as "No graph snapshot
     // found").
     write_atomic(path, |writer| {
-        write_framed_v12(writer, &header, &snapshot_data)
+        write_framed_v13(writer, &header, &snapshot_data)
     })
 }
 
@@ -1983,7 +2079,10 @@ pub fn save_to_path_with_provenance(
         dispatch_tables_table,
     };
 
-    // Create header with provenance, plugin versions, V12 version tag, and fact epoch
+    validate_snapshot_semantics_v12(&snapshot_data)?;
+
+    // Create header with provenance, plugin versions, V13 version tag, and fact epoch.
+    // V13 is shape-identical to V12, so the V12 validator accepts it.
     let forward_stats = snapshot_data.edges.stats().forward;
     let total_edges = forward_stats.csr_edge_count + forward_stats.delta_edge_count;
     let mut header = GraphHeader::with_provenance_and_plugins(
@@ -1994,12 +2093,12 @@ pub fn save_to_path_with_provenance(
         provenance,
         plugin_versions,
     );
-    header.version = FormatVersion::V12.as_u32();
+    header.version = FormatVersion::V13.as_u32();
     header.set_fact_epoch(fact_epoch);
 
     // Atomic write per `G_daemon_control_plane.md` §4.2.
     write_atomic(path, |writer| {
-        write_framed_v12(writer, &header, &snapshot_data)
+        write_framed_v13(writer, &header, &snapshot_data)
     })
 }
 
@@ -2108,16 +2207,17 @@ pub fn load_from_bytes(
     bytes_consumed += header_len as u64;
     let header: GraphHeader = postcard::from_bytes(&header_buf)?;
 
-    // Validate version — accept V7 (legacy), V8, V9, V10, V11 (upconvert), V12 (current)
+    // Validate version — accept V7 (legacy), V8, V9, V10, V11, V12 (upconvert), V13 (current).
     if header.version != VERSION
         && header.version != FormatVersion::V8.as_u32()
         && header.version != FormatVersion::V9.as_u32()
         && header.version != FormatVersion::V10.as_u32()
         && header.version != FormatVersion::V11.as_u32()
         && header.version != FormatVersion::V12.as_u32()
+        && header.version != FormatVersion::V13.as_u32()
     {
         return Err(PersistenceError::IncompatibleVersion {
-            expected: FormatVersion::V12.as_u32(),
+            expected: FormatVersion::V13.as_u32(),
             found: header.version,
         });
     }
@@ -2147,10 +2247,12 @@ pub fn load_from_bytes(
         ));
     }
 
-    // Read and deserialize data, dispatching on detected format version.
+    // Read and deserialize data, dispatching on detected format version. Each
+    // older format chains through the upconverters: V7 → V8 → V9 → V10 → V11 →
+    // V12 → V13; ...; V12 → V13; V13 → direct.
     let mut data_buf = vec![0u8; data_len as usize];
     reader.read_exact(&mut data_buf)?;
-    let mut snapshot_data: GraphSnapshotDataV12 = match format_version {
+    let mut snapshot_data: GraphSnapshotDataV13 = match format_version {
         FormatVersion::V7 => {
             // V7 predates `GraphHeader.fact_epoch`; pass `0` explicitly so the
             // V7 → V8 → V9 → V10 → V11 → V12 chained path is deterministic
@@ -2160,7 +2262,8 @@ pub fn load_from_bytes(
             let v9 = upconvert_v8_to_v9(v8, 0);
             let v10 = upconvert_v9_to_v10(v9);
             let v11 = upconvert_v10_to_v11(v10)?;
-            upconvert_v11_to_v12(v11)?
+            let v12 = upconvert_v11_to_v12(v11)?;
+            upconvert_v12_to_v13(v12)?
         }
         FormatVersion::V8 => {
             // Forward the V8 header epoch so derived scope provenance is
@@ -2169,24 +2272,32 @@ pub fn load_from_bytes(
             let v9 = upconvert_v8_to_v9(v8, header.fact_epoch());
             let v10 = upconvert_v9_to_v10(v9);
             let v11 = upconvert_v10_to_v11(v10)?;
-            upconvert_v11_to_v12(v11)?
+            let v12 = upconvert_v11_to_v12(v11)?;
+            upconvert_v12_to_v13(v12)?
         }
         FormatVersion::V9 => {
             let v9: GraphSnapshotDataV9 = postcard::from_bytes(&data_buf)?;
             let v10 = upconvert_v9_to_v10(v9);
             let v11 = upconvert_v10_to_v11(v10)?;
-            upconvert_v11_to_v12(v11)?
+            let v12 = upconvert_v11_to_v12(v11)?;
+            upconvert_v12_to_v13(v12)?
         }
         FormatVersion::V10 => {
             let v10: GraphSnapshotDataV10 = postcard::from_bytes(&data_buf)?;
             let v11 = upconvert_v10_to_v11(v10)?;
-            upconvert_v11_to_v12(v11)?
+            let v12 = upconvert_v11_to_v12(v11)?;
+            upconvert_v12_to_v13(v12)?
         }
         FormatVersion::V11 => {
             let v11: GraphSnapshotDataV11 = postcard::from_bytes(&data_buf)?;
-            upconvert_v11_to_v12(v11)?
+            let v12 = upconvert_v11_to_v12(v11)?;
+            upconvert_v12_to_v13(v12)?
         }
-        FormatVersion::V12 => postcard::from_bytes(&data_buf)?,
+        FormatVersion::V12 => {
+            let v12: GraphSnapshotDataV12 = postcard::from_bytes(&data_buf)?;
+            upconvert_v12_to_v13(v12)?
+        }
+        FormatVersion::V13 => postcard::from_bytes(&data_buf)?,
     };
 
     // Rebuild the scope-provenance reverse index after deserialization.
@@ -2207,8 +2318,9 @@ pub fn load_from_bytes(
 
     // Phase β joint-stubs: route the V12 envelope slots onto the in-memory
     // metadata store. V11 → V12 upconverts always carry empty defaults;
-    // native V12 snapshots may carry populated joint-stub tables once
-    // Plan A's extractors / Plan B's resolvers land.
+    // native V12/V13 snapshots may carry populated joint-stub tables once
+    // Plan A's extractors / Plan B's resolvers land. (V13 is shape-identical
+    // to V12, so the same envelope slots apply.)
     attach_phase_beta_side_tables(
         &mut snapshot_data.macro_metadata,
         std::mem::take(&mut snapshot_data.framework_routes_table),
@@ -2282,16 +2394,17 @@ pub fn load_from_path(
     bytes_consumed += header_len as u64;
     let header: GraphHeader = postcard::from_bytes(&header_buf)?;
 
-    // Validate version — accept V7 (legacy), V8, V9, V10 (upconvert), V11 (current)
+    // Validate version — accept V7 (legacy), V8, V9, V10, V11, V12 (upconvert), V13 (current).
     if header.version != VERSION
         && header.version != FormatVersion::V8.as_u32()
         && header.version != FormatVersion::V9.as_u32()
         && header.version != FormatVersion::V10.as_u32()
         && header.version != FormatVersion::V11.as_u32()
         && header.version != FormatVersion::V12.as_u32()
+        && header.version != FormatVersion::V13.as_u32()
     {
         return Err(PersistenceError::IncompatibleVersion {
-            expected: FormatVersion::V12.as_u32(),
+            expected: FormatVersion::V13.as_u32(),
             found: header.version,
         });
     }
@@ -2322,11 +2435,11 @@ pub fn load_from_path(
     }
 
     // Read and deserialize data — dispatch on format version. Each older
-    // format chains through the upconverters: V7 → V8 → V9 → V10 → V11 → V12;
-    // V8 → V9 → V10 → V11 → V12; ...; V11 → V12; V12 → direct.
+    // format chains through the upconverters: V7 → V8 → V9 → V10 → V11 → V12 →
+    // V13; V8 → … → V13; ...; V11 → V12 → V13; V12 → V13; V13 → direct.
     let mut data_buf = vec![0u8; data_len as usize];
     reader.read_exact(&mut data_buf)?;
-    let mut snapshot_data: GraphSnapshotDataV12 = match format_version {
+    let mut snapshot_data: GraphSnapshotDataV13 = match format_version {
         FormatVersion::V7 => {
             // V7 predates `GraphHeader.fact_epoch`; pass `0` explicitly so the
             // chained path is deterministic and matches the documented "V7
@@ -2336,7 +2449,8 @@ pub fn load_from_path(
             let v9 = upconvert_v8_to_v9(v8, 0);
             let v10 = upconvert_v9_to_v10(v9);
             let v11 = upconvert_v10_to_v11(v10)?;
-            upconvert_v11_to_v12(v11)?
+            let v12 = upconvert_v11_to_v12(v11)?;
+            upconvert_v12_to_v13(v12)?
         }
         FormatVersion::V8 => {
             // Forward the V8 header epoch so derived scope provenance is
@@ -2345,24 +2459,32 @@ pub fn load_from_path(
             let v9 = upconvert_v8_to_v9(v8, header.fact_epoch());
             let v10 = upconvert_v9_to_v10(v9);
             let v11 = upconvert_v10_to_v11(v10)?;
-            upconvert_v11_to_v12(v11)?
+            let v12 = upconvert_v11_to_v12(v11)?;
+            upconvert_v12_to_v13(v12)?
         }
         FormatVersion::V9 => {
             let v9: GraphSnapshotDataV9 = postcard::from_bytes(&data_buf)?;
             let v10 = upconvert_v9_to_v10(v9);
             let v11 = upconvert_v10_to_v11(v10)?;
-            upconvert_v11_to_v12(v11)?
+            let v12 = upconvert_v11_to_v12(v11)?;
+            upconvert_v12_to_v13(v12)?
         }
         FormatVersion::V10 => {
             let v10: GraphSnapshotDataV10 = postcard::from_bytes(&data_buf)?;
             let v11 = upconvert_v10_to_v11(v10)?;
-            upconvert_v11_to_v12(v11)?
+            let v12 = upconvert_v11_to_v12(v11)?;
+            upconvert_v12_to_v13(v12)?
         }
         FormatVersion::V11 => {
             let v11: GraphSnapshotDataV11 = postcard::from_bytes(&data_buf)?;
-            upconvert_v11_to_v12(v11)?
+            let v12 = upconvert_v11_to_v12(v11)?;
+            upconvert_v12_to_v13(v12)?
         }
-        FormatVersion::V12 => postcard::from_bytes(&data_buf)?,
+        FormatVersion::V12 => {
+            let v12: GraphSnapshotDataV12 = postcard::from_bytes(&data_buf)?;
+            upconvert_v12_to_v13(v12)?
+        }
+        FormatVersion::V13 => postcard::from_bytes(&data_buf)?,
     };
 
     // Rebuild the scope-provenance reverse index after deserialization.
@@ -2383,6 +2505,7 @@ pub fn load_from_path(
 
     // Phase β joint-stubs: reattach the V12 envelope slots onto the
     // in-memory metadata store. V11 → V12 upconverts carry empty defaults.
+    // (V13 is shape-identical to V12, so the same envelope slots apply.)
     attach_phase_beta_side_tables(
         &mut snapshot_data.macro_metadata,
         std::mem::take(&mut snapshot_data.framework_routes_table),
@@ -2447,16 +2570,17 @@ pub fn validate_snapshot(path: impl AsRef<Path>) -> Result<bool, PersistenceErro
     reader.read_exact(&mut header_buf)?;
     let header: GraphHeader = postcard::from_bytes(&header_buf)?;
 
-    // Validate version — accept V7 (legacy), V8, V9, V10, V11 (upconvert), V12 (current)
+    // Validate version — accept V7 (legacy), V8, V9, V10, V11, V12 (upconvert), V13 (current).
     if header.version != VERSION
         && header.version != FormatVersion::V8.as_u32()
         && header.version != FormatVersion::V9.as_u32()
         && header.version != FormatVersion::V10.as_u32()
         && header.version != FormatVersion::V11.as_u32()
         && header.version != FormatVersion::V12.as_u32()
+        && header.version != FormatVersion::V13.as_u32()
     {
         return Err(PersistenceError::IncompatibleVersion {
-            expected: FormatVersion::V12.as_u32(),
+            expected: FormatVersion::V13.as_u32(),
             found: header.version,
         });
     }
@@ -2496,16 +2620,17 @@ pub fn load_header_from_path(path: impl AsRef<Path>) -> Result<GraphHeader, Pers
     reader.read_exact(&mut header_buf)?;
     let header: GraphHeader = postcard::from_bytes(&header_buf)?;
 
-    // Validate version — accept V7 (legacy), V8, V9, V10, V11 (upconvert), V12 (current)
+    // Validate version — accept V7 (legacy), V8, V9, V10, V11, V12 (upconvert), V13 (current).
     if header.version != VERSION
         && header.version != FormatVersion::V8.as_u32()
         && header.version != FormatVersion::V9.as_u32()
         && header.version != FormatVersion::V10.as_u32()
         && header.version != FormatVersion::V11.as_u32()
         && header.version != FormatVersion::V12.as_u32()
+        && header.version != FormatVersion::V13.as_u32()
     {
         return Err(PersistenceError::IncompatibleVersion {
-            expected: FormatVersion::V12.as_u32(),
+            expected: FormatVersion::V13.as_u32(),
             found: header.version,
         });
     }
@@ -2602,6 +2727,85 @@ mod tests {
             entry.file,
         );
         graph
+    }
+
+    /// End-to-end V13 persistence proof for the T3 `EdgeKind::Wraps`
+    /// variant: a graph carrying a single `Wraps` edge with a non-default
+    /// `kind` + `chain_position` must survive a V13 save and reload through
+    /// BOTH `load_from_path` and `load_from_bytes` with both fields intact.
+    ///
+    /// This is the round-trip coverage the V13 renumber needs: the snapshot
+    /// magic bump exists precisely so a snapshot whose edge arena contains
+    /// `Wraps` is stamped V13 (rejected by V12 readers), and the on-disk
+    /// `EdgeKind` discriminant for `Wraps` must deserialize losslessly.
+    #[test]
+    fn v13_wraps_edge_survives_round_trip() {
+        use crate::graph::unified::edge::{EdgeKind, WrapKind};
+
+        // Two-node graph + one Wraps edge. Non-default kind/position keep the
+        // assertion non-vacuous (a dropped or zeroed field would fail).
+        let mut graph = graph_with_one_node(
+            "errpkg::Wrap",
+            Language::Go,
+            Path::new("/v13_wraps_test.go"),
+        );
+        let file_id = graph.files().get(Path::new("/v13_wraps_test.go")).unwrap();
+        let name2 = graph.strings_mut().intern("Cause").unwrap();
+        let qname2 = graph.strings_mut().intern("errpkg::Cause").unwrap();
+        let entry2 = NodeEntry::new(NodeKind::Function, name2, file_id)
+            .with_location(5, 0, 5, 10)
+            .with_qualified_name(qname2);
+        let node2 = graph.nodes_mut().alloc(entry2).unwrap();
+        let node1 = graph.nodes().iter().next().unwrap().0;
+        let _ = graph.edges().add_edge(
+            node1,
+            node2,
+            EdgeKind::Wraps {
+                kind: WrapKind::ErrorsAs,
+                chain_position: Some(3),
+            },
+            file_id,
+        );
+
+        let temp_file = NamedTempFile::new().expect("tempfile");
+        let path = temp_file.path();
+        save_to_path(&graph, path).expect("save_to_path");
+
+        // On-disk magic must be V13 (a Wraps-bearing graph cannot be V12).
+        let raw = std::fs::read(path).expect("read snapshot bytes");
+        assert_eq!(
+            &raw[..MAGIC_BYTES_V13.len()],
+            MAGIC_BYTES_V13.as_slice(),
+            "Wraps-bearing graph must persist as V13",
+        );
+
+        fn assert_wraps_survived(graph: &CodeGraph) {
+            let snap = graph.snapshot();
+            let wraps: Vec<_> = snap
+                .edges()
+                .all_live_forward_edges()
+                .into_iter()
+                .filter(|e| matches!(e.kind, EdgeKind::Wraps { .. }))
+                .collect();
+            assert_eq!(wraps.len(), 1, "exactly one Wraps edge must survive");
+            match &wraps[0].kind {
+                EdgeKind::Wraps {
+                    kind,
+                    chain_position,
+                } => {
+                    assert_eq!(*kind, WrapKind::ErrorsAs, "WrapKind must round-trip");
+                    assert_eq!(*chain_position, Some(3), "chain_position must round-trip");
+                }
+                other => panic!("expected EdgeKind::Wraps, got {other:?}"),
+            }
+        }
+
+        // Reload through both loader entry points (V13 arm in each).
+        let loaded_path = load_from_path(path, None).expect("load_from_path V13");
+        assert_wraps_survived(&loaded_path);
+
+        let loaded_bytes = load_from_bytes(&raw, None).expect("load_from_bytes V13");
+        assert_wraps_survived(&loaded_bytes);
     }
 
     #[test]
@@ -3981,27 +4185,27 @@ mod tests {
         let path = temp_file.path();
         save_to_path(&graph, path).expect("save_to_path");
 
-        // Verify magic on disk is V12 (Phase β joint-stubs).
+        // Verify magic on disk is V13 (T3 error chains — current writer).
         let raw = std::fs::read(path).expect("read snapshot bytes");
         assert_eq!(
-            &raw[..MAGIC_BYTES_V12.len()],
-            MAGIC_BYTES_V12.as_slice(),
-            "current writer must stamp V12 magic on disk",
+            &raw[..MAGIC_BYTES_V13.len()],
+            MAGIC_BYTES_V13.as_slice(),
+            "current writer must stamp V13 magic on disk",
         );
 
-        // Header version must be V12.
+        // Header version must be V13.
         let header = load_header_from_path(path).expect("load header");
-        assert_eq!(header.version, FormatVersion::V12.as_u32());
+        assert_eq!(header.version, FormatVersion::V13.as_u32());
 
-        // Loader returns a usable graph (V12 arm in `load_from_path`).
+        // Loader returns a usable graph (V13 arm in `load_from_path`).
         let plugins = create_test_plugin_manager();
-        let loaded = load_from_path(path, Some(&plugins)).expect("load V12");
+        let loaded = load_from_path(path, Some(&plugins)).expect("load V13");
         let snap = loaded.snapshot();
         assert_eq!(snap.nodes().len(), 1, "node count must round-trip");
         // Strings round-trip too (the seed function carries one interned name).
         assert!(
             !snap.strings().is_empty(),
-            "interned name must survive V12 round-trip",
+            "interned name must survive V13 round-trip",
         );
         // Phase β joint-stubs land empty by default — no resolver populates
         // them today.

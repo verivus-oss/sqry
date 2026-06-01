@@ -242,6 +242,10 @@ pub enum CanonicalEdgeMetadata {
         protocol: u32,
         metadata: Option<u32>,
     },
+    Wraps {
+        kind: u8,
+        chain_position: Option<u16>,
+    },
 }
 
 /// Builds a [`CanonicalArena`] from a live [`CodeGraph`].
@@ -578,6 +582,16 @@ fn canonicalise_edge_kind(
         EdgeKind::ExtensionReceiver => ("ExtensionReceiver", CanonicalEdgeMetadata::Empty),
         EdgeKind::CompanionOf => ("CompanionOf", CanonicalEdgeMetadata::Empty),
         EdgeKind::SealedPermit => ("SealedPermit", CanonicalEdgeMetadata::Empty),
+        EdgeKind::Wraps {
+            kind,
+            chain_position,
+        } => (
+            "Wraps",
+            CanonicalEdgeMetadata::Wraps {
+                kind: *kind as u8,
+                chain_position: *chain_position,
+            },
+        ),
     }
 }
 

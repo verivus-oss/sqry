@@ -18,6 +18,9 @@
 //! - Pointer receivers
 //! - Struct field access references (FR-GO-4)
 //! - Interface type assertions (FR-GO-4)
+//! - `Wraps` edges for error chains (T3.6): `fmt.Errorf("%w", ...)`,
+//!   `Unwrap() error` / `Unwrap() []error` method bodies, and
+//!   `errors.{Is,As,AsType,Join}` call sites — see `wraps.rs`.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -576,6 +579,31 @@ impl GraphBuilder for GoGraphBuilder {
             &mut scope_tree,
         )?;
 
+        // T3.8 Cluster D: parse the file's effective build constraint
+        // (`//go:build` / `// +build` / filename suffix / cgo) and stamp
+        // `cfg_condition` onto every non-synthetic NodeId the file
+        // staged. The stamper writes into `staging.macro_metadata`,
+        // which Cluster B's Phase 4d-prime (entrypoint.rs:820,
+        // parallel_commit.rs::phase4d_prime_propagate_staging_metadata)
+        // then propagates into `CodeGraph::macro_metadata`. Synthetic
+        // markers are preserved by `is_node_synthetic` short-circuiting
+        // the stamp (02_DESIGN §4.3.d).
+        let filename = file
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        if let Some(expr) = crate::relations::build_constraints::parse_file_prelude(
+            content,
+            filename,
+            ast_graph.uses_cgo,
+        ) {
+            let condition = expr.to_condition_string();
+            crate::relations::build_constraints::stamp_cfg_condition_for_file(
+                helper.staging_mut(),
+                &condition,
+            );
+        }
+
         Ok(())
     }
 
@@ -796,6 +824,21 @@ fn handle_method_declaration(
         &receiver_type_params,
     );
 
+    // T3 Cluster C (02_DESIGN §4.1.b / §4.1.c): if this method is a
+    // recognised `Unwrap() error` or `Unwrap() []error` shape, walk
+    // its body and emit `Wraps` edges from the receiver type to each
+    // wrapped expression. No-op for any other method name / signature.
+    if let Some(base) = receiver_base {
+        try_emit_wraps_for_unwrap_method(
+            node,
+            content,
+            base,
+            &method_context.name,
+            &ast_graph.package,
+            helper,
+        );
+    }
+
     // Cluster D3 (Go T1 signature side channel): emit a
     // `GoMethodSignatureHint` for this method declaration. The Method
     // NodeId is recovered via the same idempotent
@@ -835,6 +878,65 @@ fn handle_method_declaration(
         helper,
         scope_tree,
     )
+}
+
+/// Dispatch entry point for the T3 Cluster C `Unwrap` body analyser.
+/// Looks up the method's return-type text, classifies via
+/// [`super::wraps::classify_unwrap_method`], and if recognised resolves
+/// the receiver type's NodeId and walks the method body.
+fn try_emit_wraps_for_unwrap_method(
+    method_node: Node<'_>,
+    content: &[u8],
+    receiver_base: &str,
+    method_name: &str,
+    package: &str,
+    helper: &mut GraphBuildHelper,
+) {
+    // Quick rejection: only `Unwrap` methods are relevant. Avoids
+    // walking the return type for every Go method on the AST.
+    if method_name != "Unwrap" {
+        return;
+    }
+    // Extract the return-type text. tree-sitter-go exposes the return
+    // signature on a `result` field that is either a single type node
+    // or a `parameter_list` for multi-value returns. `Unwrap` returns
+    // exactly one value (`error` or `[]error`), so a non-parameter-list
+    // `result` is what we expect.
+    let Some(result_node) = method_node.child_by_field_name("result") else {
+        return;
+    };
+    if result_node.kind() == "parameter_list" {
+        // Multi-value return — not a valid Unwrap signature.
+        return;
+    }
+    let Some(result_text) = result_node.utf8_text(content).ok() else {
+        return;
+    };
+    let Some(is_multi) = super::wraps::classify_unwrap_method(method_name, result_text) else {
+        return;
+    };
+
+    let Some(body) = method_node.child_by_field_name("body") else {
+        return;
+    };
+
+    // Resolve the receiver type node — `<package>.<receiver_base>`.
+    // `ensure_callee` reuses the existing type node when one was
+    // declared in this file (Phase 4c-prime will unify cross-file).
+    let receiver_qn = format!("{package}.{receiver_base}");
+    let receiver_span = span_from_node(method_node);
+    let receiver_type_node_id =
+        helper.ensure_callee(&receiver_qn, receiver_span, CalleeKindHint::Function);
+
+    super::wraps::try_emit_wraps_for_unwrap_body(
+        body,
+        content,
+        receiver_type_node_id,
+        &receiver_qn,
+        package,
+        is_multi,
+        helper,
+    );
 }
 
 fn handle_type_declaration(
@@ -1052,6 +1154,22 @@ fn walk_function_body_for_calls(
                 &ast_graph.package,
             );
         }
+        "type_conversion_expression" => {
+            // tree-sitter-go (currently) parses `errors.AsType[E](err)`
+            // as a `type_conversion_expression` (the parser cannot tell
+            // a Go-1.26+ generic function call from a generic-type
+            // conversion). Dispatch to the Wraps emitter so the
+            // `errors.AsType` form still produces a `Wraps{ErrorsAsType}`
+            // edge. Non-AsType type-conversions are a no-op.
+            super::wraps::try_emit_wraps_for_type_conversion(
+                node,
+                content,
+                ast_graph.wrap_imports(),
+                ensure_caller_node(helper, caller_context),
+                &caller_context.package,
+                helper,
+            );
+        }
         "identifier" => {
             local_scopes::handle_identifier_for_reference(node, content, scope_tree, helper);
         }
@@ -1124,6 +1242,7 @@ fn handle_call_expression(
             node,
             content,
             caller_context,
+            ast_graph,
             helper,
             modifier,
             scope_tree,
@@ -1248,6 +1367,7 @@ fn handle_type_assertion_expression(
 struct ASTGraph {
     contexts: Vec<FunctionContext>,
     package: String,
+    wrap_imports: super::wraps::StdlibWrapImports,
     /// Whether this file imports "C" (`CGo`)
     uses_cgo: bool,
 }
@@ -1280,15 +1400,21 @@ impl ASTGraph {
         }
 
         let uses_cgo = detect_cgo_import(root, content);
+        let wrap_imports = super::wraps::StdlibWrapImports::from_root(root, content);
         Self {
             contexts,
             package,
+            wrap_imports,
             uses_cgo,
         }
     }
 
     fn contexts(&self) -> &[FunctionContext] {
         &self.contexts
+    }
+
+    fn wrap_imports(&self) -> &super::wraps::StdlibWrapImports {
+        &self.wrap_imports
     }
 
     #[allow(dead_code)] // Reserved for future context lookups
@@ -1863,6 +1989,7 @@ fn process_call_expression_unified(
     node: Node,
     content: &[u8],
     caller_context: &FunctionContext,
+    ast_graph: &ASTGraph,
     helper: &mut GraphBuildHelper,
     modifier: CallSiteModifier,
     scope_tree: Option<&local_scopes::GoScopeTree>,
@@ -1873,6 +2000,7 @@ fn process_call_expression_unified(
 
     let (callee_qualified, _is_builtin_call) =
         resolve_callee_qualified_name(function_node, content, caller_context)?;
+    let callee_source = extract_call_target(function_node, content).ok();
 
     // Ensure both caller and callee nodes exist
     let source_id = ensure_caller_node(helper, caller_context);
@@ -1888,6 +2016,23 @@ fn process_call_expression_unified(
         argument_count,
         modifier,
         call_span,
+    );
+
+    // T3 Cluster C: also emit `Wraps` edges for `fmt.Errorf("%w", ...)`,
+    // `errors.{Is,As,AsType,Join}` call sites. The `try_emit_wraps_for_call`
+    // dispatcher is a no-op for non-matching callee names; for matching
+    // names it emits one or more `Wraps` edges in addition to the `Calls`
+    // edge above (the two edge families are NOT mutually exclusive — both
+    // are valid traversals of the same syntactic site).
+    super::wraps::try_emit_wraps_for_call(
+        node,
+        content,
+        &callee_qualified,
+        callee_source.as_deref().unwrap_or(&callee_qualified),
+        ast_graph.wrap_imports(),
+        source_id,
+        &caller_context.package,
+        helper,
     );
 
     // Cluster B2 (Go T1 implements-and-promotion): record side-channel

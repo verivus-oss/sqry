@@ -241,12 +241,13 @@ fn check_predicate(
         | Predicate::References(v)
         | Predicate::Implements(v) => check_predicate_value(v, scope_in_scope, node_count, cfg),
         // Existence + attribute predicates are cheap or
-        // index-bounded — never prohibitive.
-        //
-        // Phase A (U14) `address_taken` / `callsite_promiscuous` are
-        // O(1) flag lookups against the metadata store; `resolved_via`
-        // is bounded by a node's outgoing `Calls` degree (typically
-        // small). All three remain in the cheap class.
+        // index-bounded — never prohibitive. CfgCondition is a single
+        // HashMap lookup + (at worst) one short stored-string parse;
+        // Wraps is one outbound-edge scan from the node. Phase A (U14)
+        // `address_taken` / `callsite_promiscuous` are O(1) flag lookups
+        // against the metadata store; `resolved_via` is bounded by a
+        // node's outgoing `Calls` degree (typically small). None of these
+        // approach the cost-gate cap.
         Predicate::HasCaller
         | Predicate::HasCallee
         | Predicate::IsUnused
@@ -263,7 +264,9 @@ fn check_predicate(
         | Predicate::ResolvedViaEq(_)
         | Predicate::InFile(_)
         | Predicate::InScope(_)
-        | Predicate::Returns(_) => Ok(()),
+        | Predicate::Returns(_)
+        | Predicate::CfgCondition(_)
+        | Predicate::Wraps(_) => Ok(()),
     }
 }
 

@@ -2078,6 +2078,20 @@ pub(crate) mod inner {
             if !should_include_in_unused_results(entry, args, strings, files) {
                 continue;
             }
+            // T3.8 (Cluster G): drop cfg-gated symbols when the caller
+            // opted in via `exclude_cfg_gated`. The metadata-store
+            // lookup is O(1) and the filter only fires when the
+            // request asked for it, so the hot path of `find_unused`
+            // is unchanged.
+            if args.exclude_cfg_gated
+                && snapshot
+                    .macro_metadata()
+                    .get_macro(node_id)
+                    .and_then(|m| m.cfg_condition.as_deref())
+                    .is_some()
+            {
+                continue;
+            }
             unused_symbols.push(build_unused_symbol_data(
                 entry,
                 node_id,
@@ -3260,6 +3274,7 @@ mod tests {
                 offset: 0,
                 size: 100,
             },
+            exclude_cfg_gated: false,
         };
 
         assert!(should_include_in_unused_results(
@@ -3291,6 +3306,7 @@ mod tests {
                 offset: 0,
                 size: 100,
             },
+            exclude_cfg_gated: false,
         };
 
         assert!(!should_include_in_unused_results(
@@ -3321,6 +3337,7 @@ mod tests {
                 offset: 0,
                 size: 100,
             },
+            exclude_cfg_gated: false,
         };
 
         assert!(!should_include_in_unused_results(

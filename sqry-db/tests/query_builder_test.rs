@@ -25,7 +25,7 @@ use std::hash::{Hash, Hasher};
 use sqry_core::graph::unified::bind::scope::arena::ScopeKind;
 use sqry_core::graph::unified::edge::kind::{
     DbQueryType, EdgeKind, ExportKind, FfiConvention, HttpMethod, LifetimeConstraintKind,
-    MacroExpansionKind, MqProtocol, ResolvedVia, TableWriteOp, TypeOfContext,
+    MacroExpansionKind, MqProtocol, ResolvedVia, TableWriteOp, TypeOfContext, WrapKind,
 };
 use sqry_core::graph::unified::node::kind::NodeKind;
 use sqry_core::graph::unified::string::StringId;
@@ -896,6 +896,18 @@ fn normalize_edge_kind_covers_every_metadata_variant() {
         EdgeKind::ProtocolCall {
             protocol: StringId::INVALID,
             metadata: Some(StringId::INVALID),
+        },
+        EdgeKind::Wraps {
+            kind: WrapKind::ErrorfVerb,
+            chain_position: Some(2),
+        },
+        EdgeKind::Wraps {
+            kind: WrapKind::UnwrapMultiMethod,
+            chain_position: Some(5),
+        },
+        EdgeKind::Wraps {
+            kind: WrapKind::ErrorsJoin,
+            chain_position: None,
         },
     ];
 

@@ -124,6 +124,7 @@ fn tool_arguments(name: &str, project: &Path) -> Option<Value> {
             json!({"symbol": "process", "direction": "outgoing", "max_depth": 2, "max_results": 20})
         }
         "complexity_metrics" => json!({"min_complexity": 1, "max_results": 20}),
+        "context_propagation" => json!({"mode": "all", "max_results": 20}),
         "cross_language_edges" => json!({"max_results": 20}),
         "dependency_impact" => json!({"symbol": "helper", "max_depth": 2, "max_results": 20}),
         "direct_callees" => json!({"symbol": "process", "max_results": 20}),

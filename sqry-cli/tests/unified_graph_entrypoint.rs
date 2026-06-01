@@ -3,7 +3,7 @@ use sqry_core::graph::node::Language;
 use sqry_core::graph::unified::build::{BuildConfig, build_unified_graph};
 use sqry_core::graph::unified::edge::{
     DbQueryType, EdgeKind, ExportKind, FfiConvention, LifetimeConstraintKind, MacroExpansionKind,
-    MqProtocol, TableWriteOp,
+    MqProtocol, TableWriteOp, WrapKind,
 };
 use sqry_core::graph::unified::{GraphSnapshot, NodeId, StringId};
 use sqry_core::graph::{GraphBuilder, GraphBuilderError, GraphResult};
@@ -105,7 +105,7 @@ fn normalize_path_for_snapshot(root: &Path, path: &Path) -> String {
     relative.to_string_lossy().replace('\\', "/")
 }
 
-#[allow(clippy::too_many_lines)] // Edge metadata match covers all 38 EdgeKind variants exhaustively
+#[allow(clippy::too_many_lines)] // Edge metadata match covers all 39 EdgeKind variants exhaustively
 fn edge_metadata_summary(snapshot: &GraphSnapshot, kind: &EdgeKind) -> String {
     match kind {
         EdgeKind::Defines => "defines".to_string(),
@@ -231,6 +231,28 @@ fn edge_metadata_summary(snapshot: &GraphSnapshot, kind: &EdgeKind) -> String {
         EdgeKind::ExtensionReceiver => "extension_receiver".to_string(),
         EdgeKind::CompanionOf => "companion_of".to_string(),
         EdgeKind::SealedPermit => "sealed_permit".to_string(),
+        EdgeKind::Wraps {
+            kind,
+            chain_position,
+        } => format!(
+            "wraps|kind={}|chain_position={}",
+            wrap_kind_name(*kind),
+            chain_position
+                .map(|p| p.to_string())
+                .unwrap_or_else(|| "none".to_string())
+        ),
+    }
+}
+
+fn wrap_kind_name(kind: WrapKind) -> &'static str {
+    match kind {
+        WrapKind::ErrorfVerb => "errorf_verb",
+        WrapKind::UnwrapMethod => "unwrap_method",
+        WrapKind::UnwrapMultiMethod => "unwrap_multi_method",
+        WrapKind::ErrorsIs => "errors_is",
+        WrapKind::ErrorsAs => "errors_as",
+        WrapKind::ErrorsAsType => "errors_as_type",
+        WrapKind::ErrorsJoin => "errors_join",
     }
 }
 

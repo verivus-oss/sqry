@@ -228,6 +228,71 @@ fn collect_relation_edges_unified(
                 max_results,
             ))
         }
+        RelationType::Wraps => Ok(collect_wraps_relation(
+            snapshot,
+            workspace_root,
+            &start_nodes,
+            max_results,
+        )),
+    }
+}
+
+/// T3.6 (Cluster G): Surface outbound `Wraps` edges from each start
+/// node. Each edge carries the underlying `WrapKind` + optional
+/// `chain_position` in the response metadata so callers can filter
+/// downstream without invoking the planner. For kind-filtered
+/// queries at submission time use `sqry_query "wraps:<kind>"`
+/// (Cluster F).
+fn collect_wraps_relation(
+    snapshot: &Arc<GraphSnapshot>,
+    workspace_root: &Path,
+    start_nodes: &[NodeId],
+    max_results: usize,
+) -> Vec<RelationEdgeData> {
+    let mut results = Vec::new();
+    for &start in start_nodes {
+        if results.len() >= max_results {
+            break;
+        }
+        for edge in snapshot.edges().edges_from(start) {
+            if results.len() >= max_results {
+                break;
+            }
+            let EdgeKind::Wraps {
+                kind,
+                chain_position,
+            } = edge.kind
+            else {
+                continue;
+            };
+            let from_ref = build_node_ref(snapshot, start, workspace_root);
+            let to_ref = build_node_ref(snapshot, edge.target, workspace_root);
+            let metadata = Some(json!({
+                "wrap_kind": wrap_kind_label(kind),
+                "chain_position": chain_position,
+            }));
+            results.push(RelationEdgeData {
+                from: Some(from_ref),
+                to: Some(to_ref),
+                relation_type: "wraps".to_string(),
+                depth: 1,
+                metadata,
+            });
+        }
+    }
+    results
+}
+
+fn wrap_kind_label(kind: sqry_core::graph::unified::edge::WrapKind) -> &'static str {
+    use sqry_core::graph::unified::edge::WrapKind;
+    match kind {
+        WrapKind::ErrorfVerb => "errorf_verb",
+        WrapKind::UnwrapMethod => "unwrap_method",
+        WrapKind::UnwrapMultiMethod => "unwrap_multi_method",
+        WrapKind::ErrorsIs => "errors_is",
+        WrapKind::ErrorsAs => "errors_as",
+        WrapKind::ErrorsAsType => "errors_as_type",
+        WrapKind::ErrorsJoin => "errors_join",
     }
 }
 

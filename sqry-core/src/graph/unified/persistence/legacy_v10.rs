@@ -382,6 +382,15 @@ pub(crate) fn translate_edge_v11_to_v10(v11: EdgeKind) -> EdgeKindV10 {
         EdgeKind::ExtensionReceiver => EdgeKindV10::ExtensionReceiver,
         EdgeKind::CompanionOf => EdgeKindV10::CompanionOf,
         EdgeKind::SealedPermit => EdgeKindV10::SealedPermit,
+        // `EdgeKind::Wraps` (T3 error chains) postdates V13; the V10 wire
+        // format has no slot for it. This down-converter only ever runs
+        // against V9 edges (during `upconvert_v9_to_v10`, which predates
+        // Wraps by four schema versions) and hand-crafted V10 test
+        // fixtures — neither can contain a Wraps edge — so this arm is
+        // unreachable by construction.
+        EdgeKind::Wraps { .. } => {
+            unreachable!("EdgeKind::Wraps has no V10 representation; V10 predates T3 error chains")
+        }
     }
 }
 

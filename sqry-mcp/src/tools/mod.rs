@@ -35,10 +35,11 @@ pub mod workspace_status;
 
 pub use workspace_status::{WorkspaceStatusArgs, execute_workspace_status};
 
-pub use params::{SqryAskParams, SqryQueryParams};
+pub use params::{ContextPropagationParams, SqryAskParams, SqryQueryParams};
 pub use validation::{
     CallHierarchyArgs,
     CallHierarchyDirection,
+    CfgConditionFilter,
     ChangeType,
     // Insights tool args
     ComplexityMetricsArgs,
@@ -86,6 +87,8 @@ pub use validation::{
     UnusedScope,
     Visibility,
 };
+#[allow(unused_imports)]
+pub use validation::{ContextPropagationArgs, ContextScopeArg};
 
 #[cfg(any(test, fuzzing))]
 #[allow(unused_imports)]

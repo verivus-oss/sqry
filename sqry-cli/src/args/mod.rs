@@ -811,6 +811,42 @@ pub enum Command {
         limit: usize,
     },
 
+    /// Context-propagation analysis for Go code (T3.7).
+    ///
+    /// Surfaces `context.Context` plumbing breaks: sync callers that drop a
+    /// caller's ctx, `go callee(...)` paths with no ctx, and HTTP-handler
+    /// callers (`func(http.ResponseWriter, *http.Request)`) that fail to
+    /// thread `r.Context()` into their callee.
+    ///
+    /// Routes through `sqry_db::queries::context_propagation::ContextPropagationQuery`
+    /// via the standard `make_query_db_cold` cache path. Read-only.
+    ///
+    /// Exit codes:
+    ///   0  success (zero leaks is a valid finding, NOT an error)
+    ///   2  invalid `--scope` or `--mode`
+    ///   3  no `.sqry-index` discoverable from the working directory
+    #[command(name = "context-propagation", display_order = 4, verbatim_doc_comment)]
+    ContextPropagation {
+        /// Workspace path (defaults to current directory). If no
+        /// `.sqry-index` exists here, walks up to find the nearest.
+        #[arg(help_heading = headings::QUERY_INPUT, display_order = 10)]
+        path: Option<String>,
+
+        /// Scope selector. `global` (default) scans the whole workspace;
+        /// `file:<path>` restricts to leaks whose caller function lives
+        /// in the named file.
+        #[arg(long, value_name = "SCOPE", default_value = "global", help_heading = headings::QUERY_INPUT, display_order = 20)]
+        scope: String,
+
+        /// Mode filter (default: `all`).
+        #[arg(long, value_enum, default_value_t = ContextPropagationMode::All, help_heading = headings::QUERY_INPUT, display_order = 30)]
+        mode: ContextPropagationMode,
+
+        /// Maximum number of leak records to print.
+        #[arg(long, value_name = "N", default_value = "1000", help_heading = headings::SECURITY_LIMITS, display_order = 10)]
+        limit: usize,
+    },
+
     /// Graph-based queries and analysis
     ///
     /// Advanced graph operations using the unified graph architecture.
@@ -2856,6 +2892,38 @@ pub struct VisualizeCommand {
     /// Maximum number of nodes to include in the diagram (1-500).
     #[arg(long, default_value_t = 100, help_heading = headings::TRAVERSAL_CONTROL, display_order = 20)]
     pub max_nodes: usize,
+}
+
+/// `sqry context-propagation --mode` filter (T3.7, Cluster G-ext).
+///
+/// Mirrors `sqry_db::queries::context_propagation::ContextModeFilter` while
+/// keeping the CLI surface in kebab-case for end-user ergonomics.
+#[derive(Debug, Clone, Copy, ValueEnum, Default, PartialEq, Eq)]
+#[value(rename_all = "kebab-case")]
+pub enum ContextPropagationMode {
+    /// Every classified leak (default).
+    #[default]
+    All,
+    /// Only `BreakSite` leaks (sync caller with `ctx` + ctx-accepting callee
+    /// + call passes 0 context args).
+    BreakSite,
+    /// Only `UnthreadedGoroutine` leaks (`go callee(...)` paths).
+    UnthreadedGoroutine,
+    /// Only HTTP-handler leaks (`func(http.ResponseWriter, *http.Request)`
+    /// callers).
+    HttpHandlerLeak,
+}
+
+impl From<ContextPropagationMode> for sqry_db::queries::context_propagation::ContextModeFilter {
+    fn from(mode: ContextPropagationMode) -> Self {
+        use sqry_db::queries::context_propagation::ContextModeFilter as Cmf;
+        match mode {
+            ContextPropagationMode::All => Cmf::All,
+            ContextPropagationMode::BreakSite => Cmf::BreakSite,
+            ContextPropagationMode::UnthreadedGoroutine => Cmf::UnthreadedGoroutine,
+            ContextPropagationMode::HttpHandlerLeak => Cmf::HttpHandlerLeak,
+        }
+    }
 }
 
 /// Supported diagram text formats.

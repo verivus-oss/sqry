@@ -10,7 +10,7 @@ description = "Salsa-style incremental computation engine for sqry semantic code
 
 [dependencies]
 anyhow.workspace = true
-sqry-core = { version = "17.0.1", path = "../sqry-core" }
+sqry-core = { version = "18.0.2", path = "../sqry-core" }
 parking_lot.workspace = true
 smallvec.workspace = true
 log.workspace = true
@@ -59,6 +59,16 @@ tempfile.workspace = true
 env_logger.workspace = true
 serde_json.workspace = true
 criterion = { version = "0.8", features = ["html_reports"] }
+# Used by the T3.7 Cluster E integration test
+# `tests/context_propagation.rs` to drive `build_unified_graph` against
+# real Go fixtures.
+sqry-lang-go = { path = "../sqry-lang-go" }
+# Used by the T3.8 Cluster F §10.4 cross-language regression test
+# `tests/cfg_wraps_planner.rs::cross_language_cfg_planner_regression`
+# which exercises the bare `cfg:linux` semantic matcher against
+# BOTH a Go fixture (storing `"linux"`) and a Rust fixture (storing
+# `"target_os = \"linux\""`) in a single index.
+sqry-lang-rust = { path = "../sqry-lang-rust" }
 # Used by WS1 differential property tests. Same major as `sqry-core` (1.11).
 proptest = "1.11"
 

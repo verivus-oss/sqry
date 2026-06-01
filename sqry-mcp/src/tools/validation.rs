@@ -11,6 +11,14 @@ pub struct SearchFilters {
     pub visibility: Option<Visibility>,
     pub kinds: Vec<String>,
     pub min_score: Option<f64>,
+    pub cfg_condition: Option<CfgConditionFilter>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct CfgConditionFilter {
+    pub equals: Option<String>,
+    pub matches: Option<String>,
+    pub semantic_match: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,6 +73,9 @@ pub enum RelationType {
     Imports,
     Exports,
     Returns,
+    /// T3.6 (Cluster G): outbound `Wraps` edges. Filters to any
+    /// `EdgeKind::Wraps` regardless of `WrapKind`.
+    Wraps,
 }
 
 impl RelationType {
@@ -75,6 +86,7 @@ impl RelationType {
             RelationType::Imports => "imports",
             RelationType::Exports => "exports",
             RelationType::Returns => "returns",
+            RelationType::Wraps => "wraps",
         }
     }
 }
@@ -91,6 +103,28 @@ pub struct RelationQueryArgs {
     pub framework: Option<FrameworkId>,
     /// Phase β joint-stub (Plan B) — see [`SemanticSearchArgs::resolved_via`].
     pub resolved_via: Option<Vec<ResolvedVia>>,
+}
+
+/// Resolved scope for the `context_propagation` MCP tool.
+#[derive(Debug, Clone)]
+pub enum ContextScopeArg {
+    /// Whole-workspace scope.
+    Global,
+    /// File-scoped, restricting reported leaks to call-sites whose
+    /// caller function lives in this file. Path is interpreted
+    /// relative to the workspace root by the executor.
+    File(String),
+}
+
+/// Internal args struct for the `context_propagation` MCP tool.
+/// Built from `tools::params::ContextPropagationParams` by the
+/// `convert_context_propagation_params` helper at the server boundary.
+#[derive(Debug, Clone)]
+pub struct ContextPropagationArgs {
+    pub path: String,
+    pub scope: ContextScopeArg,
+    pub mode: sqry_db::queries::context_propagation::ContextModeFilter,
+    pub max_results: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -228,6 +262,12 @@ pub struct FindUnusedArgs {
     pub kinds: Vec<String>,
     pub max_results: usize,
     pub pagination: PaginationArgs,
+    /// T3.8 (Cluster G): when `true`, drop any candidate whose
+    /// `MacroNodeMetadata::cfg_condition` is `Some(...)`. Useful for
+    /// excluding platform-shim functions that look "unused" on the
+    /// analyst's host but are live on other platforms (02_DESIGN
+    /// §2.5 row `find_unused`).
+    pub exclude_cfg_gated: bool,
 }
 
 /// Scope enum for `find_unused` tool
@@ -450,6 +490,7 @@ pub fn validate_relation_query_args(args: &Value) -> Result<RelationQueryArgs> {
         "imports" => RelationType::Imports,
         "exports" => RelationType::Exports,
         "returns" => RelationType::Returns,
+        "wraps" => RelationType::Wraps,
         other => bail!("Unsupported relation_type: {other}"),
     };
 
@@ -1251,6 +1292,28 @@ fn parse_filters(value: Option<&Value>, root: &Value) -> Result<SearchFilters> {
         filters.min_score = Some(score);
     }
 
+    if let Some(cfg_val) = val.get("cfg_condition") {
+        let cfg_obj = cfg_val
+            .as_object()
+            .ok_or_else(|| anyhow::anyhow!("filters.cfg_condition must be an object"))?;
+        let string_field = |field: &str| -> Result<Option<String>> {
+            cfg_obj
+                .get(field)
+                .map(|value| {
+                    value.as_str().map(|s| s.trim().to_string()).ok_or_else(|| {
+                        anyhow::anyhow!("filters.cfg_condition.{field} must be a string")
+                    })
+                })
+                .transpose()
+        };
+        let cfg_filter = CfgConditionFilter {
+            equals: string_field("equals")?.filter(|s| !s.is_empty()),
+            matches: string_field("matches")?.filter(|s| !s.is_empty()),
+            semantic_match: string_field("semantic_match")?.filter(|s| !s.is_empty()),
+        };
+        filters.cfg_condition = Some(cfg_filter);
+    }
+
     filters.kinds.retain(|value| !value.trim().is_empty());
 
     Ok(filters)
@@ -1763,6 +1826,14 @@ pub fn validate_find_unused_args(args: &Value) -> Result<FindUnusedArgs> {
 
     let pagination = parse_pagination(args, 50, 500)?;
 
+    // T3.8 (Cluster G): legacy JSON-args path honours the new flag
+    // when callers supply it. Default is `false` to preserve the
+    // existing find_unused semantics.
+    let exclude_cfg_gated = args
+        .get("exclude_cfg_gated")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+
     Ok(FindUnusedArgs {
         path: path.to_string(),
         scope,
@@ -1772,6 +1843,7 @@ pub fn validate_find_unused_args(args: &Value) -> Result<FindUnusedArgs> {
             .try_into()
             .map_err(|_| anyhow::anyhow!("max_results out of range"))?,
         pagination,
+        exclude_cfg_gated,
     })
 }
 
@@ -2102,6 +2174,43 @@ mod tests {
             "relation_type": "unknown"
         });
         assert!(validate_relation_query_args(&args).is_err());
+    }
+
+    /// T3.6 (Cluster G): the legacy JSON validator must accept the
+    /// new `"wraps"` relation that the rmcp-typed handler accepts,
+    /// so fuzz / golden / external callers see the same surface.
+    #[test]
+    fn relation_query_accepts_wraps() {
+        let args = json!({
+            "symbol": "fmt.Errorf",
+            "relation_type": "wraps"
+        });
+        let parsed = validate_relation_query_args(&args).unwrap();
+        assert_eq!(parsed.relation, RelationType::Wraps);
+    }
+
+    /// T3.8 (Cluster G): the legacy JSON validator must thread the
+    /// new `exclude_cfg_gated` flag through. Default `false`
+    /// preserves the pre-Cluster-G behaviour.
+    #[test]
+    fn find_unused_default_exclude_cfg_gated_is_false() {
+        let args = json!({
+            "scope": "all"
+        });
+        let parsed = validate_find_unused_args(&args).unwrap();
+        assert!(!parsed.exclude_cfg_gated);
+    }
+
+    /// T3.8 (Cluster G): a supplied `true` flag must flow into
+    /// `FindUnusedArgs.exclude_cfg_gated`.
+    #[test]
+    fn find_unused_threads_exclude_cfg_gated_true() {
+        let args = json!({
+            "scope": "all",
+            "exclude_cfg_gated": true
+        });
+        let parsed = validate_find_unused_args(&args).unwrap();
+        assert!(parsed.exclude_cfg_gated);
     }
 
     #[test]

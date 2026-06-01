@@ -645,6 +645,11 @@ impl<'db> PlanExecutor<'db> {
             }
             CompiledPredicate::Returns(type_name) => self.node_returns_type(node_id, type_name),
 
+            CompiledPredicate::CfgCondition(matcher) => {
+                self.node_cfg_condition_matches(node_id, matcher)
+            }
+            CompiledPredicate::Wraps(filter) => self.node_has_wraps_edge(node_id, *filter),
+
             CompiledPredicate::And(list) => list
                 .iter()
                 .all(|inner| self.check_predicate(node_id, inner)),
@@ -773,6 +778,55 @@ impl<'db> PlanExecutor<'db> {
     /// for cache reuse, but the dispatch surface stays edge-based here so
     /// that the contract — `TypeOf { Return }` edges, not `NodeEntry.signature`
     /// text — is enforced unconditionally.
+    /// Implementation of the `cfg:<value>` planner predicate
+    /// (T3 Cluster F, AC-T3.8-10).
+    ///
+    /// Reads the node's `MacroNodeMetadata::cfg_condition` slot from the
+    /// snapshot's metadata store; returns `false` when no metadata is
+    /// recorded for the node. The match itself is delegated to
+    /// [`super::cfg_match::matches_stored`], which handles the
+    /// cross-language comparator (Go-native ↔ Rust-functional).
+    fn node_cfg_condition_matches(
+        &self,
+        node_id: NodeId,
+        matcher: &super::cfg_match::CfgMatcher,
+    ) -> bool {
+        let Some(metadata) = self.snapshot.macro_metadata().get_macro(node_id) else {
+            return false;
+        };
+        let Some(stored) = metadata.cfg_condition.as_deref() else {
+            return false;
+        };
+        super::cfg_match::matches_stored(matcher, stored)
+    }
+
+    /// Implementation of the `wraps` / `wraps:<kind>` planner predicate
+    /// (T3 Cluster F, AC-T3.6-9).
+    ///
+    /// Per 02_DESIGN §2.1 the discriminant on `EdgeKind::Wraps`
+    /// collapses every `WrapKind` into a single discriminant, so we
+    /// inspect the carried `kind` directly. The bare `wraps` form
+    /// (`WrapKindFilter::Any`) accepts any `Wraps` edge; `Kind(k)`
+    /// requires exact-equality on the `kind` field.
+    fn node_has_wraps_edge(&self, node_id: NodeId, filter: super::ir::WrapKindFilter) -> bool {
+        for edge in self.snapshot.edges().edges_from(node_id) {
+            let EdgeKind::Wraps { kind, .. } = edge.kind else {
+                continue;
+            };
+            let matches = match filter {
+                super::ir::WrapKindFilter::Any => true,
+                super::ir::WrapKindFilter::Kind(want) => kind == want,
+            };
+            if matches {
+                if let Some(target_entry) = self.snapshot.nodes().get(edge.target) {
+                    record_file_dep(target_entry.file);
+                }
+                return true;
+            }
+        }
+        false
+    }
+
     fn node_returns_type(&self, node_id: NodeId, type_name: &str) -> bool {
         for edge in self.snapshot.edges().edges_from(node_id) {
             if !matches!(
@@ -904,6 +958,15 @@ enum CompiledPredicate {
     /// targeted by a forward `TypeOf { context: Some(Return), .. }` edge.
     /// See [`Predicate::Returns`] for full semantics.
     Returns(String),
+    /// T3 Cluster F: `cfg:<value>` — matches stored `cfg_condition`.
+    /// The matcher is either `Semantic(CfgAst)` (bare planner form;
+    /// cross-language match via the comparator) or `Literal(String)`
+    /// (quoted planner form; byte-exact, language-specific) per
+    /// 02_DESIGN §5.3.a + §10.4.
+    CfgCondition(super::cfg_match::CfgMatcher),
+    /// T3 Cluster F: `wraps` / `wraps:<kind>` — matches nodes with at
+    /// least one outbound `EdgeKind::Wraps` edge satisfying the filter.
+    Wraps(super::ir::WrapKindFilter),
     And(Vec<CompiledPredicate>),
     Or(Vec<CompiledPredicate>),
     Not(Box<CompiledPredicate>),
@@ -940,6 +1003,8 @@ impl CompiledPredicate {
                     .unwrap_or(CompiledStringPattern::REJECT_ALL),
             ),
             Predicate::Returns(type_name) => CompiledPredicate::Returns(type_name.clone()),
+            Predicate::CfgCondition(matcher) => CompiledPredicate::CfgCondition(matcher.clone()),
+            Predicate::Wraps(filter) => CompiledPredicate::Wraps(*filter),
             Predicate::And(list) => {
                 CompiledPredicate::And(list.iter().map(CompiledPredicate::compile).collect())
             }

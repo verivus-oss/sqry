@@ -723,6 +723,7 @@ pub fn incremental_rebuild(
     let Phase3cCommitOutput {
         diagnostics: post_commit,
         mut per_file_edges,
+        per_file_metadata,
     } = commit_output;
 
     // Sub-step 6 observation hook — gated on `test` / `rebuild-internals`.
@@ -803,7 +804,8 @@ pub fn incremental_rebuild(
     // Phase 3d Phase 4d helper itself does not take it by-parameter
     // (see its docstring).
     let _ = &export_map;
-    let pass4d = phase3d_insert_cross_file_edges(&mut rebuild_graph, &mut per_file_edges);
+    let pass4d =
+        phase3d_insert_cross_file_edges(&mut rebuild_graph, &mut per_file_edges, per_file_metadata);
 
     // Phase 3d post-Pass-4d observation hook — gated on `test` /
     // `rebuild-internals`. Fires after sub-step 8 commits.
@@ -1218,6 +1220,16 @@ struct Phase3cCommitOutput {
     /// numbers (file-by-file, edge-by-edge) identical to the full-build
     /// ordering.
     per_file_edges: Vec<Vec<PendingEdge>>,
+    /// T3 Cluster B (02_DESIGN §4.3.e Change 5): per-file staging
+    /// [`NodeMetadataStore`] collected during the Phase 3c commit loop.
+    /// Carried alongside `per_file_edges` so Phase 3d's Phase 4c-prime /
+    /// 4d / 4d-prime sequence has the same metadata input the full-build
+    /// entrypoint produces. Empty stores are filtered at extraction time
+    /// to keep this vector proportional to actually-stamped files.
+    per_file_metadata: Vec<(
+        FileId,
+        crate::graph::unified::storage::metadata::NodeMetadataStore,
+    )>,
 }
 
 /// Phase 3c sub-steps 5 + 6 — assign ranges on `rebuild_graph` and
@@ -1242,6 +1254,7 @@ fn phase3c_commit_reparsed(
         return Ok(Phase3cCommitOutput {
             diagnostics: PostCommitDiagnostics::default(),
             per_file_edges: Vec::new(),
+            per_file_metadata: Vec::new(),
         });
     }
 
@@ -1366,6 +1379,45 @@ fn phase3c_commit_reparsed(
 
     let edges_collected = phase3.per_file_edges.iter().map(Vec::len).sum::<usize>();
 
+    // T3 Cluster B (02_DESIGN §4.3.e Change 5): extract per-file staging
+    // metadata BEFORE `parsed_files` is dropped, rekeying staging-local
+    // NodeIds to canonical arena NodeIds via `phase3.per_file_node_ids[i]`.
+    // The rekey is required because staging.add_node returns staging-local
+    // IDs while `CodeGraph::macro_metadata` is keyed under arena IDs;
+    // mirrors the full-build entrypoint's chunk-loop block. Empty stores
+    // are filtered out so this vector is proportional to actually-stamped
+    // files.
+    debug_assert_eq!(
+        plan.file_plans.len(),
+        parsed_files.len(),
+        "Phase 3c sub-step 6: parsed-file vector length must match plan length"
+    );
+    debug_assert_eq!(
+        phase3.per_file_node_ids.len(),
+        plan.file_plans.len(),
+        "Phase 3c sub-step 6: per-file node ID vector length must match plan length \
+         for metadata rekey"
+    );
+    let mut per_file_metadata: Vec<(
+        FileId,
+        crate::graph::unified::storage::metadata::NodeMetadataStore,
+    )> = Vec::new();
+    for ((fp, parsed), arena_ids) in plan
+        .file_plans
+        .iter()
+        .zip(parsed_files.iter_mut())
+        .zip(phase3.per_file_node_ids.iter())
+    {
+        let metadata = parsed.staging.take_macro_metadata();
+        if metadata.is_empty() {
+            continue;
+        }
+        let rekeyed = super::parallel_commit::rekey_staging_metadata_to_arena(metadata, arena_ids);
+        if !rekeyed.is_empty() {
+            per_file_metadata.push((fp.file_id, rekeyed));
+        }
+    }
+
     Ok(Phase3cCommitOutput {
         diagnostics: PostCommitDiagnostics {
             files_committed: parsed_count,
@@ -1374,6 +1426,7 @@ fn phase3c_commit_reparsed(
             edges_collected,
         },
         per_file_edges: phase3.per_file_edges,
+        per_file_metadata,
     })
 }
 
@@ -1416,6 +1469,16 @@ pub struct Pass4dDiagnostics {
     /// [`phase4d_bulk_insert_edges`]. Useful for asserting that the
     /// bulk insert advanced the counter by `edges_submitted`.
     pub final_edge_seq: u64,
+    /// T3 Cluster B (02_DESIGN §4.3.e Change 7): `true` when Phase
+    /// 4d-prime merged at least one per-file staging
+    /// `NodeMetadataStore` into `RebuildGraph::macro_metadata`. The
+    /// boolean is retained inside this diagnostics struct so the
+    /// Phase 3d post-Pass-4d hook (used by `staging_macro_metadata_*`
+    /// integration tests) can assert metadata flowed through; it is
+    /// intentionally NOT threaded to `SqrydHook::on_publish` because
+    /// per-publish `QueryDb::new` is the de-facto invalidator (see
+    /// 02_DESIGN §4.3.e "Reindex cache freshness" + §5.3).
+    pub staged_metadata_merged: bool,
 }
 
 /// Phase 3d sub-step 7 — rebuild the cross-file [`ExportMap`] from the
@@ -1572,6 +1635,10 @@ const EXPORTABLE_KINDS: &[NodeKind] = &[
 fn phase3d_insert_cross_file_edges(
     rebuild_graph: &mut RebuildGraph,
     per_file_edges: &mut [Vec<PendingEdge>],
+    per_file_metadata: Vec<(
+        FileId,
+        crate::graph::unified::storage::metadata::NodeMetadataStore,
+    )>,
 ) -> Pass4dDiagnostics {
     let edges_submitted: usize = per_file_edges.iter().map(Vec::len).sum();
 
@@ -1590,7 +1657,8 @@ fn phase3d_insert_cross_file_edges(
     generic_rebuild_indices(rebuild_graph);
 
     // --- Phase 4c-prime: Cross-file node unification ---------------------
-    let unification = phase4c_prime_unify_cross_file_nodes(rebuild_graph, per_file_edges);
+    let (unification, unification_remap) =
+        phase4c_prime_unify_cross_file_nodes(rebuild_graph, per_file_edges);
     if unification.nodes_merged > 0 {
         // Rebuild indices after merging so loser slots become
         // name-invisible via `AuxiliaryIndices::build_from_arena`'s
@@ -1605,6 +1673,21 @@ fn phase3d_insert_cross_file_edges(
     // `edges_submitted` and returns the final seq value.
     let final_edge_seq = phase4d_bulk_insert_edges(rebuild_graph, per_file_edges);
 
+    // --- Phase 4d-prime (T3 Cluster B, 02_DESIGN §4.3.e Changes 4 + 7):
+    // propagate per-file staging metadata into `RebuildGraph::macro_metadata`
+    // using the Phase 4c-prime `NodeRemapTable` to drop loser-keyed
+    // entries first. Same helper as the full-build plane (generic over
+    // `GraphMutationTarget`). The returned bool is retained inside this
+    // diagnostics struct for the Phase 3d post-Pass-4d hook used by
+    // integration tests; it is not threaded to `SqrydHook::on_publish`
+    // because per-publish `QueryDb::new` is the de-facto invalidator
+    // (see 02_DESIGN §4.3.e "Reindex cache freshness").
+    let staged_metadata_merged = super::parallel_commit::phase4d_prime_propagate_staging_metadata(
+        rebuild_graph,
+        per_file_metadata,
+        &unification_remap,
+    );
+
     Pass4dDiagnostics {
         edges_submitted,
         dedup_remap_size,
@@ -1612,6 +1695,7 @@ fn phase3d_insert_cross_file_edges(
         unification_nodes_merged: unification.nodes_merged,
         unification_edges_rewritten: unification.edges_rewritten,
         final_edge_seq,
+        staged_metadata_merged,
     }
 }
 

@@ -341,6 +341,45 @@ impl<'a> Parser<'a> {
                 }
             }
             "unused" => Ok(builder.filter(Predicate::IsUnused)),
+            "cfg" => {
+                // T3 Cluster F: cross-language conditional-compilation
+                // predicate. Per 02_DESIGN §5.3.a + §10.4 the two
+                // addressing modes are independently observable:
+                //   - Bare `cfg:<ident>` → CfgMatcher::Semantic(Flag(ident))
+                //     — cross-language: matches both Go-stored
+                //     `"linux"` and Rust-stored `"target_os = \"linux\""`.
+                //   - Quoted `cfg:"<expr>"` → CfgMatcher::Literal(expr)
+                //     — byte-exact and language-specific.
+                self.expect_byte(b':', "':' after 'cfg'")?;
+                self.skip_inline_ws();
+                let was_quoted = self.peek_is(b'"');
+                let value = self.parse_bare_or_quoted()?;
+                let matcher = if was_quoted {
+                    super::cfg_match::CfgMatcher::Literal(value)
+                } else {
+                    super::cfg_match::CfgMatcher::Semantic(super::cfg_match::CfgAst::flag(value))
+                };
+                Ok(builder.filter(Predicate::CfgCondition(matcher)))
+            }
+            "wraps" => {
+                // T3 Cluster F: error-chain wrap predicate. Bare `wraps`
+                // accepts every WrapKind; `wraps:<kind>` filters on the
+                // snake-case spelling of `WrapKind`.
+                self.skip_inline_ws();
+                let filter = if self.peek_is(b':') {
+                    self.pos += 1;
+                    let ident = self.take_ident()?;
+                    let kind = parse_wrap_kind(&ident).ok_or(ParseError::UnknownIdent {
+                        kind: "wrap kind",
+                        value: ident,
+                        offset: start,
+                    })?;
+                    super::ir::WrapKindFilter::Kind(kind)
+                } else {
+                    super::ir::WrapKindFilter::Any
+                };
+                Ok(builder.filter(Predicate::Wraps(filter)))
+            }
             // ----- Phase A (C indirect-call precision) -----
             //
             // Spellings locked per DESIGN §11.1:
@@ -1071,6 +1110,23 @@ fn parse_direction(text: &str) -> Option<Direction> {
     }
 }
 
+/// Map the snake-case planner spelling of a `WrapKind` to the
+/// `sqry_core::graph::unified::edge::WrapKind` enum variant. Used by
+/// the `wraps:<kind>` planner predicate (T3 Cluster F).
+fn parse_wrap_kind(text: &str) -> Option<sqry_core::graph::unified::edge::WrapKind> {
+    use sqry_core::graph::unified::edge::WrapKind;
+    match text {
+        "errorf_verb" => Some(WrapKind::ErrorfVerb),
+        "unwrap_method" => Some(WrapKind::UnwrapMethod),
+        "unwrap_multi_method" => Some(WrapKind::UnwrapMultiMethod),
+        "errors_is" => Some(WrapKind::ErrorsIs),
+        "errors_as" => Some(WrapKind::ErrorsAs),
+        "errors_as_type" => Some(WrapKind::ErrorsAsType),
+        "errors_join" => Some(WrapKind::ErrorsJoin),
+        _ => None,
+    }
+}
+
 fn parse_scope_kind(text: &str) -> Option<ScopeKind> {
     match text {
         "module" => Some(ScopeKind::Module),
@@ -1665,6 +1721,83 @@ mod tests {
                 assert_eq!(pat.raw, "Counter#increment");
             }
             other => panic!("expected NodeScan with name_pattern, got {other:?}"),
+        }
+    }
+
+    // ============================================================================
+    // T3 Cluster F — cfg: + wraps: planner predicates
+    // ============================================================================
+
+    fn first_filter_predicate(plan: &QueryPlan) -> &Predicate {
+        let PlanNode::Chain { steps } = &plan.root else {
+            panic!("expected Chain root");
+        };
+        for step in steps {
+            if let PlanNode::Filter { predicate, .. } = step {
+                return predicate;
+            }
+        }
+        panic!("no Filter step in plan");
+    }
+
+    #[test]
+    fn cfg_predicate_parse_bare() {
+        let plan = parse_query("kind:function cfg:linux").expect("parse");
+        match first_filter_predicate(&plan) {
+            Predicate::CfgCondition(super::super::cfg_match::CfgMatcher::Semantic(ast)) => {
+                assert_eq!(
+                    ast,
+                    &super::super::cfg_match::CfgAst::Flag("linux".to_string())
+                );
+            }
+            other => panic!("expected CfgCondition::Semantic, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cfg_predicate_parse_quoted() {
+        // Per 02_DESIGN §5.3.a + §10.4: quoted form is Literal-only
+        // (byte-exact, language-specific). Bare form is Semantic
+        // (cross-language). The two addressing modes are kept
+        // independently observable so `cfg:"linux"` returns ONLY
+        // Go-stored symbols and `cfg:"target_os = \"linux\""`
+        // returns ONLY Rust-stored symbols (§10.4 regression).
+        let plan = parse_query("kind:function cfg:\"linux && amd64\"").expect("parse");
+        match first_filter_predicate(&plan) {
+            Predicate::CfgCondition(super::super::cfg_match::CfgMatcher::Literal(lit)) => {
+                assert_eq!(lit, "linux && amd64");
+            }
+            other => panic!("expected CfgCondition::Literal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wraps_predicate_parse_bare() {
+        let plan = parse_query("kind:function wraps").expect("parse");
+        match first_filter_predicate(&plan) {
+            Predicate::Wraps(super::super::ir::WrapKindFilter::Any) => {}
+            other => panic!("expected Wraps(Any), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wraps_predicate_parse_filtered() {
+        let plan = parse_query("kind:function wraps:errors_is").expect("parse");
+        use sqry_core::graph::unified::edge::WrapKind;
+        match first_filter_predicate(&plan) {
+            Predicate::Wraps(super::super::ir::WrapKindFilter::Kind(WrapKind::ErrorsIs)) => {}
+            other => panic!("expected Wraps(Kind(ErrorsIs)), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wraps_predicate_parse_unknown_kind_errors() {
+        let err = parse_query("kind:function wraps:not_a_kind").expect_err("should fail");
+        match err {
+            ParseError::UnknownIdent { kind, .. } => {
+                assert_eq!(kind, "wrap kind");
+            }
+            other => panic!("expected UnknownIdent for wrap kind, got {other:?}"),
         }
     }
 

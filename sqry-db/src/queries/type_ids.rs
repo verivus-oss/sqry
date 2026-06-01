@@ -10,7 +10,8 @@
 //! - `0x0000` — invalid / unknown. Must never appear on disk.
 //! - `0x0001..=0x000F` — original built-in queries (15 IDs).
 //! - `0x0010..=0x0FFF` — additional built-ins (Phase A C indirect-call
-//!   precision claims `0x0010` and `0x0011`).
+//!   precision claims `0x0010` and `0x0011`; T3.7 context-propagation
+//!   claims `0x0012`).
 //! - `0x1000..=0xFFFF` — reserved for downstream / future built-ins.
 
 pub const CALLERS: u32 = 0x0001;
@@ -31,15 +32,18 @@ pub const CONDENSATION: u32 = 0x000F;
 // Phase A — C indirect-call precision (U13).
 pub const ADDRESS_TAKEN: u32 = 0x0010;
 pub const CALLSITE_PROMISCUOUS: u32 = 0x0011;
+/// T3.7 — context-propagation leak detection. Next free slot after the
+/// Phase A C indirect-call IDs (0x0010, 0x0011); see 02_DESIGN §5.2.
+pub const CONTEXT_PROPAGATION: u32 = 0x0012;
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::queries::{
         AddressTakenQuery, CalleesQuery, CallersQuery, CallsitePromiscuousQuery, CondensationQuery,
-        CyclesQuery, EntryPointsQuery, ExportsQuery, ImplementsQuery, ImportsQuery, IsInCycleQuery,
-        IsNodeUnusedQuery, ReachabilityQuery, ReachableFromEntryPointsQuery, ReferencesQuery,
-        SccQuery, UnusedQuery,
+        ContextPropagationQuery, CyclesQuery, EntryPointsQuery, ExportsQuery, ImplementsQuery,
+        ImportsQuery, IsInCycleQuery, IsNodeUnusedQuery, ReachabilityQuery,
+        ReachableFromEntryPointsQuery, ReferencesQuery, SccQuery, UnusedQuery,
     };
     use crate::query::DerivedQuery;
 
@@ -61,6 +65,7 @@ mod tests {
             ReachableFromEntryPointsQuery::QUERY_TYPE_ID,
             SccQuery::QUERY_TYPE_ID,
             CondensationQuery::QUERY_TYPE_ID,
+            ContextPropagationQuery::QUERY_TYPE_ID,
             AddressTakenQuery::QUERY_TYPE_ID,
             CallsitePromiscuousQuery::QUERY_TYPE_ID,
         ];
@@ -93,6 +98,7 @@ mod tests {
         );
         assert_eq!(SccQuery::QUERY_TYPE_ID, SCC);
         assert_eq!(CondensationQuery::QUERY_TYPE_ID, CONDENSATION);
+        assert_eq!(ContextPropagationQuery::QUERY_TYPE_ID, CONTEXT_PROPAGATION);
         assert_eq!(AddressTakenQuery::QUERY_TYPE_ID, ADDRESS_TAKEN);
         assert_eq!(
             CallsitePromiscuousQuery::QUERY_TYPE_ID,
@@ -167,6 +173,10 @@ mod tests {
         assert!(
             CondensationQuery::PERSISTENT,
             "CondensationQuery::PERSISTENT must be true"
+        );
+        assert!(
+            ContextPropagationQuery::PERSISTENT,
+            "ContextPropagationQuery::PERSISTENT must be true"
         );
         assert!(
             AddressTakenQuery::PERSISTENT,

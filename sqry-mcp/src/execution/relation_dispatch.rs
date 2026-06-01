@@ -93,6 +93,14 @@ pub(crate) fn relation_endpoints_for_mcp(
         RelationType::Imports => mcp_imports_query(db, &key),
         RelationType::Exports => mcp_exports_query(db, &key),
         RelationType::Returns => returns_targets_for_symbol(db, symbol),
+        // `Wraps` is dispatched directly inside the relation_query
+        // handler (collect_wraps_relation in relations.rs) — it walks
+        // outbound `EdgeKind::Wraps` from resolved start nodes
+        // rather than going through a name-keyed `DerivedQuery`. This
+        // matches the dispatch taxonomy (CLAUDE.md §"sqry-db crate"
+        // §"Dispatch taxonomy"): name-resolution + NodeId-anchored
+        // edge walk, no derived-query backing yet.
+        RelationType::Wraps => Arc::new(Vec::new()),
     }
 }
 

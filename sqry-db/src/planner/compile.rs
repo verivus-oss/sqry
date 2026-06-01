@@ -316,6 +316,15 @@ pub fn normalize_edge_kind(kind: EdgeKind) -> EdgeKind {
             protocol: StringId::INVALID,
             metadata: None,
         },
+
+        // ---- T3 Wraps: preserve semantic `kind`, drop site `chain_position` ----
+        // `WrapKind` is the load-bearing discriminator (queries filter by
+        // ErrorfVerb / UnwrapMethod / etc.); `chain_position` is per-emission-site
+        // (verb index, slice index) and is treated as site metadata for caching.
+        EdgeKind::Wraps { kind, .. } => EdgeKind::Wraps {
+            kind,
+            chain_position: None,
+        },
     }
 }
 
@@ -840,7 +849,9 @@ fn validate_predicate(predicate: &Predicate) -> Result<(), BuildError> {
         | Predicate::InFile(_)
         | Predicate::InScope(_)
         | Predicate::MatchesName(_)
-        | Predicate::Returns(_) => Ok(()),
+        | Predicate::Returns(_)
+        | Predicate::CfgCondition(_)
+        | Predicate::Wraps(_) => Ok(()),
 
         Predicate::Callers(v)
         | Predicate::Callees(v)

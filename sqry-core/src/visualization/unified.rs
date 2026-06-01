@@ -1379,6 +1379,8 @@ impl<'a> UnifiedJsonExporter<'a> {
             EdgeKind::ExtensionReceiver => "extension_receiver",
             EdgeKind::CompanionOf => "companion_of",
             EdgeKind::SealedPermit => "sealed_permit",
+            // T3 error chains (Go)
+            EdgeKind::Wraps { .. } => "wraps",
         }
     }
 }

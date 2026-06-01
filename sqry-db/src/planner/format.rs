@@ -276,6 +276,40 @@ fn format_predicate_step(pred: &Predicate, out: &mut String) {
             )
             .expect("write to String");
         }
+        // T3 Cluster F — cross-language conditional-compilation predicate.
+        Predicate::CfgCondition(matcher) => {
+            use super::cfg_match::{CfgAst, CfgMatcher};
+            match matcher {
+                // Bare `cfg:<flag>` — round-trips with the parser's bare
+                // (semantic) form.
+                CfgMatcher::Semantic(CfgAst::Flag(flag)) => {
+                    write!(out, "cfg:{flag}").expect("write to String");
+                }
+                // Quoted `cfg:"<expr>"` — byte-exact literal form. `{:?}`
+                // re-quotes/escapes so it round-trips through the parser's
+                // quoted form.
+                CfgMatcher::Literal(expr) => {
+                    write!(out, "cfg:{expr:?}").expect("write to String");
+                }
+                // Compound semantic ASTs are not producible by the text
+                // parser (the bare form only yields a single `Flag`); emit
+                // the canonical Rust-style expression inside the quoted
+                // literal form so the output stays a valid planner token.
+                CfgMatcher::Semantic(ast) => {
+                    write!(out, "cfg:{:?}", render_cfg_ast(ast)).expect("write to String");
+                }
+            }
+        }
+        // T3 Cluster F — error-chain wrap predicate.
+        Predicate::Wraps(filter) => {
+            use super::ir::WrapKindFilter;
+            match filter {
+                WrapKindFilter::Any => out.push_str("wraps"),
+                WrapKindFilter::Kind(kind) => {
+                    write!(out, "wraps:{}", wrap_kind_text(*kind)).expect("write to String");
+                }
+            }
+        }
         Predicate::Callers(v) => {
             out.push_str("callers:");
             format_predicate_value(v, out);
@@ -489,6 +523,46 @@ fn resolved_via_text(via: ResolvedVia) -> &'static str {
         ResolvedVia::DuckTyped => "duck_typed",
         ResolvedVia::Structural => "structural",
         ResolvedVia::PromiscuousElided => "promiscuous_elided",
+    }
+}
+
+/// Snake-case planner spelling for a [`WrapKind`], the inverse of
+/// `parse::parse_wrap_kind`. Used by the `wraps:<kind>` formatter (T3
+/// Cluster F).
+fn wrap_kind_text(kind: sqry_core::graph::unified::edge::WrapKind) -> &'static str {
+    use sqry_core::graph::unified::edge::WrapKind;
+    match kind {
+        WrapKind::ErrorfVerb => "errorf_verb",
+        WrapKind::UnwrapMethod => "unwrap_method",
+        WrapKind::UnwrapMultiMethod => "unwrap_multi_method",
+        WrapKind::ErrorsIs => "errors_is",
+        WrapKind::ErrorsAs => "errors_as",
+        WrapKind::ErrorsAsType => "errors_as_type",
+        WrapKind::ErrorsJoin => "errors_join",
+    }
+}
+
+/// Render a [`CfgAst`] as a Rust-style boolean expression
+/// (`!cgo`, `linux && amd64`, `linux || darwin`). Only used by the
+/// `format_predicate_step` fallback for compound semantic ASTs, which the
+/// text parser cannot itself produce (its bare form yields a single
+/// `Flag`). Single-flag and literal matchers take dedicated round-tripping
+/// paths in the formatter.
+fn render_cfg_ast(ast: &super::cfg_match::CfgAst) -> String {
+    use super::cfg_match::CfgAst;
+    match ast {
+        CfgAst::Flag(s) => s.clone(),
+        CfgAst::Not(inner) => format!("!{}", render_cfg_ast(inner)),
+        CfgAst::All(items) => items
+            .iter()
+            .map(render_cfg_ast)
+            .collect::<Vec<_>>()
+            .join(" && "),
+        CfgAst::Any(items) => items
+            .iter()
+            .map(render_cfg_ast)
+            .collect::<Vec<_>>()
+            .join(" || "),
     }
 }
 

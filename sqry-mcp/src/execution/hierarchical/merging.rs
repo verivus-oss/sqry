@@ -400,6 +400,7 @@ mod tests {
                 kinds: Vec::new(),
                 visibility: None,
                 min_score: None,
+                cfg_condition: None,
             },
             pagination: PaginationArgs {
                 offset: 0,
