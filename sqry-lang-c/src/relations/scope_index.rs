@@ -39,24 +39,45 @@
 //!
 //! # Algorithm overview
 //!
-//! Two tree-sitter walks per file:
+//! A **single** depth-first tree-sitter walk per file (PERF-280; this was
+//! historically two separate walks plus an O(scopes×decls) offset scan —
+//! see the note below). The walk performs scope-arena construction and
+//! declaration binding simultaneously:
 //!
-//! 1. **Pass 1 — scope arena**: depth-first walk of the syntax tree builds
-//!    a parented arena of [`ScopeEntry`]s. A scope is opened on every:
-//!    - `function_definition`'s `compound_statement` body,
-//!    - `compound_statement` not directly a function body,
-//!    - `for_statement` (the loop's `init`/`condition`/`update` clauses share
-//!      a scope with the body, per C99/C11),
-//!    - `if_statement` single-decl branch (C99/C11 `if (T x = ...) { ... }`).
+//! * **Scope arena**: a parented arena of [`ScopeEntry`]s. A scope is
+//!   opened on entering — and closed on leaving — every one of these
+//!   scope-introducing node kinds: `function_definition` (opened on the
+//!   whole-function span so parameters are visible inside the body),
+//!   `compound_statement` not directly a function / `for` / `if`-decl body,
+//!   `for_statement` (the loop's `init`/`condition`/`update` clauses share a
+//!   scope with the body, per C99/C11), and the `if_statement` single-decl
+//!   branch (C99/C11 `if (T x = ...) { ... }`).
 //!
-//! 2. **Pass 2 — declaration binding**: a second depth-first walk visits
-//!    every `declaration` / `parameter_declaration` / `init_declarator` and
-//!    binds the declared name + type token to the innermost open scope at
-//!    the declaration's start byte. The result is stored in
-//!    `decls_by_scope`.
+//! * **Declaration binding**: when the walk reaches a `declaration` /
+//!   `parameter_declaration`, the declared name + type token is bound to
+//!   the **innermost currently-open scope** — the top of the scope stack.
+//!   Because the walk is depth-first, every ancestor scope is open and the
+//!   stack top is by construction the innermost scope containing the
+//!   declaration, so this is identical to (and replaces) the previous
+//!   `innermost_scope_for_offset` linear scan over byte ranges.
 //!
 //! Lookup walks the scope chain innermost-out and returns the matching
 //! declaration whose `decl_span.0 <= use_site_offset`.
+//!
+//! ## PERF-280: single-pass fusion
+//!
+//! The earlier implementation ran two full recursive walks (a scope-arena
+//! pass then a declaration-binding pass) and, in the second pass, located
+//! each declaration's owning scope with `innermost_scope_for_offset` — an
+//! O(num_scopes) linear scan, i.e. O(scopes×decls) per file. Profiling of
+//! `bench_full_build_linux_fs_subset` (verivus-oss/sqry#280) showed the
+//! scope-index build was the dominant Phase-A build-time cost (~1.08 ms of
+//! ~1.8 ms total Phase-A overhead). Fusing into one walk that binds to the
+//! scope-stack top is one fewer traversal and O(1) per declaration. The
+//! arena, scope indices, parent pointers, and per-scope declaration order
+//! are byte-for-byte identical to the two-pass output (the scope-stack top
+//! equals the innermost-by-offset scope during a DFS), so resolution
+//! results are unchanged — the unit tests below are the guard.
 //!
 //! # Type token policy
 //!
@@ -77,8 +98,8 @@ use tree_sitter::{Node, Tree, TreeCursor};
 /// that produced `tree`. The returned index is owned and independent of
 /// the tree's lifetime.
 ///
-/// See module documentation for the two-pass algorithm and the block-scope
-/// correctness invariant.
+/// See module documentation for the single-pass algorithm and the
+/// block-scope correctness invariant.
 #[must_use]
 pub fn build_local_scope_index(tree: &Tree, content: &[u8]) -> LocalScopeIndex {
     let mut builder = Builder {
@@ -88,25 +109,27 @@ pub fn build_local_scope_index(tree: &Tree, content: &[u8]) -> LocalScopeIndex {
         content,
     };
 
-    // Pass 1: build the parented scope arena via a depth-first walk.
-    // We open a translation-unit scope spanning the entire file as the
+    // Open a translation-unit scope spanning the entire file as the
     // outermost scope so that file-scope `typedef` and global variables
     // (which are not the focus of indirect-call resolution but might
     // still be observed) have a home.
     let root = tree.root_node();
     builder.open_scope((root.start_byte(), root.end_byte()), None);
-    builder.walk_scope_pass(root);
+
+    // Single depth-first walk: open/close scopes AND bind declarations to
+    // the innermost open scope (scope-stack top) as they are encountered
+    // (PERF-280). See module docs for why this is equivalent to the
+    // former two-pass + offset-scan implementation.
+    builder.walk(root);
+
     // The root scope is never popped — it spans the whole file.
     debug_assert_eq!(builder.scope_stack.len(), 1);
-
-    // Pass 2: bind declarations to their innermost enclosing scope.
-    builder.walk_decl_pass(root);
 
     LocalScopeIndex::from_parts(builder.scopes, builder.decls_by_scope)
 }
 
 // ---------------------------------------------------------------------------
-// Builder — internal two-pass walker
+// Builder — internal single-pass walker
 // ---------------------------------------------------------------------------
 
 struct Builder<'a> {
@@ -131,17 +154,23 @@ impl<'a> Builder<'a> {
         self.scope_stack.pop();
     }
 
-    /// Pass 1 — recursively walk the AST and open scopes for the four
-    /// scope-introducing node kinds. Children are walked in source order.
-    fn walk_scope_pass(&mut self, node: Node) {
+    /// Single depth-first pass: open scopes for the scope-introducing node
+    /// kinds AND bind any declaration to the innermost open scope, then
+    /// recurse children in source order, then close the scope on exit.
+    ///
+    /// Scope opening and declaration binding are disjoint node-kind sets
+    /// (a `declaration` / `parameter_declaration` is never one of the
+    /// scope-introducing kinds), so the relative order of the two `match`
+    /// arms below is immaterial.
+    fn walk(&mut self, node: Node) {
         let kind = node.kind();
         let mut opened = false;
 
+        // --- scope open ---
         match kind {
             "function_definition" => {
                 // The function body (`compound_statement`) is the scope.
-                // We descend into children — when we hit the body we'll
-                // open the scope there. Function parameters are inside
+                // Function parameters are inside
                 // `function_declarator > parameter_list > parameter_declaration`
                 // which lives outside the body in tree-sitter-c, so to
                 // make parameters visible inside the body we open the
@@ -185,23 +214,7 @@ impl<'a> Builder<'a> {
             _ => {}
         }
 
-        let mut cursor = node.walk();
-        for child in node.children(&mut cursor) {
-            self.walk_scope_pass(child);
-        }
-
-        if opened {
-            self.close_scope();
-        }
-    }
-
-    /// Pass 2 — walk again and bind every declaration we encounter to its
-    /// innermost-containing scope. We don't share state with pass 1's
-    /// `scope_stack` because we need byte-offset-based lookup (a single
-    /// declaration may live inside several scopes that opened/closed
-    /// during pass 1).
-    fn walk_decl_pass(&mut self, node: Node) {
-        let kind = node.kind();
+        // --- declaration binding (to innermost open scope) ---
         match kind {
             "declaration" => {
                 self.bind_declaration(node);
@@ -214,7 +227,11 @@ impl<'a> Builder<'a> {
 
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
-            self.walk_decl_pass(child);
+            self.walk(child);
+        }
+
+        if opened {
+            self.close_scope();
         }
     }
 
@@ -252,9 +269,15 @@ impl<'a> Builder<'a> {
         };
 
         let decl_span = (owner.start_byte(), owner.end_byte());
-        let scope_idx = self
-            .innermost_scope_for_offset(decl_span.0)
-            .expect("pass 1 must have opened at least the file-level scope");
+        // The innermost currently-open scope (scope-stack top) is, during
+        // a depth-first walk, exactly the innermost scope whose span
+        // contains `owner.start_byte()` — see module docs (PERF-280). The
+        // file-level scope opened in `build_local_scope_index` guarantees
+        // the stack is never empty.
+        let scope_idx = *self
+            .scope_stack
+            .last()
+            .expect("the file-level scope is always open");
 
         self.decls_by_scope[scope_idx].push(LocalDeclaration::new(
             name,
@@ -262,19 +285,6 @@ impl<'a> Builder<'a> {
             decl_span,
             scope_idx,
         ));
-    }
-
-    /// Find the innermost scope index whose span contains `offset`. Used by
-    /// pass 2 only. Operates on the partially-built `scopes` Vec.
-    fn innermost_scope_for_offset(&self, offset: usize) -> Option<usize> {
-        let mut best: Option<usize> = None;
-        for (idx, scope) in self.scopes.iter().enumerate() {
-            let span = scope.span();
-            if span.0 <= offset && offset < span.1 {
-                best = Some(idx);
-            }
-        }
-        best
     }
 }
 
@@ -354,22 +364,22 @@ fn is_declarator_kind(kind: &str) -> bool {
 }
 
 /// True if `node` (always a `compound_statement`) sits directly inside a
-/// scope-introducing parent whose scope we already opened in pass 1 —
+/// scope-introducing parent whose scope we already opened on the parent —
 /// avoids double-opening a block scope for the same byte range.
 fn is_inside_already_opened_scope(node: Node) -> bool {
     let Some(parent) = node.parent() else {
         return false;
     };
-    // Suppression list: parent kinds whose `walk_scope_pass` arm already
-    // opens a wider scope covering the child `compound_statement`'s byte
-    // range. Listing a parent here avoids double-opening the same block.
+    // Suppression list: parent kinds whose `walk` arm already opens a
+    // wider scope covering the child `compound_statement`'s byte range.
+    // Listing a parent here avoids double-opening the same block.
     //
     // - `function_definition` — the whole-function span is already open.
     // - `for_statement` — the whole-`for` span (init + body) is open.
     //
     // `while_statement` and `do_statement` are **deliberately absent**:
     // standard C does not permit declarations in their conditions, so
-    // `walk_scope_pass` does not open a wider scope at the parent. The
+    // `walk` does not open a wider scope at the parent. The
     // compound_statement body therefore MUST open its own scope so
     // declarations inside the loop body do not leak to the enclosing
     // scope after the loop ends. Codex U08 iter-1 caught the prior bug
@@ -511,7 +521,7 @@ mod scope_index_tests {
     /// (through C23) does **not** in fact allow declarations in `if`
     /// conditions — only in `for` init clauses. tree-sitter-c emits an
     /// `ERROR` node for `if (int x = ...)`. The
-    /// [`Builder::walk_scope_pass`] algorithm still recognises the
+    /// [`Builder::walk`] algorithm still recognises the
     /// declaration-in-condition shape (a `parenthesized_expression`
     /// containing a `declaration` descendant) so a future tree-sitter-c
     /// or C dialect that does parse it would slot in cleanly — but the

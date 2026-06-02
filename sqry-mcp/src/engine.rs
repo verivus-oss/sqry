@@ -12,7 +12,7 @@ use sqry_core::graph::{
 };
 use sqry_core::plugin::PluginManager;
 use sqry_core::query::QueryExecutor;
-use sqry_plugin_registry::create_plugin_manager;
+use sqry_plugin_registry::{create_plugin_manager, create_plugin_manager_all};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime};
@@ -814,8 +814,29 @@ fn normalize_path(path: &Path) -> PathBuf {
     components.iter().collect()
 }
 
+/// Plugin manager for graph **loading / serving** (issue #314).
+///
+/// This manager backs the [`FilesystemGraphProvider`] (plugin-compatibility
+/// classification + `validate_plugin_versions` during snapshot load) and the
+/// [`QueryExecutor`]. It must therefore advertise every plugin that is
+/// *compiled into this binary*, not just the fast-path default selection —
+/// otherwise a graph the CLI built with `--include-high-cost` (e.g. one that
+/// records the always-compiled `json` plugin in its manifest) is rejected as
+/// "incompatible" even though this binary can read it perfectly well.
+///
+/// High-cost plugins like `json` are non-optional dependencies of
+/// `sqry-plugin-registry` (always linked); they are merely *inactive by
+/// default* for building. Using the full roster here mirrors the CLI graph
+/// loader (`sqry-cli/.../graph/loader.rs`, which uses
+/// `create_plugin_manager_all`) so MCP accepts any graph the CLI/daemon
+/// consider valid. Genuinely-absent (feature-gated, not-compiled) plugins are
+/// still correctly rejected because they are absent from the roster too.
+///
+/// Note: auto-**build** of a brand-new index (the `ensure_graph` auto-build
+/// hook) deliberately keeps the fast-path `create_plugin_manager()` so a fresh
+/// index is not silently built with high-cost plugins.
 fn build_plugin_manager() -> PluginManager {
-    create_plugin_manager()
+    create_plugin_manager_all()
 }
 
 /// Check if auto-indexing is enabled.
@@ -2127,5 +2148,31 @@ mod engine_cache_tests {
                 "must suggest the missing feature flag: {rendered}"
             );
         }
+    }
+
+    /// Regression for issue #314: the MCP graph **load/serve** roster
+    /// (`build_plugin_manager`) must advertise every plugin compiled into
+    /// this binary — including the always-compiled high-cost `json` plugin
+    /// — so a CLI-built `--include-high-cost` graph (whose manifest +
+    /// snapshot header record `json`) is neither rejected as an
+    /// "incompatible graph" by the provider's plugin-selection
+    /// classification nor by `validate_plugin_versions` during snapshot
+    /// load. The fast-path *build* default deliberately still excludes
+    /// `json`, so the two managers must differ on exactly that axis.
+    #[test]
+    fn mcp_load_roster_advertises_high_cost_json_issue_314() {
+        let load_roster = build_plugin_manager();
+        assert!(
+            load_roster.plugin_by_id("json").is_some(),
+            "MCP load roster must advertise the always-compiled `json` plugin \
+             so high-cost CLI graphs load (issue #314)"
+        );
+
+        let fast_path_default = create_plugin_manager();
+        assert!(
+            fast_path_default.plugin_by_id("json").is_none(),
+            "fast-path build default should still exclude high-cost `json`; \
+             only the load/serve roster includes it"
+        );
     }
 }

@@ -85,28 +85,28 @@ impl GraphBuilder for CGraphBuilder {
 
         // C indirect-call precision (Phase A, U10) — Phase 1 instrumentation.
         //
-        // Three additive walks. Each populates a per-file
+        // These additive walks each populate a per-file
         // `CIndirectStagingPayload` slot owned by `StagingGraph`. U11
         // (Phase 3 commit) drains the payload into the workspace-global
         // `CIndirectSideTables`; U12 (Pass 5b) consumes it to rewrite
         // synthetic `Calls` edges into precise binding-plane / type-match
         // candidates.
         //
-        // Step 1 — collect every known C function name in the file
-        // (definitions + declarations) into a HashSet used as a predicate
-        // by `classify_address_taken_sites`. DESIGN §2.6.
-        let known_fn_names = collect_known_function_names(tree.root_node(), content);
+        // Step 1 — single combined pre-pass over the AST that collects both
+        // (a) every known C function name in the file (definitions +
+        // declarations), used as a predicate by `classify_address_taken_sites`,
+        // and (b) the type-permits maps (DESIGN §2.6). These were two
+        // independent full-tree walks; PERF-280 fuses them into one
+        // traversal. `type_permits` is also consumed by
+        // `walk_tree_for_graph` below.
+        let (known_fn_names, type_permits) =
+            collect_known_fns_and_type_permits(tree.root_node(), content);
 
         // Step 2 — recursive address-taken classifier walker covering the
         // DESIGN §2.5 pattern table (unary `&` of fn, fn-as-argument,
         // designated/positional initializer RHS, field/subscript
-        // assignment RHS, return identifier, init_declarator RHS). The
-        // walker calls `helper.mark_function_address_taken_by_name(...)`
-        // for every site whose identifier is in `known_fn_names` AND
-        // (for the four guarded rows — positional init, field-assign,
-        // subscript-assign, init_declarator-RHS) whose destination type
-        // is a function pointer per DESIGN §2.6.
-        let type_permits = build_type_permits(tree.root_node(), content);
+        // assignment RHS, return identifier, init_declarator RHS). Requires
+        // the full-file `known_fn_names` + `type_permits` from Step 1.
         classify_address_taken_sites(
             tree.root_node(),
             content,
@@ -2571,16 +2571,38 @@ fn process_single_typedef_declarator(
 /// refer to functions trigger an `ADDRESS_TAKEN` mark — `&g_int` (where
 /// `g_int` is a plain variable) is correctly skipped (DESIGN §2.5
 /// `nonfunction_taken` negative case).
-fn collect_known_function_names(root: Node<'_>, content: &[u8]) -> HashSet<String> {
+/// Single combined Phase-1 pre-pass (PERF-280).
+///
+/// Walks the AST **once** and populates both:
+///
+/// * `known_fn_names` — every C function name in the file (definitions +
+///   prototype declarations), the predicate used by
+///   `classify_address_taken_sites`; and
+/// * [`TypePermits`] — the function-pointer destination maps (DESIGN §2.6),
+///   also consumed by `walk_tree_for_graph`.
+///
+/// These were historically two independent full-tree recursive walks
+/// (`collect_known_function_names` + `build_type_permits`). Profiling of
+/// `bench_full_build_linux_fs_subset` (verivus-oss/sqry#280) attributed
+/// ~0.46 ms of per-build cost to the known-fn-names walk alone; fusing the
+/// two removes one full traversal. The per-node dispatch is identical to
+/// the two prior walks (same node kinds → same helper calls, same
+/// source-order recursion), so the outputs are unchanged.
+fn collect_known_fns_and_type_permits(
+    root: Node<'_>,
+    content: &[u8],
+) -> (HashSet<String>, TypePermits) {
     let mut names: HashSet<String> = HashSet::new();
-    collect_known_function_names_recursive(root, content, &mut names);
-    names
+    let mut permits = TypePermits::default();
+    collect_known_fns_and_type_permits_recursive(root, content, &mut names, &mut permits);
+    (names, permits)
 }
 
-fn collect_known_function_names_recursive(
+fn collect_known_fns_and_type_permits_recursive(
     node: Node<'_>,
     content: &[u8],
     names: &mut HashSet<String>,
+    permits: &mut TypePermits,
 ) {
     match node.kind() {
         "function_definition" => {
@@ -2588,23 +2610,47 @@ fn collect_known_function_names_recursive(
                 names.insert(name);
             }
         }
+        "struct_specifier" => {
+            // Only struct definitions with a body and a named tag
+            // contribute. `struct Tag {...}` populates the struct-field
+            // maps; bare `struct Tag` references (no body) and anonymous
+            // structs are skipped.
+            if let Some(name_node) = node.child_by_field_name("name")
+                && let Some(body) = node.child_by_field_name("body")
+                && let Ok(tag) = name_node.utf8_text(content)
+            {
+                let tag = tag.trim().to_string();
+                if !tag.is_empty() {
+                    record_struct_fields(body, &tag, content, permits);
+                }
+            }
+        }
         "declaration" => {
-            // Prototype shape: `T name(args);` — declarator chain bottoms
-            // out at function_declarator. `T (*name)(args)` (function-
-            // pointer variable) also has a function_declarator at some
-            // depth but is gated by a `pointer_declarator` parent —
-            // those are NOT function declarations and must not enter
-            // the known-fn set.
+            // Known-fn-names leg: prototype shape `T name(args);` — the
+            // declarator chain bottoms out at function_declarator.
+            // `T (*name)(args)` (function-pointer variable) also has a
+            // function_declarator at some depth but is gated by a
+            // `pointer_declarator` parent — those are NOT function
+            // declarations and must not enter the known-fn set.
             for proto_name in extract_function_prototype_names(node, content) {
                 names.insert(proto_name);
             }
+            // Type-permits leg: struct-typed receivers + fnptr arrays.
+            record_declaration(node, content, permits);
+        }
+        "parameter_declaration" => {
+            // Function parameters can carry struct-typed receivers
+            // (e.g. `void use_(struct S* s)`) and fnptr arrays. Record
+            // them in the same maps so `s->cb = fn` inside the function
+            // body can resolve through the var → struct-tag lookup.
+            record_parameter(node, content, permits);
         }
         _ => {}
     }
 
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        collect_known_function_names_recursive(child, content, names);
+        collect_known_fns_and_type_permits_recursive(child, content, names, permits);
     }
 }
 
@@ -2890,10 +2936,11 @@ fn classify_address_taken_recursive(
 
 /// Function-pointer destination table built once per file (DESIGN §2.6).
 ///
-/// Three lookup maps populated by `build_type_permits` in a single walk
-/// over the AST. Consulted by `classify_address_taken_recursive` to gate
-/// the four type-guarded rows (positional initializer, field-expression
-/// assignment, subscript-expression assignment, init-declarator RHS).
+/// Three lookup maps populated by `collect_known_fns_and_type_permits`
+/// in the combined Phase-1 pre-pass over the AST. Consulted by
+/// `classify_address_taken_recursive` to gate the four type-guarded rows
+/// (positional initializer, field-expression assignment,
+/// subscript-expression assignment, init-declarator RHS).
 ///
 /// The pre-pass is intentionally cheap: it only inspects declaration /
 /// struct-declaration shapes (a small subset of nodes in a typical C
@@ -2920,49 +2967,6 @@ struct TypePermits {
     /// array (e.g. `void (*table[N])();`). Drives the subscript
     /// assignment guard.
     var_fnptr_array: HashMap<String, bool>,
-}
-
-/// Walk the AST once and populate the type-permits maps.
-fn build_type_permits(root: Node<'_>, content: &[u8]) -> TypePermits {
-    let mut permits = TypePermits::default();
-    build_type_permits_recursive(root, content, &mut permits);
-    permits
-}
-
-fn build_type_permits_recursive(node: Node<'_>, content: &[u8], permits: &mut TypePermits) {
-    match node.kind() {
-        "struct_specifier" => {
-            // Only struct definitions with a body and a named tag
-            // contribute. `struct Tag {...}` populates the struct-field
-            // maps; bare `struct Tag` references (no body) and anonymous
-            // structs are skipped.
-            if let Some(name_node) = node.child_by_field_name("name")
-                && let Some(body) = node.child_by_field_name("body")
-                && let Ok(tag) = name_node.utf8_text(content)
-            {
-                let tag = tag.trim().to_string();
-                if !tag.is_empty() {
-                    record_struct_fields(body, &tag, content, permits);
-                }
-            }
-        }
-        "declaration" => {
-            record_declaration(node, content, permits);
-        }
-        "parameter_declaration" => {
-            // Function parameters can carry struct-typed receivers
-            // (e.g. `void use_(struct S* s)`) and fnptr arrays. Record
-            // them in the same maps so `s->cb = fn` inside the function
-            // body can resolve through the var → struct-tag lookup.
-            record_parameter(node, content, permits);
-        }
-        _ => {}
-    }
-
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        build_type_permits_recursive(child, content, permits);
-    }
 }
 
 /// Record every field of one `struct Tag { … }` body in both
