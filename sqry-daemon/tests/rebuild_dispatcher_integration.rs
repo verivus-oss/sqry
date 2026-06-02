@@ -558,9 +558,9 @@ async fn pf08_pf09_query_db_hook_writes_useful_derived_sqry_after_publish() {
     let config = Arc::new(DaemonConfig::default());
     let manager = WorkspaceManager::new_without_reaper(Arc::clone(&config));
 
-    // Mirror entrypoint.rs::build_daemon_components — install the
-    // production QueryDbHook with the configured drain timeout.
-    let hook = QueryDbHook::new(Duration::from_millis(config.rebuild_drain_timeout_ms));
+    // Mirror entrypoint.rs::build_daemon_components, install the
+    // production QueryDbHook with the configured derived-save timeout.
+    let hook = QueryDbHook::new(Duration::from_millis(config.derived_save_timeout_ms));
     manager.set_hook(hook as SharedHook);
 
     let key = WorkspaceKey::new(workspace_root.clone(), ProjectRootMode::WorkspaceFolder, 0);
@@ -582,10 +582,12 @@ async fn pf08_pf09_query_db_hook_writes_useful_derived_sqry_after_publish() {
     );
 
     // The hook is fire-and-forget; poll for derived.sqry within the
-    // configured timeout window with a small safety margin.
+    // configured derived-save window. The tiny fixture saves in well
+    // under a second, so cap the wait so a genuine non-write fails fast
+    // instead of stalling the suite for the full 120 s ceiling.
     let derived = storage.graph_dir().join("derived.sqry");
-    let deadline = std::time::Instant::now()
-        + Duration::from_millis(config.rebuild_drain_timeout_ms.saturating_mul(2).max(2_000));
+    let poll_budget_ms = config.derived_save_timeout_ms.clamp(2_000, 15_000);
+    let deadline = std::time::Instant::now() + Duration::from_millis(poll_budget_ms);
     while std::time::Instant::now() < deadline {
         if derived.exists() {
             break;
@@ -649,5 +651,114 @@ async fn pf08_pf09_query_db_hook_writes_useful_derived_sqry_after_publish() {
         after.cache_hits,
         before.cache_hits + 1,
         "PF08: first matching cold query must be served from daemon-written derived.sqry"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Regression: the REBUILD path must also dispatch QueryDbHook.
+//
+// verivus-oss/sqry#358. The load path (`get_or_load`) dispatched the hook,
+// but `RebuildDispatcher::execute_one_rebuild` published a new graph without
+// firing it. The derived-cache save therefore ran only on load: after every
+// `sqry daemon rebuild` / incremental rebuild the snapshot SHA changed while
+// `derived.sqry` stayed bound to the pre-rebuild SHA, so it was discarded as
+// stale on the next query and never rewritten until the next load. This test
+// drives a real rebuild and asserts derived.sqry is refreshed against the
+// post-rebuild snapshot SHA. Without the fix the derived header stays at the
+// pre-rebuild SHA and the poll below times out.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn rebuild_path_dispatches_query_db_hook_and_refreshes_derived_cache() {
+    use sqry_daemon::workspace::{QueryDbHook, SharedHook};
+    use std::time::{Duration, Instant};
+
+    let tmp = make_tiny_rust_workspace();
+    let root = tmp.path().to_path_buf();
+    let plugins = Arc::new(sqry_plugin_registry::create_plugin_manager());
+
+    direct_index_workspace(&root, &plugins);
+
+    let config = Arc::new(DaemonConfig::default());
+    let manager = WorkspaceManager::new_without_reaper(Arc::clone(&config));
+    manager.set_hook(
+        QueryDbHook::new(Duration::from_millis(config.derived_save_timeout_ms)) as SharedHook,
+    );
+    let dispatcher = RebuildDispatcher::new(
+        Arc::clone(&manager),
+        Arc::clone(&config),
+        Arc::clone(&plugins),
+    );
+    let key = WorkspaceKey::new(root.clone(), ProjectRootMode::WorkspaceFolder, 0);
+    let builder = RealGraphBuilder {
+        plugins: Arc::clone(&plugins),
+        cfg: BuildConfig::default(),
+    };
+    let estimate = working_set_estimate(WorkingSetInputs {
+        new_graph_final_estimate: 1_024 * 1024,
+        staging_overhead: 256 * 1024,
+        interner_snapshot_bytes: 128 * 1024,
+    });
+
+    // Load through the existing (already-working) path, which dispatches the
+    // hook and writes derived.sqry against the initial snapshot.
+    manager
+        .get_or_load(&key, &builder, estimate)
+        .expect("daemon load must succeed");
+    wait_for_derived_cache(&root).await;
+    let storage = GraphStorage::new(&root);
+    let (_manifest_after_load, sha_after_load) = manifest_snapshot_sha_pair(&root);
+
+    // Add a source file so the rebuild produces a different snapshot SHA.
+    fs::write(
+        root.join("src").join("added_for_rebuild_regression.rs"),
+        "pub fn added_for_rebuild_regression() -> u32 { 11 }\n",
+    )
+    .expect("write new source file");
+
+    // Force a full rebuild through the dispatcher.
+    let changes = ChangeSet {
+        changed_files: Vec::new(),
+        git_state_changed: true,
+        git_change_class: Some(GitChangeClass::TreeDiverged),
+    };
+    dispatcher
+        .handle_changes(&key, changes)
+        .await
+        .expect("force rebuild must succeed");
+    assert_eq!(
+        dispatcher.last_mode(),
+        Some(RebuildMode::Full),
+        "TreeDiverged force signal must select a full rebuild",
+    );
+
+    let (_manifest_after_rebuild, sha_after_rebuild) = manifest_snapshot_sha_pair(&root);
+    assert_ne!(
+        sha_after_rebuild, sha_after_load,
+        "adding a source file must change the post-rebuild snapshot SHA",
+    );
+
+    // The fix under test: the rebuild path re-dispatches QueryDbHook, so
+    // derived.sqry is rewritten with the NEW snapshot SHA. The hook is
+    // fire-and-forget, so poll until the derived header matches the
+    // post-rebuild snapshot. Without the rebuild-path dispatch this never
+    // updates and the loop times out at the stale pre-rebuild SHA.
+    let derived = storage.graph_dir().join("derived.sqry");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut derived_sha = String::new();
+    while Instant::now() < deadline {
+        if let Ok(bytes) = fs::read(&derived)
+            && let Ok((header, _tail)) = sqry_db::persistence::deserialize_derived_header(&bytes)
+        {
+            derived_sha = hex_lower(&header.snapshot_sha256);
+            if derived_sha == sha_after_rebuild {
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        derived_sha, sha_after_rebuild,
+        "verivus-oss/sqry#358: rebuild path must re-dispatch QueryDbHook so derived.sqry is \
+         rewritten against the post-rebuild snapshot SHA (it was left stale at the pre-rebuild SHA)",
     );
 }

@@ -1200,12 +1200,14 @@ fn create_runtime_dir(cfg: &DaemonConfig) -> DaemonResult<()> {
 /// on the freshly-constructed [`WorkspaceManager`] so every successful
 /// publish persists `<workspace_root>/.sqry/graph/derived.sqry` via
 /// `sqry_db::persistence::save_derived` on a background tokio task. The
-/// timeout is taken from `DaemonConfig::rebuild_drain_timeout_ms` so it
-/// matches the documented "single writer is sqryd" contract from
-/// `CLAUDE.md` / the PN3 cold-start design. Failures are absorbed by
-/// `spawn_hook` and never block publish; non-daemon callers (CLI, LSP,
-/// MCP) continue to use the read-only `make_query_db_cold` path with
-/// `load_derived_opportunistic`.
+/// timeout is taken from `DaemonConfig::derived_save_timeout_ms` (120 s
+/// default), a cap sized to serialize the derived cache for large
+/// graphs. It is deliberately *not* `rebuild_drain_timeout_ms` (a 5 s
+/// retention-reaper WARN threshold), which previously fired on every
+/// publish of a large workspace and silently dropped the derived cache.
+/// Failures are absorbed by `spawn_hook` and never block publish;
+/// non-daemon callers (CLI, LSP, MCP) continue to use the read-only
+/// `make_query_db_cold` path with `load_derived_opportunistic`.
 fn build_daemon_components(
     cfg: Arc<DaemonConfig>,
 ) -> (
@@ -1221,10 +1223,10 @@ fn build_daemon_components(
     // dispatcher / IPC server start serving requests, so the very first
     // publish on this daemon process triggers `save_derived`.
     let query_db_hook =
-        crate::workspace::QueryDbHook::new(Duration::from_millis(cfg.rebuild_drain_timeout_ms));
+        crate::workspace::QueryDbHook::new(Duration::from_millis(cfg.derived_save_timeout_ms));
     manager.set_hook(query_db_hook as crate::workspace::SharedHook);
     info!(
-        timeout_ms = cfg.rebuild_drain_timeout_ms,
+        timeout_ms = cfg.derived_save_timeout_ms,
         "PF03B: production QueryDbHook installed (post-publish derived-cache writer)"
     );
 

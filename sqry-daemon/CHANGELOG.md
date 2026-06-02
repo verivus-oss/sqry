@@ -6,7 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
-## [18.0.5](https://github.com/verivus-oss/sqry/compare/v18.0.4...v18.0.5) - 2026-06-02
+## [18.0.8](https://github.com/verivus-oss/sqry/compare/v18.0.7...v18.0.8) - 2026-06-02
+
+### Other
+- update Cargo.lock dependencies
+## [18.0.7](https://github.com/verivus-oss/sqry/compare/v18.0.5...v18.0.7) - 2026-06-02
+
+### Fixed
+- *(daemon)* key derived-cache save on actual snapshot SHA, not manifest ([#361](https://github.com/verivus-oss/sqry/pull/361))## [18.0.6](https://github.com/verivus-oss/sqry/compare/v18.0.5...v18.0.6) - 2026-06-02
+
+### Fixed
+- *(daemon)* write derived cache on rebuild and decouple its save timeout ([#360](https://github.com/verivus-oss/sqry/pull/360))## [18.0.5](https://github.com/verivus-oss/sqry/compare/v18.0.4...v18.0.5) - 2026-06-02
 
 ### Other
 - update Cargo.lock dependencies

@@ -1319,7 +1319,17 @@ impl RebuildDispatcher {
         // comment above the read-guard block.
         ws.store_state(WorkspaceState::Loaded);
         self.dispatched_count.fetch_add(1, Ordering::Relaxed);
-        let _ = publish_result;
+
+        // Dispatch the post-publish hook now that `workspaces_guard` has
+        // dropped (end of the publish block above), mirroring the loader
+        // in `get_or_load`. Without this, the rebuild path published a new
+        // graph but never fired `QueryDbHook`, so the derived-cache save
+        // ran only on load: after every `sqry daemon rebuild` or
+        // incremental rebuild the snapshot SHA changed while `derived.sqry`
+        // stayed at the old SHA, was discarded as stale on the next query,
+        // and was never rewritten until the next load (verivus-oss/sqry#358).
+        self.manager
+            .dispatch_publish_hook(&key.source_root, publish_result);
 
         Ok(())
     }

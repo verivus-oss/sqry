@@ -9,7 +9,7 @@ rust-version.workspace = true
 description = "Terraform (HCL) language plugin for sqry"
 
 [dependencies]
-sqry-core = { version = "18.0.5", path = "../sqry-core" }
+sqry-core = { version = "18.0.8", path = "../sqry-core" }
 anyhow.workspace = true
 thiserror.workspace = true
 tree-sitter.workspace = true

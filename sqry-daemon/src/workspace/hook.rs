@@ -29,14 +29,22 @@
 //! ### Snapshot SHA timing (PF03A decision A, corrected by RPI)
 //!
 //! [`QueryDbHook::on_publish`] never writes the canonical
-//! `<workspace_root>/.sqry/graph/snapshot.sqry` file. It verifies the
-//! already-persisted manifest/snapshot pair, warms a bounded query inventory
-//! over the published in-memory graph, and saves `derived.sqry` with the
-//! verified persisted snapshot SHA. If the manifest or snapshot is absent,
-//! corrupt, or mismatched, the hook skips derived-cache persistence and logs
-//! a diagnostic. Canonical snapshot, manifest, and analysis artifacts are
-//! owned exclusively by the manifest-as-commit-point graph persistence
-//! transaction.
+//! `<workspace_root>/.sqry/graph/snapshot.sqry` file. It computes the
+//! derived-cache identity (the SHA-256 of the on-disk snapshot, the same
+//! bytes the published graph was loaded from), warms a bounded query
+//! inventory over the published in-memory graph, and saves `derived.sqry`
+//! keyed on that snapshot SHA. If the manifest or snapshot is absent the
+//! hook skips persistence and logs a diagnostic. Canonical snapshot,
+//! manifest, and analysis artifacts are owned exclusively by the
+//! manifest-as-commit-point graph persistence transaction.
+//!
+//! The identity is the actual snapshot SHA, not the SHA recorded in
+//! `manifest.json` (Bug B, issue #359). The cold-load read path keys
+//! `derived.sqry` validity on `compute_file_sha256(snapshot.sqry)` and
+//! never reads the manifest, so a stale manifest (older-format snapshot
+//! from an earlier sqry version) must not block the save. Gating on
+//! `manifest.snapshot_sha256` previously left such workspaces with a
+//! permanently cold derived cache.
 //!
 //! ### Async lifetime / ownership (PF03A decision B)
 //!
@@ -60,9 +68,12 @@
 //! caller does not await the spawned task.
 //!
 //! The hook runs on the current tokio runtime via `tokio::spawn`; the
-//! publish call site does not await it. The default timeout is taken
-//! from `DaemonConfig::rebuild_drain_timeout_ms` (5 s by default),
-//! clampable by the call site if a tighter ceiling is desired.
+//! publish call site does not await it. The production timeout is taken
+//! from `DaemonConfig::derived_save_timeout_ms` (120 s by default), sized
+//! to serialize the derived cache for large graphs (the earlier
+//! `rebuild_drain_timeout_ms` borrow, 5 s, was far too small and dropped
+//! the cache on every publish of a big workspace), clampable by the call
+//! site if a tighter ceiling is desired.
 
 use std::{path::Path, sync::Arc, time::Duration};
 
@@ -176,10 +187,11 @@ pub fn spawn_hook<F, Fut, E>(
 /// See the module-level docs for the snapshot-SHA-timing and lifetime
 /// decisions (PF03A A and B). The hook is parameterised by:
 ///
-/// - `timeout` — wall-clock cap applied via [`spawn_hook`] /
-///   [`tokio::time::timeout`]. Defaults to `DaemonConfig::rebuild_drain_timeout_ms`
-///   (5 s) when constructed via [`Self::new`].
-/// - `query_db_config` — passed straight to [`sqry_db::QueryDb::new`] and
+/// - `timeout`: wall-clock cap applied via [`spawn_hook`] /
+///   [`tokio::time::timeout`]. Production sqryd passes
+///   `DaemonConfig::derived_save_timeout_ms` (120 s); [`Self::new`] stores
+///   whatever [`Duration`] it is handed.
+/// - `query_db_config`: passed straight to [`sqry_db::QueryDb::new`] and
 ///   used by [`sqry_db::derived_path`] to compute the target file. The
 ///   default value points at `derived.sqry` and uses the standard
 ///   per-entry size cap; production sqryd should generally accept the
@@ -195,7 +207,7 @@ impl QueryDbHook {
     /// [`sqry_db::QueryDbConfig`].
     ///
     /// PF03B's startup path uses this constructor with
-    /// `DaemonConfig::rebuild_drain_timeout_ms`.
+    /// `DaemonConfig::derived_save_timeout_ms`.
     #[must_use]
     pub fn new(timeout: Duration) -> Arc<Self> {
         Arc::new(Self {
@@ -274,7 +286,7 @@ fn run_save_derived_blocking(
     graph: &CodeGraph,
     query_db_config: sqry_db::QueryDbConfig,
 ) -> anyhow::Result<()> {
-    let Some(sha) = verified_persisted_snapshot_sha(workspace_root)? else {
+    let Some(sha) = persisted_snapshot_identity_sha(workspace_root)? else {
         return Ok(());
     };
 
@@ -293,7 +305,33 @@ fn run_save_derived_blocking(
     Ok(())
 }
 
-fn verified_persisted_snapshot_sha(workspace_root: &Path) -> anyhow::Result<Option<[u8; 32]>> {
+/// Compute the derived-cache identity for `workspace_root`: the SHA-256
+/// of the on-disk `snapshot.sqry`, i.e. exactly the bytes the published
+/// in-memory graph was loaded from (or just written from on a rebuild).
+///
+/// This MUST be the same identity the read path keys on. The cold-load
+/// reader (`sqry_db::queries::dispatch::load_derived_opportunistic`)
+/// validates `derived.sqry` by recomputing `compute_file_sha256` over
+/// the same `snapshot.sqry` and comparing it to the derived header's
+/// `snapshot_sha256`, never consulting `manifest.json`. Keying the save
+/// on the actual snapshot SHA (rather than the manifest's recorded SHA)
+/// keeps write and read identity in lock-step.
+///
+/// Bug B (issue #359): the prior implementation gated the save on
+/// `manifest.snapshot_sha256 == compute_file_sha256(snapshot.sqry)` and
+/// skipped on any disagreement. Workspaces carrying a manifest that is
+/// stale relative to its snapshot (older-format snapshots written by an
+/// earlier sqry version, whose manifest records the original SHA) then
+/// failed that gate on every publish, so `derived.sqry` was never
+/// persisted, even though a save keyed on the actual snapshot SHA would
+/// validate cleanly on the read path. The manifest is not part of the
+/// derived-cache identity contract, so it is no longer consulted here.
+///
+/// Returns `Ok(None)` (a soft skip) when no persisted graph is present
+/// yet: no manifest (workspace not indexed) or no snapshot (publish has
+/// not flushed to disk). Returns `Err` only when the snapshot exists but
+/// cannot be hashed.
+fn persisted_snapshot_identity_sha(workspace_root: &Path) -> anyhow::Result<Option<[u8; 32]>> {
     let storage = sqry_core::graph::unified::persistence::GraphStorage::new(workspace_root);
     if !storage.manifest_path().exists() {
         tracing::debug!(
@@ -312,9 +350,6 @@ fn verified_persisted_snapshot_sha(workspace_root: &Path) -> anyhow::Result<Opti
         return Ok(None);
     }
 
-    let manifest = storage.load_manifest().map_err(|err| {
-        anyhow::anyhow!("load manifest {}: {err}", storage.manifest_path().display())
-    })?;
     let actual_sha =
         sqry_db::persistence::compute_file_sha256(storage.snapshot_path()).map_err(|err| {
             anyhow::anyhow!(
@@ -322,19 +357,6 @@ fn verified_persisted_snapshot_sha(workspace_root: &Path) -> anyhow::Result<Opti
                 storage.snapshot_path().display()
             )
         })?;
-    let actual_hex = actual_sha
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    if manifest.snapshot_sha256 != actual_hex {
-        tracing::warn!(
-            workspace = %workspace_root.display(),
-            manifest_sha = %manifest.snapshot_sha256,
-            actual_sha = %actual_hex,
-            "QueryDbHook: skipping derived-cache save because manifest/snapshot SHA-256 mismatch"
-        );
-        return Ok(None);
-    }
 
     Ok(Some(actual_sha))
 }
@@ -613,6 +635,105 @@ mod tests {
             &bytes[..sqry_db::DERIVED_MAGIC.len()],
             sqry_db::DERIVED_MAGIC,
             "derived.sqry must start with SQRY_DERIVED_V02 magic"
+        );
+    }
+
+    /// Bug B regression (issue #359): a manifest whose recorded
+    /// `snapshot_sha256` is stale relative to the on-disk snapshot must
+    /// NOT block the derived-cache save.
+    ///
+    /// Field condition: workspaces carrying an older-format snapshot (and
+    /// its companion manifest) written by an earlier sqry version. The
+    /// manifest's recorded SHA no longer matches the snapshot bytes the
+    /// current daemon serves. Before the fix, `on_publish` gated on
+    /// `manifest.snapshot_sha256 == compute_file_sha256(snapshot)` and
+    /// skipped on mismatch, so `derived.sqry` was never persisted (the
+    /// `manifest/snapshot SHA-256 mismatch` warning). After the fix the
+    /// identity is the actual snapshot SHA, so the save proceeds and the
+    /// persisted header carries exactly the SHA the cold-load read path
+    /// (`load_derived_opportunistic`) recomputes from the same file.
+    ///
+    /// Neutralize-the-fix check: restoring the old `manifest != actual`
+    /// gate in `persisted_snapshot_identity_sha` makes this test fail
+    /// (derived.sqry absent), which is the proof the fix is load-bearing.
+    #[tokio::test]
+    async fn bugb_query_db_hook_writes_derived_when_manifest_sha_is_stale() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(workspace.path().join("src")).unwrap();
+        std::fs::write(
+            workspace.path().join("src").join("lib.rs"),
+            "pub fn helper() -> u32 { 42 }\n",
+        )
+        .unwrap();
+
+        let plugins = sqry_plugin_registry::create_plugin_manager();
+        let cfg = sqry_core::graph::unified::build::BuildConfig::default();
+        let graph_owned =
+            sqry_core::graph::unified::build::build_unified_graph(workspace.path(), &plugins, &cfg)
+                .unwrap();
+        sqry_core::graph::unified::build::persist_and_analyze_graph(
+            graph_owned,
+            workspace.path(),
+            &plugins,
+            &cfg,
+            "test:bugb-stale-manifest",
+            None,
+            sqry_core::progress::no_op_reporter(),
+            1,
+        )
+        .unwrap();
+
+        let storage = sqry_core::graph::unified::persistence::GraphStorage::new(workspace.path());
+
+        // Rewrite ONLY the manifest's recorded SHA, leaving the snapshot
+        // bytes untouched, so the served graph still corresponds to the
+        // snapshot on disk while the manifest disagrees with it.
+        let mut manifest =
+            sqry_core::graph::unified::persistence::Manifest::load(storage.manifest_path())
+                .expect("load manifest");
+        let real_sha = manifest.snapshot_sha256.clone();
+        manifest.snapshot_sha256 =
+            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef".to_string();
+        assert_ne!(
+            manifest.snapshot_sha256, real_sha,
+            "test setup must actually mutate the manifest SHA"
+        );
+        manifest
+            .save(storage.manifest_path())
+            .expect("save stale manifest");
+
+        let graph_owned =
+            sqry_core::graph::unified::build::build_unified_graph(workspace.path(), &plugins, &cfg)
+                .unwrap();
+        let hook = QueryDbHook::new(Duration::from_secs(5));
+        hook.on_publish(workspace.path(), Arc::new(graph_owned));
+
+        let derived = storage.graph_dir().join("derived.sqry");
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            if derived.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            derived.exists(),
+            "Bug B: hook must persist derived.sqry even when the manifest SHA is stale (expected {})",
+            derived.display()
+        );
+
+        // The persisted derived header must carry the ACTUAL snapshot SHA,
+        // which is exactly what the cold-load read path recomputes. This
+        // proves write/read identity alignment (and that the stale manifest
+        // SHA never entered the derived header).
+        let actual_sha =
+            sqry_db::persistence::compute_file_sha256(storage.snapshot_path()).unwrap();
+        let derived_bytes = std::fs::read(&derived).unwrap();
+        let (header, _tail) = sqry_db::persistence::deserialize_derived_header(&derived_bytes)
+            .expect("derived header");
+        assert_eq!(
+            header.snapshot_sha256, actual_sha,
+            "Bug B: derived header must key on the actual snapshot SHA (read-path identity)"
         );
     }
 }

@@ -223,6 +223,27 @@ impl WorkspaceManager {
         Arc::clone(&*self.hook.read())
     }
 
+    /// Dispatch the post-publish hook for a freshly published graph.
+    ///
+    /// Both production publish callers funnel through here: the loader in
+    /// `get_or_load` and the rebuild runner in
+    /// `RebuildDispatcher::execute_one_rebuild`. Routing both through one
+    /// method means a published graph always triggers `on_publish` (the
+    /// derived-cache save), no matter which path produced it. Before the
+    /// rebuild path was wired in, only the load path dispatched, so
+    /// `derived.sqry` went stale after every rebuild and was discarded on
+    /// the next query (verivus-oss/sqry#358).
+    ///
+    /// The caller MUST have dropped the `workspaces` guard first: the only
+    /// lock taken here is the brief `self.hook.read()` inside
+    /// [`Self::hook_snapshot`], so a hook impl is free to call back into
+    /// manager methods (e.g. `unload`, needing `workspaces.write()`)
+    /// without deadlocking. See the lock-order note in `publish_and_retain`.
+    pub(crate) fn dispatch_publish_hook(&self, workspace_root: &Path, graph: Arc<CodeGraph>) {
+        let hook = self.hook_snapshot();
+        hook.on_publish(workspace_root, graph);
+    }
+
     /// Memory budget in bytes (derived from `config.memory_limit_mb`).
     #[must_use]
     pub fn memory_limit_bytes(&self) -> u64 {
@@ -829,8 +850,7 @@ impl WorkspaceManager {
         // loader that fired it. The dispatch itself is synchronous
         // but spawn-only: hook impls are expected to return
         // immediately after scheduling background work.
-        let hook = self.hook_snapshot();
-        hook.on_publish(&key.source_root, Arc::clone(&published_arc));
+        self.dispatch_publish_hook(&key.source_root, Arc::clone(&published_arc));
 
         Ok(published_arc)
     }

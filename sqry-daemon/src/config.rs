@@ -101,6 +101,10 @@ pub const ENV_STALE_MAX_AGE_HOURS: &str = "SQRY_DAEMON_STALE_MAX_AGE_HOURS";
 /// Phase 8c U6.
 pub const ENV_TOOL_TIMEOUT_SECS: &str = "SQRY_DAEMON_TOOL_TIMEOUT_SECS";
 
+/// Environment variable that overrides `derived_save_timeout_ms`, the
+/// wall-clock cap on the post-publish `QueryDbHook` derived-cache save.
+pub const ENV_DERIVED_SAVE_TIMEOUT_MS: &str = "SQRY_DAEMON_DERIVED_SAVE_TIMEOUT_MS";
+
 /// Environment variable that overrides `max_shim_connections`. Task 8
 /// Phase 8c U10.
 pub const ENV_MAX_SHIM_CONNECTIONS: &str = "SQRY_DAEMON_MAX_SHIM_CONNECTIONS";
@@ -154,6 +158,24 @@ pub const DEFAULT_CLOSURE_LIMIT_PERCENT: u32 = 30;
 pub const DEFAULT_STALE_SERVE_MAX_AGE_HOURS: u32 = 24;
 /// Default: retention reaper logs a WARN after 5 s of held-retained state.
 pub const DEFAULT_REBUILD_DRAIN_TIMEOUT_MS: u64 = 5_000;
+/// Default wall-clock cap on the post-publish `QueryDbHook` derived-cache
+/// save (`120 s`).
+///
+/// This is **not** a latency budget: the save runs on a detached
+/// `tokio::spawn` task that the publish/query path never awaits, so the
+/// only purpose of the cap is to bound a genuinely wedged save rather
+/// than to keep the caller responsive. The previous behaviour borrowed
+/// [`DEFAULT_REBUILD_DRAIN_TIMEOUT_MS`] (5 s, a retention-reaper WARN
+/// threshold, explicitly *not* an accounting deadline), which is far too
+/// small to serialize the derived cache for a large graph (e.g. the
+/// `sqry` workspace: ~730k nodes / 154 MB snapshot). On such graphs the
+/// 5 s cap fired on every publish, the timeout was absorbed at WARN, and
+/// `derived.sqry` was never persisted, forcing every whole-graph derived
+/// query (`complexity_metrics`, `find_cycles`) to recompute live and blow
+/// the 60 s query deadline. 120 s comfortably covers the SHA-256 +
+/// query-warmup + serialize cost at that scale while still bounding a
+/// runaway task.
+pub const DEFAULT_DERIVED_SAVE_TIMEOUT_MS: u64 = 120_000;
 /// Default: `live_ratio < 0.5` triggers a mandatory full rebuild at the next
 /// debounce tick (interner compaction housekeeping).
 pub const DEFAULT_INTERNER_COMPACTION_THRESHOLD: f32 = 0.5;
@@ -257,6 +279,21 @@ pub struct DaemonConfig {
     /// regardless of wall-clock time.
     #[serde(default = "default_rebuild_drain_timeout_ms")]
     pub rebuild_drain_timeout_ms: u64,
+
+    /// Wall-clock cap (milliseconds) on the post-publish `QueryDbHook`
+    /// derived-cache save. The save runs on a detached background task
+    /// (`spawn_hook`) that the publish/query path never awaits, so this
+    /// bounds only a wedged save, not response latency. Must be large
+    /// enough to serialize the derived cache for the largest workspace
+    /// the daemon hosts; the 5 s `rebuild_drain_timeout_ms` previously
+    /// reused here was far too small for large graphs and silently
+    /// dropped the derived cache on every publish.
+    ///
+    /// Valid range (enforced by [`DaemonConfig::validate`]):
+    /// `1..=3_600_000` (1 ms .. 1 h). Default
+    /// [`DEFAULT_DERIVED_SAVE_TIMEOUT_MS`] (120 s).
+    #[serde(default = "default_derived_save_timeout_ms")]
+    pub derived_save_timeout_ms: u64,
 
     /// Grace window (seconds) for the IPC accept loop to drain active
     /// connections during shutdown. Task 8 Phase 8a.
@@ -393,6 +430,7 @@ impl Default for DaemonConfig {
             closure_limit_percent: DEFAULT_CLOSURE_LIMIT_PERCENT,
             stale_serve_max_age_hours: DEFAULT_STALE_SERVE_MAX_AGE_HOURS,
             rebuild_drain_timeout_ms: DEFAULT_REBUILD_DRAIN_TIMEOUT_MS,
+            derived_save_timeout_ms: DEFAULT_DERIVED_SAVE_TIMEOUT_MS,
             ipc_shutdown_drain_secs: DEFAULT_IPC_SHUTDOWN_DRAIN_SECS,
             tool_timeout_secs: DEFAULT_TOOL_TIMEOUT_SECS,
             max_shim_connections: DEFAULT_MAX_SHIM_CONNECTIONS,
@@ -537,6 +575,13 @@ impl DaemonConfig {
                 source: anyhow!("{ENV_TOOL_TIMEOUT_SECS}={v:?} must be an unsigned int: {e}"),
             })?;
         }
+        if let Some(v) = env::var_os(ENV_DERIVED_SAVE_TIMEOUT_MS) {
+            let v = v.to_string_lossy().into_owned();
+            self.derived_save_timeout_ms = v.parse::<u64>().map_err(|e| DaemonError::Config {
+                path: PathBuf::from(ENV_DERIVED_SAVE_TIMEOUT_MS),
+                source: anyhow!("{ENV_DERIVED_SAVE_TIMEOUT_MS}={v:?} must be an unsigned int: {e}"),
+            })?;
+        }
         if let Some(v) = env::var_os(ENV_MAX_SHIM_CONNECTIONS) {
             let v = v.to_string_lossy().into_owned();
             self.max_shim_connections = v.parse::<usize>().map_err(|e| DaemonError::Config {
@@ -630,6 +675,9 @@ impl DaemonConfig {
         }
         if self.tool_timeout_secs == 0 || self.tool_timeout_secs > 3_600 {
             return Err(reject("tool_timeout_secs must be in 1..=3600"));
+        }
+        if self.derived_save_timeout_ms == 0 || self.derived_save_timeout_ms > 3_600_000 {
+            return Err(reject("derived_save_timeout_ms must be in 1..=3600000"));
         }
         if self.max_shim_connections == 0 || self.max_shim_connections > 65_536 {
             return Err(reject("max_shim_connections must be in 1..=65536"));
@@ -786,6 +834,9 @@ const fn default_stale_serve_max_age_hours() -> u32 {
 }
 const fn default_rebuild_drain_timeout_ms() -> u64 {
     DEFAULT_REBUILD_DRAIN_TIMEOUT_MS
+}
+const fn default_derived_save_timeout_ms() -> u64 {
+    DEFAULT_DERIVED_SAVE_TIMEOUT_MS
 }
 const fn default_ipc_shutdown_drain_secs() -> u64 {
     DEFAULT_IPC_SHUTDOWN_DRAIN_SECS
@@ -1010,6 +1061,7 @@ mod tests {
         assert_eq!(cfg.closure_limit_percent, 30);
         assert_eq!(cfg.stale_serve_max_age_hours, 24);
         assert_eq!(cfg.rebuild_drain_timeout_ms, 5_000);
+        assert_eq!(cfg.derived_save_timeout_ms, 120_000);
         assert_eq!(cfg.tool_timeout_secs, 60);
         assert_eq!(cfg.max_shim_connections, 256);
         assert!((cfg.interner_compaction_threshold - 0.5).abs() < f32::EPSILON);
@@ -1075,6 +1127,7 @@ mod tests {
             cfg.rebuild_drain_timeout_ms,
             DEFAULT_REBUILD_DRAIN_TIMEOUT_MS
         );
+        assert_eq!(cfg.derived_save_timeout_ms, DEFAULT_DERIVED_SAVE_TIMEOUT_MS);
     }
 
     #[test]
@@ -1449,6 +1502,67 @@ mod tests {
             }
             other => panic!("expected Config error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn derived_save_timeout_env_override() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        // SAFETY: guarded by ENV_LOCK.
+        unsafe {
+            env::set_var(ENV_DERIVED_SAVE_TIMEOUT_MS, "90000");
+        }
+        let mut cfg = DaemonConfig::default();
+        let result = cfg.apply_env_overrides();
+        // SAFETY: guarded by ENV_LOCK.
+        unsafe {
+            env::remove_var(ENV_DERIVED_SAVE_TIMEOUT_MS);
+        }
+        result.expect("override ok");
+        assert_eq!(cfg.derived_save_timeout_ms, 90_000);
+    }
+
+    #[test]
+    fn derived_save_timeout_env_override_rejects_malformed() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        // SAFETY: guarded by ENV_LOCK.
+        unsafe {
+            env::set_var(ENV_DERIVED_SAVE_TIMEOUT_MS, "soon-ish");
+        }
+        let mut cfg = DaemonConfig::default();
+        let err = cfg.apply_env_overrides();
+        // SAFETY: guarded by ENV_LOCK.
+        unsafe {
+            env::remove_var(ENV_DERIVED_SAVE_TIMEOUT_MS);
+        }
+        let err = err.expect_err("malformed value must fail");
+        match err {
+            DaemonError::Config { path, .. } => {
+                assert_eq!(path, Path::new(ENV_DERIVED_SAVE_TIMEOUT_MS));
+            }
+            other => panic!("expected Config error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_rejects_out_of_range_derived_save_timeout() {
+        // Zero would race `tokio::time::timeout` at 0 ms, dropping the
+        // derived cache on every publish (the failure this fix exists to
+        // prevent); past one hour is treated as a misconfiguration.
+        let zero = DaemonConfig {
+            derived_save_timeout_ms: 0,
+            ..DaemonConfig::default()
+        };
+        assert!(zero.validate().is_err());
+        let too_long = DaemonConfig {
+            derived_save_timeout_ms: 3_600_001,
+            ..DaemonConfig::default()
+        };
+        assert!(too_long.validate().is_err());
+        let ok = DaemonConfig {
+            derived_save_timeout_ms: DEFAULT_DERIVED_SAVE_TIMEOUT_MS,
+            ..DaemonConfig::default()
+        };
+        ok.validate().expect("120 s is in range");
     }
 
     #[test]
