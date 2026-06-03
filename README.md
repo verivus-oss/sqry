@@ -54,15 +54,19 @@ sqry is useful when you need to search by code **structure**: finding all caller
 
 sqry is focused on one thing: local semantic code search via AST analysis.
 
-## What's New In 13.0.3
+## What's New (through 17.0.1)
 
-- **Accurate unused-code analysis across binding boundaries**: `sqry unused`, LSP analysis, and MCP `find_unused` now gather a full candidate superset before CLI/MCP/LSP filters run, then apply the binding-plane post-filter at the boundary. This prevents visibility, kind, and scope filters from hiding symbols that should still be considered during reachability.
-- **Binding-plane resolution is first-class**: V9 snapshots derive scope, alias, shadow, import, and export tables from the graph, and `sqry graph resolve <symbol> --explain --json` exposes witness-bearing resolution for debugging name lookup.
-- **Derived Analysis DB is the shared query path**: cycle, unused, reachability, entry-point, trace, dependency, subgraph, export, semantic-diff, CLI, and MCP analysis paths now share `sqry-db` query implementations with sharded derived-result caches.
-- **Incremental graph persistence moved to V10**: snapshots now persist the file-segment table used for append-only node allocation and safe per-file reindexing. After upgrading from a pre-V10 release, run `sqry index --force` once so the graph is rebuilt with V10 metadata.
-- **Daemon-backed workflows are production surfaces**: `sqryd` keeps graphs hot across CLI, MCP, and LSP sessions; `sqry daemon load`, `sqry daemon rebuild`, `sqry daemon status`, and `sqry daemon logs` are available, and `sqry-mcp --daemon` / `sqry lsp --daemon` can auto-start the daemon.
-- **Workspace-aware multi-repo indexing remains opt-in and explicit**: define a `.sqry-workspace` registry or a VS Code `.code-workspace` `sqry.workspace` block when you want multiple source roots queried as one logical workspace.
-- **Public release artifacts are signed and complete**: v13.0.3 publishes crates, Linux/macOS/Windows binaries for `sqry`, `sqry-mcp`, `sqry-lsp`, and `sqryd`, checksums, attestations, and the VS Code `.vsix` release asset from the public `release-distribute.yml` workflow.
+- **C/C++ indirect-call precision**: indexing now resolves C function-pointer (indirect) calls into the call graph and records how each edge was resolved. The v16.0.x rewrite made large C/C++ indexing dramatically faster (~10x on the Linux `drivers/net` subset). C++ types declared inside other types (nested classes/structs/enums) are now emitted as first-class nodes.
+- **Resolution-aware queries (V12 graph)**: the new `resolved_via:` predicate filters the call graph by *how* each edge was resolved (`direct`, `type_match`, `binding_plane`), so you can isolate calls recovered by the C indirect-call resolver from ordinary direct calls. A companion `framework:` predicate for web-framework route filtering is wired through the same surfaces (route extraction is rolling out). Both work in the planner text grammar (`sqry plan-query`, MCP `sqry_query`) and as filter parameters on the relation/search MCP tools (`relation_query`, `direct_callers`, `direct_callees`, `semantic_search`).
+- **Richer Go analysis**: implicit interface implementations, promoted methods, and function-signature implementations are detected. Struct fields are emitted as `Property` nodes with qualified names (also for C and Haskell).
+- **`returns:<Type>` is edge-backed**: the `returns:` predicate resolves against real `TypeOf{Return}` edges for Rust, Java, Python, TypeScript, and Go instead of matching signature text.
+- **Typed ambiguous-symbol errors**: bare names with multiple definitions return a structured `AmbiguousSymbol` error listing every candidate (see "Ambiguous symbol resolution" below).
+- **Natural-language hardening**: `sqry ask` runs an on-device ONNX classifier with gated, SHA256-verified model auto-download and strict integrity checking by default; override the model location with `--model-dir`.
+- **Workspace-aware indexing is explicit**: multi-repo analysis is opt-in via a `.sqry-workspace` registry or a VS Code `.code-workspace` `sqry.workspace` block — there is no implicit "cross-repo by default" behavior (see "Workspace-Aware Multi-Repo Indexing" below).
+- **`find_duplicates` payload caps**: each duplicate group is capped to 10 members by default (`max_members_per_group` to change; `0` disables), with `total_members` / `members_truncated` fields so large repositories stay within MCP payload budgets.
+- **Distribution**: a Homebrew tap auto-publishes on every release, and Windows/macOS artifacts are validated on native-platform smoke gates before public promotion.
+
+> **Upgrade note**: the C indirect-call and Go field-edge work changed in-format graph semantics. After upgrading across these releases, run `sqry index --force` once so the graph is rebuilt with the current shape.
 
 ## Install
 
@@ -93,7 +97,7 @@ $script = irm https://raw.githubusercontent.com/verivus-oss/sqry/main/scripts/in
 Pinned-release example:
 
 ```powershell
-.\install.ps1 -Component all -Version v13.0.3 -VerifySignatures
+.\install.ps1 -Component all -Version v17.0.1 -VerifySignatures
 ```
 
 Manual fallback:
@@ -287,6 +291,7 @@ filter / relation / traversal steps.
 | `in:<glob>` | `in:src/api/**/*.rs` | Filter by file-path glob. |
 | `scope:<kind>` | `scope:module` | Restrict to a binding-plane scope kind (`module`, `function`, `class`, `namespace`, `trait`, `impl`). |
 | `returns:<TypeName>` | `returns:Result` | Functions whose `TypeOf{Return}` edge targets a node whose interned name **equals** `TypeName` (exact, no glob). |
+| `resolved_via:<kind>` | `resolved_via:binding_plane` | Filter `Calls` edges by how they were resolved: `direct`, `type_match`, or `binding_plane` (the latter two recover indirect/function-pointer calls). |
 | `callers:<value>` / `callees:<value>` | `callees:visit_*` | Relation predicates; value can be a bare word, a glob, a quoted string, or a sub-query in parentheses. |
 | `imports:<value>` / `exports:<value>` | `imports:serde` | Module-graph relation predicates. |
 | `implements:<value>` (alias `impl:<value>`) | `kind:class implements:Visitor` | OO interface/trait conformance. |
@@ -640,7 +645,7 @@ sqry daemon logs --follow
 Example `sqry daemon status` output:
 
 ```
-sqryd v13.0.3 -- uptime 2h 14m
+sqryd v17.0.1 -- uptime 2h 14m
 
 Memory: 391 MB / 2048 MB  (peak: 418 MB)
 

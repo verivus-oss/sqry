@@ -124,13 +124,17 @@ Indexing behavior highlights:
 
 ---
 
-## Release Highlights (v7.2.0)
+## Release Highlights (through v17.0.1)
 
-- Shared traversal kernel across CLI, LSP, and MCP graph analysis operations
-- Deterministic path enumeration with atomic node/edge truncation and leaf-path reporting
-- `sqry-bind` facade plus reusable traversal/materialization result types in `sqry-core`
-- MCP `expand_cache_status` introspection tool and dynamic assistant-facing tool docs
-- LSP workspace-boundary hardening for path resolution
+- C/C++ indirect (function-pointer) call resolution with `resolved_via` provenance, plus a ~10x faster indexing rewrite on large C/C++ trees
+- Nested C++ type nodes (classes/structs/enums declared inside other types)
+- V12 graph schema with `framework:` / `resolved_via:` query predicates and matching MCP filter parameters
+- Richer Go analysis: implicit interface implements, promoted methods, function-signature implementations, and struct-field `Property` nodes (also C/Haskell)
+- Edge-backed `returns:<Type>` predicate via `TypeOf{Return}` edges (Rust/Java/Python/TypeScript/Go)
+- Typed `AmbiguousSymbol` errors for bare names with multiple candidates
+- Hardened natural-language `sqry ask`: on-device ONNX classifier with gated, SHA256-verified model auto-download (strict integrity by default, `--model-dir` override)
+- `find_duplicates` per-group member cap (default 10) with `total_members` / `members_truncated`
+- Homebrew tap auto-publish and native-platform release smoke gates
 
 ## MCP Tools (Model Context Protocol)
 
@@ -157,7 +161,7 @@ sqry provides **36 MCP tools** for AI/LLM integration:
 | Tool | Description |
 |------|-------------|
 | `explain_code` | Explain a symbol with context and relationships |
-| `relation_query` | Query semantic relations (callers, callees, imports, exports, returns) |
+| `relation_query` | Query semantic relations (callers, callees, imports, exports, returns); supports `framework` / `resolved_via` filter parameters (V12 graph) |
 | `show_dependencies` | Show dependency tree for a file or symbol |
 | `dependency_impact` | Analyze what would break if a symbol is changed/removed |
 
@@ -212,7 +216,7 @@ sqry provides **36 MCP tools** for AI/LLM integration:
 
 | Tool | Description |
 |------|-------------|
-| `find_duplicates` | Find duplicate code (function bodies, signatures, structs) |
+| `find_duplicates` | Find duplicate code (function bodies, signatures, structs); each group is capped to 10 members by default (`max_members_per_group`, `0` disables) with `total_members` / `members_truncated` fields |
 | `find_cycles` | Find circular dependencies (call cycles, import cycles, module cycles) |
 | `find_unused` | Find unused/dead code via reachability analysis |
 | `is_node_in_cycle` | Check if a specific symbol is part of a cycle |
@@ -435,7 +439,7 @@ The VS Code extension (`sqry-vscode`) builds on `sqry lsp` and exposes:
 
 ---
 
-## Supported Languages (35 plugins)
+## Supported Languages (37 plugins)
 
 | Category | Languages |
 |----------|-----------|
@@ -447,8 +451,9 @@ The VS Code extension (`sqry-vscode`) builds on `sqry lsp` and exposes:
 | **Functional** | Haskell, Elixir, Scala |
 | **Scripting** | Shell (Bash), Lua, R |
 | **Database** | SQL, Oracle PL/SQL |
-| **Infrastructure** | Terraform, Puppet |
-| **Enterprise** | SAP ABAP, Salesforce Apex, ServiceNow (Xanadu) |
+| **Infrastructure** | Terraform, Puppet, Pulumi |
+| **Enterprise** | SAP ABAP, Salesforce Apex, ServiceNow (Xanadu), ServiceNow XML |
+| **Data / Config** | JSON |
 | **.NET** | C# |
 
 ---
@@ -495,6 +500,9 @@ exports:UserService
 
 # Find functions with specific return type
 returns:Result
+
+# Filter calls by how they were resolved (V12 graph): direct, type_match, binding_plane
+resolved_via:binding_plane
 ```
 
 ### Advanced Predicates
