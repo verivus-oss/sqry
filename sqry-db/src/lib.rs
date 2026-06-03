@@ -67,7 +67,8 @@ use sqry_core::graph::unified::concurrent::GraphSnapshot;
 
 pub use cache::ShardedCache;
 pub use comparative::{
-    ChangeType, ComparativeQueryDb, DiffOptions, DiffOutput, DiffSummary, NodeChange, NodeLocation,
+    ChangeType, ComparativeQueryDb, DiffEdgeKey, DiffOptions, DiffOutput, DiffSummary, DiffTypeArg,
+    EdgeDelta, NodeChange, NodeLocation,
 };
 pub use config::QueryDbConfig;
 pub use dependency::DependencyRecorderGuard;

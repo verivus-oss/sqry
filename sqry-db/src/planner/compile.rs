@@ -57,7 +57,7 @@
 //! - Spec: `docs/superpowers/specs/2026-04-12-derived-analysis-db-query-planner-design.md` (§3.2)
 //! - DAG: `docs/superpowers/plans/2026-04-12-phase3-4-combined-implementation-dag.toml` (unit DB10)
 
-use sqry_core::graph::unified::edge::kind::{EdgeKind, ResolvedVia};
+use sqry_core::graph::unified::edge::kind::{ChannelBufferKind, EdgeKind, ResolvedVia};
 use sqry_core::graph::unified::node::kind::NodeKind;
 use sqry_core::graph::unified::string::StringId;
 use sqry_core::schema::Visibility;
@@ -324,6 +324,26 @@ pub fn normalize_edge_kind(kind: EdgeKind) -> EdgeKind {
         EdgeKind::Wraps { kind, .. } => EdgeKind::Wraps {
             kind,
             chain_position: None,
+        },
+
+        // ---- T2.4 ChannelPeer: preserve the `direction` semantic
+        //      discriminator; zero `buffer_kind` (a per-Channel-node cache).
+        //      Two ChannelPeer edges differing only in buffer hint collapse
+        //      into one normalized plan node.
+        EdgeKind::ChannelPeer { direction, .. } => EdgeKind::ChannelPeer {
+            direction,
+            buffer_kind: ChannelBufferKind::Unknown,
+        },
+
+        // ---- T2.5 Instantiates: preserve `inference_kind`; drop the
+        //      per-call-site `type_args` (site metadata for memoization).
+        //      NOTE: this planner normalization is distinct from the
+        //      semantic_diff comparator key, which deliberately preserves
+        //      type_args so Map[string,int] vs Map[string,int64] stay
+        //      distinguishable (DESIGN §7.6).
+        EdgeKind::Instantiates { inference_kind, .. } => EdgeKind::Instantiates {
+            type_args: Default::default(),
+            inference_kind,
         },
     }
 }

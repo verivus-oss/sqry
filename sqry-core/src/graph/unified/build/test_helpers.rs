@@ -896,6 +896,9 @@ fn edge_kind_name(kind: &EdgeKind) -> &'static str {
         EdgeKind::SealedPermit => "SealedPermit",
         // T3 error chains (Go)
         EdgeKind::Wraps { .. } => "Wraps",
+        // T2.4 / T2.5 Go channel pairing + generic instantiation
+        EdgeKind::ChannelPeer { .. } => "ChannelPeer",
+        EdgeKind::Instantiates { .. } => "Instantiates",
     }
 }
 

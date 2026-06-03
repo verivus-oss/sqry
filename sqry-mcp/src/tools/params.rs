@@ -329,6 +329,17 @@ pub enum RelationTypeParam {
     /// of `WrapKind`. For kind-filtered queries use
     /// `sqry_query "wraps:<kind>"`.
     Wraps,
+    /// T2.4 (Go channels): `ChannelPeer` edges anchored on a channel /
+    /// containing function. The container-level `rename_all = "lowercase"`
+    /// would serialize this as `"channelpeers"`, so the wire string is pinned
+    /// explicitly.
+    #[serde(rename = "channel_peers")]
+    ChannelPeers,
+    /// T2.5 (Go generics): `Instantiates` edges of a generic function /
+    /// method. The explicit rename is redundant (already lowercases to
+    /// `"instantiations"`) but kept for symmetry with `ChannelPeers`.
+    #[serde(rename = "instantiations")]
+    Instantiations,
 }
 
 impl From<RelationTypeParam> for CoreRelationKind {
@@ -340,6 +351,8 @@ impl From<RelationTypeParam> for CoreRelationKind {
             RelationTypeParam::Exports => CoreRelationKind::Exports,
             RelationTypeParam::Returns => CoreRelationKind::Returns,
             RelationTypeParam::Wraps => CoreRelationKind::Wraps,
+            RelationTypeParam::ChannelPeers => CoreRelationKind::ChannelPeers,
+            RelationTypeParam::Instantiations => CoreRelationKind::Instantiations,
         }
     }
 }
@@ -353,6 +366,8 @@ impl From<CoreRelationKind> for RelationTypeParam {
             CoreRelationKind::Exports => RelationTypeParam::Exports,
             CoreRelationKind::Returns => RelationTypeParam::Returns,
             CoreRelationKind::Wraps => RelationTypeParam::Wraps,
+            CoreRelationKind::ChannelPeers => RelationTypeParam::ChannelPeers,
+            CoreRelationKind::Instantiations => RelationTypeParam::Instantiations,
         }
     }
 }

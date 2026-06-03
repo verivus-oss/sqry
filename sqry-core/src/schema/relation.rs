@@ -63,6 +63,26 @@ pub enum RelationKind {
     /// kind-filtered queries use the planner's `wraps:<kind>`
     /// predicate.
     Wraps,
+
+    /// Find channel send / receive / close operation sites on a channel
+    /// (Go T2.4).
+    ///
+    /// Traverses `EdgeKind::ChannelPeer` edges anchored on a `Channel`
+    /// node (or expanded from a containing function's body). The
+    /// container-level `rename_all = "lowercase"` would serialize this as
+    /// `"channelpeers"`, so an explicit per-variant rename pins the
+    /// `"channel_peers"` wire string.
+    #[serde(rename = "channel_peers")]
+    ChannelPeers,
+
+    /// Find generic-instantiation call sites of a generic function /
+    /// method (Go T2.5).
+    ///
+    /// Traverses `EdgeKind::Instantiates` edges. The explicit rename is
+    /// redundant (`Instantiations` already lowercases to
+    /// `"instantiations"`) but kept for symmetry with `ChannelPeers`.
+    #[serde(rename = "instantiations")]
+    Instantiations,
 }
 
 impl RelationKind {
@@ -76,6 +96,8 @@ impl RelationKind {
             Self::Exports,
             Self::Returns,
             Self::Wraps,
+            Self::ChannelPeers,
+            Self::Instantiations,
         ]
     }
 
@@ -89,6 +111,8 @@ impl RelationKind {
             Self::Exports => "exports",
             Self::Returns => "returns",
             Self::Wraps => "wraps",
+            Self::ChannelPeers => "channel_peers",
+            Self::Instantiations => "instantiations",
         }
     }
 
@@ -105,6 +129,8 @@ impl RelationKind {
             "exports" => Some(Self::Exports),
             "returns" => Some(Self::Returns),
             "wraps" => Some(Self::Wraps),
+            "channel_peers" => Some(Self::ChannelPeers),
+            "instantiations" => Some(Self::Instantiations),
             _ => None,
         }
     }
@@ -147,6 +173,34 @@ mod tests {
         assert_eq!(RelationKind::parse("CALLEES"), Some(RelationKind::Callees));
         assert_eq!(RelationKind::parse("Imports"), Some(RelationKind::Imports));
         assert_eq!(RelationKind::parse("unknown"), None);
+    }
+
+    #[test]
+    fn test_new_relation_kinds_wire_strings() {
+        // The wire strings are contract-locked: ChannelPeers must NOT
+        // serialize as "channelpeers" (the lowercase rename_all default).
+        assert_eq!(RelationKind::ChannelPeers.as_str(), "channel_peers");
+        assert_eq!(RelationKind::Instantiations.as_str(), "instantiations");
+        assert_eq!(
+            RelationKind::parse("channel_peers"),
+            Some(RelationKind::ChannelPeers)
+        );
+        assert_eq!(
+            RelationKind::parse("instantiations"),
+            Some(RelationKind::Instantiations)
+        );
+        // serde wire shape (used by the MCP / CLI JSON surface).
+        assert_eq!(
+            serde_json::to_string(&RelationKind::ChannelPeers).unwrap(),
+            "\"channel_peers\""
+        );
+        assert_eq!(
+            serde_json::to_string(&RelationKind::Instantiations).unwrap(),
+            "\"instantiations\""
+        );
+        // Neither new relation is a call or boundary relation.
+        assert!(!RelationKind::ChannelPeers.is_call_relation());
+        assert!(!RelationKind::Instantiations.is_boundary_relation());
     }
 
     #[test]

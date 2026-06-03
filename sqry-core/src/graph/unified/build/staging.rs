@@ -1397,6 +1397,18 @@ impl StagingGraph {
             EdgeKind::TypeOf { name, .. } => {
                 Self::remap_optional_string_id(name, remap, "EdgeKind::TypeOf.name")?;
             }
+            // T2.5: each TypeArg.name StringId is baked at parse time and must
+            // be rewritten through the local→global remap, else it dangles
+            // after the global string-table dedup.
+            EdgeKind::Instantiates { type_args, .. } => {
+                for ta in type_args.iter_mut() {
+                    Self::remap_required_string_id(
+                        &mut ta.name,
+                        remap,
+                        "EdgeKind::Instantiates.type_args[].name",
+                    )?;
+                }
+            }
             // Variants without StringId fields
             EdgeKind::Defines
             | EdgeKind::Contains
@@ -1421,7 +1433,9 @@ impl StagingGraph {
             | EdgeKind::CompanionOf
             | EdgeKind::SealedPermit
             // T3 Wraps carries WrapKind (Copy) + Option<u16>; no StringId fields.
-            | EdgeKind::Wraps { .. } => {
+            | EdgeKind::Wraps { .. }
+            // T2.4 ChannelPeer carries only Copy enums; no StringId fields.
+            | EdgeKind::ChannelPeer { .. } => {
                 // No StringIds to remap
             }
         }

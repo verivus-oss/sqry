@@ -221,6 +221,8 @@ pub fn params_to_relation_query_args(params: Value) -> Result<RelationQueryArgs,
         RelationTypeParam::Exports => RelationType::Exports,
         RelationTypeParam::Returns => RelationType::Returns,
         RelationTypeParam::Wraps => RelationType::Wraps,
+        RelationTypeParam::ChannelPeers => RelationType::ChannelPeers,
+        RelationTypeParam::Instantiations => RelationType::Instantiations,
     };
 
     let pagination = convert_pagination(params.page_token, params.page_size, None)?;

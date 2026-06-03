@@ -29,7 +29,10 @@ use sqry_core::graph::unified::concurrent::GraphSnapshot;
 
 pub mod diff;
 
-pub use diff::{ChangeType, DiffOptions, DiffOutput, DiffSummary, NodeChange, NodeLocation};
+pub use diff::{
+    ChangeType, DiffEdgeKey, DiffOptions, DiffOutput, DiffSummary, DiffTypeArg, EdgeDelta,
+    NodeChange, NodeLocation,
+};
 
 /// A lightweight wrapper holding two `GraphSnapshot`s for cross-snapshot
 /// operations like `semantic_diff`.

@@ -246,6 +246,16 @@ pub enum CanonicalEdgeMetadata {
         kind: u8,
         chain_position: Option<u16>,
     },
+    ChannelPeer {
+        direction: u8,
+        buffer_kind: u8,
+    },
+    Instantiates {
+        /// `(canonicalised type-name StringId, default_typed)` per slot, in
+        /// declaration order.
+        type_args: Vec<(u32, bool)>,
+        inference_kind: u8,
+    },
 }
 
 /// Builds a [`CanonicalArena`] from a live [`CodeGraph`].
@@ -590,6 +600,29 @@ fn canonicalise_edge_kind(
             CanonicalEdgeMetadata::Wraps {
                 kind: *kind as u8,
                 chain_position: *chain_position,
+            },
+        ),
+        EdgeKind::ChannelPeer {
+            direction,
+            buffer_kind,
+        } => (
+            "ChannelPeer",
+            CanonicalEdgeMetadata::ChannelPeer {
+                direction: *direction as u8,
+                buffer_kind: *buffer_kind as u8,
+            },
+        ),
+        EdgeKind::Instantiates {
+            type_args,
+            inference_kind,
+        } => (
+            "Instantiates",
+            CanonicalEdgeMetadata::Instantiates {
+                type_args: type_args
+                    .iter()
+                    .map(|ta| (req(ta.name), ta.default_typed))
+                    .collect(),
+                inference_kind: *inference_kind as u8,
             },
         ),
     }

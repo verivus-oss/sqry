@@ -76,6 +76,13 @@ pub enum RelationType {
     /// T3.6 (Cluster G): outbound `Wraps` edges. Filters to any
     /// `EdgeKind::Wraps` regardless of `WrapKind`.
     Wraps,
+    /// T2.4 (Go channels): `ChannelPeer` edges. Body-expands a containing
+    /// function to its channel-operation CallSites, then walks their
+    /// `ChannelPeer` edges (or, for a `Channel` anchor, incoming edges).
+    ChannelPeers,
+    /// T2.5 (Go generics): `Instantiates` edges. Walks incoming
+    /// instantiation edges of a generic function / method.
+    Instantiations,
 }
 
 impl RelationType {
@@ -87,6 +94,8 @@ impl RelationType {
             RelationType::Exports => "exports",
             RelationType::Returns => "returns",
             RelationType::Wraps => "wraps",
+            RelationType::ChannelPeers => "channel_peers",
+            RelationType::Instantiations => "instantiations",
         }
     }
 }
@@ -491,6 +500,8 @@ pub fn validate_relation_query_args(args: &Value) -> Result<RelationQueryArgs> {
         "exports" => RelationType::Exports,
         "returns" => RelationType::Returns,
         "wraps" => RelationType::Wraps,
+        "channel_peers" => RelationType::ChannelPeers,
+        "instantiations" => RelationType::Instantiations,
         other => bail!("Unsupported relation_type: {other}"),
     };
 

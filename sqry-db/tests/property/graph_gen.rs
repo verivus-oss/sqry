@@ -1795,6 +1795,8 @@ pub fn edge_kind_tag(kind: &EdgeKind) -> &'static str {
         EdgeKind::CompanionOf => "CompanionOf",
         EdgeKind::SealedPermit => "SealedPermit",
         EdgeKind::Wraps { .. } => "Wraps",
+        EdgeKind::ChannelPeer { .. } => "ChannelPeer",
+        EdgeKind::Instantiates { .. } => "Instantiates",
     }
 }
 

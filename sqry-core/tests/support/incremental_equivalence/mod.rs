@@ -33,8 +33,9 @@ use std::sync::Arc;
 
 use sqry_core::graph::unified::concurrent::CodeGraph;
 use sqry_core::graph::unified::edge::kind::{
-    DbQueryType, EdgeKind, ExportKind, FfiConvention, HttpMethod, LifetimeConstraintKind,
-    MacroExpansionKind, MqProtocol, TableWriteOp, TypeOfContext, WrapKind,
+    ChannelBufferKind, ChannelPeerDirection, DbQueryType, EdgeKind, ExportKind, FfiConvention,
+    HttpMethod, InferenceKind, LifetimeConstraintKind, MacroExpansionKind, MqProtocol,
+    TableWriteOp, TypeOfContext, WrapKind,
 };
 use sqry_core::graph::unified::node::NodeKind;
 
@@ -189,6 +190,15 @@ pub enum CanonicalEdgeKind {
     Wraps {
         kind: WrapKind,
         chain_position: Option<u16>,
+    },
+    ChannelPeer {
+        direction: ChannelPeerDirection,
+        buffer_kind: ChannelBufferKind,
+    },
+    Instantiates {
+        /// Resolved `(type-name, default_typed)` slots in declaration order.
+        type_args: Vec<(Arc<str>, bool)>,
+        inference_kind: InferenceKind,
     },
 }
 
@@ -534,6 +544,23 @@ fn canonicalize_edge_kind(graph: &CodeGraph, kind: &EdgeKind) -> CanonicalEdgeKi
         } => CanonicalEdgeKind::Wraps {
             kind: *kind,
             chain_position: *chain_position,
+        },
+        EdgeKind::ChannelPeer {
+            direction,
+            buffer_kind,
+        } => CanonicalEdgeKind::ChannelPeer {
+            direction: *direction,
+            buffer_kind: *buffer_kind,
+        },
+        EdgeKind::Instantiates {
+            type_args,
+            inference_kind,
+        } => CanonicalEdgeKind::Instantiates {
+            type_args: type_args
+                .iter()
+                .map(|ta| (resolve_string(graph, ta.name), ta.default_typed))
+                .collect(),
+            inference_kind: *inference_kind,
         },
     }
 }

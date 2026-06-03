@@ -1924,6 +1924,8 @@ fn convert_relation_query_params(
         RelationTypeParam::Exports => RelationType::Exports,
         RelationTypeParam::Returns => RelationType::Returns,
         RelationTypeParam::Wraps => RelationType::Wraps,
+        RelationTypeParam::ChannelPeers => RelationType::ChannelPeers,
+        RelationTypeParam::Instantiations => RelationType::Instantiations,
     };
 
     let pagination = convert_pagination(params.page_token, params.page_size, None)?;

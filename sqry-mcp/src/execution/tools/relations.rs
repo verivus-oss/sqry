@@ -34,7 +34,7 @@
 //! `kind`) is reconstructed from the enumerated edges so the MCP payload
 //! contract is preserved.
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -234,6 +234,18 @@ fn collect_relation_edges_unified(
             &start_nodes,
             max_results,
         )),
+        RelationType::ChannelPeers => Ok(collect_channel_peer_relation(
+            snapshot,
+            workspace_root,
+            &start_nodes,
+            max_results,
+        )),
+        RelationType::Instantiations => Ok(collect_instantiates_relation(
+            snapshot,
+            workspace_root,
+            &start_nodes,
+            max_results,
+        )),
     }
 }
 
@@ -294,6 +306,202 @@ fn wrap_kind_label(kind: sqry_core::graph::unified::edge::WrapKind) -> &'static 
         WrapKind::ErrorsAsType => "errors_as_type",
         WrapKind::ErrorsJoin => "errors_join",
     }
+}
+
+fn channel_direction_label(
+    direction: sqry_core::graph::unified::edge::kind::ChannelPeerDirection,
+) -> &'static str {
+    use sqry_core::graph::unified::edge::kind::ChannelPeerDirection;
+    match direction {
+        ChannelPeerDirection::Send => "send",
+        ChannelPeerDirection::Receive => "receive",
+        ChannelPeerDirection::Close => "close",
+    }
+}
+
+fn channel_buffer_label(
+    buffer_kind: sqry_core::graph::unified::edge::kind::ChannelBufferKind,
+) -> &'static str {
+    use sqry_core::graph::unified::edge::kind::ChannelBufferKind;
+    match buffer_kind {
+        ChannelBufferKind::Unbuffered => "unbuffered",
+        ChannelBufferKind::Buffered => "buffered",
+        ChannelBufferKind::Unknown => "unknown",
+    }
+}
+
+fn inference_kind_label(
+    inference_kind: sqry_core::graph::unified::edge::kind::InferenceKind,
+) -> &'static str {
+    use sqry_core::graph::unified::edge::kind::InferenceKind;
+    match inference_kind {
+        InferenceKind::Explicit => "explicit",
+        InferenceKind::Inferred => "inferred",
+        InferenceKind::Partial => "partial",
+        InferenceKind::Unknown => "unknown",
+    }
+}
+
+/// BFS from a containing node (Function / Method / Block-like) down to the
+/// `CallSite` / `Channel` nodes inside its body, following `Contains` /
+/// `Defines` (intra-function) and `Calls` (inter-function) edges (T2.4 §7.7
+/// step 5). A `CallSite` or `Channel` is terminal — it is collected and not
+/// descended through. The depth bound (default 4) covers the AC-2 chain
+/// `main -> Calls -> producer -> Contains -> send-site CallSite`.
+fn expand_to_call_sites(
+    snapshot: &Arc<GraphSnapshot>,
+    start: NodeId,
+    max_depth: usize,
+) -> Vec<NodeId> {
+    let mut sites = Vec::new();
+    let mut visited: HashSet<NodeId> = HashSet::new();
+    let mut frontier: VecDeque<(NodeId, usize)> = VecDeque::new();
+    frontier.push_back((start, 0));
+    visited.insert(start);
+
+    while let Some((node, depth)) = frontier.pop_front() {
+        let kind = snapshot.get_node(node).map(|e| e.kind);
+        // Terminal kinds — collect and do not descend.
+        if matches!(kind, Some(NodeKind::CallSite | NodeKind::Channel)) {
+            sites.push(node);
+            continue;
+        }
+        if depth >= max_depth {
+            continue;
+        }
+        for edge in snapshot.edges().edges_from(node) {
+            let descend = match edge.kind {
+                EdgeKind::Contains | EdgeKind::Defines => true,
+                EdgeKind::Calls { .. } => matches!(
+                    snapshot.get_node(edge.target).map(|e| e.kind),
+                    Some(NodeKind::Function | NodeKind::Method)
+                ),
+                _ => false,
+            };
+            if descend && visited.insert(edge.target) {
+                frontier.push_back((edge.target, depth + 1));
+            }
+        }
+    }
+    sites
+}
+
+/// T2.4 (Go channels): surface `ChannelPeer` edges. The query target is
+/// usually a containing function, so we body-expand it to its operation-site
+/// CallSites (and any directly-named Channel nodes), then enumerate the
+/// `ChannelPeer` edges anchored there (outgoing for a CallSite, incoming for
+/// a Channel). Each edge carries `direction` + `buffer_kind` labels in the
+/// response metadata.
+fn collect_channel_peer_relation(
+    snapshot: &Arc<GraphSnapshot>,
+    workspace_root: &Path,
+    start_nodes: &[NodeId],
+    max_results: usize,
+) -> Vec<RelationEdgeData> {
+    let mut results = Vec::new();
+    let mut seen_edges: HashSet<(NodeId, NodeId, u8)> = HashSet::new();
+    for &start in start_nodes {
+        for site in expand_to_call_sites(snapshot, start, 4) {
+            if results.len() >= max_results {
+                return results;
+            }
+            let is_channel_anchor = matches!(
+                snapshot.get_node(site).map(|e| e.kind),
+                Some(NodeKind::Channel)
+            );
+            // For a CallSite anchor: outgoing ChannelPeer edges (CallSite ->
+            // Channel). For a Channel anchor: incoming ChannelPeer edges.
+            let edges = if is_channel_anchor {
+                snapshot.edges().edges_to(site)
+            } else {
+                snapshot.edges().edges_from(site)
+            };
+            for edge in edges {
+                let EdgeKind::ChannelPeer {
+                    direction,
+                    buffer_kind,
+                } = edge.kind
+                else {
+                    continue;
+                };
+                if !seen_edges.insert((edge.source, edge.target, direction as u8)) {
+                    continue;
+                }
+                let from_ref = build_node_ref(snapshot, edge.source, workspace_root);
+                let to_ref = build_node_ref(snapshot, edge.target, workspace_root);
+                let metadata = Some(json!({
+                    "direction": channel_direction_label(direction),
+                    "buffer_kind": channel_buffer_label(buffer_kind),
+                }));
+                results.push(RelationEdgeData {
+                    from: Some(from_ref),
+                    to: Some(to_ref),
+                    relation_type: "channel_peers".to_string(),
+                    depth: 1,
+                    metadata,
+                });
+                if results.len() >= max_results {
+                    return results;
+                }
+            }
+        }
+    }
+    results
+}
+
+/// T2.5 (Go generics): surface `Instantiates` edges. The query target is the
+/// generic callee (a Function / Method), so we walk **incoming** edges
+/// directly — "which call sites instantiated me" — without body-expansion.
+/// Each edge carries the resolved `type_args` vector + `inference_kind` in the
+/// response metadata.
+fn collect_instantiates_relation(
+    snapshot: &Arc<GraphSnapshot>,
+    workspace_root: &Path,
+    start_nodes: &[NodeId],
+    max_results: usize,
+) -> Vec<RelationEdgeData> {
+    let mut results = Vec::new();
+    for &start in start_nodes {
+        if results.len() >= max_results {
+            break;
+        }
+        for edge in snapshot.edges().edges_to(start) {
+            if results.len() >= max_results {
+                break;
+            }
+            let EdgeKind::Instantiates {
+                type_args,
+                inference_kind,
+            } = &edge.kind
+            else {
+                continue;
+            };
+            let resolved_args: Vec<Value> = type_args
+                .iter()
+                .map(|ta| {
+                    let name = snapshot
+                        .strings()
+                        .resolve(ta.name)
+                        .map_or_else(|| "<unknown>".to_string(), |s| s.to_string());
+                    json!({ "name": name, "default_typed": ta.default_typed })
+                })
+                .collect();
+            let from_ref = build_node_ref(snapshot, edge.source, workspace_root);
+            let to_ref = build_node_ref(snapshot, edge.target, workspace_root);
+            let metadata = Some(json!({
+                "type_args": resolved_args,
+                "inference_kind": inference_kind_label(*inference_kind),
+            }));
+            results.push(RelationEdgeData {
+                from: Some(from_ref),
+                to: Some(to_ref),
+                relation_type: "instantiations".to_string(),
+                depth: 1,
+                metadata,
+            });
+        }
+    }
+    results
 }
 
 /// Collect call-style relations (`Callers`/`Callees`) by enumerating Calls

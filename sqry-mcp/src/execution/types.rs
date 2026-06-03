@@ -536,6 +536,33 @@ pub struct NodeChange {
     pub signature_after: Option<String>,
 }
 
+/// A single channel / generic edge difference between two snapshots (T2
+/// `02_DESIGN.md` §7.6). Only `Added` / `Removed` apply to edges.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EdgeChange {
+    /// Qualified name of the edge source node (a `CallSite`).
+    pub source: String,
+    /// Qualified name of the edge target node (a `Channel` or generic callee).
+    pub target: String,
+    /// `"send"` / `"receive"` / `"close"` for ChannelPeer; the inference kind
+    /// (`"explicit"` / `"inferred"` / `"partial"` / `"unknown"`) for
+    /// Instantiates.
+    pub discriminator: String,
+    /// Resolved generic type arguments in declaration order (Instantiates
+    /// only; empty for ChannelPeer).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub type_args: Vec<EdgeTypeArg>,
+}
+
+/// A resolved generic type argument on an [`EdgeChange`].
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EdgeTypeArg {
+    pub name: String,
+    pub default_typed: bool,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SemanticDiffData {
@@ -544,6 +571,18 @@ pub struct SemanticDiffData {
     pub changes: Vec<NodeChange>,
     pub summary: DiffSummary,
     pub total: u64,
+    /// `ChannelPeer` edges added in the target snapshot (T2 §7.6).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub channel_peer_edges_added: Vec<EdgeChange>,
+    /// `ChannelPeer` edges removed in the target snapshot.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub channel_peer_edges_removed: Vec<EdgeChange>,
+    /// `Instantiates` edges added in the target snapshot.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub instantiates_edges_added: Vec<EdgeChange>,
+    /// `Instantiates` edges removed in the target snapshot.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub instantiates_edges_removed: Vec<EdgeChange>,
 }
 
 #[derive(Debug, Clone, Serialize)]

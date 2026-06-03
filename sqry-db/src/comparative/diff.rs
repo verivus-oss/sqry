@@ -25,6 +25,9 @@ use std::path::{Path, PathBuf};
 
 use sqry_core::graph::Language;
 use sqry_core::graph::unified::concurrent::GraphSnapshot;
+use sqry_core::graph::unified::edge::EdgeKind;
+use sqry_core::graph::unified::edge::kind::{ChannelPeerDirection, InferenceKind};
+use sqry_core::graph::unified::node::NodeId;
 use sqry_core::graph::unified::node::kind::NodeKind;
 use sqry_core::graph::unified::resolution::display_graph_qualified_name;
 
@@ -178,6 +181,72 @@ pub struct DiffOutput {
     /// Pre-filter summary (matches `changes` bucket counts before any
     /// caller-side filter is applied).
     pub summary: DiffSummary,
+    /// `ChannelPeer` edges present in the new snapshot but not the old.
+    pub channel_peer_edges_added: Vec<EdgeDelta>,
+    /// `ChannelPeer` edges present in the old snapshot but not the new.
+    pub channel_peer_edges_removed: Vec<EdgeDelta>,
+    /// `Instantiates` edges present in the new snapshot but not the old.
+    pub instantiates_edges_added: Vec<EdgeDelta>,
+    /// `Instantiates` edges present in the old snapshot but not the new.
+    pub instantiates_edges_removed: Vec<EdgeDelta>,
+}
+
+// ============================================================================
+// Edge-delta axis (T2 channel / generic edges — `02_DESIGN.md` §7.6)
+//
+// The node-axis comparator above is blind to the two edge kinds this feature
+// introduces. A `Map[string, int]` → `Map[string, int64]` swap or an added send
+// site is a behavioural change a user-facing diff must surface, so the edge axis
+// compares `ChannelPeer` and `Instantiates` edges between the two snapshots.
+//
+// The diff key is `(source_qn, target_qn, DiffEdgeKey)`, where `DiffEdgeKey` is
+// a COMPARATOR-LOCAL projection deliberately distinct from the planner's
+// `normalize_edge_kind`: it PRESERVES the `Instantiates` type-argument vector
+// (so type-argument changes are visible) and the `ChannelPeer` direction, while
+// dropping the per-channel-node `buffer_kind` cache. Type-arg `StringId`s are
+// resolved to owned strings during construction, because the two snapshots do
+// not share a string table.
+// ============================================================================
+
+/// A resolved generic type argument in a diff key (snapshot-independent).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DiffTypeArg {
+    /// Resolved type name, or the `"<unknown>"` sentinel.
+    pub name: String,
+    /// Set when filled by Go's untyped-constant default rule.
+    pub default_typed: bool,
+}
+
+/// Comparator-local normalized edge key for the two feature edge kinds.
+///
+/// PRESERVES every byte that contributes to behavioural meaning at the site;
+/// see the module-level rationale above and `02_DESIGN.md` §7.6.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum DiffEdgeKey {
+    /// A channel send / receive / close peer edge, keyed on direction only.
+    ChannelPeer {
+        /// `"send"` / `"receive"` / `"close"`.
+        direction: String,
+    },
+    /// A generic instantiation edge, keyed on inference kind AND the full
+    /// resolved type-argument vector.
+    Instantiates {
+        /// `"explicit"` / `"inferred"` / `"partial"` / `"unknown"`.
+        inference_kind: String,
+        /// Resolved type-name slots in declaration order.
+        type_args: Vec<DiffTypeArg>,
+    },
+}
+
+/// One edge difference between the two snapshots.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EdgeDelta {
+    /// Display-form qualified name of the edge source node.
+    pub source_qn: String,
+    /// Display-form qualified name of the edge target node.
+    pub target_qn: String,
+    /// The comparator-local normalized kind (diff key payload).
+    pub kind: DiffEdgeKey,
 }
 
 /// Options controlling the diff computation.
@@ -290,7 +359,141 @@ pub fn compute_diff(old: &GraphSnapshot, new: &GraphSnapshot, opts: &DiffOptions
     append_added_changes(&mut changes, &added_nodes, &renamed_qnames);
 
     let summary = DiffSummary::from_changes(&changes);
-    DiffOutput { changes, summary }
+    let edges = compute_edge_deltas(old, new);
+    DiffOutput {
+        changes,
+        summary,
+        channel_peer_edges_added: edges.channel_peer_added,
+        channel_peer_edges_removed: edges.channel_peer_removed,
+        instantiates_edges_added: edges.instantiates_added,
+        instantiates_edges_removed: edges.instantiates_removed,
+    }
+}
+
+/// Comparator-local normalization for the two feature edge kinds. Returns
+/// `None` for every other edge kind (the edge axis only compares these two).
+fn diff_normalized_kind(kind: &EdgeKind, snapshot: &GraphSnapshot) -> Option<DiffEdgeKey> {
+    match kind {
+        EdgeKind::ChannelPeer { direction, .. } => Some(DiffEdgeKey::ChannelPeer {
+            direction: channel_direction_str(*direction).to_string(),
+        }),
+        EdgeKind::Instantiates {
+            type_args,
+            inference_kind,
+        } => {
+            let resolved = type_args
+                .iter()
+                .map(|ta| DiffTypeArg {
+                    name: snapshot
+                        .strings()
+                        .resolve(ta.name)
+                        .map_or_else(String::new, |a| a.to_string()),
+                    default_typed: ta.default_typed,
+                })
+                .collect();
+            Some(DiffEdgeKey::Instantiates {
+                inference_kind: inference_kind_str(*inference_kind).to_string(),
+                type_args: resolved,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn channel_direction_str(direction: ChannelPeerDirection) -> &'static str {
+    match direction {
+        ChannelPeerDirection::Send => "send",
+        ChannelPeerDirection::Receive => "receive",
+        ChannelPeerDirection::Close => "close",
+    }
+}
+
+fn inference_kind_str(kind: InferenceKind) -> &'static str {
+    match kind {
+        InferenceKind::Explicit => "explicit",
+        InferenceKind::Inferred => "inferred",
+        InferenceKind::Partial => "partial",
+        InferenceKind::Unknown => "unknown",
+    }
+}
+
+/// Resolve a node id to its (raw, canonical) qualified name string.
+fn node_qn(snapshot: &GraphSnapshot, id: NodeId) -> Option<String> {
+    let entry = snapshot.get_node(id)?;
+    let sid = entry.qualified_name.unwrap_or(entry.name);
+    snapshot.strings().resolve(sid).map(|a| a.to_string())
+}
+
+/// `(source_qn, target_qn, kind)` multiset for the two feature edge kinds.
+type EdgeKeyTuple = (String, String, DiffEdgeKey);
+
+fn collect_edge_keys(snapshot: &GraphSnapshot) -> HashMap<EdgeKeyTuple, usize> {
+    let mut map: HashMap<EdgeKeyTuple, usize> = HashMap::new();
+    for (source, target, kind) in snapshot.iter_edges() {
+        let Some(diff_kind) = diff_normalized_kind(&kind, snapshot) else {
+            continue;
+        };
+        let (Some(source_qn), Some(target_qn)) =
+            (node_qn(snapshot, source), node_qn(snapshot, target))
+        else {
+            continue;
+        };
+        *map.entry((source_qn, target_qn, diff_kind)).or_insert(0) += 1;
+    }
+    map
+}
+
+/// The four edge-delta vectors produced by [`compute_edge_deltas`].
+struct EdgeDeltas {
+    channel_peer_added: Vec<EdgeDelta>,
+    channel_peer_removed: Vec<EdgeDelta>,
+    instantiates_added: Vec<EdgeDelta>,
+    instantiates_removed: Vec<EdgeDelta>,
+}
+
+/// Compare the `ChannelPeer` / `Instantiates` edge multisets between the two
+/// snapshots. An edge is "added" when the new snapshot holds more copies of a
+/// given `(source_qn, target_qn, DiffEdgeKey)` key than the old, and vice
+/// versa for "removed".
+fn compute_edge_deltas(old: &GraphSnapshot, new: &GraphSnapshot) -> EdgeDeltas {
+    let old_keys = collect_edge_keys(old);
+    let new_keys = collect_edge_keys(new);
+
+    let mut deltas = EdgeDeltas {
+        channel_peer_added: Vec::new(),
+        channel_peer_removed: Vec::new(),
+        instantiates_added: Vec::new(),
+        instantiates_removed: Vec::new(),
+    };
+
+    let push = |key: &EdgeKeyTuple, added: bool, deltas: &mut EdgeDeltas| {
+        let delta = EdgeDelta {
+            source_qn: key.0.clone(),
+            target_qn: key.1.clone(),
+            kind: key.2.clone(),
+        };
+        match (&key.2, added) {
+            (DiffEdgeKey::ChannelPeer { .. }, true) => deltas.channel_peer_added.push(delta),
+            (DiffEdgeKey::ChannelPeer { .. }, false) => deltas.channel_peer_removed.push(delta),
+            (DiffEdgeKey::Instantiates { .. }, true) => deltas.instantiates_added.push(delta),
+            (DiffEdgeKey::Instantiates { .. }, false) => deltas.instantiates_removed.push(delta),
+        }
+    };
+
+    for (key, &new_count) in &new_keys {
+        let old_count = old_keys.get(key).copied().unwrap_or(0);
+        for _ in old_count..new_count {
+            push(key, true, &mut deltas);
+        }
+    }
+    for (key, &old_count) in &old_keys {
+        let new_count = new_keys.get(key).copied().unwrap_or(0);
+        for _ in new_count..old_count {
+            push(key, false, &mut deltas);
+        }
+    }
+
+    deltas
 }
 
 /// Builds a `qualified_name -> NodeSnap` map from a snapshot, joining each
@@ -668,6 +871,48 @@ mod tests {
         assert!((levenshtein_similarity("", "") - 1.0).abs() < 1e-10);
         assert!(levenshtein_similarity("hello", "hallo") > 0.7);
         assert!(levenshtein_similarity("hello", "world") < 0.5);
+    }
+
+    #[test]
+    fn diff_normalized_kind_drops_channel_buffer_but_keeps_direction() {
+        use sqry_core::graph::unified::concurrent::CodeGraph;
+        use sqry_core::graph::unified::edge::kind::ChannelBufferKind;
+
+        let snap = CodeGraph::new().snapshot();
+        let send_unbuffered = EdgeKind::ChannelPeer {
+            direction: ChannelPeerDirection::Send,
+            buffer_kind: ChannelBufferKind::Unbuffered,
+        };
+        let send_buffered = EdgeKind::ChannelPeer {
+            direction: ChannelPeerDirection::Send,
+            buffer_kind: ChannelBufferKind::Buffered,
+        };
+        let receive = EdgeKind::ChannelPeer {
+            direction: ChannelPeerDirection::Receive,
+            buffer_kind: ChannelBufferKind::Unbuffered,
+        };
+
+        // buffer_kind is a per-channel-node cache, not behaviourally
+        // significant at the operation site: a buffer-only change must NOT
+        // surface as a diff.
+        assert_eq!(
+            diff_normalized_kind(&send_unbuffered, &snap),
+            diff_normalized_kind(&send_buffered, &snap),
+        );
+        // direction IS the semantic discriminator.
+        assert_ne!(
+            diff_normalized_kind(&send_unbuffered, &snap),
+            diff_normalized_kind(&receive, &snap),
+        );
+    }
+
+    #[test]
+    fn diff_normalized_kind_ignores_non_feature_edges() {
+        use sqry_core::graph::unified::concurrent::CodeGraph;
+
+        let snap = CodeGraph::new().snapshot();
+        assert!(diff_normalized_kind(&EdgeKind::Contains, &snap).is_none());
+        assert!(diff_normalized_kind(&EdgeKind::Defines, &snap).is_none());
     }
 
     #[test]

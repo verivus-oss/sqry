@@ -27,7 +27,9 @@ use std::{
     path::Path,
 };
 
+use smallvec::SmallVec;
 use sqry_core::graph::unified::NodeId as UnifiedNodeId;
+use sqry_core::graph::unified::NodeKind;
 use sqry_core::graph::unified::NodeMetadataStore;
 use sqry_core::graph::unified::Receiver as GoReceiverPointerness;
 use sqry_core::graph::unified::build::go_signature::canonicalise_go_signature;
@@ -40,12 +42,14 @@ use sqry_core::graph::unified::build::staging::{
 };
 use sqry_core::graph::unified::edge::FfiConvention;
 use sqry_core::graph::unified::edge::kind::TypeOfContext;
+use sqry_core::graph::unified::edge::kind::{ChannelPeerDirection, InferenceKind, TypeArg};
 use sqry_core::graph::unified::resolution::canonicalize_graph_qualified_name;
 use sqry_core::graph::{GraphBuilder, GraphBuilderError, GraphResult, Language, NodeId, Span};
 use sqry_lang_support::relations::is_uppercase_export;
 use tree_sitter::{Node, Tree};
 
 use crate::relations::local_scopes;
+use crate::relations::stdlib_generics::{self, GenericSig, ParamPattern};
 
 const DEFAULT_SCOPE_DEPTH: usize = 4;
 
@@ -1129,9 +1133,32 @@ fn walk_function_body_for_calls(
                 CallSiteModifier::None,
                 Some(scope_tree),
             )?;
+            // T2.4: `close(ch)` emits a ChannelPeer{Close} edge in addition to
+            // its (existing) Calls edge to the `close` builtin.
+            handle_close_builtin_call(node, content, caller_context, ast_graph, helper);
             // Continue to recurse - need to find nested calls in arguments like C.puts(C.CString(...))
             // The recursion is safe because child call_expressions will be handled by their own match arm
         }
+        "send_statement" => {
+            // T2.4: `ch <- v`.
+            handle_send_statement(node, content, caller_context, ast_graph, helper);
+        }
+        "unary_expression" => {
+            // T2.4: `<-ch` receive (the arm early-returns for any other unary
+            // operator).
+            handle_receive_unary(node, content, caller_context, ast_graph, helper);
+        }
+        "range_clause" => {
+            // T2.4: `for v := range ch` over a channel.
+            handle_range_clause_over_channel(node, content, caller_context, ast_graph, helper);
+        }
+        // NOTE: `select` arms are intentionally NOT handled via a
+        // `communication_case` arm. Each arm nests a standalone `send_statement`
+        // (`case ch <- v:`) or a `unary_expression` `<-ch` (`case <-ch:` /
+        // `case x := <-ch:`), which this walker already reaches by recursion —
+        // so the existing `send_statement` / `unary_expression` arms emit the
+        // ChannelPeer edge exactly once. A dedicated `communication_case`
+        // handler would double-emit.
         "go_statement" => {
             handle_go_statement(node, content, caller_context, ast_graph, helper, scope_tree)?;
             // Don't recurse - the handler already processed the call inside
@@ -1167,6 +1194,18 @@ fn walk_function_body_for_calls(
                 ast_graph.wrap_imports(),
                 ensure_caller_node(helper, caller_context),
                 &caller_context.package,
+                helper,
+            );
+            // T2.5: an explicit-bracket generic call (`Map[string, int](..)`)
+            // parses as a type_conversion_expression wrapping a generic_type;
+            // emit its Instantiates edge here. Gated on the callee being a
+            // locally-declared generic function so a generic *type* conversion
+            // (`Box[int](nil)`) is not misrecorded as an instantiation.
+            try_emit_instantiation_for_type_conversion(
+                node,
+                content,
+                caller_context,
+                ast_graph,
                 helper,
             );
         }
@@ -1264,32 +1303,61 @@ fn handle_go_statement(
     for i in 0..node.child_count() {
         #[allow(clippy::cast_possible_truncation)]
         // Graph storage: node/edge index counts fit in u32
-        if let Some(child) = node.child(i as u32)
-            && child.kind() == "call_expression"
-        {
-            // Handle the top-level call (marked as goroutine)
-            handle_call_expression(
-                child,
-                content,
-                caller_context,
-                ast_graph,
-                helper,
-                CallSiteModifier::Goroutine,
-                Some(scope_tree),
-            )?;
+        let Some(child) = node.child(i as u32) else {
+            continue;
+        };
+        match child.kind() {
+            "call_expression" => {
+                // Handle the top-level call (marked as goroutine)
+                handle_call_expression(
+                    child,
+                    content,
+                    caller_context,
+                    ast_graph,
+                    helper,
+                    CallSiteModifier::Goroutine,
+                    Some(scope_tree),
+                )?;
 
-            // Recurse into the call's children only to find nested calls
-            // (e.g., `go C.puts(C.CString("x"))` has nested C.CString call)
-            // Use children-only walker to avoid re-processing the top-level call
-            walk_function_body_children_for_calls(
-                child,
-                content,
-                caller_context,
-                ast_graph,
-                helper,
-                scope_tree,
-            )?;
-            break;
+                // Recurse into the call's children only to find nested calls
+                // (e.g., `go C.puts(C.CString("x"))` has nested C.CString call)
+                // Use children-only walker to avoid re-processing the top-level call
+                walk_function_body_children_for_calls(
+                    child,
+                    content,
+                    caller_context,
+                    ast_graph,
+                    helper,
+                    scope_tree,
+                )?;
+                break;
+            }
+            "type_conversion_expression" => {
+                // `go Work[int](42)`: an explicit-bracket generic call parses as
+                // a type_conversion_expression (the same parser quirk handled in
+                // the main dispatch arm). Because the main walker returns early
+                // for go_statement, that arm is never reached here — emit the
+                // Instantiates / Wraps edges explicitly. No `Calls` edge exists
+                // for this shape, so `is_async` has nothing to attach to and
+                // AC-13's "Calls preserved unchanged" holds trivially.
+                super::wraps::try_emit_wraps_for_type_conversion(
+                    child,
+                    content,
+                    ast_graph.wrap_imports(),
+                    ensure_caller_node(helper, caller_context),
+                    &caller_context.package,
+                    helper,
+                );
+                try_emit_instantiation_for_type_conversion(
+                    child,
+                    content,
+                    caller_context,
+                    ast_graph,
+                    helper,
+                );
+                break;
+            }
+            _ => {}
         }
     }
     Ok(())
@@ -1308,32 +1376,58 @@ fn handle_defer_statement(
     for i in 0..node.child_count() {
         #[allow(clippy::cast_possible_truncation)]
         // Graph storage: node/edge index counts fit in u32
-        if let Some(child) = node.child(i as u32)
-            && child.kind() == "call_expression"
-        {
-            // Handle the top-level call (marked as deferred)
-            handle_call_expression(
-                child,
-                content,
-                caller_context,
-                ast_graph,
-                helper,
-                CallSiteModifier::Deferred,
-                Some(scope_tree),
-            )?;
+        let Some(child) = node.child(i as u32) else {
+            continue;
+        };
+        match child.kind() {
+            "call_expression" => {
+                // Handle the top-level call (marked as deferred)
+                handle_call_expression(
+                    child,
+                    content,
+                    caller_context,
+                    ast_graph,
+                    helper,
+                    CallSiteModifier::Deferred,
+                    Some(scope_tree),
+                )?;
 
-            // Recurse into the call's children only to find nested calls
-            // (e.g., `defer C.puts(C.CString("x"))` has nested C.CString call)
-            // Use children-only walker to avoid re-processing the top-level call
-            walk_function_body_children_for_calls(
-                child,
-                content,
-                caller_context,
-                ast_graph,
-                helper,
-                scope_tree,
-            )?;
-            break;
+                // Recurse into the call's children only to find nested calls
+                // (e.g., `defer C.puts(C.CString("x"))` has nested C.CString call)
+                // Use children-only walker to avoid re-processing the top-level call
+                walk_function_body_children_for_calls(
+                    child,
+                    content,
+                    caller_context,
+                    ast_graph,
+                    helper,
+                    scope_tree,
+                )?;
+                break;
+            }
+            "type_conversion_expression" => {
+                // `defer Cleanup[T](x)`: explicit-bracket generic call parsed as
+                // a type_conversion_expression. Same rationale as the goroutine
+                // path above — emit Instantiates / Wraps explicitly since the
+                // main walker skips the defer subtree.
+                super::wraps::try_emit_wraps_for_type_conversion(
+                    child,
+                    content,
+                    ast_graph.wrap_imports(),
+                    ensure_caller_node(helper, caller_context),
+                    &caller_context.package,
+                    helper,
+                );
+                try_emit_instantiation_for_type_conversion(
+                    child,
+                    content,
+                    caller_context,
+                    ast_graph,
+                    helper,
+                );
+                break;
+            }
+            _ => {}
         }
     }
     Ok(())
@@ -1370,6 +1464,59 @@ struct ASTGraph {
     wrap_imports: super::wraps::StdlibWrapImports,
     /// Whether this file imports "C" (`CGo`)
     uses_cgo: bool,
+    /// Simple names of top-level generic functions declared in this file
+    /// (`function_declaration` nodes that carry a `type_parameters` field).
+    ///
+    /// T2.5 uses this to disambiguate an explicit generic *function* call
+    /// `Map[string, int](nil)` from an explicit generic *type* conversion
+    /// `Box[int](nil)` — tree-sitter-go parses BOTH as a
+    /// `type_conversion_expression` wrapping a `generic_type`. Emitting an
+    /// `Instantiates` edge for a type conversion would be a false positive
+    /// (spec §3.1: false positives are not acceptable). The emitter only fires
+    /// when the callee is a confirmed locally-declared generic function;
+    /// cross-file / package-qualified callees conservatively emit nothing.
+    generic_func_names: HashSet<String>,
+    /// Per-file generic *function* signatures keyed by simple name, used by the
+    /// T2.5 inferred-instantiation path (`02_DESIGN.md` §4.3). Provides the
+    /// type-parameter arity (for explicit-prefix `Partial` padding) and the
+    /// per-position parameter patterns (for `peel_static_type` inference) of
+    /// every top-level generic function declared in the file. Out-of-workspace
+    /// callees fall back to the `stdlib_generics` catalog; everything else
+    /// emits no inferred edge.
+    generic_sigs: HashMap<String, super::stdlib_generics::GenericSig>,
+    /// Per-file reassignment offsets, consumed by the T2.4 channel-alias
+    /// resolver to break an alias chain after a `=` reassignment (§3.6).
+    reassignment: super::channels::GoReassignmentMap,
+    /// File-local rule-2 candidate table for single-parameter channel
+    /// pass-through (§3.5). Empty entries / multi-candidate positions emit no
+    /// `ChannelPeer` edge (AC-4 fence, AC-2b multi-file absence).
+    rule2: super::channels::FileLocalRule2Table,
+}
+
+/// Collect the simple names of top-level generic functions in a Go file.
+///
+/// A generic function is a top-level `function_declaration` carrying a
+/// `type_parameters` field. Methods are excluded: a generic method receives
+/// its type parameters from the receiver and is never written in the
+/// `Name[args](...)` call form that collides with a type conversion.
+fn collect_generic_function_names(root: Node, content: &[u8]) -> HashSet<String> {
+    let mut names = HashSet::new();
+    let mut cursor = root.walk();
+    for child in root.children(&mut cursor) {
+        if child.kind() != "function_declaration" {
+            continue;
+        }
+        if child.child_by_field_name("type_parameters").is_none() {
+            continue;
+        }
+        if let Some(name_node) = child.child_by_field_name("name")
+            && let Ok(name) = name_node.utf8_text(content)
+            && !name.is_empty()
+        {
+            names.insert(name.to_string());
+        }
+    }
+    names
 }
 
 impl ASTGraph {
@@ -1401,11 +1548,20 @@ impl ASTGraph {
 
         let uses_cgo = detect_cgo_import(root, content);
         let wrap_imports = super::wraps::StdlibWrapImports::from_root(root, content);
+        let generic_func_names = collect_generic_function_names(root, content);
+        let generic_sigs = collect_local_generic_sigs(root, content);
+        let reassignment = super::channels::GoReassignmentMap::build(root, content);
+        let rule2 =
+            super::channels::FileLocalRule2Table::collect(root, content, &package, &reassignment);
         Self {
             contexts,
             package,
             wrap_imports,
             uses_cgo,
+            generic_func_names,
+            generic_sigs,
+            reassignment,
+            rule2,
         }
     }
 
@@ -1985,6 +2141,1124 @@ fn count_arguments(node: Node) -> usize {
 // ============================================================================
 
 /// Process call expression using `GraphBuildHelper`
+/// Parse a tree-sitter `type_arguments` node into the explicit `TypeArg`
+/// vector. Each child is a `type_elem` wrapping the argument type; the raw
+/// type text is interned and recorded as a non-default-typed slot.
+fn parse_explicit_type_args(
+    type_args_node: Node,
+    content: &[u8],
+    helper: &mut GraphBuildHelper,
+) -> SmallVec<[TypeArg; 4]> {
+    let mut type_args: SmallVec<[TypeArg; 4]> = SmallVec::new();
+    for i in 0..type_args_node.named_child_count() {
+        let Some(child) = type_args_node.named_child(i as u32) else {
+            continue;
+        };
+        if child.kind() != "type_elem" {
+            continue;
+        }
+        let Ok(text) = child.utf8_text(content) else {
+            continue;
+        };
+        let name = text.trim();
+        if name.is_empty() {
+            continue;
+        }
+        let name_id = helper.intern(name);
+        type_args.push(TypeArg {
+            name: name_id,
+            default_typed: false,
+        });
+    }
+    type_args
+}
+
+/// Stage a per-call `CallSite` and the `Instantiates` edge from it to the
+/// generic callee, plus a `Contains` edge from the enclosing function so the
+/// CallSite is reachable by the MCP body-expansion walk.
+fn stage_instantiates_edge(
+    site_anchor: Node,
+    enclosing_fn: UnifiedNodeId,
+    callee_target: UnifiedNodeId,
+    span: Span,
+    type_args: SmallVec<[TypeArg; 4]>,
+    inference_kind: InferenceKind,
+    helper: &mut GraphBuildHelper,
+) {
+    let site_name = format!("<instantiate@{}>", site_anchor.start_byte());
+    let call_site = helper.add_node(&site_name, Some(span), NodeKind::CallSite);
+    helper.add_contains_edge(enclosing_fn, call_site);
+    helper.add_instantiates_edge_with_span(
+        call_site,
+        callee_target,
+        type_args,
+        inference_kind,
+        span,
+    );
+}
+
+/// T2.5 generic-instantiation emitter for the `call_expression` path.
+///
+/// Covers the case where the parser produces a `call_expression` carrying a
+/// direct `type_arguments` field (e.g. some receiver-method generic calls).
+/// The dominant explicit form `Map[string, int](..)` parses as a
+/// `type_conversion_expression` instead (see
+/// [`try_emit_instantiation_for_type_conversion`]).
+fn emit_explicit_instantiation(
+    call_node: Node,
+    content: &[u8],
+    enclosing_fn: UnifiedNodeId,
+    callee_target: UnifiedNodeId,
+    call_span: Span,
+    callee_simple: Option<&str>,
+    ast_graph: &ASTGraph,
+    helper: &mut GraphBuildHelper,
+) {
+    let Some(type_args_node) = call_node.child_by_field_name("type_arguments") else {
+        return;
+    };
+    let mut type_args = parse_explicit_type_args(type_args_node, content, helper);
+    if type_args.is_empty() {
+        return;
+    }
+    // AC-9: an explicit-prefix list shorter than the callee's arity is a
+    // partial instantiation; pad the inferred suffix with `<unknown>`.
+    let inference_kind = pad_partial(&mut type_args, callee_simple, ast_graph, helper);
+    stage_instantiates_edge(
+        call_node,
+        enclosing_fn,
+        callee_target,
+        call_span,
+        type_args,
+        inference_kind,
+        helper,
+    );
+}
+
+/// T2.5 generic-instantiation emitter for the `type_conversion_expression`
+/// path. tree-sitter-go parses an explicit-bracket generic call such as
+/// `Map[string, int](nil)` as a `type_conversion_expression` wrapping a
+/// `generic_type` (the parser cannot distinguish a generic instantiation call
+/// from a generic-type conversion). This is the same quirk the codebase
+/// already handles for `errors.AsType[E](err)`.
+///
+/// Because this node shape is shared with a generic *type* conversion
+/// (`type Box[T any] []T; _ = Box[int](nil)`), emission is gated on
+/// `generic_func_names` — the set of locally-declared generic functions. Only
+/// a bare `type_identifier` callee whose name is in that set produces an
+/// `Instantiates { type_args, Explicit }` edge (from a per-call CallSite to the
+/// generic callee). A generic-type conversion, or a package-qualified /
+/// non-local callee we cannot confirm is a function, emits nothing — the spec
+/// (§3.1) forbids false positives and accepts false negatives.
+fn try_emit_instantiation_for_type_conversion(
+    node: Node,
+    content: &[u8],
+    caller_context: &FunctionContext,
+    ast_graph: &ASTGraph,
+    helper: &mut GraphBuildHelper,
+) {
+    let generic_func_names = &ast_graph.generic_func_names;
+    // Locate the `generic_type` child and, within it, the callee type node and
+    // the `type_arguments` list.
+    let mut generic_type = None;
+    for i in 0..node.named_child_count() {
+        if let Some(child) = node.named_child(i as u32)
+            && child.kind() == "generic_type"
+        {
+            generic_type = Some(child);
+            break;
+        }
+    }
+    let Some(generic_type) = generic_type else {
+        return;
+    };
+
+    let mut callee_node = None;
+    let mut type_args_node = None;
+    for i in 0..generic_type.named_child_count() {
+        let Some(child) = generic_type.named_child(i as u32) else {
+            continue;
+        };
+        match child.kind() {
+            "type_arguments" => type_args_node = Some(child),
+            // The instantiated type/function name: a bare `type_identifier`
+            // for a local generic, or a `qualified_type` for `pkg.Name`.
+            "type_identifier" | "qualified_type" => {
+                if callee_node.is_none() {
+                    callee_node = Some(child);
+                }
+            }
+            _ => {}
+        }
+    }
+    let (Some(callee_node), Some(type_args_node)) = (callee_node, type_args_node) else {
+        return;
+    };
+
+    // Disambiguate a generic *function* call from a generic *type* conversion:
+    // both parse as `type_conversion_expression` wrapping `generic_type`. Only
+    // a bare `type_identifier` naming a locally-declared generic function is an
+    // instantiation; everything else (a generic type, a `qualified_type`, or an
+    // unknown cross-file name) emits nothing, per the spec's zero-false-positive
+    // rule.
+    if callee_node.kind() != "type_identifier" {
+        return;
+    }
+    let Ok(callee_simple_name) = callee_node.utf8_text(content) else {
+        return;
+    };
+    if !generic_func_names.contains(callee_simple_name) {
+        return;
+    }
+
+    let mut type_args = parse_explicit_type_args(type_args_node, content, helper);
+    if type_args.is_empty() {
+        return;
+    }
+
+    let Ok((callee_qualified, _is_builtin)) =
+        resolve_callee_qualified_name(callee_node, content, caller_context)
+    else {
+        return;
+    };
+
+    // AC-9: pad an explicit-prefix shorter than the callee's arity with
+    // `<unknown>` and mark the edge `Partial`.
+    let inference_kind = pad_partial(&mut type_args, Some(callee_simple_name), ast_graph, helper);
+
+    let span = span_from_node(node);
+    let enclosing_fn = ensure_caller_node(helper, caller_context);
+    let callee_target = helper.ensure_callee(&callee_qualified, span, CalleeKindHint::Function);
+    stage_instantiates_edge(
+        node,
+        enclosing_fn,
+        callee_target,
+        span,
+        type_args,
+        inference_kind,
+        helper,
+    );
+}
+
+// ===========================================================================
+// T2.4 channel pairing: ChannelPeer + Channel emission
+//
+// The alias analysis (rules 1-3, reassignment, the rule-2 candidate table)
+// lives in the pure `channels` module. The functions here are the emission
+// glue: each operation-site handler resolves the channel the operation acts on
+// and, when resolved, stages the `Channel` node, a per-operation `CallSite`
+// node, an explicit `Contains` edge from the enclosing function (so the MCP
+// body-expansion walk can find the site), and the `ChannelPeer` edge. When the
+// resolver returns `None`, nothing is emitted — the AC-4 zero-false-positive
+// fence.
+// ===========================================================================
+
+/// Resolve `operand` to its canonical channel and, when resolved, stage the
+/// `Channel` node, the operation-site `CallSite`, its `Contains` edge, and the
+/// `ChannelPeer` edge. A no-op under the AC-4 fence.
+fn emit_channel_op(
+    operand: Node,
+    op_site: Node,
+    direction: ChannelPeerDirection,
+    content: &[u8],
+    caller_context: &FunctionContext,
+    ast_graph: &ASTGraph,
+    helper: &mut GraphBuildHelper,
+) {
+    let func_node = enclosing_func_node(op_site, caller_context);
+    let Some(origin) = super::channels::resolve_channel(
+        operand,
+        content,
+        &ast_graph.package,
+        func_node,
+        &caller_context.name,
+        operand.start_byte(),
+        &ast_graph.reassignment,
+        &ast_graph.rule2,
+        caller_context.receiver_name.as_deref(),
+        caller_context.receiver_type.as_deref(),
+    ) else {
+        return;
+    };
+
+    let op_span = span_from_node(op_site);
+    let channel_id = helper.add_channel(
+        &origin.qualified_name,
+        Some(op_span),
+        origin.buffer_kind,
+        origin.capacity,
+    );
+    let dir_str = match direction {
+        ChannelPeerDirection::Send => "send",
+        ChannelPeerDirection::Receive => "receive",
+        ChannelPeerDirection::Close => "close",
+    };
+    let site_name = format!("<{dir_str}@{}>", op_site.start_byte());
+    let op_site_id = helper.add_node(&site_name, Some(op_span), NodeKind::CallSite);
+    let enclosing_fn = ensure_caller_node(helper, caller_context);
+    helper.add_contains_edge(enclosing_fn, op_site_id);
+    helper.add_channel_peer_edge_with_span(
+        op_site_id,
+        channel_id,
+        direction,
+        origin.buffer_kind,
+        op_span,
+    );
+}
+
+/// `ch <- v` send-statement (also covers `case ch <- v:` select arms by
+/// recursion).
+fn handle_send_statement(
+    node: Node,
+    content: &[u8],
+    caller_context: &FunctionContext,
+    ast_graph: &ASTGraph,
+    helper: &mut GraphBuildHelper,
+) {
+    let Some(operand) = node.child_by_field_name("channel") else {
+        return;
+    };
+    emit_channel_op(
+        operand,
+        node,
+        ChannelPeerDirection::Send,
+        content,
+        caller_context,
+        ast_graph,
+        helper,
+    );
+}
+
+/// `<-ch` receive (the unary `<-` operator). Early-returns for every other
+/// unary operator (`!`, `-`, `*`, `&`, ...).
+fn handle_receive_unary(
+    node: Node,
+    content: &[u8],
+    caller_context: &FunctionContext,
+    ast_graph: &ASTGraph,
+    helper: &mut GraphBuildHelper,
+) {
+    let Some(operator) = node.child_by_field_name("operator") else {
+        return;
+    };
+    if operator.utf8_text(content).ok() != Some("<-") {
+        return;
+    }
+    let Some(operand) = node.child_by_field_name("operand") else {
+        return;
+    };
+    emit_channel_op(
+        operand,
+        node,
+        ChannelPeerDirection::Receive,
+        content,
+        caller_context,
+        ast_graph,
+        helper,
+    );
+}
+
+/// `for v := range ch` over a channel. Emits nothing when the range operand is
+/// not a resolvable channel (a slice / map / array / string range), preserving
+/// the AC-4 fence.
+fn handle_range_clause_over_channel(
+    node: Node,
+    content: &[u8],
+    caller_context: &FunctionContext,
+    ast_graph: &ASTGraph,
+    helper: &mut GraphBuildHelper,
+) {
+    let Some(operand) = node.child_by_field_name("right") else {
+        return;
+    };
+    emit_channel_op(
+        operand,
+        node,
+        ChannelPeerDirection::Receive,
+        content,
+        caller_context,
+        ast_graph,
+        helper,
+    );
+}
+
+/// `close(ch)` builtin call — emits a `ChannelPeer{Close}` alongside the
+/// existing `Calls` edge to the `close` builtin.
+fn handle_close_builtin_call(
+    node: Node,
+    content: &[u8],
+    caller_context: &FunctionContext,
+    ast_graph: &ASTGraph,
+    helper: &mut GraphBuildHelper,
+) {
+    let Some(function) = node.child_by_field_name("function") else {
+        return;
+    };
+    if function.kind() != "identifier" || function.utf8_text(content).ok() != Some("close") {
+        return;
+    }
+    let Some(args) = node.child_by_field_name("arguments") else {
+        return;
+    };
+    let Some(operand) = named_children(args).into_iter().next() else {
+        return;
+    };
+    emit_channel_op(
+        operand,
+        node,
+        ChannelPeerDirection::Close,
+        content,
+        caller_context,
+        ast_graph,
+        helper,
+    );
+}
+
+// ===========================================================================
+// T2.5 Phase 4b: inferred / partial / default-typed generic instantiation
+//
+// The explicit-bracket forms (rule 1) are handled by
+// `emit_explicit_instantiation` (call_expression with a direct `type_arguments`
+// field) and `try_emit_instantiation_for_type_conversion`
+// (`Map[string, int](..)`, parsed as a type_conversion_expression). This
+// section adds the inference subset for `call_expression` sites WITHOUT
+// explicit type arguments: function-argument inference (rule 2), and Go's
+// untyped-constant default typing (rule 6). Partial-list arity padding (rule 3)
+// is layered onto the explicit paths via `pad_partial`.
+//
+// Signatures come from two sources (`02_DESIGN.md` §4.3): the file-local
+// generic-function declarations in `ASTGraph::generic_sigs`, or the
+// `stdlib_generics` catalog for out-of-workspace callees. The resolver is
+// conservative — any slot it cannot solve becomes the interned `<unknown>`
+// sentinel and downgrades the edge's `inference_kind` to `Unknown`, never a
+// false `Inferred`.
+// ===========================================================================
+
+/// A single inferred type-argument slot before interning.
+#[derive(Debug, Clone)]
+struct InferredArg {
+    /// Resolved type name, or the literal `"<unknown>"` sentinel.
+    name: String,
+    /// True when filled by Go's untyped-constant default rule (AC-10).
+    default_typed: bool,
+}
+
+impl InferredArg {
+    fn unknown() -> Self {
+        Self {
+            name: "<unknown>".to_string(),
+            default_typed: false,
+        }
+    }
+}
+
+/// Named children of `node`, in source order.
+fn named_children(node: Node) -> Vec<Node> {
+    let mut out = Vec::new();
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if child.is_named() {
+            out.push(child);
+        }
+    }
+    out
+}
+
+/// Count the `name`-field identifiers a parameter declaration introduces
+/// (`a, b T` declares two), clamped to at least one for unnamed params.
+fn param_decl_name_count(decl: Node) -> usize {
+    let mut cursor = decl.walk();
+    decl.children_by_field_name("name", &mut cursor).count()
+}
+
+/// Collect a generic declaration's type-parameter names in declaration order.
+fn collect_type_param_names(tp_node: Node, content: &[u8]) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut cursor = tp_node.walk();
+    for decl in tp_node.children(&mut cursor) {
+        if decl.kind() != "type_parameter_declaration" {
+            continue;
+        }
+        let mut name_cursor = decl.walk();
+        for name_node in decl.children_by_field_name("name", &mut name_cursor) {
+            if let Ok(name) = name_node.utf8_text(content)
+                && !name.is_empty()
+            {
+                names.push(name.to_string());
+            }
+        }
+    }
+    names
+}
+
+/// Per-file generic *function* signatures keyed by simple name.
+fn collect_local_generic_sigs(root: Node, content: &[u8]) -> HashMap<String, GenericSig> {
+    let mut sigs = HashMap::new();
+    let mut cursor = root.walk();
+    for child in root.children(&mut cursor) {
+        if child.kind() != "function_declaration" {
+            continue;
+        }
+        let Some(tp_node) = child.child_by_field_name("type_parameters") else {
+            continue;
+        };
+        let Some(name_node) = child.child_by_field_name("name") else {
+            continue;
+        };
+        let Ok(name) = name_node.utf8_text(content) else {
+            continue;
+        };
+        if name.is_empty() {
+            continue;
+        }
+        let type_params = collect_type_param_names(tp_node, content);
+        if type_params.is_empty() {
+            continue;
+        }
+        let params = match child.child_by_field_name("parameters") {
+            Some(params_node) => param_patterns_from_param_list(params_node, content, &type_params),
+            None => Vec::new(),
+        };
+        sigs.insert(
+            name.to_string(),
+            GenericSig {
+                type_params,
+                params,
+            },
+        );
+    }
+    sigs
+}
+
+/// Expand a `parameter_list` into one `ParamPattern` per call-argument
+/// position (a `a, b T` declaration yields two identical positions).
+fn param_patterns_from_param_list(
+    params_node: Node,
+    content: &[u8],
+    type_params: &[String],
+) -> Vec<ParamPattern> {
+    let mut patterns = Vec::new();
+    let mut cursor = params_node.walk();
+    for decl in params_node.children(&mut cursor) {
+        match decl.kind() {
+            "parameter_declaration" => {
+                let pattern = match decl.child_by_field_name("type") {
+                    Some(type_node) => param_pattern_from_type(type_node, content, type_params),
+                    None => ParamPattern::Other,
+                };
+                for _ in 0..param_decl_name_count(decl).max(1) {
+                    patterns.push(pattern.clone());
+                }
+            }
+            "variadic_parameter_declaration" => {
+                let pattern = match decl.child_by_field_name("type") {
+                    Some(type_node) => param_pattern_from_type(type_node, content, type_params),
+                    None => ParamPattern::Other,
+                };
+                patterns.push(pattern);
+            }
+            _ => {}
+        }
+    }
+    patterns
+}
+
+/// Classify a single parameter type node against the callee's type parameters.
+fn param_pattern_from_type(
+    type_node: Node,
+    content: &[u8],
+    type_params: &[String],
+) -> ParamPattern {
+    let is_tp = |name: &str| type_params.iter().any(|p| p == name);
+    match type_node.kind() {
+        "type_identifier" => {
+            if let Ok(name) = type_node.utf8_text(content)
+                && is_tp(name)
+            {
+                return ParamPattern::Whole(name.to_string());
+            }
+            ParamPattern::Other
+        }
+        "slice_type" => {
+            if let Some(elem) = type_node.child_by_field_name("element")
+                && elem.kind() == "type_identifier"
+                && let Ok(name) = elem.utf8_text(content)
+                && is_tp(name)
+            {
+                return ParamPattern::SliceElem(name.to_string());
+            }
+            ParamPattern::Other
+        }
+        "function_type" => {
+            let params = match type_node.child_by_field_name("parameters") {
+                Some(pl) => func_position_type_params(pl, content, type_params),
+                None => Vec::new(),
+            };
+            let results = match type_node.child_by_field_name("result") {
+                Some(r) => result_position_type_params(r, content, type_params),
+                None => Vec::new(),
+            };
+            ParamPattern::FuncSig { params, results }
+        }
+        _ => ParamPattern::Other,
+    }
+}
+
+/// For each function-parameter position, the type-parameter name carried there
+/// (or `None` for a concrete type), expanding multi-name declarations.
+fn func_position_type_params(
+    params_node: Node,
+    content: &[u8],
+    type_params: &[String],
+) -> Vec<Option<String>> {
+    let mut out = Vec::new();
+    let mut cursor = params_node.walk();
+    for decl in params_node.children(&mut cursor) {
+        if decl.kind() != "parameter_declaration" && decl.kind() != "variadic_parameter_declaration"
+        {
+            continue;
+        }
+        let slot = decl.child_by_field_name("type").and_then(|tn| {
+            if tn.kind() == "type_identifier" {
+                tn.utf8_text(content)
+                    .ok()
+                    .filter(|name| type_params.iter().any(|p| p == name))
+                    .map(str::to_string)
+            } else {
+                None
+            }
+        });
+        let reps = if decl.kind() == "variadic_parameter_declaration" {
+            1
+        } else {
+            param_decl_name_count(decl).max(1)
+        };
+        for _ in 0..reps {
+            out.push(slot.clone());
+        }
+    }
+    out
+}
+
+/// Type-parameter names carried by a function's result positions.
+fn result_position_type_params(
+    result_node: Node,
+    content: &[u8],
+    type_params: &[String],
+) -> Vec<Option<String>> {
+    match result_node.kind() {
+        "parameter_list" => func_position_type_params(result_node, content, type_params),
+        "type_identifier" => {
+            let slot = result_node
+                .utf8_text(content)
+                .ok()
+                .filter(|name| type_params.iter().any(|p| p == name))
+                .map(str::to_string);
+            vec![slot]
+        }
+        _ => vec![None],
+    }
+}
+
+/// Qualify the base identifiers of a Go type string with `package`, preserving
+/// leading `[]` / `*` / `...` modifiers. Predeclared types, already-qualified
+/// (`pkg.T`) types, and anything non-trivial (maps, funcs, generics) pass
+/// through unchanged.
+fn qualify_type_text(raw: &str, package: &str) -> String {
+    let raw = raw.trim();
+    if let Some(rest) = raw.strip_prefix("[]") {
+        return format!("[]{}", qualify_type_text(rest, package));
+    }
+    if let Some(rest) = raw.strip_prefix("...") {
+        return format!("...{}", qualify_type_text(rest, package));
+    }
+    if let Some(rest) = raw.strip_prefix('*') {
+        return format!("*{}", qualify_type_text(rest, package));
+    }
+    if raw.is_empty()
+        || raw.contains('.')
+        || raw.contains('[')
+        || raw.contains('(')
+        || raw.contains('{')
+        || raw.contains(' ')
+    {
+        return raw.to_string();
+    }
+    if is_go_predeclared_type(raw) || !is_plain_go_ident(raw) {
+        return raw.to_string();
+    }
+    format!("{package}.{raw}")
+}
+
+/// True for a bare Go identifier (`User`, `_v0`), false for anything carrying
+/// type punctuation.
+fn is_plain_go_ident(raw: &str) -> bool {
+    let mut chars = raw.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+/// The Go default type for an untyped constant literal node, or `None` when the
+/// node is not an untyped constant.
+fn default_type_for_const(arg: Node) -> Option<&'static str> {
+    match arg.kind() {
+        "int_literal" => Some("int"),
+        "float_literal" => Some("float64"),
+        "imaginary_literal" => Some("complex128"),
+        "rune_literal" => Some("rune"),
+        "interpreted_string_literal" | "raw_string_literal" => Some("string"),
+        "true" | "false" => Some("bool"),
+        _ => None,
+    }
+}
+
+/// The smallest `function_declaration` / `method_declaration` enclosing the
+/// call (its byte span equals `ctx.span`), used to scope local-declaration
+/// lookups. Falls back to the call node if the lookup fails.
+fn enclosing_func_node<'t>(call_node: Node<'t>, ctx: &FunctionContext) -> Node<'t> {
+    let mut root = call_node;
+    while let Some(parent) = root.parent() {
+        root = parent;
+    }
+    root.descendant_for_byte_range(ctx.span.0, ctx.span.1)
+        .unwrap_or(call_node)
+}
+
+/// Resolve the static type of a call-site argument expression to a qualified
+/// type string, scanning `func_node` for local declarations. Returns `None`
+/// for anything the Phase 1 subset cannot resolve.
+fn static_type_of_expr(
+    expr: Node,
+    func_node: Node,
+    content: &[u8],
+    package: &str,
+    depth: usize,
+) -> Option<String> {
+    if depth > 4 {
+        return None;
+    }
+    match expr.kind() {
+        "identifier" => {
+            let name = expr.utf8_text(content).ok()?;
+            find_local_decl_type(func_node, name, expr.start_byte(), content, package, depth)
+        }
+        "composite_literal" => {
+            let type_node = expr.child_by_field_name("type")?;
+            let text = type_node.utf8_text(content).ok()?;
+            Some(qualify_type_text(text, package))
+        }
+        "parenthesized_expression" => {
+            let inner = expr.named_child(0)?;
+            static_type_of_expr(inner, func_node, content, package, depth + 1)
+        }
+        _ => None,
+    }
+}
+
+/// Find the closest declaration of `name` lexically before `usage_byte` within
+/// `func_node` and return its (qualified) static type.
+fn find_local_decl_type(
+    func_node: Node,
+    name: &str,
+    usage_byte: usize,
+    content: &[u8],
+    package: &str,
+    depth: usize,
+) -> Option<String> {
+    let mut best: Option<(usize, String)> = None;
+    collect_decl_type(
+        func_node, name, usage_byte, content, package, depth, &mut best,
+    );
+    best.map(|(_, ty)| ty)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_decl_type(
+    node: Node,
+    name: &str,
+    usage_byte: usize,
+    content: &[u8],
+    package: &str,
+    depth: usize,
+    best: &mut Option<(usize, String)>,
+) {
+    let mut consider = |decl_byte: usize, ty: Option<String>| {
+        if decl_byte >= usage_byte {
+            return;
+        }
+        let Some(ty) = ty else {
+            return;
+        };
+        if best.as_ref().is_none_or(|(b, _)| decl_byte > *b) {
+            *best = Some((decl_byte, ty));
+        }
+    };
+
+    match node.kind() {
+        "short_var_declaration" => {
+            // Scope-guard: a binding inside a nested closure body is not in
+            // scope for a usage outside it (same fence as the channel resolver).
+            if super::channels::decl_visible_at(node, usage_byte)
+                && let (Some(left), Some(right)) = (
+                    node.child_by_field_name("left"),
+                    node.child_by_field_name("right"),
+                )
+            {
+                let lhs = named_children(left);
+                let rhs = named_children(right);
+                for (idx, target) in lhs.iter().enumerate() {
+                    if target.utf8_text(content).ok() == Some(name)
+                        && let Some(rhs_expr) = rhs.get(idx)
+                    {
+                        let ty = static_type_of_expr(*rhs_expr, node, content, package, depth + 1);
+                        consider(target.start_byte(), ty);
+                    }
+                }
+            }
+        }
+        "var_spec" | "const_spec" => {
+            let mut name_cursor = node.walk();
+            let matches_name = node
+                .children_by_field_name("name", &mut name_cursor)
+                .any(|n| n.utf8_text(content).ok() == Some(name));
+            if matches_name && super::channels::decl_visible_at(node, usage_byte) {
+                let ty = if let Some(type_node) = node.child_by_field_name("type") {
+                    type_node
+                        .utf8_text(content)
+                        .ok()
+                        .map(|t| qualify_type_text(t, package))
+                } else if let Some(value) = node.child_by_field_name("value") {
+                    named_children(value)
+                        .first()
+                        .and_then(|v| static_type_of_expr(*v, node, content, package, depth + 1))
+                } else {
+                    None
+                };
+                consider(node.start_byte(), ty);
+            }
+        }
+        "parameter_declaration" => {
+            let mut name_cursor = node.walk();
+            let matches_name = node
+                .children_by_field_name("name", &mut name_cursor)
+                .any(|n| n.utf8_text(content).ok() == Some(name));
+            if matches_name
+                && let Some(type_node) = node.child_by_field_name("type")
+                && let Ok(text) = type_node.utf8_text(content)
+            {
+                consider(node.start_byte(), Some(qualify_type_text(text, package)));
+            }
+        }
+        _ => {}
+    }
+
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        collect_decl_type(child, name, usage_byte, content, package, depth, best);
+    }
+}
+
+/// Record a type-parameter binding (first binding wins; a differing later
+/// binding flags the parameter as conflicting and forces `<unknown>`).
+fn record_binding(
+    bindings: &mut HashMap<String, InferredArg>,
+    conflict: &mut HashSet<String>,
+    type_param: &str,
+    value: InferredArg,
+) {
+    if conflict.contains(type_param) {
+        return;
+    }
+    match bindings.get(type_param) {
+        None => {
+            bindings.insert(type_param.to_string(), value);
+        }
+        Some(prev) => {
+            if prev.name != value.name {
+                conflict.insert(type_param.to_string());
+            }
+        }
+    }
+}
+
+/// The qualified type text written at each parameter position of a function
+/// literal argument, expanding multi-name declarations.
+fn func_literal_param_types(
+    params_node: Node,
+    content: &[u8],
+    package: &str,
+) -> Vec<Option<String>> {
+    let mut out = Vec::new();
+    let mut cursor = params_node.walk();
+    for decl in params_node.children(&mut cursor) {
+        if decl.kind() != "parameter_declaration" && decl.kind() != "variadic_parameter_declaration"
+        {
+            continue;
+        }
+        let ty = decl
+            .child_by_field_name("type")
+            .and_then(|tn| tn.utf8_text(content).ok())
+            .map(|t| qualify_type_text(t, package));
+        let reps = if decl.kind() == "variadic_parameter_declaration" {
+            1
+        } else {
+            param_decl_name_count(decl).max(1)
+        };
+        for _ in 0..reps {
+            out.push(ty.clone());
+        }
+    }
+    out
+}
+
+/// Bind type parameters from a function-value argument's parameter and result
+/// positions against a `FuncSig` pattern.
+fn bind_func_sig(
+    arg: Node,
+    content: &[u8],
+    package: &str,
+    pattern_params: &[Option<String>],
+    pattern_results: &[Option<String>],
+    bindings: &mut HashMap<String, InferredArg>,
+    conflict: &mut HashSet<String>,
+) {
+    if arg.kind() != "func_literal" {
+        return;
+    }
+    if let Some(params_node) = arg.child_by_field_name("parameters") {
+        let arg_types = func_literal_param_types(params_node, content, package);
+        for (i, slot) in pattern_params.iter().enumerate() {
+            if let Some(type_param) = slot
+                && let Some(Some(ty)) = arg_types.get(i)
+            {
+                record_binding(
+                    bindings,
+                    conflict,
+                    type_param,
+                    InferredArg {
+                        name: ty.clone(),
+                        default_typed: false,
+                    },
+                );
+            }
+        }
+    }
+    if let Some(result_node) = arg.child_by_field_name("result") {
+        let res_types = match result_node.kind() {
+            "parameter_list" => func_literal_param_types(result_node, content, package),
+            _ => vec![
+                result_node
+                    .utf8_text(content)
+                    .ok()
+                    .map(|t| qualify_type_text(t, package)),
+            ],
+        };
+        for (i, slot) in pattern_results.iter().enumerate() {
+            if let Some(type_param) = slot
+                && let Some(Some(ty)) = res_types.get(i)
+            {
+                record_binding(
+                    bindings,
+                    conflict,
+                    type_param,
+                    InferredArg {
+                        name: ty.clone(),
+                        default_typed: false,
+                    },
+                );
+            }
+        }
+    }
+}
+
+/// Run function-argument inference for a generic call without explicit type
+/// arguments. Returns the per-type-parameter slot vector (in declaration
+/// order) and the resulting `inference_kind` (`Inferred` when every slot
+/// resolved, `Unknown` otherwise).
+fn infer_instantiation(
+    call_node: Node,
+    content: &[u8],
+    func_node: Node,
+    sig: &GenericSig,
+    package: &str,
+) -> (Vec<InferredArg>, InferenceKind) {
+    let mut bindings: HashMap<String, InferredArg> = HashMap::new();
+    let mut conflict: HashSet<String> = HashSet::new();
+
+    let arg_list = call_node
+        .child_by_field_name("arguments")
+        .map(named_children)
+        .unwrap_or_default();
+
+    for (i, pattern) in sig.params.iter().enumerate() {
+        let Some(arg) = arg_list.get(i).copied() else {
+            break;
+        };
+        match pattern {
+            ParamPattern::Whole(type_param) => {
+                let value = static_type_of_expr(arg, func_node, content, package, 0)
+                    .map(|name| InferredArg {
+                        name,
+                        default_typed: false,
+                    })
+                    .or_else(|| {
+                        default_type_for_const(arg).map(|name| InferredArg {
+                            name: name.to_string(),
+                            default_typed: true,
+                        })
+                    });
+                if let Some(value) = value {
+                    record_binding(&mut bindings, &mut conflict, type_param, value);
+                }
+            }
+            ParamPattern::SliceElem(type_param) => {
+                if let Some(ty) = static_type_of_expr(arg, func_node, content, package, 0)
+                    && let Some(elem) = ty.strip_prefix("[]")
+                {
+                    record_binding(
+                        &mut bindings,
+                        &mut conflict,
+                        type_param,
+                        InferredArg {
+                            name: elem.to_string(),
+                            default_typed: false,
+                        },
+                    );
+                }
+            }
+            ParamPattern::FuncSig { params, results } => {
+                bind_func_sig(
+                    arg,
+                    content,
+                    package,
+                    params,
+                    results,
+                    &mut bindings,
+                    &mut conflict,
+                );
+            }
+            ParamPattern::Other => {}
+        }
+    }
+
+    let mut out = Vec::with_capacity(sig.type_params.len());
+    let mut all_resolved = true;
+    for type_param in &sig.type_params {
+        if conflict.contains(type_param) {
+            out.push(InferredArg::unknown());
+            all_resolved = false;
+            continue;
+        }
+        match bindings.get(type_param) {
+            Some(value) => out.push(value.clone()),
+            None => {
+                out.push(InferredArg::unknown());
+                all_resolved = false;
+            }
+        }
+    }
+
+    let kind = if all_resolved {
+        InferenceKind::Inferred
+    } else {
+        InferenceKind::Unknown
+    };
+    (out, kind)
+}
+
+/// Simple (unqualified) callee name for a call's `function` node, used to key
+/// the file-local generic-signature map.
+fn simple_callee_name(function_node: Node, content: &[u8]) -> Option<String> {
+    match function_node.kind() {
+        "identifier" => function_node.utf8_text(content).ok().map(str::to_string),
+        "selector_expression" => function_node
+            .child_by_field_name("field")
+            .and_then(|f| f.utf8_text(content).ok())
+            .map(str::to_string),
+        _ => None,
+    }
+}
+
+/// Pad an explicit type-argument vector with `<unknown>` up to the callee's
+/// arity when the callee is a known local generic and the user wrote fewer
+/// arguments than its type-parameter count (AC-9 partial instantiation).
+/// Returns `Partial` when padding occurred, `Explicit` otherwise.
+fn pad_partial(
+    type_args: &mut SmallVec<[TypeArg; 4]>,
+    callee_simple: Option<&str>,
+    ast_graph: &ASTGraph,
+    helper: &mut GraphBuildHelper,
+) -> InferenceKind {
+    if let Some(name) = callee_simple
+        && let Some(sig) = ast_graph.generic_sigs.get(name)
+        && type_args.len() < sig.type_params.len()
+    {
+        let unknown = helper.intern("<unknown>");
+        while type_args.len() < sig.type_params.len() {
+            type_args.push(TypeArg {
+                name: unknown,
+                default_typed: false,
+            });
+        }
+        return InferenceKind::Partial;
+    }
+    InferenceKind::Explicit
+}
+
+/// Emit an inferred `Instantiates` edge for a generic `call_expression` without
+/// explicit type arguments. No-op when the callee is not a known generic.
+#[allow(clippy::too_many_arguments)]
+fn emit_inferred_instantiation(
+    call_node: Node,
+    content: &[u8],
+    caller_context: &FunctionContext,
+    callee_qualified: &str,
+    callee_simple: Option<&str>,
+    enclosing_fn: UnifiedNodeId,
+    callee_target: UnifiedNodeId,
+    call_span: Span,
+    ast_graph: &ASTGraph,
+    helper: &mut GraphBuildHelper,
+) {
+    let sig = callee_simple
+        .and_then(|name| ast_graph.generic_sigs.get(name).cloned())
+        .or_else(|| stdlib_generics::lookup(callee_qualified));
+    let Some(sig) = sig else {
+        return;
+    };
+    if sig.type_params.is_empty() {
+        return;
+    }
+
+    let func_node = enclosing_func_node(call_node, caller_context);
+    let (inferred, inference_kind) =
+        infer_instantiation(call_node, content, func_node, &sig, &ast_graph.package);
+    if inferred.is_empty() {
+        return;
+    }
+
+    let type_args: SmallVec<[TypeArg; 4]> = inferred
+        .into_iter()
+        .map(|ia| TypeArg {
+            name: helper.intern(&ia.name),
+            default_typed: ia.default_typed,
+        })
+        .collect();
+
+    stage_instantiates_edge(
+        call_node,
+        enclosing_fn,
+        callee_target,
+        call_span,
+        type_args,
+        inference_kind,
+        helper,
+    );
+}
+
 fn process_call_expression_unified(
     node: Node,
     content: &[u8],
@@ -2017,6 +3291,40 @@ fn process_call_expression_unified(
         modifier,
         call_span,
     );
+
+    // T2.5: emit an `Instantiates` edge alongside the `Calls` edge (which is
+    // preserved unchanged — AC-12). A `call_expression` carrying a direct
+    // `type_arguments` field is an explicit instantiation (rare; receiver-method
+    // generics); otherwise we attempt function-argument inference for a generic
+    // callee (`slices.SortFunc(..)`, `min(1, 2)`). The dominant explicit form
+    // `Map[string, int](..)` parses as a `type_conversion_expression` and is
+    // handled in that dispatch arm, not here.
+    let callee_simple = simple_callee_name(function_node, content);
+    if node.child_by_field_name("type_arguments").is_some() {
+        emit_explicit_instantiation(
+            node,
+            content,
+            source_id,
+            target_id,
+            call_span,
+            callee_simple.as_deref(),
+            ast_graph,
+            helper,
+        );
+    } else {
+        emit_inferred_instantiation(
+            node,
+            content,
+            caller_context,
+            &callee_qualified,
+            callee_simple.as_deref(),
+            source_id,
+            target_id,
+            call_span,
+            ast_graph,
+            helper,
+        );
+    }
 
     // T3 Cluster C: also emit `Wraps` edges for `fmt.Errorf("%w", ...)`,
     // `errors.{Is,As,AsType,Join}` call sites. The `try_emit_wraps_for_call`

@@ -241,6 +241,23 @@ fn edge_metadata_summary(snapshot: &GraphSnapshot, kind: &EdgeKind) -> String {
                 .map(|p| p.to_string())
                 .unwrap_or_else(|| "none".to_string())
         ),
+        EdgeKind::ChannelPeer {
+            direction,
+            buffer_kind,
+        } => format!("channel_peer|direction={direction:?}|buffer_kind={buffer_kind:?}"),
+        EdgeKind::Instantiates {
+            type_args,
+            inference_kind,
+        } => {
+            let args: Vec<String> = type_args
+                .iter()
+                .map(|ta| format!("{}:{}", resolve_string(snapshot, ta.name), ta.default_typed))
+                .collect();
+            format!(
+                "instantiates|inference_kind={inference_kind:?}|type_args={}",
+                args.join(",")
+            )
+        }
     }
 }
 

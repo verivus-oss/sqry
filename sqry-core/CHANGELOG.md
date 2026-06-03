@@ -6,7 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
-## [18.0.0](https://github.com/verivus-oss/sqry/compare/v17.0.1...v18.0.0) - 2026-06-01
+## [19.0.0](https://github.com/verivus-oss/sqry/compare/v18.0.11...v19.0.0) - 2026-06-03
+
+### Added
+- *(go)* T2.4 channel pairing + T2.5 generic instantiation tracking## [18.0.0](https://github.com/verivus-oss/sqry/compare/v17.0.1...v18.0.0) - 2026-06-01
 
 ### Added
 - *(go)* T3 — error chains + context propagation + build tags ([#279](https://github.com/verivus-oss/sqry/pull/279))## [17.0.0](https://github.com/verivus-oss/sqry/compare/v16.0.8...v17.0.0) - 2026-05-31

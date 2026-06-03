@@ -1381,6 +1381,9 @@ impl<'a> UnifiedJsonExporter<'a> {
             EdgeKind::SealedPermit => "sealed_permit",
             // T3 error chains (Go)
             EdgeKind::Wraps { .. } => "wraps",
+            // T2.4 / T2.5 Go channel pairing + generic instantiation
+            EdgeKind::ChannelPeer { .. } => "channel_peer",
+            EdgeKind::Instantiates { .. } => "instantiates",
         }
     }
 }

@@ -1051,6 +1051,12 @@ fn remap_edge_kind_local_string_ids(kind: &mut EdgeKind, remap: &HashMap<StringI
             remap_required_local(protocol, remap);
             remap_option_local(metadata, remap);
         }
+        // T2.5: remap each TypeArg.name local StringId.
+        EdgeKind::Instantiates { type_args, .. } => {
+            for ta in type_args.iter_mut() {
+                remap_required_local(&mut ta.name, remap);
+            }
+        }
         // Variants without StringId fields — exhaustive, no wildcard.
         EdgeKind::Defines
         | EdgeKind::Contains
@@ -1075,7 +1081,9 @@ fn remap_edge_kind_local_string_ids(kind: &mut EdgeKind, remap: &HashMap<StringI
         | EdgeKind::CompanionOf
         | EdgeKind::SealedPermit
         // T3 Wraps carries WrapKind (Copy) + Option<u16>; no StringId fields.
-        | EdgeKind::Wraps { .. } => {}
+        | EdgeKind::Wraps { .. }
+        // T2.4 ChannelPeer carries only Copy enums; no StringId fields.
+        | EdgeKind::ChannelPeer { .. } => {}
     }
 }
 
@@ -1275,6 +1283,14 @@ pub fn remap_edge_kind_string_ids(kind: &mut EdgeKind, remap: &HashMap<StringId,
             remap_string_id(protocol, remap);
             remap_option_string_id(metadata, remap);
         }
+        // T2.5: remap each TypeArg.name StringId. This is the site actually
+        // called during the Phase 4d edge-bulk-insert pipeline; without it
+        // every TypeArg.name dangles after global string dedup.
+        EdgeKind::Instantiates { type_args, .. } => {
+            for ta in type_args.iter_mut() {
+                remap_string_id(&mut ta.name, remap);
+            }
+        }
         // === Variants WITHOUT StringId fields — exhaustive, no wildcard ===
         EdgeKind::Defines
         | EdgeKind::Contains
@@ -1299,7 +1315,9 @@ pub fn remap_edge_kind_string_ids(kind: &mut EdgeKind, remap: &HashMap<StringId,
         | EdgeKind::CompanionOf
         | EdgeKind::SealedPermit
         // T3 Wraps carries WrapKind (Copy) + Option<u16>; no StringId fields.
-        | EdgeKind::Wraps { .. } => {}
+        | EdgeKind::Wraps { .. }
+        // T2.4 ChannelPeer carries only Copy enums; no StringId fields.
+        | EdgeKind::ChannelPeer { .. } => {}
     }
 }
 

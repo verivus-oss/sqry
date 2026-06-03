@@ -47,6 +47,9 @@ use super::staging::{
     CIndirectStagingPayload, PendingBinding, PendingIndirectCallsite, StagingGraph,
 };
 use crate::graph::node::{Language, Span};
+use crate::graph::unified::edge::kind::{
+    ChannelBufferKind, ChannelPeerDirection, InferenceKind, TypeArg,
+};
 use crate::graph::unified::edge::{
     EdgeKind, ExportKind, FfiConvention, HttpMethod, ResolvedVia, TableWriteOp, WrapKind,
 };
@@ -1072,6 +1075,74 @@ impl<'a> GraphBuildHelper<'a> {
             },
             self.file_id,
             spans,
+        );
+    }
+
+    /// Stage a `NodeKind::Channel` node for a Go channel alias-class (T2.4).
+    ///
+    /// Dedupes by `(qualified_name, NodeKind::Channel)` through the canonical
+    /// node cache, so all operation sites on the same alias-class collapse to
+    /// one node. `buffer_kind` / `capacity` classify the channel's
+    /// `make(chan T, N)` form; in Phase 1 the classifier is carried onto each
+    /// `ChannelPeer` edge (where the planner consumes it) rather than into a
+    /// separate node-metadata payload, so the parameters document the
+    /// classification at the call site without a persistence-format addition.
+    pub fn add_channel(
+        &mut self,
+        qualified_name: &str,
+        span: Option<Span>,
+        _buffer_kind: ChannelBufferKind,
+        _capacity: Option<u32>,
+    ) -> NodeId {
+        self.add_node(qualified_name, span, NodeKind::Channel)
+    }
+
+    /// Stage a `ChannelPeer` edge from an operation-site CallSite to its
+    /// canonical `Channel` node (T2.4).
+    pub fn add_channel_peer_edge_with_span(
+        &mut self,
+        op_site: NodeId,
+        channel: NodeId,
+        direction: ChannelPeerDirection,
+        buffer_kind: ChannelBufferKind,
+        span: Span,
+    ) {
+        self.staging.add_edge_with_spans(
+            op_site,
+            channel,
+            EdgeKind::ChannelPeer {
+                direction,
+                buffer_kind,
+            },
+            self.file_id,
+            vec![span],
+        );
+    }
+
+    /// Stage an `Instantiates` edge from a generic call-site CallSite to the
+    /// generic function / method definition (T2.5).
+    ///
+    /// `type_args` is taken by value so the Go plugin can build it via
+    /// `SmallVec::from_iter(...)` and move ownership. The `TypeArg.name`
+    /// `StringId`s are interned through this helper's interner, so they are
+    /// remapped to global ids during the commit's string-table dedup.
+    pub fn add_instantiates_edge_with_span(
+        &mut self,
+        call_site: NodeId,
+        target: NodeId,
+        type_args: smallvec::SmallVec<[TypeArg; 4]>,
+        inference_kind: InferenceKind,
+        span: Span,
+    ) {
+        self.staging.add_edge_with_spans(
+            call_site,
+            target,
+            EdgeKind::Instantiates {
+                type_args,
+                inference_kind,
+            },
+            self.file_id,
+            vec![span],
         );
     }
 

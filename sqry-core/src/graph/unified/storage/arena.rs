@@ -107,8 +107,8 @@ pub struct Slot<T> {
 
 impl<T> Slot<T> {
     /// Creates a new vacant slot with the given generation and next free.
-    #[allow(dead_code)] // Used by Compaction (Step 15)
-    fn new_vacant(generation: u64, next_free: Option<u32>) -> Self {
+    #[allow(dead_code)] // Used by Compaction (Step 15) + V13→V14 arena translation
+    pub(crate) fn new_vacant(generation: u64, next_free: Option<u32>) -> Self {
         Self {
             generation,
             state: SlotState::Vacant { next_free },
@@ -452,6 +452,26 @@ impl NodeArena {
             slots: Vec::with_capacity(capacity),
             free_head: None,
             len: 0,
+        }
+    }
+
+    /// Reconstructs an arena from its raw component parts.
+    ///
+    /// Used by the V13→V14 snapshot upconvert to rebuild the live arena from
+    /// translated slots while preserving slot indices, generations, and the
+    /// free list exactly (so existing `NodeId` references in edges stay
+    /// valid). The caller is responsible for the slot/free-list invariants;
+    /// this is a thin structural constructor, not a validating one.
+    #[must_use]
+    pub(crate) fn from_raw_parts(
+        slots: Vec<Slot<NodeEntry>>,
+        free_head: Option<u32>,
+        len: usize,
+    ) -> Self {
+        Self {
+            slots,
+            free_head,
+            len,
         }
     }
 

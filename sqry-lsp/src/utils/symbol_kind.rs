@@ -33,6 +33,7 @@ pub fn node_kind_to_symbol_kind(kind: NodeKind) -> SymbolKind {
         | NodeKind::StyleRule
         | NodeKind::StyleAtRule
         | NodeKind::Lifetime
+        | NodeKind::Channel
         | NodeKind::Other => SymbolKind::OBJECT,
     }
 }
@@ -201,6 +202,10 @@ mod tests {
         );
         assert_eq!(
             node_kind_to_symbol_kind(NodeKind::StyleAtRule),
+            SymbolKind::OBJECT
+        );
+        assert_eq!(
+            node_kind_to_symbol_kind(NodeKind::Channel),
             SymbolKind::OBJECT
         );
         assert_eq!(

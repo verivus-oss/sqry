@@ -6,7 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
-## [18.0.2](https://github.com/verivus-oss/sqry/compare/v18.0.1...v18.0.2) - 2026-06-01
+## [19.0.2](https://github.com/verivus-oss/sqry/compare/v19.0.1...v19.0.2) - 2026-06-03
+
+### Other
+- update Cargo.toml dependencies
+## [19.0.1](https://github.com/verivus-oss/sqry/compare/v19.0.0...v19.0.1) - 2026-06-03
+
+### Other
+- update Cargo.toml dependencies
+## [19.0.0](https://github.com/verivus-oss/sqry/compare/v18.0.11...v19.0.0) - 2026-06-03
+
+### Added
+- *(go)* T2.4 channel pairing + T2.5 generic instantiation tracking## [18.0.2](https://github.com/verivus-oss/sqry/compare/v18.0.1...v18.0.2) - 2026-06-01
 
 ### Other
 - update Cargo.toml dependencies

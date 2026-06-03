@@ -391,6 +391,21 @@ pub(crate) fn translate_edge_v11_to_v10(v11: EdgeKind) -> EdgeKindV10 {
         EdgeKind::Wraps { .. } => {
             unreachable!("EdgeKind::Wraps has no V10 representation; V10 predates T3 error chains")
         }
+        // `EdgeKind::ChannelPeer` / `EdgeKind::Instantiates` (T2.4 / T2.5)
+        // postdate V10 by even more schema versions than Wraps. Same
+        // unreachable-by-construction rationale: this down-converter only
+        // runs against V9 edges and hand-crafted V10 fixtures, neither of
+        // which can contain these variants.
+        EdgeKind::ChannelPeer { .. } => {
+            unreachable!(
+                "EdgeKind::ChannelPeer has no V10 representation; V10 predates Go channel pairing"
+            )
+        }
+        EdgeKind::Instantiates { .. } => {
+            unreachable!(
+                "EdgeKind::Instantiates has no V10 representation; V10 predates generic instantiation"
+            )
+        }
     }
 }
 

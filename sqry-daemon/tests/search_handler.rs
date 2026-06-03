@@ -290,6 +290,7 @@ fn node_kind_to_str_local(kind: NodeKind) -> &'static str {
         NodeKind::LambdaTarget => "lambda_target",
         NodeKind::JavaModule => "java_module",
         NodeKind::EnumConstant => "enum_constant",
+        NodeKind::Channel => "channel",
         NodeKind::Other => "other",
     }
 }

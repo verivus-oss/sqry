@@ -72,9 +72,9 @@ use crate::execution::git_worktree;
 use crate::execution::graph_builders::build_graph_metadata;
 use crate::execution::location::node_location_for_reporting;
 use crate::execution::types::{
-    CrossLanguageEdgesData, DependencyImpactData, FindUnusedData, ImpactedSymbol, NodeChange,
-    NodeRefData, PositionData, RangeData, RelationEdgeData, SemanticDiffData, ToolExecution,
-    UnusedSymbolData,
+    CrossLanguageEdgesData, DependencyImpactData, EdgeChange, EdgeTypeArg, FindUnusedData,
+    ImpactedSymbol, NodeChange, NodeRefData, PositionData, RangeData, RelationEdgeData,
+    SemanticDiffData, ToolExecution, UnusedSymbolData,
 };
 use crate::execution::utils::{duration_to_ms, paginate};
 
@@ -779,6 +779,39 @@ pub fn execute_semantic_diff(args: &SemanticDiffArgs) -> Result<ToolExecution<Se
         executor: engine.executor_arc(),
     };
     inner::execute_semantic_diff(&ctx, args, start)
+}
+
+/// Convert sqry-db [`sqry_db::EdgeDelta`] records into the MCP wire-format
+/// [`EdgeChange`] list (T2 §7.6). The `DiffEdgeKey` discriminator and resolved
+/// type-argument vector are flattened onto the wire struct.
+fn edge_deltas_to_wire(deltas: Vec<sqry_db::EdgeDelta>) -> Vec<EdgeChange> {
+    deltas
+        .into_iter()
+        .map(|delta| {
+            let (discriminator, type_args) = match delta.kind {
+                sqry_db::DiffEdgeKey::ChannelPeer { direction } => (direction, Vec::new()),
+                sqry_db::DiffEdgeKey::Instantiates {
+                    inference_kind,
+                    type_args,
+                } => (
+                    inference_kind,
+                    type_args
+                        .into_iter()
+                        .map(|ta| EdgeTypeArg {
+                            name: ta.name,
+                            default_typed: ta.default_typed,
+                        })
+                        .collect(),
+                ),
+            };
+            EdgeChange {
+                source: delta.source_qn,
+                target: delta.target_qn,
+                discriminator,
+                type_args,
+            }
+        })
+        .collect()
 }
 
 /// Convert a sqry-db [`sqry_db::NodeChange`] into the MCP wire-format
@@ -1853,6 +1886,10 @@ pub(crate) mod inner {
                     changes: Vec::new(),
                     summary: summarise_wire_changes(&[]),
                     total: 0,
+                    channel_peer_edges_added: Vec::new(),
+                    channel_peer_edges_removed: Vec::new(),
+                    instantiates_edges_added: Vec::new(),
+                    instantiates_edges_removed: Vec::new(),
                 },
                 used_index: false,
                 used_graph: false,
@@ -1936,6 +1973,16 @@ pub(crate) mod inner {
         let (page_slice, next_page_token) = paginate(&changes, &args.pagination);
         let page_changes = page_slice.to_vec();
 
+        // Edge axis (T2 §7.6): ChannelPeer / Instantiates deltas. These are a
+        // separate axis from the node `changes` above — not paginated or filtered
+        // by the node-oriented `change_types` / `symbol_kinds` predicates.
+        let channel_peer_edges_added = edge_deltas_to_wire(diff_output.channel_peer_edges_added);
+        let channel_peer_edges_removed =
+            edge_deltas_to_wire(diff_output.channel_peer_edges_removed);
+        let instantiates_edges_added = edge_deltas_to_wire(diff_output.instantiates_edges_added);
+        let instantiates_edges_removed =
+            edge_deltas_to_wire(diff_output.instantiates_edges_removed);
+
         let execution_ms = duration_to_ms(start.elapsed());
 
         tracing::debug!(
@@ -1952,6 +1999,10 @@ pub(crate) mod inner {
                 changes: page_changes,
                 summary,
                 total: total as u64,
+                channel_peer_edges_added,
+                channel_peer_edges_removed,
+                instantiates_edges_added,
+                instantiates_edges_removed,
             },
             used_index: false,
             used_graph: true,

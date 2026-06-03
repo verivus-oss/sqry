@@ -3376,6 +3376,26 @@ fn edge_metadata_json(
             "kind": kind,
             "chain_position": chain_position,
         }),
+        UnifiedEdgeKind::ChannelPeer {
+            direction,
+            buffer_kind,
+        } => json!({
+            "direction": direction,
+            "buffer_kind": buffer_kind,
+        }),
+        UnifiedEdgeKind::Instantiates {
+            type_args,
+            inference_kind,
+        } => json!({
+            "type_args": type_args
+                .iter()
+                .map(|ta| json!({
+                    "name": resolve_string_id(snapshot, ta.name),
+                    "default_typed": ta.default_typed,
+                }))
+                .collect::<Vec<_>>(),
+            "inference_kind": inference_kind,
+        }),
     }
 }
 

@@ -15,8 +15,10 @@
 //! No new semantics here. New behaviour must go via `sqry_core::graph::GraphBuilder` and the language-specific `*GraphBuilder` (see this module's export) to build `CodeGraph`.
 
 pub(crate) mod build_constraints;
+pub(crate) mod channels;
 mod graph_builder;
 pub(crate) mod local_scopes;
+pub(crate) mod stdlib_generics;
 mod types;
 mod wraps;
 

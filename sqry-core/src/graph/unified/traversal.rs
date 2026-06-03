@@ -133,6 +133,15 @@ impl From<&EdgeKind> for EdgeClassification {
             // disposition as MacroExpansion / LifetimeConstraint, which
             // are likewise filtered out of call traversal.
             EdgeKind::Wraps { .. } => Self::Reference,
+
+            // ---- T2.4 / T2.5 Go channel pairing + generic instantiation ----
+            // Neither edge participates in standard callers/callees traversal
+            // (the `Calls` edge is emitted separately for generic calls, and
+            // channel ops are not calls). Mapping to `Reference` matches the
+            // `Wraps` disposition — a neutral label that keeps these edges out
+            // of call-flow classification while leaving them walkable by
+            // consumers that opt into the kind explicitly.
+            EdgeKind::ChannelPeer { .. } | EdgeKind::Instantiates { .. } => Self::Reference,
         }
     }
 }

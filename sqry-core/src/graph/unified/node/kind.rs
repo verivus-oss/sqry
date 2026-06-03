@@ -145,6 +145,27 @@ pub enum NodeKind {
     /// Enum constant (e.g., `MONDAY` in `enum DayOfWeek`).
     EnumConstant,
 
+    // ==================== Go Concurrency (T2.4) ====================
+    /// A statically-resolvable channel symbol (Go).
+    ///
+    /// Represents the alias-class of channel values traced by the
+    /// sqry-lang-go Phase 1 alias resolver (see
+    /// `docs/development/go-channels-and-generic-instantiation/02_DESIGN.md` §4.1).
+    /// Each `Channel` node is the *target* of one or more `ChannelPeer` edges
+    /// emitted from send / receive / close operation sites. There is one
+    /// `Channel` node per alias-class, not one per operation.
+    ///
+    /// Qualified-name format:
+    ///   * named-local:  `{package}.{containing_function}.{var_name}`
+    ///   * parameter:    `{package}.{function}.{param_name}`
+    ///   * struct field: `{package}.{struct_name}.{field_name}`
+    ///
+    /// Inserted immediately before `Other` (which carries `#[serde(other)]`
+    /// and must remain the last variant). This shifts `Other`'s positional
+    /// postcard discriminant, which is why the snapshot format bumps V13 to
+    /// V14 with a frozen `NodeKindV13` wire mirror (see persistence §6.1).
+    Channel,
+
     // ==================== Extensibility ====================
     /// A custom or language-specific node kind.
     ///
@@ -241,6 +262,7 @@ impl NodeKind {
             Self::LambdaTarget => "lambda_target",
             Self::JavaModule => "java_module",
             Self::EnumConstant => "enum_constant",
+            Self::Channel => "channel",
             Self::Other => "other",
         }
     }
@@ -284,6 +306,7 @@ impl NodeKind {
             "lambda_target" => Some(Self::LambdaTarget),
             "java_module" => Some(Self::JavaModule),
             "enum_constant" => Some(Self::EnumConstant),
+            "channel" => Some(Self::Channel),
             "other" => Some(Self::Other),
             _ => None,
         }

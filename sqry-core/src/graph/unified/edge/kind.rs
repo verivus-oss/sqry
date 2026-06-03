@@ -15,6 +15,7 @@
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
+use smallvec::SmallVec;
 
 use super::super::string::StringId;
 
@@ -358,6 +359,76 @@ pub enum WrapKind {
     ErrorsJoin,
 }
 
+/// Direction of a channel operation (Go T2.4).
+///
+/// Discriminates whether a [`EdgeKind::ChannelPeer`] edge records a send,
+/// a receive, or a close on the target [`super::super::node::kind::NodeKind::Channel`].
+/// Aligns with GoGuard's producer / consumer abstraction (see
+/// `docs/development/go-channels-and-generic-instantiation/02_DESIGN.md` §1.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChannelPeerDirection {
+    /// `ch <- v` send.
+    Send,
+    /// `<-ch` receive (expression, short-var, range, select receive arm).
+    Receive,
+    /// `close(ch)` builtin call.
+    Close,
+}
+
+/// Buffer classification of the channel an operation acts on (Go T2.4).
+///
+/// Cached on each [`EdgeKind::ChannelPeer`] edge from the owning `Channel`
+/// node so the planner can filter without joining through the node. The
+/// numeric capacity (for `Buffered`) lives on the `Channel` node metadata,
+/// not on the edge, to keep edge payloads compact across millions of edges.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChannelBufferKind {
+    /// `make(chan T)` — zero capacity.
+    Unbuffered,
+    /// `make(chan T, N)` with `N` resolved to a constant.
+    Buffered,
+    /// Capacity expression was non-constant, or the channel was reached
+    /// through a parameter / struct-field where the alias resolver did not
+    /// see the original `make` call.
+    Unknown,
+}
+
+/// How a generic instantiation's type-argument vector was derived (Go T2.5).
+///
+/// Carried on each [`EdgeKind::Instantiates`] edge. See
+/// `docs/development/go-channels-and-generic-instantiation/02_DESIGN.md` §3.2.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InferenceKind {
+    /// All type arguments were explicit (`Map[string, int](...)`).
+    Explicit,
+    /// All type arguments were inferred from function-argument types.
+    Inferred,
+    /// Explicit prefix + inferred / unknown suffix (the boldlygo.tech
+    /// "right-to-left omission" subset). `apply[[]int](nil, f)`.
+    Partial,
+    /// One or more slots were unsolvable by Phase 1 rules and recorded as
+    /// the `<unknown>` sentinel.
+    Unknown,
+}
+
+/// One slot in a generic instantiation's type-argument vector (Go T2.5).
+///
+/// `Copy` and 8 bytes (4-byte `StringId` + 1-byte bool + 3 padding) so a
+/// `SmallVec<[TypeArg; 4]>` inlines its common case on the stack.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct TypeArg {
+    /// Interned type-name string. The exact string `"<unknown>"` for
+    /// unresolved slots (no separate sentinel discriminant — see §4.4).
+    pub name: StringId,
+    /// True when the slot was filled by Go's untyped-constant default rule
+    /// (`int` for untyped int, `float64` for untyped float, etc. — AC-10).
+    /// Always `false` for the `<unknown>` sentinel.
+    pub default_typed: bool,
+}
+
 /// Enumeration of edge relationship types in the graph.
 ///
 /// Each variant represents a distinct kind of relationship between nodes.
@@ -652,6 +723,57 @@ pub enum EdgeKind {
         /// `None` for single-value forms.
         chain_position: Option<u16>,
     },
+
+    // ==================== T2.4: Go channel pairing ====================
+    /// Channel send / receive / close peer edge (Go T2.4).
+    ///
+    /// Edge **source**: a [`super::super::node::kind::NodeKind::CallSite`]
+    /// representing the operation site (the `ch <- v` send-statement node,
+    /// the `<-ch` unary-expr node, the `range ch` clause, the
+    /// `case ch <- v:` / `case <-ch:` select arm, or the `close(ch)`
+    /// builtin-call node).
+    ///
+    /// Edge **target**: a [`super::super::node::kind::NodeKind::Channel`]
+    /// representing the alias-class of the channel.
+    ///
+    /// Multiple edges per channel are expected — one per operation site.
+    /// `trace_path` walks send→channel←receive in two hops; consumers that
+    /// want a one-hop view filter by `direction` on both edges.
+    ///
+    /// Appended after the current terminal `Wraps` (T3 #279) so all existing
+    /// variant indices, including `Wraps`, are preserved on the postcard
+    /// wire. Rides the V13→V14 snapshot bump driven by the `NodeKind`
+    /// change (persistence §6.1).
+    ChannelPeer {
+        /// Whether this operation sends, receives, or closes.
+        direction: ChannelPeerDirection,
+        /// Cached classifier from the `Channel` node, replicated on the
+        /// edge so the planner can filter without joining through the
+        /// channel node.
+        buffer_kind: ChannelBufferKind,
+    },
+
+    // ==================== T2.5: Generic instantiation ====================
+    /// Generic-function call-site instantiation (Go T2.5; reusable for
+    /// Rust / TS / Java in later phases).
+    ///
+    /// Edge **source**: a [`super::super::node::kind::NodeKind::CallSite`]
+    /// for the generic call. Edge **target**: the generic function / method
+    /// definition.
+    ///
+    /// The edge **co-exists** with the existing `Calls` edge at the same
+    /// call site (AC-12 requires the `Calls` edge unchanged in every case);
+    /// the `Calls` edge carries `argument_count` and `is_async`, the
+    /// `Instantiates` edge carries the type-argument vector.
+    Instantiates {
+        /// Type arguments in declaration order. Each slot is a resolved
+        /// type name or the interned `"<unknown>"` sentinel.
+        /// `SmallVec<[TypeArg; 4]>` keeps the common 1-4-arg case on the
+        /// stack (most Go generics are 1-2 type parameters).
+        type_args: SmallVec<[TypeArg; 4]>,
+        /// Discriminator on how the type-arg vector was derived.
+        inference_kind: InferenceKind,
+    },
 }
 
 impl EdgeKind {
@@ -804,6 +926,8 @@ impl EdgeKind {
             Self::CompanionOf => "companion_of",
             Self::SealedPermit => "sealed_permit",
             Self::Wraps { .. } => "wraps",
+            Self::ChannelPeer { .. } => "channel_peer",
+            Self::Instantiates { .. } => "instantiates",
         }
     }
 
@@ -811,8 +935,12 @@ impl EdgeKind {
     ///
     /// Used for byte-level admission control in the delta buffer.
     /// Estimates are conservative approximations based on variant data.
+    ///
+    /// Not `const fn`: the `Instantiates` arm reads `type_args.len()`
+    /// (`SmallVec::len` is not const). The only caller
+    /// (`EdgeDelta::size`) is a runtime path.
     #[must_use]
-    pub const fn estimated_size(&self) -> usize {
+    pub fn estimated_size(&self) -> usize {
         // Base enum discriminant: 1 byte
         // StringId: 4 bytes each
         // Option<StringId>: 5 bytes (1 discriminant + 4 payload)
@@ -873,6 +1001,13 @@ impl EdgeKind {
 
             // WrapKind: 1 + Option<u16>: 3 = 4
             Self::Wraps { .. } => 4,
+
+            // discriminant + ChannelPeerDirection + ChannelBufferKind: 1 + 1 + 1
+            Self::ChannelPeer { .. } => 3,
+
+            // discriminant + len + N*(StringId + bool) + InferenceKind:
+            // 1 + 4 + (len * 5) + 1
+            Self::Instantiates { type_args, .. } => 6 + type_args.len() * 5,
         }
     }
 }

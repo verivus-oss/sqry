@@ -14,7 +14,7 @@ use std::collections::HashMap;
 
 use super::format::{
     FormatVersion, GraphHeader, MAGIC_BYTES_V9, MAGIC_BYTES_V10, MAGIC_BYTES_V11, MAGIC_BYTES_V12,
-    MAGIC_BYTES_V13, VERSION,
+    MAGIC_BYTES_V14, VERSION,
 };
 use super::manifest::ConfigProvenance;
 use crate::config::buffers::max_snapshot_bytes;
@@ -386,19 +386,68 @@ struct GraphSnapshotDataV12 {
     dispatch_tables_table: DispatchTables,
 }
 
-/// Serializable snapshot of the graph state (V13 — T3 error chains).
+/// Serializable snapshot of the graph state (V13 — T3 error chains) — frozen
+/// wire mirror for the V13 read path.
 ///
-/// V13 is shape-identical to V12 on the wire — no fields are added or removed.
-/// The version bump exists so that V12 readers reject snapshots whose
-/// `EdgeKind` arena contains the T3 [`crate::graph::unified::edge::EdgeKind::Wraps`]
-/// variant (added in T3 Cluster A) rather than silently failing to decode an
-/// unknown discriminant.
-///
-/// Because the layout is byte-identical, this is a type alias rather than a
-/// duplicated struct; the postcard wire format is therefore guaranteed-equal
-/// by construction (no field-rename drift possible). The corresponding
-/// upconvert ([`upconvert_v12_to_v13`]) is an identity-mapping function.
-type GraphSnapshotDataV13 = GraphSnapshotDataV12;
+/// On the wire V13 is shape-identical to V12 **except** for the `NodeKind`
+/// layout: T2 (V14) inserts `NodeKind::Channel` before `Other`, shifting
+/// `Other`'s positional postcard discriminant. So the V13 reader can no longer
+/// decode the node arena / kind index into the live types — it would misread
+/// every legacy `Other` node as `Channel`. This struct freezes the two
+/// `NodeKind`-bearing fields to their V13 wire layout via the
+/// [`super::legacy_v13`] mirror types; every other field reuses the live type
+/// (additive `EdgeKind` variants decode legacy edge bytes unchanged, exactly
+/// as T3's `Wraps` append did). [`upconvert_v13_to_v14`] translates the arena
+/// and rebuilds the live indices.
+#[derive(Debug, Serialize, Deserialize)]
+struct GraphSnapshotDataV13 {
+    /// Node storage — frozen V13 `NodeKind` layout.
+    nodes: super::legacy_v13::NodeArenaV13,
+    /// Edge storage (forward + reverse). Live type: additive `EdgeKind`
+    /// variants decode V13 edge bytes unchanged.
+    edges: BidirectionalEdgeStore,
+    /// String interner.
+    strings: StringInterner,
+    /// File registry.
+    files: FileRegistry,
+    /// Auxiliary indices — frozen V13 `NodeKind`-keyed `kind_index` layout.
+    indices: super::legacy_v13::AuxiliaryIndicesV13,
+    /// Sparse metadata store keyed by full `NodeId`.
+    macro_metadata: NodeMetadataStore,
+    /// Dense node provenance (Phase 1 fact layer).
+    node_provenance: NodeProvenanceStore,
+    /// Dense edge provenance (Phase 1 fact layer).
+    edge_provenance: EdgeProvenanceStore,
+    /// Phase 2: generational scope arena.
+    scope_arena: ScopeArena,
+    /// Phase 2: alias derivation table.
+    alias_table: AliasTable,
+    /// Phase 2: shadow derivation table.
+    shadow_table: ShadowTable,
+    /// Phase 2: scope provenance store.
+    scope_provenance: ScopeProvenanceStore,
+    /// Phase 3: per-file segment table.
+    file_segments: FileSegmentTable,
+    /// Phase A (U09): C indirect-call resolver side tables.
+    #[serde(default)]
+    c_indirect_tables: Option<CIndirectSideTables>,
+    /// Plan A joint-stub (V12): per-node framework-route metadata.
+    #[serde(default)]
+    framework_routes_table: Vec<(
+        crate::graph::unified::node::id::NodeId,
+        crate::graph::unified::storage::FrameworkRouteMetadata,
+    )>,
+    /// Plan B joint-stub (V12): per-snapshot dispatch-resolution tables.
+    #[serde(default)]
+    dispatch_tables_table: DispatchTables,
+}
+
+/// Serializable snapshot of the graph state (V14 — Go channel pairing +
+/// generic instantiation). Shape-identical to V12/V13 on the wire **with the
+/// live `NodeKind` layout** (`Channel` before `Other`). Because V14 is the
+/// current writer version, a V14 snapshot is written and read with the live
+/// types directly — no mirror, no translation.
+type GraphSnapshotDataV14 = GraphSnapshotDataV12;
 
 /// V7-shaped snapshot data (pre-Phase-1, no provenance fields).
 ///
@@ -1244,27 +1293,58 @@ fn upconvert_v11_to_v12(
     })
 }
 
-/// Upconvert a V12 snapshot to V13 (T3 — error chains: `EdgeKind::Wraps`).
+/// Upconvert a V13 snapshot to V14 (T2 — Go channel pairing + generic
+/// instantiation).
 ///
-/// V13 is shape-identical to V12 on the wire (see [`GraphSnapshotDataV13`]),
-/// so this is an identity mapping. The function exists as a named upconvert
-/// step so the V12 read path in `load_from_bytes` / `load_from_path` follows
-/// the same chained-ladder pattern as the V7→V8→V9→V10→V11→V12 chain, and so
-/// any future T3-related migration logic has a documented attachment point. A
-/// V12 snapshot predates the `EdgeKind::Wraps` variant, so re-labelling it as
-/// V13 is sound — there are no Wraps edges to translate.
+/// The node arena and `kind_index` were written under the V13 `NodeKind`
+/// layout (`Other` last, no `Channel`). T2 inserts `NodeKind::Channel` before
+/// `Other`, so a direct decode into the live types would misread every legacy
+/// `Other` node as `Channel`. The V13 read path therefore deserializes the two
+/// `NodeKind`-bearing fields through the frozen [`super::legacy_v13`] mirror;
+/// this function translates the arena (preserving slot indices, generations,
+/// and the free list while remapping `Other` to its new position) and rebuilds
+/// the live `AuxiliaryIndices` from the translated arena, guaranteeing
+/// `kind_index` is re-keyed under the new layout. Every other field moves by
+/// value (the additive `EdgeKind` variants already decoded V13 edge bytes
+/// unchanged).
+fn upconvert_v13_to_v14(v13: GraphSnapshotDataV13) -> GraphSnapshotDataV14 {
+    let nodes = super::legacy_v13::translate_node_arena_v13_to_v14(v13.nodes);
+    // Rebuild the live indices from the translated arena rather than reusing
+    // the V13 (mirror-decoded) indices — this re-keys `kind_index` under the
+    // new `NodeKind` layout.
+    let indices = super::legacy_v13::AuxiliaryIndicesV13::rebuild_live(&nodes);
+    GraphSnapshotDataV14 {
+        nodes,
+        edges: v13.edges,
+        strings: v13.strings,
+        files: v13.files,
+        indices,
+        macro_metadata: v13.macro_metadata,
+        node_provenance: v13.node_provenance,
+        edge_provenance: v13.edge_provenance,
+        scope_arena: v13.scope_arena,
+        alias_table: v13.alias_table,
+        shadow_table: v13.shadow_table,
+        scope_provenance: v13.scope_provenance,
+        file_segments: v13.file_segments,
+        c_indirect_tables: v13.c_indirect_tables,
+        framework_routes_table: v13.framework_routes_table,
+        dispatch_tables_table: v13.dispatch_tables_table,
+    }
+}
+
+/// Finalize a pre-V13 (V7–V12) snapshot for the V14 in-memory shape.
 ///
-/// # Errors
-///
-/// Infallible — all V12 fields move by value into the V13 envelope. The
-/// `Result` return is kept for symmetry with the other upconvert functions in
-/// this module, which may surface translation errors when wire shapes differ
-/// across versions.
-#[inline]
-fn upconvert_v12_to_v13(
-    v12: GraphSnapshotDataV12,
-) -> Result<GraphSnapshotDataV13, PersistenceError> {
-    Ok(v12)
+/// `NodeKind` was layout-stable across V7–V13, so the V7–V12 read paths — which
+/// deserialize the node arena directly into the live `NodeArena` — suffer the
+/// same `Other`→`Channel` positional misdecode as the V13 path would without
+/// its mirror. Those versions provably contain no real `Channel` nodes, so this
+/// demotes any spuriously-decoded `Channel` back to `Other` and rebuilds the
+/// kind index. (The V13 path does not need this — it decodes through the frozen
+/// `NodeKindV13` mirror.)
+fn finalize_pre_v13_snapshot(mut v12: GraphSnapshotDataV12) -> GraphSnapshotDataV14 {
+    super::legacy_v13::demote_spurious_channel_nodes(&mut v12.nodes, &mut v12.indices);
+    v12
 }
 
 /// Rebuilds a `FileSegmentTable` by scanning the node arena.
@@ -1323,15 +1403,19 @@ fn read_magic_and_header_len(
 
     let format_version =
         FormatVersion::from_magic(&magic).ok_or_else(|| PersistenceError::InvalidMagic {
-            expected: MAGIC_BYTES_V13.to_vec(),
+            expected: MAGIC_BYTES_V14.to_vec(),
             found: magic.to_vec(),
         })?;
 
-    // V10–V13 magics are all 14 bytes — all consumed. Read full u32 header length.
+    // V10–V14 magics are all 14 bytes — all consumed. Read full u32 header length.
     // V7-V9 magic is 13 bytes — byte 14 is the first byte of the header length.
     if matches!(
         format_version,
-        FormatVersion::V10 | FormatVersion::V11 | FormatVersion::V12 | FormatVersion::V13
+        FormatVersion::V10
+            | FormatVersion::V11
+            | FormatVersion::V12
+            | FormatVersion::V13
+            | FormatVersion::V14
     ) {
         let hl = read_u32_le(reader)? as usize;
         Ok((format_version, hl, 18)) // 14 magic + 4 header_len
@@ -1715,7 +1799,7 @@ fn write_framed_v11<W: Write>(
 /// V11 with two new envelope slots — `framework_routes_table` (Plan A) and
 /// `dispatch_tables_table` (Plan B). It was the live writer before the T3
 /// error-chains bump to V13; retained as a reference path and exercised by
-/// the legacy-V12 fixture tests. The live writer is [`write_framed_v13`].
+/// the legacy-V12 fixture tests. The live writer is [`write_framed_v14`].
 #[allow(dead_code)] // Preserved as reference; live writers emit V13.
 fn write_framed_v12<W: Write>(
     writer: &mut W,
@@ -1766,18 +1850,19 @@ fn write_framed_v12<W: Write>(
     Ok(())
 }
 
-/// Writes a V13 snapshot with length-prefixed framing.
+/// Writes a V14 snapshot with length-prefixed framing.
 ///
-/// V13 is the current writer format (T3 — error chains: `EdgeKind::Wraps`).
-/// It is shape-identical to V12 on the wire (see [`GraphSnapshotDataV13`]);
-/// only the magic-byte prefix differs, so that V12 readers reject snapshots
-/// whose `EdgeKind` arena contains the new `Wraps` variant rather than
-/// silently mis-decoding an unknown discriminant. The frame shape (magic +
-/// header + data) is identical to V12.
-fn write_framed_v13<W: Write>(
+/// V14 is the current writer format (T2 — Go channel pairing + generic
+/// instantiation). On the wire it is shape-identical to V12/V13 but with the
+/// live `NodeKind` layout (`Channel` before `Other`); only the magic-byte
+/// prefix differs from V13, so that V13-or-earlier readers reject the snapshot
+/// at the magic gate rather than positionally mis-decoding the shifted
+/// `NodeKind` arena. The frame shape (magic + header + data) is identical to
+/// V13.
+fn write_framed_v14<W: Write>(
     writer: &mut W,
     header: &GraphHeader,
-    snapshot_data: &GraphSnapshotDataV13,
+    snapshot_data: &GraphSnapshotDataV14,
 ) -> Result<(), PersistenceError> {
     debug_assert!(
         !snapshot_data.strings.is_lookup_stale(),
@@ -1805,7 +1890,7 @@ fn write_framed_v13<W: Write>(
         )));
     }
 
-    writer.write_all(MAGIC_BYTES_V13)?;
+    writer.write_all(MAGIC_BYTES_V14)?;
     writer.write_all(
         &u32::try_from(header_bytes.len())
             .map_err(|_| {
@@ -1983,7 +2068,7 @@ pub fn save_to_path(graph: &CodeGraph, path: impl AsRef<Path>) -> Result<(), Per
         snapshot_data.strings.len(),
         snapshot_data.files.len(),
     );
-    header.version = FormatVersion::V13.as_u32();
+    header.version = FormatVersion::V14.as_u32();
     header.set_fact_epoch(fact_epoch);
 
     // Atomic write per `G_daemon_control_plane.md` §4.2: an
@@ -1992,7 +2077,7 @@ pub fn save_to_path(graph: &CodeGraph, path: impl AsRef<Path>) -> Result<(), Per
     // --status` previously misreported as "No graph snapshot
     // found").
     write_atomic(path, |writer| {
-        write_framed_v13(writer, &header, &snapshot_data)
+        write_framed_v14(writer, &header, &snapshot_data)
     })
 }
 
@@ -2093,12 +2178,12 @@ pub fn save_to_path_with_provenance(
         provenance,
         plugin_versions,
     );
-    header.version = FormatVersion::V13.as_u32();
+    header.version = FormatVersion::V14.as_u32();
     header.set_fact_epoch(fact_epoch);
 
     // Atomic write per `G_daemon_control_plane.md` §4.2.
     write_atomic(path, |writer| {
-        write_framed_v13(writer, &header, &snapshot_data)
+        write_framed_v14(writer, &header, &snapshot_data)
     })
 }
 
@@ -2207,7 +2292,7 @@ pub fn load_from_bytes(
     bytes_consumed += header_len as u64;
     let header: GraphHeader = postcard::from_bytes(&header_buf)?;
 
-    // Validate version — accept V7 (legacy), V8, V9, V10, V11, V12 (upconvert), V13 (current).
+    // Validate version — accept V7 (legacy), V8, V9, V10, V11, V12, V13 (upconvert), V14 (current).
     if header.version != VERSION
         && header.version != FormatVersion::V8.as_u32()
         && header.version != FormatVersion::V9.as_u32()
@@ -2215,9 +2300,10 @@ pub fn load_from_bytes(
         && header.version != FormatVersion::V11.as_u32()
         && header.version != FormatVersion::V12.as_u32()
         && header.version != FormatVersion::V13.as_u32()
+        && header.version != FormatVersion::V14.as_u32()
     {
         return Err(PersistenceError::IncompatibleVersion {
-            expected: FormatVersion::V13.as_u32(),
+            expected: FormatVersion::V14.as_u32(),
             found: header.version,
         });
     }
@@ -2252,7 +2338,7 @@ pub fn load_from_bytes(
     // V12 → V13; ...; V12 → V13; V13 → direct.
     let mut data_buf = vec![0u8; data_len as usize];
     reader.read_exact(&mut data_buf)?;
-    let mut snapshot_data: GraphSnapshotDataV13 = match format_version {
+    let mut snapshot_data: GraphSnapshotDataV14 = match format_version {
         FormatVersion::V7 => {
             // V7 predates `GraphHeader.fact_epoch`; pass `0` explicitly so the
             // V7 → V8 → V9 → V10 → V11 → V12 chained path is deterministic
@@ -2263,7 +2349,7 @@ pub fn load_from_bytes(
             let v10 = upconvert_v9_to_v10(v9);
             let v11 = upconvert_v10_to_v11(v10)?;
             let v12 = upconvert_v11_to_v12(v11)?;
-            upconvert_v12_to_v13(v12)?
+            finalize_pre_v13_snapshot(v12)
         }
         FormatVersion::V8 => {
             // Forward the V8 header epoch so derived scope provenance is
@@ -2273,31 +2359,39 @@ pub fn load_from_bytes(
             let v10 = upconvert_v9_to_v10(v9);
             let v11 = upconvert_v10_to_v11(v10)?;
             let v12 = upconvert_v11_to_v12(v11)?;
-            upconvert_v12_to_v13(v12)?
+            finalize_pre_v13_snapshot(v12)
         }
         FormatVersion::V9 => {
             let v9: GraphSnapshotDataV9 = postcard::from_bytes(&data_buf)?;
             let v10 = upconvert_v9_to_v10(v9);
             let v11 = upconvert_v10_to_v11(v10)?;
             let v12 = upconvert_v11_to_v12(v11)?;
-            upconvert_v12_to_v13(v12)?
+            finalize_pre_v13_snapshot(v12)
         }
         FormatVersion::V10 => {
             let v10: GraphSnapshotDataV10 = postcard::from_bytes(&data_buf)?;
             let v11 = upconvert_v10_to_v11(v10)?;
             let v12 = upconvert_v11_to_v12(v11)?;
-            upconvert_v12_to_v13(v12)?
+            finalize_pre_v13_snapshot(v12)
         }
         FormatVersion::V11 => {
             let v11: GraphSnapshotDataV11 = postcard::from_bytes(&data_buf)?;
             let v12 = upconvert_v11_to_v12(v11)?;
-            upconvert_v12_to_v13(v12)?
+            finalize_pre_v13_snapshot(v12)
         }
         FormatVersion::V12 => {
             let v12: GraphSnapshotDataV12 = postcard::from_bytes(&data_buf)?;
-            upconvert_v12_to_v13(v12)?
+            finalize_pre_v13_snapshot(v12)
         }
-        FormatVersion::V13 => postcard::from_bytes(&data_buf)?,
+        FormatVersion::V13 => {
+            // Decode the two NodeKind-bearing fields through the frozen V13
+            // mirror, then translate the arena + rebuild indices to V14.
+            let v13: GraphSnapshotDataV13 = postcard::from_bytes(&data_buf)?;
+            upconvert_v13_to_v14(v13)
+        }
+        // V14 is the current writer version — decode directly into the live
+        // types (the arena already carries the V14 `NodeKind` layout).
+        FormatVersion::V14 => postcard::from_bytes(&data_buf)?,
     };
 
     // Rebuild the scope-provenance reverse index after deserialization.
@@ -2394,7 +2488,7 @@ pub fn load_from_path(
     bytes_consumed += header_len as u64;
     let header: GraphHeader = postcard::from_bytes(&header_buf)?;
 
-    // Validate version — accept V7 (legacy), V8, V9, V10, V11, V12 (upconvert), V13 (current).
+    // Validate version — accept V7 (legacy), V8, V9, V10, V11, V12, V13 (upconvert), V14 (current).
     if header.version != VERSION
         && header.version != FormatVersion::V8.as_u32()
         && header.version != FormatVersion::V9.as_u32()
@@ -2402,9 +2496,10 @@ pub fn load_from_path(
         && header.version != FormatVersion::V11.as_u32()
         && header.version != FormatVersion::V12.as_u32()
         && header.version != FormatVersion::V13.as_u32()
+        && header.version != FormatVersion::V14.as_u32()
     {
         return Err(PersistenceError::IncompatibleVersion {
-            expected: FormatVersion::V13.as_u32(),
+            expected: FormatVersion::V14.as_u32(),
             found: header.version,
         });
     }
@@ -2435,11 +2530,11 @@ pub fn load_from_path(
     }
 
     // Read and deserialize data — dispatch on format version. Each older
-    // format chains through the upconverters: V7 → V8 → V9 → V10 → V11 → V12 →
-    // V13; V8 → … → V13; ...; V11 → V12 → V13; V12 → V13; V13 → direct.
+    // format chains through the upconverters: V7 → … → V12 → (demote) → V14;
+    // V13 → (mirror translate) → V14; V14 → direct.
     let mut data_buf = vec![0u8; data_len as usize];
     reader.read_exact(&mut data_buf)?;
-    let mut snapshot_data: GraphSnapshotDataV13 = match format_version {
+    let mut snapshot_data: GraphSnapshotDataV14 = match format_version {
         FormatVersion::V7 => {
             // V7 predates `GraphHeader.fact_epoch`; pass `0` explicitly so the
             // chained path is deterministic and matches the documented "V7
@@ -2450,7 +2545,7 @@ pub fn load_from_path(
             let v10 = upconvert_v9_to_v10(v9);
             let v11 = upconvert_v10_to_v11(v10)?;
             let v12 = upconvert_v11_to_v12(v11)?;
-            upconvert_v12_to_v13(v12)?
+            finalize_pre_v13_snapshot(v12)
         }
         FormatVersion::V8 => {
             // Forward the V8 header epoch so derived scope provenance is
@@ -2460,31 +2555,39 @@ pub fn load_from_path(
             let v10 = upconvert_v9_to_v10(v9);
             let v11 = upconvert_v10_to_v11(v10)?;
             let v12 = upconvert_v11_to_v12(v11)?;
-            upconvert_v12_to_v13(v12)?
+            finalize_pre_v13_snapshot(v12)
         }
         FormatVersion::V9 => {
             let v9: GraphSnapshotDataV9 = postcard::from_bytes(&data_buf)?;
             let v10 = upconvert_v9_to_v10(v9);
             let v11 = upconvert_v10_to_v11(v10)?;
             let v12 = upconvert_v11_to_v12(v11)?;
-            upconvert_v12_to_v13(v12)?
+            finalize_pre_v13_snapshot(v12)
         }
         FormatVersion::V10 => {
             let v10: GraphSnapshotDataV10 = postcard::from_bytes(&data_buf)?;
             let v11 = upconvert_v10_to_v11(v10)?;
             let v12 = upconvert_v11_to_v12(v11)?;
-            upconvert_v12_to_v13(v12)?
+            finalize_pre_v13_snapshot(v12)
         }
         FormatVersion::V11 => {
             let v11: GraphSnapshotDataV11 = postcard::from_bytes(&data_buf)?;
             let v12 = upconvert_v11_to_v12(v11)?;
-            upconvert_v12_to_v13(v12)?
+            finalize_pre_v13_snapshot(v12)
         }
         FormatVersion::V12 => {
             let v12: GraphSnapshotDataV12 = postcard::from_bytes(&data_buf)?;
-            upconvert_v12_to_v13(v12)?
+            finalize_pre_v13_snapshot(v12)
         }
-        FormatVersion::V13 => postcard::from_bytes(&data_buf)?,
+        FormatVersion::V13 => {
+            // Decode the two NodeKind-bearing fields through the frozen V13
+            // mirror, then translate the arena + rebuild indices to V14.
+            let v13: GraphSnapshotDataV13 = postcard::from_bytes(&data_buf)?;
+            upconvert_v13_to_v14(v13)
+        }
+        // V14 is the current writer version — decode directly into the live
+        // types (the arena already carries the V14 `NodeKind` layout).
+        FormatVersion::V14 => postcard::from_bytes(&data_buf)?,
     };
 
     // Rebuild the scope-provenance reverse index after deserialization.
@@ -2570,7 +2673,7 @@ pub fn validate_snapshot(path: impl AsRef<Path>) -> Result<bool, PersistenceErro
     reader.read_exact(&mut header_buf)?;
     let header: GraphHeader = postcard::from_bytes(&header_buf)?;
 
-    // Validate version — accept V7 (legacy), V8, V9, V10, V11, V12 (upconvert), V13 (current).
+    // Validate version — accept V7 (legacy), V8, V9, V10, V11, V12, V13 (upconvert), V14 (current).
     if header.version != VERSION
         && header.version != FormatVersion::V8.as_u32()
         && header.version != FormatVersion::V9.as_u32()
@@ -2578,9 +2681,10 @@ pub fn validate_snapshot(path: impl AsRef<Path>) -> Result<bool, PersistenceErro
         && header.version != FormatVersion::V11.as_u32()
         && header.version != FormatVersion::V12.as_u32()
         && header.version != FormatVersion::V13.as_u32()
+        && header.version != FormatVersion::V14.as_u32()
     {
         return Err(PersistenceError::IncompatibleVersion {
-            expected: FormatVersion::V13.as_u32(),
+            expected: FormatVersion::V14.as_u32(),
             found: header.version,
         });
     }
@@ -2620,7 +2724,7 @@ pub fn load_header_from_path(path: impl AsRef<Path>) -> Result<GraphHeader, Pers
     reader.read_exact(&mut header_buf)?;
     let header: GraphHeader = postcard::from_bytes(&header_buf)?;
 
-    // Validate version — accept V7 (legacy), V8, V9, V10, V11, V12 (upconvert), V13 (current).
+    // Validate version — accept V7 (legacy), V8, V9, V10, V11, V12, V13 (upconvert), V14 (current).
     if header.version != VERSION
         && header.version != FormatVersion::V8.as_u32()
         && header.version != FormatVersion::V9.as_u32()
@@ -2628,9 +2732,10 @@ pub fn load_header_from_path(path: impl AsRef<Path>) -> Result<GraphHeader, Pers
         && header.version != FormatVersion::V11.as_u32()
         && header.version != FormatVersion::V12.as_u32()
         && header.version != FormatVersion::V13.as_u32()
+        && header.version != FormatVersion::V14.as_u32()
     {
         return Err(PersistenceError::IncompatibleVersion {
-            expected: FormatVersion::V13.as_u32(),
+            expected: FormatVersion::V14.as_u32(),
             found: header.version,
         });
     }
@@ -2771,12 +2876,13 @@ mod tests {
         let path = temp_file.path();
         save_to_path(&graph, path).expect("save_to_path");
 
-        // On-disk magic must be V13 (a Wraps-bearing graph cannot be V12).
+        // On-disk magic must be V14 (the current writer version; a
+        // Wraps-bearing graph still round-trips, the variant is additive).
         let raw = std::fs::read(path).expect("read snapshot bytes");
         assert_eq!(
-            &raw[..MAGIC_BYTES_V13.len()],
-            MAGIC_BYTES_V13.as_slice(),
-            "Wraps-bearing graph must persist as V13",
+            &raw[..MAGIC_BYTES_V14.len()],
+            MAGIC_BYTES_V14.as_slice(),
+            "current writer must persist as V14",
         );
 
         fn assert_wraps_survived(graph: &CodeGraph) {
@@ -4185,21 +4291,21 @@ mod tests {
         let path = temp_file.path();
         save_to_path(&graph, path).expect("save_to_path");
 
-        // Verify magic on disk is V13 (T3 error chains — current writer).
+        // Verify magic on disk is V14 (T2 Go channels — current writer).
         let raw = std::fs::read(path).expect("read snapshot bytes");
         assert_eq!(
-            &raw[..MAGIC_BYTES_V13.len()],
-            MAGIC_BYTES_V13.as_slice(),
-            "current writer must stamp V13 magic on disk",
+            &raw[..MAGIC_BYTES_V14.len()],
+            MAGIC_BYTES_V14.as_slice(),
+            "current writer must stamp V14 magic on disk",
         );
 
-        // Header version must be V13.
+        // Header version must be V14.
         let header = load_header_from_path(path).expect("load header");
-        assert_eq!(header.version, FormatVersion::V13.as_u32());
+        assert_eq!(header.version, FormatVersion::V14.as_u32());
 
-        // Loader returns a usable graph (V13 arm in `load_from_path`).
+        // Loader returns a usable graph (V14 arm in `load_from_path`).
         let plugins = create_test_plugin_manager();
-        let loaded = load_from_path(path, Some(&plugins)).expect("load V13");
+        let loaded = load_from_path(path, Some(&plugins)).expect("load V14");
         let snap = loaded.snapshot();
         assert_eq!(snap.nodes().len(), 1, "node count must round-trip");
         // Strings round-trip too (the seed function carries one interned name).
