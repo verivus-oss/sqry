@@ -42,13 +42,18 @@ Semantic code search for sqry-indexed workspaces. Navigate call graphs, inherita
 
 ## Supported Languages
 
-The default extension indexing path enables the 35 standard language plugins.
-The full sqry distribution includes 37 tree-sitter plugins; high-cost plugins
-such as JSON and ServiceNow XML can be enabled from the CLI when needed.
+The default extension indexing path uses sqry's fast-path plugin selection.
+Compiled non-default plugins, such as JSON and optional specialty plugins, can
+be enabled from the CLI when needed.
 
 All languages use the same unified GraphBuilder architecture with AST-based semantic analysis:
 
 Rust, JavaScript, TypeScript, Python, Go, Java, C, C++, C#, Kotlin, Scala, Ruby, Swift, PHP, Lua, Perl, Elixir, Haskell, R, Dart, Zig, Groovy, Shell/Bash, HTML, CSS, SQL, Oracle PL/SQL, Terraform/HCL, Puppet, Pulumi, SAP ABAP, Salesforce Apex, ServiceNow, Vue, Svelte
+
+For the current indexing and plugin-selection model, see
+[docs/user-guide/indexing.md](../docs/user-guide/indexing.md). For shared
+multi-root workspace semantics, see
+[docs/user-guide/workspace.md](../docs/user-guide/workspace.md).
 
 ## Quick Start
 
@@ -218,5 +223,5 @@ MIT — See root LICENSE file
 
 ---
 
-**Version**: 19.0.4
-**Last Updated**: 2026-06-04
+**Version**: 19.0.6
+**Last Updated**: 2026-06-05

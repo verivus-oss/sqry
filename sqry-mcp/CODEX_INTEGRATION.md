@@ -93,6 +93,28 @@ codex   # open in /repo-b
 If Codex exposes multiple active roots and a request does not uniquely identify
 one workspace, sqry returns a clear error asking for explicit `path`.
 
+## `workspace_status` and Path Arguments
+
+`workspace_status` identifies each source root in
+`aggregate.source_root_statuses[]` by an **opaque** `source_root_id`
+(8-hex display/correlation token). It is not a path and not a path
+prefix.
+
+- Path-taking tools (`get_definition`, `get_document_symbols`,
+  `semantic_search` `path`, ...) accept **workspace-relative** paths
+  (`src/lib.rs`) or normal filesystem paths.
+- Do NOT call tools with `source_root_id`-prefixed paths:
+  `485f1995/src/lib.rs` is invalid and will not resolve.
+- Under the default `minimal` redaction preset, other tools render
+  workspace paths as `<source_root_id>/<relative>`; use the
+  `source_root_id` field only to correlate those prefixes with a
+  source root's status.
+- Earlier releases rendered this token under a per-root `path` field;
+  clients reading that field should migrate to `source_root_id`.
+- Under `SQRY_REDACTION_PRESET=none`, cleartext source-root locations
+  appear through the top-level `source_roots[]` field; per-root entries
+  still use `source_root_id`.
+
 ## Troubleshooting (Codex)
 
 ### `sqry mcp status` shows "not detected"

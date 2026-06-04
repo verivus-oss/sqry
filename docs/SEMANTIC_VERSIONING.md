@@ -1,7 +1,7 @@
 # Semantic Versioning Guide
 
-**Version**: 19.0.4
-**Last Updated**: 2026-06-04
+**Version**: 19.0.6
+**Last Updated**: 2026-06-05
 
 ---
 
@@ -62,7 +62,7 @@ sqry's changelog follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/
 
 ## [Unreleased]
 
-## [19.0.4] - 2026-05-31
+## [19.0.6] - 2026-05-31
 ### Fixed
 - Summary of bug fixes
 
@@ -88,10 +88,12 @@ Guidelines:
 2. Update `Cargo.toml` workspace version: `[workspace.package] version = "X.Y.Z"`.
 3. Run `cargo generate-lockfile` to update `Cargo.lock`.
 4. Ensure `CHANGELOG.md` captures user-facing changes.
-5. Validate tests: `cargo test --workspace`.
-6. Run `cargo fmt --all` and `cargo clippy --all-targets --workspace -- -D warnings`.
-7. Create and push version tag: `git tag vX.Y.Z && git push origin vX.Y.Z`.
-8. Announce via release notes with highlights from the changelog.
+5. Update public docs for the current version, Rust minimum, toolchain, MCP tool-count policy, platform support, and package-manager scope.
+6. Run `scripts/check_public_docs_drift.sh`.
+7. Validate tests: `cargo test --workspace`.
+8. Run `cargo fmt --all` and `cargo clippy --all-targets --workspace -- -D warnings`.
+9. Create and push version tag: `git tag vX.Y.Z && git push origin vX.Y.Z`.
+10. Announce via release notes with highlights from the changelog.
 
 ---
 
@@ -99,5 +101,5 @@ Guidelines:
 
 | Version | Date | Changes |
 |---------|------|---------|
-| 19.0.4 | 2026-05-31 | Full rewrite; align with current release process |
+| 19.0.6 | 2026-05-31 | Full rewrite; align with current release process |
 | 4.5.11 | 2026-02-27 | Initial draft |

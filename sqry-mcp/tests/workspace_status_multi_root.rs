@@ -7,10 +7,14 @@
 //! a `with_workspace_override` scope that binds an
 //! [`anonymous_multi_root`] [`LogicalWorkspace`] backed by two real source
 //! root directories on disk plus an injected exclusion. We then assert
-//! that the response shape matches the LSP `sqry/workspaceStatus` envelope
-//! field-for-field via [`sqry_lsp::session::build_workspace_status_info`]
-//! invoked on the same workspace — the parity invariant the DAG calls out
-//! ("mirror LSP `sqry/workspaceStatus`").
+//! LSP/MCP parity for the **non-diverged** fields (identity,
+//! `project_root_mode`, `source_roots`, `exclusions`, aggregate counts)
+//! via [`sqry_lsp::session::build_workspace_status_info`] invoked on the
+//! same workspace, and check the MCP-local aggregate projection
+//! separately: per #299, MCP per-root entries identify each source root
+//! by an opaque `source_root_id` (derived via
+//! [`sqry_mcp_redaction::compute_source_root_id`] from the LSP entry's
+//! real path) instead of the LSP/core `path` field.
 //!
 //! This is the test the codex iter1 BLOCK explicitly requested: pre-fix,
 //! the tool always returned one source root; post-fix, it surfaces every
@@ -26,6 +30,7 @@ use sqry_mcp::test_setup::init_engine_cache;
 use sqry_mcp::tool_args::WorkspaceStatusArgs;
 use sqry_mcp::tool_handlers::execute_workspace_status;
 use sqry_mcp::workspace_session_test_api::with_workspace_override;
+use sqry_mcp_redaction::compute_source_root_id;
 use tempfile::TempDir;
 
 static INIT: Once = Once::new();
@@ -95,11 +100,11 @@ fn workspace_status_returns_multi_root_structure_from_override() {
         "MCP must surface every source root in a multi-root LogicalWorkspace, got {data:?}"
     );
 
-    // (2) Aggregate WorkspaceIndexStatus has one entry per source root.
+    // (2) The MCP aggregate projection has one entry per source root.
     assert_eq!(
         data.aggregate.source_root_statuses.len(),
         2,
-        "aggregate WorkspaceIndexStatus must report one entry per source root"
+        "MCP aggregate projection must report one entry per source root"
     );
 
     // (3) Exclusions surface from the bound workspace, not the synthetic
@@ -122,9 +127,11 @@ fn workspace_status_returns_multi_root_structure_from_override() {
     assert_eq!(data.requested_workspace_id.as_deref(), Some("client-hint"));
 
     // (5) Wire-shape parity with the LSP `sqry/workspaceStatus` handler
-    //     for the same workspace. We compare every field that both
-    //     surfaces expose so the regression class ("MCP and LSP report
-    //     different shapes for the same workspace") cannot return.
+    //     for the same workspace, restricted to the NON-DIVERGED fields.
+    //     #299 made the MCP aggregate a deliberate projection, so the
+    //     parity contract covers identity, project_root_mode,
+    //     source_roots, exclusions, and the aggregate counters; the
+    //     per-root entries are checked separately in (6).
     let lsp_info = build_workspace_status_info(workspace.as_ref());
     assert_eq!(data.workspace_id_full, lsp_info.workspace_id_full);
     assert_eq!(data.workspace_id_short, lsp_info.workspace_id_short);
@@ -132,9 +139,28 @@ fn workspace_status_returns_multi_root_structure_from_override() {
     assert_eq!(data.source_roots, lsp_info.source_roots);
     assert_eq!(data.exclusions, lsp_info.exclusions);
     assert_eq!(
+        data.aggregate.missing_count,
+        lsp_info.aggregate.missing_count
+    );
+    assert_eq!(
+        data.aggregate.building_count,
+        lsp_info.aggregate.building_count
+    );
+    assert_eq!(data.aggregate.ok_count, lsp_info.aggregate.ok_count);
+    assert_eq!(data.aggregate.error_count, lsp_info.aggregate.error_count);
+    assert_eq!(
         data.aggregate.source_root_statuses.len(),
         lsp_info.aggregate.source_root_statuses.len()
     );
+
+    // (6) MCP-local aggregate projection (#299): each per-root entry
+    //     identifies its source root by the opaque source_root_id
+    //     derived from the LSP entry's REAL path, while every
+    //     non-identity field survives the projection verbatim. This is
+    //     the diverged half of the old field-for-field parity loop; the
+    //     MCP entry deliberately has no `path` field anymore (the type
+    //     system enforces that — see
+    //     `sqry_mcp::tools::workspace_status::WorkspaceStatusSourceRoot`).
     for (mcp_entry, lsp_entry) in data
         .aggregate
         .source_root_statuses
@@ -142,8 +168,25 @@ fn workspace_status_returns_multi_root_structure_from_override() {
         .zip(lsp_info.aggregate.source_root_statuses.iter())
     {
         assert_eq!(
-            mcp_entry.path, lsp_entry.path,
-            "per-source-root path mismatch between MCP and LSP wire shapes"
+            mcp_entry.source_root_id,
+            compute_source_root_id(&data.workspace_id_short, &lsp_entry.path),
+            "per-root source_root_id must derive from the LSP entry's real path"
+        );
+        assert_eq!(
+            mcp_entry.status, lsp_entry.status,
+            "per-root status must survive the MCP projection"
+        );
+        assert_eq!(
+            mcp_entry.last_indexed_at, lsp_entry.last_indexed_at,
+            "per-root last_indexed_at must survive the MCP projection"
+        );
+        assert_eq!(
+            mcp_entry.symbol_count, lsp_entry.symbol_count,
+            "per-root symbol_count must survive the MCP projection"
+        );
+        assert_eq!(
+            mcp_entry.classpath_dir, lsp_entry.classpath_dir,
+            "per-root classpath_dir must survive the MCP projection"
         );
     }
 }

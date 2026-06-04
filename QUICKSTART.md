@@ -1,422 +1,181 @@
-# sqry Quick Start Guide - by Verivus
+# sqry Quick Start
 
-**Version**: 19.0.4
-**Rust**: 1.90+ (Edition 2024)
+**Version**: 19.0.6
+**Rust**: 1.94+ (Edition 2024; repository toolchain 1.94.1)
 
----
+This guide gets you from install to useful semantic queries.
 
-## Install & Build
+## Install
+
+### Linux And macOS
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/verivus-oss/sqry/main/scripts/install.sh | bash -s -- --component all
+```
+
+Installs `sqry`, `sqry-mcp`, `sqry-lsp`, and `sqryd`. Supported release platforms are Linux `x86_64`/`arm64` and macOS `x86_64`/`arm64`.
+
+Pin a release or enable Cosign verification when needed:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/verivus-oss/sqry/main/scripts/install.sh | \
+  bash -s -- --component all --version vX.Y.Z --verify-signatures
+```
+
+`--verify-signatures` verifies the `oss-distribute.yml` release bundle identity used by the current installer script. SHA256 verification remains the default integrity check.
 
 ### Windows
 
 ```powershell
 Invoke-WebRequest https://raw.githubusercontent.com/verivus-oss/sqry/main/scripts/install.ps1 -OutFile install.ps1
 Get-Content .\install.ps1
-.\install.ps1 -VerifySignatures
+.\install.ps1 -Component all -VerifySignatures
 ```
 
-Default behavior resolves the latest GitHub release. For a pinned install, download the script and run `.\install.ps1 -Version vX.Y.Z`.
+The Windows installer downloads the Windows `x86_64` release ZIP and installs all four binaries. Use `.\install.ps1 -Version vX.Y.Z` for a pinned release.
 
-`-VerifySignatures` checks that the release zip was produced by the official GitHub Actions release workflow for this repository. Install `cosign` and ensure it is on `PATH` before using this mode. SHA256 verification is enabled by default for download integrity; use `-NoChecksum` only for troubleshooting.
+`-VerifySignatures` verifies the `oss-distribute.yml` release bundle identity used by the current installer script. SHA256 verification remains the default integrity check.
 
-> **Note**: Windows Defender and enterprise EDR products often block the `irm ... | iex` pattern heuristically. On managed machines, prefer the download-review-run flow above or install from release assets instead of piping the script into `iex`.
->
-> If PowerShell execution policy blocks `.\install.ps1` after download, prefer release assets instead of loosening machine-wide policy settings.
-
-Convenience shortcut for personal or non-managed machines:
-
-```powershell
-irm https://raw.githubusercontent.com/verivus-oss/sqry/main/scripts/install.ps1 | iex
-```
-
-Manual fallback:
-- download the Windows ZIP release asset (`sqry-<version>-windows-x86_64.zip`)
-- extract all contents, including the bundled `.dll` runtime files
-- place them in a directory on `PATH`
-
-### macOS / Linux
+### Homebrew
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/verivus-oss/sqry/main/scripts/install.sh | bash -s -- --component all
+brew tap verivus-oss/sqry
+brew install sqry
 ```
 
-Published macOS binaries currently target Apple Silicon (`arm64`) only.
+Homebrew is the current package-manager surface backed by the public release manifest. Use release assets or source builds on platforms where a package-manager surface is not yet published.
 
-### Build from source
+### Build From Source
 
 ```bash
 git clone https://github.com/verivus-oss/sqry.git
 cd sqry
-
-# Build everything
 cargo build --workspace
-
-# Verify
-./target/debug/sqry --version
-./target/debug/sqry --help
-
-# Install to PATH (required for examples below)
 cargo install --path sqry-cli
-cargo install --path sqry-mcp      # MCP server binary
-cargo install --path sqry-lsp      # LSP server binary
-cargo install --path sqry-daemon   # sqryd daemon binary
+cargo install --path sqry-mcp
+cargo install --path sqry-lsp
+cargo install --path sqry-daemon
+sqry --version
+sqryd --version
 ```
 
-> **Note**: The examples below assume `sqry` is on your `PATH`. If you skip the install step, prefix commands with `./target/debug/` (e.g., `./target/debug/sqry index`).
+Requirements:
 
-### Requirements
+- Rust `1.94+` with Edition 2024.
+- `rust-toolchain.toml` pins `1.94.1`.
+- Full builds compile the bundled tree-sitter grammars and language plugins and can require substantial disk space.
 
-- Rust 1.90+ with Edition 2024 (`rustup update stable`)
-- ~20 GB disk for full build (35 tree-sitter grammars)
-
----
-
-## Index a Codebase
+## Index A Codebase
 
 ```bash
-# Index the current directory (creates .sqry/graph/snapshot.sqry)
-sqry index
-
-# Index a specific path
-sqry index /path/to/project
-
-# Include all high-cost plugins
-sqry index --include-high-cost
-
-# Force the fast path even if SQRY_INCLUDE_HIGH_COST=1 is set
-sqry index --exclude-high-cost
-
-# Opt into one plugin explicitly
-sqry index --enable-plugin json
-
-# Check index status
-sqry graph stats
+cd /path/to/project
+sqry index .
+sqry index --status --json .
 ```
 
-sqry now persists the active plugin ids in the unified graph manifest. That
-means later `query`, `watch`, `diff`, and graph-loader operations reuse the
-plugin semantics that built the index instead of silently drifting to whatever
-the current defaults happen to be.
+The index writes `.sqry/graph/snapshot.sqry` and related `.sqry/` artifacts. Add `.sqry/` to `.gitignore` unless you intentionally share generated graph state.
 
-Currently, the default fast path excludes:
-- `json`
-- `servicenow-xml`
-
-The same plugin-selection flags also apply to `sqry update` and `sqry watch`.
-`--enable-language` and `--disable-language` remain accepted compatibility
-aliases for `--enable-plugin` and `--disable-plugin`.
-
-For very large C++ codebases, the graph builder now bounds pathological
-single-file builds so one oversized translation unit cannot stall the index run
-indefinitely.
-
----
-
-## Core Commands
-
-### Pattern Search
-
-Fast regex-based symbol search:
+Plugin selection:
 
 ```bash
-# Find symbols matching a pattern
-sqry search "test.*"
+sqry index .                         # default fast path
+sqry index --include-high-cost .     # all compiled non-default plugins
+sqry index --enable-plugin json .    # opt into one plugin
+sqry index --force .                 # rebuild after graph-format or semantics upgrades
+```
 
-# Exact match only
+See [Indexing](docs/user-guide/indexing.md) for plugin tiers, cleanup, and artifact taxonomy.
+
+## Search And Query
+
+Pattern search:
+
+```bash
+sqry search "parse_.*"
 sqry search --exact "main"
-
-# Fuzzy search (requires index)
 sqry search "config" --fuzzy
 ```
 
-### Structured Query
-
-Search by what code **means** using AST predicates and boolean logic:
+Structural query:
 
 ```bash
-# Find all public Rust functions
-sqry query "kind:function AND visibility:public AND lang:rust"
-
-# Find classes or structs
-sqry query "kind:class OR kind:struct"
-
-# Find async functions
-sqry query "kind:function AND async:true"
-
-# Relation queries: who calls authenticate?
+sqry query "kind:function AND visibility:public"
+sqry query "kind:function AND lang:rust"
+sqry query "kind:function AND returns:Result"
 sqry query "callers:authenticate"
-
-# Hierarchical search (RAG-optimized, grouped by file)
-sqry hier "kind:function visibility:public"
 ```
 
-### Relations
-
-Trace how code connects:
+Planner-backed query:
 
 ```bash
-# Who calls this function?
-sqry graph direct-callers parse_config
+sqry plan-query "kind:function callers:main"
+sqry plan-query "kind:function callers:my_read resolved_via:binding_plane"
+```
 
-# What does this function call?
+Graph commands:
+
+```bash
+sqry graph direct-callers authenticate
 sqry graph direct-callees main
-
-# Full call hierarchy (up and down)
-sqry graph call-hierarchy parse_config --depth 3
-
-# Relation queries via structured query
-sqry query "callers:authenticate"
-sqry query "imports:database"
-```
-
-### Graph Analysis
-
-```bash
-# Find circular dependencies
+sqry graph trace-path main handle_request
 sqry cycles
-
-# Find duplicate code
-sqry duplicates
-
-# Find unused symbols (dead code)
-sqry unused
-
-# Dependency impact analysis
-sqry impact parse_config
-
-# Trace path between two symbols
-sqry graph trace-path parse_config main
-
-# Extract focused subgraph
-sqry subgraph parse_config --depth 2
-
-# Semantic diff between git refs
-sqry diff HEAD~1 HEAD
-
-# Complexity metrics
-sqry graph complexity
+sqry impact authenticate --depth 3
+sqry visualize "callers:authenticate" --format mermaid
 ```
 
-### Natural Language
+## Natural Language
 
 ```bash
-# Ask questions about the codebase in plain English
-sqry ask "What functions handle error recovery?"
-
-# With automatic command execution
-sqry ask "Find all public structs" --auto-execute
+sqry ask "find login functions"
+sqry ask --dry-run "who calls authenticate"
+sqry ask --auto-execute --threshold 0.90 "find public classes"
 ```
 
-### Code Explanation
+`sqry ask` translates the request into a validated sqry command. It runs immediately only when `--auto-execute` is supplied and the confidence threshold is satisfied. See [Natural Language Queries](docs/user-guide/natural-language.md).
+
+## Workspaces
+
+Use workspaces for multi-root projects:
 
 ```bash
-# Explain a symbol with full context
-sqry explain parse_config
-
-# Find similar symbols
-sqry similar parse_config
+sqry workspace init .
+sqry workspace scan .
+sqry workspace status . --json
+sqry workspace clean . --dry-run
 ```
 
-### Export & Visualization
+See [Workspaces](docs/user-guide/workspace.md).
+
+## Daemon
 
 ```bash
-# Export graph in multiple formats
-sqry export --format dot           # Graphviz DOT
-sqry export --format d2            # D2 diagram
-sqry export --format mermaid       # Mermaid
-sqry export --format json          # JSON
-
-# Visualize call relationships
-sqry visualize "callers:main" --format mermaid
-
-# Codebase insights
-sqry insights
-```
-
-### Cache Management
-
-```bash
-sqry cache stats                   # View cache statistics
-sqry cache prune --days 30         # Prune old entries
-```
-
-### Interactive Shell
-
-```bash
-# Start interactive REPL
-sqry shell
-
-# Batch mode (pipe commands from file)
-sqry batch commands.txt
-```
-
----
-
-## MCP Server (AI Assistant Integration)
-
-sqry includes a Model Context Protocol server with **36 tools** for AI assistants:
-
-```bash
-# Start MCP server (stdio transport)
-sqry-mcp
-
-# Auto-configure for Claude Code, Codex, or Gemini CLI
-sqry mcp setup
-
-# Check MCP configuration status
-sqry mcp status
-
-# Use with Claude Code (add to .claude.json or ~/.claude.json):
-# "mcpServers": { "sqry": { "command": "sqry-mcp", "args": [] } }
-```
-
-If your MCP client sends requests to hosted/external LLM providers, enable response sanitization with [sqry-mcp-redaction](sqry-mcp-redaction/README.md).
-
----
-
-## LSP Server (Editor Integration)
-
-```bash
-# Start LSP server
-sqry lsp
-
-# Configure in your editor's LSP settings
-# Example for VS Code: see sqry-vscode extension
-```
-
----
-
-## Daemon Mode
-
-`sqryd` is a background index server that keeps your workspace graphs hot across
-CLI, LSP, and MCP sessions. Instead of rebuilding the index from scratch on each
-invocation, daemon-backed tools connect to `sqryd` over a local socket and receive
-responses from an already-loaded, incrementally-maintained graph.
-
-```bash
-# Start the daemon (background process; logs to stderr by default,
-# or to the file set in daemon.toml `log_file`)
 sqry daemon start
-
-# Check status — shows version, uptime, memory, high-water mark, and loaded workspaces
-sqry daemon status
-
-# Example status output:
-#   sqryd v8.0.6 -- uptime 3h 14m
-#
-#   Memory: 412 MB / 2048 MB  (peak: 487 MB)
-#
-#   Workspaces (1 loaded):
-#     ~/my-project                    147 MB    (peak: 180 MB   )  [Loaded]
-
-# Stop the daemon
-sqry daemon stop
+sqry daemon load .
+sqry daemon status --json
+sqry daemon rebuild . --force
+sqry daemon logs --follow
 ```
 
-`sqry-mcp` and `sqry lsp` gain `--daemon` / `--daemon-socket PATH` flags for
-daemon-backed operation. If the daemon is not running when a shim connects, it
-is started automatically:
+See [Daemon Mode](docs/user-guide/daemon.md).
+
+## MCP
 
 ```bash
-sqry-mcp --daemon                          # use default socket path
-sqry-mcp --daemon --daemon-socket /tmp/sqryd.sock  # custom socket
-sqry lsp  --daemon                         # LSP in daemon-backed mode
+sqry mcp setup --tool claude
+sqry mcp setup --tool codex
+sqry mcp setup --tool gemini
+sqry-mcp --list-tools
 ```
 
-For tuning memory limits, socket paths, log rotation, and `daemon.toml`
-configuration reference, see [docs/cli/daemon.md](docs/cli/daemon.md).
+Standalone MCP exposes the full local tool catalog. Daemon-hosted MCP exposes a smaller daemon-backed subset. Use `tools/list`, `sqry-mcp --list-tools`, or `sqry://meta/manifest` for the authoritative schema. See [MCP Guide](docs/user-guide/mcp.md).
 
----
+## VS Code
 
-## Language Support
+Install the VS Code extension and point it at the same `sqry`/`sqry-lsp` binaries. For shared workspace semantics, see [Workspaces](docs/user-guide/workspace.md); for extension setup, see [sqry-vscode/README.md](sqry-vscode/README.md).
 
-**37 languages** in two capability groups:
+## Next
 
-**Full relation support (28)**: C, C++, C#, CSS, Dart, Elixir, Go, Groovy, Haskell, HTML, Java, JavaScript, Kotlin, Lua, Perl, PHP, Python, R, Ruby, Rust, Scala, Shell, SQL, Svelte, Swift, TypeScript, Vue, Zig
-
-**Symbol extraction + imports (9)**: JSON, Oracle PL/SQL, Pulumi, Puppet, Salesforce Apex, SAP ABAP, ServiceNow Xanadu, ServiceNow XML, Terraform
-
----
-
-## Project Structure
-
-```
-sqry/
-├── sqry-core/              # Core library (graph, symbols, search, plugin system)
-├── sqry-cli/               # CLI binary ('sqry')
-├── sqry-lsp/               # LSP server
-├── sqry-mcp/               # MCP server (AI assistant integration)
-├── sqry-daemon/            # Daemon binary (sqryd) + library
-├── sqry-daemon-protocol/   # Wire types and framing (free functions)
-├── sqry-daemon-client/     # Client library (shim mode, management API)
-├── sqry-db/                # Derived analysis DB and query planner
-├── sqry-nl/                # Natural language translation
-├── sqry-plugin-registry/   # Plugin registration
-├── sqry-lang-*/            # 37 language plugins
-├── test-fixtures/          # Shared test fixtures
-└── supply-chain/           # cargo-vet audit data
-```
-
----
-
-## Development Workflow
-
-### Build & Test
-
-```bash
-cargo build --workspace                              # Build
-cargo test --workspace                               # Tests (REQUIRED before commit)
-cargo fmt --all                                      # Format (REQUIRED)
-cargo clippy --all-targets --workspace -- -D warnings  # Lint
-```
-
-### Commit Convention
-
-```bash
-# Format: <type>(<scope>): <subject>
-git commit -m "feat(graph): add cross-file resolution"
-git commit -m "fix(cache): prevent corruption on concurrent access"
-```
-
-Types: `feat` (MINOR bump), `fix` (PATCH), `perf` (PATCH), `refactor`, `docs`, `test`, `chore`
-
-### Testing Checklist
-
-```bash
-cargo test --workspace           # All tests pass (24,000+)
-cargo fmt --all --check          # Code formatted
-cargo clippy --all-targets --workspace -- -D warnings  # No warnings
-cargo build --workspace          # Build succeeds
-```
-
----
-
-## Troubleshooting
-
-```bash
-# Clean rebuild
-cargo clean && cargo build --workspace
-
-# Check Rust version (need 1.90+)
-rustc --version
-
-# Run specific test
-cargo test -p sqry-core test_name
-
-# Run with output
-cargo test -- --nocapture
-
-# Generate diagnostic bundle
-sqry troubleshoot
-```
-
----
-
-## Further Reading
-
-- **CLAUDE.md** — Repository guide and architecture
-- **AGENTS.md** — Development standards
-- **CONTRIBUTING.md** — How to contribute
-- **CHANGELOG.md** — Release history
-- **CONFIGURATION_TUNING_GUIDE.md** — Performance tuning
-- **ERRATA.md** — Known issues and corrections
+- [User Guide Index](docs/user-guide/README.md)
+- [Advanced Analysis](docs/user-guide/advanced-analysis.md)
+- [MCP component docs](sqry-mcp/README.md)
+- [CLI component docs](sqry-cli/README.md)

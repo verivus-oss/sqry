@@ -140,7 +140,7 @@ mod tests {
     /// standalone `SqryServer::get_filtered_tools()` inventory — the
     /// daemon subset is a STRICT subset of the standalone 36-tool
     /// surface. Also verifies the standalone inventory is strictly
-    /// larger by exactly [`EXPECTED_STANDALONE_ONLY_COUNT`] (= 20)
+    /// larger by exactly [`EXPECTED_STANDALONE_ONLY_COUNT`] (= 21)
     /// tools — the strict gap is pinned to guard against silent
     /// drift on either side of the partition.
     #[test]

@@ -98,3 +98,19 @@ If `brew` is on `PATH` the script also runs `brew style` as a best-effort lint (
 ## Relationship to other release workflows
 
 The tap publish runs **after** the GitHub release exists (because that's its trigger). It is decoupled from `release-plz-release.yml`, `oss-sanitize-publish.yml`, and `release-get-well-direct.yml`. Those workflows produce the release; this workflow ships the brew artefact derived from it. Adding more publish targets (Scoop, Snap, AUR) should follow the same pattern: separate workflow, release-event trigger, dedicated PAT secret.
+
+## Public package scope
+
+Homebrew is the package-manager surface currently selected by
+`release-manifest.toml` for public publication. Do not document another package
+manager as public-ready until its template, checksum renderer, release-event
+workflow, component coverage, and public validation are complete.
+
+The formula must continue to cover `sqry`, `sqry-mcp`, `sqry-lsp`, and `sqryd`
+for Linux `x86_64`/`arm64` and macOS `x86_64`/`arm64`.
+
+Run the public docs drift check during release maintenance:
+
+```bash
+scripts/check_public_docs_drift.sh
+```

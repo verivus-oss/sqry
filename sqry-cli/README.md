@@ -1,212 +1,119 @@
-# sqry CLI - by Verivus
+# sqry CLI
 
-> Semantic code search tool that understands code structure through AST analysis.
+**Version**: 19.0.6
+**Rust**: 1.94+ (Edition 2024; repository toolchain 1.94.1)
 
-## Overview
+`sqry` is the command-line interface for local semantic code search.
 
-`sqry` is a command-line tool for searching code by **what it means**, not just what it says. It parses source code into an AST using tree-sitter, builds a graph of symbols and relationships, and lets you query that graph with structured predicates.
+## Install
 
-**37 languages** supported. See [QUICKSTART.md](../QUICKSTART.md) for the full list.
-
-## Installation
+Recommended binary installers:
 
 ```bash
-# Clone and install
-git clone https://github.com/verivus-oss/sqry.git
-cd sqry
+curl -fsSL https://raw.githubusercontent.com/verivus-oss/sqry/main/scripts/install.sh | bash -s -- --component all
+```
+
+```powershell
+Invoke-WebRequest https://raw.githubusercontent.com/verivus-oss/sqry/main/scripts/install.ps1 -OutFile install.ps1
+.\install.ps1 -Component all
+```
+
+Source install:
+
+```bash
 cargo install --path sqry-cli
-
-# Verify
-sqry --version
+cargo install --path sqry-mcp
+cargo install --path sqry-lsp
+cargo install --path sqry-daemon
 ```
 
-Requires **Rust 1.90+** (Edition 2024). The full build (including 35 tree-sitter grammars) needs ~20 GB disk space.
+The public release assets include `sqry`, `sqry-mcp`, `sqry-lsp`, and `sqryd`. Homebrew is the current package-manager surface backed by the public release manifest.
+The installer scripts verify SHA256 checksums by default; optional signature verification checks the `oss-distribute.yml` release bundle identity used by the current installer scripts.
 
-## Quick Start
+## Core Workflow
 
 ```bash
-# Build the index (one-time per project)
 sqry index .
-
-# Search for symbols
-sqry main
-
-# Structured query with predicates
-sqry query "kind:function AND name~=/handle/"
-
-# Natural language query
-sqry ask "find all async functions in Rust"
-
-# Find callers of a function
-sqry graph direct-callers process_request
-
-# Find circular dependencies
-sqry cycles --type imports
+sqry search "parse_.*"
+sqry query "kind:function AND visibility:public"
+sqry graph direct-callers authenticate
+sqry graph trace-path main handle_request
+sqry ask --dry-run "who calls authenticate"
 ```
 
-## Commands
+## Command Families
 
-### Search & Query
+| Family | Commands |
+| --- | --- |
+| Search | `search`, top-level pattern shorthand, `hier`, `similar`, `explain` |
+| Structural query | `query`, `plan-query` |
+| Graph analysis | `graph`, `cycles`, `unused`, `duplicates`, `impact`, `diff`, `subgraph`, `visualize`, `export` |
+| Index lifecycle | `index`, `update`, `watch`, `analyze`, `repair`, `cache` |
+| Workspace | `workspace init`, `workspace scan`, `workspace add`, `workspace remove`, `workspace query`, `workspace stats`, `workspace status`, `workspace clean` |
+| Daemon | `daemon start`, `daemon stop`, `daemon status`, `daemon logs`, `daemon load`, `daemon rebuild`, `daemon reset` |
+| Integrations | `lsp`, `mcp setup`, `completions`, `shell`, `batch` |
+| Local state | `config`, `alias`, `history`, `insights`, `troubleshoot` |
 
-| Command | Description |
-|---------|-------------|
-| `sqry <pattern>` | Pattern search (regex by default, `--exact` for literal, `--fuzzy` for fuzzy) |
-| `sqry search <pattern>` | Explicit search command (same as above) |
-| `sqry query <query>` | Structured AST-aware query with predicates |
-| `sqry ask <question>` | Natural language query (translates to sqry query syntax) |
-| `sqry hier <query>` | Hierarchical search with file/container grouping (RAG-optimized) |
+Use `sqry <command> --help` for the authoritative CLI syntax in your installed binary.
 
-### Index Management
-
-| Command | Description |
-|---------|-------------|
-| `sqry index [path]` | Build symbol index and graph analyses (stored under `.sqry/`) |
-| `sqry update [path]` | Incremental index update (changed files only) |
-| `sqry watch [path]` | File watcher with auto-update |
-| `sqry analyze [path]` | Rebuild graph analyses with explicit tuning controls |
-| `sqry repair [path]` | Repair corrupted index |
-
-### Graph Analysis
-
-| Command | Description |
-|---------|-------------|
-| `sqry graph direct-callers <symbol>` | Find direct callers |
-| `sqry graph direct-callees <symbol>` | Find direct callees |
-| `sqry graph trace-path <from> <to>` | Find call paths between symbols |
-| `sqry graph deps <symbol>` | Transitive dependency tree |
-| `sqry graph cross-language` | List cross-language relationships |
-| `sqry graph stats` | Graph statistics |
-| `sqry graph complexity` | Complexity metrics |
-| `sqry graph cycles` | Cycle detection (alias for `sqry cycles`) |
-
-### Standalone Analysis
-
-| Command | Description |
-|---------|-------------|
-| `sqry duplicates` | Find duplicate functions/signatures/structs |
-| `sqry cycles` | Detect circular dependencies (calls, imports, modules) |
-| `sqry unused` | Find unreachable or unused symbols |
-| `sqry impact <symbol>` | Reverse dependency analysis |
-| `sqry diff <base> <target>` | Semantic diff between git refs |
-| `sqry explain <file> <symbol>` | Explain symbol with context and relations |
-| `sqry similar <file> <symbol>` | Find similar symbols |
-| `sqry subgraph <symbol>` | Extract focused subgraph |
-
-### Visualization & Export
-
-| Command | Description |
-|---------|-------------|
-| `sqry visualize <query>` | Generate diagrams (Mermaid, Graphviz, D2) |
-| `sqry export` | Export graph (DOT, D2, Mermaid, JSON) |
-
-### Session & Workflow
-
-| Command | Description |
-|---------|-------------|
-| `sqry shell [path]` | Interactive REPL with warm cache |
-| `sqry batch [path]` | Batch query execution from file |
-| `sqry workspace` | Multi-repo workspace management |
-| `sqry alias` | Query alias management |
-| `sqry history` | Query history |
-| `sqry config` | Configuration management |
-| `sqry cache` | Cache management |
-| `sqry insights` | Local usage insights |
-| `sqry troubleshoot` | Diagnostic bundle generation |
-
-### Server
-
-| Command | Description |
-|---------|-------------|
-| `sqry lsp` | Start LSP server (`--stdio` for editors) |
-| `sqry mcp setup` | Configure MCP server for AI assistants |
-| `sqry completions <shell>` | Generate shell completions (bash, zsh, fish, powershell) |
-
-## Query Syntax
-
-Structured queries use predicates with boolean operators:
+## Indexing
 
 ```bash
-# By symbol kind
-sqry query "kind:function"
-
-# By name (regex)
-sqry query "kind:function AND name~=/^handle/"
-
-# By language
-sqry query "kind:class AND lang:rust"
-
-# By parent
-sqry query "kind:method AND parent:MyClass"
-
-# By visibility
-sqry query "visibility:public AND kind:function"
-
-# By async
-sqry query "kind:function AND async:true"
-
-# Combined
-sqry query "(kind:function OR kind:method) AND lang:go AND name~=/error/"
-
-# Explain without executing
-sqry query "kind:function" --explain
+sqry index .
+sqry index --status --json .
+sqry index --force .
 ```
 
-### Behavior change: strict invalid-path handling
-
-`sqry query` now rejects malformed paths before any graph load runs. Non-existent paths,
-paths that cannot be canonicalized (dangling symlinks, permission-denied directories), and
-paths that — after canonicalization — escape the workspace root via symlinks are returned
-as `invalid path: ...` errors before pipeline (`base | aggregation`), join (`LHS CALLS RHS`),
-or semantic execution begins. `--text` mode still skips graph acquisition so it continues
-to work on unindexed paths, but it now applies the same up-front existence /
-canonicalization check so a typo'd path fails with the same diagnostic that the semantic
-modes produce. Scripts that previously relied on a missing path falling through to a
-zero-result success exit must check the path before invoking `sqry query`.
-
-## Output Formats
+Plugin selection:
 
 ```bash
-sqry main                    # Colored text (default)
-sqry main --json             # JSON
-sqry main --csv              # CSV (RFC 4180)
-sqry main --tsv              # TSV
-sqry main --count            # Count only
-sqry main --no-color         # Plain text
+sqry index --include-high-cost .
+sqry index --exclude-high-cost .
+sqry index --enable-plugin json .
+sqry index --disable-plugin json .
 ```
 
-## Filtering
+The default fast path excludes compiled non-default plugins. `json` is high-wall-clock; optional specialty plugins include `apex`, `abap`, `servicenow-xanadu-js`, `servicenow-xml`, `terraform`, `puppet`, and `pulumi` when compiled in.
+
+See [Indexing](../docs/user-guide/indexing.md).
+
+## Workspaces And Daemon
+
+Workspace commands:
 
 ```bash
-sqry main --kind function    # By symbol type
-sqry main --lang rust        # By language
-sqry main --max-depth 3      # Directory depth
-sqry main --exact            # Literal match
-sqry main --fuzzy            # Fuzzy match
-sqry main --ignore-case      # Case-insensitive
+sqry workspace init .
+sqry workspace scan .
+sqry workspace status . --json
+sqry workspace clean . --dry-run
 ```
 
-## Exit Codes
-
-- `0` - Success (matches found)
-- `1` - Error or no matches found
-
-## Development
+Daemon commands:
 
 ```bash
-cargo build --package sqry-cli
-cargo test --package sqry-cli
-cargo run --package sqry-cli -- main src/
+sqry daemon start
+sqry daemon load .
+sqry daemon status --json
+sqry daemon rebuild . --force
+sqry daemon logs --follow
 ```
 
-## Related Documentation
+See [Workspaces](../docs/user-guide/workspace.md) and [Daemon Mode](../docs/user-guide/daemon.md).
 
-- [QUICKSTART.md](../QUICKSTART.md) - Getting started guide
-- [Usage Examples](../docs/USAGE_EXAMPLES.md) - Detailed examples
-- [Feature List](../docs/FEATURE_LIST.md) - Complete feature reference
-- [Troubleshooting](../docs/TROUBLESHOOTING.md) - Common issues
+## MCP Setup
 
-## License
+```bash
+sqry mcp setup --tool claude
+sqry mcp setup --tool codex
+sqry mcp setup --tool gemini
+sqry-mcp --list-tools
+```
 
-MIT - See [LICENSE](../LICENSE)
+See [MCP Guide](../docs/user-guide/mcp.md) and [sqry-mcp/README.md](../sqry-mcp/README.md).
 
-**Version**: 19.0.4
+## Related Guides
+
+- [Quick Start](../QUICKSTART.md)
+- [User Guide](../docs/user-guide/README.md)
+- [Natural Language Queries](../docs/user-guide/natural-language.md)
+- [Advanced Analysis](../docs/user-guide/advanced-analysis.md)

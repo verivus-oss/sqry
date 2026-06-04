@@ -1,429 +1,79 @@
-# sqry User Guide (Unified Graph)
+# sqry User Guide
 
-This guide describes the current, unified-graph workflow for sqry. The unified
-graph is the source of truth for `sqry graph` and `sqry visualize` operations.
-Relation predicates in `sqry query` still read from the symbol index
-RelationStore/ImportStore.
+**Version**: 19.0.5
 
-Note: `sqry visualize` will auto-build a unified graph snapshot if one is
-missing. Running `sqry index` first is still recommended for larger repos to
-avoid repeated builds. If the graph is empty, `sqry visualize` exits with an
-actionable error; if no relations are found, it warns and renders the root
-context.
+This guide covers the stable public workflows for local semantic code search.
 
-## Quick Start
+## Core Workflows
+
+- [Indexing](indexing.md): build graph artifacts, choose plugins, clean generated state, and rebuild after graph-format changes.
+- [Workspaces](workspace.md): configure `.sqry-workspace`, VS Code `.code-workspace` `sqry.workspace`, multi-root status, and workspace cleanup.
+- [Daemon Mode](daemon.md): run `sqryd`, load and rebuild workspaces, inspect logs, and use daemon-backed MCP/LSP workflows.
+- [MCP](mcp.md): configure AI assistants, choose standalone versus daemon mode, inspect the live tool catalog, and handle `source_root_id` safely.
+- [Natural Language Queries](natural-language.md): use `sqry ask`, model integrity controls, confidence thresholds, and valid generated command examples.
+- [Advanced Analysis](advanced-analysis.md): use graph predicates, `resolved_via`, `returns`, context propagation, semantic diff, impact, and visualization.
+- [Visualization](visualization.md): render relationship graphs in Mermaid, DOT, and D2.
+
+## First Path
 
 ```bash
-# Build symbols + unified graph snapshot
 sqry index .
-
-# Fast symbol search (pattern-based)
-sqry search "main" .
-
-# Structured query with predicates
-sqry query "kind:function AND name:test" .
-
-# Graph analysis (unified graph)
-sqry graph --path . trace-path main process_data
-
-# Enumerate graph nodes/edges (unified graph)
-sqry graph --path . --format json nodes --kind function
-
-# Visualize relationships (unified graph)
-sqry visualize "callers:main" --format mermaid --path .
+sqry query "kind:function AND visibility:public"
+sqry graph direct-callers authenticate
+sqry visualize "callers:authenticate" --format mermaid
 ```
 
-## Release Highlights (v13.0.3)
+For installation and a shorter command tour, start with [Quick Start](../../QUICKSTART.md).
 
-The current v13.0.3 release train concentrates on correct graph-boundary
-analysis, reusable derived queries, daemon-backed workflows, and explicit
-workspace configuration:
+## Current Graph Model
 
-- `sqry unused`, LSP analysis, and MCP `find_unused` now collect a full
-  candidate superset before applying CLI/MCP/LSP filters, then run the
-  binding-plane post-filter at the boundary. This keeps public/struct/member
-  and other narrowing filters from masking symbols that must still participate
-  in reachability.
-- The binding plane is persisted as a V9 snapshot layer with scope, alias,
-  shadow, import, and export tables. Use
-  `sqry graph resolve <symbol> --explain --json` to inspect the witness trace
-  behind a name-resolution result.
-- Derived graph analysis now flows through `sqry-db` for cycle, unused,
-  reachability, entry-point, trace, dependency, subgraph, export, semantic-diff,
-  CLI, and MCP paths. The shared query layer owns sharded caches so repeated
-  analysis does not recompute the same derived facts in every interface.
-- Snapshot format V10 persists the file-segment table used by incremental
-  reindexing. After upgrading from a pre-V10 release, run `sqry index --force`
-  once so the workspace is rebuilt with V10 metadata.
-- Logical workspaces can now be described by `.sqry-workspace` registries or
-  VS Code `.code-workspace` `sqry.workspace` blocks. CLI, LSP, MCP, daemon, and
-  VS Code all resolve the same source roots and aggregate status.
-- `sqry workspace status` reports each source root as `ok`, `building`,
-  `missing`, or `error`. VS Code consumes the same LSP `sqry/workspaceStatus`
-  aggregate so multi-root workspaces no longer fall back to a false
-  single-folder "not indexed" state.
-- `sqryd` now supports explicit workspace loading and rebuilds:
-  `sqry daemon load <path>` and `sqry daemon rebuild <path> [--force]`.
-  `sqry-mcp --daemon` and `sqry lsp --daemon` can auto-start the daemon.
-  A successful daemon rebuild commits the durable `.sqry/graph` snapshot,
-  `.sqry/analysis` artifacts, and manifest before publishing the replacement
-  graph in memory; filesystem-backed `sqry query` stays coherent after daemon
-  load and rebuild. The daemon's derived-cache hook writes only
-  `.sqry/graph/derived.sqry` and skips the cache when the persisted
-  manifest/snapshot identity is not already valid.
-- MCP session-scoped workspace resolution uses explicit paths first, then
-  file-bearing arguments, MCP roots, the last resolved workspace, and finally
-  legacy environment/CWD fallback. In a normal single-repo session, assistants
-  no longer need to pass `path` on every call.
-- The release pipeline now publishes Homebrew tap updates automatically and
-  verifies binaries against the current `release-distribute.yml` provenance
-  identity, with the old `oss-distribute.yml` identity retained for legacy
-  releases.
+sqry writes the current unified graph snapshot format and loads older supported formats through upconversion where available. Binding-plane name-resolution support was introduced historically in V9; current releases write the current format rather than a V9 snapshot.
 
-Example MCP introspection flow:
+Use a forced rebuild after upgrading across releases that change graph semantics:
 
 ```bash
-sqry-mcp --list-tools | rg expand_cache_status
+sqry index --force .
 ```
 
-Example graph-analysis flow:
+## Graph Provenance And Resolution
+
+Use current graph commands instead of missing history pages:
 
 ```bash
-sqry graph trace-path main handle_error --path .
-sqry graph dependency-tree module --path .
-sqry impact authenticate --depth 3 --path .
+sqry graph resolve authenticate --explain --json
+sqry graph trace-path main handle_request
+sqry impact authenticate --depth 3
+sqry diff main HEAD
 ```
 
-## History And Provenance
-
-Phase 6 introduces the local history layer for explaining why graph facts exist
-and how retained facts changed across snapshots. The first scaffold is present
-for release-surface visibility; user-facing commands land in later Phase 6
-units.
-
-- [History guide](history.md)
-- [Planned CLI reference](../cli/history.md)
+These commands expose why graph facts exist and what depends on them without relying on unreleased history pages.
 
 ## MCP Response Redaction
 
-For hosted/external LLM usage through MCP, apply redaction before sending
-results:
+For external LLM usage, prefer the `standard` redaction preset unless you need strict path privacy. The MCP runtime default is `minimal`; component docs distinguish runtime defaults from recommended external-provider presets.
 
-- [sqry-mcp-redaction/README.md](../../sqry-mcp-redaction/README.md)
-- Use `standard` or `strict` presets for external providers.
+See [MCP](mcp.md) and [sqry-mcp/USER_GUIDE.md](../../sqry-mcp/USER_GUIDE.md).
 
 ## Index Validation
 
-sqry validates index integrity on load. Use `--validate off|warn|fail` to
-control strictness (global flag). With `--auto-rebuild`, `fail` triggers a
-single rebuild attempt when corruption thresholds are exceeded.
-
-Validation checks cover:
-
-- Format + checksum (corruption)
-- Dependency edges (dangling calls/imports/exports) with normalized name matching
-- Orphaned files and duplicate IDs (hard failures when thresholds are exceeded)
-- Graph cycles reported for visibility (warnings only)
-
-Threshold tuning flags:
-
-- `--threshold-dangling-refs` (default 0.05)
-- `--threshold-orphaned-files` (default 0.20)
-- `--threshold-id-gaps` (default 0.10)
-
-Example:
-
-```bash
-sqry index --validate fail --auto-rebuild --threshold-dangling-refs 0.10 .
-```
-
-Status reporting:
+Check index status before expensive workflows:
 
 ```bash
 sqry index --status --json .
-sqry index --status --metrics-format prometheus .
+sqry graph stats --path .
+sqry workspace status . --json
 ```
 
-## Plugin Cost Tiering And Index Semantics
-
-sqry now persists the active plugin ids that built an index into the unified
-graph manifest. That means later `sqry query`, `sqry watch`, `sqry diff`, and
-other graph-loading paths reuse the plugin semantics that built the snapshot
-instead of silently drifting to current defaults.
-
-The default write path uses a curated fast path. Plugins marked
-`high_wall_clock` and optional specialty plugins are excluded by default unless
-you opt back in.
-
-Examples:
+If graph semantics changed across an upgrade, or if persisted artifacts appear stale, rebuild:
 
 ```bash
-# Default fast path
-sqry index .
-
-# Enable all compiled non-default plugins
-sqry index --include-high-cost .
-
-# Enable one plugin explicitly
-sqry index --enable-plugin json .
-
-# Disable one plugin explicitly
-sqry index --disable-plugin json .
+sqry index --force .
 ```
 
-Notes:
-- `--include-high-cost` and `--exclude-high-cost` are mutually exclusive.
-- `--enable-language` and `--disable-language` remain accepted compatibility aliases for `--enable-plugin` and `--disable-plugin`.
-- For older manifests without `plugin_selection`, sqry preserves legacy
-  all-plugins behavior instead of silently applying the fast-path default.
-- Current non-default plugins:
-  - `json`
-  - Optional specialty plugins when compiled with `specialty-plugins`: `apex`, `abap`, `servicenow-xanadu-js`, `servicenow-xml`, `terraform`, `puppet`, `pulumi`
+## Component Docs
 
-## Index Discovery
-
-When running `sqry query` or `sqry search` from a subdirectory, sqry
-automatically walks up the directory tree to find the nearest `.sqry-index`
-file. This matches the behavior of tools like git, cargo, and npm.
-
-### How It Works
-
-1. sqry checks the specified directory for `.sqry-index`
-2. If not found, it checks the parent directory
-3. This continues up to the filesystem root (max 64 levels)
-4. When found, results are automatically filtered to the original scope
-
-### Example
-
-```bash
-# Index exists at /project/.sqry-index
-cd /project/src/utils
-
-# These all work and use the parent index:
-sqry query "kind:function" .        # Results from src/utils/**
-sqry query "kind:function" ../      # Results from src/**
-sqry search --fuzzy "main" .        # Fuzzy results from src/utils/**
-```
-
-### Diagnostics
-
-The query footer shows which index was used:
-
-```
-✓ Using index from /project - Query executed (50ms) - 40 symbols found (filtered to src/utils/**)
-```
-
-### File vs Directory Paths
-
-- **Directory path**: Results filtered to `path:<dir>/**`
-- **File path**: Results filtered to exact file `path:<file>`
-
-```bash
-sqry query "kind:function" ./src/main.rs  # Only main.rs functions
-sqry query "kind:function" ./src/         # All src/** functions
-```
-
-## Unified Graph Basics
-
-- **Graph storage**: `.sqry/graph/` holds the unified graph snapshot and manifest.
-- **Config**: `.sqry/graph/config/config.json` controls graph limits and behavior.
-- **Entry point**: graph build and load go through the unified graph pipeline.
-- **Large C++ repos**: pathological single-file graph builds are bounded so one
-  oversized translation unit cannot stall the entire index indefinitely.
-
-Note: Relation predicates in `sqry query` (`callers:`, `callees:`, `imports:`,
-`exports:`) are served from the symbol index RelationStore/ImportStore today.
-`sqry graph` and `sqry visualize` are backed by the unified graph snapshot.
-
-Traversal-specific notes:
-- traversal-backed commands now share one limit model (`max_depth`, node caps,
-  edge caps, and path caps)
-- truncation metadata is produced consistently across interfaces
-- path enumeration can now report root-to-leaf paths even when no target symbol
-  is specified
-- downstream consumers can correlate nodes and edges by stable `node_id`
-
-Common status commands:
-
-```bash
-sqry graph --path . status
-sqry config show --path .
-```
-
-## Language Notes
-
-### Java Local Variable References
-
-- Java plugin emits `Reference` edges for local variables and parameter bindings, including constructor, lambda, resource, catch, and compact-constructor parameters.
-- Anonymous/local class resolution prefers declared and inherited members before capture; in-file bases, classpath-index bases, and seeded well-known JDK bases resolve before capture, while truly unknown external bases remain ambiguous.
-- Pattern variables supported in enumerated contexts: if/while/for/ternary/`&&` RHS/switch guards.
-- Pattern variable syntax: `instanceof` patterns (Java 16+), `switch` patterns/guards (Java 21+).
-- Statement-level flow is supported after `if`, `while`, `do`, and `for` when Java's definite-match rules guarantee continuation implies a successful pattern match; do-while pattern variables still do not bind inside the loop body.
-
-## Core CLI Entry Points
-
-- `sqry index` builds the symbol index and unified graph snapshot.
-- `sqry update` updates the symbol index (currently performs a full rebuild via the unified pipeline).
-- `sqry index` and `sqry update` accept plugin-selection flags for fast-path and
-  high-cost plugin control.
-- `sqry search` performs pattern-based symbol search.
-- `sqry query` runs AST-aware predicate queries with boolean logic (relation
-  predicates use the index RelationStore/ImportStore).
-- `sqry graph` runs graph analyses (trace paths, stats, cycles, complexity).
-- `sqry diff` compares semantic symbol changes between two git refs.
-- `sqry visualize` renders relation queries to diagram formats from the unified
-  graph snapshot.
-- `sqry ask` translates natural language into safe sqry commands.
-  See [natural-language.md](natural-language.md) for the full guide.
-- `sqry shell` starts an interactive session with a warm cache.
-- `sqry batch` executes multiple queries from a batch file.
-- `sqry config` manages unified graph config and aliases.
-- `sqry cache` manages the persisted AST cache.
-- `sqry lsp` starts the language server.
-
-## Workspace (Multi-Repo) Commands
-
-Manage multiple repositories under a single workspace root (CLI):
-
-```bash
-sqry workspace init /projects --name "My Workspace"
-sqry workspace scan /projects --mode git-roots
-sqry workspace add /projects /projects/backend --name backend
-sqry workspace remove /projects backend
-sqry workspace query /projects "kind:function AND repo:backend"
-sqry workspace stats /projects
-```
-
-Discovery modes:
-- `index-files` (default): find `.sqry-index` files under the root
-- `git-roots`: require a `.git/` directory plus `.sqry-index`
-
-## Advanced Analysis Commands
-
-Standalone analyses powered by the unified graph:
-
-```bash
-sqry duplicates --type body --threshold 90
-sqry cycles --type imports --min-depth 3
-sqry unused --scope public --lang rust
-sqry explain src/main.rs main
-sqry similar src/lib.rs process_data --threshold 0.8
-sqry subgraph main --depth 3 --include-imports
-sqry impact authenticate --depth 5 --show-files
-sqry diff main HEAD --change-type signature_changed
-sqry hier "kind:function AND name:parse" --max-files 10 --context 5
-sqry export --format mermaid --filter-lang rust,go --output graph.mmd
-```
-
-Behavior notes:
-- `sqry impact` defaults still matter: keep `--depth` small unless you want
-  transitive blast-radius analysis.
-- `sqry graph trace-path` and related consumers now share the same traversal
-  semantics as MCP/LSP, so truncation and path ordering should match across
-  interfaces more closely than in earlier releases.
-
-## Semantic Diff (Git Refs)
-
-Use `sqry diff` to compare symbol-level changes between two refs (commit, branch,
-or tag). This is useful for release notes, API review, and refactor validation.
-
-```bash
-# Compare branches
-sqry diff main feature/auth-refactor
-
-# Focus on function signature changes only
-sqry diff v1.0.0 v2.0.0 --kind function --change-type signature_changed
-
-# Limit output and emit JSON for automation
-sqry diff HEAD~20 HEAD --limit 200 --json
-
-# Run from a subdirectory by pointing at repo path explicitly
-sqry diff main HEAD --path .
-```
-
-Supported `--change-type` values: `added`, `removed`, `modified`, `renamed`,
-`signature_changed`.
-
-## Aliases, History, and Diagnostics
-
-```bash
-sqry query "kind:function AND name:test" --save-as test-funcs
-sqry alias list --global
-sqry alias export aliases.json
-sqry history list --limit 50
-sqry insights show
-sqry troubleshoot --dry-run
-```
-
-Notes:
-- Aliases are stored locally (project) or globally (`~/.config/sqry/`).
-- History entries redact common secrets.
-- Insights are local-only; no network calls are made.
-
-## Output UX Options
-
-```bash
-sqry --pager query "kind:function"
-sqry --no-pager search "error" --json
-sqry --pager-cmd "less -R" query "name:main"
-sqry --theme light --sort name query "kind:function"
-```
-
-## LSP Custom Endpoints & Configuration
-
-`sqry lsp` exposes standard LSP handlers plus custom `sqry/*` endpoints for
-semantic search, relations, graph export, and analysis. For a full endpoint
-list and configuration keys, see `docs/FEATURE_LIST.md`.
-
-## Graph Operations
-
-`sqry graph` supports these unified graph analyses:
-
-- `trace-path <from> <to>`: shortest path across call/edge types.
-- `call-chain-depth <symbol>`: maximum call depth (optional chain output).
-- `dependency-tree <module>`: transitive import dependency tree.
-- `cross-language`: list cross-language edges with filters.
-- `stats`: node/edge summary statistics.
-- `status`: unified graph snapshot status.
-- `cycles`: circular dependency detection.
-- `complexity`: complexity metrics for symbols or modules.
-- `nodes`: list unified graph nodes with filters.
-- `edges`: list unified graph edges with filters.
-
-Example:
-
-```bash
-sqry graph --path . --format json stats
-```
-
-Node/edge listing examples:
-
-```bash
-sqry graph --path . --format json nodes --kind macro --languages rust
-sqry graph --path . --format json edges --kind http_request --from-lang rust
-```
-
-Filtering semantics:
-
-- `--kind` and language filters are case-insensitive exact matches.
-- `--name`, `--qualified-name`, `--from`, `--to` are case-sensitive substrings.
-- `--file` is a case-insensitive substring on normalized paths (edges use the
-  source/edge file).
-
-## Output Formats
-
-Global output flags apply to most commands:
-
-- `--json`, `--csv`, `--tsv` for structured output
-- `--headers` and `--columns` for CSV/TSV control
-- `--preview` for code context around matches
-- `--sort` for stable, opt-in sorting
-
-## Suggested Workflow
-
-1. Run `sqry index` to build the symbol index and unified graph snapshot.
-2. Use `sqry search` or `sqry query` to find symbols of interest.
-3. Use `sqry graph` to analyze relationships and call paths (unified graph).
-4. Use `sqry visualize` to export diagrams (unified graph).
-
-For diagram formats and rendering options, see `docs/user-guide/visualization.md`.
+- [CLI README](../../sqry-cli/README.md)
+- [MCP README](../../sqry-mcp/README.md)
+- [MCP troubleshooting](../../sqry-mcp/TROUBLESHOOTING.md)
+- [VS Code extension README](../../sqry-vscode/README.md)
+- [VS Code user guide](../../sqry-vscode/USER_GUIDE.md)

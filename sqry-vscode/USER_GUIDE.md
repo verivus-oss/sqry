@@ -1,7 +1,7 @@
 # sqry VS Code Extension - User Guide
 
-**Version**: 19.0.4
-**Last Updated**: 2026-06-04
+**Version**: 19.0.6
+**Last Updated**: 2026-06-05
 
 ---
 
@@ -56,7 +56,7 @@ cargo install --path sqry-cli
 
 # Verify installation
 sqry --version
-# Should output: sqry 19.0.4 (or later)
+# Should output: sqry 19.0.6 (or later)
 ```
 
 ### Option 1: Install from VSIX
@@ -133,7 +133,7 @@ Public auto-download binaries are currently expected for:
 - Linux `x86_64`
 - Linux `arm64`
 - Windows `x86_64`
-- macOS Apple Silicon (`arm64`)
+- macOS `arm64`
 - macOS Intel (`x86_64`)
 
 For Extension Development Host / test runs launched from source, the downloader
@@ -141,6 +141,12 @@ may fall back to the latest published patch release in the same `major.minor`
 line when the exact requested patch version is not yet public. This is only a
 development convenience so local extension testing can continue while the public
 release is still catching up.
+
+For the canonical CLI workspace workflow, see
+[docs/user-guide/workspace.md](../docs/user-guide/workspace.md). For MCP setup
+and daemon-backed assistant workflows, see
+[docs/user-guide/mcp.md](../docs/user-guide/mcp.md) and
+[docs/user-guide/daemon.md](../docs/user-guide/daemon.md).
 
 ---
 
@@ -890,6 +896,6 @@ This build installs locally via VSIX while we prepare the Marketplace release—
 
 ---
 
-**Last Updated**: 2026-06-04
-**Extension Version**: 19.0.4
-**sqry Version**: 19.0.4+
+**Last Updated**: 2026-06-05
+**Extension Version**: 19.0.6
+**sqry Version**: 19.0.6+

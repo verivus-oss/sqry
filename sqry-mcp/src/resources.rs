@@ -235,7 +235,10 @@ fn tool_category(name: &str) -> ToolCategory {
         | "hierarchical_search"
         | "pattern_search"
         | "get_workspace_symbols"
-        | "search_similar" => ToolCategory::Search,
+        | "search_similar"
+        // U04 (#299 review follow-up) — the structural query planner is a
+        // search surface: it finds nodes matching a text-DSL plan.
+        | "sqry_query" => ToolCategory::Search,
 
         "get_definition" | "get_references" | "get_hover_info" | "get_document_symbols" => {
             ToolCategory::Navigation
@@ -249,7 +252,10 @@ fn tool_category(name: &str) -> ToolCategory {
         }
 
         "find_cycles" | "is_node_in_cycle" | "find_unused" | "find_duplicates"
-        | "complexity_metrics" => ToolCategory::CodeQuality,
+        | "complexity_metrics"
+        // U04 (#299 review follow-up) — Go context.Context leak detection
+        // is a code-quality analysis.
+        | "context_propagation" => ToolCategory::CodeQuality,
 
         "semantic_diff" => ToolCategory::VersionComparison,
 
@@ -353,6 +359,7 @@ const TOOL_GUIDE_BODY: &str = "\n\
 | `hierarchical_search` | RAG-optimized search grouped by file/container | query:str!, filters:{language?,symbol_kind?,visibility?,score_min?}?, max_files:int? |
 | `pattern_search` | Find symbols by substring match | pattern:str! |
 | `get_workspace_symbols` | Search symbols by name across workspace | query:str! |
+| `sqry_query` | Structural query planner (text DSL, e.g. `kind:function has:caller:main`) | query:str!, limit:int? |
 | `sqry_ask` | Natural language to sqry query | query:str! |
 
 ### Filters Parameter
@@ -422,6 +429,7 @@ unified graph; results are byte-exact, not signature-substring matches:
 | `find_unused` | Unreachable or unused symbols | scope:enum?, language:str[]? |
 | `find_duplicates` | Duplicate functions/signatures/structs | duplicate_type:enum?, threshold:int? |
 | `complexity_metrics` | Function complexity from call graph + LOC | target:str?, min_complexity:int? |
+| `context_propagation` | Go context.Context propagation-leak detection | scope:enum?, mode:enum?, max_results:int? |
 
 ## Version Comparison
 
@@ -446,7 +454,31 @@ unified graph; results are byte-exact, not signature-substring matches:
 | `list_files` | List indexed files | language:str? |
 | `list_symbols` | List indexed symbols | kind:str?, language:str? |
 | `expand_cache_status` | Macro expansion cache status (Rust) | path:str? |
-| `workspace_status` | Aggregate WorkspaceIndexStatus + workspace identity | workspace_id:str? |
+| `workspace_status` | Per-source-root index status + workspace identity | workspace_id:str? |
+
+### `workspace_status` response fields
+
+| Field | Meaning |
+|-------|---------|
+| `workspace_id_short` / `workspace_id_full` | BLAKE3 workspace identity (short prefix / full hex). |
+| `aggregate.source_root_statuses[].source_root_id` | **Opaque** 8-hex display/correlation ID for the source root. NOT a path and NOT a path prefix — never build tool path arguments from it. |
+| `aggregate.source_root_statuses[].status` | Per-root index state: `ok` / `missing` / `building` / `error`. |
+| `aggregate.source_root_statuses[].classpath_dir` | Real filesystem path to the root's JVM classpath dir, if any. A genuine path (redacted like any path), never an opaque ID. |
+| `aggregate.{missing,building,ok,error}_count` | Summary counters. |
+| `source_roots[]` | Source-root paths (redacted under the default preset; cleartext only under `SQRY_REDACTION_PRESET=none`). |
+
+Path arguments for every path-taking tool (`get_definition`,
+`semantic_search` `path`, `get_document_symbols`, ...) are
+workspace-relative (`src/lib.rs`) or normal filesystem paths. Do NOT
+prefix them with a `source_root_id` — `485f1995/src/lib.rs` is invalid.
+Clients migrating from earlier responses: the per-root `path` field was
+replaced by `source_root_id`; it matches the `<source_root_id>/...`
+prefixes the minimal redaction preset emits in other tools' path fields.
+
+`SQRY_REDACTION_PRESET=none`: per-root aggregate entries still identify
+roots by `source_root_id` (the aggregate shape is preset-independent).
+Cleartext source-root filesystem locations appear only through top-level
+`source_roots[]`, which is not redacted under `none`.
 
 ## Export
 
@@ -810,6 +842,8 @@ mod tests {
             "export_graph".into(),
             "sqry_ask".into(),
             "workspace_status".into(),
+            "sqry_query".into(),
+            "context_propagation".into(),
         ]);
         let result = read_resource(RESOURCE_CAPABILITY_MAP);
         assert!(result.is_some(), "capability-map resource missing");
@@ -902,6 +936,8 @@ mod tests {
             "export_graph",
             "sqry_ask",
             "workspace_status",
+            "sqry_query",
+            "context_propagation",
         ];
 
         // Set up
