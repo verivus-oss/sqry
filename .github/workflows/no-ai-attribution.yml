@@ -1,0 +1,42 @@
+name: no-ai-attribution
+# Server-side gate: reject any commit whose message carries AI
+# attribution stamps (Co-authored-by Claude/Anthropic trailers or
+# "Generated with Claude Code" footers). Only the commits introduced
+# by the push or pull request are examined; pre-gate history is not
+# retroactively checked.
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  commit-messages:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Reject AI attribution stamps
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+        run: |
+          set -eu
+          NULLSHA=0000000000000000000000000000000000000000
+          if [ "$EVENT" = "pull_request" ]; then
+            ARGS="$BASE..$HEAD_SHA"
+          elif [ -n "${BEFORE:-}" ] && [ "$BEFORE" != "$NULLSHA" ] && git cat-file -e "$BEFORE" 2>/dev/null; then
+            ARGS="$BEFORE..$AFTER"
+          else
+            ARGS="-n 1 $AFTER"
+          fi
+          PATTERN='co-authored-by:.*(claude|anthropic)|generated with.*claude'
+          if git log --format='%h %s%n%b' $ARGS | grep -qiE "$PATTERN"; then
+            echo "::error::AI attribution stamp found in commit message(s) in range: $ARGS"
+            git log --format='--- %h %s%n%b' $ARGS | grep -iE "$PATTERN" -B3 || true
+            exit 1
+          fi
+          echo "OK: no attribution stamps in: $ARGS"
