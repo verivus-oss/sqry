@@ -18,7 +18,7 @@ path = "src/lib.rs"
 [dependencies]
 # Wire types + framing codec (the only sqry-* dep — keeps this crate a leaf
 # on the client side of the dep graph, sibling to the daemon itself).
-sqry-daemon-protocol = { version = "19.0.2", path = "../sqry-daemon-protocol" }
+sqry-daemon-protocol = { version = "19.0.3", path = "../sqry-daemon-protocol" }
 
 # Async transport. `net` gives us UnixStream + NamedPipeClient; `io-std`
 # exposes the process-global stdin/stdout handles used by pump_stdio;
