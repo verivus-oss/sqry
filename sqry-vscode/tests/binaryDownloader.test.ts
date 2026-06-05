@@ -51,6 +51,18 @@ function createAttestationBundle(subjects: unknown[]) {
   };
 }
 
+function createOutputChannel() {
+  const lines: string[] = [];
+  return {
+    channel: {
+      appendLine: (line: string) => {
+        lines.push(line);
+      },
+    },
+    lines,
+  };
+}
+
 describe("binaryDownloader", () => {
   describe("release asset selection", () => {
     it("prefers current checksum manifest name with legacy fallback", () => {
@@ -352,18 +364,6 @@ describe("binaryDownloader", () => {
   });
 
   describe("verifyCosignBundleWithIdentities()", () => {
-    function createOutputChannel() {
-      const lines: string[] = [];
-      return {
-        channel: {
-          appendLine: (line: string) => {
-            lines.push(line);
-          },
-        },
-        lines,
-      };
-    }
-
     it("falls back from tag identity to main identity", async () => {
       const mod = loadModule();
       const { channel } = createOutputChannel();
@@ -485,6 +485,65 @@ describe("binaryDownloader", () => {
           "d14809155ba2475e1a2967e40031e2bf3dc69f3fba64450b6f5befe2f9457d9e",
         );
       }).to.throw("Sigstore DSSE bundle does not attest release asset sqry-linux-x86_64");
+    });
+  });
+
+  describe("verifyCosignBundle()", () => {
+    let tmpDir: string;
+
+    beforeEach(() => {
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "sqry-test-"));
+    });
+
+    afterEach(() => {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
+
+    it("verifies release-wide DSSE attestations without passing binary bytes as payload", async () => {
+      const binaryPath = path.join(tmpDir, "sqry-linux-x86_64");
+      fs.writeFileSync(binaryPath, "release binary");
+      const expectedSha256 = crypto.createHash("sha256").update("release binary").digest("hex");
+
+      const bundlePath = path.join(tmpDir, "release-artifacts.attestation.json");
+      fs.writeFileSync(
+        bundlePath,
+        JSON.stringify(createAttestationBundle([
+          {
+            name: "sqry-linux-x86_64",
+            digest: {
+              sha256: expectedSha256,
+            },
+          },
+        ])),
+      );
+
+      const verifyCalls: unknown[][] = [];
+      const mod = loadModule({
+        sigstore: {
+          verify: async (...args: unknown[]) => {
+            verifyCalls.push(args);
+          },
+        },
+      });
+      const { channel } = createOutputChannel();
+
+      await mod.verifyCosignBundle(
+        binaryPath,
+        bundlePath,
+        "19.0.4",
+        channel,
+        { fsPath: tmpDir },
+        "sqry-linux-x86_64",
+        expectedSha256,
+      );
+
+      expect(verifyCalls).to.have.length(1);
+      expect(verifyCalls[0]).to.have.length(2);
+      expect(Buffer.isBuffer(verifyCalls[0][1])).to.equal(false);
+      expect(verifyCalls[0][1]).to.include({
+        certificateIssuer: "https://token.actions.githubusercontent.com",
+        certificateIdentityURI: "https://github.com/verivus-oss/sqry/.github/workflows/release-distribute.yml@refs/tags/v19.0.4",
+      });
     });
   });
 

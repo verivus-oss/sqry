@@ -4,7 +4,7 @@ This document defines the canonical types used across all sqry interfaces (CLI, 
 All types are exported from `sqry_core::schema` and should be the single source of truth.
 Graph kinds (`NodeKind`, `EdgeKind`) are defined in `sqry-core/src/graph/unified/` and re-exported from the schema module.
 
-**Version**: 19.0.6
+**Version**: 19.0.7
 **Last Updated**: 2026-06-05
 
 ---
@@ -332,6 +332,6 @@ pub struct ProtocolRelationKind(RelationKind);
 
 | Version | Date | Changes |
 |---------|------|---------|
-| 19.0.6 | 2026-03-10 | Bump schema doc version to match current sqry release |
+| 19.0.7 | 2026-03-10 | Bump schema doc version to match current sqry release |
 | 4.9.3 | 2026-03-03 | Align version with sqry release, verify accuracy |
 | 2.10.0 | 2026-01-18 | Initial schema module creation |

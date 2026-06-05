@@ -396,8 +396,8 @@ export async function verifyCosignBundle(
   try {
     const sigstore = await import("sigstore");
     const bundleContent = JSON.parse(fs.readFileSync(bundlePath, "utf-8"));
-    const binaryData = fs.readFileSync(binaryPath);
-    if (assetName && expectedSha256) {
+    const hasEmbeddedDssePayload = isDsseAttestationBundle(bundleContent);
+    if (hasEmbeddedDssePayload && assetName && expectedSha256) {
       verifyAttestationSubject(bundleContent, assetName, expectedSha256);
     }
     const identityCandidates = getCertificateIdentityCandidates(version);
@@ -417,11 +417,17 @@ export async function verifyCosignBundle(
         outputChannel,
         async (certIdentity) => {
           await withTemporarySigstoreProxyEnv(proxyUrl, async () => {
-            await sigstore.verify(bundleContent, binaryData, {
+            const options = {
               ...verifyOptions,
               certificateIssuer: OIDC_ISSUER,
               certificateIdentityURI: certIdentity,
-            });
+            };
+            if (hasEmbeddedDssePayload) {
+              await sigstore.verify(bundleContent, options);
+            } else {
+              const binaryData = fs.readFileSync(binaryPath);
+              await sigstore.verify(bundleContent, binaryData, options);
+            }
           });
         },
       );
@@ -499,6 +505,10 @@ export function verifyAttestationSubject(
   }
 
   throw new Error(`Sigstore DSSE bundle does not attest release asset ${assetName}.`);
+}
+
+export function isDsseAttestationBundle(bundleContent: unknown): boolean {
+  return isRecord(asRecord(bundleContent)["dsseEnvelope"]);
 }
 
 export function isRecoverableSigstoreTufError(error: unknown): boolean {
