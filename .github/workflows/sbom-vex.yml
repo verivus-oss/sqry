@@ -20,11 +20,16 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Configure git credentials for internal repos
+      - name: Configure git credentials for internal repos (job-scoped)
+        # Self-hosted runner shares the service user's HOME: write the token
+        # rewrite to a job-local file (RUNNER_TEMP is wiped between jobs), never
+        # the real ~/.gitconfig, where expired rewrites accumulate and break the
+        # user's git auth. GITHUB_ENV exports it to all subsequent steps.
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          git config --global url."https://x-access-token:${GH_TOKEN}@github.com/".insteadOf "https://github.com/"
+          echo "GIT_CONFIG_GLOBAL=${RUNNER_TEMP}/gitconfig" >> "$GITHUB_ENV"
+          GIT_CONFIG_GLOBAL="${RUNNER_TEMP}/gitconfig" git config --global url."https://x-access-token:${GH_TOKEN}@github.com/".insteadOf "https://github.com/"
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable

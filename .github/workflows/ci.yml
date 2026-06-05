@@ -47,8 +47,14 @@ jobs:
       RUSTFLAGS: ${{ matrix.rustflags }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-      - name: Configure git credentials
-        run: git config --global url."https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/".insteadOf "https://github.com/"
+      - name: Configure git credentials (job-scoped)
+        # Self-hosted runner shares the service user's HOME: write the token
+        # rewrite to a job-local file (RUNNER_TEMP is wiped between jobs), never
+        # the real ~/.gitconfig, where expired rewrites accumulate and break the
+        # user's git auth. GITHUB_ENV exports it to all subsequent steps.
+        run: |
+          echo "GIT_CONFIG_GLOBAL=${RUNNER_TEMP}/gitconfig" >> "$GITHUB_ENV"
+          GIT_CONFIG_GLOBAL="${RUNNER_TEMP}/gitconfig" git config --global url."https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/".insteadOf "https://github.com/"
       - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
         with:
           toolchain: "1.90"
@@ -156,8 +162,14 @@ jobs:
     runs-on: [self-hosted, linux, rust, x86_64, workhorse2]
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-      - name: Configure git credentials
-        run: git config --global url."https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/".insteadOf "https://github.com/"
+      - name: Configure git credentials (job-scoped)
+        # Self-hosted runner shares the service user's HOME: write the token
+        # rewrite to a job-local file (RUNNER_TEMP is wiped between jobs), never
+        # the real ~/.gitconfig, where expired rewrites accumulate and break the
+        # user's git auth. GITHUB_ENV exports it to all subsequent steps.
+        run: |
+          echo "GIT_CONFIG_GLOBAL=${RUNNER_TEMP}/gitconfig" >> "$GITHUB_ENV"
+          GIT_CONFIG_GLOBAL="${RUNNER_TEMP}/gitconfig" git config --global url."https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/".insteadOf "https://github.com/"
       - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
         with:
           toolchain: "1.90"
@@ -218,8 +230,14 @@ jobs:
     runs-on: [self-hosted, linux, rust, x86_64, workhorse2]
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-      - name: Configure git credentials
-        run: git config --global url."https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/".insteadOf "https://github.com/"
+      - name: Configure git credentials (job-scoped)
+        # Self-hosted runner shares the service user's HOME: write the token
+        # rewrite to a job-local file (RUNNER_TEMP is wiped between jobs), never
+        # the real ~/.gitconfig, where expired rewrites accumulate and break the
+        # user's git auth. GITHUB_ENV exports it to all subsequent steps.
+        run: |
+          echo "GIT_CONFIG_GLOBAL=${RUNNER_TEMP}/gitconfig" >> "$GITHUB_ENV"
+          GIT_CONFIG_GLOBAL="${RUNNER_TEMP}/gitconfig" git config --global url."https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/".insteadOf "https://github.com/"
       - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
         with:
           toolchain: "1.90"
@@ -252,8 +270,14 @@ jobs:
             env_var: "0"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-      - name: Configure git credentials
-        run: git config --global url."https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/".insteadOf "https://github.com/"
+      - name: Configure git credentials (job-scoped)
+        # Self-hosted runner shares the service user's HOME: write the token
+        # rewrite to a job-local file (RUNNER_TEMP is wiped between jobs), never
+        # the real ~/.gitconfig, where expired rewrites accumulate and break the
+        # user's git auth. GITHUB_ENV exports it to all subsequent steps.
+        run: |
+          echo "GIT_CONFIG_GLOBAL=${RUNNER_TEMP}/gitconfig" >> "$GITHUB_ENV"
+          GIT_CONFIG_GLOBAL="${RUNNER_TEMP}/gitconfig" git config --global url."https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/".insteadOf "https://github.com/"
       - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
         with:
           toolchain: "1.90"
@@ -268,8 +292,14 @@ jobs:
     runs-on: [self-hosted, linux, rust, x86_64, workhorse2]
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-      - name: Configure git credentials
-        run: git config --global url."https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/".insteadOf "https://github.com/"
+      - name: Configure git credentials (job-scoped)
+        # Self-hosted runner shares the service user's HOME: write the token
+        # rewrite to a job-local file (RUNNER_TEMP is wiped between jobs), never
+        # the real ~/.gitconfig, where expired rewrites accumulate and break the
+        # user's git auth. GITHUB_ENV exports it to all subsequent steps.
+        run: |
+          echo "GIT_CONFIG_GLOBAL=${RUNNER_TEMP}/gitconfig" >> "$GITHUB_ENV"
+          GIT_CONFIG_GLOBAL="${RUNNER_TEMP}/gitconfig" git config --global url."https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/".insteadOf "https://github.com/"
       - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
         with:
           toolchain: "1.90"
