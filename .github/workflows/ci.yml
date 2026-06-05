@@ -45,6 +45,11 @@ jobs:
       # P2-3 Phase 3 Step 3: Zero-warnings gate enabled for all platforms
       # Line-tables-only debug info saves ~40% disk vs full debuginfo (prevents "No space left on device")
       RUSTFLAGS: ${{ matrix.rustflags }}
+      # Job-scoped git config: the self-hosted runner shares the service user's
+      # HOME, so "git config --global" must never write to the real ~/.gitconfig
+      # (expired token rewrites accumulate there and break the user's git auth).
+      # RUNNER_TEMP is wiped between jobs, so the token rewrite cannot leak.
+      GIT_CONFIG_GLOBAL: ${{ runner.temp }}/gitconfig
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Configure git credentials
@@ -154,6 +159,9 @@ jobs:
   clippy:
     name: Clippy
     runs-on: [self-hosted, linux, rust, x86_64, workhorse2]
+    env:
+      # Job-scoped git config (see test job): keep token rewrites out of ~/.gitconfig.
+      GIT_CONFIG_GLOBAL: ${{ runner.temp }}/gitconfig
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Configure git credentials
@@ -216,6 +224,9 @@ jobs:
   docs:
     name: Documentation
     runs-on: [self-hosted, linux, rust, x86_64, workhorse2]
+    env:
+      # Job-scoped git config (see test job): keep token rewrites out of ~/.gitconfig.
+      GIT_CONFIG_GLOBAL: ${{ runner.temp }}/gitconfig
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Configure git credentials
@@ -250,6 +261,9 @@ jobs:
             env_var: "1"
           - mode: Ratio (fallback)
             env_var: "0"
+    env:
+      # Job-scoped git config (see test job): keep token rewrites out of ~/.gitconfig.
+      GIT_CONFIG_GLOBAL: ${{ runner.temp }}/gitconfig
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Configure git credentials
@@ -266,6 +280,12 @@ jobs:
     name: Security Audit
     # RKG: implements REQ:SQRY-SECURITY-AUDIT-AUTOMATION
     runs-on: [self-hosted, linux, rust, x86_64, workhorse2]
+    env:
+      # Job-scoped git config (see test job): keep token rewrites out of ~/.gitconfig.
+      # The "Remove GitHub credential rewrite" step below now unsets from this
+      # job-local file; the audit/deny steps' GIT_CONFIG_GLOBAL=/dev/null
+      # overrides still take precedence per-step.
+      GIT_CONFIG_GLOBAL: ${{ runner.temp }}/gitconfig
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Configure git credentials

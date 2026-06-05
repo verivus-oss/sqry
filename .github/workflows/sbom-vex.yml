@@ -13,6 +13,12 @@ jobs:
   sbom:
     name: Generate SBOM + VEX
     runs-on: [self-hosted, linux, rust, x86_64, workhorse2]
+    env:
+      # Job-scoped git config: the self-hosted runner shares the service user's
+      # HOME, so "git config --global" must never write to the real ~/.gitconfig
+      # (expired token rewrites accumulate there and break the user's git auth).
+      # RUNNER_TEMP is wiped between jobs, so the token rewrite cannot leak.
+      GIT_CONFIG_GLOBAL: ${{ runner.temp }}/gitconfig
 
     steps:
       - name: Checkout code
