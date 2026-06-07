@@ -58,27 +58,27 @@ tracing-subscriber.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-sqry-core = { version = "19.0.7", path = "../sqry-core" }
-sqry-db = { version = "19.0.7", path = "../sqry-db" }
-sqry-nl = { version = "19.0.7", path = "../sqry-nl" }
+sqry-core = { version = "19.0.9", path = "../sqry-core" }
+sqry-db = { version = "19.0.9", path = "../sqry-db" }
+sqry-nl = { version = "19.0.9", path = "../sqry-nl" }
 # NL07 — per-session cached `Arc<Translator>` for the `sqry/ask`
 # handler. `OnceCell::get_or_try_init` is the fallible-lazy-init
 # primitive the standalone-LSP path needs (the daemon path uses the
 # `LoadedWorkspace.nl_translator` cell instead).
 once_cell = { workspace = true }
-sqry-plugin-registry = { version = "19.0.7", path = "../sqry-plugin-registry" }
+sqry-plugin-registry = { version = "19.0.9", path = "../sqry-plugin-registry" }
 # STEP_11_4 iter3 — `collect_macro_expansion_warnings` in
 # `session.rs` calls `sqry_lang_rust::macro_expander::MacroExpander::new`
 # to validate every source root for macro-expansion compatibility, so
 # the production warning producer feeds
 # `WorkspaceIndexStatus.warnings`. No cycle: sqry-lang-rust does not
 # depend on sqry-lsp.
-sqry-lang-rust = { version = "19.0.7", path = "../sqry-lang-rust" }
+sqry-lang-rust = { version = "19.0.9", path = "../sqry-lang-rust" }
 # Phase 8c U11 — `sqry-lsp --daemon` shim client transport. Provides
 # `connect_shim` + `pump_stdio` so this binary can run as a byte-pump
 # shim against a long-lived sqryd daemon. Leaf crate on our dep graph
 # (only pulls in `sqry-daemon-protocol` + `tokio`); no cycle.
-sqry-daemon-client = { version = "19.0.7", path = "../sqry-daemon-client" }
+sqry-daemon-client = { version = "19.0.9", path = "../sqry-daemon-client" }
 # Task 11 U1 — `resolve_sqryd_binary` PATH lookup (used by daemon auto-start in
 # `run_daemon_client_mode`). Version matches the `sqry-cli` dependency so both
 # crates resolve to the same version in the workspace lock-file.

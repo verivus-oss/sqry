@@ -62,7 +62,7 @@ jobs:
     timeout-minutes: 90
     steps:
       - name: Checkout (full history for merge-base diff)
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
@@ -88,7 +88,7 @@ jobs:
         # House style (ci.yml): registry-only cache. The cargo-mutants
         # binary itself is reinstalled per run to keep this in lock-
         # step with the existing CI cache contract.
-        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry/index/
@@ -203,7 +203,7 @@ jobs:
           - sqry-lang-python
     steps:
       - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@v6
 
       - name: Free disk space
         run: |
@@ -227,7 +227,7 @@ jobs:
         # House style (ci.yml): registry-only cache. The cargo-mutants
         # binary itself is reinstalled per run to keep this in lock-
         # step with the existing CI cache contract.
-        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry/index/

@@ -46,7 +46,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@v6
 
       - name: Free disk space
         run: |
@@ -71,7 +71,7 @@ jobs:
         run: cargo +nightly install cargo-fuzz
 
       - name: Cache cargo registry
-        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry/index/
@@ -83,7 +83,7 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Cache fuzz target/
-        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        uses: actions/cache@v5
         with:
           path: sqry-db/fuzz/target/
           key: ${{ runner.os }}-fuzz-parse-target-${{ hashFiles('sqry-db/fuzz/Cargo.toml', 'sqry-db/src/planner/parse.rs') }}
@@ -103,7 +103,7 @@ jobs:
 
       - name: Upload corpus and crash artifacts on failure
         if: failure()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@v4
         with:
           name: fuzz-parse-crashes-${{ github.run_id }}
           path: |

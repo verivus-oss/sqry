@@ -306,9 +306,9 @@ checksum = "bef38d45163c2f1dde094a7dfd33ccf595c92905c8f8f4fdc18d06fb1037718a"
 
 [[package]]
 name = "bitflags"
-version = "2.12.1"
+version = "2.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "84d7ced0ae9557296835c32bf1b1e02b44c746701f898460fb000d7eaa84f00a"
+checksum = "b4388bee8683e3d04af747c73422af53102d2bd24d9eadb6cbc100baef4b43f8"
 
 [[package]]
 name = "blake3"
@@ -1896,9 +1896,9 @@ dependencies = [
 
 [[package]]
 name = "ignore"
-version = "0.4.25"
+version = "0.4.26"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d3d782a365a015e0f5c04902246139249abf769125006fbe7649e2ee88169b4a"
+checksum = "b915661dd01db3f05050265b2477bcc6527b3792388e2749b41623cc592be67d"
 dependencies = [
  "crossbeam-deque",
  "globset",
@@ -1941,7 +1941,7 @@ version = "0.11.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "533e68a5842e734946fe159fb03fc9bbbb254f590dd0d8ad321ae5ff7beca2c1"
 dependencies = [
- "bitflags 2.12.1",
+ "bitflags 2.13.0",
  "inotify-sys",
  "libc",
 ]
@@ -2051,7 +2051,7 @@ version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "07293a4e297ac234359b510362495713f75ea345d5307140414f20c69ffeb087"
 dependencies = [
- "bitflags 2.12.1",
+ "bitflags 2.13.0",
  "libc",
 ]
 
@@ -2145,7 +2145,7 @@ dependencies = [
 name = "lsp-types"
 version = "0.94.1"
 dependencies = [
- "bitflags 2.12.1",
+ "bitflags 2.13.0",
  "serde",
  "serde_json",
  "serde_repr",
@@ -2386,7 +2386,7 @@ version = "0.31.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf20d2fde8ff38632c426f1165ed7436270b44f199fc55284c38276f9db47c3d"
 dependencies = [
- "bitflags 2.12.1",
+ "bitflags 2.13.0",
  "cfg-if",
  "cfg_aliases",
  "libc",
@@ -2414,7 +2414,7 @@ version = "8.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4d3d07927151ff8575b7087f245456e549fea62edf0ec4e565a5ee50c8402bc3"
 dependencies = [
- "bitflags 2.12.1",
+ "bitflags 2.13.0",
  "fsevent-sys",
  "inotify",
  "kqueue",
@@ -2432,7 +2432,7 @@ version = "2.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "42b8cfee0e339a0337359f3c88165702ac6e600dc01c0cc9579a92d62b08477a"
 dependencies = [
- "bitflags 2.12.1",
+ "bitflags 2.13.0",
 ]
 
 [[package]]
@@ -2504,7 +2504,7 @@ version = "6.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0cc3cbf698f9438986c11a880c90a6d04b9de27575afd28bbf45b154b6c709e2"
 dependencies = [
- "bitflags 2.12.1",
+ "bitflags 2.13.0",
  "libc",
  "once_cell",
  "onig_sys",
@@ -2779,7 +2779,7 @@ version = "0.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "25485360a54d6861439d60facef26de713b1e126bf015ec8f98239467a2b82f7"
 dependencies = [
- "bitflags 2.12.1",
+ "bitflags 2.13.0",
  "chrono",
  "flate2",
  "procfs-core",
@@ -2792,7 +2792,7 @@ version = "0.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6401bf7b6af22f78b563665d15a22e9aef27775b79b149a66ca022468a4e405"
 dependencies = [
- "bitflags 2.12.1",
+ "bitflags 2.13.0",
  "chrono",
  "hex",
 ]
@@ -2805,7 +2805,7 @@ checksum = "4b45fcc2344c680f5025fe57779faef368840d0bd1f42f216291f0dc4ace4744"
 dependencies = [
  "bit-set",
  "bit-vec",
- "bitflags 2.12.1",
+ "bitflags 2.13.0",
  "num-traits",
  "rand",
  "rand_chacha",
@@ -2940,7 +2940,7 @@ version = "0.5.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed2bf2547551a7053d6fdfafda3f938979645c44812fbfcda098faae3f1a362d"
 dependencies = [
- "bitflags 2.12.1",
+ "bitflags 2.13.0",
 ]
 
 [[package]]
@@ -3102,7 +3102,7 @@ version = "1.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6fe4565b9518b83ef4f91bb47ce29620ca828bd32cb7e408f0062e9930ba190"
 dependencies = [
- "bitflags 2.12.1",
+ "bitflags 2.13.0",
  "errno",
  "libc",
  "linux-raw-sys",
@@ -3168,7 +3168,7 @@ version = "18.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4a990b25f351b25139ddc7f21ee3f6f56f86d6846b74ac8fad3a719a287cd4a0"
 dependencies = [
- "bitflags 2.12.1",
+ "bitflags 2.13.0",
  "cfg-if",
  "clipboard-win",
  "home",
@@ -3537,7 +3537,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-classpath"
-version = "19.0.7"
+version = "19.0.9"
 dependencies = [
  "anyhow",
  "cafebabe",
@@ -3561,7 +3561,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-cli"
-version = "19.0.7"
+version = "19.0.9"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -3620,7 +3620,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-core"
-version = "19.0.7"
+version = "19.0.9"
 dependencies = [
  "anyhow",
  "approx",
@@ -3716,7 +3716,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-daemon"
-version = "19.0.7"
+version = "19.0.9"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -3757,7 +3757,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-daemon-client"
-version = "19.0.7"
+version = "19.0.9"
 dependencies = [
  "anyhow",
  "serde",
@@ -3769,7 +3769,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-daemon-protocol"
-version = "19.0.7"
+version = "19.0.9"
 dependencies = [
  "chrono",
  "serde",
@@ -3780,7 +3780,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-db"
-version = "19.0.7"
+version = "19.0.9"
 dependencies = [
  "anyhow",
  "criterion",
@@ -3806,7 +3806,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-integration-tests"
-version = "19.0.7"
+version = "19.0.9"
 dependencies = [
  "serde_json",
  "sqry-core",
@@ -3817,7 +3817,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-c"
-version = "19.0.7"
+version = "19.0.9"
 dependencies = [
  "anyhow",
  "criterion",
@@ -3832,7 +3832,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-cpp"
-version = "19.0.7"
+version = "19.0.9"
 dependencies = [
  "anyhow",
  "log",
@@ -3846,7 +3846,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-csharp"
-version = "19.0.7"
+version = "19.0.9"
 dependencies = [
  "anyhow",
  "log",
@@ -3860,7 +3860,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-css"
-version = "19.0.7"
+version = "19.0.9"
 dependencies = [
  "anyhow",
  "log",
@@ -3872,7 +3872,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-dart"
-version = "19.0.7"
+version = "19.0.9"
 dependencies = [
  "anyhow",
  "env_logger",
@@ -3886,7 +3886,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-elixir"
-version = "19.0.7"
+version = "19.0.9"
 dependencies = [
  "anyhow",
  "insta",
@@ -3900,7 +3900,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-go"
-version = "19.0.7"
+version = "19.0.9"
 dependencies = [
  "anyhow",
  "criterion",
@@ -3915,7 +3915,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-groovy"
-version = "19.0.7"
+version = "19.0.9"
 dependencies = [
  "anyhow",
  "insta",
@@ -3931,7 +3931,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-haskell"
-version = "19.0.7"
+version = "19.0.9"
 dependencies = [
  "anyhow",
  "log",
@@ -3944,7 +3944,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-html"
-version = "19.0.7"
+version = "19.0.9"
 dependencies = [
  "anyhow",
  "log",
@@ -3956,7 +3956,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-java"
-version = "19.0.7"
+version = "19.0.9"
 dependencies = [
  "anyhow",
  "criterion",
@@ -3975,7 +3975,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-javascript"
-version = "19.0.7"
+version = "19.0.9"
 dependencies = [
  "anyhow",
  "approx",
@@ -3992,7 +3992,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-json"
-version = "19.0.7"
+version = "19.0.9"
 dependencies = [
  "serial_test",
  "sqry-core",
@@ -4002,7 +4002,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-kotlin"
-version = "19.0.7"
+version = "19.0.9"
 dependencies = [
  "anyhow",
  "env_logger",
@@ -4017,7 +4017,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-lua"
-version = "19.0.7"
+version = "19.0.9"
 dependencies = [
  "anyhow",
  "criterion",
@@ -4031,7 +4031,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-oracle-plsql"
-version = "19.0.7"
+version = "19.0.9"
 dependencies = [
  "sqry-core",
  "streaming-iterator",
@@ -4041,7 +4041,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-perl"
-version = "19.0.7"
+version = "19.0.9"
 dependencies = [
  "anyhow",
  "log",
@@ -4055,7 +4055,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-php"
-version = "19.0.7"
+version = "19.0.9"
 dependencies = [
  "anyhow",
  "criterion",
@@ -4073,7 +4073,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-pulumi"
-version = "19.0.7"
+version = "19.0.9"
 dependencies = [
  "anyhow",
  "serde",
@@ -4086,7 +4086,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-puppet"
-version = "19.0.7"
+version = "19.0.9"
 dependencies = [
  "anyhow",
  "serde",
@@ -4100,7 +4100,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-python"
-version = "19.0.7"
+version = "19.0.9"
 dependencies = [
  "anyhow",
  "insta",
@@ -4116,7 +4116,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-r"
-version = "19.0.7"
+version = "19.0.9"
 dependencies = [
  "anyhow",
  "log",
@@ -4129,7 +4129,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-ruby"
-version = "19.0.7"
+version = "19.0.9"
 dependencies = [
  "anyhow",
  "criterion",
@@ -4147,7 +4147,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-rust"
-version = "19.0.7"
+version = "19.0.9"
 dependencies = [
  "anyhow",
  "criterion",
@@ -4167,7 +4167,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-salesforce-apex"
-version = "19.0.7"
+version = "19.0.9"
 dependencies = [
  "anyhow",
  "sqry-core",
@@ -4179,7 +4179,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-sap-abap"
-version = "19.0.7"
+version = "19.0.9"
 dependencies = [
  "sqry-core",
  "streaming-iterator",
@@ -4190,7 +4190,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-scala"
-version = "19.0.7"
+version = "19.0.9"
 dependencies = [
  "anyhow",
  "env_logger",
@@ -4204,7 +4204,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-servicenow-xanadu"
-version = "19.0.7"
+version = "19.0.9"
 dependencies = [
  "anyhow",
  "sqry-core",
@@ -4216,7 +4216,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-servicenow-xml"
-version = "19.0.7"
+version = "19.0.9"
 dependencies = [
  "roxmltree",
  "sqry-core",
@@ -4228,7 +4228,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-shell"
-version = "19.0.7"
+version = "19.0.9"
 dependencies = [
  "anyhow",
  "log",
@@ -4240,7 +4240,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-sql"
-version = "19.0.7"
+version = "19.0.9"
 dependencies = [
  "anyhow",
  "log",
@@ -4253,7 +4253,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-support"
-version = "19.0.7"
+version = "19.0.9"
 dependencies = [
  "sqry-core",
  "tree-sitter",
@@ -4262,7 +4262,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-svelte"
-version = "19.0.7"
+version = "19.0.9"
 dependencies = [
  "anyhow",
  "insta",
@@ -4283,7 +4283,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-swift"
-version = "19.0.7"
+version = "19.0.9"
 dependencies = [
  "anyhow",
  "dashmap",
@@ -4301,7 +4301,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-terraform"
-version = "19.0.7"
+version = "19.0.9"
 dependencies = [
  "anyhow",
  "serde",
@@ -4315,7 +4315,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-typescript"
-version = "19.0.7"
+version = "19.0.9"
 dependencies = [
  "anyhow",
  "log",
@@ -4331,7 +4331,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-vue"
-version = "19.0.7"
+version = "19.0.9"
 dependencies = [
  "anyhow",
  "insta",
@@ -4352,7 +4352,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lang-zig"
-version = "19.0.7"
+version = "19.0.9"
 dependencies = [
  "anyhow",
  "criterion",
@@ -4365,7 +4365,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-lsp"
-version = "19.0.7"
+version = "19.0.9"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -4408,7 +4408,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-mcp"
-version = "19.0.7"
+version = "19.0.9"
 dependencies = [
  "anyhow",
  "approx",
@@ -4454,7 +4454,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-mcp-redaction"
-version = "19.0.7"
+version = "19.0.9"
 dependencies = [
  "log",
  "regex",
@@ -4468,7 +4468,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-nl"
-version = "19.0.7"
+version = "19.0.9"
 dependencies = [
  "criterion",
  "crossbeam-channel",
@@ -4496,7 +4496,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-plugin-registry"
-version = "19.0.7"
+version = "19.0.9"
 dependencies = [
  "sqry-core",
  "sqry-lang-c",
@@ -4540,7 +4540,7 @@ dependencies = [
 
 [[package]]
 name = "sqry-tree-sitter-support"
-version = "19.0.7"
+version = "19.0.9"
 dependencies = [
  "thiserror 2.0.18",
  "tree-sitter",
@@ -5185,7 +5185,7 @@ dependencies = [
 
 [[package]]
 name = "tree-sitter-abap-sqry"
-version = "19.0.7"
+version = "19.0.9"
 dependencies = [
  "cc",
  "sqry-tree-sitter-support",
@@ -5254,7 +5254,7 @@ dependencies = [
 
 [[package]]
 name = "tree-sitter-elixir-sqry"
-version = "19.0.7"
+version = "19.0.9"
 dependencies = [
  "cc",
  "sqry-tree-sitter-support",
@@ -5273,7 +5273,7 @@ dependencies = [
 
 [[package]]
 name = "tree-sitter-groovy-sqry"
-version = "19.0.7"
+version = "19.0.9"
 dependencies = [
  "cc",
  "sqry-tree-sitter-support",
@@ -5342,7 +5342,7 @@ dependencies = [
 
 [[package]]
 name = "tree-sitter-kotlin-sqry"
-version = "19.0.7"
+version = "19.0.9"
 dependencies = [
  "cc",
  "sqry-tree-sitter-support",
@@ -5367,7 +5367,7 @@ dependencies = [
 
 [[package]]
 name = "tree-sitter-perl-sqry"
-version = "19.0.7"
+version = "19.0.9"
 dependencies = [
  "cc",
  "sqry-tree-sitter-support",
@@ -5386,7 +5386,7 @@ dependencies = [
 
 [[package]]
 name = "tree-sitter-plsql-sqry"
-version = "19.0.7"
+version = "19.0.9"
 dependencies = [
  "cc",
  "sqry-tree-sitter-support",
@@ -5475,7 +5475,7 @@ dependencies = [
 
 [[package]]
 name = "tree-sitter-svelte-sqry"
-version = "19.0.7"
+version = "19.0.9"
 dependencies = [
  "cc",
  "sqry-tree-sitter-support",
@@ -5504,7 +5504,7 @@ dependencies = [
 
 [[package]]
 name = "tree-sitter-vue-sqry"
-version = "19.0.7"
+version = "19.0.9"
 dependencies = [
  "cc",
  "sqry-tree-sitter-support",
@@ -5867,7 +5867,7 @@ version = "0.244.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47b807c72e1bac69382b3a6fb3dbe8ea4c0ed87ff5629b8685ae6b9a611028fe"
 dependencies = [
- "bitflags 2.12.1",
+ "bitflags 2.13.0",
  "hashbrown 0.15.5",
  "indexmap",
  "semver",
@@ -6281,7 +6281,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9d66ea20e9553b30172b5e831994e35fbde2d165325bec84fc43dbf6f4eb9cb2"
 dependencies = [
  "anyhow",
- "bitflags 2.12.1",
+ "bitflags 2.13.0",
  "indexmap",
  "log",
  "serde",

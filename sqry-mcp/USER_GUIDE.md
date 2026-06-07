@@ -1,6 +1,6 @@
 # sqry MCP User Guide
 
-**Version**: 19.0.7
+**Version**: 19.0.9
 
 This guide is the component-level MCP reference. For the public workflow overview, see [docs/user-guide/mcp.md](../docs/user-guide/mcp.md).
 
