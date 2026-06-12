@@ -61,6 +61,112 @@ function Add-InstallDirToUserPath {
     return $true
 }
 
+function Test-CommandAvailable {
+    param([string]$Name)
+    return $null -ne (Get-Command $Name -ErrorAction SilentlyContinue)
+}
+
+function Invoke-NativeVerificationCommand {
+    param(
+        [string]$Command,
+        [string[]]$Arguments
+    )
+
+    & $Command @Arguments | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "$Command failed with exit code $LASTEXITCODE."
+    }
+}
+
+function Invoke-ProvenanceVerification {
+    param(
+        [string]$AssetPath,
+        [string]$AssetName,
+        [string]$ReleaseBase,
+        [string]$Repository,
+        [string]$VersionTag,
+        [string]$TempRoot
+    )
+
+    $oidcIssuer = "https://token.actions.githubusercontent.com"
+    $attestationName = "release-artifacts.attestation.json"
+    $attestationPath = Join-Path $TempRoot $attestationName
+    $hasAttestation = $false
+
+    Write-Host "Downloading attestation bundle: $attestationName"
+    try {
+        Invoke-WebRequest -Uri "$ReleaseBase/$attestationName" -OutFile $attestationPath
+        $hasAttestation = $true
+    } catch {
+        Write-Warning "Current attestation bundle not found; trying legacy per-asset Cosign bundle."
+    }
+
+    if ($hasAttestation -and (Test-CommandAvailable -Name "gh")) {
+        Write-Host "Verifying GitHub artifact attestation: $AssetName"
+        Invoke-NativeVerificationCommand -Command "gh" -Arguments @(
+            "attestation",
+            "verify",
+            $AssetPath,
+            "--repo",
+            $Repository,
+            "--bundle",
+            $attestationPath,
+            "--signer-workflow",
+            "$Repository/.github/workflows/release-distribute.yml",
+            "--source-ref",
+            "refs/heads/main"
+        )
+        Write-Host "Attestation verified: $AssetName"
+        return
+    }
+
+    if ($hasAttestation -and (Test-CommandAvailable -Name "cosign")) {
+        $cosign = Get-Command cosign -ErrorAction Stop
+        $currentIdentity = "^https://github\.com/$([regex]::Escape($Repository).Replace('/', '\/'))/\.github/workflows/release-distribute\.yml@refs/heads/main$"
+        Write-Host "Verifying Cosign attestation bundle: $AssetName"
+        Invoke-NativeVerificationCommand -Command $cosign.Source -Arguments @(
+            "verify-blob-attestation",
+            "--bundle",
+            $attestationPath,
+            "--new-bundle-format",
+            "--certificate-identity-regexp",
+            $currentIdentity,
+            "--certificate-oidc-issuer",
+            $oidcIssuer,
+            $AssetPath
+        )
+        Write-Host "Attestation verified: $AssetName"
+        return
+    }
+
+    if (Test-CommandAvailable -Name "cosign") {
+        $cosign = Get-Command cosign -ErrorAction Stop
+        $legacyBundlePath = "$AssetPath.bundle"
+        $versionEscaped = [regex]::Escape($VersionTag)
+        $legacyIdentity = "^https://github\.com/$([regex]::Escape($Repository).Replace('/', '\/'))/\.github/workflows/oss-distribute\.yml@refs/tags/$versionEscaped$"
+        Write-Host "Downloading legacy Cosign bundle: $AssetName.bundle"
+        try {
+            Invoke-WebRequest -Uri "$ReleaseBase/$AssetName.bundle" -OutFile $legacyBundlePath
+            Invoke-NativeVerificationCommand -Command $cosign.Source -Arguments @(
+                "verify-blob",
+                "--bundle",
+                $legacyBundlePath,
+                "--certificate-identity-regexp",
+                $legacyIdentity,
+                "--certificate-oidc-issuer",
+                $oidcIssuer,
+                $AssetPath
+            )
+            Write-Host "Legacy Cosign bundle verified: $AssetName"
+            return
+        } catch {
+            throw "Legacy Cosign verification failed for ${AssetName}: $($_.Exception.Message)"
+        }
+    }
+
+    throw "No supported provenance verification succeeded for $AssetName. Install gh or cosign and ensure the release publishes attestations."
+}
+
 if ($Version -eq "latest") {
     $Version = Get-LatestReleaseTag -Repository $Repo
 }
@@ -102,17 +208,16 @@ try {
     }
 
     if ($VerifySignatures) {
-        $cosign = Get-Command cosign -ErrorAction SilentlyContinue
-        if (-not $cosign) {
-            throw "cosign is required for -VerifySignatures."
+        if (-not (Test-CommandAvailable -Name "gh") -and -not (Test-CommandAvailable -Name "cosign")) {
+            throw "gh or cosign is required for -VerifySignatures."
         }
-        $bundlePath = "$archivePath.bundle"
-        $versionEscaped = [regex]::Escape($Version)
-        $identity = "^https://github\.com/$([regex]::Escape($Repo).Replace('/', '\/'))/\.github/workflows/oss-distribute\.yml@refs/tags/$versionEscaped$"
-        Write-Host "Downloading $assetName.bundle..."
-        Invoke-WebRequest -Uri "$releaseBase/$assetName.bundle" -OutFile $bundlePath
-        & $cosign.Source verify-blob --bundle $bundlePath --certificate-identity-regexp $identity --certificate-oidc-issuer "https://token.actions.githubusercontent.com" $archivePath | Out-Null
-        Write-Host "Signature verified: $assetName"
+        Invoke-ProvenanceVerification `
+            -AssetPath $archivePath `
+            -AssetName $assetName `
+            -ReleaseBase $releaseBase `
+            -Repository $Repo `
+            -VersionTag $Version `
+            -TempRoot $tmpRoot
     }
 
     Expand-Archive -Path $archivePath -DestinationPath $extractDir -Force

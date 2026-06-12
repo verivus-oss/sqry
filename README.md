@@ -58,7 +58,7 @@ curl -fsSL https://raw.githubusercontent.com/verivus-oss/sqry/main/scripts/insta
   bash -s -- --component all --version vX.Y.Z --verify-signatures
 ```
 
-`--verify-signatures` requires Cosign and verifies the `oss-distribute.yml` release bundle identity used by the current installer script. SHA256 verification remains the default integrity check.
+`--verify-signatures` requires `gh` or Cosign. It verifies the current `release-artifacts.attestation.json` GitHub artifact attestation from `release-distribute.yml`; older releases can still fall back to legacy per-asset Cosign bundles. SHA256 verification remains the default integrity check.
 
 ### Windows
 

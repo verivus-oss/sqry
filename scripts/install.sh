@@ -20,7 +20,7 @@ Options:
   --install-dir DIR     Install destination (default: ~/.local/bin)
   --repo OWNER/REPO     GitHub repository (default: verivus-oss/sqry)
   --no-checksum         Skip checksum verification (not recommended)
-  --verify-signatures   Verify Cosign bundles (requires cosign)
+  --verify-signatures   Verify GitHub artifact attestations or legacy Cosign bundles (requires gh or cosign)
   -h, --help            Show this help message
 USAGE
 }
@@ -75,9 +75,11 @@ if [[ "$VERIFY_CHECKSUMS" == true ]]; then
   fi
 fi
 
-if [[ "$VERIFY_SIGNATURES" == true ]] && ! command -v cosign >/dev/null 2>&1; then
-  echo "error: cosign is required for --verify-signatures" >&2
-  exit 1
+if [[ "$VERIFY_SIGNATURES" == true ]]; then
+  if ! command -v gh >/dev/null 2>&1 && ! command -v cosign >/dev/null 2>&1; then
+    echo "error: gh or cosign is required for --verify-signatures" >&2
+    exit 1
+  fi
 fi
 
 os=$(uname -s | tr '[:upper:]' '[:lower:]')
@@ -143,7 +145,9 @@ release_base="https://github.com/${REPO}/releases/download/${VERSION_TAG}"
 oidc_issuer="https://token.actions.githubusercontent.com"
 repo_regex="${REPO//./\\.}"
 version_escaped="${VERSION_TAG//./\\.}"
-cert_identity="^https://github\\.com/${repo_regex}/\\.github/workflows/oss-distribute\\.yml@refs/tags/${version_escaped}$"
+current_cert_identity="^https://github\\.com/${repo_regex}/\\.github/workflows/release-distribute\\.yml@refs/heads/main$"
+legacy_cert_identity="^https://github\\.com/${repo_regex}/\\.github/workflows/oss-distribute\\.yml@refs/tags/${version_escaped}$"
+attestation_bundle_name="release-artifacts.attestation.json"
 
 # Map component name to release asset name
 asset_name_for_component() {
@@ -169,6 +173,65 @@ if [[ "$VERIFY_CHECKSUMS" == true ]]; then
   echo "Downloading checksums: $checksum_file"
   curl -fsSL "${release_base}/${checksum_file}" -o "$checksum_path"
 fi
+
+attestation_bundle_path="$tmp_dir/$attestation_bundle_name"
+attestation_bundle_available=false
+if [[ "$VERIFY_SIGNATURES" == true ]]; then
+  echo "Downloading attestation bundle: $attestation_bundle_name"
+  if curl -fsSL "${release_base}/${attestation_bundle_name}" -o "$attestation_bundle_path" 2>/dev/null; then
+    attestation_bundle_available=true
+  else
+    echo "notice: current attestation bundle not found; trying legacy per-asset Cosign bundles" >&2
+  fi
+fi
+
+verify_asset_provenance() {
+  local asset_name="$1"
+  local asset_path="$2"
+
+  if [[ "$attestation_bundle_available" == true ]]; then
+    if command -v gh >/dev/null 2>&1; then
+      echo "Verifying GitHub artifact attestation: $asset_name"
+      gh attestation verify "$asset_path" \
+        --repo "$REPO" \
+        --bundle "$attestation_bundle_path" \
+        --signer-workflow "${REPO}/.github/workflows/release-distribute.yml" \
+        --source-ref refs/heads/main >/dev/null
+      echo "Attestation verified: $asset_name"
+      return
+    fi
+
+    if command -v cosign >/dev/null 2>&1; then
+      echo "Verifying Cosign attestation bundle: $asset_name"
+      cosign verify-blob-attestation \
+        --bundle "$attestation_bundle_path" \
+        --new-bundle-format \
+        --certificate-identity-regexp "$current_cert_identity" \
+        --certificate-oidc-issuer "$oidc_issuer" \
+        "$asset_path" >/dev/null
+      echo "Attestation verified: $asset_name"
+      return
+    fi
+  fi
+
+  if command -v cosign >/dev/null 2>&1; then
+    local legacy_bundle_name="${asset_name}.bundle"
+    local legacy_bundle_path="$tmp_dir/${legacy_bundle_name}"
+    echo "Downloading legacy Cosign bundle: $legacy_bundle_name"
+    if curl -fsSL "${release_base}/${legacy_bundle_name}" -o "$legacy_bundle_path" 2>/dev/null; then
+      cosign verify-blob \
+        --bundle "$legacy_bundle_path" \
+        --certificate-identity-regexp "$legacy_cert_identity" \
+        --certificate-oidc-issuer "$oidc_issuer" \
+        "$asset_path" >/dev/null
+      echo "Legacy Cosign bundle verified: $asset_name"
+      return
+    fi
+  fi
+
+  echo "error: no supported provenance verification succeeded for $asset_name" >&2
+  exit 1
+}
 
 # Download, verify, and install a single component binary
 download_and_install() {
@@ -198,18 +261,7 @@ download_and_install() {
   fi
 
   if [[ "$VERIFY_SIGNATURES" == true ]]; then
-    local bundle_name="${asset_name}.bundle"
-    echo "Verifying Cosign bundle: $bundle_name"
-    if curl -fsSL "${release_base}/${bundle_name}" -o "$tmp_dir/${bundle_name}" 2>/dev/null; then
-      cosign verify-blob \
-        --bundle "$tmp_dir/${bundle_name}" \
-        --certificate-identity-regexp "$cert_identity" \
-        --certificate-oidc-issuer "$oidc_issuer" \
-        "$asset_path" >/dev/null
-      echo "Signature verified: $asset_name"
-    else
-      echo "warning: no Cosign bundle found for $asset_name, skipping signature verification" >&2
-    fi
+    verify_asset_provenance "$asset_name" "$asset_path"
   fi
 
   mkdir -p "$INSTALL_DIR"

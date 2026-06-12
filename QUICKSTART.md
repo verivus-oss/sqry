@@ -15,14 +15,14 @@ curl -fsSL https://raw.githubusercontent.com/verivus-oss/sqry/main/scripts/insta
 
 Installs `sqry`, `sqry-mcp`, `sqry-lsp`, and `sqryd`. Supported release platforms are Linux `x86_64`/`arm64` and macOS `x86_64`/`arm64`.
 
-Pin a release or enable Cosign verification when needed:
+Pin a release or enable provenance verification when needed:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/verivus-oss/sqry/main/scripts/install.sh | \
   bash -s -- --component all --version vX.Y.Z --verify-signatures
 ```
 
-`--verify-signatures` verifies the `oss-distribute.yml` release bundle identity used by the current installer script. SHA256 verification remains the default integrity check.
+`--verify-signatures` verifies the current `release-artifacts.attestation.json` GitHub artifact attestation from `release-distribute.yml` with `gh` or Cosign; older releases can still fall back to legacy per-asset Cosign bundles. SHA256 verification remains the default integrity check.
 
 ### Windows
 
@@ -34,7 +34,7 @@ Get-Content .\install.ps1
 
 The Windows installer downloads the Windows `x86_64` release ZIP and installs all four binaries. Use `.\install.ps1 -Version vX.Y.Z` for a pinned release.
 
-`-VerifySignatures` verifies the `oss-distribute.yml` release bundle identity used by the current installer script. SHA256 verification remains the default integrity check.
+`-VerifySignatures` verifies the current `release-artifacts.attestation.json` GitHub artifact attestation from `release-distribute.yml` with `gh` or Cosign; older releases can still fall back to legacy per-asset Cosign bundles. SHA256 verification remains the default integrity check.
 
 ### Homebrew
 

@@ -28,7 +28,7 @@ cargo install --path sqry-daemon
 ```
 
 The public release assets include `sqry`, `sqry-mcp`, `sqry-lsp`, and `sqryd`. Homebrew is the current package-manager surface backed by the public release manifest.
-The installer scripts verify SHA256 checksums by default; optional signature verification checks the `oss-distribute.yml` release bundle identity used by the current installer scripts.
+The installer scripts verify SHA256 checksums by default; optional signature verification checks the current `release-artifacts.attestation.json` GitHub artifact attestation from `release-distribute.yml`, with legacy per-asset Cosign bundle fallback for older releases.
 
 ## Core Workflow
 
