@@ -16,16 +16,19 @@
 //! listening. Non-socket files at the configured path are always
 //! rejected.
 
-use std::fs::OpenOptions;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 #[cfg(unix)]
 use anyhow::anyhow;
 use sqry_core::query::executor::QueryExecutor;
+#[cfg(unix)]
+use std::fs::OpenOptions;
+#[cfg(unix)]
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio_util::sync::CancellationToken;
 
 use crate::config::DaemonConfig;

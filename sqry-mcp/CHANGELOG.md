@@ -6,7 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
-## [20.0.3](https://github.com/verivus-oss/sqry/compare/v20.0.2...v20.0.3) - 2026-06-12
+## [20.0.5](https://github.com/verivus-oss/sqry/compare/v20.0.4...v20.0.5) - 2026-06-12
+
+### Other
+- update Cargo.lock dependencies
+## [20.0.4](https://github.com/verivus-oss/sqry/compare/v20.0.3...v20.0.4) - 2026-06-12
+
+### Fixed
+- *(release)* restore windows daemon artifact build## [20.0.3](https://github.com/verivus-oss/sqry/compare/v20.0.2...v20.0.3) - 2026-06-12
 
 ### Other
 - update Cargo.lock dependencies

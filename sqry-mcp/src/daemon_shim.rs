@@ -59,6 +59,7 @@ const ENV_NO_AUTO_START: &str = "SQRY_DAEMON_NO_AUTO_START";
 /// Exit code returned by `sqryd start --detach` when the daemon is already
 /// running. Treated as success — the daemon is available, regardless of who
 /// started it.
+#[cfg(unix)]
 const SQRYD_ALREADY_RUNNING_EXIT_CODE: i32 = 75;
 
 /// Connect-timeout budget for the default-mode probe path.

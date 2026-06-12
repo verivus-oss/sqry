@@ -83,12 +83,10 @@
 //! `docs/reviews/sqryd-daemon/2026-04-19/task-9-design_iter3_request.md`
 //! §C, §D, §E, §G, §I, §J.
 
-use std::{
-    path::{Path, PathBuf},
-    process::ExitCode,
-    sync::Arc,
-    time::Duration,
-};
+use std::{path::PathBuf, process::ExitCode, sync::Arc, time::Duration};
+
+#[cfg(unix)]
+use std::path::Path;
 
 use clap::{Parser, Subcommand};
 use sqry_core::query::executor::QueryExecutor;
@@ -117,6 +115,7 @@ use crate::lifecycle::pidfile::PidfileLock;
 /// Environment variable carrying the write-end FD of the parent->grandchild
 /// self-pipe.  The grandchild closes this FD after signalling ready; the
 /// parent's read end returns EOF, proving readiness.
+#[cfg(unix)]
 const ENV_READY_PIPE_FD: &str = "SQRYD_READY_PIPE_FD";
 
 /// Environment variable carrying the raw FD of the already-locked
@@ -460,7 +459,7 @@ async fn run_start_detach(
     config_path: Option<PathBuf>,
     log_level: Option<&str>,
 ) -> DaemonResult<()> {
-    let cfg = load_config(config_path)?;
+    let cfg = load_config(config_path.as_ref())?;
     setup_stderr_tracing(log_level, &cfg);
     drop(cfg);
     warn!(
@@ -747,11 +746,11 @@ async fn run_start_spawned_by_client_unix(
 ///
 /// `ready_pipe_write_fd`: the self-pipe write-end to close at step 15 to
 /// signal the parent.  Pass -1 (or any negative value) on non-unix to skip.
+#[cfg(unix)]
 async fn run_start_foreground_inner(
     cfg: Arc<DaemonConfig>,
     log_level: Option<&str>,
-    #[cfg(unix)] ready_pipe_write_fd: libc::c_int,
-    #[cfg(not(unix))] _ready_pipe_write_fd: i32,
+    ready_pipe_write_fd: libc::c_int,
 ) -> DaemonResult<()> {
     // Step 2 -- Install tracing.
     let _tracing_guard = match install_tracing(&cfg, log_level) {
