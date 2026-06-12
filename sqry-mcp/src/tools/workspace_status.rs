@@ -13,8 +13,8 @@
 //! The tool reads the resolved [`LogicalWorkspace`] from the per-request
 //! thread-local override populated in
 //! [`crate::workspace_session::with_workspace_override`]. The MCP server
-//! resolves the LogicalWorkspace once per request (registry-discovery on
-//! the resolved workspace_root, with single-root fallback) and binds it
+//! resolves the `LogicalWorkspace` once per request (registry-discovery on
+//! the resolved `workspace_root`, with single-root fallback) and binds it
 //! to the thread before dispatching.
 //!
 //! # Relationship to the LSP `sqry/workspaceStatus` shape

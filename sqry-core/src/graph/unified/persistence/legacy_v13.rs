@@ -182,7 +182,7 @@ pub(crate) struct NodeEntryV13 {
 
 /// Translate a frozen V13 node entry to the live `NodeEntry`, mapping only the
 /// `kind` and moving every other field unchanged.
-fn translate_node_entry_v13_to_v14(entry: NodeEntryV13) -> NodeEntry {
+fn translate_node_entry_v13_to_v14(entry: &NodeEntryV13) -> NodeEntry {
     NodeEntry {
         kind: translate_node_kind_v13_to_v14(entry.kind),
         name: entry.name,
@@ -232,7 +232,7 @@ pub(crate) fn translate_node_arena_v13_to_v14(v13: NodeArenaV13) -> NodeArena {
             let generation = slot.generation();
             match slot.state() {
                 SlotState::Occupied(entry) => {
-                    Slot::new_occupied(generation, translate_node_entry_v13_to_v14(entry.clone()))
+                    Slot::new_occupied(generation, translate_node_entry_v13_to_v14(entry))
                 }
                 SlotState::Vacant { next_free } => Slot::new_vacant(generation, *next_free),
             }

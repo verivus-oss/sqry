@@ -119,8 +119,7 @@ impl WatcherHarness {
 
         let ws = manager.lookup(&key).expect("registered");
         dispatcher
-            .ensure_watching(&key, ws, root.clone())
-            .await
+            .ensure_watching(&key, &ws, &root)
             .expect("ensure_watching must succeed on a fresh harness");
 
         Self {

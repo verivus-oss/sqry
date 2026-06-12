@@ -1652,41 +1652,38 @@ fn walk_class_body(
                             // NodeKind: enum → Enum; struct/union → Struct; class → Class.
                             // (NodeKind has no dedicated Union variant; unions map to
                             // Struct, consistent with the nested-member walk below.)
-                            match kind {
-                                "enum_specifier" => {
-                                    // Nested enums carry the enclosing access
-                                    // visibility, identical to the nested
-                                    // class/struct path below.
-                                    helper.add_enum_with_visibility(
+                            if kind == "enum_specifier" {
+                                // Nested enums carry the enclosing access
+                                // visibility, identical to the nested
+                                // class/struct path below.
+                                helper.add_enum_with_visibility(
+                                    &nested_qualified,
+                                    Some(nested_span),
+                                    Some(current_visibility),
+                                );
+                            } else {
+                                let nested_id = if is_struct_or_union {
+                                    helper.add_struct_with_visibility(
                                         &nested_qualified,
                                         Some(nested_span),
                                         Some(current_visibility),
-                                    );
-                                }
-                                _ => {
-                                    let nested_id = if is_struct_or_union {
-                                        helper.add_struct_with_visibility(
-                                            &nested_qualified,
-                                            Some(nested_span),
-                                            Some(current_visibility),
-                                        )
-                                    } else {
-                                        helper.add_class_with_visibility(
-                                            &nested_qualified,
-                                            Some(nested_span),
-                                            Some(current_visibility),
-                                        )
-                                    };
-                                    build_inheritance_and_implements_edges(
-                                        inner,
-                                        content,
+                                    )
+                                } else {
+                                    helper.add_class_with_visibility(
                                         &nested_qualified,
-                                        nested_id,
-                                        helper,
-                                        namespace_stack,
-                                        pure_virtual_registry,
-                                    )?;
-                                }
+                                        Some(nested_span),
+                                        Some(current_visibility),
+                                    )
+                                };
+                                build_inheritance_and_implements_edges(
+                                    inner,
+                                    content,
+                                    &nested_qualified,
+                                    nested_id,
+                                    helper,
+                                    namespace_stack,
+                                    pure_virtual_registry,
+                                )?;
                             }
 
                             // Recurse into the body for members. Enums carry no

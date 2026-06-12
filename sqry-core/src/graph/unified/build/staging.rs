@@ -118,9 +118,9 @@ pub struct StagingStats {
 /// on [`crate::graph::unified::CodeGraph`].
 ///
 /// All fields are keyed by **qualified-name strings** rather than `NodeId`s
-/// because the final NodeIds aren't known until after Phase 3 commit +
+/// because the final `NodeIds` aren't known until after Phase 3 commit +
 /// Phase 4c-prime cross-file unification. U11's drain resolves names →
-/// NodeIds via the unified workspace qualified-name index.
+/// `NodeIds` via the unified workspace qualified-name index.
 ///
 /// `pending_address_taken_names` carries staging-local [`StringId`]s
 /// (DESIGN §2.5) — the helper interns each name through the standard
@@ -149,7 +149,7 @@ pub struct CIndirectStagingPayload {
     /// standard string interner — interned via the same path as every
     /// other staging string so U11 can remap local → global IDs through
     /// the table produced by [`Self::commit_strings`], then resolve each
-    /// global ID to a canonical NodeId via the post-unification
+    /// global ID to a canonical `NodeId` via the post-unification
     /// qualified-name index. The flag is applied via
     /// [`crate::graph::unified::storage::metadata::NodeFlags::ADDRESS_TAKEN`]
     /// using `mark_address_taken`.
@@ -174,14 +174,14 @@ pub struct CIndirectStagingPayload {
     ///
     /// Each entry records a `(struct_tag, field_name) → target_function`
     /// binding plus the enclosing instance variable name. U11 resolves
-    /// `instance_name` + `target_fn_name` to canonical NodeIds, then
+    /// `instance_name` + `target_fn_name` to canonical `NodeIds`, then
     /// inserts into `CIndirectSideTables::bindings_by_field`.
     pub pending_bindings: Vec<PendingBinding>,
 
     /// Indirect callsites captured during Phase 1.
     ///
     /// Each callsite carries the caller's qualified name (resolved to a
-    /// NodeId in U11), use-span (for `LocalScopeIndex::resolve_type`
+    /// `NodeId` in U11), use-span (for `LocalScopeIndex::resolve_type`
     /// lookups in U12's resolver), syntactic shape, argument count, and
     /// `is_async` flag. U11 drains these into
     /// `CIndirectSideTables::pending_callsites`.
@@ -197,7 +197,7 @@ pub struct CIndirectStagingPayload {
 
 /// One binding-plane entry staged during Phase 1 (DESIGN §2.5 / §7.1).
 ///
-/// Names are kept as strings rather than NodeIds because the final NodeIds
+/// Names are kept as strings rather than `NodeIds` because the final `NodeIds`
 /// aren't known until after Phase 3 + Phase 4c-prime unification.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingBinding {
@@ -208,10 +208,10 @@ pub struct PendingBinding {
     /// Field name within the struct (e.g. `read`).
     pub field_name: String,
     /// Qualified name of the enclosing instance variable (e.g.
-    /// `ext4_file_operations`). Resolved to a NodeId in U11.
+    /// `ext4_file_operations`). Resolved to a `NodeId` in U11.
     pub instance_name: String,
     /// Qualified name of the address-taken target function. Resolved to a
-    /// NodeId in U11.
+    /// `NodeId` in U11.
     pub target_fn_name: String,
     /// Designated vs positional initializer (DESIGN §2.5).
     pub site_kind: BindingSiteKind,
@@ -222,12 +222,12 @@ pub struct PendingBinding {
 /// The final `IndirectCallsite` stored on
 /// [`CIndirectSideTables`](super::super::storage::c_indirect::CIndirectSideTables)
 /// uses `caller: NodeId` + `file_id: FileId`; this staging form keeps the
-/// caller's qualified name string (resolved to NodeId in U11) and lets U11
-/// stamp the file_id from the per-file context during drain.
+/// caller's qualified name string (resolved to `NodeId` in U11) and lets U11
+/// stamp the `file_id` from the per-file context during drain.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingIndirectCallsite {
     /// Qualified name of the enclosing function/method that issued the call.
-    /// Resolved to a NodeId in U11 via the post-unification qualified-name
+    /// Resolved to a `NodeId` in U11 via the post-unification qualified-name
     /// index.
     pub caller_qualified_name: String,
     /// Byte range of the callsite expression in the source file.
@@ -477,7 +477,7 @@ pub struct GoHints {
 /// One observed struct embedding.
 ///
 /// The pass uses this to build the embedding adjacency graph
-/// (02_DESIGN §4.2 step 1). `pointerness` records whether the embedded
+/// (`02_DESIGN` §4.2 step 1). `pointerness` records whether the embedded
 /// field is `T` (value) or `*T` (pointer) — the Go method-set rules
 /// differ on this.
 #[derive(Debug, Clone, Copy)]
@@ -502,7 +502,7 @@ pub struct GoEmbeddingHint {
 /// `Implements(f → T)` edge.
 #[derive(Debug, Clone, Copy)]
 pub struct GoNamedTypeConversionHint {
-    /// `NodeId` of the call expression (CallSite or equivalent).
+    /// `NodeId` of the call expression (`CallSite` or equivalent).
     pub call_site: NodeId,
     /// Interned qualified name of the target named type `T`.
     pub target_type_qualified_name: StringId,
@@ -515,7 +515,7 @@ pub struct GoNamedTypeConversionHint {
 /// One observed `recv.M(args)` receiver-method call.
 ///
 /// The pass uses this to shadow `Calls` / `References` edges over
-/// promoted methods (02_DESIGN §4.2 step 5–6). The receiver expression
+/// promoted methods (`02_DESIGN` §4.2 step 5–6). The receiver expression
 /// is classified by [`GoReceiverHintKind`] into one of four resolution
 /// shapes.
 #[derive(Debug, Clone)]
@@ -635,19 +635,19 @@ pub struct GoMethodSignatureHint {
 /// this hint:
 ///
 /// 1. **Function declarations** (`func foo(x int) error { ... }`):
-///    `function_node` is the `NodeKind::Function` NodeId; the canonical
+///    `function_node` is the `NodeKind::Function` `NodeId`; the canonical
 ///    signature is the function's own param+result. The bare function
 ///    becomes a T1.3 candidate when its signature matches a named
 ///    function-type's underlying signature.
 /// 2. **Named function types** (`type HandlerFunc func(w
 ///    http.ResponseWriter, r *http.Request)`): `function_node` is the
-///    `NodeKind::Type` NodeId for the named type; the canonical
+///    `NodeKind::Type` `NodeId` for the named type; the canonical
 ///    signature is the **underlying** function-type's param+result. The
 ///    Type node is the T1.3 *target* of an `Implements(fn → F)` edge.
 ///
 /// Both shapes are unioned because the consumer (the T1.3 pass) needs a
 /// single `NodeId → canonical_signature` map keyed by node identity, and
-/// the two NodeKind branches are disambiguated at consumption time by
+/// the two `NodeKind` branches are disambiguated at consumption time by
 /// inspecting `graph.nodes().get(function_node).kind`.
 #[derive(Debug, Clone)]
 pub struct GoFunctionSignatureHint {
@@ -665,7 +665,7 @@ pub struct GoFunctionSignatureHint {
 /// Receiver-expression shape, classifying how the pass resolves the
 /// receiver's type at run time.
 ///
-/// 02_DESIGN §3.2 enumerates these four shapes verbatim; each carries
+/// `02_DESIGN` §3.2 enumerates these four shapes verbatim; each carries
 /// just enough information for the pass to walk the right edges.
 #[derive(Debug, Clone)]
 pub enum GoReceiverHintKind {
@@ -698,7 +698,7 @@ pub enum GoReceiverHintKind {
         binding_local: NodeId,
     },
     /// `f().M()` — receiver is the return value of another call. The
-    /// pass resolves `callee_qn` to the callee's NodeId, then follows
+    /// pass resolves `callee_qn` to the callee's `NodeId`, then follows
     /// the callee's return-type `TypeOf` edge.
     CallReturn {
         /// Qualified name of the callee whose return value is the
@@ -1035,7 +1035,7 @@ impl StagingGraph {
         std::mem::take(&mut self.macro_metadata)
     }
 
-    /// Read-only check whether a staging-local NodeId already carries a
+    /// Read-only check whether a staging-local `NodeId` already carries a
     /// `NodeMetadata::Synthetic` marker in this staging graph's metadata
     /// store.
     ///
@@ -1043,7 +1043,7 @@ impl StagingGraph {
     /// `add_synthetic_variable` at `sqry-lang-go/src/relations/graph_builder.rs`)
     /// merge the marker into `macro_metadata` immediately after staging the
     /// node. Per-file post-passes (e.g. T3.8's
-    /// `stamp_cfg_condition_for_file` per 02_DESIGN §4.3.d) consult this
+    /// `stamp_cfg_condition_for_file` per `02_DESIGN` §4.3.d) consult this
     /// predicate to skip synthetic nodes before stamping language-agnostic
     /// `cfg_condition` metadata — otherwise the stamp would overwrite the
     /// synthetic marker via `NodeMetadataStore::insert_metadata`'s
@@ -1063,7 +1063,7 @@ impl StagingGraph {
     /// `N` is `node_count_u32()` (see `add_node` at `:355` for the
     /// invariant). Useful for per-file post-passes that need to walk
     /// every staged node (e.g. T3.8's `stamp_cfg_condition_for_file`
-    /// per 02_DESIGN §4.3.d).
+    /// per `02_DESIGN` §4.3.d).
     pub fn staged_node_ids(
         &self,
     ) -> impl Iterator<Item = crate::graph::unified::node::id::NodeId> + '_ {

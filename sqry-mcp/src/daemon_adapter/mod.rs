@@ -110,6 +110,11 @@ impl std::fmt::Debug for WorkspaceContext {
 /// Internally canonicalizes `args.path` against `ctx.workspace_root`
 /// to produce the `search_root` the inner body requires, matching the
 /// workspace-boundary enforcement performed by the rmcp entrypoint.
+///
+/// # Errors
+///
+/// Returns an error if the requested path escapes the workspace or if the
+/// delegated semantic-search executor fails.
 pub fn execute_semantic_search_for_daemon(
     ctx: &WorkspaceContext,
     args: &SemanticSearchArgs,
@@ -124,6 +129,10 @@ pub fn execute_semantic_search_for_daemon(
 ///
 /// The inner body takes its own `Instant::now()` (legacy timing anchor);
 /// this wrapper forwards `(ctx, args)` verbatim.
+///
+/// # Errors
+///
+/// Returns an error if relation-query validation or graph execution fails.
 pub fn execute_relation_query_for_daemon(
     ctx: &WorkspaceContext,
     args: &RelationQueryArgs,
@@ -132,6 +141,10 @@ pub fn execute_relation_query_for_daemon(
 }
 
 /// Daemon-path wrapper for `direct_callers`.
+///
+/// # Errors
+///
+/// Returns an error if direct-caller analysis cannot be executed for `args`.
 pub fn execute_direct_callers_for_daemon(
     ctx: &WorkspaceContext,
     args: &DirectCallersArgs,
@@ -141,6 +154,10 @@ pub fn execute_direct_callers_for_daemon(
 }
 
 /// Daemon-path wrapper for `direct_callees`.
+///
+/// # Errors
+///
+/// Returns an error if direct-callee analysis cannot be executed for `args`.
 pub fn execute_direct_callees_for_daemon(
     ctx: &WorkspaceContext,
     args: &DirectCalleesArgs,
@@ -150,6 +167,10 @@ pub fn execute_direct_callees_for_daemon(
 }
 
 /// Daemon-path wrapper for `find_unused`.
+///
+/// # Errors
+///
+/// Returns an error if unused-symbol analysis cannot be executed for `args`.
 pub fn execute_find_unused_for_daemon(
     ctx: &WorkspaceContext,
     args: &FindUnusedArgs,
@@ -159,15 +180,24 @@ pub fn execute_find_unused_for_daemon(
 }
 
 /// Daemon-path wrapper for `find_cycles`.
+///
+/// # Errors
+///
+/// Returns an error if cycle analysis cannot be executed for `args`.
+#[must_use]
 pub fn execute_find_cycles_for_daemon(
     ctx: &WorkspaceContext,
     args: &FindCyclesArgs,
-) -> Result<ToolExecution<FindCyclesData>> {
+) -> ToolExecution<FindCyclesData> {
     let start = Instant::now();
     analysis_inner::execute_find_cycles(ctx, args, start)
 }
 
 /// Daemon-path wrapper for `is_node_in_cycle`.
+///
+/// # Errors
+///
+/// Returns an error if cycle-membership analysis cannot be executed for `args`.
 pub fn execute_is_node_in_cycle_for_daemon(
     ctx: &WorkspaceContext,
     args: &IsNodeInCycleArgs,
@@ -177,6 +207,10 @@ pub fn execute_is_node_in_cycle_for_daemon(
 }
 
 /// Daemon-path wrapper for `trace_path`.
+///
+/// # Errors
+///
+/// Returns an error if path tracing cannot be executed for `args`.
 pub fn execute_trace_path_for_daemon(
     ctx: &WorkspaceContext,
     args: &TracePathArgs,
@@ -186,6 +220,10 @@ pub fn execute_trace_path_for_daemon(
 }
 
 /// Daemon-path wrapper for `subgraph`.
+///
+/// # Errors
+///
+/// Returns an error if subgraph extraction cannot be executed for `args`.
 pub fn execute_subgraph_for_daemon(
     ctx: &WorkspaceContext,
     args: &SubgraphArgs,
@@ -195,6 +233,10 @@ pub fn execute_subgraph_for_daemon(
 }
 
 /// Daemon-path wrapper for `export_graph`.
+///
+/// # Errors
+///
+/// Returns an error if graph export cannot be executed for `args`.
 pub fn execute_export_graph_for_daemon(
     ctx: &WorkspaceContext,
     args: &ExportGraphArgs,
@@ -204,10 +246,12 @@ pub fn execute_export_graph_for_daemon(
 }
 
 /// Daemon-path wrapper for `complexity_metrics`.
+///
+#[must_use]
 pub fn execute_complexity_metrics_for_daemon(
     ctx: &WorkspaceContext,
     args: &ComplexityMetricsArgs,
-) -> Result<ToolExecution<ComplexityMetricsData>> {
+) -> ToolExecution<ComplexityMetricsData> {
     let start = Instant::now();
     introspection_inner::execute_complexity_metrics(ctx, args, start)
 }
@@ -217,6 +261,10 @@ pub fn execute_complexity_metrics_for_daemon(
 /// `ctx.graph` is unused by the inner body (`semantic_diff` builds its
 /// own per-git-ref graphs from worktrees) but the context is still
 /// supplied for daemon-path symmetry.
+///
+/// # Errors
+///
+/// Returns an error if either git reference cannot be materialized or diffed.
 pub fn execute_semantic_diff_for_daemon(
     ctx: &WorkspaceContext,
     args: &SemanticDiffArgs,
@@ -226,6 +274,10 @@ pub fn execute_semantic_diff_for_daemon(
 }
 
 /// Daemon-path wrapper for `dependency_impact`.
+///
+/// # Errors
+///
+/// Returns an error if dependency-impact analysis cannot be executed for `args`.
 pub fn execute_dependency_impact_for_daemon(
     ctx: &WorkspaceContext,
     args: &DependencyImpactArgs,
@@ -240,6 +292,10 @@ pub fn execute_dependency_impact_for_daemon(
 /// [`graph_inner::execute_get_dependencies`]; only the wire-facing name
 /// changed. The wrapper is named after the wire method so the daemon's
 /// `tool_dispatch` (Task 7) can look it up by the JSON-RPC method string.
+///
+/// # Errors
+///
+/// Returns an error if dependency extraction cannot be executed for `args`.
 pub fn execute_show_dependencies_for_daemon(
     ctx: &WorkspaceContext,
     args: &ShowDependenciesArgs,
@@ -264,6 +320,11 @@ pub fn execute_show_dependencies_for_daemon(
 /// because that is what the shared builder produces. The daemon IPC
 /// layer is responsible for mapping this error into its own wire-error
 /// envelope.
+///
+/// # Errors
+///
+/// Returns an MCP error if the tool response cannot be serialized into the
+/// shared response envelope.
 pub fn tool_response_json<T: Serialize>(
     exec: ToolExecution<T>,
 ) -> Result<serde_json::Value, McpError> {

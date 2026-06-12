@@ -250,8 +250,8 @@ pub struct ContextPropagationData {
 
 /// One context-propagation leak finding, surfaced through the MCP
 /// `context_propagation` tool. Mirrors
-/// `sqry_db::queries::context_propagation::ContextLeak` (01_SPEC
-/// §5.2.a + 02_DESIGN §2.5) while exposing user-facing names and
+/// `sqry_db::queries::context_propagation::ContextLeak` (`01_SPEC`
+/// §5.2.a + `02_DESIGN` §2.5) while exposing user-facing names and
 /// the byte-range span shape.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -272,9 +272,9 @@ pub struct ContextLeakDto {
     /// are 1-based for IDE friendliness; columns are 0-based byte
     /// offsets (matching tree-sitter's `Point` shape).
     pub call_span: ContextLeakSpan,
-    /// NodeId of the caller's `ctx context.Context` parameter when
+    /// `NodeId` of the caller's `ctx context.Context` parameter when
     /// the graph plugin emits one. The Go plugin currently leaves
-    /// this `None` (parameter NodeIds are synthetic and not user-
+    /// this `None` (parameter `NodeIds` are synthetic and not user-
     /// facing); future plugins may populate it. Serialised as
     /// `{ "index": u32, "generation": u64 }`.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -282,7 +282,7 @@ pub struct ContextLeakDto {
 }
 
 /// 1-based-line, 0-based-byte-column source range, matching the
-/// `Span` shape that the underlying `sqry_db` ContextLeak carries.
+/// `Span` shape that the underlying `sqry_db` `ContextLeak` carries.
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ContextLeakSpan {
@@ -292,7 +292,7 @@ pub struct ContextLeakSpan {
     pub end_column: u32,
 }
 
-/// Opaque caller-ctx-param NodeId reference. The Go plugin never
+/// Opaque caller-ctx-param `NodeId` reference. The Go plugin never
 /// populates this today; the struct exists so future plugins can
 /// emit a stable IDE jump-to handle without breaking the wire shape.
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -545,12 +545,12 @@ pub struct EdgeChange {
     pub source: String,
     /// Qualified name of the edge target node (a `Channel` or generic callee).
     pub target: String,
-    /// `"send"` / `"receive"` / `"close"` for ChannelPeer; the inference kind
+    /// `"send"` / `"receive"` / `"close"` for `ChannelPeer`; the inference kind
     /// (`"explicit"` / `"inferred"` / `"partial"` / `"unknown"`) for
     /// Instantiates.
     pub discriminator: String,
     /// Resolved generic type arguments in declaration order (Instantiates
-    /// only; empty for ChannelPeer).
+    /// only; empty for `ChannelPeer`).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub type_args: Vec<EdgeTypeArg>,
 }

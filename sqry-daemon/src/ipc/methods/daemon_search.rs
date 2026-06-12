@@ -7,7 +7,7 @@
 //! `find_by_exact_name` / regex / fuzzy logic the in-process CLI search
 //! uses (`sqry-cli/src/commands/search.rs::run_regular_search` and
 //! `::run_fuzzy_search`). Parity with the in-process path is a hard contract
-//! verified by the DAEMON_SEARCH_TESTS unit.
+//! verified by the `DAEMON_SEARCH_TESTS` unit.
 //!
 //! Wire contract:
 //! - Input: [`SearchRequest`] under JSON-RPC `params`.
@@ -247,10 +247,13 @@ fn run_search_on_graph(
     apply_filters(&mut items, req.kind.as_deref(), req.lang.as_deref());
 
     // Step 5: limit + total + truncated sentinel.
-    let limit = req.limit.map(|l| l as usize).unwrap_or(match req.mode {
-        SearchMode::Fuzzy => DEFAULT_LIMIT_FUZZY,
-        _ => DEFAULT_LIMIT_REGEX_EXACT,
-    });
+    let limit = req.limit.map_or(
+        match req.mode {
+            SearchMode::Fuzzy => DEFAULT_LIMIT_FUZZY,
+            _ => DEFAULT_LIMIT_REGEX_EXACT,
+        },
+        |l| l as usize,
+    );
     let pre_truncate_count = items.len();
     let truncated = pre_truncate_count > limit;
     if truncated {
@@ -399,7 +402,7 @@ fn fuzzy_hits(graph: &CodeGraph, pattern: &str) -> Vec<ScoredHit> {
         // Both name + qualified-name index hits for this scored string
         // inherit the same score — they represent the same fuzzy match
         // surface emerging through two index facets.
-        let score = Some(result.score as f32);
+        let score = result.score.to_string().parse::<f32>().ok();
         hits.extend(
             indices
                 .by_qualified_name(sid)

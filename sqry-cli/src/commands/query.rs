@@ -133,7 +133,7 @@ struct HybridQueryParams<'a> {
 /// # Errors
 /// Returns an error if query validation fails, execution fails, or output cannot be written.
 ///
-/// # STEP_8 precedence
+/// # `STEP_8` precedence
 ///
 /// `search_path` must be resolved by the caller via
 /// [`crate::args::Cli::resolve_subcommand_path`] so that an explicit positional
@@ -1849,8 +1849,7 @@ fn map_acquisition_error(err: GraphAcquisitionError) -> anyhow::Error {
                     sqry_plugin_registry::all_unknown_ids_have_features(&unknown_plugin_ids);
                 let manifest_str = manifest_path
                     .as_ref()
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_else(|| "<unknown>".to_string());
+                    .map_or_else(|| "<unknown>".to_string(), |p| p.display().to_string());
                 let suggestion = if !suggested.is_empty() {
                     format!(
                         "Rebuild this binary with `cargo install --path sqry-cli --features {}` \

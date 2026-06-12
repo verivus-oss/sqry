@@ -6,7 +6,7 @@ use tower_lsp::lsp_types::{Hover, HoverContents, HoverParams, MarkupContent, Mar
 ///
 /// Uses graph builders to extract node information.
 ///
-/// STEP_11_4 — gates on [`SessionManager::evaluate_handler_gate`] before
+/// `STEP_11_4` — gates on [`SessionManager::evaluate_handler_gate`] before
 /// touching the graph: requests against member folders or excluded
 /// paths return `Ok(None)` (LSP-standard "no result") without making
 /// any per-folder filesystem probe.

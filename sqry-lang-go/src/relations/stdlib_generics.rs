@@ -86,7 +86,7 @@ pub(crate) fn lookup(qualified: &str) -> Option<GenericSig> {
             type_params: tps(&["S", "E"]),
             params: vec![GenericSig::whole("S"), func_sig(&[Some("E")], &[None])],
         },
-        "slices.Index" | "slices.Contains" => GenericSig {
+        "slices.Index" | "slices.Contains" | "slices.BinarySearch" => GenericSig {
             type_params: tps(&["S", "E"]),
             params: vec![GenericSig::whole("S"), GenericSig::whole("E")],
         },
@@ -98,10 +98,6 @@ pub(crate) fn lookup(qualified: &str) -> Option<GenericSig> {
         "slices.Equal" => GenericSig {
             type_params: tps(&["S", "E"]),
             params: vec![GenericSig::whole("S"), GenericSig::whole("S")],
-        },
-        "slices.BinarySearch" => GenericSig {
-            type_params: tps(&["S", "E"]),
-            params: vec![GenericSig::whole("S"), GenericSig::whole("E")],
         },
         // maps (Go 1.21)
         "maps.Keys" | "maps.Values" | "maps.Clone" => GenericSig {

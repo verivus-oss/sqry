@@ -4,7 +4,7 @@
 //! shared [`sqry_mcp::daemon_params::params_to_<tool>_args`] helper,
 //! then forwards the resulting `*Args` through
 //! [`super::classify_and_build`] so the workspace-verdict machinery
-//! (Fresh / Stale / NotReady) is shared.
+//! (Fresh / Stale / `NotReady`) is shared.
 
 pub(crate) mod complexity_metrics;
 pub(crate) mod dependency_impact;

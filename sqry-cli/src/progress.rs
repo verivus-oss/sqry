@@ -913,14 +913,14 @@ fn unix_millis() -> u64 {
         .unwrap_or(0)
 }
 
-/// Convert `u128` to `u64` saturating at `u64::MAX`. Duration::as_millis()
+/// Convert `u128` to `u64` saturating at `u64::MAX`. `Duration::as_millis()`
 /// returns u128 but we serialize as u64 — a u64 millis count is good for
 /// ~584 million years, so this is safety more than necessity.
 fn u128_to_u64_saturating(v: u128) -> u64 {
-    if v > u64::MAX as u128 {
+    if v > u128::from(u64::MAX) {
         u64::MAX
     } else {
-        v as u64
+        u64::try_from(v).unwrap_or(u64::MAX)
     }
 }
 

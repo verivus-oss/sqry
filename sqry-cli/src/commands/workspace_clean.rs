@@ -50,6 +50,28 @@ const DAEMON_ARTIFACTS_TIMEOUT_MS: u64 = 250;
 /// Walkdir depth cap; mirrors `sqry_core::workspace::MAX_ANCESTOR_DEPTH`.
 const WALK_MAX_DEPTH: usize = 64;
 
+pub enum RemovalMode {
+    DryRun,
+    ApplyConfirmed,
+    ApplyForced,
+}
+
+pub enum UserStatePolicy {
+    Include,
+    Exclude,
+}
+
+pub enum CleanOutput {
+    Json,
+    Text,
+}
+
+pub struct CleanOptions {
+    pub removal: RemovalMode,
+    pub user_state: UserStatePolicy,
+    pub output: CleanOutput,
+}
+
 /// Entry point for `sqry workspace clean`.
 ///
 /// # Errors
@@ -58,18 +80,14 @@ const WALK_MAX_DEPTH: usize = 64;
 /// fails for the entire planned set, or if the JSON renderer fails.
 /// Per-entry removal failures are accumulated in
 /// [`WorkspaceCleanReport::errors`] and do not abort the run.
-pub fn run(
-    _cli: &Cli,
-    root: &str,
-    apply: bool,
-    force: bool,
-    include_user_state: bool,
-    json: bool,
-) -> Result<()> {
+pub fn run(_cli: &Cli, root: &str, options: &CleanOptions) -> Result<()> {
     let root_input = PathBuf::from(root);
-    let canonical_root = root_input
-        .canonicalize()
-        .with_context(|| format!("workspace clean: cannot canonicalise root {root_input:?}"))?;
+    let canonical_root = root_input.canonicalize().with_context(|| {
+        format!(
+            "workspace clean: cannot canonicalise root {}",
+            root_input.display()
+        )
+    })?;
     if !canonical_root.is_dir() {
         anyhow::bail!(
             "workspace clean: root {} is not a directory",
@@ -96,41 +114,10 @@ pub fn run(
         &canonical_root,
         canonical_active_artifact.as_deref(),
         &daemon_locked_artifacts,
-    )?;
+    );
 
     // Step 4: filter to planned removals per the §E.4 step-6 policy.
-    let mut planned_removals: Vec<PathBuf> = Vec::new();
-    for art in &discovered {
-        if art.is_canonical_active && !force {
-            skipped.push(SkippedArtifact {
-                path: art.path.clone(),
-                reason: SkipReason::CanonicalActive,
-            });
-            continue;
-        }
-        if art.is_daemon_locked && !force {
-            skipped.push(SkippedArtifact {
-                path: art.path.clone(),
-                reason: SkipReason::DaemonLocked,
-            });
-            continue;
-        }
-        if matches!(art.kind, ArtifactKind::WorkspaceRegistry) {
-            skipped.push(SkippedArtifact {
-                path: art.path.clone(),
-                reason: SkipReason::WorkspaceRegistry,
-            });
-            continue;
-        }
-        if matches!(art.kind, ArtifactKind::UserState) && !include_user_state {
-            skipped.push(SkippedArtifact {
-                path: art.path.clone(),
-                reason: SkipReason::UserState,
-            });
-            continue;
-        }
-        planned_removals.push(art.path.clone());
-    }
+    let planned_removals = plan_removals(&discovered, &mut skipped, options);
 
     // Step 5: confirmation gating (cluster-E iter-2 §E.4 fix).
     //
@@ -147,9 +134,9 @@ pub fn run(
     //                       non-interactive opt-in).
     let mut removed: Vec<PathBuf> = Vec::new();
     let mut errors: Vec<RemovalError> = Vec::new();
-    let mut effective_apply = apply;
-    if apply && !force && !planned_removals.is_empty() {
-        if json {
+    let mut effective_apply = !matches!(options.removal, RemovalMode::DryRun);
+    if matches!(options.removal, RemovalMode::ApplyConfirmed) && !planned_removals.is_empty() {
+        if matches!(options.output, CleanOutput::Json) {
             // JSON callers must opt in via --force; record the
             // refusal as a per-entry error and demote to dry-run.
             for path in &planned_removals {
@@ -197,19 +184,23 @@ pub fn run(
         removed,
         errors,
     };
-    emit_report(report, json, daemon_warning)
+    emit_report(
+        &report,
+        matches!(options.output, CleanOutput::Json),
+        daemon_warning,
+    )
 }
 
 /// Render the report. JSON mode emits the canonical schema verbatim
 /// (plus an optional `_warning` field for daemon-down state); text
 /// mode prints a human-readable summary.
 fn emit_report(
-    report: WorkspaceCleanReport,
+    report: &WorkspaceCleanReport,
     json: bool,
     daemon_warning: Option<&'static str>,
 ) -> Result<()> {
     if json {
-        let mut value = serde_json::to_value(&report)
+        let mut value = serde_json::to_value(report)
             .context("workspace clean: failed to serialise WorkspaceCleanReport")?;
         if let (Some(warning), Some(obj)) = (daemon_warning, value.as_object_mut()) {
             obj.insert(
@@ -223,8 +214,53 @@ fn emit_report(
         return Ok(());
     }
 
-    print_text_summary(&report, daemon_warning);
+    print_text_summary(report, daemon_warning);
     Ok(())
+}
+
+fn plan_removals(
+    discovered: &[DiscoveredArtifact],
+    skipped: &mut Vec<SkippedArtifact>,
+    options: &CleanOptions,
+) -> Vec<PathBuf> {
+    let mut planned_removals: Vec<PathBuf> = Vec::new();
+    for art in discovered {
+        if should_skip_artifact(art, skipped, options) {
+            continue;
+        }
+        planned_removals.push(art.path.clone());
+    }
+    planned_removals
+}
+
+fn should_skip_artifact(
+    artifact: &DiscoveredArtifact,
+    skipped: &mut Vec<SkippedArtifact>,
+    options: &CleanOptions,
+) -> bool {
+    let reason = if artifact.is_canonical_active
+        && !matches!(options.removal, RemovalMode::ApplyForced)
+    {
+        Some(SkipReason::CanonicalActive)
+    } else if artifact.is_daemon_locked && !matches!(options.removal, RemovalMode::ApplyForced) {
+        Some(SkipReason::DaemonLocked)
+    } else if matches!(artifact.kind, ArtifactKind::WorkspaceRegistry) {
+        Some(SkipReason::WorkspaceRegistry)
+    } else if matches!(artifact.kind, ArtifactKind::UserState)
+        && matches!(options.user_state, UserStatePolicy::Exclude)
+    {
+        Some(SkipReason::UserState)
+    } else {
+        None
+    };
+    let Some(reason) = reason else {
+        return false;
+    };
+    skipped.push(SkippedArtifact {
+        path: artifact.path.clone(),
+        reason,
+    });
+    true
 }
 
 fn print_text_summary(report: &WorkspaceCleanReport, daemon_warning: Option<&'static str>) {
@@ -322,7 +358,7 @@ fn walk_artifacts(
     canonical_root: &Path,
     canonical_active_artifact: Option<&Path>,
     daemon_locked: &[PathBuf],
-) -> Result<(Vec<DiscoveredArtifact>, Vec<SkippedArtifact>)> {
+) -> (Vec<DiscoveredArtifact>, Vec<SkippedArtifact>) {
     let mut discovered: Vec<DiscoveredArtifact> = Vec::new();
     let mut skipped: Vec<SkippedArtifact> = Vec::new();
     let daemon_set: HashSet<PathBuf> = daemon_locked
@@ -365,18 +401,11 @@ fn walk_artifacts(
         // Only directory entries (and the legacy `.sqry-index` file)
         // can be artifacts. File traversal still produces entries; we
         // skip them quickly here.
-        let file_name = match path.file_name().and_then(|n| n.to_str()) {
-            Some(n) => n,
-            None => continue,
+        let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
         };
-        let kind = match file_name {
-            ".sqry" if entry.file_type().is_dir() => ArtifactKind::GraphRoot,
-            ".sqry-cache" if entry.file_type().is_dir() => ArtifactKind::Cache,
-            ".sqry-prof" if entry.file_type().is_dir() => ArtifactKind::Prof,
-            ".sqry-index" if entry.file_type().is_file() => ArtifactKind::LegacyIndex,
-            ".sqry-index.user" if entry.file_type().is_file() => ArtifactKind::UserState,
-            ".sqry-workspace" if entry.file_type().is_file() => ArtifactKind::WorkspaceRegistry,
-            _ => continue,
+        let Some(kind) = artifact_kind_for_entry(&entry, file_name) else {
+            continue;
         };
 
         // Symlink defence — `walkdir` won't follow links because we set
@@ -396,18 +425,15 @@ fn walk_artifacts(
         // stays under `canonical_root`. A `.sqry-cache` symlink that
         // points outside should already be caught above, but defence
         // in depth.
-        let canonical_path = match path.canonicalize() {
-            Ok(p) => p,
-            Err(_) => {
-                skipped.push(SkippedArtifact {
-                    path: path.to_path_buf(),
-                    reason: SkipReason::OutsideRoot,
-                });
-                if entry.file_type().is_dir() {
-                    walker.skip_current_dir();
-                }
-                continue;
+        let Ok(canonical_path) = path.canonicalize() else {
+            skipped.push(SkippedArtifact {
+                path: path.to_path_buf(),
+                reason: SkipReason::OutsideRoot,
+            });
+            if entry.file_type().is_dir() {
+                walker.skip_current_dir();
             }
+            continue;
         };
         if !canonical_path.starts_with(canonical_root) {
             skipped.push(SkippedArtifact {
@@ -420,30 +446,6 @@ fn walk_artifacts(
             continue;
         }
 
-        let size_bytes = match kind {
-            ArtifactKind::Graph
-            | ArtifactKind::GraphRoot
-            | ArtifactKind::Cache
-            | ArtifactKind::Prof
-            | ArtifactKind::NestedGraph => directory_size(&canonical_path),
-            ArtifactKind::LegacyIndex
-            | ArtifactKind::UserState
-            | ArtifactKind::WorkspaceRegistry => {
-                fs::metadata(&canonical_path).map(|m| m.len()).unwrap_or(0)
-            }
-        };
-        let last_modified = fs::metadata(&canonical_path)
-            .ok()
-            .and_then(|m| m.modified().ok())
-            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-            .and_then(|d| {
-                let secs = i64::try_from(d.as_secs()).ok()?;
-                chrono::DateTime::<chrono::Utc>::from_timestamp(secs, d.subsec_nanos())
-            });
-
-        // For `GraphRoot`, also surface the inner `graph/` as the
-        // canonical-active marker target (the active artifact is the
-        // `graph/` directory, not its parent).
         let inner_graph = canonical_path.join("graph");
         let is_canonical_active = canonical_active_artifact
             .is_some_and(|a| a == canonical_path.as_path() || a == inner_graph.as_path());
@@ -452,31 +454,11 @@ fn walk_artifacts(
             .any(|p| *p == canonical_path || *p == inner_graph);
         let is_user_state = matches!(kind, ArtifactKind::UserState);
 
-        // If a `.sqry/` lives inside an outer project boundary distinct
-        // from this `canonical_root`, classify as `NestedGraph`.
-        // Detection: the `discover_workspace_root` of the parent dir
-        // returns a different `root` than `canonical_path`.
-        let final_kind = if matches!(kind, ArtifactKind::GraphRoot) && !is_canonical_active {
-            match canonical_path.parent() {
-                Some(parent) => match discover_workspace_root(parent) {
-                    WorkspaceRootDiscovery::GraphFound { root: r, .. }
-                        if r.join(".sqry") != canonical_path =>
-                    {
-                        ArtifactKind::NestedGraph
-                    }
-                    _ => ArtifactKind::GraphRoot,
-                },
-                None => ArtifactKind::GraphRoot,
-            }
-        } else {
-            kind
-        };
-
         discovered.push(DiscoveredArtifact {
             path: canonical_path.clone(),
-            kind: final_kind,
-            size_bytes,
-            last_modified,
+            kind: final_artifact_kind(kind, &canonical_path, is_canonical_active),
+            size_bytes: artifact_size_bytes(kind, &canonical_path),
+            last_modified: artifact_last_modified(&canonical_path),
             is_canonical_active,
             is_daemon_locked,
             is_user_state,
@@ -490,7 +472,62 @@ fn walk_artifacts(
         }
     }
 
-    Ok((discovered, skipped))
+    (discovered, skipped)
+}
+
+fn artifact_kind_for_entry(entry: &walkdir::DirEntry, file_name: &str) -> Option<ArtifactKind> {
+    match file_name {
+        ".sqry" if entry.file_type().is_dir() => Some(ArtifactKind::GraphRoot),
+        ".sqry-cache" if entry.file_type().is_dir() => Some(ArtifactKind::Cache),
+        ".sqry-prof" if entry.file_type().is_dir() => Some(ArtifactKind::Prof),
+        ".sqry-index" if entry.file_type().is_file() => Some(ArtifactKind::LegacyIndex),
+        ".sqry-index.user" if entry.file_type().is_file() => Some(ArtifactKind::UserState),
+        ".sqry-workspace" if entry.file_type().is_file() => Some(ArtifactKind::WorkspaceRegistry),
+        _ => None,
+    }
+}
+
+fn artifact_size_bytes(kind: ArtifactKind, canonical_path: &Path) -> u64 {
+    match kind {
+        ArtifactKind::Graph
+        | ArtifactKind::GraphRoot
+        | ArtifactKind::Cache
+        | ArtifactKind::Prof
+        | ArtifactKind::NestedGraph => directory_size(canonical_path),
+        ArtifactKind::LegacyIndex | ArtifactKind::UserState | ArtifactKind::WorkspaceRegistry => {
+            fs::metadata(canonical_path).map_or(0, |m| m.len())
+        }
+    }
+}
+
+fn artifact_last_modified(canonical_path: &Path) -> Option<chrono::DateTime<chrono::Utc>> {
+    fs::metadata(canonical_path)
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .and_then(|d| {
+            let secs = i64::try_from(d.as_secs()).ok()?;
+            chrono::DateTime::<chrono::Utc>::from_timestamp(secs, d.subsec_nanos())
+        })
+}
+
+fn final_artifact_kind(
+    kind: ArtifactKind,
+    canonical_path: &Path,
+    is_canonical_active: bool,
+) -> ArtifactKind {
+    if !matches!(kind, ArtifactKind::GraphRoot) || is_canonical_active {
+        return kind;
+    }
+    let Some(parent) = canonical_path.parent() else {
+        return ArtifactKind::GraphRoot;
+    };
+    match discover_workspace_root(parent) {
+        WorkspaceRootDiscovery::GraphFound { root, .. } if root.join(".sqry") != canonical_path => {
+            ArtifactKind::NestedGraph
+        }
+        _ => ArtifactKind::GraphRoot,
+    }
 }
 
 /// Recursive size in bytes. Best-effort: any I/O failure yields 0 for
@@ -535,17 +572,14 @@ fn probe_daemon_active_artifacts() -> (Vec<PathBuf>, Option<&'static str>) {
             Some("sqryd is not running; daemon-locked check skipped"),
         );
     }
-    let rt = match tokio::runtime::Builder::new_current_thread()
+    let Ok(rt) = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-    {
-        Ok(r) => r,
-        Err(_) => {
-            return (
-                Vec::new(),
-                Some("could not start tokio runtime to probe daemon; check skipped"),
-            );
-        }
+    else {
+        return (
+            Vec::new(),
+            Some("could not start tokio runtime to probe daemon; check skipped"),
+        );
     };
     rt.block_on(async {
         let timeout = Duration::from_millis(DAEMON_ARTIFACTS_TIMEOUT_MS);
@@ -621,39 +655,21 @@ mod tests {
             _ => None,
         };
         let (discovered, mut skipped) =
-            walk_artifacts(&canonical_root, canonical_active.as_deref(), daemon_locked).unwrap();
-        let mut planned = Vec::new();
-        for art in &discovered {
-            if art.is_canonical_active && !force {
-                skipped.push(SkippedArtifact {
-                    path: art.path.clone(),
-                    reason: SkipReason::CanonicalActive,
-                });
-                continue;
-            }
-            if art.is_daemon_locked && !force {
-                skipped.push(SkippedArtifact {
-                    path: art.path.clone(),
-                    reason: SkipReason::DaemonLocked,
-                });
-                continue;
-            }
-            if matches!(art.kind, ArtifactKind::WorkspaceRegistry) {
-                skipped.push(SkippedArtifact {
-                    path: art.path.clone(),
-                    reason: SkipReason::WorkspaceRegistry,
-                });
-                continue;
-            }
-            if matches!(art.kind, ArtifactKind::UserState) && !include_user_state {
-                skipped.push(SkippedArtifact {
-                    path: art.path.clone(),
-                    reason: SkipReason::UserState,
-                });
-                continue;
-            }
-            planned.push(art.path.clone());
-        }
+            walk_artifacts(&canonical_root, canonical_active.as_deref(), daemon_locked);
+        let options = CleanOptions {
+            removal: if force {
+                RemovalMode::ApplyForced
+            } else {
+                RemovalMode::DryRun
+            },
+            user_state: if include_user_state {
+                UserStatePolicy::Include
+            } else {
+                UserStatePolicy::Exclude
+            },
+            output: CleanOutput::Text,
+        };
+        let planned = plan_removals(&discovered, &mut skipped, &options);
         (discovered, planned, skipped)
     }
 

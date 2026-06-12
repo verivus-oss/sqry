@@ -593,7 +593,6 @@ fn edge_kind_text(kind: Option<&EdgeKind>) -> &'static str {
     };
     match k {
         EdgeKind::Calls { .. } => "calls",
-        EdgeKind::References => "references",
         EdgeKind::Imports { .. } => "imports",
         EdgeKind::Exports { .. } => "exports",
         EdgeKind::Implements => "implements",

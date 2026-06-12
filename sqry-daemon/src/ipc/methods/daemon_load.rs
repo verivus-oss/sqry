@@ -10,7 +10,7 @@
 //! clients always see structured daemon errors, never a transport-
 //! level `-32603`.
 //!
-//! # STEP_6 (workspace-aware-cross-repo) augmentation
+//! # `STEP_6` (workspace-aware-cross-repo) augmentation
 //!
 //! `daemon/load` accepts an optional `logical_workspace` payload of
 //! type [`sqry_daemon_protocol::LogicalWorkspaceWire`]. When present,
@@ -56,7 +56,7 @@ pub struct LoadParams {
     pub root_mode: Option<ProjectRootMode>,
     #[serde(default)]
     pub config_fingerprint: Option<u64>,
-    /// STEP_6: optional logical-workspace binding. When present, every
+    /// `STEP_6`: optional logical-workspace binding. When present, every
     /// source root in
     /// [`LogicalWorkspaceWire::source_roots`] is loaded under a
     /// [`WorkspaceKey`] sharing the wire's `workspace_id`. The
@@ -84,7 +84,7 @@ fn working_set_estimate_for_initial(_cfg: &DaemonConfig) -> u64 {
 
 /// Handle one `daemon/load` request.
 ///
-/// STEP_6 iter-2 BLOCK fix: when `params.logical_workspace` is
+/// `STEP_6` iter-2 BLOCK fix: when `params.logical_workspace` is
 /// `None`, fall back to the connection-level binding captured from
 /// `DaemonHello.logical_workspace` (carried on `conn`). Per-request
 /// params always win — the inheritance is a fallback, not a merge.

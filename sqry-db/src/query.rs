@@ -250,8 +250,9 @@ impl QueryRegistry {
     /// (`ShardedCache::insert_validated`) where the concrete `Q` is not known.
     #[must_use]
     pub fn shard_for_query_type_id(query_type_id: u32, shard_count: usize) -> usize {
-        let mask = (shard_count - 1) as u64;
-        (u64::from(query_type_id) & mask) as usize
+        let mask = u64::try_from(shard_count - 1).unwrap_or(u64::MAX);
+        let shard = u64::from(query_type_id) & mask;
+        usize::try_from(shard).unwrap_or_default()
     }
 
     /// Returns the number of registered query types.

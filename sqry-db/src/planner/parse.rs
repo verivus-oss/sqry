@@ -206,180 +206,20 @@ impl<'a> Parser<'a> {
         let start = self.pos;
         let head = self.take_ident()?;
         match head.as_str() {
-            "kind" => {
-                self.expect_byte(b':', "':' after 'kind'")?;
-                let ident = self.take_ident()?;
-                let offset = start;
-                let nk = NodeKind::parse(&ident).ok_or(ParseError::UnknownIdent {
-                    kind: "node kind",
-                    value: ident,
-                    offset,
-                })?;
-                Ok(builder.scan(nk))
-            }
-            "visibility" => {
-                self.expect_byte(b':', "':' after 'visibility'")?;
-                let ident = self.take_ident()?;
-                let vis = Visibility::parse(&ident).ok_or(ParseError::UnknownIdent {
-                    kind: "visibility",
-                    value: ident,
-                    offset: start,
-                })?;
-                Ok(apply_visibility(builder, vis))
-            }
-            "name" => {
-                // `name:<value>` — literal-exact / glob contract.
-                //
-                // **Semantics (B1_ALIGN, locked).**
-                //
-                // - **Literal value (no `*`, `?`, `[`).** `name:Foo`
-                //   matches every indexable graph node whose interned
-                //   `entry.name` or `entry.qualified_name` equals `Foo`
-                //   byte-for-byte, case-sensitive. If `Foo` is dot- or
-                //   Ruby-`#` qualified, the shared exact-name resolver also
-                //   checks the graph-canonical `::` rewrite so user-facing
-                //   display names like `Class.field` / `Class#field` can
-                //   resolve to canonical graph names like `Class::field`.
-                //   This path
-                //   is contract-bound to the CLI `--exact <literal>`
-                //   shorthand: both route through
-                //   [`sqry_core::graph::unified::concurrent::graph::GraphSnapshot::find_by_exact_name`]
-                //   and return the same set on any fixture.
-                //
-                // - **Glob value (contains `*`, `?`, or `[`).**
-                //   [`Self::parse_string_pattern`] promotes the pattern
-                //   to [`MatchMode::Glob`]; the executor then matches
-                //   nodes whose simple or qualified name satisfies the
-                //   glob (e.g. `name:parse_*` matches `parse_expr`,
-                //   `parse_stmt`). The CLI `--exact` shorthand does
-                //   **not** accept glob meta — it treats every
-                //   character as a literal — so the
-                //   exact-set-equality contract above does not extend
-                //   to glob values. This is intentional: the CLI
-                //   `--exact` flag is a literal-only convenience, and
-                //   glob lookups belong to the structured planner.
-                //
-                // Synthetic placeholder nodes (Go-plugin
-                // `<field:operand.field>` shadows and `<ident>@<offset>`
-                // per-binding-site Variables; see `C_SUPPRESS` and
-                // [`crate::query::QueryDb`] docs for the full taxonomy)
-                // are excluded on **both** the literal and glob paths,
-                // gated by
-                // [`sqry_core::graph::unified::concurrent::graph::GraphSnapshot::is_node_synthetic`]
-                // inside `entry_name_matches` / `scan_match`.
-                //
-                // **No substring or regex form.** A future regex form
-                // would land as a separate `name~` operator with its
-                // own grammar branch and IR variant — mirroring the
-                // `references:` / `references ~= /…/` split. There is
-                // no implicit substring fallback; users wanting regex
-                // name matching today should use `sqry search <regex>`
-                // (regex over interned strings; synthetic-visible) or
-                // wait for `name~` to land.
-                //
-                // **Precedence vs `name~` (future).** When `name~`
-                // lands, it will be parsed as a distinct token and
-                // produce a distinct IR predicate; `name:` keeps the
-                // literal-exact / glob split documented above
-                // unchanged. Folding the two into a single token with
-                // a "smart" mode is explicitly out of scope.
-                self.expect_byte(b':', "':' after 'name'")?;
-                let pat = self.parse_string_pattern()?;
-                // `name:` attaches to an existing NodeScan when possible so
-                // the scan uses the pre-built by-kind index directly. When
-                // the chain is empty, it starts a fresh `NodeScan` carrying
-                // only the name pattern so `name:Foo` is a valid standalone
-                // query (otherwise the chain would fail context-free
-                // validation in `compile.rs`).
-                Ok(apply_name_pattern(builder, pat))
-            }
-            "returns" => {
-                // `returns:<TypeName>` — selects nodes whose outgoing
-                // `EdgeKind::TypeOf { context: Some(TypeOfContext::Return), .. }`
-                // edges target a node whose interned name equals `<TypeName>`
-                // by byte-exact, case-sensitive comparison.
-                //
-                // The value parser is `parse_bare_or_quoted` (not
-                // `parse_string_pattern`) so glob meta-characters like `*`,
-                // `?`, and `[` are taken as literal name bytes rather than
-                // promoted to a glob. This keeps the contract identical to
-                // the IR docstring on `Predicate::Returns`: exact match only.
-                // A future `returns~:` regex form would land as a separate
-                // grammar branch and IR variant, mirroring how `references`
-                // already pairs `references:` (literal) with
-                // `references ~= /…/` (regex).
-                self.expect_byte(b':', "':' after 'returns'")?;
-                let type_name = self.parse_bare_or_quoted()?;
-                Ok(builder.filter(Predicate::Returns(type_name)))
-            }
+            "kind" => self.parse_kind_step(builder, start),
+            "visibility" => self.parse_visibility_step(builder, start),
+            "name" => self.parse_name_step(builder),
+            "returns" => self.parse_returns_step(builder),
             "in" => {
                 self.expect_byte(b':', "':' after 'in'")?;
                 let glob = self.parse_bare_or_quoted()?;
                 Ok(builder.filter(Predicate::InFile(PathPattern::new(glob))))
             }
-            "scope" => {
-                self.expect_byte(b':', "':' after 'scope'")?;
-                let ident = self.take_ident()?;
-                let sk = parse_scope_kind(&ident).ok_or(ParseError::UnknownIdent {
-                    kind: "scope kind",
-                    value: ident,
-                    offset: start,
-                })?;
-                Ok(builder.filter(Predicate::InScope(sk)))
-            }
-            "has" => {
-                self.expect_byte(b':', "':' after 'has'")?;
-                let ident = self.take_ident()?;
-                match ident.as_str() {
-                    "caller" => Ok(builder.filter(Predicate::HasCaller)),
-                    "callee" => Ok(builder.filter(Predicate::HasCallee)),
-                    _ => Err(ParseError::UnknownIdent {
-                        kind: "has-target (expected 'caller' or 'callee')",
-                        value: ident,
-                        offset: start,
-                    }),
-                }
-            }
+            "scope" => self.parse_scope_step(builder, start),
+            "has" => self.parse_has_step(builder, start),
             "unused" => Ok(builder.filter(Predicate::IsUnused)),
-            "cfg" => {
-                // T3 Cluster F: cross-language conditional-compilation
-                // predicate. Per 02_DESIGN §5.3.a + §10.4 the two
-                // addressing modes are independently observable:
-                //   - Bare `cfg:<ident>` → CfgMatcher::Semantic(Flag(ident))
-                //     — cross-language: matches both Go-stored
-                //     `"linux"` and Rust-stored `"target_os = \"linux\""`.
-                //   - Quoted `cfg:"<expr>"` → CfgMatcher::Literal(expr)
-                //     — byte-exact and language-specific.
-                self.expect_byte(b':', "':' after 'cfg'")?;
-                self.skip_inline_ws();
-                let was_quoted = self.peek_is(b'"');
-                let value = self.parse_bare_or_quoted()?;
-                let matcher = if was_quoted {
-                    super::cfg_match::CfgMatcher::Literal(value)
-                } else {
-                    super::cfg_match::CfgMatcher::Semantic(super::cfg_match::CfgAst::flag(value))
-                };
-                Ok(builder.filter(Predicate::CfgCondition(matcher)))
-            }
-            "wraps" => {
-                // T3 Cluster F: error-chain wrap predicate. Bare `wraps`
-                // accepts every WrapKind; `wraps:<kind>` filters on the
-                // snake-case spelling of `WrapKind`.
-                self.skip_inline_ws();
-                let filter = if self.peek_is(b':') {
-                    self.pos += 1;
-                    let ident = self.take_ident()?;
-                    let kind = parse_wrap_kind(&ident).ok_or(ParseError::UnknownIdent {
-                        kind: "wrap kind",
-                        value: ident,
-                        offset: start,
-                    })?;
-                    super::ir::WrapKindFilter::Kind(kind)
-                } else {
-                    super::ir::WrapKindFilter::Any
-                };
-                Ok(builder.filter(Predicate::Wraps(filter)))
-            }
+            "cfg" => self.parse_cfg_step(builder),
+            "wraps" => self.parse_wraps_step(builder, start),
             // ----- Phase A (C indirect-call precision) -----
             //
             // Spellings locked per DESIGN §11.1:
@@ -395,49 +235,7 @@ impl<'a> Parser<'a> {
                 let want = self.parse_optional_bool_value(start, "address_taken")?;
                 Ok(builder.filter(Predicate::IsAddressTaken(want)))
             }
-            "resolved_via" => {
-                self.expect_byte(b':', "':' after 'resolved_via'")?;
-                let ident_start = self.pos;
-                let ident = self.take_ident()?;
-                let via = match ident.as_str() {
-                    "direct" => ResolvedVia::Direct,
-                    "type_match" => ResolvedVia::TypeMatch,
-                    "binding_plane" => ResolvedVia::BindingPlane,
-                    "virtual_dispatch" => ResolvedVia::VirtualDispatch,
-                    "interface_dispatch" => ResolvedVia::InterfaceDispatch,
-                    "duck_typed" => ResolvedVia::DuckTyped,
-                    "structural" => ResolvedVia::Structural,
-                    "promiscuous_elided" => ResolvedVia::PromiscuousElided,
-                    _ => {
-                        return Err(ParseError::UnknownIdent {
-                            kind: "resolved_via value (expected 'direct', 'type_match', 'binding_plane', 'virtual_dispatch', 'interface_dispatch', 'duck_typed', 'structural', or 'promiscuous_elided')",
-                            value: ident,
-                            offset: ident_start,
-                        });
-                    }
-                };
-                // DESIGN §6.3bis adjacency fold: when the immediately
-                // preceding step is a Calls `EdgeTraversal` carrying
-                // `resolved_via: None`, install the provenance filter
-                // directly on that traversal (one-pass executor filter
-                // via `run_traversal`'s fifth parameter). Otherwise emit
-                // the U14 `Predicate::ResolvedVia` filter form which the
-                // executor handles via `node_has_calls_resolved_via`'s
-                // one-edge-back probe.
-                //
-                // The fold is intentionally conservative: it only
-                // triggers when the preceding step targets the Calls
-                // discriminant AND the EdgeTraversal's `resolved_via`
-                // field is still `None`. See
-                // `QueryBuilder::try_fold_resolved_via` for the full
-                // rule set.
-                let mut builder = builder;
-                if builder.try_fold_resolved_via(via) {
-                    Ok(builder)
-                } else {
-                    Ok(builder.filter(Predicate::ResolvedVia(via)))
-                }
-            }
+            "resolved_via" => self.parse_resolved_via_step(builder),
             "callsite_promiscuous" => {
                 let want = self.parse_optional_bool_value(start, "callsite_promiscuous")?;
                 Ok(builder.filter(Predicate::HasCallsitePromiscuous(want)))
@@ -448,37 +246,190 @@ impl<'a> Parser<'a> {
                 Ok(builder.traverse(direction, edge_kind, depth))
             }
             "callers" | "callees" | "imports" | "exports" | "implements" | "impl" => {
-                self.expect_byte(b':', "':' after relation predicate")?;
-                let value = self.parse_value()?;
-                let predicate = match head.as_str() {
-                    "callers" => Predicate::Callers(value),
-                    "callees" => Predicate::Callees(value),
-                    "imports" => Predicate::Imports(value),
-                    "exports" => Predicate::Exports(value),
-                    "implements" | "impl" => Predicate::Implements(value),
-                    _ => unreachable!("outer match covers every arm"),
-                };
-                Ok(builder.filter(predicate))
+                self.parse_relation_step(builder, &head)
             }
-            "references" => {
-                // `references:<value>` — literal / subquery form;
-                // `references ~= /regex/` — regex form (space optional).
-                self.skip_ws();
-                if self.eat_bytes(b"~=") {
-                    self.skip_ws();
-                    let regex = self.parse_regex_literal()?;
-                    Ok(builder.filter(Predicate::References(PredicateValue::Regex(regex))))
-                } else {
-                    self.expect_byte(b':', "':' or '~=' after 'references'")?;
-                    let value = self.parse_value()?;
-                    Ok(builder.filter(Predicate::References(value)))
-                }
-            }
+            "references" => self.parse_references_step(builder),
             _ => Err(ParseError::UnknownIdent {
                 kind: "step keyword",
                 value: head,
                 offset: start,
             }),
+        }
+    }
+
+    fn parse_kind_step(
+        &mut self,
+        builder: QueryBuilder,
+        start: usize,
+    ) -> Result<QueryBuilder, ParseError> {
+        self.expect_byte(b':', "':' after 'kind'")?;
+        let ident = self.take_ident()?;
+        let nk = NodeKind::parse(&ident).ok_or(ParseError::UnknownIdent {
+            kind: "node kind",
+            value: ident,
+            offset: start,
+        })?;
+        Ok(builder.scan(nk))
+    }
+
+    fn parse_visibility_step(
+        &mut self,
+        builder: QueryBuilder,
+        start: usize,
+    ) -> Result<QueryBuilder, ParseError> {
+        self.expect_byte(b':', "':' after 'visibility'")?;
+        let ident = self.take_ident()?;
+        let vis = Visibility::parse(&ident).ok_or(ParseError::UnknownIdent {
+            kind: "visibility",
+            value: ident,
+            offset: start,
+        })?;
+        Ok(apply_visibility(builder, vis))
+    }
+
+    fn parse_name_step(&mut self, builder: QueryBuilder) -> Result<QueryBuilder, ParseError> {
+        self.expect_byte(b':', "':' after 'name'")?;
+        let pat = self.parse_string_pattern()?;
+        // `name:` attaches to an existing NodeScan when possible so the scan
+        // uses the by-kind index directly. On an empty chain, it starts a
+        // standalone NodeScan so `name:Foo` remains context-free.
+        Ok(apply_name_pattern(builder, pat))
+    }
+
+    fn parse_returns_step(&mut self, builder: QueryBuilder) -> Result<QueryBuilder, ParseError> {
+        self.expect_byte(b':', "':' after 'returns'")?;
+        let type_name = self.parse_bare_or_quoted()?;
+        Ok(builder.filter(Predicate::Returns(type_name)))
+    }
+
+    fn parse_scope_step(
+        &mut self,
+        builder: QueryBuilder,
+        start: usize,
+    ) -> Result<QueryBuilder, ParseError> {
+        self.expect_byte(b':', "':' after 'scope'")?;
+        let ident = self.take_ident()?;
+        let sk = parse_scope_kind(&ident).ok_or(ParseError::UnknownIdent {
+            kind: "scope kind",
+            value: ident,
+            offset: start,
+        })?;
+        Ok(builder.filter(Predicate::InScope(sk)))
+    }
+
+    fn parse_has_step(
+        &mut self,
+        builder: QueryBuilder,
+        start: usize,
+    ) -> Result<QueryBuilder, ParseError> {
+        self.expect_byte(b':', "':' after 'has'")?;
+        let ident = self.take_ident()?;
+        match ident.as_str() {
+            "caller" => Ok(builder.filter(Predicate::HasCaller)),
+            "callee" => Ok(builder.filter(Predicate::HasCallee)),
+            _ => Err(ParseError::UnknownIdent {
+                kind: "has-target (expected 'caller' or 'callee')",
+                value: ident,
+                offset: start,
+            }),
+        }
+    }
+
+    fn parse_cfg_step(&mut self, builder: QueryBuilder) -> Result<QueryBuilder, ParseError> {
+        self.expect_byte(b':', "':' after 'cfg'")?;
+        self.skip_inline_ws();
+        let was_quoted = self.peek_is(b'"');
+        let value = self.parse_bare_or_quoted()?;
+        let matcher = if was_quoted {
+            super::cfg_match::CfgMatcher::Literal(value)
+        } else {
+            super::cfg_match::CfgMatcher::Semantic(super::cfg_match::CfgAst::flag(value))
+        };
+        Ok(builder.filter(Predicate::CfgCondition(matcher)))
+    }
+
+    fn parse_wraps_step(
+        &mut self,
+        builder: QueryBuilder,
+        start: usize,
+    ) -> Result<QueryBuilder, ParseError> {
+        self.skip_inline_ws();
+        let filter = if self.peek_is(b':') {
+            self.pos += 1;
+            let ident = self.take_ident()?;
+            let kind = parse_wrap_kind(&ident).ok_or(ParseError::UnknownIdent {
+                kind: "wrap kind",
+                value: ident,
+                offset: start,
+            })?;
+            super::ir::WrapKindFilter::Kind(kind)
+        } else {
+            super::ir::WrapKindFilter::Any
+        };
+        Ok(builder.filter(Predicate::Wraps(filter)))
+    }
+
+    fn parse_resolved_via_step(
+        &mut self,
+        builder: QueryBuilder,
+    ) -> Result<QueryBuilder, ParseError> {
+        self.expect_byte(b':', "':' after 'resolved_via'")?;
+        let ident_start = self.pos;
+        let ident = self.take_ident()?;
+        let via = match ident.as_str() {
+            "direct" => ResolvedVia::Direct,
+            "type_match" => ResolvedVia::TypeMatch,
+            "binding_plane" => ResolvedVia::BindingPlane,
+            "virtual_dispatch" => ResolvedVia::VirtualDispatch,
+            "interface_dispatch" => ResolvedVia::InterfaceDispatch,
+            "duck_typed" => ResolvedVia::DuckTyped,
+            "structural" => ResolvedVia::Structural,
+            "promiscuous_elided" => ResolvedVia::PromiscuousElided,
+            _ => {
+                return Err(ParseError::UnknownIdent {
+                    kind: "resolved_via value (expected 'direct', 'type_match', 'binding_plane', 'virtual_dispatch', 'interface_dispatch', 'duck_typed', 'structural', or 'promiscuous_elided')",
+                    value: ident,
+                    offset: ident_start,
+                });
+            }
+        };
+
+        let mut builder = builder;
+        if builder.try_fold_resolved_via(via) {
+            Ok(builder)
+        } else {
+            Ok(builder.filter(Predicate::ResolvedVia(via)))
+        }
+    }
+
+    fn parse_relation_step(
+        &mut self,
+        builder: QueryBuilder,
+        head: &str,
+    ) -> Result<QueryBuilder, ParseError> {
+        self.expect_byte(b':', "':' after relation predicate")?;
+        let value = self.parse_value()?;
+        let predicate = match head {
+            "callers" => Predicate::Callers(value),
+            "callees" => Predicate::Callees(value),
+            "imports" => Predicate::Imports(value),
+            "exports" => Predicate::Exports(value),
+            "implements" | "impl" => Predicate::Implements(value),
+            _ => unreachable!("outer match covers every arm"),
+        };
+        Ok(builder.filter(predicate))
+    }
+
+    fn parse_references_step(&mut self, builder: QueryBuilder) -> Result<QueryBuilder, ParseError> {
+        self.skip_ws();
+        if self.eat_bytes(b"~=") {
+            self.skip_ws();
+            let regex = self.parse_regex_literal()?;
+            Ok(builder.filter(Predicate::References(PredicateValue::Regex(regex))))
+        } else {
+            self.expect_byte(b':', "':' or '~=' after 'references'")?;
+            let value = self.parse_value()?;
+            Ok(builder.filter(Predicate::References(value)))
         }
     }
 
@@ -923,7 +874,7 @@ fn apply_visibility(builder: QueryBuilder, visibility: Visibility) -> QueryBuild
         let vis = existing_vis.unwrap_or(visibility);
         let name_pattern = name_pattern.clone();
         // Replace the trailing NodeScan with a merged one.
-        let mut trimmed = strip_last_step(builder);
+        let mut trimmed = strip_last_step(&builder);
         trimmed = trimmed.scan_with(
             ScanFilters::new()
                 .merge_kind(kind)
@@ -973,7 +924,7 @@ fn apply_name_pattern(builder: QueryBuilder, pattern: StringPattern) -> QueryBui
     {
         let kind = *kind;
         let vis = *visibility;
-        let mut trimmed = strip_last_step(builder);
+        let mut trimmed = strip_last_step(&builder);
         trimmed = trimmed.scan_with(ScanFilters {
             kind,
             visibility: vis,
@@ -1007,8 +958,8 @@ fn builder_steps(builder: &QueryBuilder) -> Vec<PlanNode> {
 /// Rebuilds the builder with every step except the last. Used by
 /// [`apply_visibility`] and [`apply_name_pattern`] to replace a trailing
 /// scan with a merged version without adding a new `QueryBuilder` API.
-fn strip_last_step(builder: QueryBuilder) -> QueryBuilder {
-    let steps = builder_steps(&builder);
+fn strip_last_step(builder: &QueryBuilder) -> QueryBuilder {
+    let steps = builder_steps(builder);
     let mut out = QueryBuilder::new();
     if steps.len() <= 1 {
         return out;

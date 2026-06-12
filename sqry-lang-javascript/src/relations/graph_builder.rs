@@ -1283,7 +1283,7 @@ impl<'a> ASTGraphBuilder<'a> {
             let is_async = is_async_function(node, self.content);
 
             let qualified_name = if self.current_scope.is_empty() {
-                name.to_string()
+                name.clone()
             } else if self.current_scope.len() <= self.max_scope_depth {
                 format!("{}.{}", self.current_scope.join("."), name)
             } else {

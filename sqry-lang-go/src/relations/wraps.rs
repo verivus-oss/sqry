@@ -1,7 +1,7 @@
-//! T3 Cluster C — Go `Wraps` edge emitter (02_DESIGN §4.1).
+//! T3 Cluster C — Go `Wraps` edge emitter (`02_DESIGN` §4.1).
 //!
 //! Emits [`EdgeKind::Wraps`] edges at the four Go error-chain emission
-//! sites identified in 01_SPEC §3.1 / §5.1:
+//! sites identified in `01_SPEC` §3.1 / §5.1:
 //!
 //! 1. **`fmt.Errorf("...%w...", ...)`** — one edge per `%w` verb, keyed
 //!    by [`WrapKind::ErrorfVerb`]. `chain_position` is `None` for a
@@ -18,7 +18,7 @@
 //! # Deferred shapes (codex iter-1 NIT-1, [DESIGN-DELTA])
 //!
 //! Custom user-type methods `Is(target error) bool` and
-//! `As(any) bool` (02_DESIGN §4.1.d, paragraph at line 608+) are NOT
+//! `As(any) bool` (`02_DESIGN` §4.1.d, paragraph at line 608+) are NOT
 //! emitted by Cluster C. The design specifies a `Wraps{UnwrapMethod,
 //! None}` self-loop on receiver types that override traversal via
 //! these methods (and only when the type does not also declare a real
@@ -29,16 +29,16 @@
 //! pollute `relation_query` results with traversal-override semantics
 //! that consumers cannot distinguish from real wrap relationships.
 //!
-//! The source NodeId for `fmt.Errorf` / `errors.*` edges is the **caller
+//! The source `NodeId` for `fmt.Errorf` / `errors.*` edges is the **caller
 //! function** (the same convention every existing Go-plugin edge family
-//! uses; see 02_DESIGN §4.1.a "Reconciling with 01_SPEC §6.1 AC-T3.6-1").
+//! uses; see `02_DESIGN` §4.1.a "Reconciling with `01_SPEC` §6.1 AC-T3.6-1").
 //! The user-visible "call site" identity is expressed via the edge's
 //! `spans: Vec<Span>` field, which points at the wrap-call expression.
 //!
 //! Target resolution is intentionally minimum-risk: every target arg is
-//! resolved to a placeholder NodeId via [`GraphBuildHelper::ensure_callee`]
+//! resolved to a placeholder `NodeId` via [`GraphBuildHelper::ensure_callee`]
 //! (call-compatible kinds reuse covers Function/Method/Constant/
-//! LambdaTarget — sentinels and locals routinely register as Functions
+//! `LambdaTarget` — sentinels and locals routinely register as Functions
 //! through the existing call-edge path). Phase 4c-prime cross-file
 //! unification then merges placeholders with their canonical definitions
 //! via the standard pipeline.
@@ -66,7 +66,7 @@ use tree_sitter::Node;
 /// The `w_index` is 0-based **within the recorded `%w` set** (so if a
 /// format string has two `%w` verbs, they get `w_index` 0 and 1 even
 /// if non-`%w` verbs appear between them). This is the value that
-/// flows into `EdgeKind::Wraps { chain_position }` per 02_DESIGN
+/// flows into `EdgeKind::Wraps { chain_position }` per `02_DESIGN`
 /// §4.1.a step 5.b. The `arg_position` is the 0-based index into the
 /// positional argument list **after** the format-string argument and
 /// counts ALL consuming verbs (`%s`, `%w`, `*` modifiers, etc.) so
@@ -83,12 +83,12 @@ pub(crate) struct WrapVerb {
 }
 
 /// Scan a `fmt.Errorf` format-string literal and return the positions
-/// of every `%w` verb (02_DESIGN §4.1.a step 3).
+/// of every `%w` verb (`02_DESIGN` §4.1.a step 3).
 ///
 /// Grammar:
 /// - `%%` consumes two source characters, produces no verb.
 /// - `%w` is recorded; `w_index` is its 0-based position within the
-///   recorded `%w` set (per 02_DESIGN §4.1.a step 5.b — the value
+///   recorded `%w` set (per `02_DESIGN` §4.1.a step 5.b — the value
 ///   that becomes `chain_position`). `arg_position` is its 0-based
 ///   position within ALL consuming `%`-verbs (including non-`%w`
 ///   verbs that bind to positional arguments and `*` modifiers).
@@ -228,7 +228,7 @@ pub(crate) fn scan_w_verbs(format: &str) -> Vec<WrapVerb> {
 
 /// Extract a string-literal value from a Go AST node, returning `Some`
 /// only when the node is a single interpreted or raw string literal
-/// (per 02_DESIGN §4.1.a step 2's "single string-literal after constant-
+/// (per `02_DESIGN` §4.1.a step 2's "single string-literal after constant-
 /// fold of `+`-only chains of literals" rule, conservatively
 /// implemented as "exactly one literal" — `+`-concat folding is left
 /// to a follow-up).
@@ -329,7 +329,7 @@ pub(crate) fn try_emit_wraps_for_type_conversion(
 /// callee qualified name does not match any of the `Wraps` triggers
 /// (the caller should treat this as "not a wrap site" and continue).
 ///
-/// `caller_function_node_id` is the source NodeId for the emitted
+/// `caller_function_node_id` is the source `NodeId` for the emitted
 /// edges (per §4.1.a — the caller function, NOT the call site).
 /// `call_site_span` is attached to each emitted edge's span vector so
 /// MCP / IDE surfaces can render the user-visible "wrap occurs at
@@ -528,7 +528,7 @@ fn is_errors_wrap_func(name: &str) -> bool {
     matches!(name, "Is" | "As" | "AsType" | "Join")
 }
 
-/// `fmt.Errorf` emission (02_DESIGN §4.1.a). Returns `true` iff at
+/// `fmt.Errorf` emission (`02_DESIGN` §4.1.a). Returns `true` iff at
 /// least one `%w` was found AND its argument resolved to a non-nil
 /// target.
 fn emit_wraps_for_fmt_errorf(
@@ -539,9 +539,8 @@ fn emit_wraps_for_fmt_errorf(
     call_site_span: Span,
     helper: &mut GraphBuildHelper<'_>,
 ) -> bool {
-    let args = match call_arguments(call_node) {
-        Some(a) => a,
-        None => return false,
+    let Some(args) = call_arguments(call_node) else {
+        return false;
     };
     if args.is_empty() {
         return false;
@@ -591,7 +590,7 @@ fn emit_wraps_for_fmt_errorf(
     emitted_any
 }
 
-/// `errors.Is(err, sentinel)` emission (02_DESIGN §4.1.d).
+/// `errors.Is(err, sentinel)` emission (`02_DESIGN` §4.1.d).
 fn emit_wraps_for_errors_is(
     call_node: Node<'_>,
     content: &[u8],
@@ -613,7 +612,7 @@ fn emit_wraps_for_errors_is(
     )
 }
 
-/// `errors.As(err, &target)` emission (02_DESIGN §4.1.d).
+/// `errors.As(err, &target)` emission (`02_DESIGN` §4.1.d).
 ///
 /// The target is the **type of** the dereferenced second arg, NOT the
 /// variable binding (codex iter-1 F-2). For `&pe` where
@@ -633,9 +632,8 @@ fn emit_wraps_for_errors_as(
     call_site_span: Span,
     helper: &mut GraphBuildHelper<'_>,
 ) -> bool {
-    let args = match call_arguments(call_node) {
-        Some(a) => a,
-        None => return false,
+    let Some(args) = call_arguments(call_node) else {
+        return false;
     };
     let Some(target_arg) = args.get(1).copied() else {
         return false;
@@ -648,11 +646,11 @@ fn emit_wraps_for_errors_as(
     }
     // Walk up the AST to find the enclosing function/method body, then
     // resolve `stripped_ident`'s declared type expression.
-    let type_qn =
-        match resolve_local_var_type_qualified(call_node, content, stripped_ident, package) {
-            Some(qn) => qn,
-            None => return false,
-        };
+    let Some(type_qn) =
+        resolve_local_var_type_qualified(call_node, content, stripped_ident, package)
+    else {
+        return false;
+    };
     let target_id = helper.ensure_callee(&type_qn, call_site_span, CalleeKindHint::Function);
     helper.add_wraps_edge(
         caller,
@@ -664,7 +662,7 @@ fn emit_wraps_for_errors_as(
     true
 }
 
-/// `errors.AsType[E](err)` emission (02_DESIGN §4.1.d, Go 1.26+).
+/// `errors.AsType[E](err)` emission (`02_DESIGN` §4.1.d, Go 1.26+).
 ///
 /// The type argument lives on the call's `type_arguments` field
 /// (tree-sitter Go's generic-call shape). The target is the **type
@@ -737,7 +735,7 @@ fn resolve_local_var_type_qualified(
 
 /// Find a `var_spec` / `short_var_declaration` within `scope` whose
 /// declared name list contains `ident`. Returns the type-bearing AST
-/// node (the var_spec for `var`-form, the short_var_declaration node
+/// node (the `var_spec` for `var`-form, the `short_var_declaration` node
 /// itself for `:=` form), along with the 0-based index of `ident`
 /// within the LHS name list. The index lets `var_decl_type_text`
 /// pick the right element of a multi-binding `:=` declaration
@@ -889,7 +887,7 @@ fn short_var_ident_position(decl: Node<'_>, content: &[u8], ident: &str) -> Opti
 /// Extract the type expression's source text from a `var_spec` or
 /// `short_var_declaration` for the binding at LHS position `ident_idx`.
 ///
-/// Three recognised paths (covering 02_DESIGN §4.1.d's "TypeOf-resolution"
+/// Three recognised paths (covering `02_DESIGN` §4.1.d's "TypeOf-resolution"
 /// best-effort cap and codex iter-2 F-2's `:=` requirement):
 ///
 /// 1. **Explicit `type` field** (`var pe *fs.PathError` or
@@ -897,7 +895,7 @@ fn short_var_ident_position(decl: Node<'_>, content: &[u8], ident: &str) -> Opti
 /// 2. **`:=` with composite-literal RHS at the matching position**
 ///    (`pe := &fs.PathError{...}` or `pe := fs.PathError{...}`).
 ///    Strips the leading `&` from a `unary_expression`, then reads
-///    the composite_literal's `type` field. This is the common
+///    the `composite_literal`'s `type` field. This is the common
 ///    `errors.As`-with-`:=` pattern.
 /// 3. **`:=` with parenthesised type-conversion RHS whose inner
 ///    expression is unambiguously type-shaped**
@@ -1072,7 +1070,7 @@ fn extract_type_qualified_name(
     extract_qualified_name_from_type_text(text, package)
 }
 
-/// `errors.Join(a, b, c, ...)` emission (02_DESIGN §4.1.d).
+/// `errors.Join(a, b, c, ...)` emission (`02_DESIGN` §4.1.d).
 fn emit_wraps_for_errors_join(
     call_node: Node<'_>,
     content: &[u8],
@@ -1081,9 +1079,8 @@ fn emit_wraps_for_errors_join(
     call_site_span: Span,
     helper: &mut GraphBuildHelper<'_>,
 ) -> bool {
-    let args = match call_arguments(call_node) {
-        Some(a) => a,
-        None => return false,
+    let Some(args) = call_arguments(call_node) else {
+        return false;
     };
     let mut emitted_any = false;
     for (i, arg_node) in args.iter().copied().enumerate() {
@@ -1118,9 +1115,8 @@ fn emit_single_arg_wrap(
     arg_index: usize,
     helper: &mut GraphBuildHelper<'_>,
 ) -> bool {
-    let args = match call_arguments(call_node) {
-        Some(a) => a,
-        None => return false,
+    let Some(args) = call_arguments(call_node) else {
+        return false;
     };
     let Some(arg_node) = args.get(arg_index).copied() else {
         return false;
@@ -1179,7 +1175,7 @@ fn resolve_arg_target(
 
 /// Walk a `call_expression`'s `arguments` field and return its
 /// positional argument nodes in source order.
-fn call_arguments<'tree>(call_node: Node<'tree>) -> Option<Vec<Node<'tree>>> {
+fn call_arguments(call_node: Node<'_>) -> Option<Vec<Node<'_>>> {
     let args = call_node.child_by_field_name("arguments")?;
     let mut out = Vec::new();
     let mut cursor = args.walk();
@@ -1211,7 +1207,7 @@ fn call_arguments<'tree>(call_node: Node<'tree>) -> Option<Vec<Node<'tree>>> {
 
 /// Qualify a bare identifier with the current package, mirroring the
 /// existing Go-plugin convention in `resolve_callee_qualified_name`
-/// (graph_builder.rs:1417).
+/// (`graph_builder.rs:1417`).
 fn qualify_identifier(text: &str, package: &str) -> String {
     if text.contains('.') {
         text.to_string()
@@ -1256,7 +1252,7 @@ pub(crate) fn classify_unwrap_method(method_name: &str, result_text: &str) -> Op
 /// Try to emit `Wraps` edges for a recognised `Unwrap` method body.
 ///
 /// Walks the method body looking for return statements with one of the
-/// three documented shapes (02_DESIGN §4.1.b / §4.1.c):
+/// three documented shapes (`02_DESIGN` §4.1.b / §4.1.c):
 ///
 /// - `return e.field` → single edge to `<package>.<receiver>.<field>`
 ///   (`UnwrapMethod` for `error`, `UnwrapMultiMethod` for `[]error`).
@@ -1299,7 +1295,7 @@ pub(crate) fn try_emit_wraps_for_unwrap_body(
     emitted_any
 }
 
-fn collect_return_statements<'tree>(root: Node<'tree>) -> Vec<Node<'tree>> {
+fn collect_return_statements(root: Node<'_>) -> Vec<Node<'_>> {
     let mut out = Vec::new();
     let mut stack = vec![root];
     while let Some(n) = stack.pop() {

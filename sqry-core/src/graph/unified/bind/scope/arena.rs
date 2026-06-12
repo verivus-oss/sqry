@@ -72,7 +72,7 @@ pub struct ScopeId {
 }
 
 impl ScopeId {
-    /// Invalid sentinel ScopeId used for "no enclosing scope".
+    /// Invalid sentinel `ScopeId` used for "no enclosing scope".
     pub const INVALID: ScopeId = ScopeId {
         index: u32::MAX,
         generation: 0,
@@ -190,6 +190,11 @@ impl ScopeArena {
     /// otherwise appends a fresh slot. Every allocation advances the slot
     /// generation, so stale handles from prior allocations at the same
     /// index can never alias into this new scope.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the arena grows beyond `u32::MAX` slots, which would make new
+    /// scope ids unrepresentable.
     pub fn allocate(&mut self, scope: Scope) -> ScopeId {
         self.len += 1;
         if let Some(free_idx) = self.free_head {
@@ -205,7 +210,7 @@ impl ScopeArena {
                 generation: slot.generation,
             }
         } else {
-            let index = self.slots.len() as u32;
+            let index = u32::try_from(self.slots.len()).expect("scope arena index fits u32");
             self.slots.push(ScopeSlot {
                 generation: 1,
                 state: ScopeSlotState::Occupied(scope),
@@ -299,7 +304,7 @@ impl ScopeArena {
     /// impl (A2 §K row K.A11). Callers that hold the arena behind an `Arc`
     /// must reach it through `Arc::make_mut` before invoking this method.
     ///
-    /// `#[allow(dead_code)]` mirrors the NodeIdBearing trait itself: Gate 0b
+    /// `#[allow(dead_code)]` mirrors the `NodeIdBearing` trait itself: Gate 0b
     /// lands the scaffolding and unit tests, Gate 0c adds the production
     /// call site in `RebuildGraph::finalize()`.
     #[allow(dead_code)]
@@ -327,6 +332,11 @@ impl ScopeArena {
     /// generation stored in each slot, so they are stable and safe to stash or
     /// re-use as map keys (e.g., in `build_node_to_scope_map`). Avoids the
     /// generation=1 hardcode that a manual `0..slot_count` loop would require.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the in-memory slot count exceeds `u32::MAX`, which would make
+    /// it impossible to represent a stable [`ScopeId`].
     pub fn iter(&self) -> impl Iterator<Item = (ScopeId, &Scope)> + '_ {
         self.slots
             .iter()

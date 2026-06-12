@@ -67,6 +67,11 @@ fn resolve_hover_node(
         )),
     }
 }
+/// Execute the `get_definition` tool to resolve symbol definitions.
+///
+/// # Errors
+///
+/// Returns an error if workspace resolution or graph acquisition fails.
 pub fn execute_get_definition(
     args: &GetDefinitionArgs,
 ) -> Result<ToolExecution<GetDefinitionData>> {
@@ -350,6 +355,11 @@ fn collect_caller_refs(
 }
 
 /// Execute the `get_references` tool to find all references to a symbol.
+///
+/// # Errors
+///
+/// Returns an error if workspace resolution, graph acquisition, or reference
+/// collection fails.
 pub fn execute_get_references(
     args: &GetReferencesArgs,
 ) -> Result<ToolExecution<GetReferencesData>> {
@@ -420,6 +430,11 @@ pub fn execute_get_references(
 }
 
 /// Execute the `get_hover_info` tool to get symbol information.
+///
+/// # Errors
+///
+/// Returns an error if workspace resolution, graph acquisition, or symbol
+/// resolution fails.
 pub fn execute_get_hover_info(args: &GetHoverInfoArgs) -> Result<ToolExecution<HoverInfoData>> {
     let start = Instant::now();
     let workspace_path = resolve_workspace_path(&args.path);
@@ -493,6 +508,11 @@ pub fn execute_get_hover_info(args: &GetHoverInfoArgs) -> Result<ToolExecution<H
 }
 
 /// Execute the `get_document_symbols` tool to list symbols in a file.
+///
+/// # Errors
+///
+/// Returns an error if workspace resolution, graph acquisition, or file
+/// canonicalization fails.
 pub fn execute_get_document_symbols(
     args: &GetDocumentSymbolsArgs,
 ) -> Result<ToolExecution<GetDocumentSymbolsData>> {
@@ -588,6 +608,10 @@ pub fn execute_get_document_symbols(
 }
 
 /// Execute the `get_workspace_symbols` tool to search for symbols.
+///
+/// # Errors
+///
+/// Returns an error if workspace resolution or graph acquisition fails.
 pub fn execute_get_workspace_symbols(
     args: &GetWorkspaceSymbolsArgs,
 ) -> Result<ToolExecution<GetWorkspaceSymbolsData>> {

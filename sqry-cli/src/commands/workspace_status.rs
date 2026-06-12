@@ -180,7 +180,7 @@ fn compute_source_root_status(source_root: &Path) -> SourceRootStatus {
     }
 }
 
-/// STEP_11_4 — probe `<source_root>/.sqry/classpath/` for the JVM
+/// `STEP_11_4` — probe `<source_root>/.sqry/classpath/` for the JVM
 /// classpath directory and return its absolute path when present.
 /// Returns `None` when the directory is absent or the probe failed.
 fn probe_classpath_dir(source_root: &Path) -> Option<PathBuf> {

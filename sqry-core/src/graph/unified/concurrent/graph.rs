@@ -123,10 +123,10 @@ pub struct CodeGraph {
     /// of the Go T1 implements-and-promotion design).
     ///
     /// Populated during Phase 1 plugin parse, merged into the live
-    /// target by Phase 3 commit after NodeId / StringId remap, drained
+    /// target by Phase 3 commit after `NodeId` / `StringId` remap, drained
     /// by `pass_go_method_set_satisfaction` between Phase 4e and Pass
     /// 5. Not part of `GraphSnapshot`, not persisted in V10 — see
-    /// 02_DESIGN §6. Held by-value (not `Arc<…>`) because no
+    /// `02_DESIGN` §6. Held by-value (not `Arc<…>`) because no
     /// copy-on-write or shared-reader access is required: only the
     /// rebuild owner mutates, only the pass consumes, then the field
     /// is reset.
@@ -1229,6 +1229,12 @@ impl CodeGraph {
     /// descriptive message on violation. This is intentional: publish-
     /// boundary violations are programmer errors that must surface
     /// loudly during CI / test runs.
+    ///
+    /// # Panics
+    ///
+    /// Panics in debug/test builds when bucket membership is duplicated, points
+    /// at a dead node, assigns a node to the wrong file, or omits a live node
+    /// after buckets have been populated.
     #[cfg(any(debug_assertions, test))]
     pub fn assert_bucket_bijection(&self) {
         use std::collections::HashMap as StdHashMap;
@@ -1296,10 +1302,15 @@ impl CodeGraph {
     /// step 8 — exactly one site per the plan's §F / §H agreement.
     ///
     /// No-op when `dead` is empty or in release builds.
+    ///
+    /// # Panics
+    ///
+    /// Panics in debug/test builds if any publish-visible node-bearing
+    /// structure still references a tombstoned node.
     #[cfg(any(debug_assertions, test))]
-    pub fn assert_no_tombstone_residue_for(
+    pub fn assert_no_tombstone_residue_for<S: std::hash::BuildHasher>(
         &self,
-        dead: &std::collections::HashSet<crate::graph::unified::node::NodeId>,
+        dead: &std::collections::HashSet<crate::graph::unified::node::NodeId, S>,
     ) {
         use super::super::rebuild::coverage::NodeIdBearing;
         if dead.is_empty() {

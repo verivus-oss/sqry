@@ -125,18 +125,17 @@ fn make_channel_buffer(call: Node, content: &[u8]) -> Option<(ChannelBufferKind,
     if first.kind() != "channel_type" {
         return None;
     }
-    match arg_nodes.len() {
-        1 => Some((ChannelBufferKind::Unbuffered, None)),
-        _ => {
-            let cap_node = arg_nodes[1];
-            if cap_node.kind() == "int_literal"
-                && let Ok(text) = cap_node.utf8_text(content)
-                && let Ok(n) = text.trim().parse::<u32>()
-            {
-                Some((ChannelBufferKind::Buffered, Some(n)))
-            } else {
-                Some((ChannelBufferKind::Unknown, None))
-            }
+    if arg_nodes.len() == 1 {
+        Some((ChannelBufferKind::Unbuffered, None))
+    } else {
+        let cap_node = arg_nodes[1];
+        if cap_node.kind() == "int_literal"
+            && let Ok(text) = cap_node.utf8_text(content)
+            && let Ok(n) = text.trim().parse::<u32>()
+        {
+            Some((ChannelBufferKind::Buffered, Some(n)))
+        } else {
+            Some((ChannelBufferKind::Unknown, None))
         }
     }
 }

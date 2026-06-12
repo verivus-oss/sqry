@@ -782,8 +782,7 @@ async fn file_change_triggers_rebuild() {
     // not hold a reference that would interfere with tempdir cleanup.
     server
         .dispatcher
-        .ensure_watching(&key, ws, canon_root.clone())
-        .await
+        .ensure_watching(&key, &ws, &canon_root)
         .expect("ensure_watching must succeed on a freshly-loaded workspace");
 
     // ── 6. Verify original_function is found before file change ───────────────

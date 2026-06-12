@@ -100,15 +100,15 @@ pub(crate) fn relation_endpoints_for_mcp(
         // matches the dispatch taxonomy (CLAUDE.md §"sqry-db crate"
         // §"Dispatch taxonomy"): name-resolution + NodeId-anchored
         // edge walk, no derived-query backing yet.
-        RelationType::Wraps => Arc::new(Vec::new()),
-        // `ChannelPeers` / `Instantiations` (T2.4 / T2.5) are dispatched
-        // directly inside the relation_query handler
-        // (collect_channel_peer_relation / collect_instantiates_relation in
-        // relations.rs) — they body-expand the resolved start nodes and walk
-        // `EdgeKind::ChannelPeer` / `EdgeKind::Instantiates` edges, rather
-        // than going through a name-keyed `DerivedQuery`. Same dispatch
-        // taxonomy as `Wraps`: name-resolution + NodeId-anchored edge walk.
-        RelationType::ChannelPeers | RelationType::Instantiations => Arc::new(Vec::new()),
+        RelationType::Wraps | RelationType::ChannelPeers | RelationType::Instantiations => {
+            Arc::new(Vec::new())
+        } // `ChannelPeers` / `Instantiations` (T2.4 / T2.5) are dispatched
+          // directly inside the relation_query handler
+          // (collect_channel_peer_relation / collect_instantiates_relation in
+          // relations.rs) — they body-expand the resolved start nodes and walk
+          // `EdgeKind::ChannelPeer` / `EdgeKind::Instantiates` edges, rather
+          // than going through a name-keyed `DerivedQuery`. Same dispatch
+          // taxonomy as `Wraps`: name-resolution + NodeId-anchored edge walk.
     }
 }
 

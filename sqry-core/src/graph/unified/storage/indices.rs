@@ -254,7 +254,7 @@ impl AuxiliaryIndices {
     /// Every key that appears in `remap` is rewritten to its canonical
     /// form; if that canonical form already had a bucket, the two
     /// `Vec<NodeId>`s are concatenated and deduplicated (preserving first
-    /// occurrence). The output preserves BTreeMap ordering.
+    /// occurrence). The output preserves `BTreeMap` ordering.
     fn remap_string_keyed_index(
         index: &mut BTreeMap<StringId, Vec<NodeId>>,
         remap: &std::collections::HashMap<StringId, StringId>,
@@ -293,7 +293,7 @@ impl AuxiliaryIndices {
     /// survivors in the kind index (the canonical per-node tally).
     ///
     /// Used by the Gate 0b [`NodeIdBearing`] impl to drop tombstoned
-    /// NodeIds uniformly across all four inner indices during
+    /// `NodeIds` uniformly across all four inner indices during
     /// `RebuildGraph::finalize()`.
     ///
     /// `#[allow(dead_code)]` is present because Gate 0b delivers only

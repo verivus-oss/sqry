@@ -190,7 +190,7 @@ pub struct Phase3Result {
     /// Per-file edge collections for Phase 4 bulk insert.
     pub per_file_edges: Vec<Vec<PendingEdge>>,
     /// Per-file node IDs actually committed. Indexed identically to
-    /// `per_file_edges` — element `i` is the Vec of NodeIds committed
+    /// `per_file_edges` — element `i` is the Vec of `NodeIds` committed
     /// for `plan.file_plans[i]`. Empty Vec when that file wrote no
     /// nodes (slot overflow skip, or a staging graph with only strings).
     ///
@@ -767,9 +767,9 @@ struct RemappedGoHints {
 
 /// Remap a `NodeId` through the per-file node-remap table.
 ///
-/// Hint construction in the plugin uses staging-local NodeIds (assigned
+/// Hint construction in the plugin uses staging-local `NodeIds` (assigned
 /// by `StagingGraph::add_node` / equivalents). After Phase 3 commit the
-/// canonical NodeId for each staged node lives in `node_remap`; the
+/// canonical `NodeId` for each staged node lives in `node_remap`; the
 /// remap is identity for already-global IDs.
 fn remap_node_id_hint(id: NodeId, node_remap: &HashMap<NodeId, NodeId>) -> NodeId {
     node_remap.get(&id).copied().unwrap_or(id)
@@ -777,13 +777,35 @@ fn remap_node_id_hint(id: NodeId, node_remap: &HashMap<NodeId, NodeId>) -> NodeI
 
 /// Remap a `StringId` through the per-file string-remap table.
 ///
-/// Local-tagged staging StringIds are mapped to their global slot ID;
+/// Local-tagged staging `StringIds` are mapped to their global slot ID;
 /// already-global IDs are passed through unchanged.
 fn remap_string_id_hint(id: StringId, string_remap: &HashMap<StringId, StringId>) -> StringId {
     if id.is_local() {
         string_remap.get(&id).copied().unwrap_or(id)
     } else {
         id
+    }
+}
+
+fn remap_receiver_hint(
+    receiver: &GoReceiverHintKind,
+    node_remap: &HashMap<NodeId, NodeId>,
+) -> GoReceiverHintKind {
+    match receiver {
+        GoReceiverHintKind::LocalIdent { binding_local } => GoReceiverHintKind::LocalIdent {
+            binding_local: remap_node_id_hint(*binding_local, node_remap),
+        },
+        // The Type-/Pointer-Prefixed and CallReturn variants carry plain
+        // `String` text, so no ID remap is required.
+        GoReceiverHintKind::TypePrefixed { type_text } => GoReceiverHintKind::TypePrefixed {
+            type_text: type_text.clone(),
+        },
+        GoReceiverHintKind::PointerPrefixed { type_text } => GoReceiverHintKind::PointerPrefixed {
+            type_text: type_text.clone(),
+        },
+        GoReceiverHintKind::CallReturn { callee_qn } => GoReceiverHintKind::CallReturn {
+            callee_qn: callee_qn.clone(),
+        },
     }
 }
 
@@ -850,28 +872,7 @@ fn remap_go_hints(
             call_site: remap_node_id_hint(h.call_site, node_remap),
             callee_method: remap_node_id_hint(h.callee_method, node_remap),
             method_name: remap_string_id_hint(h.method_name, string_remap),
-            receiver: match &h.receiver {
-                GoReceiverHintKind::LocalIdent { binding_local } => {
-                    GoReceiverHintKind::LocalIdent {
-                        binding_local: remap_node_id_hint(*binding_local, node_remap),
-                    }
-                }
-                // The Type-/Pointer-Prefixed and CallReturn variants
-                // carry plain `String` text — no remap required.
-                GoReceiverHintKind::TypePrefixed { type_text } => {
-                    GoReceiverHintKind::TypePrefixed {
-                        type_text: type_text.clone(),
-                    }
-                }
-                GoReceiverHintKind::PointerPrefixed { type_text } => {
-                    GoReceiverHintKind::PointerPrefixed {
-                        type_text: type_text.clone(),
-                    }
-                }
-                GoReceiverHintKind::CallReturn { callee_qn } => GoReceiverHintKind::CallReturn {
-                    callee_qn: callee_qn.clone(),
-                },
-            },
+            receiver: remap_receiver_hint(&h.receiver, node_remap),
             argument_count: h.argument_count,
             is_async: h.is_async,
             file: plan.file_id,
@@ -1368,16 +1369,88 @@ pub fn phase4_apply_global_remap(
 /// Statistics from Phase 4c-prime cross-file node unification.
 #[derive(Debug, Default)]
 pub struct UnificationStats {
-    /// Total (qualified_name, kind) groups of size >= 2 examined.
+    /// Total (`qualified_name`, kind) groups of size >= 2 examined.
     pub candidate_pairs_examined: usize,
     /// Number of loser nodes merged into winners.
     pub nodes_merged: usize,
-    /// Number of PendingEdge fields rewritten.
+    /// Number of `PendingEdge` fields rewritten.
     pub edges_rewritten: usize,
     /// Number of loser nodes (metadata merged into winners, slot kept inert).
     pub nodes_inert: usize,
     /// Time spent in the unification pass (milliseconds).
     pub elapsed_ms: u64,
+}
+
+fn collect_unification_path_keys<G>(
+    graph: &G,
+    groups_to_unify: &[Vec<NodeId>],
+) -> HashMap<NodeId, String>
+where
+    G: crate::graph::unified::mutation_target::GraphMutationTarget,
+{
+    use crate::graph::unified::mutation_target::GraphMutationTarget;
+
+    let arena = GraphMutationTarget::nodes(graph);
+    let files = GraphMutationTarget::files(graph);
+    let mut out = HashMap::with_capacity(groups_to_unify.iter().map(Vec::len).sum());
+    for group in groups_to_unify {
+        for &node_id in group {
+            if out.contains_key(&node_id) {
+                continue;
+            }
+            let key = arena
+                .get(node_id)
+                .and_then(|entry| files.resolve(entry.file))
+                .map_or_else(String::new, |path| path.to_string_lossy().into_owned());
+            out.insert(node_id, key);
+        }
+    }
+    out
+}
+
+fn select_unification_winner<G>(
+    graph: &G,
+    group: &[NodeId],
+    path_keys: &HashMap<NodeId, String>,
+    empty_path_key: &String,
+) -> NodeId
+where
+    G: crate::graph::unified::mutation_target::GraphMutationTarget,
+{
+    use crate::graph::unified::mutation_target::GraphMutationTarget;
+
+    *group
+        .iter()
+        .max_by(|&&a, &&b| {
+            let ea = GraphMutationTarget::nodes(graph).get(a);
+            let eb = GraphMutationTarget::nodes(graph).get(b);
+            match (ea, eb) {
+                (Some(ea), Some(eb)) => {
+                    let a_real = ea.start_line > 0;
+                    let b_real = eb.start_line > 0;
+                    match (a_real, b_real) {
+                        (true, false) => std::cmp::Ordering::Greater,
+                        (false, true) => std::cmp::Ordering::Less,
+                        _ => {
+                            let a_range = ea.end_line.saturating_sub(ea.start_line);
+                            let b_range = eb.end_line.saturating_sub(eb.start_line);
+                            a_range
+                                .cmp(&b_range)
+                                .then_with(|| {
+                                    let pa = path_keys.get(&a).unwrap_or(empty_path_key);
+                                    let pb = path_keys.get(&b).unwrap_or(empty_path_key);
+                                    pb.cmp(pa)
+                                })
+                                .then_with(|| b.index().cmp(&a.index()))
+                        }
+                    }
+                }
+                (Some(_), None) => std::cmp::Ordering::Greater,
+                (None, Some(_)) => std::cmp::Ordering::Less,
+                (None, None) => std::cmp::Ordering::Equal,
+            }
+        })
+        .expect("group is non-empty")
 }
 
 /// Phase 4c-prime: Unify cross-file duplicate nodes sharing the same
@@ -1396,7 +1469,7 @@ pub struct UnificationStats {
 ///      because `FileId` slot assignment differs between a fresh full
 ///      rebuild and an incremental rebuild — the incremental path clones
 ///      the existing `FileRegistry` and appends new paths, while the full
-///      path assigns FileIds in filesystem-walk order from an empty
+///      path assigns `FileIds` in filesystem-walk order from an empty
 ///      registry. Two builds of the same logical workspace therefore
 ///      disagree on which `FileId` is smaller when duplicate definitions
 ///      tie on span width, flipping the unification winner and stranding
@@ -1473,75 +1546,14 @@ pub(crate) fn phase4c_prime_unify_cross_file_nodes<
     // fall back to an empty string so the comparison still produces a
     // total order. Empty resolves tie-break each other stably (then fall
     // through to the `NodeId` index tie-break).
-    let path_keys: HashMap<NodeId, String> = {
-        let arena = GraphMutationTarget::nodes(graph);
-        let files = GraphMutationTarget::files(graph);
-        let mut out: HashMap<NodeId, String> =
-            HashMap::with_capacity(groups_to_unify.iter().map(Vec::len).sum());
-        for group in &groups_to_unify {
-            for &nid in group {
-                if out.contains_key(&nid) {
-                    continue;
-                }
-                let key = arena
-                    .get(nid)
-                    .and_then(|entry| files.resolve(entry.file))
-                    .map_or_else(String::new, |path| path.to_string_lossy().into_owned());
-                out.insert(nid, key);
-            }
-        }
-        out
-    };
+    let path_keys = collect_unification_path_keys(graph, &groups_to_unify);
     let empty_path_key = String::new();
 
     for group in &groups_to_unify {
         // Pick winner: prefer start_line > 0, tie-break by wider span,
         // then smaller path (stable across rebuild representations),
         // then smaller NodeId index.
-        let winner_id = *group
-            .iter()
-            .max_by(|&&a, &&b| {
-                let ea = GraphMutationTarget::nodes(graph).get(a);
-                let eb = GraphMutationTarget::nodes(graph).get(b);
-                match (ea, eb) {
-                    (Some(ea), Some(eb)) => {
-                        // Primary: prefer non-zero start_line
-                        let a_real = ea.start_line > 0;
-                        let b_real = eb.start_line > 0;
-                        match (a_real, b_real) {
-                            (true, false) => std::cmp::Ordering::Greater,
-                            (false, true) => std::cmp::Ordering::Less,
-                            _ => {
-                                // Tie-break 1: prefer wider span
-                                let a_range = ea.end_line.saturating_sub(ea.start_line);
-                                let b_range = eb.end_line.saturating_sub(eb.start_line);
-                                a_range
-                                    .cmp(&b_range)
-                                    .then_with(|| {
-                                        // Tie-break 2: prefer smaller path
-                                        // (reversed because `max_by` picks the
-                                        // greater side — we want smaller path
-                                        // to win, so invert the direct compare).
-                                        let pa = path_keys.get(&a).unwrap_or(&empty_path_key);
-                                        let pb = path_keys.get(&b).unwrap_or(&empty_path_key);
-                                        pb.cmp(pa)
-                                    })
-                                    .then_with(|| {
-                                        // Tie-break 3: smaller NodeId index
-                                        // (stable within a single build;
-                                        // deterministic fallback for co-located
-                                        // duplicate definitions).
-                                        b.index().cmp(&a.index())
-                                    })
-                            }
-                        }
-                    }
-                    (Some(_), None) => std::cmp::Ordering::Greater,
-                    (None, Some(_)) => std::cmp::Ordering::Less,
-                    (None, None) => std::cmp::Ordering::Equal,
-                }
-            })
-            .expect("group is non-empty");
+        let winner_id = select_unification_winner(graph, group, &path_keys, &empty_path_key);
 
         // Merge all losers into winner
         for &node_id in group {
@@ -1578,7 +1590,7 @@ pub(crate) fn phase4c_prime_unify_cross_file_nodes<
     // observe the canonical winner after finalize. On a full build the
     // second call is a no-op (edge store is empty).
     if !remap.is_empty() {
-        let pre_count: usize = all_edges.iter().map(|v| v.len()).sum();
+        let pre_count: usize = all_edges.iter().map(std::vec::Vec::len).sum();
         remap.apply_to_edges(all_edges);
         remap.apply_to_committed_edges(GraphMutationTarget::edges(graph));
         stats.edges_rewritten = pre_count; // conservative: all edges walked
@@ -1631,7 +1643,7 @@ pub(crate) fn phase4c_prime_unify_cross_file_nodes<
         // bucket, but `AuxiliaryIndices` treats them as name-invisible.
     }
 
-    stats.elapsed_ms = start.elapsed().as_millis() as u64;
+    stats.elapsed_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
     // Return the remap alongside the stats so the new Phase 4d-prime
     // (`phase4d_prime_propagate_staging_metadata`, 02_DESIGN §4.3.e
     // Changes 2 + 4) can drop loser-keyed metadata before merging the
@@ -1646,15 +1658,15 @@ pub(crate) fn phase4c_prime_unify_cross_file_nodes<
 /// `NodeId`s to canonical arena `NodeId`s using the per-file commit
 /// order.
 ///
-/// 02_DESIGN §4.3.e Change 1 assumes staging metadata reaches Phase
-/// 4d-prime under the arena NodeIds Phase 3 assigned. In practice
+/// `02_DESIGN` §4.3.e Change 1 assumes staging metadata reaches Phase
+/// 4d-prime under the arena `NodeIds` Phase 3 assigned. In practice
 /// `StagingGraph::add_node` returns `NodeId::new(i, 1)` where `i` is the
 /// staging-local sequential index (see `staging.rs:355`), and plugins
 /// key their `NodeMetadataStore` entries under those staging-local IDs
 /// (see e.g. the Rust plugin's `metadata_store.get_or_insert_default(func_id)`
 /// at `sqry-lang-rust/src/macro_boundaries/proc_macro_classify.rs:84`).
 /// Phase 3 then renumbers those into arena slots; `per_file_node_ids[i]`
-/// is the arena NodeId for staging `NodeId(i, 1)`.
+/// is the arena `NodeId` for staging `NodeId(i, 1)`.
 ///
 /// This helper rekeys each metadata entry by index: an entry under
 /// staging `NodeId(i, 1)` is moved to `per_file_node_ids[i]`. Entries
@@ -1662,12 +1674,12 @@ pub(crate) fn phase4c_prime_unify_cross_file_nodes<
 /// staging-canonical `1` are dropped (defensive — should never happen
 /// under the documented `StagingGraph::add_node` contract).
 ///
-/// Returns a fresh arena-keyed [`NodeMetadataStore`]. The input is moved
-/// in by value so callers can `take_macro_metadata` and pipe the result
-/// through this helper into the Phase 4d-prime accumulator.
+/// Returns a fresh arena-keyed [`NodeMetadataStore`]. The input is borrowed
+/// because this helper only reads staging entries and clones the values that
+/// survive rekeying into the returned store.
 #[must_use]
 pub(crate) fn rekey_staging_metadata_to_arena(
-    staging_metadata: crate::graph::unified::storage::metadata::NodeMetadataStore,
+    staging_metadata: &crate::graph::unified::storage::metadata::NodeMetadataStore,
     per_file_node_ids: &[crate::graph::unified::node::id::NodeId],
 ) -> crate::graph::unified::storage::metadata::NodeMetadataStore {
     use crate::graph::unified::node::id::NodeId;
@@ -1699,7 +1711,7 @@ pub(crate) fn rekey_staging_metadata_to_arena(
 /// the live graph's `macro_metadata` after Phase 4d (bulk edge insert)
 /// and before Phase 4e (binding-plane derivation).
 ///
-/// 02_DESIGN §4.3.e (Changes 4 + 7): the active Phase 3 commit path does
+/// `02_DESIGN` §4.3.e (Changes 4 + 7): the active Phase 3 commit path does
 /// not read `staging.macro_metadata`, and `StagingGraph::take_macro_metadata`
 /// was previously defined but never called — staging metadata never reached
 /// `CodeGraph::macro_metadata`. T3.8's `cfg_condition` cannot ride the Go
@@ -1710,7 +1722,7 @@ pub(crate) fn rekey_staging_metadata_to_arena(
 /// For each `(file_id, store)` entry:
 /// 1. Apply the Phase 4c-prime `NodeRemapTable` via
 ///    [`NodeRemapTable::apply_to_metadata_store`] so loser-keyed entries
-///    are dropped (per 01_SPEC §5.3.f the spec contract is "losers'
+///    are dropped (per `01_SPEC` §5.3.f the spec contract is "losers'
 ///    constraints are lost"; the winner's own per-file store carries the
 ///    authoritative metadata).
 /// 2. If the store still has entries after the remap, call
@@ -1727,7 +1739,7 @@ pub(crate) fn rekey_staging_metadata_to_arena(
 /// (`incremental_rebuild` → `phase3d_insert_cross_file_edges`) planes
 /// can call it against `CodeGraph` and `RebuildGraph` respectively.
 ///
-/// Runs after Phase 4d (NodeRemapTable produced by 4c is final) and
+/// Runs after Phase 4d (`NodeRemapTable` produced by 4c is final) and
 /// before Phase 4e (binding-plane synthesis can observe `cfg_condition`
 /// if it later needs to). The Rust plugin's existing `merge_macro_metadata`
 /// call automatically benefits: Rust-side `#[cfg(...)]` strings start
@@ -1849,7 +1861,7 @@ pub(crate) fn rebuild_indices<G: crate::graph::unified::mutation_target::GraphMu
 /// monotonically increasing `seq` number; the
 /// [`BidirectionalEdgeStore::add_edges_bulk_ordered`] insertion contract
 /// preserves that 1:1 mapping. This is what lets the Cluster C
-/// `C_EDGE_MIGRATE` DAG unit (2026-04-29 BadLiveware Go batch) move the
+/// `C_EDGE_MIGRATE` DAG unit (2026-04-29 `BadLiveware` Go batch) move the
 /// `TypeOf{Field}` edge source from the struct node to the per-field
 /// `Property` node without touching this helper: the new
 /// Property-sourced edge addresses a distinct `(source, target)` pair
@@ -3134,7 +3146,7 @@ mod tests {
             NodeId::new(102, 1),
         ];
 
-        let rekeyed = rekey_staging_metadata_to_arena(staging, &arena_ids);
+        let rekeyed = rekey_staging_metadata_to_arena(&staging, &arena_ids);
 
         assert_eq!(rekeyed.len(), 3);
         for (i, cond) in ["linux", "darwin", "windows"].iter().enumerate() {
@@ -3167,7 +3179,7 @@ mod tests {
         staging.insert(NodeId::new(5, 1), stale);
 
         let arena_ids = vec![NodeId::new(100, 1)];
-        let rekeyed = rekey_staging_metadata_to_arena(staging, &arena_ids);
+        let rekeyed = rekey_staging_metadata_to_arena(&staging, &arena_ids);
 
         assert_eq!(rekeyed.len(), 1, "stale out-of-range key dropped");
         assert_eq!(

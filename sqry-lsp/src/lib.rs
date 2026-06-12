@@ -60,7 +60,7 @@ const SQRYD_ALREADY_RUNNING_EXIT_CODE: i32 = 75;
 ///   process is a SHIM CLIENT; connect to the sqryd daemon at
 ///   `options.daemon_socket` (or the resolved default) and pump
 ///   stdio bytes between the editor and the daemon's hosted
-///   tower_lsp server. No in-process `SessionManager` is created.
+///   `tower_lsp` server. No in-process `SessionManager` is created.
 /// - Otherwise → the legacy standalone path: spin up a
 ///   [`SessionManager`] and serve either stdio or TCP in the same
 ///   process.
@@ -115,7 +115,7 @@ pub fn run(options: LspOptions) -> Result<()> {
 /// Opens a UDS / named-pipe connection, drives the
 /// [`sqry_daemon_client::ShimRegister`] → [`sqry_daemon_client::ShimRegisterAck`]
 /// handshake with `ShimProtocol::Lsp`, then byte-pumps this process's
-/// stdin/stdout against the resulting stream. The tower_lsp server
+/// stdin/stdout against the resulting stream. The `tower_lsp` server
 /// hosting the LSP session lives inside the daemon and is wired up
 /// by the daemon's router via `daemon_host::host_on_streams`.
 ///

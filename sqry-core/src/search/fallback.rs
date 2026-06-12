@@ -710,7 +710,10 @@ fn bar() {
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_hybrid_config_from_env() {
+        // Serialized: env mutation is process-wide and cargo runs
+        // tests on parallel threads.
         unsafe {
             std::env::set_var("SQRY_FALLBACK_ENABLED", "false");
             std::env::set_var("SQRY_MIN_SEMANTIC_RESULTS", "5");

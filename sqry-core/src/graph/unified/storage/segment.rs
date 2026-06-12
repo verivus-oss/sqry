@@ -118,11 +118,20 @@ impl FileSegmentTable {
     }
 
     /// Returns an iterator over all `(FileId, &FileSegment)` pairs.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the segment table length exceeds `u32::MAX`, which would make
+    /// the segment position unrepresentable as a [`FileId`].
     pub fn iter(&self) -> impl Iterator<Item = (FileId, &FileSegment)> + '_ {
-        self.segments
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, opt)| opt.as_ref().map(|seg| (FileId::new(idx as u32), seg)))
+        self.segments.iter().enumerate().filter_map(|(idx, opt)| {
+            opt.as_ref().map(|seg| {
+                (
+                    FileId::new(u32::try_from(idx).expect("file segment index fits u32")),
+                    seg,
+                )
+            })
+        })
     }
 
     /// Returns the backing storage length (for diagnostics).

@@ -11,7 +11,7 @@
 //!   crate.  No-op when `NOTIFY_SOCKET` is absent (the crate already handles
 //!   that silently).
 //! - On **macOS** and **Windows**: every function is a no-op returning `Ok(())`.
-//!   launchd and the Windows SCM have no sd_notify equivalent; the daemon
+//!   launchd and the Windows SCM have no `sd_notify` equivalent; the daemon
 //!   signals readiness through other mechanisms (socket-connect for auto-spawn,
 //!   launchd `KeepAlive` heartbeat for launchd supervision).
 //!
@@ -109,7 +109,7 @@ pub fn notify_stopping() -> std::io::Result<()> {
 ///
 /// This is a **read-only** check; it does not consume or clear
 /// `NOTIFY_SOCKET`.  Use this to gate the `RollingSizeAppender` skip-path
-/// described in the design (`m4` fix — §G.1 install_tracing).
+/// described in the design (`m4` fix — §G.1 `install_tracing`).
 #[must_use]
 pub fn is_under_systemd() -> bool {
     #[cfg(target_os = "linux")]

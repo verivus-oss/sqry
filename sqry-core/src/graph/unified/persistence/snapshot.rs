@@ -25,7 +25,9 @@ use crate::graph::unified::bind::scope::provenance::ScopeProvenanceStore;
 use crate::graph::unified::bind::shadow::ShadowTable;
 use crate::graph::unified::build::phase4e_binding::derive_binding_plane;
 use crate::graph::unified::concurrent::CodeGraph;
+use crate::graph::unified::edge::id::EdgeId;
 use crate::graph::unified::resolution::is_canonical_graph_qualified_name;
+use crate::graph::unified::storage::edge_provenance::EdgeProvenance;
 use crate::graph::unified::storage::{
     AuxiliaryIndices, CIndirectSideTables, DispatchTables, EdgeProvenanceStore, FileRegistry,
     FileSegmentTable, FrameworkRoutesMap, NodeArena, NodeMetadataStore, NodeProvenanceStore,
@@ -240,7 +242,7 @@ struct GraphSnapshotDataV10 {
     shadow_table: ShadowTable,
     /// Phase 2: scope provenance store.
     scope_provenance: ScopeProvenanceStore,
-    /// Phase 3: per-file segment table mapping FileId to node arena ranges.
+    /// Phase 3: per-file segment table mapping `FileId` to node arena ranges.
     file_segments: FileSegmentTable,
 }
 
@@ -294,7 +296,7 @@ struct GraphSnapshotDataV11 {
     shadow_table: ShadowTable,
     /// Phase 2: scope provenance store.
     scope_provenance: ScopeProvenanceStore,
-    /// Phase 3: per-file segment table mapping FileId to node arena ranges.
+    /// Phase 3: per-file segment table mapping `FileId` to node arena ranges.
     file_segments: FileSegmentTable,
     /// Phase A (U09): C indirect-call resolver side tables.
     ///
@@ -361,7 +363,7 @@ struct GraphSnapshotDataV12 {
     shadow_table: ShadowTable,
     /// Phase 2: scope provenance store.
     scope_provenance: ScopeProvenanceStore,
-    /// Phase 3: per-file segment table mapping FileId to node arena ranges.
+    /// Phase 3: per-file segment table mapping `FileId` to node arena ranges.
     file_segments: FileSegmentTable,
     /// Phase A (U09): C indirect-call resolver side tables. Carried forward
     /// from V11 unchanged.
@@ -658,8 +660,8 @@ fn validate_snapshot_semantics(snapshot_data: &GraphSnapshotData) -> Result<(), 
 /// Validates semantic invariants of a deserialized V9 snapshot.
 ///
 /// Checks every live node's file and name string IDs against the registry and
-/// interner. V9-specific stores (scope_arena, alias_table, shadow_table,
-/// scope_provenance) are not cross-validated here — they carry internal
+/// interner. V9-specific stores (`scope_arena`, `alias_table`, `shadow_table`,
+/// `scope_provenance`) are not cross-validated here — they carry internal
 /// consistency invariants enforced during derivation.
 #[allow(dead_code)] // Preserved as reference; V10 writers bypass this.
 fn validate_snapshot_semantics_v9(
@@ -1045,8 +1047,6 @@ fn upconvert_v8_to_v9(v8: GraphSnapshotData, fact_epoch: u64) -> GraphSnapshotDa
         },
     );
 
-    use crate::graph::unified::edge::id::EdgeId;
-    use crate::graph::unified::storage::edge_provenance::EdgeProvenance;
     let edge_stats = snapshot.edges().stats().forward;
     let total_edges = edge_stats.csr_edge_count + edge_stats.delta_edge_count;
     let mut edge_prov = EdgeProvenanceStore::new();
@@ -1057,7 +1057,7 @@ fn upconvert_v8_to_v9(v8: GraphSnapshotData, fact_epoch: u64) -> GraphSnapshotDa
             if eid.is_valid() {
                 let p = snapshot
                     .edge_provenance(eid)
-                    .cloned()
+                    .copied()
                     .unwrap_or_else(|| EdgeProvenance::fresh(0));
                 edge_prov.insert(eid, p);
             }
@@ -1270,10 +1270,8 @@ fn attach_phase_beta_side_tables(
 /// the new slots are zero-initialised. The `Result` return is kept for
 /// symmetry with the other upconvert functions in this module, which
 /// may surface translation errors when wire shapes differ across versions.
-fn upconvert_v11_to_v12(
-    v11: GraphSnapshotDataV11,
-) -> Result<GraphSnapshotDataV12, PersistenceError> {
-    Ok(GraphSnapshotDataV12 {
+fn upconvert_v11_to_v12(v11: GraphSnapshotDataV11) -> GraphSnapshotDataV12 {
+    GraphSnapshotDataV12 {
         nodes: v11.nodes,
         edges: v11.edges,
         strings: v11.strings,
@@ -1290,7 +1288,7 @@ fn upconvert_v11_to_v12(
         c_indirect_tables: v11.c_indirect_tables,
         framework_routes_table: Vec::new(),
         dispatch_tables_table: DispatchTables::default(),
-    })
+    }
 }
 
 /// Upconvert a V13 snapshot to V14 (T2 — Go channel pairing + generic
@@ -1354,6 +1352,12 @@ fn finalize_pre_v13_snapshot(mut v12: GraphSnapshotDataV12) -> GraphSnapshotData
 ///
 /// This is used during V9→V10 upconversion and as a fallback when loading
 /// snapshots without a persisted segment table.
+///
+/// # Panics
+///
+/// Panics if the arena has more than `u32::MAX` slots, which would make the
+/// slot index unrepresentable in the persisted segment table format.
+#[must_use]
 pub fn rebuild_file_segments_from_arena(arena: &NodeArena) -> FileSegmentTable {
     use crate::graph::unified::file::id::FileId;
     use std::collections::HashMap;
@@ -1364,7 +1368,7 @@ pub fn rebuild_file_segments_from_arena(arena: &NodeArena) -> FileSegmentTable {
         if let Some(entry) = slot.get() {
             let fid = entry.file;
             if fid != FileId::INVALID {
-                let slot_idx = idx as u32;
+                let slot_idx = u32::try_from(idx).expect("node arena slot index fits u32");
                 file_ranges
                     .entry(fid)
                     .and_modify(|(min, max)| {
@@ -2254,45 +2258,50 @@ pub fn verify_snapshot_bytes(data: &[u8], expected_sha256: &str) -> anyhow::Resu
     Ok(())
 }
 
-/// Loads a graph from in-memory bytes.
-///
-/// Same validation as [`load_from_path`] but operates on a byte slice,
-/// enabling single-read integrity verification (hash once, deserialize
-/// from the same bytes — no TOCTOU window).
-///
-/// # Errors
-///
-/// Returns an error if the bytes are invalid, corrupt, or incompatible.
-#[allow(clippy::cast_possible_truncation)] // data_len validated < max_snapshot_bytes()
-pub fn load_from_bytes(
-    bytes: &[u8],
-    plugins: Option<&PluginManager>,
-) -> Result<CodeGraph, PersistenceError> {
-    let total_len = bytes.len() as u64;
-    let mut reader = Cursor::new(bytes);
-    let mut bytes_consumed: u64 = 0;
+fn usize_to_u64(value: usize, field: &'static str) -> Result<u64, PersistenceError> {
+    u64::try_from(value)
+        .map_err(|_| PersistenceError::ValidationFailed(format!("{field} exceeds u64::MAX")))
+}
 
-    let (format_version, header_len, magic_bytes) = read_magic_and_header_len(&mut reader)?;
-    bytes_consumed += magic_bytes;
+fn u64_to_usize(value: u64, field: &'static str) -> Result<usize, PersistenceError> {
+    usize::try_from(value).map_err(|_| {
+        PersistenceError::ValidationFailed(format!("{field} exceeds addressable memory"))
+    })
+}
+
+fn read_snapshot_header<R: Read>(
+    reader: &mut R,
+    total_len: u64,
+    bytes_consumed: &mut u64,
+    plugins: Option<&PluginManager>,
+) -> Result<(FormatVersion, GraphHeader), PersistenceError> {
+    let (format_version, header_len, magic_bytes) = read_magic_and_header_len(reader)?;
+    *bytes_consumed += magic_bytes;
     if header_len > MAX_HEADER_BYTES {
         return Err(PersistenceError::ValidationFailed(
             "header too large".to_string(),
         ));
     }
-    let remaining = total_len.saturating_sub(bytes_consumed);
-    if (header_len as u64) > remaining {
+
+    let header_len_u64 = usize_to_u64(header_len, "header length")?;
+    if header_len_u64 > total_len.saturating_sub(*bytes_consumed) {
         return Err(PersistenceError::ValidationFailed(
             "header length exceeds remaining file bytes".to_string(),
         ));
     }
 
-    // Read and deserialize header
     let mut header_buf = vec![0u8; header_len];
     reader.read_exact(&mut header_buf)?;
-    bytes_consumed += header_len as u64;
+    *bytes_consumed += header_len_u64;
     let header: GraphHeader = postcard::from_bytes(&header_buf)?;
+    validate_snapshot_header(&header, plugins)?;
+    Ok((format_version, header))
+}
 
-    // Validate version — accept V7 (legacy), V8, V9, V10, V11, V12, V13 (upconvert), V14 (current).
+fn validate_snapshot_header(
+    header: &GraphHeader,
+    plugins: Option<&PluginManager>,
+) -> Result<(), PersistenceError> {
     if header.version != VERSION
         && header.version != FormatVersion::V8.as_u32()
         && header.version != FormatVersion::V9.as_u32()
@@ -2307,18 +2316,19 @@ pub fn load_from_bytes(
             found: header.version,
         });
     }
-
-    // Validate plugin versions (requires rebuild if mismatch) - skip if no plugin manager
     if let Some(plugin_manager) = plugins {
-        validate_plugin_versions(&header, plugin_manager)?;
+        validate_plugin_versions(header, plugin_manager)?;
     }
+    validate_header_sanity(header)
+}
 
-    // Validate header counts before attempting data deserialization
-    validate_header_sanity(&header)?;
-
-    // Read data length and validate before allocation
-    let data_len = read_u64_le(&mut reader)?;
-    bytes_consumed += 8;
+fn read_snapshot_data_section<R: Read>(
+    reader: &mut R,
+    total_len: u64,
+    bytes_consumed: &mut u64,
+) -> Result<Vec<u8>, PersistenceError> {
+    let data_len = read_u64_le(reader)?;
+    *bytes_consumed += 8;
     let max_data_bytes = max_snapshot_bytes();
     if data_len > max_data_bytes {
         return Err(PersistenceError::ValidationFailed(format!(
@@ -2326,95 +2336,78 @@ pub fn load_from_bytes(
              increase SQRY_MAX_SNAPSHOT_BYTES to load this snapshot",
         )));
     }
-    let remaining = total_len.saturating_sub(bytes_consumed);
-    if data_len > remaining {
+    if data_len > total_len.saturating_sub(*bytes_consumed) {
         return Err(PersistenceError::ValidationFailed(
             "data length exceeds remaining file bytes".to_string(),
         ));
     }
 
-    // Read and deserialize data, dispatching on detected format version. Each
-    // older format chains through the upconverters: V7 → V8 → V9 → V10 → V11 →
-    // V12 → V13; ...; V12 → V13; V13 → direct.
-    let mut data_buf = vec![0u8; data_len as usize];
+    let mut data_buf = vec![0u8; u64_to_usize(data_len, "data length")?];
     reader.read_exact(&mut data_buf)?;
-    let mut snapshot_data: GraphSnapshotDataV14 = match format_version {
+    Ok(data_buf)
+}
+
+fn decode_snapshot_data(
+    format_version: FormatVersion,
+    header: &GraphHeader,
+    data_buf: &[u8],
+) -> Result<GraphSnapshotDataV14, PersistenceError> {
+    match format_version {
         FormatVersion::V7 => {
-            // V7 predates `GraphHeader.fact_epoch`; pass `0` explicitly so the
-            // V7 → V8 → V9 → V10 → V11 → V12 chained path is deterministic
-            // and matches the documented "V7 has no fact epoch" contract.
-            let v7: GraphSnapshotDataV7 = postcard::from_bytes(&data_buf)?;
+            let v7: GraphSnapshotDataV7 = postcard::from_bytes(data_buf)?;
             let v8 = upconvert_v7_to_v8(v7);
             let v9 = upconvert_v8_to_v9(v8, 0);
             let v10 = upconvert_v9_to_v10(v9);
             let v11 = upconvert_v10_to_v11(v10)?;
-            let v12 = upconvert_v11_to_v12(v11)?;
-            finalize_pre_v13_snapshot(v12)
+            let v12 = upconvert_v11_to_v12(v11);
+            Ok(finalize_pre_v13_snapshot(v12))
         }
         FormatVersion::V8 => {
-            // Forward the V8 header epoch so derived scope provenance is
-            // stamped with the real source epoch, not silently demoted to 0.
-            let v8: GraphSnapshotData = postcard::from_bytes(&data_buf)?;
+            let v8: GraphSnapshotData = postcard::from_bytes(data_buf)?;
             let v9 = upconvert_v8_to_v9(v8, header.fact_epoch());
             let v10 = upconvert_v9_to_v10(v9);
             let v11 = upconvert_v10_to_v11(v10)?;
-            let v12 = upconvert_v11_to_v12(v11)?;
-            finalize_pre_v13_snapshot(v12)
+            let v12 = upconvert_v11_to_v12(v11);
+            Ok(finalize_pre_v13_snapshot(v12))
         }
         FormatVersion::V9 => {
-            let v9: GraphSnapshotDataV9 = postcard::from_bytes(&data_buf)?;
+            let v9: GraphSnapshotDataV9 = postcard::from_bytes(data_buf)?;
             let v10 = upconvert_v9_to_v10(v9);
             let v11 = upconvert_v10_to_v11(v10)?;
-            let v12 = upconvert_v11_to_v12(v11)?;
-            finalize_pre_v13_snapshot(v12)
+            let v12 = upconvert_v11_to_v12(v11);
+            Ok(finalize_pre_v13_snapshot(v12))
         }
         FormatVersion::V10 => {
-            let v10: GraphSnapshotDataV10 = postcard::from_bytes(&data_buf)?;
+            let v10: GraphSnapshotDataV10 = postcard::from_bytes(data_buf)?;
             let v11 = upconvert_v10_to_v11(v10)?;
-            let v12 = upconvert_v11_to_v12(v11)?;
-            finalize_pre_v13_snapshot(v12)
+            let v12 = upconvert_v11_to_v12(v11);
+            Ok(finalize_pre_v13_snapshot(v12))
         }
         FormatVersion::V11 => {
-            let v11: GraphSnapshotDataV11 = postcard::from_bytes(&data_buf)?;
-            let v12 = upconvert_v11_to_v12(v11)?;
-            finalize_pre_v13_snapshot(v12)
+            let v11: GraphSnapshotDataV11 = postcard::from_bytes(data_buf)?;
+            let v12 = upconvert_v11_to_v12(v11);
+            Ok(finalize_pre_v13_snapshot(v12))
         }
         FormatVersion::V12 => {
-            let v12: GraphSnapshotDataV12 = postcard::from_bytes(&data_buf)?;
-            finalize_pre_v13_snapshot(v12)
+            let v12: GraphSnapshotDataV12 = postcard::from_bytes(data_buf)?;
+            Ok(finalize_pre_v13_snapshot(v12))
         }
         FormatVersion::V13 => {
-            // Decode the two NodeKind-bearing fields through the frozen V13
-            // mirror, then translate the arena + rebuild indices to V14.
-            let v13: GraphSnapshotDataV13 = postcard::from_bytes(&data_buf)?;
-            upconvert_v13_to_v14(v13)
+            let v13: GraphSnapshotDataV13 = postcard::from_bytes(data_buf)?;
+            Ok(upconvert_v13_to_v14(v13))
         }
-        // V14 is the current writer version — decode directly into the live
-        // types (the arena already carries the V14 `NodeKind` layout).
-        FormatVersion::V14 => postcard::from_bytes(&data_buf)?,
-    };
+        FormatVersion::V14 => Ok(postcard::from_bytes(data_buf)?),
+    }
+}
 
-    // Rebuild the scope-provenance reverse index after deserialization.
-    // The map is not persisted on disk; it is always derived from occupied slots.
+fn graph_from_snapshot_data(
+    header: &GraphHeader,
+    mut snapshot_data: GraphSnapshotDataV14,
+) -> Result<CodeGraph, PersistenceError> {
     snapshot_data
         .scope_provenance
         .rebuild_reverse_index(&snapshot_data.scope_arena);
-
-    // Reject trailing bytes
-    let mut trailing = [0u8; 1];
-    if reader.read(&mut trailing)? > 0 {
-        return Err(PersistenceError::ValidationFailed(
-            "unexpected trailing bytes after data section".to_string(),
-        ));
-    }
-
     validate_snapshot_semantics_v12(&snapshot_data)?;
-
-    // Phase β joint-stubs: route the V12 envelope slots onto the in-memory
-    // metadata store. V11 → V12 upconverts always carry empty defaults;
-    // native V12/V13 snapshots may carry populated joint-stub tables once
-    // Plan A's extractors / Plan B's resolvers land. (V13 is shape-identical
-    // to V12, so the same envelope slots apply.)
     attach_phase_beta_side_tables(
         &mut snapshot_data.macro_metadata,
         std::mem::take(&mut snapshot_data.framework_routes_table),
@@ -2439,11 +2432,43 @@ pub fn load_from_bytes(
     graph.set_shadow_table(snapshot_data.shadow_table);
     graph.set_scope_provenance_store(snapshot_data.scope_provenance);
     graph.set_file_segments(snapshot_data.file_segments);
-    // Phase A (U09): route the V12 `Option<CIndirectSideTables>` envelope
-    // slot onto the live `CodeGraph`. V10/V11 → V12 upconverts carry the
-    // V11 value unchanged; older upconverts carry `None`.
     graph.set_c_indirect_tables(snapshot_data.c_indirect_tables);
     Ok(graph)
+}
+
+fn reject_trailing_snapshot_bytes<R: Read>(reader: &mut R) -> Result<(), PersistenceError> {
+    let mut trailing = [0u8; 1];
+    if reader.read(&mut trailing)? > 0 {
+        return Err(PersistenceError::ValidationFailed(
+            "unexpected trailing bytes after data section".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Loads a graph from in-memory bytes.
+///
+/// Same validation as [`load_from_path`] but operates on a byte slice,
+/// enabling single-read integrity verification (hash once, deserialize
+/// from the same bytes — no TOCTOU window).
+///
+/// # Errors
+///
+/// Returns an error if the bytes are invalid, corrupt, or incompatible.
+pub fn load_from_bytes(
+    bytes: &[u8],
+    plugins: Option<&PluginManager>,
+) -> Result<CodeGraph, PersistenceError> {
+    let total_len = usize_to_u64(bytes.len(), "snapshot byte length")?;
+    let mut reader = Cursor::new(bytes);
+    let mut bytes_consumed: u64 = 0;
+
+    let (format_version, header) =
+        read_snapshot_header(&mut reader, total_len, &mut bytes_consumed, plugins)?;
+    let data_buf = read_snapshot_data_section(&mut reader, total_len, &mut bytes_consumed)?;
+    let snapshot_data = decode_snapshot_data(format_version, &header, &data_buf)?;
+    reject_trailing_snapshot_bytes(&mut reader)?;
+    graph_from_snapshot_data(&header, snapshot_data)
 }
 
 /// Loads a graph from the specified path.
@@ -2457,7 +2482,6 @@ pub fn load_from_bytes(
 /// # Errors
 ///
 /// Returns an error if the file is invalid, corrupt, or incompatible.
-#[allow(clippy::cast_possible_truncation)] // data_len validated < max_snapshot_bytes()
 pub fn load_from_path(
     path: impl AsRef<Path>,
     plugins: Option<&PluginManager>,
@@ -2468,176 +2492,12 @@ pub fn load_from_path(
     let mut reader = BufReader::new(file);
     let mut bytes_consumed: u64 = 0;
 
-    let (format_version, header_len, magic_bytes) = read_magic_and_header_len(&mut reader)?;
-    bytes_consumed += magic_bytes;
-    if header_len > MAX_HEADER_BYTES {
-        return Err(PersistenceError::ValidationFailed(
-            "header too large".to_string(),
-        ));
-    }
-    let remaining = file_len.saturating_sub(bytes_consumed);
-    if (header_len as u64) > remaining {
-        return Err(PersistenceError::ValidationFailed(
-            "header length exceeds remaining file bytes".to_string(),
-        ));
-    }
-
-    // Read and deserialize header
-    let mut header_buf = vec![0u8; header_len];
-    reader.read_exact(&mut header_buf)?;
-    bytes_consumed += header_len as u64;
-    let header: GraphHeader = postcard::from_bytes(&header_buf)?;
-
-    // Validate version — accept V7 (legacy), V8, V9, V10, V11, V12, V13 (upconvert), V14 (current).
-    if header.version != VERSION
-        && header.version != FormatVersion::V8.as_u32()
-        && header.version != FormatVersion::V9.as_u32()
-        && header.version != FormatVersion::V10.as_u32()
-        && header.version != FormatVersion::V11.as_u32()
-        && header.version != FormatVersion::V12.as_u32()
-        && header.version != FormatVersion::V13.as_u32()
-        && header.version != FormatVersion::V14.as_u32()
-    {
-        return Err(PersistenceError::IncompatibleVersion {
-            expected: FormatVersion::V14.as_u32(),
-            found: header.version,
-        });
-    }
-
-    // Validate plugin versions (requires rebuild if mismatch) - skip if no plugin manager
-    if let Some(plugin_manager) = plugins {
-        validate_plugin_versions(&header, plugin_manager)?;
-    }
-
-    // Validate header counts before attempting data deserialization
-    validate_header_sanity(&header)?;
-
-    // Read data length and validate before allocation
-    let data_len = read_u64_le(&mut reader)?;
-    bytes_consumed += 8;
-    let max_data_bytes = max_snapshot_bytes();
-    if data_len > max_data_bytes {
-        return Err(PersistenceError::ValidationFailed(format!(
-            "data section too large: {data_len} bytes exceeds limit ({max_data_bytes} bytes); \
-             increase SQRY_MAX_SNAPSHOT_BYTES to load this snapshot",
-        )));
-    }
-    let remaining = file_len.saturating_sub(bytes_consumed);
-    if data_len > remaining {
-        return Err(PersistenceError::ValidationFailed(
-            "data length exceeds remaining file bytes".to_string(),
-        ));
-    }
-
-    // Read and deserialize data — dispatch on format version. Each older
-    // format chains through the upconverters: V7 → … → V12 → (demote) → V14;
-    // V13 → (mirror translate) → V14; V14 → direct.
-    let mut data_buf = vec![0u8; data_len as usize];
-    reader.read_exact(&mut data_buf)?;
-    let mut snapshot_data: GraphSnapshotDataV14 = match format_version {
-        FormatVersion::V7 => {
-            // V7 predates `GraphHeader.fact_epoch`; pass `0` explicitly so the
-            // chained path is deterministic and matches the documented "V7
-            // has no fact epoch" contract.
-            let v7: GraphSnapshotDataV7 = postcard::from_bytes(&data_buf)?;
-            let v8 = upconvert_v7_to_v8(v7);
-            let v9 = upconvert_v8_to_v9(v8, 0);
-            let v10 = upconvert_v9_to_v10(v9);
-            let v11 = upconvert_v10_to_v11(v10)?;
-            let v12 = upconvert_v11_to_v12(v11)?;
-            finalize_pre_v13_snapshot(v12)
-        }
-        FormatVersion::V8 => {
-            // Forward the V8 header epoch so derived scope provenance is
-            // stamped with the real source epoch, not silently demoted to 0.
-            let v8: GraphSnapshotData = postcard::from_bytes(&data_buf)?;
-            let v9 = upconvert_v8_to_v9(v8, header.fact_epoch());
-            let v10 = upconvert_v9_to_v10(v9);
-            let v11 = upconvert_v10_to_v11(v10)?;
-            let v12 = upconvert_v11_to_v12(v11)?;
-            finalize_pre_v13_snapshot(v12)
-        }
-        FormatVersion::V9 => {
-            let v9: GraphSnapshotDataV9 = postcard::from_bytes(&data_buf)?;
-            let v10 = upconvert_v9_to_v10(v9);
-            let v11 = upconvert_v10_to_v11(v10)?;
-            let v12 = upconvert_v11_to_v12(v11)?;
-            finalize_pre_v13_snapshot(v12)
-        }
-        FormatVersion::V10 => {
-            let v10: GraphSnapshotDataV10 = postcard::from_bytes(&data_buf)?;
-            let v11 = upconvert_v10_to_v11(v10)?;
-            let v12 = upconvert_v11_to_v12(v11)?;
-            finalize_pre_v13_snapshot(v12)
-        }
-        FormatVersion::V11 => {
-            let v11: GraphSnapshotDataV11 = postcard::from_bytes(&data_buf)?;
-            let v12 = upconvert_v11_to_v12(v11)?;
-            finalize_pre_v13_snapshot(v12)
-        }
-        FormatVersion::V12 => {
-            let v12: GraphSnapshotDataV12 = postcard::from_bytes(&data_buf)?;
-            finalize_pre_v13_snapshot(v12)
-        }
-        FormatVersion::V13 => {
-            // Decode the two NodeKind-bearing fields through the frozen V13
-            // mirror, then translate the arena + rebuild indices to V14.
-            let v13: GraphSnapshotDataV13 = postcard::from_bytes(&data_buf)?;
-            upconvert_v13_to_v14(v13)
-        }
-        // V14 is the current writer version — decode directly into the live
-        // types (the arena already carries the V14 `NodeKind` layout).
-        FormatVersion::V14 => postcard::from_bytes(&data_buf)?,
-    };
-
-    // Rebuild the scope-provenance reverse index after deserialization.
-    // The map is not persisted on disk; it is always derived from occupied slots.
-    snapshot_data
-        .scope_provenance
-        .rebuild_reverse_index(&snapshot_data.scope_arena);
-
-    // Reject trailing bytes
-    let mut trailing = [0u8; 1];
-    if reader.read(&mut trailing)? > 0 {
-        return Err(PersistenceError::ValidationFailed(
-            "unexpected trailing bytes after data section".to_string(),
-        ));
-    }
-
-    validate_snapshot_semantics_v12(&snapshot_data)?;
-
-    // Phase β joint-stubs: reattach the V12 envelope slots onto the
-    // in-memory metadata store. V11 → V12 upconverts carry empty defaults.
-    // (V13 is shape-identical to V12, so the same envelope slots apply.)
-    attach_phase_beta_side_tables(
-        &mut snapshot_data.macro_metadata,
-        std::mem::take(&mut snapshot_data.framework_routes_table),
-        std::mem::take(&mut snapshot_data.dispatch_tables_table),
-    );
-
-    let mut graph = CodeGraph::from_components(
-        snapshot_data.nodes,
-        snapshot_data.edges,
-        snapshot_data.strings,
-        snapshot_data.files,
-        snapshot_data.indices,
-        snapshot_data.macro_metadata,
-    );
-    graph.set_provenance(
-        snapshot_data.node_provenance,
-        snapshot_data.edge_provenance,
-        header.fact_epoch(),
-    );
-    graph.set_scope_arena(snapshot_data.scope_arena);
-    graph.set_alias_table(snapshot_data.alias_table);
-    graph.set_shadow_table(snapshot_data.shadow_table);
-    graph.set_scope_provenance_store(snapshot_data.scope_provenance);
-    graph.set_file_segments(snapshot_data.file_segments);
-    // Phase A (U09): route the V12 `Option<CIndirectSideTables>` envelope
-    // slot onto the live `CodeGraph`. Older upconverts carry forward the
-    // value from V11 (or `None` for V10 and older).
-    graph.set_c_indirect_tables(snapshot_data.c_indirect_tables);
-    Ok(graph)
+    let (format_version, header) =
+        read_snapshot_header(&mut reader, file_len, &mut bytes_consumed, plugins)?;
+    let data_buf = read_snapshot_data_section(&mut reader, file_len, &mut bytes_consumed)?;
+    let snapshot_data = decode_snapshot_data(format_version, &header, &data_buf)?;
+    reject_trailing_snapshot_bytes(&mut reader)?;
+    graph_from_snapshot_data(&header, snapshot_data)
 }
 
 /// Validates a graph snapshot file without fully loading it.

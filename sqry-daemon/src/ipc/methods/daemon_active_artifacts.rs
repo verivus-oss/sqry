@@ -52,7 +52,7 @@ pub struct ActiveArtifactsResult {
 }
 
 /// Handle one `daemon/active-artifacts` request.
-pub(crate) async fn handle(ctx: &HandlerContext, params: Value) -> Result<Value, MethodError> {
+pub(crate) fn handle(ctx: &HandlerContext, params: Value) -> Result<Value, MethodError> {
     let _params: ActiveArtifactsParams = match params {
         Value::Null => ActiveArtifactsParams::default(),
         other => serde_json::from_value(other).map_err(MethodError::InvalidParams)?,

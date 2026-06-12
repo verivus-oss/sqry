@@ -32,7 +32,7 @@ pub struct PlanQueryHit {
     pub name: String,
     /// Fully qualified name if the graph recorded one; else copies `name`.
     pub qualified_name: String,
-    /// `NodeKind` in lowercase snake_case form.
+    /// `NodeKind` in lowercase `snake_case` form.
     pub kind: String,
     /// Filesystem path of the file containing this symbol.
     pub file: String,
@@ -69,7 +69,7 @@ pub fn run_planner_query(cli: &Cli, query: &str, path: Option<&str>, limit: usiz
     let graph = load_unified_graph_for_cli(&location.index_root, &config, cli, no_op_reporter())
         .context("failed to load graph; run 'sqry index' to rebuild")?;
 
-    let plan = parse_query(query).map_err(format_parse_error)?;
+    let plan = parse_query(query).map_err(|err| format_parse_error(&err))?;
     let snapshot = Arc::new(graph.snapshot());
 
     // Cluster-B iter-2 BLOCKER 1: gate the planner CLI path on the
@@ -142,6 +142,6 @@ pub fn run_planner_query(cli: &Cli, query: &str, path: Option<&str>, limit: usiz
 
 /// Wraps a [`ParseError`] with a caret-pointer diagnostic so CLI users can
 /// see exactly where the parser choked.
-fn format_parse_error(err: ParseError) -> anyhow::Error {
+fn format_parse_error(err: &ParseError) -> anyhow::Error {
     anyhow::anyhow!("query parse error: {err}")
 }

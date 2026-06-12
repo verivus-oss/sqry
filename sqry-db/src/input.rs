@@ -59,7 +59,7 @@ impl FileInput {
 /// `(FileId, revision)` pair is checked against the current store.
 #[derive(Debug, Clone)]
 pub struct FileInputStore {
-    /// Maps FileId (as u32 index) to per-file input.
+    /// Maps `FileId` (as u32 index) to per-file input.
     entries: HashMap<FileId, FileInput>,
 }
 
@@ -85,8 +85,10 @@ impl FileInputStore {
         for (idx, slot) in arena.slots().iter().enumerate() {
             if let Some(entry) = slot.get() {
                 let file_id = entry.file;
-                if file_id != FileId::INVALID {
-                    let node_id = NodeId::new(idx as u32, slot.generation());
+                if file_id != FileId::INVALID
+                    && let Ok(node_index) = u32::try_from(idx)
+                {
+                    let node_id = NodeId::new(node_index, slot.generation());
                     file_nodes.entry(file_id).or_default().push(node_id);
                 }
             }
@@ -149,8 +151,8 @@ impl FileInputStore {
 
     /// Returns a snapshot of all per-file revision counters as a `Vec`.
     ///
-    /// Each element is `(FileId, revision)`. The order is unspecified (HashMap
-    /// iteration order). Used by the SAVE_PATH persistence unit to capture
+    /// Each element is `(FileId, revision)`. The order is unspecified (`HashMap`
+    /// iteration order). Used by the `SAVE_PATH` persistence unit to capture
     /// the Tier 1 dependency state into [`DerivedHeader::file_revisions`].
     #[must_use]
     pub fn all_revisions(&self) -> Vec<(FileId, u64)> {
@@ -172,7 +174,7 @@ impl FileInputStore {
     /// **Infallible by construction**: uses only `HashMap::insert` on `&self`
     /// via interior mutability through the `FileInput` revision field. Called
     /// exclusively from [`QueryDb::commit_staged_load`] — the single infallible
-    /// commit boundary in LOAD_PATH.
+    /// commit boundary in `LOAD_PATH`.
     ///
     /// # Note on `&self`
     ///
@@ -182,18 +184,15 @@ impl FileInputStore {
     /// because `HashMap::insert` and field assignment cannot fail.
     pub(crate) fn restore_revisions(&mut self, revisions: &[(FileId, u64)]) {
         for &(fid, saved_rev) in revisions {
-            match self.entries.get_mut(&fid) {
-                Some(fi) => {
-                    // Overwrite the revision with the saved value.
-                    fi.revision = saved_rev;
-                }
-                None => {
-                    // File not yet tracked — insert with the saved revision and
-                    // empty node IDs so Tier 1 validation can match it.
-                    let mut fi = FileInput::new(smallvec::SmallVec::new());
-                    fi.revision = saved_rev;
-                    self.entries.insert(fid, fi);
-                }
+            if let Some(fi) = self.entries.get_mut(&fid) {
+                // Overwrite the revision with the saved value.
+                fi.revision = saved_rev;
+            } else {
+                // File not yet tracked — insert with the saved revision and
+                // empty node IDs so Tier 1 validation can match it.
+                let mut fi = FileInput::new(smallvec::SmallVec::new());
+                fi.revision = saved_rev;
+                self.entries.insert(fid, fi);
             }
         }
     }

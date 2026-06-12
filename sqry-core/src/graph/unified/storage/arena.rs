@@ -281,7 +281,7 @@ impl NodeEntry {
     /// folding metadata + flags into the winner and calling
     /// [`crate::graph::unified::build::unification::merge_node_into`] on
     /// the loser. The loser's arena slot stays `Occupied` (so
-    /// `NodeArena::slot_count()` stays stable for CSR row_ptr sizing),
+    /// `NodeArena::slot_count()` stays stable for CSR `row_ptr` sizing),
     /// but its `name` is cleared to [`StringId::INVALID`] and its
     /// `qualified_name` to `None`. That sentinel is what this method
     /// detects.
@@ -300,7 +300,7 @@ impl NodeEntry {
 
     /// Whether this entry is a synthetic placeholder according to its name shape.
     ///
-    /// C_SUPPRESS introduced an explicit `NodeFlags::SYNTHETIC` flag
+    /// `C_SUPPRESS` introduced an explicit `NodeFlags::SYNTHETIC` flag
     /// stored in [`crate::graph::unified::storage::metadata::NodeMetadataStore`];
     /// see
     /// [`crate::graph::unified::storage::metadata::NodeMetadataStore::is_synthetic`]

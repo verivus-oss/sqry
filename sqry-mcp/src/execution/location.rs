@@ -7,10 +7,10 @@
 //!
 //! # Resolution Order
 //!
-//! 1. **OwnSpan** — the node itself has `start_line > 0`
-//! 2. **CanonicalSibling** — another node in `by_qualified_name` with line > 0
-//! 3. **IncomingEdgeSpan** — first incoming `Calls`/`References` edge with a span
-//! 4. **ExternSymbol** — canonical sibling in an external file (classpath/header)
+//! 1. **`OwnSpan`** — the node itself has `start_line > 0`
+//! 2. **`CanonicalSibling`** — another node in `by_qualified_name` with line > 0
+//! 3. **`IncomingEdgeSpan`** — first incoming `Calls`/`References` edge with a span
+//! 4. **`ExternSymbol`** — canonical sibling in an external file (classpath/header)
 //! 5. **Fallback** — raw (possibly zero) node span when nothing else resolves
 
 use sqry_core::graph::unified::concurrent::{CodeGraph, GraphSnapshot};
@@ -23,7 +23,7 @@ use crate::execution::symbol_utils::relative_path_forward_slash;
 /// How the location was resolved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LocationResolutionSource {
-    /// Node's own span was valid (start_line > 0).
+    /// Node's own span was valid (`start_line` > 0).
     OwnSpan,
     /// Resolved via a sibling node sharing the same canonical qualified name.
     CanonicalSibling,
@@ -150,28 +150,13 @@ fn resolve_location_inner(
             if let Some(sibling) = nodes.get(sibling_id)
                 && sibling.start_line > 0
             {
-                let sibling_file_path = files
-                    .resolve(sibling.file)
-                    .map(|p| relative_path_forward_slash(p.as_ref(), workspace_root))
-                    .unwrap_or_default();
-
-                let sibling_language = files.language_for_file(sibling.file).map(|l| l.to_string());
-
                 let source = if files.is_external(sibling.file) {
                     LocationResolutionSource::ExternSymbol
                 } else {
                     LocationResolutionSource::CanonicalSibling
                 };
 
-                return Some(NodeLocation {
-                    file_path: sibling_file_path,
-                    line: sibling.start_line,
-                    column: sibling.start_column,
-                    end_line: sibling.end_line,
-                    end_column: sibling.end_column,
-                    language: sibling_language,
-                    resolution_source: source,
-                });
+                return Some(location_from_entry(files, workspace_root, sibling, source));
             }
         }
     }
@@ -187,28 +172,13 @@ fn resolve_location_inner(
                 && sibling.start_line > 0
                 && sibling.kind == entry.kind
             {
-                let sibling_file_path = files
-                    .resolve(sibling.file)
-                    .map(|p| relative_path_forward_slash(p.as_ref(), workspace_root))
-                    .unwrap_or_default();
-
-                let sibling_language = files.language_for_file(sibling.file).map(|l| l.to_string());
-
                 let source = if files.is_external(sibling.file) {
                     LocationResolutionSource::ExternSymbol
                 } else {
                     LocationResolutionSource::CanonicalSibling
                 };
 
-                return Some(NodeLocation {
-                    file_path: sibling_file_path,
-                    line: sibling.start_line,
-                    column: sibling.start_column,
-                    end_line: sibling.end_line,
-                    end_column: sibling.end_column,
-                    language: sibling_language,
-                    resolution_source: source,
-                });
+                return Some(location_from_entry(files, workspace_root, sibling, source));
             }
         }
     }
@@ -224,10 +194,10 @@ fn resolve_location_inner(
             let line = u32::try_from(span.start.line.saturating_add(1)).unwrap_or(u32::MAX);
             let column = u32::try_from(span.start.column).unwrap_or(u32::MAX);
             if line > 0 {
-                let edge_file_path = files
-                    .resolve(edge_ref.file)
-                    .map(|p| relative_path_forward_slash(p.as_ref(), workspace_root))
-                    .unwrap_or_else(|| file_path.clone());
+                let edge_file_path = files.resolve(edge_ref.file).map_or_else(
+                    || file_path.clone(),
+                    |p| relative_path_forward_slash(p.as_ref(), workspace_root),
+                );
 
                 return Some(NodeLocation {
                     file_path: edge_file_path,
@@ -252,6 +222,28 @@ fn resolve_location_inner(
         language,
         resolution_source: LocationResolutionSource::Fallback,
     })
+}
+
+fn location_from_entry(
+    files: &FileRegistry,
+    workspace_root: &std::path::Path,
+    entry: &sqry_core::graph::unified::storage::arena::NodeEntry,
+    resolution_source: LocationResolutionSource,
+) -> NodeLocation {
+    NodeLocation {
+        file_path: files
+            .resolve(entry.file)
+            .map(|path| relative_path_forward_slash(path.as_ref(), workspace_root))
+            .unwrap_or_default(),
+        line: entry.start_line,
+        column: entry.start_column,
+        end_line: entry.end_line,
+        end_column: entry.end_column,
+        language: files
+            .language_for_file(entry.file)
+            .map(|lang| lang.to_string()),
+        resolution_source,
+    }
 }
 
 #[cfg(test)]

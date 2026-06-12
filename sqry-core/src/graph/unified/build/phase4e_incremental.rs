@@ -11,7 +11,7 @@
 //! buffer (for new/removed edges), producing fresh `ScopeArena`,
 //! `AliasTable`, `ShadowTable`, and `ScopeProvenanceStore`.
 //!
-//! Cost: O(E_binding) where E_binding is the count of Contains/Defines/
+//! Cost: `O(E_binding)` where `E_binding` is the count of Contains/Defines/
 //! Imports/Exports edges — typically ~30% of total edges. At 20M total
 //! edges this is ~6M edges, taking ~50ms.
 

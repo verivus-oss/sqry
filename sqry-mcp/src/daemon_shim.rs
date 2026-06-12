@@ -211,6 +211,7 @@ pub fn parse_daemon_args(args: &[String]) -> DaemonParseResult {
 /// `std::env::var_os` swallows `NotUnicode` (treating it as unset) — a
 /// malformed environment variable falls through to the platform default rather
 /// than propagating as an error, matching daemon-side behaviour.
+#[must_use]
 pub fn resolve_daemon_socket(override_path: Option<&Path>) -> PathBuf {
     if let Some(p) = override_path {
         return p.to_path_buf();
@@ -386,7 +387,7 @@ pub enum ProbeOutcome {
 /// 3. On [`is_connect_failure`]: silently return `Unavailable` — the
 ///    common "no daemon running" case must not delay startup or warn.
 /// 4. On any other error (handshake rejected, version mismatch,
-///    EnvelopeVersionMismatch, ShimRejected, etc.): WARN-log and return
+///    `EnvelopeVersionMismatch`, `ShimRejected`, etc.): WARN-log and return
 ///    `Unavailable` so the user still gets a working MCP session via
 ///    the in-process path.
 /// 5. On success: byte-pump stdio → daemon. If the pump errors mid-

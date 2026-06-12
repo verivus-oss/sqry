@@ -180,6 +180,13 @@ impl FusedPlanBatch {
     /// This is the inverse of [`fuse_plans`] and is used to verify
     /// idempotence (`fuse_plans(fused.input_plans()) == fused`) and to drive
     /// round-trip tests.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the batch's internal `original_index` bookkeeping is sparse.
+    /// [`fuse_plans`] constructs every `FusedPlanBatch` with a contiguous
+    /// original-index range, so a panic here indicates corrupted fusion
+    /// metadata.
     #[must_use]
     pub fn input_plans(&self) -> Vec<QueryPlan> {
         // Capacity = total tails across all groups.
@@ -425,6 +432,10 @@ impl Eq for FusionStats {}
 mod f64_bits {
     use serde::{Deserialize, Deserializer, Serializer};
 
+    #[allow(
+        clippy::trivially_copy_pass_by_ref,
+        reason = "serde with-module serializers are invoked with a reference to the field"
+    )]
     pub fn serialize<S>(value: &f64, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -698,7 +709,7 @@ fn materialize_shared_nodes(candidates: &[PromotedCandidate]) -> Vec<SharedNode>
         .map(|(index, candidate)| SharedNode {
             canonical_plan: candidate.canonical_plan.clone(),
             consumers: candidate_consumers(&candidate.positions),
-            id: SharedNodeId(index as u32),
+            id: SharedNodeId(u32::try_from(index).unwrap_or(u32::MAX)),
         })
         .collect()
 }
@@ -1032,7 +1043,9 @@ fn estimate_plan_tree_reduction_ratio(
         .sum();
 
     let bounded_saved_nodes = total_saved_nodes.min(total_nodes_before);
-    bounded_saved_nodes as f64 / total_nodes_before as f64
+    let saved = u32::try_from(bounded_saved_nodes).unwrap_or(u32::MAX);
+    let total = u32::try_from(total_nodes_before).unwrap_or(u32::MAX);
+    f64::from(saved) / f64::from(total)
 }
 
 /// Walks the entire input batch and collects every
@@ -1051,7 +1064,7 @@ fn estimate_plan_tree_reduction_ratio(
 /// [`FusedPlanBatch`] returned by the caller is deterministic.
 fn collect_subquery_plans(plans: &[QueryPlan]) -> (usize, Vec<QueryPlan>) {
     let mut total = 0_usize;
-    let mut seen: HashMap<PlanNode, ()> = HashMap::new();
+    let mut seen: HashSet<PlanNode> = HashSet::new();
     let mut ordered: Vec<PlanNode> = Vec::new();
 
     for plan in plans {
@@ -1069,7 +1082,7 @@ fn collect_subquery_plans(plans: &[QueryPlan]) -> (usize, Vec<QueryPlan>) {
 fn walk_plan_for_subqueries(
     node: &PlanNode,
     total: &mut usize,
-    seen: &mut HashMap<PlanNode, ()>,
+    seen: &mut HashSet<PlanNode>,
     ordered: &mut Vec<PlanNode>,
 ) {
     match node {
@@ -1095,7 +1108,7 @@ fn walk_plan_for_subqueries(
 fn walk_predicate_for_subqueries(
     pred: &Predicate,
     total: &mut usize,
-    seen: &mut HashMap<PlanNode, ()>,
+    seen: &mut HashSet<PlanNode>,
     ordered: &mut Vec<PlanNode>,
 ) {
     match pred {
@@ -1153,15 +1166,14 @@ fn walk_predicate_for_subqueries(
 fn walk_predicate_value_for_subqueries(
     value: &PredicateValue,
     total: &mut usize,
-    seen: &mut HashMap<PlanNode, ()>,
+    seen: &mut HashSet<PlanNode>,
     ordered: &mut Vec<PlanNode>,
 ) {
     if let PredicateValue::Subquery(inner) = value {
         *total += 1;
         // Record the current subquery first (outer-to-inner ordering).
         let key: PlanNode = (**inner).clone();
-        if !seen.contains_key(&key) {
-            seen.insert(key.clone(), ());
+        if seen.insert(key.clone()) {
             ordered.push(key);
         }
         // Then recurse into the inner plan to surface deeper subqueries.

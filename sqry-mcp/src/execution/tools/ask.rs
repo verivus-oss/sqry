@@ -155,6 +155,11 @@ fn resolve_workspace_path(path: &str) -> Option<PathBuf> {
 ///
 /// The path parameter is canonicalized relative to the workspace root
 /// to ensure translations are scoped correctly.
+///
+/// # Errors
+///
+/// Returns an error if workspace resolution, path canonicalization, translator
+/// configuration, or natural-language translation fails.
 pub fn execute_sqry_ask(args: &SqryAskParams) -> Result<ToolExecution<NlTranslationData>> {
     let start = Instant::now();
     let workspace_path = resolve_workspace_path(&args.path);
@@ -270,7 +275,7 @@ pub fn execute_sqry_ask(args: &SqryAskParams) -> Result<ToolExecution<NlTranslat
 /// parallel translates. Async callers MUST wrap this in
 /// [`tokio::task::spawn_blocking`] because pool acquire is sync.
 pub fn execute_sqry_ask_with_translator(
-    translator: Arc<Translator>,
+    translator: &Arc<Translator>,
     args: &SqryAskParams,
 ) -> Result<ToolExecution<NlTranslationData>> {
     let start = Instant::now();

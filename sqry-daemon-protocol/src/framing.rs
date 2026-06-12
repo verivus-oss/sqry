@@ -47,8 +47,12 @@ pub enum FrameError {
     Json(#[from] serde_json::Error),
 }
 
-/// Write a single framed blob. Returns [`io::ErrorKind::InvalidInput`]
-/// if `body.len() > MAX_FRAME_BYTES`.
+/// Write a single framed blob.
+///
+/// # Errors
+///
+/// Returns [`io::ErrorKind::InvalidInput`] if `body.len() > MAX_FRAME_BYTES`.
+/// Propagates write and flush errors from the underlying async writer.
 pub async fn write_frame<W>(w: &mut W, body: &[u8]) -> io::Result<()>
 where
     W: AsyncWrite + Unpin,
@@ -62,7 +66,12 @@ where
             ),
         ));
     }
-    let len = u32::try_from(body.len()).expect("length bounded above by MAX_FRAME_BYTES");
+    let len = u32::try_from(body.len()).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "frame body length exceeds u32::MAX",
+        )
+    })?;
     w.write_all(&len.to_le_bytes()).await?;
     w.write_all(body).await?;
     w.flush().await?;
@@ -75,6 +84,12 @@ where
 /// (zero bytes read before any length-prefix byte). Returns
 /// [`io::ErrorKind::UnexpectedEof`] when the stream ends mid-prefix or
 /// mid-body.
+///
+/// # Errors
+///
+/// Returns [`io::ErrorKind::InvalidData`] when the frame length exceeds
+/// [`MAX_FRAME_BYTES`]. Propagates transport read errors from the underlying
+/// async reader.
 pub async fn read_frame<R>(r: &mut R) -> io::Result<Option<Vec<u8>>>
 where
     R: AsyncRead + Unpin,
@@ -112,6 +127,11 @@ where
 }
 
 /// Write a typed value as a framed JSON blob.
+///
+/// # Errors
+///
+/// Returns [`FrameError::Json`] when serialization fails and [`FrameError::Io`]
+/// when writing the frame fails.
 pub async fn write_frame_json<W, T>(w: &mut W, value: &T) -> Result<(), FrameError>
 where
     W: AsyncWrite + Unpin,
@@ -124,6 +144,11 @@ where
 
 /// Read a framed JSON blob and decode into `T`. Returns `Ok(None)` on a
 /// clean frame-boundary EOF.
+///
+/// # Errors
+///
+/// Returns [`FrameError::Io`] for frame transport failures and
+/// [`FrameError::Json`] when the frame body cannot be decoded as `T`.
 pub async fn read_frame_json<R, T>(r: &mut R) -> Result<Option<T>, FrameError>
 where
     R: AsyncRead + Unpin,

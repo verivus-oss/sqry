@@ -43,8 +43,8 @@ use super::super::node::id::NodeId;
 /// Discriminants `0..=18` are explicit and pinned for V12 on-disk stability —
 /// see Plan A's `U01_CRATE_SCAFFOLD` acceptance criterion
 /// "`FrameworkId` discriminants pinned with `#[repr(u16)]` and explicit
-/// values 0-18". The ordering below mirrors the Plan A 02_DESIGN §2 variant
-/// set; **variant names match the 02_DESIGN doc 1:1** (e.g. `Actix`, not
+/// values 0-18". The ordering below mirrors the Plan A `02_DESIGN` §2 variant
+/// set; **variant names match the `02_DESIGN` doc 1:1** (e.g. `Actix`, not
 /// `ActixWeb`) so design references and code citations stay in lockstep.
 /// Discriminants must remain stable across releases once V12 ships.
 ///
@@ -63,7 +63,7 @@ use super::super::node::id::NodeId;
 pub enum FrameworkId {
     /// ASP.NET Core (C#).
     AspNetCore = 0,
-    /// Actix Web (Rust). Plan A 02_DESIGN §2 names this `Actix`.
+    /// Actix Web (Rust). Plan A `02_DESIGN` §2 names this `Actix`.
     Actix = 1,
     /// Axum (Rust).
     Axum = 2,
@@ -73,7 +73,7 @@ pub enum FrameworkId {
     Django = 4,
     /// Express (Node.js / TypeScript).
     Express = 5,
-    /// FastAPI (Python).
+    /// `FastAPI` (Python).
     FastApi = 6,
     /// Fastify (Node.js / TypeScript).
     Fastify = 7,
@@ -85,7 +85,7 @@ pub enum FrameworkId {
     Koa = 10,
     /// Laravel (PHP).
     Laravel = 11,
-    /// NestJS (TypeScript).
+    /// `NestJS` (TypeScript).
     NestJs = 12,
     /// Rails (Ruby).
     Rails = 13,
@@ -136,7 +136,7 @@ impl FrameworkId {
     }
 }
 
-/// Resolution status of a synthesized framework route — Plan A 02_DESIGN §2.
+/// Resolution status of a synthesized framework route — Plan A `02_DESIGN` §2.
 ///
 /// Captures the static-vs-runtime nature of the extracted route declaration
 /// so downstream consumers (planner, MCP filters, agent diagnostics) can
@@ -166,7 +166,7 @@ pub enum ResolutionStatus {
 }
 
 /// Normalised path template for a synthesized framework route — Plan A
-/// 02_DESIGN §2 (line 135) + §2 prose (line 153).
+/// `02_DESIGN` §2 (line 135) + §2 prose (line 153).
 ///
 /// # Joint-stub shape
 ///
@@ -203,7 +203,7 @@ impl PathTemplate {
     }
 }
 
-/// Per-node framework-route metadata — Plan A 02_DESIGN §6 line 233.
+/// Per-node framework-route metadata — Plan A `02_DESIGN` §6 line 233.
 ///
 /// One entry per Endpoint / Service / Resource node that a framework
 /// extractor classified as a synthesized route. The DESIGN field set is

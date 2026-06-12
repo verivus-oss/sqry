@@ -44,6 +44,7 @@ pub(crate) fn perf_log(msg: &str) {
 use sqry_core::graph::node::Language;
 use sqry_core::graph::unified::build::BuildConfig;
 use sqry_core::graph::unified::concurrent::CodeGraph;
+use sqry_core::graph::unified::node::NodeId;
 use sqry_core::graph::unified::persistence::GraphStorage;
 use sqry_core::graph::unified::{EdgeKind, NodeKind};
 use sqry_core::json_response::IndexStatus;
@@ -300,7 +301,7 @@ fn language_matches(lang: Language, query: &str) -> bool {
 fn member_folder_aggregate_status(session: &SessionManager, target: &Path) -> IndexStatus {
     let workspace = session.logical_workspace();
     let aggregate = crate::session::aggregate_workspace_index_status(workspace.as_ref());
-    IndexStatus::aggregate(target.to_path_buf(), aggregate)
+    IndexStatus::aggregate(target, aggregate)
 }
 
 fn load_status_graph(
@@ -1161,8 +1162,6 @@ pub fn list_duplicate_groups(
     params: &SqryListDuplicateGroupsParams,
 ) -> Result<SqryListDuplicateGroupsResult> {
     use crate::conversion::node_to_search_item;
-    use sqry_core::graph::unified::node::NodeId;
-    use std::collections::HashMap;
 
     let handler_start = Instant::now();
     perf_log(&format!(
@@ -1191,37 +1190,7 @@ pub fn list_duplicate_groups(
         ));
     }
 
-    // Group nodes by body hash (for body duplicates)
-    // BodyHash128 stores high/low u64 values - use as_u128() for grouping.
-    // Gate 0d iter-2 fix: skip unified losers from LSP
-    // `find_duplicates` handler. `merge_node_into` also clears
-    // `body_hash` on losers, but the `is_unified_loser()` guard is the
-    // canonical exclusion check. See `NodeEntry::is_unified_loser`.
-    let mut hash_groups: HashMap<u128, Vec<NodeId>> = HashMap::new();
-
-    for (node_id, entry) in graph.nodes().iter() {
-        if entry.is_unified_loser() {
-            continue;
-        }
-        if let Some(body_hash) = entry.body_hash {
-            let hash_key = body_hash.as_u128();
-            hash_groups.entry(hash_key).or_default().push(node_id);
-        }
-    }
-
-    // Filter to groups with 2+ nodes (actual duplicates)
-    let mut duplicate_groups: Vec<_> = hash_groups
-        .into_iter()
-        .filter(|(_, nodes)| nodes.len() >= 2)
-        .collect();
-
-    // Sort for deterministic ordering: descending by count, then by hash for tie-breaking
-    duplicate_groups.sort_by(|(hash_a, nodes_a), (hash_b, nodes_b)| {
-        nodes_b
-            .len()
-            .cmp(&nodes_a.len())
-            .then_with(|| hash_a.cmp(hash_b))
-    });
+    let duplicate_groups = collect_duplicate_body_groups(&graph);
 
     let limit = params
         .limit
@@ -1294,6 +1263,33 @@ pub fn list_duplicate_groups(
         truncated,
         groups: result_groups,
     })
+}
+
+fn collect_duplicate_body_groups(graph: &CodeGraph) -> Vec<(u128, Vec<NodeId>)> {
+    let mut hash_groups: HashMap<u128, Vec<NodeId>> = HashMap::new();
+    for (node_id, entry) in graph.nodes().iter() {
+        if entry.is_unified_loser() {
+            continue;
+        }
+        if let Some(body_hash) = entry.body_hash {
+            hash_groups
+                .entry(body_hash.as_u128())
+                .or_default()
+                .push(node_id);
+        }
+    }
+
+    let mut duplicate_groups: Vec<_> = hash_groups
+        .into_iter()
+        .filter(|(_, nodes)| nodes.len() >= 2)
+        .collect();
+    duplicate_groups.sort_by(|(hash_a, nodes_a), (hash_b, nodes_b)| {
+        nodes_b
+            .len()
+            .cmp(&nodes_a.len())
+            .then_with(|| hash_a.cmp(hash_b))
+    });
+    duplicate_groups
 }
 
 /// List circular dependencies (cycles) in the codebase.

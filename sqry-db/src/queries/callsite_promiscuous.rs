@@ -5,7 +5,7 @@
 //!
 //! # Invalidation
 //!
-//! `TRACKS_METADATA_REVISION = true`: the CALLSITE_PROMISCUOUS bit
+//! `TRACKS_METADATA_REVISION = true`: the `CALLSITE_PROMISCUOUS` bit
 //! lives on the [`NodeMetadataStore`] (Tier-3, the metadata-revision
 //! counter). Per DESIGN §9.3, this query reads through the same
 //! metadata store as [`super::AddressTakenQuery`] and inherits the
@@ -14,7 +14,7 @@
 //! `TRACKS_EDGE_REVISION = true`: set conservatively to parallel HEAD's
 //! [`EntryPointsQuery`] precedent at
 //! `sqry-db/src/queries/unused.rs:67-72` (both flags true). The Phase
-//! A pass5b resolver applies CALLSITE_PROMISCUOUS marks in the same
+//! A pass5b resolver applies `CALLSITE_PROMISCUOUS` marks in the same
 //! pass that materializes new `Calls` edges (cap-exceeded callers
 //! per DESIGN §4 / §5.2), so over-invalidation on edge-revision
 //! bumps is preferred to a subtle under-invalidation. See DAG

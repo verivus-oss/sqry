@@ -82,6 +82,9 @@ use crate::{
     error::{DaemonError, DaemonResult},
 };
 
+#[cfg(all(unix, target_os = "linux"))]
+const NFS_SUPER_MAGIC: libc::c_long = 0x6969;
+
 // ---------------------------------------------------------------------------
 // Ownership state machine
 // ---------------------------------------------------------------------------
@@ -206,6 +209,10 @@ impl PidfileLock {
     /// must be caught in both debug and release builds to prevent incorrect
     /// drop behaviour (skipping required pidfile unlink).
     ///
+    /// # Panics
+    ///
+    /// Panics when called on a lock that is not in [`WriteOwner`] state.
+    ///
     /// [`WriteOwner`]: PidfileOwnership::WriteOwner
     /// [`Handoff`]: PidfileOwnership::Handoff
     /// [`Adopted`]: PidfileOwnership::Adopted
@@ -231,6 +238,11 @@ impl PidfileLock {
     ///
     /// The pidfile is created with mode `0644` (world-readable so that
     /// diagnostic tools can read it without elevated privileges).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the temporary pidfile cannot be written, flushed, or
+    /// atomically renamed into place.
     pub fn write_pid(&self, pid: u32) -> DaemonResult<()> {
         write_pidfile_atomic(&self.pidfile, pid)
     }
@@ -253,6 +265,7 @@ impl PidfileLock {
     /// Violating any of these invariants is undefined behaviour (double-free,
     /// double-close, or stale-lock ABA).
     #[cfg(unix)]
+    #[must_use]
     pub unsafe fn adopt(fd: std::os::fd::RawFd, pidfile: PathBuf, lockfile: PathBuf) -> Self {
         use std::os::unix::io::FromRawFd as _;
         // SAFETY: caller guarantees fd is valid and exclusively owned.
@@ -389,12 +402,19 @@ impl Drop for PidfileLock {
 /// If the runtime directory resides on an NFS mount, `flock(2)` semantics are
 /// not guaranteed.  A [`tracing::warn`] is emitted if the mount type is
 /// detectable; NFS operators are out of scope.
+///
+/// # Errors
+///
+/// Returns [`DaemonError::AlreadyRunning`] when another process owns the
+/// configured lockfile. Returns [`DaemonError::Io`] for runtime-directory
+/// creation, lockfile open, PID-file write, stale PID-file cleanup, inherited
+/// descriptor validation, or platform locking failures.
 pub fn acquire_pidfile_lock(cfg: &DaemonConfig) -> DaemonResult<PidfileLock> {
-    let lockfile = cfg.lock_path();
+    let lock_path = cfg.lock_path();
     let pidfile = cfg.pid_path();
 
     // 1. Ensure runtime dir (and its parent) with secure permissions.
-    ensure_runtime_dir(&lockfile)?;
+    ensure_runtime_dir(&lock_path)?;
 
     // 2. Open-or-create the lockfile with mode 0600 atomically on Unix to
     //    avoid a creation-time window where the file is visible with the
@@ -409,7 +429,7 @@ pub fn acquire_pidfile_lock(cfg: &DaemonConfig) -> DaemonResult<PidfileLock> {
             .create(true)
             .truncate(false)
             .mode(0o600)
-            .open(&lockfile)?
+            .open(&lock_path)?
     };
     #[cfg(not(unix))]
     let lock_file = OpenOptions::new()
@@ -417,36 +437,36 @@ pub fn acquire_pidfile_lock(cfg: &DaemonConfig) -> DaemonResult<PidfileLock> {
         .write(true)
         .create(true)
         .truncate(false)
-        .open(&lockfile)?;
+        .open(&lock_path)?;
 
     // 3. Ensure lockfile permissions are 0600.  On Unix this is a no-op for
     //    newly-created files (mode was set above), but also correctly
     //    normalises pre-existing lockfiles left behind by a previous sqryd
     //    build that did not use OpenOptionsExt::mode.
     #[cfg(unix)]
-    set_permissions_0600(&lockfile)?;
+    set_permissions_0600(&lock_path)?;
 
     // Warn if the runtime dir appears to be on NFS (best-effort detection).
     #[cfg(unix)]
-    warn_if_nfs(lockfile.parent().unwrap_or(&lockfile));
+    warn_if_nfs(lock_path.parent().unwrap_or(&lock_path));
 
     // 4. Try to acquire the exclusive flock.
     match lock_file.try_lock_exclusive() {
         Ok(()) => {
-            debug!(lockfile = %lockfile.display(), "exclusive flock acquired");
+            debug!(lockfile = %lock_path.display(), "exclusive flock acquired");
         }
         Err(e) if is_would_block(&e) => {
             // Another daemon holds the lock.  Read the pidfile for diagnostics.
             let owner_pid = read_pid(&pidfile);
             debug!(
-                lockfile = %lockfile.display(),
+                lockfile = %lock_path.display(),
                 owner_pid = ?owner_pid,
                 "flock contended — daemon already running"
             );
             return Err(DaemonError::AlreadyRunning {
                 owner_pid,
                 socket: cfg.socket_path(),
-                lock: lockfile,
+                lock: lock_path,
             });
         }
         Err(e) => {
@@ -461,7 +481,7 @@ pub fn acquire_pidfile_lock(cfg: &DaemonConfig) -> DaemonResult<PidfileLock> {
     Ok(PidfileLock {
         lock: lock_file,
         pidfile,
-        lockfile,
+        lockfile: lock_path,
         ownership: PidfileOwnership::WriteOwner,
     })
 }
@@ -529,18 +549,15 @@ fn is_nfs(dir: &std::path::Path) -> bool {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt as _;
 
-    let c_path = match CString::new(dir.as_os_str().as_bytes()) {
-        Ok(p) => p,
-        Err(_) => return false,
+    let Ok(c_path) = CString::new(dir.as_os_str().as_bytes()) else {
+        return false;
     };
     // SAFETY: c_path is a valid null-terminated string.
     let mut buf: libc::statfs = unsafe { std::mem::zeroed() };
-    let rc = unsafe { libc::statfs(c_path.as_ptr(), &mut buf) };
+    let rc = unsafe { libc::statfs(c_path.as_ptr(), &raw mut buf) };
     if rc != 0 {
         return false;
     }
-    // NFS magic number on Linux: 0x6969
-    const NFS_SUPER_MAGIC: libc::c_long = 0x6969;
     buf.f_type == NFS_SUPER_MAGIC
 }
 
@@ -610,6 +627,7 @@ fn write_pidfile_atomic(pidfile: &std::path::Path, pid: u32) -> DaemonResult<()>
 }
 
 /// Read the PID from `pidfile` (best-effort; returns `None` on any failure).
+#[must_use]
 pub fn read_pid(pidfile: &std::path::Path) -> Option<u32> {
     let text = fs::read_to_string(pidfile).ok()?;
     text.trim().parse::<u32>().ok()

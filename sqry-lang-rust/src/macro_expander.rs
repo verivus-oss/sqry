@@ -400,7 +400,7 @@ impl MacroExpander {
 // STEP_11_4 — cross-source-root macro expansion + warning bridge
 // ---------------------------------------------------------------------------
 
-/// STEP_11_4 — pair the per-source-root [`MacroExpansionResult`]
+/// `STEP_11_4` — pair the per-source-root [`MacroExpansionResult`]
 /// outputs from a [`WorkspaceMacroExpansionOutcome`] with the source
 /// roots they came from.
 ///
@@ -423,7 +423,7 @@ pub fn pair_outcome_with_source_roots(
         .collect()
 }
 
-/// STEP_11_4 (workspace-aware-cross-repo, 2026-04-26) — outcome of a
+/// `STEP_11_4` (workspace-aware-cross-repo, 2026-04-26) — outcome of a
 /// cross-source-root macro expansion attempt against a
 /// [`sqry_core::workspace::LogicalWorkspace`].
 ///
@@ -431,7 +431,7 @@ pub fn pair_outcome_with_source_roots(
 /// file) pair that expanded cleanly. `warnings` carries one
 /// [`sqry_core::workspace::WorkspaceWarning`] per source root that
 /// failed with [`MacroExpandError::InvalidWorkspaceRoot`] — the
-/// canonical "soft-failure" surface STEP_11_4 introduces so a single
+/// canonical "soft-failure" surface `STEP_11_4` introduces so a single
 /// bad source root does not fail the whole logical workspace.
 ///
 /// Other [`MacroExpandError`] variants (e.g. `CargoExpandNotFound`,
@@ -453,7 +453,7 @@ pub struct WorkspaceMacroExpansionOutcome {
     pub errors: Vec<(std::path::PathBuf, MacroExpandError)>,
 }
 
-/// STEP_11_4 — expand the same file across every source root in
+/// `STEP_11_4` — expand the same file across every source root in
 /// `workspace`, with [`MacroExpandError::InvalidWorkspaceRoot`]
 /// promoted to a [`sqry_core::workspace::WorkspaceWarning`] instead of
 /// failing the whole call.
@@ -469,7 +469,7 @@ pub struct WorkspaceMacroExpansionOutcome {
 /// In [`sqry_core::project::ProjectRootMode::GitRoot`] mode the macro
 /// index is per-source-root, so the helper still iterates every
 /// source root but each call is independent — effectively the
-/// "today" semantics, with the InvalidWorkspaceRoot soft-failure
+/// "today" semantics, with the `InvalidWorkspaceRoot` soft-failure
 /// behaviour bolted on.
 ///
 /// The `enable_expansion` flag must be `true` for any expansion to
@@ -478,7 +478,7 @@ pub struct WorkspaceMacroExpansionOutcome {
 /// security default of [`MacroExpanderConfig`].
 ///
 /// `file_path` is interpreted relative to each source root's path
-/// (so a relative path like `src/lib.rs` works in WorkspaceRoot
+/// (so a relative path like `src/lib.rs` works in `WorkspaceRoot`
 /// mode where multiple source roots share the same logical layout).
 /// Absolute paths are passed through unchanged and will only succeed
 /// for the source root that contains them.

@@ -444,9 +444,11 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_cache_config_from_env() {
-        // Set environment variables for this test
-        // SAFETY: We're in a test environment and immediately clean up after
+        // Set environment variables for this test.
+        // SAFETY: env mutation is process-wide; serialized via
+        // #[serial_test::serial] above, cleaned up before returning.
         unsafe {
             std::env::set_var("SQRY_CACHE_MAX_BYTES", "104857600"); // 100 MB
             std::env::set_var("SQRY_CACHE_DISABLE_PERSIST", "1");

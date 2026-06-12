@@ -847,6 +847,7 @@ impl std::fmt::Debug for Translator {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut debug = f.debug_struct("Translator");
         debug
+            .field("config", &self.config)
             .field("translations", &self.translations.load(Ordering::Relaxed))
             .field("cache_enabled", &self.cache.is_some());
         #[cfg(feature = "classifier")]

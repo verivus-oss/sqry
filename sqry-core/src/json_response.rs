@@ -426,16 +426,15 @@ impl IndexStatus {
     /// # Examples
     ///
     /// ```
-    /// use std::path::PathBuf;
     /// use sqry_core::json_response::IndexStatus;
     /// use sqry_core::workspace::WorkspaceIndexStatus;
     /// let aggregate = WorkspaceIndexStatus::from_source_root_statuses(Vec::new());
-    /// let status = IndexStatus::aggregate(PathBuf::from("/tmp/member"), aggregate);
+    /// let status = IndexStatus::aggregate(std::path::Path::new("/tmp/member"), aggregate);
     /// assert_eq!(status.path.as_deref(), Some("/tmp/member"));
     /// ```
     #[must_use]
     pub fn aggregate(
-        member_path: std::path::PathBuf,
+        member_path: &std::path::Path,
         aggregate: crate::workspace::WorkspaceIndexStatus,
     ) -> Self {
         let exists =

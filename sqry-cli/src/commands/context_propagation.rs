@@ -188,8 +188,8 @@ fn leak_to_hit(
     snapshot: &sqry_core::graph::unified::concurrent::GraphSnapshot,
     leak: &ContextLeak,
 ) -> ContextLeakHit {
-    let caller = node_label(snapshot, leak.caller);
-    let callee = node_label(snapshot, leak.callee);
+    let source_label = node_label(snapshot, leak.caller);
+    let target_label = node_label(snapshot, leak.callee);
     let caller_file = snapshot
         .get_node(leak.caller)
         .and_then(|entry| snapshot.files().resolve(entry.file))
@@ -200,8 +200,8 @@ fn leak_to_hit(
         .map(|nid| node_label(snapshot, nid))
         .filter(|s| !s.is_empty());
     ContextLeakHit {
-        caller,
-        callee,
+        caller: source_label,
+        callee: target_label,
         mode: concrete_mode_label(leak.mode),
         caller_file: caller_file.clone(),
         call_site: CallSiteSpan {

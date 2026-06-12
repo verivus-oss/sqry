@@ -280,7 +280,12 @@ fn node_kind_to_string(kind: NodeKind) -> &'static str {
     }
 }
 
-/// Execute hierarchical search
+/// Execute hierarchical search.
+///
+/// # Errors
+///
+/// Returns an error if workspace resolution, graph acquisition, query
+/// classification, or hierarchical search execution fails.
 #[allow(clippy::too_many_lines)] // Pipeline staging is kept in one function for end-to-end clarity.
 pub fn execute_hierarchical_search(
     args: &HierarchicalSearchArgs,
@@ -796,6 +801,7 @@ fn sort_files_deterministic(files: &mut [FileGroup]) {
 /// Estimate tokens for a code snippet
 /// Uses ~4 chars per token approximation with 1.2x code adjustment
 #[allow(clippy::float_cmp)] // Approximate threshold comparison
+#[must_use]
 pub fn estimate_tokens(content: &str) -> u64 {
     if content.is_empty() {
         return 0;

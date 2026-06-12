@@ -13,7 +13,7 @@
 //! preserves the planner's set-membership cache contract (the bare
 //! `CallersQuery` keyed on X returns the *X-calls-Y* direction).
 //!
-//! STEP_11_4 (workspace-aware-cross-repo, 2026-04-26) — gates on
+//! `STEP_11_4` (workspace-aware-cross-repo, 2026-04-26) — gates on
 //! [`crate::session::SessionManager::evaluate_handler_gate`] before any
 //! graph access so member-folder and excluded-path requests
 //! short-circuit through the same code path the `sqry/indexStatus`
@@ -34,7 +34,7 @@ use sqry_db::queries::dispatch::{make_query_db_cold, mcp_callers_query};
 use std::sync::Arc;
 use tower_lsp::lsp_types::{CodeLens, CodeLensParams, Command};
 
-/// STEP_11_4 — outcome of a `textDocument/codeLens` request,
+/// `STEP_11_4` — outcome of a `textDocument/codeLens` request,
 /// including the gate verdict.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CodeLensOutcome {
@@ -58,7 +58,7 @@ impl CodeLensOutcome {
     }
 }
 
-/// STEP_11_4 — gated code-lens handler. Never probes the filesystem
+/// `STEP_11_4` — gated code-lens handler. Never probes the filesystem
 /// per folder.
 ///
 /// On `HandlerGate::Continue`, walks every function/method node in the
@@ -104,9 +104,8 @@ pub fn handle(session: &SessionManager, params: &CodeLensParams) -> Result<CodeL
     // Resolve the workspace path so we can build a `QueryDb` with a
     // graph snapshot — the snapshot is what the inversion wrapper
     // walks to count callers.
-    let path = match uri.to_file_path() {
-        Ok(path) => path,
-        Err(()) => return Ok(CodeLensOutcome::empty()),
+    let Ok(path) = uri.to_file_path() else {
+        return Ok(CodeLensOutcome::empty());
     };
     let Some(graph) = session.graph_for_path(&path)? else {
         // No graph yet (e.g. cold-start before auto-index completes);

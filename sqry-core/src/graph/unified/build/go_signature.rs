@@ -34,7 +34,7 @@ use crate::graph::unified::build::pass_go_method_set::canonicalise_signature;
 /// `returns` is the result clause text — empty string for void
 /// functions, a single type for single-return shapes, or a
 /// paren-wrapped list for multi-return shapes. Both inputs are
-/// canonicalised per 02_DESIGN §4.1.2:
+/// canonicalised per `02_DESIGN` §4.1.2:
 ///
 /// 1. Whitespace between modifier tokens is collapsed.
 /// 2. Parameter names are erased.

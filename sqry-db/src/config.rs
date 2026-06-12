@@ -25,7 +25,7 @@ pub struct QueryDbConfig {
     /// but **NOT cached**. This prevents a single oversized result from
     /// evicting many smaller entries and wasting shard memory.
     ///
-    /// Default: 1 MiB (1_048_576 bytes = `1 << 20`).
+    /// Default: 1 MiB (`1_048_576` bytes = `1 << 20`).
     pub max_entry_size_bytes: usize,
 
     /// Test-only knob: disables planner fusion. Default: `false` (fusion

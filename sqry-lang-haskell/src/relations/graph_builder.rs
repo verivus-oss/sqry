@@ -1417,7 +1417,7 @@ fn process_data_constructors(
 
 /// Process record fields: `{ name :: String, age :: Int }` or `{ x, y :: Int }`
 ///
-/// Cluster C / `C_OTHER_PLUGINS` (BadLiveware Go-batch DAG, 2026-04-29):
+/// Cluster C / `C_OTHER_PLUGINS` (`BadLiveware` Go-batch DAG, 2026-04-29):
 /// every named Haskell record field is materialised as a
 /// `NodeKind::Constant` node, parented to the enclosing data-type node
 /// via `Defines` + `Contains` edges. The qualified-name format is

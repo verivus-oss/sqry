@@ -53,11 +53,11 @@ pub struct SourceRootStatus {
     pub last_indexed_at: Option<SystemTime>,
     /// Cached symbol count for the source root, if available.
     pub symbol_count: Option<u64>,
-    /// STEP_11_4 — JVM classpath directory for this source root, if
+    /// `STEP_11_4` — JVM classpath directory for this source root, if
     /// the workspace builder populated
     /// [`crate::workspace::SourceRoot::classpath_dir`].
     /// `None` when the source root has no `<root>/.sqry/classpath/`
-    /// directory or the workspace was built before STEP_11_4. Surfaces
+    /// directory or the workspace was built before `STEP_11_4`. Surfaces
     /// the auto-populated field through the LSP / MCP / CLI status
     /// payload from the same source-of-truth as the daemon's
     /// `daemon/workspaceStatus` `classpath_present: bool`.
@@ -86,7 +86,7 @@ pub enum SourceRootIndexState {
 
 /// Non-fatal warning attached to a [`WorkspaceIndexStatus`] aggregate.
 ///
-/// STEP_11_4 (workspace-aware-cross-repo, 2026-04-26) — adds the
+/// `STEP_11_4` (workspace-aware-cross-repo, 2026-04-26) — adds the
 /// "soft-failure" surface so cross-source-root macro expansion errors,
 /// classpath probe failures, and similar partial-degradation events do
 /// not have to escalate to a hard `Err` that masks the rest of the
@@ -130,7 +130,7 @@ pub enum WorkspaceWarning {
 /// per-source-root statuses plus precomputed counts so the LSP / CLI
 /// can render summary lines without re-iterating the vector.
 ///
-/// STEP_11_4 (workspace-aware-cross-repo, 2026-04-26) — adds the
+/// `STEP_11_4` (workspace-aware-cross-repo, 2026-04-26) — adds the
 /// `warnings` channel so non-fatal degradations (macro expansion root
 /// errors, classpath probe failures, …) surface to LSP / MCP without
 /// escalating to a hard build error. `warnings` is `Vec<WorkspaceWarning>`

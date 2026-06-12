@@ -4,7 +4,7 @@
 //! as a flat list of `ContextLeak` records keyed on caller / callee
 //! qualified names + call-site span.
 //!
-//! Per 02_DESIGN §2.5 + 03_IMPLEMENTATION_PLAN §Cluster G the tool
+//! Per `02_DESIGN` §2.5 + `03_IMPLEMENTATION_PLAN` §Cluster G the tool
 //! accepts a workspace path, an optional file-scope filter, an
 //! optional mode filter, and a `max_results` cap. It dispatches to
 //! `ContextPropagationQuery` via the standard `make_query_db_cold`
@@ -165,12 +165,16 @@ fn mode_label(mode: ContextModeFilter) -> String {
     .to_string()
 }
 
+fn usize_to_u32_saturating(value: usize) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
+}
+
 fn leak_to_dto(
     snapshot: &sqry_core::graph::unified::concurrent::GraphSnapshot,
     leak: &ContextLeak,
 ) -> ContextLeakDto {
-    let caller = node_label(snapshot, leak.caller);
-    let callee = node_label(snapshot, leak.callee);
+    let source_name = node_label(snapshot, leak.caller);
+    let target_name = node_label(snapshot, leak.callee);
     let caller_file = snapshot
         .get_node(leak.caller)
         .and_then(|entry| snapshot.files().resolve(entry.file))
@@ -181,20 +185,10 @@ fn leak_to_dto(
     // tree-sitter's `Point::column` shape). Saturating casts guard
     // against the (impossible-in-practice) > u32 source line count.
     let call_span = ContextLeakSpan {
-        start_line: leak
-            .call_span
-            .start
-            .line
-            .saturating_add(1)
-            .min(u32::MAX as usize) as u32,
-        start_column: leak.call_span.start.column.min(u32::MAX as usize) as u32,
-        end_line: leak
-            .call_span
-            .end
-            .line
-            .saturating_add(1)
-            .min(u32::MAX as usize) as u32,
-        end_column: leak.call_span.end.column.min(u32::MAX as usize) as u32,
+        start_line: usize_to_u32_saturating(leak.call_span.start.line.saturating_add(1)),
+        start_column: usize_to_u32_saturating(leak.call_span.start.column),
+        end_line: usize_to_u32_saturating(leak.call_span.end.line.saturating_add(1)),
+        end_column: usize_to_u32_saturating(leak.call_span.end.column),
     };
     let caller_ctx_param = leak.caller_ctx_param.map(|nid| ContextLeakNodeRef {
         index: nid.index(),
@@ -202,8 +196,8 @@ fn leak_to_dto(
     });
     ContextLeakDto {
         mode: mode_concrete_label(leak.mode),
-        caller,
-        callee,
+        caller: source_name,
+        callee: target_name,
         caller_file,
         call_span,
         caller_ctx_param,

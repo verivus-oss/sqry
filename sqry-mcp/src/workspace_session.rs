@@ -123,7 +123,7 @@ pub struct ResolvedWorkspaceContext {
     resolution_source: WorkspaceResolutionSource,
     /// Resolved [`LogicalWorkspace`] for this request, when one could be
     /// constructed from the on-disk registry. `None` means the legacy
-    /// "single workspace_root" view applies (`MCP` server may synthesize
+    /// "single `workspace_root`" view applies (`MCP` server may synthesize
     /// a single-root [`LogicalWorkspace`] just-in-time for tools that
     /// require it). Populated by `WorkspaceSessionRegistry::resolve_for_request`
     /// using the §1.3-style discovery rule

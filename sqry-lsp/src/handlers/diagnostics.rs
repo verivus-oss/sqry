@@ -23,15 +23,16 @@
 //! row C075a). Prior to C075a this handler always returned an empty
 //! [`DiagnosticsOutcome::empty`].
 //!
-//! STEP_11_4 (workspace-aware-cross-repo, 2026-04-26) — even though
+//! `STEP_11_4` (workspace-aware-cross-repo, 2026-04-26) — even though
 //! the steady-state response can be non-empty, the gate **must** still
 //! consult [`crate::session::SessionManager::evaluate_handler_gate`]
 //! before any graph access, so member-folder and excluded-path
 //! requests short-circuit through the same code path the
-//! `sqry/indexStatus` handler already uses (STEP_4).
+//! `sqry/indexStatus` handler already uses (`STEP_4`).
 
 use crate::session::{HandlerGate, SessionManager};
 use anyhow::Result;
+use sqry_core::graph::unified::concurrent::CodeGraph;
 use sqry_core::graph::unified::node::NodeId;
 use sqry_core::query::{
     CircularType, DuplicateConfig, DuplicateType, UnusedScope, build_duplicate_groups_graph,
@@ -41,7 +42,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, NumberOrString, Position, Range, Url};
 
-/// STEP_11_4 — outcome of a `textDocument/diagnostic` request,
+/// `STEP_11_4` — outcome of a `textDocument/diagnostic` request,
 /// including the gate verdict so the LSP server can surface
 /// "member" / "excluded" hints to the client.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,7 +74,7 @@ const DIAGNOSTIC_SOURCE: &str = "sqry";
 /// document, small enough to bound the worst-case fetch under load.
 const FETCH_CAP: usize = 4096;
 
-/// STEP_11_4 — gated diagnostics handler. Never probes the filesystem
+/// `STEP_11_4` — gated diagnostics handler. Never probes the filesystem
 /// per folder; consults [`SessionManager::evaluate_handler_gate`] only.
 ///
 /// On `HandlerGate::Continue`, walks the requested file's nodes and
@@ -105,9 +106,8 @@ pub fn handle(session: &SessionManager, uri: &Url) -> Result<DiagnosticsOutcome>
         HandlerGate::Continue => {}
     }
 
-    let path = match uri.to_file_path() {
-        Ok(path) => path,
-        Err(()) => return Ok(DiagnosticsOutcome::empty()),
+    let Ok(path) = uri.to_file_path() else {
+        return Ok(DiagnosticsOutcome::empty());
     };
 
     let Some(graph) = session.graph_for_path(&path)? else {
@@ -129,19 +129,29 @@ pub fn handle(session: &SessionManager, uri: &Url) -> Result<DiagnosticsOutcome>
     let workspace_root = session.index_root_for_cold_load();
     let db = make_query_db_cold(Arc::clone(&snapshot), &workspace_root);
 
-    let mut diagnostics: Vec<Diagnostic> = Vec::new();
+    let mut diagnostics = Vec::new();
+    append_unused_diagnostics(&db, &graph, &document_node_ids, &mut diagnostics);
+    append_cycle_diagnostics(&db, &graph, &document_node_ids, &mut diagnostics);
+    append_duplicate_diagnostics(&graph, &document_node_ids, &mut diagnostics);
 
-    // ── Unused-symbol warnings ────────────────────────────────────
-    //
-    // `UnusedKey { scope: All, max_results }` mirrors the sqry-db
-    // dispatch contract used elsewhere in sqry-lsp
-    // (`handlers/index.rs:list_unused_symbols`). All-scope is the
-    // diagnostic surface — we are not enumerating only public or only
-    // private at the document level.
-    let unused_node_ids = db.get::<sqry_db::queries::UnusedQuery>(&sqry_db::queries::UnusedKey {
+    Ok(DiagnosticsOutcome {
+        diagnostics,
+        partial: false,
+        excluded: false,
+    })
+}
+
+fn append_unused_diagnostics(
+    db: &sqry_db::QueryDb,
+    graph: &CodeGraph,
+    document_node_ids: &HashSet<NodeId>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let unused_key = sqry_db::queries::UnusedKey {
         scope: UnusedScope::All,
         max_results: FETCH_CAP,
-    });
+    };
+    let unused_node_ids = db.get::<sqry_db::queries::UnusedQuery>(&unused_key);
     for &node_id in unused_node_ids.iter() {
         if !document_node_ids.contains(&node_id) {
             continue;
@@ -167,15 +177,15 @@ pub fn handle(session: &SessionManager, uri: &Url) -> Result<DiagnosticsOutcome>
             ),
         ));
     }
+}
 
-    // ── Cycle-member information ──────────────────────────────────
-    //
-    // `CyclesQuery` keyed on `Calls` returns a `Vec<Vec<NodeId>>` of
-    // strongly-connected components. Filter to components whose
-    // members include at least one node defined in the requested
-    // document, and emit one Information-level diagnostic per
-    // local cycle member.
-    let cycle_components = db.get::<sqry_db::queries::CyclesQuery>(&sqry_db::queries::CyclesKey {
+fn append_cycle_diagnostics(
+    db: &sqry_db::QueryDb,
+    graph: &CodeGraph,
+    document_node_ids: &HashSet<NodeId>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let cycles_key = sqry_db::queries::CyclesKey {
         circular_type: CircularType::Calls,
         bounds: sqry_db::queries::CycleBounds {
             min_depth: 2,
@@ -183,7 +193,8 @@ pub fn handle(session: &SessionManager, uri: &Url) -> Result<DiagnosticsOutcome>
             max_results: FETCH_CAP,
             should_include_self_loops: false,
         },
-    });
+    };
+    let cycle_components = db.get::<sqry_db::queries::CyclesQuery>(&cycles_key);
     for component in cycle_components.iter() {
         if !component.iter().any(|id| document_node_ids.contains(id)) {
             continue;
@@ -215,15 +226,15 @@ pub fn handle(session: &SessionManager, uri: &Url) -> Result<DiagnosticsOutcome>
             ));
         }
     }
+}
 
-    // ── Duplicate-group warnings ──────────────────────────────────
-    //
-    // `build_duplicate_groups_graph(DuplicateType::Body, ...)` exposes
-    // body-hash-equivalence groups. The MCP-side `find_duplicates`
-    // wrapper lives in sqry-mcp; we go straight through sqry-core to
-    // keep the dependency direction sqry-lsp -> sqry-core only.
+fn append_duplicate_diagnostics(
+    graph: &CodeGraph,
+    document_node_ids: &HashSet<NodeId>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
     let duplicate_groups =
-        build_duplicate_groups_graph(DuplicateType::Body, &graph, &DuplicateConfig::default());
+        build_duplicate_groups_graph(DuplicateType::Body, graph, &DuplicateConfig::default());
     for group in &duplicate_groups {
         if group.node_ids.len() < 2 {
             continue;
@@ -261,12 +272,6 @@ pub fn handle(session: &SessionManager, uri: &Url) -> Result<DiagnosticsOutcome>
             ));
         }
     }
-
-    Ok(DiagnosticsOutcome {
-        diagnostics,
-        partial: false,
-        excluded: false,
-    })
 }
 
 /// Convert a `NodeEntry` (1-based line, byte-column) into a best-effort

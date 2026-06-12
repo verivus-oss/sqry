@@ -167,25 +167,124 @@ fn mcp_timeout_error(root: &Path, secs: u64, tool_name: Option<&str>) -> McpErro
     )
 }
 
+fn invalid_argument_error(reason: &str) -> McpError {
+    let data = json!({
+        "kind": KIND_VALIDATION_ERROR,
+        "retryable": false,
+        "retry_after_ms": Value::Null,
+        "details": { "reason": reason },
+    });
+    McpError::invalid_params(format!("invalid argument: {reason}"), Some(data))
+}
+
+fn preserved_rpc_error(rpc: sqry_mcp::error::RpcError) -> McpError {
+    let data = json!({
+        "kind": rpc.kind,
+        "retryable": rpc.retryable,
+        "retry_after_ms": rpc.retry_after_ms,
+        "details": rpc.details,
+    });
+    match rpc.code {
+        -32602 => McpError::invalid_params(rpc.message, Some(data)),
+        _ => McpError::internal_error(rpc.message, Some(data)),
+    }
+}
+
+fn internal_daemon_error(err: &anyhow::Error) -> McpError {
+    let data = json!({
+        "kind": KIND_INTERNAL,
+        "retryable": false,
+        "retry_after_ms": Value::Null,
+        "details": Value::Null,
+    });
+    McpError::internal_error(format!("internal error: {err}"), Some(data))
+}
+
+fn workspace_build_failed_error(root: &Path, reason: &str) -> McpError {
+    let data = json!({
+        "kind": KIND_WORKSPACE_NOT_READY,
+        "retryable": true,
+        "retry_after_ms": 2000,
+        "details": {
+            "root": root.display().to_string(),
+            "reason": reason,
+        },
+    });
+    McpError::internal_error(format!("workspace build failed: {reason}"), Some(data))
+}
+
+fn workspace_stale_expired_error(
+    root: &Path,
+    age_hours: u64,
+    cap_hours: u32,
+    last_good_at: Option<std::time::SystemTime>,
+    last_error: Option<&str>,
+) -> McpError {
+    let last_good_at_str = last_good_at.map(|t| {
+        chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    });
+    let data = json!({
+        "kind": KIND_WORKSPACE_STALE_EXPIRED,
+        "retryable": false,
+        "retry_after_ms": Value::Null,
+        "details": {
+            "root": root.display().to_string(),
+            "age_hours": age_hours,
+            "cap_hours": cap_hours,
+            "last_good_at": last_good_at_str,
+            "last_error": last_error,
+        },
+    });
+    McpError::internal_error(
+        format!(
+            "workspace {} stale ({age_hours}h > {cap_hours}h cap)",
+            root.display()
+        ),
+        Some(data),
+    )
+}
+
+fn workspace_incompatible_error(root: &Path, reason: &str) -> McpError {
+    let data = json!({
+        "kind": KIND_WORKSPACE_INCOMPATIBLE_GRAPH,
+        "retryable": false,
+        "retry_after_ms": Value::Null,
+        "details": {
+            "root": root.display().to_string(),
+            "reason": reason,
+        },
+    });
+    McpError::internal_error(
+        format!(
+            "workspace {} graph is incompatible with this binary: {reason}",
+            root.display()
+        ),
+        Some(data),
+    )
+}
+
+fn query_too_broad_error(reason: &str, details: &Value) -> McpError {
+    let data = json!({
+        "kind": KIND_QUERY_TOO_BROAD,
+        "retryable": false,
+        "retry_after_ms": Value::Null,
+        "details": details,
+    });
+    McpError::invalid_params(format!("query rejected: {reason}"), Some(data))
+}
+
 /// Convert [`DaemonError`] to [`McpError`] using the canonical 4-key
 /// envelope.
 ///
 /// Errors with `kind: "deadline_exceeded"` have `details.tool: null`
 /// unless the caller has a tool name in scope — use
 /// [`daemon_err_to_mcp_with_tool`] for call-site-aware mapping.
+#[must_use]
 pub fn daemon_err_to_mcp(e: DaemonError) -> McpError {
     match e {
         DaemonError::ToolTimeout { root, secs, .. } => mcp_timeout_error(&root, secs, None),
 
-        DaemonError::InvalidArgument { reason } => {
-            let data = json!({
-                "kind": KIND_VALIDATION_ERROR,
-                "retryable": false,
-                "retry_after_ms": Value::Null,
-                "details": { "reason": reason.clone() },
-            });
-            McpError::invalid_params(format!("invalid argument: {reason}"), Some(data))
-        }
+        DaemonError::InvalidArgument { reason } => invalid_argument_error(&reason),
 
         // Cluster-C iter-3: render the preserved `sqry_mcp::RpcError`
         // through the same selector the standalone path uses
@@ -195,40 +294,12 @@ pub fn daemon_err_to_mcp(e: DaemonError) -> McpError {
         //   - any other code → `McpError::internal_error`
         // and the `data` block carries the inner kind/retryable/
         // retry_after_ms/details verbatim.
-        DaemonError::RpcErrorPreserved(rpc) => {
-            let data = json!({
-                "kind": rpc.kind,
-                "retryable": rpc.retryable,
-                "retry_after_ms": rpc.retry_after_ms,
-                "details": rpc.details,
-            });
-            match rpc.code {
-                -32602 => McpError::invalid_params(rpc.message, Some(data)),
-                _ => McpError::internal_error(rpc.message, Some(data)),
-            }
-        }
+        DaemonError::RpcErrorPreserved(rpc) => preserved_rpc_error(rpc),
 
-        DaemonError::Internal(err) => {
-            let data = json!({
-                "kind": KIND_INTERNAL,
-                "retryable": false,
-                "retry_after_ms": Value::Null,
-                "details": Value::Null,
-            });
-            McpError::internal_error(format!("internal error: {err}"), Some(data))
-        }
+        DaemonError::Internal(err) => internal_daemon_error(&err),
 
         DaemonError::WorkspaceBuildFailed { root, reason } => {
-            let data = json!({
-                "kind": KIND_WORKSPACE_NOT_READY,
-                "retryable": true,
-                "retry_after_ms": 2000,
-                "details": {
-                    "root": root.display().to_string(),
-                    "reason": reason.clone(),
-                },
-            });
-            McpError::internal_error(format!("workspace build failed: {reason}"), Some(data))
+            workspace_build_failed_error(&root, &reason)
         }
 
         DaemonError::WorkspaceStaleExpired {
@@ -237,53 +308,20 @@ pub fn daemon_err_to_mcp(e: DaemonError) -> McpError {
             cap_hours,
             last_good_at,
             last_error,
-        } => {
-            let last_good_at_str = last_good_at.map(|t| {
-                chrono::DateTime::<chrono::Utc>::from(t)
-                    .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
-            });
-            let data = json!({
-                "kind": KIND_WORKSPACE_STALE_EXPIRED,
-                "retryable": false,
-                "retry_after_ms": Value::Null,
-                "details": {
-                    "root": root.display().to_string(),
-                    "age_hours": age_hours,
-                    "cap_hours": cap_hours,
-                    "last_good_at": last_good_at_str,
-                    "last_error": last_error,
-                },
-            });
-            McpError::internal_error(
-                format!(
-                    "workspace {} stale ({age_hours}h > {cap_hours}h cap)",
-                    root.display()
-                ),
-                Some(data),
-            )
-        }
+        } => workspace_stale_expired_error(
+            &root,
+            age_hours,
+            cap_hours,
+            last_good_at,
+            last_error.as_deref(),
+        ),
 
         // SGA04 Gate-A major #5 — keep `WorkspaceIncompatibleGraph`
         // distinct from the catch-all so MCP clients receive a
         // dedicated `kind` tag and the `reason` string is preserved
         // verbatim in `details.reason` (no collapse to "Internal").
         DaemonError::WorkspaceIncompatibleGraph { root, reason } => {
-            let data = json!({
-                "kind": KIND_WORKSPACE_INCOMPATIBLE_GRAPH,
-                "retryable": false,
-                "retry_after_ms": Value::Null,
-                "details": {
-                    "root": root.display().to_string(),
-                    "reason": reason.clone(),
-                },
-            });
-            McpError::internal_error(
-                format!(
-                    "workspace {} graph is incompatible with this binary: {reason}",
-                    root.display()
-                ),
-                Some(data),
-            )
+            workspace_incompatible_error(&root, &reason)
         }
 
         // PB-1 — pre-flight cost gate rejection. The CC-2 7-key
@@ -291,15 +329,7 @@ pub fn daemon_err_to_mcp(e: DaemonError) -> McpError {
         // verbatim. Wire envelope (kind / retryable / retry_after_ms /
         // details) is byte-identical to the standalone
         // `RpcError::query_too_broad` shape.
-        DaemonError::QueryTooBroad { reason, details } => {
-            let data = json!({
-                "kind": KIND_QUERY_TOO_BROAD,
-                "retryable": false,
-                "retry_after_ms": Value::Null,
-                "details": details,
-            });
-            McpError::invalid_params(format!("query rejected: {reason}"), Some(data))
-        }
+        DaemonError::QueryTooBroad { reason, details } => query_too_broad_error(&reason, &details),
 
         // Server-lifecycle errors (Config, Io, MemoryBudgetExceeded,
         // WorkspaceEvicted). If these reach MCP the daemon is likely
@@ -319,6 +349,7 @@ pub fn daemon_err_to_mcp(e: DaemonError) -> McpError {
 /// Call-site-aware wrapper that builds the tool name into
 /// `details.tool` for [`DaemonError::ToolTimeout`]. For all other
 /// variants this is equivalent to [`daemon_err_to_mcp`].
+#[must_use]
 pub fn daemon_err_to_mcp_with_tool(e: DaemonError, tool_name: &str) -> McpError {
     match e {
         DaemonError::ToolTimeout { root, secs, .. } => {

@@ -406,9 +406,7 @@ fn map_acquisition_error_for_engine(err: GraphAcquisitionError) -> anyhow::Error
                 let all_have_features =
                     sqry_plugin_registry::all_unknown_ids_have_features(&unknown_plugin_ids);
                 let manifest_str = manifest_path
-                    .as_ref()
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_else(|| "<unknown>".to_string());
+                    .as_ref().map_or_else(|| "<unknown>".to_string(), |p| p.display().to_string());
                 let suggestion = if !suggested.is_empty() {
                     format!(
                         "Rebuild this binary with `cargo install --path sqry-cli --features {}` \
@@ -893,24 +891,21 @@ fn check_daemon_workspace_conflict(workspace_root: &Path) -> Result<()> {
     // a tokio executor (rmcp spawns an async task per connection).
     // block_in_place suspends the executor thread so we can block_on safely without
     // triggering "Cannot start a runtime from within a runtime".
-    match tokio::runtime::Handle::try_current() {
-        Ok(handle) => {
-            let workspace_owned = workspace_root.to_path_buf();
-            let socket_owned = socket_path.clone();
-            tokio::task::block_in_place(move || {
-                handle.block_on(async move {
-                    check_daemon_workspace_conflict_async(&workspace_owned, &socket_owned).await
-                })
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        let workspace_owned = workspace_root.to_path_buf();
+        let socket_owned = socket_path.clone();
+        tokio::task::block_in_place(move || {
+            handle.block_on(async move {
+                check_daemon_workspace_conflict_async(&workspace_owned, &socket_owned).await
             })
-        }
-        Err(_) => {
-            // No async runtime available (e.g., called from a pure sync test binary).
-            tracing::debug!(
-                socket = %socket_path.display(),
-                "No async runtime available — skipping daemon conflict check"
-            );
-            Ok(())
-        }
+        })
+    } else {
+        // No async runtime available (e.g., called from a pure sync test binary).
+        tracing::debug!(
+            socket = %socket_path.display(),
+            "No async runtime available — skipping daemon conflict check"
+        );
+        Ok(())
     }
 }
 
@@ -1031,7 +1026,7 @@ async fn check_daemon_workspace_conflict_async(
 fn is_force_standalone() -> bool {
     matches!(
         std::env::var("SQRY_FORCE_STANDALONE").as_deref(),
-        Ok("1") | Ok("true")
+        Ok("1" | "true")
     )
 }
 
@@ -1373,10 +1368,7 @@ fn get_cached_engine(workspace: &Path) -> Result<Option<Arc<Engine>>> {
                 workspace = %workspace.display(),
                 "Manifest absent during cache reload — evicting cache entry"
             );
-            let mut cache = ENGINE_CACHE.lock();
-            if let Some(lru) = cache.as_mut() {
-                lru.pop(workspace);
-            }
+            evict_cached_engine(workspace);
             return Ok(None);
         }
         Err(e) => {
@@ -1407,10 +1399,7 @@ fn get_cached_engine(workspace: &Path) -> Result<Option<Arc<Engine>>> {
                     workspace = %workspace.display(),
                     "Manifest removed between stat and open (TOCTOU) — evicting cache entry"
                 );
-                let mut cache = ENGINE_CACHE.lock();
-                if let Some(lru) = cache.as_mut() {
-                    lru.pop(workspace);
-                }
+                evict_cached_engine(workspace);
                 return Ok(None);
             }
             return Err(e);
@@ -1463,6 +1452,13 @@ fn get_cached_engine(workspace: &Path) -> Result<Option<Arc<Engine>>> {
         );
         lru.pop(workspace);
         Ok(None)
+    }
+}
+
+fn evict_cached_engine(workspace: &Path) {
+    let mut cache = ENGINE_CACHE.lock();
+    if let Some(lru) = cache.as_mut() {
+        lru.pop(workspace);
     }
 }
 

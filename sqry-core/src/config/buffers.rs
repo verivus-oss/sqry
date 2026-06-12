@@ -464,7 +464,7 @@ pub fn json_max_nodes() -> u32 {
 /// Default maximum graph snapshot data section size (16 GB).
 ///
 /// Sized to comfortably hold the serialized graph for the largest realistic
-/// codebases — including the Linux kernel (~30M LoC / ~80K files, ~7–8 GB of
+/// codebases — including the Linux kernel (~30M `LoC` / ~80K files, ~7–8 GB of
 /// serialized graph data) and similar mega-repos such as Chromium and AOSP —
 /// with significant headroom for future growth.
 ///

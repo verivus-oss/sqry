@@ -662,7 +662,7 @@ pub enum Command {
     /// Relation queries (28 languages with full support):
     ///   - callers:authenticate           # Who calls authenticate?
     ///   - callees:processData            # What does processData call?
-    ///   - exports:UserService            # What does UserService export?
+    ///   - exports:UserService            # What does `UserService` export?
     ///   - imports:database               # What imports database?
     ///
     /// Supported for: C, C++, C#, CSS, Dart, Elixir, Go, Groovy, Haskell, HTML,
@@ -1820,7 +1820,7 @@ pub enum Command {
     ///   sqry impact -d 5 `MyClass`                # Deep analysis (5 levels)
     ///   sqry impact --direct-only func          # Only direct dependents
     ///   sqry impact --show-files func           # Show affected files
-    ///   sqry impact do_exit --in kernel/exit.c  # Disambiguate by file
+    ///   sqry impact `do_exit` --in kernel/exit.c  # Disambiguate by file
     #[command(alias = "imp", display_order = 24, verbatim_doc_comment)]
     Impact {
         /// Symbol to analyze.
@@ -2069,7 +2069,7 @@ pub enum DaemonAction {
     ///
     ///   Loaded / Failed / Evicted → Unloaded
     ///   Rebuilding → cancellation dispatched (-32009; retry after 250ms)
-    ///   Loading    → -32008 ResetWhileLoading
+    ///   Loading    → -32008 `ResetWhileLoading`
     #[command(verbatim_doc_comment)]
     Reset {
         /// Workspace root directory to reset.

@@ -83,6 +83,11 @@ fn resolve_workspace_path(path: &str) -> Option<PathBuf> {
 /// independent. The multi-hop frontier-broadening bug DB15's followup
 /// fixed for `relation_query` cannot manifest because no name-keyed
 /// dispatch runs inside the BFS.
+///
+/// # Errors
+///
+/// Returns an error if workspace resolution, graph acquisition, seed
+/// resolution, or dependency graph traversal fails.
 pub fn execute_get_dependencies(
     args: &ShowDependenciesArgs,
 ) -> Result<ToolExecution<DependencyGraphData>> {
@@ -315,6 +320,11 @@ fn call_edge_metadata(edge_kind: &EdgeKind) -> Option<Value> {
 /// A `module::a::helper` seed will therefore never pull in
 /// `module::b::helper`'s call chain, matching the DB15/DB16 frontier
 /// invariant used by `dependency_impact` / `show_dependencies`.
+///
+/// # Errors
+///
+/// Returns an error if workspace resolution, graph acquisition, seed
+/// resolution, graph traversal, or export rendering fails.
 pub fn execute_export_graph(args: &ExportGraphArgs) -> Result<ToolExecution<DependencyGraphData>> {
     // Pre-refactor timing: `start` fires before engine resolution.
     let start = Instant::now();
@@ -723,6 +733,11 @@ fn render_export_graph(
 /// retained — it is a materialization cache keyed on the full
 /// `SubgraphCacheKey` (including `GraphIdentity`), not a planner query.
 /// DB19 / DB21 own the retirement decision.
+///
+/// # Errors
+///
+/// Returns an error if workspace resolution, graph acquisition, seed
+/// resolution, or subgraph materialization fails.
 pub fn execute_subgraph(args: &SubgraphArgs) -> Result<ToolExecution<DependencyGraphData>> {
     // Pre-refactor timing: `start` fires before engine resolution.
     let start = Instant::now();

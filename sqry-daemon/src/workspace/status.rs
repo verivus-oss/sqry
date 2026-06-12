@@ -100,7 +100,7 @@ pub struct WorkspaceStatus {
     /// publish. Resets to 0 on `record_success`.
     pub retry_count: u32,
 
-    /// STEP_12 telemetry — short (16 hex chars) form of the
+    /// `STEP_12` telemetry — short (16 hex chars) form of the
     /// `WorkspaceKey::workspace_id` digest, suitable for human-scale
     /// log lines and CLI columns. `None` for anonymous (per-source-root)
     /// keys that carry no logical-workspace identity. Display only —
@@ -109,7 +109,7 @@ pub struct WorkspaceStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_id_short: Option<String>,
 
-    /// STEP_12 telemetry — full 64-hex-char form of the
+    /// `STEP_12` telemetry — full 64-hex-char form of the
     /// `WorkspaceKey::workspace_id` digest. Machine identity. Scripts
     /// consuming the JSON payload **MUST** key on this field rather
     /// than [`Self::workspace_id_short`] to avoid the (remote, but

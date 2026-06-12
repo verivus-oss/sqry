@@ -165,7 +165,7 @@ impl AliasTable {
     /// impl (A2 §K row K.A12). Callers that hold the table behind an `Arc`
     /// must reach it through `Arc::make_mut` before invoking this method.
     ///
-    /// `#[allow(dead_code)]` mirrors the NodeIdBearing trait itself: Gate 0b
+    /// `#[allow(dead_code)]` mirrors the `NodeIdBearing` trait itself: Gate 0b
     /// lands the scaffolding and unit tests, Gate 0c adds the production
     /// call site in `RebuildGraph::finalize()`.
     #[allow(dead_code)]
@@ -181,7 +181,7 @@ impl AliasTable {
     /// replacing any ID that appears as a key with its canonical value.
     ///
     /// This is the mutation entry point used by Gate 0c's finalize step 1
-    /// (StringId canonicalisation). `from_symbol` is part of the
+    /// (`StringId` canonicalisation). `from_symbol` is part of the
     /// `(scope, from_symbol)` sort key, so after rewrite the entries are
     /// re-sorted by `(scope, from_symbol)` and `by_scope` is rebuilt so
     /// `resolve_alias` / `aliases_in` keep returning consistent results.
@@ -328,14 +328,13 @@ pub(crate) fn derive_aliases<G: GraphMutationTarget>(
             };
 
             // Resolve the enclosing scope.
-            let scope = match node_to_scope.get(source_node_id).copied() {
-                Some(id) => id,
-                None => {
-                    // The source node has no corresponding scope. Emit the
-                    // entry with INVALID scope and count it for observability.
-                    invalid_scope_count += 1;
-                    ScopeId::INVALID
-                }
+            let scope = if let Some(id) = node_to_scope.get(source_node_id).copied() {
+                id
+            } else {
+                // The source node has no corresponding scope. Emit the
+                // entry with INVALID scope and count it for observability.
+                invalid_scope_count += 1;
+                ScopeId::INVALID
             };
 
             // `alias` holds the local name (e.g., `baz` in `use foo::bar as baz`).

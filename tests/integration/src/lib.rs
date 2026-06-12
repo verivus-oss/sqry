@@ -1,5 +1,5 @@
 //! Cross-surface integration test scaffolding for the
-//! workspace-aware-cross-repo workstream (STEP_11).
+//! workspace-aware-cross-repo workstream (`STEP_11`).
 //!
 //! This crate intentionally exposes a **single helper module**
 //! (`fixtures`) that constructs realistic on-disk

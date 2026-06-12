@@ -230,7 +230,7 @@ impl FileRegistry {
     /// Gate 0c/0d bucket-bijection check (A2 §F.1).
     ///
     /// Yields `(FileId, Vec<NodeId>)` tuples, one per file that has at
-    /// least one recorded NodeId. Each returned `Vec<NodeId>` is a
+    /// least one recorded `NodeId`. Each returned `Vec<NodeId>` is a
     /// **clone** of the internal bucket; the registry continues to own
     /// the canonical storage, so callers must not assume identity
     /// between repeated invocations. The iterator's ordering is whatever
@@ -331,7 +331,7 @@ impl FileRegistry {
     /// This is the real impl behind the Gate 0c finalize step 6
     /// compaction. It runs *after* the arena's tombstone predicate has
     /// been fixed (step 2), so `keep` is backed by "arena has this
-    /// NodeId live" semantics.
+    /// `NodeId` live" semantics.
     #[allow(dead_code)]
     pub(crate) fn retain_nodes_in_buckets<F>(&mut self, keep: &F)
     where

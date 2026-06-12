@@ -69,7 +69,7 @@
 //! The earlier implementation ran two full recursive walks (a scope-arena
 //! pass then a declaration-binding pass) and, in the second pass, located
 //! each declaration's owning scope with `innermost_scope_for_offset` — an
-//! O(num_scopes) linear scan, i.e. O(scopes×decls) per file. Profiling of
+//! `O(num_scopes)` linear scan, i.e. O(scopes×decls) per file. Profiling of
 //! `bench_full_build_linux_fs_subset` (verivus-oss/sqry#280) showed the
 //! scope-index build was the dominant Phase-A build-time cost (~1.08 ms of
 //! ~1.8 ms total Phase-A overhead). Fusing into one walk that binds to the
@@ -140,7 +140,7 @@ struct Builder<'a> {
     content: &'a [u8],
 }
 
-impl<'a> Builder<'a> {
+impl Builder<'_> {
     fn open_scope(&mut self, span: (usize, usize), explicit_parent: Option<usize>) -> usize {
         let parent = explicit_parent.or_else(|| self.scope_stack.last().copied());
         let idx = self.scopes.len();

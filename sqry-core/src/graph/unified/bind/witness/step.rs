@@ -168,7 +168,7 @@ impl fmt::Display for ResolutionStep {
                 write!(f, "consider candidate {node} at rank {rank}")
             }
             ResolutionStep::FollowAlias { alias, from, to } => {
-                write!(f, "follow alias {:?}: {from} → {to}", alias)
+                write!(f, "follow alias {alias:?}: {from} → {to}")
             }
             ResolutionStep::ShadowedBy {
                 outer,

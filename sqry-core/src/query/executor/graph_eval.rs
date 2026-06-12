@@ -300,7 +300,7 @@ pub fn evaluate_all(ctx: &mut GraphEvalContext, expr: &Expr) -> Result<Vec<NodeI
     // wire envelope reflects the deadline cancel (rather than getting
     // reclassified as `runtime_budget` if a tick() ran later).
     if ctx.budget.cancel.is_cancelled() {
-        ctx.budget.mark_external_cancel();
+        let _ = ctx.budget.mark_external_cancel();
         return Err(crate::query::QueryError::Cancelled.into());
     }
     // Precompute all subquery result sets before the per-node evaluation loop.
@@ -339,7 +339,7 @@ pub fn evaluate_all(ctx: &mut GraphEvalContext, expr: &Expr) -> Result<Vec<NodeI
     // `None → Budget` and reclassify a deadline-cancellation as a
     // runtime-budget rejection on the wire.
     if ctx.cancellation.is_cancelled() {
-        ctx.budget.mark_external_cancel();
+        let _ = ctx.budget.mark_external_cancel();
         return finalize_span_and_return(ctx, Err(classify_cancel(&ctx.budget)), expr);
     }
 
@@ -370,7 +370,7 @@ pub fn evaluate_all(ctx: &mut GraphEvalContext, expr: &Expr) -> Result<Vec<NodeI
                     // flipped the token but didn't mark the budget.
                     // No-op when Budget was already CAS'd by a
                     // concurrent worker's tick().
-                    ctx.budget.mark_external_cancel();
+                    let _ = ctx.budget.mark_external_cancel();
                     bail = Some(classify_cancel(&ctx.budget));
                     break;
                 }
@@ -424,7 +424,7 @@ pub fn evaluate_all(ctx: &mut GraphEvalContext, expr: &Expr) -> Result<Vec<NodeI
                     // classify_cancel so a subsequent tick() can't
                     // reclassify a deadline-cancellation as
                     // runtime_budget on the wire.
-                    budget.mark_external_cancel();
+                    let _ = budget.mark_external_cancel();
                     return Err(classify_cancel(&budget));
                 }
                 if budget.tick().is_err() {

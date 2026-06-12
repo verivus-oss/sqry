@@ -173,14 +173,14 @@ pub struct ViewWithFixture {
     /// The owning fixture (kept alive for the duration of the test).
     pub fixture: TwoPlusOnePlusOne,
     /// The redaction-side projection of the fixture's logical
-    /// workspace. Mirrors the shape STEP_7's MCP wiring constructs.
+    /// workspace. Mirrors the shape `STEP_7`'s MCP wiring constructs.
     pub view: sqry_mcp_redaction::LogicalWorkspaceView,
 }
 
 /// Lift the `TwoPlusOnePlusOne` fixture's `LogicalWorkspace` into the
-/// MCP-side `LogicalWorkspaceView` that STEP_7 binds to the redactor.
+/// MCP-side `LogicalWorkspaceView` that `STEP_7` binds to the redactor.
 ///
-/// This is the projection STEP_7 ships in `sqry-mcp/src/server.rs`
+/// This is the projection `STEP_7` ships in `sqry-mcp/src/server.rs`
 /// when a `LogicalWorkspace` is resolved at session start. Reproducing
 /// the projection here (rather than calling into `sqry-mcp`) keeps the
 /// integration test crate decoupled from the MCP entry-point binary.

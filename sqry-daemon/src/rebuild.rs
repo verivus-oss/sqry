@@ -88,7 +88,7 @@
 
 use std::{
     collections::HashMap,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         Arc, OnceLock,
         atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering},
@@ -577,7 +577,7 @@ impl TestCapture {
 #[doc(hidden)]
 #[derive(Debug, Clone)]
 pub struct CapturedIteration {
-    /// The ChangeSet as-consumed by this iteration (post-coalesce).
+    /// The `ChangeSet` as-consumed by this iteration (post-coalesce).
     pub changeset: ChangeSet,
     /// Mode decided for this iteration.
     pub mode: RebuildMode,
@@ -620,7 +620,7 @@ struct WatcherEntry {
     /// Monotonic generation token. Assigned at construction time from
     /// `RebuildDispatcher::next_watcher_generation`; used by
     /// `reap_watcher` to distinguish "my entry" from "a newer entry
-    /// for the same WorkspaceKey".
+    /// for the same `WorkspaceKey`".
     generation: u64,
     /// `true` while the async task is processing dispatches. Flipped
     /// to `false` as the first action of the post-loop cleanup
@@ -968,21 +968,21 @@ impl RebuildDispatcher {
             };
 
             // Try to acquire the runner role.
-            match ws.rebuild_in_flight.compare_exchange(
+            let acquired_runner = ws.rebuild_in_flight.compare_exchange(
                 false,
                 true,
                 Ordering::AcqRel,
                 Ordering::Acquire,
-            ) {
-                Ok(_) => coalesced, // We own the runner role.
-                Err(_) => {
-                    // Another runner is active — park coalesced in
-                    // the lane; that runner will drain it at its next
-                    // drain-loop iteration. Return Ok(()) without
-                    // executing the pipeline.
-                    *lane_guard = Some(coalesced);
-                    return Ok(());
-                }
+            );
+            if acquired_runner.is_ok() {
+                coalesced
+            } else {
+                // Another runner is active — park coalesced in
+                // the lane; that runner will drain it at its next
+                // drain-loop iteration. Return Ok(()) without
+                // executing the pipeline.
+                *lane_guard = Some(coalesced);
+                return Ok(());
             }
             // lane_guard dropped at end of scope.
         };
@@ -1062,13 +1062,12 @@ impl RebuildDispatcher {
             // snapshot, so parked pending cannot be stranded.
             let next: Option<PendingRebuild> = {
                 let mut lane_guard = ws.rebuild_lane.lock().await;
-                match lane_guard.take() {
-                    Some(next) => Some(next),
-                    None => {
-                        ws.rebuild_in_flight.store(false, Ordering::Release);
-                        sentinel.armed = false;
-                        None
-                    }
+                if let Some(next) = lane_guard.take() {
+                    Some(next)
+                } else {
+                    ws.rebuild_in_flight.store(false, Ordering::Release);
+                    sentinel.armed = false;
+                    None
                 }
                 // lane_guard dropped at end of scope.
             };
@@ -1177,7 +1176,7 @@ impl RebuildDispatcher {
         let reservation = match self.manager.reserve_rebuild(key, estimate) {
             Ok(r) => r,
             Err(e) => {
-                self.record_and_transition_on_err(ws, &e);
+                Self::record_and_transition_on_err(ws, &e);
                 return Err(e);
             }
         };
@@ -1217,7 +1216,7 @@ impl RebuildDispatcher {
                     cap.pass_boundary_cancellations
                         .fetch_add(1, Ordering::AcqRel);
                 }
-                self.record_and_transition_on_err(ws, &e);
+                Self::record_and_transition_on_err(ws, &e);
                 return Err(e);
             }
         };
@@ -1290,7 +1289,7 @@ impl RebuildDispatcher {
                 match self.manager.publish_and_retain(reservation, ws, new_graph) {
                     Ok((token, arc)) => (token, arc),
                     Err(e) => {
-                        self.record_and_transition_on_err(ws, &e);
+                        Self::record_and_transition_on_err(ws, &e);
                         return Err(e);
                     }
                 };
@@ -1367,7 +1366,7 @@ impl RebuildDispatcher {
     /// - Any other `DaemonError` → `record_failure` + transition to
     ///   `WorkspaceState::Failed`. This is the entry point to A2
     ///   §G.7's stale-serve flow for that workspace.
-    fn record_and_transition_on_err(&self, ws: &LoadedWorkspace, err: &DaemonError) {
+    fn record_and_transition_on_err(ws: &LoadedWorkspace, err: &DaemonError) {
         if matches!(err, DaemonError::WorkspaceEvicted { .. }) {
             // Cluster-G iter-3 BLOCKER 3 fix: differentiate
             // eviction-path from reset-path cancellations by reading
@@ -1392,7 +1391,7 @@ impl RebuildDispatcher {
     /// they must not block a tokio runtime worker thread. The blocking
     /// closure owns the cloned `Arc<PluginManager>` /
     /// [`BuildConfig`] / `Arc<CodeGraph>` / cancellation token so it
-    /// outlives the awaited JoinHandle.
+    /// outlives the awaited `JoinHandle`.
     ///
     /// Task 7 Phase 7c: a tokio task (`spawn_cancellation_forwarder`)
     /// polls `ws.rebuild_cancelled` at `CANCEL_FORWARDER_POLL_MS`
@@ -1566,7 +1565,7 @@ impl RebuildDispatcher {
     /// # Placement constraint
     ///
     /// This method lives on `RebuildDispatcher`, NOT `WorkspaceManager`
-    /// (per the 7b2 RESUME_PROMPT constraint): coupling watcher
+    /// (per the 7b2 `RESUME_PROMPT` constraint): coupling watcher
     /// lifecycle into `manager.get_or_load` would pollute the
     /// manager's responsibilities and create a dispatcher↔manager
     /// cycle. Test harnesses (and Task 9's future daemon bootstrap)
@@ -1578,11 +1577,11 @@ impl RebuildDispatcher {
     ///   [`sqry_core::watch::SourceTreeWatcher::new`] fails (typical
     ///   cause: `.gitignore` read error or
     ///   `notify::RecommendedWatcher::new` failure).
-    pub async fn ensure_watching(
+    pub fn ensure_watching(
         self: &Arc<Self>,
         key: &WorkspaceKey,
-        ws: Arc<LoadedWorkspace>,
-        root: PathBuf,
+        ws: &Arc<LoadedWorkspace>,
+        root: &Path,
     ) -> Result<(), DaemonError> {
         // Hold `self.watchers` across the ENTIRE operation — check,
         // watcher construction, spawn, and insert. Releasing the
@@ -1635,7 +1634,7 @@ impl RebuildDispatcher {
 
         // Step 3 — Construct the watcher (sync I/O). Errors bubble
         // up via `?`; the locked guard is dropped on return.
-        let watcher = SourceTreeWatcher::new(&root).map_err(|e| {
+        let watcher = SourceTreeWatcher::new(root).map_err(|e| {
             DaemonError::Io(std::io::Error::other(format!(
                 "failed to create watcher for {}: {e:#}",
                 root.display()
@@ -1686,7 +1685,7 @@ impl RebuildDispatcher {
 
         // Step 6a — Spawn the blocking watcher thread.
         let blocking_handle = {
-            let ws = Arc::clone(&ws);
+            let ws = Arc::clone(ws);
             tokio::task::spawn_blocking(move || {
                 watch_loop_blocking(&watcher, &tx, &ws, debounce, cancel_poll_period);
             })
@@ -1696,7 +1695,7 @@ impl RebuildDispatcher {
         let async_handle = {
             let dispatcher = Arc::clone(self);
             let key = key.clone();
-            let ws = Arc::clone(&ws);
+            let ws = Arc::clone(ws);
             let live_for_task = Arc::clone(&live);
             tokio::spawn(async move {
                 dispatch_loop_async(&dispatcher, &key, &ws, rx).await;
@@ -1840,7 +1839,6 @@ fn watch_loop_blocking(
                 // events that all got filtered (editor temps,
                 // gitignored paths, .git/ internals). Do not wake
                 // the async side; loop and wait for the next batch.
-                continue;
             }
             Ok(Some(cs)) if cs.changed_files.is_empty() && !cs.requires_full_rebuild() => {
                 // Git-state-only change whose classifier output does
@@ -1850,7 +1848,6 @@ fn watch_loop_blocking(
                 // themselves — a real commit that changed the working
                 // tree was already observed as a source-tree event.
                 // Skip silently; loop for the next debounce window.
-                continue;
             }
             Ok(Some(cs)) if cs.changed_files.is_empty() && cs.requires_full_rebuild() => {
                 // Empty-files + full-rebuild classification
@@ -1894,7 +1891,6 @@ fn watch_loop_blocking(
                     git_class = ?cs.git_change_class,
                     "skipping empty-files full-rebuild signal: TOCTOU or graph-neutral git move"
                 );
-                continue;
             }
             Ok(Some(cs)) => {
                 // Capture the git state AS OF now (after debounce
@@ -1935,7 +1931,7 @@ fn watch_loop_blocking(
 ///
 /// Transient errors (`MemoryBudgetExceeded`, `WorkspaceBuildFailed`,
 /// `Io`) continue the loop — the baseline is not advanced (the
-/// publish did not happen), so the next wait_for_changes_cancellable
+/// publish did not happen), so the next `wait_for_changes_cancellable`
 /// call re-observes the divergence and retries.
 async fn dispatch_loop_async(
     dispatcher: &Arc<RebuildDispatcher>,
@@ -2411,7 +2407,6 @@ mod tests {
     /// the helper must NOT clobber the Evicted state.
     #[test]
     fn record_and_transition_on_err_preserves_evicted_state() {
-        let dispatcher = make_dispatcher_for_gate_test();
         let ws = Arc::new(LoadedWorkspace::new(
             crate::workspace::state::WorkspaceKey::new(
                 std::path::PathBuf::from("/repo"),
@@ -2424,7 +2419,7 @@ mod tests {
         let err = DaemonError::WorkspaceEvicted {
             root: std::path::PathBuf::from("/repo"),
         };
-        dispatcher.record_and_transition_on_err(&ws, &err);
+        RebuildDispatcher::record_and_transition_on_err(&ws, &err);
         assert_eq!(
             ws.load_state(),
             crate::workspace::state::WorkspaceState::Evicted,
@@ -2445,7 +2440,6 @@ mod tests {
     /// until `daemon stop && daemon start`).
     #[test]
     fn record_and_transition_on_err_unloads_reset_in_iteration_cancel() {
-        let dispatcher = make_dispatcher_for_gate_test();
         let ws = Arc::new(LoadedWorkspace::new(
             crate::workspace::state::WorkspaceKey::new(
                 std::path::PathBuf::from("/repo"),
@@ -2460,7 +2454,7 @@ mod tests {
         let err = DaemonError::WorkspaceEvicted {
             root: std::path::PathBuf::from("/repo"),
         };
-        dispatcher.record_and_transition_on_err(&ws, &err);
+        RebuildDispatcher::record_and_transition_on_err(&ws, &err);
         assert_eq!(
             ws.load_state(),
             crate::workspace::state::WorkspaceState::Unloaded,
@@ -2473,7 +2467,6 @@ mod tests {
     /// `Internal`) → `Failed` regardless of starting state.
     #[test]
     fn record_and_transition_on_err_failed_for_non_eviction_errors() {
-        let dispatcher = make_dispatcher_for_gate_test();
         let ws = Arc::new(LoadedWorkspace::new(
             crate::workspace::state::WorkspaceKey::new(
                 std::path::PathBuf::from("/repo"),
@@ -2484,7 +2477,7 @@ mod tests {
         ));
         ws.store_state(crate::workspace::state::WorkspaceState::Rebuilding);
         let err = DaemonError::Internal(anyhow::anyhow!("plugin panic"));
-        dispatcher.record_and_transition_on_err(&ws, &err);
+        RebuildDispatcher::record_and_transition_on_err(&ws, &err);
         assert_eq!(
             ws.load_state(),
             crate::workspace::state::WorkspaceState::Failed,

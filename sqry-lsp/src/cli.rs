@@ -66,7 +66,7 @@ pub struct LspOptions {
     /// `ShimRegister { protocol: Lsp, pid: std::process::id() }` frame
     /// as the very first wire frame, awaits `ShimRegisterAck`, and
     /// then pumps bytes bidirectionally between this process's
-    /// stdin/stdout and the shim connection. The actual tower_lsp
+    /// stdin/stdout and the shim connection. The actual `tower_lsp`
     /// server lives inside the daemon and is hosted via
     /// `daemon_host::host_on_streams`.
     ///

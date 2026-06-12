@@ -397,30 +397,18 @@ fn walk_condition(
 fn classify_condition(cond: &Condition, cfg: &CostGateConfig) -> Class {
     let field = cond.field.as_str();
     match (&cond.value, &cond.operator) {
-        // Equal-operator conditions on indexed fields are always
-        // cheap regardless of value.
-        (Value::String(_), Operator::Equal)
-        | (Value::Boolean(_), Operator::Equal)
-        | (Value::Number(_), Operator::Equal) => Class::Cheap,
+        // Equal-operator conditions on indexed fields are always cheap
+        // regardless of value. Variable values are only reachable if
+        // `resolve_variables` skipped them, so keep their conservative
+        // cheap classification independent of the operator.
+        (Value::String(_) | Value::Boolean(_) | Value::Number(_), Operator::Equal)
+        | (Value::Variable(_), _) => Class::Cheap,
         // String literal and `Equal` against a name field is cheap
         // (auxiliary `name_index` hit). Same for path globs.
         (Value::Regex(rv), Operator::Regex) => regex_class(field, &rv.pattern, cfg),
-        // Range comparisons on numeric fields are bounded by index
-        // count.
-        (_, Operator::Greater | Operator::Less | Operator::GreaterEq | Operator::LessEq) => {
-            Class::Medium
-        }
-        // Subquery values: the subquery walk above already validated
-        // the inner; the outer condition's classification is medium
-        // (the executor walks the subquery's matched-set and joins
-        // against the outer field's index — bounded by the smaller
-        // side).
-        (Value::Subquery(_), _) => Class::Medium,
-        // Variable values (only reachable if `resolve_variables`
-        // skipped them). Conservative cheap classification.
-        (Value::Variable(_), _) => Class::Cheap,
-        // Default: anything else is medium (single-equal on a
-        // non-name field).
+        // Default: range comparisons, subquery joins, and anything
+        // else are medium (bounded by an index count or by the smaller
+        // matched-set side).
         _ => Class::Medium,
     }
 }
@@ -460,15 +448,12 @@ fn regex_shape_is_acceptable(pattern: &str, cfg: &CostGateConfig) -> bool {
     let mut extractor = regex_syntax::hir::literal::Extractor::new();
     extractor.kind(regex_syntax::hir::literal::ExtractKind::Prefix);
     let prefixes = extractor.extract(&hir);
-    let longest_prefix = prefixes
-        .literals()
-        .map(|lits| {
-            lits.iter()
-                .map(|lit| lit.as_bytes().len())
-                .max()
-                .unwrap_or(0)
-        })
-        .unwrap_or(0);
+    let longest_prefix = prefixes.literals().map_or(0, |lits| {
+        lits.iter()
+            .map(|lit| lit.as_bytes().len())
+            .max()
+            .unwrap_or(0)
+    });
     // Strict `>` comparison: a literal prefix of EXACTLY
     // `min_prefix_len` chars is the "border-tight" case the design
     // §6 row `gate_rejects_short_anchored_regex_below_prefix_len`

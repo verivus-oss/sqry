@@ -23,7 +23,7 @@ use crate::relations::graph_builder::{
     is_go_predeclared_type, span_from_byte_range, span_from_node,
 };
 
-/// C_SUPPRESS: flag a freshly-staged Variable node as synthetic via
+/// `C_SUPPRESS`: flag a freshly-staged Variable node as synthetic via
 /// the metadata-store bit.
 ///
 /// Companion to the `add_synthetic_variable` helper in
@@ -767,7 +767,7 @@ fn materialise_local_binding(
     // carry identical `Span` derivations: full `(line, column)` from
     // byte offsets via `span_from_byte_range`.
     let span = span_from_byte_range(content, decl_start_byte, decl_end_byte);
-    let qualified_var = format!("{name}@{}", decl_start_byte);
+    let qualified_var = format!("{name}@{decl_start_byte}");
     let node_id = helper.add_node(&qualified_var, Some(span), kind);
     flag_synthetic(helper, node_id);
     tree.attach_node_id(name, decl_start_byte, node_id);

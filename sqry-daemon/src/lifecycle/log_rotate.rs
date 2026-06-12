@@ -22,7 +22,7 @@
 //!
 //! `docs/reviews/sqryd-daemon/2026-04-19/task-9-design_iter3_request.md` §G.
 //!
-//! - §G.1  `install_tracing` — NOTIFY_SOCKET gate (m4 fix).
+//! - §G.1  `install_tracing` — `NOTIFY_SOCKET` gate (m4 fix).
 //! - §G.2  `RollingSizeAppender` — M3 explicit handle close before rename,
 //!   M4 degraded mode + `OVERFLOW_FACTOR` + `RETRY_INTERVAL` + sidecar
 //!   `rotate-errors.log` via `target="sqryd.rotate"` filter.
@@ -124,10 +124,10 @@ impl RollingState {
     /// oldest).
     fn rotated_path(&self, n: u32) -> PathBuf {
         let mut p = self.base_path.clone();
-        let fname = p
-            .file_name()
-            .map(|f| format!("{}.{}", f.to_string_lossy(), n))
-            .unwrap_or_else(|| format!("sqryd.log.{n}"));
+        let fname = p.file_name().map_or_else(
+            || format!("sqryd.log.{n}"),
+            |f| format!("{}.{}", f.to_string_lossy(), n),
+        );
         p.set_file_name(fname);
         p
     }
@@ -321,7 +321,7 @@ fn set_log_permissions(f: &File) {
 /// The target filter prevents it from being routed back through the failing
 /// `RollingSizeAppender`.
 ///
-/// Design reference: §G.2 M4 — report_degraded non-recursive sidecar path.
+/// Design reference: §G.2 M4 — `report_degraded` non-recursive sidecar path.
 fn report_degraded(base_path: &Path, err: &io::Error) {
     use chrono::Utc;
 
@@ -459,10 +459,7 @@ fn write_impl(state: &Mutex<RollingState>, buf: &[u8]) -> io::Result<usize> {
     // — Degraded: RenameFailed — try background retry if interval elapsed (M4).
     let in_rename_degraded = matches!(s.degraded, Some(DegradedReason::RenameFailed { .. }));
     if in_rename_degraded {
-        let should_retry = s
-            .last_retry
-            .map(|t| t.elapsed() >= RETRY_INTERVAL)
-            .unwrap_or(true);
+        let should_retry = s.last_retry.is_none_or(|t| t.elapsed() >= RETRY_INTERVAL);
         if should_retry {
             s.try_rotate(); // Updates degraded on success or failure.
         }

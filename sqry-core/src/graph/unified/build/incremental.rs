@@ -285,7 +285,7 @@ pub struct EdgeToRemove {
 /// Closure walking uses [`CodeGraph::reverse_dependency_index`] — widened
 /// from [`CodeGraph::reverse_import_index`] per Phase 3e's correctness
 /// requirement. Every inter-file live edge (Imports, Calls, References,
-/// TypeOf, Inherits, Implements, FfiCall, HttpRequest, and every other
+/// `TypeOf`, Inherits, Implements, `FfiCall`, `HttpRequest`, and every other
 /// cross-file-capable `EdgeKind`) drives closure widening. Termination is
 /// guaranteed because the file set is finite and `HashSet::insert` prevents
 /// revisits. Files not registered in the current graph are still included
@@ -380,7 +380,7 @@ pub fn compute_reverse_dep_closure(changed_files: &[FileId], graph: &CodeGraph) 
 /// file in the reverse-dep closure), Phase 3c (sub-steps 4–6: re-parse
 /// closure files + Pass 2 range assignment + Pass 3 parallel commit
 /// against `rebuild_graph` via the [`GraphMutationTarget`] abstraction),
-/// Phase 3d (sub-steps 7–9: ExportMap rebuild + Phase 4a/4b/4c/4c-prime/4d
+/// Phase 3d (sub-steps 7–9: `ExportMap` rebuild + Phase 4a/4b/4c/4c-prime/4d
 /// cross-file edge insertion + Pass 5 cross-language linking against
 /// `rebuild_graph`), and Phase 3e (sub-steps 10–13: per-pass cancellation
 /// polling + [`RebuildGraph::finalize`] + [`GraphMemorySize::heap_bytes`]
@@ -545,8 +545,8 @@ pub fn compute_reverse_dep_closure(changed_files: &[FileId], graph: &CodeGraph) 
 /// - at every iteration of the sub-step 4 re-parse loop (Phase 3c);
 /// - post sub-step 4 (between re-parse and Pass 2 range assignment);
 /// - post sub-step 6 (before sub-step 7 begins, Phase 3d);
-/// - pre sub-step 7 (before ExportMap rebuild, Phase 3d);
-/// - between sub-step 7 and sub-step 8 (after ExportMap, Phase 3d);
+/// - pre sub-step 7 (before `ExportMap` rebuild, Phase 3d);
+/// - between sub-step 7 and sub-step 8 (after `ExportMap`, Phase 3d);
 /// - between sub-step 8 and sub-step 9 (after Pass 4d, Phase 3d);
 /// - post sub-step 9 (after Pass 5, Phase 3d);
 /// - between Pass 5 and Phase 4e binding derivation (Phase 3e);
@@ -558,10 +558,10 @@ pub fn compute_reverse_dep_closure(changed_files: &[FileId], graph: &CodeGraph) 
 /// - [`RebuildGraph::finalize`] surfaces an internal compaction failure
 ///   (infallible today; the `Result` exists for future fallible
 ///   compaction primitives per `rebuild_graph.rs` step 1 contract).
-pub fn incremental_rebuild(
+pub fn incremental_rebuild<S: std::hash::BuildHasher>(
     current_graph: &CodeGraph,
     changed_files: &[PathBuf],
-    closure: &HashSet<FileId>,
+    closure: &HashSet<FileId, S>,
     plugins: &PluginManager,
     config: &BuildConfig,
     cancellation: &CancellationToken,
@@ -621,41 +621,7 @@ pub fn incremental_rebuild(
     // tests that arm a `cancel_after_n_files` hook can rely on "the
     // Nth remove_file call" being a well-defined event.
     // ------------------------------------------------------------------
-    let ordered_closure = ordered_closure_file_ids(closure);
-    // `iter_index` feeds the
-    // `#[cfg(any(test, feature = "rebuild-internals"))]`-gated
-    // per-iteration hook below. Production builds drop the value into
-    // an explicit `let _ = iter_index;` binding so the variable reads
-    // as "used" in every configuration — this avoids both
-    // `clippy::unused_enumerate_index` (would fire if truly unused)
-    // and `clippy::explicit_counter_loop` (would fire if we
-    // hand-rolled a counter), without any warning-suppression
-    // attributes on the loop.
-    for (iter_index, file_id) in ordered_closure.into_iter().enumerate() {
-        // Poll at every iteration boundary so dispatcher cancellation
-        // takes effect within one file even for very large closures.
-        // This is the Step 3 loop check — distinct from the pre-flight
-        // check (line ~440) and the post-clone check (line ~469). Its
-        // coverage is load-bearing for the Phase 3b cancellation tests
-        // that prove a token cancelled *between* iterations N and N+1
-        // short-circuits before the (N+1)th `remove_file`.
-        cancellation.check()?;
-        let _removed_nodes: Vec<NodeId> = rebuild_graph.remove_file(file_id);
-
-        // Per-iteration observation hook — gated on `test` /
-        // `rebuild-internals`. Tests that need to flip the cancellation
-        // token *between* `remove_file` calls register a callback here
-        // via [`testing::set_phase3b_iter_hook`]. The hook fires
-        // exactly once per iteration, immediately *after* the call to
-        // `remove_file` completes but *before* the next iteration's
-        // `cancellation.check()`. In non-test / non-`rebuild-internals`
-        // builds the `let _ = iter_index;` branch drains the enumerate
-        // index so no clippy suppression is required.
-        #[cfg(any(test, feature = "rebuild-internals"))]
-        testing::fire_phase3b_iter_hook(iter_index, file_id, &rebuild_graph);
-        #[cfg(not(any(test, feature = "rebuild-internals")))]
-        let _ = iter_index;
-    }
+    remove_closure_from_rebuild(&mut rebuild_graph, closure, cancellation)?;
 
     // Post-loop cancellation boundary. If the closure was empty we want
     // at least one check between Step 3 and Phase 3c sub-step 4.
@@ -667,7 +633,7 @@ pub fn incremental_rebuild(
     // here via [`testing::set_phase3b_post_substep3_hook`].
     // Production builds compile this call out entirely.
     #[cfg(any(test, feature = "rebuild-internals"))]
-    testing::fire_phase3b_post_substep3_hook(&rebuild_graph, closure);
+    fire_phase3b_post_substep3_hook_for_closure(&rebuild_graph, closure);
 
     // ------------------------------------------------------------------
     // Sub-steps 4–6 — Phase 3c real body (+ Phase 3e new-file leg).
@@ -951,6 +917,41 @@ pub fn incremental_rebuild(
     Ok(code_graph)
 }
 
+fn remove_closure_from_rebuild<S: std::hash::BuildHasher>(
+    rebuild_graph: &mut RebuildGraph,
+    closure: &HashSet<FileId, S>,
+    cancellation: &CancellationToken,
+) -> GraphResult<()> {
+    let ordered_closure = ordered_closure_file_ids(closure);
+    // `iter_index` feeds the test-gated per-iteration hook. Production
+    // builds explicitly consume it so the loop remains warning-free without
+    // suppressions or a hand-rolled counter.
+    for (iter_index, file_id) in ordered_closure.into_iter().enumerate() {
+        // Poll at every iteration boundary so dispatcher cancellation takes
+        // effect within one file even for very large closures.
+        cancellation.check()?;
+        let _removed_nodes: Vec<NodeId> = rebuild_graph.remove_file(file_id);
+
+        // Tests can cancel between `remove_file` calls by registering this
+        // hook; it fires after the removal and before the next cancellation
+        // check.
+        #[cfg(any(test, feature = "rebuild-internals"))]
+        testing::fire_phase3b_iter_hook(iter_index, file_id, rebuild_graph);
+        #[cfg(not(any(test, feature = "rebuild-internals")))]
+        let _ = iter_index;
+    }
+    Ok(())
+}
+
+#[cfg(any(test, feature = "rebuild-internals"))]
+fn fire_phase3b_post_substep3_hook_for_closure<S: std::hash::BuildHasher>(
+    rebuild_graph: &RebuildGraph,
+    closure: &HashSet<FileId, S>,
+) {
+    let hook_closure: HashSet<FileId> = closure.iter().copied().collect();
+    testing::fire_phase3b_post_substep3_hook(rebuild_graph, &hook_closure);
+}
+
 /// Phase 3e sub-step 4 helper — collect paths from `changed_files` that
 /// are **not** yet registered on `current_graph.files()`.
 ///
@@ -1021,7 +1022,7 @@ struct ReparseOutcome {
 /// §E harness's same-inputs-same-outputs invariant). File paths come
 /// from `current_graph.indexed_files()` — that mapping is accurate
 /// regardless of whether the file was modified or deleted on disk
-/// between the clone_for_rebuild point and now, because the FileId →
+/// between the `clone_for_rebuild` point and now, because the `FileId` →
 /// path mapping in `current_graph` is immutable from this function's
 /// perspective (`current_graph` is a shared borrow).
 ///
@@ -1033,9 +1034,9 @@ struct ReparseOutcome {
 /// is substantially more expensive than `remove_file` and a closure
 /// containing hundreds of modified files would otherwise block
 /// cancellation for noticeable wall time.
-fn phase3c_reparse_closure(
+fn phase3c_reparse_closure<S: std::hash::BuildHasher>(
     current_graph: &CodeGraph,
-    closure: &HashSet<FileId>,
+    closure: &HashSet<FileId, S>,
     new_file_paths: &[PathBuf],
     plugins: &PluginManager,
     cancellation: &CancellationToken,
@@ -1100,13 +1101,11 @@ fn phase3c_reparse_closure(
             Ok(ParsedFileOutcome::Parsed(pf)) => {
                 parsed.push((path, pf));
             }
-            Ok(ParsedFileOutcome::Skipped) => {
+            Ok(ParsedFileOutcome::Skipped | ParsedFileOutcome::TimedOut { .. }) => {
                 // File's plugin disappeared or graph builder is
-                // unavailable. Drop it from the commit plan; the
-                // full-build fallback handles whatever is needed.
-            }
-            Ok(ParsedFileOutcome::TimedOut { .. }) => {
-                // Parse/build timeout: same treatment as Skipped.
+                // unavailable, or parse/build timed out. Drop it from
+                // the commit plan; the full-build fallback handles
+                // whatever is needed.
                 // Production full-build emits a warning here; we stay
                 // quiet to avoid duplicate log noise — the full-build
                 // fallback will re-emit the same warning if the file
@@ -1220,7 +1219,7 @@ struct Phase3cCommitOutput {
     /// numbers (file-by-file, edge-by-edge) identical to the full-build
     /// ordering.
     per_file_edges: Vec<Vec<PendingEdge>>,
-    /// T3 Cluster B (02_DESIGN §4.3.e Change 5): per-file staging
+    /// T3 Cluster B (`02_DESIGN` §4.3.e Change 5): per-file staging
     /// [`NodeMetadataStore`] collected during the Phase 3c commit loop.
     /// Carried alongside `per_file_edges` so Phase 3d's Phase 4c-prime /
     /// 4d / 4d-prime sequence has the same metadata input the full-build
@@ -1266,13 +1265,7 @@ fn phase3c_commit_reparsed(
     // values move into `parsed_files`; the staging graphs are then
     // borrowed out of that vector for `phase3_parallel_commit`.
     let parsed_count = outcome.parsed.len();
-    let mut file_info: Vec<(PathBuf, Option<crate::graph::Language>)> =
-        Vec::with_capacity(parsed_count);
-    let mut parsed_files: Vec<super::entrypoint::ParsedFile> = Vec::with_capacity(parsed_count);
-    for (path, pf) in outcome.parsed {
-        file_info.push((path, Some(pf.language)));
-        parsed_files.push(pf);
-    }
+    let (file_info, mut parsed_files) = split_reparse_inputs(outcome);
     let file_ids = rebuild_graph
         .files_mut()
         .register_batch(&file_info)
@@ -1359,13 +1352,7 @@ fn phase3c_commit_reparsed(
     //
     // Iteration order matches `plan.file_plans`, which is deterministic
     // across runs. `per_file_node_ids[i]` pairs with `plan.file_plans[i]`.
-    for fp in &plan.file_plans {
-        let start = fp.node_range.start;
-        let count = fp.node_range.end.saturating_sub(start);
-        rebuild_graph
-            .file_segments_mut()
-            .record_range(fp.file_id, start, count);
-    }
+    record_reparsed_file_segments(rebuild_graph, &plan);
     debug_assert_eq!(
         phase3.per_file_node_ids.len(),
         plan.file_plans.len(),
@@ -1412,7 +1399,7 @@ fn phase3c_commit_reparsed(
         if metadata.is_empty() {
             continue;
         }
-        let rekeyed = super::parallel_commit::rekey_staging_metadata_to_arena(metadata, arena_ids);
+        let rekeyed = super::parallel_commit::rekey_staging_metadata_to_arena(&metadata, arena_ids);
         if !rekeyed.is_empty() {
             per_file_metadata.push((fp.file_id, rekeyed));
         }
@@ -1428,6 +1415,31 @@ fn phase3c_commit_reparsed(
         per_file_edges: phase3.per_file_edges,
         per_file_metadata,
     })
+}
+
+fn record_reparsed_file_segments(rebuild_graph: &mut RebuildGraph, plan: &super::ChunkCommitPlan) {
+    for file_plan in &plan.file_plans {
+        let start = file_plan.node_range.start;
+        let count = file_plan.node_range.end.saturating_sub(start);
+        rebuild_graph
+            .file_segments_mut()
+            .record_range(file_plan.file_id, start, count);
+    }
+}
+
+fn split_reparse_inputs(
+    outcome: ReparseOutcome,
+) -> (
+    Vec<(PathBuf, Option<crate::graph::Language>)>,
+    Vec<super::entrypoint::ParsedFile>,
+) {
+    let mut file_info = Vec::with_capacity(outcome.parsed.len());
+    let mut parsed_files = Vec::with_capacity(outcome.parsed.len());
+    for (path, parsed_file) in outcome.parsed {
+        file_info.push((path, Some(parsed_file.language)));
+        parsed_files.push(parsed_file);
+    }
+    (file_info, parsed_files)
 }
 
 /// Diagnostic counters emitted by Phase 3d sub-step 8 — the combined
@@ -1469,7 +1481,7 @@ pub struct Pass4dDiagnostics {
     /// [`phase4d_bulk_insert_edges`]. Useful for asserting that the
     /// bulk insert advanced the counter by `edges_submitted`.
     pub final_edge_seq: u64,
-    /// T3 Cluster B (02_DESIGN §4.3.e Change 7): `true` when Phase
+    /// T3 Cluster B (`02_DESIGN` §4.3.e Change 7): `true` when Phase
     /// 4d-prime merged at least one per-file staging
     /// `NodeMetadataStore` into `RebuildGraph::macro_metadata`. The
     /// boolean is retained inside this diagnostics struct so the
@@ -1477,7 +1489,7 @@ pub struct Pass4dDiagnostics {
     /// integration tests) can assert metadata flowed through; it is
     /// intentionally NOT threaded to `SqrydHook::on_publish` because
     /// per-publish `QueryDb::new` is the de-facto invalidator (see
-    /// 02_DESIGN §4.3.e "Reindex cache freshness" + §5.3).
+    /// `02_DESIGN` §4.3.e "Reindex cache freshness" + §5.3).
     pub staged_metadata_merged: bool,
 }
 
@@ -1500,7 +1512,7 @@ pub struct Pass4dDiagnostics {
 /// symbol-to-node map also preserve insertion order.
 ///
 /// Tombstoned / stale-generation slots are skipped by the arena's
-/// `iter()` (it only surfaces live entries), so the ExportMap is free
+/// `iter()` (it only surfaces live entries), so the `ExportMap` is free
 /// of closure-removal residue even when Phase 3b sub-step 3 drained
 /// several closure files.
 ///
@@ -1542,19 +1554,19 @@ fn phase3d_rebuild_export_map(rebuild_graph: &RebuildGraph) -> ExportMap {
 /// Node kinds that participate in cross-file symbol resolution.
 ///
 /// Mirrors the union of [`super::helper::CALL_COMPATIBLE_KINDS`]
-/// (Function / Method / Macro / Constant / LambdaTarget) plus type-
+/// (Function / Method / Macro / Constant / `LambdaTarget`) plus type-
 /// and container-kinds that plugins routinely cross-reference via
 /// `Imports` / `References` / `TypeOf` edges. Keeping the list broad
-/// makes Phase 3d's ExportMap a superset of whatever Phase 4c-prime
+/// makes Phase 3d's `ExportMap` a superset of whatever Phase 4c-prime
 /// would unify, which is the safe direction — it would be worse to
 /// miss a genuine cross-file import than to emit an extra benign
-/// ExportMap entry.
+/// `ExportMap` entry.
 ///
 /// The list is an intentional subset of [`NodeKind`]; adding a new
 /// `NodeKind` variant without extending this list is a conscious
 /// decision that the new kind is *not* cross-file-referenceable
 /// (e.g., `Other`, `CallSite`, intra-file-only nodes). Extending the
-/// list is free — the ExportMap just registers more entries.
+/// list is free — the `ExportMap` just registers more entries.
 const EXPORTABLE_KINDS: &[NodeKind] = &[
     NodeKind::Function,
     NodeKind::Method,
@@ -1600,7 +1612,7 @@ const EXPORTABLE_KINDS: &[NodeKind] = &[
 ///    Phase 4c-prime because the unification pass reads
 ///    `by_qualified_name` (though it also has a fallback: the pass
 ///    collects qn groups via arena iteration + `qualified_name`
-///    StringIds, and the rebuilt indices ensure downstream
+///    `StringIds`, and the rebuilt indices ensure downstream
 ///    name-resolution surfaces observe only winners after
 ///    unification).
 /// 4. Phase 4c-prime — [`phase4c_prime_unify_cross_file_nodes`] merges
@@ -1619,19 +1631,19 @@ const EXPORTABLE_KINDS: &[NodeKind] = &[
 ///
 /// # `export_map` usage
 ///
-/// The ExportMap built by sub-step 7 is **not** consumed by Phase 4d
+/// The `ExportMap` built by sub-step 7 is **not** consumed by Phase 4d
 /// itself — the full build's cross-file edge resolution happens
 /// implicitly through Phase 4c-prime unification (which rewrites
 /// pending-edge targets across files sharing a qualified name).
-/// Phase 3d's ExportMap is a superset of that unification's effect
+/// Phase 3d's `ExportMap` is a superset of that unification's effect
 /// and gives the rebuild plane an explicit cross-file symbol table
 /// that the Phase 3d observation hook and integration tests consume;
-/// Phase 3e and Task 6 may later feed the ExportMap into the daemon's
+/// Phase 3e and Task 6 may later feed the `ExportMap` into the daemon's
 /// workspace manifest or a future cross-file resolver without
 /// re-scanning the arena. Because this helper does not consume it,
-/// the ExportMap is held by the caller (`incremental_rebuild`) and is
+/// the `ExportMap` is held by the caller (`incremental_rebuild`) and is
 /// passed only to the post-ExportMap observation hook; this function
-/// takes no ExportMap parameter.
+/// takes no `ExportMap` parameter.
 fn phase3d_insert_cross_file_edges(
     rebuild_graph: &mut RebuildGraph,
     per_file_edges: &mut [Vec<PendingEdge>],
@@ -1703,7 +1715,9 @@ fn phase3d_insert_cross_file_edges(
 /// sorted by raw [`FileId::index`]. `HashSet` iteration order is
 /// intentionally unspecified, so a stable sort is the minimum-viable
 /// contract to make cancellation tests reproducible.
-fn ordered_closure_file_ids(closure: &HashSet<FileId>) -> Vec<FileId> {
+fn ordered_closure_file_ids<S: std::hash::BuildHasher>(
+    closure: &HashSet<FileId, S>,
+) -> Vec<FileId> {
     let mut ordered: Vec<FileId> = closure.iter().copied().collect();
     ordered.sort_by_key(|fid| fid.index());
     ordered
@@ -2202,7 +2216,7 @@ pub mod testing {
     }
 
     /// Install a callback that runs after Phase 3d sub-step 7
-    /// (ExportMap rebuild) and before the post-ExportMap cancellation
+    /// (`ExportMap` rebuild) and before the post-ExportMap cancellation
     /// boundary. Replaces any previously-installed hook on the same
     /// thread. Returns the prior hook for manual restore; prefer
     /// [`Phase3dPostExportMapHookGuard`] for RAII cleanup.

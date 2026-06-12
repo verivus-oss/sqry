@@ -36,6 +36,15 @@ use crate::config::{INTERNER_BUILDER_OVERHEAD_RATIO, WORKING_SET_MULTIPLIER};
 
 use super::state::OldGraphToken;
 
+fn rounded_f64_to_u64(value: f64) -> u64 {
+    if !value.is_finite() || value <= 0.0 {
+        return 0;
+    }
+    format!("{:.0}", value.ceil())
+        .parse::<u64>()
+        .unwrap_or(u64::MAX)
+}
+
 // ---------------------------------------------------------------------------
 // RetainedEntry
 // ---------------------------------------------------------------------------
@@ -180,18 +189,8 @@ pub fn working_set_estimate(inputs: WorkingSetInputs) -> u64 {
     } = inputs;
 
     let grow = |bytes: u64, factor: f64| -> u64 {
-        // Casting large u64s to f64 loses precision at ~2^53, which is
-        // 8 PB — three orders of magnitude above any credible graph
-        // memory budget. Still guard with saturating_add below.
-        let lossy_f = bytes as f64 * factor;
-        if !lossy_f.is_finite() || lossy_f <= 0.0 {
-            0
-        } else {
-            // `as u64` saturates on overflow in Rust 1.45+, so an
-            // absurdly large float lands at u64::MAX rather than
-            // wrapping.
-            lossy_f.ceil() as u64
-        }
+        let bytes_f = bytes.to_string().parse::<f64>().unwrap_or(f64::INFINITY);
+        rounded_f64_to_u64(bytes_f * factor)
     };
 
     grow(new_graph_final_estimate, WORKING_SET_MULTIPLIER)

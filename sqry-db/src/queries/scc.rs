@@ -40,7 +40,7 @@ pub type SccValue = std::sync::Arc<CachedSccData>;
 // HashMap<NodeId, u32>: serde-able because NodeId derives Serialize/Deserialize.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CachedSccData {
-    /// NodeId → SCC component index.
+    /// `NodeId` → SCC component index.
     pub node_to_component: HashMap<NodeId, u32>,
     /// SCC component index → member node IDs.
     pub components: Vec<Vec<NodeId>>,
@@ -58,13 +58,11 @@ impl CachedSccData {
     /// Returns true if the given node is part of a non-trivial cycle (SCC size > 1).
     #[must_use]
     pub fn is_in_cycle(&self, node: NodeId) -> bool {
-        self.component_of(node)
-            .map(|idx| {
-                self.components
-                    .get(idx as usize)
-                    .is_some_and(|c| c.len() > 1)
-            })
-            .unwrap_or(false)
+        self.component_of(node).is_some_and(|idx| {
+            self.components
+                .get(idx as usize)
+                .is_some_and(|c| c.len() > 1)
+        })
     }
 
     /// Returns the total number of SCC components.
@@ -227,8 +225,9 @@ impl DerivedQuery for SccQuery {
         // Build the node-to-component map
         let mut node_to_component = HashMap::with_capacity(all_nodes.len());
         for (idx, component) in components.iter().enumerate() {
+            let component_index = u32::try_from(idx).unwrap_or(u32::MAX);
             for &nid in component {
-                node_to_component.insert(nid, idx as u32);
+                node_to_component.insert(nid, component_index);
             }
         }
 

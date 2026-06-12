@@ -38,6 +38,7 @@ mod tools_schema;
 mod workspace_session;
 
 use anyhow::Result;
+use daemon_shim::DaemonParseResult;
 use rmcp::ServiceExt;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
@@ -214,7 +215,6 @@ pub(crate) fn parse_cli_action(args: &[String]) -> CliAction {
     }
 
     // Delegate daemon-flag scanning to daemon_shim (single source of truth).
-    use daemon_shim::DaemonParseResult;
     match daemon_shim::parse_daemon_args(args) {
         DaemonParseResult::Daemon { socket } => return CliAction::Daemon { socket },
         DaemonParseResult::MissingDaemon => {
@@ -418,7 +418,7 @@ async fn run_rmcp_server() -> Result<()> {
 /// `A_cancellation.md` §5 + GT-6: cap the blocking thread pool at 64
 /// so a storm of timed-out tool calls (which leave their
 /// `spawn_blocking` body running cooperatively until the
-/// CancellationToken signal is observed) cannot exhaust the default
+/// `CancellationToken` signal is observed) cannot exhaust the default
 /// 512-thread cap and queue subsequent calls indefinitely. Mirrors
 /// the sqry-daemon binary's runtime cap. See
 /// `sqry-mcp/tests/semantic_search_timeout_recovery.rs` for the

@@ -691,7 +691,7 @@ impl SessionManager {
                     "Graph load failed for project '{}' ({load_error}), auto-rebuilding index for LSP",
                     project.index_root.display()
                 );
-                self.rebuild_project_graph_after_load_failure(&project, &load_error)
+                Self::rebuild_project_graph_after_load_failure(&project, &load_error)
             }
         }
     }
@@ -765,7 +765,6 @@ impl SessionManager {
     }
 
     fn rebuild_project_graph_after_load_failure(
-        &self,
         project: &Project,
         load_error: &sqry_core::project::ProjectError,
     ) -> Result<Option<Arc<CodeGraph>>> {
@@ -1403,7 +1402,7 @@ const SQRY_WORKSPACE_FILENAME: &str = ".sqry-workspace";
 /// payload so the caller can surface the failure rather than silently
 /// fall through.
 ///
-/// STEP_5 codex iter1 MAJOR fix: when the payload is the lightweight
+/// `STEP_5` codex iter1 MAJOR fix: when the payload is the lightweight
 /// **extension-side classification hint** (a JSON object with a top-level
 /// `folders` array and a `classification` key — see
 /// `sqry-vscode/src/sqryClient.ts::SqryWorkspaceInitializationPayload`),
@@ -1673,7 +1672,7 @@ pub fn aggregate_workspace_index_status(
     aggregate
 }
 
-/// STEP_11_4 — aggregator variant that folds in extra
+/// `STEP_11_4` — aggregator variant that folds in extra
 /// [`sqry_core::workspace::WorkspaceWarning`] entries (e.g. from a
 /// `sqry_lang_rust::macro_expander::expand_in_workspace` outcome)
 /// before the aggregate is returned. Without this, macro-expansion
@@ -1691,7 +1690,7 @@ pub fn aggregate_workspace_index_status_with_warnings(
     aggregate
 }
 
-/// STEP_11_4 iter3 — structural validation of every source root for
+/// `STEP_11_4` iter3 — structural validation of every source root for
 /// Rust macro-expansion compatibility. Produces one
 /// [`sqry_core::workspace::WorkspaceWarning::MacroExpansionInvalidRoot`]
 /// per source root that fails the `MacroExpander::new` guard
@@ -1814,7 +1813,7 @@ pub fn build_workspace_status_info(workspace: &LogicalWorkspace) -> WorkspaceSta
 pub use sqry_core::workspace::Classification as PathClassification;
 pub use sqry_core::workspace::MemberReason as PathMemberReason;
 
-/// STEP_11_4 — verdict returned by [`SessionManager::evaluate_handler_gate`]
+/// `STEP_11_4` — verdict returned by [`SessionManager::evaluate_handler_gate`]
 /// for an LSP-handler URI. Each handler short-circuits on
 /// [`Self::Member`] and [`Self::Excluded`], returning an empty / `None`
 /// result without touching the graph; only [`Self::Continue`] (with
@@ -1822,10 +1821,10 @@ pub use sqry_core::workspace::MemberReason as PathMemberReason;
 /// workspace, fall through to today's per-repo behaviour") proceeds
 /// into the normal handler body.
 ///
-/// The gate is invoked by every URI-keyed LSP handler (code_action,
-/// hover, document_symbol, workspace_symbol; see
+/// The gate is invoked by every URI-keyed LSP handler (`code_action`,
+/// hover, `document_symbol`, `workspace_symbol`; see
 /// `sqry-lsp/tests/lsp_handler_member_excluded_contract.rs`) so the
-/// regression class STEP_11_4 was opened to close — "a non-status
+/// regression class `STEP_11_4` was opened to close — "a non-status
 /// handler probes the filesystem per folder and bypasses the
 /// workspace classifier" — cannot re-emerge through any of those
 /// handler surfaces.
@@ -1887,14 +1886,14 @@ impl SessionManager {
         self.logical_workspace().classify(path)
     }
 
-    /// STEP_11_4 — evaluate the handler-level URI gate against the
+    /// `STEP_11_4` — evaluate the handler-level URI gate against the
     /// current logical workspace. Returns the [`HandlerGate`] verdict
     /// every URI-keyed LSP handler must consult before touching the
     /// graph.
     ///
     /// The gate exists so member-folder and excluded-path requests
     /// short-circuit through the same code path the
-    /// `sqry/indexStatus` handler already uses (STEP_4), preventing
+    /// `sqry/indexStatus` handler already uses (`STEP_4`), preventing
     /// the regression class where a non-status handler bypasses the
     /// classifier and probes the filesystem per folder.
     ///

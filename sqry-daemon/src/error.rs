@@ -21,7 +21,11 @@
 //! | `Io`                | 73        | `EX_CANTCREAT`         |
 //! | Other variants      | 70        | `EX_SOFTWARE` (default)|
 
-use std::{path::PathBuf, time::SystemTime};
+use std::{
+    fmt::Write as _,
+    path::{Path, PathBuf},
+    time::SystemTime,
+};
 
 use sqry_core::graph::acquisition::GraphAcquisitionError;
 use thiserror::Error;
@@ -43,6 +47,15 @@ use crate::{
 ///
 /// [1]: https://docs.rs/sqry-mcp/latest/sqry_mcp/error/constant.KIND_QUERY_TOO_BROAD.html
 pub const KIND_QUERY_TOO_BROAD: &str = "query_too_broad";
+
+fn f64_hours_to_u64(hours: f64) -> u64 {
+    if !hours.is_finite() || hours <= 0.0 {
+        return 0;
+    }
+    format!("{:.0}", hours.trunc())
+        .parse::<u64>()
+        .unwrap_or(u64::MAX)
+}
 
 /// Result alias for daemon operations.
 pub type DaemonResult<T> = Result<T, DaemonError>;
@@ -437,13 +450,13 @@ impl DaemonError {
             // 69 EX_UNAVAILABLE: daemon didn't start in time.
             Self::AutoStartTimeout { .. } => 69,
             // 70 EX_SOFTWARE: internal OS-level failure (signal registration).
-            Self::SignalSetup { .. } => 70,
             // 78 EX_CONFIG: malformed or unreadable config file.
             Self::Config { .. } => 78,
             // 73 EX_CANTCREAT: I/O failure (pidfile write, socket bind, etc.).
             Self::Io(_) => 73,
             // IPC-layer errors that escape to the CLI surface default to 70.
-            Self::WorkspaceBuildFailed { .. }
+            Self::SignalSetup { .. }
+            | Self::WorkspaceBuildFailed { .. }
             | Self::WorkspaceStaleExpired { .. }
             | Self::MemoryBudgetExceeded { .. }
             | Self::WorkspaceEvicted { .. }
@@ -492,35 +505,22 @@ impl DaemonError {
                 cap_hours,
                 last_good_at,
                 last_error,
-            } => {
-                // UTC-Zulu RFC3339 (`YYYY-MM-DDTHH:MM:SSZ`). `chrono` is
-                // already a workspace dependency used throughout the repo
-                // for RFC3339 rendering; `to_rfc3339_opts(Secs, true)`
-                // emits the UTC-Zulu form required by Task 7.
-                let last_good_rfc3339 = last_good_at.map(|t| {
-                    chrono::DateTime::<chrono::Utc>::from(t)
-                        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
-                });
-                Some(json!({
+            } => Some(workspace_stale_data(
+                root,
+                *age_hours,
+                *cap_hours,
+                *last_good_at,
+                last_error.as_deref(),
+            )),
+            Self::WorkspaceBuildFailed { root, reason }
+            | Self::WorkspaceIncompatibleGraph { root, reason } => Some(json!({
                     "root": root,
-                    "age_hours": age_hours,
-                    "cap_hours": cap_hours,
-                    "last_good_at": last_good_rfc3339,
-                    "last_error": last_error,
-                }))
-            }
-            Self::WorkspaceBuildFailed { root, reason } => Some(json!({
-                "root": root,
-                "reason": reason,
+                    "reason": reason,
             })),
             Self::WorkspaceEvicted { root } => Some(json!({ "root": root })),
             Self::WorkspaceNotLoaded { root } => Some(json!({
                 "root": root,
                 "hint": "use daemon/load to load the workspace before calling daemon/rebuild",
-            })),
-            Self::WorkspaceIncompatibleGraph { root, reason } => Some(json!({
-                "root": root,
-                "reason": reason,
             })),
             // Phase 8c §O canonical 4-key envelope
             // `{kind, retryable, retry_after_ms, details}` matching
@@ -531,29 +531,7 @@ impl DaemonError {
                 root: _,
                 secs: _,
                 deadline_ms,
-            } => Some(json!({
-                "kind": "deadline_exceeded",
-                "retryable": true,
-                // Cluster-A iter-2 BLOCKER 1: align `retry_after_ms`
-                // with the standalone `RpcError::deadline_exceeded`
-                // (`SqryServer` default = 500 ms). The IPC envelope
-                // and the MCP-host envelope must agree byte-for-byte
-                // so direct-path callers and rmcp clients see the
-                // same recovery hint.
-                "retry_after_ms": 500,
-                "details": {
-                    // `tool` is `null` here; the MCP-path wrapper
-                    // `daemon_err_to_mcp` (Phase 8c U8) populates it
-                    // with the method name pulled from the inbound
-                    // JSON-RPC request.
-                    "tool": serde_json::Value::Null,
-                    "deadline_ms": deadline_ms,
-                    // Cluster-A iter-2 BLOCKER 1: `root` removed for
-                    // wire-identity with the standalone envelope.
-                    // The workspace path is still surfaced via the
-                    // `Display` impl on `DaemonError::ToolTimeout`.
-                },
-            })),
+            } => Some(tool_timeout_data(*deadline_ms)),
             Self::InvalidArgument { reason } => Some(json!({
                 "kind": "validation_error",
                 "retryable": false,
@@ -566,24 +544,20 @@ impl DaemonError {
             // shape verbatim so the daemon-hosted MCP envelope is
             // byte-identical to the standalone path's
             // `rpc_error_to_mcp` output.
-            Self::RpcErrorPreserved(rpc) => Some(json!({
-                "kind": rpc.kind,
-                "retryable": rpc.retryable,
-                "retry_after_ms": rpc.retry_after_ms,
-                "details": rpc.details,
-            })),
+            Self::RpcErrorPreserved(rpc) => Some(rpc_error_data(rpc)),
             Self::Internal(_) => Some(json!({
                 "kind": "internal",
                 "retryable": false,
                 "retry_after_ms": serde_json::Value::Null,
                 "details": serde_json::Value::Null,
             })),
-            Self::Io(_) | Self::Config { .. } => None,
-            // Lifecycle errors don't cross the IPC boundary; no structured
-            // payload is needed.
-            Self::AlreadyRunning { .. }
+            Self::Io(_)
+            | Self::Config { .. }
+            | Self::AlreadyRunning { .. }
             | Self::AutoStartTimeout { .. }
             | Self::SignalSetup { .. } => None,
+            // Lifecycle errors don't cross the IPC boundary; no structured
+            // payload is needed.
             Self::WorkspaceOversize {
                 root,
                 measured_bytes,
@@ -623,14 +597,62 @@ impl DaemonError {
             // suggested_predicates / doc_url) and hands it to this
             // arm verbatim — this layer only owns the 4-key
             // envelope.
-            Self::QueryTooBroad { details, .. } => Some(json!({
-                "kind": KIND_QUERY_TOO_BROAD,
-                "retryable": false,
-                "retry_after_ms": serde_json::Value::Null,
-                "details": details,
-            })),
+            Self::QueryTooBroad { details, .. } => Some(query_too_broad_data(details)),
         }
     }
+}
+
+fn workspace_stale_data(
+    root: &Path,
+    age_hours: u64,
+    cap_hours: u32,
+    last_good_at: Option<SystemTime>,
+    last_error: Option<&str>,
+) -> serde_json::Value {
+    use serde_json::json;
+    let last_good_rfc3339 = last_good_at.map(|t| {
+        chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    });
+    json!({
+        "root": root,
+        "age_hours": age_hours,
+        "cap_hours": cap_hours,
+        "last_good_at": last_good_rfc3339,
+        "last_error": last_error,
+    })
+}
+
+fn tool_timeout_data(deadline_ms: u64) -> serde_json::Value {
+    use serde_json::json;
+    json!({
+        "kind": "deadline_exceeded",
+        "retryable": true,
+        "retry_after_ms": 500,
+        "details": {
+            "tool": serde_json::Value::Null,
+            "deadline_ms": deadline_ms,
+        },
+    })
+}
+
+fn rpc_error_data(rpc: &sqry_mcp::error::RpcError) -> serde_json::Value {
+    use serde_json::json;
+    json!({
+        "kind": rpc.kind,
+        "retryable": rpc.retryable,
+        "retry_after_ms": rpc.retry_after_ms,
+        "details": rpc.details,
+    })
+}
+
+fn query_too_broad_data(details: &serde_json::Value) -> serde_json::Value {
+    use serde_json::json;
+    json!({
+        "kind": KIND_QUERY_TOO_BROAD,
+        "retryable": false,
+        "retry_after_ms": serde_json::Value::Null,
+        "details": details,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -680,17 +702,18 @@ impl From<GraphAcquisitionError> for DaemonError {
                         let mut buf =
                             format!("unknown plugin ids: [{}]", unknown_plugin_ids.join(", "),);
                         if let Some(p) = manifest_path.as_ref() {
-                            buf.push_str(&format!(" (manifest: {})", p.display()));
+                            let _ = write!(buf, " (manifest: {})", p.display());
                         }
                         if !suggested.is_empty() {
                             // Cluster-E iter-2: render the full
                             // copy-paste-ready cargo install command,
                             // matching the CLI / standalone-MCP shape.
-                            buf.push_str(&format!(
+                            let _ = write!(
+                                buf,
                                 " — rebuild this binary with: \
                                  cargo install --path sqry-cli --features {}",
                                 suggested.join(","),
-                            ));
+                            );
                         }
                         buf
                     }
@@ -741,7 +764,7 @@ impl From<GraphAcquisitionError> for DaemonError {
                 age_hours,
             } => Self::WorkspaceStaleExpired {
                 root: workspace_root,
-                age_hours: age_hours.map(|h| h as u64).unwrap_or(0),
+                age_hours: age_hours.map_or(0, f64_hours_to_u64),
                 cap_hours: 0,
                 last_good_at: None,
                 last_error: None,

@@ -119,12 +119,14 @@ fn build_ambiguity_message(
     candidate_count: usize,
     sample_file: Option<&str>,
 ) -> String {
+    use std::fmt::Write as _;
+
     let mut msg = format!(
         "Symbol '{name}' is ambiguous ({candidate_count} candidates); pass `--in <file>` \
          to disambiguate by the file the intended symbol is defined in"
     );
     if let Some(file) = sample_file {
-        msg.push_str(&format!(" (e.g., `--in {file}`)"));
+        let _ = write!(msg, " (e.g., `--in {file}`)");
     }
     msg
 }

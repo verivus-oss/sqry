@@ -16,11 +16,12 @@
 //! listening. Non-socket files at the configured path are always
 //! rejected.
 
+use std::fs::OpenOptions;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[cfg(unix)]
 use anyhow::anyhow;
@@ -66,8 +67,13 @@ impl std::fmt::Debug for IpcServer {
 }
 
 impl IpcServer {
-    /// Bind the server. Unix: UnixListener with the two-branch policy;
-    /// Windows: NamedPipeServer with explicit options.
+    /// Bind the server. Unix: `UnixListener` with the two-branch policy;
+    /// Windows: `NamedPipeServer` with explicit options.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the configured socket or pipe cannot be bound, or
+    /// when Unix socket-parent validation fails.
     pub async fn bind(
         config: Arc<DaemonConfig>,
         manager: Arc<WorkspaceManager>,
@@ -122,6 +128,11 @@ impl IpcServer {
     }
 
     /// Accept loop. Returns when the shutdown token fires.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if accepting or serving an IPC connection fails outside
+    /// the normal shutdown path.
     pub async fn run(self) -> DaemonResult<()> {
         let Self {
             mut listener,
@@ -238,8 +249,6 @@ fn ensure_socket_parent_writable(socket_path: &Path) -> DaemonResult<()> {
     // which lets a writable socket parent leak the probe write to an
     // unrelated location). The probe filename includes pid + nanos
     // so two daemon-start attempts can't race on the same name.
-    use std::fs::OpenOptions;
-    use std::time::{SystemTime, UNIX_EPOCH};
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.subsec_nanos())

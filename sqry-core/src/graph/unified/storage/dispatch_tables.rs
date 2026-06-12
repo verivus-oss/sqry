@@ -40,7 +40,7 @@
 //! per-edge resolution into the edge metadata, while [`DispatchTables`] holds
 //! the *aggregate* per-node bookkeeping (lookup tables, fan-out cap hits,
 //! ambiguity sets) that the resolver needs across edges. Storing both in the
-//! same place keeps planner index reuse intact (see Plan B U_WS2_7
+//! same place keeps planner index reuse intact (see Plan B `U_WS2_7`
 //! critical decision: "per-edge filter, not separate edge kind; preserves
 //! planner index reuse").
 
@@ -50,7 +50,7 @@ use serde::{Deserialize, Serialize};
 
 use super::super::node::id::NodeId;
 
-/// Per-node dispatch-resolution side tables — Plan B 02_DESIGN §3.7
+/// Per-node dispatch-resolution side tables — Plan B `02_DESIGN` §3.7
 /// (line 279) shape.
 ///
 /// Populated by Plan B's WS2 resolvers (JVM virtual / interface dispatch, Go

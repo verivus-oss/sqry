@@ -363,7 +363,7 @@ pub enum WrapKind {
 ///
 /// Discriminates whether a [`EdgeKind::ChannelPeer`] edge records a send,
 /// a receive, or a close on the target [`super::super::node::kind::NodeKind::Channel`].
-/// Aligns with GoGuard's producer / consumer abstraction (see
+/// Aligns with `GoGuard`'s producer / consumer abstraction (see
 /// `docs/development/go-channels-and-generic-instantiation/02_DESIGN.md` §1.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -968,7 +968,8 @@ impl EdgeKind {
 
             // u8 + bool: 1 + 1 + 1
             // MacroExpansionKind + bool: 1 + 1
-            Self::Calls { .. } | Self::MacroExpansion { .. } => 3,
+            // ChannelPeerDirection + ChannelBufferKind: 1 + 1
+            Self::Calls { .. } | Self::MacroExpansion { .. } | Self::ChannelPeer { .. } => 3,
 
             // Option<StringId> + bool: 5 + 1 + 1 (imports/exports)
             // DbQueryType + Option<StringId>: 1 + 5
@@ -1001,9 +1002,6 @@ impl EdgeKind {
 
             // WrapKind: 1 + Option<u16>: 3 = 4
             Self::Wraps { .. } => 4,
-
-            // discriminant + ChannelPeerDirection + ChannelBufferKind: 1 + 1 + 1
-            Self::ChannelPeer { .. } => 3,
 
             // discriminant + len + N*(StringId + bool) + InferenceKind:
             // 1 + 4 + (len * 5) + 1

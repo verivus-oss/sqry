@@ -56,7 +56,7 @@ pub struct CancelRebuildParams {
 /// 3. Set `ws.rebuild_cancelled = true` (the per-workspace
 ///    cancellation signal polled by the rebuild pipeline).
 /// 4. Return `CancelRebuildResult { cancelled: rebuild_was_in_flight }`.
-pub(crate) async fn handle(ctx: &HandlerContext, params: Value) -> Result<Value, MethodError> {
+pub(crate) fn handle(ctx: &HandlerContext, params: Value) -> Result<Value, MethodError> {
     let params: CancelRebuildParams =
         serde_json::from_value(params).map_err(MethodError::InvalidParams)?;
 
@@ -163,7 +163,7 @@ mod tests {
         // doesn't exist) or at find_key_and_workspace_by_path. Both are
         // acceptable rejections.
         let params = json!({ "path": "/nonexistent/workspace" });
-        let result = daemon_cancel_rebuild::handle(&ctx, params).await;
+        let result = daemon_cancel_rebuild::handle(&ctx, params);
 
         match result {
             Err(MethodError::Daemon(DaemonError::WorkspaceNotLoaded { .. })) => {}
@@ -213,7 +213,7 @@ mod tests {
         };
 
         let params = json!({ "path": canonical.to_string_lossy().as_ref() });
-        let result = daemon_cancel_rebuild::handle(&ctx, params).await.unwrap();
+        let result = daemon_cancel_rebuild::handle(&ctx, params).unwrap();
 
         // `cancelled` must be false — no rebuild was in flight.
         let envelope: serde_json::Value = result;

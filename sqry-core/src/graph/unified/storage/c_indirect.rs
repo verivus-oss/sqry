@@ -222,7 +222,7 @@ pub enum BindingSiteKind {
 /// One captured indirect call site, queued for resolution by
 /// `pass5b_c_indirect_resolve`.
 ///
-/// `caller` is the NodeId of the enclosing C function / method (the
+/// `caller` is the `NodeId` of the enclosing C function / method (the
 /// caller-side anchor of the synthetic `Calls` edge captured in Phase 1).
 /// `file_id` and `use_span` locate the callsite for `LocalScopeIndex`
 /// lookups; the resolver uses `shape` to dispatch between the

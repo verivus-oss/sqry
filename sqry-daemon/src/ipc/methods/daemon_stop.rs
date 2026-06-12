@@ -29,7 +29,7 @@ pub struct StopResult {
     pub scheduled: bool,
 }
 
-pub(crate) async fn handle(ctx: &HandlerContext, params: Value) -> Result<Value, MethodError> {
+pub(crate) fn handle(ctx: &HandlerContext, params: Value) -> Result<Value, MethodError> {
     let _params: StopParams = match params {
         Value::Null => StopParams::default(),
         other => serde_json::from_value(other).map_err(MethodError::InvalidParams)?,

@@ -1599,7 +1599,7 @@ struct UnifiedSubGraph {
 }
 
 /// Resolve the `module` argument of `sqry graph dependency-tree` into
-/// root NodeIds for the BFS.
+/// root `NodeIds` for the BFS.
 ///
 /// Tries symbol-name lookup first (the historical contract — `dependency-tree
 /// SymbolName` walks dependencies of that symbol). Falls back to file-path
@@ -4103,54 +4103,14 @@ fn run_is_in_cycle_unified(
     verbose: bool,
 ) -> Result<()> {
     use serde_json::json;
-    use sqry_core::graph::unified::{
-        FileScope, ResolutionMode, SymbolQuery, SymbolResolutionOutcome,
-    };
-    use sqry_core::query::CircularType;
     use std::sync::Arc;
 
-    // Parse cycle type. We accept the canonical plural forms (`calls`,
-    // `imports`, `modules`) plus the DB17 MCP surface's singular aliases
-    // so the CLI and MCP surfaces stay in lock-step. The pre-DB19 CLI
-    // also accepted `all` meaning "cycles across any edge kind" — we
-    // preserve that by running two sqry-db queries (`Calls` then
-    // `Imports`) and unioning the results.
-    let cycle_types: Vec<CircularType> = if cycle_type.eq_ignore_ascii_case("all") {
-        vec![CircularType::Calls, CircularType::Imports]
-    } else {
-        let parsed = CircularType::try_parse(cycle_type).with_context(|| {
-            format!("Invalid cycle type: {cycle_type}. Use: calls, imports, modules, all")
-        })?;
-        vec![parsed]
-    };
-
+    let cycle_types = parse_cycle_types(cycle_type)?;
     let snapshot = Arc::new(graph.snapshot());
-
-    // Strict resolution: reject ambiguous simple names up front rather
-    // than answering "in a cycle?" on an arbitrary candidate. Mirrors
-    // the DB17 MCP policy for `is_node_in_cycle` / `dependency_impact`.
-    let target_id = match snapshot.resolve_symbol(&SymbolQuery {
-        symbol,
-        file_scope: FileScope::Any,
-        mode: ResolutionMode::Strict,
-    }) {
-        SymbolResolutionOutcome::Resolved(node_id) => node_id,
-        SymbolResolutionOutcome::NotFound | SymbolResolutionOutcome::FileNotIndexed => {
-            bail!("Symbol '{symbol}' not found in the graph");
-        }
-        SymbolResolutionOutcome::Ambiguous(candidates) => {
-            bail!(
-                "Symbol '{symbol}' is ambiguous ({} candidates). Use a canonical qualified name.",
-                candidates.len()
-            );
-        }
-    };
+    let target_id = resolve_cycle_target(&snapshot, symbol)?;
 
     if verbose {
-        eprintln!(
-            "Checking if symbol '{}' ({:?}) is in a {} cycle",
-            symbol, target_id, cycle_type
-        );
+        eprintln!("Checking if symbol '{symbol}' ({target_id:?}) is in a {cycle_type} cycle");
     }
 
     // Route through sqry-db: `IsInCycleQuery` is the hybrid cycle
@@ -4219,6 +4179,66 @@ fn run_is_in_cycle_unified(
         }
     }
 
+    render_is_in_cycle_output(
+        symbol,
+        cycle_type,
+        show_cycle,
+        format,
+        in_cycle,
+        &found_cycles,
+    )?;
+
+    Ok(())
+}
+
+fn parse_cycle_types(cycle_type: &str) -> Result<Vec<sqry_core::query::CircularType>> {
+    use sqry_core::query::CircularType;
+
+    if cycle_type.eq_ignore_ascii_case("all") {
+        return Ok(vec![CircularType::Calls, CircularType::Imports]);
+    }
+    let parsed = CircularType::try_parse(cycle_type).with_context(|| {
+        format!("Invalid cycle type: {cycle_type}. Use: calls, imports, modules, all")
+    })?;
+    Ok(vec![parsed])
+}
+
+fn resolve_cycle_target(
+    snapshot: &sqry_core::graph::unified::concurrent::GraphSnapshot,
+    symbol: &str,
+) -> Result<sqry_core::graph::unified::node::NodeId> {
+    use sqry_core::graph::unified::{
+        FileScope, ResolutionMode, SymbolQuery, SymbolResolutionOutcome,
+    };
+
+    match snapshot.resolve_symbol(&SymbolQuery {
+        symbol,
+        file_scope: FileScope::Any,
+        mode: ResolutionMode::Strict,
+    }) {
+        SymbolResolutionOutcome::Resolved(node_id) => Ok(node_id),
+        SymbolResolutionOutcome::NotFound | SymbolResolutionOutcome::FileNotIndexed => {
+            bail!("Symbol '{symbol}' not found in the graph");
+        }
+        SymbolResolutionOutcome::Ambiguous(candidates) => {
+            bail!(
+                "Symbol '{symbol}' is ambiguous ({} candidates). Use a canonical qualified name.",
+                candidates.len()
+            );
+        }
+    }
+}
+
+fn render_is_in_cycle_output(
+    symbol: &str,
+    cycle_type: &str,
+    show_cycle: bool,
+    format: &str,
+    in_cycle: bool,
+    found_cycles: &[serde_json::Value],
+) -> Result<()> {
+    use serde_json::json;
+
     if format == "json" {
         let output = if show_cycle {
             json!({
@@ -4236,28 +4256,40 @@ fn run_is_in_cycle_unified(
         };
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else if in_cycle {
-        println!("Symbol '{symbol}' IS in a {cycle_type} cycle.");
-        if show_cycle {
-            for (i, cycle) in found_cycles.iter().enumerate() {
-                println!();
-                println!("Cycle {}:", i + 1);
-                if let Some(names) = cycle["cycle"].as_array() {
-                    for (j, name) in names.iter().enumerate() {
-                        let prefix = if j == 0 { "  " } else { "  → " };
-                        println!("{prefix}{name}", name = name.as_str().unwrap_or("?"));
-                    }
-                    // Show the loop back.
-                    if let Some(first) = names.first() {
-                        println!("  → {} (cycle)", first.as_str().unwrap_or("?"));
-                    }
-                }
-            }
-        }
+        render_cycle_text(symbol, cycle_type, show_cycle, found_cycles);
     } else {
         println!("Symbol '{symbol}' is NOT in any {cycle_type} cycle.");
     }
-
     Ok(())
+}
+
+fn render_cycle_text(
+    symbol: &str,
+    cycle_type: &str,
+    show_cycle: bool,
+    found_cycles: &[serde_json::Value],
+) {
+    println!("Symbol '{symbol}' IS in a {cycle_type} cycle.");
+    if !show_cycle {
+        return;
+    }
+    for (i, cycle) in found_cycles.iter().enumerate() {
+        println!();
+        println!("Cycle {}:", i + 1);
+        if let Some(names) = cycle["cycle"].as_array() {
+            render_cycle_names(names);
+        }
+    }
+}
+
+fn render_cycle_names(names: &[serde_json::Value]) {
+    for (j, name) in names.iter().enumerate() {
+        let prefix = if j == 0 { "  " } else { "  → " };
+        println!("{prefix}{name}", name = name.as_str().unwrap_or("?"));
+    }
+    if let Some(first) = names.first() {
+        println!("  → {} (cycle)", first.as_str().unwrap_or("?"));
+    }
 }
 
 #[cfg(test)]

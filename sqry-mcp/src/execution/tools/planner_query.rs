@@ -88,8 +88,7 @@ pub fn execute_sqry_query(params: &SqryQueryParams) -> Result<ToolExecution<Sqry
 
     let limit = params
         .limit
-        .map(|n| n as usize)
-        .unwrap_or(DEFAULT_LIMIT)
+        .map_or(DEFAULT_LIMIT, |n| usize::try_from(n).unwrap_or(usize::MAX))
         .min(MAX_LIMIT);
 
     let truncated = node_ids.len() > limit;
@@ -152,7 +151,7 @@ pub fn execute_sqry_query(params: &SqryQueryParams) -> Result<ToolExecution<Sqry
 /// params onto a parsed [`PlanNode`] tree as a trailing
 /// [`PlanNode::Filter`] in a [`PlanNode::Chain`].
 ///
-/// This is the converter-side wiring codex iter_1 §Check 9 mandated: the
+/// This is the converter-side wiring codex `iter_1` §Check 9 mandated: the
 /// MCP boundary used to drop both fields; this helper ensures they reach
 /// the planner. When the predicate vector is empty (the caller passed
 /// `None` for both, the back-compat default), the plan is left

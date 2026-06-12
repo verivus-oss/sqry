@@ -18,7 +18,7 @@ const REGISTRY_FILE: &str = ".sqry-workspace";
 /// # Errors
 /// Returns an error if any subcommand fails to execute.
 ///
-/// # STEP_8 invariant
+/// # `STEP_8` invariant
 ///
 /// `sqry workspace …` is incompatible with the global `--workspace` /
 /// `SQRY_WORKSPACE_FILE` flag — each `WorkspaceCommand` variant carries its
@@ -62,14 +62,32 @@ pub fn run_workspace(cli: &Cli, action: &WorkspaceCommand) -> Result<()> {
             force,
             include_user_state,
             json,
-        } => crate::commands::workspace_clean::run(
-            cli,
-            root,
-            *apply,
-            *force,
-            *include_user_state,
-            *json,
-        ),
+        } => {
+            let removal = match (*apply, *force) {
+                (false, _) => crate::commands::workspace_clean::RemovalMode::DryRun,
+                (true, false) => crate::commands::workspace_clean::RemovalMode::ApplyConfirmed,
+                (true, true) => crate::commands::workspace_clean::RemovalMode::ApplyForced,
+            };
+            let user_state = if *include_user_state {
+                crate::commands::workspace_clean::UserStatePolicy::Include
+            } else {
+                crate::commands::workspace_clean::UserStatePolicy::Exclude
+            };
+            let output = if *json {
+                crate::commands::workspace_clean::CleanOutput::Json
+            } else {
+                crate::commands::workspace_clean::CleanOutput::Text
+            };
+            crate::commands::workspace_clean::run(
+                cli,
+                root,
+                &crate::commands::workspace_clean::CleanOptions {
+                    removal,
+                    user_state,
+                    output,
+                },
+            )
+        }
     }
 }
 

@@ -160,7 +160,7 @@ impl From<CoreVisibility> for VisibilityParam {
 
 /// MCP-facing framework identifier (Plan A joint-stub).
 ///
-/// Wraps [`sqry_core::schema::FrameworkId`] with a JsonSchema derive so the
+/// Wraps [`sqry_core::schema::FrameworkId`] with a `JsonSchema` derive so the
 /// tool's input schema declares `framework` as a typed enum. Snake-case
 /// serde so the wire form is `"flask"`, `"fast_api"`, ...
 ///
@@ -248,7 +248,7 @@ impl From<sqry_core::schema::FrameworkId> for FrameworkIdParam {
 
 /// MCP-facing dispatch-resolution provenance (Plan B V12 8-variant form).
 ///
-/// Wraps [`sqry_core::schema::ResolvedVia`] with a JsonSchema derive so the
+/// Wraps [`sqry_core::schema::ResolvedVia`] with a `JsonSchema` derive so the
 /// tool's input schema declares `resolved_via` as a typed enum array.
 /// Snake-case serde — wire forms are `"direct"`, `"type_match"`,
 /// `"binding_plane"`, `"virtual_dispatch"`, `"interface_dispatch"`,
@@ -548,7 +548,7 @@ pub struct SemanticSearchParams {
     /// with `details.source = "runtime_budget"`. `None` (the
     /// default) defers to the daemon-wide
     /// `SQRY_TOOL_BUDGET_ROWS` env var or the documented default
-    /// (5_000_000 rows).
+    /// (`5_000_000` rows).
     #[serde(default)]
     pub budget_rows: Option<u64>,
 
@@ -1439,7 +1439,7 @@ impl From<ContextModeParam> for sqry_db::queries::context_propagation::ContextMo
 }
 
 /// `context_propagation` scope selector (T3.7, Cluster G). Mirrors
-/// the contract in 02_DESIGN §2.5 row 3 (`scope: "global" | "file"`)
+/// the contract in `02_DESIGN` §2.5 row 3 (`scope: "global" | "file"`)
 /// while keeping the file path attached on the same value the way
 /// the underlying `sqry_db::queries::context_propagation::ContextScope`
 /// does. Tagged externally for JSON-Schema clarity:

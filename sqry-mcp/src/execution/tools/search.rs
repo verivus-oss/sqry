@@ -133,6 +133,12 @@ fn semantic_sort_key(
     }
 }
 
+/// Execute the `semantic_search` tool.
+///
+/// # Errors
+///
+/// Returns an error if workspace security validation, graph acquisition, query
+/// planning, or search execution fails.
 pub fn execute_semantic_search(
     args: &SemanticSearchArgs,
     cancel: &sqry_core::query::cancellation::CancellationToken,
@@ -390,6 +396,11 @@ fn find_reference_node(
 /// Execute the `find_similar` tool to find symbols similar to a reference.
 ///
 /// Uses `CodeGraph` to find symbols with similar names using fuzzy matching.
+///
+/// # Errors
+///
+/// Returns an error if workspace resolution, graph acquisition, file
+/// canonicalization, or reference-symbol resolution fails.
 #[allow(clippy::too_many_lines)]
 pub fn execute_find_similar(args: &SearchSimilarArgs) -> Result<ToolExecution<FindSimilarData>> {
     let start = Instant::now();

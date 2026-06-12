@@ -11,10 +11,10 @@
 //!   `"unix"`, `"target_os = \"linux\""`, `"all(unix, target_arch = \"x86_64\")"`,
 //!   `"not(test)"`.
 //!
-//! 02_DESIGN §5.3.a locks the contract:
+//! `02_DESIGN` §5.3.a locks the contract:
 //!
 //! 1. Stored strings remain plugin-native — neither plugin rewrites the
-//!    other's shape on insertion (01_SPEC §6.3 ACs hold byte-for-byte).
+//!    other's shape on insertion (`01_SPEC` §6.3 ACs hold byte-for-byte).
 //! 2. Cross-language matching at query time goes through a single
 //!    comparator that parses both shapes into a shared [`CfgAst`] and
 //!    compares semantically (set-equality for `All`/`Any`, identity for
@@ -22,10 +22,10 @@
 //!    synonyms).
 //!
 //! References:
-//! - 01_SPEC.md §6.3 (T3.8 acceptance criteria).
-//! - 02_DESIGN.md §5.3.a (this module's algorithm), §2.3 (storage
+//! - `01_SPEC.md` §6.3 (T3.8 acceptance criteria).
+//! - `02_DESIGN.md` §5.3.a (this module's algorithm), §2.3 (storage
 //!   contract on `cfg_condition`).
-//! - 03_IMPLEMENTATION_PLAN.md §Cluster F.
+//! - `03_IMPLEMENTATION_PLAN.md` §Cluster F.
 
 use serde::{Deserialize, Serialize};
 
@@ -41,7 +41,7 @@ use serde::{Deserialize, Serialize};
 /// operand lists, collapse single-operand `All([x])` / `Any([x])`
 /// to `x`) and then compares structurally with **set-equality** on
 /// `All` / `Any` operand lists (operand order is irrelevant per
-/// 02_DESIGN §5.3.a). `Flag` is identity-compared after the
+/// `02_DESIGN` §5.3.a). `Flag` is identity-compared after the
 /// platform-token normalisation in [`normalise_flag`] (so Rust
 /// `target_os = "linux"` and Go `linux` both reduce to
 /// `Flag("linux")`).
@@ -67,7 +67,7 @@ impl CfgAst {
 
     /// Returns `true` when this AST is structurally and semantically
     /// equivalent to `other` under the design's **set-equality** rule
-    /// (02_DESIGN §5.3.a). Both sides are first canonicalised:
+    /// (`02_DESIGN` §5.3.a). Both sides are first canonicalised:
     ///
     /// 1. Recursively canonicalise each operand.
     /// 2. Dedup operand lists for `All` / `Any` (`linux && linux`
@@ -83,6 +83,7 @@ impl CfgAst {
     /// `conjoin` to `All([linux, linux])` (the Go combiner does not
     /// dedup); `cfg:linux` (a single-flag matcher) must still match
     /// that stored AST.
+    #[must_use]
     pub fn semantically_equals(&self, other: &CfgAst) -> bool {
         let a = self.canonical();
         let b = other.canonical();
@@ -119,9 +120,8 @@ fn canonical_compound(items: &[CfgAst], is_all: bool) -> CfgAst {
             (CfgAst::All(_), true) | (CfgAst::Any(_), false)
         );
         if nested_same_kind {
-            let inner_items = match canonical {
-                CfgAst::All(xs) | CfgAst::Any(xs) => xs,
-                _ => unreachable!(),
+            let (CfgAst::All(inner_items) | CfgAst::Any(inner_items)) = canonical else {
+                unreachable!()
             };
             for inner in inner_items {
                 if !uniq.iter().any(|u| struct_equals(u, &inner)) {
@@ -148,8 +148,9 @@ fn struct_equals(a: &CfgAst, b: &CfgAst) -> bool {
     match (a, b) {
         (CfgAst::Flag(x), CfgAst::Flag(y)) => x == y,
         (CfgAst::Not(x), CfgAst::Not(y)) => struct_equals(x, y),
-        (CfgAst::All(xs), CfgAst::All(ys)) => set_equals(xs, ys),
-        (CfgAst::Any(xs), CfgAst::Any(ys)) => set_equals(xs, ys),
+        (CfgAst::All(xs), CfgAst::All(ys)) | (CfgAst::Any(xs), CfgAst::Any(ys)) => {
+            set_equals(xs, ys)
+        }
         _ => false,
     }
 }
@@ -167,7 +168,7 @@ fn set_equals(xs: &[CfgAst], ys: &[CfgAst]) -> bool {
 
 /// Query-side matcher: matches a stored `cfg_condition` string.
 ///
-/// Per 02_DESIGN §5.3.a + §10.4 the planner distinguishes two
+/// Per `02_DESIGN` §5.3.a + §10.4 the planner distinguishes two
 /// addressing modes:
 ///
 /// - [`CfgMatcher::Semantic`] — bare planner tokens (`cfg:linux`)
@@ -177,7 +178,7 @@ fn set_equals(xs: &[CfgAst], ys: &[CfgAst]) -> bool {
 ///   contain that flag (for example `"linux && amd64"`).
 /// - [`CfgMatcher::Literal`] — quoted planner forms
 ///   (`cfg:"linux && amd64"`, `cfg:"target_os = \"linux\""`) are
-///   byte-exact and stay language-specific. The 02_DESIGN §10.4
+///   byte-exact and stay language-specific. The `02_DESIGN` §10.4
 ///   regression locks this contract: `cfg:"linux"` returns ONLY
 ///   Go-stored symbols and `cfg:"target_os = \"linux\""` returns
 ///   ONLY Rust-stored symbols.
@@ -192,6 +193,7 @@ pub enum CfgMatcher {
 }
 
 /// Returns `true` iff `stored` matches `matcher`.
+#[must_use]
 pub fn matches_stored(matcher: &CfgMatcher, stored: &str) -> bool {
     match matcher {
         CfgMatcher::Literal(q) => stored == q,
@@ -224,7 +226,7 @@ fn contains_positive_flag(stored: &CfgAst, query_flag: &CfgAst) -> bool {
 
 /// Auto-detect which plugin produced `stored` and parse into [`CfgAst`].
 ///
-/// Detection heuristic per 02_DESIGN §5.3.a:
+/// Detection heuristic per `02_DESIGN` §5.3.a:
 /// - Presence of `all(` / `any(` / `not(` / ` = ` ⇒ Rust-functional.
 /// - Presence of `&&` / `||` / `!` infix (and absent of the above)
 ///   ⇒ Go-native.
@@ -233,6 +235,7 @@ fn contains_positive_flag(stored: &CfgAst, query_flag: &CfgAst) -> bool {
 /// Both parsers are total over their respective grammars: a parse
 /// failure falls back to a single `Flag(stored)` (the unparsed
 /// string). The comparator never panics on malformed input.
+#[must_use]
 pub fn parse_stored_cfg(stored: &str) -> CfgAst {
     let s = stored.trim();
     if s.is_empty() {
@@ -290,7 +293,7 @@ const PLATFORM_KEYS: &[&str] = &[
 /// `Flag("amd64")` on the Go side; structural equality fails. Codex
 /// multi-LLM review iter-1 finding 1.
 ///
-/// Pairs cover the Go GOARCH × Rust target_arch matrix where the
+/// Pairs cover the Go GOARCH × Rust `target_arch` matrix where the
 /// spellings differ. Tokens that match byte-for-byte across both
 /// sides (e.g. `arm`, `mips`, `mips64`, `riscv64`, `s390x`,
 /// `ppc64`, `ppc64le`) need no alias.
@@ -625,7 +628,7 @@ impl<'a> RustParser<'a> {
         }
         std::str::from_utf8(&self.bytes[start..self.pos])
             .ok()
-            .map(|s| s.to_string())
+            .map(std::string::ToString::to_string)
     }
 }
 

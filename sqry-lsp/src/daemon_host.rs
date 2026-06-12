@@ -1,7 +1,7 @@
 //! Daemon-hosted LSP entrypoint. sqry-daemon's router (Phase 8c U10)
 //! invokes [`host_on_streams`] for each `ShimProtocol::Lsp` shim
 //! connection after the `ShimRegisterAck { accepted: true }` has
-//! been written. The raw byte-pump stream is handed to tower_lsp's
+//! been written. The raw byte-pump stream is handed to `tower_lsp`'s
 //! server for LSP protocol handling.
 //!
 //! Per Codex iter-1 §E + iter-2 §E: each daemon-hosted LSP shim
@@ -53,7 +53,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::session::SessionManager;
 
-/// Host a tower_lsp LSP server on an arbitrary full-duplex stream
+/// Host a `tower_lsp` LSP server on an arbitrary full-duplex stream
 /// pair. Used by sqry-daemon's shim byte-pump to serve
 /// `ShimProtocol::Lsp` connections.
 ///
@@ -71,7 +71,7 @@ use crate::session::SessionManager;
 ///
 /// # Errors
 ///
-/// Returns an [`anyhow::Error`] if tower_lsp's service construction
+/// Returns an [`anyhow::Error`] if `tower_lsp`'s service construction
 /// fails. Normal disconnects (including cancellation) return
 /// `Ok(())`.
 pub async fn host_on_streams<R, W>(

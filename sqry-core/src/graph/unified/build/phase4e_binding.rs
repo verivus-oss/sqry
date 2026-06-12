@@ -221,10 +221,9 @@ pub(crate) fn derive_binding_plane_generic<G: GraphMutationTarget>(
     stats.aliases_with_invalid_scope = invalid_scope_count;
     if invalid_scope_count > 0 {
         log::warn!(
-            "Phase 4e: {} Import nodes had no enclosing scope; \
+            "Phase 4e: {invalid_scope_count} Import nodes had no enclosing scope; \
              alias entries emitted with ScopeId::INVALID — \
-             check Phase 1 plugins for missing Contains edges",
-            invalid_scope_count
+             check Phase 1 plugins for missing Contains edges"
         );
     }
     graph.set_alias_table(alias_table);
@@ -252,8 +251,7 @@ pub(crate) fn derive_binding_plane_generic<G: GraphMutationTarget>(
         // (e.g., external files or test fixtures).
         let content_hash = GraphMutationTarget::files(graph)
             .file_provenance(scope.file)
-            .map(|v| *v.content_hash)
-            .unwrap_or([0u8; 32]);
+            .map_or([0u8; 32], |v| *v.content_hash);
         let stable =
             compute_scope_stable_id(file_stable, content_hash, scope.kind, scope.byte_span);
         provenance_store.insert(

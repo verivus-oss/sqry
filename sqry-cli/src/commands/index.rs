@@ -80,6 +80,16 @@ pub(crate) fn run_classpath_pipeline_only(
 }
 
 #[cfg(feature = "jvm-classpath")]
+struct ExistingClasspathImport {
+    importer_id: sqry_core::graph::unified::node::NodeId,
+    file_id: sqry_core::graph::unified::file::FileId,
+    alias: Option<sqry_core::graph::unified::string::StringId>,
+    is_wildcard: bool,
+    import_name: Option<String>,
+    importer_path: Option<PathBuf>,
+}
+
+#[cfg(feature = "jvm-classpath")]
 fn create_workspace_classpath_import_edges(
     graph: &mut sqry_core::graph::unified::concurrent::CodeGraph,
     classpath_result: &sqry_classpath::pipeline::ClasspathPipelineResult,
@@ -88,38 +98,128 @@ fn create_workspace_classpath_import_edges(
         Vec<sqry_classpath::graph::emitter::ClasspathNodeRef>,
     >,
 ) -> (usize, usize, usize, usize) {
-    use sqry_core::graph::unified::edge::EdgeKind;
-    use sqry_core::graph::unified::node::NodeKind;
+    let package_index = build_classpath_package_index(classpath_result, fqn_to_nodes);
+    let scoped_jars = build_scope_jar_sets(&classpath_result.provenance);
+    let provenance_lookup = build_provenance_lookup(&classpath_result.provenance);
+    let existing_imports = collect_existing_classpath_imports(graph);
 
-    let class_fqns: std::collections::HashSet<&str> = classpath_result
-        .index
-        .classes
-        .iter()
-        .map(|class_stub| class_stub.fqn.as_str())
-        .collect();
-    let mut package_index: std::collections::HashMap<
-        String,
-        Vec<&sqry_classpath::graph::emitter::ClasspathNodeRef>,
-    > = std::collections::HashMap::new();
-    for fqn in class_fqns {
-        if let Some(node_refs) = fqn_to_nodes.get(fqn)
-            && let Some((package_name, _)) = fqn.rsplit_once('.')
-        {
-            package_index
-                .entry(package_name.to_owned())
-                .or_default()
-                .extend(node_refs.iter());
+    let mut created_edges = 0usize;
+    let mut skipped_member_imports = 0usize;
+    let mut skipped_unscoped_imports = 0usize;
+    let mut skipped_ambiguous_imports = 0usize;
+
+    for import in existing_imports {
+        let Some(import_name) = import.import_name else {
+            continue;
+        };
+        if import_name.starts_with("static ") {
+            skipped_member_imports += 1;
+            continue;
+        }
+
+        let Some(resolved) = resolve_allowed_jars(import.importer_path.as_deref(), &scoped_jars)
+        else {
+            skipped_unscoped_imports += 1;
+            continue;
+        };
+
+        if import.is_wildcard || import_name.ends_with(".*") || import_name.ends_with("._") {
+            let package_name = import_name
+                .strip_suffix(".*")
+                .or_else(|| import_name.strip_suffix("._"))
+                .unwrap_or(import_name.as_str());
+            if let Some(targets) = package_index.get(package_name) {
+                let filtered_targets =
+                    filter_scope_targets(targets.clone(), &resolved.allowed_jars);
+                let grouped_targets = group_targets_by_fqn(filtered_targets);
+                for target_group in grouped_targets.into_values() {
+                    let reduced = prefer_direct_targets(
+                        target_group,
+                        resolved.matched_root.as_deref(),
+                        &provenance_lookup,
+                    );
+                    if reduced.len() > 1 {
+                        skipped_ambiguous_imports += 1;
+                        continue;
+                    }
+                    add_classpath_import_edge(
+                        graph,
+                        import.importer_id,
+                        reduced[0].node_id,
+                        import.alias,
+                        import.is_wildcard,
+                        import.file_id,
+                        &mut created_edges,
+                    );
+                }
+            }
+            continue;
+        }
+
+        if let Some(targets) = fqn_to_nodes.get(import_name.as_str()) {
+            let filtered_targets =
+                filter_scope_targets(targets.iter().collect(), &resolved.allowed_jars);
+            let reduced = prefer_direct_targets(
+                filtered_targets,
+                resolved.matched_root.as_deref(),
+                &provenance_lookup,
+            );
+            if reduced.len() > 1 {
+                skipped_ambiguous_imports += 1;
+                continue;
+            }
+            if let Some(target_ref) = reduced.first() {
+                add_classpath_import_edge(
+                    graph,
+                    import.importer_id,
+                    target_ref.node_id,
+                    import.alias,
+                    import.is_wildcard,
+                    import.file_id,
+                    &mut created_edges,
+                );
+            }
         }
     }
 
-    let scoped_jars = build_scope_jar_sets(&classpath_result.provenance);
-    let provenance_lookup = build_provenance_lookup(&classpath_result.provenance);
+    (
+        created_edges,
+        skipped_member_imports,
+        skipped_unscoped_imports,
+        skipped_ambiguous_imports,
+    )
+}
+
+#[cfg(feature = "jvm-classpath")]
+fn add_classpath_import_edge(
+    graph: &mut sqry_core::graph::unified::concurrent::CodeGraph,
+    importer_id: sqry_core::graph::unified::node::NodeId,
+    target_id: sqry_core::graph::unified::node::NodeId,
+    alias: Option<sqry_core::graph::unified::string::StringId>,
+    is_wildcard: bool,
+    file_id: sqry_core::graph::unified::file::FileId,
+    created_edges: &mut usize,
+) {
+    use sqry_core::graph::unified::edge::EdgeKind;
+
+    let _delta = graph.edges().add_edge(
+        importer_id,
+        target_id,
+        EdgeKind::Imports { alias, is_wildcard },
+        file_id,
+    );
+    *created_edges += 1;
+}
+
+#[cfg(feature = "jvm-classpath")]
+fn collect_existing_classpath_imports(
+    graph: &sqry_core::graph::unified::concurrent::CodeGraph,
+) -> Vec<ExistingClasspathImport> {
+    use sqry_core::graph::unified::edge::EdgeKind;
+    use sqry_core::graph::unified::node::NodeKind;
+
     let mut existing_imports = Vec::new();
     for (source_id, source_entry) in graph.nodes().iter() {
-        // Gate 0d iter-2 fix: skip unified losers. Edges from losers
-        // are remapped to winners via `NodeRemapTable`, so iterating
-        // them would be a no-op, but the explicit guard makes the
-        // contract explicit. See `NodeEntry::is_unified_loser`.
         if source_entry.is_unified_loser() {
             continue;
         }
@@ -143,98 +243,48 @@ fn create_workspace_classpath_import_edges(
                 .and_then(|id| graph.strings().resolve(id))
                 .or_else(|| graph.strings().resolve(import_entry.name))
                 .map(|value| value.to_string());
-            existing_imports.push((
-                source_id,
-                edge.file,
+            existing_imports.push(ExistingClasspathImport {
+                importer_id: source_id,
+                file_id: edge.file,
                 alias,
                 is_wildcard,
                 import_name,
                 importer_path,
-            ));
+            });
         }
     }
+    existing_imports
+}
 
-    let mut created_edges = 0usize;
-    let mut skipped_member_imports = 0usize;
-    let mut skipped_unscoped_imports = 0usize;
-    let mut skipped_ambiguous_imports = 0usize;
-
-    for (importer_id, file_id, alias, is_wildcard, import_name, importer_path) in existing_imports {
-        let Some(import_name) = import_name else {
-            continue;
-        };
-        if import_name.starts_with("static ") {
-            skipped_member_imports += 1;
-            continue;
-        }
-
-        let Some(resolved) = resolve_allowed_jars(importer_path.as_deref(), &scoped_jars) else {
-            skipped_unscoped_imports += 1;
-            continue;
-        };
-
-        if is_wildcard || import_name.ends_with(".*") || import_name.ends_with("._") {
-            let package_name = import_name
-                .strip_suffix(".*")
-                .or_else(|| import_name.strip_suffix("._"))
-                .unwrap_or(import_name.as_str());
-            if let Some(targets) = package_index.get(package_name) {
-                let filtered_targets =
-                    filter_scope_targets(targets.to_vec(), &resolved.allowed_jars);
-                let grouped_targets = group_targets_by_fqn(filtered_targets);
-                for target_group in grouped_targets.into_values() {
-                    let reduced = prefer_direct_targets(
-                        target_group,
-                        resolved.matched_root.as_deref(),
-                        &provenance_lookup,
-                    );
-                    if reduced.len() > 1 {
-                        skipped_ambiguous_imports += 1;
-                        continue;
-                    }
-                    let target_id = reduced[0].node_id;
-                    let _delta = graph.edges().add_edge(
-                        importer_id,
-                        target_id,
-                        EdgeKind::Imports { alias, is_wildcard },
-                        file_id,
-                    );
-                    created_edges += 1;
-                }
-            }
-            continue;
-        }
-
-        if let Some(targets) = fqn_to_nodes.get(import_name.as_str()) {
-            let filtered_targets =
-                filter_scope_targets(targets.iter().collect(), &resolved.allowed_jars);
-            let reduced = prefer_direct_targets(
-                filtered_targets,
-                resolved.matched_root.as_deref(),
-                &provenance_lookup,
-            );
-            if reduced.len() > 1 {
-                skipped_ambiguous_imports += 1;
-                continue;
-            }
-            if let Some(target_ref) = reduced.first() {
-                let _delta = graph.edges().add_edge(
-                    importer_id,
-                    target_ref.node_id,
-                    EdgeKind::Imports { alias, is_wildcard },
-                    file_id,
-                );
-                created_edges += 1;
-            }
+#[cfg(feature = "jvm-classpath")]
+fn build_classpath_package_index<'a>(
+    classpath_result: &'a sqry_classpath::pipeline::ClasspathPipelineResult,
+    fqn_to_nodes: &'a std::collections::HashMap<
+        String,
+        Vec<sqry_classpath::graph::emitter::ClasspathNodeRef>,
+    >,
+) -> std::collections::HashMap<String, Vec<&'a sqry_classpath::graph::emitter::ClasspathNodeRef>> {
+    let class_fqns: std::collections::HashSet<&str> = classpath_result
+        .index
+        .classes
+        .iter()
+        .map(|class_stub| class_stub.fqn.as_str())
+        .collect();
+    let mut package_index: std::collections::HashMap<
+        String,
+        Vec<&sqry_classpath::graph::emitter::ClasspathNodeRef>,
+    > = std::collections::HashMap::new();
+    for fqn in class_fqns {
+        if let Some(node_refs) = fqn_to_nodes.get(fqn)
+            && let Some((package_name, _)) = fqn.rsplit_once('.')
+        {
+            package_index
+                .entry(package_name.to_owned())
+                .or_default()
+                .extend(node_refs.iter());
         }
     }
-
-    (
-        created_edges,
-        skipped_member_imports,
-        skipped_unscoped_imports,
-        skipped_ambiguous_imports,
-    )
+    package_index
 }
 
 #[cfg(feature = "jvm-classpath")]
@@ -608,7 +658,7 @@ fn format_validation_prometheus(status: &IndexStatus) -> String {
 #[allow(clippy::too_many_arguments)]
 /// Build a fresh index for the given path.
 ///
-/// STEP_8 precedence: callers must resolve `path` via
+/// `STEP_8` precedence: callers must resolve `path` via
 /// [`crate::args::Cli::resolve_subcommand_path`] so that an explicit positional
 /// `<path>` always wins over the global `--workspace` / `SQRY_WORKSPACE_FILE`
 /// flag. This function trusts the caller to have applied that precedence.

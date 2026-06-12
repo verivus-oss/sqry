@@ -72,11 +72,21 @@ pub struct IntentClassifier;
 #[cfg(not(feature = "classifier"))]
 impl IntentClassifier {
     /// Create a stub classifier.
+    ///
+    /// # Errors
+    ///
+    /// The stub implementation is infallible today; it returns `Result` to
+    /// preserve the feature-enabled classifier constructor contract.
     pub fn new() -> Result<Self, ClassifierError> {
         Ok(Self)
     }
 
     /// Classify intent (stub - always returns Ambiguous).
+    ///
+    /// # Errors
+    ///
+    /// The stub implementation is infallible today; it returns `Result` to
+    /// preserve the feature-enabled classifier API.
     pub fn classify(&self, _input: &str) -> Result<ClassificationResult, ClassifierError> {
         Ok(ClassificationResult {
             intent: Intent::Ambiguous,

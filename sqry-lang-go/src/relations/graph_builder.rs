@@ -240,13 +240,13 @@ fn default_go_import_selector(import_path: &str) -> String {
         .to_string()
 }
 
-/// Cluster G1 (T1.3 — 01_SPEC §7 AC-10/AC-11, 05_TEST_PLAN.md):
+/// Cluster G1 (T1.3 — `01_SPEC` §7 AC-10/AC-11, `05_TEST_PLAN.md)`:
 /// inspect a `call_expression` AST node for the shape of a same-
 /// package named-type conversion (`T(g)` where `T` is a function-typed
 /// `Type` and `g` is an identifier whose qualified name resolves to a
 /// `Function` / `Method` in the same package). When the shape matches,
 /// emit a `GoNamedTypeConversionHint` with `argument_node` resolved to
-/// the function's NodeId via `helper.ensure_callee` so the post-Phase-4e
+/// the function's `NodeId` via `helper.ensure_callee` so the post-Phase-4e
 /// `pass_go_method_set_satisfaction`'s signature-comparison predicate
 /// can look up the argument's `GoFunctionSignatureHint`.
 ///
@@ -254,7 +254,7 @@ fn default_go_import_selector(import_path: &str) -> String {
 /// calls) and `handle_var_declaration` / `handle_const_declaration`
 /// (top-level `var _ = T(g)` / `const _ = T(g)` initializers). The
 /// `callee_override` parameter lets the in-body path reuse the
-/// caller's already-resolved callee NodeId; when `None`, the helper
+/// caller's already-resolved callee `NodeId`; when `None`, the helper
 /// resolves the target itself via `helper.ensure_callee` against the
 /// canonical target qn.
 ///
@@ -887,7 +887,7 @@ fn handle_method_declaration(
 /// Dispatch entry point for the T3 Cluster C `Unwrap` body analyser.
 /// Looks up the method's return-type text, classifies via
 /// [`super::wraps::classify_unwrap_method`], and if recognised resolves
-/// the receiver type's NodeId and walks the method body.
+/// the receiver type's `NodeId` and walks the method body.
 fn try_emit_wraps_for_unwrap_method(
     method_node: Node<'_>,
     content: &[u8],
@@ -2151,7 +2151,10 @@ fn parse_explicit_type_args(
 ) -> SmallVec<[TypeArg; 4]> {
     let mut type_args: SmallVec<[TypeArg; 4]> = SmallVec::new();
     for i in 0..type_args_node.named_child_count() {
-        let Some(child) = type_args_node.named_child(i as u32) else {
+        let Ok(child_index) = u32::try_from(i) else {
+            continue;
+        };
+        let Some(child) = type_args_node.named_child(child_index) else {
             continue;
         };
         if child.kind() != "type_elem" {
@@ -2175,7 +2178,7 @@ fn parse_explicit_type_args(
 
 /// Stage a per-call `CallSite` and the `Instantiates` edge from it to the
 /// generic callee, plus a `Contains` edge from the enclosing function so the
-/// CallSite is reachable by the MCP body-expansion walk.
+/// `CallSite` is reachable by the MCP body-expansion walk.
 fn stage_instantiates_edge(
     site_anchor: Node,
     enclosing_fn: UnifiedNodeId,
@@ -2246,7 +2249,7 @@ fn emit_explicit_instantiation(
 /// (`type Box[T any] []T; _ = Box[int](nil)`), emission is gated on
 /// `generic_func_names` — the set of locally-declared generic functions. Only
 /// a bare `type_identifier` callee whose name is in that set produces an
-/// `Instantiates { type_args, Explicit }` edge (from a per-call CallSite to the
+/// `Instantiates { type_args, Explicit }` edge (from a per-call `CallSite` to the
 /// generic callee). A generic-type conversion, or a package-qualified /
 /// non-local callee we cannot confirm is a function, emits nothing — the spec
 /// (§3.1) forbids false positives and accepts false negatives.
@@ -2262,7 +2265,10 @@ fn try_emit_instantiation_for_type_conversion(
     // the `type_arguments` list.
     let mut generic_type = None;
     for i in 0..node.named_child_count() {
-        if let Some(child) = node.named_child(i as u32)
+        let Ok(child_index) = u32::try_from(i) else {
+            continue;
+        };
+        if let Some(child) = node.named_child(child_index)
             && child.kind() == "generic_type"
         {
             generic_type = Some(child);
@@ -2276,7 +2282,10 @@ fn try_emit_instantiation_for_type_conversion(
     let mut callee_node = None;
     let mut type_args_node = None;
     for i in 0..generic_type.named_child_count() {
-        let Some(child) = generic_type.named_child(i as u32) else {
+        let Ok(child_index) = u32::try_from(i) else {
+            continue;
+        };
+        let Some(child) = generic_type.named_child(child_index) else {
             continue;
         };
         match child.kind() {
@@ -3152,12 +3161,11 @@ fn infer_instantiation(
             all_resolved = false;
             continue;
         }
-        match bindings.get(type_param) {
-            Some(value) => out.push(value.clone()),
-            None => {
-                out.push(InferredArg::unknown());
-                all_resolved = false;
-            }
+        if let Some(value) = bindings.get(type_param) {
+            out.push(value.clone());
+        } else {
+            out.push(InferredArg::unknown());
+            all_resolved = false;
         }
     }
 
@@ -3370,7 +3378,7 @@ fn process_call_expression_unified(
 /// pushes the appropriate combination of [`GoReceiverCallHint`] /
 /// [`GoNamedTypeConversionHint`] entries into the staging buffer.
 ///
-/// Classification rules (cf. 02_DESIGN §3.2 lines ~600-744):
+/// Classification rules (cf. `02_DESIGN` §3.2 lines ~600-744):
 ///
 /// * `function_node.kind() == "selector_expression"` → method call.
 ///   The operand sub-expression's syntactic shape determines which
@@ -3470,7 +3478,7 @@ fn emit_go_receiver_and_conversion_hints(
 }
 
 /// Classify the operand expression of a `selector_expression` into a
-/// [`GoReceiverHintKind`] per 02_DESIGN §3.2.
+/// [`GoReceiverHintKind`] per `02_DESIGN` §3.2.
 ///
 /// Returns `None` for shapes the walker cannot classify; the caller
 /// drops the hint silently in that case (the pass tolerates missing
@@ -4840,11 +4848,11 @@ fn result_clause_canonical_text(
 }
 
 /// Build the canonical signature for a function-like AST node
-/// (function_declaration, method_declaration, method_elem,
-/// function_type). Concatenates the parameter and result clauses via
+/// (`function_declaration`, `method_declaration`, `method_elem`,
+/// `function_type`). Concatenates the parameter and result clauses via
 /// the helpers above, then runs the canonical normaliser to collapse
 /// whitespace, erase parameter names, and preserve variadic syntax per
-/// 02_DESIGN §4.1.2.
+/// `02_DESIGN` §4.1.2.
 ///
 /// For method declarations the receiver is **not** included in the
 /// signature — Go method-set comparison treats the receiver as the
@@ -4868,7 +4876,7 @@ fn canonical_signature_for_func_like(
 /// Build the canonical signature for an interface `method_elem` whose
 /// child positions are not exposed via tree-sitter `field_name`s.
 ///
-/// The caller has already filtered the method_elem's children into a
+/// The caller has already filtered the `method_elem`'s children into a
 /// `Vec<Node>` of type-shaped positions (everything except the leading
 /// `field_identifier` that names the method). By Go grammar:
 ///

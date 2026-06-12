@@ -1,6 +1,6 @@
 //! `daemon/workspaceStatus` handler.
 //!
-//! STEP_6 of the workspace-aware-cross-repo plan (2026-04-26):
+//! `STEP_6` of the workspace-aware-cross-repo plan (2026-04-26):
 //! returns the aggregate per-source-root rollup of every
 //! [`crate::workspace::WorkspaceKey`] in the manager whose
 //! `workspace_id` matches the request payload.
@@ -13,7 +13,7 @@
 //! - Eviction is per-source-root; the aggregate reports
 //!   [`sqry_daemon_protocol::WorkspaceState::Evicted`] for any source
 //!   root that has been LRU'd out while siblings remain loaded
-//!   (acceptance criterion #4 / #5 from the STEP_6 brief).
+//!   (acceptance criterion #4 / #5 from the `STEP_6` brief).
 //! - "Workspace not found" is surfaced as
 //!   [`crate::error::DaemonError::WorkspaceNotLoaded`]; the daemon
 //!   never returns an empty aggregate.
@@ -38,7 +38,7 @@ pub struct WorkspaceStatusParams {
 /// Handle one `daemon/workspaceStatus` request. Returns the
 /// [`ResponseEnvelope<WorkspaceIndexStatus>`] serialised as a `Value`
 /// ready for the JSON-RPC `result` field.
-pub(crate) async fn handle(ctx: &HandlerContext, params: Value) -> Result<Value, MethodError> {
+pub(crate) fn handle(ctx: &HandlerContext, params: Value) -> Result<Value, MethodError> {
     let params: WorkspaceStatusParams =
         serde_json::from_value(params).map_err(MethodError::InvalidParams)?;
 

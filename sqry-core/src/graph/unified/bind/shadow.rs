@@ -173,7 +173,7 @@ impl ShadowTable {
     /// impl (A2 §K row K.A13). Callers that hold the table behind an `Arc`
     /// must reach it through `Arc::make_mut` before invoking this method.
     ///
-    /// `#[allow(dead_code)]` mirrors the NodeIdBearing trait itself: Gate 0b
+    /// `#[allow(dead_code)]` mirrors the `NodeIdBearing` trait itself: Gate 0b
     /// lands the scaffolding and unit tests, Gate 0c adds the production
     /// call site in `RebuildGraph::finalize()`.
     #[allow(dead_code)]
@@ -188,7 +188,7 @@ impl ShadowTable {
     /// Rewrite every `StringId` stored on every entry through `remap`,
     /// replacing any ID that appears as a key with its canonical value.
     ///
-    /// Used by Gate 0c's finalize step 1 (StringId canonicalisation).
+    /// Used by Gate 0c's finalize step 1 (`StringId` canonicalisation).
     /// `symbol` participates in the `(scope, symbol, byte_offset)` sort
     /// key AND in the `chains: HashMap<(ScopeId, StringId), _>` index, so
     /// after rewrite the entries are re-sorted and the `chains` map is

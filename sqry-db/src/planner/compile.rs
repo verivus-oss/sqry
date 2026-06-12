@@ -195,16 +195,16 @@ impl PlanNodeKind {
 ///
 /// | Variant | Preserved field | Why |
 /// |---------|-----------------|-----|
-/// | [`EdgeKind::TypeOf`] | `context: Option<TypeOfContext>` | Parameter vs Return vs Field vs Variable vs TypeParameter vs Constraint are distinct relationships. |
+/// | [`EdgeKind::TypeOf`] | `context: Option<TypeOfContext>` | Parameter vs Return vs Field vs Variable vs `TypeParameter` vs Constraint are distinct relationships. |
 /// | [`EdgeKind::Exports`] | `kind: ExportKind` | Direct / Reexport / Default / Namespace are distinct export forms. |
 /// | [`EdgeKind::Imports`] | `is_wildcard: bool` | A `use foo::*` wildcard import is a different relationship from a named import. |
-/// | [`EdgeKind::LifetimeConstraint`] | `constraint_kind` | Outlives / TypeBound / Reference / Static / HigherRanked / TraitObject are distinct Rust lifetime relations. |
+/// | [`EdgeKind::LifetimeConstraint`] | `constraint_kind` | Outlives / `TypeBound` / Reference / Static / `HigherRanked` / `TraitObject` are distinct Rust lifetime relations. |
 /// | [`EdgeKind::MacroExpansion`] | `expansion_kind` | `CfgGate`, `Derive`, `Attribute`, `Declarative`, and `Function` expansions have distinct query semantics. |
 /// | [`EdgeKind::FfiCall`] | `convention` | C vs Cdecl vs Stdcall vs Fastcall vs System are distinct FFI edges. |
 /// | [`EdgeKind::HttpRequest`] | `method` | GET / POST / PUT / DELETE / PATCH / HEAD are distinct HTTP edges. |
 /// | [`EdgeKind::DbQuery`] | `query_type` | Select / Insert / Update / Delete / Execute are distinct DB edges. |
 /// | [`EdgeKind::TableWrite`] | `operation` | Insert / Update / Delete are distinct write edges. |
-/// | [`EdgeKind::MessageQueue`] | `protocol` | Kafka / SQS / RabbitMQ / NATS / Redis / Other are distinct MQ edges. |
+/// | [`EdgeKind::MessageQueue`] | `protocol` | Kafka / SQS / `RabbitMQ` / NATS / Redis / Other are distinct MQ edges. |
 ///
 /// ## Pass-through
 ///
@@ -342,7 +342,7 @@ pub fn normalize_edge_kind(kind: EdgeKind) -> EdgeKind {
         //      type_args so Map[string,int] vs Map[string,int64] stay
         //      distinguishable (DESIGN §7.6).
         EdgeKind::Instantiates { inference_kind, .. } => EdgeKind::Instantiates {
-            type_args: Default::default(),
+            type_args: smallvec::SmallVec::default(),
             inference_kind,
         },
     }
@@ -619,7 +619,7 @@ impl QueryBuilder {
     /// Returns `false` (leaving the builder untouched) when the last
     /// step is not a Calls `EdgeTraversal`, the edge-kind discriminant
     /// is something other than [`EdgeKind::Calls`], or the
-    /// EdgeTraversal already carries `resolved_via: Some(_)` — in which
+    /// `EdgeTraversal` already carries `resolved_via: Some(_)` — in which
     /// case the caller is responsible for emitting a
     /// [`PlanNode::Filter`] with [`Predicate::ResolvedVia`] instead
     /// (preserving U14's node-scan filter semantics for
@@ -777,6 +777,14 @@ impl QueryBuilder {
     /// rather than the bare `one`. This keeps the plan shape uniform for
     /// downstream fusion and execution. Callers that prefer the bare step
     /// can match against `plan.root` and unwrap when `Chain.steps.len() == 1`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BuildError::EmptyBuilder`] when no steps were added,
+    /// [`BuildError::FirstStepNotContextFree`] when the first step depends on
+    /// incoming context, [`BuildError::ZeroDepth`] for zero-depth traversals,
+    /// and [`BuildError::InvalidSetOpOperand`] when a set operation is rooted
+    /// in a context-dependent operand.
     pub fn build(self) -> Result<QueryPlan, BuildError> {
         if self.steps.is_empty() {
             return Err(BuildError::EmptyBuilder);

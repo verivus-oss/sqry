@@ -129,9 +129,8 @@ impl<'g> BindingPlane<'g> {
     /// in the snapshot.
     #[must_use]
     pub fn classify(&self, node_id: NodeId) -> SymbolClassification {
-        let entry = match self.snapshot.get_node(node_id) {
-            Some(e) => e,
-            None => return SymbolClassification::Unknown,
+        let Some(entry) = self.snapshot.get_node(node_id) else {
+            return SymbolClassification::Unknown;
         };
         classify_node(self.snapshot, node_id, entry.kind)
     }
@@ -281,8 +280,8 @@ impl<'g> BindingPlane<'g> {
 ///
 /// The step trace documents the resolver's internal work:
 /// 1. `ApplyResolutionMode` — the caller-supplied mode
-/// 2. `LookupInBucket` — for each bucket probed (ExactQualified,
-///    ExactSimple, CanonicalSuffix)
+/// 2. `LookupInBucket` — for each bucket probed (`ExactQualified`,
+///    `ExactSimple`, `CanonicalSuffix`)
 /// 3. `ConsiderCandidate` — for each candidate in the winning bucket
 /// 4. Terminal: `Chose` (single winner), `Ambiguous` (multiple), or
 ///    `Unresolved` (not found / file not indexed)

@@ -356,15 +356,12 @@ fn regex_shape_is_acceptable(pattern: &str, cfg: &PlannerCostGateConfig) -> bool
     let mut extractor = regex_syntax::hir::literal::Extractor::new();
     extractor.kind(regex_syntax::hir::literal::ExtractKind::Prefix);
     let prefixes = extractor.extract(&hir);
-    let longest_prefix = prefixes
-        .literals()
-        .map(|lits| {
-            lits.iter()
-                .map(|lit| lit.as_bytes().len())
-                .max()
-                .unwrap_or(0)
-        })
-        .unwrap_or(0);
+    let longest_prefix = prefixes.literals().map_or(0, |lits| {
+        lits.iter()
+            .map(|lit| lit.as_bytes().len())
+            .max()
+            .unwrap_or(0)
+    });
     if longest_prefix > cfg.min_prefix_len {
         return true;
     }

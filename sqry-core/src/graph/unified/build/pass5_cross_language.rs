@@ -705,20 +705,19 @@ fn collect_http_requests<G: GraphMutationTarget>(
         // edges it returns are live by construction (CSR tombstones +
         // delta shadows filtered), so the slot is guaranteed to be
         // occupied — only the generation is ambiguous.
-        let (source_node, source_file) = match graph.nodes().get(edge_ref.source) {
-            Some(entry) => (edge_ref.source, entry.file),
-            None => {
-                let slot = graph.nodes().slot(edge_ref.source.index());
-                let Some(slot) = slot else { continue };
-                let Some(entry) = slot.get() else { continue };
-                // Rewire the source NodeId to carry the slot's live
-                // generation so downstream consumers (e.g. the
-                // cross-file edge Pass 5 emits) reference a NodeId that
-                // will still be valid after `RebuildGraph::finalize` step
-                // 9 rebuilds the CSR from compacted deltas.
-                let live_source = NodeId::new(edge_ref.source.index(), slot.generation());
-                (live_source, entry.file)
-            }
+        let (source_node, source_file) = if let Some(entry) = graph.nodes().get(edge_ref.source) {
+            (edge_ref.source, entry.file)
+        } else {
+            let slot = graph.nodes().slot(edge_ref.source.index());
+            let Some(slot) = slot else { continue };
+            let Some(entry) = slot.get() else { continue };
+            // Rewire the source NodeId to carry the slot's live
+            // generation so downstream consumers (e.g. the
+            // cross-file edge Pass 5 emits) reference a NodeId that
+            // will still be valid after `RebuildGraph::finalize` step
+            // 9 rebuilds the CSR from compacted deltas.
+            let live_source = NodeId::new(edge_ref.source.index(), slot.generation());
+            (live_source, entry.file)
         };
         requests.push(HttpRequestInfo {
             source_node,

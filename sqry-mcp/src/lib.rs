@@ -121,7 +121,7 @@ pub mod tool_handlers {
 
 /// `STEP_7` MAJOR 2 test surface — public access to the per-request
 /// thread-local workspace override so integration tests can bind a
-/// LogicalWorkspace before invoking workspace-aware tools (mirroring
+/// `LogicalWorkspace` before invoking workspace-aware tools (mirroring
 /// the runtime dispatch in `SqryServer::execute_tool_for_request`).
 pub mod workspace_session_test_api {
     pub use crate::workspace_session::{current_logical_workspace, with_workspace_override};

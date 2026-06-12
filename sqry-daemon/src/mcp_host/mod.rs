@@ -592,41 +592,40 @@ impl DaemonMcpHandler {
             return Ok(());
         };
 
-        match parse_translated_graph_command(&command, original_path) {
-            Some((tool_name, mut tool_args)) => {
-                // SGA05: dispatch through the shared acquirer so the
-                // translated tool consumes a graph admitted by the
-                // daemon's read-only acquisition path. The daemon
-                // provider canonicalises the path internally (PathPolicy
-                // default), so we pass the un-canonicalised
-                // `original_path` here exactly as direct tool calls do.
-                ensure_path_arg(&mut tool_args, original_path);
-                let exec_output = self
-                    .dispatch_translated_graph_tool(tool_name, tool_args, original_path)
-                    .await?;
-                splice_execution_output(payload, exec_output);
-                Ok(())
-            }
-            None => {
-                // Not a graph-backed tool we route — refuse to shell
-                // out (per SGA02 §Tool Ownership Boundary) and leave
-                // an explicit marker so callers can distinguish
-                // "we did not run this command" from "command produced
-                // empty output". Out-of-scope translations include
-                // `sqry index --status`, `sqry visualize ...`, and any
-                // future CLI that does not have a daemon-supported
-                // MCP equivalent.
-                let marker = format!(
-                    "[daemon] translated command {command:?} is not a daemon-supported \
-                     graph-backed tool; daemon-hosted sqry_ask does not shell out for \
-                     out-of-scope commands. Route via the daemon's MCP tools (e.g. \
-                     semantic_search) or run the CLI from your client. \
-                     workspace_root={}",
-                    canonical_root.display()
-                );
-                splice_execution_output(payload, marker);
-                Ok(())
-            }
+        if let Some((tool_name, mut tool_args)) =
+            parse_translated_graph_command(&command, original_path)
+        {
+            // SGA05: dispatch through the shared acquirer so the
+            // translated tool consumes a graph admitted by the
+            // daemon's read-only acquisition path. The daemon
+            // provider canonicalises the path internally (PathPolicy
+            // default), so we pass the un-canonicalised
+            // `original_path` here exactly as direct tool calls do.
+            ensure_path_arg(&mut tool_args, original_path);
+            let exec_output = self
+                .dispatch_translated_graph_tool(tool_name, tool_args, original_path)
+                .await?;
+            splice_execution_output(payload, exec_output);
+            Ok(())
+        } else {
+            // Not a graph-backed tool we route — refuse to shell
+            // out (per SGA02 §Tool Ownership Boundary) and leave
+            // an explicit marker so callers can distinguish
+            // "we did not run this command" from "command produced
+            // empty output". Out-of-scope translations include
+            // `sqry index --status`, `sqry visualize ...`, and any
+            // future CLI that does not have a daemon-supported
+            // MCP equivalent.
+            let marker = format!(
+                "[daemon] translated command {command:?} is not a daemon-supported \
+                 graph-backed tool; daemon-hosted sqry_ask does not shell out for \
+                 out-of-scope commands. Route via the daemon's MCP tools (e.g. \
+                 semantic_search) or run the CLI from your client. \
+                 workspace_root={}",
+                canonical_root.display()
+            );
+            splice_execution_output(payload, marker);
+            Ok(())
         }
     }
 

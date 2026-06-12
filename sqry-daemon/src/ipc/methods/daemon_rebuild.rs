@@ -52,6 +52,9 @@ use super::super::path_policy::resolve_index_root;
 use super::super::protocol::{RebuildResult, ResponseEnvelope, ResponseMeta};
 use super::{HandlerContext, MethodError};
 
+const POLL_INTERVAL: Duration = Duration::from_millis(200);
+const POLL_TIMEOUT: Duration = Duration::from_secs(600);
+
 /// `daemon/rebuild` request parameters.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -155,19 +158,17 @@ pub(crate) async fn handle(ctx: &HandlerContext, params: Value) -> Result<Value,
         .map_err(MethodError::Daemon)?;
 
     // Wait for any in-flight rebuild to complete (handles coalesced case).
-    const POLL_INTERVAL: Duration = Duration::from_millis(200);
-    const POLL_TIMEOUT: Duration = Duration::from_secs(600);
     while ws.rebuild_in_flight.load(Ordering::Acquire) {
         if started.elapsed() > POLL_TIMEOUT {
             return Err(MethodError::Daemon(DaemonError::ToolTimeout {
                 root: canonical,
                 secs: POLL_TIMEOUT.as_secs(),
-                deadline_ms: POLL_TIMEOUT.as_millis() as u64,
+                deadline_ms: u64::try_from(POLL_TIMEOUT.as_millis()).unwrap_or(u64::MAX),
             }));
         }
         tokio::time::sleep(POLL_INTERVAL).await;
     }
-    let duration_ms = started.elapsed().as_millis() as u64;
+    let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
 
     // Step 6: read back graph stats from the freshly published snapshot.
     // `ws.graph` is an ArcSwap; the `load()` gives us the current Arc.

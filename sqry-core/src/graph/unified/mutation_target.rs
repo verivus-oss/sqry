@@ -471,7 +471,7 @@ pub(crate) trait GraphMutationTarget {
     ///
     /// Used by Phase 3's parallel-commit path to merge per-file
     /// [`StagingGraph::go_hints`][crate::graph::unified::build::staging::StagingGraph::go_hints]
-    /// into the live target after NodeId / StringId remapping.
+    /// into the live target after `NodeId` / `StringId` remapping.
     fn go_hints_mut(&mut self) -> &mut GoHints;
 }
 

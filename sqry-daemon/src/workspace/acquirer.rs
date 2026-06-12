@@ -64,6 +64,10 @@ use crate::error::DaemonError;
 use crate::ipc::tool_core;
 use crate::workspace::{ServeVerdict, WorkspaceBuilder, WorkspaceKey, WorkspaceManager};
 
+fn u64_hours_to_f64(hours: u64) -> f64 {
+    f64::from(u32::try_from(hours).unwrap_or(u32::MAX))
+}
+
 /// Initial admission-control reservation used by the daemon provider's
 /// bounded read-only rehydrate. The same constant the MCP host uses for
 /// `sqry_ask` initial loads — keeps admission accounting consistent
@@ -254,7 +258,6 @@ impl GraphAcquirer for DaemonGraphProvider {
                 // `acquire_and_execute` parses this label back into a
                 // `WorkspaceState` for the JSON-RPC `ResponseMeta`.
                 let lifecycle_label = match state {
-                    crate::workspace::WorkspaceState::Loaded => Some("loaded"),
                     crate::workspace::WorkspaceState::Rebuilding => Some("rebuilding"),
                     // Fresh verdicts only ever carry Loaded / Rebuilding
                     // (see `WorkspaceManager::classify_for_serve` table).
@@ -279,7 +282,7 @@ impl GraphAcquirer for DaemonGraphProvider {
                 let freshness = GraphFreshness::Stale {
                     last_good_at: Some(rfc3339_utc(last_good_at)),
                     last_error,
-                    age_hours: Some(age_hours as f64),
+                    age_hours: Some(u64_hours_to_f64(age_hours)),
                 };
                 Ok(self.acquisition_from_parts(
                     graph,
@@ -361,7 +364,7 @@ impl DaemonGraphProvider {
                 last_error: _,
             } => Err(GraphAcquisitionError::StaleExpired {
                 workspace_root: canonical_root,
-                age_hours: Some(age_hours as f64),
+                age_hours: Some(u64_hours_to_f64(age_hours)),
             }),
             DaemonError::WorkspaceBuildFailed { root: _, reason } => {
                 Err(GraphAcquisitionError::BuildFailed {

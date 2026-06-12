@@ -65,7 +65,7 @@ pub const MAGIC_BYTES_V10: &[u8; 14] = b"SQRY_GRAPH_V10";
 /// reader. V11 extends V10 with:
 /// - `StoredEntry { typed, flags }` metadata-store wire format (see U02).
 ///   The bitset-style `NodeFlags` channel lets a node carry SYNTHETIC,
-///   ADDRESS_TAKEN, and CALLSITE_PROMISCUOUS independently of any
+///   `ADDRESS_TAKEN`, and `CALLSITE_PROMISCUOUS` independently of any
 ///   `TypedMetadata::Macro` or `TypedMetadata::Classpath` payload.
 /// - Reserved `c_indirect_tables: Option<_>` slot on the snapshot envelope
 ///   for the Phase A C-icall side tables (populated by U09; absent in V10).

@@ -21,7 +21,7 @@ pub struct StatusParams {}
 /// Handle one `daemon/status` request. Returns the
 /// [`ResponseEnvelope<DaemonStatus>`] serialised as a `Value` ready
 /// for the JSON-RPC `result` field.
-pub(crate) async fn handle(ctx: &HandlerContext, params: Value) -> Result<Value, MethodError> {
+pub(crate) fn handle(ctx: &HandlerContext, params: Value) -> Result<Value, MethodError> {
     let _params: StatusParams = match params {
         Value::Null => StatusParams::default(),
         other => serde_json::from_value(other).map_err(MethodError::InvalidParams)?,

@@ -24,9 +24,11 @@ use crate::graph::unified::build::parallel_commit::{
 use crate::graph::unified::build::pass3_intra::PendingEdge;
 use crate::graph::unified::build::progress::GraphBuildProgressTracker;
 use crate::graph::unified::concurrent::CodeGraph;
+use crate::graph::unified::node::{NodeId, NodeKind};
 use crate::graph::unified::storage::c_indirect::{
     BindingEntry, CIndirectSideTables, IndirectCallsite,
 };
+use crate::graph::unified::string::StringId;
 use crate::io::FileReader;
 use crate::plugin::PluginManager;
 use crate::plugin::error::ParseError;
@@ -726,7 +728,7 @@ fn build_unified_graph_inner(
                 continue;
             }
             let rekeyed =
-                super::parallel_commit::rekey_staging_metadata_to_arena(metadata, arena_ids);
+                super::parallel_commit::rekey_staging_metadata_to_arena(&metadata, arena_ids);
             if !rekeyed.is_empty() {
                 all_staged_metadata.push((fp.file_id, rekeyed));
             }
@@ -945,14 +947,14 @@ fn build_unified_graph_inner(
     // ------------------------------------------------------------------
     cancellation.check()?;
     tracker.start_phase(6, "C indirect-call resolution", 1);
-    let pass5b_stats = super::pass5b_c_indirect::resolve_c_indirect_calls(&mut graph);
+    let c_indirect_stats = super::pass5b_c_indirect::resolve_c_indirect_calls(&mut graph);
     log::info!(
         target: "sqry_core::build",
         "Pass 5b: binding={}, typematch={}, cap_exceeded={}, fallback={}",
-        pass5b_stats.binding_resolved,
-        pass5b_stats.typematch_resolved,
-        pass5b_stats.cap_exceeded,
-        pass5b_stats.stub_fallback,
+        c_indirect_stats.binding_resolved,
+        c_indirect_stats.typematch_resolved,
+        c_indirect_stats.cap_exceeded,
+        c_indirect_stats.stub_fallback,
     );
     tracker.increment_progress();
     tracker.complete_phase();
@@ -1001,13 +1003,13 @@ fn build_unified_graph_inner(
 
     // Pass 5: Cross-language linking (FFI declarations → C/C++ functions, HTTP requests → endpoints)
     tracker.start_phase(8, "Cross-language linking", 1);
-    let pass5_stats = super::pass5_cross_language::link_cross_language_edges(&mut graph);
-    if pass5_stats.total_edges_created > 0 {
+    let cross_language_stats = super::pass5_cross_language::link_cross_language_edges(&mut graph);
+    if cross_language_stats.total_edges_created > 0 {
         log::info!(
             "Pass 5: {} cross-language edges created ({} FFI, {} HTTP)",
-            pass5_stats.total_edges_created,
-            pass5_stats.ffi_edges_created,
-            pass5_stats.http_endpoints_matched,
+            cross_language_stats.total_edges_created,
+            cross_language_stats.ffi_edges_created,
+            cross_language_stats.http_endpoints_matched,
         );
     }
     tracker.increment_progress(); // pass 5 done
@@ -1058,24 +1060,306 @@ pub(crate) struct DeferredCIndirectStats {
     /// `CIndirectSideTables::bindings_by_field` across all keys.
     pub binding_entries_inserted: usize,
     /// Number of bindings whose `instance_name` AND `target_fn_name` both
-    /// resolved to a canonical NodeId. Bindings that fail to resolve
-    /// either name are dropped (not inserted) because both NodeIds are
+    /// resolved to a canonical `NodeId`. Bindings that fail to resolve
+    /// either name are dropped (not inserted) because both `NodeIds` are
     /// required to construct a valid `BindingEntry`.
     pub bindings_resolved: usize,
     /// Number of `IndirectCallsite` entries pushed onto
     /// `CIndirectSideTables::pending_callsites`. A callsite whose
     /// `caller_qualified_name` fails to resolve is dropped — U12's
-    /// resolver requires a real caller NodeId to rewrite the synthetic
+    /// resolver requires a real caller `NodeId` to rewrite the synthetic
     /// `Calls` edge.
     pub indirect_callsites_inserted: usize,
     /// Number of `(file_id, LocalScopeIndex)` pairs inserted. Last write
     /// wins on duplicate keys (the C plugin guarantees per-file
-    /// uniqueness, but defensive duplicate handling lives at the HashMap
+    /// uniqueness, but defensive duplicate handling lives at the `HashMap`
     /// layer).
     pub local_scope_indices_inserted: usize,
-    /// Names that resolved to zero CALL_COMPATIBLE_KINDS nodes — see the
+    /// Names that resolved to zero `CALL_COMPATIBLE_KINDS` nodes — see the
     /// struct-level doc for typical causes.
     pub unresolved_names: usize,
+}
+
+type DeferredCNodeCache = std::collections::HashMap<String, Vec<NodeId>>;
+type StructFieldSignature = ((StringId, StringId), StringId);
+type BindingSideTableEntry = ((StringId, StringId), BindingEntry);
+
+fn apply_local_scope_indices(
+    graph: &mut CodeGraph,
+    local_scope_indices: Vec<(
+        crate::graph::unified::file::FileId,
+        crate::graph::unified::storage::c_indirect::LocalScopeIndex,
+    )>,
+    stats: &mut DeferredCIndirectStats,
+) {
+    if local_scope_indices.is_empty() {
+        return;
+    }
+
+    let tables = graph
+        .c_indirect_tables_mut()
+        .get_or_insert_with(CIndirectSideTables::new);
+    for (file_id, scope_index) in local_scope_indices {
+        // Defensive: in-spec, the C plugin pushes exactly one scope index per
+        // file. Last-write-wins on duplicate keys preserves the most recently
+        // staged index, matching the U09 wire-shape contract.
+        tables.local_scope_indices.insert(file_id, scope_index);
+        stats.local_scope_indices_inserted += 1;
+    }
+}
+
+fn resolve_c_callable_names<'a, I>(
+    graph: &mut CodeGraph,
+    names: I,
+    stats: &mut DeferredCIndirectStats,
+) -> DeferredCNodeCache
+where
+    I: Iterator<Item = &'a str>,
+{
+    resolve_c_names(graph, names, stats, |kind| {
+        super::helper::CALL_COMPATIBLE_KINDS.contains(kind)
+    })
+}
+
+fn resolve_c_variable_names<'a, I>(
+    graph: &mut CodeGraph,
+    names: I,
+    stats: &mut DeferredCIndirectStats,
+) -> DeferredCNodeCache
+where
+    I: Iterator<Item = &'a str>,
+{
+    resolve_c_names(graph, names, stats, |kind| {
+        matches!(kind, NodeKind::Variable)
+    })
+}
+
+fn resolve_c_names<'a, I, F>(
+    graph: &mut CodeGraph,
+    names: I,
+    stats: &mut DeferredCIndirectStats,
+    is_eligible_kind: F,
+) -> DeferredCNodeCache
+where
+    I: Iterator<Item = &'a str>,
+    F: Fn(&NodeKind) -> bool,
+{
+    let mut resolved = DeferredCNodeCache::new();
+    for name in names {
+        if resolved.contains_key(name) {
+            continue;
+        }
+        let str_id = match graph.strings_mut().intern(name) {
+            Ok(id) => id,
+            Err(err) => {
+                log::warn!(
+                    "Phase 4c-prime-post: failed to intern C indirect name {name:?}: {err:?} - \
+                     skipping every entry referencing this name"
+                );
+                resolved.insert(name.to_owned(), Vec::new());
+                continue;
+            }
+        };
+
+        let matches = collect_c_nodes_by_string_id(graph, str_id, &is_eligible_kind);
+        if matches.is_empty() {
+            stats.unresolved_names += 1;
+        }
+        resolved.insert(name.to_owned(), matches);
+    }
+    resolved
+}
+
+fn collect_c_nodes_by_string_id<F>(
+    graph: &CodeGraph,
+    str_id: StringId,
+    is_eligible_kind: &F,
+) -> Vec<NodeId>
+where
+    F: Fn(&NodeKind) -> bool,
+{
+    let by_qn = graph.indices().by_qualified_name(str_id).to_vec();
+    let by_nm = graph.indices().by_name(str_id).to_vec();
+    let mut seen: std::collections::HashSet<(u32, u64)> = std::collections::HashSet::new();
+    let mut matches = Vec::new();
+    let arena = graph.nodes();
+    let files = graph.files();
+    for nid in by_qn.into_iter().chain(by_nm) {
+        if !seen.insert((nid.index(), nid.generation())) {
+            continue;
+        }
+        let Some(entry) = arena.get(nid) else {
+            continue;
+        };
+        if !is_eligible_kind(&entry.kind) {
+            continue;
+        }
+        if files.language_for_file(entry.file) != Some(crate::graph::Language::C) {
+            continue;
+        }
+        matches.push(nid);
+    }
+    matches
+}
+
+fn apply_address_taken_marks(
+    graph: &mut CodeGraph,
+    entries: &[crate::graph::unified::build::parallel_commit::DeferredAddressTakenEntry],
+    callable_nodes: &DeferredCNodeCache,
+    stats: &mut DeferredCIndirectStats,
+) {
+    for entry in entries {
+        if let Some(node_ids) = callable_nodes.get(&entry.function_qualified_name) {
+            for &nid in node_ids {
+                graph.macro_metadata_mut().mark_address_taken(nid);
+                stats.address_taken_marks_applied += 1;
+            }
+        }
+    }
+}
+
+fn insert_struct_field_signatures(
+    graph: &mut CodeGraph,
+    signatures: &[(String, String, String)],
+    stats: &mut DeferredCIndirectStats,
+) {
+    if signatures.is_empty() {
+        return;
+    }
+
+    let mut interned: Vec<StructFieldSignature> = Vec::with_capacity(signatures.len());
+    let mut intern_failures = 0usize;
+    for (struct_tag, field_name, signature) in signatures {
+        let strings = graph.strings_mut();
+        let st = strings.intern(struct_tag);
+        let fn_ = strings.intern(field_name);
+        let sig = strings.intern(signature);
+        match (st, fn_, sig) {
+            (Ok(st), Ok(fn_), Ok(sig)) => interned.push(((st, fn_), sig)),
+            _ => intern_failures += 1,
+        }
+    }
+    if intern_failures > 0 {
+        log::warn!(
+            "Phase 4c-prime-post: {intern_failures} struct-field-signature triple(s) \
+             failed to intern (capacity exhaustion?) - dropped"
+        );
+    }
+    let tables = graph
+        .c_indirect_tables_mut()
+        .get_or_insert_with(CIndirectSideTables::new);
+    for (key, value) in interned {
+        tables.struct_field_fnptr.insert(key, value);
+        stats.struct_field_signatures_inserted += 1;
+    }
+}
+
+fn insert_c_indirect_bindings(
+    graph: &mut CodeGraph,
+    bindings: &[(
+        crate::graph::unified::file::FileId,
+        super::staging::PendingBinding,
+    )],
+    instance_nodes: &DeferredCNodeCache,
+    callable_nodes: &DeferredCNodeCache,
+    stats: &mut DeferredCIndirectStats,
+) {
+    if bindings.is_empty() {
+        return;
+    }
+
+    let mut interned_bindings: Vec<BindingSideTableEntry> = Vec::with_capacity(bindings.len());
+    let mut intern_failures = 0usize;
+    for (_file_id, binding) in bindings {
+        let strings = graph.strings_mut();
+        let Ok(st_id) = strings.intern(&binding.struct_tag) else {
+            intern_failures += 1;
+            continue;
+        };
+        let Ok(fn_id) = strings.intern(&binding.field_name) else {
+            intern_failures += 1;
+            continue;
+        };
+
+        let instances = instance_nodes
+            .get(&binding.instance_name)
+            .map_or(&[] as &[NodeId], Vec::as_slice);
+        let targets = callable_nodes
+            .get(&binding.target_fn_name)
+            .map_or(&[] as &[NodeId], Vec::as_slice);
+        if instances.is_empty() || targets.is_empty() {
+            continue;
+        }
+        stats.bindings_resolved += 1;
+
+        for &instance_node in instances {
+            for &target_fn in targets {
+                interned_bindings.push((
+                    (st_id, fn_id),
+                    BindingEntry {
+                        instance_node,
+                        target_fn,
+                        site_kind: binding.site_kind,
+                    },
+                ));
+            }
+        }
+    }
+    if intern_failures > 0 {
+        log::warn!(
+            "Phase 4c-prime-post: {intern_failures} binding key(s) failed to intern \
+             (capacity exhaustion?) - dropped"
+        );
+    }
+    let tables = graph
+        .c_indirect_tables_mut()
+        .get_or_insert_with(CIndirectSideTables::new);
+    for (key, entry) in interned_bindings {
+        tables.bindings_by_field.entry(key).or_default().push(entry);
+        stats.binding_entries_inserted += 1;
+    }
+}
+
+fn insert_indirect_callsites(
+    graph: &mut CodeGraph,
+    callsites: &[(
+        crate::graph::unified::file::FileId,
+        super::staging::PendingIndirectCallsite,
+    )],
+    callable_nodes: &DeferredCNodeCache,
+    stats: &mut DeferredCIndirectStats,
+) {
+    if callsites.is_empty() {
+        return;
+    }
+
+    let mut callsites_to_push = Vec::with_capacity(callsites.len());
+    for (file_id, callsite) in callsites {
+        let Some(callers) = callable_nodes.get(&callsite.caller_qualified_name) else {
+            continue;
+        };
+        for &caller in callers {
+            callsites_to_push.push(IndirectCallsite {
+                caller,
+                file_id: *file_id,
+                use_span: callsite.use_span,
+                shape: callsite.shape.clone(),
+                argument_count: callsite.argument_count,
+                is_async: callsite.is_async,
+            });
+        }
+    }
+    if callsites_to_push.is_empty() {
+        return;
+    }
+
+    let tables = graph
+        .c_indirect_tables_mut()
+        .get_or_insert_with(CIndirectSideTables::new);
+    for callsite in callsites_to_push {
+        tables.pending_callsites.push(callsite);
+        stats.indirect_callsites_inserted += 1;
+    }
 }
 
 /// Apply deferred C indirect-call side-tables to the post-unification graph.
@@ -1096,7 +1380,7 @@ pub(crate) struct DeferredCIndirectStats {
 /// 1. Intern the name through `graph.strings_mut().intern(...)` — this
 ///    interns into the **post-Phase-4a-dedup, post-Phase-4c** canonical
 ///    interner, so the resulting `StringId` is the canonical id every
-///    AuxiliaryIndices bucket is keyed on.
+///    `AuxiliaryIndices` bucket is keyed on.
 /// 2. Look up matches via `graph.indices().by_qualified_name(str_id)`
 ///    first (handles languages whose canonical qualified name differs
 ///    from the semantic name — e.g. Rust `foo::bar::baz`), and union with
@@ -1113,17 +1397,17 @@ pub(crate) struct DeferredCIndirectStats {
 ///    language is `Language::C` (via
 ///    `graph.files().language_for_file(entry.file)`). This is required
 ///    by SPEC §3.1.2 line 163 ("Every C `NodeKind::Function`...") and
-///    DESIGN §8.2 lines 1239-1241 — the by_name fallback is
+///    DESIGN §8.2 lines 1239-1241 — the `by_name` fallback is
 ///    workspace-global, so without this filter a Rust `fn cb_alpha`,
 ///    Python `def cb_alpha`, etc. sharing a bare name with a C symbol
 ///    would be erroneously marked address-taken (or inserted into
 ///    `bindings_by_field` / `pending_callsites`) by C-only semantics.
 /// 4. For `address_taken_names`: call `mark_address_taken` on every
-///    matched NodeId (SPEC §3.1.2 — "is this function ever
+///    matched `NodeId` (SPEC §3.1.2 — "is this function ever
 ///    address-taken?" — every plausible target gets flagged).
 ///
 /// Tombstoned losers are absent from both `by_name` and `by_qualified_name`
-/// post-Phase-4c-prime — `merge_node_into` clears their name/qualified_name
+/// post-Phase-4c-prime — `merge_node_into` clears their `name/qualified_name`
 /// fields to `StringId::INVALID` / `None`, and `build_from_arena`
 /// (re-run from `rebuild_indices`) skips them. The marks therefore land
 /// only on canonical winners.
@@ -1135,26 +1419,18 @@ pub(crate) fn apply_deferred_address_taken_marks(
     graph: &mut CodeGraph,
     pending: PhaseCIndirectDrain,
 ) -> DeferredCIndirectStats {
-    use super::helper::CALL_COMPATIBLE_KINDS;
-
     let mut stats = DeferredCIndirectStats::default();
+    let PhaseCIndirectDrain {
+        address_taken_names,
+        struct_field_signatures,
+        bindings,
+        indirect_callsites,
+        local_scope_indices,
+    } = pending;
 
-    // Local-scope indices need no name resolution. Drain them first so
-    // the c_indirect_tables slot is materialised before we start interning
-    // strings (which mutably borrow graph).
-    if !pending.local_scope_indices.is_empty() {
-        let tables = graph
-            .c_indirect_tables_mut()
-            .get_or_insert_with(CIndirectSideTables::new);
-        for (file_id, scope_index) in pending.local_scope_indices {
-            // Defensive: in-spec, the C plugin pushes exactly one scope
-            // index per file. Last-write-wins on duplicate keys (the
-            // HashMap semantics) preserves the most-recently-staged
-            // index, matching the U09 wire-shape contract.
-            tables.local_scope_indices.insert(file_id, scope_index);
-            stats.local_scope_indices_inserted += 1;
-        }
-    }
+    // Local-scope indices need no name resolution. Drain them first so the
+    // c_indirect_tables slot is materialised before string interning begins.
+    apply_local_scope_indices(graph, local_scope_indices, &mut stats);
 
     // Resolve every distinct name to its canonical NodeId set ONCE,
     // cached in a HashMap. The drain may contain duplicates (the same
@@ -1203,159 +1479,29 @@ pub(crate) fn apply_deferred_address_taken_marks(
     // `a.c` and have its address taken in `b.c`. Both candidate
     // definitions must be eligible so long as they originate from C
     // source.
-    let callable_names_iter = pending
-        .address_taken_names
+    let callable_names_iter = address_taken_names
         .iter()
         .map(|e| e.function_qualified_name.as_str())
+        .chain(bindings.iter().map(|(_, b)| b.target_fn_name.as_str()))
         .chain(
-            pending
-                .bindings
-                .iter()
-                .map(|(_, b)| b.target_fn_name.as_str()),
-        )
-        .chain(
-            pending
-                .indirect_callsites
+            indirect_callsites
                 .iter()
                 .map(|(_, cs)| cs.caller_qualified_name.as_str()),
         );
-    let mut name_to_node_ids: std::collections::HashMap<
-        String,
-        Vec<crate::graph::unified::node::NodeId>,
-    > = std::collections::HashMap::new();
-    for name in callable_names_iter {
-        if name_to_node_ids.contains_key(name) {
-            continue;
-        }
-        // `intern` returns `Result<StringId, InternError>`. On capacity
-        // exhaustion (which would also have been visible at parse time),
-        // we record an empty result for this name — propagating the
-        // error would force a full build failure for a side-table
-        // application that is informational rather than load-bearing for
-        // graph correctness.
-        let str_id = match graph.strings_mut().intern(name) {
-            Ok(id) => id,
-            Err(e) => {
-                log::warn!(
-                    "Phase 4c-prime-post: failed to intern C indirect name {name:?}: {e:?} — \
-                     skipping every entry referencing this name"
-                );
-                name_to_node_ids.insert(name.to_owned(), Vec::new());
-                continue;
-            }
-        };
-        // Snapshot the resolved NodeIds into an owned Vec so the
-        // immutable index borrow doesn't outlive this iteration —
-        // subsequent loop bodies need mutable access to other
-        // parts of the graph (metadata store, c_indirect_tables).
-        let by_qn = graph.indices().by_qualified_name(str_id).to_vec();
-        let by_nm = graph.indices().by_name(str_id).to_vec();
-
-        // Filter by CALL_COMPATIBLE_KINDS, by C-language origin, and
-        // deduplicate. A node whose qualified_name == name appears in
-        // both buckets — dedupe via a HashSet on (index, generation).
-        // We don't use NodeId directly as the HashSet key because Hash
-        // isn't derived on NodeId in every code path historically;
-        // (index, generation) is the canonical handle pair.
-        //
-        // The C-language filter consults `graph.files().language_for_file(...)`
-        // for each candidate's owning file (see
-        // `sqry-core/src/graph/unified/storage/registry.rs:598`). Per
-        // SPEC §3.1.2 line 163 ("Every C `NodeKind::Function`...") and
-        // DESIGN §8.2, address-taken marks, binding-target lookups, and
-        // indirect-callsite caller lookups all operate over the C
-        // symbol set only — Rust/Go/Python namesakes must NOT be
-        // affected by U11 application.
-        let mut seen: std::collections::HashSet<(u32, u64)> = std::collections::HashSet::new();
-        let mut matches: Vec<crate::graph::unified::node::NodeId> = Vec::new();
-        let arena = graph.nodes();
-        let files = graph.files();
-        for nid in by_qn.into_iter().chain(by_nm.into_iter()) {
-            if !seen.insert((nid.index(), nid.generation())) {
-                continue;
-            }
-            let Some(entry) = arena.get(nid) else {
-                continue;
-            };
-            if !CALL_COMPATIBLE_KINDS.contains(&entry.kind) {
-                continue;
-            }
-            // C-language scope guard. `language_for_file` returns
-            // `None` for invalid `FileId`s or files whose language was
-            // never set; both cases are conservatively rejected to
-            // keep the U11 surface C-only.
-            if files.language_for_file(entry.file) != Some(crate::graph::Language::C) {
-                continue;
-            }
-            matches.push(nid);
-        }
-
-        if matches.is_empty() {
-            stats.unresolved_names += 1;
-        }
-        name_to_node_ids.insert(name.to_owned(), matches);
-    }
+    let name_to_node_ids = resolve_c_callable_names(graph, callable_names_iter, &mut stats);
 
     // Second cache: bindings' `instance_name` resolves to a Variable
     // NodeId. Same intern → by_qualified_name ∪ by_name → dedupe
     // pipeline, different kind filter (Variable only). Built lazily —
     // skipped entirely when `pending.bindings` is empty (the common
     // non-C / non-vtable case).
-    let mut instance_to_node_ids: std::collections::HashMap<
-        String,
-        Vec<crate::graph::unified::node::NodeId>,
-    > = std::collections::HashMap::new();
-    if !pending.bindings.is_empty() {
-        for (_file_id, binding) in &pending.bindings {
-            let name = binding.instance_name.as_str();
-            if instance_to_node_ids.contains_key(name) {
-                continue;
-            }
-            let str_id = match graph.strings_mut().intern(name) {
-                Ok(id) => id,
-                Err(e) => {
-                    log::warn!(
-                        "Phase 4c-prime-post: failed to intern C indirect instance name \
-                         {name:?}: {e:?} — skipping every binding referencing this instance"
-                    );
-                    instance_to_node_ids.insert(name.to_owned(), Vec::new());
-                    continue;
-                }
-            };
-            let by_qn = graph.indices().by_qualified_name(str_id).to_vec();
-            let by_nm = graph.indices().by_name(str_id).to_vec();
-            let mut seen: std::collections::HashSet<(u32, u64)> = std::collections::HashSet::new();
-            let mut matches: Vec<crate::graph::unified::node::NodeId> = Vec::new();
-            let arena = graph.nodes();
-            let files = graph.files();
-            for nid in by_qn.into_iter().chain(by_nm.into_iter()) {
-                if !seen.insert((nid.index(), nid.generation())) {
-                    continue;
-                }
-                let Some(entry) = arena.get(nid) else {
-                    continue;
-                };
-                // Variable is the storage kind the C plugin assigns to
-                // ops-table instances (`helper.add_variable`,
-                // graph_builder.rs:786 / 2069).
-                if !matches!(entry.kind, crate::graph::unified::node::NodeKind::Variable) {
-                    continue;
-                }
-                // C-language scope guard, same rationale as the
-                // callable cache above — same-named non-C variables
-                // (e.g. a Rust `static the_ops`) must NOT be inserted
-                // into `bindings_by_field` as a C ops-table instance.
-                if files.language_for_file(entry.file) != Some(crate::graph::Language::C) {
-                    continue;
-                }
-                matches.push(nid);
-            }
-            if matches.is_empty() {
-                stats.unresolved_names += 1;
-            }
-            instance_to_node_ids.insert(name.to_owned(), matches);
-        }
-    }
+    let instance_to_node_ids = resolve_c_variable_names(
+        graph,
+        bindings
+            .iter()
+            .map(|(_, binding)| binding.instance_name.as_str()),
+        &mut stats,
+    );
 
     // Apply address-taken marks (SPEC §3.1.2: mark every match).
     //
@@ -1366,68 +1512,14 @@ pub(crate) fn apply_deferred_address_taken_marks(
     // address-takes are legal (a `cb_alpha` defined in `a.c` may have
     // its address taken in `b.c`); the candidate's own owning-file
     // language is the correct filter.
-    for entry in &pending.address_taken_names {
-        if let Some(node_ids) = name_to_node_ids.get(&entry.function_qualified_name) {
-            for &nid in node_ids {
-                graph.macro_metadata_mut().mark_address_taken(nid);
-                stats.address_taken_marks_applied += 1;
-            }
-        }
-    }
+    apply_address_taken_marks(graph, &address_taken_names, &name_to_node_ids, &mut stats);
 
     // Intern struct-field-signature triples and populate
     // `struct_field_fnptr`. Each leg interns through the same canonical
     // graph interner so downstream consumers can compare via single
     // `StringId::eq` (DESIGN §3.1 rationale: "amortises across functions
     // sharing signatures").
-    if !pending.struct_field_signatures.is_empty() {
-        // Intern legs first to avoid mutably-then-immutably borrowing the
-        // graph in the same expression. Each `intern` mutably borrows the
-        // interner, but we need a fresh borrow per call — collect the
-        // interned triples into a Vec then insert into the side-table.
-        let mut interned: Vec<(
-            (
-                crate::graph::unified::string::StringId,
-                crate::graph::unified::string::StringId,
-            ),
-            crate::graph::unified::string::StringId,
-        )> = Vec::with_capacity(pending.struct_field_signatures.len());
-        let mut intern_failures = 0usize;
-        for (struct_tag, field_name, signature) in &pending.struct_field_signatures {
-            let strings = graph.strings_mut();
-            let st = strings.intern(struct_tag);
-            let fn_ = strings.intern(field_name);
-            let sig = strings.intern(signature);
-            match (st, fn_, sig) {
-                (Ok(st), Ok(fn_), Ok(sig)) => {
-                    interned.push(((st, fn_), sig));
-                }
-                _ => {
-                    intern_failures += 1;
-                }
-            }
-        }
-        if intern_failures > 0 {
-            log::warn!(
-                "Phase 4c-prime-post: {intern_failures} struct-field-signature triple(s) \
-                 failed to intern (capacity exhaustion?) — dropped"
-            );
-        }
-        let tables = graph
-            .c_indirect_tables_mut()
-            .get_or_insert_with(CIndirectSideTables::new);
-        for (key, value) in interned {
-            // Last-write-wins on duplicate `(struct_tag, field_name)` —
-            // C cannot legally redeclare the same struct field with a
-            // different function-pointer type in the same translation
-            // unit, so this only fires across files that include
-            // conflicting headers (a real bug the user should fix; the
-            // resolver tolerates the resulting signature mismatch by
-            // surfacing it as a binding-plane-miss).
-            tables.struct_field_fnptr.insert(key, value);
-            stats.struct_field_signatures_inserted += 1;
-        }
-    }
+    insert_struct_field_signatures(graph, &struct_field_signatures, &mut stats);
 
     // Resolve bindings: both legs (`instance_name`, `target_fn_name`) must
     // resolve to a canonical NodeId. On either-side miss, the binding is
@@ -1439,78 +1531,13 @@ pub(crate) fn apply_deferred_address_taken_marks(
     // (instance_node, target_fn) pair — the Cartesian product. This
     // preserves SPEC §3.1.2 semantics ("is this function ever
     // address-taken?" — every plausible binding contributes).
-    if !pending.bindings.is_empty() {
-        let mut interned_bindings: Vec<(
-            (
-                crate::graph::unified::string::StringId,
-                crate::graph::unified::string::StringId,
-            ),
-            BindingEntry,
-        )> = Vec::with_capacity(pending.bindings.len());
-        let mut intern_failures = 0usize;
-
-        for (_file_id, binding) in &pending.bindings {
-            // Intern struct_tag + field_name through the graph interner.
-            // The origin `_file_id` is discarded here — both legs were
-            // already resolved through the C-language-scoped caches
-            // (`name_to_node_ids`, `instance_to_node_ids`) above, which
-            // is the load-bearing constraint per DESIGN §8.2.
-            let strings = graph.strings_mut();
-            let st_id = match strings.intern(&binding.struct_tag) {
-                Ok(id) => id,
-                Err(_) => {
-                    intern_failures += 1;
-                    continue;
-                }
-            };
-            let fn_id = match strings.intern(&binding.field_name) {
-                Ok(id) => id,
-                Err(_) => {
-                    intern_failures += 1;
-                    continue;
-                }
-            };
-
-            let instances = instance_to_node_ids
-                .get(&binding.instance_name)
-                .map(Vec::as_slice)
-                .unwrap_or(&[]);
-            let targets = name_to_node_ids
-                .get(&binding.target_fn_name)
-                .map(Vec::as_slice)
-                .unwrap_or(&[]);
-            if instances.is_empty() || targets.is_empty() {
-                continue;
-            }
-            stats.bindings_resolved += 1;
-
-            for &instance_node in instances {
-                for &target_fn in targets {
-                    interned_bindings.push((
-                        (st_id, fn_id),
-                        BindingEntry {
-                            instance_node,
-                            target_fn,
-                            site_kind: binding.site_kind,
-                        },
-                    ));
-                }
-            }
-        }
-        if intern_failures > 0 {
-            log::warn!(
-                "Phase 4c-prime-post: {intern_failures} binding key(s) failed to intern \
-                 (capacity exhaustion?) — dropped"
-            );
-        }
-        let tables = graph
-            .c_indirect_tables_mut()
-            .get_or_insert_with(CIndirectSideTables::new);
-        for (key, entry) in interned_bindings {
-            tables.bindings_by_field.entry(key).or_default().push(entry);
-            stats.binding_entries_inserted += 1;
-        }
-    }
+    insert_c_indirect_bindings(
+        graph,
+        &bindings,
+        &instance_to_node_ids,
+        &name_to_node_ids,
+        &mut stats,
+    );
 
     // Resolve indirect callsites. Caller name MUST resolve — without a
     // caller NodeId, U12's resolver cannot retarget the synthetic Calls
@@ -1521,34 +1548,7 @@ pub(crate) fn apply_deferred_address_taken_marks(
     // function whose qualified name shadowed another), emit one
     // `IndirectCallsite` per matched NodeId so every plausible caller
     // gets its synthetic edge retargeted.
-    if !pending.indirect_callsites.is_empty() {
-        let mut callsites_to_push: Vec<IndirectCallsite> =
-            Vec::with_capacity(pending.indirect_callsites.len());
-        for (file_id, cs) in &pending.indirect_callsites {
-            let Some(callers) = name_to_node_ids.get(&cs.caller_qualified_name) else {
-                continue;
-            };
-            for &caller in callers {
-                callsites_to_push.push(IndirectCallsite {
-                    caller,
-                    file_id: *file_id,
-                    use_span: cs.use_span,
-                    shape: cs.shape.clone(),
-                    argument_count: cs.argument_count,
-                    is_async: cs.is_async,
-                });
-            }
-        }
-        if !callsites_to_push.is_empty() {
-            let tables = graph
-                .c_indirect_tables_mut()
-                .get_or_insert_with(CIndirectSideTables::new);
-            for cs in callsites_to_push {
-                tables.pending_callsites.push(cs);
-                stats.indirect_callsites_inserted += 1;
-            }
-        }
-    }
+    insert_indirect_callsites(graph, &indirect_callsites, &name_to_node_ids, &mut stats);
 
     stats
 }
@@ -2942,6 +2942,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_parse_file_rejects_oversized_input() {
         let temp_dir = TempDir::new().expect("temp dir");
         let file_path = temp_dir.path().join("oversized.rs");

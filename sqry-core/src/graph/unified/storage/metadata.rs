@@ -56,15 +56,15 @@ pub struct MacroNodeMetadata {
     ///   `"all(target_os = \"linux\", target_arch = \"amd64\")"`).
     /// - Go: file-level build constraint canonicalised by the
     ///   Go plugin's `build_constraints` module (e.g. `"linux"`,
-    ///   `"linux && amd64"`, `"!windows"`, `"cgo"`). Per 01_SPEC §3.3
-    ///   and 02_DESIGN §3.3 (T3.8), Go build tags are file-level —
+    ///   `"linux && amd64"`, `"!windows"`, `"cgo"`). Per `01_SPEC` §3.3
+    ///   and `02_DESIGN` §3.3 (T3.8), Go build tags are file-level —
     ///   every non-synthetic node staged from the same file shares the
     ///   same `cfg_condition` string.
     /// - Other languages: equivalent file-level / item-level
     ///   conditional-compilation guards may use the same slot. The
     ///   stored string is whatever canonical form the plugin chose;
     ///   cross-language structural comparison is handled by sqry-db's
-    ///   `cfg_match` comparator (02_DESIGN §5.3.a).
+    ///   `cfg_match` comparator (`02_DESIGN` §5.3.a).
     ///
     /// `None` means "no conditional-compilation guard recorded for this
     /// node" (the default for plain Rust items without `#[cfg]` and Go
@@ -135,7 +135,7 @@ pub enum TypedMetadata {
 pub struct NodeFlags(u8);
 
 impl NodeFlags {
-    /// Synthetic placeholder node marker (C_SUPPRESS).
+    /// Synthetic placeholder node marker (`C_SUPPRESS`).
     ///
     /// Identifies internal-use-only nodes that language plugins emit as
     /// shadows / scaffolding for binding-plane analysis (e.g. the Go
@@ -453,8 +453,7 @@ impl NodeMetadataStore {
     pub fn get_flags(&self, node_id: NodeId) -> NodeFlags {
         self.entries
             .get(&(node_id.index(), node_id.generation()))
-            .map(|e| e.flags)
-            .unwrap_or(NodeFlags::EMPTY)
+            .map_or(NodeFlags::EMPTY, |e| e.flags)
     }
 
     /// Returns `true` iff the node has [`NodeFlags::SYNTHETIC`] set.
@@ -634,7 +633,7 @@ impl NodeMetadataStore {
     ///
     /// Used by the Gate 0b [`NodeIdBearing`] impl
     /// (`sqry-core/src/graph/unified/rebuild/coverage.rs`) to drop
-    /// metadata for tombstoned NodeIds during
+    /// metadata for tombstoned `NodeIds` during
     /// `RebuildGraph::finalize()`. Exposed at `pub(crate)` scope because
     /// only the rebuild pipeline needs predicate-based filtering;
     /// downstream callers use the targeted [`Self::remove`] /

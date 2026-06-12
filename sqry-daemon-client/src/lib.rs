@@ -29,7 +29,7 @@
 //! the wrong handler. The two surfaces are intentionally separate at the
 //! API level to make this constraint compile-time enforced.
 //!
-//! # pump_stdio factoring
+//! # `pump_stdio` factoring
 //!
 //! `pump_stdio` is split into a generic [`pump_stdio_impl`] that takes
 //! the editor-side reader/writer + shim-side split halves, plus a thin
@@ -85,7 +85,7 @@ pub const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 // Error surface.
 // ---------------------------------------------------------------------------
 
-/// Client-side error surface. `FrameError` subsumes both IO and serde_json
+/// Client-side error surface. `FrameError` subsumes both IO and `serde_json`
 /// decode failures that originate inside [`sqry_daemon_protocol::framing`];
 /// the top-level [`ClientError::Io`] variant is reserved for IO failures
 /// outside the codec (e.g. split/copy plumbing in [`pump_stdio_impl`]).
@@ -515,7 +515,7 @@ where
 /// - [`ClientError::ShimRejected`] if the daemon's
 ///   [`ShimRegisterAck`] carries `accepted = false`.
 /// - [`ClientError::ShimAckEof`] if the daemon closes cleanly before
-///   sending an ack (i.e. read_frame returned `Ok(None)` at a frame
+///   sending an ack (i.e. `read_frame` returned `Ok(None)` at a frame
 ///   boundary).
 /// - [`ClientError::Io`] / [`ClientError::Frame`] for IO / framing
 ///   failures at any point during the handshake.

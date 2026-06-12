@@ -83,7 +83,12 @@
 //! `docs/reviews/sqryd-daemon/2026-04-19/task-9-design_iter3_request.md`
 //! §C, §D, §E, §G, §I, §J.
 
-use std::{path::PathBuf, process::ExitCode, sync::Arc, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    process::ExitCode,
+    sync::Arc,
+    time::Duration,
+};
 
 use clap::{Parser, Subcommand};
 use sqry_core::query::executor::QueryExecutor;
@@ -272,6 +277,11 @@ pub struct Start {
 /// This is the only public entry point called from `main`.  On error it
 /// returns the error value; `main` prints it with `{err:#}` and converts
 /// `err.exit_code()` to a [`std::process::ExitCode`].
+///
+/// # Errors
+///
+/// Returns a [`DaemonError`] when CLI dispatch, runtime creation, config
+/// loading, lifecycle setup, or the selected daemon subcommand fails.
 pub fn run() -> DaemonResult<()> {
     let cli = SqrydCli::parse();
     // `A_cancellation.md` §5 + GT-6: cap the blocking thread pool at
@@ -307,16 +317,16 @@ pub fn run() -> DaemonResult<()> {
         }
         Command::Status { json } => rt.block_on(run_status(config_path, log_level, json)),
         #[cfg(target_os = "linux")]
-        Command::InstallSystemdUser => run_install_systemd_user(config_path, log_level),
+        Command::InstallSystemdUser => run_install_systemd_user(config_path.as_ref(), log_level),
         #[cfg(target_os = "linux")]
         Command::InstallSystemdSystem { user } => {
-            run_install_systemd_system(config_path, log_level, user)
+            run_install_systemd_system(config_path.as_ref(), log_level, user)
         }
         #[cfg(target_os = "macos")]
         Command::InstallLaunchd => run_install_launchd(config_path, log_level),
         #[cfg(target_os = "windows")]
         Command::InstallWindows => run_install_windows(config_path, log_level),
-        Command::PrintConfig => run_print_config(config_path, log_level),
+        Command::PrintConfig => run_print_config(config_path.as_ref(), log_level),
     }
 }
 
@@ -340,7 +350,14 @@ async fn run_start(
         return run_start_spawned_by_client(config_path, log_level).await;
     }
     if args.detach {
-        return run_start_detach(config_path, log_level).await;
+        #[cfg(unix)]
+        {
+            return run_start_detach(config_path.as_ref(), log_level);
+        }
+        #[cfg(not(unix))]
+        {
+            return run_start_detach(config_path, log_level).await;
+        }
     }
     run_start_foreground(config_path, log_level).await
 }
@@ -357,7 +374,7 @@ async fn run_start_foreground(
     log_level: Option<&str>,
 ) -> DaemonResult<()> {
     // Step 1 -- Load config.
-    let cfg = load_config(config_path)?;
+    let cfg = load_config(config_path.as_ref())?;
     let cfg = Arc::new(cfg);
 
     // Step 2 -- Install tracing.
@@ -384,17 +401,17 @@ async fn run_start_foreground(
     info!(pid_file = %cfg.pid_path().display(), "pidfile lock acquired");
 
     // Steps 6-10: build all components.
-    let (manager, dispatcher, builder, executor) = build_daemon_components(Arc::clone(&cfg));
+    let (manager, dispatcher, builder, executor) = build_daemon_components(&cfg);
 
     // Step 11 -- CancellationToken.
     let shutdown = CancellationToken::new();
 
     // Step 12 -- Install signal handlers.
-    let _signal_guard = install_signal_handlers(shutdown.clone())?;
+    let signal_guard = install_signal_handlers(shutdown.clone())?;
     info!("signal handlers installed");
 
     // Step 13 -- Pre-load pinned workspaces (log + continue on failure).
-    preload_pinned_workspaces(&cfg, &manager, &builder).await;
+    preload_pinned_workspaces(&cfg, &manager, &builder);
 
     // Step 14 -- Bind IPC server.
     let server = IpcServer::bind(
@@ -414,9 +431,9 @@ async fn run_start_foreground(
     // Step 16 -- Run.
     server.run().await?;
 
-    // Step 17 -- RAII Drop: _signal_guard, then pidfile_lock.
+    // Step 17 -- RAII Drop: signal_guard, then pidfile_lock.
     info!("sqryd shutdown complete");
-    drop(_signal_guard);
+    drop(signal_guard);
     drop(pidfile_lock);
 
     Ok(())
@@ -433,34 +450,33 @@ async fn run_start_foreground(
 /// read end until EOF (ready) or timeout.
 ///
 /// On Windows: no-op with WARN log; runs foreground instead.
+#[cfg(unix)]
+fn run_start_detach(config_path: Option<&PathBuf>, log_level: Option<&str>) -> DaemonResult<()> {
+    run_start_detach_unix(config_path, log_level)
+}
+
+#[cfg(not(unix))]
 async fn run_start_detach(
     config_path: Option<PathBuf>,
     log_level: Option<&str>,
 ) -> DaemonResult<()> {
-    #[cfg(unix)]
-    {
-        run_start_detach_unix(config_path, log_level).await
-    }
-    #[cfg(not(unix))]
-    {
-        let cfg = load_config(config_path.clone())?;
-        setup_stderr_tracing(log_level, &cfg);
-        drop(cfg);
-        warn!(
-            "--detach is a no-op on Windows; running in the foreground instead. \
-             Use Task Scheduler or sc.exe to run sqryd as a background service."
-        );
-        run_start_foreground(config_path, log_level).await
-    }
+    let cfg = load_config(config_path)?;
+    setup_stderr_tracing(log_level, &cfg);
+    drop(cfg);
+    warn!(
+        "--detach is a no-op on Windows; running in the foreground instead. \
+         Use Task Scheduler or sc.exe to run sqryd as a background service."
+    );
+    run_start_foreground(config_path, log_level).await
 }
 
 #[cfg(unix)]
-async fn run_start_detach_unix(
-    config_path: Option<PathBuf>,
+fn run_start_detach_unix(
+    config_path: Option<&PathBuf>,
     log_level: Option<&str>,
 ) -> DaemonResult<()> {
     // Step A -- Load config and set up basic tracing for the parent.
-    let cfg = load_config(config_path.clone())?;
+    let cfg = load_config(config_path)?;
     let cfg = Arc::new(cfg);
 
     let _tracing_guard = match install_tracing(&cfg, log_level) {
@@ -474,7 +490,7 @@ async fn run_start_detach_unix(
     create_runtime_dir(&cfg)?;
 
     // Step A -- Acquire pidfile lock (WriteOwner).
-    let mut pidfile_lock = acquire_pidfile_lock(&cfg)?;
+    let pidfile_lock = acquire_pidfile_lock(&cfg)?;
     info!(pid_file = %cfg.pid_path().display(), "parent: pidfile lock acquired (WriteOwner)");
 
     // Step B -- Create self-pipe with O_CLOEXEC on both ends.
@@ -489,10 +505,45 @@ async fn run_start_detach_unix(
     let exe = std::env::current_exe()
         .map_err(|e| DaemonError::Io(std::io::Error::other(format!("current_exe: {e}"))))?;
 
-    let mut cmd = std::process::Command::new(&exe);
+    let mut cmd = detached_child_command(
+        &exe,
+        config_path,
+        log_level,
+        write_fd,
+        lock_fd,
+        &pidfile_path,
+        &lockfile_path,
+    );
+
+    let child = cmd.spawn().map_err(|e| {
+        DaemonError::Io(std::io::Error::other(format!(
+            "failed to spawn grandchild sqryd process: {e}"
+        )))
+    })?;
+
+    let grandchild_pid = child.id();
+    info!(pid = grandchild_pid, "spawned grandchild");
+
+    // Step D -- Parent closes its write end; only the grandchild holds it now.
+    drop_raw_fd(write_fd);
+
+    wait_for_detached_ready(child, read_fd, pidfile_lock, &cfg, grandchild_pid)
+}
+
+#[cfg(unix)]
+fn detached_child_command(
+    exe: &std::path::Path,
+    config_path: Option<&PathBuf>,
+    log_level: Option<&str>,
+    write_fd: i32,
+    lock_fd: i32,
+    pidfile_path: &Path,
+    lockfile_path: &Path,
+) -> std::process::Command {
+    let mut cmd = std::process::Command::new(exe);
     cmd.args(["start", "--detach", "--spawned-by-client"]);
 
-    if let Some(ref cp) = config_path {
+    if let Some(cp) = config_path {
         cmd.arg("--config").arg(cp);
     }
     if let Some(ll) = log_level {
@@ -503,26 +554,19 @@ async fn run_start_detach_unix(
     cmd.env(ENV_LOCK_FD, lock_fd.to_string());
     cmd.env(ENV_PIDFILE_PATH, pidfile_path.as_os_str());
     cmd.env(ENV_LOCKFILE_PATH, lockfile_path.as_os_str());
-
-    // Redirect stdio to /dev/null for the detached grandchild.
     cmd.stdin(std::process::Stdio::null());
     cmd.stdout(std::process::Stdio::null());
     cmd.stderr(std::process::Stdio::null());
 
-    // pre_exec: setsid() + clear FD_CLOEXEC on write_fd + lock_fd.
     // SAFETY: pre_exec runs after fork in the child; only async-signal-safe
     // syscalls are used (setsid and fcntl are both async-signal-safe per POSIX).
-    let write_fd_copy = write_fd;
-    let lock_fd_copy = lock_fd;
     unsafe {
         use std::os::unix::process::CommandExt as _;
         cmd.pre_exec(move || {
-            // New session: detach from controlling terminal.
             if libc::setsid() < 0 {
                 return Err(std::io::Error::last_os_error());
             }
-            // Clear FD_CLOEXEC so write_fd and lock_fd survive the exec.
-            for fd in [write_fd_copy, lock_fd_copy] {
+            for fd in [write_fd, lock_fd] {
                 let flags = libc::fcntl(fd, libc::F_GETFD);
                 if flags < 0 {
                     return Err(std::io::Error::last_os_error());
@@ -535,94 +579,79 @@ async fn run_start_detach_unix(
             Ok(())
         });
     }
+    cmd
+}
 
-    let mut child = cmd.spawn().map_err(|e| {
-        DaemonError::Io(std::io::Error::other(format!(
-            "failed to spawn grandchild sqryd process: {e}"
-        )))
-    })?;
-
-    let grandchild_pid = child.id();
-    info!(pid = grandchild_pid, "spawned grandchild");
-
-    // Step D -- Parent closes its write end; only the grandchild holds it now.
-    drop_raw_fd(write_fd);
-
-    // Step E -- Poll the read end until EOF or timeout.
+#[cfg(unix)]
+fn wait_for_detached_ready(
+    mut child: std::process::Child,
+    read_fd: i32,
+    pidfile_lock: PidfileLock,
+    cfg: &DaemonConfig,
+    grandchild_pid: u32,
+) -> DaemonResult<()> {
     let timeout_secs = cfg.auto_start_ready_timeout_secs;
     let deadline = std::time::Instant::now() + Duration::from_secs(timeout_secs);
-
     let result = poll_ready_pipe(read_fd, deadline);
-
-    // Close read end regardless of outcome.
     drop_raw_fd(read_fd);
 
-    match result {
-        Ok(()) => {
-            // EOF on the ready pipe — but EOF can also mean the grandchild
-            // exited early (before step 15) and the OS closed all its write-end
-            // FDs as part of process teardown.  Distinguish the two cases by
-            // calling `try_wait`: if the child has already exited it is a
-            // startup failure, not a readiness signal (M-1 fix).
-            match child.try_wait() {
-                Ok(Some(status)) => {
-                    // Grandchild already exited — pipe EOF was process death.
-                    warn!(
-                        pid = grandchild_pid,
-                        ?status,
-                        "grandchild exited before signalling ready (pipe EOF was process death)"
-                    );
-                    // Drop with WriteOwner: unlinks pidfile + unlocks.
-                    drop(pidfile_lock);
-                    return Err(DaemonError::AutoStartTimeout {
-                        timeout_secs,
-                        socket: cfg.socket_path(),
-                    });
-                }
-                Ok(None) => {
-                    // Child is still running — pipe EOF was step 15 close: genuine readiness.
-                }
-                Err(e) => {
-                    // try_wait failed (unusual). Log and assume alive.
-                    warn!(
-                        pid = grandchild_pid,
-                        err = %e,
-                        "try_wait after pipe EOF failed -- assuming grandchild is alive"
-                    );
-                }
-            }
+    if let Ok(()) = result {
+        return finish_ready_detach(child, pidfile_lock, cfg, grandchild_pid, timeout_secs);
+    }
 
-            // Grandchild signalled ready: hand off pidfile ownership so our
-            // Drop does NOT unlink the pidfile (Handoff state).
-            pidfile_lock.hand_off_to_adopter();
-            info!(
-                pid = grandchild_pid,
-                "grandchild signalled ready -- parent exiting 0 (Handoff)"
-            );
-            // Drop with Handoff: does NOT unlock (M-2 fix applied in pidfile.rs).
-            drop(pidfile_lock);
-            Ok(())
-        }
-        Err(()) => {
+    warn!(
+        pid = grandchild_pid,
+        timeout_secs, "grandchild did not signal ready within timeout -- killing"
+    );
+    if let Err(e) = child.kill() {
+        warn!(pid = grandchild_pid, err = %e, "kill(grandchild) failed");
+    }
+    let _ = child.wait();
+    drop(pidfile_lock);
+    Err(DaemonError::AutoStartTimeout {
+        timeout_secs,
+        socket: cfg.socket_path(),
+    })
+}
+
+#[cfg(unix)]
+fn finish_ready_detach(
+    mut child: std::process::Child,
+    mut pidfile_lock: PidfileLock,
+    cfg: &DaemonConfig,
+    grandchild_pid: u32,
+    timeout_secs: u64,
+) -> DaemonResult<()> {
+    match child.try_wait() {
+        Ok(Some(status)) => {
             warn!(
                 pid = grandchild_pid,
-                timeout_secs, "grandchild did not signal ready within timeout -- killing"
+                ?status,
+                "grandchild exited before signalling ready (pipe EOF was process death)"
             );
-            // Child::kill sends SIGKILL to the exact PID (n5: targets the
-            // specific PID via libc::kill(pid, SIGKILL), bypassing the
-            // process group despite the grandchild's setsid).
-            if let Err(e) = child.kill() {
-                warn!(pid = grandchild_pid, err = %e, "kill(grandchild) failed");
-            }
-            let _ = child.wait();
-            // Drop with WriteOwner: unlinks pidfile + unlocks.
             drop(pidfile_lock);
-            Err(DaemonError::AutoStartTimeout {
+            return Err(DaemonError::AutoStartTimeout {
                 timeout_secs,
                 socket: cfg.socket_path(),
-            })
+            });
+        }
+        Ok(None) => {}
+        Err(e) => {
+            warn!(
+                pid = grandchild_pid,
+                err = %e,
+                "try_wait after pipe EOF failed -- assuming grandchild is alive"
+            );
         }
     }
+
+    pidfile_lock.hand_off_to_adopter();
+    info!(
+        pid = grandchild_pid,
+        "grandchild signalled ready -- parent exiting 0 (Handoff)"
+    );
+    drop(pidfile_lock);
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -686,7 +715,7 @@ async fn run_start_spawned_by_client_unix(
         })?;
 
     // Step 1 -- Load config.
-    let cfg = load_config(config_path)?;
+    let cfg = load_config(config_path.as_ref())?;
     let cfg = Arc::new(cfg);
 
     // Write grandchild's own PID to pidfile (atomic tmp+rename, overwriting
@@ -742,7 +771,7 @@ async fn run_start_foreground_inner(
     create_runtime_dir(&cfg)?;
 
     // Steps 6-10.
-    let (manager, dispatcher, builder, executor) = build_daemon_components(Arc::clone(&cfg));
+    let (manager, dispatcher, builder, executor) = build_daemon_components(&cfg);
 
     // Step 11.
     let shutdown = CancellationToken::new();
@@ -751,7 +780,7 @@ async fn run_start_foreground_inner(
     let _signal_guard = install_signal_handlers(shutdown.clone())?;
 
     // Step 13.
-    preload_pinned_workspaces(&cfg, &manager, &builder).await;
+    preload_pinned_workspaces(&cfg, &manager, &builder);
 
     // Step 14.
     let server = IpcServer::bind(
@@ -792,7 +821,7 @@ async fn run_stop(
     log_level: Option<&str>,
     timeout_secs: u64,
 ) -> DaemonResult<()> {
-    let cfg = load_config(config_path)?;
+    let cfg = load_config(config_path.as_ref())?;
     setup_stderr_tracing(log_level, &cfg);
     let socket_path = cfg.socket_path();
 
@@ -838,7 +867,7 @@ async fn run_status(
     log_level: Option<&str>,
     json_output: bool,
 ) -> DaemonResult<()> {
-    let cfg = load_config(config_path)?;
+    let cfg = load_config(config_path.as_ref())?;
     setup_stderr_tracing(log_level, &cfg);
     let socket_path = cfg.socket_path();
 
@@ -995,7 +1024,7 @@ fn render_status_human(result: &serde_json::Value) {
         .unwrap_or("unknown");
     let uptime = payload
         .get("uptime_seconds")
-        .and_then(|v| v.as_u64())
+        .and_then(serde_json::Value::as_u64)
         .unwrap_or(0);
 
     println!("sqryd  version: {version}");
@@ -1004,11 +1033,11 @@ fn render_status_human(result: &serde_json::Value) {
     if let Some(memory) = payload.get("memory") {
         let limit = memory
             .get("limit_bytes")
-            .and_then(|v| v.as_u64())
+            .and_then(serde_json::Value::as_u64)
             .unwrap_or(0);
         let current = memory
             .get("current_bytes")
-            .and_then(|v| v.as_u64())
+            .and_then(serde_json::Value::as_u64)
             .unwrap_or(0);
         println!(
             "       memory:  {} MiB used / {} MiB limit",
@@ -1036,7 +1065,7 @@ fn render_status_human(result: &serde_json::Value) {
 
 #[cfg(target_os = "linux")]
 fn run_install_systemd_user(
-    config_path: Option<PathBuf>,
+    config_path: Option<&PathBuf>,
     log_level: Option<&str>,
 ) -> DaemonResult<()> {
     let cfg = load_config(config_path)?;
@@ -1049,14 +1078,14 @@ fn run_install_systemd_user(
 
 #[cfg(target_os = "linux")]
 fn run_install_systemd_system(
-    config_path: Option<PathBuf>,
+    config_path: Option<&PathBuf>,
     log_level: Option<&str>,
     user: Option<String>,
 ) -> DaemonResult<()> {
     let cfg = load_config(config_path)?;
     setup_stderr_tracing(log_level, &cfg);
     let opts = InstallOptions {
-        user: user.clone(),
+        user,
         ..Default::default()
     };
     // Validate the user account (n3 fix: exits 78 EX_CONFIG on failure).
@@ -1092,7 +1121,7 @@ fn run_install_launchd(config_path: Option<PathBuf>, log_level: Option<&str>) ->
 
 #[cfg(target_os = "windows")]
 fn run_install_windows(config_path: Option<PathBuf>, log_level: Option<&str>) -> DaemonResult<()> {
-    let cfg = load_config(config_path)?;
+    let cfg = load_config(config_path.as_ref())?;
     setup_stderr_tracing(log_level, &cfg);
     let opts = InstallOptions::default();
     let sc = crate::lifecycle::units::windows::generate_sc_create(&cfg, &opts);
@@ -1105,7 +1134,7 @@ fn run_install_windows(config_path: Option<PathBuf>, log_level: Option<&str>) ->
     Ok(())
 }
 
-fn run_print_config(config_path: Option<PathBuf>, log_level: Option<&str>) -> DaemonResult<()> {
+fn run_print_config(config_path: Option<&PathBuf>, log_level: Option<&str>) -> DaemonResult<()> {
     let cfg = load_config(config_path)?;
     setup_stderr_tracing(log_level, &cfg);
     let toml_str = toml::to_string_pretty(&cfg).map_err(|e| DaemonError::Config {
@@ -1147,8 +1176,8 @@ pub fn main_impl() -> ExitCode {
 ///
 /// When `config_path` is `None`, `DaemonConfig::load()` is used which
 /// respects `SQRY_DAEMON_CONFIG` normally.
-fn load_config(config_path: Option<PathBuf>) -> DaemonResult<DaemonConfig> {
-    if let Some(ref p) = config_path {
+fn load_config(config_path: Option<&PathBuf>) -> DaemonResult<DaemonConfig> {
+    if let Some(p) = config_path {
         let mut cfg = DaemonConfig::load_from_path(p)?;
         cfg.apply_env_overrides()?;
         cfg.validate()?;
@@ -1209,7 +1238,7 @@ fn create_runtime_dir(cfg: &DaemonConfig) -> DaemonResult<()> {
 /// non-daemon callers (CLI, LSP, MCP) continue to use the read-only
 /// `make_query_db_cold` path with `load_derived_opportunistic`.
 fn build_daemon_components(
-    cfg: Arc<DaemonConfig>,
+    cfg: &Arc<DaemonConfig>,
 ) -> (
     Arc<WorkspaceManager>,
     Arc<RebuildDispatcher>,
@@ -1217,7 +1246,7 @@ fn build_daemon_components(
     Arc<QueryExecutor>,
 ) {
     let plugins = Arc::new(sqry_plugin_registry::create_plugin_manager());
-    let manager = WorkspaceManager::new(Arc::clone(&cfg));
+    let manager = WorkspaceManager::new(cfg);
 
     // PF03B: install the production derived-cache writer hook BEFORE the
     // dispatcher / IPC server start serving requests, so the very first
@@ -1231,7 +1260,7 @@ fn build_daemon_components(
     );
 
     let dispatcher =
-        RebuildDispatcher::new(Arc::clone(&manager), Arc::clone(&cfg), Arc::clone(&plugins));
+        RebuildDispatcher::new(Arc::clone(&manager), Arc::clone(cfg), Arc::clone(&plugins));
     let builder: Arc<dyn crate::workspace::WorkspaceBuilder> =
         Arc::new(RealWorkspaceBuilder::new(Arc::clone(&plugins)));
     let executor = Arc::new(QueryExecutor::new());
@@ -1272,7 +1301,7 @@ fn signal_ready(cfg: &DaemonConfig, socket_path: &std::path::Path) {
 /// Pre-load pinned workspaces declared in the daemon config.
 ///
 /// Step 13 per §C.3.1: log + continue on failure.
-async fn preload_pinned_workspaces(
+fn preload_pinned_workspaces(
     cfg: &DaemonConfig,
     manager: &Arc<WorkspaceManager>,
     builder: &Arc<dyn crate::workspace::WorkspaceBuilder>,
@@ -1675,7 +1704,7 @@ mod tests {
         writeln!(tmp, "# minimal sqryd test config").expect("write");
         let path = tmp.path().to_path_buf();
 
-        let result = load_config(Some(path.clone()));
+        let result = load_config(Some(&path));
 
         assert!(
             result.is_ok(),

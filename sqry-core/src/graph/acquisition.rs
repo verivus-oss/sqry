@@ -61,6 +61,12 @@ use crate::plugin::PluginManager;
 pub trait GraphAcquirer: Send + Sync {
     /// Acquire a graph for `request`. Returns a populated [`GraphAcquisition`]
     /// or a typed [`GraphAcquisitionError`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GraphAcquisitionError`] when path validation fails, no usable
+    /// graph exists, a stale graph is outside policy, the persisted graph is
+    /// incompatible with the current runtime, or graph loading fails.
     fn acquire(
         &self,
         request: GraphAcquisitionRequest,
@@ -474,6 +480,7 @@ pub struct FilesystemGraphProvider {
 impl std::fmt::Debug for FilesystemGraphProvider {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FilesystemGraphProvider")
+            .field("plugin_manager", &"<PluginManager>")
             .field("auto_build_hook", &self.auto_build.is_some())
             .finish()
     }
@@ -512,9 +519,8 @@ impl FilesystemGraphProvider {
     /// the original (un-canonicalized) request path so adapters can render
     /// stable diagnostics.
     fn apply_path_policy(
-        &self,
         request_path: &Path,
-        policy: &PathPolicy,
+        policy: PathPolicy,
     ) -> Result<PathBuf, GraphAcquisitionError> {
         let exists = request_path.exists();
         if policy.require_existing && !exists {
@@ -539,8 +545,7 @@ impl FilesystemGraphProvider {
                     request_path.to_path_buf()
                 } else {
                     std::env::current_dir()
-                        .map(|cwd| cwd.join(request_path))
-                        .unwrap_or_else(|_| request_path.to_path_buf())
+                        .map_or_else(|_| request_path.to_path_buf(), |cwd| cwd.join(request_path))
                 }
             }
         };
@@ -567,7 +572,7 @@ impl FilesystemGraphProvider {
     ///   in an *outer* project (the
     ///   [`crate::workspace::WorkspaceRootDiscovery::BoundaryOnly`] case
     ///   where the discovered graph does not belong to the same project
-    ///   boundary as `start`). In the BoundaryOnly case the caller path
+    ///   boundary as `start`). In the `BoundaryOnly` case the caller path
     ///   below uses `canonical_request` as the `workspace_root` for
     ///   [`GraphAcquisitionError::NoGraph`] / `AutoBuildIfEnabled`, which
     ///   is always inside the right project even if it is deeper than the
@@ -624,6 +629,158 @@ impl FilesystemGraphProvider {
             manifest_path: manifest_path.map(Path::to_path_buf),
         }
     }
+
+    fn acquire_without_graph(
+        &self,
+        canonical_request: &Path,
+        request: &GraphAcquisitionRequest,
+    ) -> Result<GraphAcquisition, GraphAcquisitionError> {
+        match request.missing_graph_policy {
+            MissingGraphPolicy::Error => Err(GraphAcquisitionError::NoGraph {
+                workspace_root: canonical_request.to_path_buf(),
+            }),
+            MissingGraphPolicy::AutoBuildIfEnabled => match &self.auto_build {
+                Some(hook) => {
+                    let graph = hook(canonical_request)?;
+                    Ok(GraphAcquisition {
+                        graph,
+                        workspace_root: canonical_request.to_path_buf(),
+                        query_scope: None,
+                        is_file_scope: false,
+                        freshness: GraphFreshness::Fresh {
+                            lifecycle_label: None,
+                        },
+                        identity: GraphIdentity {
+                            snapshot_sha256: None,
+                            manifest_built_at: None,
+                            snapshot_format_version: None,
+                            source_root: canonical_request.to_path_buf(),
+                            plugin_selection_status: PluginSelectionStatus::Exact,
+                        },
+                        metadata: GraphAcquisitionMetadata {
+                            acquisition_source: AcquisitionSource::Filesystem,
+                            tool_name: request.tool_name,
+                            notes: vec!["auto-built via provider hook".to_string()],
+                        },
+                    })
+                }
+                None => Err(GraphAcquisitionError::NoGraph {
+                    workspace_root: canonical_request.to_path_buf(),
+                }),
+            },
+        }
+    }
+
+    fn validate_workspace_boundary(
+        requested_path: PathBuf,
+        canonical_request: &Path,
+        workspace_root: &Path,
+        path_policy: PathPolicy,
+    ) -> Result<(), GraphAcquisitionError> {
+        if path_policy.require_within_workspace
+            && !canonical_request.starts_with(workspace_root)
+            && !path_policy.allow_symlink_escape
+        {
+            return Err(GraphAcquisitionError::InvalidPath {
+                path: requested_path,
+                reason: format!(
+                    "canonical path {} escapes workspace root {}",
+                    canonical_request.display(),
+                    workspace_root.display()
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    fn load_manifest_for_acquisition(
+        storage: &GraphStorage,
+        workspace_root: &Path,
+    ) -> Result<(Option<Manifest>, String), GraphAcquisitionError> {
+        if !storage.manifest_path().exists() {
+            return Ok((None, String::new()));
+        }
+
+        storage
+            .load_manifest()
+            .map(|manifest| {
+                let expected_sha = manifest.snapshot_sha256.clone();
+                (Some(manifest), expected_sha)
+            })
+            .map_err(|e| GraphAcquisitionError::LoadFailed {
+                source_root: workspace_root.to_path_buf(),
+                reason: format!("manifest unreadable: {e}"),
+            })
+    }
+
+    fn validate_plugin_selection(
+        &self,
+        manifest: Option<&Manifest>,
+        manifest_path: &Path,
+        policy: &PluginSelectionPolicy,
+        workspace_root: &Path,
+    ) -> Result<(), GraphAcquisitionError> {
+        let plugin_status = manifest.map_or(PluginSelectionStatus::Exact, |m| {
+            self.classify_plugin_selection(m, Some(manifest_path), policy)
+        });
+        if matches!(plugin_status, PluginSelectionStatus::Exact) {
+            Ok(())
+        } else {
+            Err(GraphAcquisitionError::IncompatibleGraph {
+                source_root: workspace_root.to_path_buf(),
+                status: plugin_status,
+            })
+        }
+    }
+
+    fn load_graph_snapshot(
+        &self,
+        storage: &GraphStorage,
+        workspace_root: &Path,
+        expected_sha: &str,
+    ) -> Result<Arc<CodeGraph>, GraphAcquisitionError> {
+        let snapshot_path = storage.snapshot_path().to_path_buf();
+        let snapshot_bytes =
+            std::fs::read(&snapshot_path).map_err(|e| GraphAcquisitionError::LoadFailed {
+                source_root: workspace_root.to_path_buf(),
+                reason: format!("read snapshot {}: {e}", snapshot_path.display()),
+            })?;
+
+        verify_snapshot_bytes(&snapshot_bytes, expected_sha).map_err(|e| {
+            GraphAcquisitionError::LoadFailed {
+                source_root: workspace_root.to_path_buf(),
+                reason: format!("snapshot integrity check failed: {e}"),
+            }
+        })?;
+
+        match load_from_bytes(&snapshot_bytes, Some(&self.plugin_manager)) {
+            Ok(graph) => Ok(Arc::new(graph)),
+            Err(PersistenceError::IncompatibleVersion { expected, found }) => {
+                Err(GraphAcquisitionError::IncompatibleGraph {
+                    source_root: workspace_root.to_path_buf(),
+                    status: PluginSelectionStatus::IncompatibleSnapshotFormat {
+                        reason: format!(
+                            "snapshot version mismatch: expected {expected}, found {found}"
+                        ),
+                    },
+                })
+            }
+            Err(e) => Err(GraphAcquisitionError::LoadFailed {
+                source_root: workspace_root.to_path_buf(),
+                reason: format!("snapshot deserialize: {e}"),
+            }),
+        }
+    }
+
+    fn identity_from_manifest(manifest: Option<&Manifest>, workspace_root: &Path) -> GraphIdentity {
+        GraphIdentity {
+            snapshot_sha256: manifest.map(|m| m.snapshot_sha256.clone()),
+            manifest_built_at: manifest.map(|m| m.built_at.clone()),
+            snapshot_format_version: manifest.map(|m| m.snapshot_format_version),
+            source_root: workspace_root.to_path_buf(),
+            plugin_selection_status: PluginSelectionStatus::Exact,
+        }
+    }
 }
 
 impl GraphAcquirer for FilesystemGraphProvider {
@@ -633,64 +790,24 @@ impl GraphAcquirer for FilesystemGraphProvider {
     ) -> Result<GraphAcquisition, GraphAcquisitionError> {
         // Step 1: path policy. Runs BEFORE any disk graph load.
         let canonical_request =
-            self.apply_path_policy(&request.requested_path, &request.path_policy)?;
+            Self::apply_path_policy(&request.requested_path, request.path_policy)?;
 
         // Step 2: find the nearest .sqry/graph ancestor.
         let Some((workspace_root, ancestor_depth, is_file_scope)) =
             Self::find_workspace_root(&canonical_request)
         else {
-            // No artifact exists. Honor MissingGraphPolicy.
-            return match request.missing_graph_policy {
-                MissingGraphPolicy::Error => Err(GraphAcquisitionError::NoGraph {
-                    workspace_root: canonical_request,
-                }),
-                MissingGraphPolicy::AutoBuildIfEnabled => match &self.auto_build {
-                    Some(hook) => {
-                        let graph = hook(&canonical_request)?;
-                        Ok(GraphAcquisition {
-                            graph,
-                            workspace_root: canonical_request.clone(),
-                            query_scope: None,
-                            is_file_scope: false,
-                            freshness: GraphFreshness::Fresh {
-                                lifecycle_label: None,
-                            },
-                            identity: GraphIdentity {
-                                snapshot_sha256: None,
-                                manifest_built_at: None,
-                                snapshot_format_version: None,
-                                source_root: canonical_request.clone(),
-                                plugin_selection_status: PluginSelectionStatus::Exact,
-                            },
-                            metadata: GraphAcquisitionMetadata {
-                                acquisition_source: AcquisitionSource::Filesystem,
-                                tool_name: request.tool_name,
-                                notes: vec!["auto-built via provider hook".to_string()],
-                            },
-                        })
-                    }
-                    None => Err(GraphAcquisitionError::NoGraph {
-                        workspace_root: canonical_request,
-                    }),
-                },
-            };
+            return self.acquire_without_graph(&canonical_request, &request);
         };
 
         // Step 2b: workspace-boundary check. After ancestor discovery the
         // canonical request must sit inside the resolved workspace root
         // unless symlink escape is explicitly allowed.
-        if request.path_policy.require_within_workspace
-            && !canonical_request.starts_with(&workspace_root)
-            && !request.path_policy.allow_symlink_escape
-        {
-            return Err(GraphAcquisitionError::InvalidPath {
-                path: request.requested_path,
-                reason: format!(
-                    "canonical path {:?} escapes workspace root {:?}",
-                    canonical_request, workspace_root
-                ),
-            });
-        }
+        Self::validate_workspace_boundary(
+            request.requested_path,
+            &canonical_request,
+            &workspace_root,
+            request.path_policy,
+        )?;
 
         // Step 3: query scope and file-scope flags.
         let (query_scope, is_file_scope) = if ancestor_depth > 0 || is_file_scope {
@@ -701,93 +818,22 @@ impl GraphAcquirer for FilesystemGraphProvider {
 
         // Step 4: load manifest (when present) for SHA-256 + plugin compat.
         let storage = GraphStorage::new(&workspace_root);
-        let mut manifest_opt: Option<Manifest> = None;
-        let mut expected_sha = String::new();
-        if storage.manifest_path().exists() {
-            match storage.load_manifest() {
-                Ok(m) => {
-                    expected_sha = m.snapshot_sha256.clone();
-                    manifest_opt = Some(m);
-                }
-                Err(e) => {
-                    return Err(GraphAcquisitionError::LoadFailed {
-                        source_root: workspace_root,
-                        reason: format!("manifest unreadable: {e}"),
-                    });
-                }
-            }
-        }
+        let (manifest_opt, expected_sha) =
+            Self::load_manifest_for_acquisition(&storage, &workspace_root)?;
 
         // Step 5: plugin-selection compatibility before snapshot read.
-        let plugin_status = manifest_opt
-            .as_ref()
-            .map_or(PluginSelectionStatus::Exact, |m| {
-                self.classify_plugin_selection(
-                    m,
-                    Some(storage.manifest_path()),
-                    &request.plugin_selection_policy,
-                )
-            });
-        if !matches!(plugin_status, PluginSelectionStatus::Exact) {
-            return Err(GraphAcquisitionError::IncompatibleGraph {
-                source_root: workspace_root,
-                status: plugin_status,
-            });
-        }
+        self.validate_plugin_selection(
+            manifest_opt.as_ref(),
+            storage.manifest_path(),
+            &request.plugin_selection_policy,
+            &workspace_root,
+        )?;
 
         // Step 6: read snapshot bytes, verify SHA-256, deserialize.
-        let snapshot_path = storage.snapshot_path().to_path_buf();
-        let snapshot_bytes = match std::fs::read(&snapshot_path) {
-            Ok(b) => b,
-            Err(e) => {
-                return Err(GraphAcquisitionError::LoadFailed {
-                    source_root: workspace_root,
-                    reason: format!("read snapshot {:?}: {e}", snapshot_path),
-                });
-            }
-        };
-        if let Err(e) = verify_snapshot_bytes(&snapshot_bytes, &expected_sha) {
-            return Err(GraphAcquisitionError::LoadFailed {
-                source_root: workspace_root,
-                reason: format!("snapshot integrity check failed: {e}"),
-            });
-        }
-
-        let graph = match load_from_bytes(&snapshot_bytes, Some(&self.plugin_manager)) {
-            Ok(g) => Arc::new(g),
-            // SGA03 Major #2 (codex iter2) — surface
-            // `PersistenceError::IncompatibleVersion` as a typed
-            // `IncompatibleGraph` with `IncompatibleSnapshotFormat` rather
-            // than collapsing it into `LoadFailed`. Adapters (e.g. the
-            // daemon's `From<GraphAcquisitionError>` impl) rely on this
-            // distinction to map to `WorkspaceIncompatibleGraph` /
-            // dedicated MCP error envelopes.
-            Err(PersistenceError::IncompatibleVersion { expected, found }) => {
-                return Err(GraphAcquisitionError::IncompatibleGraph {
-                    source_root: workspace_root,
-                    status: PluginSelectionStatus::IncompatibleSnapshotFormat {
-                        reason: format!(
-                            "snapshot version mismatch: expected {expected}, found {found}"
-                        ),
-                    },
-                });
-            }
-            Err(e) => {
-                return Err(GraphAcquisitionError::LoadFailed {
-                    source_root: workspace_root,
-                    reason: format!("snapshot deserialize: {e}"),
-                });
-            }
-        };
+        let graph = self.load_graph_snapshot(&storage, &workspace_root, &expected_sha)?;
 
         // Step 7: assemble identity + metadata from the manifest (when present).
-        let identity = GraphIdentity {
-            snapshot_sha256: manifest_opt.as_ref().map(|m| m.snapshot_sha256.clone()),
-            manifest_built_at: manifest_opt.as_ref().map(|m| m.built_at.clone()),
-            snapshot_format_version: manifest_opt.as_ref().map(|m| m.snapshot_format_version),
-            source_root: workspace_root.clone(),
-            plugin_selection_status: PluginSelectionStatus::Exact,
-        };
+        let identity = Self::identity_from_manifest(manifest_opt.as_ref(), &workspace_root);
 
         Ok(GraphAcquisition {
             graph,

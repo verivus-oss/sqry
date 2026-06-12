@@ -124,8 +124,7 @@ async fn reload_workspace(harness: &support::WatcherHarness) {
     if let Some(ws) = harness.manager.lookup(&harness.key) {
         let _ = harness
             .dispatcher
-            .ensure_watching(&harness.key, ws, harness.root.clone())
-            .await;
+            .ensure_watching(&harness.key, &ws, &harness.root);
     }
 }
 

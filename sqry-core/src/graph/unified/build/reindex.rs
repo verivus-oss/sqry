@@ -69,37 +69,31 @@ pub fn reindex_files(graph: &mut CodeGraph, changed_paths: &[PathBuf]) -> Reinde
 
     for path in changed_paths {
         // Step 1: Resolve FileId
-        let file_id = match graph.files().get(path) {
-            Some(fid) => fid,
-            None => {
-                debug!(
-                    "reindex: skipping {} — not in file registry",
-                    path.display()
-                );
-                stats.files_skipped += 1;
-                continue;
-            }
+        let Some(file_id) = graph.files().get(path) else {
+            debug!(
+                "reindex: skipping {} — not in file registry",
+                path.display()
+            );
+            stats.files_skipped += 1;
+            continue;
         };
 
         // Step 2: Look up old segment
-        let old_segment = match graph.file_segments().get(file_id).copied() {
-            Some(seg) => seg,
-            None => {
-                debug!(
-                    "reindex: skipping {} (FileId {:?}) — no segment",
-                    path.display(),
-                    file_id
-                );
-                stats.files_skipped += 1;
-                continue;
-            }
+        let Some(old_segment) = graph.file_segments().get(file_id).copied() else {
+            debug!(
+                "reindex: skipping {} (FileId {:?}) — no segment",
+                path.display(),
+                file_id
+            );
+            stats.files_skipped += 1;
+            continue;
         };
 
         // Step 3: Tombstone old edges (BEFORE nodes — ordering invariant)
-        let edges_tombstoned = tombstone_old_edges(graph, &old_segment);
+        let edges_tombstoned = tombstone_old_edges(graph, old_segment);
 
         // Step 4: Tombstone old node slots
-        let nodes_tombstoned = tombstone_old_nodes(graph, &old_segment);
+        let nodes_tombstoned = tombstone_old_nodes(graph, old_segment);
 
         // Step 5-8: Handled by the caller after parsing
         // The actual parsing, node commit, and edge insertion are done by the
@@ -129,7 +123,7 @@ pub fn reindex_files(graph: &mut CodeGraph, changed_paths: &[PathBuf]) -> Reinde
 /// Tombstones all edges for nodes in the old segment by calling
 /// `remove_edge` on the bidirectional edge store (which appends Remove
 /// deltas to both forward and reverse stores and sets CSR tombstones).
-fn tombstone_old_edges(graph: &mut CodeGraph, segment: &FileSegment) -> usize {
+fn tombstone_old_edges(graph: &mut CodeGraph, segment: FileSegment) -> usize {
     let start = segment.start_slot;
     let end = segment.end_slot();
     let mut count = 0usize;
@@ -187,7 +181,7 @@ fn tombstone_old_edges(graph: &mut CodeGraph, segment: &FileSegment) -> usize {
 }
 
 /// Tombstones old node slots by calling `arena.remove(id)`.
-fn tombstone_old_nodes(graph: &mut CodeGraph, segment: &FileSegment) -> usize {
+fn tombstone_old_nodes(graph: &mut CodeGraph, segment: FileSegment) -> usize {
     let start = segment.start_slot;
     let end = segment.end_slot();
     let mut count = 0usize;

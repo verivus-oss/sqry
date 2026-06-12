@@ -191,7 +191,7 @@ impl EdgeStore {
     /// rehydrated without going through `add_edge` (which would lose
     /// the persisted `csr_version` and per-edge sequence numbers).
     ///
-    /// `pub(crate)` because only the persistence/legacy_v10 module has a
+    /// `pub(crate)` because only the `persistence/legacy_v10` module has a
     /// legitimate reason to construct an `EdgeStore` from out-of-band
     /// parts; external callers must go through `EdgeStore::new` or
     /// `with_csr`.
@@ -375,7 +375,7 @@ impl EdgeStore {
     ///   `O(node_count + edge_count)` pass, setting
     ///   `csr_tombstones[idx] = true` whenever the edge at `idx` has
     ///   either endpoint in `dead`. We walk by source-row so that source
-    ///   hits are `O(1)` per row (skip rows whose source NodeId is in
+    ///   hits are `O(1)` per row (skip rows whose source `NodeId` is in
     ///   `dead` after setting all their edges), and target hits are
     ///   `O(edges)` scan.
     /// * **Delta tier**: [`DeltaBuffer::retain_if`] drops every edge (Add
@@ -391,13 +391,13 @@ impl EdgeStore {
     /// Delta-buffer drops are not counted — the caller tracks those via
     /// `stats()` if needed.
     ///
-    /// Note: CSR tombstoning uses the slot *index* field of NodeId (not
+    /// Note: CSR tombstoning uses the slot *index* field of `NodeId` (not
     /// the full `(index, generation)` pair) because CSR column entries
-    /// store the full NodeId — the generation stored in the CSR was
+    /// store the full `NodeId` — the generation stored in the CSR was
     /// captured at the most recent full rebuild and may not match the
     /// current arena's generation for a re-allocated slot. Set membership
-    /// is performed against `dead`, which contains the NodeIds as they
-    /// were *at the moment of tombstoning*; callers pass the NodeIds
+    /// is performed against `dead`, which contains the `NodeIds` as they
+    /// were *at the moment of tombstoning*; callers pass the `NodeIds`
     /// they drained from `FileRegistry::take_nodes` or the arena's live
     /// enumeration before calling `NodeArena::remove`.
     #[allow(dead_code)] // Consumer is
@@ -422,9 +422,8 @@ impl EdgeStore {
         if let Some(ref csr) = self.csr {
             let node_count = csr.node_count();
             for slot_index in 0..node_count {
-                let slot_u32 = match u32::try_from(slot_index) {
-                    Ok(v) => v,
-                    Err(_) => continue,
+                let Ok(slot_u32) = u32::try_from(slot_index) else {
+                    continue;
                 };
                 let source_slot_dead = dead_slot_indices.contains(&slot_u32);
                 for edge_ref in csr.edges_of(slot_u32) {
@@ -751,6 +750,13 @@ impl EdgeStore {
     /// FFI linkers already build lookup tables keyed by
     /// `(method, normalized_path)` / qualified name, so the emission
     /// order inside each tier is immaterial to their output.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a source [`NodeId`](crate::graph::unified::node::NodeId)
+    /// cannot be converted to its dense index. That would indicate corrupted
+    /// graph storage because all CSR and delta entries must reference indexed
+    /// nodes.
     pub fn all_live_forward_edges(&self) -> Vec<StoreEdgeRef> {
         // Build a GLOBAL delta LWW map keyed by (source, target, kind).
         // One pass over the delta buffer — shared across every source,

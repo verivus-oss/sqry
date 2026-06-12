@@ -520,8 +520,10 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_env_var_toggle_disables_jaccard() {
-        // Set env var to disable Jaccard
+        // Set env var to disable Jaccard. Serialized: env mutation is
+        // process-wide and cargo runs tests on parallel threads.
         unsafe {
             std::env::set_var("SQRY_FUZZY_USE_JACCARD", "0");
         }

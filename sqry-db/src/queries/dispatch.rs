@@ -23,7 +23,7 @@
 //!
 //! Codex's DB14 review (`docs/reviews/phase3-derived-db/2026-04-14/db14_review_post_codex.md`)
 //! explicitly recommended *not* flipping sqry-db's queries to match the
-//! graph_eval naming ("flipping DB14 to match `graph_eval::match_*` would
+//! `graph_eval` naming ("flipping DB14 to match `graph_eval::match_*` would
 //! make the names more aesthetically uniform while breaking the actual
 //! set-membership contract you are caching"). DB15 implemented the second
 //! option Codex left open: route through inverted wrappers in one place.
@@ -106,7 +106,7 @@ pub fn make_query_db(snapshot: Arc<GraphSnapshot>) -> QueryDb {
 /// Does not panic. All cold-load errors are handled gracefully.
 #[must_use]
 pub fn make_query_db_cold(snapshot: Arc<GraphSnapshot>, workspace_root: &Path) -> QueryDb {
-    let mut db = QueryDb::new(Arc::clone(&snapshot), QueryDbConfig::default());
+    let mut db = QueryDb::new(snapshot, QueryDbConfig::default());
     let _ = load_derived_opportunistic(&mut db, workspace_root);
     db
 }
@@ -128,7 +128,7 @@ pub fn derived_path(workspace_root: &Path, config: &QueryDbConfig) -> PathBuf {
 /// `<workspace_root>/.sqry/graph/snapshot.sqry`, then calls
 /// [`load_derived`] against the companion `derived.sqry` file.
 ///
-/// Error policy (CLIENT_LOAD spec §5.9):
+/// Error policy (`CLIENT_LOAD` spec §5.9):
 /// - `Ok(Applied)` / `Ok(Skipped)` → logged at `debug` level.
 /// - `Err(NotFound)` → silent; expected on fresh workspaces.
 /// - `Err(StaleSnapshot)` / `Err(Corrupt)` → derived file deleted +

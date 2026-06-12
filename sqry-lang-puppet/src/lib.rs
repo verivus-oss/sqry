@@ -36,14 +36,7 @@ impl Default for PuppetPlugin {
 
 impl PuppetPlugin {
     /// Walk AST to extract scopes
-    #[allow(clippy::only_used_in_recursion)]
-    fn walk_ast_scopes(
-        &self,
-        node: Node,
-        content: &[u8],
-        file_path: &Path,
-        scopes: &mut Vec<Scope>,
-    ) {
+    fn walk_ast_scopes(node: Node, content: &[u8], file_path: &Path, scopes: &mut Vec<Scope>) {
         match node.kind() {
             "class_definition" | "defined_resource_type" => {
                 let mut cursor = node.walk();
@@ -87,7 +80,7 @@ impl PuppetPlugin {
         // Recurse into children
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
-            self.walk_ast_scopes(child, content, file_path, scopes);
+            Self::walk_ast_scopes(child, content, file_path, scopes);
         }
     }
 }
@@ -131,7 +124,7 @@ impl LanguagePlugin for PuppetPlugin {
     ) -> Result<Vec<Scope>, ScopeError> {
         let root = tree.root_node();
         let mut scopes = Vec::new();
-        self.walk_ast_scopes(root, content, file_path, &mut scopes);
+        Self::walk_ast_scopes(root, content, file_path, &mut scopes);
 
         // Sort scopes by position (required for link_nested_scopes)
         scopes.sort_by_key(|s| (s.start_line, s.start_column));

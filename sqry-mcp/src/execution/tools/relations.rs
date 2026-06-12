@@ -388,8 +388,8 @@ fn expand_to_call_sites(
 
 /// T2.4 (Go channels): surface `ChannelPeer` edges. The query target is
 /// usually a containing function, so we body-expand it to its operation-site
-/// CallSites (and any directly-named Channel nodes), then enumerate the
-/// `ChannelPeer` edges anchored there (outgoing for a CallSite, incoming for
+/// `CallSites` (and any directly-named Channel nodes), then enumerate the
+/// `ChannelPeer` edges anchored there (outgoing for a `CallSite`, incoming for
 /// a Channel). Each edge carries `direction` + `buffer_kind` labels in the
 /// response metadata.
 fn collect_channel_peer_relation(
@@ -524,7 +524,7 @@ fn collect_instantiates_relation(
 /// `direct_callers` / `direct_callees` still route through sqry-db (see
 /// [`crate::execution::relation_dispatch`]) because they take a
 /// user-supplied name as the predicate value rather than a resolved
-/// NodeId set, and sqry-db's segment-aware matching with caching is the
+/// `NodeId` set, and sqry-db's segment-aware matching with caching is the
 /// right primitive there.
 ///
 /// The Phase N architectural mandate that "transport must not bypass
@@ -548,66 +548,15 @@ fn collect_call_relation_via_db(
 
     let mut results = Vec::new();
     let start_set: HashSet<NodeId> = start_nodes.iter().copied().collect();
-
-    // Depth-1: enumerate Calls edges touching each start node directly.
-    // Track which neighbours actually produced an edge so depth-2+ BFS
-    // only walks from real depth-1 endpoints.
-    let mut depth_one_anchors: Vec<NodeId> = Vec::new();
-    let mut depth_one_anchor_set: HashSet<NodeId> = HashSet::new();
-
-    for &start_node in start_nodes {
-        if results.len() >= max_results {
-            return results;
-        }
-        let edges = match relation {
-            RelationType::Callers => snapshot.edges().edges_to(start_node),
-            RelationType::Callees => snapshot.edges().edges_from(start_node),
-            _ => unreachable!("guarded by debug_assert above"),
-        };
-        for edge in edges {
-            if results.len() >= max_results {
-                return results;
-            }
-            if !matches!(edge.kind, EdgeKind::Calls { .. }) {
-                continue;
-            }
-            let counterpart = match relation {
-                RelationType::Callers => edge.source,
-                RelationType::Callees => edge.target,
-                _ => unreachable!(),
-            };
-            let (from_id, to_id) = match relation {
-                RelationType::Callers => (counterpart, start_node),
-                RelationType::Callees => (start_node, counterpart),
-                _ => unreachable!(),
-            };
-            let from_ref = build_node_ref(snapshot, from_id, workspace_root);
-            let to_ref = build_node_ref(snapshot, to_id, workspace_root);
-            let metadata = match &edge.kind {
-                EdgeKind::Calls {
-                    argument_count,
-                    is_async,
-                    resolved_via,
-                } => Some(json!({
-                    "argument_count": argument_count,
-                    "is_async": is_async,
-                    "resolved_via": serde_json::to_value(resolved_via)
-                        .unwrap_or(Value::Null),
-                })),
-                _ => None,
-            };
-            results.push(RelationEdgeData {
-                from: Some(from_ref),
-                to: Some(to_ref),
-                relation_type: relation.as_str().to_string(),
-                depth: 1,
-                metadata,
-            });
-            if depth_one_anchor_set.insert(counterpart) {
-                depth_one_anchors.push(counterpart);
-            }
-        }
-    }
+    let (depth_one_results, depth_one_anchors, depth_one_anchor_set) =
+        collect_depth_one_call_relations(
+            snapshot,
+            workspace_root,
+            start_nodes,
+            relation,
+            max_results,
+        );
+    results.extend(depth_one_results);
 
     if max_depth <= 1 {
         return results;
@@ -660,6 +609,83 @@ fn collect_call_relation_via_db(
     }
 
     results
+}
+
+fn collect_depth_one_call_relations(
+    snapshot: &GraphSnapshot,
+    workspace_root: &Path,
+    start_nodes: &[NodeId],
+    relation: RelationType,
+    max_results: usize,
+) -> (Vec<RelationEdgeData>, Vec<NodeId>, HashSet<NodeId>) {
+    let mut results = Vec::new();
+    let mut anchors = Vec::new();
+    let mut anchor_set = HashSet::new();
+    for &start_node in start_nodes {
+        let edges = match relation {
+            RelationType::Callers => snapshot.edges().edges_to(start_node),
+            RelationType::Callees => snapshot.edges().edges_from(start_node),
+            _ => unreachable!("guarded by debug_assert above"),
+        };
+        for edge in edges {
+            if results.len() >= max_results || !matches!(edge.kind, EdgeKind::Calls { .. }) {
+                continue;
+            }
+            let counterpart = match relation {
+                RelationType::Callers => edge.source,
+                RelationType::Callees => edge.target,
+                _ => unreachable!(),
+            };
+            let (from_id, to_id) = match relation {
+                RelationType::Callers => (counterpart, start_node),
+                RelationType::Callees => (start_node, counterpart),
+                _ => unreachable!(),
+            };
+            results.push(build_call_relation_edge(
+                snapshot,
+                workspace_root,
+                relation,
+                &edge.kind,
+                from_id,
+                to_id,
+                1,
+            ));
+            if anchor_set.insert(counterpart) {
+                anchors.push(counterpart);
+            }
+        }
+    }
+    (results, anchors, anchor_set)
+}
+
+fn build_call_relation_edge(
+    snapshot: &GraphSnapshot,
+    workspace_root: &Path,
+    relation: RelationType,
+    kind: &EdgeKind,
+    from_id: NodeId,
+    to_id: NodeId,
+    depth: usize,
+) -> RelationEdgeData {
+    let metadata = match kind {
+        EdgeKind::Calls {
+            argument_count,
+            is_async,
+            resolved_via,
+        } => Some(json!({
+            "argument_count": argument_count,
+            "is_async": is_async,
+            "resolved_via": serde_json::to_value(resolved_via).unwrap_or(Value::Null),
+        })),
+        _ => None,
+    };
+    RelationEdgeData {
+        from: Some(build_node_ref(snapshot, from_id, workspace_root)),
+        to: Some(build_node_ref(snapshot, to_id, workspace_root)),
+        relation_type: relation.as_str().to_string(),
+        depth: u32::try_from(depth).unwrap_or(u32::MAX),
+        metadata,
+    }
 }
 
 /// For a `(frontier_node, start_set)` pair, look up the actual Calls
@@ -840,7 +866,7 @@ fn collect_exports(
 /// Walks outgoing `TypeOf{Return}` edges from `node` and emits one entry
 /// per resolved target type node. Mirrors the planner's `Predicate::Returns`
 /// evaluator in `sqry_db::planner::execute::node_returns_type` for
-/// cross-engine consistency. See B2 cluster of the BadLiveware Go-batch DAG.
+/// cross-engine consistency. See B2 cluster of the `BadLiveware` Go-batch DAG.
 ///
 /// Returns an empty `Vec` when the node has no Return edges (e.g. void
 /// function, constructor, or a language whose plugin does not yet emit
@@ -1006,6 +1032,11 @@ fn fallback_ref(name: &str, workspace_root: &Path) -> NodeRefData {
 }
 
 /// Execute the `call_hierarchy` tool to find callers or callees of a symbol.
+///
+/// # Errors
+///
+/// Returns an error if workspace resolution, graph acquisition, symbol
+/// resolution, or hierarchy traversal fails.
 pub fn execute_call_hierarchy(
     args: &CallHierarchyArgs,
 ) -> Result<ToolExecution<CallHierarchyData>> {

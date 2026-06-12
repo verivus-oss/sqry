@@ -32,6 +32,7 @@ type ScoredSymbol = (DisplaySymbol, f64);
 /// post-connect deadlines keep a daemon-shaped but wedged peer from blocking
 /// `sqry --exact ...` before the in-process fallback can run.
 const DAEMON_SEARCH_RPC_TIMEOUT: Duration = Duration::from_millis(250);
+static DAEMON_FALLBACK_DIAGNOSTIC_EMITTED: OnceLock<()> = OnceLock::new();
 
 /// Returns true when `SQRY_LOG` or `RUST_LOG` is set such that an `info`-or-
 /// more-verbose level applies to **the `sqry_cli::progress` target** (or to
@@ -117,8 +118,7 @@ fn maybe_emit_daemon_fallback_diagnostic(verbose: bool) {
     if !verbose {
         return;
     }
-    static EMITTED: OnceLock<()> = OnceLock::new();
-    if EMITTED.get().is_some() {
+    if DAEMON_FALLBACK_DIAGNOSTIC_EMITTED.get().is_some() {
         return;
     }
 
@@ -138,7 +138,7 @@ fn maybe_emit_daemon_fallback_diagnostic(verbose: bool) {
 
     // Set the OnceLock before writing — even if the write fails (closed
     // stderr, etc.) we never want a second emission.
-    let _ = EMITTED.set(());
+    let _ = DAEMON_FALLBACK_DIAGNOSTIC_EMITTED.set(());
 
     let socket_str = socket_path.display().to_string();
     let mut out = std::io::stderr().lock();
@@ -174,7 +174,7 @@ fn maybe_emit_daemon_fallback_diagnostic(verbose: bool) {
 /// via `recv_timeout`. The `timeout` budget is split across connect,
 /// hello-handshake, and status request; if the worker still exceeds
 /// `timeout` overall the
-/// outer recv_timeout returns false and the worker is left to complete on
+/// outer `recv_timeout` returns false and the worker is left to complete on
 /// its own — its eventual send to a closed channel is a no-op.
 fn probe_daemon_reachable_bounded(socket_path: &Path, timeout: Duration) -> bool {
     let path = socket_path.to_path_buf();
@@ -378,15 +378,11 @@ fn try_daemon_search(
         // 250ms budget for connect + hello-handshake per DAG spec 3.2.3.
         // A wedged or absent daemon must never block the user search.
         let probe = Duration::from_millis(250);
-        let mut client = match sqry_daemon_client::DaemonClient::connect_with_timeouts(
-            &socket_path,
-            probe,
-            probe,
-        )
-        .await
-        {
-            Ok(c) => c,
-            Err(_) => return None,
+        let Ok(mut client) =
+            sqry_daemon_client::DaemonClient::connect_with_timeouts(&socket_path, probe, probe)
+                .await
+        else {
+            return None;
         };
 
         // Workspace-Loaded gate. Forcing the daemon to load synchronously
@@ -473,7 +469,7 @@ fn finalize_daemon_search(
     // contract — matches the in-process semantics that report the same
     // metric on `all_symbols.len()` after `apply_search_filters` runs and
     // before `truncate(limit)`.
-    let total_matches = result.total as usize;
+    let total_matches = usize::try_from(result.total).unwrap_or(usize::MAX);
 
     if cli.count {
         println!("{total_matches} matches found");
@@ -544,7 +540,7 @@ struct MacroBoundaryFlags<'a> {
 /// Decide whether a single candidate `NodeId` survives the macro-boundary
 /// filter. The decision is sourced **directly** from the live
 /// `NodeMetadataStore` — never from environment variables and never from
-/// the `DisplaySymbol::metadata` HashMap — so the filter contract is the
+/// the `DisplaySymbol::metadata` `HashMap` — so the filter contract is the
 /// same regardless of how the candidate set was produced (regex scan,
 /// trigram fuzzy, exact lookup, etc.).
 ///

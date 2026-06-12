@@ -36,7 +36,7 @@
 //! caching is a separate concern from predicate caching: the TTL
 //! semantics (5 minutes here vs. epoch-bound in sqry-db), the key
 //! shape (full request signature here vs. query-canonical key there),
-//! and the value shape (response DTO here vs. raw NodeId / edge data
+//! and the value shape (response DTO here vs. raw `NodeId` / edge data
 //! there) all differ. Keeping both layers preserves the locality of
 //! each optimization and the telemetry this module emits for payload
 //! observability.

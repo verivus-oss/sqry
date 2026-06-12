@@ -54,7 +54,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 /// `sqry_core::workspace::WorkspaceId` type — both use the same 32-byte
 /// representation, so the bridge is a zero-cost newtype unwrap.
 ///
-/// STEP_6 (workspace-aware-cross-repo DAG) introduced this type. Older
+/// `STEP_6` (workspace-aware-cross-repo DAG) introduced this type. Older
 /// daemon clients that send `DaemonHello` without `logical_workspace`
 /// continue to work because the field is `#[serde(default)]` — they
 /// reproduce today's per-source-root semantics, with `workspace_id =
@@ -128,14 +128,14 @@ pub struct LogicalWorkspaceWire {
     /// `WorkspaceKey { workspace_id: Some(this id), source_root: <p>, .. }`
     /// per entry, all sharing the same `workspace_id` for grouping.
     pub source_roots: Vec<std::path::PathBuf>,
-    /// STEP_11_4 — per-source-root bindings. Each entry's `path` MUST
+    /// `STEP_11_4` — per-source-root bindings. Each entry's `path` MUST
     /// appear in [`Self::source_roots`]; the binding's
     /// `config_fingerprint` overrides the workspace-level default for
     /// that root only. Empty in the common case so the wire stays
     /// pre-STEP_11_4-compatible.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub source_root_bindings: Vec<SourceRootBinding>,
-    /// STEP_11_4 — workspace-level config fingerprint applied to any
+    /// `STEP_11_4` — workspace-level config fingerprint applied to any
     /// source root that does not carry its own
     /// [`SourceRootBinding::config_fingerprint`] override. `0` is the
     /// "fingerprint not set" sentinel.
@@ -143,11 +143,15 @@ pub struct LogicalWorkspaceWire {
     pub workspace_config_fingerprint: u64,
 }
 
+#[allow(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde skip_serializing_if callbacks are invoked with a reference to the field"
+)]
 fn is_zero_u64(value: &u64) -> bool {
     *value == 0
 }
 
-/// STEP_11_4 — per-source-root binding inside a [`LogicalWorkspaceWire`].
+/// `STEP_11_4` — per-source-root binding inside a [`LogicalWorkspaceWire`].
 ///
 /// `path` MUST appear in the parent [`LogicalWorkspaceWire::source_roots`]
 /// vector; the daemon matches bindings to source roots by canonical path
@@ -177,7 +181,7 @@ pub struct SourceRootBinding {
 /// MCP / LSP queries can render a per-source-root state without paying
 /// the cost of the full `daemon/status` snapshot.
 ///
-/// STEP_11_4 (workspace-aware-cross-repo, 2026-04-26) — adds the
+/// `STEP_11_4` (workspace-aware-cross-repo, 2026-04-26) — adds the
 /// `classpath_present` flag so consumers of `daemon/workspaceStatus`
 /// know which source roots have JVM classpath analysis available
 /// (`<source_root>/.sqry/classpath/` exists) without having to make a
@@ -195,7 +199,7 @@ pub struct WorkspaceSourceRootStatus {
     pub state: WorkspaceState,
     /// Live graph size for this source root, in bytes.
     pub current_bytes: u64,
-    /// STEP_11_4 — `true` when the daemon observed
+    /// `STEP_11_4` — `true` when the daemon observed
     /// `<source_root>/.sqry/classpath/` as a directory at status time.
     /// `false` when the directory is absent or the probe failed (the
     /// daemon never blocks status on a classpath probe; failures
@@ -221,7 +225,7 @@ pub struct WorkspaceSourceRootStatus {
 /// [`WorkspaceState::Evicted`] but at least one other reports any
 /// non-Evicted state — see [`Self::partially_evicted`].
 ///
-/// STEP_12 (workspace-aware-cross-repo, 2026-04-26) introduced the
+/// `STEP_12` (workspace-aware-cross-repo, 2026-04-26) introduced the
 /// hex-string telemetry fields `workspace_id_short` (16 hex chars,
 /// display) and `workspace_id_full` (64 hex chars, machine identity).
 /// Scripts consuming this payload should key on `workspace_id_full` —
@@ -233,10 +237,10 @@ pub struct WorkspaceSourceRootStatus {
 pub struct WorkspaceIndexStatus {
     /// Identity the request matched against.
     pub workspace_id: WorkspaceId,
-    /// STEP_12 — short (16 hex) form of `workspace_id`, suitable for
+    /// `STEP_12` — short (16 hex) form of `workspace_id`, suitable for
     /// CLI columns and human-scale log lines. Display only.
     pub workspace_id_short: String,
-    /// STEP_12 — full (64 hex) form of `workspace_id`. Machine
+    /// `STEP_12` — full (64 hex) form of `workspace_id`. Machine
     /// identity. Cross-process script consumers MUST key on this
     /// rather than the short form to avoid the (remote, non-zero)
     /// possibility of short-hex collisions across hundreds of
@@ -297,7 +301,7 @@ pub const ENVELOPE_VERSION: u32 = 1;
 /// persisted telemetry.
 ///
 /// This type lives in the leaf wire-type crate so [`ResponseMeta`] can
-/// carry a canonical workspace_state string on every successful tool
+/// carry a canonical `workspace_state` string on every successful tool
 /// response without the leaf crate taking a dep on `sqry-daemon` itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[repr(u8)]
@@ -407,7 +411,7 @@ pub struct DaemonHello {
     /// Wire protocol version. Phase 8a accepts exactly `1`.
     pub protocol_version: u32,
 
-    /// Optional logical-workspace binding hint (STEP_6 of the
+    /// Optional logical-workspace binding hint (`STEP_6` of the
     /// workspace-aware-cross-repo plan). When present, every
     /// subsequent `daemon/load` on this connection that does not
     /// itself supply `logical_workspace` inherits this binding —
@@ -487,7 +491,7 @@ pub struct ResponseEnvelope<T> {
 
 /// Metadata attached to every successful response. For Phase 8a
 /// management methods the staleness fields are always absent
-/// (`stale = false`, no last_good_at, no last_error,
+/// (`stale = false`, no `last_good_at`, no `last_error`,
 /// `workspace_state = None`). Phase 8b populates them from the
 /// server-side `ServeVerdict` for tool-method responses.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -564,7 +568,7 @@ impl ResponseMeta {
     /// `WorkspaceManager::classify_for_serve` only emits a Stale verdict
     /// when the observed state is `Failed`. Keeping this constructor
     /// intentionally rigid (no caller-supplied state) prevents the wire
-    /// form from claiming `stale = true` with a workspace_state the
+    /// form from claiming `stale = true` with a `workspace_state` the
     /// classifier could never have produced.
     #[must_use]
     pub fn stale_from(
@@ -647,7 +651,7 @@ pub enum RebuildStatus {
     Rejected,
 }
 
-/// `daemon/rebuild` success result payload (schema_version 2 — see
+/// `daemon/rebuild` success result payload (`schema_version` 2 — see
 /// cluster-G §2.4).
 ///
 /// Serialised under the `result` field of [`ResponseEnvelope`]. The
@@ -859,7 +863,7 @@ impl Serialize for JsonRpcVersion {
 impl<'de> Deserialize<'de> for JsonRpcVersion {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         struct Vis(PhantomData<JsonRpcVersion>);
-        impl<'de> de::Visitor<'de> for Vis {
+        impl de::Visitor<'_> for Vis {
             type Value = JsonRpcVersion;
             fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 f.write_str("the string \"2.0\"")

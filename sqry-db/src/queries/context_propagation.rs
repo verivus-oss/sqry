@@ -16,12 +16,12 @@
 //!
 //! `context.Background()` / `context.TODO()` at the call site is
 //! treated as a leak (matching the `contextcheck` convention; see
-//! 01_SPEC §6.2 AC-T3.7-5 and 02_DESIGN §4.2 / §4.2.a).
+//! `01_SPEC` §6.2 AC-T3.7-5 and `02_DESIGN` §4.2 / §4.2.a).
 //!
 //! References:
-//! - 01_SPEC.md §3.2, §5.2, §6.2 (T3.7 acceptance criteria).
-//! - 02_DESIGN.md §3.2, §4.2, §5.2 (algorithm + cache contract).
-//! - 03_IMPLEMENTATION_PLAN.md §Cluster E.
+//! - `01_SPEC.md` §3.2, §5.2, §6.2 (T3.7 acceptance criteria).
+//! - `02_DESIGN.md` §3.2, §4.2, §5.2 (algorithm + cache contract).
+//! - `03_IMPLEMENTATION_PLAN.md` §Cluster E.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -52,7 +52,7 @@ use crate::query::DerivedQuery;
 /// `StoreEdgeRef::file` (CSR-backed edges drop file IDs after
 /// compaction; see Codex iter-1 BLOCKER-2). The Phase-1 spec does
 /// not include a `Module(NodeId)` variant — that is deferred to
-/// Phase 2 (01_SPEC §9.4).
+/// Phase 2 (`01_SPEC` §9.4).
 #[derive(Debug, Clone, Copy, Hash, Eq, PartialEq, Serialize, Deserialize)]
 pub enum ContextScope {
     /// All `Calls` edges in the snapshot.
@@ -101,7 +101,7 @@ pub struct ContextPropagationKey {
 /// `call_span` is the byte-range location of the failing call-site
 /// (from the `StoreEdgeRef::spans[0]` on the underlying `Calls` edge).
 /// The Go plugin does not emit `NodeKind::CallSite` handles, so the
-/// span — not a NodeId — is the user-facing call-site identity.
+/// span — not a `NodeId` — is the user-facing call-site identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContextLeak {
     /// Source location of the leaking call-site (from `Calls.spans[0]`).
@@ -112,9 +112,9 @@ pub struct ContextLeak {
     pub callee: NodeId,
     /// Why this call is a leak.
     pub mode: ContextMode,
-    /// The caller's ctx parameter NodeId, when one can be unambiguously
-    /// identified. Per 01_SPEC §5.2.a this is "for IDE jump-to"; the
-    /// Go plugin does not emit dedicated parameter-binding NodeIds at
+    /// The caller's ctx parameter `NodeId`, when one can be unambiguously
+    /// identified. Per `01_SPEC` §5.2.a this is "for IDE jump-to"; the
+    /// Go plugin does not emit dedicated parameter-binding `NodeIds` at
     /// emit time, so this field is currently always `None` for Go.
     /// Future plugins or a Phase-2 enhancement may populate it.
     pub caller_ctx_param: Option<NodeId>,
@@ -129,7 +129,7 @@ pub struct ContextLeakSet {
 /// `DerivedQuery` implementation surfacing context-propagation leaks.
 ///
 /// - `QUERY_TYPE_ID = 0x0010` (first slot above the existing built-ins;
-///   see 02_DESIGN §5.2).
+///   see `02_DESIGN` §5.2).
 /// - `TRACKS_EDGE_REVISION = true` — any `Calls` / `TypeOf` change
 ///   invalidates the cached set.
 /// - `TRACKS_METADATA_REVISION = false` — reads no `NodeMetadata`.
@@ -154,7 +154,7 @@ impl DerivedQuery for ContextPropagationQuery {
 
 /// Compiled once per process — the `\bcontext\s*\.\s*(Background|TODO)\s*\(\s*\)`
 /// pattern detects an explicit fresh-context literal at a call site
-/// (AC-T3.7-5). The pattern is bounded and has no unbounded `.*`; ReDoS
+/// (AC-T3.7-5). The pattern is bounded and has no unbounded `.*`; `ReDoS`
 /// surface is none.
 fn ctx_background_or_todo_regex() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
@@ -170,7 +170,7 @@ const CONTEXT_IMPORT_PATH: &str = "context";
 const HTTP_IMPORT_PATH: &str = "net/http";
 
 /// The simple type names we recognise in stdlib `context` and
-/// `net/http` packages. Per 01_SPEC §3.2 these are the spec-pinned
+/// `net/http` packages. Per `01_SPEC` §3.2 these are the spec-pinned
 /// hard-coded names — user-defined wrappers are out of scope, so we
 /// require BOTH a matching simple name AND a matching package
 /// identifier from the file's import statements.
@@ -490,9 +490,10 @@ impl<'a> ContextPropagationExecutor<'a> {
             // node instead of trusting `edge.file`. The caller's file
             // is also the right scope discriminator: a `Calls` edge
             // belongs to the file containing the caller function.
-            let caller = edge.source;
-            let callee = edge.target;
-            let Some(caller_file) = self.snapshot.get_node(caller).map(|entry| entry.file) else {
+            let source_node = edge.source;
+            let target_node = edge.target;
+            let Some(caller_file) = self.snapshot.get_node(source_node).map(|entry| entry.file)
+            else {
                 continue;
             };
 
@@ -509,13 +510,13 @@ impl<'a> ContextPropagationExecutor<'a> {
             record_file_dep(caller_file);
 
             // Callee must accept context.Context. Cheap fast-path.
-            if self.ctx_param_name(callee).is_none() {
+            if self.ctx_param_name(target_node).is_none() {
                 continue;
             }
 
-            let caller_ctx_name = self.ctx_param_name(caller).cloned();
+            let caller_ctx_name = self.ctx_param_name(source_node).cloned();
             let caller_has_ctx = caller_ctx_name.is_some();
-            let request_param_name = self.http_handler_request_param(caller);
+            let request_param_name = self.http_handler_request_param(source_node);
             let caller_is_handler = request_param_name.is_some();
 
             // Classification priority (01_SPEC §3.2):
@@ -562,8 +563,8 @@ impl<'a> ContextPropagationExecutor<'a> {
             let call_span = edge.spans.first().copied().unwrap_or_default();
             leaks.push(ContextLeak {
                 call_span,
-                caller,
-                callee,
+                caller: source_node,
+                callee: target_node,
                 mode,
                 caller_ctx_param: None,
             });
@@ -658,7 +659,7 @@ impl<'a> ContextPropagationExecutor<'a> {
     /// typically `"r"`). Passing it into `call_threads_context`
     /// enables recognising a threaded handler call like
     /// `Work(r.Context())` and suppressing the leak per
-    /// 01_SPEC §3.2 "http-handler-leak ... without `r.Context()` being
+    /// `01_SPEC` §3.2 "http-handler-leak ... without `r.Context()` being
     /// threaded".
     fn http_handler_request_param(&mut self, node: NodeId) -> Option<String> {
         if !self.http_handler_cache.contains_key(&node) {
@@ -744,7 +745,7 @@ impl<'a> ContextPropagationExecutor<'a> {
     }
 
     /// Best-effort source-span re-walk for the `ctx_threaded`
-    /// predicate (02_DESIGN §4.2.a):
+    /// predicate (`02_DESIGN` §4.2.a):
     ///
     /// 1. Resolve the caller's `FileId` to a path and read the file.
     /// 2. Slice the call-site `Span` text.

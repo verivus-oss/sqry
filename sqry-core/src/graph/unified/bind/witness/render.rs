@@ -50,9 +50,11 @@ pub fn render_witness(witness: &SymbolResolutionWitness) -> WitnessRendering {
 
 /// Builds the human-readable step list: one numbered line per step.
 fn render_text(steps: &[ResolutionStep]) -> String {
+    use std::fmt::Write as _;
+
     let mut buf = String::new();
     for (idx, step) in steps.iter().enumerate() {
-        buf.push_str(&format!("{:3}. {step}\n", idx + 1));
+        let _ = writeln!(buf, "{:3}. {step}", idx + 1);
     }
     buf
 }

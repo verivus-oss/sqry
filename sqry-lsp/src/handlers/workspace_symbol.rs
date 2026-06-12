@@ -27,14 +27,14 @@ pub struct WorkspaceSymbolResult {
     pub offset: usize,
     pub languages: Vec<String>,
     pub query: String,
-    /// STEP_11_4 — `true` when at least one workspace search root was
+    /// `STEP_11_4` — `true` when at least one workspace search root was
     /// dropped from the search because
     /// [`crate::session::SessionManager::evaluate_handler_gate`]
     /// classified it as a member folder. The remaining results come
     /// from the still-included source roots only; consumers should
     /// surface a "partial workspace" hint to users.
     pub partial: bool,
-    /// STEP_11_4 — `true` when at least one workspace search root was
+    /// `STEP_11_4` — `true` when at least one workspace search root was
     /// dropped because it classified as `Excluded`. Set independently
     /// of [`Self::partial`] so consumers can distinguish "skipped
     /// member folder" from "skipped excluded path".

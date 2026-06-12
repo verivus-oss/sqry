@@ -330,7 +330,7 @@ fn read_head_ref_from_file(gitdir: &Path) -> Option<String> {
     // `ref: refs/heads/main` → symbolic ref. Bare OID → detached HEAD.
     trimmed
         .strip_prefix("ref: ")
-        .map(|refname| refname.to_owned())
+        .map(std::borrow::ToOwned::to_owned)
 }
 
 /// Runs a single `git rev-parse HEAD HEAD^{tree}` subprocess and returns

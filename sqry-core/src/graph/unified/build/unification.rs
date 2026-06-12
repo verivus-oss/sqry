@@ -237,7 +237,7 @@ impl NodeRemapTable {
     /// loser's `NodeMetadataStore` entry alive at the staging level. The
     /// winner's own per-file `NodeMetadataStore` (produced by the file
     /// that actually defines the surviving symbol) already carries the
-    /// authoritative metadata. Per 01_SPEC §5.3.f and 02_DESIGN §4.3.e,
+    /// authoritative metadata. Per `01_SPEC` §5.3.f and `02_DESIGN` §4.3.e,
     /// "losers' constraints are lost" is the documented Phase-1 contract
     /// for T3 — re-keying loser metadata under the winner would force the
     /// file-order question with no guarantee that `staged_metadata`
@@ -246,10 +246,10 @@ impl NodeRemapTable {
     /// We therefore **drop** loser entries rather than rewriting them
     /// under the winner key. Dropping is the only choice consistent with
     /// all three contracts simultaneously (winner-selection, synthetic
-    /// suppression, and 01_SPEC §5.3.f).
+    /// suppression, and `01_SPEC` §5.3.f).
     ///
     /// Mirrors [`Self::apply_to_edges`]: no-op on empty table; in-place
-    /// mutation otherwise. Performance: O(n_meta) where n_meta is the
+    /// mutation otherwise. Performance: `O(n_meta)` where `n_meta` is the
     /// entry count of `store`.
     pub fn apply_to_metadata_store(
         &self,
@@ -290,7 +290,7 @@ impl NodeRemapTable {
 /// - **span**: pick whichever has `start_line > 0`; if both, pick the wider range
 /// - **visibility**: prefer non-`None`
 /// - **signature**: prefer non-`None`
-/// - **is_async / is_static / is_unsafe**: OR the flags
+/// - **`is_async` / `is_static` / `is_unsafe`**: OR the flags
 /// - **file**: prefer the winner's file (canonical definition)
 /// - **doc**: prefer non-`None`
 ///

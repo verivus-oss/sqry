@@ -5,7 +5,7 @@
 //!
 //! # Invalidation
 //!
-//! `TRACKS_METADATA_REVISION = true`: the ADDRESS_TAKEN bit lives on the
+//! `TRACKS_METADATA_REVISION = true`: the `ADDRESS_TAKEN` bit lives on the
 //! [`NodeMetadataStore`] (Tier-3, the metadata-revision counter). Per
 //! DESIGN §9.2, any change to the workspace that adds or removes an
 //! address-taken mark bumps the metadata revision and must invalidate

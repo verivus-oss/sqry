@@ -1281,7 +1281,14 @@ mod tests {
         }
     }
 
+    // The pool env tests below hold the local env_lock() (pool state
+    // discipline) AND join the crate-wide #[serial_test::serial] lane:
+    // SQRY_LEXER_POOL_MAX is listed in config::snapshot::CONFIG_INVENTORY,
+    // whose serial-laned tests remove every inventory var. The two
+    // exclusion domains don't coordinate, so the mutex alone still
+    // races those tests (codex iter2 MAJOR).
     #[test]
+    #[serial_test::serial]
     fn lexer_pool_returns_lexers_to_stash() {
         let _guard = env_lock().lock().unwrap();
         reset_pool_default();
@@ -1300,6 +1307,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn lexer_pool_respects_zero_capacity_env() {
         let _guard = env_lock().lock().unwrap();
         set_env(ENV_POOL_MAX, "0");
@@ -1320,6 +1328,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn lexer_pool_reuses_single_slot() {
         let _guard = env_lock().lock().unwrap();
         set_env(ENV_POOL_MAX, "1");
@@ -1360,6 +1369,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     #[ignore = "Test depends on clean env_lock state. Run in isolation with: cargo test -p sqry-core --lib with_lexer_allows_reentrant_usage -- --ignored --test-threads=1"]
     fn with_lexer_allows_reentrant_usage() {
         let _guard = env_lock().lock().unwrap();
@@ -1378,6 +1388,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn lexer_pool_thread_local_isolation() {
         let _guard = env_lock().lock().unwrap();
         reset_pool_default();
@@ -1411,6 +1422,7 @@ mod tests {
 
     #[cfg(feature = "dhat-heap")]
     #[test]
+    #[serial_test::serial]
     #[ignore = "Heap profiling test must run in isolation. Run with: cargo test -p sqry-core --lib lexer_reuse_minimizes_heap_allocations -- --ignored --test-threads=1"]
     fn lexer_reuse_minimizes_heap_allocations() {
         let _guard = env_lock().lock().unwrap();

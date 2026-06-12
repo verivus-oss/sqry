@@ -14,7 +14,7 @@ pub const CODE_ONNX_RUNTIME_MISSING: &str = "ONNX_RUNTIME_MISSING";
 /// constructor and the daemon-hosted `DaemonError::QueryTooBroad`
 /// match arm. Clients pattern-match on this string to distinguish
 /// pre-flight cost rejections (non-retryable; rewrite the query) from
-/// deadline_exceeded (transient; retry possible).
+/// `deadline_exceeded` (transient; retry possible).
 ///
 /// Foundation-only export: this constant is consumed by cluster-B
 /// Layer-2 (`IMP-B`). The binary target sees no caller until then,
@@ -146,6 +146,7 @@ impl RpcError {
         }
     }
 
+    #[must_use]
     pub fn deadline_exceeded(tool: &str, deadline_ms: u64, retry_delay_ms: u64) -> Self {
         let mut detail_map = Map::new();
         detail_map.insert("tool".to_string(), Value::String(tool.to_string()));

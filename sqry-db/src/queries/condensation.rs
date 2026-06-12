@@ -79,9 +79,8 @@ impl DerivedQuery for CondensationQuery {
             if entry.is_unified_loser() {
                 continue;
             }
-            let src_comp = match scc.component_of(nid) {
-                Some(c) => c,
-                None => continue,
+            let Some(src_comp) = scc.component_of(nid) else {
+                continue;
             };
 
             for edge_ref in &snapshot.edges().edges_from(nid) {

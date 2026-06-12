@@ -386,8 +386,8 @@ pub enum Predicate {
     /// In the joint-stubs PR the executor uses the same outgoing-Calls
     /// walk as [`Self::ResolvedVia`] but accepts every requested variant
     /// in the set. Today no `Calls` edge carries any of the new
-    /// resolution-provenance variants Plan B will add (VirtualDispatch,
-    /// InterfaceDispatch, DuckTyped, Structural, PromiscuousElided),
+    /// resolution-provenance variants Plan B will add (`VirtualDispatch`,
+    /// `InterfaceDispatch`, `DuckTyped`, Structural, `PromiscuousElided`),
     /// so the predicate degenerates to the existing 3-variant union
     /// over `Direct`, `TypeMatch`, `BindingPlane` — exactly the same
     /// behaviour as the existing `ResolvedVia` predicate when those
@@ -454,7 +454,7 @@ pub enum Predicate {
     /// `"target_os = \"linux\""`. Quoted forms
     /// (`cfg:"linux && amd64"`, `cfg:"target_os = \"linux\""`)
     /// parse to [`CfgMatcher::Literal`] and stay byte-exact /
-    /// language-specific per 02_DESIGN §5.3.a + §10.4 (the two
+    /// language-specific per `02_DESIGN` §5.3.a + §10.4 (the two
     /// addressing modes are kept independently observable so users
     /// can opt in to either).
     ///
@@ -465,7 +465,7 @@ pub enum Predicate {
     /// `wraps` / `wraps:<wrap-kind>` — true iff the node has at least
     /// one outbound [`EdgeKind::Wraps`] edge whose `kind` field
     /// satisfies the carried [`WrapKindFilter`] (T3.6 acceptance
-    /// criterion 9; 02_DESIGN §2.1).
+    /// criterion 9; `02_DESIGN` §2.1).
     Wraps(WrapKindFilter),
 
     // --- Boolean combinators ---
@@ -481,7 +481,7 @@ pub enum Predicate {
 ///
 /// `Any` accepts every `Wraps` discriminant (the bare `wraps`
 /// planner predicate); `Kind(k)` keeps only edges with the matching
-/// `WrapKind`. Per 02_DESIGN §2.1 the planner relies on
+/// `WrapKind`. Per `02_DESIGN` §2.1 the planner relies on
 /// [`super::compile::normalize_edge_kind`] preserving `WrapKind` for
 /// cache-bucket distinctness, while a second-stage filter at the
 /// executor enforces the actual `kind` comparison.

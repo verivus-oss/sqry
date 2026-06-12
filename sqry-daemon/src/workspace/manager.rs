@@ -42,7 +42,7 @@
 //! - The retention reaper acquires only `admission`.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::Path,
     sync::{
         Arc, Weak,
@@ -160,8 +160,16 @@ pub struct WorkspaceManager {
     /// `RwLock` rather than `ArcSwap` because `SharedHook = Arc<dyn
     /// Trait + Send + Sync>` is cheap to clone inside the read
     /// critical section, and the hook is only consulted on publish
-    /// (not on every query) — the RwLock is never a hot path.
+    /// (not on every query) — the `RwLock` is never a hot path.
     hook: RwLock<SharedHook>,
+}
+
+enum LoadGate {
+    Loaded(Arc<CodeGraph>),
+    Acquired {
+        workspace: Arc<LoadedWorkspace>,
+        registered_key: WorkspaceKey,
+    },
 }
 
 impl WorkspaceManager {
@@ -172,9 +180,10 @@ impl WorkspaceManager {
     /// (`#[tokio::main]`, an `async` block driven by `Runtime::block_on`,
     /// etc.). Tests that don't need the reaper can use
     /// [`Self::new_without_reaper`].
-    pub fn new(config: Arc<DaemonConfig>) -> Arc<Self> {
+    #[must_use]
+    pub fn new(config: &Arc<DaemonConfig>) -> Arc<Self> {
         let mgr = Arc::new(Self {
-            config: Arc::clone(&config),
+            config: Arc::clone(config),
             workspaces: RwLock::new(HashMap::new()),
             admission: Mutex::new(AdmissionState::default()),
             reaper: Mutex::new(None),
@@ -191,6 +200,7 @@ impl WorkspaceManager {
     /// unit tests that drive the retention map synchronously via
     /// [`Self::reap_once`].
     #[doc(hidden)]
+    #[must_use]
     pub fn new_without_reaper(config: Arc<DaemonConfig>) -> Arc<Self> {
         Arc::new(Self {
             config,
@@ -297,7 +307,21 @@ impl WorkspaceManager {
     /// `status()` for point-in-time workspace state. Direct `lookup`
     /// access bypasses the LRU touch that `status()` performs.
     pub fn lookup(&self, key: &WorkspaceKey) -> Option<Arc<LoadedWorkspace>> {
-        self.workspaces.read().get(key).cloned()
+        let guard = self.workspaces.read();
+        // #393: anonymous workspaces are coalesced by source_root even
+        // when historical duplicate keys remain in the map. Use the
+        // deterministic source-root winner rather than HashMap iteration
+        // order so divergent callers all observe the same workspace.
+        if key.workspace_id.is_none()
+            && let Some((_, ws)) =
+                Self::anonymous_workspace_by_source_root(&guard, &key.source_root)
+        {
+            return Some(Arc::clone(ws));
+        }
+        if let Some(ws) = guard.get(key) {
+            return Some(Arc::clone(ws));
+        }
+        None
     }
 
     /// Retention reaper: a single pass over `retained_old`.
@@ -364,6 +388,14 @@ impl WorkspaceManager {
     /// `Err`, the admission state is exactly pre-call — either no
     /// eviction happened (headroom already available) or the
     /// eviction cleared retained entries but could not fit.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DaemonError::WorkspaceEvicted`] if the requesting
+    /// workspace was removed before the reservation could be made, or
+    /// [`DaemonError::MemoryBudgetExceeded`] if the configured daemon
+    /// memory limit cannot admit the estimated rebuild working set
+    /// after eligible retained graphs are evicted.
     pub fn reserve_rebuild(
         self: &Arc<Self>,
         for_key: &WorkspaceKey,
@@ -388,7 +420,26 @@ impl WorkspaceManager {
         let victims = {
             let workspaces = self.workspaces.read();
 
-            let Some(requester_ws) = workspaces.get(for_key) else {
+            // #393 reload regression fix: for anonymous keys, the caller's
+            // WorkspaceKey may differ in (root_mode, fingerprint) from the
+            // first-inserted canonical key under which the entry is stored
+            // (see coalesce in get_or_insert_workspace). Exact get(for_key)
+            // would spuriously return WorkspaceEvicted for a still-registered
+            // same-source_root anon workspace (e.g. post-reset get_or_load
+            // under divergent anon key). Fallback to source_root among anon
+            // entries so reserve (and thus get_or_load) succeeds.
+            let requester_ws = if for_key.workspace_id.is_none() {
+                match Self::anonymous_workspace_by_source_root(&workspaces, &for_key.source_root) {
+                    Some((_, ws)) => ws,
+                    None => {
+                        return Err(DaemonError::WorkspaceEvicted {
+                            root: for_key.source_root.clone(),
+                        });
+                    }
+                }
+            } else if let Some(ws) = workspaces.get(for_key) {
+                ws
+            } else {
                 return Err(DaemonError::WorkspaceEvicted {
                     root: for_key.source_root.clone(),
                 });
@@ -478,7 +529,17 @@ impl WorkspaceManager {
                 // every pinned workspace. Also skip workspaces in
                 // Evicted or Unloaded state — they have no bytes to
                 // reclaim and would be no-ops.
-                **k != *for_key
+                //
+                // #393: when reserve_rebuild is called with a divergent
+                // anonymous key (different secondary fields) for the same
+                // source_root, **k != *for_key would fail to exempt the
+                // actual registered entry (stored under the first-inserted
+                // key). Treat same anon source_root as "self" for exemption.
+                let is_requester = **k == *for_key
+                    || (for_key.workspace_id.is_none()
+                        && k.workspace_id.is_none()
+                        && k.source_root == for_key.source_root);
+                !is_requester
                     && !ws.pinned
                     && ws.load_state() != WorkspaceState::Evicted
                     && ws.load_state() != WorkspaceState::Unloaded
@@ -524,7 +585,7 @@ impl WorkspaceManager {
     ///    observes the signal at its next pass boundary and aborts
     ///    without publishing.
     /// 4. Mark the state `Evicted` — and **leave the entry in the
-    ///    manager map** as a tombstone. STEP_6 (workspace-aware-
+    ///    manager map** as a tombstone. `STEP_6` (workspace-aware-
     ///    cross-repo, 2026-04-26): keeping the tombstone is what
     ///    makes per-source-root partial eviction observable through
     ///    `daemon/workspaceStatus`. The aggregate must report
@@ -551,7 +612,7 @@ impl WorkspaceManager {
     /// entry — leaking accounting for any graph still held by a
     /// slow query.
     ///
-    /// Codex STEP_6 iter-1 BLOCK: the pre-fix version unconditionally
+    /// Codex `STEP_6` iter-1 BLOCK: the pre-fix version unconditionally
     /// removed the entry from `self.workspaces` after marking it
     /// `Evicted`, defeating partial-eviction reporting. The
     /// remove-entry step now lives in [`Self::unload`] alone.
@@ -591,6 +652,94 @@ impl WorkspaceManager {
         drop(workspaces);
     }
 
+    fn prepare_load_gate(self: &Arc<Self>, key: &WorkspaceKey) -> Result<LoadGate, DaemonError> {
+        if let Some(graph) = self.loaded_graph_for_key(key) {
+            return Ok(LoadGate::Loaded(graph));
+        }
+
+        let workspace = self.get_or_insert_workspace(key);
+        let registered_key = Self::registered_key_for_load(key, &workspace);
+        let Some(prior_state) = Self::enter_loading_state(&workspace) else {
+            let current = workspace.load_state();
+            if current == WorkspaceState::Loaded {
+                workspace.touch();
+                return Ok(LoadGate::Loaded(workspace.graph.load_full()));
+            }
+            return Err(DaemonError::WorkspaceBuildFailed {
+                root: key.source_root.clone(),
+                reason: format!("workspace load already in progress ({current})"),
+            });
+        };
+        Self::honor_preexisting_cancel(&workspace, key, prior_state)?;
+        Ok(LoadGate::Acquired {
+            workspace,
+            registered_key,
+        })
+    }
+
+    fn loaded_graph_for_key(&self, key: &WorkspaceKey) -> Option<Arc<CodeGraph>> {
+        let workspaces = self.workspaces.read();
+        let ws = if key.workspace_id.is_none() {
+            Self::anonymous_workspace_by_source_root(&workspaces, &key.source_root)
+                .map(|(_, ws)| ws)
+        } else {
+            workspaces.get(key)
+        }?;
+        if ws.load_state() != WorkspaceState::Loaded {
+            return None;
+        }
+        ws.touch();
+        Some(ws.graph.load_full())
+    }
+
+    fn registered_key_for_load(key: &WorkspaceKey, workspace: &LoadedWorkspace) -> WorkspaceKey {
+        if key.workspace_id.is_none()
+            && workspace.key.workspace_id.is_none()
+            && workspace.key.source_root == key.source_root
+        {
+            workspace.key.clone()
+        } else {
+            key.clone()
+        }
+    }
+
+    fn enter_loading_state(workspace: &LoadedWorkspace) -> Option<WorkspaceState> {
+        [
+            WorkspaceState::Unloaded,
+            WorkspaceState::Failed,
+            WorkspaceState::Evicted,
+        ]
+        .into_iter()
+        .find(|prior| {
+            workspace
+                .state
+                .compare_exchange(
+                    prior.as_u8(),
+                    WorkspaceState::Loading.as_u8(),
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
+        })
+    }
+
+    fn honor_preexisting_cancel(
+        workspace: &LoadedWorkspace,
+        key: &WorkspaceKey,
+        prior_state: WorkspaceState,
+    ) -> Result<(), DaemonError> {
+        let pre_cancelled = workspace.rebuild_cancelled.swap(false, Ordering::AcqRel);
+        if !pre_cancelled || prior_state == WorkspaceState::Evicted {
+            return Ok(());
+        }
+        workspace.rebuild_cancelled.store(true, Ordering::Release);
+        workspace.store_state(WorkspaceState::Failed);
+        Err(DaemonError::WorkspaceBuildFailed {
+            root: key.source_root.clone(),
+            reason: "workspace evicted mid-load".to_string(),
+        })
+    }
+
     /// Load the workspace's graph, building it via `builder` if not
     /// already present.
     ///
@@ -613,7 +762,7 @@ impl WorkspaceManager {
     /// 6. Re-check `rebuild_cancelled` + workspace map membership
     ///    before publishing. If eviction ran during the build, the
     ///    reservation refunds via RAII and no graph is published.
-    /// 7. Publish via `publish_and_retain`. Disarm the LoadingGuard
+    /// 7. Publish via `publish_and_retain`. Disarm the `LoadingGuard`
     ///    + record success + touch.
     /// 8. Release `workspaces_guard`, THEN dispatch the
     ///    post-publish `SqrydHook`. The hook fires outside every
@@ -624,7 +773,7 @@ impl WorkspaceManager {
     /// Codex Task 6 Phase 6b iter-1 MAJOR (×2): the pre-fix version
     /// clobbered a concurrent eviction's `rebuild_cancelled` signal
     /// and could publish into a workspace already removed from the
-    /// map. The CAS + post-build re-check + LoadingGuard together
+    /// map. The CAS + post-build re-check + `LoadingGuard` together
     /// close both holes.
     ///
     /// Codex Task 6 Phase 6c iter-2 MAJOR: the pre-fix version
@@ -647,92 +796,23 @@ impl WorkspaceManager {
         builder: &dyn WorkspaceBuilder,
         working_set_estimate: u64,
     ) -> Result<Arc<CodeGraph>, DaemonError> {
-        // --- Step 1: cache-hit fast path ------------------------
-        {
-            let workspaces = self.workspaces.read();
-            if let Some(ws) = workspaces.get(key)
-                && ws.load_state() == WorkspaceState::Loaded
-            {
-                ws.touch();
-                return Ok(ws.graph.load_full());
-            }
-        }
-
-        // --- Step 2: take the lifecycle gate via state CAS ------
-        let ws = self.get_or_insert_workspace(key);
-        let allowed = [
-            WorkspaceState::Unloaded.as_u8(),
-            WorkspaceState::Failed.as_u8(),
-            WorkspaceState::Evicted.as_u8(),
-        ];
-        let mut acquired_from: Option<WorkspaceState> = None;
-        for prior in allowed {
-            if ws
-                .state
-                .compare_exchange(
-                    prior,
-                    WorkspaceState::Loading.as_u8(),
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                )
-                .is_ok()
-            {
-                acquired_from = WorkspaceState::from_u8(prior);
-                break;
-            }
-        }
-        let Some(prior_state) = acquired_from else {
-            // Someone else already holds the gate (Loading /
-            // Rebuilding) OR raced us into Loaded. Cache-read and
-            // return if Loaded, else surface a transient error.
-            let current = ws.load_state();
-            if current == WorkspaceState::Loaded {
-                ws.touch();
-                return Ok(ws.graph.load_full());
-            }
-            return Err(DaemonError::WorkspaceBuildFailed {
-                root: key.source_root.clone(),
-                reason: format!("workspace load already in progress ({current})"),
-            });
+        let (ws, registered_key) = match self.prepare_load_gate(key)? {
+            LoadGate::Loaded(graph) => return Ok(graph),
+            LoadGate::Acquired {
+                workspace,
+                registered_key,
+            } => (workspace, registered_key),
         };
-        // We own the gate. Clear the cancellation flag AFTER the
-        // CAS, but interpret a pre-cleared `cancelled = true`
-        // differently depending on the prior state we won from:
-        //
-        // - Prior = `Evicted`: STEP_6 iter-2. LRU eviction
-        //   completed on this entry (workspaces.write() was held
-        //   across both the `cancelled.store(true)` and the
-        //   `state.store(Evicted)` in `execute_eviction`). The
-        //   cancelled flag is a stale residue of that completed
-        //   eviction; this `get_or_load` is a fresh reload and
-        //   must clear cancelled unconditionally.
-        // - Prior = `Unloaded` / `Failed`: a concurrent eviction
-        //   is racing us. The flag is a live cancel signal — the
-        //   eviction reached `cancelled.store(true)` before our
-        //   CAS but the state had not yet been moved to
-        //   `Evicted`. Honour the cancel and fail this load.
-        let pre_cancelled = ws.rebuild_cancelled.swap(false, Ordering::AcqRel);
-        if pre_cancelled && prior_state != WorkspaceState::Evicted {
-            // Evict raced us out of the allowed-state list. Put
-            // the cancelled flag back, transition to Failed (so
-            // this caller's LoadingGuard doesn't fire), and fail.
-            ws.rebuild_cancelled.store(true, Ordering::Release);
-            ws.store_state(WorkspaceState::Failed);
-            return Err(DaemonError::WorkspaceBuildFailed {
-                root: key.source_root.clone(),
-                reason: "workspace evicted mid-load".to_string(),
-            });
-        }
 
         // --- Step 3: arm LoadingGuard for panic / early-return --
         let mut loading = LoadingGuard {
             ws: &ws,
-            key,
+            key: &registered_key,
             armed: true,
         };
 
         // --- Step 4: reserve admission headroom ------------------
-        let reservation = self.reserve_rebuild(key, working_set_estimate)?;
+        let reservation = self.reserve_rebuild(&registered_key, working_set_estimate)?;
 
         // --- Step 5: build the graph ----------------------------
         let graph = match builder.build(&key.source_root) {
@@ -790,7 +870,7 @@ impl WorkspaceManager {
                 reason: "workspace evicted mid-load".to_string(),
             });
         }
-        if !workspaces_guard.contains_key(key) {
+        if !workspaces_guard.contains_key(&registered_key) {
             drop(workspaces_guard);
             drop(reservation);
             ws.record_failure(DaemonError::WorkspaceBuildFailed {
@@ -861,10 +941,46 @@ impl WorkspaceManager {
     fn get_or_insert_workspace(&self, key: &WorkspaceKey) -> Arc<LoadedWorkspace> {
         // Upgrade path — try a read first to avoid the write-lock
         // cost when the entry already exists.
-        if let Some(ws) = self.workspaces.read().get(key) {
-            return Arc::clone(ws);
+        {
+            let workspaces = self.workspaces.read();
+            if key.workspace_id.is_none()
+                && let Some((_, ws)) =
+                    Self::anonymous_workspace_by_source_root(&workspaces, &key.source_root)
+            {
+                return Arc::clone(ws);
+            }
+            if let Some(ws) = workspaces.get(key) {
+                return Arc::clone(ws);
+            }
         }
         let mut workspaces = self.workspaces.write();
+
+        // Coalesce anonymous (workspace_id=None) loads for the same
+        // canonical source_root. Different callers (preload with
+        // WorkspaceFolder, daemon/load handler with its default
+        // root_mode + fingerprint=0, mcp_host/acquirer paths, etc.)
+        // may construct WorkspaceKey values that differ in the
+        // secondary dimensions even though they target the identical
+        // on-disk path. Without this, the HashMap would contain
+        // multiple entries for the "same" workspace (see #393).
+        // Any subsequent load for the path, regardless of the exact
+        // secondary fields in the caller's key, must operate on the
+        // registered ws instance for that source_root. Clean coalesce
+        // returns the first entry because it is the only existing match;
+        // historical duplicate maps use a stable key ordering so the
+        // winner is deterministic rather than HashMap-order dependent.
+        // This ensures:
+        //   - get_or_load hits the Loaded fast-path on the real entry
+        //   - no second Arc<LoadedWorkspace> is ever inserted
+        //   - status shows the path only once
+        //   - reset-by-path can clear the (logical) workspace.
+        if key.workspace_id.is_none()
+            && let Some((_, ws)) =
+                Self::anonymous_workspace_by_source_root(&workspaces, &key.source_root)
+        {
+            return Arc::clone(ws);
+        }
+
         Arc::clone(
             workspaces
                 .entry(key.clone())
@@ -904,15 +1020,24 @@ impl WorkspaceManager {
     /// eviction (`evict_lru`, `reserve_rebuild`'s Phase 2) leaves
     /// the tombstone in place so per-source-root partial-eviction
     /// state stays observable through `daemon/workspaceStatus` —
-    /// see [`Self::execute_eviction`] doc and STEP_6 iter-1 BLOCK.
+    /// see [`Self::execute_eviction`] doc and `STEP_6` iter-1 BLOCK.
     ///
     /// Returns `true` if the workspace was present, `false` if it
     /// was already absent.
     pub fn unload(&self, key: &WorkspaceKey) -> bool {
         let mut workspaces = self.workspaces.write();
-        if !workspaces.contains_key(key) {
+        let target_key = if workspaces.contains_key(key) {
+            key.clone()
+        } else if key.workspace_id.is_none() {
+            // #393: tolerate unload by divergent anon key; remove the
+            // deterministic registered entry for the source_root.
+            match Self::anonymous_workspace_by_source_root(&workspaces, &key.source_root) {
+                Some((k, _)) => k.clone(),
+                None => return false,
+            }
+        } else {
             return false;
-        }
+        };
         // Drop graph + admission bytes under the same write lock
         // we will use for `remove`. Holding the lock across both
         // operations means external observers see EITHER "entry
@@ -920,8 +1045,8 @@ impl WorkspaceManager {
         // present + Evicted but about to be removed" intermediate
         // state. (LRU eviction is a separate flow that DOES expose
         // the Evicted tombstone — that is the STEP_6 contract.)
-        self.evict_to_tombstone_locked(&mut workspaces, key);
-        workspaces.remove(key);
+        self.evict_to_tombstone_locked(&mut workspaces, &target_key);
+        workspaces.remove(&target_key);
         true
     }
 
@@ -1060,34 +1185,86 @@ impl WorkspaceManager {
         let workspaces = self.workspaces.read();
         workspaces
             .iter()
-            .find(|(k, _)| k.source_root == path)
+            .filter(|(k, _)| k.source_root == path)
+            .min_by(|(left, _), (right, _)| Self::workspace_key_stable_cmp(left, right))
             .map(|(k, ws)| (k.clone(), Arc::clone(ws)))
+    }
+
+    /// Return *every* registered entry whose `source_root` matches the
+    /// given canonical path.
+    ///
+    /// This is the path-based counterpart to lookup-by-exact-`WorkspaceKey`.
+    /// It exists so that `daemon/reset <path>` (and any future path-based
+    /// recovery) can affect all entries that a user or script would
+    /// consider "the workspace at this path", even if historical bugs
+    /// (#393) left multiple `WorkspaceKey`s (differing only in
+    /// `root_mode`/`config_fingerprint`/`workspace_id`) for the same
+    /// `source_root`.
+    ///
+    /// After the coalesce logic in `get_or_insert_workspace`, new
+    /// plain-path anonymous loads will no longer create such dups;
+    /// this method + the reset handler change below let operators
+    /// recover from any pre-existing duplicates.
+    #[must_use]
+    pub fn find_all_by_source_root(
+        &self,
+        path: &std::path::Path,
+    ) -> Vec<(WorkspaceKey, Arc<LoadedWorkspace>)> {
+        let workspaces = self.workspaces.read();
+        let mut matches: Vec<_> = workspaces
+            .iter()
+            .filter(|(k, _)| k.source_root == path)
+            .map(|(k, ws)| (k.clone(), Arc::clone(ws)))
+            .collect();
+        matches.sort_by(|(left, _), (right, _)| Self::workspace_key_stable_cmp(left, right));
+        matches
     }
 
     /// Snapshot of daemon-wide status. Point-in-time, non-transactional.
     pub fn status(&self) -> DaemonStatus {
         let workspaces_snapshot: Vec<WorkspaceStatus> = {
             let workspaces = self.workspaces.read();
-            let mut entries: Vec<_> = workspaces
-                .iter()
-                .map(|(k, ws)| WorkspaceStatus {
-                    index_root: k.source_root.clone(),
-                    state: ws.load_state(),
-                    pinned: ws.pinned,
-                    current_bytes: ws.memory_bytes.load(Ordering::Acquire) as u64,
-                    high_water_bytes: ws.memory_high_water_bytes.load(Ordering::Acquire) as u64,
-                    last_good_at: *ws.last_good_at.read(),
-                    last_error: ws.last_error.read().as_ref().map(|e| e.to_string()),
-                    retry_count: ws.retry_count.load(Ordering::Acquire),
-                    // STEP_12 telemetry: surface both display and machine
-                    // identity hex forms when the key carries a logical
-                    // workspace_id; anonymous keys leave both as None so
-                    // the wire shape is uniform.
-                    workspace_id_short: k.workspace_id.as_ref().map(|id| id.as_short_hex()),
-                    workspace_id_full: k.workspace_id.as_ref().map(|id| id.as_full_hex()),
+            let mut raw_entries: Vec<_> = workspaces.iter().collect();
+            raw_entries
+                .sort_by(|(left, _), (right, _)| Self::workspace_key_stable_cmp(left, right));
+
+            let mut seen_anonymous_roots = HashSet::new();
+            let entries: Vec<_> = raw_entries
+                .into_iter()
+                .filter_map(|(k, ws)| {
+                    if k.workspace_id.is_none()
+                        && !seen_anonymous_roots.insert(k.source_root.clone())
+                    {
+                        return None;
+                    }
+                    Some(WorkspaceStatus {
+                        index_root: k.source_root.clone(),
+                        state: ws.load_state(),
+                        pinned: ws.pinned,
+                        current_bytes: ws.memory_bytes.load(Ordering::Acquire) as u64,
+                        high_water_bytes: ws.memory_high_water_bytes.load(Ordering::Acquire) as u64,
+                        last_good_at: *ws.last_good_at.read(),
+                        last_error: ws
+                            .last_error
+                            .read()
+                            .as_ref()
+                            .map(std::string::ToString::to_string),
+                        retry_count: ws.retry_count.load(Ordering::Acquire),
+                        // STEP_12 telemetry: surface both display and machine
+                        // identity hex forms when the key carries a logical
+                        // workspace_id; anonymous keys leave both as None so
+                        // the wire shape is uniform.
+                        workspace_id_short: k
+                            .workspace_id
+                            .as_ref()
+                            .map(sqry_daemon_protocol::WorkspaceId::as_short_hex),
+                        workspace_id_full: k
+                            .workspace_id
+                            .as_ref()
+                            .map(sqry_daemon_protocol::WorkspaceId::as_full_hex),
+                    })
                 })
                 .collect();
-            entries.sort_by(|a, b| a.index_root.cmp(&b.index_root));
             entries
         };
 
@@ -1119,6 +1296,31 @@ impl WorkspaceManager {
             },
             workspaces: workspaces_snapshot,
         }
+    }
+
+    fn anonymous_workspace_by_source_root<'a>(
+        workspaces: &'a HashMap<WorkspaceKey, Arc<LoadedWorkspace>>,
+        source_root: &Path,
+    ) -> Option<(&'a WorkspaceKey, &'a Arc<LoadedWorkspace>)> {
+        workspaces
+            .iter()
+            .filter(|(k, _)| k.workspace_id.is_none() && k.source_root == source_root)
+            .min_by(|(left, _), (right, _)| Self::workspace_key_stable_cmp(left, right))
+    }
+
+    fn workspace_key_stable_cmp(left: &WorkspaceKey, right: &WorkspaceKey) -> std::cmp::Ordering {
+        left.source_root
+            .cmp(&right.source_root)
+            .then_with(|| match (&left.workspace_id, &right.workspace_id) {
+                (None, None) => std::cmp::Ordering::Equal,
+                (None, Some(_)) => std::cmp::Ordering::Less,
+                (Some(_), None) => std::cmp::Ordering::Greater,
+                (Some(left_id), Some(right_id)) => {
+                    left_id.as_full_hex().cmp(&right_id.as_full_hex())
+                }
+            })
+            .then_with(|| left.root_mode.as_str().cmp(right.root_mode.as_str()))
+            .then_with(|| left.config_fingerprint.cmp(&right.config_fingerprint))
     }
 
     /// Enumerate the `.sqry/graph` directories belonging to every
@@ -1165,7 +1367,7 @@ impl WorkspaceManager {
     }
 
     /// Aggregate `daemon/workspaceStatus` snapshot for a single
-    /// `workspace_id` (STEP_6 of the workspace-aware-cross-repo plan).
+    /// `workspace_id` (`STEP_6` of the workspace-aware-cross-repo plan).
     ///
     /// Walks the manager's workspace map, collects every
     /// [`WorkspaceKey`] whose `workspace_id == Some(target_id)`, and
@@ -1275,7 +1477,7 @@ impl WorkspaceManager {
         ws
     }
 
-    /// Acquire the internal `workspaces` RwLock in read mode.
+    /// Acquire the internal `workspaces` `RwLock` in read mode.
     ///
     /// Task 7 Phase 7c: exposed so
     /// [`crate::RebuildDispatcher::execute_one_rebuild`] can hold the
@@ -1321,7 +1523,7 @@ impl WorkspaceManager {
     ///
     /// Task 7 Phase 7c feat iter-1 Codex BLOCKER fix: takes
     /// `workspaces.read()` across the FULL snapshot — state, graph,
-    /// last_good, and last_error_text are all captured inside the
+    /// `last_good`, and `last_error_text` are all captured inside the
     /// read critical section. Dropping the read lock before reading
     /// the graph would allow `execute_eviction` (which needs
     /// `workspaces.write()` for the full graph-swap + state-store +
@@ -1334,6 +1536,14 @@ impl WorkspaceManager {
     /// # Errors
     ///
     /// Returns the variants listed in the table above.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if [`classify_staleness`] returns
+    /// [`StalenessVerdict::Stale`] while `last_good_at` is absent.
+    /// That would violate the staleness classifier invariant: stale
+    /// verdicts are emitted only for workspaces with a prior successful
+    /// publish timestamp.
     pub fn classify_for_serve(
         &self,
         key: &WorkspaceKey,
@@ -1374,7 +1584,11 @@ impl WorkspaceManager {
             let state = ws.load_state();
             let graph = ws.graph.load_full();
             let last_good = *ws.last_good_at.read();
-            let last_error_text = ws.last_error.read().as_ref().map(|e| e.to_string());
+            let last_error_text = ws
+                .last_error
+                .read()
+                .as_ref()
+                .map(std::string::ToString::to_string);
             (state, graph, last_good, last_error_text)
             // workspaces.read() dropped here — the (state, graph)
             // pair is now a coherent snapshot taken atomically w.r.t.
@@ -1458,6 +1672,14 @@ impl WorkspaceManager {
     /// methods needing `workspaces.write()`. The caller is
     /// responsible for dispatching the hook after dropping every
     /// outer workspaces-lock holder.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DaemonError::WorkspaceOversize`] when the fully-built
+    /// graph exceeds the daemon admission limit after replacing the
+    /// workspace's prior contribution. The reservation is still owned
+    /// by this function on that path, so its RAII drop refunds the
+    /// reserved bytes before the error reaches the caller.
     pub fn publish_and_retain(
         self: &Arc<Self>,
         reservation: RebuildReservation,
@@ -1698,71 +1920,23 @@ impl WorkspaceManager {
         builder: &dyn WorkspaceBuilder,
         working_set_estimate: u64,
     ) -> Result<Arc<CodeGraph>, DaemonError> {
-        // --- Step 1: cache-hit fast path ---------------------------
-        {
-            let workspaces = self.workspaces.read();
-            if let Some(ws) = workspaces.get(key)
-                && ws.load_state() == WorkspaceState::Loaded
-            {
-                ws.touch();
-                return Ok(ws.graph.load_full());
-            }
-        }
-
-        // --- Step 2: lifecycle CAS gate (mirrors get_or_load) -------
-        let ws = self.get_or_insert_workspace(key);
-        let allowed = [
-            WorkspaceState::Unloaded.as_u8(),
-            WorkspaceState::Failed.as_u8(),
-            WorkspaceState::Evicted.as_u8(),
-        ];
-        let mut acquired_from: Option<WorkspaceState> = None;
-        for prior in allowed {
-            if ws
-                .state
-                .compare_exchange(
-                    prior,
-                    WorkspaceState::Loading.as_u8(),
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                )
-                .is_ok()
-            {
-                acquired_from = WorkspaceState::from_u8(prior);
-                break;
-            }
-        }
-        let Some(prior_state) = acquired_from else {
-            let current = ws.load_state();
-            if current == WorkspaceState::Loaded {
-                ws.touch();
-                return Ok(ws.graph.load_full());
-            }
-            return Err(DaemonError::WorkspaceBuildFailed {
-                root: key.source_root.clone(),
-                reason: format!("workspace load already in progress ({current})"),
-            });
+        let (ws, registered_key) = match self.prepare_load_gate(key)? {
+            LoadGate::Loaded(graph) => return Ok(graph),
+            LoadGate::Acquired {
+                workspace,
+                registered_key,
+            } => (workspace, registered_key),
         };
-
-        let pre_cancelled = ws.rebuild_cancelled.swap(false, Ordering::AcqRel);
-        if pre_cancelled && prior_state != WorkspaceState::Evicted {
-            ws.rebuild_cancelled.store(true, Ordering::Release);
-            ws.store_state(WorkspaceState::Failed);
-            return Err(DaemonError::WorkspaceBuildFailed {
-                root: key.source_root.clone(),
-                reason: "workspace evicted mid-load".to_string(),
-            });
-        }
 
         // --- Step 3: arm LoadingGuard for panic / early-return ----
         let mut loading = LoadingGuard {
             ws: &ws,
-            key,
+            key: &registered_key,
             armed: true,
         };
 
         // --- Step 4: reserve admission headroom -------------------
-        let reservation = self.reserve_rebuild(key, working_set_estimate)?;
+        let reservation = self.reserve_rebuild(&registered_key, working_set_estimate)?;
 
         // --- Step 5: load_persisted (read-only, no build pipeline)
         let graph = match builder.load_persisted(&key.source_root) {
@@ -1792,7 +1966,7 @@ impl WorkspaceManager {
                 reason: "workspace evicted mid-reload".to_string(),
             });
         }
-        if !workspaces_guard.contains_key(key) {
+        if !workspaces_guard.contains_key(&registered_key) {
             drop(workspaces_guard);
             drop(reservation);
             ws.record_failure(DaemonError::WorkspaceBuildFailed {
@@ -1902,7 +2076,7 @@ impl Drop for WorkspaceManager {
     }
 }
 
-/// STEP_11_4 — probe `<source_root>/.sqry/classpath/` for presence at
+/// `STEP_11_4` — probe `<source_root>/.sqry/classpath/` for presence at
 /// `daemon/workspaceStatus` time.
 ///
 /// Status path: cheap (`fs::metadata`), never blocks on anything
@@ -1943,7 +2117,7 @@ pub(crate) struct LoadingGuard<'a> {
     pub(crate) armed: bool,
 }
 
-impl<'a> Drop for LoadingGuard<'a> {
+impl Drop for LoadingGuard<'_> {
     fn drop(&mut self) {
         if !self.armed {
             return;
@@ -2054,6 +2228,12 @@ pub(crate) fn clone_err(err: &DaemonError) -> DaemonError {
             // losing the typed causes (if any) is acceptable.
             DaemonError::Internal(anyhow::anyhow!("{err:#}"))
         }
+        other => clone_lifecycle_or_storage_err(other),
+    }
+}
+
+fn clone_lifecycle_or_storage_err(err: &DaemonError) -> DaemonError {
+    match err {
         // Task 9 U1 — lifecycle variants (AlreadyRunning, AutoStartTimeout,
         // SignalSetup). These errors all fire before IpcServer::bind and
         // therefore before any workspace is registered; they should never
@@ -2124,6 +2304,16 @@ pub(crate) fn clone_err(err: &DaemonError) -> DaemonError {
                 reason: other.to_string(),
             }
         }
+        DaemonError::WorkspaceBuildFailed { .. }
+        | DaemonError::WorkspaceStaleExpired { .. }
+        | DaemonError::MemoryBudgetExceeded { .. }
+        | DaemonError::WorkspaceEvicted { .. }
+        | DaemonError::WorkspaceNotLoaded { .. }
+        | DaemonError::WorkspaceIncompatibleGraph { .. }
+        | DaemonError::ToolTimeout { .. }
+        | DaemonError::InvalidArgument { .. }
+        | DaemonError::RpcErrorPreserved(_)
+        | DaemonError::Internal(_) => unreachable!("workspace errors handled by clone_err"),
     }
 }
 
@@ -2166,7 +2356,7 @@ impl std::fmt::Debug for RebuildReservation {
         f.debug_struct("RebuildReservation")
             .field("bytes", &self.bytes)
             .field("released", &self.released)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -2209,7 +2399,7 @@ pub(crate) struct RollbackGuard<'a> {
     pub(crate) armed: bool,
 }
 
-impl<'a> Drop for RollbackGuard<'a> {
+impl Drop for RollbackGuard<'_> {
     fn drop(&mut self) {
         if !self.armed {
             return;
@@ -2251,7 +2441,10 @@ async fn retention_reaper(mgr: Weak<WorkspaceManager>) {
 
 #[cfg(test)]
 mod tests {
-    use std::{path::PathBuf, sync::atomic::Ordering};
+    use std::{
+        path::{Path, PathBuf},
+        sync::atomic::Ordering,
+    };
 
     use sqry_core::project::ProjectRootMode;
 
@@ -3410,7 +3603,7 @@ mod tests {
 
     #[tokio::test]
     async fn retention_reaper_task_eventually_drops_free_entries() {
-        let mgr = WorkspaceManager::new(make_config());
+        let mgr = WorkspaceManager::new(&make_config());
         let ws = make_workspace();
         mgr.workspaces
             .write()
@@ -3549,6 +3742,228 @@ mod tests {
             !ws.rebuild_cancelled.load(Ordering::Acquire),
             "rebuild_cancelled must be CLEARED after reset; otherwise the next \
              get_or_load fails with WorkspaceBuildFailed and `daemon reset` is broken"
+        );
+    }
+
+    fn anonymous_keys_for_same_root() -> (PathBuf, WorkspaceKey, WorkspaceKey, WorkspaceKey) {
+        let root = PathBuf::from("/repos/same-path");
+        let key1 = WorkspaceKey::new(root.clone(), ProjectRootMode::WorkspaceFolder, 0);
+        let key2 = WorkspaceKey::new(root.clone(), ProjectRootMode::GitRoot, 0);
+        let key3 = WorkspaceKey::new(root.clone(), ProjectRootMode::GitRoot, 99);
+        (root, key1, key2, key3)
+    }
+
+    fn status_count_for_root(mgr: &WorkspaceManager, root: &Path) -> usize {
+        mgr.status()
+            .workspaces
+            .iter()
+            .filter(|workspace_status| workspace_status.index_root == root)
+            .count()
+    }
+
+    fn reset_all_for_source_root(mgr: &Arc<WorkspaceManager>, root: &Path) -> bool {
+        let mut reset_any = false;
+        for (candidate_key, _) in mgr.find_all_by_source_root(root) {
+            if mgr
+                .reset(&candidate_key, false)
+                .expect("path candidate reset must succeed")
+            {
+                reset_any = true;
+            }
+        }
+        reset_any
+    }
+
+    /// Regression for #393: clean anonymous loads that arrive with
+    /// differing secondary key fields for the same source_root coalesce
+    /// to the first registered workspace instead of inserting a second
+    /// map entry.
+    #[test]
+    fn get_or_insert_coalesces_anonymous_keys_with_same_source_root() {
+        let mgr = WorkspaceManager::new_without_reaper(make_config());
+        let (root, key1, key2, _) = anonymous_keys_for_same_root();
+        let ws1 = mgr.get_or_insert_workspace(&key1);
+        ws1.store_state(WorkspaceState::Loaded);
+        let ws2 = mgr.get_or_insert_workspace(&key2);
+
+        assert!(
+            Arc::ptr_eq(&ws1, &ws2),
+            "coalesce must return the exact same Arc<LoadedWorkspace> instance"
+        );
+        assert_eq!(
+            mgr.find_all_by_source_root(&root).len(),
+            1,
+            "clean anonymous loads must leave one map entry for the source_root"
+        );
+        assert_eq!(
+            status_count_for_root(&mgr, &root),
+            1,
+            "status must list the clean coalesced source_root once"
+        );
+    }
+
+    /// After a reset leaves the coalesced workspace as an `Unloaded`
+    /// tombstone, divergent anonymous callers must still find that
+    /// registered entry. In particular, `reserve_rebuild` must not
+    /// report `WorkspaceEvicted` merely because the caller constructed a
+    /// different secondary key.
+    #[test]
+    fn divergent_anonymous_key_recovers_after_reset_without_workspace_evicted() {
+        let mgr = WorkspaceManager::new_without_reaper(make_config());
+        let (root, key1, key2, key3) = anonymous_keys_for_same_root();
+        let ws1 = mgr.get_or_insert_workspace(&key1);
+        ws1.store_state(WorkspaceState::Loaded);
+        let did_reset = mgr.reset(&key1, false).expect("single reset must succeed");
+        assert!(did_reset, "reset of the coalesced entry must report true");
+
+        let ws3 = mgr.get_or_insert_workspace(&key3);
+        assert!(
+            Arc::ptr_eq(&ws1, &ws3),
+            "post-reset divergent anon key must still coalesce to the registered ws"
+        );
+        assert_eq!(
+            ws3.load_state(),
+            WorkspaceState::Unloaded,
+            "coalesced workspace after reset must be Unloaded and ready for reload"
+        );
+        let res = mgr.reserve_rebuild(&key2, 0);
+        assert!(
+            res.is_ok(),
+            "reserve_rebuild with divergent anon key post-reset/coalesce must not hit WorkspaceEvicted: {:?}",
+            res.err()
+        );
+        assert_eq!(
+            mgr.find_all_by_source_root(&root).len(),
+            1,
+            "divergent post-reset access must not insert a second anonymous entry"
+        );
+    }
+
+    /// Historical duplicate anonymous entries must be recoverable by the
+    /// reset handler's path-level fan-out. Reset preserves tombstone
+    /// entries by design, but none may remain Loaded afterward.
+    #[test]
+    fn path_reset_clears_historical_anonymous_duplicates() {
+        let mgr = WorkspaceManager::new_without_reaper(make_config());
+        let (root, key1, key2, _) = anonymous_keys_for_same_root();
+        let ws1 = Arc::new(LoadedWorkspace::new(key1.clone(), false));
+        ws1.store_state(WorkspaceState::Loaded);
+        let legacy_duplicate = Arc::new(LoadedWorkspace::new(key2.clone(), false));
+        legacy_duplicate.store_state(WorkspaceState::Loaded);
+        {
+            let mut workspaces = mgr.workspaces.write();
+            workspaces.insert(key1, ws1);
+            workspaces.insert(key2, legacy_duplicate);
+        }
+
+        let path_candidates = mgr.find_all_by_source_root(&root);
+        assert_eq!(
+            path_candidates.len(),
+            2,
+            "path finder used by daemon/reset must return every same-source_root entry"
+        );
+        assert!(
+            path_candidates
+                .iter()
+                .all(|(_, ws)| ws.load_state() == WorkspaceState::Loaded),
+            "both same-source_root entries start Loaded before path reset"
+        );
+
+        assert!(
+            reset_all_for_source_root(&mgr, &root),
+            "handler-style path reset must report reset: true"
+        );
+        let path_candidates_after_reset = mgr.find_all_by_source_root(&root);
+        assert_eq!(
+            path_candidates_after_reset.len(),
+            2,
+            "reset preserves tombstone entries for historical duplicates"
+        );
+        assert!(
+            path_candidates_after_reset
+                .iter()
+                .all(|(_, ws)| ws.load_state() == WorkspaceState::Unloaded),
+            "path reset must leave no same-source_root entry Loaded"
+        );
+    }
+
+    /// Status is the user-visible surface from #393. Even when a
+    /// historical duplicate is still present as a tombstone, anonymous
+    /// rows with the same index_root are collapsed to one deterministic
+    /// status row.
+    #[test]
+    fn status_does_not_emit_duplicate_anonymous_rows_for_historical_duplicates() {
+        let mgr = WorkspaceManager::new_without_reaper(make_config());
+        let (root, key1, key2, _) = anonymous_keys_for_same_root();
+        mgr.workspaces.write().insert(
+            key1.clone(),
+            Arc::new(LoadedWorkspace::new(key1.clone(), false)),
+        );
+        mgr.workspaces.write().insert(
+            key2.clone(),
+            Arc::new(LoadedWorkspace::new(key2.clone(), false)),
+        );
+
+        assert_eq!(
+            mgr.find_all_by_source_root(&root).len(),
+            2,
+            "test setup must contain the historical duplicate entries"
+        );
+        assert_eq!(
+            status_count_for_root(&mgr, &root),
+            1,
+            "daemon status must collapse duplicate anonymous index_root rows"
+        );
+    }
+
+    /// Historical duplicate winner selection must not rely on
+    /// `HashMap::iter()` order. Anonymous same-root lookups use the
+    /// stable key ordering, so the GitRoot/0 entry wins over the
+    /// WorkspaceFolder/0 entry regardless of insertion order.
+    #[test]
+    fn historical_anonymous_duplicate_winner_is_deterministic() {
+        let mgr = WorkspaceManager::new_without_reaper(make_config());
+        let (root, key1, key2, key3) = anonymous_keys_for_same_root();
+        let workspace_folder_ws = Arc::new(LoadedWorkspace::new(key1.clone(), false));
+        let git_root_ws = Arc::new(LoadedWorkspace::new(key2.clone(), false));
+        workspace_folder_ws.store_state(WorkspaceState::Loaded);
+        git_root_ws.store_state(WorkspaceState::Loaded);
+        {
+            let mut workspaces = mgr.workspaces.write();
+            workspaces.insert(key1.clone(), Arc::clone(&workspace_folder_ws));
+            workspaces.insert(key2, Arc::clone(&git_root_ws));
+        }
+
+        let workspace_folder_last_accessed = *workspace_folder_ws.last_accessed.read();
+        let git_root_last_accessed = *git_root_ws.last_accessed.read();
+        std::thread::sleep(Duration::from_millis(1));
+        let builder = super::super::builder::EmptyGraphBuilder;
+        mgr.get_or_load(&key1, &builder, 0)
+            .expect("loaded historical winner should be returned from cache");
+        assert_eq!(
+            *workspace_folder_ws.last_accessed.read(),
+            workspace_folder_last_accessed,
+            "get_or_load must not touch the exact non-winner historical duplicate"
+        );
+        assert!(
+            *git_root_ws.last_accessed.read() > git_root_last_accessed,
+            "get_or_load must use the deterministic anonymous winner even when the caller key exactly matches a non-winner duplicate"
+        );
+
+        let selected = mgr.get_or_insert_workspace(&key3);
+        assert!(
+            Arc::ptr_eq(&selected, &git_root_ws),
+            "deterministic anonymous winner should be the stable minimum key"
+        );
+        let first_candidate = mgr
+            .find_all_by_source_root(&root)
+            .into_iter()
+            .next()
+            .expect("historical duplicate candidates present");
+        assert_eq!(
+            first_candidate.0.root_mode,
+            ProjectRootMode::GitRoot,
+            "path candidate ordering must expose the same deterministic winner first"
         );
     }
 }

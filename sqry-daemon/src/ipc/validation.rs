@@ -76,6 +76,11 @@ impl ValidationError {
 ///   (explicitly rejects fractional, exponent-form, boolean, object,
 ///   and array ids)
 /// - `params` that is not an object, array, or null
+///
+/// # Errors
+///
+/// Returns [`ValidationError::InvalidRequest`] when any JSON-RPC envelope
+/// invariant above is violated.
 pub fn validate_request_value(value: serde_json::Value) -> Result<JsonRpcRequest, ValidationError> {
     let serde_json::Value::Object(obj) = &value else {
         return Err(ValidationError::InvalidRequest {

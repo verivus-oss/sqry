@@ -4,6 +4,7 @@
 //! `semantic_diff`.
 
 use std::collections::{HashSet, VecDeque};
+use std::fmt::Write as _;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
@@ -47,7 +48,7 @@ pub fn ambiguous_symbol_envelope_json(err: &AmbiguousSymbolError) -> String {
         err.candidates.len()
     );
     if let Some(file) = sample_file {
-        message.push_str(&format!(" (e.g., file_path=\"{file}\")"));
+        let _ = write!(message, " (e.g., file_path=\"{file}\")");
     }
     let envelope = serde_json::json!({
         "error": {
@@ -95,7 +96,7 @@ fn resolve_workspace_path(path: &str) -> Option<std::path::PathBuf> {
 /// * `file_path` — optional pre-canonicalized file path to restrict the search.
 ///   When provided the resolver uses `FileScope::Path` so only candidates in
 ///   that file are considered. Path canonicalization and workspace validation
-///   are the caller's responsibility (owned by DISAMBIG_2's validation layer).
+///   are the caller's responsibility (owned by `DISAMBIG_2`'s validation layer).
 ///
 /// # Errors
 ///
@@ -350,6 +351,11 @@ fn matches_scope_filter(
 ///
 /// Uses the unified graph (`GraphSnapshot`) to find edges where source and target
 /// nodes belong to different programming languages.
+///
+/// # Errors
+///
+/// Returns an error if the workspace path is invalid, the graph cannot be
+/// loaded, or graph snapshot access fails.
 pub fn execute_cross_language_edges(
     args: &CrossLanguageEdgesArgs,
 ) -> Result<ToolExecution<CrossLanguageEdgesData>> {
@@ -697,7 +703,7 @@ fn collect_impacted_callers_bfs(
 /// already owns it with the strict segment matcher.
 ///
 /// This mirrors the DB15 followup decision for `relation_query`: once the
-/// seed is a concrete NodeId, BFS via direct CSR edge lookups is the right
+/// seed is a concrete `NodeId`, BFS via direct CSR edge lookups is the right
 /// primitive, and sqry-db's name-keyed predicate queries (which could
 /// reintroduce a segment-matcher mismatch at depth 1) are not. See
 /// [`crate::execution::relation_dispatch`] module docs for the taxonomy.
@@ -711,6 +717,11 @@ fn collect_impacted_callers_bfs(
 /// return the union across ambiguous matches) — `dependency_impact` must
 /// stay single-node anchored because the returned impact depths are
 /// meaningless across a union of unrelated chains.
+///
+/// # Errors
+///
+/// Returns an error if workspace resolution, graph acquisition, symbol
+/// resolution, or dependency traversal fails.
 pub fn execute_dependency_impact(
     args: &DependencyImpactArgs,
 ) -> Result<ToolExecution<DependencyImpactData>> {
@@ -759,6 +770,11 @@ pub fn execute_dependency_impact(
 /// Phases 4–7 (filter / summary / pagination) remain in the MCP handler so
 /// the wire DTO (`SemanticDiffData` + `NodeChange` camelCase shape + `fileUri`
 /// URLs + `resolution_source`) stays stable at the network boundary.
+///
+/// # Errors
+///
+/// Returns an error if git worktree materialization, graph building, diff
+/// execution, or result pagination fails.
 pub fn execute_semantic_diff(args: &SemanticDiffArgs) -> Result<ToolExecution<SemanticDiffData>> {
     // Pre-refactor timing: `start` fires before engine resolution.
     let start = Instant::now();
@@ -820,7 +836,7 @@ fn edge_deltas_to_wire(deltas: Vec<sqry_db::EdgeDelta>) -> Vec<EdgeChange> {
 ///
 /// This preserves the exact pre-DB20 wire shape: `change_type` is a
 /// lowercase string ("added" / "removed" / "modified" / "renamed" /
-/// "signature_changed"), `baseLocation` / `targetLocation` are
+/// "`signature_changed`"), `baseLocation` / `targetLocation` are
 /// [`NodeRefData`] structs with `fileUri` URLs, and empty-optional fields
 /// are omitted via `serde(skip_serializing_if = "Option::is_none")`.
 fn convert_db_change_to_wire(
@@ -1042,6 +1058,11 @@ fn convert_duplicate_groups(
 ///
 /// Uses `CodeGraph` with `body_hash` for body duplicate detection and signature/struct
 /// hashing for other duplicate types.
+///
+/// # Errors
+///
+/// Returns an error if workspace resolution, graph acquisition, or duplicate
+/// grouping fails.
 pub fn execute_find_duplicates(
     args: &FindDuplicatesArgs,
 ) -> Result<ToolExecution<FindDuplicatesData>> {
@@ -1238,6 +1259,11 @@ fn convert_cycles_to_output(
 /// or `sqry analyze`" is gone. The result set is still bounded by
 /// `args.max_results` plus `min_depth`/`max_depth`, matching the old
 /// `extract_cycles_from_scc` + `should_include_scc` filtering exactly.
+///
+/// # Errors
+///
+/// Returns an error if workspace resolution, graph acquisition, or cycle-query
+/// execution fails.
 pub fn execute_find_cycles(args: &FindCyclesArgs) -> Result<ToolExecution<FindCyclesData>> {
     // Pre-refactor timing: `start` fires before engine resolution.
     let start = Instant::now();
@@ -1254,7 +1280,7 @@ pub fn execute_find_cycles(args: &FindCyclesArgs) -> Result<ToolExecution<FindCy
         graph,
         executor: engine.executor_arc(),
     };
-    inner::execute_find_cycles(&ctx, args, start)
+    Ok(inner::execute_find_cycles(&ctx, args, start))
 }
 
 // ============================================================================
@@ -1284,14 +1310,13 @@ pub fn execute_find_cycles(args: &FindCyclesArgs) -> Result<ToolExecution<FindCy
 /// review blocker fixed here.
 fn mcp_scope_to_core_superset(scope: UnusedScope) -> sqry_core::query::UnusedScope {
     match scope {
-        UnusedScope::All => sqry_core::query::UnusedScope::All,
+        UnusedScope::All | UnusedScope::Struct => sqry_core::query::UnusedScope::All,
         UnusedScope::Public => sqry_core::query::UnusedScope::Public,
         UnusedScope::Private => sqry_core::query::UnusedScope::Private,
         UnusedScope::Function => sqry_core::query::UnusedScope::Function,
         // MCP `Struct` is `Struct | Class | Interface | Trait`; sqry-db's
         // `Struct` is only `Struct | Class`. Use `All` as the provable
         // superset and let the MCP post-filter narrow.
-        UnusedScope::Struct => sqry_core::query::UnusedScope::All,
     }
 }
 
@@ -1345,6 +1370,11 @@ fn mcp_scope_to_core_superset(scope: UnusedScope) -> sqry_core::query::UnusedSco
 /// [`sqry_db::queries::ReachableFromEntryPointsQuery`] supersedes. The
 /// previous "Analysis files not found" empty-result warning branch is gone;
 /// sqry-db computes on demand and caches.
+///
+/// # Errors
+///
+/// Returns an error if workspace resolution, graph acquisition, or unused-symbol
+/// query execution fails.
 pub fn execute_find_unused(args: &FindUnusedArgs) -> Result<ToolExecution<FindUnusedData>> {
     // Pre-refactor timing: `start` fires before engine resolution.
     let start = Instant::now();
@@ -1440,8 +1470,13 @@ use crate::tools::{DirectCalleesArgs, DirectCallersArgs, IsNodeInCycleArgs, Patt
 /// The predicate-path `IsInCycleQuery` still uses the
 /// handler-supplied `max_results = 100` default on the outer
 /// `find_cycles` surface; this function's two calls are aligned on
-/// bounds + circular_type so the `CyclesQuery` is a cache hit on the
+/// bounds + `circular_type` so the `CyclesQuery` is a cache hit on the
 /// already-warmed `SccQuery`.
+///
+/// # Errors
+///
+/// Returns an error if workspace resolution, graph acquisition, symbol
+/// resolution, or cycle-query execution fails.
 pub fn execute_is_node_in_cycle(
     args: &IsNodeInCycleArgs,
 ) -> Result<ToolExecution<NodeInCycleData>> {
@@ -1464,6 +1499,11 @@ pub fn execute_is_node_in_cycle(
 }
 
 /// Execute the `pattern_search` tool to find symbols by pattern.
+///
+/// # Errors
+///
+/// Returns an error if workspace resolution, graph acquisition, or pattern
+/// matching fails.
 pub fn execute_pattern_search(
     args: &PatternSearchArgs,
 ) -> Result<ToolExecution<PatternSearchData>> {
@@ -1780,7 +1820,18 @@ fn build_caller_callee_data(
 }
 
 pub(crate) mod inner {
-    use super::*;
+    use super::{
+        Arc, CycleType, DependencyImpactArgs, DependencyImpactData, DirectCalleesArgs,
+        DirectCalleesData, DirectCallersArgs, DirectCallersData, Engine, FindCyclesArgs,
+        FindCyclesData, FindUnusedArgs, FindUnusedData, ImpactedSymbol, Instant, IsNodeInCycleArgs,
+        NodeChange, NodeInCycleData, Result, SemanticDiffArgs, SemanticDiffData, ToolExecution,
+        UnusedScope, UnusedSymbolData, anyhow, build_caller_callee_data, build_unused_symbol_data,
+        collect_impacted_callers_bfs, convert_cycles_to_output, convert_db_change_to_wire,
+        cycle_bounds_for, cycle_type_label, decorate_single_symbol_lookup_error, duration_to_ms,
+        edge_deltas_to_wire, git_worktree, materialize_cycle_node_ids, mcp_cycle_type_to_core,
+        mcp_scope_to_core_superset, paginate, resolve_global_symbol_strict,
+        should_include_in_unused_results, summarise_wire_changes,
+    };
 
     /// Daemon/SqryServer-shared body for `dependency_impact`.
     pub(crate) fn execute_dependency_impact(
@@ -1840,6 +1891,57 @@ pub(crate) mod inner {
     /// `ctx.graph` is unused — `semantic_diff` builds per-git-ref graphs from
     /// worktrees (see rustdoc on the public wrapper). The context is still
     /// supplied for daemon-path symmetry.
+    fn empty_semantic_diff_execution(
+        args: &SemanticDiffArgs,
+        workspace_root: &std::path::Path,
+        start: Instant,
+    ) -> ToolExecution<SemanticDiffData> {
+        ToolExecution {
+            data: SemanticDiffData {
+                base_ref: args.base.git_ref.clone(),
+                target_ref: args.target.git_ref.clone(),
+                changes: Vec::new(),
+                summary: summarise_wire_changes(&[]),
+                total: 0,
+                channel_peer_edges_added: Vec::new(),
+                channel_peer_edges_removed: Vec::new(),
+                instantiates_edges_added: Vec::new(),
+                instantiates_edges_removed: Vec::new(),
+            },
+            used_index: false,
+            used_graph: false,
+            graph_metadata: None,
+            execution_ms: duration_to_ms(start.elapsed()),
+            next_page_token: None,
+            total: Some(0),
+            truncated: Some(false),
+            candidates_scanned: None,
+            workspace_path: crate::execution::symbol_utils::path_to_forward_slash(workspace_root),
+        }
+    }
+
+    fn apply_semantic_diff_filters(changes: &mut Vec<NodeChange>, args: &SemanticDiffArgs) {
+        if !args.filters.change_types.is_empty() {
+            changes.retain(|change| {
+                args.filters
+                    .change_types
+                    .iter()
+                    .any(|change_type| change_type.as_str() == change.change_type)
+            });
+        }
+        if !args.filters.symbol_kinds.is_empty() {
+            changes.retain(|change| {
+                args.filters
+                    .symbol_kinds
+                    .iter()
+                    .any(|kind| kind.eq_ignore_ascii_case(&change.kind))
+            });
+        }
+        if !args.include_unchanged {
+            changes.retain(|change| change.change_type != "unchanged");
+        }
+    }
+
     pub(crate) fn execute_semantic_diff(
         ctx: &crate::daemon_adapter::WorkspaceContext,
         args: &SemanticDiffArgs,
@@ -1879,30 +1981,7 @@ pub(crate) mod inner {
                 sha = %base_sha,
                 "semantic_diff identical-OID fast-path: emitting empty diff"
             );
-            return Ok(ToolExecution {
-                data: SemanticDiffData {
-                    base_ref: args.base.git_ref.clone(),
-                    target_ref: args.target.git_ref.clone(),
-                    changes: Vec::new(),
-                    summary: summarise_wire_changes(&[]),
-                    total: 0,
-                    channel_peer_edges_added: Vec::new(),
-                    channel_peer_edges_removed: Vec::new(),
-                    instantiates_edges_added: Vec::new(),
-                    instantiates_edges_removed: Vec::new(),
-                },
-                used_index: false,
-                used_graph: false,
-                graph_metadata: None,
-                execution_ms: duration_to_ms(start.elapsed()),
-                next_page_token: None,
-                total: Some(0),
-                truncated: Some(false),
-                candidates_scanned: None,
-                workspace_path: crate::execution::symbol_utils::path_to_forward_slash(
-                    workspace_root,
-                ),
-            });
+            return Ok(empty_semantic_diff_execution(args, workspace_root, start));
         }
 
         // Phase 1: Create git worktrees (one per ref). The manager is RAII: the
@@ -1941,26 +2020,7 @@ pub(crate) mod inner {
             .map(|c| convert_db_change_to_wire(c, workspace_root, &worktree_base, &worktree_target))
             .collect::<Result<Vec<_>>>()?;
 
-        // Phase 4: Apply filters (wire-level strings — predicates unchanged).
-        if !args.filters.change_types.is_empty() {
-            changes.retain(|change| {
-                args.filters
-                    .change_types
-                    .iter()
-                    .any(|ct| ct.as_str() == change.change_type)
-            });
-        }
-        if !args.filters.symbol_kinds.is_empty() {
-            changes.retain(|change| {
-                args.filters
-                    .symbol_kinds
-                    .iter()
-                    .any(|kind| kind.eq_ignore_ascii_case(&change.kind))
-            });
-        }
-        if !args.include_unchanged {
-            changes.retain(|change| change.change_type != "unchanged");
-        }
+        apply_semantic_diff_filters(&mut changes, args);
 
         // Phase 5: Compute summary post-filter, pre-pagination.
         let summary = summarise_wire_changes(&changes);
@@ -2022,7 +2082,7 @@ pub(crate) mod inner {
         ctx: &crate::daemon_adapter::WorkspaceContext,
         args: &FindCyclesArgs,
         start: Instant,
-    ) -> Result<ToolExecution<FindCyclesData>> {
+    ) -> ToolExecution<FindCyclesData> {
         let workspace_root: &std::path::Path = &ctx.workspace_root;
         let graph = &ctx.graph;
 
@@ -2053,7 +2113,7 @@ pub(crate) mod inner {
         let (page_slice, next_page_token) = paginate(&output_cycles, &args.pagination);
         let page_cycles = page_slice.to_vec();
 
-        Ok(ToolExecution {
+        ToolExecution {
             data: FindCyclesData {
                 cycle_type: cycle_type_label(args.cycle_type).to_string(),
                 cycles: page_cycles,
@@ -2068,7 +2128,7 @@ pub(crate) mod inner {
             truncated: Some(total > args.max_results),
             candidates_scanned: None,
             workspace_path: crate::execution::symbol_utils::path_to_forward_slash(workspace_root),
-        })
+        }
     }
 
     /// Daemon/SqryServer-shared body for `find_unused`.

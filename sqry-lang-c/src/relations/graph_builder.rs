@@ -1048,7 +1048,7 @@ fn is_skipped_init_value(text: &str) -> bool {
 ///
 /// tree-sitter-c shapes a designated initializer as
 /// `initializer_pair { designator: field_designator(field_identifier), value: <expr> }`.
-/// We pull the field_identifier text. Returns `None` for malformed input
+/// We pull the `field_identifier` text. Returns `None` for malformed input
 /// or for designators that are not field designators (e.g. array
 /// subscript designators `[0]`, which don't participate in struct
 /// binding-plane capture).
@@ -2151,7 +2151,7 @@ fn is_field_declarator_node(kind: &str) -> bool {
 
 /// Process a single field declarator.
 ///
-/// Cluster C / `C_OTHER_PLUGINS` (BadLiveware Go-batch DAG, 2026-04-29):
+/// Cluster C / `C_OTHER_PLUGINS` (`BadLiveware` Go-batch DAG, 2026-04-29):
 /// every named C struct field is materialised as a `NodeKind::Property`
 /// node, parented to the enclosing struct via `Defines` + `Contains`
 /// edges. The qualified-name format is `<StructName>.<FieldName>`,
@@ -2269,7 +2269,7 @@ fn process_single_field_declarator(
 /// `function_declarator { declarator: parenthesized_declarator {
 /// declarator: pointer_declarator { declarator: field_identifier }},
 /// parameters: parameter_list }`. The key distinguishing feature is the
-/// `pointer_declarator` *inside* the function_declarator's declarator
+/// `pointer_declarator` *inside* the `function_declarator`'s declarator
 /// chain — a plain non-pointer function (e.g. an unusual struct-as-
 /// method field, which C does not really have) lacks the pointer.
 ///
@@ -2286,7 +2286,7 @@ fn is_function_pointer_field_declarator(declarator: Node<'_>) -> bool {
     inner_contains_pointer_declarator(inner)
 }
 
-/// True when `node` (the inner-declarator chain of a function_declarator)
+/// True when `node` (the inner-declarator chain of a `function_declarator`)
 /// reaches a `pointer_declarator` before bottoming out at a
 /// `field_identifier` / `identifier`.
 fn inner_contains_pointer_declarator(node: Node<'_>) -> bool {
@@ -2326,15 +2326,9 @@ fn extract_field_declarator_name_with_node<'tree>(
             let name = declarator.utf8_text(content).ok()?.to_string();
             Some((name, declarator))
         }
-        "field_declarator" => {
+        "field_declarator" | "function_declarator" => {
             if let Some(nested) = declarator.child_by_field_name("declarator") {
                 return extract_field_declarator_name_with_node(nested, content);
-            }
-            extract_simple_declarator_name_with_node(declarator, content)
-        }
-        "function_declarator" => {
-            if let Some(decl) = declarator.child_by_field_name("declarator") {
-                return extract_field_declarator_name_with_node(decl, content);
             }
             extract_simple_declarator_name_with_node(declarator, content)
         }
@@ -2673,24 +2667,16 @@ fn extract_function_prototype_names(decl_node: Node<'_>, content: &[u8]) -> Vec<
     let mut out = Vec::new();
     let mut cursor = decl_node.walk();
     for child in decl_node.children(&mut cursor) {
-        match child.kind() {
-            "function_declarator" => {
-                if let Some(name) = extract_name_from_function_declarator(child, content) {
-                    out.push(name);
-                }
-            }
-            "init_declarator" => {
-                // `T name = init;` — name is a variable, not a function
-                // prototype, so skip. The variable side is handled by
-                // pattern §2.5 init_declarator-RHS in the classifier.
-            }
-            _ => {}
+        if child.kind() == "function_declarator"
+            && let Some(name) = extract_name_from_function_declarator(child, content)
+        {
+            out.push(name);
         }
     }
     out
 }
 
-/// Walk a declarator chain to find the bottom function_declarator and
+/// Walk a declarator chain to find the bottom `function_declarator` and
 /// extract its identifier name. Skips through `parenthesized_declarator`
 /// wrappers; treats a `pointer_declarator` wrapper as "this is a
 /// function-pointer variable, not a function definition", returning
@@ -2714,10 +2700,24 @@ fn extract_name_from_function_declarator(node: Node<'_>, content: &[u8]) -> Opti
             }
             None
         }
-        // pointer_declarator → function-pointer variable, not a function
-        // declaration. Refuse to extract a name.
-        "pointer_declarator" => None,
         _ => None,
+    }
+}
+
+fn mark_identifier_children_address_taken(
+    node: Node<'_>,
+    content: &[u8],
+    known_fn_names: &HashSet<String>,
+    helper: &mut GraphBuildHelper,
+) {
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if child.kind() == "identifier"
+            && let Ok(name) = child.utf8_text(content)
+            && known_fn_names.contains(name)
+        {
+            helper.mark_function_address_taken_by_name(name);
+        }
     }
 }
 
@@ -2806,16 +2806,12 @@ fn classify_address_taken_recursive(
         // Pattern 2: identifier in argument list. No type guard — passing
         // a function name in a call argument is itself an address-take
         // (the function decays to a pointer at the call site).
-        "argument_list" => {
-            let mut cursor = node.walk();
-            for child in node.named_children(&mut cursor) {
-                if child.kind() == "identifier"
-                    && let Ok(name) = child.utf8_text(content)
-                    && known_fn_names.contains(name)
-                {
-                    helper.mark_function_address_taken_by_name(name);
-                }
-            }
+        //
+        // Pattern 6: `return identifier`. No type guard — returning a
+        // bare function name from any function-returning-fnptr context
+        // is itself an address-take.
+        "argument_list" | "return_statement" => {
+            mark_identifier_children_address_taken(node, content, known_fn_names, helper);
         }
         // Pattern 3: designated initializer RHS. No type guard — the
         // `.field = fn` shape is itself a fnptr-slot designator.
@@ -2886,23 +2882,6 @@ fn classify_address_taken_recursive(
                 && lhs_assignment_target_is_fnptr(lhs, content, type_permits)
             {
                 helper.mark_function_address_taken_by_name(name);
-            }
-        }
-        // Pattern 6: `return identifier`. No type guard — returning a
-        // bare function name from any function-returning-fnptr context
-        // is itself an address-take. (We don't bother distinguishing
-        // returns-from-fnptr-returning vs returns-from-other since C's
-        // type system funnels it through anyway, and the wider miss
-        // here is rare in practice.)
-        "return_statement" => {
-            let mut cursor = node.walk();
-            for child in node.named_children(&mut cursor) {
-                if child.kind() == "identifier"
-                    && let Ok(name) = child.utf8_text(content)
-                    && known_fn_names.contains(name)
-                {
-                    helper.mark_function_address_taken_by_name(name);
-                }
             }
         }
         // Pattern 7: `init_declarator { value: identifier }`.
@@ -3217,8 +3196,7 @@ fn positional_init_slot_is_fnptr(
             };
             return fields
                 .get(slot_index)
-                .map(|(_, is_fnptr)| *is_fnptr)
-                .unwrap_or(false);
+                .is_some_and(|(_, is_fnptr)| *is_fnptr);
         }
         // Stop walking up if we leave the declaration entirely (e.g. we
         // hit a `function_definition` or `translation_unit`) — the

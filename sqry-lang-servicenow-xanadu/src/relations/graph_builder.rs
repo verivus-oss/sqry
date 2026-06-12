@@ -867,7 +867,7 @@ fn handle_member_method_call(
         if let Some(class_name) = find_enclosing_class_name(call_node, content) {
             format!("{class_name}.{property}")
         } else {
-            property.to_string()
+            property.clone()
         }
     } else {
         // For `obj.method()`, assume obj is a class instance

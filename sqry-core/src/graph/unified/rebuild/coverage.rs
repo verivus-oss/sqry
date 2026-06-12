@@ -106,9 +106,9 @@
 //! (plan lines 765–790): `all_node_ids()` must surface every `NodeId` the
 //! container references so the residue check can assert none appears in
 //! the drained tombstone set. For containers that track a single canonical
-//! NodeId per logical entry (arena, metadata, per-file bucket), this
-//! means "every NodeId currently in the container". For edge stores and
-//! auxiliary indices, this means "every source + target NodeId", with
+//! `NodeId` per logical entry (arena, metadata, per-file bucket), this
+//! means "every `NodeId` currently in the container". For edge stores and
+//! auxiliary indices, this means "every source + target `NodeId`", with
 //! duplicates permitted (the residue check uses set membership).
 //!
 //! `retain_nodes(keep)` is the dual: remove every reference whose `keep`
@@ -132,7 +132,7 @@ use super::super::storage::registry::FileRegistry;
 /// [`NodeId`]s (A2 §K).
 ///
 /// The rebuild pipeline calls [`all_node_ids`](Self::all_node_ids) to
-/// audit whether any tombstoned NodeId has leaked into the finalized
+/// audit whether any tombstoned `NodeId` has leaked into the finalized
 /// `CodeGraph`, and [`retain_nodes`](Self::retain_nodes) to drop every
 /// reference whose `keep` predicate returns `false`.
 ///
@@ -169,7 +169,7 @@ pub(crate) trait NodeIdBearing {
 impl NodeIdBearing for NodeArena {
     /// Yields one `NodeId` (with the slot's current generation) per
     /// occupied slot. Vacant slots are skipped because they carry no
-    /// live NodeId. Callers that need tombstoned NodeIds must capture
+    /// live `NodeId`. Callers that need tombstoned `NodeIds` must capture
     /// them *before* calling `NodeArena::remove` /
     /// `compact_tombstoned`.
     fn all_node_ids(&self) -> Box<dyn Iterator<Item = NodeId> + '_> {
@@ -198,13 +198,13 @@ impl NodeIdBearing for NodeArena {
 // ---------------------------------------------------------------------
 
 impl NodeIdBearing for BidirectionalEdgeStore {
-    /// Yields every NodeId referenced by any edge in either tier of
+    /// Yields every `NodeId` referenced by any edge in either tier of
     /// either direction:
     ///
     /// - Delta buffer (both directions): source + target of every
     ///   `DeltaOp::Add` entry. `DeltaOp::Remove` entries are skipped
     ///   because they represent *deletions* — they cannot resurrect a
-    ///   tombstoned NodeId.
+    ///   tombstoned `NodeId`.
     /// - CSR (both directions): every column-index entry. CSR rows are
     ///   keyed by arena slot index (no generation); the row axis is
     ///   therefore covered by [`NodeArena`]'s impl and not re-emitted
@@ -229,7 +229,8 @@ impl NodeIdBearing for BidirectionalEdgeStore {
             }
             if let Some(csr) = forward.csr() {
                 for node_idx in 0..csr.node_count() {
-                    for edge_ref in csr.edges_of(node_idx as u32) {
+                    let node_idx = u32::try_from(node_idx).expect("CSR node index fits u32");
+                    for edge_ref in csr.edges_of(node_idx) {
                         out.push(edge_ref.target);
                     }
                 }
@@ -246,7 +247,8 @@ impl NodeIdBearing for BidirectionalEdgeStore {
             }
             if let Some(csr) = reverse.csr() {
                 for node_idx in 0..csr.node_count() {
-                    for edge_ref in csr.edges_of(node_idx as u32) {
+                    let node_idx = u32::try_from(node_idx).expect("CSR node index fits u32");
+                    for edge_ref in csr.edges_of(node_idx) {
                         out.push(edge_ref.target);
                     }
                 }
@@ -296,7 +298,7 @@ impl NodeIdBearing for AuxiliaryIndices {
     }
 
     /// Applies `keep` to every bucket in every index, removing
-    /// predicate-rejected NodeIds. Empty buckets are garbage-collected
+    /// predicate-rejected `NodeIds`. Empty buckets are garbage-collected
     /// from their parent `BTreeMap` to keep iteration order and
     /// serialization bit-stable.
     fn retain_nodes(&mut self, keep: &dyn Fn(NodeId) -> bool) {

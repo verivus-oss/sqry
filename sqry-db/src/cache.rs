@@ -36,7 +36,7 @@ use crate::query::{DerivedQuery, QueryKey};
 
 /// A cache entry yielded by [`ShardedCache::iter_persistent`].
 ///
-/// Each entry carries everything the SAVE_PATH unit needs to write the entry to
+/// Each entry carries everything the `SAVE_PATH` unit needs to write the entry to
 /// disk: the stable on-disk discriminator, the serialised key + value, and the
 /// dependency metadata needed to validate the entry on reload.
 ///
@@ -78,7 +78,7 @@ pub struct CachedResult {
     value: Box<dyn Any + Send + Sync>,
     /// Tier 1: File-level dependencies recorded during execution.
     ///
-    /// Each entry is `(FileId, revision_at_read_time)`. SmallVec with inline
+    /// Each entry is `(FileId, revision_at_read_time)`. `SmallVec` with inline
     /// capacity 8 covers the common case of queries touching ≤8 files without
     /// heap allocation.
     file_deps: SmallVec<[FileDep; 8]>,
@@ -254,7 +254,7 @@ impl std::fmt::Debug for CachedResult {
 /// raw-byte retention. The method serialises the key and value at insert time
 /// and enforces the `max_entry_size_bytes` cap from [`QueryDbConfig`].
 ///
-/// Use [`iter_persistent`] to stream all persistent entries for the SAVE_PATH unit.
+/// Use [`iter_persistent`] to stream all persistent entries for the `SAVE_PATH` unit.
 /// It collects cheap `Arc` clones under each shard lock, then releases the lock
 /// before yielding, so shard locks are never held during I/O.
 pub struct ShardedCache {
@@ -490,6 +490,7 @@ impl ShardedCache {
     }
 
     /// Removes a specific key from a shard.
+    #[must_use]
     pub fn remove(&self, shard_idx: usize, key: &QueryKey) -> bool {
         let mut shard = self.shards[shard_idx].write();
         shard.remove(key).is_some()
@@ -522,7 +523,7 @@ impl ShardedCache {
     ///
     /// **Infallible by construction**: uses only `HashMap::insert`. Called
     /// exclusively from [`QueryDb::commit_staged_load`] — the single
-    /// infallible commit boundary in LOAD_PATH.
+    /// infallible commit boundary in `LOAD_PATH`.
     ///
     /// # Typed vs raw-only entries
     ///
@@ -538,7 +539,7 @@ impl ShardedCache {
         query_type_id: u32,
         raw_key_bytes: Arc<[u8]>,
         raw_result_bytes: Arc<[u8]>,
-        deps: crate::persistence::QueryDeps,
+        deps: &crate::persistence::QueryDeps,
     ) {
         // INVARIANT: all calls below are infallible — see spec §5.7
         //
@@ -601,7 +602,7 @@ impl ShardedCache {
 
     /// Yields all persistent cache entries as [`PersistableEntry`] values.
     ///
-    /// This is the feed for the SAVE_PATH persistence unit.
+    /// This is the feed for the `SAVE_PATH` persistence unit.
     ///
     /// # Implementation note
     ///

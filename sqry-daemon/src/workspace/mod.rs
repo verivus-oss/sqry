@@ -15,7 +15,7 @@
 //!
 //! Phase 6b (next increment) lands workspace lifecycle:
 //! `get_or_load`, `evict_lru`, `unload`, `status`, Failed-state
-//! handling + staleness cap + `-32002` expiry, and the SQRYD_HOOK
+//! handling + staleness cap + `-32002` expiry, and the `SQRYD_HOOK`
 //! `save_derived` wire-in.
 
 pub(crate) mod acquirer;

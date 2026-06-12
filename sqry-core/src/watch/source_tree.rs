@@ -23,7 +23,7 @@
 //! # Windows rename coalescing
 //!
 //! On Windows, `ReadDirectoryChangesW` reports atomic renames (used by Vim,
-//! JetBrains, VS Code) as separate Remove + Create pairs. The debounce
+//! `JetBrains`, VS Code) as separate Remove + Create pairs. The debounce
 //! loop includes a coalescing pass that detects a Remove immediately followed
 //! by a Create for the **same canonical path** and collapses them into a
 //! single logical Modify. This ensures editor save patterns normalize to
@@ -37,7 +37,7 @@
 //! - Vim: `.*.swp`, `.*.swo`, `*~`
 //! - Emacs: `*~`, `#*#`, `.#*`
 //! - VS Code: `.bak` suffix (from safe-save rename dance)
-//! - JetBrains: `___jb_tmp___`, `___jb_old___` suffixes
+//! - `JetBrains`: `___jb_tmp___`, `___jb_old___` suffixes
 //!
 //! These filters run *after* `.gitignore` matching so that a deliberate
 //! `.gitignore` override (`!*.swp`) is respected.
@@ -245,7 +245,7 @@ impl SourceTreeWatcher {
         }
 
         let git_state_changed = self.git_state.poll_changed();
-        self.build_changeset(raw_changes, git_state_changed, last_git_state)
+        Ok(self.build_changeset(raw_changes, git_state_changed, last_git_state))
     }
 
     /// Debounced wait for changes with cooperative cancellation.
@@ -360,8 +360,11 @@ impl SourceTreeWatcher {
         }
 
         let git_state_changed = self.git_state.poll_changed();
-        self.build_changeset(raw_changes, git_state_changed, last_git_state)
-            .map(Some)
+        Ok(Some(self.build_changeset(
+            raw_changes,
+            git_state_changed,
+            last_git_state,
+        )))
     }
 
     /// Non-blocking poll for changes.
@@ -403,22 +406,25 @@ impl SourceTreeWatcher {
             return Ok(None);
         }
 
-        self.build_changeset(raw_changes, git_state_changed, last_git_state)
-            .map(Some)
+        Ok(Some(self.build_changeset(
+            raw_changes,
+            git_state_changed,
+            last_git_state,
+        )))
     }
 
     /// Builds a [`ChangeSet`] from raw changes, applying gitignore filtering,
     /// editor temp filtering, `.git/` exclusion, and rename coalescing.
     ///
     /// `git_state_changed` is passed in from the caller to avoid double-draining
-    /// the git-state channel (poll_changed drains on first call; a second call
+    /// the git-state channel (`poll_changed` drains on first call; a second call
     /// would return `false` and lose the signal).
     fn build_changeset(
         &self,
         raw_changes: Vec<RawChange>,
         git_state_changed: bool,
         last_git_state: Option<&LastIndexedGitState>,
-    ) -> Result<ChangeSet> {
+    ) -> ChangeSet {
         // 1. Filter out .git/ paths, sqry internal artifacts, gitignored
         // paths, and editor temps.
         let filtered: Vec<RawChange> = raw_changes
@@ -450,11 +456,11 @@ impl SourceTreeWatcher {
             None
         };
 
-        Ok(ChangeSet {
+        ChangeSet {
             changed_files,
             git_state_changed,
             git_change_class,
-        })
+        }
     }
 
     /// Returns `true` if the path is excluded by the `.gitignore` matcher.
@@ -471,6 +477,8 @@ impl SourceTreeWatcher {
 /// Builds a [`Gitignore`] matcher by walking up from `root` and loading all
 /// `.gitignore` files found. Falls back to an empty matcher on error.
 fn build_gitignore_matcher(root: &Path) -> Gitignore {
+    const MAX_DEPTH: usize = 20;
+
     let mut builder = GitignoreBuilder::new(root);
 
     // Load root .gitignore.
@@ -485,14 +493,12 @@ fn build_gitignore_matcher(root: &Path) -> Gitignore {
     // We use a simple iterative walk to avoid pulling in another dependency.
     let mut dirs_to_scan = vec![root.to_path_buf()];
     let mut depth = 0;
-    const MAX_DEPTH: usize = 20;
 
     while !dirs_to_scan.is_empty() && depth < MAX_DEPTH {
         let mut next_dirs = Vec::new();
         for dir in &dirs_to_scan {
-            let entries = match std::fs::read_dir(dir) {
-                Ok(e) => e,
-                Err(_) => continue,
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                continue;
             };
             for entry in entries.flatten() {
                 let path = entry.path();
@@ -539,14 +545,17 @@ fn is_under_sqry_dir(path: &Path, root: &Path) -> bool {
 
 /// Returns `true` if the path looks like a common editor temporary file.
 ///
-/// Checks file name patterns for Vim, Emacs, VS Code, and JetBrains editors.
+/// Checks file name patterns for Vim, Emacs, VS Code, and `JetBrains` editors.
 fn is_editor_temporary(path: &Path) -> bool {
     let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
         return false;
     };
 
     // Vim: .foo.swp, .foo.swo
-    if (file_name.ends_with(".swp") || file_name.ends_with(".swo"))
+    if path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("swp") || ext.eq_ignore_ascii_case("swo"))
         && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
         && stem.starts_with('.')
     {
@@ -569,7 +578,11 @@ fn is_editor_temporary(path: &Path) -> bool {
     }
 
     // VS Code safe-save: .bak suffix on the renamed-away original
-    if file_name.ends_with(".bak") {
+    if path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("bak"))
+    {
         return true;
     }
 
@@ -612,7 +625,7 @@ fn collect_raw_changes(event: &Event, out: &mut Vec<RawChange>) {
 /// Coalesces Remove + Create pairs on the same path into a single Modify.
 ///
 /// This handles the Windows `ReadDirectoryChangesW` pattern where an atomic
-/// rename (used by Vim, JetBrains, VS Code) is reported as a Remove of the
+/// rename (used by Vim, `JetBrains`, VS Code) is reported as a Remove of the
 /// old file followed by a Create of the new file at the same path.
 ///
 /// The algorithm is sequential: for each Remove, it looks ahead for a Create

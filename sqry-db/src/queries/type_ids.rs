@@ -33,7 +33,7 @@ pub const CONDENSATION: u32 = 0x000F;
 pub const ADDRESS_TAKEN: u32 = 0x0010;
 pub const CALLSITE_PROMISCUOUS: u32 = 0x0011;
 /// T3.7 — context-propagation leak detection. Next free slot after the
-/// Phase A C indirect-call IDs (0x0010, 0x0011); see 02_DESIGN §5.2.
+/// Phase A C indirect-call IDs (0x0010, 0x0011); see `02_DESIGN` §5.2.
 pub const CONTEXT_PROPAGATION: u32 = 0x0012;
 
 #[cfg(test)]

@@ -797,7 +797,7 @@ impl RebuildGraph {
         Ok(graph)
     }
 
-    /// Returns the number of NodeIds currently staged for tombstoning
+    /// Returns the number of `NodeIds` currently staged for tombstoning
     /// via [`RebuildGraph::tombstone`] (to be added by Task 4 Step 4).
     /// Useful for Gate 0c tests that exercise finalize with an empty
     /// or non-empty tombstone set.
@@ -861,7 +861,7 @@ impl RebuildGraph {
     // that exposes only `forward()` / `reverse()` / `edges_from` /
     // `edges_to` / `stats` on `&self` — never the `*_mut` methods.
 
-    /// Stage a NodeId for tombstoning during the next `finalize` pass.
+    /// Stage a `NodeId` for tombstoning during the next `finalize` pass.
     ///
     /// Gate 0c ships this helper so finalize tests can drive the
     /// 14-step contract with a realistic tombstone set without waiting
@@ -878,7 +878,7 @@ impl RebuildGraph {
     /// for each id, but expresses the bulk intent at the call site.
     ///
     /// Used by [`remove_file`](Self::remove_file) to fold every
-    /// file-local NodeId into the staged set in a single pass.
+    /// file-local `NodeId` into the staged set in a single pass.
     pub(crate) fn tombstone_many<I: IntoIterator<Item = NodeId>>(&mut self, ids: I) {
         self.tombstones.extend(ids);
     }
@@ -901,8 +901,8 @@ impl RebuildGraph {
     /// the CSR is rebuilt from the compacted delta (§H lines 684–691).
     ///
     /// The method does **not** rewrite `NodeIdBearing` surfaces on the
-    /// rebuild (NodeArena, AuxiliaryIndices, NodeMetadataStore,
-    /// NodeProvenanceStore, ScopeArena, AliasTable, ShadowTable) —
+    /// rebuild (`NodeArena`, `AuxiliaryIndices`, `NodeMetadataStore`,
+    /// `NodeProvenanceStore`, `ScopeArena`, `AliasTable`, `ShadowTable`) —
     /// those surfaces are compacted once, uniformly, by `finalize()`
     /// steps 2–7 against the accumulated `tombstones` set. Running a
     /// partial compaction here would duplicate work and violate the
@@ -918,7 +918,7 @@ impl RebuildGraph {
     ///
     /// Only two surfaces are mutated before `finalize()` runs:
     ///
-    /// * **NodeArena**: each file-local `NodeId` is `remove`d so the
+    /// * **`NodeArena`**: each file-local `NodeId` is `remove`d so the
     ///   slot's generation advances and stale handles cannot alias a
     ///   re-allocation. Downstream compaction at step 2 is then a
     ///   no-op for these slots (idempotent; the arena skips stale
@@ -926,18 +926,18 @@ impl RebuildGraph {
     /// * **Edge store** (both forward + reverse, both CSR + delta):
     ///   [`BidirectionalEdgeStore::tombstone_edges_for_nodes`] kills
     ///   every edge whose source or target is one of the drained
-    ///   NodeIds. CSR tombstones land in `csr_tombstones`; delta
+    ///   `NodeIds`. CSR tombstones land in `csr_tombstones`; delta
     ///   edges are dropped outright. Step 9 of `finalize` then
     ///   rebuilds a fresh CSR from the tombstone-free delta, so the
     ///   CSR tombstones become physically invisible by publish time.
-    /// * **FileRegistry**: the bucket is drained via
+    /// * **`FileRegistry`**: the bucket is drained via
     ///   [`FileRegistry::take_nodes`] and the file entry is
     ///   deregistered via [`FileRegistry::unregister`]. Both are
     ///   idempotent on an already-removed file.
     ///
     /// # Returned value
     ///
-    /// The list of NodeIds that were staged for tombstoning. Empty on
+    /// The list of `NodeIds` that were staged for tombstoning. Empty on
     /// an unknown or already-removed file. Useful for Gate 0c finalize
     /// tests that need to assert on bucket-drain correctness or on the
     /// union of staged tombstones across several `remove_file` calls.
@@ -1009,11 +1009,11 @@ impl RebuildGraph {
     /// structures themselves (plan §F.2 literal named API).
     ///
     /// Iterates every `NodeIdBearing` field on this `RebuildGraph` and
-    /// panics if any contains a NodeId present in `self.tombstones`.
+    /// panics if any contains a `NodeId` present in `self.tombstones`.
     /// This is a diagnostic helper for mid-rebuild consistency checks:
     /// e.g., Task 4 Step 4's `RebuildGraph::remove_file` can call this
     /// after tombstoning a file but before more closure files land, to
-    /// prove the just-tombstoned NodeIds really left every index before
+    /// prove the just-tombstoned `NodeIds` really left every index before
     /// the next pass commits. The `RebuildGraph::finalize` flow then
     /// re-asserts against the drained set on the *assembled* `CodeGraph`
     /// at step 14 — those are two different snapshots of the same
@@ -1028,6 +1028,13 @@ impl RebuildGraph {
     /// post-remove sanity check, incremental-engine debug probes, Gate
     /// 0d negative tests) can name the assertion without rolling their
     /// own iteration.
+    ///
+    /// # Panics
+    ///
+    /// Panics in debug/test builds when any node-bearing rebuild surface
+    /// still references a node recorded in `self.tombstones`. That indicates
+    /// the rebuild plane removed a file without fully compacting every
+    /// dependent arena, edge, and auxiliary index before the next pass.
     #[cfg(any(debug_assertions, test))]
     pub fn assert_no_tombstone_residue(&self) {
         use super::coverage::NodeIdBearing;

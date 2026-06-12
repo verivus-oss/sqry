@@ -24,7 +24,7 @@ use thiserror::Error;
 
 /// Documented default row budget per tool invocation.
 ///
-/// 5_000_000 rows is large enough that healthy queries on
+/// `5_000_000` rows is large enough that healthy queries on
 /// realistic workspaces never trip it (a worst-case `kind:function`
 /// scan across every node in a multi-million-line monorepo is
 /// bounded by node-count, not by query shape). It exists to bound
@@ -202,6 +202,7 @@ impl QueryBudget {
     /// `Budget` already won the race. Returned bool indicates
     /// whether THIS call won the CAS (used in tests).
     #[inline]
+    #[must_use]
     pub fn mark_external_cancel(&self) -> bool {
         self.state
             .compare_exchange(
@@ -358,13 +359,18 @@ mod tests {
         assert_eq!(budget.source(), CancellationSource::Budget);
     }
 
+    // The three tests below mutate the process-global
+    // ENV_TOOL_BUDGET_ROWS variable. Cargo runs tests on parallel
+    // threads, so without serialization the set_var("999") here races
+    // the remove_var-then-read in the siblings (observed as a CI flake,
+    // default 5_000_000 read back as 999). #[serial_test::serial] puts
+    // every env-mutating test in this binary on one lane.
     #[test]
+    #[serial_test::serial]
     fn from_per_call_prefers_per_call_value_over_env() {
-        // Use a unique env-var snapshot so concurrent tests
-        // don't interfere — but here the per-call value should
-        // win regardless.
-        // SAFETY: setting an env var is a one-process-wide write;
-        // single-threaded test scope.
+        // The per-call value should win regardless of the env var.
+        // SAFETY: env mutation is process-wide; serialized via
+        // #[serial_test::serial] above.
         unsafe {
             std::env::set_var(ENV_TOOL_BUDGET_ROWS, "999");
         }
@@ -377,6 +383,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn from_per_call_zero_falls_back_to_default() {
         unsafe {
             std::env::remove_var(ENV_TOOL_BUDGET_ROWS);
@@ -390,6 +397,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn from_per_call_none_uses_default_when_env_unset() {
         unsafe {
             std::env::remove_var(ENV_TOOL_BUDGET_ROWS);

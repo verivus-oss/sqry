@@ -55,26 +55,55 @@ pub struct ResetResult {
     pub reset: bool,
 }
 
-pub(crate) async fn handle(ctx: &HandlerContext, params: Value) -> Result<Value, MethodError> {
+pub(crate) fn handle(ctx: &HandlerContext, params: Value) -> Result<Value, MethodError> {
     let p: ResetParams = serde_json::from_value(params).map_err(MethodError::InvalidParams)?;
     let canonical = resolve_index_root(&p.path).map_err(|e| {
         MethodError::Daemon(DaemonError::InvalidArgument {
             reason: format!("cannot resolve path {}: {e}", p.path.display()),
         })
     })?;
-    let Some((key, _ws)) = ctx.manager.find_key_and_workspace_by_path(&canonical) else {
+
+    // Use the source-root matcher (not exact key) so that a plain
+    // `daemon reset <path>` clears *all* entries that share the
+    // canonical path. This is required to recover from duplicate
+    // in-memory workspace entries for the same source_root that
+    // could be created before the coalesce guard in
+    // WorkspaceManager::get_or_insert_workspace (#393).
+    //
+    // The pinned/Loading/Rebuilding checks are still performed per
+    // key inside manager.reset (and the any-pinned pre-check here
+    // preserves the documented error behaviour for the path).
+    let candidates = ctx.manager.find_all_by_source_root(&canonical);
+    if candidates.is_empty() {
         return Err(MethodError::Daemon(DaemonError::WorkspaceNotLoaded {
             root: canonical,
         }));
-    };
-    let reset = ctx
-        .manager
-        .reset(&key, p.force)
-        .map_err(MethodError::Daemon)?;
+    }
+
+    // If *any* entry for this path is pinned, the whole path-level
+    // reset requires force (preserves prior contract; a dup would
+    // otherwise let a non-forced reset partially succeed).
+    if candidates.iter().any(|(_, ws)| ws.pinned) && !p.force {
+        return Err(MethodError::Daemon(DaemonError::WorkspacePinned {
+            root: canonical,
+        }));
+    }
+
+    let mut reset_any = false;
+    for (key, _) in candidates {
+        if ctx
+            .manager
+            .reset(&key, p.force)
+            .map_err(MethodError::Daemon)?
+        {
+            reset_any = true;
+        }
+    }
+
     let envelope = ResponseEnvelope {
         result: ResetResult {
             root: canonical,
-            reset,
+            reset: reset_any,
         },
         meta: ResponseMeta::management(ctx.daemon_version),
     };

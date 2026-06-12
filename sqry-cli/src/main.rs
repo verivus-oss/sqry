@@ -101,8 +101,7 @@ fn init_logging() {
         std::env::var("SQRY_LOG").ok(),
         std::env::var("RUST_LOG").ok(),
     ) {
-        (Some(v), _) if !v.trim().is_empty() => v,
-        (_, Some(v)) if !v.trim().is_empty() => v,
+        (Some(v), _) | (_, Some(v)) if !v.trim().is_empty() => v,
         _ => "off".to_string(),
     };
     let _ = env_logger::Builder::new()
@@ -421,7 +420,11 @@ fn run() -> Result<()> {
                 pattern,
                 path: path.as_deref(),
                 save_as: save_as.as_deref(),
-                global: *global,
+                scope: if *global {
+                    SearchAliasScope::Global
+                } else {
+                    SearchAliasScope::Workspace
+                },
                 description: description.as_deref(),
                 validate: *validate,
                 history_argv: &history_argv,
@@ -1015,12 +1018,17 @@ fn list_enabled_languages(cli: &Cli) -> Result<()> {
     Ok(())
 }
 
+enum SearchAliasScope {
+    Global,
+    Workspace,
+}
+
 struct SearchCommandArgs<'a> {
     cli: &'a Cli,
     pattern: &'a str,
     path: Option<&'a str>,
     save_as: Option<&'a str>,
-    global: bool,
+    scope: SearchAliasScope,
     description: Option<&'a str>,
     validate: ValidationMode,
     history_argv: &'a [String],
@@ -1029,7 +1037,7 @@ struct SearchCommandArgs<'a> {
     macro_boundaries: bool,
     /// Per-subcommand `--verbose` / `-v` flag from `sqry search`. The shorthand
     /// path threads `cli.verbose` instead; either source enables verbose at the
-    /// run_search call site.
+    /// `run_search` call site.
     verbose: bool,
 }
 
@@ -1067,7 +1075,7 @@ fn handle_search_command(args: &SearchCommandArgs<'_>) -> Result<()> {
             args.cli,
             alias_name,
             args.pattern,
-            args.global,
+            matches!(args.scope, SearchAliasScope::Global),
             args.description,
         )
         .context("Failed to save alias")?;

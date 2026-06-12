@@ -22,6 +22,12 @@ use std::thread;
 
 use crate::config::QueryDbConfig;
 
+fn usize_ratio(numerator: usize, denominator: usize) -> f64 {
+    let numerator = u32::try_from(numerator).unwrap_or(u32::MAX);
+    let denominator = u32::try_from(denominator).unwrap_or(u32::MAX);
+    f64::from(numerator) / f64::from(denominator)
+}
+
 /// Handle to a background compaction thread.
 ///
 /// Dropping the handle signals the thread to stop (via the `stop` flag).
@@ -67,13 +73,13 @@ pub fn should_compact(
         return false;
     }
 
-    let fragmentation = free_slots as f64 / total_slots as f64;
+    let fragmentation = usize_ratio(free_slots, total_slots);
     if fragmentation > config.compaction_fragmentation_threshold {
         return true;
     }
 
     if csr_count > 0 {
-        let delta_ratio = delta_count as f64 / csr_count as f64;
+        let delta_ratio = usize_ratio(delta_count, csr_count);
         if delta_ratio > config.compaction_delta_ratio_threshold {
             return true;
         }
@@ -106,6 +112,7 @@ impl CompactionHandle {
     /// Waits for the compaction thread to finish and returns the result.
     ///
     /// Returns `None` if no thread was started or it has already been joined.
+    #[must_use]
     pub fn join(mut self) -> Option<CompactionResult> {
         self.thread.take().and_then(|t| t.join().ok())
     }

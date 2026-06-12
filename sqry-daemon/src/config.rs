@@ -222,7 +222,7 @@ pub const DEFAULT_AUTO_START_READY_TIMEOUT_SECS: u64 = 10;
 pub const DEFAULT_LOG_KEEP_ROTATIONS: u32 = 5;
 
 /// Default arena-size cap for the pre-flight cost gate
-/// (`B_cost_gate.md` §1, `00_contracts.md` §3.CC-3): below 50_000
+/// (`B_cost_gate.md` §1, `00_contracts.md` §3.CC-3): below `50_000`
 /// nodes, prohibitive regex shapes are allowed unconditionally. Above
 /// that, scope-filter coupling is required.
 pub const DEFAULT_COST_GATE_NODE_LIMIT: usize = 50_000;
@@ -497,6 +497,12 @@ impl DaemonConfig {
     ///
     /// A missing config file is **not** an error — the defaults plus env-var
     /// overrides are returned. A malformed file is always an error.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DaemonError::Config`] if config-path resolution fails, the
+    /// config file cannot be read or parsed, an environment override is
+    /// malformed, or validation rejects the effective configuration.
     pub fn load() -> DaemonResult<Self> {
         let path = Self::resolve_config_path()?;
         let mut config = if path.exists() {
@@ -511,6 +517,11 @@ impl DaemonConfig {
 
     /// Load a config file from an explicit path, ignoring env overrides.
     /// Useful for tests and documentation examples.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DaemonError::Config`] when `path` cannot be read or the TOML
+    /// payload cannot be parsed into a [`DaemonConfig`].
     pub fn load_from_path(path: &Path) -> DaemonResult<Self> {
         let text = std::fs::read_to_string(path).map_err(|source| DaemonError::Config {
             path: path.to_path_buf(),
@@ -524,6 +535,10 @@ impl DaemonConfig {
 
     /// Parse a TOML string into a [`DaemonConfig`]. Defaults fill any missing
     /// fields.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `text` is not valid daemon configuration TOML.
     pub fn from_toml_str(text: &str) -> anyhow::Result<Self> {
         let cfg: Self = toml::from_str(text).context("parsing daemon config TOML")?;
         Ok(cfg)
@@ -531,6 +546,11 @@ impl DaemonConfig {
 
     /// Apply `SQRY_DAEMON_*` environment-variable overrides. See the
     /// `ENV_*` constants for the full list.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DaemonError::Config`] when an environment override that should
+    /// contain a number cannot be parsed.
     pub fn apply_env_overrides(&mut self) -> DaemonResult<()> {
         if let Some(v) = env::var_os(ENV_MEMORY_LIMIT_MB) {
             let v = v.to_string_lossy().into_owned();
@@ -645,6 +665,11 @@ impl DaemonConfig {
 
     /// Sanity-check invariants that admission accounting and the rebuild
     /// dispatcher depend on.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DaemonError::Config`] when a numeric configuration value is
+    /// outside the supported daemon operating range.
     pub fn validate(&self) -> DaemonResult<()> {
         let reject = |msg: &str| DaemonError::Config {
             path: PathBuf::from("<in-memory>"),
@@ -695,6 +720,11 @@ impl DaemonConfig {
     ///
     /// Falls back to `$XDG_CONFIG_HOME/sqry/daemon.toml`, then
     /// `$HOME/.config/sqry/daemon.toml`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DaemonError::Config`] if no platform config directory can be
+    /// resolved and [`ENV_CONFIG_PATH`] is not set.
     pub fn resolve_config_path() -> DaemonResult<PathBuf> {
         if let Some(v) = env::var_os(ENV_CONFIG_PATH) {
             return Ok(PathBuf::from(v));
@@ -862,12 +892,24 @@ const fn default_auto_start_ready_timeout_secs() -> u64 {
 const fn default_log_keep_rotations() -> u32 {
     DEFAULT_LOG_KEEP_ROTATIONS
 }
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "serde default callback must return the Option<usize> field type"
+)]
 const fn default_cost_gate_node_limit() -> Option<usize> {
     Some(DEFAULT_COST_GATE_NODE_LIMIT)
 }
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "serde default callback must return the Option<usize> field type"
+)]
 const fn default_cost_gate_min_prefix() -> Option<usize> {
     Some(DEFAULT_COST_GATE_MIN_PREFIX)
 }
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "serde default callback must return the Option<usize> field type"
+)]
 const fn default_cost_gate_min_literal() -> Option<usize> {
     Some(DEFAULT_COST_GATE_MIN_LITERAL)
 }

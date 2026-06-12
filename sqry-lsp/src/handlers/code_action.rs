@@ -12,7 +12,7 @@ pub const COMMAND_EXPLAIN_SYMBOL: &str = "sqry.explainSymbol";
 
 /// Build sqry-specific code actions for the current symbol.
 ///
-/// STEP_11_4 — gates on [`SessionManager::evaluate_handler_gate`] before
+/// `STEP_11_4` — gates on [`SessionManager::evaluate_handler_gate`] before
 /// touching the graph: requests against member folders or excluded
 /// paths return `Ok(None)` (LSP-standard "no actions available")
 /// without making any per-folder filesystem probe.

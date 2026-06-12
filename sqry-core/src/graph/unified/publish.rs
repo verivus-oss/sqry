@@ -204,7 +204,10 @@ pub fn assert_publish_bijection(_graph: &CodeGraph) {}
 /// unambiguous: either finalize step 14 ran against `drained_tombstones`
 /// or no residue check ran at all.
 #[cfg(any(debug_assertions, test))]
-pub fn assert_publish_invariants(graph: &CodeGraph, drained: &HashSet<NodeId>) {
+pub fn assert_publish_invariants<S: std::hash::BuildHasher>(
+    graph: &CodeGraph,
+    drained: &HashSet<NodeId, S>,
+) {
     graph.assert_bucket_bijection();
     graph.assert_no_tombstone_residue_for(drained);
 }

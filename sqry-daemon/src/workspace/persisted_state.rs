@@ -1,13 +1,13 @@
 //! On-disk persisted-state schema for daemon workspace bookkeeping.
 //!
-//! STEP_6 (workspace-aware-cross-repo, 2026-04-26) introduced the
+//! `STEP_6` (workspace-aware-cross-repo, 2026-04-26) introduced the
 //! `workspace_id` dimension on [`super::state::WorkspaceKey`] and a
 //! corresponding **v2** wire shape. To keep older sqryd state files —
 //! which never carried `workspace_id` and used the legacy `index_root`
 //! field name — readable across an upgrade, this module owns:
 //!
 //! - [`PersistedState::FORMAT_VERSION`] — the current schema version
-//!   (bumped from `1` to `2` by STEP_6).
+//!   (bumped from `1` to `2` by `STEP_6`).
 //! - [`PersistedStateV1`] — the legacy v1 wire shape.
 //! - [`PersistedState`] (the canonical v2 form) — `format_version` +
 //!   a vector of `WorkspaceKey`s.
@@ -40,14 +40,14 @@ use serde::{Deserialize, Serialize};
 
 use super::state::WorkspaceKey;
 
-/// The canonical v2 persisted-state shape introduced by STEP_6.
+/// The canonical v2 persisted-state shape introduced by `STEP_6`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PersistedState {
     /// On-disk schema version. v2 is current; v1 is upconverted on load.
     pub format_version: u32,
     /// Bookkeeping snapshot — every workspace key the daemon was
     /// tracking when the state was persisted. Per-key state (current
-    /// bytes / last_good_at / pinned) is recovered from
+    /// bytes / `last_good_at` / pinned) is recovered from
     /// `.sqry/graph/snapshot.sqry` on reload, so we only persist the
     /// keys themselves.
     pub keys: Vec<WorkspaceKey>,

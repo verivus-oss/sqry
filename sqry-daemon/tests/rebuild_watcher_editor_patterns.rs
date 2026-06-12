@@ -90,8 +90,7 @@ async fn ensure_watching_is_idempotent_for_same_key() {
     // Re-call with the same key — must be a no-op fast path.
     let ws = h.manager.lookup(&h.key).expect("workspace present");
     h.dispatcher
-        .ensure_watching(&h.key, ws, h.root.clone())
-        .await
+        .ensure_watching(&h.key, &ws, &h.root)
         .expect("second ensure_watching must succeed");
 
     assert_eq!(
@@ -136,7 +135,7 @@ async fn ensure_watching_is_race_free_under_concurrent_callers() {
         let ws = Arc::clone(&ws);
         let root = h.root.clone();
         handles.push(tokio::spawn(async move {
-            dispatcher.ensure_watching(&key, ws, root).await
+            dispatcher.ensure_watching(&key, &ws, &root)
         }));
     }
 
@@ -181,8 +180,7 @@ async fn ensure_watching_prunes_finished_entry_and_respawns() {
     // subsequent ensure_watching spawns a fresh pair.
     ws.rebuild_cancelled.store(false, Ordering::Release);
     h.dispatcher
-        .ensure_watching(&h.key, ws, h.root.clone())
-        .await
+        .ensure_watching(&h.key, &ws, &h.root)
         .expect("respawn after shutdown must succeed");
 
     assert_eq!(

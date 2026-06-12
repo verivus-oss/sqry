@@ -35,7 +35,7 @@ pub struct UnloadResult {
     pub was_loaded: bool,
 }
 
-pub(crate) async fn handle(ctx: &HandlerContext, params: Value) -> Result<Value, MethodError> {
+pub(crate) fn handle(ctx: &HandlerContext, params: Value) -> Result<Value, MethodError> {
     let params: UnloadParams =
         serde_json::from_value(params).map_err(MethodError::InvalidParams)?;
     let canonical = resolve_index_root(&params.index_root)?;

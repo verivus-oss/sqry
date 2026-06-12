@@ -42,6 +42,11 @@ use sqry_daemon_protocol::{
 
 use crate::{AsyncReadWrite, ClientError, DEFAULT_CONNECT_TIMEOUT, platform_connect};
 
+#[derive(serde::Deserialize)]
+struct ActiveArtifactsBody {
+    artifacts: Vec<std::path::PathBuf>,
+}
+
 // ---------------------------------------------------------------------------
 // Hello-handshake timeout constant.
 // ---------------------------------------------------------------------------
@@ -336,16 +341,12 @@ impl DaemonClient {
         // `serde_json::from_value` on an explicit field shape gives
         // us a real `serde_json::Error` for `SchemaMismatch` without
         // pulling in `serde` as a direct dep.
-        #[derive(serde::Deserialize)]
-        struct Body {
-            artifacts: Vec<std::path::PathBuf>,
-        }
         let body_value = raw
             .get("result")
             .cloned()
             .or_else(|| Some(raw.clone()))
             .unwrap_or(raw);
-        let body: Body =
+        let body: ActiveArtifactsBody =
             serde_json::from_value(body_value).map_err(|source| ClientError::SchemaMismatch {
                 method: "daemon/active-artifacts",
                 source,

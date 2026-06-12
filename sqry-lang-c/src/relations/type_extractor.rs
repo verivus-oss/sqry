@@ -44,7 +44,7 @@ use tree_sitter::Node;
 /// such as `struct foo` or typedef names are unaffected.
 ///
 /// Consumed by [`normalize_width_alias`] and (in a follow-up Phase A
-/// unit, U07_SIGNATURE_BUILDER) by the canonical type-signature builder
+/// unit, `U07_SIGNATURE_BUILDER`) by the canonical type-signature builder
 /// in `sqry-lang-c/src/relations/signature_builder.rs`. The unit-tests
 /// in `width_alias_tests` exercise every row.
 #[allow(dead_code)] // wired by U07_SIGNATURE_BUILDER in a follow-up commit on this branch

@@ -174,6 +174,11 @@ where
 // ---------------------------------------------------------------------------
 
 /// `semantic_search`: JSON → [`SemanticSearchArgs`].
+///
+/// # Errors
+///
+/// Returns [`RpcError`] when JSON-RPC params are malformed, the query is
+/// empty, or pagination/bounds validation fails.
 pub fn params_to_semantic_search_args(params: Value) -> Result<SemanticSearchArgs, RpcError> {
     let params: SemanticSearchParams = deserialise_params(params)?;
     // Mirror the rmcp-side non-empty `query` guard in `server.rs` so the
@@ -212,6 +217,11 @@ pub fn params_to_semantic_search_args(params: Value) -> Result<SemanticSearchArg
 }
 
 /// `relation_query`: JSON → [`RelationQueryArgs`].
+///
+/// # Errors
+///
+/// Returns [`RpcError`] when JSON-RPC params are malformed or pagination/depth
+/// bounds validation fails.
 pub fn params_to_relation_query_args(params: Value) -> Result<RelationQueryArgs, RpcError> {
     let params: RelationQueryParams = deserialise_params(params)?;
     let relation = match params.relation_type {
@@ -245,6 +255,11 @@ pub fn params_to_relation_query_args(params: Value) -> Result<RelationQueryArgs,
 }
 
 /// `direct_callers`: JSON → [`DirectCallersArgs`].
+///
+/// # Errors
+///
+/// Returns [`RpcError`] when JSON-RPC params are malformed, required fields
+/// fail validation, or pagination/bounds validation fails.
 pub fn params_to_direct_callers_args(params: Value) -> Result<DirectCallersArgs, RpcError> {
     let params: DirectCallersParams = deserialise_params(params)?;
     // Mirror the rmcp-side `params.validate()` guard (non-empty `symbol`).
@@ -266,6 +281,11 @@ pub fn params_to_direct_callers_args(params: Value) -> Result<DirectCallersArgs,
 }
 
 /// `direct_callees`: JSON → [`DirectCalleesArgs`].
+///
+/// # Errors
+///
+/// Returns [`RpcError`] when JSON-RPC params are malformed, required fields
+/// fail validation, or pagination/bounds validation fails.
 pub fn params_to_direct_callees_args(params: Value) -> Result<DirectCalleesArgs, RpcError> {
     let params: DirectCalleesParams = deserialise_params(params)?;
     // Mirror the rmcp-side `params.validate()` guard (non-empty `symbol`).
@@ -287,6 +307,11 @@ pub fn params_to_direct_callees_args(params: Value) -> Result<DirectCalleesArgs,
 }
 
 /// `find_unused`: JSON → [`FindUnusedArgs`].
+///
+/// # Errors
+///
+/// Returns [`RpcError`] when JSON-RPC params are malformed or pagination/bounds
+/// validation fails.
 pub fn params_to_find_unused_args(params: Value) -> Result<FindUnusedArgs, RpcError> {
     let params: FindUnusedParams = deserialise_params(params)?;
     let pagination = convert_pagination(None, 50, params.pagination.as_ref())?;
@@ -312,6 +337,11 @@ pub fn params_to_find_unused_args(params: Value) -> Result<FindUnusedArgs, RpcEr
 }
 
 /// `find_cycles`: JSON → [`FindCyclesArgs`].
+///
+/// # Errors
+///
+/// Returns [`RpcError`] when JSON-RPC params are malformed, cycle-depth bounds
+/// are invalid, or pagination/bounds validation fails.
 pub fn params_to_find_cycles_args(params: Value) -> Result<FindCyclesArgs, RpcError> {
     let params: FindCyclesParams = deserialise_params(params)?;
     let pagination = convert_pagination(None, 50, params.pagination.as_ref())?;
@@ -346,6 +376,11 @@ pub fn params_to_find_cycles_args(params: Value) -> Result<FindCyclesArgs, RpcEr
 }
 
 /// `is_node_in_cycle`: JSON → [`IsNodeInCycleArgs`].
+///
+/// # Errors
+///
+/// Returns [`RpcError`] when JSON-RPC params are malformed or custom
+/// cycle-membership validation fails.
 pub fn params_to_is_node_in_cycle_args(params: Value) -> Result<IsNodeInCycleArgs, RpcError> {
     let params: IsNodeInCycleParams = deserialise_params(params)?;
     // Mirror the custom validation on `IsNodeInCycleParams::validate`.
@@ -373,6 +408,11 @@ pub fn params_to_is_node_in_cycle_args(params: Value) -> Result<IsNodeInCycleArg
 }
 
 /// `trace_path`: JSON → [`TracePathArgs`].
+///
+/// # Errors
+///
+/// Returns [`RpcError`] when JSON-RPC params are malformed or hop/path bounds
+/// validation fails.
 pub fn params_to_trace_path_args(params: Value) -> Result<TracePathArgs, RpcError> {
     let params: TracePathParams = deserialise_params(params)?;
     let max_hops = validate_max_hops(params.max_hops)?;
@@ -390,6 +430,11 @@ pub fn params_to_trace_path_args(params: Value) -> Result<TracePathArgs, RpcErro
 }
 
 /// `subgraph`: JSON → [`SubgraphArgs`].
+///
+/// # Errors
+///
+/// Returns [`RpcError`] when JSON-RPC params are malformed, required fields
+/// fail validation, or pagination/depth/node bounds validation fails.
 pub fn params_to_subgraph_args(params: Value) -> Result<SubgraphArgs, RpcError> {
     let params: SubgraphParams = deserialise_params(params)?;
     params.validate()?;
@@ -411,6 +456,11 @@ pub fn params_to_subgraph_args(params: Value) -> Result<SubgraphArgs, RpcError> 
 }
 
 /// `export_graph`: JSON → [`ExportGraphArgs`].
+///
+/// # Errors
+///
+/// Returns [`RpcError`] when JSON-RPC params are malformed, required fields
+/// fail validation, or pagination/depth/result bounds validation fails.
 pub fn params_to_export_graph_args(params: Value) -> Result<ExportGraphArgs, RpcError> {
     let params: ExportGraphParams = deserialise_params(params)?;
     params.validate()?;
@@ -465,6 +515,11 @@ pub fn params_to_export_graph_args(params: Value) -> Result<ExportGraphArgs, Rpc
 }
 
 /// `complexity_metrics`: JSON → [`ComplexityMetricsArgs`].
+///
+/// # Errors
+///
+/// Returns [`RpcError`] when JSON-RPC params are malformed or result-count
+/// bounds validation fails.
 pub fn params_to_complexity_metrics_args(params: Value) -> Result<ComplexityMetricsArgs, RpcError> {
     let params: ComplexityMetricsParams = deserialise_params(params)?;
     let max_results = validate_max_results(params.max_results, 1000)?;
@@ -479,6 +534,11 @@ pub fn params_to_complexity_metrics_args(params: Value) -> Result<ComplexityMetr
 }
 
 /// `semantic_diff`: JSON → [`SemanticDiffArgs`].
+///
+/// # Errors
+///
+/// Returns [`RpcError`] when JSON-RPC params are malformed or pagination/result
+/// bounds validation fails.
 pub fn params_to_semantic_diff_args(params: Value) -> Result<SemanticDiffArgs, RpcError> {
     let params: SemanticDiffParams = deserialise_params(params)?;
     let pagination = convert_pagination(params.page_token, params.page_size, None)?;
@@ -524,6 +584,11 @@ pub fn params_to_semantic_diff_args(params: Value) -> Result<SemanticDiffArgs, R
 }
 
 /// `dependency_impact`: JSON → [`DependencyImpactArgs`].
+///
+/// # Errors
+///
+/// Returns [`RpcError`] when JSON-RPC params are malformed or pagination/depth
+/// bounds validation fails.
 pub fn params_to_dependency_impact_args(params: Value) -> Result<DependencyImpactArgs, RpcError> {
     let params: DependencyImpactParams = deserialise_params(params)?;
     let pagination = convert_pagination(params.page_token, params.page_size, None)?;
@@ -554,6 +619,11 @@ pub fn params_to_dependency_impact_args(params: Value) -> Result<DependencyImpac
 /// performs the same struct-shape deserialise + bounds checks the
 /// rmcp `SqryServer::sqry_ask` path runs before dispatch, returning
 /// the canonical `RpcError` on failure.
+///
+/// # Errors
+///
+/// Returns [`RpcError`] when params are malformed, `query` is empty, or `query`
+/// exceeds the daemon route character cap.
 pub fn params_to_sqry_ask_args(
     params: Value,
 ) -> Result<crate::tools::params::SqryAskParams, RpcError> {
@@ -573,6 +643,11 @@ pub fn params_to_sqry_ask_args(
 }
 
 /// `show_dependencies`: JSON → [`ShowDependenciesArgs`].
+///
+/// # Errors
+///
+/// Returns [`RpcError`] when JSON-RPC params are malformed, required fields
+/// fail validation, or pagination/depth/result bounds validation fails.
 pub fn params_to_show_dependencies_args(params: Value) -> Result<ShowDependenciesArgs, RpcError> {
     let params: ShowDependenciesParams = deserialise_params(params)?;
     params.validate()?;

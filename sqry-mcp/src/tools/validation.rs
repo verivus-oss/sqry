@@ -48,7 +48,7 @@ pub struct SemanticSearchArgs {
     /// Per-call runtime row budget cap (per `C_budget.md` §C5 +
     /// `00_contracts.md` §3.CC-2). `None` defers to the daemon
     /// `SQRY_TOOL_BUDGET_ROWS` env var or the documented default
-    /// (5_000_000).
+    /// (`5_000_000`).
     pub budget_rows: Option<u64>,
     /// Phase β joint-stub (Plan A) — filter results to nodes carrying
     /// framework-route metadata for the named framework. Threaded from
@@ -77,7 +77,7 @@ pub enum RelationType {
     /// `EdgeKind::Wraps` regardless of `WrapKind`.
     Wraps,
     /// T2.4 (Go channels): `ChannelPeer` edges. Body-expands a containing
-    /// function to its channel-operation CallSites, then walks their
+    /// function to its channel-operation `CallSites`, then walks their
     /// `ChannelPeer` edges (or, for a `Channel` anchor, incoming edges).
     ChannelPeers,
     /// T2.5 (Go generics): `Instantiates` edges. Walks incoming
@@ -86,6 +86,7 @@ pub enum RelationType {
 }
 
 impl RelationType {
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             RelationType::Callers => "callers",
@@ -274,7 +275,7 @@ pub struct FindUnusedArgs {
     /// T3.8 (Cluster G): when `true`, drop any candidate whose
     /// `MacroNodeMetadata::cfg_condition` is `Some(...)`. Useful for
     /// excluding platform-shim functions that look "unused" on the
-    /// analyst's host but are live on other platforms (02_DESIGN
+    /// analyst's host but are live on other platforms (`02_DESIGN`
     /// §2.5 row `find_unused`).
     pub exclude_cfg_gated: bool,
 }
@@ -321,6 +322,7 @@ pub enum ChangeType {
 }
 
 impl ChangeType {
+    #[must_use]
     pub fn as_str(&self) -> &'static str {
         match self {
             ChangeType::Added => "added",

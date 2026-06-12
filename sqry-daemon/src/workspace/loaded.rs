@@ -112,7 +112,7 @@ pub struct LoadedWorkspace {
     ///
     /// Only [`crate::workspace::publish::publish_and_retain`] swaps a
     /// new graph in; eviction stores a fresh empty graph so the
-    /// ArcSwap remains non-null (simpler than Option-wrapping).
+    /// `ArcSwap` remains non-null (simpler than Option-wrapping).
     pub graph: ArcSwap<CodeGraph>,
 
     /// Current lifecycle state. Stored as `AtomicU8` to keep the
@@ -266,7 +266,7 @@ impl LoadedWorkspace {
     /// The empty graph is `Arc`-cheap (sub-kilobyte) so keeping the
     /// `ArcSwap` non-null for the entire workspace lifetime avoids an
     /// `Option` layer on the query path. Eviction stores another
-    /// empty graph through the same ArcSwap; re-load overwrites it.
+    /// empty graph through the same `ArcSwap`; re-load overwrites it.
     #[must_use]
     pub fn new(key: WorkspaceKey, pinned: bool) -> Self {
         Self {

@@ -1,6 +1,6 @@
 //! Canonical type-signature builder for C function/function-pointer declarators.
 //!
-//! Realises **IMP:c-icall-precision-007** / **U07_SIGNATURE_BUILDER** of
+//! Realises **IMP:c-icall-precision-007** / **`U07_SIGNATURE_BUILDER`** of
 //! the Phase A indirect-call-precision DAG. Implements the declarator
 //! walker described in DESIGN §3.3 plus base-token normalisation via the
 //! width-alias table from U01 ([`normalize_width_alias`]) and typedef
@@ -25,7 +25,7 @@
 //! and their `abstract_*` siblings, plus the parenthesised forms) and
 //! builds a structured [`Declarator`] value:
 //!
-//! 1. **Pass 1** — locate the function_declarator (the node owning the
+//! 1. **Pass 1** — locate the `function_declarator` (the node owning the
 //!    `parameters` field).
 //! 2. **Pass 2** — walk *outwards* from the function declarator to count
 //!    pointer levels and detect array decay.
@@ -358,7 +358,7 @@ fn child_declarator(node: Node) -> Option<Node> {
     node.child_by_field_name("declarator")
 }
 
-/// Locate the **function_declarator** that names this declaration —
+/// Locate the **`function_declarator`** that names this declaration —
 /// i.e. the function declarator whose `declarator` field walks down
 /// the declarator chain to the leaf identifier (or, for abstract
 /// forms, to no further function declarator). In the spiral-reading
@@ -404,7 +404,7 @@ fn find_function_declarator(node: Node) -> Option<Node> {
 /// chain from `decl_node` until we reach a leaf (identifier / nothing).
 ///
 /// Returns `(pointer_depth, is_array_decayed)`. `is_array_decayed` is
-/// set when at least one array_declarator was traversed at a parameter
+/// set when at least one `array_declarator` was traversed at a parameter
 /// position (which always decays in C — there's no top-level "non-
 /// parameter array decay" concept relevant to a single token).
 fn walk_pointer_depth(node: Node, mut array_seen: bool) -> (u8, bool) {
@@ -425,32 +425,31 @@ fn walk_pointer_depth(node: Node, mut array_seen: bool) -> (u8, bool) {
                 break;
             }
         }
-        match child_declarator(current) {
-            Some(next) => current = next,
-            None => {
-                // For abstract_pointer_declarator there may be no
-                // `declarator` field but a single named child carrying
-                // further structure.
-                let mut cursor = current.walk();
-                let mut moved = false;
-                for child in current.named_children(&mut cursor) {
-                    if matches!(
-                        child.kind(),
-                        "pointer_declarator"
-                            | "abstract_pointer_declarator"
-                            | "array_declarator"
-                            | "abstract_array_declarator"
-                            | "parenthesized_declarator"
-                            | "abstract_parenthesized_declarator"
-                    ) {
-                        current = child;
-                        moved = true;
-                        break;
-                    }
-                }
-                if !moved {
+        if let Some(next) = child_declarator(current) {
+            current = next;
+        } else {
+            // For abstract_pointer_declarator there may be no
+            // `declarator` field but a single named child carrying
+            // further structure.
+            let mut cursor = current.walk();
+            let mut moved = false;
+            for child in current.named_children(&mut cursor) {
+                if matches!(
+                    child.kind(),
+                    "pointer_declarator"
+                        | "abstract_pointer_declarator"
+                        | "array_declarator"
+                        | "abstract_array_declarator"
+                        | "parenthesized_declarator"
+                        | "abstract_parenthesized_declarator"
+                ) {
+                    current = child;
+                    moved = true;
                     break;
                 }
+            }
+            if !moved {
+                break;
             }
         }
     }
@@ -499,7 +498,7 @@ fn walk_parameter_list(
 ///   upgrade this to recursive nested rendering.
 /// - **array parameter**: array decay bumps the canonical pointer
 ///   depth by 1.
-/// - **plain pointer / value parameter**: base token + `*`*pointer_depth.
+/// - **plain pointer / value parameter**: base token + `*`*`pointer_depth`.
 fn build_parameter_token(
     param_node: Node,
     content: &[u8],
@@ -648,11 +647,11 @@ fn build_function_signature_from_func_decl(
 /// Count pointer-declarator levels that occur **before** the first
 /// parenthesised group inside `node`. Those are return-type pointers.
 ///
-/// `int (*)(int)`: the function_declarator's `declarator` field is an
+/// `int (*)(int)`: the `function_declarator`'s `declarator` field is an
 /// `abstract_pointer_declarator`, but that pointer is INSIDE the
 /// parenthesised group, so its depth is 0 from this perspective.
 ///
-/// `int* (*)(int)`: the abstract_function_declarator's declarator
+/// `int* (*)(int)`: the `abstract_function_declarator`'s declarator
 /// chain is `abstract_pointer_declarator(abstract_parenthesized_declarator(abstract_pointer_declarator(...)))`
 /// — the outer pointer is at top level (return-type) and the inner is
 /// inside the parens (function-pointer indirection). We count only the

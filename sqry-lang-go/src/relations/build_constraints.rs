@@ -13,11 +13,11 @@
 //! 2. The legacy `// +build` form (still in widespread use) — space-
 //!    separated terms are OR-of-AND; `,` is AND; `!` is negation. When
 //!    both forms are present, the `//go:build` line wins and a warning
-//!    is logged if the two forms disagree (01_SPEC §6.3 AC-T3.8-3).
+//!    is logged if the two forms disagree (`01_SPEC` §6.3 AC-T3.8-3).
 //! 3. Filename-suffix constraints — `foo_GOOS.go`, `foo_GOARCH.go`,
 //!    `foo_GOOS_GOARCH.go`. The `_test` suffix is stripped before
 //!    GOOS / GOARCH matching and is NOT itself a build-tag identifier
-//!    (01_SPEC §6.3 AC-T3.8-6).
+//!    (`01_SPEC` §6.3 AC-T3.8-6).
 //!
 //! cgo files (`import "C"`) carry an implicit `cgo` term, conjoined
 //! with whatever the other recognisers produce.
@@ -29,8 +29,8 @@
 //! `"linux && amd64"`, `"!windows"`, `"(linux || darwin) && amd64"`.
 //!
 //! References:
-//! - 01_SPEC §3.3, §5.3, §6.3 (T3.8 acceptance criteria).
-//! - 02_DESIGN §3.3, §4.3 (algorithm + canonicalisation rules).
+//! - `01_SPEC` §3.3, §5.3, §6.3 (T3.8 acceptance criteria).
+//! - `02_DESIGN` §3.3, §4.3 (algorithm + canonicalisation rules).
 //! - <https://pkg.go.dev/go/build/constraint>
 //! - <https://pkg.go.dev/cmd/go#hdr-Build_constraints>
 
@@ -38,8 +38,8 @@ use std::path::Path;
 
 /// Maximum recursion depth for `//go:build` parsing.
 ///
-/// Guards against pathological nested-paren inputs (DoS surface, per
-/// 02_DESIGN §11.2). 128 levels comfortably exceeds any realistic
+/// Guards against pathological nested-paren inputs (`DoS` surface, per
+/// `02_DESIGN` §11.2). 128 levels comfortably exceeds any realistic
 /// build-constraint depth — `go/build/constraint` itself has no hard
 /// cap but real-world constraints are flat.
 const MAX_PARSE_DEPTH: usize = 128;
@@ -82,7 +82,7 @@ pub(crate) enum ParseError {
     UnclosedParen,
     /// Operator with no right-hand side (e.g. `linux &&`).
     DanglingOperator,
-    /// Recursion exceeded [`MAX_PARSE_DEPTH`] (DoS guard).
+    /// Recursion exceeded [`MAX_PARSE_DEPTH`] (`DoS` guard).
     DepthExceeded,
 }
 
@@ -125,7 +125,7 @@ impl NormalisedExpr {
         Self::Flag(s.to_string())
     }
 
-    /// Produce the canonical Go-native infix string per 02_DESIGN §4.3.c.
+    /// Produce the canonical Go-native infix string per `02_DESIGN` §4.3.c.
     ///
     /// Mirrors what `go/build/constraint`'s `Expr.String()` returns:
     /// flat infix, `&&` / `||` with surrounding spaces, `!` prefix
@@ -227,7 +227,7 @@ struct GoBuildParser<'a> {
     depth: usize,
 }
 
-impl<'a> GoBuildParser<'a> {
+impl GoBuildParser<'_> {
     fn skip_ws(&mut self) {
         while self.pos < self.bytes.len() {
             let c = self.bytes[self.pos];
@@ -430,7 +430,7 @@ pub(crate) fn parse_plusbuild_expr(src: &str) -> Result<NormalisedExpr, ParseErr
 // ---------------------------------------------------------------------------
 
 /// Parse the GOOS/GOARCH suffix from a Go filename, per cmd/go's
-/// filename-matching rules (01_SPEC §5.3.c).
+/// filename-matching rules (`01_SPEC` §5.3.c).
 ///
 /// Returns `None` if:
 /// - the path's basename does not end in `.go`,
@@ -487,13 +487,13 @@ fn is_known_goarch(s: &str) -> bool {
 ///
 /// Returns `None` when the file has no build constraint at all
 /// (no `//go:build`, no `// +build`, no recognised filename suffix,
-/// and no `import "C"`). Per 01_SPEC §6.3 AC-T3.8-6 `_test.go` files
+/// and no `import "C"`). Per `01_SPEC` §6.3 AC-T3.8-6 `_test.go` files
 /// without an explicit `//go:build` line MUST yield `None`.
 ///
 /// When both `//go:build` and `// +build` are present and disagree
 /// (i.e. their canonical forms differ), a warning is logged and
 /// `//go:build` wins per cmd/go's authoritative-form rule
-/// (01_SPEC §6.3 AC-T3.8-3).
+/// (`01_SPEC` §6.3 AC-T3.8-3).
 pub(crate) fn parse_file_prelude(
     file_text: &[u8],
     filename: &str,
@@ -605,15 +605,15 @@ fn conjoin(terms: impl IntoIterator<Item = Option<NormalisedExpr>>) -> Option<No
 // Per-file stamping
 // ---------------------------------------------------------------------------
 
-/// Walk every staged (non-synthetic) NodeId in `staging` and merge a
-/// `cfg_condition` MacroNodeMetadata onto each. Called by the Go
+/// Walk every staged (non-synthetic) `NodeId` in `staging` and merge a
+/// `cfg_condition` `MacroNodeMetadata` onto each. Called by the Go
 /// plugin's `build_graph` immediately before it returns, after the
 /// file's effective `NormalisedExpr` has been computed by
 /// [`parse_file_prelude`] and stringified by
 /// [`NormalisedExpr::to_condition_string`].
 ///
 /// Synthetic markers staged by `add_synthetic_variable` and friends
-/// are preserved (02_DESIGN §4.3.d) — `is_node_synthetic` skips them
+/// are preserved (`02_DESIGN` §4.3.d) — `is_node_synthetic` skips them
 /// before any new metadata is constructed so the post-pass never
 /// overwrites the synthetic flag via `merge`'s overwrite semantics.
 pub(crate) fn stamp_cfg_condition_for_file(

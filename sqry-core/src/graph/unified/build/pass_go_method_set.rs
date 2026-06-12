@@ -48,12 +48,52 @@ use crate::graph::unified::string::StringId;
 
 /// Maximum embedding depth at which T1.2 promotion walks the BFS.
 ///
-/// Per 02_DESIGN §4.2 step 2 and §9.3: real Go code rarely exceeds 4
+/// Per `02_DESIGN` §4.2 step 2 and §9.3: real Go code rarely exceeds 4
 /// embedding levels; 16 is a hard ceiling for BFS to guarantee O(n × 16)
 /// worst-case behaviour. Exceeding the cap aborts that branch of the
 /// walk and increments `GoMethodSetStats::ambiguity_blocked_promotions`
 /// under the "truncated" subcategory documented on the field.
 const MAX_PROMOTION_DEPTH: u8 = 16;
+const MAX_INTERFACE_EMBED_DEPTH: usize = 16;
+
+#[derive(Debug, Clone, Copy)]
+struct PendingShadow {
+    caller: NodeId,
+    target: NodeId,
+    kind_tag: u8, // 0 = Calls, 1 = References
+    argument_count: u8,
+    is_async: bool,
+    file: FileId,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PendingImplements {
+    source: NodeId,
+    target: NodeId,
+    file: FileId,
+    tag: u8, // 0 = value-form (C -> I), 1 = pointer-form (*C -> I)
+}
+
+struct OuterMeta {
+    outer: NodeId,
+    package_id: StringId,
+    short_name_id: StringId,
+    short_name_str: String,
+    outer_qn_str: String,
+    outer_file: FileId,
+    has_pointer_promotion: bool,
+    promotion_count: usize,
+}
+
+struct OuterReadOnly {
+    outer: NodeId,
+    outer_qn_str: String,
+    package_qn_str: String,
+    short_name_str: String,
+    outer_file: FileId,
+    has_pointer_promotion: bool,
+    promotion_count: usize,
+}
 
 /// Result statistics for the Go method-set satisfaction pass.
 ///
@@ -61,7 +101,7 @@ const MAX_PROMOTION_DEPTH: u8 = 16;
 /// for log-line parity. All counters are populated by Cluster D; the
 /// Cluster C skeleton returns the all-zero `Default`.
 ///
-/// Counter semantics (per 02_DESIGN §2.1):
+/// Counter semantics (per `02_DESIGN` §2.1):
 ///
 /// - `implements_edges_value` — `Implements(C → I)` edges where `C`'s
 ///   value-bucket method set satisfies `I`.
@@ -121,7 +161,7 @@ pub struct GoMethodSetStats {
 ///
 /// * `graph` — mutable reference to the fully-built graph.
 /// * `changed_files` — `Some(&[FileId])` for incremental re-runs (per
-///   02_DESIGN §3.6, the pass scopes its analysis to entities defined
+///   `02_DESIGN` §3.6, the pass scopes its analysis to entities defined
 ///   in the changed files and their tombstone closure); `None` for the
 ///   full-build entrypoint, which walks the entire graph.
 ///
@@ -144,7 +184,7 @@ pub fn run_go_method_set_satisfaction(
 
 /// Generic implementation used by both the public
 /// [`run_go_method_set_satisfaction`] shim (full-build path) and the
-/// intra-crate incremental rebuild dispatcher (per 02_DESIGN §3.6,
+/// intra-crate incremental rebuild dispatcher (per `02_DESIGN` §3.6,
 /// operating on a
 /// [`RebuildGraph`][crate::graph::unified::rebuild::rebuild_graph::RebuildGraph]).
 ///
@@ -342,7 +382,7 @@ pub(crate) fn run_go_method_set_satisfaction_generic<G: GraphMutationTarget>(
 /// Canonical method record used by T1.1 method-set comparison.
 ///
 /// Built once per method during the satisfaction pass and indexed into
-/// the per-package method-set tables described in 02_DESIGN §4.3.
+/// the per-package method-set tables described in `02_DESIGN` §4.3.
 #[derive(Debug, Clone)]
 #[allow(
     dead_code,
@@ -352,7 +392,7 @@ pub(crate) fn run_go_method_set_satisfaction_generic<G: GraphMutationTarget>(
 )]
 pub(crate) struct CanonicalMethod {
     /// `NodeId` of the `Method` node the canonical signature was
-    /// derived from. Same name as in 02_DESIGN §4.3 step 1.
+    /// derived from. Same name as in `02_DESIGN` §4.3 step 1.
     pub defining_node: NodeId,
     /// Receiver kind (value vs pointer) — splits the method between
     /// value-bucket and pointer-bucket method sets per the Go spec.
@@ -361,7 +401,7 @@ pub(crate) struct CanonicalMethod {
     pub canonical_signature: NormalizedSignature,
 }
 
-/// One reachable embedding edge resolved by the BFS in 02_DESIGN §4.2 step 2.
+/// One reachable embedding edge resolved by the BFS in `02_DESIGN` §4.2 step 2.
 ///
 /// `outer` embeds `inner` at BFS `depth`; `pointerness` records whether
 /// the embed was syntactically `T` or `*T`. The Go method-set rules
@@ -390,7 +430,7 @@ pub(crate) struct Embedding {
 /// Canonical byte form of a Go function / method signature.
 ///
 /// Constructed by [`canonicalise_signature`]; compared bytewise per
-/// 02_DESIGN §4.1.3. The internal representation is a `Vec<u8>` of
+/// `02_DESIGN` §4.1.3. The internal representation is a `Vec<u8>` of
 /// ASCII bytes (Go identifiers are ASCII-clean in practice; the
 /// normaliser keeps non-ASCII bytes untouched so the contract holds
 /// for the full UTF-8 input space).
@@ -471,7 +511,7 @@ pub(crate) struct PassLocalIndices {
 /// Canonicalise a Go function / method signature into a deterministic
 /// byte sequence suitable for bytewise equality comparison.
 ///
-/// Implements the 5-rule pipeline of 02_DESIGN §4.1.2. The output is
+/// Implements the 5-rule pipeline of `02_DESIGN` §4.1.2. The output is
 /// shaped as the §4.1 grammar:
 ///
 /// ```text
@@ -483,16 +523,16 @@ pub(crate) struct PassLocalIndices {
 /// # Inputs
 ///
 /// `params` and `returns` are the parameter-list and return-clause
-/// strings extracted from the live graph's `TypeOf` edges (02_DESIGN
+/// strings extracted from the live graph's `TypeOf` edges (`02_DESIGN`
 /// §4.1.1). The caller is expected to have already:
 ///
 /// - resolved package-relative names to `<pkg>.<name>`
-///   (02_DESIGN §4.1.2 rule 4); the `Type` node's `qualified_name` is
+///   (`02_DESIGN` §4.1.2 rule 4); the `Type` node's `qualified_name` is
 ///   already in that form because the Go plugin emits it that way at
 ///   `handle_struct_type_spec` (`graph_builder.rs:1944`); and
 /// - flattened generic type parameters to `<pkg>.<T>.<E>` via the
 ///   plugin's existing `extract_receiver_type_param_map`
-///   (`graph_builder.rs:1235`) — 02_DESIGN §4.1.2 rule 5.
+///   (`graph_builder.rs:1235`) — `02_DESIGN` §4.1.2 rule 5.
 ///
 /// Rules 4 and 5 are preconditions on the input strings, not work this
 /// function performs. They are documented here because the contract
@@ -519,7 +559,7 @@ pub(crate) struct PassLocalIndices {
 ///    Combined with rule 1, `... T` and `...T` both canonicalise to
 ///    `...T`.
 ///
-/// Plus the grammar shape (02_DESIGN §4.1 lines 1127–1130):
+/// Plus the grammar shape (`02_DESIGN` §4.1 lines 1127–1130):
 ///
 /// 4. **Return-clause shape rule** — the §4.1 grammar emits
 ///    `optional_return_clause` as `""` for nullary, `type` for a
@@ -557,7 +597,7 @@ pub(crate) struct PassLocalIndices {
 /// that violate the §4.1.1 precondition (e.g. unresolved alias text)
 /// pass through unchanged for their offending substring; the resulting
 /// signature will simply fail to compare equal to a properly-resolved
-/// counterpart. This matches 02_DESIGN §4.1.3 ("There is no fuzzy
+/// counterpart. This matches `02_DESIGN` §4.1.3 ("There is no fuzzy
 /// match.").
 #[allow(
     dead_code,
@@ -884,7 +924,7 @@ struct PerOuterPromotion {
     value: BTreeMap<StringId, NodeId>,
     /// `name → defining_method_node` map for methods promoted **only**
     /// into the pointer-bucket method set. Emitted under the `<pkg>.*<S>`
-    /// namespace per 02_DESIGN §4.2 step 4.
+    /// namespace per `02_DESIGN` §4.2 step 4.
     pointer_only: BTreeMap<StringId, NodeId>,
 }
 
@@ -901,7 +941,7 @@ type EmbeddingAdjacency = BTreeMap<NodeId, Vec<(NodeId, Receiver)>>;
 /// outer struct inside [`compute_promotions_for_outer`].
 ///
 /// Embeddings whose `inner_qualified_name` does not resolve to any
-/// live arena node are skipped silently. This matches 02_DESIGN
+/// live arena node are skipped silently. This matches `02_DESIGN`
 /// §4.2 step 2's "drop unresolved silently" rule and AC-7's
 /// no-false-positive intent.
 fn collect_embeddings<G: GraphMutationTarget>(graph: &G) -> Vec<Embedding> {
@@ -915,9 +955,8 @@ fn collect_embeddings<G: GraphMutationTarget>(graph: &G) -> Vec<Embedding> {
         // contract is that the inner is a type-shaped node (Struct,
         // Type, Interface). Prefer Struct → Interface → Type when
         // multiple candidates exist; ignore non-type candidates.
-        let inner = match resolve_inner_type_node(graph, hint.inner_qualified_name) {
-            Some(n) => n,
-            None => continue,
+        let Some(inner) = resolve_inner_type_node(graph, hint.inner_qualified_name) else {
+            continue;
         };
         out.push(Embedding {
             outer: hint.outer,
@@ -994,7 +1033,7 @@ fn has_outgoing_inherits<G: GraphMutationTarget>(graph: &G, node: NodeId) -> boo
         .any(|edge| matches!(edge.kind, EdgeKind::Inherits))
 }
 
-/// Build the embedding-adjacency map keyed by `outer` NodeId.
+/// Build the embedding-adjacency map keyed by `outer` `NodeId`.
 ///
 /// Values are sorted by `(inner.index, pointerness)` so the per-outer
 /// BFS visits embeddings in a deterministic order. AC-12 (build
@@ -1022,7 +1061,7 @@ fn pointerness_key(p: Receiver) -> u8 {
 }
 
 /// One candidate contributor for a promoted name, tagged with depth
-/// and the embedding path that produced it. Per 02_DESIGN §4.2 step 2,
+/// and the embedding path that produced it. Per `02_DESIGN` §4.2 step 2,
 /// distinct embedding paths must remain distinct contributors so the
 /// same-depth ambiguity rule (golang/go#57352) can detect collisions
 /// at the shallowest depth.
@@ -1034,7 +1073,7 @@ struct PromotionCandidate {
     /// method into the outer's reach — i.e. the BFS frame's
     /// `inner`, not the original declaring type if reached via
     /// interface inheritance. Used by step 3's same-depth ambiguity
-    /// check (Cluster G1 / 01_SPEC §7 AC-4 / golang/go#57352): two
+    /// check (Cluster G1 / `01_SPEC` §7 AC-4 / golang/go#57352): two
     /// distinct immediate embeds contributing the same method name
     /// at the same depth = ambiguous selector regardless of whether
     /// they ultimately resolve to the same defining method.
@@ -1069,6 +1108,37 @@ enum PromotionBucket {
     /// only; pointer-receiver methods of an embedded `*T` promote onto
     /// both `S` and `*S`).
     PointerOnly,
+}
+
+fn promotion_methods_for_inner<G: GraphMutationTarget>(
+    graph: &G,
+    inner: NodeId,
+    resolved_inner_qn: &str,
+) -> Vec<(StringId, NodeId)> {
+    let inner_kind = graph.nodes().get(inner).map(|entry| entry.kind);
+    let interface_companion = if matches!(inner_kind, Some(NodeKind::Interface)) {
+        Some(inner)
+    } else if let Some(qn_id) = graph.strings().get(resolved_inner_qn) {
+        graph
+            .indices()
+            .by_qualified_name(qn_id)
+            .iter()
+            .copied()
+            .find(|&node_id| {
+                matches!(
+                    graph.nodes().get(node_id).map(|entry| entry.kind),
+                    Some(NodeKind::Interface)
+                )
+            })
+    } else {
+        None
+    };
+
+    if let Some(interface_node) = interface_companion {
+        find_interface_flattened_methods(graph, interface_node)
+    } else {
+        find_method_names_of_type(graph, resolved_inner_qn)
+    }
 }
 
 /// Step 2 + 3: per-outer BFS over the embedding adjacency, collecting
@@ -1117,9 +1187,8 @@ fn compute_promotions_for_outer<G: GraphMutationTarget>(
     // name collisions. Outer's "own" methods are discovered by
     // qualified-name prefix matching: any Method whose qualified
     // name is `<outer_qn>.<m>`.
-    let outer_qn_str = match qualified_name_string(graph, outer) {
-        Some(s) => s,
-        None => return PerOuterPromotion::default(),
+    let Some(outer_qn_str) = qualified_name_string(graph, outer) else {
+        return PerOuterPromotion::default();
     };
     let own_method_names: BTreeSet<StringId> = find_method_names_of_type(graph, &outer_qn_str)
         .into_iter()
@@ -1155,9 +1224,8 @@ fn compute_promotions_for_outer<G: GraphMutationTarget>(
             continue;
         }
 
-        let outgoing = match adjacency.get(&cur) {
-            Some(v) => v,
-            None => continue,
+        let Some(outgoing) = adjacency.get(&cur) else {
+            continue;
         };
 
         // Sort outgoing edges deterministically (already sorted by
@@ -1184,9 +1252,8 @@ fn compute_promotions_for_outer<G: GraphMutationTarget>(
             // Inner type's qualified name → look up methods of that
             // type. Each method becomes one contributor at this
             // depth.
-            let inner_qn_str = match qualified_name_string(graph, inner) {
-                Some(s) => s,
-                None => continue,
+            let Some(inner_qn_str) = qualified_name_string(graph, inner) else {
+                continue;
             };
             // Type-alias hop (AC-9, golang/go#66540): if `inner` is a
             // `NodeKind::Type` (named alias / named non-struct), walk
@@ -1225,29 +1292,7 @@ fn compute_promotions_for_outer<G: GraphMutationTarget>(
             // `(qn, NodeKind::Interface)` vs `(qn, NodeKind::Struct)`).
             // For AC-4 / golang/go#57352 the Interface companion is
             // what carries the `Inherits`-to-embedded-interface chain.
-            let inner_kind = graph.nodes().get(inner).map(|e| e.kind);
-            let interface_companion = if matches!(inner_kind, Some(NodeKind::Interface)) {
-                Some(inner)
-            } else if let Some(qn_id) = graph.strings().get(&resolved_inner_qn) {
-                graph
-                    .indices()
-                    .by_qualified_name(qn_id)
-                    .iter()
-                    .copied()
-                    .find(|&nid| {
-                        matches!(
-                            graph.nodes().get(nid).map(|e| e.kind),
-                            Some(NodeKind::Interface)
-                        )
-                    })
-            } else {
-                None
-            };
-            let methods = if let Some(iface) = interface_companion {
-                find_interface_flattened_methods(graph, iface)
-            } else {
-                find_method_names_of_type(graph, &resolved_inner_qn)
-            };
+            let methods = promotion_methods_for_inner(graph, inner, &resolved_inner_qn);
             for (method_name_id, method_node) in methods {
                 // §5.3 outer-shadow: if outer has its own method
                 // with this name at depth 0, deeper promotions are
@@ -1290,10 +1335,13 @@ fn compute_promotions_for_outer<G: GraphMutationTarget>(
                     .get(&method_node)
                     .copied()
                     .unwrap_or(Receiver::Value);
-                let bucket = match (method_receiver, new_chain_pointerness) {
-                    (Receiver::Value, _) => PromotionBucket::Value,
-                    (Receiver::Pointer, Receiver::Pointer) => PromotionBucket::Value,
-                    (Receiver::Pointer, Receiver::Value) => PromotionBucket::PointerOnly,
+                let bucket = if matches!(
+                    (method_receiver, new_chain_pointerness),
+                    (Receiver::Pointer, Receiver::Value)
+                ) {
+                    PromotionBucket::PointerOnly
+                } else {
+                    PromotionBucket::Value
                 };
 
                 candidates_by_name
@@ -1532,7 +1580,7 @@ fn resolve_alias_underlying_qn<G: GraphMutationTarget>(
 /// method reachable from `interface_node` via interface-of-interface
 /// embedding (`Inherits` edges to other `NodeKind::Interface`s),
 /// returning the union of directly-declared methods plus all inherited
-/// ones. Deduplicates by name_id — the first occurrence wins (BFS
+/// ones. Deduplicates by `name_id` — the first occurrence wins (BFS
 /// order from the embedded interface). The result is consumed by
 /// `compute_promotions_for_outer`'s ambiguity check so multi-interface
 /// embeddings detect same-depth name collisions (golang/go#57352).
@@ -1546,7 +1594,6 @@ fn find_interface_flattened_methods<G: GraphMutationTarget>(
     graph: &G,
     interface_node: NodeId,
 ) -> Vec<(StringId, NodeId)> {
-    const MAX_INTERFACE_EMBED_DEPTH: usize = 16;
     let mut out: Vec<(StringId, NodeId)> = Vec::new();
     let mut seen: BTreeSet<StringId> = BTreeSet::new();
     let mut visited: BTreeSet<NodeId> = BTreeSet::new();
@@ -1565,9 +1612,8 @@ fn find_interface_flattened_methods<G: GraphMutationTarget>(
         if depth >= MAX_INTERFACE_EMBED_DEPTH {
             continue;
         }
-        let qn_str = match qualified_name_string(graph, cur) {
-            Some(s) => s,
-            None => continue,
+        let Some(qn_str) = qualified_name_string(graph, cur) else {
+            continue;
         };
         for (name_id, method_node) in find_method_names_of_type(graph, &qn_str) {
             if seen.insert(name_id) {
@@ -1606,20 +1652,17 @@ fn find_method_names_of_type<G: GraphMutationTarget>(
     // O(|methods| × |embedded inner types|) which is acceptable for
     // typical Go workspaces (cap ≤ 16 promotion depth × O(N) methods).
     for &method_node in graph.indices().by_kind(NodeKind::Method) {
-        let entry = match graph.nodes().get(method_node) {
-            Some(e) => e,
-            None => continue,
+        let Some(entry) = graph.nodes().get(method_node) else {
+            continue;
         };
         if !node_is_go_or_language_unknown(graph, method_node) {
             continue;
         }
-        let qn = match entry.qualified_name {
-            Some(q) => q,
-            None => continue,
+        let Some(qn) = entry.qualified_name else {
+            continue;
         };
-        let qn_str = match graph.strings().resolve(qn) {
-            Some(s) => s,
-            None => continue,
+        let Some(qn_str) = graph.strings().resolve(qn) else {
+            continue;
         };
         if let Some(short) = qn_str.strip_prefix(&method_prefix) {
             // A nested qualifier inside `short` (e.g. another `::`)
@@ -1638,65 +1681,28 @@ fn find_method_names_of_type<G: GraphMutationTarget>(
     out
 }
 
-/// Step 4 + 5: materialise promoted-method nodes (with pass-local
-/// dedupe), emit `Contains(S → S.m)` / `Inherits(S.m → T.m)` value-form
-/// edges and `Contains(*S → *S.m)` / `Inherits(*S.m → T.m)` /
-/// `Inherits(*S → S)` pointer-form edges per 02_DESIGN §4.2 step 4.
-///
-/// Iterates `all_promotions` in `NodeId::index`-sorted order (BTreeMap
-/// gives stable iteration). Within each per-outer promotion bucket the
-/// names are sorted by `StringId`, so the resulting node + edge
-/// emission sequence is deterministic across runs (AC-12 prerequisite).
-fn materialise_and_emit_structural<G: GraphMutationTarget>(
-    graph: &mut G,
+fn collect_outer_read_only<G: GraphMutationTarget>(
+    graph: &G,
     all_promotions: &BTreeMap<NodeId, PerOuterPromotion>,
-    indices: &mut PassLocalIndices,
-    newly_created_nodes: &mut Vec<NodeId>,
-    stats: &mut GoMethodSetStats,
-) {
-    // Snapshot per-outer (package, short_name, file, has_pointer_promotion)
-    // tuples upfront so the subsequent `nodes_mut()` borrow does not
-    // conflict with the `nodes()` reads.
-    struct OuterMeta {
-        outer: NodeId,
-        package_id: StringId,
-        short_name_id: StringId,
-        short_name_str: String,
-        outer_qn_str: String,
-        outer_file: FileId,
-        has_pointer_promotion: bool,
-        promotion_count: usize,
-    }
-    // First, snapshot all read-only outer state (no `strings_mut()`).
-    struct OuterReadOnly {
-        outer: NodeId,
-        outer_qn_str: String,
-        package_qn_str: String,
-        short_name_str: String,
-        outer_file: FileId,
-        has_pointer_promotion: bool,
-        promotion_count: usize,
-    }
-    let mut read_only: Vec<OuterReadOnly> = Vec::with_capacity(all_promotions.len());
+) -> Vec<OuterReadOnly> {
+    let mut read_only = Vec::with_capacity(all_promotions.len());
     for (&outer, promotion) in all_promotions {
         if promotion.value.is_empty() && promotion.pointer_only.is_empty() {
             continue;
         }
-        let outer_entry = match graph.nodes().get(outer) {
-            Some(e) => e,
-            None => continue,
+        let Some(outer_entry) = graph.nodes().get(outer) else {
+            continue;
         };
-        let outer_qn_id = match outer_entry.qualified_name {
-            Some(q) => q,
-            None => continue,
+        let Some(outer_qn_id) = outer_entry.qualified_name else {
+            continue;
         };
         let outer_qn_str = match graph.strings().resolve(outer_qn_id) {
-            Some(s) => s.to_string(),
+            Some(value) => value.to_string(),
             None => continue,
         };
-        let (package_qn_str, short_name) = match split_qn_into_package_and_name(&outer_qn_str) {
-            Some(split) => split,
-            None => continue,
+        let Some((package_qn_str, short_name)) = split_qn_into_package_and_name(&outer_qn_str)
+        else {
+            continue;
         };
         read_only.push(OuterReadOnly {
             outer,
@@ -1708,20 +1714,20 @@ fn materialise_and_emit_structural<G: GraphMutationTarget>(
             promotion_count: promotion.value.len() + promotion.pointer_only.len(),
         });
     }
+    read_only
+}
 
-    // Second pass: intern package + short-name strings into the live
-    // string interner, lifting them into the index keyspace. This step
-    // requires `&mut strings_mut()` which is why it is split from the
-    // read-only snapshot above.
-    let mut outers_meta: Vec<OuterMeta> = Vec::with_capacity(read_only.len());
+fn intern_outer_meta<G: GraphMutationTarget>(
+    graph: &mut G,
+    read_only: Vec<OuterReadOnly>,
+) -> Vec<OuterMeta> {
+    let mut outers_meta = Vec::with_capacity(read_only.len());
     for ro in read_only {
-        let package_id = match graph.strings_mut().intern(&ro.package_qn_str) {
-            Ok(id) => id,
-            Err(_) => continue,
+        let Ok(package_id) = graph.strings_mut().intern(&ro.package_qn_str) else {
+            continue;
         };
-        let short_name_id = match graph.strings_mut().intern(&ro.short_name_str) {
-            Ok(id) => id,
-            Err(_) => continue,
+        let Ok(short_name_id) = graph.strings_mut().intern(&ro.short_name_str) else {
+            continue;
         };
         outers_meta.push(OuterMeta {
             outer: ro.outer,
@@ -1734,184 +1740,199 @@ fn materialise_and_emit_structural<G: GraphMutationTarget>(
             promotion_count: ro.promotion_count,
         });
     }
+    outers_meta
+}
 
-    for meta in outers_meta {
-        let promotion = match all_promotions.get(&meta.outer) {
-            Some(p) => p,
+fn materialise_pointer_form_node<G: GraphMutationTarget>(
+    graph: &mut G,
+    meta: &OuterMeta,
+    indices: &mut PassLocalIndices,
+    newly_created_nodes: &mut Vec<NodeId>,
+) -> Option<NodeId> {
+    if !meta.has_pointer_promotion {
+        return None;
+    }
+
+    let pointer_form_qn = format!(
+        "{}::*{}",
+        package_qn_resolve(&meta.outer_qn_str, &meta.short_name_str),
+        meta.short_name_str
+    );
+    let key = (meta.package_id, meta.short_name_id);
+    if let Some(&existing) = indices.pointer_type.get(&key) {
+        return Some(existing);
+    }
+
+    let Ok(interned) = graph.strings_mut().intern(&pointer_form_qn) else {
+        return None;
+    };
+    let new_id = mint_synthetic_node(
+        graph,
+        NodeKind::Type,
+        &meta.short_name_str,
+        interned,
+        meta.outer_file,
+    )?;
+    indices.pointer_type.insert(key, new_id);
+    newly_created_nodes.push(new_id);
+    graph
+        .edges_mut()
+        .add_edge(new_id, meta.outer, EdgeKind::Inherits, meta.outer_file);
+    Some(new_id)
+}
+
+fn emit_value_promotions<G: GraphMutationTarget>(
+    graph: &mut G,
+    meta: &OuterMeta,
+    promotion: &PerOuterPromotion,
+    indices: &mut PassLocalIndices,
+    newly_created_nodes: &mut Vec<NodeId>,
+    stats: &mut GoMethodSetStats,
+) {
+    for (&name_id, &defining_method) in &promotion.value {
+        let method_short = match graph.strings().resolve(name_id) {
+            Some(value) => value.to_string(),
             None => continue,
         };
-
-        // Materialise the pointer-form anchor `<pkg>.*<S>` when the
-        // pointer-only bucket has entries. Per 02_DESIGN §4.2 step 4,
-        // we also materialise it as a "pre-step" when ANY promoted
-        // method exists, but D1 lifts that to the minimal contract:
-        // emit *S only when at least one pointer-only promotion needs
-        // it, since value-bucket reachability from *S already flows
-        // through `Inherits(*S → S)`-less paths (Cluster D2 will
-        // re-trigger this branch for pointer-form satisfaction).
-        let mut pointer_form_node: Option<NodeId> = None;
-        if meta.has_pointer_promotion {
-            // Cluster G1: pointer-form anchor qn uses canonical
-            // (`::`-separated) form so it matches the
-            // `by_qualified_name` index populated by canonicalised
-            // node qns. The marker is the literal sequence `::*`
-            // (canonical separator + pointer indicator). See
-            // 05_TEST_PLAN.md §7.5.
-            let pointer_form_qn = format!(
-                "{}::*{}",
-                package_qn_resolve(&meta.outer_qn_str, &meta.short_name_str),
-                meta.short_name_str
-            );
-            let key = (meta.package_id, meta.short_name_id);
-            let node_id = if let Some(&existing) = indices.pointer_type.get(&key) {
-                existing
-            } else {
-                let interned = match graph.strings_mut().intern(&pointer_form_qn) {
-                    Ok(id) => id,
-                    Err(_) => continue,
-                };
-                let new_id = mint_synthetic_node(
-                    graph,
-                    NodeKind::Type,
-                    &meta.short_name_str,
-                    interned,
-                    meta.outer_file,
-                );
-                let new_id = match new_id {
-                    Some(id) => id,
-                    None => continue,
-                };
-                indices.pointer_type.insert(key, new_id);
-                newly_created_nodes.push(new_id);
-
-                // Emit `Inherits(*S → S)` linkage so queries from *S
-                // walk through to S's value-bucket promotions. The
-                // edge anchors to S's file_id per §3.4 rule 1.
-                graph
-                    .edges_mut()
-                    .add_edge(new_id, meta.outer, EdgeKind::Inherits, meta.outer_file);
-                new_id
+        let value_qn = format!("{}::{}", meta.outer_qn_str, method_short);
+        let key = (meta.package_id, meta.short_name_id, name_id);
+        let method_node_id = if let Some(&existing) = indices.value.get(&key) {
+            existing
+        } else {
+            let Ok(interned_qn) = graph.strings_mut().intern(&value_qn) else {
+                continue;
             };
-            pointer_form_node = Some(node_id);
-        }
-
-        // Value-form promotions: materialise `<pkg>.<S>.<m>` and emit
-        // `Contains(S → S.m)` + `Inherits(S.m → T.m)`.
-        for (&name_id, &defining_method) in &promotion.value {
-            let method_short = match graph.strings().resolve(name_id) {
-                Some(s) => s.to_string(),
-                None => continue,
-            };
-            // Cluster G1: canonical separator. See 05_TEST_PLAN.md §7.5.
-            let value_qn = format!("{}::{}", meta.outer_qn_str, method_short);
-            let key = (meta.package_id, meta.short_name_id, name_id);
-            let method_node_id = if let Some(&existing) = indices.value.get(&key) {
-                existing
-            } else {
-                let interned_qn = match graph.strings_mut().intern(&value_qn) {
-                    Ok(id) => id,
-                    Err(_) => continue,
-                };
-                let new_id = mint_synthetic_node(
-                    graph,
-                    NodeKind::Method,
-                    &method_short,
-                    interned_qn,
-                    meta.outer_file,
-                );
-                let new_id = match new_id {
-                    Some(id) => id,
-                    None => continue,
-                };
-                indices.value.insert(key, new_id);
-                newly_created_nodes.push(new_id);
-                stats.promoted_method_nodes = stats.promoted_method_nodes.saturating_add(1);
-                new_id
-            };
-            // Cluster D2.2: record `(outer_node, method_name) →
-            // promoted_value_node` so the shadow-emission walker can
-            // gate by resolved receiver type.
-            indices
-                .outer_to_value_promoted
-                .insert((meta.outer, name_id), method_node_id);
-            // Structural edges. Use S's file_id per §3.4 rule 2/3.
-            graph.edges_mut().add_edge(
-                meta.outer,
-                method_node_id,
-                EdgeKind::Contains,
+            let Some(new_id) = mint_synthetic_node(
+                graph,
+                NodeKind::Method,
+                &method_short,
+                interned_qn,
                 meta.outer_file,
-            );
-            graph.edges_mut().add_edge(
-                method_node_id,
-                defining_method,
-                EdgeKind::Inherits,
-                meta.outer_file,
-            );
-        }
+            ) else {
+                continue;
+            };
+            indices.value.insert(key, new_id);
+            newly_created_nodes.push(new_id);
+            stats.promoted_method_nodes = stats.promoted_method_nodes.saturating_add(1);
+            new_id
+        };
+        indices
+            .outer_to_value_promoted
+            .insert((meta.outer, name_id), method_node_id);
+        graph.edges_mut().add_edge(
+            meta.outer,
+            method_node_id,
+            EdgeKind::Contains,
+            meta.outer_file,
+        );
+        graph.edges_mut().add_edge(
+            method_node_id,
+            defining_method,
+            EdgeKind::Inherits,
+            meta.outer_file,
+        );
+    }
+}
 
-        // Pointer-only promotions: materialise `<pkg>.*<S>.<m>` and
-        // emit Contains(*S → *S.m) + Inherits(*S.m → T.m).
-        if let Some(ptr_node) = pointer_form_node {
-            for (&name_id, &defining_method) in &promotion.pointer_only {
-                let method_short = match graph.strings().resolve(name_id) {
-                    Some(s) => s.to_string(),
-                    None => continue,
-                };
-                // Cluster G1: canonical pointer-form promoted-method
-                // qn — `<pkg>::*<S>::<m>`. See 05_TEST_PLAN.md §7.5.
-                let ptr_qn = format!(
-                    "{}::*{}::{}",
-                    package_qn_resolve(&meta.outer_qn_str, &meta.short_name_str),
-                    meta.short_name_str,
-                    method_short,
-                );
-                let key = (meta.package_id, meta.short_name_id, name_id);
-                let method_node_id = if let Some(&existing) = indices.pointer.get(&key) {
-                    existing
-                } else {
-                    let interned_qn = match graph.strings_mut().intern(&ptr_qn) {
-                        Ok(id) => id,
-                        Err(_) => continue,
-                    };
-                    let new_id = mint_synthetic_node(
-                        graph,
-                        NodeKind::Method,
-                        &method_short,
-                        interned_qn,
-                        meta.outer_file,
-                    );
-                    let new_id = match new_id {
-                        Some(id) => id,
-                        None => continue,
-                    };
-                    indices.pointer.insert(key, new_id);
-                    newly_created_nodes.push(new_id);
-                    stats.promoted_method_nodes = stats.promoted_method_nodes.saturating_add(1);
-                    new_id
-                };
-                // Cluster D2.2: record the pointer-form promoted-
-                // method index keyed by the *value*-form outer node.
-                // The shadow walker uses the value-form outer to
-                // join receiver-call hints; pointer-only buckets
-                // still resolve through the same value-form outer
-                // identity.
-                indices
-                    .outer_to_pointer_promoted
-                    .insert((meta.outer, name_id), method_node_id);
-                graph.edges_mut().add_edge(
-                    ptr_node,
-                    method_node_id,
-                    EdgeKind::Contains,
-                    meta.outer_file,
-                );
-                graph.edges_mut().add_edge(
-                    method_node_id,
-                    defining_method,
-                    EdgeKind::Inherits,
-                    meta.outer_file,
-                );
-            }
-        }
+fn emit_pointer_only_promotions<G: GraphMutationTarget>(
+    graph: &mut G,
+    meta: &OuterMeta,
+    promotion: &PerOuterPromotion,
+    pointer_form_node: Option<NodeId>,
+    indices: &mut PassLocalIndices,
+    newly_created_nodes: &mut Vec<NodeId>,
+    stats: &mut GoMethodSetStats,
+) {
+    let Some(ptr_node) = pointer_form_node else {
+        return;
+    };
+
+    for (&name_id, &defining_method) in &promotion.pointer_only {
+        let method_short = match graph.strings().resolve(name_id) {
+            Some(value) => value.to_string(),
+            None => continue,
+        };
+        let ptr_qn = format!(
+            "{}::*{}::{}",
+            package_qn_resolve(&meta.outer_qn_str, &meta.short_name_str),
+            meta.short_name_str,
+            method_short,
+        );
+        let key = (meta.package_id, meta.short_name_id, name_id);
+        let method_node_id = if let Some(&existing) = indices.pointer.get(&key) {
+            existing
+        } else {
+            let Ok(interned_qn) = graph.strings_mut().intern(&ptr_qn) else {
+                continue;
+            };
+            let Some(new_id) = mint_synthetic_node(
+                graph,
+                NodeKind::Method,
+                &method_short,
+                interned_qn,
+                meta.outer_file,
+            ) else {
+                continue;
+            };
+            indices.pointer.insert(key, new_id);
+            newly_created_nodes.push(new_id);
+            stats.promoted_method_nodes = stats.promoted_method_nodes.saturating_add(1);
+            new_id
+        };
+        indices
+            .outer_to_pointer_promoted
+            .insert((meta.outer, name_id), method_node_id);
+        graph.edges_mut().add_edge(
+            ptr_node,
+            method_node_id,
+            EdgeKind::Contains,
+            meta.outer_file,
+        );
+        graph.edges_mut().add_edge(
+            method_node_id,
+            defining_method,
+            EdgeKind::Inherits,
+            meta.outer_file,
+        );
+    }
+}
+
+/// Step 4 + 5: materialise promoted-method nodes (with pass-local
+/// dedupe), emit `Contains(S → S.m)` / `Inherits(S.m → T.m)` value-form
+/// edges and `Contains(*S → *S.m)` / `Inherits(*S.m → T.m)` /
+/// `Inherits(*S → S)` pointer-form edges per `02_DESIGN` §4.2 step 4.
+///
+/// Iterates `all_promotions` in `NodeId::index`-sorted order (`BTreeMap`
+/// gives stable iteration). Within each per-outer promotion bucket the
+/// names are sorted by `StringId`, so the resulting node + edge
+/// emission sequence is deterministic across runs (AC-12 prerequisite).
+fn materialise_and_emit_structural<G: GraphMutationTarget>(
+    graph: &mut G,
+    all_promotions: &BTreeMap<NodeId, PerOuterPromotion>,
+    indices: &mut PassLocalIndices,
+    newly_created_nodes: &mut Vec<NodeId>,
+    stats: &mut GoMethodSetStats,
+) {
+    let read_only = collect_outer_read_only(graph, all_promotions);
+    let outers_meta = intern_outer_meta(graph, read_only);
+
+    for meta in outers_meta {
+        let Some(promotion) = all_promotions.get(&meta.outer) else {
+            continue;
+        };
+
+        let pointer_form_node =
+            materialise_pointer_form_node(graph, &meta, indices, newly_created_nodes);
+        emit_value_promotions(graph, &meta, promotion, indices, newly_created_nodes, stats);
+        emit_pointer_only_promotions(
+            graph,
+            &meta,
+            promotion,
+            pointer_form_node,
+            indices,
+            newly_created_nodes,
+            stats,
+        );
 
         let _ = meta.promotion_count; // retained for debug instrumentation
     }
@@ -1960,7 +1981,7 @@ fn package_qn_resolve<'a>(outer_qn: &'a str, short_name: &str) -> &'a str {
 // scope-guard violation per the E2 plan).
 
 /// Pure string-shape predicate: returns true iff `qualified_name` matches
-/// one of the three pass-emitted namespace shapes documented in 02_DESIGN
+/// one of the three pass-emitted namespace shapes documented in `02_DESIGN`
 /// §3.6 lines 1027-1031:
 ///
 /// * `<pkg>.<S>.<m>`  — value-form promoted method on outer struct `S`.
@@ -2032,7 +2053,7 @@ fn is_pass_owned_node(node: &NodeEntry, qualified_name: &str, is_synthetic: bool
 /// Returns true iff `edge` is owned by the Go T1 method-set pass.
 ///
 /// Walks the edge's classification and consults endpoint state to
-/// reproduce the four-way disjunction from 02_DESIGN §3.6 lines
+/// reproduce the four-way disjunction from `02_DESIGN` §3.6 lines
 /// 1034-1072:
 ///
 /// * **(A)** `Contains` / `Inherits` with either endpoint pass-owned
@@ -2282,15 +2303,13 @@ fn tombstone_all_pass_owned<G: GraphMutationTarget>(graph: &mut G) -> usize {
                 .get(e.target)
                 .and_then(|t| t.qualified_name)
                 .and_then(|sid| strings.resolve(sid))
-                .map(|s| s.starts_with("<type:"))
-                .unwrap_or(false);
+                .is_some_and(|s| s.starts_with("<type:"));
             if target_starts_with_type {
                 continue;
             }
             let source_is_go = nodes
                 .get(e.source)
-                .map(|n| files.language_for_file(n.file) == Some(Language::Go))
-                .unwrap_or(false);
+                .is_some_and(|n| files.language_for_file(n.file) == Some(Language::Go));
             if !source_is_go {
                 continue;
             }
@@ -2347,7 +2366,7 @@ fn tombstone_all_pass_owned<G: GraphMutationTarget>(graph: &mut G) -> usize {
 /// Mint a synthetic node (Method or Type) with the given canonical
 /// qualified-name `StringId`. Marks the node as
 /// `NodeFlags::SYNTHETIC` so it stays out of workspace-symbol
-/// search per the C_SUPPRESS contract, AND registers the new node in
+/// search per the `C_SUPPRESS` contract, AND registers the new node in
 /// the [`FileRegistry`] per-file bucket so the publish-boundary
 /// bijection (`CodeGraph::assert_bucket_bijection` check (d)) holds:
 /// "every live node in the arena belongs to some bucket".
@@ -2362,7 +2381,7 @@ fn tombstone_all_pass_owned<G: GraphMutationTarget>(graph: &mut G) -> usize {
 /// invariant unconditionally.
 ///
 /// Returns `None` if the underlying arena allocation fails (only
-/// happens at the u32::MAX-node ceiling — never hit in practice).
+/// happens at the `u32::MAX-node` ceiling — never hit in practice).
 fn mint_synthetic_node<G: GraphMutationTarget>(
     graph: &mut G,
     kind: NodeKind,
@@ -2390,7 +2409,7 @@ fn mint_synthetic_node<G: GraphMutationTarget>(
 /// pointer-only promotions) is non-empty whenever the original method
 /// has a call site whose receiver resolves to the outer type.
 ///
-/// Algorithm (Cluster D2.2 strict gating, per 02_DESIGN §3.3 step 6 +
+/// Algorithm (Cluster D2.2 strict gating, per `02_DESIGN` §3.3 step 6 +
 /// §4.2 step 5–6):
 ///
 /// For each `GoReceiverCallHint` in the side channel:
@@ -2448,24 +2467,15 @@ fn emit_shadow_calls_and_references<G: GraphMutationTarget>(
     // with the `&graph.go_hints()` borrow.
     let receiver_hints: Vec<GoReceiverCallHint> = graph.go_hints().receiver_calls.clone();
 
-    #[derive(Debug, Clone, Copy)]
-    struct PendingShadow {
-        caller: NodeId,
-        target: NodeId,
-        kind_tag: u8, // 0 = Calls, 1 = References
-        argument_count: u8,
-        is_async: bool,
-        file: FileId,
-    }
     let mut pending: Vec<PendingShadow> = Vec::new();
 
     for hint in &receiver_hints {
         // Resolve the receiver expression to a canonical outer-type
         // NodeId, plus the "pointer-prefixed?" bit for the bucket
         // selection.
-        let (receiver_node, want_pointer) = match resolve_receiver_kind(graph, &hint.receiver) {
-            Some(r) => r,
-            None => continue,
+        let Some((receiver_node, want_pointer)) = resolve_receiver_kind(graph, &hint.receiver)
+        else {
+            continue;
         };
 
         let method_name_id = hint.method_name;
@@ -2480,9 +2490,8 @@ fn emit_shadow_calls_and_references<G: GraphMutationTarget>(
                 .get(&(receiver_node, method_name_id))
                 .copied()
         };
-        let promoted_node = match promoted_node {
-            Some(n) => n,
-            None => continue,
+        let Some(promoted_node) = promoted_node else {
+            continue;
         };
 
         // Recover the caller(s) by reverse-walking the existing
@@ -2506,8 +2515,7 @@ fn emit_shadow_calls_and_references<G: GraphMutationTarget>(
             let caller_file = graph
                 .nodes()
                 .get(caller)
-                .map(|e| e.file)
-                .unwrap_or(FileId::INVALID);
+                .map_or(FileId::INVALID, |e| e.file);
             pending.push(PendingShadow {
                 caller,
                 target: promoted_node,
@@ -2574,15 +2582,6 @@ fn emit_shadow_calls_legacy<G: GraphMutationTarget>(
         }
     }
 
-    #[derive(Debug, Clone, Copy)]
-    struct PendingShadow {
-        caller: NodeId,
-        target: NodeId,
-        kind_tag: u8,
-        argument_count: u8,
-        is_async: bool,
-        file: FileId,
-    }
     let mut pending: Vec<PendingShadow> = Vec::new();
 
     for (&defining, promoted_set) in &promoted_targets {
@@ -2591,8 +2590,7 @@ fn emit_shadow_calls_legacy<G: GraphMutationTarget>(
             let caller_file = graph
                 .nodes()
                 .get(caller)
-                .map(|e| e.file)
-                .unwrap_or(FileId::INVALID);
+                .map_or(FileId::INVALID, |e| e.file);
             for &promoted_node in promoted_set {
                 pending.push(PendingShadow {
                     caller,
@@ -2636,7 +2634,7 @@ fn emit_shadow_calls_legacy<G: GraphMutationTarget>(
 ///
 /// Returns `None` when the receiver cannot be resolved within the
 /// pass's bounded-hop budget (`MAX_RECEIVER_HOPS`). Bounded resolution
-/// keeps the pass O(N_hints) in the worst case and matches 02_DESIGN
+/// keeps the pass `O(N_hints)` in the worst case and matches `02_DESIGN`
 /// §3.2's "drop silently" rule for unresolvable receivers.
 fn resolve_receiver_kind<G: GraphMutationTarget>(
     graph: &G,
@@ -2816,14 +2814,14 @@ fn walk_typeof_return_to_type_node<G: GraphMutationTarget>(
 
 /// Cluster D2.3 — T1.1 implicit interface satisfaction.
 ///
-/// Implements the satisfaction algorithm specified in 02_DESIGN §4.3.
+/// Implements the satisfaction algorithm specified in `02_DESIGN` §4.3.
 /// Runs strictly after T1.2 promotion (so promoted methods participate
 /// in method-set composition) and after the targeted index update for
 /// promotion-minted nodes (so synthetic pointer-form Type nodes
 /// minted by the T1.2 step are resolvable by the by-qualified-name
 /// index).
 ///
-/// Algorithm sketch (full spec in 02_DESIGN §4.3):
+/// Algorithm sketch (full spec in `02_DESIGN` §4.3):
 ///
 /// 1. Enumerate every interface `I` in the workspace, build a
 ///    method-set `MethodSet(I)` = `{(method_name_id, canonical_sig)}`.
@@ -2835,7 +2833,7 @@ fn walk_typeof_return_to_type_node<G: GraphMutationTarget>(
 ///    methods + promoted value-bucket methods, and
 ///    `PointerMethodSet(C)` from value-set ∪ pointer-receiver methods
 ///    ∪ pointer-bucket promoted methods.
-/// 3. For each `(C, I)` pair (sorted deterministically by NodeId
+/// 3. For each `(C, I)` pair (sorted deterministically by `NodeId`
 ///    indices), test value-bucket satisfaction first; on miss, test
 ///    pointer-bucket. Emit `Implements(C → I)` for value-bucket and
 ///    additionally `Implements(*C → I)` (per Go assignability rules
@@ -2898,13 +2896,6 @@ fn run_t1_1_satisfaction<G: GraphMutationTarget>(
 
     // Collect (source, target, file) tuples for the Implements edges
     // and emit them deterministically at the end of the pass.
-    #[derive(Debug, Clone, Copy)]
-    struct PendingImplements {
-        source: NodeId,
-        target: NodeId,
-        file: FileId,
-        tag: u8, // 0 = value-form (C → I), 1 = pointer-form (*C → I)
-    }
     let mut pending: Vec<PendingImplements> = Vec::new();
 
     // Pass-local index for pointer-form Type nodes minted by T1.1,
@@ -2917,11 +2908,7 @@ fn run_t1_1_satisfaction<G: GraphMutationTarget>(
         let Some(c_methods) = candidate_method_sets.get(&c) else {
             continue;
         };
-        let c_file = graph
-            .nodes()
-            .get(c)
-            .map(|e| e.file)
-            .unwrap_or(FileId::INVALID);
+        let c_file = graph.nodes().get(c).map_or(FileId::INVALID, |e| e.file);
         let c_kind = graph.nodes().get(c).map(|e| e.kind);
 
         for (i_node, i_methods) in &sorted_interfaces {
@@ -3021,37 +3008,177 @@ fn run_t1_1_satisfaction<G: GraphMutationTarget>(
     }
 }
 
-/// 02_DESIGN §4.4: T1.3 function-signature implementations.
+/// `02_DESIGN` §4.4: T1.3 function-signature implementations.
 ///
 /// Emits `Implements(fn → F)` edges where `F` is a named function type
 /// (a Type node with a `GoFunctionSignatureHint` whose source was a
 /// `type Foo func(...)` declaration) and `fn` is a function or method
 /// whose canonical signature matches `F`'s underlying signature.
 ///
-/// Two candidate-sources are unioned per 02_DESIGN §4.4:
+/// Two candidate-sources are unioned per `02_DESIGN` §4.4:
 ///
 /// - **Source A** — explicit `T(g)` named-type conversions captured by
 ///   the Go plugin as `GoNamedTypeConversionHint`. The hint's
 ///   `argument_node` is the function reference; the
 ///   `target_type_qualified_name` resolves to the named function-type
-///   NodeId. This is the load-bearing path for AC-11
+///   `NodeId`. This is the load-bearing path for AC-11
 ///   (`http.HandlerFunc(handleIndex)`).
 /// - **Source B** — reverse `TypeOf` walk from each named function-type
 ///   `F`: each incoming `TypeOf` edge identifies a slot (Variable /
 ///   Parameter / Property / Return) typed as `F`; the slot's outgoing
-///   `References` edges to a Function or Method NodeId expose the bound
+///   `References` edges to a Function or Method `NodeId` expose the bound
 ///   address-taken function. The binding-plane has already linked
 ///   `var fn F = handleIndex` shapes by Phase 4e, so the reverse-walk
 ///   only needs to enumerate those existing `References` edges.
 ///
-/// Tier 1's same-package guard (01_SPEC §3.1 T1.3) filters out
+/// Tier 1's same-package guard (`01_SPEC` §3.1 T1.3) filters out
 /// candidates whose package qualifier differs from the named
 /// function-type's package qualifier. Cross-package T1.3 is explicitly
-/// out of scope for Tier 1 and is documented in 02_DESIGN §4.4.
+/// out of scope for Tier 1 and is documented in `02_DESIGN` §4.4.
 ///
 /// All edges are dedupd via a `BTreeMap`-keyed pending set and
 /// drained in `NodeId`-sorted order so the emission sequence is
 /// deterministic across runs (AC-12 prerequisite).
+fn partition_function_signatures<G: GraphMutationTarget>(
+    graph: &G,
+    function_signatures: &HashMap<NodeId, String>,
+) -> (BTreeMap<NodeId, String>, BTreeMap<NodeId, String>) {
+    let mut named_function_types = BTreeMap::new();
+    let mut function_candidates = BTreeMap::new();
+    for (&node_id, sig) in function_signatures {
+        let Some(entry) = graph.nodes().get(node_id) else {
+            continue;
+        };
+        match entry.kind {
+            NodeKind::Type => {
+                named_function_types.insert(node_id, sig.clone());
+            }
+            NodeKind::Function => {
+                function_candidates.insert(node_id, sig.clone());
+            }
+            _ => {}
+        }
+    }
+    (named_function_types, function_candidates)
+}
+
+fn method_signature_candidates<G: GraphMutationTarget>(
+    graph: &G,
+    method_signatures: &HashMap<NodeId, String>,
+) -> BTreeMap<NodeId, String> {
+    method_signatures
+        .iter()
+        .filter_map(|(&node_id, sig)| {
+            graph
+                .nodes()
+                .get(node_id)
+                .filter(|entry| matches!(entry.kind, NodeKind::Method))
+                .map(|_| (node_id, sig.clone()))
+        })
+        .collect()
+}
+
+fn collect_conversion_signature_implements<G: GraphMutationTarget>(
+    graph: &G,
+    named_function_types: &BTreeMap<NodeId, String>,
+    function_candidates: &BTreeMap<NodeId, String>,
+    method_candidates: &BTreeMap<NodeId, String>,
+    pending: &mut BTreeMap<(NodeId, NodeId), FileId>,
+) {
+    let conversion_candidates: Vec<(StringId, NodeId, FileId)> = graph
+        .go_hints()
+        .named_type_conversions
+        .iter()
+        .map(|hint| {
+            (
+                hint.target_type_qualified_name,
+                hint.argument_node,
+                hint.file,
+            )
+        })
+        .collect();
+    for (target_qn_id, argument_node, hint_file) in conversion_candidates {
+        let target_node = graph
+            .indices()
+            .by_qualified_name(target_qn_id)
+            .iter()
+            .copied()
+            .find(|node_id| named_function_types.contains_key(node_id));
+        let Some(target_node) = target_node else {
+            continue;
+        };
+        let Some(target_sig) = named_function_types.get(&target_node) else {
+            continue;
+        };
+        let arg_sig = function_candidates
+            .get(&argument_node)
+            .or_else(|| method_candidates.get(&argument_node));
+        let Some(arg_sig) = arg_sig else {
+            continue;
+        };
+        if arg_sig == target_sig && same_package_qn(graph, argument_node, target_node) {
+            pending.insert((argument_node, target_node), hint_file);
+        }
+    }
+}
+
+fn is_signature_data_flow_slot(edge_kind: &EdgeKind) -> bool {
+    match edge_kind {
+        EdgeKind::TypeOf { context, .. } => matches!(
+            context,
+            Some(
+                TypeOfContext::Variable
+                    | TypeOfContext::Parameter
+                    | TypeOfContext::Field
+                    | TypeOfContext::Return,
+            )
+        ),
+        _ => false,
+    }
+}
+
+fn collect_reverse_typeof_signature_implements<G: GraphMutationTarget>(
+    graph: &G,
+    named_function_types: &BTreeMap<NodeId, String>,
+    function_candidates: &BTreeMap<NodeId, String>,
+    method_candidates: &BTreeMap<NodeId, String>,
+    pending: &mut BTreeMap<(NodeId, NodeId), FileId>,
+) {
+    for (&f_node, f_sig) in named_function_types {
+        let f_file = graph
+            .nodes()
+            .get(f_node)
+            .map_or(FileId::INVALID, |entry| entry.file);
+        for edge in graph.edges().edges_to(f_node) {
+            if !is_signature_data_flow_slot(&edge.kind) {
+                continue;
+            }
+            for slot_edge in graph.edges().edges_from(edge.source) {
+                if !matches!(slot_edge.kind, EdgeKind::References) {
+                    continue;
+                }
+                let referenced = slot_edge.target;
+                let ref_sig = function_candidates
+                    .get(&referenced)
+                    .or_else(|| method_candidates.get(&referenced));
+                let Some(ref_sig) = ref_sig else {
+                    continue;
+                };
+                if ref_sig != f_sig || !same_package_qn(graph, referenced, f_node) {
+                    continue;
+                }
+                let referenced_file = graph
+                    .nodes()
+                    .get(referenced)
+                    .map_or(f_file, |entry| entry.file);
+                pending
+                    .entry((referenced, f_node))
+                    .or_insert(referenced_file);
+            }
+        }
+    }
+}
+
 fn run_t1_3_signature_implements<G: GraphMutationTarget>(
     graph: &mut G,
     function_signatures: &HashMap<NodeId, String>,
@@ -3068,23 +3195,8 @@ fn run_t1_3_signature_implements<G: GraphMutationTarget>(
     //
     // `BTreeMap` keyed on NodeId.index() makes the iteration order
     // deterministic across runs.
-    let mut named_function_types: BTreeMap<NodeId, String> = BTreeMap::new();
-    let mut function_candidates: BTreeMap<NodeId, String> = BTreeMap::new();
-    for (&node_id, sig) in function_signatures {
-        let kind = match graph.nodes().get(node_id) {
-            Some(entry) => entry.kind,
-            None => continue,
-        };
-        match kind {
-            NodeKind::Type => {
-                named_function_types.insert(node_id, sig.clone());
-            }
-            NodeKind::Function => {
-                function_candidates.insert(node_id, sig.clone());
-            }
-            _ => {}
-        }
-    }
+    let (named_function_types, function_candidates) =
+        partition_function_signatures(graph, function_signatures);
 
     if named_function_types.is_empty() {
         return;
@@ -3095,16 +3207,7 @@ fn run_t1_3_signature_implements<G: GraphMutationTarget>(
     // satisfy a named function type whose signature matches the
     // method's own signature — the receiver is part of the binding,
     // not the signature.
-    let method_candidates: BTreeMap<NodeId, String> = method_signatures
-        .iter()
-        .filter_map(|(&node_id, sig)| {
-            graph
-                .nodes()
-                .get(node_id)
-                .filter(|entry| matches!(entry.kind, NodeKind::Method))
-                .map(|_| (node_id, sig.clone()))
-        })
-        .collect();
+    let method_candidates = method_signature_candidates(graph, method_signatures);
 
     // Each pending Implements is keyed by `(fn_node, target_F)` so
     // the dedupe step collapses duplicate emissions from the union of
@@ -3112,55 +3215,13 @@ fn run_t1_3_signature_implements<G: GraphMutationTarget>(
     let mut pending: BTreeMap<(NodeId, NodeId), FileId> = BTreeMap::new();
 
     // ----- Source A: explicit `T(g)` conversions -----
-    let conversion_candidates: Vec<(NodeId, StringId, NodeId, FileId)> = graph
-        .go_hints()
-        .named_type_conversions
-        .iter()
-        .map(|h| {
-            (
-                h.call_site,
-                h.target_type_qualified_name,
-                h.argument_node,
-                h.file,
-            )
-        })
-        .collect();
-    for (_call_site, target_qn_id, argument_node, hint_file) in conversion_candidates {
-        let candidates = graph.indices().by_qualified_name(target_qn_id).to_vec();
-        // Pick the Type-kinded candidate whose NodeId is in
-        // `named_function_types`. Multiple `by_qualified_name`
-        // candidates can arise when the Go plugin emits stubs across
-        // files; only the function-typed Type carries a signature
-        // hint.
-        let target_node = candidates
-            .into_iter()
-            .find(|nid| named_function_types.contains_key(nid));
-        let Some(target_node) = target_node else {
-            continue;
-        };
-        let target_sig = match named_function_types.get(&target_node) {
-            Some(s) => s,
-            None => continue,
-        };
-
-        // Pull the argument's canonical signature from either the
-        // function or method signature map (a method-value selector
-        // routes through method_candidates).
-        let arg_sig = function_candidates
-            .get(&argument_node)
-            .or_else(|| method_candidates.get(&argument_node));
-        let Some(arg_sig) = arg_sig else {
-            continue;
-        };
-
-        if arg_sig != target_sig {
-            continue;
-        }
-        if !same_package_qn(graph, argument_node, target_node) {
-            continue;
-        }
-        pending.insert((argument_node, target_node), hint_file);
-    }
+    collect_conversion_signature_implements(
+        graph,
+        &named_function_types,
+        &function_candidates,
+        &method_candidates,
+        &mut pending,
+    );
 
     // ----- Source B: reverse `TypeOf` walk -----
     //
@@ -3170,70 +3231,13 @@ fn run_t1_3_signature_implements<G: GraphMutationTarget>(
     // slot (Variable / Parameter / Property / Return), then for each
     // such slot enumerate outgoing `References` edges to Function /
     // Method nodes whose canonical signature matches `F`'s.
-    let sorted_named_types: Vec<NodeId> = named_function_types.keys().copied().collect();
-    for &f_node in &sorted_named_types {
-        let f_sig = match named_function_types.get(&f_node) {
-            Some(s) => s,
-            None => continue,
-        };
-        let f_file = graph
-            .nodes()
-            .get(f_node)
-            .map(|e| e.file)
-            .unwrap_or(FileId::INVALID);
-
-        let incoming = graph.edges().edges_to(f_node);
-        for edge in incoming {
-            // Only data-flow slots participate; ignore TypeParameter /
-            // Constraint contexts which describe generic bounds, not
-            // function-typed slots.
-            let is_data_flow_slot = match edge.kind {
-                EdgeKind::TypeOf { context, .. } => matches!(
-                    context,
-                    Some(crate::graph::unified::edge::kind::TypeOfContext::Variable)
-                        | Some(crate::graph::unified::edge::kind::TypeOfContext::Parameter)
-                        | Some(crate::graph::unified::edge::kind::TypeOfContext::Field)
-                        | Some(crate::graph::unified::edge::kind::TypeOfContext::Return)
-                ),
-                _ => false,
-            };
-            if !is_data_flow_slot {
-                continue;
-            }
-            let slot = edge.source;
-            // Walk outgoing `References` of the slot; emit when the
-            // referenced node is a Function or Method with a
-            // matching canonical signature.
-            for slot_edge in graph.edges().edges_from(slot) {
-                if !matches!(slot_edge.kind, EdgeKind::References) {
-                    continue;
-                }
-                let referenced = slot_edge.target;
-                let ref_sig = function_candidates
-                    .get(&referenced)
-                    .or_else(|| method_candidates.get(&referenced));
-                let Some(ref_sig) = ref_sig else {
-                    continue;
-                };
-                if ref_sig != f_sig {
-                    continue;
-                }
-                if !same_package_qn(graph, referenced, f_node) {
-                    continue;
-                }
-                // File anchor: 02_DESIGN §4.4 step 4 — anchor on
-                // `fn.file_id` when the candidate is a Function or
-                // Method node; fall back to `F.file_id` for
-                // defensiveness.
-                let fn_file = graph
-                    .nodes()
-                    .get(referenced)
-                    .map(|e| e.file)
-                    .unwrap_or(f_file);
-                pending.entry((referenced, f_node)).or_insert(fn_file);
-            }
-        }
-    }
+    collect_reverse_typeof_signature_implements(
+        graph,
+        &named_function_types,
+        &function_candidates,
+        &method_candidates,
+        &mut pending,
+    );
 
     // Drain pending → emit. BTreeMap iterates in sorted key order;
     // `(NodeId, NodeId)` sorts by source then target, giving the
@@ -3253,18 +3257,16 @@ fn run_t1_3_signature_implements<G: GraphMutationTarget>(
     }
 }
 
-/// Same-package check per 02_DESIGN §4.4: the leading
+/// Same-package check per `02_DESIGN` §4.4: the leading
 /// `<package>.<TopLevelName>` prefix of both nodes' qualified names
 /// must match. Returns `true` if either side has no qualified name
 /// (defensive — should not happen for production graphs).
 fn same_package_qn<G: GraphMutationTarget>(graph: &G, a: NodeId, b: NodeId) -> bool {
-    let qn_a = match qualified_name_string(graph, a) {
-        Some(s) => s,
-        None => return false,
+    let Some(qn_a) = qualified_name_string(graph, a) else {
+        return false;
     };
-    let qn_b = match qualified_name_string(graph, b) {
-        Some(s) => s,
-        None => return false,
+    let Some(qn_b) = qualified_name_string(graph, b) else {
+        return false;
     };
     // The package qualifier is the leading segment of the canonical
     // qualified name (everything before the first `::`). Cluster G1:
@@ -3305,9 +3307,8 @@ fn collect_interface_method_sets<G: GraphMutationTarget>(
         if !node_is_go_or_language_unknown(graph, iface) {
             continue;
         }
-        let iface_qn = match qualified_name_string(graph, iface) {
-            Some(s) => s,
-            None => continue,
+        let Some(iface_qn) = qualified_name_string(graph, iface) else {
+            continue;
         };
         let methods = find_method_names_of_type(graph, &iface_qn);
         direct.insert(iface, methods);
@@ -3315,7 +3316,6 @@ fn collect_interface_method_sets<G: GraphMutationTarget>(
 
     // Second pass: flatten through embedded `Inherits` edges with a
     // bounded BFS to handle interface-of-interface composition.
-    const MAX_INTERFACE_EMBED_DEPTH: usize = 16;
     for &iface in &interface_nodes {
         if !node_is_go_or_language_unknown(graph, iface) {
             continue;
@@ -3496,7 +3496,7 @@ fn method_set_contains_match(haystack: &[MethodSetEntry], required: &MethodSetEn
 /// nodes; their receiver pointerness is read from `method_receivers`
 /// and their canonical signatures are looked up in `method_signatures`.
 /// Promoted methods come from the pass-local promotion indices keyed on
-/// `(outer_node, method_name_id)` → promoted-method NodeId. The
+/// `(outer_node, method_name_id)` → promoted-method `NodeId`. The
 /// promoted node's signature is recovered indirectly via the
 /// `Inherits`-target edge that points back at the source method —
 /// promoted-method nodes do not themselves carry a
@@ -3515,14 +3515,14 @@ fn compute_candidate_method_sets<G: GraphMutationTarget>(
     // so we can recover the underlying method's signature via the
     // `Inherits` back-edge minted by T1.2 step 5.
     let mut promoted_value_by_outer: BTreeMap<NodeId, Vec<(StringId, NodeId)>> = BTreeMap::new();
-    for (&(outer_node, name_id), &promoted_id) in indices.outer_to_value_promoted.iter() {
+    for (&(outer_node, name_id), &promoted_id) in &indices.outer_to_value_promoted {
         promoted_value_by_outer
             .entry(outer_node)
             .or_default()
             .push((name_id, promoted_id));
     }
     let mut promoted_pointer_by_outer: BTreeMap<NodeId, Vec<(StringId, NodeId)>> = BTreeMap::new();
-    for (&(outer_node, name_id), &promoted_id) in indices.outer_to_pointer_promoted.iter() {
+    for (&(outer_node, name_id), &promoted_id) in &indices.outer_to_pointer_promoted {
         promoted_pointer_by_outer
             .entry(outer_node)
             .or_default()
@@ -3530,9 +3530,8 @@ fn compute_candidate_method_sets<G: GraphMutationTarget>(
     }
 
     for &c in candidates {
-        let c_qn = match qualified_name_string(graph, c) {
-            Some(s) => s,
-            None => continue,
+        let Some(c_qn) = qualified_name_string(graph, c) else {
+            continue;
         };
         let mut value_methods: Vec<MethodSetEntry> = Vec::new();
         let mut pointer_methods: Vec<MethodSetEntry> = Vec::new();

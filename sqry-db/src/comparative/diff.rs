@@ -175,7 +175,7 @@ impl DiffSummary {
 /// Output of [`compute_diff`] / [`super::ComparativeQueryDb::diff`].
 #[derive(Debug, Clone, Default)]
 pub struct DiffOutput {
-    /// All detected changes, in the order the underlying HashMap iteration
+    /// All detected changes, in the order the underlying `HashMap` iteration
     /// produces (caller-visible ordering should sort/paginate as needed).
     pub changes: Vec<NodeChange>,
     /// Pre-filter summary (matches `changes` bucket counts before any

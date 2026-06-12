@@ -81,6 +81,11 @@ fn collect_filtered_files(
     (file_entries, total_count)
 }
 
+/// Execute the `list_files` tool to enumerate indexed files.
+///
+/// # Errors
+///
+/// Returns an error if workspace resolution or graph acquisition fails.
 pub fn execute_list_files(args: &ListFilesArgs) -> Result<ToolExecution<ListFilesData>> {
     let start = Instant::now();
     let workspace_path = resolve_workspace_path(&args.path);
@@ -146,6 +151,11 @@ fn matches_symbol_filters(kind_str: &str, language: &str, args: &ListSymbolsArgs
 }
 
 /// Execute the `list_symbols` tool to list symbols in the graph.
+///
+/// # Errors
+///
+/// Returns an error if workspace resolution, graph acquisition, or result
+/// pagination fails.
 pub fn execute_list_symbols(args: &ListSymbolsArgs) -> Result<ToolExecution<ListSymbolsData>> {
     let start = Instant::now();
     let workspace_path = resolve_workspace_path(&args.path);
@@ -257,6 +267,10 @@ pub fn execute_list_symbols(args: &ListSymbolsArgs) -> Result<ToolExecution<List
 }
 
 /// Execute the `get_graph_stats` tool to get graph statistics.
+///
+/// # Errors
+///
+/// Returns an error if workspace resolution or graph acquisition fails.
 pub fn execute_get_graph_stats(args: &GetGraphStatsArgs) -> Result<ToolExecution<GraphStatsData>> {
     let start = Instant::now();
     let workspace_path = resolve_workspace_path(&args.path);
@@ -501,6 +515,10 @@ fn estimate_unused_count(snapshot: &sqry_core::graph::unified::concurrent::Graph
 }
 
 /// Execute the `get_insights` tool to provide codebase health metrics.
+///
+/// # Errors
+///
+/// Returns an error if workspace resolution or graph acquisition fails.
 #[allow(
     clippy::too_many_lines,
     reason = "aggregates multiple health metrics in a single pass; extraction into helpers would obscure the data-flow logic"
@@ -687,6 +705,10 @@ fn detect_expand_cache_status(workspace_root: &std::path::Path) -> String {
 }
 
 /// Execute the `expand_cache_status` tool to report macro expansion cache state.
+///
+/// # Errors
+///
+/// Returns an error if workspace resolution or graph acquisition fails.
 pub fn execute_expand_cache_status(
     args: &ExpandCacheStatusArgs,
 ) -> Result<ToolExecution<ExpandCacheStatusData>> {
@@ -961,6 +983,11 @@ fn summarize_complexity_metrics(
 /// `args.min_complexity`. Post-filters by `args.target` (substring
 /// match on symbol name / file path) inside
 /// [`collect_complexity_metric`].
+///
+/// # Errors
+///
+/// Returns an error if workspace resolution, graph acquisition, or complexity
+/// metric collection fails.
 pub fn execute_complexity_metrics(
     args: &crate::tools::ComplexityMetricsArgs,
 ) -> Result<ToolExecution<super::super::types::ComplexityMetricsData>> {
@@ -984,13 +1011,12 @@ pub fn execute_complexity_metrics(
         graph,
         executor: engine.executor_arc(),
     };
-    inner::execute_complexity_metrics(&ctx, args, start)
+    Ok(inner::execute_complexity_metrics(&ctx, args, start))
 }
 
 pub(crate) mod inner {
     use super::{
-        Result, ToolExecution, collect_complexity_metric, duration_to_ms,
-        summarize_complexity_metrics,
+        ToolExecution, collect_complexity_metric, duration_to_ms, summarize_complexity_metrics,
     };
     use crate::daemon_adapter::WorkspaceContext;
     use std::time::Instant;
@@ -1000,7 +1026,7 @@ pub(crate) mod inner {
         ctx: &WorkspaceContext,
         args: &crate::tools::ComplexityMetricsArgs,
         start: Instant,
-    ) -> Result<ToolExecution<super::super::super::types::ComplexityMetricsData>> {
+    ) -> ToolExecution<super::super::super::types::ComplexityMetricsData> {
         use super::super::super::types::ComplexityMetricData;
 
         let snapshot = ctx.graph.snapshot();
@@ -1056,7 +1082,7 @@ pub(crate) mod inner {
             "complexity_metrics completed"
         );
 
-        Ok(ToolExecution {
+        ToolExecution {
             data,
             used_index: false,
             used_graph: true,
@@ -1069,7 +1095,7 @@ pub(crate) mod inner {
             workspace_path: crate::execution::symbol_utils::path_to_forward_slash(
                 &ctx.workspace_root,
             ),
-        })
+        }
     }
 }
 

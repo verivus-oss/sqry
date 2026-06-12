@@ -1097,7 +1097,7 @@ impl<'a> GraphBuildHelper<'a> {
         self.add_node(qualified_name, span, NodeKind::Channel)
     }
 
-    /// Stage a `ChannelPeer` edge from an operation-site CallSite to its
+    /// Stage a `ChannelPeer` edge from an operation-site `CallSite` to its
     /// canonical `Channel` node (T2.4).
     pub fn add_channel_peer_edge_with_span(
         &mut self,
@@ -1119,7 +1119,7 @@ impl<'a> GraphBuildHelper<'a> {
         );
     }
 
-    /// Stage an `Instantiates` edge from a generic call-site CallSite to the
+    /// Stage an `Instantiates` edge from a generic call-site `CallSite` to the
     /// generic function / method definition (T2.5).
     ///
     /// `type_args` is taken by value so the Go plugin can build it via
@@ -1455,7 +1455,7 @@ impl<'a> GraphBuildHelper<'a> {
     }
 
     /// Add a T3 `Wraps` edge from a wrapper expression to a wrapped error
-    /// value (Go error chains, 02_DESIGN §1.3 / §2.4).
+    /// value (Go error chains, `02_DESIGN` §1.3 / §2.4).
     ///
     /// The `kind` discriminates the source-syntax form
     /// (`fmt.Errorf("%w", err)`, `Unwrap()` method, `errors.{Is,As,AsType,Join}`);
@@ -1684,7 +1684,7 @@ impl<'a> GraphBuildHelper<'a> {
     /// each push goes through `self.intern(...)` so the local → global
     /// `StringId` remap built by `StagingGraph::commit_strings` applies
     /// uniformly during Phase 3 commit. U11 resolves each global
-    /// `StringId` to its canonical NodeId via the post-unification
+    /// `StringId` to its canonical `NodeId` via the post-unification
     /// qualified-name index and applies the `NodeFlags::ADDRESS_TAKEN`
     /// bit. Duplicates within a file are tolerated — `mark_address_taken`
     /// is idempotent.
@@ -1710,7 +1710,7 @@ impl<'a> GraphBuildHelper<'a> {
     /// staging payload (DESIGN §4.2).
     ///
     /// The caller is identified by its qualified name string; U11 resolves
-    /// it to a NodeId after Phase 4c-prime cross-file unification. U12's
+    /// it to a `NodeId` after Phase 4c-prime cross-file unification. U12's
     /// resolver consumes the callsite list in `pass5b_c_indirect_resolve`.
     pub fn push_indirect_callsite(
         &mut self,

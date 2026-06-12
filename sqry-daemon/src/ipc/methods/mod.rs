@@ -7,16 +7,16 @@
 //! - `daemon/unload` — [`daemon_unload`]
 //! - `daemon/stop` — [`daemon_stop`]
 //!
-//! MCP Robustness (CLI_REBUILD_2) adds:
+//! MCP Robustness (`CLI_REBUILD_2`) adds:
 //!
 //! - `daemon/rebuild` — [`daemon_rebuild`]
 //! - `daemon/cancel_rebuild` — [`daemon_cancel_rebuild`]
 //!
-//! STEP_6 of the workspace-aware-cross-repo plan adds:
+//! `STEP_6` of the workspace-aware-cross-repo plan adds:
 //!
 //! - `daemon/workspaceStatus` — [`daemon_workspace_status`]
 //!
-//! issue-238 tier-2 (DAEMON_SEARCH_HANDLER) adds:
+//! issue-238 tier-2 (`DAEMON_SEARCH_HANDLER`) adds:
 //!
 //! - `daemon/search` — [`daemon_search`]
 //!
@@ -93,7 +93,7 @@ impl std::fmt::Debug for HandlerContext {
 /// Per-connection state captured at handshake time and inherited by
 /// every subsequent request on the same connection.
 ///
-/// STEP_6 (workspace-aware-cross-repo, 2026-04-26) iter-2 BLOCK fix:
+/// `STEP_6` (workspace-aware-cross-repo, 2026-04-26) iter-2 BLOCK fix:
 /// `DaemonHello.logical_workspace` documented a connection-level
 /// binding contract — every later `daemon/load` that omits
 /// `logical_workspace` from its own params should inherit the
@@ -280,7 +280,7 @@ pub fn format_panic_payload(join_err: JoinError) -> String {
 /// `conn` carries per-connection state captured at handshake time —
 /// today only the optional `DaemonHello.logical_workspace` binding,
 /// inherited by `daemon/load` calls that omit their own
-/// `logical_workspace` param (STEP_6 iter-2 BLOCK fix).
+/// `logical_workspace` param (`STEP_6` iter-2 BLOCK fix).
 pub(crate) async fn dispatch(
     ctx: &HandlerContext,
     conn: &ConnectionState,
@@ -289,12 +289,12 @@ pub(crate) async fn dispatch(
     let id = req.id.clone()?;
 
     let result = match req.method.as_str() {
-        "daemon/status" => daemon_status::handle(ctx, req.params).await,
+        "daemon/status" => daemon_status::handle(ctx, req.params),
         "daemon/load" => daemon_load::handle(ctx, conn, req.params).await,
-        "daemon/unload" => daemon_unload::handle(ctx, req.params).await,
-        "daemon/stop" => daemon_stop::handle(ctx, req.params).await,
+        "daemon/unload" => daemon_unload::handle(ctx, req.params),
+        "daemon/stop" => daemon_stop::handle(ctx, req.params),
         "daemon/rebuild" => daemon_rebuild::handle(ctx, req.params).await,
-        "daemon/cancel_rebuild" => daemon_cancel_rebuild::handle(ctx, req.params).await,
+        "daemon/cancel_rebuild" => daemon_cancel_rebuild::handle(ctx, req.params),
         // issue-238 tier-2 — `daemon/search` routes through the shared
         // GraphAcquirer boundary so post-eviction reload works. See
         // `daemon_search` module docs for the parity contract.
@@ -303,18 +303,18 @@ pub(crate) async fn dispatch(
         // per-source-root rollup of every WorkspaceKey grouped under
         // the requested `workspace_id`. See
         // `daemon_workspace_status` module docs for the contract.
-        "daemon/workspaceStatus" => daemon_workspace_status::handle(ctx, req.params).await,
+        "daemon/workspaceStatus" => daemon_workspace_status::handle(ctx, req.params),
         // sqry-mcp flakiness P1 (`E_p1_cluster.md` §E.4 + `00_contracts.md`
         // §3.CC-4): read-only enumeration of `.sqry/graph` directories
         // belonging to every live workspace. Consumed by
         // `sqry workspace clean` (cluster E Layer-2) with a 250ms caller
         // budget; fallback path is `<root>/.sqry/graph/active.lock`.
-        "daemon/active-artifacts" => daemon_active_artifacts::handle(ctx, req.params).await,
+        "daemon/active-artifacts" => daemon_active_artifacts::handle(ctx, req.params),
         // Cluster-G §3.2: non-destructive workspace recovery. Drops the
         // in-memory graph + admission bytes but preserves the manager-
         // map entry, `pinned` bit, and `last_error`. Files on disk are
         // never touched (cluster-E §E.4 owns the destructive path).
-        "daemon/reset" => daemon_reset::handle(ctx, req.params).await,
+        "daemon/reset" => daemon_reset::handle(ctx, req.params),
         // Phase 8b Task 7 — the 14 MCP tool methods. Each is gated on
         // `WorkspaceManager::classify_for_serve` inside
         // `tool_dispatch::classify_and_build`; NotReady verdicts surface

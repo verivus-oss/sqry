@@ -25,6 +25,15 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
+fn f64_hours_to_u64(hours: f64) -> u64 {
+    if !hours.is_finite() || hours <= 0.0 {
+        return 0;
+    }
+    format!("{:.0}", hours.trunc())
+        .parse::<u64>()
+        .unwrap_or(u64::MAX)
+}
+
 /// Test instrumentation for `execute_with_timeout`.
 ///
 /// Provides a workspace-path-keyed notification mechanism so integration
@@ -401,7 +410,7 @@ where
                 .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
                 .map(|dt| SystemTime::from(dt.with_timezone(&chrono::Utc)));
             let lg_at = parsed_last_good.unwrap_or_else(SystemTime::now);
-            let age_u64 = age_hours.map(|h| h as u64).unwrap_or(0);
+            let age_u64 = age_hours.map_or(0, f64_hours_to_u64);
             let stale_warning =
                 render_stale_warning(&canonical_root, age_u64, lg_at, last_error.as_deref());
             Ok(ExecuteVerdict::Stale {
@@ -416,7 +425,7 @@ where
 
 /// SGA05 legacy — kept exclusively for the in-crate unit tests in
 /// the `tests` module below, which assert direct
-/// `classify_for_serve` semantics (NotReady, Loading, ToolTimeout,
+/// `classify_for_serve` semantics (`NotReady`, Loading, `ToolTimeout`,
 /// Internal-from-closure-error) that are easier to express against
 /// `WorkspaceManager` directly than against
 /// [`acquire_and_execute`] (which also runs path canonicalisation +
@@ -431,7 +440,7 @@ where
 /// 3. On Fresh/Stale: builds a [`WorkspaceContext`] and runs `run`
 ///    inside [`tokio::task::spawn_blocking`] with a
 ///    [`tokio::time::timeout(tool_timeout, ...)`] outer bound.
-/// 4. On NotReady: returns [`DaemonError::WorkspaceBuildFailed`].
+/// 4. On `NotReady`: returns [`DaemonError::WorkspaceBuildFailed`].
 /// 5. On outer timeout: drops the [`tokio::task::JoinHandle`] and
 ///    returns [`DaemonError::ToolTimeout`] (OS thread continues;
 ///    result discarded).
@@ -440,7 +449,7 @@ where
 /// # Errors
 ///
 /// - [`DaemonError::InvalidArgument`] — path canonicalisation failed.
-/// - [`DaemonError::WorkspaceBuildFailed`] — NotReady verdict.
+/// - [`DaemonError::WorkspaceBuildFailed`] — `NotReady` verdict.
 /// - [`DaemonError::WorkspaceStaleExpired`] — Stale expired past cap.
 /// - [`DaemonError::WorkspaceEvicted`] — workspace evicted between
 ///   classify and graph capture.

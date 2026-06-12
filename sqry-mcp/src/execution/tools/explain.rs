@@ -40,6 +40,12 @@ fn resolve_workspace_path(path: &str) -> Option<PathBuf> {
         Some(PathBuf::from(path))
     }
 }
+/// Execute the `explain_code` tool.
+///
+/// # Errors
+///
+/// Returns an error if workspace resolution, graph acquisition, file
+/// canonicalization, or symbol explanation fails.
 pub fn execute_explain_code(args: &ExplainCodeArgs) -> Result<ToolExecution<ExplainCodeData>> {
     let start = Instant::now();
     let workspace_path = resolve_workspace_path(&args.path);

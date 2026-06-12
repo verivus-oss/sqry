@@ -1,7 +1,7 @@
 //! Workspace state machine and key types.
 //!
 //! Corresponds to Task 6 Step 1 of the sqryd plan, augmented by
-//! STEP_6 of the workspace-aware-cross-repo DAG (2026-04-26):
+//! `STEP_6` of the workspace-aware-cross-repo DAG (2026-04-26):
 //!
 //! - [`WorkspaceState`] — the six-state workspace lifecycle enum (A2 §G.5,
 //!   §G.7). **Moved to `sqry-daemon-protocol` in Phase 8c U1** so the
@@ -14,7 +14,7 @@
 //! - [`WorkspaceKey`] — the identity used to dedup workspaces in
 //!   [`crate::workspace::WorkspaceManager`].
 //!
-//!   STEP_6 of the workspace-aware-cross-repo plan **augments** (does not
+//!   `STEP_6` of the workspace-aware-cross-repo plan **augments** (does not
 //!   replace) the original three-dimensional key. The composite key is
 //!   now four-dimensional: an optional `workspace_id` that groups
 //!   logically-related source roots, plus the canonical absolute
@@ -25,7 +25,7 @@
 //!
 //!   Backward compatibility:
 //!   - `workspace_id == None` reproduces today's per-source-root /
-//!     anonymous semantics — exactly what the daemon did before STEP_6.
+//!     anonymous semantics — exactly what the daemon did before `STEP_6`.
 //!   - The serde wire form preserves the legacy `index_root` field name
 //!     via `#[serde(alias = "index_root")]`, so persisted v1 JSON
 //!     fixtures and over-the-wire payloads from older clients keep
@@ -64,7 +64,7 @@ pub use sqry_daemon_protocol::protocol::WorkspaceState;
 /// responsibility; [`Self::new`] does not canonicalise because a path may
 /// not exist on disk yet at the moment a key is synthesised).
 ///
-/// # STEP_6 augmentation
+/// # `STEP_6` augmentation
 ///
 /// `workspace_id` lifts the key into a four-dimensional space so a
 /// single logical workspace can group multiple source roots under one

@@ -445,7 +445,7 @@ impl QueryDb {
     /// - [`cache::ShardedCache::insert_validated`] (infallible `HashMap::insert`)
     pub(crate) fn commit_staged_load(
         &mut self,
-        header: persistence::DerivedHeader,
+        header: &persistence::DerivedHeader,
         staged: Vec<persistence::StagedEntry>,
     ) {
         // INVARIANT: all calls below are infallible — see spec §5.7
@@ -471,12 +471,12 @@ impl QueryDb {
                 entry.query_type_id,
                 entry.raw_key_bytes.into(),
                 entry.raw_result_bytes.into(),
-                entry.deps,
+                &entry.deps,
             );
         }
     }
 
-    /// Yields all persistent cache entries for the SAVE_PATH persistence unit.
+    /// Yields all persistent cache entries for the `SAVE_PATH` persistence unit.
     ///
     /// Delegates to [`ShardedCache::iter_persistent`]. This crate-internal
     /// accessor exists to allow `persistence::save_derived` (a sibling module)

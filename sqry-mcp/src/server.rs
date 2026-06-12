@@ -214,6 +214,39 @@ impl SqryServer {
         Redactor::new(config).ok()
     }
 
+    fn redact_error_message(redactor: Option<&Redactor>, msg: String) -> String {
+        if let Some(redactor) = redactor {
+            let mut value = serde_json::Value::String(msg);
+            redactor.redact(&mut value);
+            match value {
+                serde_json::Value::String(redacted) => redacted,
+                other => other.to_string(),
+            }
+        } else {
+            msg
+        }
+    }
+
+    fn build_redacted_response<T: Serialize>(
+        execution: ToolExecution<T>,
+        redactor: Option<&Redactor>,
+    ) -> Result<serde_json::Value, McpError> {
+        let mut response = Self::build_response(execution)?;
+        if let Some(redactor) = redactor {
+            redactor.redact(&mut response);
+        }
+        Ok(response)
+    }
+
+    fn cancel_if_timeout_elapsed<T>(
+        result: &Result<T, tokio::time::error::Elapsed>,
+        cancel: &sqry_core::query::cancellation::CancellationToken,
+    ) {
+        if result.is_err() {
+            cancel.cancel();
+        }
+    }
+
     /// Build a tool router filtered by the active feature flags.
     fn filtered_tool_router(feature_flags: &FeatureFlags) -> ToolRouter<Self> {
         let mut router = Self::tool_router();
@@ -444,9 +477,7 @@ impl SqryServer {
             // and the contract on the deadline arm is fire-and-forget;
             // the cooperative-cancellation token is what frees the
             // blocking-pool slot once the closure body returns.
-            if result.is_err() {
-                cancel.cancel();
-            }
+            Self::cancel_if_timeout_elapsed(&result, &cancel);
 
             let workspace_scoped_redactor = redactor_clone.as_ref().and_then(|redactor| {
                 Self::redactor_for_workspace(
@@ -456,33 +487,10 @@ impl SqryServer {
                 )
             });
 
-            // Helper: redact an error message string if redactor is active
-            let redact_error = |msg: String| -> String {
-                if let Some(ref redactor) = workspace_scoped_redactor {
-                    let mut val = serde_json::Value::String(msg);
-                    redactor.redact(&mut val);
-                    match val {
-                        serde_json::Value::String(s) => s,
-                        other => other.to_string(),
-                    }
-                } else {
-                    msg
-                }
-            };
+            let scoped_redactor = workspace_scoped_redactor.as_ref();
 
             match result {
-                Ok(Ok(Ok(execution))) => {
-                    // Build response matching native implementation's build_success()
-                    // Preserves all metadata: execution_ms, pagination, used_index, etc.
-                    let mut response = Self::build_response(execution)?;
-
-                    // Apply redaction if configured (none preset = no redactor = skip)
-                    if let Some(ref redactor) = workspace_scoped_redactor {
-                        redactor.redact(&mut response);
-                    }
-
-                    Ok(response)
-                }
+                Ok(Ok(Ok(execution))) => Self::build_redacted_response(execution, scoped_redactor),
                 Ok(Ok(Err(anyhow_err))) => {
                     // `A_cancellation.md` §4: if the closure observed
                     // the cancellation we just signalled (deadline
@@ -574,13 +582,16 @@ impl SqryServer {
                         Err(rpc_error_to_mcp(rpc_err.clone()))
                     } else {
                         Err(McpError::internal_error(
-                            redact_error(anyhow_err.to_string()),
+                            Self::redact_error_message(scoped_redactor, anyhow_err.to_string()),
                             None,
                         ))
                     }
                 }
                 Ok(Err(join_err)) => Err(McpError::internal_error(
-                    redact_error(format!("Task panicked: {join_err}")),
+                    Self::redact_error_message(
+                        scoped_redactor,
+                        format!("Task panicked: {join_err}"),
+                    ),
                     None,
                 )),
                 Err(_) => Err(rpc_error_to_mcp(RpcError::deadline_exceeded(
@@ -1722,7 +1733,7 @@ fn validate_usize(value: i64, field: &str, min: i64, max: i64) -> Result<usize, 
 /// Cluster-C iter-2: validate per-call `budget_rows`. The MCP wire
 /// contract (`C_budget.md` §C5) forbids `0` because a budget of zero
 /// would trip on the first row, which is never the operator intent.
-/// Return `RpcError::validation_with_data` (-32602 InvalidParams) so
+/// Return `RpcError::validation_with_data` (-32602 `InvalidParams`) so
 /// callers see a typed validation failure instead of falling through
 /// to the env / default path silently.
 fn validate_budget_rows(value: Option<u64>) -> Result<Option<u64>, RpcError> {

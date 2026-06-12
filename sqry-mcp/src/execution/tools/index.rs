@@ -32,6 +32,12 @@ fn resolve_workspace_path(path: &str) -> Option<PathBuf> {
         Some(PathBuf::from(path))
     }
 }
+/// Execute the `get_index_status` tool.
+///
+/// # Errors
+///
+/// Returns an error if workspace resolution, path canonicalization, or index
+/// status aggregation fails.
 pub fn execute_index_status(args: &GetIndexStatusArgs) -> Result<ToolExecution<IndexStatusData>> {
     let start = Instant::now();
     let workspace_path = resolve_workspace_path(&args.path);
@@ -141,6 +147,11 @@ pub fn execute_index_status(args: &GetIndexStatusArgs) -> Result<ToolExecution<I
 ///
 /// This triggers a full rebuild of the unified graph (`.sqry/graph/`) for the given path.
 /// The operation scans all source files and rebuilds the graph from scratch.
+///
+/// # Errors
+///
+/// Returns an error if workspace resolution, path canonicalization, graph
+/// rebuilding, or persistence fails.
 #[allow(clippy::too_many_lines)]
 pub fn execute_rebuild_index(args: &RebuildIndexArgs) -> Result<ToolExecution<RebuildIndexData>> {
     let start = Instant::now();

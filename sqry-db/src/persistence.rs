@@ -68,7 +68,7 @@ pub const DERIVED_FORMAT_VERSION: u16 = 2;
 /// Serializable snapshot of the three-tier dependency metadata recorded
 /// during query execution.
 ///
-/// Stored inside each [`PersistedEntry`] so the LOAD_PATH layer can
+/// Stored inside each [`PersistedEntry`] so the `LOAD_PATH` layer can
 /// reconstruct `CachedResult`'s dependency fields after cold-start
 /// rehydration.
 ///
@@ -154,7 +154,7 @@ impl DerivedHeader {
     /// Returns `true` if the magic bytes and format version identify a valid
     /// v02 derived file.
     ///
-    /// Used by LOAD_PATH to reject legacy v01 files and corrupted files
+    /// Used by `LOAD_PATH` to reject legacy v01 files and corrupted files
     /// before attempting entry decode.
     #[must_use]
     pub fn is_valid_v02(&self) -> bool {
@@ -188,14 +188,14 @@ pub type DerivedManifest = DerivedHeader;
 /// One persisted cache entry in the derived file.
 ///
 /// Follows the [`DerivedHeader`] in the stream, repeated `entry_count` times.
-/// The LOAD_PATH unit decodes entries one-by-one with
+/// The `LOAD_PATH` unit decodes entries one-by-one with
 /// [`deserialize_next_entry`] so framing corruption at entry N is caught
 /// before any entries are committed.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersistedEntry {
     /// Stable on-disk query type discriminator.  Must match a registered
     /// query's `DerivedQuery::QUERY_TYPE_ID`; unknown IDs are silently
-    /// skipped by LOAD_PATH.
+    /// skipped by `LOAD_PATH`.
     pub query_type_id: u32,
     /// Postcard-serialized query key bytes.
     pub raw_key_bytes: Vec<u8>,
@@ -213,7 +213,7 @@ pub struct PersistedEntry {
 ///
 /// Wire layout: `[header postcard bytes][entry postcard bytes]*`.
 ///
-/// Each record is independently postcard-encoded and concatenated. The LOAD_PATH
+/// Each record is independently postcard-encoded and concatenated. The `LOAD_PATH`
 /// layer uses [`deserialize_derived_header`] + repeated [`deserialize_next_entry`]
 /// to decode the stream incrementally without peak-RAM buffering of all entries.
 ///
@@ -240,7 +240,7 @@ where
 /// Deserialize the header from the beginning of `bytes`, returning the
 /// header and the remaining byte slice (the entry stream tail).
 ///
-/// Does NOT decode entries — that is the caller's responsibility.  LOAD_PATH
+/// Does NOT decode entries — that is the caller's responsibility.  `LOAD_PATH`
 /// calls [`deserialize_next_entry`] repeatedly on the returned tail to decode
 /// entries one at a time inside a staged-validation loop.
 ///
@@ -303,7 +303,7 @@ pub fn derived_path_for_snapshot(snapshot_path: &Path, filename: &str) -> PathBu
 ///
 /// This function is retained as a thin compatibility shim for the existing
 /// warm-path tests and callers that previously called `save_manifest`.
-/// New code should use the full `save_derived` function (SAVE_PATH unit).
+/// New code should use the full `save_derived` function (`SAVE_PATH` unit).
 ///
 /// # Errors
 ///
@@ -318,8 +318,8 @@ pub fn save_manifest(path: &Path, manifest: &DerivedHeader) -> anyhow::Result<()
 ///
 /// Returns `None` if the file doesn't exist, can't be read, or can't be
 /// deserialized.  Note: this decodes the whole file as a `DerivedHeader` and
-/// does NOT validate magic / format_version — that responsibility lives in the
-/// LOAD_PATH unit's staged-validation loop.
+/// does NOT validate magic / `format_version` — that responsibility lives in the
+/// `LOAD_PATH` unit's staged-validation loop.
 #[must_use]
 pub fn load_manifest(path: &Path) -> Option<DerivedHeader> {
     let bytes = std::fs::read(path).ok()?;
@@ -330,7 +330,7 @@ pub fn load_manifest(path: &Path) -> Option<DerivedHeader> {
 // save_derived — SAVE_PATH unit
 // ============================================================================
 
-/// Writes the QueryDb's persistent cache entries to `path` using an atomic
+/// Writes the `QueryDb`'s persistent cache entries to `path` using an atomic
 /// write.
 ///
 /// # Algorithm
@@ -634,7 +634,7 @@ pub fn load_derived(
 
     // Step 7: Commit staged entries — INFALLIBLE.
     let entries_applied = staged.len();
-    db.commit_staged_load(header, staged);
+    db.commit_staged_load(&header, staged);
 
     // Step 8: Close the cold-load window.
     db.cold_load_allowed.store(false, Ordering::Release);

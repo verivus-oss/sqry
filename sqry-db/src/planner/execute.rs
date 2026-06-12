@@ -803,7 +803,7 @@ impl<'db> PlanExecutor<'db> {
     /// Implementation of the `wraps` / `wraps:<kind>` planner predicate
     /// (T3 Cluster F, AC-T3.6-9).
     ///
-    /// Per 02_DESIGN §2.1 the discriminant on `EdgeKind::Wraps`
+    /// Per `02_DESIGN` §2.1 the discriminant on `EdgeKind::Wraps`
     /// collapses every `WrapKind` into a single discriminant, so we
     /// inspect the carried `kind` directly. The bare `wraps` form
     /// (`WrapKindFilter::Any`) accepts any `Wraps` edge; `Kind(k)`
@@ -962,7 +962,7 @@ enum CompiledPredicate {
     /// The matcher is either `Semantic(CfgAst)` (bare planner form;
     /// cross-language match via the comparator) or `Literal(String)`
     /// (quoted planner form; byte-exact, language-specific) per
-    /// 02_DESIGN §5.3.a + §10.4.
+    /// `02_DESIGN` §5.3.a + §10.4.
     CfgCondition(super::cfg_match::CfgMatcher),
     /// T3 Cluster F: `wraps` / `wraps:<kind>` — matches nodes with at
     /// least one outbound `EdgeKind::Wraps` edge satisfying the filter.

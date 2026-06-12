@@ -61,10 +61,34 @@ use tempfile::NamedTempFile;
 /// - **Windows / other non-Unix**: Parent-directory fsync is a no-op. The
 ///   tempfile is still written and renamed atomically via the OS rename call.
 pub fn atomic_write_bytes(target_path: &Path, bytes: &[u8]) -> io::Result<()> {
-    // ── Step 1: Reject if target itself is a symlink ──────────────────────
-    //
-    // Use `symlink_metadata` (lstat), which does NOT follow symlinks, so we
-    // can detect the symlink before any dereferencing takes place.
+    let (parent, canonical_parent) = validate_atomic_write_target(target_path)?;
+    write_and_persist_tempfile(&parent, target_path, bytes)?;
+    fsync_parent_dir(&canonical_parent)?;
+
+    Ok(())
+}
+
+fn validate_atomic_write_target(
+    target_path: &Path,
+) -> io::Result<(std::path::PathBuf, std::path::PathBuf)> {
+    reject_target_symlink(target_path)?;
+
+    let parent = target_path.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "atomic_write_bytes: target path has no parent directory: {}",
+                target_path.display()
+            ),
+        )
+    })?;
+    reject_parent_symlink(parent)?;
+    let canonical_parent = canonical_parent_dir(parent)?;
+
+    Ok((parent.to_path_buf(), canonical_parent))
+}
+
+fn reject_target_symlink(target_path: &Path) -> io::Result<()> {
     if let Ok(meta) = std::fs::symlink_metadata(target_path)
         && meta.file_type().is_symlink()
     {
@@ -76,30 +100,10 @@ pub fn atomic_write_bytes(target_path: &Path, bytes: &[u8]) -> io::Result<()> {
             ),
         ));
     }
+    Ok(())
+}
 
-    // ── Step 2: Resolve parent and reject if it is a symlink ─────────────
-    //
-    // We canonicalize the parent to resolve any `..` components, then
-    // re-check with `symlink_metadata` to detect the case where the final
-    // component of the canonical path is itself a symlink. On Linux/macOS,
-    // `canonicalize` follows symlinks at every component, so the result is
-    // always a real path — but `symlink_metadata` on the canonical result
-    // tells us whether the canonical path itself is a symlink (which would
-    // mean the whole directory chain was re-routed). In practice the most
-    // important case is: the raw parent as supplied by the caller is a
-    // symlink (e.g. `/tmp/link -> /real/dir`). Canonicalize resolves it and
-    // the re-check on the *raw* parent catches that.
-    let parent = target_path.parent().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!(
-                "atomic_write_bytes: target path has no parent directory: {}",
-                target_path.display()
-            ),
-        )
-    })?;
-
-    // Reject if the raw (non-canonicalized) parent is a symlink.
+fn reject_parent_symlink(parent: &Path) -> io::Result<()> {
     let raw_parent_meta = std::fs::symlink_metadata(parent).map_err(|e| {
         io::Error::new(
             e.kind(),
@@ -118,8 +122,10 @@ pub fn atomic_write_bytes(target_path: &Path, bytes: &[u8]) -> io::Result<()> {
             ),
         ));
     }
+    Ok(())
+}
 
-    // Also canonicalize and verify the canonical parent is a real directory.
+fn canonical_parent_dir(parent: &Path) -> io::Result<std::path::PathBuf> {
     let canonical_parent = parent.canonicalize().map_err(|e| {
         io::Error::new(
             e.kind(),
@@ -148,11 +154,10 @@ pub fn atomic_write_bytes(target_path: &Path, bytes: &[u8]) -> io::Result<()> {
             ),
         ));
     }
+    Ok(canonical_parent)
+}
 
-    // ── Step 3: Create named tempfile in the same directory ───────────────
-    //
-    // `NamedTempFile::new_in` creates the temp file in the specified
-    // directory, guaranteeing same-device placement for the rename below.
+fn write_and_persist_tempfile(parent: &Path, target_path: &Path, bytes: &[u8]) -> io::Result<()> {
     let mut tmp = NamedTempFile::new_in(parent).map_err(|e| {
         io::Error::new(
             e.kind(),
@@ -163,10 +168,7 @@ pub fn atomic_write_bytes(target_path: &Path, bytes: &[u8]) -> io::Result<()> {
         )
     })?;
 
-    // ── Step 4: Write bytes and fsync the file ────────────────────────────
     if let Err(write_err) = tmp.write_all(bytes) {
-        // Explicit cleanup — NamedTempFile removes on drop, but be explicit
-        // about the error context.
         let _ = tmp.close();
         return Err(io::Error::new(
             write_err.kind(),
@@ -200,19 +202,6 @@ pub fn atomic_write_bytes(target_path: &Path, bytes: &[u8]) -> io::Result<()> {
             ),
         )
     })?;
-
-    // ── Step 6: fsync the parent directory (Unix only) ────────────────────
-    //
-    // On Unix, fsyncing the parent directory ensures the rename (directory
-    // entry update) is also flushed to durable storage. Without this step a
-    // crash immediately after rename could leave the directory still pointing
-    // to the old inode on some filesystems (e.g., ext3 without journal).
-    //
-    // On Windows this is a no-op — the OS handles directory-entry durability
-    // differently and there is no straightforward equivalent with the same
-    // safety properties.
-    fsync_parent_dir(&canonical_parent)?;
-
     Ok(())
 }
 

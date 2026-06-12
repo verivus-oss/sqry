@@ -155,120 +155,140 @@ fn run_daemon_rebuild(path: &Path, force: bool, timeout: u64, json: bool) -> Res
         .build()
         .context("failed to build tokio runtime for daemon rebuild")?;
 
-    rt.block_on(async {
-        let mut client = sqry_daemon_client::DaemonClient::connect(&socket_path)
-            .await
-            .with_context(|| {
-                format!("failed to connect to daemon at {}", socket_path.display())
-            })?;
-
-        let started = Instant::now();
-        let deadline = started + Duration::from_secs(timeout);
-
-        // Spawn a status-polling task that prints progress to stderr.
-        let poll_socket = socket_path.clone();
-        let poll_path = canonical_path.clone();
-        let poll_done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let poll_flag = std::sync::Arc::clone(&poll_done);
-        let poll_handle = tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(Duration::from_secs(5)).await;
-                if poll_flag.load(std::sync::atomic::Ordering::Relaxed) {
-                    break;
-                }
-                // Connect a fresh client for status polling.
-                let Ok(mut poll_client) =
-                    sqry_daemon_client::DaemonClient::connect(&poll_socket).await
-                else {
-                    continue;
-                };
-                if let Ok(status) = poll_client.status().await {
-                    let elapsed = started.elapsed().as_secs();
-                    if let Some(ws_state) = extract_workspace_state(&status, &poll_path) {
-                        eprint!("\rsqry: {ws_state} ({elapsed}s elapsed)");
-                        let _ = std::io::stderr().flush();
-                    }
-                }
-            }
-        });
-
-        // Send the rebuild request. This blocks until the daemon finishes.
-        let result = tokio::select! {
-            res = client.rebuild(&canonical_path, force) => res,
-            () = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
-                poll_done.store(true, std::sync::atomic::Ordering::Relaxed);
-                let _ = poll_handle.await;
-                let elapsed_ms = started.elapsed().as_millis() as u64;
-                if json {
-                    let out = serde_json::json!({
-                        "status": "timeout",
-                        "elapsed_ms": elapsed_ms,
-                        "message": "rebuild still in progress on daemon"
-                    });
-                    println!("{}", serde_json::to_string_pretty(&out)?);
-                } else {
-                    eprintln!("\nsqry: rebuild timed out after {timeout}s (daemon continues in background)");
-                }
-                std::process::exit(2);
-            }
-        };
-
-        poll_done.store(true, std::sync::atomic::Ordering::Relaxed);
-        let _ = poll_handle.await;
-        // Clear the progress line.
-        eprint!("\r\x1b[K");
-
-        match result {
-            Ok(value) => {
-                if json {
-                    let mut out = serde_json::Map::new();
-                    out.insert(
-                        "status".to_owned(),
-                        serde_json::Value::String("completed".to_owned()),
-                    );
-                    // Extract fields from the response envelope.
-                    if let Some(r) = value.get("result") {
-                        if let Some(d) = r.get("duration_ms") {
-                            out.insert("duration_ms".to_owned(), d.clone());
-                        }
-                        if let Some(n) = r.get("nodes") {
-                            out.insert("nodes".to_owned(), n.clone());
-                        }
-                        if let Some(e) = r.get("edges") {
-                            out.insert("edges".to_owned(), e.clone());
-                        }
-                        if let Some(f) = r.get("files_indexed") {
-                            out.insert("files_indexed".to_owned(), f.clone());
-                        }
-                    }
-                    println!(
-                        "{}",
-                        serde_json::to_string_pretty(&serde_json::Value::Object(out))?
-                    );
-                } else {
-                    render_rebuild_human(&value, &canonical_path);
-                }
-            }
-            Err(sqry_daemon_client::ClientError::RpcError {
-                code: -32004,
-                message,
-                ..
-            }) => {
-                anyhow::bail!(
-                    "workspace {} is not loaded on the daemon. \
-                     Load it first with `sqry daemon load {}`.\n  (daemon said: {message})",
-                    canonical_path.display(),
-                    canonical_path.display()
-                );
-            }
-            Err(e) => {
-                return Err(anyhow::anyhow!("daemon/rebuild failed: {e}"));
-            }
-        }
-        anyhow::Ok(())
-    })?;
+    rt.block_on(run_rebuild_request(
+        &socket_path,
+        &canonical_path,
+        force,
+        timeout,
+        json,
+    ))?;
 
     Ok(())
+}
+
+async fn run_rebuild_request(
+    socket_path: &Path,
+    canonical_path: &Path,
+    force: bool,
+    timeout: u64,
+    json: bool,
+) -> Result<()> {
+    let mut client = sqry_daemon_client::DaemonClient::connect(socket_path)
+        .await
+        .with_context(|| format!("failed to connect to daemon at {}", socket_path.display()))?;
+    let started = Instant::now();
+    let poll_done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let poll_handle = spawn_rebuild_poll(
+        socket_path.to_path_buf(),
+        canonical_path.to_path_buf(),
+        started,
+        std::sync::Arc::clone(&poll_done),
+    );
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(timeout),
+        client.rebuild(canonical_path, force),
+    )
+    .await;
+    poll_done.store(true, std::sync::atomic::Ordering::Relaxed);
+    let _ = poll_handle.await;
+    eprint!("\r\x1b[K");
+
+    match result {
+        Err(_) => emit_rebuild_timeout(started, timeout, json)?,
+        Ok(Ok(value)) => render_rebuild_result(&value, canonical_path, json)?,
+        Ok(Err(sqry_daemon_client::ClientError::RpcError {
+            code: -32004,
+            message,
+            ..
+        })) => bail_workspace_not_loaded(canonical_path, &message)?,
+        Ok(Err(e)) => return Err(anyhow::anyhow!("daemon/rebuild failed: {e}")),
+    }
+    Ok(())
+}
+
+fn spawn_rebuild_poll(
+    socket_path: PathBuf,
+    poll_path: PathBuf,
+    started: Instant,
+    poll_done: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            if poll_done.load(std::sync::atomic::Ordering::Relaxed) {
+                break;
+            }
+            let Ok(mut poll_client) = sqry_daemon_client::DaemonClient::connect(&socket_path).await
+            else {
+                continue;
+            };
+            if let Ok(status) = poll_client.status().await {
+                let elapsed = started.elapsed().as_secs();
+                if let Some(ws_state) = extract_workspace_state(&status, &poll_path) {
+                    eprint!("\rsqry: {ws_state} ({elapsed}s elapsed)");
+                    let _ = std::io::stderr().flush();
+                }
+            }
+        }
+    })
+}
+
+fn emit_rebuild_timeout(started: Instant, timeout: u64, json: bool) -> Result<()> {
+    let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    if json {
+        let out = serde_json::json!({
+            "status": "timeout",
+            "elapsed_ms": elapsed_ms,
+            "message": "rebuild still in progress on daemon"
+        });
+        println!("{}", serde_json::to_string_pretty(&out)?);
+    } else {
+        eprintln!("\nsqry: rebuild timed out after {timeout}s (daemon continues in background)");
+    }
+    std::process::exit(2);
+}
+
+fn render_rebuild_result(
+    value: &serde_json::Value,
+    canonical_path: &Path,
+    json: bool,
+) -> Result<()> {
+    if json {
+        render_rebuild_json(value)?;
+    } else {
+        render_rebuild_human(value, canonical_path);
+    }
+    Ok(())
+}
+
+fn render_rebuild_json(value: &serde_json::Value) -> Result<()> {
+    let mut out = serde_json::Map::new();
+    out.insert(
+        "status".to_owned(),
+        serde_json::Value::String("completed".to_owned()),
+    );
+    if let Some(result) = value.get("result") {
+        for key in ["duration_ms", "nodes", "edges", "files_indexed"] {
+            if let Some(field) = result.get(key) {
+                out.insert(key.to_owned(), field.clone());
+            }
+        }
+    }
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::Value::Object(out))?
+    );
+    Ok(())
+}
+
+fn bail_workspace_not_loaded(canonical_path: &Path, message: &str) -> Result<()> {
+    anyhow::bail!(
+        "workspace {} is not loaded on the daemon. \
+         Load it first with `sqry daemon load {}`.\n  (daemon said: {message})",
+        canonical_path.display(),
+        canonical_path.display()
+    );
 }
 
 fn extract_workspace_state(status: &serde_json::Value, path: &Path) -> Option<String> {
@@ -281,7 +301,7 @@ fn extract_workspace_state(status: &serde_json::Value, path: &Path) -> Option<St
             return ws
                 .get("state")
                 .and_then(|s| s.as_str())
-                .map(|s| s.to_owned());
+                .map(std::borrow::ToOwned::to_owned);
         }
     }
     None
@@ -289,16 +309,31 @@ fn extract_workspace_state(status: &serde_json::Value, path: &Path) -> Option<St
 
 fn render_rebuild_human(value: &serde_json::Value, path: &Path) {
     if let Some(r) = value.get("result") {
-        let duration = r.get("duration_ms").and_then(|d| d.as_u64()).unwrap_or(0);
-        let nodes = r.get("nodes").and_then(|n| n.as_u64()).unwrap_or(0);
-        let edges = r.get("edges").and_then(|e| e.as_u64()).unwrap_or(0);
-        let files = r.get("files_indexed").and_then(|f| f.as_u64()).unwrap_or(0);
-        let was_full = r.get("was_full").and_then(|w| w.as_bool()).unwrap_or(false);
+        let duration = r
+            .get("duration_ms")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        let nodes = r
+            .get("nodes")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        let edges = r
+            .get("edges")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        let files = r
+            .get("files_indexed")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        let was_full = r
+            .get("was_full")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
         let mode = if was_full { "full" } else { "incremental" };
         eprintln!(
             "sqry: {mode} rebuild of {} completed in {:.1}s ({nodes} nodes, {edges} edges, {files} files)",
             path.display(),
-            duration as f64 / 1000.0
+            Duration::from_millis(duration).as_secs_f64()
         );
     } else {
         eprintln!("sqry: rebuild completed for {}", path.display());
@@ -494,9 +529,13 @@ fn run_daemon_logs(lines: usize, follow: bool) -> Result<()> {
                  The daemon may have just started, or is logging to stderr.",
                 p.display()
             );
-            return print_log_fallback_hint(&config);
+            print_log_fallback_hint(&config);
+            return Ok(());
         }
-        Err(_) => return print_log_fallback_hint(&config),
+        Err(_) => {
+            print_log_fallback_hint(&config);
+            return Ok(());
+        }
     };
 
     if follow {
@@ -512,9 +551,7 @@ fn run_daemon_logs(lines: usize, follow: bool) -> Result<()> {
 /// (`log_file = "stderr"`), or because the file does not exist yet
 /// (cluster-G §5.4).
 ///
-/// Returns `Ok(())` rather than an error so the CLI exits with status
-/// 0; the user already saw the diagnostic on stderr above.
-fn print_log_fallback_hint(config: &sqry_daemon::config::DaemonConfig) -> Result<()> {
+fn print_log_fallback_hint(config: &sqry_daemon::config::DaemonConfig) {
     eprintln!();
     eprintln!(
         "Default log location: {}",
@@ -539,7 +576,6 @@ fn print_log_fallback_hint(config: &sqry_daemon::config::DaemonConfig) -> Result
     } else if cfg!(target_os = "windows") {
         eprintln!("On Windows, use Event Viewer or `Get-WinEvent`.");
     }
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -734,23 +770,27 @@ pub fn try_auto_start_daemon() -> Result<bool> {
 #[must_use]
 pub fn human_bytes(bytes: u64) -> String {
     const UNITS: &[&str] = &["B", "KB", "MB", "GB", "TB"];
-    const DIVISOR: u64 = 1024;
+    const DIVISOR: u128 = 1024;
 
-    if bytes < DIVISOR {
+    if bytes < u64::try_from(DIVISOR).unwrap_or(u64::MAX) {
         return format!("{bytes} B");
     }
 
-    let mut value = bytes as f64;
+    let mut scale = DIVISOR;
     let mut unit_index = 0usize;
-    while value >= DIVISOR as f64 && unit_index + 1 < UNITS.len() {
-        value /= DIVISOR as f64;
+    let bytes_u128 = u128::from(bytes);
+    while bytes_u128 >= scale.saturating_mul(DIVISOR) && unit_index + 1 < UNITS.len() - 1 {
+        scale = scale.saturating_mul(DIVISOR);
         unit_index += 1;
     }
-    // Use integer display when the value is exact; otherwise one decimal place.
-    if (value - value.floor()).abs() < 0.05 {
-        format!("{:.0} {}", value, UNITS[unit_index])
+
+    let tenths = (bytes_u128.saturating_mul(10).saturating_add(scale / 2)) / scale;
+    let whole = tenths / 10;
+    let fraction = tenths % 10;
+    if fraction == 0 {
+        format!("{whole} {}", UNITS[unit_index + 1])
     } else {
-        format!("{:.1} {}", value, UNITS[unit_index])
+        format!("{whole}.{fraction} {}", UNITS[unit_index + 1])
     }
 }
 
@@ -934,7 +974,7 @@ fn render_workspace_line(ws: &serde_json::Value) {
 /// Render a single workspace line from the status response into `out`.
 ///
 /// Field names match `WorkspaceStatus` in `sqry-daemon/src/workspace/status.rs`:
-/// - `index_root` — canonical absolute path (PathBuf serialised as string).
+/// - `index_root` — canonical absolute path (`PathBuf` serialised as string).
 /// - `current_bytes` — live graph size.
 /// - `high_water_bytes` — monotonic peak.
 /// - `state` — serde form of `WorkspaceState` (e.g. `"Loaded"`, `"Rebuilding"`).

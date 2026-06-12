@@ -89,6 +89,11 @@ fn resolve_workspace_path(path: &str) -> Option<PathBuf> {
 /// full `TracePathCacheKey` (including `GraphIdentity`), not a planner
 /// query. DB19 / DB21 own the question of whether to retire it in favour
 /// of sqry-db's per-query caches.
+///
+/// # Errors
+///
+/// Returns an error if workspace resolution, graph acquisition, endpoint
+/// resolution, or path tracing fails.
 pub fn execute_trace_path(args: &TracePathArgs) -> Result<ToolExecution<TracePathData>> {
     // Pre-refactor timing started here — before engine resolution. Preserve
     // by capturing `start` in the wrapper and threading it into `inner::`.

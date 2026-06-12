@@ -17,8 +17,8 @@
 //!    reserved for a later cluster); binding-plane lookup is
 //!    intentionally empty and the resolver falls through.
 //! 2. **Type-match fallback** (DESIGN §4.2 step 3): the expected
-//!    signature is recovered from `struct_field_fnptr` (FieldExpr) or
-//!    from `LocalScopeIndex::resolve_type` (PointerExpr). The candidate
+//!    signature is recovered from `struct_field_fnptr` (`FieldExpr`) or
+//!    from `LocalScopeIndex::resolve_type` (`PointerExpr`). The candidate
 //!    set is every C function whose `fn_signature` matches AND whose
 //!    `is_address_taken` flag is set. The `fn_signature` table is
 //!    transitively seeded from `bindings_by_field` × `struct_field_fnptr`
@@ -37,7 +37,7 @@
 //!    (DESIGN §4.3).
 //!
 //! See DESIGN sections 4, 7, and 8.4 for the canonical algorithm. See
-//! IMPL_PLAN §"U12 — `pass5b_c_indirect_resolve`" for the wire-in
+//! `IMPL_PLAN` §"U12 — `pass5b_c_indirect_resolve`" for the wire-in
 //! contract.
 
 use std::collections::HashMap;
@@ -431,7 +431,7 @@ fn resolve_one(
 ///
 /// 1. Locate the synthetic stub edge on the caller's outgoing-edge set:
 ///    the one `Calls` edge whose target's name matches the callsite
-///    shape's `field_name` / `var_name` AND whose argument_count
+///    shape's `field_name` / `var_name` AND whose `argument_count`
 ///    matches the staged callsite.
 /// 2. (planned) Remove it. Applied in [`apply_planned_action`].
 /// 3. (planned) Emit `Calls { argument_count, is_async, resolved_via }`

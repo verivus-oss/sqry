@@ -306,7 +306,7 @@ impl SourceRoot {
         }
     }
 
-    /// STEP_11_4 — populate [`Self::classpath_dir`] from a probe of
+    /// `STEP_11_4` — populate [`Self::classpath_dir`] from a probe of
     /// `<self.path>/.sqry/classpath/`. The directory is set when the
     /// probe finds a *directory* at that path, leaving the field
     /// `None` when the path is missing or is not a directory.
@@ -342,7 +342,7 @@ impl SourceRoot {
         }
     }
 
-    /// STEP_11_4 — fluent builder for [`Self::config_fingerprint`].
+    /// `STEP_11_4` — fluent builder for [`Self::config_fingerprint`].
     ///
     /// Used by call sites that hold a freshly computed
     /// [`crate::config::compute_workspace_config_fingerprint`] value
@@ -357,7 +357,7 @@ impl SourceRoot {
         self
     }
 
-    /// STEP_11_4 — return the per-source-root config fingerprint with
+    /// `STEP_11_4` — return the per-source-root config fingerprint with
     /// fallback to a workspace-level default supplied by the caller.
     ///
     /// `SourceRoot.config_fingerprint == 0` is treated as "use the
@@ -479,9 +479,9 @@ impl LogicalWorkspace {
     /// `member_folders`, so `redact_excluded_in_passthrough` and the
     /// member-folder prefix renderer never fire on real
     /// `.sqry-workspace`-loaded sessions). The pre-iter4 inline TODO
-    /// pointed at "STEP_2 will overhaul the registry layer entirely" —
-    /// STEP_2 shipped the registry-side v2 schema but did not update this
-    /// projection. Fixed here so STEP_7's MCP redaction wiring is
+    /// pointed at "`STEP_2` will overhaul the registry layer entirely" —
+    /// `STEP_2` shipped the registry-side v2 schema but did not update this
+    /// projection. Fixed here so `STEP_7`'s MCP redaction wiring is
     /// observable end-to-end.
     ///
     /// # Errors
@@ -893,7 +893,7 @@ impl LogicalWorkspace {
         self.config_fingerprint
     }
 
-    /// STEP_11_4 — set the workspace-level config fingerprint computed
+    /// `STEP_11_4` — set the workspace-level config fingerprint computed
     /// via [`crate::config::compute_workspace_config_fingerprint`].
     ///
     /// The fingerprint is **not** part of the [`WorkspaceId`] hash
@@ -905,7 +905,7 @@ impl LogicalWorkspace {
         self.config_fingerprint = fingerprint;
     }
 
-    /// STEP_11_4 — set the workspace-level config fingerprint and
+    /// `STEP_11_4` — set the workspace-level config fingerprint and
     /// propagate it to every [`SourceRoot`] that does not already
     /// carry an explicit per-root override (i.e. whose
     /// `config_fingerprint == 0`).
@@ -925,7 +925,7 @@ impl LogicalWorkspace {
         }
     }
 
-    /// STEP_11_4 — populate every [`SourceRoot::classpath_dir`] in this
+    /// `STEP_11_4` — populate every [`SourceRoot::classpath_dir`] in this
     /// workspace by probing `<root>/.sqry/classpath/` for each. Returns
     /// a vector of `(source_root, io::Error)` pairs for any probe that
     /// failed for a reason other than `NotFound`; callers typically
