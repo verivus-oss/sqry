@@ -734,7 +734,7 @@ impl EdgeStore {
     /// Add-followed-by-Remove delta sequences are filtered. The
     /// filtering logic mirrors `edges_from` exactly — the map-based
     /// suppression step produces the same decision as
-    /// [`csr_has_edge_with_seq_at_least`](Self::csr_has_edge_with_seq_at_least)
+    /// `csr_has_edge_with_seq_at_least`
     /// would, using the same generation-agnostic source-idx +
     /// target + kind triple as its equality relation.
     ///
@@ -753,7 +753,7 @@ impl EdgeStore {
     ///
     /// # Panics
     ///
-    /// Panics if a source [`NodeId`](crate::graph::unified::node::NodeId)
+    /// Panics if a source [`NodeId`]
     /// cannot be converted to its dense index. That would indicate corrupted
     /// graph storage because all CSR and delta entries must reference indexed
     /// nodes.

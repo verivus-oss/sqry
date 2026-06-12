@@ -6,7 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
-## [20.0.0](https://github.com/verivus-oss/sqry/compare/v19.0.9...v20.0.0) - 2026-06-12
+## [20.0.2](https://github.com/verivus-oss/sqry/compare/v20.0.1...v20.0.2) - 2026-06-12
+
+### Fixed
+- *(release)* repair public docs and macos daemon build## [20.0.0](https://github.com/verivus-oss/sqry/compare/v19.0.9...v20.0.0) - 2026-06-12
 
 ### Fixed
 - land actual product work before marketplace packaging

@@ -1,6 +1,6 @@
 # sqry MCP Troubleshooting
 
-**Version**: 20.0.1
+**Version**: 20.0.3
 
 ## Confirm The Binary
 

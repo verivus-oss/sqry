@@ -49,11 +49,11 @@ serde_json = "1.0"
 regex.workspace = true
 tracing = "0.1"
 tracing-subscriber = "0.3"
-sqry-core = { version = "20.0.1", path = "../sqry-core" }
-sqry-db = { version = "20.0.1", path = "../sqry-db" }
-sqry-plugin-registry = { version = "20.0.1", path = "../sqry-plugin-registry" }
-sqry-nl = { version = "20.0.1", path = "../sqry-nl", default-features = false }
-sqry-mcp-redaction = { version = "20.0.1", path = "../sqry-mcp-redaction" }
+sqry-core = { version = "20.0.3", path = "../sqry-core" }
+sqry-db = { version = "20.0.3", path = "../sqry-db" }
+sqry-plugin-registry = { version = "20.0.3", path = "../sqry-plugin-registry" }
+sqry-nl = { version = "20.0.3", path = "../sqry-nl", default-features = false }
+sqry-mcp-redaction = { version = "20.0.3", path = "../sqry-mcp-redaction" }
 
 # MCP SDK for protocol compliance
 rmcp = { version = "1.7.0", features = ["server", "transport-io"] }
@@ -76,7 +76,7 @@ lru = "0.18"
 # Phase 8c U12 — shim-mode client for `--daemon` / `--daemon-socket`.
 # sqry-daemon-client is a leaf on the dep graph (no sqry-daemon server
 # dep); no cycle is introduced. Verify with `cargo tree -p sqry-mcp`.
-sqry-daemon-client = { version = "20.0.1", path = "../sqry-daemon-client" }
+sqry-daemon-client = { version = "20.0.3", path = "../sqry-daemon-client" }
 
 # Task 12 U1 — `which` resolves the sqryd binary via PATH lookup (tier 3
 # of the resolution order: SQRYD_PATH env > sibling > which). Pinned to

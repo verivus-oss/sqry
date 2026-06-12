@@ -1111,7 +1111,7 @@ fn run_install_systemd_system(
 
 #[cfg(target_os = "macos")]
 fn run_install_launchd(config_path: Option<PathBuf>, log_level: Option<&str>) -> DaemonResult<()> {
-    let cfg = load_config(config_path)?;
+    let cfg = load_config(config_path.as_ref())?;
     setup_stderr_tracing(log_level, &cfg);
     let opts = InstallOptions::default();
     let plist = crate::lifecycle::units::launchd::generate_plist(&cfg, &opts);
