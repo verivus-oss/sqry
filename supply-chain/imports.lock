@@ -134,33 +134,12 @@ user-id = 3618
 user-login = "dtolnay"
 user-name = "David Tolnay"
 
-[[publisher.monostate]]
-version = "0.1.18"
-when = "2025-09-29"
-user-id = 3618
-user-login = "dtolnay"
-user-name = "David Tolnay"
-
-[[publisher.monostate-impl]]
-version = "0.1.18"
-when = "2025-09-29"
-user-id = 3618
-user-login = "dtolnay"
-user-name = "David Tolnay"
-
 [[publisher.once_cell_polyfill]]
 version = "1.70.2"
 when = "2025-10-21"
 user-id = 6743
 user-login = "epage"
 user-name = "Ed Page"
-
-[[publisher.paste]]
-version = "1.0.15"
-when = "2024-05-07"
-user-id = 3618
-user-login = "dtolnay"
-user-name = "David Tolnay"
 
 [[publisher.predicates]]
 version = "3.1.4"
@@ -221,13 +200,6 @@ user-name = "David Tolnay"
 [[publisher.rustversion]]
 version = "1.0.22"
 when = "2025-08-08"
-user-id = 3618
-user-login = "dtolnay"
-user-name = "David Tolnay"
-
-[[publisher.ryu]]
-version = "1.0.23"
-when = "2026-02-08"
 user-id = 3618
 user-login = "dtolnay"
 user-name = "David Tolnay"
@@ -399,13 +371,6 @@ when = "2026-02-16"
 user-id = 3618
 user-login = "dtolnay"
 user-name = "David Tolnay"
-
-[[publisher.unicode-normalization]]
-version = "0.1.25"
-when = "2025-10-30"
-user-id = 1139
-user-login = "Manishearth"
-user-name = "Manish Goregaokar"
 
 [[publisher.unicode-width]]
 version = "0.1.14"

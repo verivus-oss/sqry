@@ -1,71 +1,57 @@
-# ERRATA: Natural Language Interface Architecture
+# ERRATA: Natural Language Interface Architecture (REMOVED)
 
-**Date**: 2025-11-21
-**Affects**: Documentation and architecture for natural language queries (`sqry ask`, `sqry_ask` MCP tool)
-
----
-
-## Summary
-
-Early documentation for sqry's natural language feature incorrectly described an architecture where LLMs and embeddings would **search** the codebase. The correct architecture - and the one actually implemented - uses LLMs only to **translate** natural language into sqry query syntax. sqry's core search engine (AST/graph) handles the actual search.
-
-This errata supersedes any remaining references to "embedding search" or "LLM-based retrieval" as part of sqry's search functionality. (Note: "hybrid search" referring to combined AST + text fallback is unrelated and still valid.)
+**Date**: 2025-11-21 (original errata); 2026-06-14 (removal)
+**Status**: Historical / non-current. The natural-language surface described
+below (`sqry ask`, the `sqry_ask` MCP tool, the `sqry-nl` crate, the ONNX
+classifier and embedding-model artifacts) was removed from sqry. See
+`docs/reviews/sqry-nl-removal/2026-06-14/`. Nothing in this file describes a
+shipped or supported capability. It is retained only as a record of the design
+debate that preceded the removal.
 
 ---
 
-## What Changed
+## Summary (historical)
+
+Early documentation for sqry's natural language feature incorrectly described an
+architecture where LLMs and embeddings would **search** the codebase. The
+architecture that was actually built used LLMs only to **translate** natural
+language into sqry query syntax, with sqry's core search engine (AST/graph)
+handling the actual search.
+
+That translation layer (CLI `sqry ask`, MCP `sqry_ask`, the `sqry-nl` crate) has
+since been removed entirely. sqry's supported interface is structured-predicate
+search via CLI, LSP, and the MCP tool surface (no natural-language entry point).
+
+---
+
+## What the debate was about (historical)
 
 ### The incorrect description
 
-An earlier design described a pipeline where embeddings would search code chunks and an LLM would rerank results before passing them to sqry's graph engine. This would have put LLM inference (seconds) in the search path, defeating sqry's core advantage (graph queries in milliseconds).
+An earlier design described a pipeline where embeddings would search code chunks
+and an LLM would rerank results before passing them to sqry's graph engine. This
+would have put LLM inference (seconds) in the search path, defeating sqry's core
+advantage (graph queries in milliseconds). It was never shipped.
 
-### The correct architecture
+### The translation architecture that did ship (now removed)
 
 ```
 User or AI agent: "find authentication logic"
     |
     v
-NL translation layer: converts to sqry query syntax
+NL translation layer: converted to sqry query syntax
     |  output: sqry query "kind:function AND name~=auth"
     v
-sqry core: executes query via AST/graph (milliseconds)
+sqry core: executed query via AST/graph (milliseconds)
     |
     v
 Results
 ```
 
-LLMs translate natural language to sqry commands. sqry searches. The translation adds ~1-2 seconds of overhead, but the search itself remains fast.
-
-### Why this matters
-
-If you see references to "embedding-based search" in older documentation or code comments, those describe the **incorrect** architecture that was never shipped. The correct terms are "NL translation" or "natural language interface."
+The translation layer added overhead on the order of one to two seconds per
+query. It was removed in 2026-06; structured-predicate queries are now the only
+supported interface.
 
 ---
 
-## Using the NL Interface
-
-- **CLI**: `sqry ask "your question here"`
-- **MCP tool**: `sqry_ask` (translates NL to sqry query, then executes)
-
-See `sqry ask --help` for options.
-
----
-
-## For AI Agent / MCP Integrators
-
-The NL layer is especially useful for AI agents that use sqry via MCP. Instead of learning sqry's query syntax, agents can call `sqry_ask` with natural language:
-
-```json
-{
-  "tool": "sqry_ask",
-  "params": {
-    "query": "find authentication logic"
-  }
-}
-```
-
-The NL layer translates the query, sqry executes it, and results are returned. The agent doesn't need to know sqry syntax.
-
----
-
-*Version 1.0 - 2025-11-21*
+*Original errata version 1.0 (2025-11-21); superseded by removal 2026-06-14.*

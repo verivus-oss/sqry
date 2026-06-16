@@ -90,7 +90,6 @@ AVAILABLE PROMPTS (appear as /mcp__sqry__* in Claude Code):
     trace_path           Trace call path between two functions
     explain_symbol       Get detailed explanation of a symbol
     code_impact          Analyze impact of changing a symbol
-    ask                  Natural language query interface
 
 HIERARCHICAL_SEARCH CONFIGURABLE LIMITS:
     max_results                 Maximum symbols to return (default: 200)
@@ -315,6 +314,13 @@ async fn run_rmcp_server() -> Result<()> {
 
     // CRITICAL: Initialize all caches before handling requests
     // This must happen after config load but before server starts accepting requests
+    //
+    // NOTE: this binary owns its own module tree (`mod engine;` etc.), so it
+    // initializes its own statics inline here. The `sqryd` daemon links the
+    // lib target instead and calls `sqry_mcp::init_mcp_caches` (lib.rs) for
+    // the lib's statics. Adding a new payload cache means updating BOTH this
+    // block and `init_mcp_caches`, or the daemon host will panic on the new
+    // cache the way daemon-hosted trace_path/subgraph once did.
     //
     // Phase 3C DB21: the payload LRU caches in `execution::graph_cache`
     // (retained per the DB17 follow-up + DB19 confirmation — they cache

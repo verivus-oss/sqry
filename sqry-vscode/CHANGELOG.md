@@ -6,6 +6,14 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 
 ## [Unreleased]
 
+## [21.0.0] - 2026-06-16
+
+### Changed
+- Updated extension release metadata and bundled sqry compatibility to
+  `21.0.0`. The bundled sqry removes the natural-language surface (`sqry ask`,
+  the `sqry_ask` MCP tool, `sqry/ask` LSP request); use the structured query and
+  graph commands instead.
+
 ## [16.0.0] - 2026-05-19
 
 ### Changed

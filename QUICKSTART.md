@@ -1,6 +1,6 @@
 # sqry Quick Start
 
-**Version**: 20.0.5
+**Version**: 21.0.1
 **Rust**: 1.94+ (Edition 2024; repository toolchain 1.94.1)
 
 This guide gets you from install to useful semantic queries.
@@ -122,16 +122,6 @@ sqry cycles
 sqry impact authenticate --depth 3
 sqry visualize "callers:authenticate" --format mermaid
 ```
-
-## Natural Language
-
-```bash
-sqry ask "find login functions"
-sqry ask --dry-run "who calls authenticate"
-sqry ask --auto-execute --threshold 0.90 "find public classes"
-```
-
-`sqry ask` translates the request into a validated sqry command. It runs immediately only when `--auto-execute` is supplied and the confidence threshold is satisfied. See [Natural Language Queries](docs/user-guide/natural-language.md).
 
 ## Workspaces
 

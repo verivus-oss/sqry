@@ -11,7 +11,6 @@
 //! | [`attribute_macros`] | 4.5a | `build_graph()` | Detect attribute macros on items |
 //! | [`metavariables`] | 4.5b | `build_graph()` | Extract metavariables from `macro_rules!` |
 //! | [`proc_macro_classify`] | 4.5c | `build_graph()` | Classify proc-macro functions |
-//! | [`cross_crate_macros`] | 4.5d | `entrypoint.rs` | Cross-crate macro resolution |
 //! | [`cfg_analysis`] | 4.5e | `build_graph()` | Parse `cfg`/`cfg_attr` predicates |
 //! | [`expand_cache`] | 4.5f | CLI-triggered | Expansion cache storage |
 //! | [`generated_symbols`] | 4.5f | CLI-triggered | Expansion diffing |
@@ -21,14 +20,10 @@
 //! - **`build_graph()`**: Call [`analyze_macro_boundaries_in_build_graph`] for each
 //!   file during AST analysis. This dispatches to 4.5a, 4.5b, 4.5c, and 4.5e.
 //!
-//! - **`entrypoint.rs`**: Call [`cross_crate_macros::resolve_cross_crate_macros`]
-//!   between Pass 4 and Pass 5 for cross-crate macro resolution (4.5d).
-//!
 //! - **CLI**: Use [`expand_cache`] and [`generated_symbols`] for `sqry cache expand`.
 
 pub mod attribute_macros;
 pub mod cfg_analysis;
-pub mod cross_crate_macros;
 pub mod expand_cache;
 pub mod generated_symbols;
 pub mod metavariables;
@@ -50,9 +45,6 @@ pub struct MacroBoundaryConfig {
     pub enable_scope_analysis: bool,
     /// Enable proc-macro function classification (4.5c). Default: `true`.
     pub enable_proc_macro_io: bool,
-    /// Enable cross-crate macro resolution (4.5d). Default: `true`.
-    /// Note: 4.5d runs in `entrypoint.rs`, not in `build_graph()`.
-    pub enable_cross_crate: bool,
     /// Enable `cfg`/`cfg_attr` analysis (4.5e). Default: `true`.
     pub enable_cfg_analysis: bool,
     /// Enable macro-generated symbol extraction (4.5f). Default: `true`.
@@ -72,7 +64,6 @@ impl Default for MacroBoundaryConfig {
             enable_attribute_macros: true,
             enable_scope_analysis: true,
             enable_proc_macro_io: true,
-            enable_cross_crate: true,
             enable_cfg_analysis: true,
             enable_generated_symbols: true,
             active_features: Vec::new(),
@@ -91,7 +82,6 @@ impl MacroBoundaryConfig {
             enable_attribute_macros: false,
             enable_scope_analysis: false,
             enable_proc_macro_io: false,
-            enable_cross_crate: false,
             enable_cfg_analysis: false,
             enable_generated_symbols: false,
             active_features: Vec::new(),
@@ -119,8 +109,8 @@ impl MacroBoundaryConfig {
 /// - **4.5c** Proc-macro function classification
 /// - **4.5e** `cfg/cfg_attr` analysis
 ///
-/// Sub-analyzers 4.5d (cross-crate) and 4.5f (expand cache) run outside
-/// `build_graph()` and are not called here.
+/// Sub-analyzer 4.5f (expand cache) runs outside `build_graph()` and is
+/// not called here.
 ///
 /// # Arguments
 ///
@@ -252,7 +242,6 @@ mod tests {
         assert!(config.enable_attribute_macros);
         assert!(config.enable_scope_analysis);
         assert!(config.enable_proc_macro_io);
-        assert!(config.enable_cross_crate);
         assert!(config.enable_cfg_analysis);
         assert!(config.enable_generated_symbols);
         assert!(config.active_features.is_empty());
@@ -266,7 +255,6 @@ mod tests {
         assert!(!config.enable_attribute_macros);
         assert!(!config.enable_scope_analysis);
         assert!(!config.enable_proc_macro_io);
-        assert!(!config.enable_cross_crate);
         assert!(!config.enable_cfg_analysis);
         assert!(!config.enable_generated_symbols);
         assert!(!config.any_build_graph_analyzer_enabled());

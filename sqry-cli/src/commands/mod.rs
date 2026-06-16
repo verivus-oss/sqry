@@ -2,7 +2,6 @@
 
 pub mod alias;
 pub mod analyze;
-pub mod ask;
 pub mod batch;
 pub mod cache;
 pub mod completions;
@@ -40,7 +39,6 @@ pub mod workspace_status;
 
 pub use alias::{run_alias, save_query_alias, save_search_alias};
 pub use analyze::run_analyze;
-pub use ask::run_ask;
 pub use batch::run_batch;
 pub use cache::run_cache;
 pub use completions::run_completions;

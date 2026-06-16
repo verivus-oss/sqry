@@ -16,20 +16,6 @@ pub use cancel::spawn_blocking;
 pub use cli::{LspCli, LspOptions};
 pub use server::SqryLanguageServer;
 
-/// NL08 — public test surface for the private `server::map_error`
-/// helper. Lets `tests/ask_ort_missing.rs` assert that the
-/// `OnnxRuntimeMissing` anyhow path produces the canonical RpcError
-/// envelope without instantiating a full tower_lsp `Client`.
-///
-/// NL08 review iter-1: gated behind `cfg(any(test, feature =
-/// "test-helpers"))` so this re-export does not appear in the
-/// published crate API. `#[doc(hidden)]` alone only hid the symbol
-/// from rustdoc; the cfg gate makes it genuinely private outside
-/// of test / `test-helpers`-enabled builds. Matches the gate on
-/// the function definition in `server.rs`.
-#[cfg(any(test, feature = "test-helpers"))]
-pub use server::map_error_public_for_tests;
-
 use anyhow::{Context, Result};
 use log::{error, info};
 use session::SessionManager;
@@ -621,7 +607,6 @@ pub(crate) fn build_sqry_service(
             "sqry/hierarchicalSearch",
             server::SqryLanguageServer::handle_hierarchical_search,
         )
-        .custom_method("sqry/ask", server::SqryLanguageServer::handle_ask)
         .custom_method(
             "sqry/directCallers",
             server::SqryLanguageServer::handle_direct_callers,

@@ -168,15 +168,6 @@ benchmarks/swebench/results/
 hf_cache/
 **/hf_cache/
 
-# ML model files (large binaries - use external storage)
-*.onnx
-**/models/*.onnx
-models/
-!sqry-nl/models/
-sqry-nl/models/*
-!sqry-nl/models/checksums.json
-!sqry-nl/models/manifest.json
-
 # SonarQube local dev tooling
 .scannerwork/
 **/.scannerwork/

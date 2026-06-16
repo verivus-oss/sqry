@@ -105,7 +105,6 @@ sqry/
 ├── sqry-cli/               # CLI binary (sqry)
 ├── sqry-lsp/               # LSP server (sqry lsp)
 ├── sqry-mcp/               # MCP server for AI assistants
-├── sqry-nl/                # Natural language query translation
 ├── sqry-lang-*/            # 37 language plugins
 ├── sqry-lang-support/      # Plugin infrastructure
 ├── sqry-tree-sitter-support/ # Tree-sitter bindings

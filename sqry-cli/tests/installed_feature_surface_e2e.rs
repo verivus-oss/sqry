@@ -158,7 +158,6 @@ fn installed_cli_feature_surface_matrix() {
         ("text search", &["--text", "--limit", "5", "process", "."]),
         ("query", &["query", "kind:function", "."]),
         ("query json", &["--json", "query", "kind:function", "."]),
-        ("ask", &["ask", "find functions named process", "."]),
         ("plan-query", &["plan-query", "kind:function", "."]),
         ("hier", &["hier", "process", "--path", "."]),
         ("update", &["update", "."]),

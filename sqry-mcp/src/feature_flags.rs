@@ -32,11 +32,6 @@ pub struct FeatureFlags {
     /// Environment variable: `SQRY_MCP_ENABLE_DEPENDENCY_IMPACT`
     /// Default: true
     pub is_dependency_impact_enabled: bool,
-
-    /// Whether the `sqry_ask` natural language translation tool is enabled.
-    /// Environment variable: `SQRY_MCP_ENABLE_SQRY_ASK`
-    /// Default: true
-    pub is_sqry_ask_enabled: bool,
 }
 
 impl Default for FeatureFlags {
@@ -49,7 +44,6 @@ impl Default for FeatureFlags {
             is_cross_language_enabled: true,
             is_semantic_diff_enabled: true,
             is_dependency_impact_enabled: true,
-            is_sqry_ask_enabled: true,
         }
     }
 }
@@ -63,7 +57,6 @@ impl FeatureFlags {
             is_cross_language_enabled: env_flag("SQRY_MCP_ENABLE_CROSS_LANGUAGE", true),
             is_semantic_diff_enabled: env_flag("SQRY_MCP_ENABLE_SEMANTIC_DIFF", true),
             is_dependency_impact_enabled: env_flag("SQRY_MCP_ENABLE_DEPENDENCY_IMPACT", true),
-            is_sqry_ask_enabled: env_flag("SQRY_MCP_ENABLE_SQRY_ASK", true),
         }
     }
 
@@ -75,7 +68,6 @@ impl FeatureFlags {
             "cross_language_edges" => self.is_cross_language_enabled,
             "semantic_diff" => self.is_semantic_diff_enabled,
             "dependency_impact" => self.is_dependency_impact_enabled,
-            "sqry_ask" => self.is_sqry_ask_enabled,
             // Core tools always enabled
             "semantic_search"
             | "hierarchical_search"
@@ -144,9 +136,6 @@ impl FeatureFlags {
             ),
             "dependency_impact" => Some(
                 "Dependency impact analysis is currently disabled. Set SQRY_MCP_ENABLE_DEPENDENCY_IMPACT=true to enable.".to_string()
-            ),
-            "sqry_ask" => Some(
-                "Natural language translation is currently disabled. Set SQRY_MCP_ENABLE_SQRY_ASK=true to enable.".to_string()
             ),
             _ => Some(format!("Unknown tool: {tool_name}")),
         }

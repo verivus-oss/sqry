@@ -15,9 +15,10 @@ Website: https://sqry.dev
 - Edge-backed `returns:<TypeName>` and resolution-aware `resolved_via:<kind>` predicates for supported graph paths.
 - Workspace-aware indexing through `.sqry-workspace` registries and VS Code `.code-workspace` `sqry.workspace` blocks. <!-- claim:multi-root-supported test:resolve_logical_workspace_short_circuits_in_documented_order -->
 - Daemon-backed shared graph loading through `sqryd` for editor, MCP, and repeated-agent workflows.
-- MCP integration for AI assistants. Standalone `sqry-mcp` currently exposes 37 tools; daemon-hosted MCP exposes a 16-tool subset. Use `tools/list`, `sqry-mcp --list-tools`, or `sqry://meta/manifest` as the authoritative catalog.
+- MCP integration for AI assistants. Standalone `sqry-mcp` currently exposes 36 tools; daemon-hosted MCP exposes a 15-tool subset. Use `tools/list`, `sqry-mcp --list-tools`, or `sqry://meta/manifest` as the authoritative catalog.
 - LSP and VS Code extension support for editor workflows.
-- Natural-language translation with `sqry ask`, which produces a validated sqry command before execution.
+
+> **Removed in 21.0.0:** the experimental natural-language surface (`sqry ask` CLI command, `sqry_ask` MCP tool, `sqry/ask` LSP request) was removed. Use the structured query and graph commands shown below; see [Removed features](docs/TROUBLESHOOTING.md#removed-features) for migration.
 
 ## When To Use sqry
 
@@ -161,18 +162,6 @@ sqry plan-query "kind:function callers:my_read resolved_via:binding_plane"
 
 See [Advanced Analysis](docs/user-guide/advanced-analysis.md) for graph predicates, snapshot wording, impact analysis, semantic diff, and visualization.
 
-## Natural Language
-
-```bash
-sqry ask "find public Rust functions"
-sqry ask --dry-run "who calls authenticate"
-sqry ask --auto-execute --threshold 0.90 "find Config structs"
-```
-
-`sqry ask` translates plain English into a validated sqry command. Without `--auto-execute`, it shows the command and asks for confirmation. Model downloads and unverified model loading are opt-in.
-
-See [Natural Language Queries](docs/user-guide/natural-language.md).
-
 ## Workspaces
 
 Use a workspace when one logical project spans several repositories or folders.
@@ -222,7 +211,6 @@ For the VS Code extension, see [sqry-vscode/README.md](sqry-vscode/README.md) an
 - [Workspaces](docs/user-guide/workspace.md)
 - [Daemon Mode](docs/user-guide/daemon.md)
 - [MCP Guide](docs/user-guide/mcp.md)
-- [Natural Language Queries](docs/user-guide/natural-language.md)
 - [Advanced Analysis](docs/user-guide/advanced-analysis.md)
 
 ## Project Scope

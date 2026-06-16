@@ -59,7 +59,6 @@ Once configured, Claude Code can use all sqry MCP tools directly:
 - **Diff**: `semantic_diff`
 - **Index**: `get_index_status`, `get_graph_stats`, `get_insights`, `list_files`, `list_symbols`, `rebuild_index`
 - **Cross-language**: `cross_language_edges`
-- **Natural language**: `sqry_ask`
 - **Export**: `export_graph`
 - **Similar**: `search_similar`
 - **Explain**: `explain_code`

@@ -166,7 +166,6 @@ fn tool_arguments(name: &str, project: &Path) -> Option<Value> {
         }
         "semantic_search" => json!({"query": "process", "max_results": 20}),
         "show_dependencies" => json!({"symbol_name": "helper", "max_depth": 2}),
-        "sqry_ask" => json!({"query": "find functions named process", "execute": false}),
         "sqry_query" => json!({"query": "kind:function", "limit": 20}),
         "subgraph" => json!({"symbols": ["process"], "max_depth": 2, "max_nodes": 20}),
         "trace_path" => json!({"from_symbol": "process", "to_symbol": "helper", "max_hops": 4}),

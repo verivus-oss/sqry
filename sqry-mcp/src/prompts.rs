@@ -21,7 +21,6 @@ pub fn create_prompt_router<S: Send + Sync + Clone + 'static>() -> PromptRouter<
         .with_route(trace_path_prompt())
         .with_route(explain_symbol_prompt())
         .with_route(code_impact_prompt())
-        .with_route(ask_prompt())
 }
 
 fn prompt_argument(
@@ -369,49 +368,6 @@ This will show:
     prompt_result(format!("Analyze impact of changing: {symbol}"), message)
 }
 
-/// Natural language ask prompt - query code in plain English.
-fn ask_prompt<S: Send + Sync + 'static>() -> PromptRoute<S> {
-    let prompt = Prompt::new(
-        "ask",
-        Some(
-            "Ask questions about code in natural language - sqry will translate to the right query",
-        ),
-        Some(vec![prompt_argument(
-            "question",
-            "Question",
-            "Your question in plain English (e.g., 'who calls the login function?', 'find all database queries')",
-            true,
-        )]),
-    );
-
-    PromptRoute::new_dyn(prompt, |context: PromptContext<'_, S>| {
-        Box::pin(async move { Ok(handle_ask(&context)) })
-    })
-}
-
-fn handle_ask<S>(context: &PromptContext<'_, S>) -> GetPromptResult {
-    let question = context
-        .arguments
-        .as_ref()
-        .and_then(|args| args.get("question"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("find all functions");
-
-    let message = format!(
-        r#"Use the sqry sqry_ask tool to answer: "{question}"
-
-The sqry_ask tool uses natural language understanding to:
-1. Parse your question
-2. Identify the appropriate sqry command (search, relation query, trace, etc.)
-3. Generate and execute the correct query
-4. Return results in a readable format
-
-This is the easiest way to query code - just ask your question naturally!"#
-    );
-
-    prompt_result(format!("Ask: {question}"), message)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -430,7 +386,7 @@ mod tests {
         assert!(names.contains(&"trace_path"));
         assert!(names.contains(&"explain_symbol"));
         assert!(names.contains(&"code_impact"));
-        assert!(names.contains(&"ask"));
+        assert!(!names.contains(&"ask"));
     }
 
     #[test]

@@ -579,6 +579,24 @@ static QUERY_CACHE_TTL: OnceLock<Duration> = OnceLock::new();
 static TRACE_PATH_TELEMETRY: OnceLock<Mutex<CacheTelemetry>> = OnceLock::new();
 static SUBGRAPH_TELEMETRY: OnceLock<Mutex<CacheTelemetry>> = OnceLock::new();
 
+/// Test probe: whether the trace_path telemetry cell has been initialized.
+/// Used by the isolated `init_mcp_caches` regression guard to assert the
+/// telemetry is unset before init and set after, in a fresh process where no
+/// other test has touched the global `OnceLock`. `allow(dead_code)` because
+/// only the external integration test consumes it (via the lib re-export);
+/// the `sqry-mcp` binary's separate module tree never calls it.
+#[allow(dead_code)]
+pub fn trace_path_telemetry_initialized() -> bool {
+    TRACE_PATH_TELEMETRY.get().is_some()
+}
+
+/// Test probe: whether the subgraph telemetry cell has been initialized.
+/// Companion to [`trace_path_telemetry_initialized`]; same `dead_code` note.
+#[allow(dead_code)]
+pub fn subgraph_telemetry_initialized() -> bool {
+    SUBGRAPH_TELEMETRY.get().is_some()
+}
+
 /// Initialize the trace path cache with specified capacity and TTL.
 ///
 /// This function must be called during server initialization before any cache access.

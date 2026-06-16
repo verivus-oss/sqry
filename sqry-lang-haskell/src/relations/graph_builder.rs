@@ -1443,7 +1443,7 @@ fn process_data_constructors(
 /// driven by the module's export list, which is not yet plumbed through
 /// to record-field emission; tightening visibility to honour
 /// `module Foo (Bar(field)) where ...` exports is left to a follow-up
-/// using the existing `ExportMap` plumbing.
+/// that consults the parsed export list directly at field-emit time.
 ///
 /// **Anonymous record fields** (the `field_index`-only branch below,
 /// `x :: Int` with no `name` child — currently a tree-sitter quirk on

@@ -1,5 +1,5 @@
 //! Task 4 Step 4 Phase 3d — integration tests for the real
-//! `incremental_rebuild` body sub-steps 7-9.
+//! `incremental_rebuild` body sub-steps 8-9.
 //!
 //! These tests require real language plugins to drive both Phase 3c's
 //! `parse_file` path AND Phase 3d's cross-file + cross-language
@@ -18,14 +18,12 @@
 //!
 //! # Tests
 //!
-//! 1. `incremental_rebuild_phase3d_exports_rebuild_and_cross_file_edges`
+//! 1. `incremental_rebuild_phase3d_pass4d_diagnostics`
 //!    — uses the two-file Rust fixture (`lib.rs` imports `a.rs`), drives
 //!    the rebuild with an edit to `a.rs`, and asserts the Phase 3d
-//!    post-ExportMap hook observed the rebuild-plane ExportMap
-//!    containing at least one exportable symbol, AND the post-Pass-4d
-//!    hook observed a non-zero `edges_submitted` count (proving the
-//!    intra-file `Calls` edges Phase 3c collected were bulk-inserted
-//!    into the rebuild plane's edge store).
+//!    post-Pass-4d hook observed a non-zero `edges_submitted` count
+//!    (proving the intra-file `Calls` edges Phase 3c collected were
+//!    bulk-inserted into the rebuild plane's edge store).
 //!
 //! 2. `incremental_rebuild_phase3d_pass5_links_cross_language_edges`
 //!    — uses a Rust+C fixture with an `extern "C"` FFI declaration in
@@ -38,15 +36,12 @@
 //!    edges, so the test is about proving the pipeline reached
 //!    sub-step 9, not about any specific edge count).
 //!
-//! 3. `incremental_rebuild_phase3d_polls_cancellation_at_four_new_boundaries`
-//!    — four sub-cases covering the four new Phase 3d cancellation
-//!    polls: pre-ExportMap (already covered by Phase 3c's post-substep6
-//!    check, so this sub-case asserts the Phase 3d chain NEVER fires
-//!    when the Phase 3c cancellation fires), post-ExportMap,
-//!    post-Pass-4d, and post-Pass-5. Each sub-case installs hook guards
-//!    that flip the cancellation token at the appropriate boundary
-//!    and asserts that (a) the hook at the cancelled boundary DID
-//!    fire; (b) no later Phase 3d hook fired; (c) the function
+//! 3. `incremental_rebuild_phase3d_polls_cancellation_at_*_boundary`
+//!    — two sub-cases covering the surviving Phase 3d cancellation
+//!    polls: post-Pass-4d and post-Pass-5. Each sub-case installs hook
+//!    guards that flip the cancellation token at the appropriate
+//!    boundary and asserts that (a) the hook at the cancelled boundary
+//!    DID fire; (b) no later Phase 3d hook fired; (c) the function
 //!    returns `GraphBuilderError::Cancelled`.
 //!
 //! 4. `incremental_rebuild_phase3d_still_delegates_to_full_build_fallback`
@@ -67,12 +62,11 @@ use tempfile::TempDir;
 
 use sqry_core::graph::GraphBuilderError;
 use sqry_core::graph::unified::build::incremental::testing::{
-    Phase3dPostExportMapHookGuard, Phase3dPostPass4dHookGuard, Phase3dPostPass5HookGuard,
+    Phase3dPostPass4dHookGuard, Phase3dPostPass5HookGuard,
 };
 use sqry_core::graph::unified::build::incremental::{
     Pass4dDiagnostics, compute_reverse_dep_closure, incremental_rebuild,
 };
-use sqry_core::graph::unified::build::pass4_cross::ExportMap;
 use sqry_core::graph::unified::build::pass5_cross_language::Pass5Stats;
 use sqry_core::graph::unified::build::{BuildConfig, CancellationToken, build_unified_graph};
 use sqry_core::graph::unified::concurrent::CodeGraph;
@@ -286,21 +280,9 @@ fn build_rust_c_ffi_fixture() -> Fixture {
 // --- tests --------------------------------------------------------------
 
 #[test]
-fn incremental_rebuild_phase3d_exports_rebuild_and_cross_file_edges() {
+fn incremental_rebuild_phase3d_pass4d_diagnostics() {
     let fx = build_two_file_rust_fixture();
     let cancellation = CancellationToken::new();
-
-    // Capture the ExportMap's `.len()` and a sample lookup so we can
-    // assert the rebuild plane's symbol table is populated (not
-    // empty) at the moment sub-step 7 completes.
-    let export_map_len = Rc::new(RefCell::new(0usize));
-    let export_map_contains_any = Rc::new(RefCell::new(false));
-    let export_map_len_hook = Rc::clone(&export_map_len);
-    let export_map_contains_any_hook = Rc::clone(&export_map_contains_any);
-    let _em_guard = Phase3dPostExportMapHookGuard::install(move |_rg, em: &ExportMap| {
-        *export_map_len_hook.borrow_mut() = em.len();
-        *export_map_contains_any_hook.borrow_mut() = !em.is_empty();
-    });
 
     let pass4d_diag = Rc::new(RefCell::new(Pass4dDiagnostics::default()));
     let pass4d_diag_hook = Rc::clone(&pass4d_diag);
@@ -317,26 +299,6 @@ fn incremental_rebuild_phase3d_exports_rebuild_and_cross_file_edges() {
         &cancellation,
     )
     .expect("incremental_rebuild happy path");
-
-    // The two-file Rust fixture contains multiple pub-fn definitions;
-    // ExportMap::len counts unique qualified names. The exact count
-    // depends on how the Rust plugin assigns `qualified_name` to each
-    // node (some plugin builds emit qualified names only for certain
-    // kinds), so we assert the rebuild-plane ExportMap is non-empty
-    // rather than pinning a specific count. What matters for Phase 3d
-    // is that sub-step 7 ACTUALLY scanned the arena and registered at
-    // least one symbol — a zero-sized ExportMap would mean the scan
-    // produced nothing and the Phase 3d boundary silently degraded.
-    assert!(
-        *export_map_contains_any.borrow(),
-        "Phase 3d sub-step 7 must register at least one exportable symbol in the rebuild-plane \
-         ExportMap"
-    );
-    let em_len = *export_map_len.borrow();
-    assert!(
-        em_len >= 1,
-        "Phase 3d sub-step 7 must populate the rebuild-plane ExportMap; len = {em_len}"
-    );
 
     // The re-parse of `a.rs` produces at least one intra-file edge
     // (the body of `greet` / `greet_also`). `lib.rs` is not necessarily
@@ -400,77 +362,12 @@ fn incremental_rebuild_phase3d_pass5_links_cross_language_edges() {
 }
 
 #[test]
-fn incremental_rebuild_phase3d_polls_cancellation_at_post_export_map_boundary() {
-    // Cancellation flipped from inside the Phase 3d post-ExportMap hook
-    // (between sub-steps 7 and 8). Sub-step 7 must run to completion,
-    // the post-ExportMap cancellation.check()? must fire immediately
-    // after, and no sub-step 8 or 9 hook may fire.
-    let fx = build_two_file_rust_fixture();
-    let cancellation = CancellationToken::new();
-
-    let em_fired = Rc::new(RefCell::new(false));
-    let em_fired_hook = Rc::clone(&em_fired);
-    let cancel_from_hook = cancellation.clone();
-    let _em_guard = Phase3dPostExportMapHookGuard::install(move |_rg, _em: &ExportMap| {
-        *em_fired_hook.borrow_mut() = true;
-        cancel_from_hook.cancel();
-    });
-
-    let p4_fired = Rc::new(RefCell::new(false));
-    let p4_fired_hook = Rc::clone(&p4_fired);
-    let _p4_guard = Phase3dPostPass4dHookGuard::install(move |_rg, _diag| {
-        *p4_fired_hook.borrow_mut() = true;
-    });
-
-    let p5_fired = Rc::new(RefCell::new(false));
-    let p5_fired_hook = Rc::clone(&p5_fired);
-    let _p5_guard = Phase3dPostPass5HookGuard::install(move |_rg, _stats| {
-        *p5_fired_hook.borrow_mut() = true;
-    });
-
-    let err = incremental_rebuild(
-        &fx.current_graph,
-        &fx.changed_paths,
-        &fx.closure,
-        plugin_manager(),
-        &build_config(),
-        &cancellation,
-    )
-    .expect_err("post-ExportMap cancellation must short-circuit incremental_rebuild");
-
-    assert!(
-        matches!(err, GraphBuilderError::Cancelled),
-        "expected GraphBuilderError::Cancelled, got: {err:?}"
-    );
-    assert!(
-        *em_fired.borrow(),
-        "Phase 3d post-ExportMap hook must fire before cancellation is observed"
-    );
-    assert!(
-        !*p4_fired.borrow(),
-        "Phase 3d post-Pass-4d hook must NOT fire after a post-ExportMap cancellation; sub-step 8 \
-         must not run"
-    );
-    assert!(
-        !*p5_fired.borrow(),
-        "Phase 3d post-Pass-5 hook must NOT fire after a post-ExportMap cancellation; sub-step 9 \
-         must not run"
-    );
-}
-
-#[test]
 fn incremental_rebuild_phase3d_polls_cancellation_at_post_pass4d_boundary() {
     // Cancellation flipped from inside the Phase 3d post-Pass-4d hook
-    // (between sub-steps 8 and 9). Sub-steps 7 and 8 must run; sub-
-    // step 9's post-Pass-5 hook must NOT fire.
+    // (between sub-steps 8 and 9). Sub-step 8 must run; sub-step 9's
+    // post-Pass-5 hook must NOT fire.
     let fx = build_two_file_rust_fixture();
     let cancellation = CancellationToken::new();
-
-    let em_fired = Rc::new(RefCell::new(false));
-    let em_fired_hook = Rc::clone(&em_fired);
-    let _em_guard = Phase3dPostExportMapHookGuard::install(move |_rg, _em: &ExportMap| {
-        *em_fired_hook.borrow_mut() = true;
-    });
 
     let p4_fired = Rc::new(RefCell::new(false));
     let p4_fired_hook = Rc::clone(&p4_fired);
@@ -498,10 +395,6 @@ fn incremental_rebuild_phase3d_polls_cancellation_at_post_pass4d_boundary() {
 
     assert!(matches!(err, GraphBuilderError::Cancelled));
     assert!(
-        *em_fired.borrow(),
-        "Phase 3d post-ExportMap hook must fire (sub-step 7 ran before the cancelled boundary)"
-    );
-    assert!(
         *p4_fired.borrow(),
         "Phase 3d post-Pass-4d hook must fire (the cancellation is flipped from inside it)"
     );
@@ -515,17 +408,11 @@ fn incremental_rebuild_phase3d_polls_cancellation_at_post_pass4d_boundary() {
 #[test]
 fn incremental_rebuild_phase3d_polls_cancellation_at_post_pass5_boundary() {
     // Cancellation flipped from inside the Phase 3d post-Pass-5 hook
-    // (between sub-step 9 and the Phase 3e/fallback boundary). All
-    // three Phase 3d hooks must fire; the overall rebuild must return
-    // Cancelled instead of the full-build fallback result.
+    // (between sub-step 9 and the Phase 3e/fallback boundary). Both
+    // remaining Phase 3d hooks must fire; the overall rebuild must
+    // return Cancelled instead of the full-build fallback result.
     let fx = build_two_file_rust_fixture();
     let cancellation = CancellationToken::new();
-
-    let em_fired = Rc::new(RefCell::new(false));
-    let em_fired_hook = Rc::clone(&em_fired);
-    let _em_guard = Phase3dPostExportMapHookGuard::install(move |_rg, _em: &ExportMap| {
-        *em_fired_hook.borrow_mut() = true;
-    });
 
     let p4_fired = Rc::new(RefCell::new(false));
     let p4_fired_hook = Rc::clone(&p4_fired);
@@ -552,7 +439,6 @@ fn incremental_rebuild_phase3d_polls_cancellation_at_post_pass5_boundary() {
     .expect_err("post-Pass-5 cancellation must short-circuit incremental_rebuild");
 
     assert!(matches!(err, GraphBuilderError::Cancelled));
-    assert!(*em_fired.borrow(), "sub-step 7 ran");
     assert!(*p4_fired.borrow(), "sub-step 8 ran");
     assert!(
         *p5_fired.borrow(),
@@ -571,12 +457,6 @@ fn incremental_rebuild_phase3d_still_delegates_to_full_build_fallback() {
     // Phase 3e territory.
     let fx = build_two_file_rust_fixture();
     let cancellation = CancellationToken::new();
-
-    let em_fired = Rc::new(RefCell::new(false));
-    let em_fired_hook = Rc::clone(&em_fired);
-    let _em_guard = Phase3dPostExportMapHookGuard::install(move |_rg, _em: &ExportMap| {
-        *em_fired_hook.borrow_mut() = true;
-    });
 
     let p4_fired = Rc::new(RefCell::new(false));
     let p4_fired_hook = Rc::clone(&p4_fired);
@@ -601,9 +481,9 @@ fn incremental_rebuild_phase3d_still_delegates_to_full_build_fallback() {
     .expect("fallback full-build must succeed");
 
     assert!(
-        *em_fired.borrow() && *p4_fired.borrow() && *p5_fired.borrow(),
-        "every Phase 3d hook must fire before the fallback runs — otherwise sub-steps 7-9 were \
-         skipped entirely"
+        *p4_fired.borrow() && *p5_fired.borrow(),
+        "Phase 3d post-Pass-4d and post-Pass-5 hooks must fire before the fallback runs — \
+         otherwise sub-steps 8-9 were skipped entirely"
     );
 
     // The full-build fallback rebuilds the whole workspace, so the

@@ -35,7 +35,7 @@ pub mod workspace_status;
 
 pub use workspace_status::{WorkspaceStatusArgs, execute_workspace_status};
 
-pub use params::{ContextPropagationParams, SqryAskParams, SqryQueryParams};
+pub use params::{ContextPropagationParams, SqryQueryParams};
 pub use validation::{
     CallHierarchyArgs,
     CallHierarchyDirection,

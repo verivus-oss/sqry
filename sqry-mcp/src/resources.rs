@@ -190,7 +190,6 @@ pub enum ToolCategory {
     CrossLanguage,
     IndexManagement,
     Export,
-    NaturalLanguage,
 }
 
 impl ToolCategory {
@@ -205,7 +204,6 @@ impl ToolCategory {
             Self::CrossLanguage => "Cross-language analysis",
             Self::IndexManagement => "Inspect the index",
             Self::Export => "Export / visualize",
-            Self::NaturalLanguage => "Natural language",
         }
     }
 
@@ -221,7 +219,6 @@ impl ToolCategory {
             Self::CrossLanguage,
             Self::IndexManagement,
             Self::Export,
-            Self::NaturalLanguage,
         ]
     }
 }
@@ -274,8 +271,6 @@ fn tool_category(name: &str) -> ToolCategory {
         | "workspace_status" => ToolCategory::IndexManagement,
 
         "export_graph" => ToolCategory::Export,
-
-        "sqry_ask" => ToolCategory::NaturalLanguage,
 
         unknown => {
             // Unknown tools must be categorized. In debug/test builds, panic to catch
@@ -360,7 +355,6 @@ const TOOL_GUIDE_BODY: &str = "\n\
 | `pattern_search` | Find symbols by substring match | pattern:str! |
 | `get_workspace_symbols` | Search symbols by name across workspace | query:str! |
 | `sqry_query` | Structural query planner (text DSL, e.g. `kind:function has:caller:main`) | query:str!, limit:int? |
-| `sqry_ask` | Natural language to sqry query | query:str! |
 
 ### Filters Parameter
 
@@ -693,7 +687,7 @@ CompanionOf, SealedPermit
 | 1 | AST -> Nodes | Defines/Contains edges |
 | 2 | Enrichment | Visibility, types, signatures |
 | 3 | Intra-file | Calls, references within file |
-| 4 | Cross-file | Import resolution via ExportMap |
+| 4 | Cross-file | Phase 4c-prime node unification (`phase4c_prime_unify_cross_file_nodes`) + Phase 4d edge insertion |
 | 5 | Cross-language | FFI + HTTP endpoint linking |
 
 ## Concurrency
@@ -840,7 +834,6 @@ mod tests {
             "list_symbols".into(),
             "expand_cache_status".into(),
             "export_graph".into(),
-            "sqry_ask".into(),
             "workspace_status".into(),
             "sqry_query".into(),
             "context_propagation".into(),
@@ -934,7 +927,6 @@ mod tests {
             "list_symbols",
             "expand_cache_status",
             "export_graph",
-            "sqry_ask",
             "workspace_status",
             "sqry_query",
             "context_propagation",

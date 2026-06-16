@@ -278,8 +278,7 @@ fn resolve_path(raw: &Path) -> Result<PathBuf, DaemonError> {
 ///
 /// Every daemon-hosted read-only tool (the 14 graph-backed tools in
 /// [`sqry_mcp::tools_schema::DAEMON_SUPPORTED_TOOL_NAMES`] minus the
-/// mutating `rebuild_index` and the translation-wrapper `sqry_ask`)
-/// routes through this entrypoint, which:
+/// mutating `rebuild_index`) routes through this entrypoint, which:
 ///
 /// 1. Builds a per-request [`DaemonGraphProvider`] over the supplied
 ///    `manager` + `builder` pair (`tool_name` is forwarded into the

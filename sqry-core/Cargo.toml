@@ -33,7 +33,8 @@ rebuild-internals = []
 
 # Enable JVM classpath analysis (Track C)
 # When enabled, the build pipeline runs a classpath pre-pass that parses JVM
-# bytecode from dependency JARs and registers classpath nodes in the ExportMap.
+# bytecode from dependency JARs and registers the resulting classpath nodes
+# into the unified graph alongside source-derived nodes.
 jvm-classpath = []
 
 # ============================================================================

@@ -1,5 +1,10 @@
 # sqryd Daemon Implementation Plan
 
+> **Historical / non-current.** The sqry-nl / `sqry ask` / `sqry_ask` / ONNX /
+> classifier / embedding-model surface mentioned below was removed from sqry
+> (see `docs/reviews/sqry-nl-removal/2026-06-14/`). Those mentions are a record
+> of past work and do not describe shipped behavior.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build `sqryd`, a long-lived daemon that owns code graphs in memory, watches for file changes, and serves LSP/MCP/CLI clients over a shared Unix domain socket.

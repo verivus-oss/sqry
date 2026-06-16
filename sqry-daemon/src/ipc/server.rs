@@ -34,7 +34,10 @@ use tokio_util::sync::CancellationToken;
 use crate::config::DaemonConfig;
 #[cfg(unix)]
 use crate::config::ENV_SOCKET_PATH;
-#[cfg(unix)]
+// `DaemonError` is used unconditionally in `IpcServer::bind` (the cache-init
+// error mapping), not just in the unix-only socket-parent checks, so the import
+// must not be `#[cfg(unix)]`-gated or the Windows named-pipe build fails to find
+// the enum.
 use crate::error::DaemonError;
 use crate::error::DaemonResult;
 use crate::rebuild::RebuildDispatcher;
@@ -85,6 +88,20 @@ impl IpcServer {
         tool_executor: Arc<QueryExecutor>,
         shutdown: CancellationToken,
     ) -> DaemonResult<Self> {
+        // Initialize the sqry-mcp payload caches (engine / discovery /
+        // trace_path / subgraph) that daemon-hosted tool dispatch reads. This
+        // is the single chokepoint every serving path goes through (production
+        // entrypoints, the `sqryd-test-server` fixture, and the `TestServer`
+        // test harness all reach dispatch via a bound `IpcServer`), so doing it
+        // here makes it structurally impossible to serve daemon-hosted tools
+        // with uninitialized caches — the gap that made `trace_path` /
+        // `subgraph` panic and crash the daemon. The inits are idempotent, so
+        // repeated binds in the same process are safe.
+        sqry_mcp::init_mcp_caches(
+            &sqry_mcp::McpConfig::load_or_default().map_err(DaemonError::Internal)?,
+        )
+        .map_err(DaemonError::Internal)?;
+
         let socket_path = config.socket_path();
         // Cluster-G §5.2 — pre-flight the socket parent directory so a
         // missing or unwritable parent surfaces as a typed

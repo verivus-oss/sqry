@@ -399,7 +399,8 @@ async fn run_start_foreground(
     let pidfile_lock = acquire_pidfile_lock(&cfg)?;
     info!(pid_file = %cfg.pid_path().display(), "pidfile lock acquired");
 
-    // Steps 6-10: build all components.
+    // Steps 6-10: build all components. (The sqry-mcp payload caches are
+    // initialized inside `IpcServer::bind`, the single serving chokepoint.)
     let (manager, dispatcher, builder, executor) = build_daemon_components(&cfg);
 
     // Step 11 -- CancellationToken.
@@ -769,7 +770,8 @@ async fn run_start_foreground_inner(
     // Step 3 -- runtime_dir (may already exist; idempotent).
     create_runtime_dir(&cfg)?;
 
-    // Steps 6-10.
+    // Steps 6-10. (sqry-mcp payload caches are initialized inside
+    // `IpcServer::bind`, the single serving chokepoint.)
     let (manager, dispatcher, builder, executor) = build_daemon_components(&cfg);
 
     // Step 11.

@@ -1,14 +1,14 @@
 //! Phase 8c U15 — daemon tools/list subset assertion.
 //!
 //! Verifies that the tools advertised by the daemon MCP host via
-//! `tools/list` are exactly the 16 names in
-//! `sqry_mcp::tools_schema::DAEMON_SUPPORTED_TOOL_NAMES` (15 query
-//! tools + `sqry_ask` added by NL07).
+//! `tools/list` are exactly the 15 names in
+//! `sqry_mcp::tools_schema::DAEMON_SUPPORTED_TOOL_NAMES` (the
+//! natural-language sqry_ask tool was removed).
 //!
 //! This test drives the full IPC path: ShimRegister → ShimRegisterAck
 //! → rmcp client `list_tools`. It exercises the actual `list_tools`
 //! code path in `DaemonMcpHandler` rather than the unit-level assertion
-//! in `mcp_host/mod.rs`, giving end-to-end coverage of the 16-name
+//! in `mcp_host/mod.rs`, giving end-to-end coverage of the 15-name
 //! contract through the wire.
 
 #![allow(clippy::too_many_lines)]
@@ -84,14 +84,14 @@ async fn daemon_tools_list_exactly_15_names_matches_daemon_supported_tool_names(
     assert_eq!(
         got_names, expected_names,
         "daemon tools/list must return exactly DAEMON_SUPPORTED_TOOL_NAMES \
-         (16 tools after NL07: 15 query tools + sqry_ask). \
+         (15 tools; the natural-language sqry_ask tool was removed). \
          Got {got_names:?}, expected {expected_names:?}"
     );
     assert_eq!(
         list_result.tools.len(),
-        16,
-        "tools list length must be exactly 16 under default feature flags \
-         (15 query tools + sqry_ask from NL07)"
+        15,
+        "tools list length must be exactly 15 under default feature flags \
+         (the natural-language sqry_ask tool was removed)"
     );
 
     // Clean up: cancel the rmcp client and stop the server.

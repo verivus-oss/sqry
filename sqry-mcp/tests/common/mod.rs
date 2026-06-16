@@ -246,7 +246,7 @@ impl McpTestClient {
         //
         // Force `--no-daemon` so these standalone-mode tests don't silently
         // route through a running sqryd (whose `DAEMON_SUPPORTED_TOOL_NAMES`
-        // is a 16-tool subset; tools like `list_files`, `get_index_status`,
+        // is a 15-tool subset; tools like `list_files`, `get_index_status`,
         // `get_references` are not in it and would be rejected with
         // "unknown tool name"). Daemon-mode integration tests use
         // `DaemonFixture` in `sqry-mcp/tests/common/daemon_fixture.rs`.

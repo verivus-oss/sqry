@@ -23,8 +23,7 @@ pub struct ClasspathScope {
 ///
 /// Used during graph emission to:
 /// 1. Set `is_direct_dependency` on [`ClasspathNodeMetadata`].
-/// 2. Control `ExportMap` registration order (direct before transitive).
-/// 3. Attach Maven/Gradle coordinates to nodes for provenance queries.
+/// 2. Attach Maven/Gradle coordinates to nodes for provenance queries.
 ///
 /// [`ClasspathNodeMetadata`]: sqry_core::graph::unified::storage::ClasspathNodeMetadata
 #[derive(Debug, Clone, Serialize, Deserialize)]

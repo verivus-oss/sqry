@@ -53,7 +53,7 @@ members = [
     "crates/tree-sitter-perl-sqry",
     "sqry-lang-oracle-plsql",
     "sqry-mcp-redaction",
-    "sqry-nl", "sqry-plugin-registry",
+    "sqry-plugin-registry",
     "sqry-classpath",
     "sqry-db",
     "sqry-daemon",
@@ -111,7 +111,6 @@ default-members = [
     "crates/tree-sitter-perl-sqry",
     "sqry-lang-oracle-plsql",
     "sqry-mcp-redaction",
-    "sqry-nl",
     "sqry-plugin-registry",
     "sqry-db",
     "sqry-daemon",
@@ -121,16 +120,14 @@ default-members = [
 ]
 exclude = [
     "tools/detection-corpus-validator",  # Standalone utility, not part of workspace
-    "tools/graphsync",  # Standalone tool, excluded due to serde-saphyr/smallvec conflict with ort
+    "tools/graphsync",  # Standalone tool with an independent lockfile, kept out of the workspace resolver
     "tools/naming-audit",  # Internal-only development tool, not shipped with sqry
     "tools/slopscan",  # Internal-only development tool, not shipped with sqry
     "sqry-openai",  # Archived Python integration, not default product surface
-    "sqry-nl/training",  # Archived NL model training pipeline
-    "sqry-nl/models",  # Archived NL model metadata/artifacts
 ]
 
 [workspace.package]
-version = "20.0.5"
+version = "21.0.1"
 edition = "2024"
 authors = ["Verivus Pty Ltd"]
 license = "MIT"

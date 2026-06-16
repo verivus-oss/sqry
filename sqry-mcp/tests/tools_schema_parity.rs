@@ -14,12 +14,12 @@
 //! # Why a separate integration test?
 //!
 //! The U7 unit tests in `tools_schema.rs` guard the constant itself (exactly
-//! 16 after NL07, sorted, unique) and the subset relationship against the
+//! 15 tools, sorted, unique) and the subset relationship against the
 //! private `SqryServer::get_filtered_tools()` inventory. This integration test
 //! guards the **public-API round-trip**: `daemon_supported_tools()` must
 //! return a list whose names match `DAEMON_SUPPORTED_TOOL_NAMES` exactly by
-//! set equality — no more, no fewer — and must contain exactly 16 tools
-//! (15 query tools + `sqry_ask` from NL07) with no duplicates.
+//! set equality (no more, no fewer), and must contain exactly 15 tools
+//! (the natural-language sqry_ask tool was removed) with no duplicates.
 
 use std::collections::HashSet;
 
@@ -27,9 +27,9 @@ use sqry_mcp::tools_schema::{DAEMON_SUPPORTED_TOOL_NAMES, daemon_supported_tools
 
 /// `daemon_supported_tool_names_matches_standalone_subset`
 ///
-/// `daemon_supported_tools()` must return exactly the 16 tools whose names
-/// are in `DAEMON_SUPPORTED_TOOL_NAMES` (15 query tools + `sqry_ask` added
-/// in NL07). No extra tools, no missing tools, no duplicates. The parity
+/// `daemon_supported_tools()` must return exactly the 15 tools whose names
+/// are in `DAEMON_SUPPORTED_TOOL_NAMES` (the natural-language sqry_ask tool
+/// was removed). No extra tools, no missing tools, no duplicates. The parity
 /// between the constant and the runtime-filtered list is the integration-
 /// level guard that sqry-daemon's `DaemonMcpHandler` will advertise the
 /// correct tool set to MCP clients.
@@ -77,13 +77,13 @@ fn daemon_supported_tool_names_matches_standalone_subset() {
          get_filtered_tools() inventory (the source of the filter)."
     );
 
-    // Exactly 16 tools (15 query tools + NL07's `sqry_ask`) —
+    // Exactly 15 tools (the natural-language sqry_ask tool was removed) —
     // belt-and-suspenders for the set-equality proof above.
     assert_eq!(
         tools.len(),
-        16,
-        "daemon_supported_tools() must return exactly 16 tools under default feature flags \
-         (15 query tools + sqry_ask from NL07), got {} tools: {:?}",
+        15,
+        "daemon_supported_tools() must return exactly 15 tools under default feature flags \
+         (the natural-language sqry_ask tool was removed), got {} tools: {:?}",
         tools.len(),
         returned_names
     );

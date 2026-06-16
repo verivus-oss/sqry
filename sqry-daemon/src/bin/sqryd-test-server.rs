@@ -71,6 +71,9 @@ async fn main() {
     let tool_executor = Arc::new(sqry_core::query::executor::QueryExecutor::new());
     let shutdown = CancellationToken::new();
 
+    // (sqry-mcp payload caches are initialized inside `IpcServer::bind`, so the
+    // daemon-hosted trace_path / subgraph tools are safe to drive through this
+    // fixture without a separate init here.)
     let server = IpcServer::bind(
         Arc::clone(&config),
         Arc::clone(&manager),

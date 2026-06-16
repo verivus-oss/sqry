@@ -29,17 +29,14 @@
 //! per §G.7 if the only way to fit is to evict the pin itself.
 
 use std::{
-    sync::Arc,
     sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering},
     time::{Instant, SystemTime},
 };
 
 use arc_swap::ArcSwap;
-use once_cell::sync::OnceCell;
 use parking_lot::RwLock;
 use sqry_core::graph::CodeGraph;
 use sqry_core::watch::{ChangeSet, LastIndexedGitState};
-use sqry_nl::Translator;
 
 use crate::error::DaemonError;
 
@@ -236,28 +233,6 @@ pub struct LoadedWorkspace {
     /// watcher bridge (which attaches `git_state_at_enqueue = Some(...)`)
     /// populates this field.
     pub last_indexed_git_state: RwLock<Option<LastIndexedGitState>>,
-
-    /// NL07 — lazily-initialised, per-workspace
-    /// [`sqry_nl::Translator`] backing the daemon-hosted `sqry_ask`
-    /// MCP tool.
-    ///
-    /// Init cost is heavy (O(seconds) — N parallel ONNX session
-    /// loads from the [`sqry_nl::classifier::ClassifierPool`]) so the
-    /// daemon defers it to the first `sqry_ask` call against the
-    /// workspace via [`OnceCell::get_or_try_init`]. Subsequent calls
-    /// receive a cheap `Arc<Translator>` clone.
-    ///
-    /// Lifetime: tied to [`LoadedWorkspace`] itself. Workspace
-    /// eviction (LRU, explicit unload, daemon shutdown) drops the
-    /// `OnceCell`, which drops the `Arc<Translator>`, which drops
-    /// the pool's `N` classifier sessions and frees their model
-    /// weights. No explicit cleanup required.
-    ///
-    /// Concurrency: the cell itself is `Send + Sync`. The
-    /// `Translator` inside uses an internal sync pool that the
-    /// daemon's MCP host calls under `tokio::task::spawn_blocking`
-    /// so the daemon's tokio runtime never blocks on `recv()`.
-    pub nl_translator: OnceCell<Arc<Translator>>,
 }
 
 impl LoadedWorkspace {
@@ -284,7 +259,6 @@ impl LoadedWorkspace {
             rebuild_cancelled: AtomicBool::new(false),
             rebuild_in_flight: AtomicBool::new(false),
             last_indexed_git_state: RwLock::new(None),
-            nl_translator: OnceCell::new(),
         }
     }
 

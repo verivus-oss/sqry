@@ -19,7 +19,6 @@ public = [
     "sqry-lsp/",
     "sqry-mcp/",
     "sqry-mcp-redaction/",
-    "sqry-nl/",
     "sqry-lang-support/",
     "sqry-plugin-registry/",
     "sqry-tree-sitter-support/",
@@ -285,7 +284,6 @@ binary_assets = [
     "sqry-vscode/media/*.png",
     "sqry-vscode/media/*.svg",
     "sqry-vscode/resources/*.png",
-    "sqry-nl/models/*.onnx",
 ]
 
 [release.crates]
@@ -297,7 +295,6 @@ publish_order = [
     "sqry-daemon-protocol",
     "sqry-daemon-client",
     "sqry-mcp-redaction",
-    "sqry-nl",
     # Phase 2: Support libraries
     "sqry-lang-support",
     "sqry-tree-sitter-support",

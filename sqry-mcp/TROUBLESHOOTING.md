@@ -1,6 +1,6 @@
 # sqry MCP Troubleshooting
 
-**Version**: 20.0.5
+**Version**: 21.0.1
 
 ## Confirm The Binary
 
@@ -9,7 +9,7 @@ sqry-mcp --version
 sqry-mcp --list-tools
 ```
 
-Standalone mode currently lists 37 tools. If the count differs, trust the live output and update local docs or client expectations.
+Standalone mode currently lists 36 tools. If the count differs, trust the live output and update local docs or client expectations.
 
 ## MCP Client Does Not See Tools
 
@@ -99,16 +99,6 @@ src/lib.rs
 The runtime default is `minimal`. For external providers, use `standard` unless you need `strict`.
 
 If you need cleartext source-root paths for local diagnostics, use a preset that permits the top-level `source_roots[]` carrier. Do not convert `source_root_id` into tool path arguments.
-
-## Natural Language Model Errors
-
-`sqry_ask` and `sqry ask` use model integrity checks by default.
-
-Options:
-
-- Use `--model-dir` or the MCP `model_dir` parameter for a specific local model directory.
-- Use `--allow-model-download` or MCP `allow_model_download` only when network download is acceptable.
-- Use `--allow-unverified-model` or MCP `allow_unverified_model` only for development or explicitly trusted local workflows.
 
 ## More Help
 

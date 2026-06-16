@@ -36,11 +36,8 @@
 //! internal types with identical bounds checking to the rmcp
 //! `SqryServer` path.
 
-use std::sync::Arc;
-
 use anyhow::{Result, anyhow};
 use serde_json::Value;
-use sqry_nl::Translator;
 
 use super::{
     WorkspaceContext, execute_complexity_metrics_for_daemon, execute_dependency_impact_for_daemon,
@@ -57,10 +54,8 @@ use crate::daemon_params::{
     params_to_direct_callees_args, params_to_direct_callers_args, params_to_export_graph_args,
     params_to_find_cycles_args, params_to_find_unused_args, params_to_is_node_in_cycle_args,
     params_to_relation_query_args, params_to_semantic_diff_args, params_to_semantic_search_args,
-    params_to_show_dependencies_args, params_to_sqry_ask_args, params_to_subgraph_args,
-    params_to_trace_path_args,
+    params_to_show_dependencies_args, params_to_subgraph_args, params_to_trace_path_args,
 };
-use crate::execution::execute_sqry_ask_with_translator;
 
 /// Dispatch a named tool call against a pre-resolved
 /// [`WorkspaceContext`].
@@ -192,54 +187,10 @@ pub fn dispatch_by_name(
             "dispatch_by_name: rebuild_index must be handled by the caller \
              (DaemonMcpHandler::handle_rebuild_index), not routed through dispatch_by_name"
         )),
-        // NL07: `sqry_ask` requires an `Arc<Translator>` from the
-        // workspace cache, which `dispatch_by_name`'s
-        // `WorkspaceContext` deliberately does not carry. Routing
-        // happens through [`dispatch_sqry_ask`] called directly by
-        // the daemon MCP host, mirroring the `rebuild_index` pattern.
-        "sqry_ask" => Err(anyhow!(
-            "dispatch_by_name: sqry_ask must be handled by the caller \
-             (DaemonMcpHandler::handle_sqry_ask via dispatch_sqry_ask), \
-             not routed through dispatch_by_name"
-        )),
         other => Err(anyhow!(
             "dispatch_by_name: unknown tool name {other:?} (not in DAEMON_SUPPORTED_TOOL_NAMES)"
         )),
     }
-}
-
-/// NL07 — daemon entry point for the `sqry_ask` MCP tool.
-///
-/// `dispatch_by_name` cannot route `sqry_ask` because its
-/// [`WorkspaceContext`] does not carry an [`Arc<Translator>`]. The
-/// daemon MCP host calls this helper directly: it threads the
-/// per-workspace translator (lazy-initialised on
-/// `LoadedWorkspace.nl_translator`) plus the canonical
-/// [`WorkspaceContext`] (used here only for workspace-root
-/// canonicalisation) through to
-/// [`execute_sqry_ask_with_translator`].
-///
-/// The `_wctx` parameter is kept in the signature for symmetry with
-/// `dispatch_by_name` and so future tooling can read workspace-root
-/// info if needed; the current `sqry_ask` executor resolves its own
-/// workspace path through [`crate::engine::engine_for_workspace`].
-///
-/// # Errors
-///
-/// - `anyhow::Error` wrapping [`crate::error::RpcError`] when args
-///   deserialisation or bounds validation fails (the daemon IPC
-///   boundary maps this to `DaemonError::InvalidArgument` / `-32602`).
-/// - Any error propagated from
-///   [`execute_sqry_ask_with_translator`] (workspace canonicalisation,
-///   translator-side translate failure).
-pub fn dispatch_sqry_ask(
-    _wctx: &WorkspaceContext,
-    translator: &Arc<Translator>,
-    args_value: &Value,
-) -> Result<Value> {
-    let args = params_to_sqry_ask_args(args_value.clone()).map_err(anyhow::Error::from)?;
-    let exec = execute_sqry_ask_with_translator(translator, &args)?;
-    tool_response_json(exec).map_err(|e| anyhow!("response build: {e:?}"))
 }
 
 #[cfg(test)]
@@ -291,44 +242,6 @@ mod tests {
         assert!(
             msg.contains("DAEMON_SUPPORTED_TOOL_NAMES"),
             "error should reference the constant, got: {msg}"
-        );
-    }
-
-    /// NL07: `sqry_ask` is in `DAEMON_SUPPORTED_TOOL_NAMES` but cannot
-    /// be routed through `dispatch_by_name` because the helper does
-    /// not have access to the per-workspace `Arc<Translator>`. The
-    /// arm must surface a clear "must be handled by the caller"
-    /// error mirroring the `rebuild_index` pattern.
-    #[test]
-    fn dispatch_by_name_rejects_sqry_ask_with_caller_must_handle_message() {
-        use std::path::PathBuf;
-        use std::sync::Arc;
-
-        use sqry_core::graph::unified::concurrent::CodeGraph;
-        use sqry_core::query::executor::QueryExecutor;
-
-        let graph = Arc::new(CodeGraph::new());
-        let executor = Arc::new(QueryExecutor::new());
-        let wctx = WorkspaceContext {
-            workspace_root: PathBuf::from("/nonexistent/workspace"),
-            graph,
-            executor,
-        };
-        let err = dispatch_by_name(
-            "sqry_ask",
-            &wctx,
-            &serde_json::json!({}),
-            &sqry_core::query::cancellation::CancellationToken::new(),
-        )
-        .unwrap_err();
-        let msg = err.to_string();
-        assert!(
-            msg.contains("must be handled by the caller"),
-            "sqry_ask error must mention 'must be handled by the caller', got: {msg}"
-        );
-        assert!(
-            msg.contains("dispatch_sqry_ask"),
-            "error should reference dispatch_sqry_ask, got: {msg}"
         );
     }
 

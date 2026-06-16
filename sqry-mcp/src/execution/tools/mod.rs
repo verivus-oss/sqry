@@ -4,7 +4,6 @@
 //! the main execution module for better organization.
 
 mod analysis;
-mod ask;
 mod context_propagation;
 mod explain;
 mod graph;
@@ -28,9 +27,6 @@ pub use analysis::{
     execute_is_node_in_cycle,
     execute_pattern_search,
     execute_semantic_diff,
-};
-pub use ask::{
-    build_translator_config_for_path, execute_sqry_ask, execute_sqry_ask_with_translator,
 };
 pub use context_propagation::execute_context_propagation;
 pub use explain::execute_explain_code;

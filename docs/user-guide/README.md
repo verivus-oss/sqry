@@ -10,7 +10,6 @@ This guide covers the stable public workflows for local semantic code search.
 - [Workspaces](workspace.md): configure `.sqry-workspace`, VS Code `.code-workspace` `sqry.workspace`, multi-root status, and workspace cleanup.
 - [Daemon Mode](daemon.md): run `sqryd`, load and rebuild workspaces, inspect logs, and use daemon-backed MCP/LSP workflows.
 - [MCP](mcp.md): configure AI assistants, choose standalone versus daemon mode, inspect the live tool catalog, and handle `source_root_id` safely.
-- [Natural Language Queries](natural-language.md): use `sqry ask`, model integrity controls, confidence thresholds, and valid generated command examples.
 - [Advanced Analysis](advanced-analysis.md): use graph predicates, `resolved_via`, `returns`, context propagation, semantic diff, impact, and visualization.
 - [Visualization](visualization.md): render relationship graphs in Mermaid, DOT, and D2.
 

@@ -163,9 +163,9 @@ pub use admission::{
 };
 pub use bind::{BindingQuery, BindingResult, ResolvedBinding, SymbolClassification};
 pub use build::{
-    ExportMap, GraphBuildHelper, HelperStats, IdentityIndex, IdentityKey, IncrementalStats,
-    IntraFileReference, Pass3Stats, Pass4Stats, PendingEdge, StagingGraph, StagingOp,
-    add_edge_incremental, pass3_intra_edges, pass4_cross_file, remove_file_nodes,
+    GraphBuildHelper, HelperStats, IdentityIndex, IdentityKey, IncrementalStats,
+    IntraFileReference, Pass3Stats, PendingEdge, StagingGraph, StagingOp, add_edge_incremental,
+    pass3_intra_edges, remove_file_nodes,
 };
 pub use compaction::{
     BuildFailureReason, CheckpointStats, CompactionCheckpoint, CompactionError, CompactionPhase,

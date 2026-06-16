@@ -137,14 +137,6 @@ pub const HISTORY_CONFIGURATION: &str = "History Configuration";
 /// Query persistence options (for --save-as on query/search)
 pub const PERSISTENCE_OPTIONS: &str = "Persistence Options";
 
-// ===== Natural Language Headings =====
-
-/// Natural language query input
-pub const NL_INPUT: &str = "Query Input";
-
-/// Natural language translation configuration
-pub const NL_CONFIGURATION: &str = "Translation Configuration";
-
 /// Graph analysis input targets
 pub const GRAPH_ANALYSIS_INPUT: &str = "Analysis Input";
 

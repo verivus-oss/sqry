@@ -8,7 +8,7 @@
 //! This module provides the resolution logic for `mod foo;` declarations.
 //! The actual cross-file edge creation requires:
 //!
-//! 1. All files to be indexed (to build complete `ExportMap`)
+//! 1. All files to be indexed (so every target module is in the graph)
 //! 2. Module context propagation (knowing each file's module path)
 //! 3. Pass 4 processing to create import edges between modules
 //!

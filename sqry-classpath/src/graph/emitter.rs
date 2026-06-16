@@ -20,15 +20,13 @@
 //!    module).
 //!
 //! After emission, the returned `FQN→NodeId` mapping is used by
-//! [`register_classpath_exports`] and [`create_classpath_edges`] for `ExportMap`
-//! registration and cross-reference edge creation.
+//! [`create_classpath_edges`] for cross-reference edge creation.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use log::debug;
 use sqry_core::graph::node::Language;
-use sqry_core::graph::unified::build::ExportMap;
 use sqry_core::graph::unified::build::StagingGraph;
 use sqry_core::graph::unified::concurrent::CodeGraph;
 use sqry_core::graph::unified::edge::EdgeKind;
@@ -145,8 +143,7 @@ fn register_synthetic_file(
 
 /// Emit all classpath nodes and edges into a staging graph.
 ///
-/// Returns the mapping of FQN to `NodeId` for `ExportMap` registration and
-/// cross-reference edge creation.
+/// Returns the mapping of FQN to `NodeId` for cross-reference edge creation.
 ///
 /// # Arguments
 ///
@@ -589,84 +586,6 @@ fn find_provenance_for_jar<'a>(
     prov_map: &HashMap<&Path, &'a ClasspathProvenance>,
 ) -> Option<&'a ClasspathProvenance> {
     prov_map.get(jar_path).copied()
-}
-
-// ---------------------------------------------------------------------------
-// ExportMap registration (U15b)
-// ---------------------------------------------------------------------------
-
-/// Register classpath nodes in the `ExportMap` for cross-file resolution.
-///
-/// FQN precedence: workspace > direct dep > transitive dep.
-/// Direct dependencies are registered before transitive dependencies so that
-/// `ExportMap::lookup()` (which returns the first entry) prefers them.
-///
-/// Only class-level nodes (not methods/fields) are registered, matching the
-/// Java import resolution model where imports resolve to types.
-#[allow(clippy::implicit_hasher)] // Standard HashMap is intentional for classpath emitter
-pub fn register_classpath_exports(
-    fqn_to_nodes: &HashMap<String, Vec<ClasspathNodeRef>>,
-    export_map: &mut ExportMap,
-    provenance: &[ClasspathProvenance],
-    index: &ClasspathIndex,
-) {
-    // Build a set of class-level FQNs (not methods/fields).
-    let class_fqns: std::collections::HashSet<&str> =
-        index.classes.iter().map(|s| s.fqn.as_str()).collect();
-
-    // Register direct dependencies first for precedence.
-    let direct_jars: std::collections::HashSet<&Path> = provenance
-        .iter()
-        .filter(|p| p.has_direct_scope())
-        .map(|p| p.jar_path.as_path())
-        .collect();
-
-    let transitive_jars: std::collections::HashSet<&Path> = provenance
-        .iter()
-        .filter(|p| !p.has_direct_scope())
-        .map(|p| p.jar_path.as_path())
-        .collect();
-
-    // Phase 1: Register direct dependency classes.
-    register_exports_for_jars(&class_fqns, fqn_to_nodes, export_map, &direct_jars, index);
-
-    // Phase 2: Register transitive dependency classes.
-    register_exports_for_jars(
-        &class_fqns,
-        fqn_to_nodes,
-        export_map,
-        &transitive_jars,
-        index,
-    );
-}
-
-/// Register exports for classes from a specific set of JARs.
-fn register_exports_for_jars(
-    class_fqns: &std::collections::HashSet<&str>,
-    fqn_to_nodes: &HashMap<String, Vec<ClasspathNodeRef>>,
-    export_map: &mut ExportMap,
-    jar_filter: &std::collections::HashSet<&Path>,
-    index: &ClasspathIndex,
-) {
-    for stub in &index.classes {
-        let Some(source_jar) = stub.source_jar.as_deref() else {
-            continue;
-        };
-        if !jar_filter.contains(Path::new(source_jar)) {
-            continue;
-        }
-
-        let fqn = stub.fqn.as_str();
-        if class_fqns.contains(fqn)
-            && let Some(node_refs) = fqn_to_nodes.get(fqn)
-        {
-            for node_ref in node_refs {
-                if node_ref.jar_path == Path::new(source_jar) {
-                    export_map.register(fqn.to_owned(), node_ref.file_id, node_ref.node_id);
-                }
-            }
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1249,84 +1168,6 @@ mod tests {
         assert!(result.fqn_to_node.contains_key("java.util.ArrayList"));
         assert!(result.fqn_to_node.contains_key("java.util.List"));
         assert!(result.fqn_to_node.contains_key("java.io.Serializable"));
-    }
-
-    // -----------------------------------------------------------------------
-    // Test 4: ExportMap registration and lookup
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_export_map_registration_and_lookup() {
-        let mut alpha = make_stub("com.example.Alpha");
-        alpha.source_jar = Some("/jars/example.jar".to_owned());
-        let mut beta = make_stub("com.example.Beta");
-        beta.source_jar = Some("/jars/example.jar".to_owned());
-        let stubs = vec![alpha, beta];
-
-        let prov = vec![make_provenance("/jars/example.jar", true)];
-        let index = ClasspathIndex::build(stubs.clone());
-        let (result, _staging, _registry, _interner, _meta) = run_emission(stubs, &prov);
-
-        let mut export_map = ExportMap::new();
-        register_classpath_exports(&result.fqn_to_nodes, &mut export_map, &prov, &index);
-
-        // Lookup should find the registered classes
-        let alpha = export_map.lookup("com.example.Alpha");
-        assert!(alpha.is_some(), "Alpha should be in ExportMap");
-
-        let beta = export_map.lookup("com.example.Beta");
-        assert!(beta.is_some(), "Beta should be in ExportMap");
-
-        // Non-existent should return None
-        let missing = export_map.lookup("com.example.DoesNotExist");
-        assert!(missing.is_none());
-    }
-
-    // -----------------------------------------------------------------------
-    // Test 5: FQN precedence (direct > transitive)
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_fqn_precedence_direct_before_transitive() {
-        let mut direct_stub = make_stub("com.example.Foo");
-        direct_stub.source_jar = Some("/jars/direct.jar".to_owned());
-        let mut transitive_stub = make_stub("com.example.Foo");
-        transitive_stub.source_jar = Some("/jars/transitive.jar".to_owned());
-        // Deliberately keep aggregate `is_direct` false while marking the scope
-        // as direct to prove export precedence reads per-scope metadata.
-        let mut prov_direct = make_provenance("/jars/direct.jar", false);
-        prov_direct.scopes[0].is_direct = true;
-        let prov_transitive = make_provenance("/jars/transitive.jar", false);
-
-        let index = ClasspathIndex::build(vec![direct_stub, transitive_stub]);
-        let (result, _staging, _registry, _interner, _meta) = run_emission(
-            index.classes.clone(),
-            &[prov_direct.clone(), prov_transitive],
-        );
-
-        let mut export_map = ExportMap::new();
-        register_classpath_exports(
-            &result.fqn_to_nodes,
-            &mut export_map,
-            &[prov_direct, make_provenance("/jars/transitive.jar", false)],
-            &index,
-        );
-
-        let entry = export_map
-            .lookup("com.example.Foo")
-            .expect("class should be registered");
-        let (_file_id, node_id) = entry;
-        let direct_node_id = result
-            .fqn_to_nodes
-            .get("com.example.Foo")
-            .and_then(|node_refs| {
-                node_refs
-                    .iter()
-                    .find(|node_ref| node_ref.jar_path.as_path() == Path::new("/jars/direct.jar"))
-            })
-            .map(|node_ref| node_ref.node_id)
-            .expect("direct node should exist");
-        assert_eq!(node_id, direct_node_id);
     }
 
     #[test]

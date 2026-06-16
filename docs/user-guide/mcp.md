@@ -34,7 +34,7 @@ sqry daemon load .
 sqry-mcp --daemon
 ```
 
-Standalone `sqry-mcp` currently exposes 37 tools. Daemon-hosted MCP exposes a 16-tool subset for daemon-backed workflows. Prefer dynamic discovery for exact schemas:
+Standalone `sqry-mcp` currently exposes 36 tools. Daemon-hosted MCP exposes a 15-tool subset for daemon-backed workflows. Prefer dynamic discovery for exact schemas:
 
 ```bash
 sqry-mcp --list-tools
@@ -64,12 +64,6 @@ Cleartext source-root paths appear only through top-level `source_roots[]` when 
 ## Redaction
 
 The MCP runtime default is `minimal`. For external or hosted LLM providers, `standard` is the recommended preset unless you need stricter path privacy. `strict` hides more path detail and can require more correlation work from the client.
-
-## Natural Language Tool
-
-The `sqry_ask` MCP tool translates natural language into a validated sqry command. `execute: true` asks MCP to execute the translated command; clients should still display enough context for the user to understand what ran.
-
-Model downloads and unverified model loading are opt-in through the tool parameters or corresponding environment controls.
 
 ## More Detail
 

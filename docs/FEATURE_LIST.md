@@ -2,6 +2,8 @@
 
 This document provides a comprehensive list of all features available across sqry's interfaces.
 
+> **Removed in 21.0.0:** the natural-language surface (`sqry ask`, the `sqry_ask` MCP tool, the `sqry/ask` LSP request) was removed. See [Removed features](TROUBLESHOOTING.md#removed-features) for migration to the structured commands and tools listed below.
+
 ## CLI Commands (`sqry`)
 
 ### Core Commands
@@ -9,9 +11,8 @@ This document provides a comprehensive list of all features available across sqr
 | Command | Description |
 |---------|-------------|
 | `sqry index` | Build or update the semantic index for a workspace |
-| `sqry search <query>` | Semantic code search using natural language or structured queries |
+| `sqry search <query>` | Semantic code search by symbol name, regex, and fuzzy patterns |
 | `sqry query <expression>` | Execute structured queries against the symbol index |
-| `sqry ask <question>` | Natural language queries with AI-powered responses |
 | `sqry graph <subcommand>` | Graph operations (nodes, edges, stats, etc.) |
 
 ### Graph Subcommands
@@ -132,7 +133,6 @@ Indexing behavior highlights:
 - Richer Go analysis: implicit interface implements, promoted methods, function-signature implementations, and struct-field `Property` nodes (also C/Haskell)
 - Edge-backed `returns:<Type>` predicate via `TypeOf{Return}` edges (Rust/Java/Python/TypeScript/Go)
 - Typed `AmbiguousSymbol` errors for bare names with multiple candidates
-- Hardened natural-language `sqry ask`: on-device ONNX classifier with gated, SHA256-verified model auto-download (strict integrity by default, `--model-dir` override)
 - `find_duplicates` per-group member cap (default 10) with `total_members` / `members_truncated`
 - Homebrew tap auto-publish and native-platform release smoke gates
 
@@ -221,12 +221,6 @@ sqry provides **36 MCP tools** for AI/LLM integration:
 | `find_unused` | Find unused/dead code via reachability analysis |
 | `is_node_in_cycle` | Check if a specific symbol is part of a cycle |
 
-### Natural Language
-
-| Tool | Description |
-|------|-------------|
-| `sqry_ask` | Translate natural language queries into sqry commands |
-
 ### MCP Prompts (Claude Code `/` menu)
 
 These prompts appear as `/mcp__sqry__<prompt_name>` in Claude Code when prompts
@@ -243,7 +237,6 @@ rather than slash-prompt aliases.
 | `trace_path` | Guided shortest-path tracing between symbols |
 | `explain_symbol` | Guided symbol explanation workflow |
 | `code_impact` | Guided dependency impact workflow |
-| `ask` | Guided natural-language translation prompt |
 
 ### MCP Feature Flags
 
@@ -256,7 +249,6 @@ These environment variables can disable specific MCP tool groups at runtime:
 | `SQRY_MCP_ENABLE_CROSS_LANGUAGE` | `cross_language_edges` |
 | `SQRY_MCP_ENABLE_SEMANTIC_DIFF` | `semantic_diff` |
 | `SQRY_MCP_ENABLE_DEPENDENCY_IMPACT` | `dependency_impact` |
-| `SQRY_MCP_ENABLE_SQRY_ASK` | `sqry_ask` |
 
 ---
 
@@ -300,7 +292,6 @@ These endpoints are exposed as direct JSON-RPC custom methods (i.e., the method 
 | `sqry/search` | Semantic search with filtering |
 | `sqry/hierarchicalSearch` | RAG-optimized search with grouping |
 | `sqry/patternSearch` | Wildcard pattern search |
-| `sqry/ask` | Natural language to sqry command translation |
 
 #### Symbol Analysis
 
@@ -420,7 +411,7 @@ The VS Code extension (`sqry-vscode`) builds on `sqry lsp` and exposes:
 
 ### Search & Query
 
-- `SemanticSearch` - Natural language search
+- `SemanticSearch` - AST-based semantic symbol search
 - `QueryExecutor` - Execute structured queries
 - `RelationQuery` - Query symbol relationships
 - `SimilaritySearch` - Find similar symbols

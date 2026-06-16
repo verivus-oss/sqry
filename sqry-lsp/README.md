@@ -11,14 +11,15 @@ server speaks **standard LSP** (definition, references, document and
 workspace symbols, hover, code actions, code lenses, diagnostics) over
 the same connection as a curated set of **`sqry/*` JSON-RPC custom
 methods** that expose graph-native semantics not covered by the LSP
-specification: hierarchical search, `sqry/ask` natural-language
-queries, dependency impact, cycle detection, complexity metrics,
-`sqry/semanticDiff`, and more.
+specification: hierarchical search, dependency impact, cycle detection,
+complexity metrics, `sqry/semanticDiff`, and more.
 
 The server is implemented in Rust on top of `tower-lsp` and shares the
 same `sqry-core` graph engine, `sqry-db` derived-fact cache, and
 plugin set used by every other sqry surface — `sqry-lsp` is a
 transport, not a separate analyzer.
+
+> **Removed in 21.0.0:** the `sqry/ask` natural-language LSP request was removed. Use the structural `sqry/*` methods (hierarchical search, dependency impact, cycle detection, etc.) or `sqry query` from the CLI; see [Removed features](../docs/TROUBLESHOOTING.md#removed-features) for migration.
 
 ---
 
@@ -238,7 +239,6 @@ plain JSON values rather than typed LSP responses.
 | `sqry/listCircularDependencies` | Find cycles (call / import / module). UTF-16 cycle-member columns are wire-correct (PN2). | `{ kind?, max_results? }` | `{ cycles: [...], truncated, total }` |
 | `sqry/listUnusedSymbols` | Dead-code detection. | `{ language?, max_results? }` | `{ unused: [...], truncated, total }` |
 | `sqry/hierarchicalSearch` | RAG-optimised grouped search (file → symbols). | `{ query, filters?, max_results? }` | `{ groups: [{ file, hits: [...] }], truncated, total }` |
-| `sqry/ask` | Natural-language query → sqry command translation. | `{ question, context? }` | `{ command, args, explanation }` |
 | `sqry/directCallers` | Direct callers of a symbol (depth = 1). | `{ name | uri+position, max_results? }` | `{ callers: [...], truncated, total }` |
 | `sqry/directCallees` | Direct callees of a symbol (depth = 1). | `{ name | uri+position, max_results? }` | `{ callees: [...], truncated, total }` |
 | `sqry/batchCallerCalleeCount` | Batched caller / callee counts for a list of symbols (used by `sqry-vscode` to render gutter badges in a single round-trip). | `{ symbols: [{ name | uri+position }] }` | `{ counts: [{ symbol, callers, callees }] }` |

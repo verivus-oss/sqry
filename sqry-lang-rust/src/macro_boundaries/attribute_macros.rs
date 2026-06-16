@@ -4,7 +4,7 @@
 //!
 //! 1. **Same-workspace proc-macros** — attribute path resolves to a function in
 //!    a proc-macro crate within the workspace. Emits `MacroExpansion{Attribute}`
-//!    with `is_verified: true`. (Resolved in cross-crate pass, not here.)
+//!    with `is_verified: true`.
 //!
 //! 2. **Well-known proc-macro registry** — curated list of confirmed
 //!    `#[proc_macro_attribute]` exports. Emits `MacroExpansion{Attribute}` with

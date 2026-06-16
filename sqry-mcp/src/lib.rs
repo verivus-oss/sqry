@@ -65,6 +65,68 @@ pub use pagination::{decode_cursor, encode_cursor};
 // Re-export mcp_config for testing
 pub use mcp_config::McpConfig;
 
+/// Initialize the process-global MCP payload caches (engine, discovery,
+/// trace_path, subgraph) from `config`.
+///
+/// Any host that serves the workspace-resolved MCP tools through this
+/// crate's `daemon_adapter` / engine paths MUST call this once before the
+/// first request. The standalone `sqry-mcp` binary does the equivalent in
+/// its own module tree inside `main`; the `sqryd` daemon links this lib
+/// target, so it must call this helper (otherwise `trace_path` / `subgraph`
+/// panic with "telemetry not initialized" and engine-backed tools fail with
+/// "Engine cache not initialized", which is exactly the gap that left
+/// daemon-hosted trace_path/subgraph crashing the daemon).
+///
+/// The four `OnceLock`-backed inits are idempotent, so a repeat call is a
+/// harmless no-op. Capacities come from `config`; the TTL is the fixed
+/// `execution::graph_cache::CACHE_TTL_SECS`. Keeping all four in one place
+/// stops the daemon host from drifting out of sync when a cache is added.
+pub fn init_mcp_caches(config: &McpConfig) -> anyhow::Result<()> {
+    use std::num::NonZeroUsize;
+    use std::time::Duration;
+
+    let engine_capacity = config.effective_engine_cache_capacity()?;
+    let discovery_capacity = config.effective_discovery_cache_capacity()?;
+    let trace_path_capacity = config.effective_trace_cache_size()?;
+    let subgraph_capacity = config.effective_subgraph_cache_size()?;
+    let query_ttl = Duration::from_secs(execution::graph_cache::CACHE_TTL_SECS);
+
+    engine::init_engine_cache(
+        NonZeroUsize::new(engine_capacity)
+            .ok_or_else(|| anyhow::anyhow!("BUG: engine_capacity validated but still zero"))?,
+    );
+    path_resolver::init_discovery_cache(
+        NonZeroUsize::new(discovery_capacity)
+            .ok_or_else(|| anyhow::anyhow!("BUG: discovery_capacity validated but still zero"))?,
+    );
+    execution::init_trace_path_cache(
+        NonZeroUsize::new(trace_path_capacity)
+            .ok_or_else(|| anyhow::anyhow!("BUG: trace_path_capacity validated but still zero"))?,
+        query_ttl,
+    );
+    execution::init_subgraph_cache(
+        NonZeroUsize::new(subgraph_capacity)
+            .ok_or_else(|| anyhow::anyhow!("BUG: subgraph_capacity validated but still zero"))?,
+        query_ttl,
+    );
+    Ok(())
+}
+
+/// Test-only probes for the `init_mcp_caches` regression guard. Hidden from
+/// docs and intended solely for the isolated integration test
+/// `tests/daemon_cache_init_guard.rs`, which runs in its own process so no
+/// other test can initialize the global telemetry `OnceLock`s first. A lib
+/// unit test cannot guard this: the cells are process-global, so a sibling
+/// test in the shared lib-test binary could initialize them and mask a
+/// regression (the test would pass even if `init_mcp_caches` stopped wiring
+/// telemetry).
+#[doc(hidden)]
+pub mod cache_init_test_probe {
+    pub use crate::execution::graph_cache::{
+        subgraph_telemetry_initialized, trace_path_telemetry_initialized,
+    };
+}
+
 /// Re-export tool validation functions for fuzzing.
 #[cfg(any(test, fuzzing))]
 pub mod tool_validation {
@@ -87,8 +149,7 @@ pub mod tool_args {
         DirectCallersArgs, ExportGraphArgs, FindCyclesArgs, FindUnusedArgs, GitVersionRef,
         IsNodeInCycleArgs, PaginationArgs, RelationQueryArgs, RelationType, SearchFilters,
         SemanticDiffArgs, SemanticDiffFilters, SemanticSearchArgs, ShowDependenciesArgs,
-        SqryAskParams, SqryQueryParams, SubgraphArgs, TracePathArgs, UnusedScope,
-        WorkspaceStatusArgs,
+        SqryQueryParams, SubgraphArgs, TracePathArgs, UnusedScope, WorkspaceStatusArgs,
     };
 }
 
@@ -102,8 +163,7 @@ pub mod tool_handlers {
         execute_complexity_metrics, execute_dependency_impact, execute_direct_callees,
         execute_direct_callers, execute_export_graph, execute_find_cycles, execute_find_unused,
         execute_get_dependencies, execute_is_node_in_cycle, execute_relation_query,
-        execute_semantic_diff, execute_sqry_ask, execute_sqry_query, execute_subgraph,
-        execute_trace_path,
+        execute_semantic_diff, execute_sqry_query, execute_subgraph, execute_trace_path,
     };
     pub use crate::tools::execute_workspace_status;
 }

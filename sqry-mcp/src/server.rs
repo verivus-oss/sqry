@@ -20,8 +20,8 @@ use crate::tools::params::{
     IsNodeInCycleParams, ListFilesParams, ListSymbolsParams, PaginationParams, PatternSearchParams,
     RebuildIndexParams, RelationQueryParams, RelationTypeParam, SearchFiltersParams,
     SearchSimilarParams, SemanticDiffParams, SemanticSearchParams, ShowDependenciesParams,
-    SqryAskParams, SqryQueryParams, SubgraphParams, TracePathParams, UnusedScopeParam,
-    VisibilityParam, WorkspaceStatusParams,
+    SqryQueryParams, SubgraphParams, TracePathParams, UnusedScopeParam, VisibilityParam,
+    WorkspaceStatusParams,
 };
 use crate::workspace_session::{self, WorkspaceSessionRegistry};
 use rmcp::{
@@ -573,11 +573,10 @@ impl SqryServer {
                             details,
                         )));
                     }
-                    // NL08: structured tool errors (e.g.
-                    // `RpcError::onnx_runtime_missing`) are surfaced
-                    // through the canonical envelope rather than the
-                    // opaque internal-error fallback, so MCP clients
-                    // can pattern-match on `details.code`.
+                    // Structured tool errors are surfaced through the
+                    // canonical envelope rather than the opaque
+                    // internal-error fallback, so MCP clients can
+                    // pattern-match on `details.code`.
                     if let Some(rpc_err) = anyhow_err.downcast_ref::<RpcError>() {
                         Err(rpc_error_to_mcp(rpc_err.clone()))
                     } else {
@@ -1148,29 +1147,6 @@ impl SqryServer {
         Ok(Self::success_result(&result))
     }
 
-    /// Translate natural language into sqry query commands.
-    #[tool(
-        description = "Translate natural language into sqry query commands",
-        annotations(read_only_hint = true, open_world_hint = false)
-    )]
-    async fn sqry_ask(
-        &self,
-        Parameters(params): Parameters<SqryAskParams>,
-        context: RequestContext<RoleServer>,
-    ) -> Result<CallToolResult, McpError> {
-        self.ensure_tool_enabled("sqry_ask")?;
-
-        // SqryAskParams maps directly to the execution args
-        let args = params.clone();
-        let result = self
-            .execute_tool_for_request("sqry_ask", &params, &context, move |_cancel| {
-                execution::execute_sqry_ask(&args)
-            })
-            .await?;
-
-        Ok(Self::success_result(&result))
-    }
-
     /// Execute a structural query through the sqry-db planner (DB13).
     #[tool(
         description = "Execute a structural query via the sqry-db planner: parses a predicate-chain text syntax (kind:function has:caller ...), runs it against the unified graph, and returns matching nodes with file+line metadata",
@@ -1596,7 +1572,6 @@ impl ServerHandler for SqryServer {
                  - File symbols: get_document_symbols\n\
                  - Export/visualize: export_graph\n\
                  - Cross-language: cross_language_edges\n\
-                 - Natural language: sqry_ask\n\
                  - Find similar: search_similar\n\
                  - Explain symbol context: explain_code\n\n\
                  The `filters` parameter on semantic_search/hierarchical_search is a JSON object \

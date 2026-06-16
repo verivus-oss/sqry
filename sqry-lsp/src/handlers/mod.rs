@@ -12,7 +12,6 @@ use crate::documents::{DocumentSnapshot, compute_line_offsets};
 use crate::file_types::classify_file;
 use crate::session::{NodeMatch, SessionManager};
 
-pub mod ask;
 pub mod batch_counts;
 pub mod call_hierarchy;
 pub mod code_action;

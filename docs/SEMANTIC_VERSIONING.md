@@ -1,7 +1,7 @@
 # Semantic Versioning Guide
 
-**Version**: 20.0.5
-**Last Updated**: 2026-06-13
+**Version**: 21.0.1
+**Last Updated**: 2026-06-16
 
 ---
 
@@ -44,7 +44,6 @@ Use scopes to indicate the affected component (e.g., `feat(graph): ...`, `fix(mc
 | `lsp` | LSP server |
 | `graph` | Unified graph subsystem (within sqry-core) |
 | `lang-*` | Language plugins (e.g., `lang-rust`, `lang-python`) |
-| `nl` | Natural language query translation (sqry-nl) |
 | `vscode` | VS Code extension |
 | `release` | Release pipeline and packaging |
 | `uses` | Share/export feature |
@@ -62,7 +61,7 @@ sqry's changelog follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/
 
 ## [Unreleased]
 
-## [20.0.5] - 2026-05-31
+## [21.0.1] - 2026-05-31
 ### Fixed
 - Summary of bug fixes
 
@@ -101,5 +100,5 @@ Guidelines:
 
 | Version | Date | Changes |
 |---------|------|---------|
-| 20.0.5 | 2026-05-31 | Full rewrite; align with current release process |
+| 21.0.1 | 2026-05-31 | Full rewrite; align with current release process |
 | 4.5.11 | 2026-02-27 | Initial draft |

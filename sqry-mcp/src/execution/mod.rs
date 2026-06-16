@@ -19,8 +19,6 @@ pub(crate) mod utils;
 pub use graph_cache::{init_subgraph_cache, init_trace_path_cache};
 
 pub use hierarchical::execute_hierarchical_search;
-#[allow(unused_imports)]
-pub use tools::build_translator_config_for_path;
 pub use tools::{
     execute_call_hierarchy,
     execute_complexity_metrics,
@@ -57,8 +55,6 @@ pub use tools::{
     execute_relation_query,
     execute_semantic_diff,
     execute_semantic_search,
-    execute_sqry_ask,
-    execute_sqry_ask_with_translator,
     execute_sqry_query,
     execute_subgraph,
     execute_trace_path,
@@ -70,8 +66,8 @@ pub use tools::{
 // avoids dead re-exports flagged by `clippy -D warnings`.
 #[allow(unused_imports)]
 pub use types::{
-    CodeContext, DiffSummary, NlDisambiguationOption, NlTranslationData, NodeChange, NodeRefData,
-    PositionData, RangeData, RebuildIndexData, ToolExecution,
+    CodeContext, DiffSummary, NodeChange, NodeRefData, PositionData, RangeData, RebuildIndexData,
+    ToolExecution,
 };
 
 // Phase 8b Task 4: surface the per-tool `*_inner` re-exports at

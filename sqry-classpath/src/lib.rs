@@ -13,7 +13,7 @@
 //! 3. **Scan** - Parse `.class` bytecode from each JAR into `ClassStub` records
 //! 4. **Cache** - Persist parsed stubs per JAR (SHA-256 keyed) for incremental rebuilds
 //! 5. **Index** - Merge all stubs into a `ClasspathIndex` for fast FQN lookup
-//! 6. **Emit** - Create synthetic graph nodes and register in `ExportMap`
+//! 6. **Emit** - Create synthetic graph nodes for classes/methods/fields
 //!
 //! # Feature Gate
 //!

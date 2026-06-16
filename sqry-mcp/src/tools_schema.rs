@@ -1,25 +1,24 @@
 //! Daemon-hosted MCP tool surface.
 //!
-//! The sqryd daemon hosts a 16-tool MCP subset via the shim byte-pump
+//! The sqryd daemon hosts a 15-tool MCP subset via the shim byte-pump
 //! transport. Standalone `sqry-mcp` (no daemon) exposes the full
 //! 36-tool runtime MCP standalone surface via
 //! [`crate::server::SqryServer::get_filtered_tools`]. These two are
-//! intentionally NOT identical — 20 standalone-only tools are
+//! intentionally NOT identical — 21 standalone-only tools are
 //! unavailable when connecting through the daemon (per Codex iter-0 B3:
 //! "the daemon-hosted MCP surface is finally honest").
 //!
 //! Users wanting the full 36-tool inventory continue to invoke
 //! `sqry-mcp` without `--daemon`.
 
-/// Names of the 16 tools that the daemon MCP host exposes via
+/// Names of the 15 tools that the daemon MCP host exposes via
 /// `tools/list` and that [`crate::daemon_adapter::dispatch::dispatch_by_name`]
 /// can route. Alphabetical order for stable assertions.
 ///
 /// **Source of truth:** the Phase 8b `tool_dispatch/tools/*.rs`
-/// dispatcher in sqry-daemon plus the NL07 `sqry_ask` arm. Any
-/// addition/removal here must be mirrored in sqry-daemon's
-/// `ipc::methods::tool_dispatch::dispatch_tool` and in the daemon
-/// MCP host's `dispatch_sqry_ask` route.
+/// dispatcher in sqry-daemon. Any addition/removal here must be
+/// mirrored in sqry-daemon's
+/// `ipc::methods::tool_dispatch::dispatch_tool`.
 pub const DAEMON_SUPPORTED_TOOL_NAMES: &[&str] = &[
     "complexity_metrics",
     "dependency_impact",
@@ -34,12 +33,11 @@ pub const DAEMON_SUPPORTED_TOOL_NAMES: &[&str] = &[
     "semantic_diff",
     "semantic_search",
     "show_dependencies",
-    "sqry_ask",
     "subgraph",
     "trace_path",
 ];
 
-/// Return the rmcp Tool schema list filtered to only the 16
+/// Return the rmcp Tool schema list filtered to only the 15
 /// daemon-supported tools. The daemon MCP host
 /// (`sqry-daemon::mcp_host`, Phase 8c U8) calls this in its
 /// `ServerHandler::list_tools`.
@@ -48,8 +46,8 @@ pub const DAEMON_SUPPORTED_TOOL_NAMES: &[&str] = &[
 /// filters by [`DAEMON_SUPPORTED_TOOL_NAMES`]. The feature-flag filter
 /// still applies — daemon-host tools are additionally subject to
 /// [`crate::feature_flags::FeatureFlags::from_env`]. When a feature
-/// flag disables one of the 16 names, the returned vec will be
-/// shorter than 16.
+/// flag disables one of the 15 names, the returned vec will be
+/// shorter than 15.
 #[must_use]
 pub fn daemon_supported_tools() -> Vec<rmcp::model::Tool> {
     use crate::feature_flags::FeatureFlags;
@@ -67,17 +65,16 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
 
-    /// `DAEMON_SUPPORTED_TOOL_NAMES` must contain exactly 16 names and
+    /// `DAEMON_SUPPORTED_TOOL_NAMES` must contain exactly 15 names and
     /// they must be sorted / deduplicated. Assertion guards against
     /// accidental addition or duplication that would desync from
-    /// sqry-daemon's `dispatch_tool` match plus the NL07 `sqry_ask`
-    /// route.
+    /// sqry-daemon's `dispatch_tool` match.
     #[test]
-    fn daemon_supported_tool_names_is_exactly_16_sorted_unique() {
+    fn daemon_supported_tool_names_is_exactly_15_sorted_unique() {
         assert_eq!(
             DAEMON_SUPPORTED_TOOL_NAMES.len(),
-            16,
-            "DAEMON_SUPPORTED_TOOL_NAMES must contain exactly 16 tools"
+            15,
+            "DAEMON_SUPPORTED_TOOL_NAMES must contain exactly 15 tools"
         );
 
         // Sorted.
@@ -98,21 +95,21 @@ mod tests {
         );
     }
 
-    /// With default feature flags (no env flags set), all 16 names must
+    /// With default feature flags (no env flags set), all 15 names must
     /// appear in `daemon_supported_tools()`. If the test harness sets
-    /// `SQRY_MCP_FLAGS` env vars that disable one of the 16, this
+    /// `SQRY_MCP_FLAGS` env vars that disable one of the 15, this
     /// assertion may need narrowing — but the intent of the default
-    /// daemon surface is exactly 16.
+    /// daemon surface is exactly 15.
     #[test]
-    fn daemon_supported_tools_returns_exact_16_under_default_flags() {
+    fn daemon_supported_tools_returns_exact_15_under_default_flags() {
         let tools = daemon_supported_tools();
         let names: HashSet<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
         let expected: HashSet<&str> = DAEMON_SUPPORTED_TOOL_NAMES.iter().copied().collect();
         assert_eq!(
             names,
             expected,
-            "daemon_supported_tools must return exactly the 16 DAEMON_SUPPORTED_TOOL_NAMES \
-             (default feature flags). Got {} tools, expected 16.",
+            "daemon_supported_tools must return exactly the 15 DAEMON_SUPPORTED_TOOL_NAMES \
+             (default feature flags). Got {} tools, expected 15.",
             tools.len()
         );
     }
@@ -120,8 +117,8 @@ mod tests {
     /// C045 — exact-gap pin between the standalone and daemon tool
     /// surfaces. With C091 enabling `expand_cache_status` and T3
     /// Cluster G adding `context_propagation` at runtime, the
-    /// standalone inventory is **37 tools** and the daemon subset is
-    /// **16 tools** (per `DAEMON_SUPPORTED_TOOL_NAMES`), giving a
+    /// standalone inventory is **36 tools** and the daemon subset is
+    /// **15 tools** (per `DAEMON_SUPPORTED_TOOL_NAMES`), giving a
     /// strict gap of **21 standalone-only tools**. `context_propagation`
     /// is deliberately NOT added to the daemon subset in this iter —
     /// daemon dispatch wiring requires a lockstep update to

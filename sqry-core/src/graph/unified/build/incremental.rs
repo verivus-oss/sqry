@@ -52,7 +52,6 @@ use super::parallel_commit::{
 };
 use super::pass_go_method_set::{GoMethodSetStats, run_go_method_set_satisfaction_generic};
 use super::pass3_intra::PendingEdge;
-use super::pass4_cross::ExportMap;
 use super::pass5_cross_language::{Pass5Stats, link_cross_language_edges_generic};
 use super::phase4e_binding::BindingDerivationStats;
 use super::phase4e_incremental::derive_binding_plane_incremental_generic;
@@ -363,16 +362,17 @@ pub fn compute_reverse_dep_closure(changed_files: &[FileId], graph: &CodeGraph) 
 /// 2. Removes nodes/edges originating from every file in `closure`.
 /// 3. Re-parses closure files (Pass 1 AST → `StagingGraph`).
 /// 4. Re-runs Pass 2 enrichment and Pass 3 intra-file edges on closure files.
-/// 5. Rebuilds `ExportMap` entries for closure files.
-/// 6. Re-runs Pass 4 cross-file linking for closure files.
-/// 7. Re-runs Pass 5 cross-language linking if closure files carry
+/// 5. Runs Phase 4a/4b/4c/4c-prime/4d (global string dedup, node remap,
+///    auxiliary-index rebuild, cross-file node unification, bulk edge
+///    insertion) against the rebuild plane.
+/// 6. Re-runs Pass 5 cross-language linking if closure files carry
 ///    FFI/HTTP/gRPC/SQL markers.
-/// 8. Rebuilds analysis artefacts (CSR, SCC).
-/// 9. Returns the new graph.
+/// 7. Rebuilds analysis artefacts (CSR, SCC).
+/// 8. Returns the new graph.
 ///
 /// [spec]: ../../../../../../docs/superpowers/specs/2026-03-19-sqryd-daemon-design.md
 ///
-/// # Status — Phase 3e (all 13 sub-steps implemented; no fallback)
+/// # Status — Phase 3e (12 of the original 13 sub-steps implemented; no fallback)
 ///
 /// Task 4's implementation landed across Phase 3a (cancellation
 /// plumbing), Phase 3b (sub-steps 1–3: acquire `current_graph`, build a
@@ -380,11 +380,13 @@ pub fn compute_reverse_dep_closure(changed_files: &[FileId], graph: &CodeGraph) 
 /// file in the reverse-dep closure), Phase 3c (sub-steps 4–6: re-parse
 /// closure files + Pass 2 range assignment + Pass 3 parallel commit
 /// against `rebuild_graph` via the [`GraphMutationTarget`] abstraction),
-/// Phase 3d (sub-steps 7–9: `ExportMap` rebuild + Phase 4a/4b/4c/4c-prime/4d
-/// cross-file edge insertion + Pass 5 cross-language linking against
-/// `rebuild_graph`), and Phase 3e (sub-steps 10–13: per-pass cancellation
-/// polling + [`RebuildGraph::finalize`] + [`GraphMemorySize::heap_bytes`]
-/// diagnostic + `CodeGraph` return).
+/// Phase 3d (sub-steps 8–9: Phase 4a/4b/4c/4c-prime/4d cross-file edge
+/// insertion + Pass 5 cross-language linking against `rebuild_graph` —
+/// the former sub-step 7 rebuilt a per-closure `ExportMap` whose only
+/// consumer was a test-gated observation hook; both were removed with
+/// the rest of the `ExportMap` plumbing), and Phase 3e (sub-steps 10–13:
+/// per-pass cancellation polling + [`RebuildGraph::finalize`] +
+/// [`GraphMemorySize::heap_bytes`] diagnostic + `CodeGraph` return).
 ///
 /// Phase 3e is the terminal phase: after this commit, the function no
 /// longer delegates to [`super::entrypoint::build_unified_graph`] and no
@@ -469,12 +471,11 @@ pub fn compute_reverse_dep_closure(changed_files: &[FileId], graph: &CodeGraph) 
 ///
 /// ## Sub-steps 7–9 — Phase 3d cross-file + cross-language against `rebuild_graph`
 ///
-/// Sub-step 7 scans `rebuild_graph`'s committed arena for exportable
-/// [`NodeKind`]s and registers every node under its qualified name in
-/// a fresh [`ExportMap`]. This matches the symbol-table the full build
-/// implicitly constructs during `phase3_parallel_commit` + Phase 4c-prime
-/// unification; having it materialised here makes downstream
-/// cross-file resolution explicit in the rebuild plane.
+/// (Phase 3d originally rebuilt a cross-file symbol map at this point
+/// — sub-step 7 — but that intermediate map was never consumed: the
+/// full build's cross-file edge resolution flows entirely through
+/// Phase 4c-prime unification, so the rebuild now goes straight to
+/// sub-step 8.)
 ///
 /// Sub-step 8 runs the full-build Phase 4a/4b/4c/4c-prime/4d sequence
 /// against `rebuild_graph`: global string dedup
@@ -544,10 +545,11 @@ pub fn compute_reverse_dep_closure(changed_files: &[FileId], graph: &CodeGraph) 
 /// - post sub-step 3 (before sub-step 4 begins);
 /// - at every iteration of the sub-step 4 re-parse loop (Phase 3c);
 /// - post sub-step 4 (between re-parse and Pass 2 range assignment);
-/// - post sub-step 6 (before sub-step 7 begins, Phase 3d);
-/// - pre sub-step 7 (before `ExportMap` rebuild, Phase 3d);
-/// - between sub-step 7 and sub-step 8 (after `ExportMap`, Phase 3d);
-/// - between sub-step 8 and sub-step 9 (after Pass 4d, Phase 3d);
+/// - post sub-step 6 (before sub-step 8 Phase 4d begins, Phase 3d —
+///   formerly bracketed the removed sub-step 7 ExportMap rebuild and
+///   retained as a defensive poll boundary);
+/// - between sub-step 8 (Phase 4d) and sub-step 9 (Pass 5), Phase 3d —
+///   formerly the post-ExportMap boundary, retained as defensive;
 /// - post sub-step 9 (after Pass 5, Phase 3d);
 /// - between Pass 5 and Phase 4e binding derivation (Phase 3e);
 /// - between Phase 4e and `finalize()` (Phase 3e sub-step 10).
@@ -695,7 +697,7 @@ pub fn incremental_rebuild<S: std::hash::BuildHasher>(
     // Sub-step 6 observation hook — gated on `test` / `rebuild-internals`.
     // Fires after Phase 3c commits re-parsed closure files into
     // `rebuild_graph`, so tests can snapshot the rebuild plane's node
-    // count *before* the Phase 3d sub-steps 7-9 operate on it.
+    // count *before* the Phase 3d sub-steps 8-9 operate on it.
     #[cfg(any(test, feature = "rebuild-internals"))]
     testing::fire_phase3c_post_substep6_hook(&rebuild_graph, &post_commit);
     // Production builds need to acknowledge the Phase 3c diagnostics
@@ -708,17 +710,11 @@ pub fn incremental_rebuild<S: std::hash::BuildHasher>(
     }
 
     // ------------------------------------------------------------------
-    // Phase 3d real body — sub-steps 7, 8, 9 against `rebuild_graph`.
+    // Phase 3d real body — sub-steps 8, 9 against `rebuild_graph`.
     //
     // Phase 3c landed sub-steps 4-6 (re-parse closure + new files +
     // Pass 2 range assignment + Pass 3 parallel commit). Phase 3d
     // extends the rebuild-plane pipeline with:
-    //   - Sub-step 7: ExportMap rebuild — scan the committed arena of
-    //     `rebuild_graph` and register every exportable node under its
-    //     qualified name so downstream cross-file resolution has a
-    //     consistent symbol table. Mirrors the effect of the full-build
-    //     pipeline's implicit ExportMap (constructed during
-    //     `phase3_parallel_commit` + Phase 4c-prime unification).
     //   - Sub-step 8: Pass 4a/4b/4c/4c-prime/4d — string dedup, global
     //     remap, index rebuild, cross-file node unification, and bulk
     //     insert of the per-file `PendingEdge` vectors Phase 3c
@@ -736,28 +732,23 @@ pub fn incremental_rebuild<S: std::hash::BuildHasher>(
     // Sub-steps 10-13 follow inline below (finalize + heap_bytes +
     // return). There is no fallback — `rebuild_graph` is consumed by
     // `finalize()` and the assembled `CodeGraph` is returned directly.
+    //
+    // Note: the old sub-step 7 (which rebuilt a cross-file `ExportMap`
+    // over the committed rebuild plane) was removed when the dead
+    // `pass4_cross` plumbing was dropped — cross-file resolution flows
+    // entirely through Phase 4c-prime unification today, and the only
+    // reader of the rebuilt map was a test-only observation hook. The
+    // pair of `cancellation.check()?` calls below were the boundaries
+    // that bracketed sub-step 7; they are retained as defensive poll
+    // boundaries between Phase 3c's commit and Phase 4's bulk insert.
     // ------------------------------------------------------------------
 
-    // Sub-step 7 — rebuild the cross-file ExportMap from the committed
-    // `rebuild_graph` state. Runs before Phase 4 remaps any strings so
-    // the ExportMap captures qualified names as they were written by
-    // Phase 3 (the Phase 4a dedup remap is a canonicalisation; the
-    // qualified-name strings themselves survive unchanged — dedup
-    // replaces duplicate StringIds with a canonical ID for the same
-    // underlying str).
     cancellation.check()?;
-    let export_map = phase3d_rebuild_export_map(&rebuild_graph);
 
-    // Phase 3d post-ExportMap observation hook — gated on `test` /
-    // `rebuild-internals`. Fires after sub-step 7 and before the next
-    // cancellation boundary.
-    #[cfg(any(test, feature = "rebuild-internals"))]
-    testing::fire_phase3d_post_export_map_hook(&rebuild_graph, &export_map);
-
-    // Cancellation boundary between sub-step 7 (ExportMap) and sub-step
-    // 8 (Pass 4d bulk edge insert). If a dispatcher cancels here,
-    // sub-steps 8 and 9 never run and the rebuild plane is discarded
-    // before touching the edge store.
+    // Cancellation boundary preceding sub-step 8 (Pass 4d bulk edge
+    // insert). If a dispatcher cancels here, sub-steps 8 and 9 never
+    // run and the rebuild plane is discarded before touching the edge
+    // store.
     cancellation.check()?;
 
     // Sub-step 8 — run Phase 4a dedup + Phase 4b remap + Phase 4c
@@ -765,11 +756,6 @@ pub fn incremental_rebuild<S: std::hash::BuildHasher>(
     // Phase 4d bulk edge insert against `rebuild_graph`, using the
     // per-file edges Phase 3c collected. Preserves the full-build
     // sequence (entrypoint.rs lines 543..=587).
-    // The `export_map` value is kept in scope here so downstream
-    // Phase 3d observers + future daemon surfaces can consume it; the
-    // Phase 3d Phase 4d helper itself does not take it by-parameter
-    // (see its docstring).
-    let _ = &export_map;
     let pass4d =
         phase3d_insert_cross_file_edges(&mut rebuild_graph, &mut per_file_edges, per_file_metadata);
 
@@ -836,7 +822,7 @@ pub fn incremental_rebuild<S: std::hash::BuildHasher>(
     );
 
     // Cancellation boundary between the Go T1 pass and Pass 5. A
-    // dispatcher cancelling here still pays for sub-steps 7-8 +
+    // dispatcher cancelling here still pays for sub-step 8 +
     // Phase 4e + Go T1 but skips Pass 5 and the finalize cost.
     cancellation.check()?;
 
@@ -1493,106 +1479,6 @@ pub struct Pass4dDiagnostics {
     pub staged_metadata_merged: bool,
 }
 
-/// Phase 3d sub-step 7 — rebuild the cross-file [`ExportMap`] from the
-/// committed `rebuild_graph` state.
-///
-/// Walks the rebuild plane's [`NodeArena`] slot-by-slot and registers
-/// every node whose kind is in [`EXPORTABLE_KINDS`] (defined below)
-/// AND whose `qualified_name` resolves to a non-empty string. The
-/// resulting map is structurally identical to what the full-build
-/// pipeline implicitly produces during
-/// `phase3_parallel_commit` + Phase 4c-prime unification — the
-/// qualified names on the `NodeEntry` records are authoritative.
-///
-/// Iteration order is the arena's slot order (by `NodeId::index`);
-/// `ExportMap::register` appends to a `Vec<(FileId, NodeId)>` per
-/// qualified name, so repeated registrations for the same name record
-/// every definition in slot order. That matches the full-build
-/// behaviour where repeated `build_export_map` calls over the same
-/// symbol-to-node map also preserve insertion order.
-///
-/// Tombstoned / stale-generation slots are skipped by the arena's
-/// `iter()` (it only surfaces live entries), so the `ExportMap` is free
-/// of closure-removal residue even when Phase 3b sub-step 3 drained
-/// several closure files.
-///
-/// # Complexity
-///
-/// `O(N)` where `N` is the number of live node slots. The constant
-/// factor is small: one hashmap insert per exportable node, plus one
-/// string-interner resolve per qualified name.
-fn phase3d_rebuild_export_map(rebuild_graph: &RebuildGraph) -> ExportMap {
-    let mut export_map = ExportMap::new();
-    let strings = GraphMutationTarget::strings(rebuild_graph);
-
-    for (node_id, entry) in GraphMutationTarget::nodes(rebuild_graph).iter() {
-        if !EXPORTABLE_KINDS.contains(&entry.kind) {
-            continue;
-        }
-        let Some(qn_id) = entry.qualified_name else {
-            continue;
-        };
-        let Some(qn_str) = strings.resolve(qn_id) else {
-            // Interner returned None — the qualified-name StringId
-            // points at a vacated slot (should not happen post-commit
-            // but is defensive). Skip rather than panic: a partially-
-            // missing ExportMap entry is preferable to a rebuild
-            // abort, and the full-build fallback that runs after
-            // Phase 3d will reconstruct the symbol table from scratch
-            // if Phase 3e ever stops relying on it.
-            continue;
-        };
-        if qn_str.is_empty() {
-            continue;
-        }
-        export_map.register(qn_str.to_string(), entry.file, node_id);
-    }
-
-    export_map
-}
-
-/// Node kinds that participate in cross-file symbol resolution.
-///
-/// Mirrors the union of [`super::helper::CALL_COMPATIBLE_KINDS`]
-/// (Function / Method / Macro / Constant / `LambdaTarget`) plus type-
-/// and container-kinds that plugins routinely cross-reference via
-/// `Imports` / `References` / `TypeOf` edges. Keeping the list broad
-/// makes Phase 3d's `ExportMap` a superset of whatever Phase 4c-prime
-/// would unify, which is the safe direction — it would be worse to
-/// miss a genuine cross-file import than to emit an extra benign
-/// `ExportMap` entry.
-///
-/// The list is an intentional subset of [`NodeKind`]; adding a new
-/// `NodeKind` variant without extending this list is a conscious
-/// decision that the new kind is *not* cross-file-referenceable
-/// (e.g., `Other`, `CallSite`, intra-file-only nodes). Extending the
-/// list is free — the `ExportMap` just registers more entries.
-const EXPORTABLE_KINDS: &[NodeKind] = &[
-    NodeKind::Function,
-    NodeKind::Method,
-    NodeKind::Macro,
-    NodeKind::Constant,
-    NodeKind::LambdaTarget,
-    NodeKind::Class,
-    NodeKind::Interface,
-    NodeKind::Trait,
-    NodeKind::Struct,
-    NodeKind::Enum,
-    NodeKind::EnumVariant,
-    NodeKind::EnumConstant,
-    NodeKind::Type,
-    NodeKind::TypeParameter,
-    NodeKind::Module,
-    NodeKind::JavaModule,
-    NodeKind::Variable,
-    NodeKind::Property,
-    NodeKind::Component,
-    NodeKind::Service,
-    NodeKind::Resource,
-    NodeKind::Endpoint,
-    NodeKind::Annotation,
-];
-
 /// Phase 3d sub-step 8 — run Phase 4a/4b/4c/4c-prime/4d against
 /// `rebuild_graph`, consuming the per-file [`PendingEdge`] vectors
 /// Phase 3c collected.
@@ -1628,22 +1514,6 @@ const EXPORTABLE_KINDS: &[NodeKind] = &[
 ///
 /// Returns [`Pass4dDiagnostics`] with counters for the observation
 /// hook and the Phase 3d integration tests.
-///
-/// # `export_map` usage
-///
-/// The `ExportMap` built by sub-step 7 is **not** consumed by Phase 4d
-/// itself — the full build's cross-file edge resolution happens
-/// implicitly through Phase 4c-prime unification (which rewrites
-/// pending-edge targets across files sharing a qualified name).
-/// Phase 3d's `ExportMap` is a superset of that unification's effect
-/// and gives the rebuild plane an explicit cross-file symbol table
-/// that the Phase 3d observation hook and integration tests consume;
-/// Phase 3e and Task 6 may later feed the `ExportMap` into the daemon's
-/// workspace manifest or a future cross-file resolver without
-/// re-scanning the arena. Because this helper does not consume it,
-/// the `ExportMap` is held by the caller (`incremental_rebuild`) and is
-/// passed only to the post-ExportMap observation hook; this function
-/// takes no `ExportMap` parameter.
 fn phase3d_insert_cross_file_edges(
     rebuild_graph: &mut RebuildGraph,
     per_file_edges: &mut [Vec<PendingEdge>],
@@ -1741,7 +1611,7 @@ fn ordered_closure_file_ids<S: std::hash::BuildHasher>(
 /// - Production builds (neither cfg) compile the entire module out.
 #[cfg(any(test, feature = "rebuild-internals"))]
 pub mod testing {
-    use super::{CodeGraph, ExportMap, FileId, HashSet, Pass5Stats, RebuildGraph};
+    use super::{CodeGraph, FileId, HashSet, Pass5Stats, RebuildGraph};
     use std::cell::RefCell;
 
     /// Callback invoked at the end of sub-step 3 with an immutable
@@ -2189,90 +2059,6 @@ pub mod testing {
     // have to re-add the import. The type is used indirectly via
     // `RebuildGraph` today; this stub makes the cohabitation explicit.
     const _: fn(&CodeGraph) = |_| {};
-
-    // ------------------------------------------------------------------
-    // Phase 3d post-ExportMap hook (sub-step 7 boundary)
-    // ------------------------------------------------------------------
-    //
-    // Fires once between Phase 3d sub-step 7 (ExportMap rebuild) and
-    // sub-step 8 (Phase 4a/4b/4c/4c-prime/4d cross-file edge insert).
-    //
-    // Tests install this hook with a body that:
-    //   - inspects `ExportMap::len` / `lookup` to assert the rebuild
-    //     plane's symbol table is populated;
-    //   - optionally flips the cancellation token to gate the rest of
-    //     sub-step 8 / 9 and assert the post-ExportMap cancellation
-    //     boundary fires before edge insertion starts.
-
-    /// Callback signature for the Phase 3d post-ExportMap hook.
-    /// Arguments are an immutable reference to the mid-rebuild
-    /// `RebuildGraph` (so tests can snapshot the committed arena) and
-    /// an immutable reference to the freshly-built `ExportMap`.
-    type Phase3dPostExportMapHook = Box<dyn FnMut(&RebuildGraph, &ExportMap)>;
-
-    thread_local! {
-        static PHASE3D_POST_EXPORT_MAP_HOOK: RefCell<Option<Phase3dPostExportMapHook>>
-            = const { RefCell::new(None) };
-    }
-
-    /// Install a callback that runs after Phase 3d sub-step 7
-    /// (`ExportMap` rebuild) and before the post-ExportMap cancellation
-    /// boundary. Replaces any previously-installed hook on the same
-    /// thread. Returns the prior hook for manual restore; prefer
-    /// [`Phase3dPostExportMapHookGuard`] for RAII cleanup.
-    pub fn set_phase3d_post_export_map_hook<F>(hook: F) -> Option<Phase3dPostExportMapHook>
-    where
-        F: FnMut(&RebuildGraph, &ExportMap) + 'static,
-    {
-        PHASE3D_POST_EXPORT_MAP_HOOK.with(|cell| cell.replace(Some(Box::new(hook))))
-    }
-
-    /// Remove any currently-installed Phase 3d post-ExportMap hook on
-    /// the current thread. Idempotent.
-    pub fn clear_phase3d_post_export_map_hook() {
-        PHASE3D_POST_EXPORT_MAP_HOOK.with(|cell| {
-            let _ = cell.replace(None);
-        });
-    }
-
-    /// Fire the installed Phase 3d post-ExportMap hook (if any).
-    /// Called from [`super::incremental_rebuild`] right after
-    /// [`super::phase3d_rebuild_export_map`] returns.
-    pub(super) fn fire_phase3d_post_export_map_hook(
-        rebuild_graph: &RebuildGraph,
-        export_map: &ExportMap,
-    ) {
-        PHASE3D_POST_EXPORT_MAP_HOOK.with(|cell| {
-            if let Some(hook) = cell.borrow_mut().as_mut() {
-                hook(rebuild_graph, export_map);
-            }
-        });
-    }
-
-    /// `RAII` guard for the Phase 3d post-ExportMap hook. Installs on
-    /// construction, clears on drop.
-    pub struct Phase3dPostExportMapHookGuard {
-        _sealed: (),
-    }
-
-    impl Phase3dPostExportMapHookGuard {
-        /// Install `hook` as the thread-local Phase 3d post-ExportMap
-        /// callback (fires once after sub-step 7 completes), returning
-        /// a guard that clears it on drop.
-        pub fn install<F>(hook: F) -> Self
-        where
-            F: FnMut(&RebuildGraph, &ExportMap) + 'static,
-        {
-            let _previous = set_phase3d_post_export_map_hook(hook);
-            Self { _sealed: () }
-        }
-    }
-
-    impl Drop for Phase3dPostExportMapHookGuard {
-        fn drop(&mut self) {
-            clear_phase3d_post_export_map_hook();
-        }
-    }
 
     // ------------------------------------------------------------------
     // Phase 3d post-Pass-4d hook (sub-step 8 boundary)

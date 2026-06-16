@@ -11,15 +11,12 @@ db-urls = ["https://github.com/rustsec/advisory-db"]
 unmaintained = "workspace" # Keep failures scoped to direct dependencies until async-std is removed (RUSTSEC-2025-0052)
 yanked = "warn"
 # Ignore list = superset of `.cargo/audit.toml`'s ignore list.
-# - The 3 IDs in .cargo/audit.toml (2023-0071 rsa, 2024-0436 paste,
-#   2025-0119 number_prefix) appear here too with a "see audit.toml"
-#   pointer; audit.toml is the canonical record (rationale + expiry).
-# 2026-05-07 reconciliation: added 2023-0071, 2024-0436, 2025-0119 to
-# match audit.toml. No prior entry's rationale was rewritten.
+# - 2023-0071 (rsa) is the canonical exception; audit.toml holds rationale + expiry.
+# 2026-06-15 (sqry-nl removal): dropped 2024-0436 (paste) and 2025-0119
+# (number_prefix). The ONNX/embeddings/DataFusion stack that pulled them was
+# removed with sqry-nl, so neither advisory matches any crate in the tree.
 ignore = [
   "RUSTSEC-2023-0071", # rsa: Marvin Attack (not exploitable in sqry context — see audit.toml)
-  "RUSTSEC-2024-0436", # paste: unmaintained proc macro (zero runtime risk — see audit.toml)
-  "RUSTSEC-2025-0119", # number_prefix: unmaintained low-risk formatting lib (see audit.toml)
 ]
 
 [licenses]

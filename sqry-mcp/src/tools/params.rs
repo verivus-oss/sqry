@@ -1131,52 +1131,6 @@ pub struct SemanticDiffParams {
 }
 
 // ============================================================================
-// Natural Language Tool (P2-18)
-// ============================================================================
-
-/// `sqry_ask` params.
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
-#[schemars(example = "json!({
-    \"query\": \"who calls the authenticate function?\",
-    \"path\": \".\",
-    \"execute\": true
-})")]
-pub struct SqryAskParams {
-    /// Natural language query
-    pub query: String,
-
-    #[serde(default = "default_path")]
-    pub path: String,
-
-    /// Whether to execute the translated command and return results
-    #[serde(default)]
-    pub execute: bool,
-
-    /// Optional override for the intent-classifier model directory.
-    ///
-    /// When set, takes precedence over `SQRY_NL_MODEL_DIR`, the XDG cache
-    /// (`<cache>/sqry/models`), and the next-to-binary fallback. The
-    /// directory must contain a `manifest.json` to count as a hit.
-    #[serde(default)]
-    pub model_dir: Option<String>,
-
-    /// Permit loading a classifier whose checksums cannot be verified.
-    ///
-    /// Defaults to `false`. Operator escape hatch for development workflows.
-    #[serde(default)]
-    pub allow_unverified_model: bool,
-
-    /// Permit fetching the classifier model from the network when not
-    /// present locally. Defaults to `false`.
-    #[serde(default)]
-    pub allow_model_download: bool,
-}
-
-// NOTE: Validation is performed in validation.rs via validate_sqry_ask_args().
-// The SqryAskParams struct is kept for schema generation via schemars and
-// potential future rmcp SDK migration.
-
-// ============================================================================
 // Structural Query Tool (DB13 — planner)
 // ============================================================================
 
@@ -2280,7 +2234,6 @@ mod tests {
         let _ = schema_for!(SubgraphParams);
         let _ = schema_for!(DependencyImpactParams);
         let _ = schema_for!(SemanticDiffParams);
-        let _ = schema_for!(SqryAskParams);
         // New graph-based tool params
         let _ = schema_for!(FindCyclesParams);
         let _ = schema_for!(FindDuplicatesParams);

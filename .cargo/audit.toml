@@ -29,70 +29,14 @@
 # Expires: 2026-06-01 (6 months - re-evaluate after Lance ecosystem updates)
 
 # ============================================================================
-# RUSTSEC-2025-0119: number_prefix crate is unmaintained
-#
-# Crate: number_prefix 0.4.0
-# Severity: Informational (unmaintained)
-# Date: 2025-11-17
-#
-# RATIONALE FOR ACCEPTANCE:
-# number_prefix is a small formatting library (converts numbers to human-readable
-# strings like "1.5 MB"). It is pulled in via: indicatif → hf-hub → sqry-core
-# (embeddings feature only).
-#
-# RISK ASSESSMENT: LOW
-# 1. Compile-time/formatting only - no runtime security surface
-# 2. Simple, stable codebase (~200 LOC) - unlikely to have latent bugs
-# 3. Used only in optional embeddings feature (not default build)
-# 4. Transitive dependency (3 levels deep) - not directly controlled
-#
-# MITIGATION:
-# - Monitor for indicatif updates (may switch to maintained alternative)
-# - Consider replacing hf-hub if embeddings feature matures
-# - Quarterly review of unmaintained dependencies
-#
-# Documented in: RR12_DEPENDENCY_HYGIENE_ANALYSIS.md
-# Accepted by: Claude (RR-12 Task #1 Cleanup, 2025-11-23)
-# Expires: 2026-06-01 (re-evaluate with embeddings feature review)
-
-# ============================================================================
-# RUSTSEC-2024-0436: paste - no longer maintained
-#
-# Crate: paste 1.0.15
-# Severity: Informational (unmaintained)
-# Date: 2024-10-07
-#
-# RATIONALE FOR ACCEPTANCE:
-# paste is a procedural macro for token concatenation (e.g., paste! { [<foo _bar>] }).
-# It is heavily used throughout the DataFusion/Lance/Candle ecosystems:
-#   - datafusion-* (7 crates)
-#   - lance-bitpacking
-#   - gemm-* (matrix math, 12 crates)
-#   - tokenizers (embeddings feature)
-#
-# RISK ASSESSMENT: VERY LOW
-# 1. **Compile-time proc macro only** - no runtime code, zero security surface
-# 2. **Mature, stable codebase** - feature-complete, no known bugs
-# 3. **Core ecosystem dependency** - used by Apache DataFusion, Lance, Candle
-# 4. **No viable alternative** - replacing would require forking entire ecosystems
-#
-# The paste crate is unmaintained but stable. Proc macros compile to nothing in
-# the final binary (code generation only), so there's no runtime attack surface.
-# The upstream ecosystems (DataFusion, Lance) will likely maintain a fork if
-# critical issues arise.
-#
-# MITIGATION:
-# - Monitor DataFusion/Lance releases for paste replacement
-# - Accept risk as industry-standard practice (many projects use unmaintained paste)
-# - No action required unless critical bug discovered (unlikely for mature proc macro)
-#
-# Documented in: RR12_DEPENDENCY_HYGIENE_ANALYSIS.md
-# Accepted by: Claude (RR-12 Task #1 Cleanup, 2025-11-23)
-# Expires: 2026-06-01 (re-evaluate with DataFusion/Lance ecosystem updates)
+# 2026-06-15 (sqry-nl removal): the number_prefix (RUSTSEC-2025-0119) and paste
+# (RUSTSEC-2024-0436) exceptions were dropped. Both crates reached the tree only
+# through the ONNX / embeddings / DataFusion stack (hf-hub/indicatif, tokenizers,
+# datafusion/lance/gemm), which was removed with the sqry-nl crate. `cargo tree
+# -i paste` / `-i number_prefix` (default and --all-features) now report neither
+# crate, so the advisories no longer match anything in the dependency graph.
 
 [advisories]
 ignore = [
     "RUSTSEC-2023-0071",  # rsa: Marvin Attack (not exploitable in sqry context)
-    "RUSTSEC-2025-0119",  # number_prefix: unmaintained (low-risk formatting lib)
-    "RUSTSEC-2024-0436",  # paste: unmaintained (compile-time proc macro, zero runtime risk)
 ]

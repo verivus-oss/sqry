@@ -73,3 +73,36 @@ async fn server_reports_phase2_capabilities_new() -> Result<()> {
     }
     Ok(())
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn server_does_not_route_removed_sqry_ask_request() -> Result<()> {
+    // The custom `sqry/ask` natural-language request was removed
+    // completely. tower-lsp answers an unregistered method with a
+    // JSON-RPC MethodNotFound error rather than a result, so the route
+    // must no longer resolve to a successful response.
+    let root = common::fixture_path("sqry-lsp/tests/fixtures/mini-workspace");
+    let mut server = common::TestServer::new(&root);
+
+    let initialize = Request::build("initialize")
+        .params(json!(InitializeParams::default()))
+        .id(1)
+        .finish();
+    let _ = server
+        .send_request(initialize)
+        .await?
+        .expect("initialize response");
+
+    let ask = Request::build("sqry/ask")
+        .params(json!({ "query": "who calls authenticate" }))
+        .id(2)
+        .finish();
+    if let Some(response) = server.send_request(ask).await? {
+        let (_, body) = response.into_parts();
+        assert!(
+            body.is_err(),
+            "removed sqry/ask request must not return a result; expected a \
+             JSON-RPC error, got {body:?}"
+        );
+    }
+    Ok(())
+}

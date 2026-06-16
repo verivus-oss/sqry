@@ -216,26 +216,11 @@ fn handle_cli_error(cli_error: &error::CliError, json_output: bool) -> i32 {
         return *code;
     }
 
-    // NL08: ONNX Runtime missing gets a dedicated multi-line stderr
-    // surface so the operator sees the platform-specific install hint
-    // on its own line. Exit code 65 (`EX_DATAERR`) is set via
-    // `cli_error.exit_code()`.
-    if let error::CliError::OnnxRuntimeMissing { hint } = cli_error {
-        let mut streams = OutputStreams::new();
-        if json_output {
-            write_json_error(&mut streams, "sqry::onnx_runtime_missing", hint);
-        } else {
-            let _ = streams.write_diagnostic("error: ONNX Runtime not found\n");
-            let _ = streams.write_diagnostic(&format!("hint: {hint}\n"));
-        }
-        return cli_error.exit_code();
-    }
-
     let mut streams = OutputStreams::new();
     if json_output {
         let code = match cli_error {
             error::CliError::RuntimeError(_) => "sqry::runtime",
-            error::CliError::PagerExit(_) | error::CliError::OnnxRuntimeMissing { .. } => {
+            error::CliError::PagerExit(_) => {
                 unreachable!() // handled above
             }
         };
@@ -730,32 +715,6 @@ fn run() -> Result<()> {
         }) => {
             commands::run_troubleshoot(&cli, output.as_deref(), *dry_run, *include_trace, window)
                 .context("Troubleshoot command failed")?;
-        }
-
-        // Natural language query command
-        Some(Command::Ask {
-            query,
-            path,
-            auto_execute,
-            dry_run,
-            threshold,
-            model_dir,
-            allow_unverified_model,
-            allow_model_download,
-        }) => {
-            let search_path = path.as_deref().unwrap_or(cli.search_path());
-            commands::run_ask(
-                &cli,
-                query,
-                search_path,
-                *auto_execute,
-                *dry_run,
-                *threshold,
-                model_dir.as_deref(),
-                *allow_unverified_model,
-                *allow_model_download,
-            )
-            .context("Ask command failed")?;
         }
 
         // Duplicate code detection

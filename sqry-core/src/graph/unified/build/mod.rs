@@ -5,7 +5,9 @@
 //! - **Pass 1**: Extract nodes from AST (`GraphBuilder` emits `NodeEntry` + DEFINES edges)
 //! - **Pass 2**: Enrich node metadata (visibility, async, docs) during graph build
 //! - **Pass 3**: Create intra-file edges (CALLS, REFERENCES within file)
-//! - **Pass 4**: Cross-file linking (IMPORTS, cross-file CALLS via `ExportMap`)
+//! - **Pass 4**: Cross-file linking — Phase 4a (string dedup), 4b (global remap),
+//!   4c (rebuild aux indices), 4c-prime (cross-file node unification), 4d
+//!   (bulk pending-edge insert), 4e (binding-plane derivation)
 //! - **Pass 5**: Cross-language linking (FFI declarations → C/C++ functions, HTTP requests → endpoints)
 //!
 //! # Architecture
@@ -36,8 +38,11 @@
 //!            ↓
 //!     ┌──────────────────────────────────────┐
 //!     │  Pass 4: Cross-file Linking           │
-//!     │  - IMPORTS edges                     │
-//!     │  - Cross-file CALLS via ExportMap    │
+//!     │  - Phase 4a/4b: string dedup + remap │
+//!     │  - Phase 4c/4c-prime: index rebuild  │
+//!     │    + cross-file node unification     │
+//!     │  - Phase 4d: bulk pending-edge insert│
+//!     │  - Phase 4e: binding-plane derivation│
 //!     └──────────────────────────────────────┘
 //!            ↓
 //!     ┌──────────────────────────────────────┐
@@ -71,7 +76,6 @@ pub mod identity;
 pub mod incremental;
 pub mod parallel_commit;
 pub mod pass3_intra;
-pub mod pass4_cross;
 pub mod pass5_cross_language;
 pub mod pass5b_c_indirect;
 pub mod pass_go_method_set;
@@ -147,7 +151,6 @@ pub use parallel_commit::{
 pub use pass3_intra::{
     IntraFileReference, Pass3Result, Pass3Stats, PendingEdge, UnresolvedRef, pass3_intra_edges,
 };
-pub use pass4_cross::{ExportMap, Pass4Stats, pass4_cross_file};
 pub use pass5_cross_language::{Pass5Stats, link_cross_language_edges};
 pub use progress::GraphBuildProgressTracker;
 pub use reindex::{ReindexStats, allocate_new_segment, reindex_files};

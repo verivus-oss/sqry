@@ -4,8 +4,8 @@
 //! via rmcp `serve_client`. The 8 tests cover:
 //!
 //! 1. `mcp_host_serves_initialize` — rmcp initialize round-trip.
-//! 2. `mcp_host_tools_list_returns_16_subset` — tools/list returns 16 names
-//!    (15 query tools + sqry_ask added by NL07).
+//! 2. `mcp_host_tools_list_returns_15_subset` — tools/list returns 15 names
+//!    (the natural-language sqry_ask tool was removed).
 //! 3. `mcp_host_tools_call_semantic_search_fresh_verdict` — fresh workspace,
 //!    success response.
 //! 4. `mcp_host_raii_deregisters_on_client_disconnect` — ShimRegistry
@@ -157,7 +157,7 @@ async fn mcp_host_serves_initialize() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn mcp_host_tools_list_returns_16_subset() {
+async fn mcp_host_tools_list_returns_15_subset() {
     let server = TestServer::new().await;
     let (rh, wh) = connect_mcp_shim(&server).await;
     let running = rmcp::serve_client((), (rh, wh))
@@ -179,9 +179,9 @@ async fn mcp_host_tools_list_returns_16_subset() {
     );
     assert_eq!(
         list_result.tools.len(),
-        16,
-        "tools/list count must be 16 under default feature flags \
-         (15 query tools + sqry_ask added by NL07)"
+        15,
+        "tools/list count must be 15 under default feature flags \
+         (the natural-language sqry_ask tool was removed)"
     );
 
     drop(running);

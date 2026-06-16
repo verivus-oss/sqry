@@ -5,10 +5,37 @@ All notable changes to sqry will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+> Note: older entries below mention the natural-language surface (`sqry ask`,
+> the `sqry_ask` MCP tool, the `sqry-nl` crate, the ONNX classifier and
+> embedding models, MiniLM/DistilBERT). That surface was removed from sqry; see
+> `docs/reviews/sqry-nl-removal/2026-06-14/`. Those entries are retained as the
+> historical release record and do not describe current behavior.
+
 ## [Unreleased]
+
+## [21.0.0] - 2026-06-16
+
+### Removed
+
+- **feat! [breaking]**: Removed the natural-language surface in full: the CLI
+  `sqry ask` command, the MCP `sqry_ask` tool (standalone and daemon-hosted),
+  the LSP `sqry/ask` custom request, the `sqry-nl` crate, and the ONNX runtime,
+  intent-classifier, and embedding-model stack (`ort`, `ort-sys`, `tokenizers`).
+  No deprecation period and no compatibility stub. Standalone MCP now exposes 36
+  tools (was 37); the daemon-hosted subset exposes 15 (was 16). Migration:
+  replace `sqry ask "..."` with explicit commands (`sqry query`, `sqry graph
+  direct-callers`, `sqry graph trace-path`) and the MCP `sqry_query`,
+  `semantic_search`, and `relation_query` tools. See
+  `docs/TROUBLESHOOTING.md#removed-features`.
 
 ### Fixed
 
+- **fix(daemon)**: Daemon-hosted `trace_path` and `subgraph` no longer panic and
+  crash `sqryd`. The daemon links the `sqry-mcp` lib target but never initialized
+  the process-global payload caches those tools read; the caches are now
+  initialized inside `IpcServer::bind`, the single chokepoint every serving path
+  goes through, so daemon-hosted tool dispatch can never run against uninitialized
+  caches.
 - **perf(c-icall-precision)**: Pass 5b C indirect-call resolution now plans
   rewrites in a read phase and applies them in a separate write phase, avoiding
   the prior `O(callsites x edge-delta)` scan pattern during large C/C++

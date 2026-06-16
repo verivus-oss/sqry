@@ -1,6 +1,6 @@
 # sqry MCP User Guide
 
-**Version**: 20.0.5
+**Version**: 21.0.1
 
 This guide is the component-level MCP reference. For the public workflow overview, see [docs/user-guide/mcp.md](../docs/user-guide/mcp.md).
 
@@ -28,7 +28,7 @@ sqry-mcp --list-tools
 
 MCP clients can call `tools/list`. sqry MCP resources expose `sqry://meta/manifest`, `sqry://docs/tool-guide`, and `sqry://docs/capability-map`.
 
-Standalone `sqry-mcp` currently exposes 37 tools. Daemon-hosted MCP exposes a 16-tool subset.
+Standalone `sqry-mcp` currently exposes 36 tools. Daemon-hosted MCP exposes a 15-tool subset.
 
 ## Common Tools
 
@@ -41,7 +41,7 @@ Representative standalone tools include:
 - `find_cycles`, `find_duplicates`, `find_unused`, `complexity_metrics`
 - `export_graph`, `cross_language_edges`, `context_propagation`
 - `workspace_status`, `get_index_status`, `get_graph_stats`
-- `sqry_ask`, `sqry_query`
+- `sqry_query`
 
 The exact catalog is the live discovery output.
 
@@ -85,20 +85,6 @@ Legacy clients that previously read path-shaped aggregate fields should migrate 
 - `strict`: stronger path privacy with more opaque output.
 
 Preset behavior affects display paths and cleartext carriers, not the rule for tool input paths.
-
-## Natural Language
-
-`sqry_ask` translates a request into a validated sqry command.
-
-```json
-{
-  "query": "who calls authenticate",
-  "path": ".",
-  "execute": false
-}
-```
-
-Set `execute` deliberately. Model downloads and unverified model loading are opt-in.
 
 ## Daemon Mode Notes
 

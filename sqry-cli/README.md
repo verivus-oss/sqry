@@ -1,9 +1,11 @@
 # sqry CLI
 
-**Version**: 20.0.5
+**Version**: 21.0.1
 **Rust**: 1.94+ (Edition 2024; repository toolchain 1.94.1)
 
 `sqry` is the command-line interface for local semantic code search.
+
+> **Removed in 21.0.1:** the natural-language `sqry ask` command was removed. Use `sqry query`, `sqry graph direct-callers`, and `sqry graph trace-path` instead; see [Removed features](../docs/TROUBLESHOOTING.md#removed-features) for migration.
 
 ## Install
 
@@ -38,7 +40,6 @@ sqry search "parse_.*"
 sqry query "kind:function AND visibility:public"
 sqry graph direct-callers authenticate
 sqry graph trace-path main handle_request
-sqry ask --dry-run "who calls authenticate"
 ```
 
 ## Command Families
@@ -115,5 +116,4 @@ See [MCP Guide](../docs/user-guide/mcp.md) and [sqry-mcp/README.md](../sqry-mcp/
 
 - [Quick Start](../QUICKSTART.md)
 - [User Guide](../docs/user-guide/README.md)
-- [Natural Language Queries](../docs/user-guide/natural-language.md)
 - [Advanced Analysis](../docs/user-guide/advanced-analysis.md)

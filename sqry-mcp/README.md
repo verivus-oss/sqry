@@ -1,6 +1,6 @@
 # sqry MCP Server
 
-**Version**: 20.0.5
+**Version**: 21.0.1
 
 `sqry-mcp` exposes sqry semantic code-search tools to Model Context Protocol clients.
 
@@ -20,13 +20,15 @@ sqry daemon load .
 sqry-mcp --daemon
 ```
 
-Standalone mode currently exposes 37 tools. Daemon-hosted MCP exposes a 16-tool subset backed by `sqryd`. Use dynamic discovery for exact schemas and descriptions:
+Standalone mode currently exposes 36 tools. Daemon-hosted MCP exposes a 15-tool subset backed by `sqryd`. Use dynamic discovery for exact schemas and descriptions:
 
 ```bash
 sqry-mcp --list-tools
 ```
 
 MCP clients can also call `tools/list`, and sqry clients can read `sqry://meta/manifest`.
+
+> **Removed in 21.0.1:** the `sqry_ask` natural-language MCP tool was removed. Use `sqry_query`, `semantic_search`, and `relation_query` instead; see [Removed features](../docs/TROUBLESHOOTING.md#removed-features) for migration.
 
 ## Setup
 
@@ -56,7 +58,7 @@ Prefer discovery over copying static tables:
 - `sqry://docs/tool-guide`
 - `sqry://docs/capability-map`
 
-The standalone catalog includes tools for symbol search, navigation, relation queries, graph export, impact analysis, semantic diff, duplicate/cycle/unused detection, workspace status, natural-language translation, and context propagation.
+The standalone catalog includes tools for symbol search, navigation, relation queries, graph export, impact analysis, semantic diff, duplicate/cycle/unused detection, workspace status, and context propagation.
 
 ## Workspaces
 
@@ -97,16 +99,9 @@ Keep these separate:
 - Recommended external-provider preset: `standard`
 - Library/environment defaults: see `sqry-mcp-redaction` docs for embedding-specific behavior
 
-## Natural Language
-
-The `sqry_ask` tool translates natural language to a validated sqry command. Execution is controlled by the `execute` parameter and the same model-integrity settings used by the CLI.
-
-Model downloads and unverified models are opt-in.
-
 ## Related Guides
 
 - [Public MCP guide](../docs/user-guide/mcp.md)
 - [Workspace guide](../docs/user-guide/workspace.md)
 - [Daemon guide](../docs/user-guide/daemon.md)
-- [Natural language guide](../docs/user-guide/natural-language.md)
 - [Troubleshooting](TROUBLESHOOTING.md)

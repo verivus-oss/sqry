@@ -132,9 +132,10 @@ fn incoming_calls_return_caller_ranges_new() -> Result<()> {
 /// (e.g., `extra::helper` for `helper` in `src/extra.rs`). When a call is made
 /// to a cross-file symbol, `ensure_function()` creates a local stub node.
 ///
-/// Pass 4's `resolve_unresolved_ref` uses `ExportMap::lookup_cross_file()` to
-/// find the real definition in a different file than the stub, creating the
-/// correct cross-file call edge.
+/// Phase 4c-prime (`phase4c_prime_unify_cross_file_nodes`) merges the local
+/// stub into the canonical definition in a different file, rewriting edges
+/// through `NodeRemapTable` so the cross-file call edge points at the real
+/// definition.
 #[test]
 #[allow(clippy::match_wildcard_for_single_variants)] // Wildcard covers future variants
 fn incoming_calls_include_cross_file_new() -> Result<()> {

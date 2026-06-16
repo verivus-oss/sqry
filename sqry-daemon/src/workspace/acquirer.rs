@@ -70,8 +70,8 @@ fn u64_hours_to_f64(hours: u64) -> f64 {
 
 /// Initial admission-control reservation used by the daemon provider's
 /// bounded read-only rehydrate. The same constant the MCP host uses for
-/// `sqry_ask` initial loads — keeps admission accounting consistent
-/// across daemon read-only paths.
+/// initial loads — keeps admission accounting consistent across daemon
+/// read-only paths.
 const RELOAD_WORKING_SET_BYTES: u64 = 2 * 1024 * 1024;
 
 /// Daemon-side [`GraphAcquirer`] backed by a shared
