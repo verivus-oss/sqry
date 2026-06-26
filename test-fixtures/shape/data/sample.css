@@ -1,0 +1,25 @@
+/* Hand-written CSS fixture for the body-shape coverage test. CSS is purely
+   declarative: rules, selectors, custom properties, and an at-rule. There are
+   no function-like bodies, so the plugin mints no Function/Method nodes and the
+   shape mapping is honestly empty. */
+
+:root {
+  --primary: #007bff;
+  --gap: 8px;
+}
+
+.card {
+  color: var(--primary);
+  padding: var(--gap);
+  display: grid;
+}
+
+.card:hover {
+  color: rebeccapurple;
+}
+
+@media (min-width: 600px) {
+  .card {
+    padding: calc(var(--gap) * 2);
+  }
+}

@@ -281,6 +281,22 @@ impl NodeRemapTable {
         for loser in losers_to_drop {
             store.remove_entry(loser);
         }
+
+        // Pass 3: drop loser-keyed SHAPE descriptors under the same §5.3.f
+        // contract. A loser can carry a descriptor and no entry (the common
+        // shape-only case), so this is a separate scan over the descriptor map.
+        // Dropping (not remapping onto the winner) is the only choice
+        // consistent with winner-selection: the winner's own per-file store
+        // already carries its authoritative descriptor.
+        let shape_losers: Vec<NodeId> = store
+            .shape_descriptors()
+            .keys()
+            .copied()
+            .filter(|nid| self.map.contains_key(nid))
+            .collect();
+        for loser in shape_losers {
+            store.remove_shape_descriptor(loser);
+        }
     }
 }
 
@@ -1129,6 +1145,41 @@ mod tests {
         assert!(
             store.is_synthetic(untouched),
             "non-loser synthetic marker survives"
+        );
+    }
+
+    #[test]
+    fn apply_to_metadata_store_drops_loser_shape_descriptors() {
+        // The shape-only loser case: a node carrying ONLY a descriptor (no
+        // entry) must still be dropped when it loses Phase 4c-prime unification,
+        // or it strands a descriptor on a tombstoned arena slot.
+        use crate::graph::unified::storage::metadata::NodeMetadataStore;
+        use crate::graph::unified::storage::shape::ShapeDescriptor;
+
+        let loser = NodeId::new(101, 1);
+        let winner = NodeId::new(200, 1);
+        let untouched = NodeId::new(300, 1);
+
+        let mut store = NodeMetadataStore::new();
+        store.insert_shape_descriptor(loser, ShapeDescriptor::default());
+        store.insert_shape_descriptor(winner, ShapeDescriptor::default());
+        store.insert_shape_descriptor(untouched, ShapeDescriptor::default());
+
+        let mut remap = NodeRemapTable::default();
+        remap.insert(loser, winner);
+        remap.apply_to_metadata_store(&mut store);
+
+        assert!(
+            store.shape_descriptor(loser).is_none(),
+            "loser's shape descriptor must be dropped (§5.3.f)"
+        );
+        assert!(
+            store.shape_descriptor(winner).is_some(),
+            "winner keeps its own authoritative descriptor"
+        );
+        assert!(
+            store.shape_descriptor(untouched).is_some(),
+            "non-loser descriptor survives"
         );
     }
 

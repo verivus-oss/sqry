@@ -1704,6 +1704,19 @@ pub(crate) fn rekey_staging_metadata_to_arena(
         // staging-to-arena rekey.
         rekeyed.insert_entry(arena_id, entry.clone());
     }
+    // Rekey shape descriptors the same way: staging keys them under
+    // `NodeId(i, 1)`, the same staging-local index `i` that Phase 3 renumbered
+    // into `per_file_node_ids[i]`. Without this, descriptors computed in the
+    // staging store never reach the arena and the feature silently no-ops.
+    for (&staging_id, descriptor) in staging_metadata.shape_descriptors() {
+        if staging_id.generation() != 1 {
+            continue;
+        }
+        let Some(&arena_id) = per_file_node_ids.get(staging_id.index() as usize) else {
+            continue;
+        };
+        rekeyed.insert_shape_descriptor(arena_id, descriptor.clone());
+    }
     rekeyed
 }
 
@@ -3157,6 +3170,47 @@ mod tests {
         }
         // Original staging keys are gone (no longer in the rekeyed store).
         assert!(rekeyed.get_macro(NodeId::new(0, 1)).is_none());
+    }
+
+    #[test]
+    fn rekey_staging_metadata_maps_shape_descriptors_local_to_arena() {
+        // The shape-only path: descriptors keyed under staging-local NodeIds
+        // must land under the corresponding arena NodeIds, with no entry
+        // metadata present at all (the common case for ordinary functions).
+        use crate::graph::unified::build::shape::CfBucket;
+        use crate::graph::unified::storage::metadata::NodeMetadataStore;
+        use crate::graph::unified::storage::shape::ShapeDescriptor;
+
+        let mut staging = NodeMetadataStore::new();
+        for i in 0..3u32 {
+            let mut d = ShapeDescriptor::default();
+            // Stamp a distinguishable histogram per node so we can confirm the
+            // exact descriptor rode the rekey, not just some descriptor.
+            d.cf_histogram[CfBucket::Branch.index()] = (i + 1) as u16;
+            staging.insert_shape_descriptor(NodeId::new(i, 1), d);
+        }
+        assert!(staging.get_macro(NodeId::new(0, 1)).is_none());
+        assert!(
+            !staging.is_empty(),
+            "a shape-only staging store is non-empty"
+        );
+
+        let arena_ids = vec![
+            NodeId::new(100, 1),
+            NodeId::new(101, 1),
+            NodeId::new(102, 1),
+        ];
+        let rekeyed = rekey_staging_metadata_to_arena(&staging, &arena_ids);
+
+        assert_eq!(rekeyed.shape_descriptors().len(), 3);
+        for i in 0..3u32 {
+            let d = rekeyed
+                .shape_descriptor(arena_ids[i as usize])
+                .expect("arena NodeId carries the remapped descriptor");
+            assert_eq!(d.cf_histogram[CfBucket::Branch.index()], (i + 1) as u16);
+        }
+        // Original staging key carries nothing in the rekeyed store.
+        assert!(rekeyed.shape_descriptor(NodeId::new(0, 1)).is_none());
     }
 
     #[test]

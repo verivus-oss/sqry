@@ -5,7 +5,10 @@
 
 use std::collections::HashSet;
 use std::path::Path;
+use std::sync::OnceLock;
 
+use sqry_core::graph::unified::build::shape::{CfBucket, ShapeMapping};
+use sqry_core::graph::unified::storage::shape::SignatureShape;
 use sqry_core::graph::{
     GraphBuilder, GraphResult, Language, Position, Span,
     unified::{GraphBuildHelper, StagingGraph},
@@ -103,6 +106,77 @@ impl GraphBuilder for PulumiGraphBuilder {
     fn language(&self) -> Language {
         Language::Pulumi
     }
+
+    fn shape_mapping(&self) -> Option<&dyn ShapeMapping> {
+        Some(pulumi_shape_mapping())
+    }
+}
+
+/// Per-language [`ShapeMapping`] for Pulumi YAML/JSON stack files.
+///
+/// Pulumi stacks are pure data (YAML or JSON); the grammar has no function/method
+/// definition and no control-flow node, and this plugin emits no `NodeKind::Function`
+/// or `NodeKind::Method`, so the build seam never attaches a descriptor for a Pulumi
+/// file. The mapping is still implemented (AC-1: no plugin omitted) over the YAML
+/// grammar (the canonical Pulumi format); its control-flow table is honestly empty
+/// because YAML has no control-flow kinds. The coverage test asserts both halves of
+/// the declarative contract: the map registers no buckets, and no eligible
+/// function-with-body node is produced. Shared via [`pulumi_shape_mapping`].
+pub struct PulumiShapeMapping {
+    cf_by_kind_id: Vec<Option<CfBucket>>,
+}
+
+impl PulumiShapeMapping {
+    /// Build the `kind_id -> CfBucket` table from the tree-sitter-yaml grammar.
+    fn build() -> Self {
+        // `tree_sitter_yaml::language()` returns a `Language` directly (not a
+        // `LanguageFn`), so no `.into()` here.
+        let lang: tree_sitter::Language = tree_sitter_yaml::language();
+        let count = lang.node_kind_count();
+        let mut cf_by_kind_id = vec![None; count];
+        for (id, slot) in cf_by_kind_id.iter_mut().enumerate() {
+            let Ok(kind_id) = u16::try_from(id) else {
+                break;
+            };
+            if !lang.node_kind_is_named(kind_id) {
+                continue;
+            }
+            if let Some(name) = lang.node_kind_for_id(kind_id) {
+                *slot = cf_bucket_for_pulumi_kind(name);
+            }
+        }
+        Self { cf_by_kind_id }
+    }
+}
+
+impl ShapeMapping for PulumiShapeMapping {
+    fn cf_bucket(&self, ts_node_kind_id: u16) -> Option<CfBucket> {
+        self.cf_by_kind_id
+            .get(ts_node_kind_id as usize)
+            .copied()
+            .flatten()
+    }
+
+    fn signature_shape(&self, _fn_node: Node, _src: &[u8]) -> SignatureShape {
+        // Pulumi stack documents have no parameter lists; the signature shape is
+        // empty by construction (honest minimal impl for a data-only language).
+        SignatureShape::default()
+    }
+}
+
+/// Map one tree-sitter-yaml grammar node-kind name to its canonical control-flow
+/// bucket. YAML is a pure data language with no control flow, so this is an honest
+/// total `None`; the function exists to keep the build seam (`cf_bucket_for_*`)
+/// uniform across plugins.
+fn cf_bucket_for_pulumi_kind(_name: &str) -> Option<CfBucket> {
+    None
+}
+
+/// The process-wide Pulumi shape mapping, built once on first use.
+#[must_use]
+pub fn pulumi_shape_mapping() -> &'static PulumiShapeMapping {
+    static MAPPING: OnceLock<PulumiShapeMapping> = OnceLock::new();
+    MAPPING.get_or_init(PulumiShapeMapping::build)
 }
 
 #[derive(Debug, Clone)]
@@ -624,6 +698,76 @@ mod tests {
         assert_eq!(
             reference,
             Some(PulumiReference::Resource("myRes".to_string()))
+        );
+    }
+
+    // ----- body-shape descriptor coverage -----
+
+    const SHAPE_SAMPLE: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../test-fixtures/shape/iac/Pulumi.yaml"
+    ));
+
+    #[test]
+    fn builder_advertises_shape_mapping() {
+        assert!(
+            PulumiGraphBuilder.shape_mapping().is_some(),
+            "Pulumi builder must advertise a ShapeMapping (AC-1: no plugin omitted)"
+        );
+    }
+
+    #[test]
+    fn yaml_control_flow_map_is_honestly_empty() {
+        // YAML is a pure data language: no node kind is a control-flow construct, so
+        // the mapping registers zero buckets. This asserts the map is honestly total
+        // `None` rather than carrying spurious arms.
+        let mapping = pulumi_shape_mapping();
+        let lang: tree_sitter::Language = tree_sitter_yaml::language();
+        let mut any_bucket = false;
+        for id in 0..lang.node_kind_count() {
+            if let Ok(kid) = u16::try_from(id)
+                && mapping.cf_bucket(kid).is_some()
+            {
+                any_bucket = true;
+            }
+        }
+        assert!(
+            !any_bucket,
+            "YAML has no control-flow kinds; the Pulumi map must register no buckets"
+        );
+    }
+
+    #[test]
+    fn declarative_no_function_or_method_body_nodes() {
+        use sqry_core::graph::unified::build::body_hash::has_valid_body_span;
+        use sqry_core::graph::unified::node::NodeKind;
+        use std::path::PathBuf;
+
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_yaml::language())
+            .expect("load yaml grammar");
+        let tree = parser.parse(SHAPE_SAMPLE, None).expect("parse yaml");
+
+        let mut staging = StagingGraph::new();
+        let builder = PulumiGraphBuilder;
+        let file = PathBuf::from("Pulumi.yaml");
+        builder
+            .build_graph(&tree, SHAPE_SAMPLE.as_bytes(), &file, &mut staging)
+            .unwrap();
+
+        // The honest declarative contract: Pulumi emits no Function/Method node at
+        // all, so no node carries a body span the seam would fingerprint.
+        let eligible = staging
+            .nodes()
+            .filter(|n| {
+                matches!(n.entry.kind, NodeKind::Function | NodeKind::Method)
+                    && has_valid_body_span(n.entry)
+            })
+            .count();
+        assert_eq!(
+            eligible, 0,
+            "Pulumi is declarative data: no Function/Method node should carry a body span"
         );
     }
 }

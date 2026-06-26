@@ -1,0 +1,25 @@
+# Hand-written Pulumi YAML stack sample for body-shape descriptor coverage.
+# Pulumi stacks are pure declarative data: resources, config, and outputs with no
+# function/method definitions and no control flow. The shape coverage test asserts
+# the honest declarative contract (no eligible Function/Method body nodes, empty
+# control-flow map), so the build seam attaches no descriptor here.
+name: myapp
+runtime: yaml
+description: A minimal Pulumi stack for shape coverage.
+
+config:
+  aws:region: us-east-1
+
+resources:
+  logsBucket:
+    type: aws:s3:Bucket
+    properties:
+      bucket: myapp-logs
+
+  appQueue:
+    type: aws:sqs:Queue
+    properties:
+      name: myapp-events
+
+outputs:
+  bucketName: ${logsBucket.bucket}

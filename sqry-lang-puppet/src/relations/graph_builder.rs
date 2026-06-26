@@ -12,8 +12,11 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::OnceLock;
 
+use sqry_core::graph::unified::build::shape::{CfBucket, ShapeMapping};
 use sqry_core::graph::unified::edge::kind::TypeOfContext;
+use sqry_core::graph::unified::storage::shape::SignatureShape;
 use sqry_core::graph::{
     GraphBuilder, GraphResult, Language, Span,
     unified::{GraphBuildHelper, NodeId as UnifiedNodeId, StagingGraph},
@@ -71,6 +74,101 @@ impl GraphBuilder for PuppetGraphBuilder {
     fn language(&self) -> Language {
         Language::Puppet
     }
+
+    fn shape_mapping(&self) -> Option<&dyn ShapeMapping> {
+        Some(puppet_shape_mapping())
+    }
+}
+
+/// Per-language [`ShapeMapping`] for Puppet manifests.
+///
+/// Puppet is largely declarative (its `class_definition` / `defined_resource_type`
+/// bodies map to `NodeKind::Class`, not Function/Method, so the build seam does not
+/// currently attach descriptors to them). It still carries real control flow inside
+/// those bodies (`if`/`elsif`/`unless` branches, `case`/selector matches, the
+/// `.each` iterator, resource declarations as the unit of action, assignment, and
+/// lambda blocks), so this maps that surface honestly onto the canonical
+/// [`CfBucket`] schema. The table is built once and shared via
+/// [`puppet_shape_mapping`].
+pub struct PuppetShapeMapping {
+    cf_by_kind_id: Vec<Option<CfBucket>>,
+}
+
+impl PuppetShapeMapping {
+    /// Build the `kind_id -> CfBucket` table from the tree-sitter-puppet grammar.
+    fn build() -> Self {
+        let lang: tree_sitter::Language = tree_sitter_puppet::LANGUAGE.into();
+        let count = lang.node_kind_count();
+        let mut cf_by_kind_id = vec![None; count];
+        for (id, slot) in cf_by_kind_id.iter_mut().enumerate() {
+            let Ok(kind_id) = u16::try_from(id) else {
+                break;
+            };
+            if !lang.node_kind_is_named(kind_id) {
+                continue;
+            }
+            if let Some(name) = lang.node_kind_for_id(kind_id) {
+                *slot = cf_bucket_for_puppet_kind(name);
+            }
+        }
+        Self { cf_by_kind_id }
+    }
+}
+
+impl ShapeMapping for PuppetShapeMapping {
+    fn cf_bucket(&self, ts_node_kind_id: u16) -> Option<CfBucket> {
+        self.cf_by_kind_id
+            .get(ts_node_kind_id as usize)
+            .copied()
+            .flatten()
+    }
+
+    fn signature_shape(&self, fn_node: Node, _src: &[u8]) -> SignatureShape {
+        let mut shape = SignatureShape::default();
+        // A `class_definition` / `defined_resource_type` exposes its parameters as a
+        // `parameter_list` child; each `parameter` may carry a default value
+        // (`parameter` with more than the lone `variable` child).
+        let mut cursor = fn_node.walk();
+        for child in fn_node.named_children(&mut cursor) {
+            if child.kind() == "parameter_list" {
+                let mut pcursor = child.walk();
+                for param in child.named_children(&mut pcursor) {
+                    if param.kind() == "parameter" {
+                        shape.arity_positional = shape.arity_positional.saturating_add(1);
+                        if param.named_child_count() > 1 {
+                            shape.has_defaults = true;
+                        }
+                    }
+                }
+            }
+        }
+        shape
+    }
+}
+
+/// Map one tree-sitter-puppet grammar node-kind name to its canonical control-flow
+/// bucket. Additive-only; `_ => return None` for non-control-flow.
+fn cf_bucket_for_puppet_kind(name: &str) -> Option<CfBucket> {
+    let bucket = match name {
+        "if_statement" | "elsif_statement" | "unless_statement" => CfBucket::Branch,
+        "case_statement" | "selector" => CfBucket::Match,
+        // The `$x.each |$i| { ... }` iteration construct.
+        "iterator_statement" => CfBucket::Loop,
+        // Function calls plus resource declarations / requires (the declarative unit
+        // of action in a Puppet manifest).
+        "function_call" | "resource_declaration" | "require_statement" => CfBucket::Call,
+        "assignment" => CfBucket::Assign,
+        "lambda" => CfBucket::Closure,
+        _ => return None,
+    };
+    Some(bucket)
+}
+
+/// The process-wide Puppet shape mapping, built once on first use.
+#[must_use]
+pub fn puppet_shape_mapping() -> &'static PuppetShapeMapping {
+    static MAPPING: OnceLock<PuppetShapeMapping> = OnceLock::new();
+    MAPPING.get_or_init(PuppetShapeMapping::build)
 }
 
 /// First pass: collect all class and defined type definitions, create nodes and export edges
@@ -1360,6 +1458,94 @@ class myapp (
         assert_has_node_with_kind(&staging, "Stdlib::Absolutepath", NodeKind::Type);
         assert_has_node_with_kind(&staging, "String", NodeKind::Type);
         assert_has_node_with_kind(&staging, "myapp::config_dir", NodeKind::Variable);
+    }
+}
+
+#[cfg(test)]
+mod shape_tests {
+    use super::{PuppetGraphBuilder, puppet_shape_mapping};
+    use sqry_core::graph::GraphBuilder;
+    use sqry_core::graph::unified::build::shape::{
+        CfBucket, ShapeBudget, compute_shape_descriptor,
+    };
+
+    const SAMPLE: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../test-fixtures/shape/iac/manifest.pp"
+    ));
+
+    fn parse(src: &str) -> tree_sitter::Tree {
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_puppet::LANGUAGE.into())
+            .expect("load puppet grammar");
+        parser.parse(src, None).expect("parse puppet")
+    }
+
+    fn first_of_kind<'t>(node: tree_sitter::Node<'t>, kind: &str) -> Option<tree_sitter::Node<'t>> {
+        if node.kind() == kind {
+            return Some(node);
+        }
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if let Some(found) = first_of_kind(child, kind) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn builder_advertises_shape_mapping() {
+        assert!(
+            PuppetGraphBuilder.shape_mapping().is_some(),
+            "Puppet builder must advertise a ShapeMapping"
+        );
+    }
+
+    #[test]
+    fn cf_map_covers_real_control_flow_in_define_body() {
+        let mapping = puppet_shape_mapping();
+        let tree = parse(SAMPLE);
+        let src = SAMPLE.as_bytes();
+        // The `defined_resource_type` carries the manifest body's control flow.
+        let define = first_of_kind(tree.root_node(), "defined_resource_type")
+            .expect("defined_resource_type present");
+        let d = compute_shape_descriptor(define, src, mapping, &ShapeBudget::default());
+
+        assert!(!d.is_unhashable(), "the define body must be hashable");
+        assert!(
+            d.cf_histogram[CfBucket::Branch.index()] >= 1,
+            "if/elsif/unless branch"
+        );
+        assert!(d.cf_histogram[CfBucket::Match.index()] >= 1, "case match");
+        assert!(
+            d.cf_histogram[CfBucket::Loop.index()] >= 1,
+            "the .each iterator"
+        );
+        assert!(
+            d.cf_histogram[CfBucket::Call.index()] >= 1,
+            "resource declarations / function calls"
+        );
+        assert!(d.cf_histogram[CfBucket::Assign.index()] >= 1, "assignment");
+    }
+
+    #[test]
+    fn signature_shape_reads_parameter_list() {
+        let mapping = puppet_shape_mapping();
+        let tree = parse(SAMPLE);
+        let src = SAMPLE.as_bytes();
+        let define = first_of_kind(tree.root_node(), "defined_resource_type")
+            .expect("defined_resource_type present");
+        let d = compute_shape_descriptor(define, src, mapping, &ShapeBudget::default());
+        assert_eq!(
+            d.signature_shape.arity_positional, 2,
+            "myapp::service has two parameters"
+        );
+        assert!(
+            d.signature_shape.has_defaults,
+            "replicas carries a default value"
+        );
     }
 }
 // Collapsible nested conditionals kept for readability with early-exit patterns

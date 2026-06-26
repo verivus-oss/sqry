@@ -834,6 +834,25 @@ fn run() -> Result<()> {
                 .context("Similar command failed")?;
         }
 
+        // Shape-match command (body-shape structural neighbours, U08)
+        Some(Command::ShapeMatch {
+            symbol,
+            file,
+            path,
+            threshold,
+            limit,
+        }) => {
+            commands::run_shape_match(
+                &cli,
+                symbol,
+                file.as_deref(),
+                path.as_deref(),
+                *threshold,
+                *limit,
+            )
+            .context("shape-match command failed")?;
+        }
+
         // Subgraph command
         Some(Command::Subgraph {
             symbols,
@@ -888,7 +907,7 @@ fn run() -> Result<()> {
             limit,
             kind,
             change_type,
-            ..
+            structural,
         }) => {
             let kinds: Vec<String> = kind
                 .as_ref()
@@ -906,6 +925,7 @@ fn run() -> Result<()> {
                 *limit,
                 &kinds,
                 &change_types,
+                *structural,
             )
             .context("Diff command failed")?;
         }

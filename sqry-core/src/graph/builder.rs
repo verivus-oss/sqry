@@ -60,6 +60,21 @@ pub trait GraphBuilder: Send + Sync {
     /// The language handled by this builder.
     fn language(&self) -> Language;
 
+    /// Per-language [`ShapeMapping`](crate::graph::unified::build::shape::ShapeMapping)
+    /// for the identifier-blind body-shape descriptor feature, or `None` if this
+    /// builder does not (yet) supply one.
+    ///
+    /// Resolved once per file in the build seam
+    /// ([`StagingGraph::attach_body_hashes`](crate::graph::unified::build::staging::StagingGraph::attach_body_hashes))
+    /// so the single shared `compute_shape_descriptor` walker can fingerprint each
+    /// Function/Method body alongside its body hash. The default returns `None`: a
+    /// language with no mapping simply contributes no shape descriptors, exactly as
+    /// before this feature. Each language plugin overrides this in its own crate, so
+    /// the fan-out across the 37 plugins stays parallel-safe.
+    fn shape_mapping(&self) -> Option<&dyn crate::graph::unified::build::shape::ShapeMapping> {
+        None
+    }
+
     /// Incrementally update the graph after an edit.
     ///
     /// The default implementation simply rebuilds the file from scratch.  Builders

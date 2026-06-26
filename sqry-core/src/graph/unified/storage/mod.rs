@@ -28,6 +28,7 @@ pub mod node_provenance;
 pub mod registry;
 pub mod segment;
 pub mod serde_helpers;
+pub mod shape;
 
 pub use arena::{ArenaError, NodeArena, NodeEntry, Slot, SlotState};
 pub use c_indirect::{
@@ -52,3 +53,7 @@ pub use metadata::{
 pub use node_provenance::{NodeProvenance, NodeProvenanceStore};
 pub use registry::{FileRegistry, RegistryError, RegistryStats};
 pub use segment::{FileSegment, FileSegmentTable};
+pub use shape::{
+    CF_BUCKET_COUNT, CalleeShape, MIN_HASHABLE_TOKENS, MINHASH_LANES, SHAPE_SCHEMA_VERSION,
+    ShapeDescriptor, ShapeFlags, ShapeHash128, SignatureShape,
+};

@@ -103,7 +103,7 @@ pub fn extract_scripts(
         // Must happen per-field so spans and hash input stay aligned.
         // The pipeline's later attach_body_hashes() against XML bytes will skip
         // nodes that already have hashes (body_hash.is_none() check).
-        del_staging.attach_body_hashes(script_bytes);
+        del_staging.attach_body_hashes(script_bytes, None);
 
         if !del_staging.is_empty() {
             replay_state.replay(staging, &mut del_staging)?;

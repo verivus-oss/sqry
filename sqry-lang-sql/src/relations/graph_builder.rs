@@ -6,13 +6,16 @@
 //! - Table read operations (SELECT)
 //! - Table write operations (INSERT, UPDATE, DELETE, CREATE/DROP/ALTER TABLE)
 
+use sqry_core::graph::unified::build::shape::{CfBucket, ShapeMapping};
+use sqry_core::graph::unified::storage::shape::SignatureShape;
 use sqry_core::graph::{
     GraphBuilder, GraphBuilderError, GraphResult, Language, Position, Span,
     unified::{GraphBuildHelper, StagingGraph},
 };
 use std::path::Path;
+use std::sync::OnceLock;
 use streaming_iterator::StreamingIterator;
-use tree_sitter::{Query, QueryCursor, Tree};
+use tree_sitter::{Node, Query, QueryCursor, Tree};
 
 #[derive(Debug, Clone)]
 struct SqlCallable {
@@ -178,6 +181,101 @@ impl GraphBuilder for SqlGraphBuilder {
     fn language(&self) -> Language {
         Language::Sql
     }
+
+    fn shape_mapping(&self) -> Option<&dyn ShapeMapping> {
+        Some(sql_shape_mapping())
+    }
+}
+
+/// Per-language [`ShapeMapping`] for SQL (tree-sitter-sequel).
+///
+/// SQL functions and procedures are real graph callables (`create_function`),
+/// so the body-shape descriptor applies to them. The control flow that the
+/// grammar parses lives inside `LANGUAGE sql` bodies (CASE expressions, set
+/// operations, subqueries); `LANGUAGE plpgsql` and other dollar-quoted bodies
+/// are opaque text to this grammar, so a procedural body with no parsed CF
+/// kinds yields a near-empty histogram, which is the honest result. The
+/// mapping is built once from the grammar and shared process-wide.
+pub struct SqlShapeMapping {
+    cf_by_kind_id: Vec<Option<CfBucket>>,
+}
+
+impl SqlShapeMapping {
+    fn build() -> Self {
+        let lang: tree_sitter::Language = tree_sitter_sequel::LANGUAGE.into();
+        let count = lang.node_kind_count();
+        let mut cf_by_kind_id = vec![None; count];
+        for (id, slot) in cf_by_kind_id.iter_mut().enumerate() {
+            let Ok(kind_id) = u16::try_from(id) else {
+                break;
+            };
+            if !lang.node_kind_is_named(kind_id) {
+                continue;
+            }
+            if let Some(name) = lang.node_kind_for_id(kind_id) {
+                *slot = cf_bucket_for_sql_kind(name);
+            }
+        }
+        Self { cf_by_kind_id }
+    }
+}
+
+impl ShapeMapping for SqlShapeMapping {
+    fn cf_bucket(&self, ts_node_kind_id: u16) -> Option<CfBucket> {
+        self.cf_by_kind_id
+            .get(ts_node_kind_id as usize)
+            .copied()
+            .flatten()
+    }
+
+    fn signature_shape(&self, fn_node: Node, _src: &[u8]) -> SignatureShape {
+        let mut shape = SignatureShape::default();
+        // `create_function` exposes the argument list as a `function_arguments`
+        // node (no field name), so locate it among the named children.
+        let mut cursor = fn_node.walk();
+        for child in fn_node.named_children(&mut cursor) {
+            if child.kind() == "function_arguments" {
+                let mut arg_cursor = child.walk();
+                for arg in child.named_children(&mut arg_cursor) {
+                    if arg.kind() == "function_argument" {
+                        shape.arity_positional = shape.arity_positional.saturating_add(1);
+                        // A `keyword_default` token inside the argument marks a
+                        // default value.
+                        let mut def_cursor = arg.walk();
+                        for piece in arg.children(&mut def_cursor) {
+                            if piece.kind() == "keyword_default" {
+                                shape.has_defaults = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        shape
+    }
+}
+
+/// Map one tree-sitter-sequel grammar node-kind name to its canonical
+/// control-flow bucket. Additive-only against the frozen [`CfBucket`] set.
+fn cf_bucket_for_sql_kind(name: &str) -> Option<CfBucket> {
+    let bucket = match name {
+        // `CASE ... WHEN ... THEN ... END` is the SQL conditional construct.
+        "case" => CfBucket::Match,
+        "when_clause" => CfBucket::Branch,
+        // Procedural assignment (`x := y`) inside parsed routine bodies.
+        "assignment" => CfBucket::Assign,
+        // Function/aggregate invocations carried by the query body.
+        "invocation" => CfBucket::Call,
+        _ => return None,
+    };
+    Some(bucket)
+}
+
+/// The process-wide SQL shape mapping, built once on first use.
+#[must_use]
+pub fn sql_shape_mapping() -> &'static SqlShapeMapping {
+    static MAPPING: OnceLock<SqlShapeMapping> = OnceLock::new();
+    MAPPING.get_or_init(SqlShapeMapping::build)
 }
 
 /// Tree-sitter queries for SQL relationship extraction.
@@ -1598,6 +1696,92 @@ mod tests {
         assert_eq!(
             export_count, 0,
             "Expected 0 Export edges for empty file, got {export_count}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod shape_tests {
+    use super::*;
+    use sqry_core::graph::unified::build::shape::{ShapeBudget, compute_shape_descriptor};
+
+    const SAMPLE: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../test-fixtures/shape/data/sample.sql"
+    ));
+
+    fn parse(src: &str) -> Tree {
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_sequel::LANGUAGE.into())
+            .expect("load sql grammar");
+        parser.parse(src, None).expect("parse")
+    }
+
+    /// Resolve the first `create_function` node anywhere in the tree.
+    fn first_create_function(node: Node<'_>) -> Option<Node<'_>> {
+        if node.kind() == "create_function" {
+            return Some(node);
+        }
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if let Some(found) = first_create_function(child) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn cf_map_is_non_empty_and_covers_real_kinds() {
+        let mapping = sql_shape_mapping();
+        let populated = mapping.cf_by_kind_id.iter().filter(|s| s.is_some()).count();
+        assert!(
+            populated > 0,
+            "SQL cf map must map at least one real grammar kind"
+        );
+
+        // The grammar exposes `case`/`when_clause` as named kinds; confirm the
+        // mapping resolves them to the canonical buckets by id, not by guesswork.
+        let lang: tree_sitter::Language = tree_sitter_sequel::LANGUAGE.into();
+        let case_id = lang.id_for_node_kind("case", true);
+        let when_id = lang.id_for_node_kind("when_clause", true);
+        assert_eq!(mapping.cf_bucket(case_id), Some(CfBucket::Match));
+        assert_eq!(mapping.cf_bucket(when_id), Some(CfBucket::Branch));
+    }
+
+    #[test]
+    fn descriptor_counts_case_control_flow_in_sql_body() {
+        let tree = parse(SAMPLE);
+        let func = first_create_function(tree.root_node()).expect("create_function in fixture");
+        let descriptor = compute_shape_descriptor(
+            func,
+            SAMPLE.as_bytes(),
+            sql_shape_mapping(),
+            &ShapeBudget::default(),
+        );
+        assert!(
+            !descriptor.is_unhashable(),
+            "a function with a parsed CASE body must be hashable"
+        );
+        assert!(
+            descriptor.cf_histogram[CfBucket::Match.index()] >= 1,
+            "the CASE expression must be counted in the Match bucket"
+        );
+    }
+
+    #[test]
+    fn signature_shape_reads_arguments_and_defaults() {
+        let tree = parse(SAMPLE);
+        let func = first_create_function(tree.root_node()).expect("create_function in fixture");
+        let shape = sql_shape_mapping().signature_shape(func, SAMPLE.as_bytes());
+        assert_eq!(
+            shape.arity_positional, 2,
+            "grade(score, bonus) has two arguments"
+        );
+        assert!(
+            shape.has_defaults,
+            "the DEFAULT 0 argument must set has_defaults"
         );
     }
 }

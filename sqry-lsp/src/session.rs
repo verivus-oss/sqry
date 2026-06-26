@@ -785,7 +785,9 @@ impl SessionManager {
         builder
             .build_graph(&tree, parse_content, path, &mut staging)
             .map_err(|err| anyhow!("failed to build graph for '{}': {:?}", path.display(), err))?;
-        staging.attach_body_hashes(content);
+        // Node-listing path: body hashes only. Shape descriptors are never read
+        // from this throwaway staging graph, so computing them would be wasted work.
+        staging.attach_body_hashes(content, None);
 
         let strings = staging_string_table(&staging);
         let language = builder.language().to_string();

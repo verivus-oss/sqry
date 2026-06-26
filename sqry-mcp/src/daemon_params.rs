@@ -39,14 +39,15 @@ use crate::tools::params::{
     DirectCalleesParams, DirectCallersParams, EdgeKindParam, ExportGraphParams, FindCyclesParams,
     FindUnusedParams, GraphFormatParam, IsNodeInCycleParams, PaginationParams, RelationQueryParams,
     RelationTypeParam, SearchFiltersParams, SemanticDiffParams, SemanticSearchParams,
-    ShowDependenciesParams, SubgraphParams, TracePathParams, UnusedScopeParam, VisibilityParam,
+    ShowDependenciesParams, StructuralSimilarParams, SubgraphParams, TracePathParams,
+    UnusedScopeParam, VisibilityParam,
 };
 use crate::tools::{
     ChangeType, ComplexityMetricsArgs, CycleType, DependencyImpactArgs, DirectCalleesArgs,
     DirectCallersArgs, ExportGraphArgs, FindCyclesArgs, FindUnusedArgs, GitVersionRef,
     IsNodeInCycleArgs, PaginationArgs, RelationQueryArgs, RelationType, SearchFilters,
-    SemanticDiffArgs, SemanticDiffFilters, SemanticSearchArgs, ShowDependenciesArgs, SubgraphArgs,
-    TracePathArgs, UnusedScope, Visibility,
+    SemanticDiffArgs, SemanticDiffFilters, SemanticSearchArgs, ShowDependenciesArgs,
+    StructuralSimilarArgs, SubgraphArgs, TracePathArgs, UnusedScope, Visibility,
 };
 
 // ---------------------------------------------------------------------------
@@ -333,6 +334,24 @@ pub fn params_to_find_unused_args(params: Value) -> Result<FindUnusedArgs, RpcEr
         max_results,
         pagination,
         exclude_cfg_gated: params.exclude_cfg_gated,
+    })
+}
+
+/// `structural_similar`: JSON → [`StructuralSimilarArgs`] (body-shape, U07).
+///
+/// # Errors
+///
+/// Returns [`RpcError`] when JSON-RPC params are malformed or bounds validation
+/// fails. Mirrors `server.rs::convert_structural_similar_params`.
+pub fn params_to_structural_similar_args(params: Value) -> Result<StructuralSimilarArgs, RpcError> {
+    let params: StructuralSimilarParams = deserialise_params(params)?;
+    let max_results = validate_max_results(params.max_results, 200)?;
+    Ok(StructuralSimilarArgs {
+        path: params.path,
+        file_path: params.file_path,
+        symbol_name: params.symbol_name,
+        similarity_threshold: params.similarity_threshold,
+        max_results,
     })
 }
 

@@ -34,10 +34,14 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::OnceLock;
 
+use sqry_core::graph::unified::build::shape::{CfBucket, ShapeMapping};
+use sqry_core::graph::unified::build::staging::ShapeAttachCtx;
 use sqry_core::graph::unified::edge::ExportKind;
 use sqry_core::graph::unified::edge::kind::TypeOfContext;
 use sqry_core::graph::unified::node::NodeKind;
+use sqry_core::graph::unified::storage::shape::SignatureShape;
 use sqry_core::graph::unified::{GraphBuildHelper, NodeId, StagingGraph};
 use sqry_core::graph::{GraphBuilder, GraphBuilderError, GraphResult, Language, Span};
 use sqry_lang_typescript::relations::type_extractor::{
@@ -136,6 +140,135 @@ impl GraphBuilder for VueGraphBuilder {
     fn language(&self) -> Language {
         Language::Vue
     }
+
+    // NOTE: no `shape_mapping()` override here on purpose. The SFC-level tree is
+    // the Vue grammar (`script_element`/`raw_text`), which carries no function
+    // bodies, so the whole-file shape seam in the indexing entrypoint has
+    // nothing to fingerprint. The function bodies live in the embedded
+    // `<script>` blocks, parsed with the JS/TS grammar; those are fingerprinted
+    // per-block in `process_script_block_with_locals` via the JS shape mapping
+    // below, exactly where the JS subtree (and its kind ids) are valid.
+}
+
+/// Per-language [`ShapeMapping`] for the JavaScript/TypeScript inside Vue
+/// `<script>` blocks.
+///
+/// Vue single-file components embed JS or TS, so the body-shape descriptor for a
+/// component's functions has to walk the JS/TS subtree, not the Vue markup tree.
+/// `cf_bucket` indexes by grammar kind id, so the mapping is built per grammar:
+/// one table for the JavaScript grammar and one for the TypeScript grammar, both
+/// driven by the same control-flow name matcher (TS shares JS's control-flow
+/// construct names). The matcher is implemented directly in this crate rather
+/// than borrowed from the JS plugin, keeping the Vue worktree self-contained.
+pub struct VueJsShapeMapping {
+    cf_by_kind_id: Vec<Option<CfBucket>>,
+}
+
+impl VueJsShapeMapping {
+    /// Build the table from a concrete grammar (`tree_sitter_javascript` or
+    /// `tree_sitter_typescript`), mapping its named control-flow kinds.
+    fn build(lang: &tree_sitter::Language) -> Self {
+        let count = lang.node_kind_count();
+        let mut cf_by_kind_id = vec![None; count];
+        for (id, slot) in cf_by_kind_id.iter_mut().enumerate() {
+            let Ok(kind_id) = u16::try_from(id) else {
+                break;
+            };
+            if !lang.node_kind_is_named(kind_id) {
+                continue;
+            }
+            if let Some(name) = lang.node_kind_for_id(kind_id) {
+                *slot = cf_bucket_for_js_kind(name);
+            }
+        }
+        Self { cf_by_kind_id }
+    }
+}
+
+impl ShapeMapping for VueJsShapeMapping {
+    fn cf_bucket(&self, ts_node_kind_id: u16) -> Option<CfBucket> {
+        self.cf_by_kind_id
+            .get(ts_node_kind_id as usize)
+            .copied()
+            .flatten()
+    }
+
+    fn signature_shape(&self, fn_node: Node, _src: &[u8]) -> SignatureShape {
+        signature_shape_js(fn_node)
+    }
+}
+
+/// Read the structural [`SignatureShape`] from a JS/TS function node's
+/// `formal_parameters` list. Shared by the Vue JS and TS mappings.
+fn signature_shape_js(fn_node: Node) -> SignatureShape {
+    let mut shape = SignatureShape::default();
+    if let Some(params) = fn_node.child_by_field_name("parameters") {
+        let mut cursor = params.walk();
+        for child in params.named_children(&mut cursor) {
+            match child.kind() {
+                // A plain identifier, or a destructured object/array binding, is
+                // one positional parameter.
+                "identifier" | "object_pattern" | "array_pattern" => {
+                    shape.arity_positional = shape.arity_positional.saturating_add(1);
+                }
+                // `a = 1` default-valued parameter.
+                "assignment_pattern" => {
+                    shape.arity_positional = shape.arity_positional.saturating_add(1);
+                    shape.has_defaults = true;
+                }
+                // `...rest` collects the variadic tail.
+                "rest_pattern" => shape.has_varargs = true,
+                _ => {}
+            }
+        }
+    }
+    // TS functions carry a `return_type` field; JS functions never do.
+    shape.has_return_annotation = fn_node.child_by_field_name("return_type").is_some();
+    shape
+}
+
+/// Map one tree-sitter JavaScript/TypeScript grammar node-kind name to its
+/// canonical control-flow bucket. Additive-only against the frozen [`CfBucket`]
+/// set. Shared verbatim by the Vue and Svelte crates; both embed JS/TS.
+fn cf_bucket_for_js_kind(name: &str) -> Option<CfBucket> {
+    let bucket = match name {
+        "if_statement" | "ternary_expression" => CfBucket::Branch,
+        "for_statement" | "for_in_statement" | "while_statement" | "do_statement" => CfBucket::Loop,
+        "switch_statement" => CfBucket::Match,
+        "try_statement" => CfBucket::Try,
+        "catch_clause" => CfBucket::Catch,
+        "throw_statement" => CfBucket::Throw,
+        // `with (obj) { ... }` scopes a resource for the block body.
+        "with_statement" => CfBucket::Resource,
+        "return_statement" => CfBucket::Return,
+        "yield_expression" => CfBucket::Yield,
+        "await_expression" => CfBucket::Await,
+        "break_statement" | "continue_statement" => CfBucket::BreakContinue,
+        "call_expression" | "new_expression" => CfBucket::Call,
+        "lexical_declaration"
+        | "variable_declaration"
+        | "assignment_expression"
+        | "augmented_assignment_expression" => CfBucket::Assign,
+        "arrow_function" | "function_expression" | "generator_function" => CfBucket::Closure,
+        _ => return None,
+    };
+    Some(bucket)
+}
+
+/// The process-wide Vue JavaScript-block shape mapping, built once on first use.
+#[must_use]
+pub fn vue_js_shape_mapping() -> &'static VueJsShapeMapping {
+    static MAPPING: OnceLock<VueJsShapeMapping> = OnceLock::new();
+    MAPPING.get_or_init(|| VueJsShapeMapping::build(&tree_sitter_javascript::LANGUAGE.into()))
+}
+
+/// The process-wide Vue TypeScript-block shape mapping, built once on first use.
+#[must_use]
+pub fn vue_ts_shape_mapping() -> &'static VueJsShapeMapping {
+    static MAPPING: OnceLock<VueJsShapeMapping> = OnceLock::new();
+    MAPPING.get_or_init(|| {
+        VueJsShapeMapping::build(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
+    })
 }
 
 // ============================================================================
@@ -752,6 +885,19 @@ fn process_script_block_with_locals(
         shared_locals,
         component_id,
     )?;
+
+    // Attach identifier-blind shape descriptors for this block's functions.
+    // The descriptor walk needs the JS/TS subtree whose kind ids match the
+    // grammar that parsed the block, so it is done here (where `tree` is alive)
+    // rather than at the SFC level, where only the Vue markup tree exists.
+    let mapping: &dyn ShapeMapping = match block.lang {
+        ScriptLanguage::JavaScript => vue_js_shape_mapping(),
+        ScriptLanguage::TypeScript => vue_ts_shape_mapping(),
+    };
+    let shape_ctx = ShapeAttachCtx::new(&tree, block.content.as_bytes(), mapping);
+    helper
+        .staging_mut()
+        .attach_body_hashes(block.content.as_bytes(), Some(shape_ctx));
 
     Ok(())
 }
@@ -3608,6 +3754,147 @@ function greet() {
             expected_hash,
             "Body hash must be derived from script block bytes, \
              not the full SFC file content"
+        );
+    }
+}
+
+#[cfg(test)]
+mod shape_tests {
+    use super::*;
+    use sqry_core::graph::unified::build::shape::{ShapeBudget, compute_shape_descriptor};
+
+    const SAMPLE: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../test-fixtures/shape/data/sample.vue"
+    ));
+
+    fn parse_js(src: &str) -> Tree {
+        let mut parser = Parser::new();
+        parser
+            .set_language(&tree_sitter_javascript::LANGUAGE.into())
+            .expect("load js grammar");
+        parser.parse(src, None).expect("parse")
+    }
+
+    fn parse_vue(src: &str) -> Tree {
+        let mut parser = Parser::new();
+        parser
+            .set_language(&tree_sitter_vue_sqry::language())
+            .expect("load vue grammar");
+        parser.parse(src, None).expect("parse")
+    }
+
+    fn first_of<'a>(node: Node<'a>, kinds: &[&str]) -> Option<Node<'a>> {
+        if kinds.contains(&node.kind()) {
+            return Some(node);
+        }
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if let Some(found) = first_of(child, kinds) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn js_cf_map_is_non_empty_and_covers_real_kinds() {
+        let mapping = vue_js_shape_mapping();
+        let populated = mapping.cf_by_kind_id.iter().filter(|s| s.is_some()).count();
+        assert!(populated > 0, "JS cf map must map real grammar kinds");
+
+        let lang: tree_sitter::Language = tree_sitter_javascript::LANGUAGE.into();
+        let id = |n: &str| lang.id_for_node_kind(n, true);
+        assert_eq!(
+            mapping.cf_bucket(id("if_statement")),
+            Some(CfBucket::Branch)
+        );
+        assert_eq!(mapping.cf_bucket(id("for_statement")), Some(CfBucket::Loop));
+        assert_eq!(
+            mapping.cf_bucket(id("switch_statement")),
+            Some(CfBucket::Match)
+        );
+        assert_eq!(
+            mapping.cf_bucket(id("call_expression")),
+            Some(CfBucket::Call)
+        );
+        assert_eq!(
+            mapping.cf_bucket(id("arrow_function")),
+            Some(CfBucket::Closure)
+        );
+    }
+
+    #[test]
+    fn descriptor_counts_js_control_flow() {
+        let src = "function classify(score) { let l=''; if (score>=90){l='A';} else {l='B';} for (let i=0;i<score;i++){ record(i); } return l; }";
+        let tree = parse_js(src);
+        let func =
+            first_of(tree.root_node(), &["function_declaration"]).expect("function_declaration");
+        let d = compute_shape_descriptor(
+            func,
+            src.as_bytes(),
+            vue_js_shape_mapping(),
+            &ShapeBudget::default(),
+        );
+        assert!(!d.is_unhashable(), "a real JS body must be hashable");
+        assert!(
+            d.cf_histogram[CfBucket::Branch.index()] >= 1,
+            "if -> Branch"
+        );
+        assert!(d.cf_histogram[CfBucket::Loop.index()] >= 1, "for -> Loop");
+        assert!(d.cf_histogram[CfBucket::Call.index()] >= 1, "call -> Call");
+        assert!(
+            d.cf_histogram[CfBucket::Return.index()] >= 1,
+            "return -> Return"
+        );
+        assert!(
+            d.cf_histogram[CfBucket::Assign.index()] >= 1,
+            "let/= -> Assign"
+        );
+    }
+
+    #[test]
+    fn signature_shape_reads_js_parameters() {
+        let src = "function f(a, b = 2, ...rest) { return a; }";
+        let tree = parse_js(src);
+        let func =
+            first_of(tree.root_node(), &["function_declaration"]).expect("function_declaration");
+        let shape = vue_js_shape_mapping().signature_shape(func, src.as_bytes());
+        assert_eq!(shape.arity_positional, 2, "a and b = 2 are positional");
+        assert!(shape.has_defaults, "b = 2 sets has_defaults");
+        assert!(shape.has_varargs, "...rest sets has_varargs");
+    }
+
+    #[test]
+    fn embedded_script_block_gets_a_shape_descriptor() {
+        // Boundary assertion: the SFC markup tree carries no functions, but the
+        // <script> block's `classify` method is fingerprinted via the embedded
+        // JS shape mapping, so a descriptor lands in staging for it.
+        let tree = parse_vue(SAMPLE);
+        let mut staging = StagingGraph::new();
+        let builder = VueGraphBuilder::default();
+        builder
+            .build_graph(
+                &tree,
+                SAMPLE.as_bytes(),
+                Path::new("sample.vue"),
+                &mut staging,
+            )
+            .expect("build vue graph");
+
+        let metadata = staging.take_macro_metadata();
+        let descriptors = metadata.shape_descriptors();
+        assert!(
+            !descriptors.is_empty(),
+            "the embedded <script> function must receive a shape descriptor"
+        );
+        let has_real_cf = descriptors.values().any(|d| {
+            d.cf_histogram[CfBucket::Branch.index()] >= 1
+                && d.cf_histogram[CfBucket::Loop.index()] >= 1
+        });
+        assert!(
+            has_real_cf,
+            "the classify method's if + for must be counted in its descriptor"
         );
     }
 }

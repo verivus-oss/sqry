@@ -12,9 +12,12 @@
 //! 3. **Pass 3**: Extract call expressions → Create Call edges
 
 use sqry_core::graph::unified::build::helper::CalleeKindHint;
+use sqry_core::graph::unified::build::shape::{CfBucket, ShapeMapping};
 use sqry_core::graph::unified::edge::kind::TypeOfContext;
+use sqry_core::graph::unified::storage::shape::SignatureShape;
 use sqry_core::graph::unified::{GraphBuildHelper, StagingGraph};
 use sqry_core::graph::{GraphBuilder, GraphBuilderError, GraphResult, Language, Position, Span};
+use std::sync::OnceLock;
 use std::{collections::HashMap, path::Path};
 use tree_sitter::{Node, Tree};
 
@@ -170,6 +173,10 @@ impl KotlinGraphBuilder {
 impl GraphBuilder for KotlinGraphBuilder {
     fn language(&self) -> Language {
         Language::Kotlin
+    }
+
+    fn shape_mapping(&self) -> Option<&dyn ShapeMapping> {
+        Some(kotlin_shape_mapping())
     }
 
     fn build_graph(
@@ -2752,6 +2759,125 @@ fn extract_bound_type_base_name(type_node: Node, content: &[u8]) -> String {
     }
 }
 
+/// Per-language [`ShapeMapping`] for Kotlin: a precomputed `kind_id -> CfBucket`
+/// table over the tree-sitter-kotlin grammar, shared process-wide via
+/// [`kotlin_shape_mapping`]. Same shape as the C reference impl: one array index
+/// per node on the hot walk, identifier-blind throughout.
+pub struct KotlinShapeMapping {
+    cf_by_kind_id: Vec<Option<CfBucket>>,
+}
+
+impl KotlinShapeMapping {
+    fn build() -> Self {
+        // tree-sitter-kotlin-sqry exposes `language()` returning a `Language`
+        // directly, not a `LanguageFn`, so there is no `.into()` here.
+        let lang: tree_sitter::Language = tree_sitter_kotlin_sqry::language();
+        let count = lang.node_kind_count();
+        let mut cf_by_kind_id = vec![None; count];
+        for (id, slot) in cf_by_kind_id.iter_mut().enumerate() {
+            let Ok(kind_id) = u16::try_from(id) else {
+                break;
+            };
+            if !lang.node_kind_is_named(kind_id) {
+                continue;
+            }
+            if let Some(name) = lang.node_kind_for_id(kind_id) {
+                *slot = cf_bucket_for_kotlin_kind(name);
+            }
+        }
+        Self { cf_by_kind_id }
+    }
+}
+
+impl ShapeMapping for KotlinShapeMapping {
+    fn cf_bucket(&self, ts_node_kind_id: u16) -> Option<CfBucket> {
+        self.cf_by_kind_id
+            .get(ts_node_kind_id as usize)
+            .copied()
+            .flatten()
+    }
+
+    fn signature_shape(&self, fn_node: Node, _src: &[u8]) -> SignatureShape {
+        let mut shape = SignatureShape::default();
+        // A `function_declaration` holds its parameters in a
+        // `function_value_parameters` child (by kind, not field); count its
+        // `parameter` children for the positional arity.
+        let mut cursor = fn_node.walk();
+        for child in fn_node.named_children(&mut cursor) {
+            if child.kind() == "function_value_parameters" {
+                let mut pcursor = child.walk();
+                for param in child.named_children(&mut pcursor) {
+                    if param.kind() == "parameter" {
+                        shape.arity_positional = shape.arity_positional.saturating_add(1);
+                    }
+                }
+            }
+        }
+        shape.has_return_annotation = kotlin_has_return_type(fn_node);
+        shape
+    }
+}
+
+/// Whether a Kotlin `function_declaration` declares a return type. The grammar
+/// exposes it either through a `type` field or, when unfielded, as a type node
+/// sitting after the `function_value_parameters` child (the same lookup the
+/// plugin's `extract_return_type` performs).
+fn kotlin_has_return_type(fn_node: Node) -> bool {
+    if fn_node.child_by_field_name("type").is_some() {
+        return true;
+    }
+    let mut cursor = fn_node.walk();
+    let mut passed_params = false;
+    for child in fn_node.named_children(&mut cursor) {
+        match child.kind() {
+            "function_value_parameters" => passed_params = true,
+            "user_type" | "nullable_type" | "not_nullable_type" | "function_type"
+            | "parenthesized_type"
+                if passed_params =>
+            {
+                return true;
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Map one tree-sitter-kotlin grammar node-kind name to its canonical
+/// control-flow bucket. Additive-only against the frozen [`CfBucket`] set.
+fn cf_bucket_for_kotlin_kind(name: &str) -> Option<CfBucket> {
+    let bucket = match name {
+        "if_expression" => CfBucket::Branch,
+        "for_statement" | "while_statement" | "do_while_statement" => CfBucket::Loop,
+        "when_expression" | "when_entry" | "when_condition" => CfBucket::Match,
+        "try_expression" => CfBucket::Try,
+        "catch_block" => CfBucket::Catch,
+        "finally_block" => CfBucket::Resource,
+        // Kotlin uses one `jump_expression` node for return / break / continue /
+        // throw; the histogram cannot disambiguate those structurally, so the
+        // whole jump family maps onto BreakContinue.
+        "jump_expression" => CfBucket::BreakContinue,
+        "call_expression"
+        | "infix_expression"
+        | "constructor_invocation"
+        | "constructor_delegation_call" => CfBucket::Call,
+        "assignment"
+        | "property_declaration"
+        | "variable_declaration"
+        | "multi_variable_declaration" => CfBucket::Assign,
+        "lambda_literal" | "anonymous_function" | "annotated_lambda" => CfBucket::Closure,
+        _ => return None,
+    };
+    Some(bucket)
+}
+
+/// The process-wide Kotlin shape mapping, built once on first use.
+#[must_use]
+pub fn kotlin_shape_mapping() -> &'static KotlinShapeMapping {
+    static MAPPING: OnceLock<KotlinShapeMapping> = OnceLock::new();
+    MAPPING.get_or_init(KotlinShapeMapping::build)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5111,5 +5237,89 @@ class NativeLib {
                 )
             })
             .count()
+    }
+}
+
+#[cfg(test)]
+mod shape_tests {
+    use super::*;
+    use sqry_core::graph::unified::build::shape::{
+        CfBucket, ShapeBudget, compute_shape_descriptor,
+    };
+    use tree_sitter::Parser;
+
+    const SAMPLE: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../test-fixtures/shape/systems/sample.kt"
+    ));
+
+    fn parse(src: &str) -> Tree {
+        let mut parser = Parser::new();
+        parser
+            .set_language(&tree_sitter_kotlin_sqry::language())
+            .expect("load Kotlin grammar");
+        parser.parse(src, None).expect("parse Kotlin sample")
+    }
+
+    fn first_of_kind<'a>(node: Node<'a>, kind: &str) -> Option<Node<'a>> {
+        if node.kind() == kind {
+            return Some(node);
+        }
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if let Some(found) = first_of_kind(child, kind) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn kotlin_mapping_is_non_empty() {
+        let mapping = kotlin_shape_mapping();
+        let lang: tree_sitter::Language = tree_sitter_kotlin_sqry::language();
+        let count = (0..lang.node_kind_count())
+            .filter_map(|id| u16::try_from(id).ok())
+            .filter(|id| mapping.cf_bucket(*id).is_some())
+            .count();
+        assert!(
+            count > 0,
+            "Kotlin cf_bucket map should cover real control-flow kinds"
+        );
+    }
+
+    #[test]
+    fn kotlin_histogram_covers_control_flow() {
+        let tree = parse(SAMPLE);
+        let func = first_of_kind(tree.root_node(), "function_declaration")
+            .expect("sample has a function_declaration");
+        let desc = compute_shape_descriptor(
+            func,
+            SAMPLE.as_bytes(),
+            kotlin_shape_mapping(),
+            &ShapeBudget::default(),
+        );
+        let h = &desc.cf_histogram;
+        assert!(h[CfBucket::Branch.index()] >= 1, "branch present");
+        assert!(h[CfBucket::Loop.index()] >= 1, "loop present");
+        assert!(h[CfBucket::Match.index()] >= 1, "when present");
+        assert!(h[CfBucket::Call.index()] >= 1, "call present");
+        assert!(h[CfBucket::Try.index()] >= 1, "try present");
+        assert!(h[CfBucket::Catch.index()] >= 1, "catch present");
+        assert!(
+            h[CfBucket::BreakContinue.index()] >= 1,
+            "jump_expression (return/break/continue/throw) present"
+        );
+    }
+
+    #[test]
+    fn kotlin_signature_shape_reads_params() {
+        let tree = parse(SAMPLE);
+        let func = first_of_kind(tree.root_node(), "function_declaration")
+            .expect("sample has a function_declaration");
+        let shape = kotlin_shape_mapping().signature_shape(func, SAMPLE.as_bytes());
+        // classify(n: Int, label: String): Int -> two positional params + return type.
+        assert_eq!(shape.arity_positional, 2, "two positional params");
+        assert!(shape.has_return_annotation, "return type present");
     }
 }

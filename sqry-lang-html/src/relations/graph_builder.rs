@@ -16,7 +16,10 @@
 //! Relative/absolute paths are resolved against the source file.
 
 use std::path::Path;
+use std::sync::OnceLock;
 
+use sqry_core::graph::unified::build::shape::{CfBucket, ShapeMapping};
+use sqry_core::graph::unified::storage::shape::SignatureShape;
 use sqry_core::graph::{
     GraphBuilder, GraphResult, Language,
     node::{Position, Span},
@@ -144,6 +147,53 @@ impl GraphBuilder for HtmlGraphBuilder {
     fn language(&self) -> Language {
         Language::Html
     }
+
+    fn shape_mapping(&self) -> Option<&dyn ShapeMapping> {
+        Some(html_shape_mapping())
+    }
+}
+
+/// Per-language [`ShapeMapping`] for HTML (tree-sitter-html).
+///
+/// HTML is declarative markup: elements, attributes, and text. The plugin does
+/// mint `Function` nodes for inline event-handler call targets (`onclick="f()"`),
+/// but those are call stubs with no body span, so the shape walker (which only
+/// fingerprints Function/Method nodes with a valid body span) never picks them
+/// up. The impl is present (AC-1: no plugin omitted) and honestly empty; the
+/// coverage test asserts both facts explicitly.
+pub struct HtmlShapeMapping {
+    cf_by_kind_id: Vec<Option<CfBucket>>,
+}
+
+impl HtmlShapeMapping {
+    fn build() -> Self {
+        let lang: tree_sitter::Language = tree_sitter_html::LANGUAGE.into();
+        let count = lang.node_kind_count();
+        // HTML markup has no control-flow constructs; an all-`None` table is the
+        // structural witness that the language is declarative.
+        let cf_by_kind_id = vec![None; count];
+        Self { cf_by_kind_id }
+    }
+}
+
+impl ShapeMapping for HtmlShapeMapping {
+    fn cf_bucket(&self, ts_node_kind_id: u16) -> Option<CfBucket> {
+        self.cf_by_kind_id
+            .get(ts_node_kind_id as usize)
+            .copied()
+            .flatten()
+    }
+
+    fn signature_shape(&self, _fn_node: Node, _src: &[u8]) -> SignatureShape {
+        SignatureShape::default()
+    }
+}
+
+/// The process-wide HTML shape mapping, built once on first use.
+#[must_use]
+pub fn html_shape_mapping() -> &'static HtmlShapeMapping {
+    static MAPPING: OnceLock<HtmlShapeMapping> = OnceLock::new();
+    MAPPING.get_or_init(HtmlShapeMapping::build)
 }
 
 // ============================================================================
@@ -1463,3 +1513,73 @@ mod tests {
     }
 }
 // Nested conditionals retained for clarity when parsing attribute shapes
+
+#[cfg(test)]
+mod shape_tests {
+    use super::*;
+    use sqry_core::graph::unified::build::has_valid_body_span;
+    use sqry_core::graph::unified::node::kind::NodeKind;
+    use std::path::PathBuf;
+    use tree_sitter::Parser;
+
+    const SAMPLE: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../test-fixtures/shape/data/sample.html"
+    ));
+
+    fn parse(src: &str) -> Tree {
+        let mut parser = Parser::new();
+        parser
+            .set_language(&tree_sitter_html::LANGUAGE.into())
+            .expect("load html grammar");
+        parser.parse(src, None).expect("parse")
+    }
+
+    #[test]
+    fn shape_mapping_is_present_and_declarative_empty() {
+        let mapping = html_shape_mapping();
+        let mapped = mapping.cf_by_kind_id.iter().filter(|s| s.is_some()).count();
+        assert_eq!(
+            mapped, 0,
+            "HTML is declarative markup: no grammar kind maps to a control-flow bucket"
+        );
+
+        let lang: tree_sitter::Language = tree_sitter_html::LANGUAGE.into();
+        for name in ["element", "start_tag", "attribute", "text"] {
+            let id = lang.id_for_node_kind(name, true);
+            assert_eq!(
+                mapping.cf_bucket(id),
+                None,
+                "{name} must not map to a control-flow bucket"
+            );
+        }
+    }
+
+    #[test]
+    fn no_eligible_function_or_method_nodes() {
+        // HTML mints Function call stubs for inline handlers, but they carry no
+        // body span, so none is eligible for a shape descriptor. Assert that
+        // explicitly rather than relying on an empty histogram.
+        let tree = parse(SAMPLE);
+        let mut staging = StagingGraph::new();
+        let builder = HtmlGraphBuilder;
+        let file = PathBuf::from("sample.html");
+        builder
+            .build_graph(&tree, SAMPLE.as_bytes(), &file, &mut staging)
+            .expect("build html graph");
+
+        let eligible = staging
+            .nodes()
+            .filter(|n| matches!(n.entry.kind, NodeKind::Function | NodeKind::Method))
+            .filter(|n| has_valid_body_span(n.entry))
+            .count();
+        assert_eq!(
+            eligible, 0,
+            "HTML must mint no Function/Method node with a body span"
+        );
+        assert!(
+            staging.node_count() >= 1,
+            "the HTML fixture must still produce declarative nodes"
+        );
+    }
+}

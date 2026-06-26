@@ -6,7 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
-## [20.0.10](https://github.com/verivus-oss/sqry/compare/v20.0.5...v20.0.10) - 2026-06-14
+## [22.0.0](https://github.com/verivus-oss/sqry/compare/v21.0.1...v22.0.0) - 2026-06-25
+
+### Added
+- *(shape)* per-function body-shape descriptor + structural-similar surfaces (V15) ([#426](https://github.com/verivus-oss/sqry/pull/426))## [20.0.10](https://github.com/verivus-oss/sqry/compare/v20.0.5...v20.0.10) - 2026-06-14
 
 ### Changed
 - *(graph)* remove dead ExportMap / pass4_cross plumbing ([#418](https://github.com/verivus-oss/sqry/pull/418))## [20.0.2](https://github.com/verivus-oss/sqry/compare/v20.0.1...v20.0.2) - 2026-06-12

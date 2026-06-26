@@ -1,0 +1,13 @@
+{
+  "name": "shape-fixture",
+  "version": "1.0.0",
+  "nested": {
+    "enabled": true,
+    "retries": 3,
+    "tags": ["alpha", "beta", "gamma"]
+  },
+  "matrix": [
+    { "id": 1, "label": "one" },
+    { "id": 2, "label": "two" }
+  ]
+}

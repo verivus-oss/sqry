@@ -874,6 +874,9 @@ fn validate_predicate(predicate: &Predicate) -> Result<(), BuildError> {
         // Phase β joint-stubs — leaf predicates, no nested PlanNode to validate.
         | Predicate::FrameworkEq(_)
         | Predicate::ResolvedViaEq(_)
+        // Structural similarity (U09) — a leaf predicate carrying a probe symbol
+        // name, no nested PlanNode to validate.
+        | Predicate::ShapeSimilar(_)
         | Predicate::InFile(_)
         | Predicate::InScope(_)
         | Predicate::MatchesName(_)

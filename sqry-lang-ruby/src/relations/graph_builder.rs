@@ -3,9 +3,13 @@ use std::{
     path::Path,
 };
 
+use std::sync::OnceLock;
+
 use sqry_core::graph::unified::build::helper::CalleeKindHint;
+use sqry_core::graph::unified::build::shape::{CfBucket, ShapeMapping};
 use sqry_core::graph::unified::edge::FfiConvention;
 use sqry_core::graph::unified::edge::kind::TypeOfContext;
+use sqry_core::graph::unified::storage::shape::SignatureShape;
 use sqry_core::graph::unified::{GraphBuildHelper, StagingGraph};
 use sqry_core::graph::{GraphBuilder, GraphBuilderError, GraphResult, Language, Position, Span};
 use tree_sitter::{Node, Point, Tree};
@@ -86,6 +90,109 @@ impl GraphBuilder for RubyGraphBuilder {
     fn language(&self) -> Language {
         Language::Ruby
     }
+
+    fn shape_mapping(&self) -> Option<&dyn ShapeMapping> {
+        Some(ruby_shape_mapping())
+    }
+}
+
+/// Per-language [`ShapeMapping`] for Ruby (identifier-blind body-shape feature).
+///
+/// Holds a precomputed `kind_id -> CfBucket` table built once from the
+/// tree-sitter-ruby grammar so the hot shape walk is a single array index per
+/// node. Everything except this mapping is the shared `compute_shape_descriptor`
+/// routine in sqry-core. Ruby keywords like `raise`/`throw` are ordinary method
+/// calls in the grammar (a `call` with an `identifier` head), so they stay in the
+/// `Call` bucket: mapping them to `Throw` would require reading the identifier,
+/// which would break identifier-blindness.
+pub struct RubyShapeMapping {
+    cf_by_kind_id: Vec<Option<CfBucket>>,
+}
+
+impl RubyShapeMapping {
+    fn build() -> Self {
+        let lang: tree_sitter::Language = tree_sitter_ruby::LANGUAGE.into();
+        let count = lang.node_kind_count();
+        let mut cf_by_kind_id = vec![None; count];
+        for (id, slot) in cf_by_kind_id.iter_mut().enumerate() {
+            let Ok(kind_id) = u16::try_from(id) else {
+                break;
+            };
+            if !lang.node_kind_is_named(kind_id) {
+                continue;
+            }
+            if let Some(name) = lang.node_kind_for_id(kind_id) {
+                *slot = cf_bucket_for_ruby_kind(name);
+            }
+        }
+        Self { cf_by_kind_id }
+    }
+}
+
+impl ShapeMapping for RubyShapeMapping {
+    fn cf_bucket(&self, ts_node_kind_id: u16) -> Option<CfBucket> {
+        self.cf_by_kind_id
+            .get(ts_node_kind_id as usize)
+            .copied()
+            .flatten()
+    }
+
+    fn signature_shape(&self, fn_node: Node, _src: &[u8]) -> SignatureShape {
+        let mut shape = SignatureShape::default();
+        if let Some(params) = fn_node.child_by_field_name("parameters") {
+            let mut cursor = params.walk();
+            for child in params.named_children(&mut cursor) {
+                match child.kind() {
+                    "identifier" => {
+                        shape.arity_positional = shape.arity_positional.saturating_add(1);
+                    }
+                    "optional_parameter" => {
+                        shape.arity_positional = shape.arity_positional.saturating_add(1);
+                        shape.has_defaults = true;
+                    }
+                    "keyword_parameter" => {
+                        shape.arity_keyword_only = shape.arity_keyword_only.saturating_add(1);
+                    }
+                    "splat_parameter" | "forward_parameter" => shape.has_varargs = true,
+                    "hash_splat_parameter" => shape.has_kwargs = true,
+                    // block_parameter / destructured_parameter contribute structure
+                    // but are not positional/keyword arity.
+                    _ => {}
+                }
+            }
+        }
+        shape
+    }
+}
+
+/// Map one tree-sitter-ruby node-kind name to its canonical control-flow bucket.
+/// Additive-only against the frozen [`CfBucket`] set.
+fn cf_bucket_for_ruby_kind(name: &str) -> Option<CfBucket> {
+    let bucket = match name {
+        "if" | "elsif" | "else" | "unless" | "if_modifier" | "unless_modifier" | "conditional" => {
+            CfBucket::Branch
+        }
+        "while" | "until" | "for" | "while_modifier" | "until_modifier" => CfBucket::Loop,
+        "case" | "case_match" | "when" | "in" => CfBucket::Match,
+        "begin" => CfBucket::Try,
+        "rescue" | "rescue_modifier" => CfBucket::Catch,
+        "ensure" => CfBucket::Resource,
+        "return" => CfBucket::Return,
+        "yield" => CfBucket::Yield,
+        "break" | "next" | "redo" | "retry" => CfBucket::BreakContinue,
+        "call" | "command_call" | "method_call" => CfBucket::Call,
+        "assignment" | "operator_assignment" => CfBucket::Assign,
+        "do_block" | "block" | "lambda" => CfBucket::Closure,
+        _ => return None,
+    };
+    Some(bucket)
+}
+
+/// The process-wide Ruby shape mapping, built once on first use.
+#[must_use]
+pub fn ruby_shape_mapping() -> &'static RubyShapeMapping {
+    static MAPPING: OnceLock<RubyShapeMapping> = OnceLock::new();
+    MAPPING.get_or_init(RubyShapeMapping::build)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3314,5 +3421,103 @@ mod field_emission_tests {
         let staging = build(src);
         find_node(&staging, "Service::logger", Some(NodeKind::Property))
             .expect("self.attr_accessor command_call must emit Property");
+    }
+}
+
+#[cfg(test)]
+mod shape_tests {
+    //! Coverage for the Ruby [`ShapeMapping`] (body-shape descriptor feature).
+    //! Consumes the hand-written control-flow fixture so the test is load-bearing.
+
+    use super::{cf_bucket_for_ruby_kind, ruby_shape_mapping};
+    use sqry_core::graph::unified::build::shape::{
+        CfBucket, ShapeBudget, ShapeMapping, compute_shape_descriptor,
+    };
+    use tree_sitter::{Node, Parser, Tree};
+
+    const SAMPLE: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../test-fixtures/shape/dynamic/ruby.rb"
+    ));
+
+    fn parse(src: &str) -> Tree {
+        let mut parser = Parser::new();
+        parser
+            .set_language(&tree_sitter_ruby::LANGUAGE.into())
+            .expect("load ruby grammar");
+        parser.parse(src, None).expect("parse ruby")
+    }
+
+    fn first_method<'t>(tree: &'t Tree) -> Node<'t> {
+        let root = tree.root_node();
+        let mut cursor = root.walk();
+        for child in root.named_children(&mut cursor) {
+            if child.kind() == "method" {
+                return child;
+            }
+        }
+        panic!("no method node in ruby fixture");
+    }
+
+    #[test]
+    fn mapping_is_non_empty_and_covers_real_kinds() {
+        let mapping = ruby_shape_mapping();
+        // Direct kind -> bucket checks against the verified grammar names.
+        assert_eq!(cf_bucket_for_ruby_kind("if"), Some(CfBucket::Branch));
+        assert_eq!(cf_bucket_for_ruby_kind("while"), Some(CfBucket::Loop));
+        assert_eq!(cf_bucket_for_ruby_kind("case"), Some(CfBucket::Match));
+        assert_eq!(cf_bucket_for_ruby_kind("begin"), Some(CfBucket::Try));
+        assert_eq!(cf_bucket_for_ruby_kind("rescue"), Some(CfBucket::Catch));
+        assert_eq!(cf_bucket_for_ruby_kind("ensure"), Some(CfBucket::Resource));
+        assert_eq!(cf_bucket_for_ruby_kind("return"), Some(CfBucket::Return));
+        assert_eq!(cf_bucket_for_ruby_kind("yield"), Some(CfBucket::Yield));
+        assert_eq!(
+            cf_bucket_for_ruby_kind("break"),
+            Some(CfBucket::BreakContinue)
+        );
+        assert_eq!(cf_bucket_for_ruby_kind("call"), Some(CfBucket::Call));
+        assert_eq!(cf_bucket_for_ruby_kind("do_block"), Some(CfBucket::Closure));
+        assert_eq!(cf_bucket_for_ruby_kind("not_a_real_kind"), None);
+
+        // The resolved kind-id table must have at least one populated bucket.
+        let lang: tree_sitter::Language = tree_sitter_ruby::LANGUAGE.into();
+        let if_id = (0..lang.node_kind_count())
+            .map(|i| i as u16)
+            .find(|&i| lang.node_kind_is_named(i) && lang.node_kind_for_id(i) == Some("if"))
+            .expect("grammar exposes named `if`");
+        assert_eq!(mapping.cf_bucket(if_id), Some(CfBucket::Branch));
+    }
+
+    #[test]
+    fn descriptor_covers_fixture_control_flow() {
+        let tree = parse(SAMPLE);
+        let func = first_method(&tree);
+        let descriptor = compute_shape_descriptor(
+            func,
+            SAMPLE.as_bytes(),
+            ruby_shape_mapping(),
+            &ShapeBudget::default(),
+        );
+        let hist = descriptor.cf_histogram;
+        assert!(hist[CfBucket::Branch.index()] >= 1, "branch (if/elsif)");
+        assert!(hist[CfBucket::Loop.index()] >= 1, "loop (while/for)");
+        assert!(hist[CfBucket::Match.index()] >= 1, "match (case/when)");
+        assert!(hist[CfBucket::Try.index()] >= 1, "try (begin)");
+        assert!(hist[CfBucket::Catch.index()] >= 1, "catch (rescue)");
+        assert!(hist[CfBucket::Call.index()] >= 1, "call");
+        assert!(hist[CfBucket::Closure.index()] >= 1, "closure (do_block)");
+        assert!(hist[CfBucket::BreakContinue.index()] >= 1, "break/next");
+    }
+
+    #[test]
+    fn signature_shape_reads_arity_and_kwargs() {
+        let tree = parse(SAMPLE);
+        let func = first_method(&tree);
+        let shape = ruby_shape_mapping().signature_shape(func, SAMPLE.as_bytes());
+        // `def classify(value, label: "n/a", *rest, **opts)`.
+        assert_eq!(shape.arity_positional, 1, "one positional: value");
+        assert_eq!(shape.arity_keyword_only, 1, "one keyword: label");
+        assert!(shape.has_varargs, "*rest");
+        assert!(shape.has_kwargs, "**opts");
     }
 }

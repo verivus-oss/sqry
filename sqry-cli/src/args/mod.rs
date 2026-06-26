@@ -1694,6 +1694,40 @@ pub enum Command {
         limit: usize,
     },
 
+    /// Find functions structurally similar to a reference function
+    ///
+    /// Matches on the identifier-blind body-shape descriptor (control-flow
+    /// shape + MinHash), so it finds rename-and-relocate twins that fuzzy name
+    /// matching misses. Reports two numbers per match: whether the structural
+    /// shape_hash is byte-identical, and the approximate MinHash similarity.
+    ///
+    /// Examples:
+    ///   sqry shape-match parse_config            # Structural neighbours of parse_config
+    ///   sqry shape-match --threshold 0.8 handler # 80% MinHash floor
+    ///   sqry shape-match --file src/a.rs run      # Disambiguate by file
+    #[command(alias = "shape", display_order = 27, verbatim_doc_comment)]
+    ShapeMatch {
+        /// Reference function/method name (simple or qualified).
+        #[arg(help_heading = headings::SEARCH_INPUT, display_order = 10)]
+        symbol: String,
+
+        /// Restrict the probe to a symbol in this file (disambiguates overloads).
+        #[arg(long, help_heading = headings::SEARCH_INPUT, display_order = 20)]
+        file: Option<String>,
+
+        /// Search path (defaults to current directory).
+        #[arg(long, help_heading = headings::SEARCH_INPUT, display_order = 30)]
+        path: Option<String>,
+
+        /// Minimum MinHash similarity floor (0.0 to 1.0, default: 0.6).
+        #[arg(long, short = 't', default_value = "0.6", help_heading = headings::GRAPH_FILTERING, display_order = 10)]
+        threshold: f64,
+
+        /// Maximum results to return (default: 20).
+        #[arg(long, short = 'l', default_value = "20", help_heading = headings::GRAPH_FILTERING, display_order = 20)]
+        limit: usize,
+    },
+
     /// Extract a focused subgraph around seed symbols
     ///
     /// Collects nodes and edges within a specified depth from seed symbols,
@@ -1822,6 +1856,13 @@ pub enum Command {
         /// Example: --change-type added,modified
         #[arg(long, short = 'c', help_heading = headings::GRAPH_FILTERING, display_order = 30)]
         change_type: Option<String>,
+
+        /// Structural lineage mode: pair functions across the two refs by their
+        /// identifier-blind body-shape descriptor (exact `shape_hash` first, then
+        /// MinHash near-matches) instead of by name. Surfaces rename+relocate
+        /// twins that name-based diff reports as add/remove pairs.
+        #[arg(long, help_heading = headings::GRAPH_FILTERING, display_order = 40)]
+        structural: bool,
     },
 
     /// Hierarchical semantic search (RAG-optimized)

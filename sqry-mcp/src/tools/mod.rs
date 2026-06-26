@@ -82,6 +82,7 @@ pub use validation::{
     SemanticDiffFilters,
     SemanticSearchArgs,
     ShowDependenciesArgs,
+    StructuralSimilarArgs,
     SubgraphArgs,
     TracePathArgs,
     UnusedScope,

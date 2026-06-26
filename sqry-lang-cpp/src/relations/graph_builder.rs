@@ -16,11 +16,14 @@
 //! 4. **Pass 4**: Extract FFI declarations → Create FFI function nodes
 
 use sqry_core::graph::unified::build::helper::CalleeKindHint;
+use sqry_core::graph::unified::build::shape::{CfBucket, ShapeMapping};
+use sqry_core::graph::unified::storage::shape::SignatureShape;
 use sqry_core::graph::unified::{FfiConvention, GraphBuildHelper, StagingGraph};
 use sqry_core::graph::{GraphBuilder, GraphBuilderError, GraphResult, Language, Position, Span};
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
+    sync::OnceLock,
     time::{Duration, Instant},
 };
 use tree_sitter::{Node, Tree};
@@ -438,6 +441,10 @@ impl GraphBuilder for CppGraphBuilder {
         Language::Cpp
     }
 
+    fn shape_mapping(&self) -> Option<&dyn ShapeMapping> {
+        Some(cpp_shape_mapping())
+    }
+
     fn build_graph(
         &self,
         tree: &Tree,
@@ -448,6 +455,127 @@ impl GraphBuilder for CppGraphBuilder {
         let mut budget = BuildBudget::new(file);
         self.build_graph_with_budget(tree, content, file, staging, &mut budget)
     }
+}
+
+/// Per-language [`ShapeMapping`] for C++: the reference partner of Python for
+/// AC-6 (a structurally equivalent C++ and Python function must produce
+/// comparable descriptors under the one bucket schema).
+///
+/// Holds a precomputed `kind_id -> CfBucket` table built once from the
+/// tree-sitter-cpp grammar and shared process-wide via [`cpp_shape_mapping`].
+/// Everything except this mapping is the one shared `compute_shape_descriptor`
+/// routine.
+pub struct CppShapeMapping {
+    cf_by_kind_id: Vec<Option<CfBucket>>,
+}
+
+impl CppShapeMapping {
+    /// Build the `kind_id -> CfBucket` table from the tree-sitter-cpp grammar.
+    fn build() -> Self {
+        let lang: tree_sitter::Language = tree_sitter_cpp::LANGUAGE.into();
+        let count = lang.node_kind_count();
+        let mut cf_by_kind_id = vec![None; count];
+        for (id, slot) in cf_by_kind_id.iter_mut().enumerate() {
+            let Ok(kind_id) = u16::try_from(id) else {
+                break;
+            };
+            if !lang.node_kind_is_named(kind_id) {
+                continue;
+            }
+            if let Some(name) = lang.node_kind_for_id(kind_id) {
+                *slot = cf_bucket_for_cpp_kind(name);
+            }
+        }
+        Self { cf_by_kind_id }
+    }
+}
+
+impl ShapeMapping for CppShapeMapping {
+    fn cf_bucket(&self, ts_node_kind_id: u16) -> Option<CfBucket> {
+        self.cf_by_kind_id
+            .get(ts_node_kind_id as usize)
+            .copied()
+            .flatten()
+    }
+
+    fn signature_shape(&self, fn_node: Node, _src: &[u8]) -> SignatureShape {
+        let mut shape = SignatureShape::default();
+        // A C++ function nests its parameter list inside the declarator
+        // (`function_definition.declarator -> function_declarator -> parameter_list`),
+        // so there is no direct `parameters` field to read.
+        if let Some(params) = cpp_parameter_list(fn_node) {
+            let mut cursor = params.walk();
+            for child in params.named_children(&mut cursor) {
+                match child.kind() {
+                    "parameter_declaration" => {
+                        shape.arity_positional = shape.arity_positional.saturating_add(1);
+                    }
+                    // `int x = 0` default argument.
+                    "optional_parameter_declaration" => {
+                        shape.arity_positional = shape.arity_positional.saturating_add(1);
+                        shape.has_defaults = true;
+                    }
+                    // C-style `...` ellipsis or `Args... args` parameter pack.
+                    "variadic_parameter_declaration" | "variadic_declarator" => {
+                        shape.has_varargs = true;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        // The function declares a return type whenever the node carries a `type`
+        // field (`auto`/`int`/...); constructors and destructors do not.
+        shape.has_return_annotation = fn_node.child_by_field_name("type").is_some();
+        shape
+    }
+}
+
+/// Descend a C++ function node to its `parameter_list`, threading through the
+/// `declarator` field (`function_declarator` for a plain definition, possibly
+/// wrapped in pointer/reference declarators).
+fn cpp_parameter_list(fn_node: Node) -> Option<Node> {
+    let mut declarator = fn_node.child_by_field_name("declarator")?;
+    // Unwrap pointer/reference declarator layers until we reach the function
+    // declarator that owns the parameter list.
+    for _ in 0..8 {
+        if declarator.kind() == "function_declarator" {
+            return declarator.child_by_field_name("parameters");
+        }
+        match declarator.child_by_field_name("declarator") {
+            Some(inner) => declarator = inner,
+            None => break,
+        }
+    }
+    None
+}
+
+/// Map one tree-sitter-cpp grammar node-kind name to its canonical control-flow
+/// bucket. Additive-only; the bucket set is frozen.
+fn cf_bucket_for_cpp_kind(name: &str) -> Option<CfBucket> {
+    let bucket = match name {
+        "if_statement" | "conditional_expression" => CfBucket::Branch,
+        "for_statement" | "for_range_loop" | "while_statement" | "do_statement" => CfBucket::Loop,
+        "switch_statement" | "case_statement" => CfBucket::Match,
+        "try_statement" => CfBucket::Try,
+        "catch_clause" => CfBucket::Catch,
+        "throw_statement" | "throw_expression" => CfBucket::Throw,
+        "return_statement" | "co_return_statement" => CfBucket::Return,
+        "co_yield_expression" => CfBucket::Yield,
+        "co_await_expression" => CfBucket::Await,
+        "break_statement" | "continue_statement" | "goto_statement" => CfBucket::BreakContinue,
+        "call_expression" => CfBucket::Call,
+        "assignment_expression" | "init_declarator" | "declaration" => CfBucket::Assign,
+        "lambda_expression" => CfBucket::Closure,
+        _ => return None,
+    };
+    Some(bucket)
+}
+
+/// The process-wide C++ shape mapping, built once on first use.
+#[must_use]
+pub fn cpp_shape_mapping() -> &'static CppShapeMapping {
+    static MAPPING: OnceLock<CppShapeMapping> = OnceLock::new();
+    MAPPING.get_or_init(CppShapeMapping::build)
 }
 
 // ================================
@@ -3919,5 +4047,154 @@ namespace demo {
         let staging = build_cpp(source);
 
         assert_has_node_with_kind_exact(&staging, "demo::Service.counter", NodeKind::Property);
+    }
+}
+
+#[cfg(test)]
+mod shape_tests {
+    use super::{cf_bucket_for_cpp_kind, cpp_shape_mapping};
+    use sqry_core::graph::unified::build::shape::{
+        CfBucket, ShapeBudget, ShapeMapping, compute_shape_descriptor,
+    };
+
+    const SAMPLE: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../test-fixtures/shape/reference/sample.cpp"
+    ));
+
+    fn parse(src: &str) -> tree_sitter::Tree {
+        let lang: tree_sitter::Language = tree_sitter_cpp::LANGUAGE.into();
+        let mut p = tree_sitter::Parser::new();
+        p.set_language(&lang).expect("load cpp grammar");
+        p.parse(src, None).expect("parse")
+    }
+
+    /// Resolve the function_definition whose declarator names the given function.
+    fn function_named<'t>(tree: &'t tree_sitter::Tree, name: &str) -> tree_sitter::Node<'t> {
+        let root = tree.root_node();
+        let mut stack = vec![root];
+        while let Some(node) = stack.pop() {
+            if node.kind() == "function_definition"
+                && function_def_name(node).as_deref() == Some(name)
+            {
+                return node;
+            }
+            let mut c = node.walk();
+            for ch in node.children(&mut c) {
+                stack.push(ch);
+            }
+        }
+        panic!("no function_definition named {name}");
+    }
+
+    /// Pull the declared identifier out of a C++ function_definition declarator.
+    fn function_def_name(node: tree_sitter::Node) -> Option<String> {
+        let mut decl = node.child_by_field_name("declarator")?;
+        for _ in 0..8 {
+            if decl.kind() == "function_declarator" {
+                let inner = decl.child_by_field_name("declarator")?;
+                return inner.utf8_text(SAMPLE.as_bytes()).ok().map(str::to_owned);
+            }
+            decl = decl.child_by_field_name("declarator")?;
+        }
+        None
+    }
+
+    #[test]
+    fn cf_table_is_non_empty() {
+        let mapping = cpp_shape_mapping();
+        let lang: tree_sitter::Language = tree_sitter_cpp::LANGUAGE.into();
+        let mut covered = 0;
+        for id in 0..lang.node_kind_count() {
+            if mapping.cf_bucket(id as u16).is_some() {
+                covered += 1;
+            }
+        }
+        assert!(
+            covered >= 10,
+            "expected many C++ CF kinds mapped, got {covered}"
+        );
+    }
+
+    #[test]
+    fn histogram_covers_real_control_flow() {
+        let tree = parse(SAMPLE);
+        let func = function_named(&tree, "classify");
+        let d = compute_shape_descriptor(
+            func,
+            SAMPLE.as_bytes(),
+            cpp_shape_mapping(),
+            &ShapeBudget::default(),
+        );
+        assert!(!d.is_unhashable());
+        for bucket in [
+            CfBucket::Branch,
+            CfBucket::Loop,
+            CfBucket::Match,
+            CfBucket::Try,
+            CfBucket::Catch,
+            CfBucket::Throw,
+            CfBucket::Return,
+            CfBucket::BreakContinue,
+            CfBucket::Call,
+            CfBucket::Assign,
+        ] {
+            assert!(
+                d.cf_histogram[bucket.index()] >= 1,
+                "classify must exercise {bucket:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn lambda_body_covers_closure() {
+        let tree = parse(SAMPLE);
+        let func = function_named(&tree, "adder");
+        let d = compute_shape_descriptor(
+            func,
+            SAMPLE.as_bytes(),
+            cpp_shape_mapping(),
+            &ShapeBudget::default(),
+        );
+        assert!(
+            d.cf_histogram[CfBucket::Closure.index()] >= 1,
+            "lambda closure"
+        );
+    }
+
+    #[test]
+    fn signature_shape_reads_arity_defaults_return() {
+        let tree = parse(SAMPLE);
+        let func = function_named(&tree, "classify");
+        let mapping = cpp_shape_mapping();
+        let shape = mapping.signature_shape(func, SAMPLE.as_bytes());
+        // int classify(const std::vector<int> &values, int threshold = 0)
+        assert_eq!(shape.arity_positional, 2);
+        assert!(shape.has_defaults, "threshold = 0");
+        assert!(shape.has_return_annotation, "int return type");
+    }
+
+    /// AC-6 anchor: structurally equivalent classify() in C++ and Python share a
+    /// comparable cf histogram shape under the one bucket schema.
+    #[test]
+    fn ac6_cpp_classify_histogram_well_formed() {
+        let tree = parse(SAMPLE);
+        let func = function_named(&tree, "classify");
+        let d = compute_shape_descriptor(
+            func,
+            SAMPLE.as_bytes(),
+            cpp_shape_mapping(),
+            &ShapeBudget::default(),
+        );
+        // The branch/loop/return/call core is the cross-language comparison axis.
+        assert_eq!(d.cf_histogram[CfBucket::Branch.index()], 2, "two if levels");
+        assert!(d.cf_histogram[CfBucket::Loop.index()] >= 2, "for + while");
+        assert!(d.cf_histogram[CfBucket::Return.index()] >= 2, "two returns");
+    }
+
+    #[test]
+    fn unknown_kind_maps_to_none() {
+        assert!(cf_bucket_for_cpp_kind("translation_unit").is_none());
+        assert!(cf_bucket_for_cpp_kind("identifier").is_none());
     }
 }

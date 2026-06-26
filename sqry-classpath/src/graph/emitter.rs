@@ -305,9 +305,25 @@ pub fn emit_into_code_graph(
                 (remapped_id, entry.clone())
             })
             .collect();
+        // Classpath/JVM stub nodes never carry a shape descriptor (those are
+        // computed only for tree-sitter function/method bodies during language
+        // staging, never on the bytecode-stub path), so this map is empty in
+        // practice. Remap and carry it through anyway so the rebuild below can
+        // never silently strand a descriptor if that ever changes.
+        let remapped_shape_descriptors: Vec<_> = metadata
+            .shape_descriptors()
+            .iter()
+            .map(|(node_id, descriptor)| {
+                let remapped_id = id_mapping.get(node_id).copied().unwrap_or(*node_id);
+                (remapped_id, descriptor.clone())
+            })
+            .collect();
         metadata = NodeMetadataStore::new();
         for (node_id, entry) in remapped_entries {
             metadata.insert_entry(node_id, entry);
+        }
+        for (node_id, descriptor) in remapped_shape_descriptors {
+            metadata.insert_shape_descriptor(node_id, descriptor);
         }
     }
 

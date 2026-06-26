@@ -28,6 +28,24 @@ pub struct QueryDbConfig {
     /// Default: 1 MiB (`1_048_576` bytes = `1 << 20`).
     pub max_entry_size_bytes: usize,
 
+    /// LSH band count for the structural-neighbour index (`StructuralNeighborsQuery`).
+    ///
+    /// The MinHash signature ([`MINHASH_LANES`](sqry_core::graph::unified::storage::shape::MINHASH_LANES)
+    /// = 64 lanes) is split into `structural_lsh_bands` bands of
+    /// `structural_lsh_rows` lanes each; two functions are LSH candidates when
+    /// they collide in at least one band. More bands (fewer rows) raises recall
+    /// at the cost of more candidates; fewer bands (more rows) raises precision.
+    /// `bands * rows` must not exceed the lane count or the pair is rejected and
+    /// the default `16 x 4` banding is used. Retuning the lane count is a
+    /// `SHAPE_SCHEMA_VERSION` bump; retuning bands/rows is NOT (it only changes
+    /// the in-memory/derived-cache index, which is SHA-gated and recomputed).
+    ///
+    /// Default: 16.
+    pub structural_lsh_bands: usize,
+    /// LSH rows-per-band for the structural-neighbour index. Default: 4
+    /// (`16 x 4 = 64` = the full MinHash lane count).
+    pub structural_lsh_rows: usize,
+
     /// Test-only knob: disables planner fusion. Default: `false` (fusion
     /// enabled).
     ///
@@ -69,6 +87,8 @@ impl Default for QueryDbConfig {
             derived_persistence_filename: "derived.sqry".to_owned(),
             enable_background_compaction: true,
             max_entry_size_bytes: 1 << 20, // 1 MiB
+            structural_lsh_bands: 16,
+            structural_lsh_rows: 4,
             #[cfg(any(test, feature = "baseline"))]
             fusion_disabled: false,
         }

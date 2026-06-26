@@ -16,11 +16,12 @@ use sqry_core::graph::unified::{FileScope, ResolutionMode, SymbolQuery, SymbolRe
 use sqry_core::search::matcher::{FuzzyMatcher, MatchConfig};
 
 use crate::engine::{canonicalize_in_workspace, engine_for_workspace};
-use crate::tools::{SearchSimilarArgs, SemanticSearchArgs};
+use crate::tools::{SearchSimilarArgs, SemanticSearchArgs, StructuralSimilarArgs};
 
 use crate::execution::location::node_location_for_reporting_snapshot;
 use crate::execution::types::{
-    FindSimilarData, SemanticSearchData, SimilarSymbolData, ToolExecution,
+    FindSimilarData, SemanticSearchData, SimilarSymbolData, StructuralNeighborData,
+    StructuralSimilarData, ToolExecution,
 };
 use crate::execution::utils::{duration_to_ms, paginate};
 
@@ -347,6 +348,22 @@ pub(crate) mod inner {
             workspace_path: crate::execution::symbol_utils::path_to_forward_slash(workspace_root),
         })
     }
+
+    /// Daemon/SqryServer-shared body for `structural_similar` (U07): acquires the
+    /// snapshot from the workspace context and delegates to the shared core, so
+    /// the daemon and standalone transports are behaviourally identical.
+    ///
+    /// # Errors
+    /// Returns an error if a supplied `file_path` escapes the workspace or the
+    /// probe symbol has no body-shape descriptor.
+    pub(crate) fn execute_structural_similar(
+        ctx: &WorkspaceContext,
+        args: &super::StructuralSimilarArgs,
+        start: Instant,
+    ) -> Result<ToolExecution<super::StructuralSimilarData>> {
+        let snapshot = Arc::new(ctx.graph.snapshot());
+        super::structural_similar_from_snapshot(&snapshot, &ctx.workspace_root, args, start)
+    }
 }
 
 /// Find the reference node for similarity search.
@@ -598,6 +615,139 @@ pub fn execute_find_similar(args: &SearchSimilarArgs) -> Result<ToolExecution<Fi
         total: Some(total as u64),
         truncated: Some(truncated_flag),
         candidates_scanned: Some(candidates_scanned),
+        workspace_path: crate::execution::symbol_utils::path_to_forward_slash(workspace_root),
+    })
+}
+
+/// Execute the `structural_similar` tool (body-shape descriptor, U07).
+///
+/// Resolves the probe to a Function/Method carrying a shape descriptor, then
+/// routes through the sqry-db `StructuralNeighborsQuery` LSH index (NOT a
+/// hand-rolled traversal) via the shared `structural_neighbors` helper. Each
+/// match reports the AC-4 two numbers: exact `shape_hash` identity + MinHash
+/// Jaccard. Distinct from the name-based `search_similar`.
+///
+/// # Errors
+/// Returns an error if the workspace/graph cannot be resolved or the probe
+/// symbol has no body-shape descriptor.
+pub fn execute_structural_similar(
+    args: &StructuralSimilarArgs,
+) -> Result<ToolExecution<StructuralSimilarData>> {
+    let start = Instant::now();
+    let workspace_path = resolve_workspace_path(&args.path);
+    let engine = engine_for_workspace(workspace_path.as_ref())?;
+    let workspace_root = engine.workspace_root().to_path_buf();
+    let graph = engine.ensure_graph()?;
+    let snapshot = std::sync::Arc::new(graph.snapshot());
+    structural_similar_from_snapshot(&snapshot, &workspace_root, args, start)
+}
+
+/// Shared core for `structural_similar`, reached by BOTH the standalone rmcp
+/// path ([`execute_structural_similar`]) and the daemon-hosted path
+/// (`daemon_adapter::execute_structural_similar_for_daemon`). Operating on an
+/// already-acquired snapshot keeps the two transports behaviourally identical.
+///
+/// # Errors
+/// Returns an error if a supplied `file_path` escapes the workspace or the probe
+/// symbol has no body-shape descriptor.
+pub(crate) fn structural_similar_from_snapshot(
+    snapshot: &std::sync::Arc<sqry_core::graph::unified::concurrent::GraphSnapshot>,
+    workspace_root: &Path,
+    args: &StructuralSimilarArgs,
+    start: Instant,
+) -> Result<ToolExecution<StructuralSimilarData>> {
+    let want_file = args
+        .file_path
+        .as_ref()
+        .map(|f| canonicalize_in_workspace(f, workspace_root))
+        .transpose()?;
+
+    // Resolve the probe: first Function/Method carrying a descriptor that matches
+    // `symbol_name` (simple or qualified), optionally constrained to `file_path`.
+    let probe_id = {
+        let strings = snapshot.strings();
+        let files = snapshot.files();
+        let descriptors = snapshot.macro_metadata().shape_descriptors();
+        snapshot
+            .iter_nodes()
+            .find(|(node_id, entry)| {
+                if entry.is_unified_loser() || !descriptors.contains_key(node_id) {
+                    return false;
+                }
+                if let Some(wf) = &want_file {
+                    let matches = files
+                        .resolve(entry.file)
+                        .map(|p| workspace_root.join(p.as_ref()))
+                        .is_some_and(|p| &p == wf);
+                    if !matches {
+                        return false;
+                    }
+                }
+                let n = strings.resolve(entry.name);
+                let q = entry.qualified_name.and_then(|id| strings.resolve(id));
+                n.is_some_and(|n| n.as_ref() == args.symbol_name)
+                    || q.is_some_and(|q| q.as_ref() == args.symbol_name)
+            })
+            .map(|(id, _)| id)
+    };
+
+    let Some(probe_id) = probe_id else {
+        return Err(anyhow!(
+            "No function/method named '{}' with a body-shape descriptor was found{}",
+            args.symbol_name,
+            args.file_path
+                .as_ref()
+                .map_or_else(String::new, |f| format!(" in '{f}'"))
+        ));
+    };
+
+    let reference_ref = {
+        let entry = snapshot
+            .nodes()
+            .get(probe_id)
+            .context("probe node vanished from snapshot")?;
+        build_node_ref_from_node(entry, probe_id, snapshot.as_ref(), workspace_root)
+    };
+
+    let db = sqry_db::queries::dispatch::make_query_db(std::sync::Arc::clone(snapshot));
+    #[allow(clippy::cast_possible_truncation)]
+    let floor = args.similarity_threshold as f32;
+    let matches = sqry_db::queries::structural_neighbors(
+        &db,
+        snapshot.as_ref(),
+        probe_id,
+        floor,
+        args.max_results,
+    );
+
+    let results: Vec<StructuralNeighborData> = matches
+        .into_iter()
+        .filter_map(|m| {
+            let entry = snapshot.nodes().get(m.node)?;
+            let symbol = build_node_ref_from_node(entry, m.node, snapshot.as_ref(), workspace_root);
+            Some(StructuralNeighborData {
+                symbol,
+                shape_hash_exact: m.shape_hash_exact,
+                jaccard: f64::from(m.jaccard),
+            })
+        })
+        .collect();
+
+    let total = results.len() as u64;
+    Ok(ToolExecution {
+        data: StructuralSimilarData {
+            reference: reference_ref,
+            results,
+            total,
+        },
+        used_index: false,
+        used_graph: true,
+        graph_metadata: None,
+        execution_ms: duration_to_ms(start.elapsed()),
+        next_page_token: None,
+        total: Some(total),
+        truncated: Some(false),
+        candidates_scanned: None,
         workspace_path: crate::execution::symbol_utils::path_to_forward_slash(workspace_root),
     })
 }

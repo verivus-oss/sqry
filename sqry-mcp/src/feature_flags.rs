@@ -32,6 +32,11 @@ pub struct FeatureFlags {
     /// Environment variable: `SQRY_MCP_ENABLE_DEPENDENCY_IMPACT`
     /// Default: true
     pub is_dependency_impact_enabled: bool,
+
+    /// Whether the `structural_similar` tool is enabled (body-shape descriptor).
+    /// Environment variable: `SQRY_MCP_ENABLE_STRUCTURAL_SIMILAR`
+    /// Default: true
+    pub is_structural_similar_enabled: bool,
 }
 
 impl Default for FeatureFlags {
@@ -44,6 +49,7 @@ impl Default for FeatureFlags {
             is_cross_language_enabled: true,
             is_semantic_diff_enabled: true,
             is_dependency_impact_enabled: true,
+            is_structural_similar_enabled: true,
         }
     }
 }
@@ -57,6 +63,7 @@ impl FeatureFlags {
             is_cross_language_enabled: env_flag("SQRY_MCP_ENABLE_CROSS_LANGUAGE", true),
             is_semantic_diff_enabled: env_flag("SQRY_MCP_ENABLE_SEMANTIC_DIFF", true),
             is_dependency_impact_enabled: env_flag("SQRY_MCP_ENABLE_DEPENDENCY_IMPACT", true),
+            is_structural_similar_enabled: env_flag("SQRY_MCP_ENABLE_STRUCTURAL_SIMILAR", true),
         }
     }
 
@@ -68,6 +75,7 @@ impl FeatureFlags {
             "cross_language_edges" => self.is_cross_language_enabled,
             "semantic_diff" => self.is_semantic_diff_enabled,
             "dependency_impact" => self.is_dependency_impact_enabled,
+            "structural_similar" => self.is_structural_similar_enabled,
             // Core tools always enabled
             "semantic_search"
             | "hierarchical_search"

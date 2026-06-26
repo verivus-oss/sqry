@@ -20,8 +20,8 @@ use crate::tools::params::{
     IsNodeInCycleParams, ListFilesParams, ListSymbolsParams, PaginationParams, PatternSearchParams,
     RebuildIndexParams, RelationQueryParams, RelationTypeParam, SearchFiltersParams,
     SearchSimilarParams, SemanticDiffParams, SemanticSearchParams, ShowDependenciesParams,
-    SqryQueryParams, SubgraphParams, TracePathParams, UnusedScopeParam, VisibilityParam,
-    WorkspaceStatusParams,
+    SqryQueryParams, StructuralSimilarParams, SubgraphParams, TracePathParams, UnusedScopeParam,
+    VisibilityParam, WorkspaceStatusParams,
 };
 use crate::workspace_session::{self, WorkspaceSessionRegistry};
 use rmcp::{
@@ -811,6 +811,29 @@ impl SqryServer {
         let result = self
             .execute_tool_for_request("search_similar", &params, &context, move |_cancel| {
                 execution::execute_find_similar(&args)
+            })
+            .await?;
+
+        Ok(Self::success_result(&result))
+    }
+
+    /// Find functions structurally similar to a reference function via the
+    /// identifier-blind body-shape descriptor (control-flow shape + MinHash).
+    #[tool(
+        description = "Find functions structurally similar to a reference function via the identifier-blind body-shape descriptor (control-flow shape + MinHash); reports exact shape_hash identity plus approximate Jaccard. Distinct from name-based search_similar.",
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
+    async fn structural_similar(
+        &self,
+        Parameters(params): Parameters<StructuralSimilarParams>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        self.ensure_tool_enabled("structural_similar")?;
+
+        let args = convert_structural_similar_params(params.clone()).map_err(rpc_error_to_mcp)?;
+        let result = self
+            .execute_tool_for_request("structural_similar", &params, &context, move |_cancel| {
+                execution::execute_structural_similar(&args)
             })
             .await?;
 
@@ -1986,6 +2009,19 @@ fn convert_search_similar_params(
         similarity_threshold: params.similarity_threshold,
         max_results,
         pagination,
+    })
+}
+
+fn convert_structural_similar_params(
+    params: StructuralSimilarParams,
+) -> Result<crate::tools::StructuralSimilarArgs, RpcError> {
+    let max_results = validate_max_results(params.max_results, 200)?;
+    Ok(crate::tools::StructuralSimilarArgs {
+        path: params.path,
+        file_path: params.file_path,
+        symbol_name: params.symbol_name,
+        similarity_threshold: params.similarity_threshold,
+        max_results,
     })
 }
 

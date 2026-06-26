@@ -225,7 +225,10 @@ impl<'a> GraphBuildHelper<'a> {
     /// Nodes that already have a hash are skipped, so the later whole-file
     /// call in the indexing entrypoint is harmless.
     pub fn attach_body_hashes(&mut self, content: &[u8]) {
-        self.staging.attach_body_hashes(content);
+        // Per-block helper (Vue/Svelte embedded scripts): body hashes only. Shape
+        // descriptors for embedded-script blocks are a later concern; the whole-file
+        // index seam in the entrypoint owns shape wiring.
+        self.staging.attach_body_hashes(content, None);
     }
 
     /// Intern a string and get a local `StringId`.

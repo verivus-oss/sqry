@@ -84,14 +84,14 @@ async fn daemon_tools_list_exactly_15_names_matches_daemon_supported_tool_names(
     assert_eq!(
         got_names, expected_names,
         "daemon tools/list must return exactly DAEMON_SUPPORTED_TOOL_NAMES \
-         (15 tools; the natural-language sqry_ask tool was removed). \
+         (16 tools: 15 + body-shape structural_similar, U07). \
          Got {got_names:?}, expected {expected_names:?}"
     );
     assert_eq!(
         list_result.tools.len(),
-        15,
-        "tools list length must be exactly 15 under default feature flags \
-         (the natural-language sqry_ask tool was removed)"
+        16,
+        "tools list length must be exactly 16 under default feature flags \
+         (15 + body-shape structural_similar, U07)"
     );
 
     // Clean up: cancel the rmcp client and stop the server.

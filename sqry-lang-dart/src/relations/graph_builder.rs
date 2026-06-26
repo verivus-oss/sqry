@@ -10,13 +10,16 @@
 //! - Async call detection
 
 use sqry_core::graph::unified::build::helper::CalleeKindHint;
+use sqry_core::graph::unified::build::shape::{CfBucket, ShapeMapping};
 use sqry_core::graph::unified::edge::kind::TypeOfContext;
 use sqry_core::graph::unified::node::NodeKind;
+use sqry_core::graph::unified::storage::shape::SignatureShape;
 use sqry_core::graph::{
     GraphBuilder, GraphResult, Language, Position, Span,
     unified::{GraphBuildHelper, StagingGraph},
 };
 use std::path::Path;
+use std::sync::OnceLock;
 use tree_sitter::{Node, Tree};
 
 use crate::relations::type_extractor::{
@@ -106,6 +109,188 @@ impl GraphBuilder for DartGraphBuilder {
     fn language(&self) -> Language {
         Language::Dart
     }
+
+    fn shape_mapping(&self) -> Option<&dyn ShapeMapping> {
+        Some(dart_shape_mapping())
+    }
+}
+
+/// Per-language [`ShapeMapping`] for Dart: a precomputed `kind_id -> CfBucket`
+/// table over the tree-sitter-dart grammar, shared process-wide via
+/// [`dart_shape_mapping`]. Mirrors the C reference impl.
+pub struct DartShapeMapping {
+    cf_by_kind_id: Vec<Option<CfBucket>>,
+}
+
+impl DartShapeMapping {
+    fn build() -> Self {
+        let lang: tree_sitter::Language = tree_sitter_dart::language();
+        let count = lang.node_kind_count();
+        let mut cf_by_kind_id = vec![None; count];
+        for (id, slot) in cf_by_kind_id.iter_mut().enumerate() {
+            let Ok(kind_id) = u16::try_from(id) else {
+                break;
+            };
+            if !lang.node_kind_is_named(kind_id) {
+                continue;
+            }
+            if let Some(name) = lang.node_kind_for_id(kind_id) {
+                *slot = cf_bucket_for_dart_kind(name);
+            }
+        }
+        Self { cf_by_kind_id }
+    }
+}
+
+impl ShapeMapping for DartShapeMapping {
+    fn cf_bucket(&self, ts_node_kind_id: u16) -> Option<CfBucket> {
+        self.cf_by_kind_id
+            .get(ts_node_kind_id as usize)
+            .copied()
+            .flatten()
+    }
+
+    fn signature_shape(&self, fn_node: Node, _src: &[u8]) -> SignatureShape {
+        let mut shape = SignatureShape::default();
+        // The recorded function span is the declaration wrapper that holds a
+        // `function_signature` plus a `function_body`; the signature carries the
+        // `formal_parameter_list`. Both standalone functions and methods nest the
+        // signature this way, so resolve it structurally rather than by a single
+        // field name.
+        if let Some(params) = dart_formal_parameter_list(fn_node) {
+            let mut cursor = params.walk();
+            for child in params.named_children(&mut cursor) {
+                match child.kind() {
+                    "formal_parameter"
+                    | "constructor_param"
+                    | "super_formal_parameter"
+                    | "initialized_identifier" => {
+                        shape.arity_positional = shape.arity_positional.saturating_add(1);
+                    }
+                    // Named / optional parameter groups carry their own children.
+                    "optional_formal_parameters" => {
+                        let mut inner = child.walk();
+                        for grand in child.named_children(&mut inner) {
+                            if matches!(
+                                grand.kind(),
+                                "formal_parameter" | "constructor_param" | "super_formal_parameter"
+                            ) {
+                                shape.has_defaults = true;
+                                shape.arity_keyword_only =
+                                    shape.arity_keyword_only.saturating_add(1);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        // Dart return types are optional and not a named field on the wrapper; the
+        // signature node exposes them through its leading type children. A
+        // `function_signature` that begins with a type identifier declares a return
+        // annotation, so witness that structurally without reading any name.
+        shape.has_return_annotation = dart_has_return_annotation(fn_node);
+        shape
+    }
+}
+
+/// Locate the `formal_parameter_list` for a Dart function/method node.
+///
+/// The recorded span is a declaration wrapper, so descend to the first
+/// `function_signature` (or `method_signature`) and read its
+/// `formal_parameter_list` child.
+fn dart_formal_parameter_list(fn_node: Node) -> Option<Node> {
+    let signature = if matches!(fn_node.kind(), "function_signature" | "method_signature") {
+        fn_node
+    } else {
+        dart_first_descendant_of_kind(fn_node, &["function_signature", "method_signature"])?
+    };
+    let mut cursor = signature.walk();
+    for child in signature.named_children(&mut cursor) {
+        if child.kind() == "formal_parameter_list" {
+            return Some(child);
+        }
+        // `method_signature` wraps a `function_signature`, which then holds the list.
+        if child.kind() == "function_signature"
+            && let Some(list) = dart_first_descendant_of_kind(child, &["formal_parameter_list"])
+        {
+            return Some(list);
+        }
+    }
+    None
+}
+
+/// Whether the Dart function declares a leading return-type annotation.
+fn dart_has_return_annotation(fn_node: Node) -> bool {
+    let signature = if matches!(fn_node.kind(), "function_signature" | "method_signature") {
+        Some(fn_node)
+    } else {
+        dart_first_descendant_of_kind(fn_node, &["function_signature", "method_signature"])
+    };
+    let Some(signature) = signature else {
+        return false;
+    };
+    let mut cursor = signature.walk();
+    signature.named_children(&mut cursor).any(|child| {
+        matches!(
+            child.kind(),
+            "type_identifier" | "void_type" | "function_type" | "type_arguments"
+        )
+    })
+}
+
+/// First descendant (pre-order) whose kind matches one of `kinds`.
+fn dart_first_descendant_of_kind<'a>(node: Node<'a>, kinds: &[&str]) -> Option<Node<'a>> {
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if kinds.contains(&child.kind()) {
+            return Some(child);
+        }
+        if let Some(found) = dart_first_descendant_of_kind(child, kinds) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+/// Map one tree-sitter-dart grammar node-kind name to its canonical control-flow
+/// bucket. Additive-only against the frozen [`CfBucket`] set.
+fn cf_bucket_for_dart_kind(name: &str) -> Option<CfBucket> {
+    let bucket = match name {
+        "if_statement" | "if_element" | "conditional_expression" | "if_null_expression" => {
+            CfBucket::Branch
+        }
+        "for_statement" | "for_element" | "while_statement" | "do_statement" => CfBucket::Loop,
+        "switch_statement" | "switch_block" | "switch_label" => CfBucket::Match,
+        "try_statement" => CfBucket::Try,
+        "catch_clause" => CfBucket::Catch,
+        "finally_clause" => CfBucket::Resource,
+        "throw_expression" | "throw_expression_without_cascade" => CfBucket::Throw,
+        "return_statement" => CfBucket::Return,
+        "yield_statement" | "yield_each_statement" => CfBucket::Yield,
+        "await_expression" => CfBucket::Await,
+        "break_statement" | "continue_statement" => CfBucket::BreakContinue,
+        // Dart spells ordinary calls as a selector carrying an `arguments` list
+        // (there is no dedicated call node), plus explicit constructor invocations.
+        // Counting the `arguments` node is the reliable call witness.
+        "arguments"
+        | "constructor_invocation"
+        | "explicit_constructor_invocation"
+        | "new_expression" => CfBucket::Call,
+        "assignment_expression"
+        | "assignment_expression_without_cascade"
+        | "local_variable_declaration" => CfBucket::Assign,
+        "lambda_expression" | "function_expression" => CfBucket::Closure,
+        _ => return None,
+    };
+    Some(bucket)
+}
+
+/// The process-wide Dart shape mapping, built once on first use.
+#[must_use]
+pub fn dart_shape_mapping() -> &'static DartShapeMapping {
+    static MAPPING: OnceLock<DartShapeMapping> = OnceLock::new();
+    MAPPING.get_or_init(DartShapeMapping::build)
 }
 
 // ================================
@@ -3434,6 +3619,106 @@ void _privateFunction() {}";
         assert_eq!(
             export_count, 4,
             "Expected 4 Export edges (all public symbols, none private)"
+        );
+    }
+}
+
+#[cfg(test)]
+mod shape_tests {
+    use super::*;
+    use sqry_core::graph::unified::build::shape::{
+        CfBucket, ShapeBudget, compute_shape_descriptor,
+    };
+    use tree_sitter::Parser;
+
+    const SAMPLE: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../test-fixtures/shape/systems/sample.dart"
+    ));
+
+    fn parse(src: &str) -> Tree {
+        let mut parser = Parser::new();
+        parser
+            .set_language(&tree_sitter_dart::language())
+            .expect("load Dart grammar");
+        parser.parse(src, None).expect("parse Dart sample")
+    }
+
+    /// Find the `function_signature` whose declared name matches `name`.
+    fn signature_named<'a>(node: Node<'a>, name: &str, src: &[u8]) -> Option<Node<'a>> {
+        if node.kind() == "function_signature"
+            && let Some(n) = node.child_by_field_name("name")
+            && n.utf8_text(src).ok() == Some(name)
+        {
+            return Some(node);
+        }
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if let Some(found) = signature_named(child, name, src) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    /// Resolve the `classify` function node exactly as the build seam records it:
+    /// the wrapper node spanning the `function_signature` plus its body.
+    fn classify_fn_node(tree: &Tree) -> Node<'_> {
+        let sig = signature_named(tree.root_node(), "classify", SAMPLE.as_bytes())
+            .expect("sample has a `classify` function_signature");
+        // The recorded span is the signature's parent wrapper (signature + body).
+        sig.parent().unwrap_or(sig)
+    }
+
+    #[test]
+    fn dart_mapping_is_non_empty() {
+        let mapping = dart_shape_mapping();
+        let lang: tree_sitter::Language = tree_sitter_dart::language();
+        let count = (0..lang.node_kind_count())
+            .filter_map(|id| u16::try_from(id).ok())
+            .filter(|id| mapping.cf_bucket(*id).is_some())
+            .count();
+        assert!(
+            count > 0,
+            "Dart cf_bucket map should cover real control-flow kinds"
+        );
+    }
+
+    #[test]
+    fn dart_histogram_covers_control_flow() {
+        let tree = parse(SAMPLE);
+        let func = classify_fn_node(&tree);
+        let desc = compute_shape_descriptor(
+            func,
+            SAMPLE.as_bytes(),
+            dart_shape_mapping(),
+            &ShapeBudget::default(),
+        );
+        let h = &desc.cf_histogram;
+        assert!(h[CfBucket::Branch.index()] >= 1, "branch present");
+        assert!(h[CfBucket::Loop.index()] >= 1, "loop present");
+        assert!(h[CfBucket::Match.index()] >= 1, "switch present");
+        assert!(h[CfBucket::Call.index()] >= 1, "call present");
+        assert!(h[CfBucket::Return.index()] >= 1, "return present");
+        assert!(h[CfBucket::Try.index()] >= 1, "try present");
+        assert!(h[CfBucket::Catch.index()] >= 1, "catch present");
+        assert!(h[CfBucket::Throw.index()] >= 1, "throw present");
+        assert!(
+            h[CfBucket::BreakContinue.index()] >= 1,
+            "break/continue present"
+        );
+    }
+
+    #[test]
+    fn dart_signature_shape_reads_params() {
+        let tree = parse(SAMPLE);
+        let func = classify_fn_node(&tree);
+        let shape = dart_shape_mapping().signature_shape(func, SAMPLE.as_bytes());
+        // classify(int n, String label): two positional params.
+        assert_eq!(shape.arity_positional, 2, "two positional params");
+        assert!(
+            shape.has_return_annotation,
+            "classify declares an `int` return type"
         );
     }
 }

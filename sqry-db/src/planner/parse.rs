@@ -249,6 +249,7 @@ impl<'a> Parser<'a> {
                 self.parse_relation_step(builder, &head)
             }
             "references" => self.parse_references_step(builder),
+            "shape" => self.parse_shape_step(builder, start),
             _ => Err(ParseError::UnknownIdent {
                 kind: "step keyword",
                 value: head,
@@ -431,6 +432,25 @@ impl<'a> Parser<'a> {
             let value = self.parse_value()?;
             Ok(builder.filter(Predicate::References(value)))
         }
+    }
+
+    /// `shape~=<symbol>` — body-shape structural similarity (U09). Only the `~=`
+    /// operator is accepted (it reads as "structurally approximately equal to").
+    /// The value is a bare or quoted probe symbol name.
+    fn parse_shape_step(
+        &mut self,
+        builder: QueryBuilder,
+        _start: usize,
+    ) -> Result<QueryBuilder, ParseError> {
+        self.skip_ws();
+        if !self.eat_bytes(b"~=") {
+            // Produce a precise "expected `~=`" error rather than a generic one.
+            self.expect_byte(b'~', "'~=' after 'shape'")?;
+            self.expect_byte(b'=', "'=' to complete '~=' after 'shape'")?;
+        }
+        self.skip_ws();
+        let symbol = self.parse_bare_or_quoted()?;
+        Ok(builder.filter(Predicate::ShapeSimilar(symbol)))
     }
 
     // ------------------------------------------------------------------

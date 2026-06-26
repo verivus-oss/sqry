@@ -108,6 +108,31 @@ async fn relation_query() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn structural_similar() {
+    // WS6 reachability gate (U07): the daemon JSON-RPC method must ROUTE to the
+    // tool dispatcher. Whether the probe resolves to a descriptor-bearing node
+    // depends on the fixture; either a fresh-loaded success envelope or a
+    // -32603 (no descriptor) proves the method is reachable — what must NOT
+    // happen is a -32601 MethodNotFound, which would mean the method gate or
+    // dispatch arm is unwired.
+    let (server, _dir, mut client, path) = fresh_loaded().await;
+    let resp = client
+        .request(
+            "structural_similar",
+            json!({
+                "symbol_name": "main",
+                "path": &path,
+                "similarity_threshold": 0.6,
+                "max_results": 10,
+            }),
+        )
+        .await;
+    assert_method_reachable(&resp);
+    drop(client);
+    server.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn direct_callers() {
     let (server, _dir, mut client, path) = fresh_loaded().await;
     let resp = client

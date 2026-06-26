@@ -56,6 +56,7 @@ pub use tools::{
     execute_semantic_diff,
     execute_semantic_search,
     execute_sqry_query,
+    execute_structural_similar,
     execute_subgraph,
     execute_trace_path,
 };
@@ -67,7 +68,7 @@ pub use tools::{
 #[allow(unused_imports)]
 pub use types::{
     CodeContext, DiffSummary, NodeChange, NodeRefData, PositionData, RangeData, RebuildIndexData,
-    ToolExecution,
+    StructuralNeighborData, StructuralSimilarData, ToolExecution,
 };
 
 // Phase 8b Task 4: surface the per-tool `*_inner` re-exports at

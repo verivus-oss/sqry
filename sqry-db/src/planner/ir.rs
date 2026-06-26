@@ -394,6 +394,21 @@ pub enum Predicate {
     /// variants are passed in.
     ResolvedViaEq(Vec<ResolvedVia>),
 
+    // --- Body-shape-descriptor structural similarity (U09) ---
+    /// `shape~=<symbol>`: filters to nodes that are structural neighbours of the
+    /// named symbol under the identifier-blind body-shape descriptor (U01–U06).
+    ///
+    /// The payload is the probe symbol's name (simple or qualified). At
+    /// evaluation the probe is resolved to a Function/Method `NodeId` carrying a
+    /// `ShapeDescriptor`, the structural-neighbour set is computed once via the
+    /// LSH index ([`StructuralNeighborsQuery`](crate::queries::StructuralNeighborsQuery))
+    /// and memoised, and each candidate is kept iff it is in that set. An unknown
+    /// symbol yields the empty set (the filter matches nothing) rather than an
+    /// error, matching the no-panic contract of the other name-bearing predicates.
+    ///
+    /// Text frontend: `shape~=<symbol>` (e.g. `shape~=parse_config`).
+    ShapeSimilar(String),
+
     // --- Value-bearing relation predicates ---
     /// `callers:<value>`: node's callers match the pattern / subquery.
     Callers(PredicateValue),
@@ -511,6 +526,7 @@ impl Predicate {
             | Predicate::HasCallsitePromiscuous(_)
             | Predicate::FrameworkEq(_)
             | Predicate::ResolvedViaEq(_)
+            | Predicate::ShapeSimilar(_)
             | Predicate::InFile(_)
             | Predicate::InScope(_)
             | Predicate::MatchesName(_)

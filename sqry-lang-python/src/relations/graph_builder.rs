@@ -1,11 +1,13 @@
-use std::{collections::HashMap, path::Path};
+use std::{collections::HashMap, path::Path, sync::OnceLock};
 
 use sqry_core::graph::unified::StagingGraph;
 use sqry_core::graph::unified::build::GraphBuildHelper;
 use sqry_core::graph::unified::build::helper::CalleeKindHint;
+use sqry_core::graph::unified::build::shape::{CfBucket, ShapeMapping};
 use sqry_core::graph::unified::edge::FfiConvention;
 use sqry_core::graph::unified::edge::kind::TypeOfContext;
 use sqry_core::graph::unified::node::NodeId as UnifiedNodeId;
+use sqry_core::graph::unified::storage::shape::SignatureShape;
 use sqry_core::graph::{GraphBuilder, GraphBuilderError, GraphResult, Language, Span};
 use tree_sitter::{Node, Tree};
 
@@ -153,6 +155,131 @@ impl GraphBuilder for PythonGraphBuilder {
     fn language(&self) -> Language {
         Language::Python
     }
+
+    fn shape_mapping(&self) -> Option<&dyn ShapeMapping> {
+        Some(python_shape_mapping())
+    }
+}
+
+/// Per-language [`ShapeMapping`] for Python: the SPEC anchor for the
+/// identifier-blind body-shape descriptor.
+///
+/// Holds a precomputed `kind_id -> CfBucket` table so the hot shape walk does a
+/// single array index per node instead of a grammar string lookup. The table is
+/// built once from the tree-sitter-python grammar and shared process-wide via
+/// [`python_shape_mapping`]. Everything except this mapping is the one shared
+/// `compute_shape_descriptor` routine in sqry-core.
+pub struct PythonShapeMapping {
+    cf_by_kind_id: Vec<Option<CfBucket>>,
+}
+
+impl PythonShapeMapping {
+    /// Build the `kind_id -> CfBucket` table from the tree-sitter-python grammar.
+    fn build() -> Self {
+        let lang: tree_sitter::Language = tree_sitter_python::LANGUAGE.into();
+        let count = lang.node_kind_count();
+        let mut cf_by_kind_id = vec![None; count];
+        for (id, slot) in cf_by_kind_id.iter_mut().enumerate() {
+            let Ok(kind_id) = u16::try_from(id) else {
+                break;
+            };
+            if !lang.node_kind_is_named(kind_id) {
+                continue;
+            }
+            if let Some(name) = lang.node_kind_for_id(kind_id) {
+                *slot = cf_bucket_for_python_kind(name);
+            }
+        }
+        Self { cf_by_kind_id }
+    }
+}
+
+impl ShapeMapping for PythonShapeMapping {
+    fn cf_bucket(&self, ts_node_kind_id: u16) -> Option<CfBucket> {
+        self.cf_by_kind_id
+            .get(ts_node_kind_id as usize)
+            .copied()
+            .flatten()
+    }
+
+    fn signature_shape(&self, fn_node: Node, _src: &[u8]) -> SignatureShape {
+        let mut shape = SignatureShape::default();
+        if let Some(params) = fn_node.child_by_field_name("parameters") {
+            // Python keyword-only parameters follow a bare `*` or a `*args`
+            // splat. Track whether we have crossed that boundary so positional
+            // and keyword-only arities are counted into the right slot.
+            let mut keyword_only = false;
+            let mut cursor = params.walk();
+            for child in params.named_children(&mut cursor) {
+                match child.kind() {
+                    // `*args`: variadic AND the start of the keyword-only region.
+                    "list_splat_pattern" => {
+                        shape.has_varargs = true;
+                        keyword_only = true;
+                    }
+                    // `**kwargs`.
+                    "dictionary_splat_pattern" => shape.has_kwargs = true,
+                    // A plain positional / keyword parameter (`x`).
+                    "identifier" | "typed_parameter" => {
+                        bump_arity(&mut shape, keyword_only);
+                    }
+                    // A parameter carrying a default value (`x=1`, `x: int = 1`).
+                    "default_parameter" | "typed_default_parameter" => {
+                        shape.has_defaults = true;
+                        bump_arity(&mut shape, keyword_only);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        shape.has_return_annotation = fn_node.child_by_field_name("return_type").is_some();
+        shape
+    }
+}
+
+/// Count one parameter into the positional or keyword-only arity slot.
+fn bump_arity(shape: &mut SignatureShape, keyword_only: bool) {
+    if keyword_only {
+        shape.arity_keyword_only = shape.arity_keyword_only.saturating_add(1);
+    } else {
+        shape.arity_positional = shape.arity_positional.saturating_add(1);
+    }
+}
+
+/// Map one tree-sitter-python grammar node-kind name to its canonical
+/// control-flow bucket. Additive-only: the bucket set is frozen (see
+/// [`CfBucket`]), so new Python kinds extend the match, never reorder the buckets.
+fn cf_bucket_for_python_kind(name: &str) -> Option<CfBucket> {
+    let bucket = match name {
+        "if_statement" | "elif_clause" | "conditional_expression" => CfBucket::Branch,
+        "for_statement" | "while_statement" => CfBucket::Loop,
+        "match_statement" | "case_clause" => CfBucket::Match,
+        "try_statement" => CfBucket::Try,
+        "except_clause" | "except_group_clause" => CfBucket::Catch,
+        "raise_statement" => CfBucket::Throw,
+        // `with`/`async with` is Python's resource-acquisition construct.
+        "with_statement" => CfBucket::Resource,
+        "return_statement" => CfBucket::Return,
+        "yield" => CfBucket::Yield,
+        "await" => CfBucket::Await,
+        "break_statement" | "continue_statement" => CfBucket::BreakContinue,
+        "call" => CfBucket::Call,
+        "assignment" | "augmented_assignment" | "named_expression" => CfBucket::Assign,
+        "lambda" => CfBucket::Closure,
+        "list_comprehension"
+        | "dictionary_comprehension"
+        | "set_comprehension"
+        | "generator_expression" => CfBucket::Comprehension,
+        _ => return None,
+    };
+    Some(bucket)
+}
+
+/// The process-wide Python shape mapping, built once on first use.
+#[must_use]
+pub fn python_shape_mapping() -> &'static PythonShapeMapping {
+    static MAPPING: OnceLock<PythonShapeMapping> = OnceLock::new();
+    MAPPING.get_or_init(PythonShapeMapping::build)
 }
 
 /// Check if the module defines `__all__`.
@@ -2226,5 +2353,139 @@ mod tests {
     fn test_extract_first_string_literal_empty_returns_none() {
         let result = extract_first_string_literal("no quotes here");
         assert_eq!(result, None);
+    }
+}
+
+#[cfg(test)]
+mod shape_tests {
+    use super::{cf_bucket_for_python_kind, python_shape_mapping};
+    use sqry_core::graph::unified::build::shape::{
+        CfBucket, ShapeBudget, ShapeMapping, compute_shape_descriptor,
+    };
+
+    const SAMPLE: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../test-fixtures/shape/reference/sample.py"
+    ));
+
+    fn parse(src: &str) -> tree_sitter::Tree {
+        let lang: tree_sitter::Language = tree_sitter_python::LANGUAGE.into();
+        let mut p = tree_sitter::Parser::new();
+        p.set_language(&lang).expect("load python grammar");
+        p.parse(src, None).expect("parse")
+    }
+
+    /// Resolve the function_definition with the given name from the fixture.
+    fn function_named<'t>(tree: &'t tree_sitter::Tree, name: &str) -> tree_sitter::Node<'t> {
+        let root = tree.root_node();
+        let mut stack = vec![root];
+        while let Some(node) = stack.pop() {
+            if node.kind() == "function_definition"
+                && node
+                    .child_by_field_name("name")
+                    .and_then(|n| n.utf8_text(SAMPLE.as_bytes()).ok())
+                    == Some(name)
+            {
+                return node;
+            }
+            let mut c = node.walk();
+            for ch in node.children(&mut c) {
+                stack.push(ch);
+            }
+        }
+        panic!("no function_definition named {name}");
+    }
+
+    #[test]
+    fn cf_table_is_non_empty() {
+        let mapping = python_shape_mapping();
+        let lang: tree_sitter::Language = tree_sitter_python::LANGUAGE.into();
+        let mut covered = 0;
+        for id in 0..lang.node_kind_count() {
+            let kid = id as u16;
+            if mapping.cf_bucket(kid).is_some() {
+                covered += 1;
+            }
+        }
+        assert!(
+            covered >= 10,
+            "expected many python CF kinds mapped, got {covered}"
+        );
+    }
+
+    #[test]
+    fn histogram_covers_real_control_flow() {
+        let tree = parse(SAMPLE);
+        let func = function_named(&tree, "classify");
+        let d = compute_shape_descriptor(
+            func,
+            SAMPLE.as_bytes(),
+            python_shape_mapping(),
+            &ShapeBudget::default(),
+        );
+        assert!(!d.is_unhashable(), "classify body must be hashable");
+        for bucket in [
+            CfBucket::Branch,
+            CfBucket::Loop,
+            CfBucket::Match,
+            CfBucket::Try,
+            CfBucket::Catch,
+            CfBucket::Throw,
+            CfBucket::Resource,
+            CfBucket::Return,
+            CfBucket::BreakContinue,
+            CfBucket::Call,
+            CfBucket::Assign,
+            CfBucket::Comprehension,
+        ] {
+            assert!(
+                d.cf_histogram[bucket.index()] >= 1,
+                "classify must exercise {bucket:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn async_body_covers_yield_await_closure() {
+        let tree = parse(SAMPLE);
+        let func = function_named(&tree, "fetch");
+        let d = compute_shape_descriptor(
+            func,
+            SAMPLE.as_bytes(),
+            python_shape_mapping(),
+            &ShapeBudget::default(),
+        );
+        assert!(d.cf_histogram[CfBucket::Await.index()] >= 1, "await");
+        assert!(d.cf_histogram[CfBucket::Yield.index()] >= 1, "yield");
+        assert!(
+            d.cf_histogram[CfBucket::Closure.index()] >= 1,
+            "lambda closure"
+        );
+        assert!(
+            d.signature_shape.has_return_annotation,
+            "-> str return annotation"
+        );
+    }
+
+    #[test]
+    fn signature_shape_reads_arity_and_splats() {
+        let tree = parse(SAMPLE);
+        let func = function_named(&tree, "classify");
+        let mapping = python_shape_mapping();
+        let shape = mapping.signature_shape(func, SAMPLE.as_bytes());
+        // classify(values, threshold=0, *extra, **opts)
+        assert_eq!(
+            shape.arity_positional, 2,
+            "values + threshold are positional"
+        );
+        assert!(shape.has_defaults, "threshold=0");
+        assert!(shape.has_varargs, "*extra");
+        assert!(shape.has_kwargs, "**opts");
+    }
+
+    #[test]
+    fn unknown_kind_maps_to_none() {
+        assert!(cf_bucket_for_python_kind("module").is_none());
+        assert!(cf_bucket_for_python_kind("identifier").is_none());
     }
 }

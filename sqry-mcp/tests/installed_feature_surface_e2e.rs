@@ -167,6 +167,9 @@ fn tool_arguments(name: &str, project: &Path) -> Option<Value> {
         "semantic_search" => json!({"query": "process", "max_results": 20}),
         "show_dependencies" => json!({"symbol_name": "helper", "max_depth": 2}),
         "sqry_query" => json!({"query": "kind:function", "limit": 20}),
+        "structural_similar" => {
+            json!({"symbol_name": "helper", "similarity_threshold": 0.6, "max_results": 20})
+        }
         "subgraph" => json!({"symbols": ["process"], "max_depth": 2, "max_nodes": 20}),
         "trace_path" => json!({"from_symbol": "process", "to_symbol": "helper", "max_hops": 4}),
         "workspace_status" => json!({}),
@@ -282,6 +285,21 @@ fn installed_mcp_feature_surface_matrix() -> Result<()> {
                 "search_similar negative assertion must return a structured not-found error: {response}"
             );
             continue;
+        }
+
+        if name == "structural_similar" {
+            // The probe may legitimately lack a body-shape descriptor in this
+            // fixture (tiny bodies are unhashable), in which case the tool
+            // returns a structured error. Either a JSON success envelope (handled
+            // by the fall-through below) or a descriptor/not-found error proves
+            // the tool is wired and reachable.
+            if let Some(message) = response["error"]["message"].as_str() {
+                assert!(
+                    message.contains("body-shape descriptor") || message.contains("not found"),
+                    "structural_similar error must be a structured descriptor error: {response}"
+                );
+                continue;
+            }
         }
 
         let text = extract_tool_text(&response)?;

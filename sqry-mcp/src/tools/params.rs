@@ -802,6 +802,29 @@ pub struct SearchSimilarParams {
     pub page_size: i64,
 }
 
+/// `structural_similar` params (body-shape descriptor, U07).
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct StructuralSimilarParams {
+    /// Reference function/method name (simple or qualified).
+    pub symbol_name: String,
+
+    /// Optional file to disambiguate the probe symbol.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_path: Option<String>,
+
+    #[serde(default = "default_path")]
+    pub path: String,
+
+    /// Minimum MinHash similarity floor (0.0-1.0).
+    #[serde(default = "default_similarity_threshold")]
+    #[schemars(range(min = 0.0, max = 1.0))]
+    pub similarity_threshold: f64,
+
+    #[serde(default = "default_max_results_20")]
+    #[schemars(range(min = 1, max = 200))]
+    pub max_results: i64,
+}
+
 /// `show_dependencies` params.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct ShowDependenciesParams {

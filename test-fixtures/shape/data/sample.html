@@ -1,0 +1,20 @@
+<!-- Hand-written HTML fixture for the body-shape coverage test. HTML is
+     declarative markup. The inline onclick handler mints a Function call stub
+     with no body span, so no node is eligible for a shape descriptor. -->
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <title>Shape Fixture</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="card">
+      <h1>Hello</h1>
+      <button onclick="handleClick()">Click</button>
+      <ul>
+        <li>one</li>
+        <li>two</li>
+      </ul>
+    </main>
+  </body>
+</html>

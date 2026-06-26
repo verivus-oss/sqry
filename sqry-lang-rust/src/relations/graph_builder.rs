@@ -4,6 +4,8 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
+use sqry_core::graph::unified::build::shape::{CfBucket, ShapeMapping};
+use sqry_core::graph::unified::storage::shape::SignatureShape;
 use sqry_core::graph::unified::{
     FfiConvention, GraphBuildHelper, LifetimeConstraintKind, MacroExpansionKind, NodeId, NodeKind,
     StagingGraph, build::helper::CalleeKindHint, edge::kind::TypeOfContext,
@@ -560,6 +562,110 @@ impl GraphBuilder for RustGraphBuilder {
     fn language(&self) -> Language {
         Language::Rust
     }
+
+    fn shape_mapping(&self) -> Option<&dyn ShapeMapping> {
+        Some(rust_shape_mapping())
+    }
+}
+
+/// Per-language [`ShapeMapping`] for Rust: the reference implementation for the
+/// identifier-blind body-shape descriptor feature.
+///
+/// Holds a precomputed `kind_id -> CfBucket` table so the hot shape walk does a
+/// single array index per node instead of a grammar string lookup. The table is
+/// built once from the tree-sitter-rust grammar and shared process-wide via
+/// [`rust_shape_mapping`]. Everything except this mapping (the subtree walk,
+/// histogram counting, shingling, WL relabel, MinHash, shape_hash) is the one
+/// shared `compute_shape_descriptor` routine in sqry-core.
+pub struct RustShapeMapping {
+    /// `cf_by_kind_id[id]` is the canonical control-flow bucket for grammar
+    /// node-kind id `id`, or `None` when that kind is not a control-flow construct
+    /// (it still contributes to the structural shingle, just not the histogram).
+    cf_by_kind_id: Vec<Option<CfBucket>>,
+}
+
+impl RustShapeMapping {
+    /// Build the `kind_id -> CfBucket` table from the tree-sitter-rust grammar.
+    fn build() -> Self {
+        let lang: tree_sitter::Language = tree_sitter_rust::LANGUAGE.into();
+        let count = lang.node_kind_count();
+        let mut cf_by_kind_id = vec![None; count];
+        for (id, slot) in cf_by_kind_id.iter_mut().enumerate() {
+            let Ok(kind_id) = u16::try_from(id) else {
+                break;
+            };
+            // Only NAMED kinds are control-flow constructs; anonymous tokens
+            // (operators, keywords, punctuation) are structure, not buckets.
+            if !lang.node_kind_is_named(kind_id) {
+                continue;
+            }
+            if let Some(name) = lang.node_kind_for_id(kind_id) {
+                *slot = cf_bucket_for_rust_kind(name);
+            }
+        }
+        Self { cf_by_kind_id }
+    }
+}
+
+impl ShapeMapping for RustShapeMapping {
+    fn cf_bucket(&self, ts_node_kind_id: u16) -> Option<CfBucket> {
+        self.cf_by_kind_id
+            .get(ts_node_kind_id as usize)
+            .copied()
+            .flatten()
+    }
+
+    fn signature_shape(&self, fn_node: Node, _src: &[u8]) -> SignatureShape {
+        let mut shape = SignatureShape::default();
+        if let Some(params) = fn_node.child_by_field_name("parameters") {
+            let mut cursor = params.walk();
+            for child in params.named_children(&mut cursor) {
+                match child.kind() {
+                    "parameter" | "self_parameter" => {
+                        shape.arity_positional = shape.arity_positional.saturating_add(1);
+                    }
+                    // `extern "C" fn f(x: i32, ...)` variadic tail.
+                    "variadic_parameter" => shape.has_varargs = true,
+                    _ => {}
+                }
+            }
+        }
+        shape.has_return_annotation = fn_node.child_by_field_name("return_type").is_some();
+        shape
+    }
+}
+
+/// Map one tree-sitter-rust grammar node-kind name to its canonical control-flow
+/// bucket. Additive-only: the bucket set is frozen (see `CfBucket`), so new Rust
+/// kinds extend the match, never reorder the buckets.
+fn cf_bucket_for_rust_kind(name: &str) -> Option<CfBucket> {
+    let bucket = match name {
+        "if_expression" | "if_let_expression" => CfBucket::Branch,
+        "match_expression" => CfBucket::Match,
+        "for_expression" | "while_expression" | "while_let_expression" | "loop_expression" => {
+            CfBucket::Loop
+        }
+        "return_expression" => CfBucket::Return,
+        "yield_expression" => CfBucket::Yield,
+        "await_expression" => CfBucket::Await,
+        // The `?` postfix operator: error propagation maps onto the `try` bucket.
+        "try_expression" => CfBucket::Try,
+        "break_expression" | "continue_expression" => CfBucket::BreakContinue,
+        "call_expression" | "macro_invocation" => CfBucket::Call,
+        "let_declaration" | "assignment_expression" | "compound_assignment_expr" => {
+            CfBucket::Assign
+        }
+        "closure_expression" => CfBucket::Closure,
+        _ => return None,
+    };
+    Some(bucket)
+}
+
+/// The process-wide Rust shape mapping, built once on first use.
+#[must_use]
+pub fn rust_shape_mapping() -> &'static RustShapeMapping {
+    static MAPPING: OnceLock<RustShapeMapping> = OnceLock::new();
+    MAPPING.get_or_init(RustShapeMapping::build)
 }
 
 // ========== StagingGraph Walking Functions ==========

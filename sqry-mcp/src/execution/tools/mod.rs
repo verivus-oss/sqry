@@ -42,7 +42,7 @@ pub use navigation::{
 };
 pub use planner_query::execute_sqry_query;
 pub use relations::{execute_call_hierarchy, execute_relation_query};
-pub use search::{execute_find_similar, execute_semantic_search};
+pub use search::{execute_find_similar, execute_semantic_search, execute_structural_similar};
 pub use trace::execute_trace_path;
 
 // Phase 8b Task 3: inner:: submodules used by daemon_adapter for

@@ -82,6 +82,7 @@ pub struct DiffDisplaySummary {
 /// - Git refs are invalid
 /// - Graph building fails
 /// - Output formatting fails
+#[allow(clippy::too_many_arguments)]
 pub fn run_diff(
     cli: &Cli,
     base_ref: &str,
@@ -90,6 +91,7 @@ pub fn run_diff(
     max_results: usize,
     kinds: &[String],
     change_types: &[String],
+    structural: bool,
 ) -> Result<()> {
     // 1. Validate and resolve repository root
     let root = resolve_repo_root(path, cli)?;
@@ -156,6 +158,19 @@ pub fn run_diff(
     );
     log::debug!("Built target graph: ref={target_ref}");
 
+    // 4. Structural lineage mode (U08): pair functions across refs by their
+    //    identifier-blind body-shape descriptor instead of by name.
+    if structural {
+        return run_structural_diff(
+            cli,
+            base_ref,
+            target_ref,
+            base_graph.as_ref(),
+            target_graph.as_ref(),
+            max_results,
+        );
+    }
+
     // 4. Compare graphs
     let comparator = GraphComparator::new(
         base_graph,
@@ -201,6 +216,202 @@ pub fn run_diff(
     )?;
 
     // WorktreeManager drops here, automatically cleaning up worktrees
+    Ok(())
+}
+
+// ============================================================================
+// Structural lineage diff (U08)
+// ============================================================================
+
+/// Floor MinHash Jaccard for a near-match in structural diff mode.
+const STRUCTURAL_DIFF_NEAR_FLOOR: f32 = 0.6;
+
+#[derive(Debug, serde::Serialize)]
+struct StructuralPair {
+    base: String,
+    target: String,
+    /// `exact` (byte-identical `shape_hash`) or `near` (MinHash only).
+    match_kind: &'static str,
+    /// True when the base and target qualified names differ (a rename/relocate).
+    renamed: bool,
+    jaccard: f32,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct StructuralDiffOutput {
+    base_ref: String,
+    target_ref: String,
+    pairs: Vec<StructuralPair>,
+    base_only: Vec<String>,
+    target_only: Vec<String>,
+    total_pairs: usize,
+}
+
+/// One hashable function descriptor lifted from a snapshot for cross-ref pairing.
+struct ShapeRow {
+    qname: String,
+    shape_hash: sqry_core::graph::unified::storage::ShapeHash128,
+    minhash: [u32; sqry_core::graph::unified::storage::shape::MINHASH_LANES],
+}
+
+/// Collect hashable Function/Method descriptors from a graph, in node-id order.
+fn collect_shape_rows(graph: &sqry_core::graph::unified::concurrent::CodeGraph) -> Vec<ShapeRow> {
+    let snapshot = graph.snapshot();
+    let strings = snapshot.strings();
+    let descriptors = snapshot.macro_metadata().shape_descriptors();
+    let mut rows = Vec::new();
+    for (node_id, descriptor) in descriptors {
+        if descriptor.is_unhashable() {
+            continue;
+        }
+        let Some(entry) = snapshot.nodes().get(*node_id) else {
+            continue;
+        };
+        if entry.is_unified_loser() {
+            continue;
+        }
+        let qname = entry
+            .qualified_name
+            .and_then(|id| strings.resolve(id))
+            .or_else(|| strings.resolve(entry.name))
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        rows.push(ShapeRow {
+            qname,
+            shape_hash: descriptor.shape_hash,
+            minhash: descriptor.minhash,
+        });
+    }
+    rows
+}
+
+fn structural_jaccard(
+    a: &[u32; sqry_core::graph::unified::storage::shape::MINHASH_LANES],
+    b: &[u32; sqry_core::graph::unified::storage::shape::MINHASH_LANES],
+) -> f32 {
+    let lanes = sqry_core::graph::unified::storage::shape::MINHASH_LANES;
+    let matching = a.iter().zip(b.iter()).filter(|(x, y)| x == y).count();
+    #[allow(clippy::cast_precision_loss)]
+    {
+        matching as f32 / lanes as f32
+    }
+}
+
+/// Structural lineage diff: pair base functions to target functions by exact
+/// `shape_hash` first, then by MinHash near-match, reporting rename/relocate
+/// twins that name-based diff would miss.
+fn run_structural_diff(
+    cli: &Cli,
+    base_ref: &str,
+    target_ref: &str,
+    base_graph: &sqry_core::graph::unified::concurrent::CodeGraph,
+    target_graph: &sqry_core::graph::unified::concurrent::CodeGraph,
+    max_results: usize,
+) -> Result<()> {
+    let mut streams = OutputStreams::new();
+
+    let base_rows = collect_shape_rows(base_graph);
+    let target_rows = collect_shape_rows(target_graph);
+
+    let mut target_used = vec![false; target_rows.len()];
+    let mut pairs: Vec<StructuralPair> = Vec::new();
+    let mut base_only: Vec<String> = Vec::new();
+
+    for base in &base_rows {
+        // Pass 1: exact shape_hash (non-zero) against an unused target.
+        let exact = (!base.shape_hash.is_zero())
+            .then(|| {
+                target_rows.iter().enumerate().find(|(i, t)| {
+                    !target_used[*i] && !t.shape_hash.is_zero() && t.shape_hash == base.shape_hash
+                })
+            })
+            .flatten();
+
+        let chosen = if let Some((i, t)) = exact {
+            Some((i, t, "exact", 1.0_f32))
+        } else {
+            // Pass 2: best MinHash near-match above the floor among unused targets.
+            let mut best: Option<(usize, &ShapeRow, f32)> = None;
+            for (i, t) in target_rows.iter().enumerate() {
+                if target_used[i] {
+                    continue;
+                }
+                let j = structural_jaccard(&base.minhash, &t.minhash);
+                if j >= STRUCTURAL_DIFF_NEAR_FLOOR && best.as_ref().is_none_or(|(_, _, bj)| j > *bj)
+                {
+                    best = Some((i, t, j));
+                }
+            }
+            best.map(|(i, t, j)| (i, t, "near", j))
+        };
+
+        if let Some((i, t, kind, jac)) = chosen {
+            target_used[i] = true;
+            pairs.push(StructuralPair {
+                base: base.qname.clone(),
+                target: t.qname.clone(),
+                match_kind: kind,
+                renamed: base.qname != t.qname,
+                jaccard: jac,
+            });
+        } else {
+            base_only.push(base.qname.clone());
+        }
+    }
+
+    let target_only: Vec<String> = target_rows
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !target_used[*i])
+        .map(|(_, t)| t.qname.clone())
+        .collect();
+
+    let total_pairs = pairs.len();
+    pairs.sort_by(|a, b| {
+        // Renamed/relocated twins first (the interesting lineage), then exact
+        // before near, then by descending similarity, then name.
+        b.renamed
+            .cmp(&a.renamed)
+            .then_with(|| a.match_kind.cmp(b.match_kind))
+            .then(
+                b.jaccard
+                    .partial_cmp(&a.jaccard)
+                    .unwrap_or(std::cmp::Ordering::Equal),
+            )
+            .then_with(|| a.base.cmp(&b.base))
+    });
+    pairs.truncate(max_results);
+
+    let output = StructuralDiffOutput {
+        base_ref: base_ref.to_string(),
+        target_ref: target_ref.to_string(),
+        pairs,
+        base_only,
+        target_only,
+        total_pairs,
+    };
+
+    if cli.json {
+        let json = serde_json::to_string_pretty(&output).context("serialize structural diff")?;
+        streams.write_result(&json)?;
+    } else {
+        let mut text = format!("Structural lineage {base_ref} -> {target_ref}\n");
+        text.push_str(&format!(
+            "  {} paired ({} shown), {} base-only, {} target-only\n",
+            output.total_pairs,
+            output.pairs.len(),
+            output.base_only.len(),
+            output.target_only.len()
+        ));
+        for p in &output.pairs {
+            let tag = if p.renamed { "RENAMED" } else { "stable " };
+            text.push_str(&format!(
+                "  {tag} [{}:{:.3}] {} -> {}\n",
+                p.match_kind, p.jaccard, p.base, p.target
+            ));
+        }
+        streams.write_result(&text)?;
+    }
     Ok(())
 }
 

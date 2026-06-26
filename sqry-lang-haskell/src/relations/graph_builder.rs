@@ -28,14 +28,17 @@
 //! - Template Haskell: Not tracked (compile-time only)
 //! - FFI patterns deferred: `cplusplus`, `prim`, `javascript` (future phases)
 
+use std::sync::OnceLock;
 use std::{collections::HashMap, path::Path};
 
 use sqry_core::graph::unified::StagingGraph;
 use sqry_core::graph::unified::build::GraphBuildHelper;
 use sqry_core::graph::unified::build::helper::CalleeKindHint;
+use sqry_core::graph::unified::build::shape::{CfBucket, ShapeMapping};
 use sqry_core::graph::unified::edge::FfiConvention;
 use sqry_core::graph::unified::edge::kind::TypeOfContext;
 use sqry_core::graph::unified::node::NodeId;
+use sqry_core::graph::unified::storage::shape::SignatureShape;
 use sqry_core::graph::{GraphBuilder, GraphBuilderError, GraphResult, Language, Span};
 use tree_sitter::{Node, Tree};
 
@@ -219,6 +222,10 @@ impl GraphBuilder for HaskellGraphBuilder {
 
     fn language(&self) -> Language {
         Language::Haskell
+    }
+
+    fn shape_mapping(&self) -> Option<&dyn ShapeMapping> {
+        Some(haskell_shape_mapping())
     }
 }
 
@@ -6031,5 +6038,196 @@ data T = Int `A` Int | Int `B` Int
             1,
             "data T = Int `A` Int | Int `B` Int should produce exactly 1 T -> Int References edge"
         );
+    }
+}
+
+/// Per-language [`ShapeMapping`] for Haskell (identifier-blind body-shape
+/// feature).
+///
+/// Precomputed `kind_id -> CfBucket` table built once from the tree-sitter-haskell
+/// grammar. Haskell control flow is expression-based: `if`/then/else is a
+/// `conditional`, guards are `guards`, `case ... of` plus its `alternative` arms
+/// are pattern matches, lambdas are closures, list comprehensions carry a
+/// `generator` per `<-` qualifier, and `let`/`where` bindings (`bind`) are the
+/// binding form. `error`/`throw` are ordinary applications, so they stay in the
+/// `Call` bucket.
+pub struct HaskellShapeMapping {
+    cf_by_kind_id: Vec<Option<CfBucket>>,
+}
+
+impl HaskellShapeMapping {
+    fn build() -> Self {
+        let lang: tree_sitter::Language = tree_sitter_haskell::LANGUAGE.into();
+        let count = lang.node_kind_count();
+        let mut cf_by_kind_id = vec![None; count];
+        for (id, slot) in cf_by_kind_id.iter_mut().enumerate() {
+            let Ok(kind_id) = u16::try_from(id) else {
+                break;
+            };
+            if !lang.node_kind_is_named(kind_id) {
+                continue;
+            }
+            if let Some(name) = lang.node_kind_for_id(kind_id) {
+                *slot = cf_bucket_for_haskell_kind(name);
+            }
+        }
+        Self { cf_by_kind_id }
+    }
+}
+
+impl ShapeMapping for HaskellShapeMapping {
+    fn cf_bucket(&self, ts_node_kind_id: u16) -> Option<CfBucket> {
+        self.cf_by_kind_id
+            .get(ts_node_kind_id as usize)
+            .copied()
+            .flatten()
+    }
+
+    fn signature_shape(&self, fn_node: Node, _src: &[u8]) -> SignatureShape {
+        // A function-equation declaration (`name p1 p2 ... = body`) exposes its
+        // formal parameters through the `patterns` field; each named child is one
+        // positional argument. Type-signature `function` arrow nodes have no
+        // `patterns` field, so they read as the default empty signature.
+        let mut shape = SignatureShape::default();
+        if let Some(patterns) = fn_node.child_by_field_name("patterns") {
+            let mut cursor = patterns.walk();
+            let count = patterns.named_children(&mut cursor).count();
+            shape.arity_positional = u16::try_from(count).unwrap_or(u16::MAX);
+        }
+        shape
+    }
+}
+
+/// Map one tree-sitter-haskell node-kind name to its canonical control-flow
+/// bucket. Additive-only against the frozen [`CfBucket`] set.
+fn cf_bucket_for_haskell_kind(name: &str) -> Option<CfBucket> {
+    let bucket = match name {
+        "conditional" | "guards" | "guard" => CfBucket::Branch,
+        "case" | "alternative" | "multi_way_if" => CfBucket::Match,
+        // Each `<-` qualifier of a list comprehension is a generator loop.
+        "generator" => CfBucket::Loop,
+        "list_comprehension" => CfBucket::Comprehension,
+        "lambda" | "lambda_case" => CfBucket::Closure,
+        "apply" | "infix" => CfBucket::Call,
+        // `let`/`where` value bindings.
+        "bind" => CfBucket::Assign,
+        _ => return None,
+    };
+    Some(bucket)
+}
+
+/// The process-wide Haskell shape mapping, built once on first use.
+#[must_use]
+pub fn haskell_shape_mapping() -> &'static HaskellShapeMapping {
+    static MAPPING: OnceLock<HaskellShapeMapping> = OnceLock::new();
+    MAPPING.get_or_init(HaskellShapeMapping::build)
+}
+
+#[cfg(test)]
+mod shape_tests {
+    //! Coverage for the Haskell [`ShapeMapping`]. Consumes the hand-written
+    //! control-flow fixture so the test is load-bearing.
+
+    use super::{cf_bucket_for_haskell_kind, haskell_shape_mapping};
+    use sqry_core::graph::unified::build::shape::{
+        CfBucket, ShapeBudget, ShapeMapping, compute_shape_descriptor,
+    };
+    use tree_sitter::{Node, Parser, Tree};
+
+    const SAMPLE: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../test-fixtures/shape/dynamic/sample.hs"
+    ));
+
+    fn parse(src: &str) -> Tree {
+        let mut parser = Parser::new();
+        parser
+            .set_language(&tree_sitter_haskell::LANGUAGE.into())
+            .expect("load haskell grammar");
+        parser.parse(src, None).expect("parse haskell")
+    }
+
+    /// First function-equation declaration (`classify value label rest = ...`):
+    /// the first `function` node that carries a `patterns` field (which the
+    /// type-signature arrow `function` nodes do not).
+    fn first_equation<'t>(tree: &'t Tree) -> Node<'t> {
+        let mut stack = vec![tree.root_node()];
+        while let Some(node) = stack.pop() {
+            if node.kind() == "function" && node.child_by_field_name("patterns").is_some() {
+                return node;
+            }
+            let mut cursor = node.walk();
+            let mut children: Vec<Node> = node.named_children(&mut cursor).collect();
+            children.reverse();
+            stack.extend(children);
+        }
+        panic!("no function equation in haskell fixture");
+    }
+
+    #[test]
+    fn mapping_is_non_empty_and_covers_real_kinds() {
+        assert_eq!(
+            cf_bucket_for_haskell_kind("conditional"),
+            Some(CfBucket::Branch)
+        );
+        assert_eq!(cf_bucket_for_haskell_kind("guards"), Some(CfBucket::Branch));
+        assert_eq!(cf_bucket_for_haskell_kind("case"), Some(CfBucket::Match));
+        assert_eq!(
+            cf_bucket_for_haskell_kind("alternative"),
+            Some(CfBucket::Match)
+        );
+        assert_eq!(
+            cf_bucket_for_haskell_kind("generator"),
+            Some(CfBucket::Loop)
+        );
+        assert_eq!(
+            cf_bucket_for_haskell_kind("list_comprehension"),
+            Some(CfBucket::Comprehension)
+        );
+        assert_eq!(
+            cf_bucket_for_haskell_kind("lambda"),
+            Some(CfBucket::Closure)
+        );
+        assert_eq!(cf_bucket_for_haskell_kind("apply"), Some(CfBucket::Call));
+        assert_eq!(cf_bucket_for_haskell_kind("bind"), Some(CfBucket::Assign));
+        assert_eq!(cf_bucket_for_haskell_kind("nope"), None);
+
+        let lang: tree_sitter::Language = tree_sitter_haskell::LANGUAGE.into();
+        let id = (0..lang.node_kind_count())
+            .map(|i| i as u16)
+            .find(|&i| lang.node_kind_is_named(i) && lang.node_kind_for_id(i) == Some("case"))
+            .expect("grammar exposes named case");
+        assert_eq!(haskell_shape_mapping().cf_bucket(id), Some(CfBucket::Match));
+    }
+
+    #[test]
+    fn descriptor_covers_fixture_control_flow() {
+        let tree = parse(SAMPLE);
+        let func = first_equation(&tree);
+        let descriptor = compute_shape_descriptor(
+            func,
+            SAMPLE.as_bytes(),
+            haskell_shape_mapping(),
+            &ShapeBudget::default(),
+        );
+        let hist = descriptor.cf_histogram;
+        assert!(hist[CfBucket::Branch.index()] >= 1, "conditional/guards");
+        assert!(hist[CfBucket::Match.index()] >= 1, "case/alternative");
+        assert!(
+            hist[CfBucket::Comprehension.index()] >= 1,
+            "list comprehension"
+        );
+        assert!(hist[CfBucket::Closure.index()] >= 1, "lambda");
+        assert!(hist[CfBucket::Call.index()] >= 1, "apply");
+        assert!(hist[CfBucket::Assign.index()] >= 1, "let/where bind");
+    }
+
+    #[test]
+    fn signature_shape_reads_pattern_arity() {
+        let tree = parse(SAMPLE);
+        let func = first_equation(&tree);
+        let shape = haskell_shape_mapping().signature_shape(func, SAMPLE.as_bytes());
+        // `classify value label rest = ...` binds three patterns.
+        assert_eq!(shape.arity_positional, 3, "value + label + rest");
     }
 }

@@ -5,13 +5,16 @@
 //! Filters out built-in commands to avoid synthetic nodes for shell builtins.
 //! Detects `source` and `.` commands as import edges for cross-file module inclusion.
 
+use std::sync::OnceLock;
 use std::{
     collections::{HashMap, HashSet},
     path::Path,
 };
 
 use sqry_core::graph::unified::build::helper::CalleeKindHint;
+use sqry_core::graph::unified::build::shape::{CfBucket, ShapeMapping};
 use sqry_core::graph::unified::edge::ExportKind;
+use sqry_core::graph::unified::storage::shape::SignatureShape;
 use sqry_core::graph::{
     GraphBuilder, GraphBuilderError, GraphResult, Language, Span,
     unified::{GraphBuildHelper, StagingGraph},
@@ -34,6 +37,10 @@ impl Default for ShellGraphBuilder {
 impl GraphBuilder for ShellGraphBuilder {
     fn language(&self) -> Language {
         Language::Shell
+    }
+
+    fn shape_mapping(&self) -> Option<&dyn ShapeMapping> {
+        Some(shell_shape_mapping())
     }
 
     // Shell graph extraction is linear and benefits from a single pass.
@@ -1183,5 +1190,176 @@ my_helper() {
                 .is_some_and(|name| name == "echo" || name == "cd" || name == "pwd")),
             "Builtin commands should not create nodes"
         );
+    }
+}
+
+/// Per-language [`ShapeMapping`] for shell/bash (identifier-blind body-shape
+/// feature).
+///
+/// Precomputed `kind_id -> CfBucket` table built once from the tree-sitter-bash
+/// grammar. Shell functions take no declared parameters (positional `$1`..`$N` are
+/// read at runtime), so [`signature_shape`](ShellShapeMapping::signature_shape)
+/// is honestly minimal. `break`/`continue`/`return` are ordinary commands in the
+/// grammar, so they fall into the `Call` bucket rather than a dedicated kind.
+pub struct ShellShapeMapping {
+    cf_by_kind_id: Vec<Option<CfBucket>>,
+}
+
+impl ShellShapeMapping {
+    fn build() -> Self {
+        let lang: tree_sitter::Language = tree_sitter_bash::LANGUAGE.into();
+        let count = lang.node_kind_count();
+        let mut cf_by_kind_id = vec![None; count];
+        for (id, slot) in cf_by_kind_id.iter_mut().enumerate() {
+            let Ok(kind_id) = u16::try_from(id) else {
+                break;
+            };
+            if !lang.node_kind_is_named(kind_id) {
+                continue;
+            }
+            if let Some(name) = lang.node_kind_for_id(kind_id) {
+                *slot = cf_bucket_for_shell_kind(name);
+            }
+        }
+        Self { cf_by_kind_id }
+    }
+}
+
+impl ShapeMapping for ShellShapeMapping {
+    fn cf_bucket(&self, ts_node_kind_id: u16) -> Option<CfBucket> {
+        self.cf_by_kind_id
+            .get(ts_node_kind_id as usize)
+            .copied()
+            .flatten()
+    }
+
+    fn signature_shape(&self, _fn_node: Node, _src: &[u8]) -> SignatureShape {
+        // Shell functions declare no formal parameters; arity is not structurally
+        // available, so the honest signature is the default (all zero/false).
+        SignatureShape::default()
+    }
+}
+
+/// Map one tree-sitter-bash node-kind name to its canonical control-flow bucket.
+/// Additive-only against the frozen [`CfBucket`] set. `until` loops parse as
+/// `while_statement`, so a single Loop arm covers both.
+fn cf_bucket_for_shell_kind(name: &str) -> Option<CfBucket> {
+    let bucket = match name {
+        "if_statement" | "elif_clause" | "else_clause" | "ternary_expression" => CfBucket::Branch,
+        "while_statement" | "for_statement" | "c_style_for_statement" => CfBucket::Loop,
+        "case_statement" | "case_item" => CfBucket::Match,
+        "command" => CfBucket::Call,
+        "variable_assignment" | "declaration_command" => CfBucket::Assign,
+        // A nested `function_definition` is a closure-like inner function.
+        "function_definition" => CfBucket::Closure,
+        _ => return None,
+    };
+    Some(bucket)
+}
+
+/// The process-wide shell shape mapping, built once on first use.
+#[must_use]
+pub fn shell_shape_mapping() -> &'static ShellShapeMapping {
+    static MAPPING: OnceLock<ShellShapeMapping> = OnceLock::new();
+    MAPPING.get_or_init(ShellShapeMapping::build)
+}
+
+#[cfg(test)]
+mod shape_tests {
+    //! Coverage for the shell [`ShapeMapping`]. Consumes the hand-written
+    //! control-flow fixture so the test is load-bearing.
+
+    use super::{cf_bucket_for_shell_kind, shell_shape_mapping};
+    use sqry_core::graph::unified::build::shape::{
+        CfBucket, ShapeBudget, ShapeMapping, compute_shape_descriptor,
+    };
+    use tree_sitter::{Node, Parser, Tree};
+
+    const SAMPLE: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../test-fixtures/shape/dynamic/script.sh"
+    ));
+
+    fn parse(src: &str) -> Tree {
+        let mut parser = Parser::new();
+        parser
+            .set_language(&tree_sitter_bash::LANGUAGE.into())
+            .expect("load bash grammar");
+        parser.parse(src, None).expect("parse bash")
+    }
+
+    fn first_function<'t>(tree: &'t Tree) -> Node<'t> {
+        let root = tree.root_node();
+        let mut cursor = root.walk();
+        for child in root.named_children(&mut cursor) {
+            if child.kind() == "function_definition" {
+                return child;
+            }
+        }
+        panic!("no function_definition in shell fixture");
+    }
+
+    #[test]
+    fn mapping_is_non_empty_and_covers_real_kinds() {
+        assert_eq!(
+            cf_bucket_for_shell_kind("if_statement"),
+            Some(CfBucket::Branch)
+        );
+        assert_eq!(
+            cf_bucket_for_shell_kind("while_statement"),
+            Some(CfBucket::Loop)
+        );
+        assert_eq!(
+            cf_bucket_for_shell_kind("for_statement"),
+            Some(CfBucket::Loop)
+        );
+        assert_eq!(
+            cf_bucket_for_shell_kind("case_statement"),
+            Some(CfBucket::Match)
+        );
+        assert_eq!(cf_bucket_for_shell_kind("command"), Some(CfBucket::Call));
+        assert_eq!(
+            cf_bucket_for_shell_kind("variable_assignment"),
+            Some(CfBucket::Assign)
+        );
+        assert_eq!(cf_bucket_for_shell_kind("nope"), None);
+
+        let lang: tree_sitter::Language = tree_sitter_bash::LANGUAGE.into();
+        let id = (0..lang.node_kind_count())
+            .map(|i| i as u16)
+            .find(|&i| {
+                lang.node_kind_is_named(i) && lang.node_kind_for_id(i) == Some("if_statement")
+            })
+            .expect("grammar exposes named if_statement");
+        assert_eq!(shell_shape_mapping().cf_bucket(id), Some(CfBucket::Branch));
+    }
+
+    #[test]
+    fn descriptor_covers_fixture_control_flow() {
+        let tree = parse(SAMPLE);
+        let func = first_function(&tree);
+        let descriptor = compute_shape_descriptor(
+            func,
+            SAMPLE.as_bytes(),
+            shell_shape_mapping(),
+            &ShapeBudget::default(),
+        );
+        let hist = descriptor.cf_histogram;
+        assert!(hist[CfBucket::Branch.index()] >= 1, "branch (if/elif)");
+        assert!(hist[CfBucket::Loop.index()] >= 1, "loop (while/for/until)");
+        assert!(hist[CfBucket::Match.index()] >= 1, "case");
+        assert!(hist[CfBucket::Call.index()] >= 1, "command");
+        assert!(hist[CfBucket::Assign.index()] >= 1, "assignment");
+    }
+
+    #[test]
+    fn signature_shape_is_minimal() {
+        let tree = parse(SAMPLE);
+        let func = first_function(&tree);
+        let shape = shell_shape_mapping().signature_shape(func, SAMPLE.as_bytes());
+        // Shell has no declared formal parameters; the honest signature is empty.
+        assert_eq!(shape.arity_positional, 0);
+        assert_eq!(shape.arity_keyword_only, 0);
+        assert!(!shape.has_varargs);
     }
 }

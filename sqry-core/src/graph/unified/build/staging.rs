@@ -1529,7 +1529,8 @@ impl StagingGraph {
         self.rollback();
     }
 
-    /// Attach body hashes to staged nodes that support hashing.
+    /// Attach body hashes (and, when a shape context is supplied, identifier-blind
+    /// shape descriptors) to staged nodes.
     ///
     /// This should be called after building the staging graph but before committing.
     /// It iterates through all staged `AddNode` operations and computes body hashes
@@ -1538,23 +1539,65 @@ impl StagingGraph {
     ///
     /// # Arguments
     ///
-    /// * `content` - The source file content as bytes
+    /// * `content` - The source file content as bytes (the body-hash coordinate
+    ///   system, the raw bytes the index records).
+    /// * `shape` - Optional shape-compute context (parsed tree + per-language
+    ///   [`ShapeMapping`](crate::graph::unified::build::shape::ShapeMapping) + visit
+    ///   budget). When `Some`, a [`ShapeDescriptor`](crate::graph::unified::storage::shape::ShapeDescriptor)
+    ///   is computed for each Function/Method node with a valid body span and inserted
+    ///   into this staging graph's `NodeMetadataStore` (the one
+    ///   [`take_macro_metadata`](Self::take_macro_metadata) drains), keyed by the
+    ///   staging-local `NodeId`, so descriptors ride the existing
+    ///   take -> rekey -> merge pipeline. When `None`, only body hashes are computed
+    ///   (the pre-feature behaviour, used by non-index build paths and languages with
+    ///   no mapping yet).
     ///
     /// # Notes
     ///
-    /// - Only nodes with valid body spans (`start_line` > 0, end > start) are hashed
-    /// - Bodies smaller than 4 bytes are not hashed to avoid trivial matches
-    pub fn attach_body_hashes(&mut self, content: &[u8]) {
-        use super::body_hash::{build_line_offsets, compute_node_body_hash};
+    /// - Only nodes with valid body spans (`start_line` > 0, end > start) are hashed.
+    ///   Shape descriptors share that exact gate, so a `{0,0}` data-quality span
+    ///   suppresses both identically (SPEC §7).
+    /// - Bodies smaller than 4 bytes are not hashed to avoid trivial matches; the
+    ///   shape walker independently emits an explicit `unhashable` marker for tiny
+    ///   bodies (it never silently drops one).
+    pub fn attach_body_hashes(&mut self, content: &[u8], shape: Option<ShapeAttachCtx<'_>>) {
+        use super::body_hash::{build_line_offsets, compute_node_body_hash, has_valid_body_span};
+        use crate::graph::unified::node::kind::NodeKind;
 
         let line_offsets = build_line_offsets(content);
 
+        // Shape descriptors must land in the SAME staging `NodeMetadataStore` that
+        // `take_macro_metadata()` drains, so they ride the existing
+        // take -> rekey_staging_metadata_to_arena -> merge pipeline. The operations
+        // walk borrows `self.operations` mutably (to assign `body_hash`), so collect
+        // here and flush into `self.macro_metadata` once that borrow ends.
+        let mut pending_descriptors: Vec<(
+            NodeId,
+            crate::graph::unified::storage::shape::ShapeDescriptor,
+        )> = Vec::new();
+
         for op in &mut self.operations {
-            if let StagingOp::AddNode { entry, .. } = op
-                && entry.body_hash.is_none()
-            {
-                entry.body_hash = compute_node_body_hash(content, entry, &line_offsets);
+            if let StagingOp::AddNode { entry, expected_id } = op {
+                if entry.body_hash.is_none() {
+                    entry.body_hash = compute_node_body_hash(content, entry, &line_offsets);
+                }
+                // Sibling computation: identifier-blind shape descriptor for
+                // Function/Method bodies, gated on the same span-validity contract
+                // as body_hash above.
+                if let Some(ctx) = shape.as_ref()
+                    && let Some(node_id) = *expected_id
+                    && matches!(entry.kind, NodeKind::Function | NodeKind::Method)
+                    && has_valid_body_span(entry)
+                    && let Some(descriptor) = ctx.descriptor_for(entry)
+                {
+                    pending_descriptors.push((node_id, descriptor));
+                }
             }
+        }
+
+        for (node_id, descriptor) in pending_descriptors {
+            self.macro_metadata
+                .insert_shape_descriptor(node_id, descriptor);
         }
     }
 
@@ -1681,6 +1724,93 @@ impl StagingGraph {
     #[must_use]
     pub fn resolve_node_name(&self, entry: &NodeEntry) -> Option<&str> {
         self.resolve_node_canonical_name(entry)
+    }
+}
+
+/// Inputs the identifier-blind shape walker needs that
+/// [`StagingGraph::attach_body_hashes`] does not otherwise carry.
+///
+/// Built once per file in `parse_file` after the file's plugin resolves a
+/// [`ShapeMapping`](crate::graph::unified::build::shape::ShapeMapping). It holds
+/// the parsed tree (so a Function/Method [`NodeEntry`] span can be resolved back to
+/// its subtree), the source the tree was parsed from (the coordinate system the
+/// recorded spans live in, which may differ from the raw body-hash bytes when a
+/// plugin preprocesses), the per-language mapping, and the visit budget. `None` at
+/// the call site means "compute body hashes only" — the behaviour before this
+/// feature, and the path for any language without a mapping yet.
+pub struct ShapeAttachCtx<'a> {
+    tree: &'a tree_sitter::Tree,
+    src: &'a [u8],
+    mapping: &'a dyn crate::graph::unified::build::shape::ShapeMapping,
+    budget: crate::graph::unified::build::shape::ShapeBudget,
+    /// Line-start byte offsets over `src`, computed once so each `descriptor_for`
+    /// converts a recorded line/column span to bytes without re-scanning.
+    line_offsets: Vec<usize>,
+}
+
+impl<'a> ShapeAttachCtx<'a> {
+    /// Build a context with the default visit budget.
+    #[must_use]
+    pub fn new(
+        tree: &'a tree_sitter::Tree,
+        src: &'a [u8],
+        mapping: &'a dyn crate::graph::unified::build::shape::ShapeMapping,
+    ) -> Self {
+        Self {
+            tree,
+            src,
+            mapping,
+            budget: crate::graph::unified::build::shape::ShapeBudget::default(),
+            line_offsets: crate::graph::unified::build::body_hash::build_line_offsets(src),
+        }
+    }
+
+    /// Resolve the tree node whose byte span exactly matches `entry` and compute
+    /// its identifier-blind descriptor.
+    ///
+    /// The recorded span is first converted to a byte range with the SAME
+    /// `resolve_body_span` body_hash uses. Going through the byte range (rather than
+    /// feeding the recorded line/column straight to `descendant_for_point_range`) is
+    /// what makes this work across the whole plugin set: most plugins record true
+    /// `(row, column)`, but several (php, perl, r, elixir, plsql, ...) encode the
+    /// span as line 1 plus an absolute byte offset in the column. `resolve_body_span`
+    /// maps both conventions to the correct bytes via `line_offsets`, exactly as it
+    /// does for body_hash, so the two seams stay in lock-step.
+    ///
+    /// `descendant_for_byte_range` returns the SMALLEST node spanning the range,
+    /// which for a recorded function/method span is the function node itself. A
+    /// non-exact match means the recorded span does not correspond to a real
+    /// subtree (e.g. a genuine preprocessing skew where the recorded coordinates
+    /// belong to a different content buffer), so we return `None` rather than
+    /// fingerprint the wrong node, the same conservative stance body_hash takes for
+    /// an invalid span.
+    fn descriptor_for(
+        &self,
+        entry: &NodeEntry,
+    ) -> Option<crate::graph::unified::storage::shape::ShapeDescriptor> {
+        let (start_byte, end_byte) = crate::graph::unified::build::body_hash::resolve_body_span(
+            &self.line_offsets,
+            entry.start_line,
+            entry.start_column,
+            entry.end_line,
+            entry.end_column,
+            self.src.len(),
+        )?;
+        let node = self
+            .tree
+            .root_node()
+            .descendant_for_byte_range(start_byte, end_byte)?;
+        if node.start_byte() != start_byte || node.end_byte() != end_byte {
+            return None;
+        }
+        Some(
+            crate::graph::unified::build::shape::compute_shape_descriptor(
+                node,
+                self.src,
+                self.mapping,
+                &self.budget,
+            ),
+        )
     }
 }
 
@@ -2481,8 +2611,8 @@ mod tests {
             }
         }
 
-        // Attach body hashes
-        staging.attach_body_hashes(content);
+        // Attach body hashes (no shape context: this test exercises body_hash only)
+        staging.attach_body_hashes(content, None);
 
         // After attach, only the function should have body_hash set
         let mut func_has_hash = false;
@@ -2506,6 +2636,131 @@ mod tests {
 
         assert!(func_has_hash, "Function should have body hash");
         assert!(!var_has_hash, "Variable should NOT have body hash");
+    }
+
+    /// Minimal in-crate [`ShapeMapping`] so the staging seam can be exercised
+    /// without a language-plugin dependency (sqry-core cannot depend on
+    /// sqry-lang-rust). Covers just enough Rust kinds to drive the walker.
+    struct SeamTestMapping;
+
+    impl crate::graph::unified::build::shape::ShapeMapping for SeamTestMapping {
+        fn cf_bucket(&self, id: u16) -> Option<crate::graph::unified::build::shape::CfBucket> {
+            use crate::graph::unified::build::shape::CfBucket;
+            let lang: tree_sitter::Language = tree_sitter_rust::LANGUAGE.into();
+            match lang.node_kind_for_id(id)? {
+                "if_expression" => Some(CfBucket::Branch),
+                "return_expression" => Some(CfBucket::Return),
+                "let_declaration" => Some(CfBucket::Assign),
+                "call_expression" => Some(CfBucket::Call),
+                _ => None,
+            }
+        }
+
+        fn signature_shape(
+            &self,
+            fn_node: tree_sitter::Node,
+            _src: &[u8],
+        ) -> crate::graph::unified::storage::shape::SignatureShape {
+            let mut s = crate::graph::unified::storage::shape::SignatureShape::default();
+            if let Some(p) = fn_node.child_by_field_name("parameters") {
+                let mut c = p.walk();
+                for child in p.named_children(&mut c) {
+                    if matches!(child.kind(), "parameter" | "self_parameter") {
+                        s.arity_positional = s.arity_positional.saturating_add(1);
+                    }
+                }
+            }
+            s
+        }
+    }
+
+    fn parse_rust(src: &str) -> tree_sitter::Tree {
+        let mut parser = tree_sitter::Parser::new();
+        let lang: tree_sitter::Language = tree_sitter_rust::LANGUAGE.into();
+        parser.set_language(&lang).expect("load rust grammar");
+        parser.parse(src, None).expect("parse")
+    }
+
+    fn first_function_item(tree: &tree_sitter::Tree) -> tree_sitter::Node<'_> {
+        let root = tree.root_node();
+        let mut cursor = root.walk();
+        root.named_children(&mut cursor)
+            .find(|n| n.kind() == "function_item")
+            .expect("function_item present")
+    }
+
+    #[test]
+    fn test_attach_shape_descriptors_targets_staging_store_for_function_only() {
+        use crate::graph::unified::build::shape::CfBucket;
+
+        let src = "fn foo(x: i32) -> i32 { let y = x + 1; if y > 0 { return y; } y }";
+        let tree = parse_rust(src);
+        let func = first_function_item(&tree);
+        let sp = func.start_position();
+        let ep = func.end_position();
+
+        let mut staging = StagingGraph::new();
+        let file_id = FileId::new(0);
+        let name_id = StringId::new(1);
+
+        // Function node spanning the whole function_item (1-indexed lines, mirroring
+        // the build helper's span->location conversion).
+        let mut func_entry = NodeEntry::new(NodeKind::Function, name_id, file_id);
+        func_entry.start_line = u32::try_from(sp.row).unwrap() + 1;
+        func_entry.start_column = u32::try_from(sp.column).unwrap();
+        func_entry.end_line = u32::try_from(ep.row).unwrap() + 1;
+        func_entry.end_column = u32::try_from(ep.column).unwrap();
+        let func_node_id = staging.add_node(func_entry);
+
+        // A non-Function kind with a valid span: must be skipped by the kind gate.
+        let mut var_entry = NodeEntry::new(NodeKind::Variable, name_id, file_id);
+        var_entry.start_line = 1;
+        var_entry.start_column = 24;
+        var_entry.end_line = 1;
+        var_entry.end_column = 38;
+        let var_node_id = staging.add_node(var_entry);
+
+        let ctx = ShapeAttachCtx::new(&tree, src.as_bytes(), &SeamTestMapping);
+        staging.attach_body_hashes(src.as_bytes(), Some(ctx));
+
+        let metadata = staging.take_macro_metadata();
+        let descriptors = metadata.shape_descriptors();
+        assert!(
+            descriptors.contains_key(&func_node_id),
+            "descriptor must be keyed by the staging-local NodeId in the take_macro_metadata store"
+        );
+        assert!(
+            !descriptors.contains_key(&var_node_id),
+            "non-Function/Method kinds get no descriptor"
+        );
+        let d = &descriptors[&func_node_id];
+        assert_eq!(d.cf_histogram[CfBucket::Branch.index()], 1);
+        assert_eq!(d.cf_histogram[CfBucket::Return.index()], 1);
+        assert_eq!(d.cf_histogram[CfBucket::Assign.index()], 1);
+        assert_eq!(d.signature_shape.arity_positional, 1);
+        assert!(!d.is_unhashable());
+    }
+
+    #[test]
+    fn test_attach_body_hashes_none_ctx_produces_no_descriptors() {
+        let src = "fn foo(x: i32) -> i32 { let y = x + 1; if y > 0 { return y; } y }";
+        let mut staging = StagingGraph::new();
+        let file_id = FileId::new(0);
+        let name_id = StringId::new(1);
+        let mut func_entry = NodeEntry::new(NodeKind::Function, name_id, file_id);
+        func_entry.start_line = 1;
+        func_entry.start_column = 0;
+        func_entry.end_line = 1;
+        func_entry.end_column = u32::try_from(src.len()).unwrap();
+        staging.add_node(func_entry);
+
+        // No shape context: body hashes only, the pre-feature behaviour.
+        staging.attach_body_hashes(src.as_bytes(), None);
+
+        assert!(
+            staging.take_macro_metadata().shape_descriptors().is_empty(),
+            "without a shape context no descriptors are produced"
+        );
     }
 
     // ==================== Query API Tests ====================

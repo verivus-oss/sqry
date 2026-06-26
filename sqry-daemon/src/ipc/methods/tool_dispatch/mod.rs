@@ -70,6 +70,7 @@ pub(crate) async fn dispatch_tool(
         "semantic_diff" => tools::semantic_diff::handle(ctx, params).await,
         "dependency_impact" => tools::dependency_impact::handle(ctx, params).await,
         "show_dependencies" => tools::show_dependencies::handle(ctx, params).await,
+        "structural_similar" => tools::structural_similar::handle(ctx, params).await,
         // `rebuild_index` is intentionally NOT routed through this
         // table — it is a mutating workspace-loading operation served
         // by the daemon MCP host's `handle_rebuild_index` (and the

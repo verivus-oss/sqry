@@ -31,7 +31,10 @@
 //! - `@layer name { ... }` - layer block definition
 
 use std::path::Path;
+use std::sync::OnceLock;
 
+use sqry_core::graph::unified::build::shape::{CfBucket, ShapeMapping};
+use sqry_core::graph::unified::storage::shape::SignatureShape;
 use sqry_core::graph::{
     GraphBuilder, GraphResult, Language,
     unified::{GraphBuildHelper, StagingGraph},
@@ -45,6 +48,10 @@ pub struct CssGraphBuilder;
 impl GraphBuilder for CssGraphBuilder {
     fn language(&self) -> Language {
         Language::Css
+    }
+
+    fn shape_mapping(&self) -> Option<&dyn ShapeMapping> {
+        Some(css_shape_mapping())
     }
 
     fn build_graph(
@@ -68,6 +75,52 @@ impl GraphBuilder for CssGraphBuilder {
 
         Ok(())
     }
+}
+
+/// Per-language [`ShapeMapping`] for CSS (tree-sitter-css).
+///
+/// CSS is declarative: stylesheets carry rules, selectors, and declarations,
+/// never function-like bodies, so the CSS plugin mints no `Function`/`Method`
+/// nodes and there is no procedural control flow to bucket. The impl is present
+/// (every plugin ships a real one) and is honestly empty: the cf table maps no
+/// grammar kind, and `signature_shape` has no parameter list to read. The
+/// coverage test asserts that honesty explicitly rather than silently mapping
+/// nothing.
+pub struct CssShapeMapping {
+    cf_by_kind_id: Vec<Option<CfBucket>>,
+}
+
+impl CssShapeMapping {
+    fn build() -> Self {
+        let lang: tree_sitter::Language = tree_sitter_css::LANGUAGE.into();
+        let count = lang.node_kind_count();
+        // CSS has no control-flow constructs; the table stays all-`None`, which
+        // is the structural witness that the language is declarative.
+        let cf_by_kind_id = vec![None; count];
+        Self { cf_by_kind_id }
+    }
+}
+
+impl ShapeMapping for CssShapeMapping {
+    fn cf_bucket(&self, ts_node_kind_id: u16) -> Option<CfBucket> {
+        self.cf_by_kind_id
+            .get(ts_node_kind_id as usize)
+            .copied()
+            .flatten()
+    }
+
+    fn signature_shape(&self, _fn_node: Node, _src: &[u8]) -> SignatureShape {
+        // No function-like declarations in CSS; the default (zero arity, no
+        // flags) is the honest signature.
+        SignatureShape::default()
+    }
+}
+
+/// The process-wide CSS shape mapping, built once on first use.
+#[must_use]
+pub fn css_shape_mapping() -> &'static CssShapeMapping {
+    static MAPPING: OnceLock<CssShapeMapping> = OnceLock::new();
+    MAPPING.get_or_init(CssShapeMapping::build)
 }
 
 // ============================================================================
@@ -1545,6 +1598,81 @@ mod tests {
             contains_edges.len(),
             1,
             "Expected 1 Contains edge for single layer declaration"
+        );
+    }
+}
+
+#[cfg(test)]
+mod shape_tests {
+    use super::*;
+    use sqry_core::graph::unified::build::has_valid_body_span;
+    use sqry_core::graph::unified::node::kind::NodeKind;
+    use std::path::PathBuf;
+    use tree_sitter::Parser;
+
+    const SAMPLE: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../test-fixtures/shape/data/sample.css"
+    ));
+
+    fn parse(src: &str) -> Tree {
+        let mut parser = Parser::new();
+        parser
+            .set_language(&tree_sitter_css::LANGUAGE.into())
+            .expect("load css grammar");
+        parser.parse(src, None).expect("parse")
+    }
+
+    #[test]
+    fn shape_mapping_is_present_and_declarative_empty() {
+        // The plugin ships a real mapping (AC-1: no plugin omitted), and it is
+        // honestly empty: no CSS grammar kind maps to a control-flow bucket.
+        let mapping = css_shape_mapping();
+        let mapped = mapping.cf_by_kind_id.iter().filter(|s| s.is_some()).count();
+        assert_eq!(
+            mapped, 0,
+            "CSS is declarative: no grammar kind maps to a control-flow bucket"
+        );
+
+        // Spot-check a few real CSS kinds resolve to None by id.
+        let lang: tree_sitter::Language = tree_sitter_css::LANGUAGE.into();
+        for name in ["rule_set", "declaration", "media_statement", "block"] {
+            let id = lang.id_for_node_kind(name, true);
+            assert_eq!(
+                mapping.cf_bucket(id),
+                None,
+                "{name} must not map to a control-flow bucket"
+            );
+        }
+    }
+
+    #[test]
+    fn no_eligible_function_or_method_nodes() {
+        // The shape walker only fingerprints Function/Method nodes with a valid
+        // body span. CSS mints none, so there is nothing to fingerprint, and the
+        // test asserts that absence explicitly rather than relying on an empty
+        // histogram.
+        let tree = parse(SAMPLE);
+        let mut staging = StagingGraph::new();
+        let builder = CssGraphBuilder;
+        let file = PathBuf::from("sample.css");
+        builder
+            .build_graph(&tree, SAMPLE.as_bytes(), &file, &mut staging)
+            .expect("build css graph");
+
+        let eligible = staging
+            .nodes()
+            .filter(|n| matches!(n.entry.kind, NodeKind::Function | NodeKind::Method))
+            .filter(|n| has_valid_body_span(n.entry))
+            .count();
+        assert_eq!(
+            eligible, 0,
+            "CSS must mint no Function/Method node with a body span"
+        );
+        // The stylesheet still produces declarative nodes, so the build is real.
+        assert!(
+            staging.node_count() >= 1,
+            "the CSS fixture must still produce declarative nodes"
         );
     }
 }

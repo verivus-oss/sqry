@@ -1,11 +1,13 @@
-use std::{collections::HashMap, path::Path};
+use std::{collections::HashMap, path::Path, sync::OnceLock};
 
 use crate::relations::java_common::{PackageResolver, build_member_symbol, build_symbol};
 use crate::relations::local_scopes::{self, JavaScopeTree, ResolutionOutcome};
 use sqry_core::graph::unified::StagingGraph;
 use sqry_core::graph::unified::build::helper::GraphBuildHelper;
+use sqry_core::graph::unified::build::shape::{CfBucket, ShapeMapping};
 use sqry_core::graph::unified::edge::FfiConvention;
 use sqry_core::graph::unified::edge::kind::TypeOfContext;
+use sqry_core::graph::unified::storage::shape::SignatureShape;
 use sqry_core::graph::{GraphBuilder, GraphBuilderError, GraphResult, Language, Span};
 use tree_sitter::{Node, Tree};
 
@@ -144,6 +146,110 @@ impl GraphBuilder for JavaGraphBuilder {
     fn language(&self) -> Language {
         Language::Java
     }
+
+    fn shape_mapping(&self) -> Option<&dyn ShapeMapping> {
+        Some(java_shape_mapping())
+    }
+}
+
+/// Per-language [`ShapeMapping`] for Java.
+///
+/// Holds a precomputed `kind_id -> CfBucket` table built once from the
+/// tree-sitter-java grammar and shared process-wide via [`java_shape_mapping`].
+/// Everything except this mapping is the one shared `compute_shape_descriptor`
+/// routine.
+pub struct JavaShapeMapping {
+    cf_by_kind_id: Vec<Option<CfBucket>>,
+}
+
+impl JavaShapeMapping {
+    /// Build the `kind_id -> CfBucket` table from the tree-sitter-java grammar.
+    fn build() -> Self {
+        let lang: tree_sitter::Language = tree_sitter_java::LANGUAGE.into();
+        let count = lang.node_kind_count();
+        let mut cf_by_kind_id = vec![None; count];
+        for (id, slot) in cf_by_kind_id.iter_mut().enumerate() {
+            let Ok(kind_id) = u16::try_from(id) else {
+                break;
+            };
+            if !lang.node_kind_is_named(kind_id) {
+                continue;
+            }
+            if let Some(name) = lang.node_kind_for_id(kind_id) {
+                *slot = cf_bucket_for_java_kind(name);
+            }
+        }
+        Self { cf_by_kind_id }
+    }
+}
+
+impl ShapeMapping for JavaShapeMapping {
+    fn cf_bucket(&self, ts_node_kind_id: u16) -> Option<CfBucket> {
+        self.cf_by_kind_id
+            .get(ts_node_kind_id as usize)
+            .copied()
+            .flatten()
+    }
+
+    fn signature_shape(&self, fn_node: Node, _src: &[u8]) -> SignatureShape {
+        let mut shape = SignatureShape::default();
+        if let Some(params) = fn_node.child_by_field_name("parameters") {
+            let mut cursor = params.walk();
+            for child in params.named_children(&mut cursor) {
+                match child.kind() {
+                    "formal_parameter" => {
+                        shape.arity_positional = shape.arity_positional.saturating_add(1);
+                    }
+                    // `String... args` varargs tail.
+                    "spread_parameter" => {
+                        shape.has_varargs = true;
+                        shape.arity_positional = shape.arity_positional.saturating_add(1);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        // A method declares its return type in the `type` field (constructors and
+        // lambdas have none). Java has no defaults or keyword-only parameters.
+        shape.has_return_annotation = fn_node.child_by_field_name("type").is_some();
+        shape
+    }
+}
+
+/// Map one tree-sitter-java grammar node-kind name to its canonical control-flow
+/// bucket. Additive-only; the bucket set is frozen.
+fn cf_bucket_for_java_kind(name: &str) -> Option<CfBucket> {
+    let bucket = match name {
+        "if_statement" | "ternary_expression" => CfBucket::Branch,
+        "for_statement" | "enhanced_for_statement" | "while_statement" | "do_statement" => {
+            CfBucket::Loop
+        }
+        "switch_expression" | "switch_block_statement_group" | "switch_label" | "switch_rule" => {
+            CfBucket::Match
+        }
+        "try_statement" => CfBucket::Try,
+        "catch_clause" => CfBucket::Catch,
+        "throw_statement" => CfBucket::Throw,
+        // try-with-resources and `synchronized` both acquire/release a resource.
+        "try_with_resources_statement" | "synchronized_statement" => CfBucket::Resource,
+        "return_statement" => CfBucket::Return,
+        "yield_statement" => CfBucket::Yield,
+        "break_statement" | "continue_statement" => CfBucket::BreakContinue,
+        "method_invocation" | "object_creation_expression" | "explicit_constructor_invocation" => {
+            CfBucket::Call
+        }
+        "local_variable_declaration" | "assignment_expression" => CfBucket::Assign,
+        "lambda_expression" => CfBucket::Closure,
+        _ => return None,
+    };
+    Some(bucket)
+}
+
+/// The process-wide Java shape mapping, built once on first use.
+#[must_use]
+pub fn java_shape_mapping() -> &'static JavaShapeMapping {
+    static MAPPING: OnceLock<JavaShapeMapping> = OnceLock::new();
+    MAPPING.get_or_init(JavaShapeMapping::build)
 }
 
 // ================================
@@ -3722,5 +3828,124 @@ fn extract_bound_type_base_name(type_node: Node, content: &[u8]) -> String {
         }
         "scoped_type_identifier" => extract_full_identifier(type_node, content),
         _ => extract_identifier(type_node, content),
+    }
+}
+
+#[cfg(test)]
+mod shape_tests {
+    use super::{cf_bucket_for_java_kind, java_shape_mapping};
+    use sqry_core::graph::unified::build::shape::{
+        CfBucket, ShapeBudget, ShapeMapping, compute_shape_descriptor,
+    };
+
+    const SAMPLE: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../test-fixtures/shape/reference/Sample.java"
+    ));
+
+    fn parse(src: &str) -> tree_sitter::Tree {
+        let lang: tree_sitter::Language = tree_sitter_java::LANGUAGE.into();
+        let mut p = tree_sitter::Parser::new();
+        p.set_language(&lang).expect("load java grammar");
+        p.parse(src, None).expect("parse")
+    }
+
+    fn method_named<'t>(tree: &'t tree_sitter::Tree, name: &str) -> tree_sitter::Node<'t> {
+        let root = tree.root_node();
+        let mut stack = vec![root];
+        while let Some(node) = stack.pop() {
+            if node.kind() == "method_declaration"
+                && node
+                    .child_by_field_name("name")
+                    .and_then(|n| n.utf8_text(SAMPLE.as_bytes()).ok())
+                    == Some(name)
+            {
+                return node;
+            }
+            let mut c = node.walk();
+            for ch in node.children(&mut c) {
+                stack.push(ch);
+            }
+        }
+        panic!("no method_declaration named {name}");
+    }
+
+    #[test]
+    fn cf_table_is_non_empty() {
+        let mapping = java_shape_mapping();
+        let lang: tree_sitter::Language = tree_sitter_java::LANGUAGE.into();
+        let mut covered = 0;
+        for id in 0..lang.node_kind_count() {
+            if mapping.cf_bucket(id as u16).is_some() {
+                covered += 1;
+            }
+        }
+        assert!(
+            covered >= 10,
+            "expected many Java CF kinds mapped, got {covered}"
+        );
+    }
+
+    #[test]
+    fn histogram_covers_real_control_flow() {
+        let tree = parse(SAMPLE);
+        let func = method_named(&tree, "classify");
+        let d = compute_shape_descriptor(
+            func,
+            SAMPLE.as_bytes(),
+            java_shape_mapping(),
+            &ShapeBudget::default(),
+        );
+        assert!(!d.is_unhashable());
+        for bucket in [
+            CfBucket::Branch,
+            CfBucket::Loop,
+            CfBucket::Match,
+            CfBucket::Try,
+            CfBucket::Catch,
+            CfBucket::Throw,
+            CfBucket::Return,
+            CfBucket::BreakContinue,
+            CfBucket::Call,
+            CfBucket::Assign,
+        ] {
+            assert!(
+                d.cf_histogram[bucket.index()] >= 1,
+                "classify must exercise {bucket:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn lambda_body_covers_closure() {
+        let tree = parse(SAMPLE);
+        let func = method_named(&tree, "adder");
+        let d = compute_shape_descriptor(
+            func,
+            SAMPLE.as_bytes(),
+            java_shape_mapping(),
+            &ShapeBudget::default(),
+        );
+        assert!(
+            d.cf_histogram[CfBucket::Closure.index()] >= 1,
+            "lambda closure"
+        );
+    }
+
+    #[test]
+    fn signature_shape_reads_arity_and_return() {
+        let tree = parse(SAMPLE);
+        let func = method_named(&tree, "classify");
+        let mapping = java_shape_mapping();
+        let shape = mapping.signature_shape(func, SAMPLE.as_bytes());
+        // int classify(List<Integer> values, int threshold)
+        assert_eq!(shape.arity_positional, 2);
+        assert!(shape.has_return_annotation, "int return type");
+    }
+
+    #[test]
+    fn unknown_kind_maps_to_none() {
+        assert!(cf_bucket_for_java_kind("program").is_none());
+        assert!(cf_bucket_for_java_kind("identifier").is_none());
     }
 }

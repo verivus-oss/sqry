@@ -11,6 +11,7 @@ This guide covers the stable public workflows for local semantic code search.
 - [Daemon Mode](daemon.md): run `sqryd`, load and rebuild workspaces, inspect logs, and use daemon-backed MCP/LSP workflows.
 - [MCP](mcp.md): configure AI assistants, choose standalone versus daemon mode, inspect the live tool catalog, and handle `source_root_id` safely.
 - [Advanced Analysis](advanced-analysis.md): use graph predicates, `resolved_via`, `returns`, context propagation, semantic diff, impact, and visualization.
+- [Structural Shape Matching](shape-match.md): find functions by identifier-blind body shape with `shape-match`, `diff --structural`, the `shape~=` predicate, and the `structural_similar` MCP tool.
 - [Visualization](visualization.md): render relationship graphs in Mermaid, DOT, and D2.
 
 ## First Path

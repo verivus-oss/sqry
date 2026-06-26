@@ -21,6 +21,8 @@
 //! | `project/types.rs` | `HASH_SEED` | `0x5351_5259_5041_5448` | "SQRYPATH" | Path hashing |
 //! | `body_hash.rs` | `HASH_SEED_0` | `0x5351_5259_4455_5030` | "SQRYDUP0" | Body hash high bits |
 //! | `body_hash.rs` | `HASH_SEED_1` | `0x5351_5259_4455_5031` | "SQRYDUP1" | Body hash low bits |
+//! | `body_hash.rs` | `SHAPE_SEED_0` | `0x5351_5259_5348_5030` | "SQRYSHP0" | Shape hash high bits |
+//! | `body_hash.rs` | `SHAPE_SEED_1` | `0x5351_5259_5348_5031` | "SQRYSHP1" | Shape hash low bits |
 //!
 //! # Rules for adding new seeds
 //!
@@ -28,7 +30,11 @@
 //! 2. Use ASCII encoding of meaningful names (8 chars = 64 bits)
 //! 3. Follow pattern: "SQRY" prefix + 4-char identifier
 //! 4. Register new seeds in this table before implementation
-//! 5. Changing seeds requires `INDEX_SCHEMA_VERSION` bump
+//! 5. Changing the `HASH_SEED_*` (body-hash) seeds requires an
+//!    `INDEX_SCHEMA_VERSION` bump; changing the `SHAPE_SEED_*` (shape-hash) seeds
+//!    requires a `SHAPE_SCHEMA_VERSION` bump (the sibling discipline defined in
+//!    `crate::graph::unified::storage::shape`). The two version counters are
+//!    independent because the two hashes live in separate on-disk payloads.
 
 use serde::{Deserialize, Serialize};
 use xxhash_rust::xxh64::xxh64;
@@ -44,6 +50,25 @@ pub const HASH_SEED_0: u64 = 0x5351_5259_4455_5030;
 /// Schema: `INDEX_SCHEMA_VERSION` = 2
 /// ASCII: "SQRYDUP1" = `0x5351_5259_4455_5031`
 pub const HASH_SEED_1: u64 = 0x5351_5259_4455_5031;
+
+/// Fixed hash seed for the high 64 bits of the structural `shape_hash` and the
+/// `Weisfeiler-Lehman` label / `MinHash` lane derivation (the shape walker in
+/// `crate::graph::unified::build::shape`).
+///
+/// Distinct from the `HASH_SEED_*` body-hash seeds so the renaming-invariant
+/// structural hash never collides with the exact copy-paste hash. Changing it
+/// changes the bytes of every `ShapeDescriptor`, so it is gated by
+/// `SHAPE_SCHEMA_VERSION`, NOT `INDEX_SCHEMA_VERSION`.
+///
+/// ASCII: "SQRYSHP0" = `0x5351_5259_5348_5030`
+pub const SHAPE_SEED_0: u64 = 0x5351_5259_5348_5030;
+
+/// Fixed hash seed for the low 64 bits of the structural `shape_hash`.
+///
+/// The shape-hash sibling of [`HASH_SEED_1`]; gated by `SHAPE_SCHEMA_VERSION`.
+///
+/// ASCII: "SQRYSHP1" = `0x5351_5259_5348_5031`
+pub const SHAPE_SEED_1: u64 = 0x5351_5259_5348_5031;
 
 /// 128-bit body hash for collision resistance
 ///
@@ -148,6 +173,22 @@ mod tests {
         assert_eq!(HASH_SEED_0, 0x5351_5259_4455_5030);
         // "SQRYDUP1" in hex: S=53, Q=51, R=52, Y=59, D=44, U=55, P=50, 1=31
         assert_eq!(HASH_SEED_1, 0x5351_5259_4455_5031);
+    }
+
+    #[test]
+    fn test_shape_seeds_fixed_and_unique() {
+        // "SQRYSHP0": S=53, Q=51, R=52, Y=59, S=53, H=48, P=50, 0=30
+        assert_eq!(SHAPE_SEED_0, 0x5351_5259_5348_5030);
+        // "SQRYSHP1": ... 1=31
+        assert_eq!(SHAPE_SEED_1, 0x5351_5259_5348_5031);
+        // The seed-registry invariant: every seed in this module is unique, so the
+        // structural hash can never collide with the exact copy-paste hash.
+        let seeds = [HASH_SEED_0, HASH_SEED_1, SHAPE_SEED_0, SHAPE_SEED_1];
+        for (i, a) in seeds.iter().enumerate() {
+            for b in &seeds[i + 1..] {
+                assert_ne!(a, b, "seeds must be unique across the codebase");
+            }
+        }
     }
 
     #[test]

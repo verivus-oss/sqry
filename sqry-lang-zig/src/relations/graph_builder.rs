@@ -22,13 +22,16 @@
 //! - Inline assembly calls: Not tracked (low-level only)
 //! - Function pointers: Not tracked (runtime dispatch)
 
+use std::sync::OnceLock;
 use std::{
     collections::{HashMap, HashSet},
     path::Path,
 };
 
+use sqry_core::graph::unified::build::shape::{CfBucket, ShapeMapping};
 use sqry_core::graph::unified::edge::kind::TypeOfContext;
 use sqry_core::graph::unified::resolution::canonicalize_graph_qualified_name;
+use sqry_core::graph::unified::storage::shape::SignatureShape;
 use sqry_core::graph::unified::{GraphBuildHelper, NodeId, StagingGraph};
 use sqry_core::graph::{GraphBuilder, GraphBuilderError, GraphResult, Language, Span};
 use tree_sitter::{Node, Tree};
@@ -190,6 +193,113 @@ impl GraphBuilder for ZigGraphBuilder {
     fn language(&self) -> Language {
         Language::Zig
     }
+
+    fn shape_mapping(&self) -> Option<&dyn ShapeMapping> {
+        Some(zig_shape_mapping())
+    }
+}
+
+/// Per-language [`ShapeMapping`] for Zig: a precomputed `kind_id -> CfBucket`
+/// table over the tree-sitter-zig grammar, shared process-wide via
+/// [`zig_shape_mapping`]. Mirrors the C reference impl: a single array index per
+/// node on the hot shape walk, identifier-blind throughout.
+pub struct ZigShapeMapping {
+    cf_by_kind_id: Vec<Option<CfBucket>>,
+}
+
+impl ZigShapeMapping {
+    fn build() -> Self {
+        let lang: tree_sitter::Language = tree_sitter_zig::LANGUAGE.into();
+        let count = lang.node_kind_count();
+        let mut cf_by_kind_id = vec![None; count];
+        for (id, slot) in cf_by_kind_id.iter_mut().enumerate() {
+            let Ok(kind_id) = u16::try_from(id) else {
+                break;
+            };
+            if !lang.node_kind_is_named(kind_id) {
+                continue;
+            }
+            if let Some(name) = lang.node_kind_for_id(kind_id) {
+                *slot = cf_bucket_for_zig_kind(name);
+            }
+        }
+        Self { cf_by_kind_id }
+    }
+}
+
+impl ShapeMapping for ZigShapeMapping {
+    fn cf_bucket(&self, ts_node_kind_id: u16) -> Option<CfBucket> {
+        self.cf_by_kind_id
+            .get(ts_node_kind_id as usize)
+            .copied()
+            .flatten()
+    }
+
+    fn signature_shape(&self, fn_node: Node, _src: &[u8]) -> SignatureShape {
+        let mut shape = SignatureShape::default();
+        // A `function_declaration` carries its parameters in a named child of kind
+        // `parameters` (not a tree-sitter field); its `parameter` children are the
+        // positional params. Zig has no varargs/kwargs at the grammar level.
+        if let Some(params) = zig_parameters(fn_node) {
+            let mut cursor = params.walk();
+            for child in params.named_children(&mut cursor) {
+                if child.kind() == "parameter" {
+                    shape.arity_positional = shape.arity_positional.saturating_add(1);
+                }
+            }
+        }
+        // The return type lives in the `type` field of `function_declaration`; a
+        // present slot is the structural witness of a declared return type.
+        shape.has_return_annotation = fn_node.child_by_field_name("type").is_some();
+        shape
+    }
+}
+
+/// Find the `parameters` child of a Zig `function_declaration`. The grammar
+/// exposes it as a named child by kind rather than a labelled field.
+fn zig_parameters(fn_node: Node) -> Option<Node> {
+    let mut cursor = fn_node.walk();
+    fn_node
+        .named_children(&mut cursor)
+        .find(|child| child.kind() == "parameters")
+}
+
+/// Map one tree-sitter-zig grammar node-kind name to its canonical control-flow
+/// bucket. Additive-only against the frozen [`CfBucket`] set.
+fn cf_bucket_for_zig_kind(name: &str) -> Option<CfBucket> {
+    let bucket = match name {
+        "if_expression" | "if_statement" | "if_type_expression" => CfBucket::Branch,
+        "for_expression" | "for_statement" | "while_expression" | "while_statement" => {
+            CfBucket::Loop
+        }
+        "switch_expression" | "switch_case" => CfBucket::Match,
+        "try_expression" => CfBucket::Try,
+        // `x catch |e| ...`: error-set recovery maps onto the catch bucket.
+        "catch_expression" => CfBucket::Catch,
+        // `defer` / `errdefer` are scope-exit resource cleanup.
+        "defer_statement" | "errdefer_statement" => CfBucket::Resource,
+        "return_expression" => CfBucket::Return,
+        // Zig's async/suspend family maps onto the async-suspend bucket.
+        "await_expression"
+        | "async_expression"
+        | "nosuspend_expression"
+        | "suspend_statement"
+        | "nosuspend_statement" => CfBucket::Await,
+        "break_expression" | "continue_expression" => CfBucket::BreakContinue,
+        "call_expression" => CfBucket::Call,
+        "assignment_expression" | "variable_declaration" => CfBucket::Assign,
+        // Zig has no `throw`: errors are values surfaced through `try` / `catch`,
+        // so there is no Throw arm by design.
+        _ => return None,
+    };
+    Some(bucket)
+}
+
+/// The process-wide Zig shape mapping, built once on first use.
+#[must_use]
+pub fn zig_shape_mapping() -> &'static ZigShapeMapping {
+    static MAPPING: OnceLock<ZigShapeMapping> = OnceLock::new();
+    MAPPING.get_or_init(ZigShapeMapping::build)
 }
 
 // ============================================================================
@@ -2650,5 +2760,94 @@ pub const O = opaque {
                  never TypeOfContext::Variable (saw {context:?})",
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod shape_tests {
+    use super::*;
+    use sqry_core::graph::unified::build::shape::{
+        CfBucket, ShapeBudget, compute_shape_descriptor,
+    };
+
+    const SAMPLE: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../test-fixtures/shape/systems/sample.zig"
+    ));
+
+    fn parse(src: &str) -> Tree {
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_zig::LANGUAGE.into())
+            .expect("load Zig grammar");
+        parser.parse(src, None).expect("parse Zig sample")
+    }
+
+    fn nth_of_kind<'a>(node: Node<'a>, kind: &str, mut skip: usize) -> Option<Node<'a>> {
+        fn walk<'a>(node: Node<'a>, kind: &str, skip: &mut usize) -> Option<Node<'a>> {
+            if node.kind() == kind {
+                if *skip == 0 {
+                    return Some(node);
+                }
+                *skip -= 1;
+            }
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if let Some(found) = walk(child, kind, skip) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        walk(node, kind, &mut skip)
+    }
+
+    #[test]
+    fn zig_mapping_is_non_empty() {
+        let mapping = zig_shape_mapping();
+        let lang: tree_sitter::Language = tree_sitter_zig::LANGUAGE.into();
+        let count = (0..lang.node_kind_count())
+            .filter_map(|id| u16::try_from(id).ok())
+            .filter(|id| mapping.cf_bucket(*id).is_some())
+            .count();
+        assert!(
+            count > 0,
+            "Zig cf_bucket map should cover real control-flow kinds"
+        );
+    }
+
+    #[test]
+    fn zig_histogram_covers_control_flow() {
+        let tree = parse(SAMPLE);
+        // The second `function_declaration` is `classify` (first is `compute`).
+        let func = nth_of_kind(tree.root_node(), "function_declaration", 1)
+            .expect("sample has a classify function_declaration");
+        let desc = compute_shape_descriptor(
+            func,
+            SAMPLE.as_bytes(),
+            zig_shape_mapping(),
+            &ShapeBudget::default(),
+        );
+        let h = &desc.cf_histogram;
+        assert!(h[CfBucket::Branch.index()] >= 1, "branch present");
+        assert!(h[CfBucket::Loop.index()] >= 1, "loop present");
+        assert!(h[CfBucket::Match.index()] >= 1, "switch present");
+        assert!(h[CfBucket::Call.index()] >= 1, "call present");
+        assert!(h[CfBucket::Return.index()] >= 1, "return present");
+        assert!(
+            h[CfBucket::BreakContinue.index()] >= 1,
+            "break/continue present"
+        );
+    }
+
+    #[test]
+    fn zig_signature_shape_reads_params() {
+        let tree = parse(SAMPLE);
+        let func = nth_of_kind(tree.root_node(), "function_declaration", 1)
+            .expect("sample has a classify function_declaration");
+        let shape = zig_shape_mapping().signature_shape(func, SAMPLE.as_bytes());
+        // classify(n: i32, items: []const u8) i32: two positional params.
+        assert_eq!(shape.arity_positional, 2, "two positional params");
+        assert!(shape.has_return_annotation, "Zig return type slot present");
     }
 }

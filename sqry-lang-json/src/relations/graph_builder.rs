@@ -8,8 +8,11 @@
 //! node kinds for domain-relevant entries.
 
 use std::path::Path;
+use std::sync::OnceLock;
 
 use sqry_core::config::buffers::{json_max_depth, json_max_nodes};
+use sqry_core::graph::unified::build::shape::{CfBucket, ShapeMapping};
+use sqry_core::graph::unified::storage::shape::SignatureShape;
 use sqry_core::graph::{
     GraphBuilder, GraphResult, Language, Position, Span,
     unified::{GraphBuildHelper, StagingGraph, node::NodeId},
@@ -486,6 +489,52 @@ impl GraphBuilder for JsonGraphBuilder {
     fn language(&self) -> Language {
         Language::Json
     }
+
+    fn shape_mapping(&self) -> Option<&dyn ShapeMapping> {
+        Some(json_shape_mapping())
+    }
+}
+
+/// Per-language [`ShapeMapping`] for JSON (tree-sitter-json).
+///
+/// JSON is a pure data format: objects, arrays, and scalars, with no
+/// function-like bodies and no control flow. The JSON plugin mints no
+/// `Function`/`Method` nodes, so there is nothing for the shape walker to
+/// fingerprint. The impl is present (AC-1: no plugin omitted) and honestly
+/// empty; the coverage test asserts that absence explicitly.
+pub struct JsonShapeMapping {
+    cf_by_kind_id: Vec<Option<CfBucket>>,
+}
+
+impl JsonShapeMapping {
+    fn build() -> Self {
+        let lang: tree_sitter::Language = tree_sitter_json::LANGUAGE.into();
+        let count = lang.node_kind_count();
+        // No control-flow constructs exist in JSON; an all-`None` table is the
+        // structural witness that the format is declarative.
+        let cf_by_kind_id = vec![None; count];
+        Self { cf_by_kind_id }
+    }
+}
+
+impl ShapeMapping for JsonShapeMapping {
+    fn cf_bucket(&self, ts_node_kind_id: u16) -> Option<CfBucket> {
+        self.cf_by_kind_id
+            .get(ts_node_kind_id as usize)
+            .copied()
+            .flatten()
+    }
+
+    fn signature_shape(&self, _fn_node: Node, _src: &[u8]) -> SignatureShape {
+        SignatureShape::default()
+    }
+}
+
+/// The process-wide JSON shape mapping, built once on first use.
+#[must_use]
+pub fn json_shape_mapping() -> &'static JsonShapeMapping {
+    static MAPPING: OnceLock<JsonShapeMapping> = OnceLock::new();
+    MAPPING.get_or_init(JsonShapeMapping::build)
 }
 
 #[cfg(test)]
@@ -592,5 +641,72 @@ mod tests {
     fn test_json_precheck_rejects_plain_text() {
         assert!(!json_fast_precheck(b"Hello world"));
         assert!(!json_fast_precheck(b"key = value"));
+    }
+}
+
+#[cfg(test)]
+mod shape_tests {
+    use super::*;
+    use sqry_core::graph::unified::build::has_valid_body_span;
+    use sqry_core::graph::unified::node::kind::NodeKind;
+    use std::path::PathBuf;
+    use tree_sitter::Parser;
+
+    const SAMPLE: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../test-fixtures/shape/data/sample.json"
+    ));
+
+    fn parse(src: &str) -> Tree {
+        let mut parser = Parser::new();
+        parser
+            .set_language(&tree_sitter_json::LANGUAGE.into())
+            .expect("load json grammar");
+        parser.parse(src, None).expect("parse")
+    }
+
+    #[test]
+    fn shape_mapping_is_present_and_declarative_empty() {
+        let mapping = json_shape_mapping();
+        let mapped = mapping.cf_by_kind_id.iter().filter(|s| s.is_some()).count();
+        assert_eq!(
+            mapped, 0,
+            "JSON is declarative: no grammar kind maps to a control-flow bucket"
+        );
+
+        let lang: tree_sitter::Language = tree_sitter_json::LANGUAGE.into();
+        for name in ["object", "array", "pair", "string"] {
+            let id = lang.id_for_node_kind(name, true);
+            assert_eq!(
+                mapping.cf_bucket(id),
+                None,
+                "{name} must not map to a control-flow bucket"
+            );
+        }
+    }
+
+    #[test]
+    fn no_eligible_function_or_method_nodes() {
+        let tree = parse(SAMPLE);
+        let mut staging = StagingGraph::new();
+        let builder = JsonGraphBuilder;
+        let file = PathBuf::from("sample.json");
+        builder
+            .build_graph(&tree, SAMPLE.as_bytes(), &file, &mut staging)
+            .expect("build json graph");
+
+        let eligible = staging
+            .nodes()
+            .filter(|n| matches!(n.entry.kind, NodeKind::Function | NodeKind::Method))
+            .filter(|n| has_valid_body_span(n.entry))
+            .count();
+        assert_eq!(
+            eligible, 0,
+            "JSON must mint no Function/Method node with a body span"
+        );
+        assert!(
+            staging.node_count() >= 1,
+            "the JSON fixture must still produce declarative nodes"
+        );
     }
 }

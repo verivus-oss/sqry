@@ -18,5 +18,6 @@ pub(crate) mod relation_query;
 pub(crate) mod semantic_diff;
 pub(crate) mod semantic_search;
 pub(crate) mod show_dependencies;
+pub(crate) mod structural_similar;
 pub(crate) mod subgraph;
 pub(crate) mod trace_path;

@@ -189,6 +189,13 @@ pub struct PlanExecutor<'db> {
     /// dedup contract), so two predicates carrying the same subquery share a
     /// single evaluation.
     shared_node_cache: HashMap<PlanNode, Arc<Vec<NodeId>>>,
+    /// Memoised structural-neighbour sets keyed by probe symbol name (U09).
+    ///
+    /// A `shape~=<symbol>` filter resolves its probe and computes the neighbour
+    /// set once; every candidate in the filtered set then tests membership in
+    /// O(1). Without this memo, a filter over N nodes would re-resolve the probe
+    /// and re-probe the index N times.
+    shape_neighbor_memo: HashMap<String, Arc<std::collections::HashSet<NodeId>>>,
 }
 
 impl<'db> PlanExecutor<'db> {
@@ -199,6 +206,7 @@ impl<'db> PlanExecutor<'db> {
             db,
             snapshot: db.snapshot_arc(),
             shared_node_cache: HashMap::new(),
+            shape_neighbor_memo: HashMap::new(),
         }
     }
 
@@ -609,6 +617,15 @@ impl<'db> PlanExecutor<'db> {
                 .iter()
                 .any(|via| self.node_has_calls_resolved_via(node_id, *via)),
 
+            // Body-shape-descriptor structural similarity (U09). The probe's
+            // structural-neighbour set is resolved + computed once per symbol
+            // (memoised below), so this per-candidate test is an O(1) set
+            // membership. An unknown probe yields the empty set (matches
+            // nothing) rather than an error.
+            CompiledPredicate::ShapeSimilar(symbol) => {
+                self.shape_neighbor_set(symbol).contains(&node_id)
+            }
+
             // DB14: relation predicates dispatch through
             // `QueryDb::get::<...Query>` (or the shared subquery helper) so
             // every caller of the planner benefits from language-aware name
@@ -894,7 +911,73 @@ impl<'db> PlanExecutor<'db> {
     fn record_entry_deps(entry: &NodeEntry) {
         record_file_dep(entry.file);
     }
+
+    /// Memoised structural-neighbour set for a probe symbol (U09). The first
+    /// `shape~=<symbol>` candidate computes the set; the rest hit the memo.
+    fn shape_neighbor_set(&mut self, symbol: &str) -> Arc<std::collections::HashSet<NodeId>> {
+        if let Some(set) = self.shape_neighbor_memo.get(symbol) {
+            return Arc::clone(set);
+        }
+        let set = Arc::new(self.compute_shape_neighbor_set(symbol));
+        self.shape_neighbor_memo
+            .insert(symbol.to_owned(), Arc::clone(&set));
+        set
+    }
+
+    /// Resolve the probe symbol and compute its structural-neighbour node-id set
+    /// via the LSH index. Returns the empty set for an unknown / unhashable
+    /// probe (the filter then matches nothing — no panic, mirroring the other
+    /// name-bearing predicates).
+    fn compute_shape_neighbor_set(&self, symbol: &str) -> std::collections::HashSet<NodeId> {
+        let Some(probe) = self.resolve_shape_probe(symbol) else {
+            return std::collections::HashSet::new();
+        };
+        crate::queries::structural_neighbors(
+            self.db,
+            self.snapshot.as_ref(),
+            probe,
+            SHAPE_SIMILARITY_FLOOR,
+            usize::MAX,
+        )
+        .into_iter()
+        .map(|n| n.node)
+        .collect()
+    }
+
+    /// Resolve a `shape~=<symbol>` probe to the first Function/Method node that
+    /// matches `symbol` (by simple or qualified name) AND carries a shape
+    /// descriptor. Deterministic: iterates the arena in node-id order.
+    fn resolve_shape_probe(&self, symbol: &str) -> Option<NodeId> {
+        let descriptors = self.snapshot.macro_metadata().shape_descriptors();
+        let strings = self.snapshot.strings();
+        for (node_id, entry) in self.snapshot.nodes().iter() {
+            if entry.is_unified_loser() {
+                continue;
+            }
+            if !matches!(entry.kind, NodeKind::Function | NodeKind::Method) {
+                continue;
+            }
+            if !descriptors.contains_key(&node_id) {
+                continue;
+            }
+            let simple_matches = strings.resolve(entry.name).is_some_and(|n| &*n == symbol);
+            let qualified_matches = entry
+                .qualified_name
+                .and_then(|q| strings.resolve(q))
+                .is_some_and(|q| &*q == symbol);
+            if simple_matches || qualified_matches {
+                return Some(node_id);
+            }
+        }
+        None
+    }
 }
+
+/// Default Jaccard floor for the `shape~=<symbol>` planner predicate: a candidate
+/// must agree with the probe in at least half its MinHash lanes to be reported as
+/// structurally similar. The MCP / CLI surfaces (U07 / U08) expose a tunable floor;
+/// the planner predicate uses this fixed, documented default.
+const SHAPE_SIMILARITY_FLOOR: f32 = 0.5;
 
 // ============================================================================
 // Compiled predicate / pattern / value
@@ -944,6 +1027,11 @@ enum CompiledPredicate {
     /// `pass5d_go_interface`, `pass5e_python_duck`, `pass5f_ts_structural`,
     /// promiscuous-cap elision) emit the remaining 5.
     ResolvedViaEq(Vec<ResolvedVia>),
+    /// Body-shape-descriptor structural similarity (U09): carries the probe
+    /// symbol name. The executor resolves it to a Function/Method `NodeId`,
+    /// computes the structural-neighbour set once via the LSH index (memoised),
+    /// and keeps each candidate iff it is in that set.
+    ShapeSimilar(String),
     Callers(PredicateValue),
     Callees(PredicateValue),
     Imports(PredicateValue),
@@ -986,6 +1074,9 @@ impl CompiledPredicate {
             // Phase β joint-stubs.
             Predicate::FrameworkEq(framework) => CompiledPredicate::FrameworkEq(*framework),
             Predicate::ResolvedViaEq(set) => CompiledPredicate::ResolvedViaEq(set.clone()),
+            // Structural similarity (U09): keep the probe symbol name; the
+            // neighbour set is resolved + memoised at evaluation time.
+            Predicate::ShapeSimilar(symbol) => CompiledPredicate::ShapeSimilar(symbol.clone()),
             // Relation values keep their raw form — compilation is the
             // DerivedQuery's job.
             Predicate::Callers(v) => CompiledPredicate::Callers(v.clone()),

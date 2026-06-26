@@ -65,6 +65,18 @@ user-id = 3618 # David Tolnay (dtolnay)
 start = "2019-02-28"
 end = "2027-02-20"
 
+[[trusted.bstr]]
+criteria = "safe-to-deploy"
+user-id = 189 # Andrew Gallant (BurntSushi)
+start = "2019-04-02"
+end = "2027-02-20"
+
+[[trusted.chacha20]]
+criteria = "safe-to-deploy"
+trusted-publisher = "github:RustCrypto/stream-ciphers"
+start = "2026-02-06"
+end = "2027-02-20"
+
 [[trusted.clap_builder]]
 criteria = "safe-to-deploy"
 user-id = 6743 # Ed Page (epage)
@@ -99,6 +111,12 @@ end = "2027-02-20"
 criteria = "safe-to-deploy"
 user-id = 6743 # Ed Page (epage)
 start = "2024-01-19"
+end = "2027-02-20"
+
+[[trusted.env_logger]]
+criteria = "safe-to-deploy"
+user-id = 6743 # Ed Page (epage)
+start = "2022-11-24"
 end = "2027-02-20"
 
 [[trusted.is_terminal_polyfill]]

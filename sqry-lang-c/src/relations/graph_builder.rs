@@ -1,9 +1,13 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
+use std::sync::OnceLock;
+
 use sqry_core::graph::unified::build::helper::CalleeKindHint;
+use sqry_core::graph::unified::build::shape::{CfBucket, ShapeMapping};
 use sqry_core::graph::unified::edge::kind::TypeOfContext;
 use sqry_core::graph::unified::storage::c_indirect::{BindingSiteKind, IndirectShape};
+use sqry_core::graph::unified::storage::shape::SignatureShape;
 use sqry_core::graph::unified::{FfiConvention, GraphBuildHelper, GraphSnapshot, StagingGraph};
 use sqry_core::graph::{CodeEdge, GraphBuilder, GraphBuilderError, GraphResult, Language, Span};
 use tree_sitter::{Node, Tree};
@@ -152,6 +156,10 @@ impl GraphBuilder for CGraphBuilder {
 
     fn language(&self) -> Language {
         Language::C
+    }
+
+    fn shape_mapping(&self) -> Option<&dyn ShapeMapping> {
+        Some(c_shape_mapping())
     }
 
     fn detect_cross_language_edges(&self, _snapshot: &GraphSnapshot) -> GraphResult<Vec<CodeEdge>> {
@@ -533,6 +541,115 @@ fn walk_tree_for_graph(
     }
 
     Ok(())
+}
+
+/// Per-language [`ShapeMapping`] for C: a precomputed `kind_id -> CfBucket` table
+/// over the tree-sitter-c grammar, shared process-wide via [`c_shape_mapping`].
+/// Mirrors the Rust reference impl: a single array index per node on the hot
+/// shape walk, identifier-blind throughout.
+pub struct CShapeMapping {
+    cf_by_kind_id: Vec<Option<CfBucket>>,
+}
+
+impl CShapeMapping {
+    fn build() -> Self {
+        let lang: tree_sitter::Language = tree_sitter_c::LANGUAGE.into();
+        let count = lang.node_kind_count();
+        let mut cf_by_kind_id = vec![None; count];
+        for (id, slot) in cf_by_kind_id.iter_mut().enumerate() {
+            let Ok(kind_id) = u16::try_from(id) else {
+                break;
+            };
+            if !lang.node_kind_is_named(kind_id) {
+                continue;
+            }
+            if let Some(name) = lang.node_kind_for_id(kind_id) {
+                *slot = cf_bucket_for_c_kind(name);
+            }
+        }
+        Self { cf_by_kind_id }
+    }
+}
+
+impl ShapeMapping for CShapeMapping {
+    fn cf_bucket(&self, ts_node_kind_id: u16) -> Option<CfBucket> {
+        self.cf_by_kind_id
+            .get(ts_node_kind_id as usize)
+            .copied()
+            .flatten()
+    }
+
+    fn signature_shape(&self, fn_node: Node, _src: &[u8]) -> SignatureShape {
+        let mut shape = SignatureShape::default();
+        // A `function_definition` exposes its parameters through the nested
+        // `function_declarator` (the `declarator` field). Walk down to its
+        // `parameters` list, which holds `parameter_declaration` children plus an
+        // optional `variadic_parameter` tail (the `...`).
+        if let Some(params) = c_parameter_list(fn_node) {
+            let mut cursor = params.walk();
+            for child in params.named_children(&mut cursor) {
+                match child.kind() {
+                    "parameter_declaration" => {
+                        shape.arity_positional = shape.arity_positional.saturating_add(1);
+                    }
+                    "variadic_parameter" => shape.has_varargs = true,
+                    _ => {}
+                }
+            }
+        }
+        // The function's return type lives in the `type` field of
+        // `function_definition`; C always spells a return type, so this is a
+        // structural witness that the slot is present rather than a richer fact.
+        shape.has_return_annotation = fn_node.child_by_field_name("type").is_some();
+        shape
+    }
+}
+
+/// Resolve the `parameter_list` for a C function node, descending through the
+/// `function_declarator` chain (`declarator` field) that wraps the parameters.
+fn c_parameter_list(fn_node: Node) -> Option<Node> {
+    let mut declarator = fn_node.child_by_field_name("declarator");
+    // Pointer / parenthesized declarators nest another `declarator` before the
+    // `function_declarator`; follow the chain until a `parameters` field appears.
+    while let Some(node) = declarator {
+        if let Some(params) = node.child_by_field_name("parameters") {
+            return Some(params);
+        }
+        declarator = node.child_by_field_name("declarator");
+    }
+    None
+}
+
+/// Map one tree-sitter-c grammar node-kind name to its canonical control-flow
+/// bucket. Additive-only against the frozen [`CfBucket`] set.
+fn cf_bucket_for_c_kind(name: &str) -> Option<CfBucket> {
+    let bucket = match name {
+        // `if` plus the `? :` ternary and preprocessor conditionals.
+        "if_statement"
+        | "conditional_expression"
+        | "preproc_if"
+        | "preproc_ifdef"
+        | "preproc_elif"
+        | "preproc_elifdef" => CfBucket::Branch,
+        "for_statement" | "while_statement" | "do_statement" => CfBucket::Loop,
+        "switch_statement" | "case_statement" => CfBucket::Match,
+        // C has no exceptions; SEH (`__try` / `__finally`) is the closest analogue.
+        "seh_try_statement" => CfBucket::Try,
+        "seh_finally_clause" => CfBucket::Resource,
+        "return_statement" => CfBucket::Return,
+        "break_statement" | "continue_statement" | "goto_statement" => CfBucket::BreakContinue,
+        "call_expression" => CfBucket::Call,
+        "assignment_expression" | "init_declarator" | "declaration" => CfBucket::Assign,
+        _ => return None,
+    };
+    Some(bucket)
+}
+
+/// The process-wide C shape mapping, built once on first use.
+#[must_use]
+pub fn c_shape_mapping() -> &'static CShapeMapping {
+    static MAPPING: OnceLock<CShapeMapping> = OnceLock::new();
+    MAPPING.get_or_init(CShapeMapping::build)
 }
 
 fn handle_function_node(
@@ -3267,5 +3384,88 @@ fn lhs_assignment_target_is_fnptr(
             false
         }
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod shape_tests {
+    use super::*;
+    use sqry_core::graph::unified::build::shape::{
+        CfBucket, ShapeBudget, compute_shape_descriptor,
+    };
+
+    const SAMPLE: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../test-fixtures/shape/systems/sample.c"
+    ));
+
+    fn parse(src: &str) -> Tree {
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_c::LANGUAGE.into())
+            .expect("load C grammar");
+        parser.parse(src, None).expect("parse C sample")
+    }
+
+    fn first_of_kind<'a>(node: Node<'a>, kind: &str) -> Option<Node<'a>> {
+        if node.kind() == kind {
+            return Some(node);
+        }
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if let Some(found) = first_of_kind(child, kind) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn c_mapping_is_non_empty() {
+        let mapping = c_shape_mapping();
+        let lang: tree_sitter::Language = tree_sitter_c::LANGUAGE.into();
+        let count = (0..lang.node_kind_count())
+            .filter_map(|id| u16::try_from(id).ok())
+            .filter(|id| mapping.cf_bucket(*id).is_some())
+            .count();
+        assert!(
+            count > 0,
+            "C cf_bucket map should cover real control-flow kinds"
+        );
+    }
+
+    #[test]
+    fn c_histogram_covers_control_flow() {
+        let tree = parse(SAMPLE);
+        let func = first_of_kind(tree.root_node(), "function_definition")
+            .expect("sample has a function_definition");
+        let desc = compute_shape_descriptor(
+            func,
+            SAMPLE.as_bytes(),
+            c_shape_mapping(),
+            &ShapeBudget::default(),
+        );
+        let h = &desc.cf_histogram;
+        assert!(h[CfBucket::Branch.index()] >= 1, "branch present");
+        assert!(h[CfBucket::Loop.index()] >= 1, "loop present");
+        assert!(h[CfBucket::Match.index()] >= 1, "switch present");
+        assert!(h[CfBucket::Call.index()] >= 1, "call present");
+        assert!(h[CfBucket::Return.index()] >= 1, "return present");
+        assert!(
+            h[CfBucket::BreakContinue.index()] >= 1,
+            "break/continue present"
+        );
+    }
+
+    #[test]
+    fn c_signature_shape_reads_params() {
+        let tree = parse(SAMPLE);
+        let func = first_of_kind(tree.root_node(), "function_definition")
+            .expect("sample has a function_definition");
+        let shape = c_shape_mapping().signature_shape(func, SAMPLE.as_bytes());
+        // classify(int n, const char *label, ...): two positional params + varargs.
+        assert_eq!(shape.arity_positional, 2, "two positional params");
+        assert!(shape.has_varargs, "variadic tail detected");
+        assert!(shape.has_return_annotation, "C return type slot present");
     }
 }

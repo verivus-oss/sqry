@@ -35,6 +35,7 @@ pub mod dispatch;
 pub mod reachability;
 pub mod relation;
 pub mod scc;
+pub mod structural_neighbors;
 pub mod type_ids;
 pub mod unused;
 pub mod unused_post_filter;
@@ -60,6 +61,9 @@ pub use relation::{
     ExportsQuery, ImplementsQuery, ImportsQuery, ReferencesQuery, RelationKey, RelationKind,
 };
 pub use scc::{CachedSccData, SccKey, SccQuery, SccValue};
+pub use structural_neighbors::{
+    StructuralLshIndex, StructuralNeighbor, StructuralNeighborsQuery, structural_neighbors,
+};
 pub use unused::{
     EntryPointsQuery, IsNodeUnusedKey, IsNodeUnusedQuery, IsNodeUnusedValue,
     ReachableFromEntryPointsQuery, UnusedKey, UnusedQuery, UnusedValue,

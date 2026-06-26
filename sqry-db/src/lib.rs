@@ -219,6 +219,9 @@ impl QueryDb {
         self.registry.register::<queries::AddressTakenQuery>();
         self.registry
             .register::<queries::CallsitePromiscuousQuery>();
+        // Body-shape-descriptor — structural-neighbour LSH index (U06).
+        self.registry
+            .register::<queries::StructuralNeighborsQuery>();
     }
 
     /// Registers a derived query type for cache routing.
@@ -567,6 +570,8 @@ mod tests {
         // Phase A — C indirect-call precision (U13).
         db.register::<queries::AddressTakenQuery>();
         db.register::<queries::CallsitePromiscuousQuery>();
+        // Body-shape-descriptor — structural-neighbour LSH index (U06).
+        db.register::<queries::StructuralNeighborsQuery>();
 
         assert_eq!(
             db.registry.registered_count(),

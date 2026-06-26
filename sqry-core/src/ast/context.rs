@@ -141,7 +141,9 @@ impl ContextExtractor {
                 ))
             })?;
 
-        staging.attach_body_hashes(&raw_content);
+        // Context extraction builds a throwaway graph for query results, not the
+        // persisted index; it needs body hashes only, no shape descriptors.
+        staging.attach_body_hashes(&raw_content, None);
 
         let mut graph = CodeGraph::new();
         let file_id = graph

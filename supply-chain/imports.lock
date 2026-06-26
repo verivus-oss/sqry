@@ -43,6 +43,13 @@ user-id = 3618
 user-login = "dtolnay"
 user-name = "David Tolnay"
 
+[[publisher.anyhow]]
+version = "1.0.103"
+when = "2026-06-25"
+user-id = 3618
+user-login = "dtolnay"
+user-name = "David Tolnay"
+
 [[publisher.assert_cmd]]
 version = "2.2.0"
 when = "2026-03-10"
@@ -64,12 +71,24 @@ user-id = 3618
 user-login = "dtolnay"
 user-name = "David Tolnay"
 
+[[publisher.bstr]]
+version = "1.12.3"
+when = "2026-06-25"
+user-id = 189
+user-login = "BurntSushi"
+user-name = "Andrew Gallant"
+
 [[publisher.bumpalo]]
 version = "3.20.2"
 when = "2026-02-19"
 user-id = 696
 user-login = "fitzgen"
 user-name = "Nick Fitzgerald"
+
+[[publisher.chacha20]]
+version = "0.10.1"
+when = "2026-06-24"
+trusted-publisher = "github:RustCrypto/stream-ciphers"
 
 [[publisher.clap_builder]]
 version = "4.6.0"
@@ -116,6 +135,20 @@ user-name = "Henri Sivonen"
 [[publisher.env_filter]]
 version = "1.0.1"
 when = "2026-03-23"
+user-id = 6743
+user-login = "epage"
+user-name = "Ed Page"
+
+[[publisher.env_filter]]
+version = "2.0.0"
+when = "2026-06-25"
+user-id = 6743
+user-login = "epage"
+user-name = "Ed Page"
+
+[[publisher.env_logger]]
+version = "0.11.11"
+when = "2026-06-25"
 user-id = 6743
 user-login = "epage"
 user-name = "Ed Page"

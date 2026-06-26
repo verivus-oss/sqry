@@ -233,6 +233,8 @@ fn tool_category(name: &str) -> ToolCategory {
         | "pattern_search"
         | "get_workspace_symbols"
         | "search_similar"
+        // Body-shape structural-neighbour search (U07) is a search surface.
+        | "structural_similar"
         // U04 (#299 review follow-up) — the structural query planner is a
         // search surface: it finds nodes matching a text-DSL plan.
         | "sqry_query" => ToolCategory::Search,
@@ -413,6 +415,7 @@ unified graph; results are byte-exact, not signature-substring matches:
 | `subgraph` | Focused subgraph around seed symbols | symbols:str[]! |
 | `explain_code` | Symbol context with relations | file_path:str!, symbol_name:str! |
 | `search_similar` | Find similar symbols (fuzzy match) | reference:{file_path,symbol_name}! |
+| `structural_similar` | Find structural twins (body-shape descriptor: shape_hash + MinHash) | symbol_name:str!, file_path:str?, similarity_threshold:f? |
 
 ## Code Quality
 

@@ -4,8 +4,8 @@ This document defines the canonical types used across all sqry interfaces (CLI, 
 All types are exported from `sqry_core::schema` and should be the single source of truth.
 Graph kinds (`NodeKind`, `EdgeKind`) are defined in `sqry-core/src/graph/unified/` and re-exported from the schema module.
 
-**Version**: 21.0.1
-**Last Updated**: 2026-06-16
+**Version**: 22.0.4
+**Last Updated**: 2026-06-26
 
 ---
 
@@ -24,7 +24,8 @@ Graph kinds (`NodeKind`, `EdgeKind`) are defined in `sqry-core/src/graph/unified
    - [CycleKind](#cyclekind)
    - [DuplicateKind](#duplicatekind)
    - [UnusedScope](#unusedscope)
-5. [Usage Guidelines](#usage-guidelines)
+5. [Body-Shape Descriptor (V15)](#body-shape-descriptor-v15)
+6. [Usage Guidelines](#usage-guidelines)
 
 ---
 
@@ -281,6 +282,55 @@ Scopes for unused symbol detection.
 
 ---
 
+## Body-Shape Descriptor (V15)
+
+**Location**: `sqry-core/src/graph/unified/storage/shape.rs` (types),
+`sqry-core/src/graph/unified/build/shape.rs` (walker + `CfBucket`).
+
+An identifier-blind structural fingerprint of one Function/Method body, computed
+in the build seam alongside `body_hash` and stored in a `NodeId`-keyed side table
+on `NodeMetadataStore` (`shape_descriptors`). It is a deterministic function of the
+AST (grammar productions + arities), never of the source text, so it is invariant
+under renaming and reformatting. It is distinct from `body_hash` (exact-bytes
+duplicate detection), which is unchanged.
+
+### ShapeDescriptor
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `cf_histogram` | `[u16; 15]` | Canonical control-flow bucket counts (see `CfBucket`) |
+| `signature_shape` | `SignatureShape` | Structural arities (positional / keyword-only), varargs + return-annotation flags |
+| `callee_shape` | `CalleeShape` | Bucketed callee fan-out; `Unresolved` this effort (gated on call-resolution-completeness), never silently zeroed |
+| `shape_hash` | `ShapeHash128` | Rename-invariant dual-seeded structural hash (`{high, low}`, 32-char hex); NOT `body_hash` |
+| `minhash` | `[u32; 64]` | MinHash over identifier-erased Weisfeiler-Lehman labels, for LSH banding |
+| `flags` | `ShapeFlags` | Explicit `unhashable` (<4-token body) / `truncated` (over walker budget) markers, never a silently-zeroed descriptor |
+
+**CfBucket** (`#[repr(u8)]`, frozen 0..14, additive-only): `Branch`, `Loop`,
+`Match`, `Try`, `Catch`, `Throw`, `Return`, `Call`, `Closure`, `Assign`, `Await`,
+`Yield`, `Resource`, `Jump`, `Comprehension`. Shared by every plugin's
+`ShapeMapping`, so histograms are comparable across languages (AC-6).
+
+**CalleeShape**: `Unresolved` (default, this effort) | `Resolved { count, degree_buckets }`.
+
+### SHAPE_SCHEMA_VERSION
+
+`SHAPE_SCHEMA_VERSION = 1`, `CF_BUCKET_COUNT = 15`, `MINHASH_LANES = 64` are
+on-disk-affecting constants: changing the `SQRYSHP0`/`SQRYSHP1` seeds, the
+`CfBucket` order, or the lane count bumps `SHAPE_SCHEMA_VERSION` (a sibling
+discipline to `INDEX_SCHEMA_VERSION`).
+
+### Persistence (snapshot V15)
+
+This feature owns the `SQRY_GRAPH_V14 -> V15` bump. Descriptors ride a dedicated
+`GraphSnapshotDataV15` envelope slot (`shape_descriptors_table`), reattached on
+load via `set_shape_descriptors`. They do NOT ride the `NodeMetadataStore` custom
+serde (which carries only `entries`), matching the V12 framework-route /
+dispatch-table joint-stub precedent. A V14 snapshot loads under the V15 loader with
+an empty side table (inline `upconvert_v14_to_v15`, no forced rebuild); descriptors
+populate on the next `sqry index --force` (AC-8).
+
+---
+
 ## Usage Guidelines
 
 ### For Interface Packages (LSP, MCP)
@@ -332,6 +382,7 @@ pub struct ProtocolRelationKind(RelationKind);
 
 | Version | Date | Changes |
 |---------|------|---------|
-| 21.0.1 | 2026-03-10 | Bump schema doc version to match current sqry release |
+| 22.0.4 | 2026-06-25 | Document the body-shape descriptor types + snapshot V15 (`ShapeDescriptor`, `CfBucket`, `SHAPE_SCHEMA_VERSION`) |
+| 22.0.4 | 2026-03-10 | Bump schema doc version to match current sqry release |
 | 4.9.3 | 2026-03-03 | Align version with sqry release, verify accuracy |
 | 2.10.0 | 2026-01-18 | Initial schema module creation |

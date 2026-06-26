@@ -122,6 +122,20 @@ pub const MAGIC_BYTES_V13: &[u8; 14] = b"SQRY_GRAPH_V13";
 /// opening a V14 snapshot rejects it at the magic gate.
 pub const MAGIC_BYTES_V14: &[u8; 14] = b"SQRY_GRAPH_V14";
 
+/// Body-shape-descriptor V15 magic bytes.
+///
+/// Emitted by the V15 writer (per-function identifier-blind `ShapeDescriptor`
+/// side table) and accepted by the V15 reader. V15 is shape-identical to V14 on
+/// the wire **plus** one appended envelope slot: a flat
+/// `Vec<(NodeId, ShapeDescriptor)>` carrying the `shape_descriptors` side table
+/// (the `NodeMetadataStore` custom serde only emits `entries`, so the descriptors
+/// ride a dedicated payload field, mirroring the V12 framework-route / dispatch
+/// envelope slots). V14 snapshots upconvert to V15 inline on load via
+/// `upconvert_v14_to_v15`, which moves every V14 field by value and leaves the
+/// descriptor table empty. A V14-or-earlier reader opening a V15 snapshot rejects
+/// it at the magic gate.
+pub const MAGIC_BYTES_V15: &[u8; 14] = b"SQRY_GRAPH_V15";
+
 /// Legacy V7 numeric version, exposed with a versioned name so the Phase 1 reader
 /// dispatch can cite it explicitly. Equal to [`VERSION`].
 pub const LEGACY_VERSION_V7: u32 = 7;
@@ -171,6 +185,15 @@ pub enum FormatVersion {
     /// legacy `Other` nodes land at their new position, and `kind_index` is
     /// rebuilt from the translated arena.
     V14 = 14,
+    /// V15 — read/write after the body-shape-descriptor feature. Shape-identical
+    /// to V14 on the wire plus one appended envelope slot carrying the
+    /// `shape_descriptors` side table (`Vec<(NodeId, ShapeDescriptor)>`). V14
+    /// snapshots upconvert to V15 inline on load via `upconvert_v14_to_v15`
+    /// (every field moves by value, the descriptor table comes up empty), so an
+    /// existing V14 snapshot loads with no descriptors until the next
+    /// `sqry index --force` repopulates them. A V14-or-earlier reader rejects a
+    /// V15 snapshot at the magic gate.
+    V15 = 15,
 }
 
 impl FormatVersion {
@@ -186,6 +209,7 @@ impl FormatVersion {
             Self::V12 => MAGIC_BYTES_V12.as_slice(),
             Self::V13 => MAGIC_BYTES_V13.as_slice(),
             Self::V14 => MAGIC_BYTES_V14.as_slice(),
+            Self::V15 => MAGIC_BYTES_V15.as_slice(),
         }
     }
 
@@ -200,9 +224,14 @@ impl FormatVersion {
     /// Returns `None` if the bytes do not match any known format magic.
     #[must_use]
     pub fn from_magic(bytes: &[u8]) -> Option<Self> {
-        // V14, V13, V12, V11, and V10 magics are all 14 bytes. Check newest
-        // first (V14 → V13 → … → V10) so a longer / newer magic is never
+        // V15, V14, V13, V12, V11, and V10 magics are all 14 bytes. Check newest
+        // first (V15 → V14 → … → V10) so a longer / newer magic is never
         // mis-classified as an older one by a less-strict comparison path.
+        if bytes.len() >= MAGIC_BYTES_V15.len()
+            && bytes[..MAGIC_BYTES_V15.len()] == *MAGIC_BYTES_V15
+        {
+            return Some(Self::V15);
+        }
         if bytes.len() >= MAGIC_BYTES_V14.len()
             && bytes[..MAGIC_BYTES_V14.len()] == *MAGIC_BYTES_V14
         {
@@ -244,9 +273,8 @@ impl FormatVersion {
     }
 }
 
-/// Current writer format version (T2 Go channel pairing + generic
-/// instantiation: V14).
-pub const CURRENT_VERSION: FormatVersion = FormatVersion::V14;
+/// Current writer format version (body-shape-descriptor side table: V15).
+pub const CURRENT_VERSION: FormatVersion = FormatVersion::V15;
 
 /// Header for persisted graph files.
 ///
@@ -663,11 +691,41 @@ mod tests {
         assert_eq!(FormatVersion::V12 as u32, 12);
         assert_eq!(FormatVersion::V13 as u32, 13);
         assert_eq!(FormatVersion::V14 as u32, 14);
+        assert_eq!(FormatVersion::V15 as u32, 15);
     }
 
     #[test]
-    fn current_version_is_v14() {
-        assert_eq!(CURRENT_VERSION, FormatVersion::V14);
+    fn current_version_is_v15() {
+        assert_eq!(CURRENT_VERSION, FormatVersion::V15);
+    }
+
+    #[test]
+    fn shape_magic_bytes_v15_is_distinct_and_14_bytes() {
+        assert_eq!(MAGIC_BYTES_V15, b"SQRY_GRAPH_V15");
+        assert_eq!(MAGIC_BYTES_V15.len(), 14);
+        assert_ne!(MAGIC_BYTES_V15.as_slice(), MAGIC_BYTES_V14.as_slice());
+        assert_ne!(MAGIC_BYTES_V15.as_slice(), MAGIC_BYTES_V13.as_slice());
+    }
+
+    /// V15 must be tried before V14/older so a `SQRY_GRAPH_V15` prefix is never
+    /// mis-classified as an older 14-byte magic.
+    #[test]
+    fn shape_format_version_dispatch_v15_before_older() {
+        let mut buf = MAGIC_BYTES_V15.to_vec();
+        buf.extend_from_slice(&[0u8; 8]);
+        assert_eq!(FormatVersion::from_magic(&buf), Some(FormatVersion::V15));
+
+        let mut buf14 = MAGIC_BYTES_V14.to_vec();
+        buf14.extend_from_slice(&[0u8; 8]);
+        assert_eq!(FormatVersion::from_magic(&buf14), Some(FormatVersion::V14));
+    }
+
+    #[test]
+    fn shape_format_version_v15_magic_round_trip() {
+        let v = FormatVersion::V15;
+        let bytes = v.magic();
+        assert_eq!(bytes, MAGIC_BYTES_V15.as_slice());
+        assert_eq!(FormatVersion::from_magic(bytes), Some(v));
     }
 
     #[test]

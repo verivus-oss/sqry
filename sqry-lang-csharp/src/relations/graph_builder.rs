@@ -20,9 +20,12 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::OnceLock;
 
+use sqry_core::graph::unified::build::shape::{CfBucket, ShapeMapping};
 use sqry_core::graph::unified::edge::FfiConvention;
 use sqry_core::graph::unified::edge::kind::TypeOfContext;
+use sqry_core::graph::unified::storage::shape::SignatureShape;
 use sqry_core::graph::unified::{GraphBuildHelper, NodeId, StagingGraph};
 use sqry_core::graph::{
     GraphBuilder, GraphBuilderError, GraphResult, GraphSnapshot, Language, Span,
@@ -143,6 +146,10 @@ impl GraphBuilder for CSharpGraphBuilder {
         Language::CSharp
     }
 
+    fn shape_mapping(&self) -> Option<&dyn ShapeMapping> {
+        Some(csharp_shape_mapping())
+    }
+
     fn detect_cross_language_edges(
         &self,
         _snapshot: &GraphSnapshot,
@@ -151,6 +158,122 @@ impl GraphBuilder for CSharpGraphBuilder {
         // This method is required by the trait interface
         Ok(vec![])
     }
+}
+
+/// Per-language [`ShapeMapping`] for C#: a precomputed `kind_id -> CfBucket` table
+/// over the tree-sitter-c-sharp grammar, shared process-wide via
+/// [`csharp_shape_mapping`]. Mirrors the C reference impl: a single array index
+/// per node on the hot shape walk, identifier-blind throughout.
+pub struct CSharpShapeMapping {
+    cf_by_kind_id: Vec<Option<CfBucket>>,
+}
+
+impl CSharpShapeMapping {
+    fn build() -> Self {
+        let lang: tree_sitter::Language = tree_sitter_c_sharp::LANGUAGE.into();
+        let count = lang.node_kind_count();
+        let mut cf_by_kind_id = vec![None; count];
+        for (id, slot) in cf_by_kind_id.iter_mut().enumerate() {
+            let Ok(kind_id) = u16::try_from(id) else {
+                break;
+            };
+            if !lang.node_kind_is_named(kind_id) {
+                continue;
+            }
+            if let Some(name) = lang.node_kind_for_id(kind_id) {
+                *slot = cf_bucket_for_csharp_kind(name);
+            }
+        }
+        Self { cf_by_kind_id }
+    }
+}
+
+impl ShapeMapping for CSharpShapeMapping {
+    fn cf_bucket(&self, ts_node_kind_id: u16) -> Option<CfBucket> {
+        self.cf_by_kind_id
+            .get(ts_node_kind_id as usize)
+            .copied()
+            .flatten()
+    }
+
+    fn signature_shape(&self, fn_node: Node, _src: &[u8]) -> SignatureShape {
+        let mut shape = SignatureShape::default();
+        // A `method_declaration` exposes its parameters through the `parameters`
+        // field (a `parameter_list`), holding `parameter` children. The `type` and
+        // `name` fields are the structural slots; a default value (`= literal`)
+        // shows up as one extra non-field named child of any expression kind, and a
+        // `params` varargs tail surfaces as a `modifier` child spelled `params`.
+        if let Some(params) = fn_node.child_by_field_name("parameters") {
+            let mut cursor = params.walk();
+            for child in params.named_children(&mut cursor) {
+                if child.kind() != "parameter" {
+                    continue;
+                }
+                shape.arity_positional = shape.arity_positional.saturating_add(1);
+                let type_node = child.child_by_field_name("type");
+                let name_node = child.child_by_field_name("name");
+                let mut pc = child.walk();
+                for part in child.named_children(&mut pc) {
+                    if Some(part) == type_node || Some(part) == name_node {
+                        continue;
+                    }
+                    match part.kind() {
+                        "attribute_list" => {}
+                        "modifier" => {
+                            if part.utf8_text(_src).map(str::trim) == Ok("params") {
+                                shape.has_varargs = true;
+                            }
+                        }
+                        // Whatever remains is the default-value expression.
+                        _ => shape.has_defaults = true,
+                    }
+                }
+            }
+        }
+        // The return type lives in the `returns` field of `method_declaration`.
+        shape.has_return_annotation = fn_node.child_by_field_name("returns").is_some();
+        shape
+    }
+}
+
+/// Map one tree-sitter-c-sharp grammar node-kind name to its canonical
+/// control-flow bucket. Additive-only against the frozen [`CfBucket`] set.
+fn cf_bucket_for_csharp_kind(name: &str) -> Option<CfBucket> {
+    let bucket = match name {
+        "if_statement"
+        | "conditional_expression"
+        | "when_clause"
+        | "preproc_if"
+        | "preproc_elif" => CfBucket::Branch,
+        "for_statement" | "foreach_statement" | "while_statement" | "do_statement" => {
+            CfBucket::Loop
+        }
+        "switch_statement" | "switch_expression" | "switch_section" | "switch_expression_arm" => {
+            CfBucket::Match
+        }
+        "try_statement" => CfBucket::Try,
+        "catch_clause" => CfBucket::Catch,
+        "throw_statement" | "throw_expression" => CfBucket::Throw,
+        "using_statement" | "finally_clause" => CfBucket::Resource,
+        "return_statement" => CfBucket::Return,
+        "yield_statement" => CfBucket::Yield,
+        "await_expression" => CfBucket::Await,
+        "break_statement" | "continue_statement" | "goto_statement" => CfBucket::BreakContinue,
+        "invocation_expression" | "object_creation_expression" => CfBucket::Call,
+        "assignment_expression" | "variable_declaration" | "local_declaration_statement" => {
+            CfBucket::Assign
+        }
+        "lambda_expression" | "anonymous_method_expression" => CfBucket::Closure,
+        _ => return None,
+    };
+    Some(bucket)
+}
+
+/// The process-wide C# shape mapping, built once on first use.
+#[must_use]
+pub fn csharp_shape_mapping() -> &'static CSharpShapeMapping {
+    static MAPPING: OnceLock<CSharpShapeMapping> = OnceLock::new();
+    MAPPING.get_or_init(CSharpShapeMapping::build)
 }
 
 // ============================================================================
@@ -2434,5 +2557,93 @@ fn extract_constraint_base_type_name(type_node: Node, content: &[u8]) -> String 
             type_node.utf8_text(content).unwrap_or_default().to_string()
         }
         _ => type_node.utf8_text(content).unwrap_or_default().to_string(),
+    }
+}
+
+#[cfg(test)]
+mod shape_tests {
+    use super::*;
+    use sqry_core::graph::unified::build::shape::{
+        CfBucket, ShapeBudget, compute_shape_descriptor,
+    };
+
+    const SAMPLE: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../test-fixtures/shape/systems/sample.cs"
+    ));
+
+    fn parse(src: &str) -> Tree {
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_c_sharp::LANGUAGE.into())
+            .expect("load C# grammar");
+        parser.parse(src, None).expect("parse C# sample")
+    }
+
+    fn first_of_kind<'a>(node: Node<'a>, kind: &str) -> Option<Node<'a>> {
+        if node.kind() == kind {
+            return Some(node);
+        }
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if let Some(found) = first_of_kind(child, kind) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn csharp_mapping_is_non_empty() {
+        let mapping = csharp_shape_mapping();
+        let lang: tree_sitter::Language = tree_sitter_c_sharp::LANGUAGE.into();
+        let count = (0..lang.node_kind_count())
+            .filter_map(|id| u16::try_from(id).ok())
+            .filter(|id| mapping.cf_bucket(*id).is_some())
+            .count();
+        assert!(
+            count > 0,
+            "C# cf_bucket map should cover real control-flow kinds"
+        );
+    }
+
+    #[test]
+    fn csharp_histogram_covers_control_flow() {
+        let tree = parse(SAMPLE);
+        let func = first_of_kind(tree.root_node(), "method_declaration")
+            .expect("sample has a method_declaration");
+        let desc = compute_shape_descriptor(
+            func,
+            SAMPLE.as_bytes(),
+            csharp_shape_mapping(),
+            &ShapeBudget::default(),
+        );
+        let h = &desc.cf_histogram;
+        assert!(h[CfBucket::Branch.index()] >= 1, "branch present");
+        assert!(h[CfBucket::Loop.index()] >= 1, "loop present");
+        assert!(h[CfBucket::Match.index()] >= 1, "switch present");
+        assert!(h[CfBucket::Call.index()] >= 1, "call present");
+        assert!(h[CfBucket::Return.index()] >= 1, "return present");
+        assert!(
+            h[CfBucket::BreakContinue.index()] >= 1,
+            "break/continue present"
+        );
+        assert!(h[CfBucket::Try.index()] >= 1, "try present");
+        assert!(h[CfBucket::Catch.index()] >= 1, "catch present");
+        assert!(h[CfBucket::Throw.index()] >= 1, "throw present");
+        assert!(h[CfBucket::Closure.index()] >= 1, "lambda present");
+    }
+
+    #[test]
+    fn csharp_signature_shape_reads_params() {
+        let tree = parse(SAMPLE);
+        let func = first_of_kind(tree.root_node(), "method_declaration")
+            .expect("sample has a method_declaration");
+        let shape = csharp_shape_mapping().signature_shape(func, SAMPLE.as_bytes());
+        // Classify(int n, string label = "default"): two positional params,
+        // one carrying a default value.
+        assert_eq!(shape.arity_positional, 2, "two positional params");
+        assert!(shape.has_defaults, "default value detected");
+        assert!(shape.has_return_annotation, "C# return type slot present");
     }
 }

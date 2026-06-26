@@ -26,14 +26,17 @@
 
 use crate::relations::{BridgingHeaderLocator, SwiftBridgingIndex};
 use sqry_core::graph::unified::build::helper::CalleeKindHint;
+use sqry_core::graph::unified::build::shape::{CfBucket, ShapeMapping};
 use sqry_core::graph::unified::edge::FfiConvention;
 use sqry_core::graph::unified::edge::kind::TypeOfContext;
 use sqry_core::graph::unified::node::NodeId as UnifiedNodeId;
+use sqry_core::graph::unified::storage::shape::SignatureShape;
 use sqry_core::graph::{
     GraphBuilder, GraphBuilderError, GraphResult, Language, Position, Span,
     unified::{GraphBuildHelper, StagingGraph},
 };
 use std::path::Path;
+use std::sync::OnceLock;
 use tree_sitter::{Node, Tree};
 
 /// Maximum type nesting depth allowed for graph extraction.
@@ -66,6 +69,10 @@ impl SwiftGraphBuilder {
 impl GraphBuilder for SwiftGraphBuilder {
     fn language(&self) -> Language {
         Language::Swift
+    }
+
+    fn shape_mapping(&self) -> Option<&dyn ShapeMapping> {
+        Some(swift_shape_mapping())
     }
 
     fn build_graph(
@@ -1996,6 +2003,95 @@ fn is_swift_type_node(kind: &str) -> bool {
     )
 }
 
+/// Per-language [`ShapeMapping`] for Swift: a precomputed `kind_id -> CfBucket`
+/// table over the tree-sitter-swift grammar, shared process-wide via
+/// [`swift_shape_mapping`]. Mirrors the C reference impl (a single array index
+/// per node on the hot shape walk, identifier-blind throughout).
+pub struct SwiftShapeMapping {
+    cf_by_kind_id: Vec<Option<CfBucket>>,
+}
+
+impl SwiftShapeMapping {
+    fn build() -> Self {
+        let lang: tree_sitter::Language = tree_sitter_swift::LANGUAGE.into();
+        let count = lang.node_kind_count();
+        let mut cf_by_kind_id = vec![None; count];
+        for (id, slot) in cf_by_kind_id.iter_mut().enumerate() {
+            let Ok(kind_id) = u16::try_from(id) else {
+                break;
+            };
+            if !lang.node_kind_is_named(kind_id) {
+                continue;
+            }
+            if let Some(name) = lang.node_kind_for_id(kind_id) {
+                *slot = cf_bucket_for_swift_kind(name);
+            }
+        }
+        Self { cf_by_kind_id }
+    }
+}
+
+impl ShapeMapping for SwiftShapeMapping {
+    fn cf_bucket(&self, ts_node_kind_id: u16) -> Option<CfBucket> {
+        self.cf_by_kind_id
+            .get(ts_node_kind_id as usize)
+            .copied()
+            .flatten()
+    }
+
+    fn signature_shape(&self, fn_node: Node, _src: &[u8]) -> SignatureShape {
+        let mut shape = SignatureShape::default();
+        // Swift's `function_declaration` carries its `parameter` nodes as direct
+        // named children (the parameter list is not a wrapper node), so count them
+        // structurally.
+        let mut cursor = fn_node.walk();
+        for child in fn_node.named_children(&mut cursor) {
+            if child.kind() == "parameter" {
+                shape.arity_positional = shape.arity_positional.saturating_add(1);
+            }
+        }
+        // A `default_value` field on the declaration witnesses at least one
+        // default-valued parameter; `return_type` witnesses an explicit return
+        // annotation. Both are structural facts, never identifier text.
+        shape.has_defaults = fn_node.child_by_field_name("default_value").is_some();
+        shape.has_return_annotation = fn_node.child_by_field_name("return_type").is_some();
+        shape
+    }
+}
+
+/// Map one tree-sitter-swift grammar node-kind name to its canonical control-flow
+/// bucket. Additive-only against the frozen [`CfBucket`] set.
+fn cf_bucket_for_swift_kind(name: &str) -> Option<CfBucket> {
+    let bucket = match name {
+        "if_statement" | "guard_statement" | "ternary_expression" => CfBucket::Branch,
+        "for_statement" | "while_statement" | "repeat_while_statement" => CfBucket::Loop,
+        "switch_statement" | "switch_entry" => CfBucket::Match,
+        // `do { } catch { }` is the block-level try; `try` postfix on an
+        // expression also maps onto the try bucket.
+        "do_statement" | "try_expression" => CfBucket::Try,
+        "catch_block" => CfBucket::Catch,
+        // Swift represents `throw` with a dedicated `throw_keyword` named node.
+        "throw_keyword" => CfBucket::Throw,
+        "await_expression" => CfBucket::Await,
+        // `control_transfer_statement` covers return / break / continue /
+        // fallthrough as a single node; the grammar does not disambiguate them, so
+        // they share the break/continue bucket.
+        "control_transfer_statement" => CfBucket::BreakContinue,
+        "call_expression" | "macro_invocation" => CfBucket::Call,
+        "assignment" | "property_declaration" => CfBucket::Assign,
+        "lambda_literal" => CfBucket::Closure,
+        _ => return None,
+    };
+    Some(bucket)
+}
+
+/// The process-wide Swift shape mapping, built once on first use.
+#[must_use]
+pub fn swift_shape_mapping() -> &'static SwiftShapeMapping {
+    static MAPPING: OnceLock<SwiftShapeMapping> = OnceLock::new();
+    MAPPING.get_or_init(SwiftShapeMapping::build)
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
@@ -3532,6 +3628,93 @@ class C {
             resolved_name,
             Some("x"),
             "TypeOf edge name must be the bare field name (not qualified)"
+        );
+    }
+}
+
+#[cfg(test)]
+mod shape_tests {
+    use super::*;
+    use sqry_core::graph::unified::build::shape::{
+        CfBucket, ShapeBudget, compute_shape_descriptor,
+    };
+
+    const SAMPLE: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../test-fixtures/shape/systems/sample.swift"
+    ));
+
+    fn parse(src: &str) -> Tree {
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_swift::LANGUAGE.into())
+            .expect("load Swift grammar");
+        parser.parse(src, None).expect("parse Swift sample")
+    }
+
+    fn first_of_kind<'a>(node: Node<'a>, kind: &str) -> Option<Node<'a>> {
+        if node.kind() == kind {
+            return Some(node);
+        }
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if let Some(found) = first_of_kind(child, kind) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn swift_mapping_is_non_empty() {
+        let mapping = swift_shape_mapping();
+        let lang: tree_sitter::Language = tree_sitter_swift::LANGUAGE.into();
+        let count = (0..lang.node_kind_count())
+            .filter_map(|id| u16::try_from(id).ok())
+            .filter(|id| mapping.cf_bucket(*id).is_some())
+            .count();
+        assert!(
+            count > 0,
+            "Swift cf_bucket map should cover real control-flow kinds"
+        );
+    }
+
+    #[test]
+    fn swift_histogram_covers_control_flow() {
+        let tree = parse(SAMPLE);
+        let func = first_of_kind(tree.root_node(), "function_declaration")
+            .expect("sample has a function_declaration");
+        let desc = compute_shape_descriptor(
+            func,
+            SAMPLE.as_bytes(),
+            swift_shape_mapping(),
+            &ShapeBudget::default(),
+        );
+        let h = &desc.cf_histogram;
+        assert!(h[CfBucket::Branch.index()] >= 1, "branch present");
+        assert!(h[CfBucket::Loop.index()] >= 1, "loop present");
+        assert!(h[CfBucket::Match.index()] >= 1, "switch present");
+        assert!(h[CfBucket::Try.index()] >= 1, "do/try present");
+        assert!(h[CfBucket::Catch.index()] >= 1, "catch present");
+        assert!(h[CfBucket::Throw.index()] >= 1, "throw present");
+        assert!(h[CfBucket::Call.index()] >= 1, "call present");
+        assert!(
+            h[CfBucket::BreakContinue.index()] >= 1,
+            "control transfer present"
+        );
+    }
+
+    #[test]
+    fn swift_signature_shape_reads_params() {
+        let tree = parse(SAMPLE);
+        let func = first_of_kind(tree.root_node(), "function_declaration")
+            .expect("sample has a function_declaration");
+        let shape = swift_shape_mapping().signature_shape(func, SAMPLE.as_bytes());
+        // classify(_ n: Int, label: String) -> Int : two positional params.
+        assert_eq!(shape.arity_positional, 2, "two positional params");
+        assert!(
+            shape.has_return_annotation,
+            "Swift return annotation present"
         );
     }
 }

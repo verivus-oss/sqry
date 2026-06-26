@@ -324,7 +324,7 @@ pub(crate) async fn dispatch(
         "semantic_search" | "relation_query" | "direct_callers" | "direct_callees"
         | "find_unused" | "find_cycles" | "is_node_in_cycle" | "trace_path" | "subgraph"
         | "export_graph" | "complexity_metrics" | "semantic_diff" | "dependency_impact"
-        | "show_dependencies" => {
+        | "show_dependencies" | "structural_similar" => {
             tool_dispatch::dispatch_tool(ctx, req.method.as_str(), req.params).await
         }
         other => Err(MethodError::MethodNotFound(other.to_owned())),

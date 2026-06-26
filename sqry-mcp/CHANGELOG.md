@@ -6,7 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
-## [21.0.1](https://github.com/verivus-oss/sqry/compare/v21.0.0...v21.0.1) - 2026-06-16
+## [22.0.4](https://github.com/verivus-oss/sqry/compare/v22.0.3...v22.0.4) - 2026-06-26
+
+### Other
+- update Cargo.toml dependencies
+## [22.0.3](https://github.com/verivus-oss/sqry/compare/v21.0.1...v22.0.3) - 2026-06-25
+
+### Fixed
+- *(release)* keep rmcp macros coherent in fresh locks## [22.0.2](https://github.com/verivus-oss/sqry/compare/v21.0.1...v22.0.2) - 2026-06-25
+
+### Fixed
+- *(mcp)* pin rmcp to ~1.7 (block 1.8 breaking peer_info change)## [22.0.1](https://github.com/verivus-oss/sqry/compare/v22.0.0...v22.0.1) - 2026-06-25
+
+### Other
+- update Cargo.lock dependencies
+## [22.0.0](https://github.com/verivus-oss/sqry/compare/v21.0.1...v22.0.0) - 2026-06-25
+
+### Added
+- *(shape)* per-function body-shape descriptor + structural-similar surfaces (V15) ([#426](https://github.com/verivus-oss/sqry/pull/426))## [21.0.1](https://github.com/verivus-oss/sqry/compare/v21.0.0...v21.0.1) - 2026-06-16
 
 ### Other
 - update Cargo.lock dependencies

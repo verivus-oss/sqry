@@ -98,9 +98,10 @@ Indexing behavior highlights:
 | `sqry cycles` | Find circular dependencies (calls, imports, modules) |
 | `sqry unused` | Find unused/dead code via reachability analysis |
 | `sqry export` | Export code graph (DOT, D2, Mermaid, JSON) |
-| `sqry diff` | Semantic diff between git refs (compares symbol-level changes) |
+| `sqry diff` | Semantic diff between git refs (compares symbol-level changes); `--structural` pairs functions by body shape first, surfacing rename/relocate twins that name-based diff misses |
 | `sqry explain` | Explain a symbol with context and relationships |
-| `sqry similar` | Find symbols similar to a reference |
+| `sqry similar` | Find symbols similar to a reference (name/fuzzy) |
+| `sqry shape-match` | Find functions structurally similar to a reference by identifier-blind body shape (alias `shape`) |
 | `sqry subgraph` | Extract focused subgraph around symbols |
 | `sqry impact` | Analyze what would break if a symbol changes |
 | `sqry hier` | Hierarchical search optimized for RAG retrieval |
@@ -220,6 +221,7 @@ sqry provides **36 MCP tools** for AI/LLM integration:
 | `find_cycles` | Find circular dependencies (call cycles, import cycles, module cycles) |
 | `find_unused` | Find unused/dead code via reachability analysis |
 | `is_node_in_cycle` | Check if a specific symbol is part of a cycle |
+| `structural_similar` | Find functions structurally similar to a reference by identifier-blind body shape (rename/relocate invariant); returns `shape_hash_exact` + `jaccard` per match. Distinct from name-based `search_similar` |
 
 ### MCP Prompts (Claude Code `/` menu)
 
@@ -249,6 +251,7 @@ These environment variables can disable specific MCP tool groups at runtime:
 | `SQRY_MCP_ENABLE_CROSS_LANGUAGE` | `cross_language_edges` |
 | `SQRY_MCP_ENABLE_SEMANTIC_DIFF` | `semantic_diff` |
 | `SQRY_MCP_ENABLE_DEPENDENCY_IMPACT` | `dependency_impact` |
+| `SQRY_MCP_ENABLE_STRUCTURAL_SIMILAR` | `structural_similar` |
 
 ---
 
@@ -510,6 +513,9 @@ scope.ancestor:AppModule
 
 # Find symbols with references
 references:config
+
+# Find functions structurally similar to a reference (identifier-blind body shape)
+shape~=parse_config
 ```
 
 ### Code Quality Predicates (CD Static Analysis)

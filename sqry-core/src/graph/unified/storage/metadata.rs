@@ -22,13 +22,14 @@
 //! Only nodes with metadata get entries, keeping memory overhead proportional
 //! to the number of annotated symbols rather than total node count.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use serde::{Deserialize, Serialize};
 
 use super::super::node::id::NodeId;
 use super::dispatch_tables::DispatchTables;
 use super::framework_routes::{FrameworkRouteMetadata, FrameworkRoutesMap};
+use super::shape::ShapeDescriptor;
 
 /// Optional metadata for nodes that participate in macro boundary analysis.
 ///
@@ -286,6 +287,29 @@ pub struct NodeMetadataStore {
     /// Plan B (V12, joint-stubs) — per-snapshot dispatch-resolution side
     /// tables, populated by WS2 resolvers. Empty in the stub.
     dispatch_tables: DispatchTables,
+    /// Identifier-blind per-function body-shape descriptors (V15), keyed by
+    /// full `NodeId`.
+    ///
+    /// Unlike `framework_routes` / `dispatch_tables` (which are empty stubs
+    /// reattached only at load time), this map IS populated during language
+    /// staging and rides the existing take -> rekey -> merge metadata
+    /// pipeline. Every `NodeId`-lifecycle and accounting hook on this type
+    /// therefore has to carry it: the emptiness contract ([`Self::is_empty`] /
+    /// [`Self::len`]), the staging->arena rekey
+    /// (`build::parallel_commit::rekey_staging_metadata_to_arena`), the Phase
+    /// 4c-prime loser drop (`build::unification::NodeRemapTable::apply_to_metadata_store`),
+    /// the incremental-rebuild prune ([`Self::retain_entries`]), the
+    /// staged->canonical [`Self::merge`], [`PartialEq`], `heap_bytes`, and the
+    /// `NodeIdBearing::all_node_ids` union in `rebuild::coverage`. A miss in any
+    /// one silently no-ops the feature or strands a descriptor on a tombstoned
+    /// node.
+    ///
+    /// It is NOT carried by the custom `entries` serde (which writes only
+    /// `entries`); the V15 snapshot envelope carries it in a dedicated slot,
+    /// reattached via [`Self::set_shape_descriptors`] (the `framework_routes`
+    /// envelope-slot precedent). `BTreeMap` (not `HashMap`) for deterministic
+    /// serialization order (AC-1 / AC-8).
+    shape_descriptors: BTreeMap<NodeId, ShapeDescriptor>,
 }
 
 /// Discriminant values for the on-wire `kind` byte.
@@ -386,6 +410,10 @@ impl<'de> Deserialize<'de> for NodeMetadataStore {
             entries: map,
             framework_routes: FrameworkRoutesMap::default(),
             dispatch_tables: DispatchTables::default(),
+            // Envelope slot, same as the two stubs above: the V15 loader
+            // reattaches the descriptors via `set_shape_descriptors` after
+            // this entry-vec deserialization. Default to empty here.
+            shape_descriptors: BTreeMap::new(),
         })
     }
 }
@@ -591,16 +619,34 @@ impl NodeMetadataStore {
     // Iteration / bookkeeping
     // ---------------------------------------------------------------
 
-    /// Returns the number of nodes with metadata.
+    /// Returns the number of distinct nodes carrying any metadata: every
+    /// entry, plus shape-only descriptors whose `NodeId` has no entry.
+    ///
+    /// Counts the UNION (not the sum) so a node that carries both an entry and
+    /// a shape descriptor is counted once, keeping `len()` consistent with
+    /// [`Self::is_empty`] (`len() == 0` iff `is_empty()`). Most functions carry
+    /// a descriptor but no entry-metadata, so this is the common shape-only
+    /// case that the build-pipeline drop gates must NOT discard.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.entries.len()
+        let shape_only = self
+            .shape_descriptors
+            .keys()
+            .filter(|nid| !self.entries.contains_key(&(nid.index(), nid.generation())))
+            .count();
+        self.entries.len() + shape_only
     }
 
     /// Returns true if no nodes have metadata.
+    ///
+    /// Load-bearing: the chunked build pipeline uses `is_empty()` as a DROP
+    /// gate (entrypoint, incremental, parallel-commit). A shape-only store
+    /// (descriptors but no `entries`, the common case for ordinary functions)
+    /// MUST report non-empty or it is silently discarded before the rekey +
+    /// merge, no-op'ing the whole feature. Hence the `shape_descriptors` term.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.entries.is_empty() && self.shape_descriptors.is_empty()
     }
 
     /// Iterate over entries whose typed payload is `Macro`, yielding the
@@ -622,10 +668,18 @@ impl NodeMetadataStore {
 
     /// Merge another metadata store into this one.
     ///
-    /// Entries from `other` overwrite existing entries with the same key.
+    /// Entries from `other` overwrite existing entries with the same key. Shape
+    /// descriptors are merged identically (overwrite on key collision): unlike
+    /// the `framework_routes` / `dispatch_tables` stubs (which are reattached
+    /// only at load time and so are deliberately NOT merged here), shape
+    /// descriptors are produced per-file during staging and reach the
+    /// authoritative store through exactly this merge, so they must ride it.
     pub fn merge(&mut self, other: &NodeMetadataStore) {
         for (&key, value) in &other.entries {
             self.entries.insert(key, value.clone());
+        }
+        for (&node_id, descriptor) in &other.shape_descriptors {
+            self.shape_descriptors.insert(node_id, descriptor.clone());
         }
     }
 
@@ -656,6 +710,11 @@ impl NodeMetadataStore {
     {
         self.entries
             .retain(|&(index, generation), _entry| keep(index, generation));
+        // Prune shape descriptors under the SAME predicate so a tombstoned
+        // node cannot leave a stranded descriptor behind. Without this the
+        // residue audit would flag a descriptor-only stale `NodeId`.
+        self.shape_descriptors
+            .retain(|node_id, _descriptor| keep(node_id.index(), node_id.generation()));
     }
 
     /// Test-only: clear the Phase A marker bits
@@ -744,6 +803,61 @@ impl NodeMetadataStore {
     pub fn set_dispatch_tables(&mut self, tables: DispatchTables) {
         self.dispatch_tables = tables;
     }
+
+    // ---------------------------------------------------------------
+    // Shape descriptors (V15 body-shape side table)
+    // ---------------------------------------------------------------
+
+    /// Insert (or replace) the shape descriptor for a node.
+    ///
+    /// Called from the build seam (`build::staging`) during staging, keyed by
+    /// the staging-local `NodeId`, and again by
+    /// `rekey_staging_metadata_to_arena` under the committed arena `NodeId`.
+    pub fn insert_shape_descriptor(&mut self, node_id: NodeId, descriptor: ShapeDescriptor) {
+        self.shape_descriptors.insert(node_id, descriptor);
+    }
+
+    /// Borrowed access to a node's shape descriptor, if one was computed.
+    #[must_use]
+    pub fn shape_descriptor(&self, node_id: NodeId) -> Option<&ShapeDescriptor> {
+        self.shape_descriptors.get(&node_id)
+    }
+
+    /// Read-only access to the whole shape-descriptor map.
+    ///
+    /// Used by the V15 snapshot writer to extract the envelope payload, by the
+    /// staging->arena rekey to iterate staging descriptors, and by the
+    /// structural-index / query surfaces downstream.
+    #[must_use]
+    pub fn shape_descriptors(&self) -> &BTreeMap<NodeId, ShapeDescriptor> {
+        &self.shape_descriptors
+    }
+
+    /// Remove a node's shape descriptor, returning it if present.
+    ///
+    /// Used by the Phase 4c-prime loser-drop
+    /// (`NodeRemapTable::apply_to_metadata_store`) to evict a tombstoned
+    /// loser's descriptor.
+    pub fn remove_shape_descriptor(&mut self, node_id: NodeId) -> Option<ShapeDescriptor> {
+        self.shape_descriptors.remove(&node_id)
+    }
+
+    /// Replace the shape-descriptor map wholesale.
+    ///
+    /// Used by the V15 snapshot loader to reattach the envelope slot after
+    /// entry-vec deserialization (the `set_framework_routes` precedent).
+    pub fn set_shape_descriptors(&mut self, descriptors: BTreeMap<NodeId, ShapeDescriptor>) {
+        self.shape_descriptors = descriptors;
+    }
+
+    /// Iterate the `NodeId`s that carry a shape descriptor.
+    ///
+    /// The `NodeIdBearing` impl in `rebuild::coverage` chains this with the
+    /// entry-derived `NodeId`s so the tombstone-residue audit sees descriptor-
+    /// only nodes too.
+    pub fn iter_shape_descriptor_node_ids(&self) -> impl Iterator<Item = NodeId> + '_ {
+        self.shape_descriptors.keys().copied()
+    }
 }
 
 impl PartialEq for NodeMetadataStore {
@@ -751,6 +865,8 @@ impl PartialEq for NodeMetadataStore {
         self.entries == other.entries
             && self.framework_routes == other.framework_routes
             && self.dispatch_tables == other.dispatch_tables
+            // AC-8 round-trip equality must not be blind to descriptor loss.
+            && self.shape_descriptors == other.shape_descriptors
     }
 }
 
@@ -812,7 +928,16 @@ impl crate::graph::unified::memory::GraphMemorySize for NodeMetadataStore {
                 * (std::mem::size_of::<NodeId>()
                     + std::mem::size_of::<super::dispatch_tables::TsDispatchEntry>())
             + dt.cap_hits.len() * std::mem::size_of::<super::dispatch_tables::CapHit>();
-        base + inner + framework_routes_bytes + dispatch_tables_bytes
+        // V15 body-shape side table. `ShapeDescriptor` is fixed-size POD (no
+        // heap-allocated fields: the cf histogram and the MinHash lanes are
+        // inline arrays), so `size_of` captures the whole payload; charge the
+        // key alongside it, mirroring the framework-routes accounting above.
+        // This delta feeds `CodeGraph::heap_bytes` and the daemon
+        // admission/LRU memory budget, so a shape-only graph is accounted, not
+        // admitted past `memory_limit_mb` undercounted.
+        let shape_descriptors_bytes = self.shape_descriptors.len()
+            * (std::mem::size_of::<NodeId>() + std::mem::size_of::<ShapeDescriptor>());
+        base + inner + framework_routes_bytes + dispatch_tables_bytes + shape_descriptors_bytes
     }
 }
 
@@ -1214,6 +1339,117 @@ mod tests {
             Some(TypedMetadata::Classpath(_))
         ));
         assert!(store.is_empty());
+    }
+
+    // ------------------------------------------------------------------
+    // V15 shape-descriptor side table: emptiness contract + lifecycle hooks
+    // ------------------------------------------------------------------
+
+    mod shape_descriptor_tests {
+        use super::*;
+        use crate::graph::unified::build::shape::CfBucket;
+        use crate::graph::unified::memory::GraphMemorySize;
+        use crate::graph::unified::storage::shape::ShapeDescriptor;
+
+        fn descriptor_with_branches(n: u16) -> ShapeDescriptor {
+            let mut d = ShapeDescriptor::default();
+            d.cf_histogram[CfBucket::Branch.index()] = n;
+            d
+        }
+
+        #[test]
+        fn shape_only_store_is_non_empty_and_counts() {
+            // The single most dangerous miss: a store with descriptors but no
+            // entries (the common case for ordinary functions) MUST report
+            // non-empty so the build-pipeline drop gates do not discard it.
+            let mut store = NodeMetadataStore::new();
+            assert!(store.is_empty());
+            assert_eq!(store.len(), 0);
+
+            store.insert_shape_descriptor(NodeId::new(7, 1), ShapeDescriptor::default());
+            assert!(!store.is_empty(), "shape-only store must be non-empty");
+            assert_eq!(store.len(), 1);
+        }
+
+        #[test]
+        fn len_counts_union_not_sum() {
+            // A node carrying BOTH an entry and a descriptor is counted once,
+            // keeping len() consistent with is_empty().
+            let mut store = NodeMetadataStore::new();
+            let both = NodeId::new(1, 1);
+            store.insert(both, MacroNodeMetadata::default());
+            store.insert_shape_descriptor(both, ShapeDescriptor::default());
+            store.insert_shape_descriptor(NodeId::new(2, 1), ShapeDescriptor::default());
+            // 1 node with an entry (also a descriptor) + 1 shape-only node = 2.
+            assert_eq!(store.len(), 2);
+        }
+
+        #[test]
+        fn merge_carries_shape_descriptors() {
+            let mut dst = NodeMetadataStore::new();
+            let mut src = NodeMetadataStore::new();
+            src.insert_shape_descriptor(NodeId::new(3, 1), descriptor_with_branches(5));
+            dst.merge(&src);
+            assert_eq!(
+                dst.shape_descriptor(NodeId::new(3, 1))
+                    .map(|d| d.cf_histogram[CfBucket::Branch.index()]),
+                Some(5),
+                "merge must carry shape descriptors into the authoritative store"
+            );
+        }
+
+        #[test]
+        fn retain_entries_prunes_shape_descriptors() {
+            let mut store = NodeMetadataStore::new();
+            let keep = NodeId::new(10, 1);
+            let drop = NodeId::new(11, 1);
+            store.insert_shape_descriptor(keep, ShapeDescriptor::default());
+            store.insert_shape_descriptor(drop, ShapeDescriptor::default());
+            store.retain_entries(|index, _generation| index == 10);
+            assert!(store.shape_descriptor(keep).is_some());
+            assert!(
+                store.shape_descriptor(drop).is_none(),
+                "retain must prune descriptors under the same predicate"
+            );
+        }
+
+        #[test]
+        fn partial_eq_is_sensitive_to_descriptor_loss() {
+            let mut a = NodeMetadataStore::new();
+            let mut b = NodeMetadataStore::new();
+            a.insert_shape_descriptor(NodeId::new(4, 1), descriptor_with_branches(2));
+            b.insert_shape_descriptor(NodeId::new(4, 1), descriptor_with_branches(9));
+            assert_ne!(a, b, "equality must not be blind to descriptor differences");
+            b.insert_shape_descriptor(NodeId::new(4, 1), descriptor_with_branches(2));
+            assert_eq!(a, b);
+        }
+
+        #[test]
+        fn heap_bytes_grows_with_descriptors() {
+            let store_empty = NodeMetadataStore::new();
+            let base = store_empty.heap_bytes();
+            let mut store = NodeMetadataStore::new();
+            store.insert_shape_descriptor(NodeId::new(5, 1), ShapeDescriptor::default());
+            assert!(
+                store.heap_bytes() > base,
+                "a descriptor must increase the accounted heap size"
+            );
+        }
+
+        #[test]
+        fn set_and_read_shape_descriptors_envelope_slot() {
+            let mut map: BTreeMap<NodeId, ShapeDescriptor> = BTreeMap::new();
+            map.insert(NodeId::new(6, 1), descriptor_with_branches(3));
+            let mut store = NodeMetadataStore::new();
+            store.set_shape_descriptors(map);
+            assert_eq!(store.shape_descriptors().len(), 1);
+            assert_eq!(
+                store
+                    .shape_descriptor(NodeId::new(6, 1))
+                    .map(|d| d.cf_histogram[CfBucket::Branch.index()]),
+                Some(3)
+            );
+        }
     }
 
     // ------------------------------------------------------------------

@@ -6,10 +6,13 @@
 //! 3. Creating call edges between caller and callee
 //! 4. Detecting `LuaJIT` FFI patterns and creating FFI edges
 
+use std::sync::OnceLock;
 use std::{collections::HashMap, path::Path};
 
 use sqry_core::graph::unified::build::helper::CalleeKindHint;
+use sqry_core::graph::unified::build::shape::{CfBucket, ShapeMapping};
 use sqry_core::graph::unified::edge::FfiConvention;
+use sqry_core::graph::unified::storage::shape::SignatureShape;
 use sqry_core::graph::unified::{GraphBuildHelper, NodeKind, StagingGraph};
 use sqry_core::graph::{GraphBuilder, GraphBuilderError, GraphResult, Language, Position, Span};
 use tree_sitter::{Node, Tree};
@@ -125,6 +128,91 @@ impl GraphBuilder for LuaGraphBuilder {
     fn language(&self) -> Language {
         Language::Lua
     }
+
+    fn shape_mapping(&self) -> Option<&dyn ShapeMapping> {
+        Some(lua_shape_mapping())
+    }
+}
+
+/// Per-language [`ShapeMapping`] for Lua (identifier-blind body-shape feature).
+///
+/// Precomputed `kind_id -> CfBucket` table built once from the tree-sitter-lua
+/// grammar. Lua has no exception or throw construct (errors propagate through the
+/// `error`/`pcall` calls, which stay in the `Call` bucket), so the honest bucket
+/// set covers branch/loop/break/return/call/assign/closure.
+pub struct LuaShapeMapping {
+    cf_by_kind_id: Vec<Option<CfBucket>>,
+}
+
+impl LuaShapeMapping {
+    fn build() -> Self {
+        let lang: tree_sitter::Language = tree_sitter_lua::LANGUAGE.into();
+        let count = lang.node_kind_count();
+        let mut cf_by_kind_id = vec![None; count];
+        for (id, slot) in cf_by_kind_id.iter_mut().enumerate() {
+            let Ok(kind_id) = u16::try_from(id) else {
+                break;
+            };
+            if !lang.node_kind_is_named(kind_id) {
+                continue;
+            }
+            if let Some(name) = lang.node_kind_for_id(kind_id) {
+                *slot = cf_bucket_for_lua_kind(name);
+            }
+        }
+        Self { cf_by_kind_id }
+    }
+}
+
+impl ShapeMapping for LuaShapeMapping {
+    fn cf_bucket(&self, ts_node_kind_id: u16) -> Option<CfBucket> {
+        self.cf_by_kind_id
+            .get(ts_node_kind_id as usize)
+            .copied()
+            .flatten()
+    }
+
+    fn signature_shape(&self, fn_node: Node, _src: &[u8]) -> SignatureShape {
+        let mut shape = SignatureShape::default();
+        if let Some(params) = fn_node.child_by_field_name("parameters") {
+            let mut cursor = params.walk();
+            for child in params.named_children(&mut cursor) {
+                match child.kind() {
+                    "identifier" => {
+                        shape.arity_positional = shape.arity_positional.saturating_add(1);
+                    }
+                    "vararg_expression" => shape.has_varargs = true,
+                    _ => {}
+                }
+            }
+        }
+        shape
+    }
+}
+
+/// Map one tree-sitter-lua node-kind name to its canonical control-flow bucket.
+/// Additive-only against the frozen [`CfBucket`] set.
+fn cf_bucket_for_lua_kind(name: &str) -> Option<CfBucket> {
+    let bucket = match name {
+        "if_statement" | "elseif_statement" | "else_statement" => CfBucket::Branch,
+        "while_statement" | "for_statement" | "repeat_statement" => CfBucket::Loop,
+        "break_statement" | "goto_statement" => CfBucket::BreakContinue,
+        "return_statement" => CfBucket::Return,
+        "function_call" => CfBucket::Call,
+        "assignment_statement" | "variable_declaration" => CfBucket::Assign,
+        // Anonymous nested function literals; the named top-level
+        // `function_declaration` is the definition itself, not a body construct.
+        "function_definition" => CfBucket::Closure,
+        _ => return None,
+    };
+    Some(bucket)
+}
+
+/// The process-wide Lua shape mapping, built once on first use.
+#[must_use]
+pub fn lua_shape_mapping() -> &'static LuaShapeMapping {
+    static MAPPING: OnceLock<LuaShapeMapping> = OnceLock::new();
+    MAPPING.get_or_init(LuaShapeMapping::build)
 }
 
 /// Check if a `function_declaration` or `assignment_statement` has the 'local' keyword.
@@ -2564,5 +2652,116 @@ end
                 "All edges should be Imports"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod shape_tests {
+    //! Coverage for the Lua [`ShapeMapping`]. Consumes the hand-written
+    //! control-flow fixture so the test is load-bearing.
+
+    use super::{cf_bucket_for_lua_kind, lua_shape_mapping};
+    use sqry_core::graph::unified::build::shape::{
+        CfBucket, ShapeBudget, ShapeMapping, compute_shape_descriptor,
+    };
+    use tree_sitter::{Node, Parser, Tree};
+
+    const SAMPLE: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../test-fixtures/shape/dynamic/lua.lua"
+    ));
+
+    fn parse(src: &str) -> Tree {
+        let mut parser = Parser::new();
+        parser
+            .set_language(&tree_sitter_lua::LANGUAGE.into())
+            .expect("load lua grammar");
+        parser.parse(src, None).expect("parse lua")
+    }
+
+    fn first_function<'t>(tree: &'t Tree) -> Node<'t> {
+        let root = tree.root_node();
+        let mut cursor = root.walk();
+        for child in root.named_children(&mut cursor) {
+            if child.kind() == "function_declaration" {
+                return child;
+            }
+        }
+        panic!("no function_declaration in lua fixture");
+    }
+
+    #[test]
+    fn mapping_is_non_empty_and_covers_real_kinds() {
+        assert_eq!(
+            cf_bucket_for_lua_kind("if_statement"),
+            Some(CfBucket::Branch)
+        );
+        assert_eq!(
+            cf_bucket_for_lua_kind("while_statement"),
+            Some(CfBucket::Loop)
+        );
+        assert_eq!(
+            cf_bucket_for_lua_kind("repeat_statement"),
+            Some(CfBucket::Loop)
+        );
+        assert_eq!(
+            cf_bucket_for_lua_kind("break_statement"),
+            Some(CfBucket::BreakContinue)
+        );
+        assert_eq!(
+            cf_bucket_for_lua_kind("return_statement"),
+            Some(CfBucket::Return)
+        );
+        assert_eq!(
+            cf_bucket_for_lua_kind("function_call"),
+            Some(CfBucket::Call)
+        );
+        assert_eq!(
+            cf_bucket_for_lua_kind("function_definition"),
+            Some(CfBucket::Closure)
+        );
+        assert_eq!(cf_bucket_for_lua_kind("nope"), None);
+
+        let lang: tree_sitter::Language = tree_sitter_lua::LANGUAGE.into();
+        let id = (0..lang.node_kind_count())
+            .map(|i| i as u16)
+            .find(|&i| {
+                lang.node_kind_is_named(i) && lang.node_kind_for_id(i) == Some("if_statement")
+            })
+            .expect("grammar exposes named if_statement");
+        assert_eq!(lua_shape_mapping().cf_bucket(id), Some(CfBucket::Branch));
+    }
+
+    #[test]
+    fn descriptor_covers_fixture_control_flow() {
+        let tree = parse(SAMPLE);
+        let func = first_function(&tree);
+        let descriptor = compute_shape_descriptor(
+            func,
+            SAMPLE.as_bytes(),
+            lua_shape_mapping(),
+            &ShapeBudget::default(),
+        );
+        let hist = descriptor.cf_histogram;
+        assert!(hist[CfBucket::Branch.index()] >= 1, "branch (if)");
+        assert!(hist[CfBucket::Loop.index()] >= 1, "loop (while/for/repeat)");
+        assert!(hist[CfBucket::BreakContinue.index()] >= 1, "break");
+        assert!(hist[CfBucket::Return.index()] >= 1, "return");
+        assert!(hist[CfBucket::Call.index()] >= 1, "call");
+        assert!(hist[CfBucket::Assign.index()] >= 1, "assignment");
+        assert!(
+            hist[CfBucket::Closure.index()] >= 1,
+            "nested function literal"
+        );
+    }
+
+    #[test]
+    fn signature_shape_reads_arity_and_varargs() {
+        let tree = parse(SAMPLE);
+        let func = first_function(&tree);
+        let shape = lua_shape_mapping().signature_shape(func, SAMPLE.as_bytes());
+        // `local function classify(value, label, ...)`.
+        assert_eq!(shape.arity_positional, 2, "value + label");
+        assert!(shape.has_varargs, "...");
     }
 }

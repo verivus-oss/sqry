@@ -311,17 +311,29 @@ impl NodeIdBearing for AuxiliaryIndices {
 // ---------------------------------------------------------------------
 
 impl NodeIdBearing for NodeMetadataStore {
-    /// Yields the `NodeId` reconstructed from every `(index, generation)`
-    /// key currently in the metadata map.
+    /// Yields the `NodeId` for every node carrying ANY metadata: the
+    /// reconstructed key of every `(index, generation)` entry, UNIONed with the
+    /// key of every node carrying only a shape descriptor.
+    ///
+    /// The shape-descriptor union is load-bearing for the tombstone-residue
+    /// audit (`assert_no_tombstone_residue`): most functions carry a descriptor
+    /// but no entry, so without it a descriptor-only stale `NodeId` left behind
+    /// by a botched tombstone would slip past the audit unseen. Duplicates (a
+    /// node with both an entry and a descriptor) are harmless — the residue
+    /// check deduplicates via set membership.
     fn all_node_ids(&self) -> Box<dyn Iterator<Item = NodeId> + '_> {
         Box::new(
             self.iter_entries()
-                .map(|((index, generation), _entry)| NodeId::new(index, generation)),
+                .map(|((index, generation), _entry)| NodeId::new(index, generation))
+                .chain(self.iter_shape_descriptor_node_ids()),
         )
     }
 
-    /// Drops every metadata entry whose reconstructed `NodeId` fails
-    /// `keep`.
+    /// Drops every metadata entry AND every shape descriptor whose
+    /// reconstructed `NodeId` fails `keep`.
+    ///
+    /// Delegates to [`NodeMetadataStore::retain_entries`], which prunes both the
+    /// entry map and the shape-descriptor map under the same predicate.
     fn retain_nodes(&mut self, keep: &dyn Fn(NodeId) -> bool) {
         self.retain_entries(|index, generation| keep(NodeId::new(index, generation)));
     }
@@ -661,6 +673,48 @@ mod tests {
         assert_eq!(store.len(), 1);
         assert!(store.get_macro(keep).is_some());
         assert!(store.get_macro(drop).is_none());
+    }
+
+    #[test]
+    fn metadata_all_node_ids_unions_descriptor_only_nodes() {
+        // Hook 3b (read side): a node carrying ONLY a shape descriptor must be
+        // surfaced by all_node_ids, or the tombstone-residue audit is blind to
+        // a stranded descriptor-only stale NodeId.
+        use crate::graph::unified::storage::shape::ShapeDescriptor;
+
+        let entry_node = NodeId::new(1, 1);
+        let descriptor_only = NodeId::new(2, 1);
+        let mut store = NodeMetadataStore::new();
+        store.insert(entry_node, MacroNodeMetadata::default());
+        store.insert_shape_descriptor(descriptor_only, ShapeDescriptor::default());
+
+        let ids: HashSet<NodeId> = store.all_node_ids().collect();
+        assert!(ids.contains(&entry_node));
+        assert!(
+            ids.contains(&descriptor_only),
+            "descriptor-only node must appear in the residue-audit set"
+        );
+    }
+
+    #[test]
+    fn metadata_retain_nodes_drops_descriptor_only_node() {
+        // The residue-audit catch only works if retain ALSO prunes the
+        // descriptor-only node it surfaced.
+        use crate::graph::unified::storage::shape::ShapeDescriptor;
+
+        let keep = NodeId::new(1, 1);
+        let drop = NodeId::new(2, 1);
+        let mut store = NodeMetadataStore::new();
+        store.insert_shape_descriptor(keep, ShapeDescriptor::default());
+        store.insert_shape_descriptor(drop, ShapeDescriptor::default());
+
+        store.retain_nodes(&|id| id == keep);
+
+        assert!(store.shape_descriptor(keep).is_some());
+        assert!(
+            store.shape_descriptor(drop).is_none(),
+            "retain_nodes must drop the descriptor-only rejected node"
+        );
     }
 
     // ---- K.A10: NodeProvenanceStore --------------------------------

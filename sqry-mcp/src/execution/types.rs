@@ -501,6 +501,29 @@ pub struct FindSimilarData {
     pub total: u64,
 }
 
+/// One structural-neighbour match (body-shape descriptor, U07). Carries the two
+/// distinct AC-4 numbers: exact structural identity and approximate similarity.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StructuralNeighborData {
+    pub symbol: NodeRefData,
+    /// True when the neighbour's `shape_hash` is byte-identical to the probe's
+    /// (a rename/relocate-invariant exact structural match).
+    pub shape_hash_exact: bool,
+    /// Approximate MinHash Jaccard similarity (0.0–1.0).
+    pub jaccard: f64,
+}
+
+/// `structural_similar` result: a probe plus its identifier-blind structural
+/// neighbours, ranked exact-first then by MinHash similarity.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StructuralSimilarData {
+    pub reference: NodeRefData,
+    pub results: Vec<StructuralNeighborData>,
+    pub total: u64,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImpactedSymbol {

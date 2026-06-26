@@ -797,6 +797,7 @@ fn walk_predicate_for_shared_subtrees(
         // Phase β joint-stubs — atomic leaf predicates with no nested PlanNode.
         | Predicate::FrameworkEq(_)
         | Predicate::ResolvedViaEq(_)
+        | Predicate::ShapeSimilar(_)
         | Predicate::InFile(_)
         | Predicate::InScope(_)
         | Predicate::MatchesName(_)
@@ -994,6 +995,7 @@ fn visit_proper_predicate_subtrees(predicate: &Predicate, visitor: &mut dyn FnMu
         // Phase β joint-stubs — atomic leaf predicates with no nested PlanNode.
         | Predicate::FrameworkEq(_)
         | Predicate::ResolvedViaEq(_)
+        | Predicate::ShapeSimilar(_)
         | Predicate::InFile(_)
         | Predicate::InScope(_)
         | Predicate::MatchesName(_)
@@ -1122,6 +1124,7 @@ fn walk_predicate_for_subqueries(
         // Phase β joint-stubs — atomic leaf predicates with no nested PlanNode.
         | Predicate::FrameworkEq(_)
         | Predicate::ResolvedViaEq(_)
+        | Predicate::ShapeSimilar(_)
         | Predicate::InFile(_)
         | Predicate::InScope(_)
         | Predicate::MatchesName(_)

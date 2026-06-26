@@ -18,10 +18,13 @@ use std::path::Path;
 
 use sqry_core::graph::unified::StagingGraph;
 use sqry_core::graph::unified::build::GraphBuildHelper;
+use sqry_core::graph::unified::build::shape::{CfBucket, ShapeMapping};
 use sqry_core::graph::unified::edge::TableWriteOp;
 use sqry_core::graph::unified::edge::kind::TypeOfContext;
 use sqry_core::graph::unified::node::NodeId;
+use sqry_core::graph::unified::storage::shape::SignatureShape;
 use sqry_core::graph::{GraphBuilder, GraphBuilderError, GraphResult, Language, Span};
+use std::sync::OnceLock;
 use tree_sitter::{Node, Tree};
 
 use super::type_extractor;
@@ -99,6 +102,112 @@ impl GraphBuilder for OraclePlsqlGraphBuilder {
     fn language(&self) -> Language {
         Language::Plsql
     }
+
+    fn shape_mapping(&self) -> Option<&dyn ShapeMapping> {
+        Some(plsql_shape_mapping())
+    }
+}
+
+/// Per-language [`ShapeMapping`] for Oracle PL/SQL (tree-sitter-plsql-sqry).
+///
+/// PL/SQL procedures and functions carry real procedural control flow that the
+/// grammar parses fully (`if_statement`, the loop family, `case_statement`,
+/// exception handling, `raise_statement`, cursor fetch/open/close), so the
+/// body-shape descriptor counts genuine buckets. The mapping is built once from
+/// the grammar and shared process-wide.
+pub struct PlsqlShapeMapping {
+    cf_by_kind_id: Vec<Option<CfBucket>>,
+}
+
+impl PlsqlShapeMapping {
+    fn build() -> Self {
+        let lang: tree_sitter::Language = tree_sitter_plsql_sqry::language();
+        let count = lang.node_kind_count();
+        let mut cf_by_kind_id = vec![None; count];
+        for (id, slot) in cf_by_kind_id.iter_mut().enumerate() {
+            let Ok(kind_id) = u16::try_from(id) else {
+                break;
+            };
+            if !lang.node_kind_is_named(kind_id) {
+                continue;
+            }
+            if let Some(name) = lang.node_kind_for_id(kind_id) {
+                *slot = cf_bucket_for_plsql_kind(name);
+            }
+        }
+        Self { cf_by_kind_id }
+    }
+}
+
+impl ShapeMapping for PlsqlShapeMapping {
+    fn cf_bucket(&self, ts_node_kind_id: u16) -> Option<CfBucket> {
+        self.cf_by_kind_id
+            .get(ts_node_kind_id as usize)
+            .copied()
+            .flatten()
+    }
+
+    fn signature_shape(&self, fn_node: Node, _src: &[u8]) -> SignatureShape {
+        let mut shape = SignatureShape::default();
+        // The argument list is a `parameter_declaration` child holding
+        // `parameter_declaration_element` entries; a `default_expression` child
+        // on an element marks a default value.
+        let mut cursor = fn_node.walk();
+        for child in fn_node.named_children(&mut cursor) {
+            if child.kind() == "parameter_declaration" {
+                let mut elem_cursor = child.walk();
+                for elem in child.named_children(&mut elem_cursor) {
+                    if elem.kind() == "parameter_declaration_element" {
+                        shape.arity_positional = shape.arity_positional.saturating_add(1);
+                        let mut def_cursor = elem.walk();
+                        for piece in elem.named_children(&mut def_cursor) {
+                            if piece.kind() == "default_expression" {
+                                shape.has_defaults = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // A `function_definition`/`function_declaration` carries a
+        // `return_declaration`; its presence is the return-type signal.
+        let mut ret_cursor = fn_node.walk();
+        for child in fn_node.named_children(&mut ret_cursor) {
+            if child.kind() == "return_declaration" {
+                shape.has_return_annotation = true;
+            }
+        }
+        shape
+    }
+}
+
+/// Map one tree-sitter-plsql-sqry grammar node-kind name to its canonical
+/// control-flow bucket. Additive-only against the frozen [`CfBucket`] set.
+fn cf_bucket_for_plsql_kind(name: &str) -> Option<CfBucket> {
+    let bucket = match name {
+        "if_statement" => CfBucket::Branch,
+        "case_statement" => CfBucket::Match,
+        "basic_loop_statement" | "for_loop_statement" | "while_loop_statement" => CfBucket::Loop,
+        "exit_statement" | "continue_statement" => CfBucket::BreakContinue,
+        // PL/SQL has no separate `try`; the exception block is the catch surface.
+        "exception_block" | "exception_handler" => CfBucket::Catch,
+        "raise_statement" => CfBucket::Throw,
+        "return_statement" => CfBucket::Return,
+        "pipe_row_statement" => CfBucket::Yield,
+        "assignment_statement" => CfBucket::Assign,
+        // Cursor and dynamic-statement surfaces map onto Call.
+        "ref_call" | "execute_immediate" | "open_statement" | "open_for_statement"
+        | "fetch_statement" | "close_statement" => CfBucket::Call,
+        _ => return None,
+    };
+    Some(bucket)
+}
+
+/// The process-wide PL/SQL shape mapping, built once on first use.
+#[must_use]
+pub fn plsql_shape_mapping() -> &'static PlsqlShapeMapping {
+    static MAPPING: OnceLock<PlsqlShapeMapping> = OnceLock::new();
+    MAPPING.get_or_init(PlsqlShapeMapping::build)
 }
 
 #[derive(Debug, Clone)]
@@ -1356,5 +1465,136 @@ mod tests {
         assert!(!is_valid_identifier("123abc"));
         assert!(!is_valid_identifier("has space"));
         assert!(!is_valid_identifier("has.dot"));
+    }
+}
+
+#[cfg(test)]
+mod shape_tests {
+    use super::*;
+    use sqry_core::graph::unified::build::shape::{ShapeBudget, compute_shape_descriptor};
+
+    const SAMPLE: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../test-fixtures/shape/data/sample.pkb"
+    ));
+
+    fn parse(src: &str) -> Tree {
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_plsql_sqry::language())
+            .expect("load plsql grammar");
+        parser.parse(src, None).expect("parse")
+    }
+
+    /// Resolve the first node of one of the given kinds anywhere in the tree.
+    fn first_of<'a>(node: Node<'a>, kinds: &[&str]) -> Option<Node<'a>> {
+        if kinds.contains(&node.kind()) {
+            return Some(node);
+        }
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if let Some(found) = first_of(child, kinds) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn cf_map_is_non_empty_and_covers_real_kinds() {
+        let mapping = plsql_shape_mapping();
+        let populated = mapping.cf_by_kind_id.iter().filter(|s| s.is_some()).count();
+        assert!(
+            populated > 0,
+            "PL/SQL cf map must map at least one real grammar kind"
+        );
+
+        let lang: tree_sitter::Language = tree_sitter_plsql_sqry::language();
+        let id = |n: &str| lang.id_for_node_kind(n, true);
+        assert_eq!(
+            mapping.cf_bucket(id("if_statement")),
+            Some(CfBucket::Branch)
+        );
+        assert_eq!(
+            mapping.cf_bucket(id("for_loop_statement")),
+            Some(CfBucket::Loop)
+        );
+        assert_eq!(
+            mapping.cf_bucket(id("case_statement")),
+            Some(CfBucket::Match)
+        );
+        assert_eq!(
+            mapping.cf_bucket(id("exception_handler")),
+            Some(CfBucket::Catch)
+        );
+        assert_eq!(
+            mapping.cf_bucket(id("raise_statement")),
+            Some(CfBucket::Throw)
+        );
+        assert_eq!(
+            mapping.cf_bucket(id("return_statement")),
+            Some(CfBucket::Return)
+        );
+    }
+
+    #[test]
+    fn descriptor_counts_procedural_control_flow() {
+        let tree = parse(SAMPLE);
+        let proc = first_of(tree.root_node(), &["procedure_definition"])
+            .expect("procedure_definition in fixture");
+        let descriptor = compute_shape_descriptor(
+            proc,
+            SAMPLE.as_bytes(),
+            plsql_shape_mapping(),
+            &ShapeBudget::default(),
+        );
+        assert!(
+            !descriptor.is_unhashable(),
+            "a procedure body with control flow must be hashable"
+        );
+        let h = &descriptor.cf_histogram;
+        assert!(h[CfBucket::Branch.index()] >= 1, "IF must count Branch");
+        assert!(
+            h[CfBucket::Loop.index()] >= 2,
+            "FOR + WHILE must count Loop twice"
+        );
+        assert!(h[CfBucket::Match.index()] >= 1, "CASE must count Match");
+        assert!(
+            h[CfBucket::Catch.index()] >= 1,
+            "the exception block must count Catch"
+        );
+        assert!(h[CfBucket::Throw.index()] >= 1, "RAISE must count Throw");
+        assert!(
+            h[CfBucket::Call.index()] >= 1,
+            "the log_it calls must count Call"
+        );
+        assert!(
+            h[CfBucket::Assign.index()] >= 1,
+            "the := assignments must count Assign"
+        );
+    }
+
+    #[test]
+    fn signature_shape_reads_parameters_defaults_and_return() {
+        let tree = parse(SAMPLE);
+        let proc = first_of(tree.root_node(), &["procedure_definition"])
+            .expect("procedure_definition in fixture");
+        let shape = plsql_shape_mapping().signature_shape(proc, SAMPLE.as_bytes());
+        assert_eq!(
+            shape.arity_positional, 3,
+            "classify(score, bonus, grade) has three parameters"
+        );
+        assert!(
+            shape.has_defaults,
+            "the DEFAULT 0 parameter must set has_defaults"
+        );
+
+        let func = first_of(tree.root_node(), &["function_definition"])
+            .expect("function_definition in fixture");
+        let fshape = plsql_shape_mapping().signature_shape(func, SAMPLE.as_bytes());
+        assert!(
+            fshape.has_return_annotation,
+            "a FUNCTION ... RETURN VARCHAR2 must set has_return_annotation"
+        );
     }
 }

@@ -10,9 +10,12 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::OnceLock;
 
+use sqry_core::graph::unified::build::shape::{CfBucket, ShapeMapping};
 use sqry_core::graph::unified::edge::kind::TypeOfContext;
 use sqry_core::graph::unified::node::NodeKind;
+use sqry_core::graph::unified::storage::shape::SignatureShape;
 use sqry_core::graph::{
     GraphBuilder, GraphBuilderError, GraphResult, Language, Position, Span,
     unified::{GraphBuildHelper, StagingGraph, TableWriteOp},
@@ -161,6 +164,101 @@ impl GraphBuilder for ApexGraphBuilder {
     fn language(&self) -> Language {
         Language::Apex
     }
+
+    fn shape_mapping(&self) -> Option<&dyn ShapeMapping> {
+        Some(apex_shape_mapping())
+    }
+}
+
+/// Per-language [`ShapeMapping`] for Salesforce Apex.
+///
+/// Apex carries real method bodies (Java-like), so this maps the grammar's full
+/// control-flow surface onto the canonical [`CfBucket`] schema. The table is built
+/// once from the tree-sitter-sfapex Apex grammar and shared process-wide via
+/// [`apex_shape_mapping`]; the hot walk does a single array index per node.
+pub struct ApexShapeMapping {
+    cf_by_kind_id: Vec<Option<CfBucket>>,
+}
+
+impl ApexShapeMapping {
+    /// Build the `kind_id -> CfBucket` table from the tree-sitter-sfapex Apex grammar.
+    fn build() -> Self {
+        let lang: tree_sitter::Language = tree_sitter_sfapex::apex::LANGUAGE.into();
+        let count = lang.node_kind_count();
+        let mut cf_by_kind_id = vec![None; count];
+        for (id, slot) in cf_by_kind_id.iter_mut().enumerate() {
+            let Ok(kind_id) = u16::try_from(id) else {
+                break;
+            };
+            if !lang.node_kind_is_named(kind_id) {
+                continue;
+            }
+            if let Some(name) = lang.node_kind_for_id(kind_id) {
+                *slot = cf_bucket_for_apex_kind(name);
+            }
+        }
+        Self { cf_by_kind_id }
+    }
+}
+
+impl ShapeMapping for ApexShapeMapping {
+    fn cf_bucket(&self, ts_node_kind_id: u16) -> Option<CfBucket> {
+        self.cf_by_kind_id
+            .get(ts_node_kind_id as usize)
+            .copied()
+            .flatten()
+    }
+
+    fn signature_shape(&self, fn_node: Node, _src: &[u8]) -> SignatureShape {
+        let mut shape = SignatureShape::default();
+        if let Some(params) = fn_node.child_by_field_name("parameters") {
+            let mut cursor = params.walk();
+            for child in params.named_children(&mut cursor) {
+                if child.kind() == "formal_parameter" {
+                    shape.arity_positional = shape.arity_positional.saturating_add(1);
+                }
+            }
+        }
+        // Apex methods carry an explicit declared return type before the name; the
+        // `type` field on a `method_declaration` is the structural witness.
+        shape.has_return_annotation = fn_node.child_by_field_name("type").is_some();
+        shape
+    }
+}
+
+/// Map one tree-sitter-sfapex Apex grammar node-kind name to its canonical
+/// control-flow bucket. Additive-only; `_ => return None` for non-control-flow.
+fn cf_bucket_for_apex_kind(name: &str) -> Option<CfBucket> {
+    let bucket = match name {
+        "if_statement" => CfBucket::Branch,
+        "switch_expression" => CfBucket::Match,
+        "for_statement" | "enhanced_for_statement" | "while_statement" | "do_statement" => {
+            CfBucket::Loop
+        }
+        "try_statement" => CfBucket::Try,
+        "catch_clause" => CfBucket::Catch,
+        "throw_statement" => CfBucket::Throw,
+        // `finally` is the Apex resource-cleanup construct (closest canonical slot).
+        "finally_clause" => CfBucket::Resource,
+        "return_statement" => CfBucket::Return,
+        "break_statement" | "continue_statement" => CfBucket::BreakContinue,
+        "method_invocation" | "object_creation_expression" | "explicit_constructor_invocation" => {
+            CfBucket::Call
+        }
+        "assignment_expression"
+        | "local_variable_declaration"
+        | "field_declaration"
+        | "variable_declarator" => CfBucket::Assign,
+        _ => return None,
+    };
+    Some(bucket)
+}
+
+/// The process-wide Apex shape mapping, built once on first use.
+#[must_use]
+pub fn apex_shape_mapping() -> &'static ApexShapeMapping {
+    static MAPPING: OnceLock<ApexShapeMapping> = OnceLock::new();
+    MAPPING.get_or_init(ApexShapeMapping::build)
 }
 
 // =============================================================================
@@ -3744,6 +3842,101 @@ public class Account {
             resolved_name,
             Some("name"),
             "TypeOf edge name must be the bare field name 'name', got {resolved_name:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod shape_tests {
+    use super::{ApexGraphBuilder, apex_shape_mapping};
+    use sqry_core::graph::GraphBuilder;
+    use sqry_core::graph::unified::build::shape::{
+        CfBucket, ShapeBudget, compute_shape_descriptor,
+    };
+
+    const SAMPLE: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../test-fixtures/shape/iac/apex.cls"
+    ));
+
+    fn parse(src: &str) -> tree_sitter::Tree {
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_sfapex::apex::LANGUAGE.into())
+            .expect("load apex grammar");
+        parser.parse(src, None).expect("parse apex")
+    }
+
+    /// Find the first `method_declaration` whose name identifier is `name`.
+    fn method_named<'t>(
+        node: tree_sitter::Node<'t>,
+        src: &[u8],
+        name: &str,
+    ) -> Option<tree_sitter::Node<'t>> {
+        if node.kind() == "method_declaration"
+            && let Some(id) = node.child_by_field_name("name")
+            && id.utf8_text(src).ok() == Some(name)
+        {
+            return Some(node);
+        }
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if let Some(found) = method_named(child, src, name) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn builder_advertises_shape_mapping() {
+        assert!(
+            ApexGraphBuilder.shape_mapping().is_some(),
+            "Apex builder must advertise a ShapeMapping"
+        );
+    }
+
+    #[test]
+    fn cf_map_is_non_empty_and_covers_real_control_flow() {
+        let mapping = apex_shape_mapping();
+        let tree = parse(SAMPLE);
+        let src = SAMPLE.as_bytes();
+        let method =
+            method_named(tree.root_node(), src, "process").expect("process method present");
+        let d = compute_shape_descriptor(method, src, mapping, &ShapeBudget::default());
+
+        assert!(!d.is_unhashable(), "a real method body must be hashable");
+        // The fixture exercises every one of these canonical buckets.
+        assert!(d.cf_histogram[CfBucket::Branch.index()] >= 1, "branch");
+        assert!(d.cf_histogram[CfBucket::Loop.index()] >= 1, "loop");
+        assert!(d.cf_histogram[CfBucket::Match.index()] >= 1, "match");
+        assert!(d.cf_histogram[CfBucket::Try.index()] >= 1, "try");
+        assert!(d.cf_histogram[CfBucket::Catch.index()] >= 1, "catch");
+        assert!(d.cf_histogram[CfBucket::Throw.index()] >= 1, "throw");
+        assert!(d.cf_histogram[CfBucket::Return.index()] >= 1, "return");
+        assert!(
+            d.cf_histogram[CfBucket::BreakContinue.index()] >= 1,
+            "break/continue"
+        );
+        assert!(d.cf_histogram[CfBucket::Call.index()] >= 1, "call");
+        assert!(d.cf_histogram[CfBucket::Assign.index()] >= 1, "assign");
+    }
+
+    #[test]
+    fn signature_shape_reads_arity_and_return() {
+        let mapping = apex_shape_mapping();
+        let tree = parse(SAMPLE);
+        let src = SAMPLE.as_bytes();
+        let method =
+            method_named(tree.root_node(), src, "process").expect("process method present");
+        let d = compute_shape_descriptor(method, src, mapping, &ShapeBudget::default());
+        assert_eq!(
+            d.signature_shape.arity_positional, 2,
+            "process(Integer, String) has two positional params"
+        );
+        assert!(
+            d.signature_shape.has_return_annotation,
+            "process declares an Integer return type"
         );
     }
 }

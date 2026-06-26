@@ -14,7 +14,7 @@ use std::collections::HashMap;
 
 use super::format::{
     FormatVersion, GraphHeader, MAGIC_BYTES_V9, MAGIC_BYTES_V10, MAGIC_BYTES_V11, MAGIC_BYTES_V12,
-    MAGIC_BYTES_V14, VERSION,
+    MAGIC_BYTES_V14, MAGIC_BYTES_V15, VERSION,
 };
 use super::manifest::ConfigProvenance;
 use crate::config::buffers::max_snapshot_bytes;
@@ -31,7 +31,7 @@ use crate::graph::unified::storage::edge_provenance::EdgeProvenance;
 use crate::graph::unified::storage::{
     AuxiliaryIndices, CIndirectSideTables, DispatchTables, EdgeProvenanceStore, FileRegistry,
     FileSegmentTable, FrameworkRoutesMap, NodeArena, NodeMetadataStore, NodeProvenanceStore,
-    StringInterner,
+    ShapeDescriptor, StringInterner,
 };
 use crate::plugin::PluginManager;
 
@@ -451,6 +451,75 @@ struct GraphSnapshotDataV13 {
 /// types directly — no mirror, no translation.
 type GraphSnapshotDataV14 = GraphSnapshotDataV12;
 
+/// Serializable snapshot of the graph state (V15 — body-shape-descriptor side
+/// table). Shape-identical to V14 on the wire **plus** one appended envelope
+/// slot: a flat `Vec<(NodeId, ShapeDescriptor)>` carrying the per-function
+/// `shape_descriptors` map.
+///
+/// # Why a dedicated envelope slot (not the metadata-store serde)
+///
+/// `NodeMetadataStore`'s custom serde emits only its `entries` map (the V11 wire
+/// shape is preserved bit-for-bit; framework-route / dispatch joint-stubs already
+/// ride envelope slots for the same reason). The `shape_descriptors` map is NOT
+/// part of that serde, so a descriptor would be silently dropped on encode if it
+/// rode `macro_metadata`. The V15 writer extracts the map into
+/// `shape_descriptors_table` before encoding, and the loader rebuilds the
+/// `BTreeMap` and reattaches it via `NodeMetadataStore::set_shape_descriptors`.
+///
+/// `#[serde(default)]` keeps the V14 → V15 upconvert lossless: a re-serialized
+/// legacy payload without the slot, or a truncated V15 payload, decodes the table
+/// as an empty `Vec`.
+#[derive(Debug, Serialize, Deserialize)]
+struct GraphSnapshotDataV15 {
+    /// Node storage.
+    nodes: NodeArena,
+    /// Edge storage (forward + reverse).
+    edges: BidirectionalEdgeStore,
+    /// String interner.
+    strings: StringInterner,
+    /// File registry.
+    files: FileRegistry,
+    /// Auxiliary indices.
+    indices: AuxiliaryIndices,
+    /// Sparse metadata store keyed by full `NodeId` (V11 wire shape: `entries`
+    /// only — the shape descriptors ride `shape_descriptors_table` below).
+    macro_metadata: NodeMetadataStore,
+    /// Dense node provenance (Phase 1 fact layer).
+    node_provenance: NodeProvenanceStore,
+    /// Dense edge provenance (Phase 1 fact layer).
+    edge_provenance: EdgeProvenanceStore,
+    /// Phase 2: generational scope arena.
+    scope_arena: ScopeArena,
+    /// Phase 2: alias derivation table.
+    alias_table: AliasTable,
+    /// Phase 2: shadow derivation table.
+    shadow_table: ShadowTable,
+    /// Phase 2: scope provenance store.
+    scope_provenance: ScopeProvenanceStore,
+    /// Phase 3: per-file segment table mapping `FileId` to node arena ranges.
+    file_segments: FileSegmentTable,
+    /// Phase A: C indirect-call resolver side tables. Carried forward unchanged.
+    #[serde(default)]
+    c_indirect_tables: Option<CIndirectSideTables>,
+    /// Plan A joint-stub: per-node framework-route metadata. Carried forward.
+    #[serde(default)]
+    framework_routes_table: Vec<(
+        crate::graph::unified::node::id::NodeId,
+        crate::graph::unified::storage::FrameworkRouteMetadata,
+    )>,
+    /// Plan B joint-stub: per-snapshot dispatch-resolution tables. Carried forward.
+    #[serde(default)]
+    dispatch_tables_table: DispatchTables,
+    /// V15 body-shape side table: per-function identifier-blind `ShapeDescriptor`.
+    ///
+    /// Flat `Vec<(NodeId, ShapeDescriptor)>` wire shape (postcard does not encode
+    /// typed-key maps natively); the loader rebuilds the `BTreeMap` and reattaches
+    /// it via `NodeMetadataStore::set_shape_descriptors`. Empty for every
+    /// V14 → V15 upconvert and for any workspace whose plugins emit no descriptors.
+    #[serde(default)]
+    shape_descriptors_table: Vec<(crate::graph::unified::node::id::NodeId, ShapeDescriptor)>,
+}
+
 /// V7-shaped snapshot data (pre-Phase-1, no provenance fields).
 ///
 /// Used only by the V7 legacy read path to deserialize old blobs.
@@ -793,8 +862,8 @@ fn validate_snapshot_semantics_v11(
 /// V12 carries the same resolver-eligibility invariants as V11; the additive
 /// joint-stub slots (`framework_routes_table`, `dispatch_tables_table`) have
 /// no resolver-eligibility consequence and are not checked here.
-fn validate_snapshot_semantics_v12(
-    snapshot_data: &GraphSnapshotDataV12,
+fn validate_snapshot_semantics_v15(
+    snapshot_data: &GraphSnapshotDataV15,
 ) -> Result<(), PersistenceError> {
     for (node_id, entry) in snapshot_data.nodes.iter() {
         if entry.name == crate::graph::unified::string::StringId::INVALID {
@@ -1250,6 +1319,39 @@ fn attach_phase_beta_side_tables(
     macro_metadata.set_dispatch_tables(dispatch_tables_table);
 }
 
+/// Extract the V15 `shape_descriptors` side table from the in-memory metadata
+/// store into the flat `Vec<(NodeId, ShapeDescriptor)>` envelope wire shape.
+///
+/// The metadata-store custom serde emits only `entries`, so the descriptor map
+/// must be lifted out explicitly before encode (mirroring
+/// [`extract_phase_beta_side_tables`]). Cloned out of the store — no mutation of
+/// the source.
+fn extract_shape_descriptor_table(
+    macro_metadata: &NodeMetadataStore,
+) -> Vec<(crate::graph::unified::node::id::NodeId, ShapeDescriptor)> {
+    macro_metadata
+        .shape_descriptors()
+        .iter()
+        .map(|(&node_id, descriptor)| (node_id, descriptor.clone()))
+        .collect()
+}
+
+/// Reattach the V15 `shape_descriptors` envelope slot onto the in-memory metadata
+/// store after deserialization, rebuilding the `BTreeMap` from the flat wire
+/// `Vec`. Mirrors [`attach_phase_beta_side_tables`]; the descriptors are NOT part
+/// of the metadata-store serde, so this reattach is mandatory or every loaded
+/// descriptor is silently lost.
+fn attach_shape_descriptor_table(
+    macro_metadata: &mut NodeMetadataStore,
+    shape_descriptors_table: Vec<(crate::graph::unified::node::id::NodeId, ShapeDescriptor)>,
+) {
+    let mut shape_descriptors = std::collections::BTreeMap::new();
+    for (node_id, descriptor) in shape_descriptors_table {
+        shape_descriptors.insert(node_id, descriptor);
+    }
+    macro_metadata.set_shape_descriptors(shape_descriptors);
+}
+
 /// Upconvert a V11 [`GraphSnapshotDataV11`] to V12 by zero-initialising the
 /// two new joint-stub envelope slots (`framework_routes_table` +
 /// `dispatch_tables_table`).
@@ -1345,6 +1447,35 @@ fn finalize_pre_v13_snapshot(mut v12: GraphSnapshotDataV12) -> GraphSnapshotData
     v12
 }
 
+/// Upconvert a V14 snapshot to V15 (body-shape-descriptor side table).
+///
+/// V15 is shape-identical to V14 plus the appended `shape_descriptors_table`
+/// envelope slot. Every V14 field moves by value and the descriptor table comes
+/// up empty: a snapshot written before this feature simply carries no
+/// descriptors until the next `sqry index --force` repopulates them (AC-8). This
+/// is the single appended upconvert; the rest of the chain is untouched.
+fn upconvert_v14_to_v15(v14: GraphSnapshotDataV14) -> GraphSnapshotDataV15 {
+    GraphSnapshotDataV15 {
+        nodes: v14.nodes,
+        edges: v14.edges,
+        strings: v14.strings,
+        files: v14.files,
+        indices: v14.indices,
+        macro_metadata: v14.macro_metadata,
+        node_provenance: v14.node_provenance,
+        edge_provenance: v14.edge_provenance,
+        scope_arena: v14.scope_arena,
+        alias_table: v14.alias_table,
+        shadow_table: v14.shadow_table,
+        scope_provenance: v14.scope_provenance,
+        file_segments: v14.file_segments,
+        c_indirect_tables: v14.c_indirect_tables,
+        framework_routes_table: v14.framework_routes_table,
+        dispatch_tables_table: v14.dispatch_tables_table,
+        shape_descriptors_table: Vec::new(),
+    }
+}
+
 /// Rebuilds a `FileSegmentTable` by scanning the node arena.
 ///
 /// For each occupied slot, records the `FileId` and slot index. Then for each
@@ -1411,7 +1542,7 @@ fn read_magic_and_header_len(
             found: magic.to_vec(),
         })?;
 
-    // V10–V14 magics are all 14 bytes — all consumed. Read full u32 header length.
+    // V10–V15 magics are all 14 bytes — all consumed. Read full u32 header length.
     // V7-V9 magic is 13 bytes — byte 14 is the first byte of the header length.
     if matches!(
         format_version,
@@ -1420,6 +1551,7 @@ fn read_magic_and_header_len(
             | FormatVersion::V12
             | FormatVersion::V13
             | FormatVersion::V14
+            | FormatVersion::V15
     ) {
         let hl = read_u32_le(reader)? as usize;
         Ok((format_version, hl, 18)) // 14 magic + 4 header_len
@@ -1803,8 +1935,8 @@ fn write_framed_v11<W: Write>(
 /// V11 with two new envelope slots — `framework_routes_table` (Plan A) and
 /// `dispatch_tables_table` (Plan B). It was the live writer before the T3
 /// error-chains bump to V13; retained as a reference path and exercised by
-/// the legacy-V12 fixture tests. The live writer is [`write_framed_v14`].
-#[allow(dead_code)] // Preserved as reference; live writers emit V13.
+/// the legacy-V12 fixture tests. The live writer is [`write_framed_v15`].
+#[allow(dead_code)] // Preserved as reference; live writers emit V15.
 fn write_framed_v12<W: Write>(
     writer: &mut W,
     header: &GraphHeader,
@@ -1856,13 +1988,12 @@ fn write_framed_v12<W: Write>(
 
 /// Writes a V14 snapshot with length-prefixed framing.
 ///
-/// V14 is the current writer format (T2 — Go channel pairing + generic
-/// instantiation). On the wire it is shape-identical to V12/V13 but with the
-/// live `NodeKind` layout (`Channel` before `Other`); only the magic-byte
-/// prefix differs from V13, so that V13-or-earlier readers reject the snapshot
-/// at the magic gate rather than positionally mis-decoding the shifted
-/// `NodeKind` arena. The frame shape (magic + header + data) is identical to
-/// V13.
+/// V14 (T2 — Go channel pairing) was the live writer before the
+/// body-shape-descriptor bump to V15. Retained as a reference path and used by
+/// the AC-8 old-snapshot-load fixture, which writes a genuine V14 payload and
+/// reads it back through the current V15 loader. On the wire it is the V12/V14
+/// envelope under the V14 magic.
+#[allow(dead_code)] // Preserved as reference; live writers emit V15.
 fn write_framed_v14<W: Write>(
     writer: &mut W,
     header: &GraphHeader,
@@ -1895,6 +2026,62 @@ fn write_framed_v14<W: Write>(
     }
 
     writer.write_all(MAGIC_BYTES_V14)?;
+    writer.write_all(
+        &u32::try_from(header_bytes.len())
+            .map_err(|_| {
+                PersistenceError::ValidationFailed(
+                    "header too large for u32 length prefix".to_string(),
+                )
+            })?
+            .to_le_bytes(),
+    )?;
+    writer.write_all(&header_bytes)?;
+    writer.write_all(&(data_bytes.len() as u64).to_le_bytes())?;
+    writer.write_all(&data_bytes)?;
+
+    writer.flush()?;
+    Ok(())
+}
+
+/// Writes a V15 snapshot with length-prefixed framing.
+///
+/// V15 is the current writer format (body-shape-descriptor side table). On the
+/// wire it is the V14 envelope plus one appended `shape_descriptors_table` slot
+/// under the V15 magic, so that V14-or-earlier readers reject the snapshot at the
+/// magic gate rather than mis-decoding the trailing slot. The frame shape
+/// (magic + header + data) is identical to V14.
+fn write_framed_v15<W: Write>(
+    writer: &mut W,
+    header: &GraphHeader,
+    snapshot_data: &GraphSnapshotDataV15,
+) -> Result<(), PersistenceError> {
+    debug_assert!(
+        !snapshot_data.strings.is_lookup_stale(),
+        "Cannot serialize StringInterner with stale lookup — \
+         call build_dedup_table() before saving"
+    );
+
+    let header_bytes = postcard::to_allocvec(header)?;
+    let data_bytes = postcard::to_allocvec(snapshot_data)?;
+
+    if header_bytes.len() > MAX_HEADER_BYTES {
+        return Err(PersistenceError::ValidationFailed(format!(
+            "header too large to save: {} bytes exceeds MAX_HEADER_BYTES ({} bytes)",
+            header_bytes.len(),
+            MAX_HEADER_BYTES,
+        )));
+    }
+    let max_data_bytes = max_snapshot_bytes();
+    if data_bytes.len() as u64 > max_data_bytes {
+        return Err(PersistenceError::ValidationFailed(format!(
+            "data section too large to save: {} bytes exceeds limit ({} bytes); \
+             increase SQRY_MAX_SNAPSHOT_BYTES if the codebase legitimately requires a larger snapshot",
+            data_bytes.len(),
+            max_data_bytes,
+        )));
+    }
+
+    writer.write_all(MAGIC_BYTES_V15)?;
     writer.write_all(
         &u32::try_from(header_bytes.len())
             .map_err(|_| {
@@ -2041,7 +2228,11 @@ pub fn save_to_path(graph: &CodeGraph, path: impl AsRef<Path>) -> Result<(), Per
     let (framework_routes_table, dispatch_tables_table) =
         extract_phase_beta_side_tables(snapshot.macro_metadata());
 
-    let snapshot_data = GraphSnapshotDataV12 {
+    // V15 body-shape side table: lifted out of the metadata store (its serde
+    // emits only `entries`) into the dedicated envelope slot.
+    let shape_descriptors_table = extract_shape_descriptor_table(snapshot.macro_metadata());
+
+    let snapshot_data = GraphSnapshotDataV15 {
         nodes,
         edges,
         strings,
@@ -2058,12 +2249,12 @@ pub fn save_to_path(graph: &CodeGraph, path: impl AsRef<Path>) -> Result<(), Per
         c_indirect_tables,
         framework_routes_table,
         dispatch_tables_table,
+        shape_descriptors_table,
     };
 
-    validate_snapshot_semantics_v12(&snapshot_data)?;
+    validate_snapshot_semantics_v15(&snapshot_data)?;
 
-    // Create header — V13 with stamped fact_epoch and correct version tag.
-    // V13 is shape-identical to V12, so the V12 validator accepts it.
+    // Create header — V15 with stamped fact_epoch and correct version tag.
     let forward_stats = snapshot_data.edges.stats().forward;
     let total_edges = forward_stats.csr_edge_count + forward_stats.delta_edge_count;
     let mut header = GraphHeader::new(
@@ -2072,7 +2263,7 @@ pub fn save_to_path(graph: &CodeGraph, path: impl AsRef<Path>) -> Result<(), Per
         snapshot_data.strings.len(),
         snapshot_data.files.len(),
     );
-    header.version = FormatVersion::V14.as_u32();
+    header.version = FormatVersion::V15.as_u32();
     header.set_fact_epoch(fact_epoch);
 
     // Atomic write per `G_daemon_control_plane.md` §4.2: an
@@ -2081,7 +2272,7 @@ pub fn save_to_path(graph: &CodeGraph, path: impl AsRef<Path>) -> Result<(), Per
     // --status` previously misreported as "No graph snapshot
     // found").
     write_atomic(path, |writer| {
-        write_framed_v14(writer, &header, &snapshot_data)
+        write_framed_v15(writer, &header, &snapshot_data)
     })
 }
 
@@ -2149,7 +2340,10 @@ pub fn save_to_path_with_provenance(
     let (framework_routes_table, dispatch_tables_table) =
         extract_phase_beta_side_tables(snapshot.macro_metadata());
 
-    let snapshot_data = GraphSnapshotDataV12 {
+    // V15 body-shape side table: see the sibling save path's comment.
+    let shape_descriptors_table = extract_shape_descriptor_table(snapshot.macro_metadata());
+
+    let snapshot_data = GraphSnapshotDataV15 {
         nodes,
         edges,
         strings,
@@ -2166,12 +2360,12 @@ pub fn save_to_path_with_provenance(
         c_indirect_tables,
         framework_routes_table,
         dispatch_tables_table,
+        shape_descriptors_table,
     };
 
-    validate_snapshot_semantics_v12(&snapshot_data)?;
+    validate_snapshot_semantics_v15(&snapshot_data)?;
 
-    // Create header with provenance, plugin versions, V13 version tag, and fact epoch.
-    // V13 is shape-identical to V12, so the V12 validator accepts it.
+    // Create header with provenance, plugin versions, V15 version tag, and fact epoch.
     let forward_stats = snapshot_data.edges.stats().forward;
     let total_edges = forward_stats.csr_edge_count + forward_stats.delta_edge_count;
     let mut header = GraphHeader::with_provenance_and_plugins(
@@ -2182,12 +2376,12 @@ pub fn save_to_path_with_provenance(
         provenance,
         plugin_versions,
     );
-    header.version = FormatVersion::V14.as_u32();
+    header.version = FormatVersion::V15.as_u32();
     header.set_fact_epoch(fact_epoch);
 
     // Atomic write per `G_daemon_control_plane.md` §4.2.
     write_atomic(path, |writer| {
-        write_framed_v14(writer, &header, &snapshot_data)
+        write_framed_v15(writer, &header, &snapshot_data)
     })
 }
 
@@ -2310,9 +2504,10 @@ fn validate_snapshot_header(
         && header.version != FormatVersion::V12.as_u32()
         && header.version != FormatVersion::V13.as_u32()
         && header.version != FormatVersion::V14.as_u32()
+        && header.version != FormatVersion::V15.as_u32()
     {
         return Err(PersistenceError::IncompatibleVersion {
-            expected: FormatVersion::V14.as_u32(),
+            expected: FormatVersion::V15.as_u32(),
             found: header.version,
         });
     }
@@ -2351,7 +2546,10 @@ fn decode_snapshot_data(
     format_version: FormatVersion,
     header: &GraphHeader,
     data_buf: &[u8],
-) -> Result<GraphSnapshotDataV14, PersistenceError> {
+) -> Result<GraphSnapshotDataV15, PersistenceError> {
+    // Every pre-V15 read path funnels up to a V14 in-memory shape; the single
+    // appended `upconvert_v14_to_v15` then lifts it to V15 with an empty
+    // descriptor table. The V15 arm decodes the descriptor envelope directly.
     match format_version {
         FormatVersion::V7 => {
             let v7: GraphSnapshotDataV7 = postcard::from_bytes(data_buf)?;
@@ -2360,7 +2558,7 @@ fn decode_snapshot_data(
             let v10 = upconvert_v9_to_v10(v9);
             let v11 = upconvert_v10_to_v11(v10)?;
             let v12 = upconvert_v11_to_v12(v11);
-            Ok(finalize_pre_v13_snapshot(v12))
+            Ok(upconvert_v14_to_v15(finalize_pre_v13_snapshot(v12)))
         }
         FormatVersion::V8 => {
             let v8: GraphSnapshotData = postcard::from_bytes(data_buf)?;
@@ -2368,50 +2566,59 @@ fn decode_snapshot_data(
             let v10 = upconvert_v9_to_v10(v9);
             let v11 = upconvert_v10_to_v11(v10)?;
             let v12 = upconvert_v11_to_v12(v11);
-            Ok(finalize_pre_v13_snapshot(v12))
+            Ok(upconvert_v14_to_v15(finalize_pre_v13_snapshot(v12)))
         }
         FormatVersion::V9 => {
             let v9: GraphSnapshotDataV9 = postcard::from_bytes(data_buf)?;
             let v10 = upconvert_v9_to_v10(v9);
             let v11 = upconvert_v10_to_v11(v10)?;
             let v12 = upconvert_v11_to_v12(v11);
-            Ok(finalize_pre_v13_snapshot(v12))
+            Ok(upconvert_v14_to_v15(finalize_pre_v13_snapshot(v12)))
         }
         FormatVersion::V10 => {
             let v10: GraphSnapshotDataV10 = postcard::from_bytes(data_buf)?;
             let v11 = upconvert_v10_to_v11(v10)?;
             let v12 = upconvert_v11_to_v12(v11);
-            Ok(finalize_pre_v13_snapshot(v12))
+            Ok(upconvert_v14_to_v15(finalize_pre_v13_snapshot(v12)))
         }
         FormatVersion::V11 => {
             let v11: GraphSnapshotDataV11 = postcard::from_bytes(data_buf)?;
             let v12 = upconvert_v11_to_v12(v11);
-            Ok(finalize_pre_v13_snapshot(v12))
+            Ok(upconvert_v14_to_v15(finalize_pre_v13_snapshot(v12)))
         }
         FormatVersion::V12 => {
             let v12: GraphSnapshotDataV12 = postcard::from_bytes(data_buf)?;
-            Ok(finalize_pre_v13_snapshot(v12))
+            Ok(upconvert_v14_to_v15(finalize_pre_v13_snapshot(v12)))
         }
         FormatVersion::V13 => {
             let v13: GraphSnapshotDataV13 = postcard::from_bytes(data_buf)?;
-            Ok(upconvert_v13_to_v14(v13))
+            Ok(upconvert_v14_to_v15(upconvert_v13_to_v14(v13)))
         }
-        FormatVersion::V14 => Ok(postcard::from_bytes(data_buf)?),
+        FormatVersion::V14 => {
+            let v14: GraphSnapshotDataV14 = postcard::from_bytes(data_buf)?;
+            Ok(upconvert_v14_to_v15(v14))
+        }
+        FormatVersion::V15 => Ok(postcard::from_bytes(data_buf)?),
     }
 }
 
 fn graph_from_snapshot_data(
     header: &GraphHeader,
-    mut snapshot_data: GraphSnapshotDataV14,
+    mut snapshot_data: GraphSnapshotDataV15,
 ) -> Result<CodeGraph, PersistenceError> {
     snapshot_data
         .scope_provenance
         .rebuild_reverse_index(&snapshot_data.scope_arena);
-    validate_snapshot_semantics_v12(&snapshot_data)?;
+    validate_snapshot_semantics_v15(&snapshot_data)?;
     attach_phase_beta_side_tables(
         &mut snapshot_data.macro_metadata,
         std::mem::take(&mut snapshot_data.framework_routes_table),
         std::mem::take(&mut snapshot_data.dispatch_tables_table),
+    );
+    // Reattach the V15 shape side table (NOT carried by the metadata-store serde).
+    attach_shape_descriptor_table(
+        &mut snapshot_data.macro_metadata,
+        std::mem::take(&mut snapshot_data.shape_descriptors_table),
     );
 
     let mut graph = CodeGraph::from_components(
@@ -2533,7 +2740,7 @@ pub fn validate_snapshot(path: impl AsRef<Path>) -> Result<bool, PersistenceErro
     reader.read_exact(&mut header_buf)?;
     let header: GraphHeader = postcard::from_bytes(&header_buf)?;
 
-    // Validate version — accept V7 (legacy), V8, V9, V10, V11, V12, V13 (upconvert), V14 (current).
+    // Validate version — accept V7 (legacy)..V14 (upconvert), V15 (current).
     if header.version != VERSION
         && header.version != FormatVersion::V8.as_u32()
         && header.version != FormatVersion::V9.as_u32()
@@ -2542,9 +2749,10 @@ pub fn validate_snapshot(path: impl AsRef<Path>) -> Result<bool, PersistenceErro
         && header.version != FormatVersion::V12.as_u32()
         && header.version != FormatVersion::V13.as_u32()
         && header.version != FormatVersion::V14.as_u32()
+        && header.version != FormatVersion::V15.as_u32()
     {
         return Err(PersistenceError::IncompatibleVersion {
-            expected: FormatVersion::V14.as_u32(),
+            expected: FormatVersion::V15.as_u32(),
             found: header.version,
         });
     }
@@ -2584,7 +2792,7 @@ pub fn load_header_from_path(path: impl AsRef<Path>) -> Result<GraphHeader, Pers
     reader.read_exact(&mut header_buf)?;
     let header: GraphHeader = postcard::from_bytes(&header_buf)?;
 
-    // Validate version — accept V7 (legacy), V8, V9, V10, V11, V12, V13 (upconvert), V14 (current).
+    // Validate version — accept V7 (legacy)..V14 (upconvert), V15 (current).
     if header.version != VERSION
         && header.version != FormatVersion::V8.as_u32()
         && header.version != FormatVersion::V9.as_u32()
@@ -2593,9 +2801,10 @@ pub fn load_header_from_path(path: impl AsRef<Path>) -> Result<GraphHeader, Pers
         && header.version != FormatVersion::V12.as_u32()
         && header.version != FormatVersion::V13.as_u32()
         && header.version != FormatVersion::V14.as_u32()
+        && header.version != FormatVersion::V15.as_u32()
     {
         return Err(PersistenceError::IncompatibleVersion {
-            expected: FormatVersion::V14.as_u32(),
+            expected: FormatVersion::V15.as_u32(),
             found: header.version,
         });
     }
@@ -2736,13 +2945,13 @@ mod tests {
         let path = temp_file.path();
         save_to_path(&graph, path).expect("save_to_path");
 
-        // On-disk magic must be V14 (the current writer version; a
+        // On-disk magic must be V15 (the current writer version; a
         // Wraps-bearing graph still round-trips, the variant is additive).
         let raw = std::fs::read(path).expect("read snapshot bytes");
         assert_eq!(
-            &raw[..MAGIC_BYTES_V14.len()],
-            MAGIC_BYTES_V14.as_slice(),
-            "current writer must persist as V14",
+            &raw[..MAGIC_BYTES_V15.len()],
+            MAGIC_BYTES_V15.as_slice(),
+            "current writer must persist as V15",
         );
 
         fn assert_wraps_survived(graph: &CodeGraph) {
@@ -4151,21 +4360,21 @@ mod tests {
         let path = temp_file.path();
         save_to_path(&graph, path).expect("save_to_path");
 
-        // Verify magic on disk is V14 (T2 Go channels — current writer).
+        // Verify magic on disk is V15 (body-shape side table — current writer).
         let raw = std::fs::read(path).expect("read snapshot bytes");
         assert_eq!(
-            &raw[..MAGIC_BYTES_V14.len()],
-            MAGIC_BYTES_V14.as_slice(),
-            "current writer must stamp V14 magic on disk",
+            &raw[..MAGIC_BYTES_V15.len()],
+            MAGIC_BYTES_V15.as_slice(),
+            "current writer must stamp V15 magic on disk",
         );
 
-        // Header version must be V14.
+        // Header version must be V15.
         let header = load_header_from_path(path).expect("load header");
-        assert_eq!(header.version, FormatVersion::V14.as_u32());
+        assert_eq!(header.version, FormatVersion::V15.as_u32());
 
-        // Loader returns a usable graph (V14 arm in `load_from_path`).
+        // Loader returns a usable graph (V15 arm in `load_from_path`).
         let plugins = create_test_plugin_manager();
-        let loaded = load_from_path(path, Some(&plugins)).expect("load V14");
+        let loaded = load_from_path(path, Some(&plugins)).expect("load V15");
         let snap = loaded.snapshot();
         assert_eq!(snap.nodes().len(), 1, "node count must round-trip");
         // Strings round-trip too (the seed function carries one interned name).
@@ -4183,6 +4392,149 @@ mod tests {
             snap.macro_metadata().dispatch_tables().is_empty(),
             "dispatch_tables must be empty in the stub",
         );
+        // V15: no descriptor was inserted, so the side table round-trips empty.
+        assert!(
+            snap.macro_metadata().shape_descriptors().is_empty(),
+            "shape_descriptors must be empty when none were inserted",
+        );
+    }
+
+    /// Seed a graph carrying one function node plus a distinctive
+    /// `ShapeDescriptor`, returning the graph and the descriptor for comparison.
+    fn seed_graph_with_descriptor() -> (CodeGraph, ShapeDescriptor) {
+        let mut graph = CodeGraph::new();
+        let file_id = graph
+            .files_mut()
+            .register_with_language(
+                std::path::Path::new("/tmp/u05.rs"),
+                Some(crate::graph::node::Language::Rust),
+            )
+            .expect("register file");
+        let name_id = graph
+            .strings_mut()
+            .intern("u05_target")
+            .expect("intern name");
+        let qname_id = graph
+            .strings_mut()
+            .intern("u05_target")
+            .expect("intern qname");
+        let entry = NodeEntry::new(NodeKind::Function, name_id, file_id)
+            .with_location(1, 0, 1, 10)
+            .with_qualified_name(qname_id);
+        let node_id = graph.nodes_mut().alloc(entry.clone()).expect("alloc node");
+        graph.indices_mut().add(
+            node_id,
+            entry.kind,
+            entry.name,
+            entry.qualified_name,
+            entry.file,
+        );
+
+        // A non-default descriptor so the round-trip proves field-level fidelity,
+        // not just "an empty struct survives".
+        let mut descriptor = ShapeDescriptor::default();
+        descriptor.cf_histogram[0] = 7;
+        descriptor.cf_histogram[11] = 3;
+        descriptor.signature_shape.arity_positional = 2;
+        descriptor.signature_shape.has_return_annotation = true;
+        descriptor.shape_hash = crate::graph::unified::storage::ShapeHash128 {
+            high: 0x0123_4567_89AB_CDEF,
+            low: 0xFEDC_BA98_7654_3210,
+        };
+        descriptor.minhash[0] = 0xDEAD_BEEF;
+        descriptor.minhash[63] = 0x00C0_FFEE;
+        graph
+            .macro_metadata_mut()
+            .insert_shape_descriptor(node_id, descriptor.clone());
+        (graph, descriptor)
+    }
+
+    /// AC-8 round-trip: a V15 snapshot with a populated `shape_descriptors`
+    /// side table reloads with byte-identical descriptors via the dedicated
+    /// envelope slot + `set_shape_descriptors` reattach path.
+    #[test]
+    fn ac8_v15_shape_descriptor_round_trip() {
+        let (graph, descriptor) = seed_graph_with_descriptor();
+
+        let temp_file = NamedTempFile::new().expect("tempfile");
+        let path = temp_file.path();
+        save_to_path(&graph, path).expect("save_to_path");
+
+        // On disk it is a V15 snapshot.
+        let raw = std::fs::read(path).expect("read snapshot bytes");
+        assert_eq!(&raw[..MAGIC_BYTES_V15.len()], MAGIC_BYTES_V15.as_slice());
+
+        let plugins = create_test_plugin_manager();
+        let loaded = load_from_path(path, Some(&plugins)).expect("load V15");
+        let snap = loaded.snapshot();
+        let descriptors = snap.macro_metadata().shape_descriptors();
+        assert_eq!(
+            descriptors.len(),
+            1,
+            "exactly one descriptor must survive the round-trip",
+        );
+        let reloaded = descriptors.values().next().expect("one descriptor");
+        assert_eq!(
+            reloaded, &descriptor,
+            "descriptor must be byte-identical after V15 round-trip",
+        );
+    }
+
+    /// AC-8 old-snapshot load: a V14 snapshot (no shape side table on the wire)
+    /// loads under the V15 loader with an empty `shape_descriptors` map and no
+    /// forced rebuild, exercising the `upconvert_v14_to_v15` empty-table path.
+    #[test]
+    fn ac8_v14_snapshot_loads_with_empty_descriptors() {
+        // Build a V14 payload by hand: a V14 = V12-shaped envelope written under
+        // the V14 magic via the retained reference writer, then read through the
+        // current V15 loader.
+        let (graph, _descriptor) = seed_graph_with_descriptor();
+        let snapshot = graph.snapshot();
+        let v14_data = GraphSnapshotDataV12 {
+            nodes: snapshot.nodes().clone(),
+            edges: snapshot.edges().clone(),
+            strings: snapshot.strings().clone(),
+            files: snapshot.files().clone(),
+            indices: snapshot.indices().clone(),
+            macro_metadata: snapshot.macro_metadata().clone(),
+            node_provenance: NodeProvenanceStore::default(),
+            edge_provenance: EdgeProvenanceStore::default(),
+            scope_arena: snapshot.scope_arena().clone(),
+            alias_table: snapshot.alias_table().clone(),
+            shadow_table: snapshot.shadow_table().clone(),
+            scope_provenance: snapshot.scope_provenance_store().clone(),
+            file_segments: snapshot.file_segments().clone(),
+            c_indirect_tables: None,
+            framework_routes_table: Vec::new(),
+            dispatch_tables_table: DispatchTables::default(),
+        };
+        let mut header = GraphHeader::new(
+            v14_data.nodes.len(),
+            0,
+            v14_data.strings.len(),
+            v14_data.files.len(),
+        );
+        header.version = FormatVersion::V14.as_u32();
+
+        let temp_file = NamedTempFile::new().expect("tempfile");
+        let path = temp_file.path();
+        write_atomic(path, |writer| write_framed_v14(writer, &header, &v14_data))
+            .expect("write V14 payload");
+
+        // The on-disk magic is V14.
+        let raw = std::fs::read(path).expect("read snapshot bytes");
+        assert_eq!(&raw[..MAGIC_BYTES_V14.len()], MAGIC_BYTES_V14.as_slice());
+
+        // The V15 loader accepts it (no forced rebuild) and the descriptor side
+        // table comes up empty — the macro_metadata serde never carried it, and
+        // a V14 payload has no shape envelope slot.
+        let plugins = create_test_plugin_manager();
+        let loaded = load_from_path(path, Some(&plugins)).expect("load V14 under V15 loader");
+        assert!(
+            loaded.macro_metadata().shape_descriptors().is_empty(),
+            "a V14 snapshot loads with no descriptors until reindex",
+        );
+        assert_eq!(loaded.snapshot().nodes().len(), 1, "node count round-trips");
     }
 
     /// Hand-craft a V10 payload (V10 magic + V10 envelope, written by the

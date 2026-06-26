@@ -25,6 +25,7 @@
 use std::{
     collections::{HashMap, HashSet},
     path::Path,
+    sync::OnceLock,
 };
 
 use smallvec::SmallVec;
@@ -35,6 +36,7 @@ use sqry_core::graph::unified::Receiver as GoReceiverPointerness;
 use sqry_core::graph::unified::build::go_signature::canonicalise_go_signature;
 use sqry_core::graph::unified::build::helper::CalleeKindHint;
 use sqry_core::graph::unified::build::helper::GraphBuildHelper;
+use sqry_core::graph::unified::build::shape::{CfBucket, ShapeMapping};
 use sqry_core::graph::unified::build::staging::GoMethodReceiverHint;
 use sqry_core::graph::unified::build::staging::{
     GoEmbeddingHint, GoFunctionSignatureHint, GoMethodSignatureHint, GoNamedTypeConversionHint,
@@ -44,6 +46,7 @@ use sqry_core::graph::unified::edge::FfiConvention;
 use sqry_core::graph::unified::edge::kind::TypeOfContext;
 use sqry_core::graph::unified::edge::kind::{ChannelPeerDirection, InferenceKind, TypeArg};
 use sqry_core::graph::unified::resolution::canonicalize_graph_qualified_name;
+use sqry_core::graph::unified::storage::shape::SignatureShape;
 use sqry_core::graph::{GraphBuilder, GraphBuilderError, GraphResult, Language, NodeId, Span};
 use sqry_lang_support::relations::is_uppercase_export;
 use tree_sitter::{Node, Tree};
@@ -614,6 +617,129 @@ impl GraphBuilder for GoGraphBuilder {
     fn language(&self) -> Language {
         Language::Go
     }
+
+    fn shape_mapping(&self) -> Option<&dyn ShapeMapping> {
+        Some(go_shape_mapping())
+    }
+}
+
+/// Per-language [`ShapeMapping`] for Go.
+///
+/// Holds a precomputed `kind_id -> CfBucket` table built once from the
+/// tree-sitter-go grammar and shared process-wide via [`go_shape_mapping`].
+/// Everything except this mapping is the one shared `compute_shape_descriptor`
+/// routine.
+pub struct GoShapeMapping {
+    cf_by_kind_id: Vec<Option<CfBucket>>,
+}
+
+impl GoShapeMapping {
+    /// Build the `kind_id -> CfBucket` table from the tree-sitter-go grammar.
+    fn build() -> Self {
+        let lang: tree_sitter::Language = tree_sitter_go::LANGUAGE.into();
+        let count = lang.node_kind_count();
+        let mut cf_by_kind_id = vec![None; count];
+        for (id, slot) in cf_by_kind_id.iter_mut().enumerate() {
+            let Ok(kind_id) = u16::try_from(id) else {
+                break;
+            };
+            if !lang.node_kind_is_named(kind_id) {
+                continue;
+            }
+            if let Some(name) = lang.node_kind_for_id(kind_id) {
+                *slot = cf_bucket_for_go_kind(name);
+            }
+        }
+        Self { cf_by_kind_id }
+    }
+}
+
+impl ShapeMapping for GoShapeMapping {
+    fn cf_bucket(&self, ts_node_kind_id: u16) -> Option<CfBucket> {
+        self.cf_by_kind_id
+            .get(ts_node_kind_id as usize)
+            .copied()
+            .flatten()
+    }
+
+    fn signature_shape(&self, fn_node: Node, _src: &[u8]) -> SignatureShape {
+        let mut shape = SignatureShape::default();
+        if let Some(params) = fn_node.child_by_field_name("parameters") {
+            let mut cursor = params.walk();
+            for child in params.named_children(&mut cursor) {
+                match child.kind() {
+                    "parameter_declaration" => {
+                        // A Go parameter group `a, b int` declares one identifier
+                        // per name; an unnamed group (`int`) declares exactly one.
+                        let names = count_go_param_names(child);
+                        shape.arity_positional = shape.arity_positional.saturating_add(names);
+                    }
+                    // `args ...T` variadic tail (always a single trailing group).
+                    "variadic_parameter_declaration" => {
+                        shape.has_varargs = true;
+                        shape.arity_positional = shape.arity_positional.saturating_add(1);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        // Go declares results in a `result` field (a type or a parameter_list);
+        // its presence is the closest analogue to a return annotation.
+        shape.has_return_annotation = fn_node.child_by_field_name("result").is_some();
+        shape
+    }
+}
+
+/// Count the named identifiers a Go `parameter_declaration` group declares. A
+/// group like `a, b int` carries two `identifier` name children; an unnamed
+/// type-only group (`int`) carries none and still counts as one parameter.
+fn count_go_param_names(group: Node) -> u16 {
+    let mut cursor = group.walk();
+    let names = group
+        .children(&mut cursor)
+        .filter(|c| c.kind() == "identifier")
+        .count();
+    u16::try_from(names.max(1)).unwrap_or(u16::MAX)
+}
+
+/// Map one tree-sitter-go grammar node-kind name to its canonical control-flow
+/// bucket. Additive-only; the bucket set is frozen.
+///
+/// Go has no native throw/catch kinds (`panic`/`recover` are ordinary calls),
+/// so the Throw/Catch buckets stay empty for Go bodies.
+fn cf_bucket_for_go_kind(name: &str) -> Option<CfBucket> {
+    let bucket = match name {
+        "if_statement" => CfBucket::Branch,
+        "for_statement" => CfBucket::Loop,
+        // Switches and channel selects are Go's multi-way branch constructs.
+        "expression_switch_statement"
+        | "type_switch_statement"
+        | "select_statement"
+        | "expression_case"
+        | "type_case"
+        | "communication_case"
+        | "default_case" => CfBucket::Match,
+        // `defer` schedules cleanup at scope exit, Go's resource-release idiom.
+        "defer_statement" => CfBucket::Resource,
+        "return_statement" => CfBucket::Return,
+        "break_statement" | "continue_statement" | "goto_statement" | "fallthrough_statement" => {
+            CfBucket::BreakContinue
+        }
+        "call_expression" => CfBucket::Call,
+        "short_var_declaration" | "assignment_statement" | "var_declaration" | "send_statement" => {
+            CfBucket::Assign
+        }
+        "func_literal" => CfBucket::Closure,
+        _ => return None,
+    };
+    Some(bucket)
+}
+
+/// The process-wide Go shape mapping, built once on first use.
+#[must_use]
+pub fn go_shape_mapping() -> &'static GoShapeMapping {
+    static MAPPING: OnceLock<GoShapeMapping> = OnceLock::new();
+    MAPPING.get_or_init(GoShapeMapping::build)
 }
 
 /// Walk the AST tree to create edges (calls, imports, exports, etc.)
@@ -7446,5 +7572,107 @@ mod tests {
             "Expected ≥1 LocalIdent receiver-call hint for `g.Hello()`, \
              got {local_ident_hits} (all hints = {receiver_hints:?})",
         );
+    }
+}
+
+#[cfg(test)]
+mod shape_tests {
+    use super::{cf_bucket_for_go_kind, go_shape_mapping};
+    use sqry_core::graph::unified::build::shape::{
+        CfBucket, ShapeBudget, ShapeMapping, compute_shape_descriptor,
+    };
+
+    const SAMPLE: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../test-fixtures/shape/reference/sample.go"
+    ));
+
+    fn parse(src: &str) -> tree_sitter::Tree {
+        let lang: tree_sitter::Language = tree_sitter_go::LANGUAGE.into();
+        let mut p = tree_sitter::Parser::new();
+        p.set_language(&lang).expect("load go grammar");
+        p.parse(src, None).expect("parse")
+    }
+
+    fn function_named<'t>(tree: &'t tree_sitter::Tree, name: &str) -> tree_sitter::Node<'t> {
+        let root = tree.root_node();
+        let mut stack = vec![root];
+        while let Some(node) = stack.pop() {
+            if node.kind() == "function_declaration"
+                && node
+                    .child_by_field_name("name")
+                    .and_then(|n| n.utf8_text(SAMPLE.as_bytes()).ok())
+                    == Some(name)
+            {
+                return node;
+            }
+            let mut c = node.walk();
+            for ch in node.children(&mut c) {
+                stack.push(ch);
+            }
+        }
+        panic!("no function_declaration named {name}");
+    }
+
+    #[test]
+    fn cf_table_is_non_empty() {
+        let mapping = go_shape_mapping();
+        let lang: tree_sitter::Language = tree_sitter_go::LANGUAGE.into();
+        let mut covered = 0;
+        for id in 0..lang.node_kind_count() {
+            if mapping.cf_bucket(id as u16).is_some() {
+                covered += 1;
+            }
+        }
+        assert!(
+            covered >= 10,
+            "expected many Go CF kinds mapped, got {covered}"
+        );
+    }
+
+    #[test]
+    fn histogram_covers_real_control_flow() {
+        let tree = parse(SAMPLE);
+        let func = function_named(&tree, "classify");
+        let d = compute_shape_descriptor(
+            func,
+            SAMPLE.as_bytes(),
+            go_shape_mapping(),
+            &ShapeBudget::default(),
+        );
+        assert!(!d.is_unhashable());
+        for bucket in [
+            CfBucket::Branch,
+            CfBucket::Loop,
+            CfBucket::Match,
+            CfBucket::Resource,
+            CfBucket::Return,
+            CfBucket::BreakContinue,
+            CfBucket::Call,
+            CfBucket::Assign,
+            CfBucket::Closure,
+        ] {
+            assert!(
+                d.cf_histogram[bucket.index()] >= 1,
+                "classify must exercise {bucket:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn signature_shape_reads_arity_and_result() {
+        let tree = parse(SAMPLE);
+        let func = function_named(&tree, "classify");
+        let mapping = go_shape_mapping();
+        let shape = mapping.signature_shape(func, SAMPLE.as_bytes());
+        // classify(values []int, threshold int) (int, error)
+        assert_eq!(shape.arity_positional, 2);
+        assert!(shape.has_return_annotation, "(int, error) result tuple");
+    }
+
+    #[test]
+    fn unknown_kind_maps_to_none() {
+        assert!(cf_bucket_for_go_kind("source_file").is_none());
+        assert!(cf_bucket_for_go_kind("identifier").is_none());
     }
 }

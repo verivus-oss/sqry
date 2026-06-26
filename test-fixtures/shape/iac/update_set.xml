@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Hand-written ServiceNow XML update-set sample for body-shape descriptor coverage.
+  ServiceNow XML records are declarative: this plugin extracts record metadata and
+  table schema, and delegates any embedded server-side script to the ServiceNow
+  JavaScript builder. The XML plugin itself emits no Function/Method node whose span
+  resolves inside its own (HTML) parse tree, so the build seam attaches no shape
+  descriptor through the XML mapping. This plugin is HighWallClock, so its coverage
+  test is gated out of the default suite.
+-->
+<record_update table="sys_script">
+  <sys_script action="INSERT_OR_UPDATE">
+    <name>Set priority on insert</name>
+    <collection>incident</collection>
+    <active>true</active>
+    <when>before</when>
+    <script><![CDATA[
+(function executeRule(current, previous) {
+    if (current.impact == 1) {
+        current.priority = 1;
+    } else {
+        current.priority = 3;
+    }
+})(current, previous);
+]]></script>
+  </sys_script>
+</record_update>

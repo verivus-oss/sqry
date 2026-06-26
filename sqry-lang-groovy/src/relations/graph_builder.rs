@@ -19,12 +19,15 @@ use sqry_core::graph::{
     GraphBuilder, GraphBuilderError, Language, Span,
     unified::StagingGraph,
     unified::build::GraphBuildHelper,
+    unified::build::shape::{CfBucket, ShapeMapping},
     unified::edge::kind::TypeOfContext,
     unified::node::{NodeId, NodeKind},
+    unified::storage::shape::SignatureShape,
 };
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::Path;
+use std::sync::OnceLock;
 use tree_sitter::{Node, Query, QueryCursor, StreamingIterator, Tree};
 
 use super::type_extractor::{
@@ -57,6 +60,10 @@ pub struct GroovyGraphBuilder;
 impl GraphBuilder for GroovyGraphBuilder {
     fn language(&self) -> Language {
         Language::Groovy
+    }
+
+    fn shape_mapping(&self) -> Option<&dyn ShapeMapping> {
+        Some(groovy_shape_mapping())
     }
 
     fn build_graph(
@@ -1948,6 +1955,96 @@ fn extract_type_name(node: Node, content: &[u8]) -> String {
     }
 }
 
+/// Per-language [`ShapeMapping`] for Groovy: a precomputed `kind_id -> CfBucket`
+/// table over the tree-sitter-groovy grammar, shared process-wide via
+/// [`groovy_shape_mapping`]. Mirrors the C reference impl: one array index per
+/// node on the hot shape walk, identifier-blind throughout.
+pub struct GroovyShapeMapping {
+    cf_by_kind_id: Vec<Option<CfBucket>>,
+}
+
+impl GroovyShapeMapping {
+    fn build() -> Self {
+        // The vendored Groovy grammar returns a `Language` directly (no `.into()`).
+        let lang: tree_sitter::Language = tree_sitter_groovy_sqry::language();
+        let count = lang.node_kind_count();
+        let mut cf_by_kind_id = vec![None; count];
+        for (id, slot) in cf_by_kind_id.iter_mut().enumerate() {
+            let Ok(kind_id) = u16::try_from(id) else {
+                break;
+            };
+            if !lang.node_kind_is_named(kind_id) {
+                continue;
+            }
+            if let Some(name) = lang.node_kind_for_id(kind_id) {
+                *slot = cf_bucket_for_groovy_kind(name);
+            }
+        }
+        Self { cf_by_kind_id }
+    }
+}
+
+impl ShapeMapping for GroovyShapeMapping {
+    fn cf_bucket(&self, ts_node_kind_id: u16) -> Option<CfBucket> {
+        self.cf_by_kind_id
+            .get(ts_node_kind_id as usize)
+            .copied()
+            .flatten()
+    }
+
+    fn signature_shape(&self, fn_node: Node, _src: &[u8]) -> SignatureShape {
+        let mut shape = SignatureShape::default();
+        // A `function_definition` exposes its parameters through the `parameters`
+        // field, which holds a `parameter_list` whose named `parameter` children
+        // carry the positional arity. Each `parameter` may have a `value` field
+        // (a default), which marks `has_defaults`.
+        if let Some(params) = fn_node.child_by_field_name("parameters") {
+            let mut cursor = params.walk();
+            for child in params.named_children(&mut cursor) {
+                if child.kind() == "parameter" {
+                    shape.arity_positional = shape.arity_positional.saturating_add(1);
+                    if child.child_by_field_name("value").is_some() {
+                        shape.has_defaults = true;
+                    }
+                }
+            }
+        }
+        // The declared return type lives in the `type` field of the function node
+        // (Groovy allows `def`/untyped, so absence is honest, not an error).
+        shape.has_return_annotation = fn_node.child_by_field_name("type").is_some();
+        shape
+    }
+}
+
+/// Map one tree-sitter-groovy grammar node-kind name to its canonical control-flow
+/// bucket. Additive-only against the frozen [`CfBucket`] set. The Groovy grammar
+/// spells several control-flow keywords as bare named nodes (`return`, `break`,
+/// `continue`, `case`).
+fn cf_bucket_for_groovy_kind(name: &str) -> Option<CfBucket> {
+    let bucket = match name {
+        "if_statement" | "ternary_op" => CfBucket::Branch,
+        "for_loop" | "for_in_loop" | "while_loop" | "do_while_loop" => CfBucket::Loop,
+        "switch_statement" | "switch_block" | "case" => CfBucket::Match,
+        // The grammar exposes only `try_statement`; it has no separate catch /
+        // finally / throw named nodes, so those buckets stay unmapped (honest).
+        "try_statement" => CfBucket::Try,
+        "return" => CfBucket::Return,
+        "break" | "continue" => CfBucket::BreakContinue,
+        "function_call" | "juxt_function_call" => CfBucket::Call,
+        "assignment" | "declaration" => CfBucket::Assign,
+        "closure" => CfBucket::Closure,
+        _ => return None,
+    };
+    Some(bucket)
+}
+
+/// The process-wide Groovy shape mapping, built once on first use.
+#[must_use]
+pub fn groovy_shape_mapping() -> &'static GroovyShapeMapping {
+    static MAPPING: OnceLock<GroovyShapeMapping> = OnceLock::new();
+    MAPPING.get_or_init(GroovyShapeMapping::build)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2842,5 +2939,87 @@ class Public {
             "Expected at least 1 export edge (public class only), got {}",
             stats.edges_staged
         );
+    }
+}
+
+#[cfg(test)]
+mod shape_tests {
+    use super::*;
+    use sqry_core::graph::unified::build::shape::{
+        CfBucket, ShapeBudget, compute_shape_descriptor,
+    };
+
+    const SAMPLE: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../test-fixtures/shape/systems/sample.groovy"
+    ));
+
+    fn parse(src: &str) -> Tree {
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_groovy_sqry::language())
+            .expect("load Groovy grammar");
+        parser.parse(src, None).expect("parse Groovy sample")
+    }
+
+    fn first_of_kind<'a>(node: Node<'a>, kind: &str) -> Option<Node<'a>> {
+        if node.kind() == kind {
+            return Some(node);
+        }
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if let Some(found) = first_of_kind(child, kind) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn groovy_mapping_is_non_empty() {
+        let mapping = groovy_shape_mapping();
+        let lang: tree_sitter::Language = tree_sitter_groovy_sqry::language();
+        let count = (0..lang.node_kind_count())
+            .filter_map(|id| u16::try_from(id).ok())
+            .filter(|id| mapping.cf_bucket(*id).is_some())
+            .count();
+        assert!(
+            count > 0,
+            "Groovy cf_bucket map should cover real control-flow kinds"
+        );
+    }
+
+    #[test]
+    fn groovy_histogram_covers_control_flow() {
+        let tree = parse(SAMPLE);
+        let func = first_of_kind(tree.root_node(), "function_definition")
+            .expect("sample has a function_definition");
+        let desc = compute_shape_descriptor(
+            func,
+            SAMPLE.as_bytes(),
+            groovy_shape_mapping(),
+            &ShapeBudget::default(),
+        );
+        let h = &desc.cf_histogram;
+        assert!(h[CfBucket::Branch.index()] >= 1, "branch present");
+        assert!(h[CfBucket::Loop.index()] >= 1, "loop present");
+        assert!(h[CfBucket::Match.index()] >= 1, "switch present");
+        assert!(h[CfBucket::Call.index()] >= 1, "call present");
+        assert!(h[CfBucket::Return.index()] >= 1, "return present");
+        assert!(
+            h[CfBucket::BreakContinue.index()] >= 1,
+            "break/continue present"
+        );
+    }
+
+    #[test]
+    fn groovy_signature_shape_reads_params() {
+        let tree = parse(SAMPLE);
+        let func = first_of_kind(tree.root_node(), "function_definition")
+            .expect("sample has a function_definition");
+        let shape = groovy_shape_mapping().signature_shape(func, SAMPLE.as_bytes());
+        // classify(int n, String label): two positional params.
+        assert_eq!(shape.arity_positional, 2, "two positional params");
+        assert!(shape.has_return_annotation, "int return type slot present");
     }
 }

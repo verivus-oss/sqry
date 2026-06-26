@@ -11,11 +11,14 @@
 
 use sqry_core::graph::unified::StagingGraph;
 use sqry_core::graph::unified::build::GraphBuildHelper;
+use sqry_core::graph::unified::build::shape::{CfBucket, ShapeMapping};
 use sqry_core::graph::unified::node::NodeId;
+use sqry_core::graph::unified::storage::shape::SignatureShape;
 use sqry_core::graph::{GraphBuilder, GraphBuilderError, GraphResult, Language, Span};
 use std::collections::HashMap;
 use std::ops::Range;
 use std::path::Path;
+use std::sync::OnceLock;
 use tree_sitter::{Node, Query, QueryCursor, StreamingIterator, Tree};
 
 /// `GraphBuilder` implementation for Perl.
@@ -25,6 +28,10 @@ pub struct PerlGraphBuilder;
 impl GraphBuilder for PerlGraphBuilder {
     fn language(&self) -> Language {
         Language::Perl
+    }
+
+    fn shape_mapping(&self) -> Option<&dyn ShapeMapping> {
+        Some(perl_shape_mapping())
     }
 
     fn build_graph(
@@ -1365,5 +1372,206 @@ sub another_func {
     fn test_perl_graph_builder_language() {
         let builder = PerlGraphBuilder;
         assert_eq!(builder.language(), Language::Perl);
+    }
+}
+
+/// Per-language [`ShapeMapping`] for Perl (identifier-blind body-shape feature).
+///
+/// Precomputed `kind_id -> CfBucket` table built once from the vendored
+/// tree-sitter-perl-sqry grammar (whose `language()` returns a `Language`
+/// directly). Perl subroutines take no declared formal parameters (arguments
+/// arrive through `@_`), so [`signature_shape`](PerlShapeMapping::signature_shape)
+/// is honestly minimal. `die` is an ordinary function call in the grammar, so it
+/// stays in the `Call` bucket; `eval { ... }` is Perl's structural exception
+/// guard and maps to `Try`.
+pub struct PerlShapeMapping {
+    cf_by_kind_id: Vec<Option<CfBucket>>,
+}
+
+impl PerlShapeMapping {
+    fn build() -> Self {
+        let lang: tree_sitter::Language = tree_sitter_perl_sqry::language();
+        let count = lang.node_kind_count();
+        let mut cf_by_kind_id = vec![None; count];
+        for (id, slot) in cf_by_kind_id.iter_mut().enumerate() {
+            let Ok(kind_id) = u16::try_from(id) else {
+                break;
+            };
+            if !lang.node_kind_is_named(kind_id) {
+                continue;
+            }
+            if let Some(name) = lang.node_kind_for_id(kind_id) {
+                *slot = cf_bucket_for_perl_kind(name);
+            }
+        }
+        Self { cf_by_kind_id }
+    }
+}
+
+impl ShapeMapping for PerlShapeMapping {
+    fn cf_bucket(&self, ts_node_kind_id: u16) -> Option<CfBucket> {
+        self.cf_by_kind_id
+            .get(ts_node_kind_id as usize)
+            .copied()
+            .flatten()
+    }
+
+    fn signature_shape(&self, _fn_node: Node, _src: &[u8]) -> SignatureShape {
+        // Perl subroutines declare no formal parameters; the calling convention
+        // unpacks `@_` at runtime, so the honest signature is the default.
+        SignatureShape::default()
+    }
+}
+
+/// Map one tree-sitter-perl-sqry node-kind name to its canonical control-flow
+/// bucket. Additive-only against the frozen [`CfBucket`] set.
+fn cf_bucket_for_perl_kind(name: &str) -> Option<CfBucket> {
+    let bucket = match name {
+        "conditional_statement" | "postfix_conditional_expression" => CfBucket::Branch,
+        "loop_statement"
+        | "for_statement"
+        | "postfix_loop_expression"
+        | "postfix_for_expression" => CfBucket::Loop,
+        "eval_expression" => CfBucket::Try,
+        "return_expression" => CfBucket::Return,
+        "loopex_expression" => CfBucket::BreakContinue,
+        "map_grep_expression" => CfBucket::Comprehension,
+        "function_call_expression"
+        | "method_call_expression"
+        | "ambiguous_function_call_expression"
+        | "func0op_call_expression"
+        | "func1op_call_expression" => CfBucket::Call,
+        "assignment_expression" => CfBucket::Assign,
+        "anonymous_subroutine_expression" => CfBucket::Closure,
+        _ => return None,
+    };
+    Some(bucket)
+}
+
+/// The process-wide Perl shape mapping, built once on first use.
+#[must_use]
+pub fn perl_shape_mapping() -> &'static PerlShapeMapping {
+    static MAPPING: OnceLock<PerlShapeMapping> = OnceLock::new();
+    MAPPING.get_or_init(PerlShapeMapping::build)
+}
+
+#[cfg(test)]
+mod shape_tests {
+    //! Coverage for the Perl [`ShapeMapping`]. Consumes the hand-written
+    //! control-flow fixture so the test is load-bearing.
+
+    use super::{cf_bucket_for_perl_kind, perl_shape_mapping};
+    use sqry_core::graph::unified::build::shape::{
+        CfBucket, ShapeBudget, ShapeMapping, compute_shape_descriptor,
+    };
+    use tree_sitter::{Node, Parser, Tree};
+
+    const SAMPLE: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../test-fixtures/shape/dynamic/perl.pl"
+    ));
+
+    fn parse(src: &str) -> Tree {
+        let mut parser = Parser::new();
+        parser
+            .set_language(&tree_sitter_perl_sqry::language())
+            .expect("load perl grammar");
+        parser.parse(src, None).expect("parse perl")
+    }
+
+    /// First subroutine declaration in document order (`sub classify`).
+    fn first_sub<'t>(tree: &'t Tree) -> Node<'t> {
+        let mut stack = vec![tree.root_node()];
+        while let Some(node) = stack.pop() {
+            if node.kind() == "subroutine_declaration_statement" {
+                return node;
+            }
+            let mut cursor = node.walk();
+            let mut children: Vec<Node> = node.named_children(&mut cursor).collect();
+            children.reverse();
+            stack.extend(children);
+        }
+        panic!("no subroutine_declaration_statement in perl fixture");
+    }
+
+    #[test]
+    fn mapping_is_non_empty_and_covers_real_kinds() {
+        assert_eq!(
+            cf_bucket_for_perl_kind("conditional_statement"),
+            Some(CfBucket::Branch)
+        );
+        assert_eq!(
+            cf_bucket_for_perl_kind("loop_statement"),
+            Some(CfBucket::Loop)
+        );
+        assert_eq!(
+            cf_bucket_for_perl_kind("for_statement"),
+            Some(CfBucket::Loop)
+        );
+        assert_eq!(
+            cf_bucket_for_perl_kind("eval_expression"),
+            Some(CfBucket::Try)
+        );
+        assert_eq!(
+            cf_bucket_for_perl_kind("return_expression"),
+            Some(CfBucket::Return)
+        );
+        assert_eq!(
+            cf_bucket_for_perl_kind("loopex_expression"),
+            Some(CfBucket::BreakContinue)
+        );
+        assert_eq!(
+            cf_bucket_for_perl_kind("map_grep_expression"),
+            Some(CfBucket::Comprehension)
+        );
+        assert_eq!(
+            cf_bucket_for_perl_kind("anonymous_subroutine_expression"),
+            Some(CfBucket::Closure)
+        );
+        assert_eq!(cf_bucket_for_perl_kind("nope"), None);
+
+        let lang: tree_sitter::Language = tree_sitter_perl_sqry::language();
+        let id = (0..lang.node_kind_count())
+            .map(|i| i as u16)
+            .find(|&i| {
+                lang.node_kind_is_named(i)
+                    && lang.node_kind_for_id(i) == Some("conditional_statement")
+            })
+            .expect("grammar exposes named conditional_statement");
+        assert_eq!(perl_shape_mapping().cf_bucket(id), Some(CfBucket::Branch));
+    }
+
+    #[test]
+    fn descriptor_covers_fixture_control_flow() {
+        let tree = parse(SAMPLE);
+        let func = first_sub(&tree);
+        let descriptor = compute_shape_descriptor(
+            func,
+            SAMPLE.as_bytes(),
+            perl_shape_mapping(),
+            &ShapeBudget::default(),
+        );
+        let hist = descriptor.cf_histogram;
+        assert!(hist[CfBucket::Branch.index()] >= 1, "branch (if/unless)");
+        assert!(hist[CfBucket::Loop.index()] >= 1, "loop (while/for)");
+        assert!(hist[CfBucket::Try.index()] >= 1, "eval block");
+        assert!(hist[CfBucket::Return.index()] >= 1, "return");
+        assert!(
+            hist[CfBucket::BreakContinue.index()] >= 1,
+            "next/last (loopex)"
+        );
+        assert!(hist[CfBucket::Comprehension.index()] >= 1, "map/grep");
+        assert!(hist[CfBucket::Call.index()] >= 1, "call");
+        assert!(hist[CfBucket::Closure.index()] >= 1, "anonymous sub");
+    }
+
+    #[test]
+    fn signature_shape_is_minimal() {
+        let tree = parse(SAMPLE);
+        let func = first_sub(&tree);
+        let shape = perl_shape_mapping().signature_shape(func, SAMPLE.as_bytes());
+        // Perl reads arguments from `@_`; no declared formal parameters.
+        assert_eq!(shape.arity_positional, 0);
+        assert!(!shape.has_varargs);
     }
 }

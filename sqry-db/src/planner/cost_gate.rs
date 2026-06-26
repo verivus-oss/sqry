@@ -262,6 +262,11 @@ fn check_predicate(
         // membership over outgoing Calls is bounded by node degree.
         | Predicate::FrameworkEq(_)
         | Predicate::ResolvedViaEq(_)
+        // Structural similarity (U09): the probe's neighbour set is computed
+        // once (cached LSH index probe) and memoised, then membership is an
+        // O(1) set lookup per candidate — a bounded linear filter, well under
+        // the cost-gate cap.
+        | Predicate::ShapeSimilar(_)
         | Predicate::InFile(_)
         | Predicate::InScope(_)
         | Predicate::Returns(_)

@@ -83,6 +83,7 @@ pub mod phase4e_binding;
 pub mod phase4e_incremental;
 pub mod progress;
 pub mod reindex;
+pub mod shape;
 pub mod staging;
 pub mod test_helpers;
 pub(crate) mod unification;

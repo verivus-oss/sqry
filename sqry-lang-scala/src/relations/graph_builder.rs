@@ -17,10 +17,15 @@
 use sqry_core::graph::{
     GraphBuilder, GraphBuilderError, GraphResult, Language, Span,
     unified::{
-        ExportKind, GraphBuildHelper, StagingGraph, build::helper::CalleeKindHint,
-        edge::kind::TypeOfContext, node::NodeId,
+        ExportKind, GraphBuildHelper, StagingGraph,
+        build::helper::CalleeKindHint,
+        build::shape::{CfBucket, ShapeMapping},
+        edge::kind::TypeOfContext,
+        node::NodeId,
+        storage::shape::SignatureShape,
     },
 };
+use std::sync::OnceLock;
 use std::{collections::HashMap, path::Path};
 use tree_sitter::{Node, Tree};
 
@@ -57,6 +62,10 @@ impl ScalaGraphBuilder {
 impl GraphBuilder for ScalaGraphBuilder {
     fn language(&self) -> Language {
         Language::Scala
+    }
+
+    fn shape_mapping(&self) -> Option<&dyn ShapeMapping> {
+        Some(scala_shape_mapping())
     }
 
     fn build_graph(
@@ -565,6 +574,108 @@ fn process_import_declaration(node: Node<'_>, content: &[u8], helper: &mut Graph
 
     // Parse the import and create edges
     parse_and_create_import_edges(path_text, span, module_id, helper);
+}
+
+/// Per-language [`ShapeMapping`] for Scala: a precomputed `kind_id -> CfBucket`
+/// table over the tree-sitter-scala grammar, shared process-wide via
+/// [`scala_shape_mapping`]. Mirrors the C / Rust reference impls: one array index
+/// per node on the hot shape walk, identifier-blind throughout.
+pub struct ScalaShapeMapping {
+    cf_by_kind_id: Vec<Option<CfBucket>>,
+}
+
+impl ScalaShapeMapping {
+    fn build() -> Self {
+        let lang: tree_sitter::Language = tree_sitter_scala::LANGUAGE.into();
+        let count = lang.node_kind_count();
+        let mut cf_by_kind_id = vec![None; count];
+        for (id, slot) in cf_by_kind_id.iter_mut().enumerate() {
+            let Ok(kind_id) = u16::try_from(id) else {
+                break;
+            };
+            if !lang.node_kind_is_named(kind_id) {
+                continue;
+            }
+            if let Some(name) = lang.node_kind_for_id(kind_id) {
+                *slot = cf_bucket_for_scala_kind(name);
+            }
+        }
+        Self { cf_by_kind_id }
+    }
+}
+
+impl ShapeMapping for ScalaShapeMapping {
+    fn cf_bucket(&self, ts_node_kind_id: u16) -> Option<CfBucket> {
+        self.cf_by_kind_id
+            .get(ts_node_kind_id as usize)
+            .copied()
+            .flatten()
+    }
+
+    fn signature_shape(&self, fn_node: Node, _src: &[u8]) -> SignatureShape {
+        let mut shape = SignatureShape::default();
+        // A `function_definition` may carry several parameter clauses (Scala
+        // supports multiple parameter lists). The `parameters` field can resolve to
+        // a `parameters` node OR a `type_parameters` node, so we walk every named
+        // child and only descend into `parameters` clauses.
+        let mut cursor = fn_node.walk();
+        for clause in fn_node.named_children(&mut cursor) {
+            if clause.kind() != "parameters" {
+                continue;
+            }
+            let mut inner = clause.walk();
+            for param in clause.named_children(&mut inner) {
+                if param.kind() != "parameter" {
+                    continue;
+                }
+                shape.arity_positional = shape.arity_positional.saturating_add(1);
+                if param.child_by_field_name("default_value").is_some() {
+                    shape.has_defaults = true;
+                }
+                // Scala varargs spell `x: Int*`, modelled as a parameter whose
+                // `type` field is a `repeated_parameter_type`.
+                if param
+                    .child_by_field_name("type")
+                    .is_some_and(|t| t.kind() == "repeated_parameter_type")
+                {
+                    shape.has_varargs = true;
+                }
+            }
+        }
+        shape.has_return_annotation = fn_node.child_by_field_name("return_type").is_some();
+        shape
+    }
+}
+
+/// Map one tree-sitter-scala grammar node-kind name to its canonical control-flow
+/// bucket. Additive-only against the frozen [`CfBucket`] set.
+fn cf_bucket_for_scala_kind(name: &str) -> Option<CfBucket> {
+    let bucket = match name {
+        "if_expression" | "guard" | "given_conditional" => CfBucket::Branch,
+        "for_expression" | "while_expression" | "do_while_expression" => CfBucket::Loop,
+        "match_expression" | "case_clause" | "type_case_clause" | "match_type" => CfBucket::Match,
+        "try_expression" => CfBucket::Try,
+        "catch_clause" => CfBucket::Catch,
+        "throw_expression" => CfBucket::Throw,
+        // `finally` cleanup and `using` resource clauses map onto the resource
+        // bucket. Scala has no `break` / `continue` / `yield` node kinds (yield is
+        // folded into `for_expression`, break is a library method call), so those
+        // buckets are honestly absent here.
+        "finally_clause" | "using_directive" => CfBucket::Resource,
+        "return_expression" => CfBucket::Return,
+        "call_expression" | "infix_expression" => CfBucket::Call,
+        "assignment_expression" | "val_declaration" | "var_declaration" => CfBucket::Assign,
+        "lambda_expression" => CfBucket::Closure,
+        _ => return None,
+    };
+    Some(bucket)
+}
+
+/// The process-wide Scala shape mapping, built once on first use.
+#[must_use]
+pub fn scala_shape_mapping() -> &'static ScalaShapeMapping {
+    static MAPPING: OnceLock<ScalaShapeMapping> = OnceLock::new();
+    MAPPING.get_or_init(ScalaShapeMapping::build)
 }
 
 /// Parse import path and create the appropriate Import edges.
@@ -2878,5 +2989,94 @@ mod tests {
             "TypeOf target must capture the full Scala type string"
         );
         assert_eq!(bare.as_deref(), Some("y"));
+    }
+}
+
+#[cfg(test)]
+mod shape_tests {
+    use super::*;
+    use sqry_core::graph::unified::build::shape::{
+        CfBucket, ShapeBudget, compute_shape_descriptor,
+    };
+
+    const SAMPLE: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../test-fixtures/shape/systems/sample.scala"
+    ));
+
+    fn parse(src: &str) -> Tree {
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_scala::LANGUAGE.into())
+            .expect("load Scala grammar");
+        parser.parse(src, None).expect("parse Scala sample")
+    }
+
+    fn find_classify<'a>(node: Node<'a>, src: &[u8]) -> Option<Node<'a>> {
+        if node.kind() == "function_definition"
+            && node
+                .child_by_field_name("name")
+                .and_then(|n| n.utf8_text(src).ok())
+                == Some("classify")
+        {
+            return Some(node);
+        }
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if let Some(found) = find_classify(child, src) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn scala_mapping_is_non_empty() {
+        let mapping = scala_shape_mapping();
+        let lang: tree_sitter::Language = tree_sitter_scala::LANGUAGE.into();
+        let count = (0..lang.node_kind_count())
+            .filter_map(|id| u16::try_from(id).ok())
+            .filter(|id| mapping.cf_bucket(*id).is_some())
+            .count();
+        assert!(
+            count > 0,
+            "Scala cf_bucket map should cover real control-flow kinds"
+        );
+    }
+
+    #[test]
+    fn scala_histogram_covers_control_flow() {
+        let tree = parse(SAMPLE);
+        let func = find_classify(tree.root_node(), SAMPLE.as_bytes())
+            .expect("sample has a classify function_definition");
+        let desc = compute_shape_descriptor(
+            func,
+            SAMPLE.as_bytes(),
+            scala_shape_mapping(),
+            &ShapeBudget::default(),
+        );
+        let h = &desc.cf_histogram;
+        assert!(h[CfBucket::Branch.index()] >= 1, "branch present");
+        assert!(h[CfBucket::Loop.index()] >= 1, "loop present");
+        assert!(h[CfBucket::Match.index()] >= 1, "match present");
+        assert!(h[CfBucket::Call.index()] >= 1, "call present");
+        assert!(h[CfBucket::Return.index()] >= 1, "return present");
+        assert!(h[CfBucket::Try.index()] >= 1, "try present");
+        assert!(h[CfBucket::Catch.index()] >= 1, "catch present");
+        assert!(h[CfBucket::Throw.index()] >= 1, "throw present");
+    }
+
+    #[test]
+    fn scala_signature_shape_reads_params() {
+        let tree = parse(SAMPLE);
+        let func = find_classify(tree.root_node(), SAMPLE.as_bytes())
+            .expect("sample has a classify function_definition");
+        let shape = scala_shape_mapping().signature_shape(func, SAMPLE.as_bytes());
+        // classify(n: Int, label: String): two positional params, return type slot.
+        assert_eq!(shape.arity_positional, 2, "two positional params");
+        assert!(
+            shape.has_return_annotation,
+            "Scala return type slot present"
+        );
     }
 }

@@ -2221,7 +2221,15 @@ pub(super) fn parse_file(path: &Path, plugins: &PluginManager) -> Result<ParsedF
         );
     }
 
-    staging.attach_body_hashes(raw_content);
+    // Resolve the per-language shape mapping from the plugin's builder and, when
+    // present, hand the shape walker the parsed tree + the parse-aligned source so
+    // each Function/Method body is fingerprinted alongside its body hash. Body
+    // hashes use `raw_content` (the index's coordinate system); the shape walker
+    // navigates the tree, whose positions live in `parse_content`.
+    let shape_ctx = builder
+        .shape_mapping()
+        .map(|mapping| super::staging::ShapeAttachCtx::new(&tree, parse_content, mapping));
+    staging.attach_body_hashes(raw_content, shape_ctx);
 
     Ok(ParsedFileOutcome::Parsed(ParsedFile {
         language: builder.language(),

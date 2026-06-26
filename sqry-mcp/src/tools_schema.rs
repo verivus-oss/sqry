@@ -33,6 +33,7 @@ pub const DAEMON_SUPPORTED_TOOL_NAMES: &[&str] = &[
     "semantic_diff",
     "semantic_search",
     "show_dependencies",
+    "structural_similar",
     "subgraph",
     "trace_path",
 ];
@@ -65,16 +66,16 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
 
-    /// `DAEMON_SUPPORTED_TOOL_NAMES` must contain exactly 15 names and
+    /// `DAEMON_SUPPORTED_TOOL_NAMES` must contain exactly 16 names and
     /// they must be sorted / deduplicated. Assertion guards against
     /// accidental addition or duplication that would desync from
-    /// sqry-daemon's `dispatch_tool` match.
+    /// sqry-daemon's `dispatch_tool` match. (15 + `structural_similar`, U07.)
     #[test]
-    fn daemon_supported_tool_names_is_exactly_15_sorted_unique() {
+    fn daemon_supported_tool_names_is_exactly_16_sorted_unique() {
         assert_eq!(
             DAEMON_SUPPORTED_TOOL_NAMES.len(),
-            15,
-            "DAEMON_SUPPORTED_TOOL_NAMES must contain exactly 15 tools"
+            16,
+            "DAEMON_SUPPORTED_TOOL_NAMES must contain exactly 16 tools"
         );
 
         // Sorted.
@@ -101,15 +102,15 @@ mod tests {
     /// assertion may need narrowing — but the intent of the default
     /// daemon surface is exactly 15.
     #[test]
-    fn daemon_supported_tools_returns_exact_15_under_default_flags() {
+    fn daemon_supported_tools_returns_exact_16_under_default_flags() {
         let tools = daemon_supported_tools();
         let names: HashSet<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
         let expected: HashSet<&str> = DAEMON_SUPPORTED_TOOL_NAMES.iter().copied().collect();
         assert_eq!(
             names,
             expected,
-            "daemon_supported_tools must return exactly the 15 DAEMON_SUPPORTED_TOOL_NAMES \
-             (default feature flags). Got {} tools, expected 15.",
+            "daemon_supported_tools must return exactly the 16 DAEMON_SUPPORTED_TOOL_NAMES \
+             (default feature flags). Got {} tools, expected 16.",
             tools.len()
         );
     }

@@ -300,6 +300,18 @@ pub struct SearchSimilarArgs {
     pub pagination: PaginationArgs,
 }
 
+/// Validated args for the `structural_similar` tool (body-shape descriptor, U07).
+#[derive(Debug, Clone)]
+pub struct StructuralSimilarArgs {
+    pub path: String,
+    /// Optional file to disambiguate the probe symbol.
+    pub file_path: Option<String>,
+    pub symbol_name: String,
+    /// Minimum MinHash Jaccard floor (0.0–1.0).
+    pub similarity_threshold: f64,
+    pub max_results: usize,
+}
+
 #[derive(Debug, Clone)]
 pub struct DependencyImpactArgs {
     pub symbol: String,

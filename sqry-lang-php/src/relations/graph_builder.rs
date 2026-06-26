@@ -32,9 +32,12 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::OnceLock;
 
 use sqry_core::graph::unified::build::helper::CalleeKindHint;
+use sqry_core::graph::unified::build::shape::{CfBucket, ShapeMapping};
 use sqry_core::graph::unified::edge::kind::{FfiConvention, TypeOfContext};
+use sqry_core::graph::unified::storage::shape::SignatureShape;
 use sqry_core::graph::unified::{GraphBuildHelper, NodeId, StagingGraph};
 use sqry_core::graph::{
     GraphBuilder, GraphBuilderError, GraphResult, GraphSnapshot, Language, Span,
@@ -137,6 +140,10 @@ impl GraphBuilder for PhpGraphBuilder {
 
     fn language(&self) -> Language {
         Language::Php
+    }
+
+    fn shape_mapping(&self) -> Option<&dyn ShapeMapping> {
+        Some(php_shape_mapping())
     }
 
     fn detect_cross_language_edges(
@@ -3364,5 +3371,219 @@ function f() { $y = 2; }
         let staging = build(src);
         assert_eq!(count_nodes_by_kind(&staging, NodeKind::Property), 0);
         assert_eq!(count_nodes_by_kind(&staging, NodeKind::Constant), 0);
+    }
+}
+
+/// Per-language [`ShapeMapping`] for PHP (identifier-blind body-shape feature).
+///
+/// Precomputed `kind_id -> CfBucket` table built once from the tree-sitter-php
+/// grammar so the shape walk is a single array index per node. Everything except
+/// this mapping is the shared `compute_shape_descriptor` routine in sqry-core.
+pub struct PhpShapeMapping {
+    cf_by_kind_id: Vec<Option<CfBucket>>,
+}
+
+impl PhpShapeMapping {
+    fn build() -> Self {
+        let lang: tree_sitter::Language = tree_sitter_php::LANGUAGE_PHP.into();
+        let count = lang.node_kind_count();
+        let mut cf_by_kind_id = vec![None; count];
+        for (id, slot) in cf_by_kind_id.iter_mut().enumerate() {
+            let Ok(kind_id) = u16::try_from(id) else {
+                break;
+            };
+            if !lang.node_kind_is_named(kind_id) {
+                continue;
+            }
+            if let Some(name) = lang.node_kind_for_id(kind_id) {
+                *slot = cf_bucket_for_php_kind(name);
+            }
+        }
+        Self { cf_by_kind_id }
+    }
+}
+
+impl ShapeMapping for PhpShapeMapping {
+    fn cf_bucket(&self, ts_node_kind_id: u16) -> Option<CfBucket> {
+        self.cf_by_kind_id
+            .get(ts_node_kind_id as usize)
+            .copied()
+            .flatten()
+    }
+
+    fn signature_shape(&self, fn_node: Node, _src: &[u8]) -> SignatureShape {
+        let mut shape = SignatureShape::default();
+        if let Some(params) = fn_node.child_by_field_name("parameters") {
+            let mut cursor = params.walk();
+            for child in params.named_children(&mut cursor) {
+                match child.kind() {
+                    "simple_parameter" | "property_promotion_parameter" => {
+                        shape.arity_positional = shape.arity_positional.saturating_add(1);
+                        if child.child_by_field_name("default_value").is_some() {
+                            shape.has_defaults = true;
+                        }
+                    }
+                    "variadic_parameter" => shape.has_varargs = true,
+                    _ => {}
+                }
+            }
+        }
+        shape.has_return_annotation = fn_node.child_by_field_name("return_type").is_some();
+        shape
+    }
+}
+
+/// Map one tree-sitter-php node-kind name to its canonical control-flow bucket.
+/// Additive-only against the frozen [`CfBucket`] set.
+fn cf_bucket_for_php_kind(name: &str) -> Option<CfBucket> {
+    let bucket = match name {
+        "if_statement"
+        | "else_if_clause"
+        | "else_clause"
+        | "conditional_expression"
+        | "match_conditional_expression" => CfBucket::Branch,
+        "while_statement" | "do_statement" | "for_statement" | "foreach_statement" => {
+            CfBucket::Loop
+        }
+        "switch_statement" | "case_statement" | "default_statement" | "match_expression"
+        | "match_block" => CfBucket::Match,
+        "try_statement" => CfBucket::Try,
+        "catch_clause" => CfBucket::Catch,
+        "finally_clause" => CfBucket::Resource,
+        "throw_expression" => CfBucket::Throw,
+        "return_statement" => CfBucket::Return,
+        "yield_expression" => CfBucket::Yield,
+        "break_statement" | "continue_statement" => CfBucket::BreakContinue,
+        "function_call_expression"
+        | "member_call_expression"
+        | "scoped_call_expression"
+        | "nullsafe_member_call_expression"
+        | "object_creation_expression" => CfBucket::Call,
+        "assignment_expression" | "augmented_assignment_expression" => CfBucket::Assign,
+        "anonymous_function" | "arrow_function" => CfBucket::Closure,
+        _ => return None,
+    };
+    Some(bucket)
+}
+
+/// The process-wide PHP shape mapping, built once on first use.
+#[must_use]
+pub fn php_shape_mapping() -> &'static PhpShapeMapping {
+    static MAPPING: OnceLock<PhpShapeMapping> = OnceLock::new();
+    MAPPING.get_or_init(PhpShapeMapping::build)
+}
+
+#[cfg(test)]
+mod shape_tests {
+    //! Coverage for the PHP [`ShapeMapping`]. Consumes the hand-written
+    //! control-flow fixture so the test is load-bearing.
+
+    use super::{cf_bucket_for_php_kind, php_shape_mapping};
+    use sqry_core::graph::unified::build::shape::{
+        CfBucket, ShapeBudget, ShapeMapping, compute_shape_descriptor,
+    };
+    use tree_sitter::{Node, Parser, Tree};
+
+    const SAMPLE: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../test-fixtures/shape/dynamic/php.php"
+    ));
+
+    fn parse(src: &str) -> Tree {
+        let mut parser = Parser::new();
+        parser
+            .set_language(&tree_sitter_php::LANGUAGE_PHP.into())
+            .expect("load php grammar");
+        parser.parse(src, None).expect("parse php")
+    }
+
+    fn first_function<'t>(tree: &'t Tree) -> Node<'t> {
+        let root = tree.root_node();
+        let mut cursor = root.walk();
+        for child in root.named_children(&mut cursor) {
+            if child.kind() == "function_definition" {
+                return child;
+            }
+        }
+        panic!("no function_definition in php fixture");
+    }
+
+    #[test]
+    fn mapping_is_non_empty_and_covers_real_kinds() {
+        assert_eq!(
+            cf_bucket_for_php_kind("if_statement"),
+            Some(CfBucket::Branch)
+        );
+        assert_eq!(
+            cf_bucket_for_php_kind("while_statement"),
+            Some(CfBucket::Loop)
+        );
+        assert_eq!(
+            cf_bucket_for_php_kind("switch_statement"),
+            Some(CfBucket::Match)
+        );
+        assert_eq!(cf_bucket_for_php_kind("try_statement"), Some(CfBucket::Try));
+        assert_eq!(
+            cf_bucket_for_php_kind("catch_clause"),
+            Some(CfBucket::Catch)
+        );
+        assert_eq!(
+            cf_bucket_for_php_kind("finally_clause"),
+            Some(CfBucket::Resource)
+        );
+        assert_eq!(
+            cf_bucket_for_php_kind("throw_expression"),
+            Some(CfBucket::Throw)
+        );
+        assert_eq!(
+            cf_bucket_for_php_kind("anonymous_function"),
+            Some(CfBucket::Closure)
+        );
+        assert_eq!(cf_bucket_for_php_kind("nope"), None);
+
+        let lang: tree_sitter::Language = tree_sitter_php::LANGUAGE_PHP.into();
+        let id = (0..lang.node_kind_count())
+            .map(|i| i as u16)
+            .find(|&i| {
+                lang.node_kind_is_named(i) && lang.node_kind_for_id(i) == Some("if_statement")
+            })
+            .expect("grammar exposes named if_statement");
+        assert_eq!(php_shape_mapping().cf_bucket(id), Some(CfBucket::Branch));
+    }
+
+    #[test]
+    fn descriptor_covers_fixture_control_flow() {
+        let tree = parse(SAMPLE);
+        let func = first_function(&tree);
+        let descriptor = compute_shape_descriptor(
+            func,
+            SAMPLE.as_bytes(),
+            php_shape_mapping(),
+            &ShapeBudget::default(),
+        );
+        let hist = descriptor.cf_histogram;
+        assert!(hist[CfBucket::Branch.index()] >= 1, "branch");
+        assert!(hist[CfBucket::Loop.index()] >= 1, "loop");
+        assert!(hist[CfBucket::Match.index()] >= 1, "switch/case");
+        assert!(hist[CfBucket::Try.index()] >= 1, "try");
+        assert!(hist[CfBucket::Catch.index()] >= 1, "catch");
+        assert!(hist[CfBucket::Resource.index()] >= 1, "finally");
+        assert!(hist[CfBucket::Throw.index()] >= 1, "throw");
+        assert!(hist[CfBucket::Return.index()] >= 1, "return");
+        assert!(hist[CfBucket::Call.index()] >= 1, "call");
+        assert!(hist[CfBucket::Closure.index()] >= 1, "closure");
+        assert!(hist[CfBucket::BreakContinue.index()] >= 1, "break/continue");
+    }
+
+    #[test]
+    fn signature_shape_reads_arity_and_return() {
+        let tree = parse(SAMPLE);
+        let func = first_function(&tree);
+        let shape = php_shape_mapping().signature_shape(func, SAMPLE.as_bytes());
+        // `function classify(int $value, string $label = "n/a", ...$rest): string`.
+        assert_eq!(shape.arity_positional, 2, "value + label");
+        assert!(shape.has_defaults, "label has a default");
+        assert!(shape.has_varargs, "...$rest");
+        assert!(shape.has_return_annotation, ": string");
     }
 }

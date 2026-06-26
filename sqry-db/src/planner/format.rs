@@ -353,6 +353,9 @@ fn format_predicate_step(pred: &Predicate, out: &mut String) {
         Predicate::Returns(name) => {
             write!(out, "returns:{}", quote_value_if_needed(name)).expect("write");
         }
+        Predicate::ShapeSimilar(symbol) => {
+            write!(out, "shape~={}", quote_value_if_needed(symbol)).expect("write");
+        }
         Predicate::And(_) | Predicate::Or(_) | Predicate::Not(_) => {
             // Boolean combinators are constructible through the builder
             // API only; the text grammar does not surface them today.

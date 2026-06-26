@@ -49,7 +49,7 @@ use crate::execution::ToolExecution;
 use crate::execution::types::{
     ComplexityMetricsData, DependencyGraphData, DependencyImpactData, DirectCalleesData,
     DirectCallersData, FindCyclesData, FindUnusedData, NodeInCycleData, RelationQueryData,
-    SemanticDiffData, SemanticSearchData, TracePathData,
+    SemanticDiffData, SemanticSearchData, StructuralSimilarData, TracePathData,
 };
 use crate::execution::{
     analysis_inner, graph_inner, introspection_inner, relations_inner, search_inner, trace_inner,
@@ -57,7 +57,8 @@ use crate::execution::{
 use crate::tools::{
     ComplexityMetricsArgs, DependencyImpactArgs, DirectCalleesArgs, DirectCallersArgs,
     ExportGraphArgs, FindCyclesArgs, FindUnusedArgs, IsNodeInCycleArgs, RelationQueryArgs,
-    SemanticDiffArgs, SemanticSearchArgs, ShowDependenciesArgs, SubgraphArgs, TracePathArgs,
+    SemanticDiffArgs, SemanticSearchArgs, ShowDependenciesArgs, StructuralSimilarArgs,
+    SubgraphArgs, TracePathArgs,
 };
 
 /// Caller-supplied, pre-resolved workspace state consumed by every
@@ -138,6 +139,20 @@ pub fn execute_relation_query_for_daemon(
     args: &RelationQueryArgs,
 ) -> Result<ToolExecution<RelationQueryData>> {
     relations_inner::execute_relation_query(ctx, args)
+}
+
+/// Daemon-path wrapper for `structural_similar` (body-shape descriptor, U07).
+///
+/// # Errors
+///
+/// Returns an error if a supplied `file_path` escapes the workspace or the probe
+/// symbol has no body-shape descriptor.
+pub fn execute_structural_similar_for_daemon(
+    ctx: &WorkspaceContext,
+    args: &StructuralSimilarArgs,
+) -> Result<ToolExecution<StructuralSimilarData>> {
+    let start = Instant::now();
+    search_inner::execute_structural_similar(ctx, args, start)
 }
 
 /// Daemon-path wrapper for `direct_callers`.

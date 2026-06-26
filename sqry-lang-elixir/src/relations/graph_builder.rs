@@ -16,7 +16,11 @@
 //! - Macros: Not expanded (compile-time only)
 //! - Dynamic calls: apply/3 not tracked (runtime-only)
 
+use std::sync::OnceLock;
 use std::{collections::HashMap, path::Path};
+
+use sqry_core::graph::unified::build::shape::{CfBucket, ShapeMapping};
+use sqry_core::graph::unified::storage::shape::SignatureShape;
 
 use sqry_core::graph::unified::edge::kind::TypeOfContext;
 use sqry_core::graph::unified::{ExportKind, GraphBuildHelper, StagingGraph};
@@ -108,6 +112,10 @@ impl GraphBuilder for ElixirGraphBuilder {
 
     fn language(&self) -> Language {
         Language::Elixir
+    }
+
+    fn shape_mapping(&self) -> Option<&dyn ShapeMapping> {
+        Some(elixir_shape_mapping())
     }
 }
 
@@ -2748,5 +2756,220 @@ mod tests {
             1,
             "Should detect NIF with complex/interpolated paths"
         );
+    }
+}
+
+/// Per-language [`ShapeMapping`] for Elixir (identifier-blind body-shape feature).
+///
+/// Precomputed `kind_id -> CfBucket` table built once from the vendored
+/// tree-sitter-elixir-sqry grammar (whose `language()` returns a `Language`
+/// directly). Elixir's grammar is macro-uniform: `if`/`case`/`cond`/`with`/`for`/
+/// `try` are all plain `call` nodes whose head is an identifier, so they cannot be
+/// bucketed without reading that identifier (which would break
+/// identifier-blindness). The honest, structural control flow Elixir exposes is
+/// clause-based pattern matching (`stab_clause` = the `->` arms of case/cond/with/
+/// fn) plus the block kinds (`rescue_block`/`catch_block`/`after_block`), the
+/// anonymous-function literal, and the `call`. Pattern-match clauses therefore map
+/// to `Match`, the rescue/catch blocks to `Catch`, the after block to `Resource`,
+/// and `fn ... end` to `Closure`.
+pub struct ElixirShapeMapping {
+    cf_by_kind_id: Vec<Option<CfBucket>>,
+}
+
+impl ElixirShapeMapping {
+    fn build() -> Self {
+        let lang: tree_sitter::Language = tree_sitter_elixir_sqry::language();
+        let count = lang.node_kind_count();
+        let mut cf_by_kind_id = vec![None; count];
+        for (id, slot) in cf_by_kind_id.iter_mut().enumerate() {
+            let Ok(kind_id) = u16::try_from(id) else {
+                break;
+            };
+            if !lang.node_kind_is_named(kind_id) {
+                continue;
+            }
+            if let Some(name) = lang.node_kind_for_id(kind_id) {
+                *slot = cf_bucket_for_elixir_kind(name);
+            }
+        }
+        Self { cf_by_kind_id }
+    }
+}
+
+impl ShapeMapping for ElixirShapeMapping {
+    fn cf_bucket(&self, ts_node_kind_id: u16) -> Option<CfBucket> {
+        self.cf_by_kind_id
+            .get(ts_node_kind_id as usize)
+            .copied()
+            .flatten()
+    }
+
+    fn signature_shape(&self, fn_node: Node, _src: &[u8]) -> SignatureShape {
+        // `def name(args) do ... end` parses as a `call` whose first argument is
+        // the function-head `call` (`name(args)`); the head's `arguments` node
+        // holds the formal parameters. Read positional arity from there; fall back
+        // to the default when the structure does not match.
+        let mut shape = SignatureShape::default();
+        let mut cursor = fn_node.walk();
+        let head = fn_node
+            .named_children(&mut cursor)
+            .find(|c| c.kind() == "arguments")
+            .and_then(|args| {
+                let mut ac = args.walk();
+                args.named_children(&mut ac).find(|c| c.kind() == "call")
+            });
+        if let Some(head) = head {
+            let mut hc = head.walk();
+            if let Some(params) = head
+                .named_children(&mut hc)
+                .find(|c| c.kind() == "arguments")
+            {
+                let mut pc = params.walk();
+                shape.arity_positional =
+                    u16::try_from(params.named_children(&mut pc).count()).unwrap_or(u16::MAX);
+            }
+        }
+        shape
+    }
+}
+
+/// Map one tree-sitter-elixir-sqry node-kind name to its canonical control-flow
+/// bucket. Additive-only against the frozen [`CfBucket`] set.
+fn cf_bucket_for_elixir_kind(name: &str) -> Option<CfBucket> {
+    let bucket = match name {
+        // Every `->` clause of case/cond/with/fn is a pattern-match arm.
+        "stab_clause" => CfBucket::Match,
+        "rescue_block" | "catch_block" => CfBucket::Catch,
+        "after_block" => CfBucket::Resource,
+        "anonymous_function" => CfBucket::Closure,
+        "call" => CfBucket::Call,
+        _ => return None,
+    };
+    Some(bucket)
+}
+
+/// The process-wide Elixir shape mapping, built once on first use.
+#[must_use]
+pub fn elixir_shape_mapping() -> &'static ElixirShapeMapping {
+    static MAPPING: OnceLock<ElixirShapeMapping> = OnceLock::new();
+    MAPPING.get_or_init(ElixirShapeMapping::build)
+}
+
+#[cfg(test)]
+mod shape_tests {
+    //! Coverage for the Elixir [`ShapeMapping`]. Consumes the hand-written
+    //! control-flow fixture so the test is load-bearing.
+
+    use super::{cf_bucket_for_elixir_kind, elixir_shape_mapping};
+    use sqry_core::graph::unified::build::shape::{
+        CfBucket, ShapeBudget, ShapeMapping, compute_shape_descriptor,
+    };
+    use tree_sitter::{Node, Parser, Tree};
+
+    const SAMPLE: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../test-fixtures/shape/dynamic/sample.ex"
+    ));
+
+    fn parse(src: &str) -> Tree {
+        let mut parser = Parser::new();
+        parser
+            .set_language(&tree_sitter_elixir_sqry::language())
+            .expect("load elixir grammar");
+        parser.parse(src, None).expect("parse elixir")
+    }
+
+    /// The `def classify(...)` head: the first `call` whose target identifier the
+    /// grammar exposes as a `def` form. We locate it structurally as the first
+    /// `call` that has a `do_block` and whose first argument is itself a `call`
+    /// (the function head), which is exactly the `def classify(...) do ... end`.
+    fn classify_def<'t>(tree: &'t Tree) -> Node<'t> {
+        let mut stack = vec![tree.root_node()];
+        while let Some(node) = stack.pop() {
+            if node.kind() == "call" {
+                let mut c = node.walk();
+                let kids: Vec<Node> = node.named_children(&mut c).collect();
+                let has_do = kids.iter().any(|k| k.kind() == "do_block");
+                let head_is_call = kids
+                    .iter()
+                    .find(|k| k.kind() == "arguments")
+                    .map(|args| {
+                        let mut ac = args.walk();
+                        args.named_children(&mut ac).any(|c| c.kind() == "call")
+                    })
+                    .unwrap_or(false);
+                if has_do && head_is_call {
+                    return node;
+                }
+            }
+            let mut cursor = node.walk();
+            let mut children: Vec<Node> = node.named_children(&mut cursor).collect();
+            children.reverse();
+            stack.extend(children);
+        }
+        panic!("no def-with-head call in elixir fixture");
+    }
+
+    #[test]
+    fn mapping_is_non_empty_and_covers_real_kinds() {
+        assert_eq!(
+            cf_bucket_for_elixir_kind("stab_clause"),
+            Some(CfBucket::Match)
+        );
+        assert_eq!(
+            cf_bucket_for_elixir_kind("rescue_block"),
+            Some(CfBucket::Catch)
+        );
+        assert_eq!(
+            cf_bucket_for_elixir_kind("catch_block"),
+            Some(CfBucket::Catch)
+        );
+        assert_eq!(
+            cf_bucket_for_elixir_kind("after_block"),
+            Some(CfBucket::Resource)
+        );
+        assert_eq!(
+            cf_bucket_for_elixir_kind("anonymous_function"),
+            Some(CfBucket::Closure)
+        );
+        assert_eq!(cf_bucket_for_elixir_kind("call"), Some(CfBucket::Call));
+        assert_eq!(cf_bucket_for_elixir_kind("nope"), None);
+
+        let lang: tree_sitter::Language = tree_sitter_elixir_sqry::language();
+        let id = (0..lang.node_kind_count())
+            .map(|i| i as u16)
+            .find(|&i| {
+                lang.node_kind_is_named(i) && lang.node_kind_for_id(i) == Some("stab_clause")
+            })
+            .expect("grammar exposes named stab_clause");
+        assert_eq!(elixir_shape_mapping().cf_bucket(id), Some(CfBucket::Match));
+    }
+
+    #[test]
+    fn descriptor_covers_fixture_control_flow() {
+        let tree = parse(SAMPLE);
+        let func = classify_def(&tree);
+        let descriptor = compute_shape_descriptor(
+            func,
+            SAMPLE.as_bytes(),
+            elixir_shape_mapping(),
+            &ShapeBudget::default(),
+        );
+        let hist = descriptor.cf_histogram;
+        // case/cond/with/fn clauses all surface as pattern-match arms.
+        assert!(hist[CfBucket::Match.index()] >= 1, "stab clauses");
+        assert!(hist[CfBucket::Catch.index()] >= 1, "rescue/catch block");
+        assert!(hist[CfBucket::Resource.index()] >= 1, "after block");
+        assert!(hist[CfBucket::Closure.index()] >= 1, "anonymous function");
+        assert!(hist[CfBucket::Call.index()] >= 1, "call");
+    }
+
+    #[test]
+    fn signature_shape_reads_def_head_arity() {
+        let tree = parse(SAMPLE);
+        let func = classify_def(&tree);
+        let shape = elixir_shape_mapping().signature_shape(func, SAMPLE.as_bytes());
+        // `def classify(value, label \\ "n/a", rest \\ [])` has three head params.
+        assert_eq!(shape.arity_positional, 3, "value + label + rest");
     }
 }
