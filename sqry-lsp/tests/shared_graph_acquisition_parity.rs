@@ -192,6 +192,7 @@ fn lsp_search_matches_cli_for_same_graph() {
         query: "name:func_alpha".into(),
         path: None,
         limit: Some(10),
+        ..SqrySearchParams::default()
     };
     let result = search::execute(&session, &params).expect("LSP search executes");
     let lsp_names: Vec<String> = result.results.iter().map(|r| r.name.clone()).collect();
@@ -266,6 +267,7 @@ fn lsp_stale_diagnostic_visible() {
         query: "name:func_alpha".into(),
         path: None,
         limit: Some(10),
+        ..SqrySearchParams::default()
     };
 
     // The LSP `search` handler resolves a graph through
@@ -323,6 +325,7 @@ fn lsp_search_handler_routes_through_session_graph() {
         query: "name:func_alpha".into(),
         path: None,
         limit: Some(10),
+        ..SqrySearchParams::default()
     };
     let result = search::execute(&session, &params).expect("LSP search executes");
 

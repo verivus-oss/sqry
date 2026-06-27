@@ -56,7 +56,15 @@ pub struct SessionManager {
     /// pre-Step-4 single-root behaviour until `initialize()` resolves
     /// the real workspace.
     logical_workspace: Arc<RwLock<Arc<LogicalWorkspace>>>,
+    /// Optional daemon-hosted revision status provider.
+    ///
+    /// Standalone LSP sessions do not own daemon revision state and keep this
+    /// empty. Daemon-hosted LSP sessions install a provider that snapshots the
+    /// daemon's resident revision registry for `sqry/workspaceStatus`.
+    revision_status_provider: Arc<RwLock<Option<RevisionStatusProvider>>>,
 }
+
+type RevisionStatusProvider = Arc<dyn Fn() -> Vec<serde_json::Value> + Send + Sync>;
 
 #[derive(Debug, Clone)]
 pub struct NodeMatch {
@@ -214,6 +222,7 @@ impl SessionManager {
             graph_for_path_calls: Arc::new(AtomicU64::new(0)),
             project_manager,
             logical_workspace,
+            revision_status_provider: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -1593,6 +1602,9 @@ pub struct WorkspaceStatusInfo {
     pub member_folders: Vec<MemberFolderInfo>,
     /// Excluded paths (canonical).
     pub exclusions: Vec<PathBuf>,
+    /// Loaded daemon revision statuses visible to this session.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub revisions: Vec<serde_json::Value>,
 }
 
 /// Wire-side view of [`sqry_core::workspace::MemberFolder`].
@@ -1638,6 +1650,39 @@ pub fn build_workspace_status_info(workspace: &LogicalWorkspace) -> WorkspaceSta
         source_roots,
         member_folders,
         exclusions: workspace.exclusions().to_vec(),
+        revisions: Vec::new(),
+    }
+}
+
+/// Build the wire-side `WorkspaceStatusInfo` and attach daemon revision status.
+#[must_use]
+pub fn build_workspace_status_info_with_revisions(
+    workspace: &LogicalWorkspace,
+    revisions: Vec<serde_json::Value>,
+) -> WorkspaceStatusInfo {
+    let mut info = build_workspace_status_info(workspace);
+    info.revisions = revisions;
+    info
+}
+
+impl SessionManager {
+    /// Install a daemon-hosted revision status provider.
+    #[must_use]
+    pub fn with_revision_status_provider<F>(self, provider: F) -> Self
+    where
+        F: Fn() -> Vec<serde_json::Value> + Send + Sync + 'static,
+    {
+        *self.revision_status_provider.write() = Some(Arc::new(provider));
+        self
+    }
+
+    /// Snapshot loaded daemon revision statuses visible to this LSP session.
+    #[must_use]
+    pub fn revision_statuses(&self) -> Vec<serde_json::Value> {
+        self.revision_status_provider
+            .read()
+            .as_ref()
+            .map_or_else(Vec::new, |provider| provider())
     }
 }
 

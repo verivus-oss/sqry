@@ -130,6 +130,13 @@ fn mk_search_args(query: &str, workspace: String) -> SemanticSearchArgs {
         budget_rows: None,
         framework: None,
         resolved_via: None,
+        revision_id: None,
+        revision_ref: None,
+        revision_commit: None,
+        revision_tree: None,
+        revision_dirty: false,
+        revision_include_untracked: false,
+        revision_include_ignored: false,
     }
 }
 

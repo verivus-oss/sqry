@@ -25,6 +25,7 @@ pub mod hook;
 pub mod loaded;
 pub mod manager;
 pub mod persisted_state;
+pub mod revision;
 pub mod staleness;
 pub mod state;
 pub mod status;
@@ -39,6 +40,9 @@ pub(crate) use manager::clone_err;
 pub use manager::{RebuildReservation, ServeVerdict, WorkspaceManager};
 pub use persisted_state::{
     PersistedState, PersistedStateError, load_persisted_state, parse_persisted_state,
+};
+pub use revision::{
+    ResidentQueryGuard, ResidentRevisionHandle, ResidentRevisionLoad, ResidentRevisionRegistry,
 };
 pub use staleness::{BACKOFF_SCHEDULE, StalenessVerdict, backoff_delay_for, classify_staleness};
 pub use state::{OldGraphToken, WorkspaceKey, WorkspaceState, wire_workspace_id_from_core};

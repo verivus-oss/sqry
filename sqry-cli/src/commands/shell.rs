@@ -260,6 +260,7 @@ fn execute_query(cli: &Cli, session: &SessionManager, workspace: &Path, query: &
         index_age_seconds: None,
         used_ancestor_index: None,
         filtered_to: None,
+        revision: None,
     };
 
     formatter.format(&results, Some(&metadata), &mut streams)?;

@@ -52,8 +52,15 @@ pub mod tool_core;
 pub mod validation;
 
 pub use protocol::{
-    CancelRebuildResult, DaemonHello, DaemonHelloResponse, JsonRpcError, JsonRpcId, JsonRpcPayload,
-    JsonRpcRequest, JsonRpcResponse, JsonRpcVersion, RebuildResult, ResponseEnvelope, ResponseMeta,
+    ArtifactId, ArtifactInputDigest, CancelRebuildResult, DaemonHello, DaemonHelloResponse,
+    JsonRpcError, JsonRpcId, JsonRpcPayload, JsonRpcRequest, JsonRpcResponse, JsonRpcVersion,
+    ListRevisionsRequest, ListRevisionsResult, LoadRevisionRequest, LoadRevisionResult,
+    ObjectFormat, PruneRefusal, PruneRevisionCandidate, PruneRevisionsRequest,
+    PruneRevisionsResult, PruneWorktreeCandidate, RebuildResult, RepositoryIdentity,
+    ResidentHandleKind, ResolvedRevision, ResponseEnvelope, ResponseMeta, RevisionId,
+    RevisionLoadState, RevisionQueryMetadata, RevisionQueryTarget, RevisionSelector,
+    RevisionStatus, RevisionStatusRequest, SourceByteMode, UnloadRevisionRequest,
+    UnloadRevisionResult,
 };
 pub use server::IpcServer;
 pub use shim_registry::{ShimConnEntry, ShimConnId, ShimHandle, ShimRegistry};

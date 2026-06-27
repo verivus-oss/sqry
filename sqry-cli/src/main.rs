@@ -40,7 +40,7 @@ macro_rules! large_stack_test {
 pub(crate) use large_stack_test;
 
 use anyhow::{Context, Result};
-use args::{Cli, Command, ValidationMode};
+use args::{Cli, Command, RevisionQueryArgs, ValidationMode};
 use clap::FromArgMatches;
 use miette::{GraphicalReportHandler, GraphicalTheme};
 use output::OutputStreams;
@@ -398,6 +398,7 @@ fn run() -> Result<()> {
             cfg_filter,
             include_generated,
             macro_boundaries,
+            revision,
             verbose,
         }) => {
             let args = SearchCommandArgs {
@@ -416,6 +417,7 @@ fn run() -> Result<()> {
                 cfg_filter: cfg_filter.as_deref(),
                 include_generated: *include_generated,
                 macro_boundaries: *macro_boundaries,
+                revision,
                 verbose: *verbose,
             };
             handle_search_command(&args)?;
@@ -436,6 +438,7 @@ fn run() -> Result<()> {
             limit,
             validate,
             var,
+            revision,
             ..
         }) => handle_query_command(
             &cli,
@@ -452,6 +455,7 @@ fn run() -> Result<()> {
             *limit,
             *validate,
             var,
+            revision,
             &history_argv,
         )?,
 
@@ -1014,6 +1018,7 @@ struct SearchCommandArgs<'a> {
     cfg_filter: Option<&'a str>,
     include_generated: bool,
     macro_boundaries: bool,
+    revision: &'a RevisionQueryArgs,
     /// Per-subcommand `--verbose` / `-v` flag from `sqry search`. The shorthand
     /// path threads `cli.verbose` instead; either source enables verbose at the
     /// `run_search` call site.
@@ -1039,6 +1044,7 @@ fn handle_search_command(args: &SearchCommandArgs<'_>) -> Result<()> {
         args.cfg_filter,
         args.include_generated,
         args.macro_boundaries,
+        args.revision,
         args.verbose,
     );
 
@@ -1080,6 +1086,7 @@ fn handle_query_command(
     limit: Option<usize>,
     validate: ValidationMode,
     variables: &[String],
+    revision: &RevisionQueryArgs,
     history_argv: &[String],
 ) -> Result<()> {
     // Validate mutual exclusivity of --session and --no-parallel
@@ -1115,6 +1122,7 @@ fn handle_query_command(
         timeout,
         limit,
         variables,
+        revision,
     );
 
     // Record in history (after execution, regardless of result)
@@ -1384,6 +1392,7 @@ fn handle_no_command(cli: &Cli, history_argv: &[String]) -> Result<()> {
         // documented defaults explicitly (None / false / false). `verbose`
         // is sourced from the top-level `--verbose` flag on `Cli`; env-driven
         // enablement (SQRY_LOG / RUST_LOG) is layered inside `run_search`.
+        let revision = RevisionQueryArgs::default();
         let result = commands::run_search(
             cli,
             pattern,
@@ -1391,6 +1400,7 @@ fn handle_no_command(cli: &Cli, history_argv: &[String]) -> Result<()> {
             None,
             false,
             false,
+            &revision,
             cli.verbose,
         );
 

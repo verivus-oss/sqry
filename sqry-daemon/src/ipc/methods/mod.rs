@@ -27,8 +27,12 @@
 pub mod daemon_active_artifacts;
 pub mod daemon_cancel_rebuild;
 pub mod daemon_load;
+pub mod daemon_load_revision;
+pub mod daemon_prune_revisions;
+pub mod daemon_query;
 pub mod daemon_rebuild;
 pub mod daemon_reset;
+pub mod daemon_revision_status;
 pub mod daemon_search;
 pub mod daemon_status;
 pub mod daemon_stop;
@@ -291,6 +295,11 @@ pub(crate) async fn dispatch(
     let result = match req.method.as_str() {
         "daemon/status" => daemon_status::handle(ctx, req.params),
         "daemon/load" => daemon_load::handle(ctx, conn, req.params).await,
+        "daemon/loadRevision" => daemon_load_revision::handle_load(ctx, req.params).await,
+        "daemon/unloadRevision" => daemon_load_revision::handle_unload(ctx, req.params),
+        "daemon/listRevisions" => daemon_revision_status::handle_list(ctx, req.params),
+        "daemon/revisionStatus" => daemon_revision_status::handle_status(ctx, req.params),
+        "daemon/pruneRevisions" => daemon_prune_revisions::handle(ctx, req.params),
         "daemon/unload" => daemon_unload::handle(ctx, req.params),
         "daemon/stop" => daemon_stop::handle(ctx, req.params),
         "daemon/rebuild" => daemon_rebuild::handle(ctx, req.params).await,
@@ -299,6 +308,9 @@ pub(crate) async fn dispatch(
         // GraphAcquirer boundary so post-eviction reload works. See
         // `daemon_search` module docs for the parity contract.
         "daemon/search" => daemon_search::handle(ctx, req.params).await,
+        // RWS11: structural query route. Omitted revision targets use the
+        // live workspace path; explicit targets query resident revisions only.
+        "daemon/query" => daemon_query::handle(ctx, req.params).await,
         // STEP_6 (workspace-aware-cross-repo): aggregate
         // per-source-root rollup of every WorkspaceKey grouped under
         // the requested `workspace_id`. See

@@ -1,7 +1,8 @@
 // RKG: CODE:SQRY-CLI implements REQ:SQRY-RUBY-QUALIFIED-CALLERS
 //! Query command implementation
 
-use crate::args::Cli;
+use crate::args::{Cli, RevisionQueryArgs};
+use crate::commands::daemon::revision_query_target_from_args;
 use crate::index_discovery::{augment_query_with_scope, find_nearest_index};
 use crate::output::{
     DisplaySymbol, OutputStreams, call_identity_from_qualified_name, create_formatter,
@@ -152,6 +153,7 @@ pub fn run_query(
     timeout_secs: Option<u64>,
     result_limit: Option<usize>,
     variables: &[String],
+    revision: &RevisionQueryArgs,
 ) -> Result<()> {
     // Create output streams with optional pager support
     let mut streams = OutputStreams::with_pager(cli.pager_config());
@@ -175,6 +177,33 @@ pub fn run_query(
     } else {
         Some(&parsed_variables)
     };
+
+    if let Some(revision_target) = revision_query_target_from_args(revision)? {
+        if explain {
+            anyhow::bail!("revision query does not support --explain");
+        }
+        if session_mode {
+            anyhow::bail!("revision query does not support --session");
+        }
+        if no_parallel {
+            anyhow::bail!("revision query does not support --no-parallel");
+        }
+        if cli.text {
+            anyhow::bail!("revision query does not support --text");
+        }
+        if variables_opt.is_some() {
+            anyhow::bail!("revision query does not support --var");
+        }
+        run_query_with_daemon_revision(
+            cli,
+            &mut streams,
+            query_string,
+            search_path,
+            result_limit,
+            revision_target,
+        )?;
+        return streams.finish_checked();
+    }
 
     // SGA03 Major #3 fix — strict invalid-path validation must run before
     // pipeline/join dispatch so a malformed path produces an `invalid path`
@@ -298,6 +327,104 @@ fn maybe_emit_security_diagnostics(
         ))?;
     }
     Ok(())
+}
+
+fn run_query_with_daemon_revision(
+    cli: &Cli,
+    streams: &mut OutputStreams,
+    query_string: &str,
+    search_path: &str,
+    result_limit: Option<usize>,
+    revision: sqry_daemon_protocol::RevisionQueryTarget,
+) -> Result<()> {
+    let socket_path = sqry_daemon::config::DaemonConfig::load()
+        .context("revision query requires a running sqry daemon configuration")?
+        .socket_path();
+    let request = sqry_daemon_protocol::QueryRequest {
+        envelope_version: sqry_daemon_protocol::ENVELOPE_VERSION,
+        query: query_string.to_owned(),
+        search_path: search_path.to_owned(),
+        limit: result_limit.map(|limit| u32::try_from(limit).unwrap_or(u32::MAX)),
+        revision: Some(revision),
+    };
+    let started = Instant::now();
+    let envelope = run_daemon_query_request(socket_path, request)?;
+    let elapsed = started.elapsed();
+    let revision = envelope
+        .result
+        .revision
+        .map(serde_json::to_value)
+        .transpose()?;
+    let total_matches = usize::try_from(envelope.result.total).unwrap_or(usize::MAX);
+    let symbols: Vec<DisplaySymbol> = envelope
+        .result
+        .items
+        .into_iter()
+        .map(daemon_query_item_to_display_symbol)
+        .collect();
+
+    let metadata = crate::output::FormatterMetadata {
+        pattern: Some(query_string.to_owned()),
+        total_matches,
+        execution_time: elapsed,
+        filters: sqry_core::json_response::Filters {
+            kind: None,
+            lang: None,
+            ignore_case: false,
+            exact: false,
+            fuzzy: None,
+        },
+        index_age_seconds: None,
+        used_ancestor_index: None,
+        filtered_to: None,
+        revision,
+    };
+    let formatter = create_formatter(cli);
+    formatter.format(&symbols, Some(&metadata), streams)?;
+    Ok(())
+}
+
+fn run_daemon_query_request(
+    socket_path: PathBuf,
+    request: sqry_daemon_protocol::QueryRequest,
+) -> Result<sqry_daemon_protocol::ResponseEnvelope<sqry_daemon_protocol::QueryResult>> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("failed to build tokio runtime for daemon query")?;
+    rt.block_on(async move {
+        let mut client = sqry_daemon_client::DaemonClient::connect(&socket_path)
+            .await
+            .with_context(|| format!("failed to connect to daemon at {}", socket_path.display()))?;
+        let value = client
+            .send_request("daemon/query", serde_json::to_value(request)?)
+            .await
+            .context("daemon/query failed")?;
+        serde_json::from_value(value).context("daemon/query response schema mismatch")
+    })
+}
+
+fn daemon_query_item_to_display_symbol(item: sqry_daemon_protocol::SearchItem) -> DisplaySymbol {
+    let file_path = PathBuf::from(&item.file_path);
+    let mut metadata = std::collections::HashMap::new();
+    metadata.insert(
+        "__raw_file_path".to_owned(),
+        file_path.to_string_lossy().to_string(),
+    );
+    metadata.insert("__raw_language".to_owned(), item.language.clone());
+    DisplaySymbol {
+        name: item.name,
+        qualified_name: item.qualified_name,
+        kind: item.kind,
+        file_path,
+        start_line: item.start_line as usize,
+        start_column: item.start_column as usize,
+        end_line: item.end_line as usize,
+        end_column: item.end_column as usize,
+        metadata,
+        caller_identity: None,
+        callee_identity: None,
+    }
 }
 
 fn run_query_explain(
@@ -1145,6 +1272,7 @@ fn build_formatter_metadata(
             None
         },
         filtered_to: index_info.filtered_to.clone(),
+        revision: None,
     }
 }
 

@@ -1,6 +1,7 @@
 //! Symbol search command implementation
 
-use crate::args::Cli;
+use crate::args::{Cli, RevisionQueryArgs};
+use crate::commands::daemon::revision_query_target_from_args;
 use crate::commands::graph::loader::{GraphLoadConfig, load_unified_graph_for_cli};
 use crate::index_discovery::find_nearest_index;
 use crate::output::{
@@ -319,16 +320,25 @@ fn build_daemon_search_request(
     pattern: &str,
     search_path: &str,
     macro_flags: &MacroBoundaryFlags<'_>,
+    revision: Option<sqry_daemon_protocol::RevisionQueryTarget>,
 ) -> sqry_daemon_protocol::SearchRequest {
+    let mode = if cli.fuzzy {
+        sqry_daemon_protocol::SearchMode::Fuzzy
+    } else if cli.exact {
+        sqry_daemon_protocol::SearchMode::Exact
+    } else {
+        sqry_daemon_protocol::SearchMode::Regex
+    };
     sqry_daemon_protocol::SearchRequest {
         envelope_version: sqry_daemon_protocol::ENVELOPE_VERSION,
         pattern: pattern.to_string(),
         search_path: search_path.to_string(),
-        mode: sqry_daemon_protocol::SearchMode::Exact,
+        mode,
         kind: cli.kind.map(|k| k.to_string().to_lowercase()),
         lang: cli.lang.clone(),
         limit: cli.limit.map(|l| u32::try_from(l).unwrap_or(u32::MAX)),
         include_generated: macro_flags.include_generated,
+        revision,
     }
 }
 
@@ -350,13 +360,21 @@ fn try_daemon_search(
     pattern: &str,
     search_path: &str,
     macro_flags: &MacroBoundaryFlags<'_>,
+    revision: Option<sqry_daemon_protocol::RevisionQueryTarget>,
     verbose: bool,
-) -> Option<sqry_daemon_protocol::SearchResult> {
+) -> Result<Option<sqry_daemon_protocol::SearchResult>> {
+    let requires_daemon = revision.is_some();
     // Resolve socket path. Missing/malformed config is treated as
     // "daemon unavailable" — fall through without diagnostic.
     let socket_path = sqry_daemon::config::DaemonConfig::load()
         .ok()
-        .map(|c| c.socket_path())?;
+        .map(|c| c.socket_path());
+    let Some(socket_path) = socket_path else {
+        if requires_daemon {
+            anyhow::bail!("revision search requires a running sqry daemon configuration");
+        }
+        return Ok(None);
+    };
 
     // Spin a current-thread tokio runtime for the async client. The runtime
     // is dropped before this function returns, so its bookkeeping never
@@ -364,9 +382,15 @@ fn try_daemon_search(
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .ok()?;
+        .ok();
+    let Some(rt) = rt else {
+        if requires_daemon {
+            anyhow::bail!("revision search could not create a tokio runtime");
+        }
+        return Ok(None);
+    };
 
-    let req = build_daemon_search_request(cli, pattern, search_path, macro_flags);
+    let req = build_daemon_search_request(cli, pattern, search_path, macro_flags, revision);
     let search_path_owned = PathBuf::from(search_path);
 
     rt.block_on(async move {
@@ -382,43 +406,96 @@ fn try_daemon_search(
             sqry_daemon_client::DaemonClient::connect_with_timeouts(&socket_path, probe, probe)
                 .await
         else {
-            return None;
+            if requires_daemon {
+                anyhow::bail!(
+                    "revision search requires sqryd at {}",
+                    socket_path.display()
+                );
+            }
+            return Ok(None);
         };
 
         // Workspace-Loaded gate. Forcing the daemon to load synchronously
         // would defeat the latency goal — verify state via `daemon/status`
         // and fall through if not yet loaded.
-        let status_val = tokio::time::timeout(DAEMON_SEARCH_RPC_TIMEOUT, client.status())
-            .await
-            .ok()?
-            .ok()?;
+        let status_val =
+            match tokio::time::timeout(DAEMON_SEARCH_RPC_TIMEOUT, client.status()).await {
+                Ok(Ok(status)) => status,
+                Ok(Err(err)) => {
+                    if requires_daemon {
+                        anyhow::bail!("revision search could not read daemon status: {err}");
+                    }
+                    return Ok(None);
+                }
+                Err(_) => {
+                    if requires_daemon {
+                        anyhow::bail!("revision search timed out while reading daemon status");
+                    }
+                    return Ok(None);
+                }
+            };
         if !workspace_is_loaded_for(&status_val, &search_path_owned) {
             emit_daemon_verbose(verbose, "workspace not loaded in daemon; using in-process");
-            return None;
+            if requires_daemon {
+                anyhow::bail!(
+                    "revision search requires the live workspace {} to be loaded in sqryd",
+                    search_path_owned.display()
+                );
+            }
+            return Ok(None);
         }
 
         emit_daemon_verbose(verbose, "attached, querying via daemon");
 
-        let req_value = serde_json::to_value(&req).ok()?;
+        let req_value = match serde_json::to_value(&req) {
+            Ok(value) => value,
+            Err(err) => {
+                if requires_daemon {
+                    return Err(err).context("serialize daemon/search request");
+                }
+                return Ok(None);
+            }
+        };
         let started = Instant::now();
-        let resp_value = tokio::time::timeout(
+        let resp_value = match tokio::time::timeout(
             DAEMON_SEARCH_RPC_TIMEOUT,
             client.send_request("daemon/search", req_value),
         )
         .await
-        .ok()?
-        .ok()?;
+        {
+            Ok(Ok(value)) => value,
+            Ok(Err(err)) => {
+                if requires_daemon {
+                    return Err(err).context("daemon/search failed");
+                }
+                return Ok(None);
+            }
+            Err(err) => {
+                if requires_daemon {
+                    return Err(err).context("daemon/search timed out");
+                }
+                return Ok(None);
+            }
+        };
         let elapsed = started.elapsed();
 
         let envelope: sqry_daemon_protocol::ResponseEnvelope<sqry_daemon_protocol::SearchResult> =
-            serde_json::from_value(resp_value).ok()?;
+            match serde_json::from_value(resp_value) {
+                Ok(envelope) => envelope,
+                Err(err) => {
+                    if requires_daemon {
+                        return Err(err).context("daemon/search response schema mismatch");
+                    }
+                    return Ok(None);
+                }
+            };
 
         emit_daemon_verbose(
             verbose,
             &format!("daemon search complete in {}ms", elapsed.as_millis()),
         );
 
-        Some(envelope.result)
+        Ok(Some(envelope.result))
     })
 }
 
@@ -462,7 +539,7 @@ fn search_item_to_display_symbol(item: sqry_daemon_protocol::SearchItem) -> Disp
 fn finalize_daemon_search(
     cli: &Cli,
     pattern: &str,
-    result: sqry_daemon_protocol::SearchResult,
+    mut result: sqry_daemon_protocol::SearchResult,
     started: Instant,
 ) -> Result<()> {
     // `count` is wire-stable post-filter, pre-truncate per the daemon
@@ -492,7 +569,14 @@ fn finalize_daemon_search(
     let limit = cli.limit.unwrap_or(100);
     let execution_time = started.elapsed();
 
-    let metadata = build_search_metadata(cli, pattern, None, None, total_matches, execution_time);
+    let revision = result
+        .revision
+        .take()
+        .map(serde_json::to_value)
+        .transpose()?;
+    let mut metadata =
+        build_search_metadata(cli, pattern, None, None, total_matches, execution_time);
+    metadata.revision = revision;
 
     let formatter = create_formatter(cli);
     let mut streams = OutputStreams::with_pager(cli.pager_config());
@@ -690,6 +774,7 @@ fn build_search_metadata(
         index_age_seconds,
         used_ancestor_index,
         filtered_to,
+        revision: None,
     }
 }
 
@@ -711,6 +796,7 @@ pub fn run_search(
     cfg_filter: Option<&str>,
     include_generated: bool,
     macro_boundaries: bool,
+    revision: &RevisionQueryArgs,
     verbose: bool,
 ) -> Result<()> {
     let macro_flags = MacroBoundaryFlags {
@@ -743,11 +829,29 @@ pub fn run_search(
     // skips fuzzy / JSON-stream / macro-boundary paths where the in-process
     // pipeline carries semantics the daemon does not yet replicate
     // (fuzzy-tuning knobs, streaming events, macro-metadata filtering).
-    if should_attempt_daemon(cli, &macro_flags) {
+    let revision_target = revision_query_target_from_args(revision)?;
+    let explicit_revision = revision_target.is_some();
+    if explicit_revision
+        && (cli.json_stream || macro_flags.cfg_filter.is_some() || macro_flags.macro_boundaries)
+    {
+        anyhow::bail!(
+            "revision search does not support --json-stream, --cfg-filter, or --macro-boundaries"
+        );
+    }
+    if explicit_revision && cli.ignore_case {
+        anyhow::bail!("revision search does not support --ignore-case");
+    }
+
+    if explicit_revision || should_attempt_daemon(cli, &macro_flags) {
         let daemon_started = Instant::now();
-        if let Some(result) =
-            try_daemon_search(cli, pattern, search_path, &macro_flags, verbose_effective)
-        {
+        if let Some(result) = try_daemon_search(
+            cli,
+            pattern,
+            search_path,
+            &macro_flags,
+            revision_target,
+            verbose_effective,
+        )? {
             return finalize_daemon_search(cli, pattern, result, daemon_started);
         }
     }
@@ -2144,7 +2248,7 @@ mod tests {
                 macro_boundaries: false,
             };
 
-            let req = build_daemon_search_request(&cli, "needle", "/tmp/ws", &flags);
+            let req = build_daemon_search_request(&cli, "needle", "/tmp/ws", &flags, None);
             assert_eq!(req.pattern, "needle");
             assert_eq!(req.search_path, "/tmp/ws");
             assert_eq!(req.mode, SearchMode::Exact);
@@ -2174,7 +2278,7 @@ mod tests {
                 include_generated: false,
                 macro_boundaries: false,
             };
-            let req = build_daemon_search_request(&cli, "x", "/tmp/ws", &flags);
+            let req = build_daemon_search_request(&cli, "x", "/tmp/ws", &flags, None);
             assert_eq!(req.limit, Some(u32::MAX));
         }
     }
@@ -2193,7 +2297,7 @@ mod tests {
                 include_generated: true,
                 macro_boundaries: false,
             };
-            let req = build_daemon_search_request(&cli, "x", "/tmp/ws", &flags);
+            let req = build_daemon_search_request(&cli, "x", "/tmp/ws", &flags, None);
             assert!(req.include_generated);
         }
     }
@@ -2267,6 +2371,7 @@ mod tests {
             total: 7,
             truncated: true,
             cursor: None,
+            revision: None,
         };
 
             // We don't capture stdout here — the contract is that the function

@@ -48,7 +48,12 @@ pub mod management;
 
 pub use management::{DEFAULT_HELLO_TIMEOUT, DaemonClient};
 pub use sqry_daemon_protocol::{
-    ENVELOPE_VERSION, ShimProtocol, ShimRegister, ShimRegisterAck, framing,
+    ArtifactId, ArtifactInputDigest, ENVELOPE_VERSION, ListRevisionsRequest, ListRevisionsResult,
+    LoadRevisionRequest, LoadRevisionResult, ObjectFormat, PruneRevisionCandidate,
+    PruneRevisionsRequest, PruneRevisionsResult, RepositoryIdentity, ResidentHandleKind,
+    ResolvedRevision, RevisionId, RevisionLoadState, RevisionQueryMetadata, RevisionQueryTarget,
+    RevisionSelector, RevisionStatus, RevisionStatusRequest, ShimProtocol, ShimRegister,
+    ShimRegisterAck, SourceByteMode, UnloadRevisionRequest, UnloadRevisionResult, framing,
 };
 
 use std::path::{Path, PathBuf};

@@ -17,6 +17,12 @@ use std::{path::Path, sync::Arc};
 use sqry_core::graph::CodeGraph;
 
 use crate::error::DaemonError;
+use crate::workspace::revision::{
+    ArtifactKeyInputs, ArtifactPublishResult, DirtySnapshotOptions, DirtySnapshotSource,
+    RawGitSource, RawGitSourceOptions, RevisionArtifactStore, VirtualSourceReader,
+    materialize_virtual_source,
+};
+use sqry_daemon_protocol::{ArtifactId, ResolvedRevision};
 
 #[cfg(test)]
 fn hex_lower(bytes: &[u8]) -> String {
@@ -73,6 +79,24 @@ pub trait WorkspaceBuilder: Send + Sync + std::fmt::Debug {
             reason: "persisted graph rehydrate not implemented for this builder".to_string(),
         })
     }
+
+    /// Build from a virtual revision source by materializing regular raw
+    /// source entries into a temporary parser input tree.
+    ///
+    /// Symlinks, gitlinks, deletions, too-large files, and unsupported states
+    /// stay represented by the virtual source and are not followed or parsed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DaemonError`] if virtual source materialization fails or if
+    /// the underlying filesystem graph build fails.
+    fn build_virtual_source(
+        &self,
+        source: &dyn VirtualSourceReader,
+    ) -> Result<CodeGraph, DaemonError> {
+        let materialized = materialize_virtual_source(source)?;
+        self.build(materialized.root())
+    }
 }
 
 // Allow calling builders through an `Arc` so they can be shared
@@ -84,6 +108,13 @@ impl<T: WorkspaceBuilder + ?Sized> WorkspaceBuilder for Arc<T> {
 
     fn load_persisted(&self, workspace_root: &Path) -> Result<CodeGraph, DaemonError> {
         (**self).load_persisted(workspace_root)
+    }
+
+    fn build_virtual_source(
+        &self,
+        source: &dyn VirtualSourceReader,
+    ) -> Result<CodeGraph, DaemonError> {
+        (**self).build_virtual_source(source)
     }
 }
 
@@ -177,6 +208,76 @@ impl RealWorkspaceBuilder {
             plugins,
             build_config,
         }
+    }
+
+    /// Build a graph from an immutable raw Git tree source.
+    ///
+    /// This path reads Git blob objects directly, materializes only eligible
+    /// regular blobs into a temporary parser input tree, and then reuses the
+    /// existing graph build pipeline. It never builds from checkout-filtered
+    /// worktree bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DaemonError::RevisionObjectMissing`] for locally missing Git
+    /// objects, [`DaemonError::RevisionSourceUnavailable`] for source material
+    /// failures, or [`DaemonError::WorkspaceBuildFailed`] for graph build
+    /// failures.
+    pub fn build_raw_git_tree(
+        &self,
+        options: RawGitSourceOptions,
+    ) -> Result<CodeGraph, DaemonError> {
+        let source = RawGitSource::open(options)?;
+        self.build_virtual_source(&source)
+    }
+
+    /// Capture and build a resident-only dirty snapshot graph.
+    ///
+    /// Dirty snapshots are not published to the immutable artifact store by this
+    /// method. The caller can use [`DirtySnapshotSource::fingerprint`] to create
+    /// a resident revision identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DaemonError::DirtySnapshotChanged`] when the worktree mutates
+    /// repeatedly during capture, or a build/source error when captured bytes
+    /// cannot be materialized or parsed.
+    pub fn build_dirty_snapshot(
+        &self,
+        options: &DirtySnapshotOptions,
+    ) -> Result<(CodeGraph, DirtySnapshotSource), DaemonError> {
+        for attempt in 0..=1 {
+            let source = DirtySnapshotSource::capture_once(options)?;
+            let graph = self.build_virtual_source(&source)?;
+            let validation = DirtySnapshotSource::capture_once(options)?;
+            if source.fingerprint().snapshot_digest == validation.fingerprint().snapshot_digest {
+                return Ok((graph, source));
+            }
+            if attempt == 1 {
+                return Err(DaemonError::DirtySnapshotChanged {
+                    root: options.repo_root.clone(),
+                });
+            }
+        }
+        unreachable!("dirty snapshot build returns on success or final retry failure")
+    }
+
+    /// Build and publish an immutable raw Git revision artifact.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DaemonError`] if raw source traversal, graph construction, or
+    /// artifact publication fails.
+    pub fn build_and_publish_raw_git_artifact(
+        &self,
+        source_options: RawGitSourceOptions,
+        store: &RevisionArtifactStore,
+        artifact_id: ArtifactId,
+        resolved_revision: ResolvedRevision,
+        key_inputs: ArtifactKeyInputs,
+    ) -> Result<ArtifactPublishResult, DaemonError> {
+        let graph = self.build_raw_git_tree(source_options)?;
+        store.publish_graph(&graph, artifact_id, resolved_revision, key_inputs, None)
     }
 }
 
@@ -368,5 +469,71 @@ mod tests {
             }
             other => panic!("expected DaemonError::WorkspaceIncompatibleGraph, got {other:?}"),
         }
+    }
+
+    #[derive(Debug)]
+    struct RecordingBuilder;
+
+    impl WorkspaceBuilder for RecordingBuilder {
+        fn build(&self, workspace_root: &Path) -> Result<CodeGraph, DaemonError> {
+            let source = std::fs::read(workspace_root.join("src/lib.rs")).map_err(|err| {
+                DaemonError::WorkspaceBuildFailed {
+                    root: workspace_root.to_path_buf(),
+                    reason: err.to_string(),
+                }
+            })?;
+            assert_eq!(source, b"fn main() {}\n");
+            assert!(!workspace_root.join("link").exists());
+            Ok(CodeGraph::new())
+        }
+    }
+
+    #[derive(Debug)]
+    struct FakeVirtualSource {
+        entries: Vec<crate::workspace::revision::VirtualSourceEntry>,
+    }
+
+    impl crate::workspace::revision::VirtualSourceReader for FakeVirtualSource {
+        fn entries(&self) -> &[crate::workspace::revision::VirtualSourceEntry] {
+            &self.entries
+        }
+
+        fn read_entry_bytes(
+            &self,
+            entry: &crate::workspace::revision::VirtualSourceEntry,
+        ) -> Result<Vec<u8>, DaemonError> {
+            if entry.path.display_lossy() == "src/lib.rs" {
+                Ok(b"fn main() {}\n".to_vec())
+            } else {
+                unreachable!("non-regular virtual entries must not be read")
+            }
+        }
+    }
+
+    #[test]
+    fn workspace_builder_materializes_virtual_regular_files_only() {
+        use crate::workspace::revision::{VirtualPath, VirtualSourceEntry, VirtualSourceKind};
+
+        let source = FakeVirtualSource {
+            entries: vec![
+                VirtualSourceEntry::new(
+                    VirtualPath::from_git_path_bytes(b"src/lib.rs".to_vec()).unwrap(),
+                    VirtualSourceKind::RegularFile,
+                    Some("a".repeat(40)),
+                    Some(13),
+                ),
+                VirtualSourceEntry::new(
+                    VirtualPath::from_git_path_bytes(b"link".to_vec()).unwrap(),
+                    VirtualSourceKind::Symlink,
+                    Some("b".repeat(40)),
+                    Some(10),
+                ),
+            ],
+        };
+
+        let graph = RecordingBuilder
+            .build_virtual_source(&source)
+            .expect("virtual source build should delegate through temp tree");
+        assert_eq!(graph.node_count(), 0);
     }
 }

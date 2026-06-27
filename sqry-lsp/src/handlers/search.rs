@@ -18,6 +18,12 @@ pub fn execute(session: &SessionManager, params: &SqrySearchParams) -> Result<Sq
     }
     let limit = requested_limit.min(configured_limit);
 
+    if has_revision_selector(params) {
+        anyhow::bail!(
+            "sqry/search revision selectors require daemon-backed revision search with a loaded revision"
+        );
+    }
+
     let root = session.resolve_path(params.path.as_deref())?;
     let query = params.query.trim();
 
@@ -39,6 +45,7 @@ pub fn execute(session: &SessionManager, params: &SqrySearchParams) -> Result<Sq
             total: 0,
             is_truncated: false,
             used_index: true,
+            revision: None,
         });
     };
 
@@ -96,5 +103,14 @@ pub fn execute(session: &SessionManager, params: &SqrySearchParams) -> Result<Sq
         total,
         is_truncated: truncated,
         used_index: true, // Always uses CodeGraph
+        revision: None,
     })
+}
+
+fn has_revision_selector(params: &SqrySearchParams) -> bool {
+    params.revision_id.is_some()
+        || params.revision_ref.is_some()
+        || params.revision_commit.is_some()
+        || params.revision_tree.is_some()
+        || params.revision_dirty
 }

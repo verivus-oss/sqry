@@ -29,6 +29,7 @@ use anyhow::{Context, anyhow};
 use serde::Deserialize;
 
 use crate::error::{DaemonError, DaemonResult};
+use crate::workspace::revision::{ManifestHashError, canonical_json_sha256};
 
 // ---------------------------------------------------------------------------
 // Public constants (Amendment 2 §G.6 — admission working-set rule).
@@ -235,6 +236,21 @@ pub const DEFAULT_COST_GATE_MIN_PREFIX: usize = 3;
 // Earlier the daemon defaulted to 3, leaving a 1-char drift between
 // the in-process executor and daemon-hosted MCP gates.
 pub const DEFAULT_COST_GATE_MIN_LITERAL: usize = 4;
+/// Default on-disk budget for revision graph artifacts: 10 GiB.
+pub const DEFAULT_REVISION_ARTIFACT_MAX_DISK_BYTES: u64 = 10 * 1024 * 1024 * 1024;
+/// Default per-repository on-disk budget for revision graph artifacts: 2 GiB.
+pub const DEFAULT_REVISION_ARTIFACT_MAX_REPO_DISK_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+/// Current revision graph key schema version.
+pub const DEFAULT_REVISION_GRAPH_SCHEMA_VERSION: u32 = 1;
+/// Current derived revision graph schema version.
+pub const DEFAULT_REVISION_DERIVED_SCHEMA_VERSION: u32 = 1;
+/// Default safe prefix for daemon-created agent worktree branches.
+pub const DEFAULT_MANAGED_WORKTREE_BRANCH_PREFIX: &str = "sqry/agent/";
+/// Protected branch names that managed agent worktrees must not target.
+pub const DEFAULT_MANAGED_WORKTREE_PROTECTED_BRANCHES: &[&str] =
+    &["main", "master", "release-control"];
+/// Protected branch prefixes that managed agent worktrees must not target.
+pub const DEFAULT_MANAGED_WORKTREE_PROTECTED_PREFIXES: &[&str] = &["release/", "release-control/"];
 
 // ---------------------------------------------------------------------------
 // Config structs.
@@ -362,6 +378,14 @@ pub struct DaemonConfig {
     #[serde(default)]
     pub workspaces: Vec<WorkspaceConfig>,
 
+    /// Revision graph artifact key/storage configuration.
+    #[serde(default)]
+    pub revision_artifacts: RevisionArtifactConfig,
+
+    /// Daemon-owned managed worktree root and branch safety policy.
+    #[serde(default)]
+    pub managed_worktrees: ManagedWorktreeConfig,
+
     /// Timeout (seconds) used in two places:
     ///
     /// 1. **`--detach` parent wait loop** (`run_start_detach`): how long the
@@ -440,12 +464,73 @@ impl Default for DaemonConfig {
             log_max_size_mb: DEFAULT_LOG_MAX_SIZE_MB,
             socket: SocketConfig::default(),
             workspaces: Vec::new(),
+            revision_artifacts: RevisionArtifactConfig::default(),
+            managed_worktrees: ManagedWorktreeConfig::default(),
             auto_start_ready_timeout_secs: DEFAULT_AUTO_START_READY_TIMEOUT_SECS,
             log_keep_rotations: DEFAULT_LOG_KEEP_ROTATIONS,
             install_user_service: false,
             cost_gate_node_limit: Some(DEFAULT_COST_GATE_NODE_LIMIT),
             cost_gate_min_prefix: Some(DEFAULT_COST_GATE_MIN_PREFIX),
             cost_gate_min_literal: Some(DEFAULT_COST_GATE_MIN_LITERAL),
+        }
+    }
+}
+
+/// Revision graph artifact configuration.
+#[derive(Debug, Clone, Deserialize, serde::Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RevisionArtifactConfig {
+    /// Maximum disk bytes reserved for all revision graph artifacts.
+    #[serde(default = "default_revision_artifact_max_disk_bytes")]
+    pub max_disk_bytes: u64,
+    /// Maximum disk bytes reserved for one repository identity.
+    #[serde(default = "default_revision_artifact_max_repo_disk_bytes")]
+    pub max_repo_disk_bytes: u64,
+    /// Artifact key graph schema version.
+    #[serde(default = "default_revision_graph_schema_version")]
+    pub graph_schema_version: u32,
+    /// Artifact key derived schema version.
+    #[serde(default = "default_revision_derived_schema_version")]
+    pub derived_schema_version: u32,
+}
+
+impl Default for RevisionArtifactConfig {
+    fn default() -> Self {
+        Self {
+            max_disk_bytes: DEFAULT_REVISION_ARTIFACT_MAX_DISK_BYTES,
+            max_repo_disk_bytes: DEFAULT_REVISION_ARTIFACT_MAX_REPO_DISK_BYTES,
+            graph_schema_version: DEFAULT_REVISION_GRAPH_SCHEMA_VERSION,
+            derived_schema_version: DEFAULT_REVISION_DERIVED_SCHEMA_VERSION,
+        }
+    }
+}
+
+/// Daemon-managed Git worktree configuration.
+#[derive(Debug, Clone, Deserialize, serde::Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ManagedWorktreeConfig {
+    /// Optional daemon-owned worktree root. When absent, the daemon cache root
+    /// `$XDG_CACHE_HOME/sqry/managed-worktrees` is used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root: Option<PathBuf>,
+    /// Allowed branch prefixes for branch-backed agent worktrees.
+    #[serde(default = "default_managed_worktree_branch_prefixes")]
+    pub safe_branch_prefixes: Vec<String>,
+    /// Protected exact branch names rejected for agent worktrees.
+    #[serde(default = "default_managed_worktree_protected_branches")]
+    pub protected_branches: Vec<String>,
+    /// Protected branch prefixes rejected for agent worktrees.
+    #[serde(default = "default_managed_worktree_protected_prefixes")]
+    pub protected_branch_prefixes: Vec<String>,
+}
+
+impl Default for ManagedWorktreeConfig {
+    fn default() -> Self {
+        Self {
+            root: None,
+            safe_branch_prefixes: default_managed_worktree_branch_prefixes(),
+            protected_branches: default_managed_worktree_protected_branches(),
+            protected_branch_prefixes: default_managed_worktree_protected_prefixes(),
         }
     }
 }
@@ -713,6 +798,37 @@ impl DaemonConfig {
         if self.log_keep_rotations == 0 || self.log_keep_rotations > 100 {
             return Err(reject("log_keep_rotations must be in 1..=100"));
         }
+        if self.revision_artifacts.max_disk_bytes == 0 {
+            return Err(reject("revision_artifacts.max_disk_bytes must be > 0"));
+        }
+        if self.revision_artifacts.max_repo_disk_bytes == 0 {
+            return Err(reject("revision_artifacts.max_repo_disk_bytes must be > 0"));
+        }
+        if self.revision_artifacts.graph_schema_version == 0 {
+            return Err(reject(
+                "revision_artifacts.graph_schema_version must be > 0",
+            ));
+        }
+        if self.revision_artifacts.derived_schema_version == 0 {
+            return Err(reject(
+                "revision_artifacts.derived_schema_version must be > 0",
+            ));
+        }
+        if self.managed_worktrees.safe_branch_prefixes.is_empty() {
+            return Err(reject(
+                "managed_worktrees.safe_branch_prefixes must not be empty",
+            ));
+        }
+        if self
+            .managed_worktrees
+            .safe_branch_prefixes
+            .iter()
+            .any(|prefix| prefix.trim().is_empty())
+        {
+            return Err(reject(
+                "managed_worktrees.safe_branch_prefixes must not contain empty prefixes",
+            ));
+        }
         Ok(())
     }
 
@@ -787,6 +903,35 @@ impl DaemonConfig {
     pub const fn memory_limit_bytes(&self) -> u64 {
         self.memory_limit_mb.saturating_mul(1024 * 1024)
     }
+
+    /// Deterministic fingerprint over graph-affecting daemon config.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ManifestHashError`] if deterministic JSON serialization fails.
+    pub fn revision_graph_config_hash(&self) -> Result<String, ManifestHashError> {
+        let inputs = RevisionGraphConfigHashInputs {
+            incremental_threshold: self.incremental_threshold,
+            closure_limit_percent: self.closure_limit_percent,
+            interner_compaction_threshold_bits: self.interner_compaction_threshold.to_bits(),
+            cost_gate_node_limit: self.cost_gate_node_limit,
+            cost_gate_min_prefix: self.cost_gate_min_prefix,
+            cost_gate_min_literal: self.cost_gate_min_literal,
+            revision_artifacts: self.revision_artifacts.clone(),
+        };
+        canonical_json_sha256(&inputs)
+    }
+}
+
+#[derive(serde::Serialize)]
+struct RevisionGraphConfigHashInputs {
+    incremental_threshold: usize,
+    closure_limit_percent: u32,
+    interner_compaction_threshold_bits: u32,
+    cost_gate_node_limit: Option<usize>,
+    cost_gate_min_prefix: Option<usize>,
+    cost_gate_min_literal: Option<usize>,
+    revision_artifacts: RevisionArtifactConfig,
 }
 
 /// Platform-specific per-user runtime directory for socket / pid / lock files.
@@ -912,6 +1057,33 @@ const fn default_cost_gate_min_prefix() -> Option<usize> {
 )]
 const fn default_cost_gate_min_literal() -> Option<usize> {
     Some(DEFAULT_COST_GATE_MIN_LITERAL)
+}
+const fn default_revision_artifact_max_disk_bytes() -> u64 {
+    DEFAULT_REVISION_ARTIFACT_MAX_DISK_BYTES
+}
+const fn default_revision_artifact_max_repo_disk_bytes() -> u64 {
+    DEFAULT_REVISION_ARTIFACT_MAX_REPO_DISK_BYTES
+}
+const fn default_revision_graph_schema_version() -> u32 {
+    DEFAULT_REVISION_GRAPH_SCHEMA_VERSION
+}
+const fn default_revision_derived_schema_version() -> u32 {
+    DEFAULT_REVISION_DERIVED_SCHEMA_VERSION
+}
+fn default_managed_worktree_branch_prefixes() -> Vec<String> {
+    vec![DEFAULT_MANAGED_WORKTREE_BRANCH_PREFIX.to_owned()]
+}
+fn default_managed_worktree_protected_branches() -> Vec<String> {
+    DEFAULT_MANAGED_WORKTREE_PROTECTED_BRANCHES
+        .iter()
+        .map(|branch| (*branch).to_owned())
+        .collect()
+}
+fn default_managed_worktree_protected_prefixes() -> Vec<String> {
+    DEFAULT_MANAGED_WORKTREE_PROTECTED_PREFIXES
+        .iter()
+        .map(|prefix| (*prefix).to_owned())
+        .collect()
 }
 
 /// Per-OS default daemon log file path. Returns
@@ -1691,6 +1863,179 @@ mod tests {
         );
         assert_eq!(cfg.log_keep_rotations, DEFAULT_LOG_KEEP_ROTATIONS);
         assert!(!cfg.install_user_service);
+    }
+
+    #[test]
+    fn rws03_revision_artifact_config_defaults_when_absent() {
+        let cfg = DaemonConfig::from_toml_str("memory_limit_mb = 1024").expect("parse");
+        assert_eq!(
+            cfg.revision_artifacts.max_disk_bytes,
+            DEFAULT_REVISION_ARTIFACT_MAX_DISK_BYTES
+        );
+        assert_eq!(
+            cfg.revision_artifacts.graph_schema_version,
+            DEFAULT_REVISION_GRAPH_SCHEMA_VERSION
+        );
+        assert_eq!(
+            cfg.revision_artifacts.derived_schema_version,
+            DEFAULT_REVISION_DERIVED_SCHEMA_VERSION
+        );
+    }
+
+    #[test]
+    fn rws03_revision_artifact_config_parses_from_toml() {
+        let text = r#"
+            [revision_artifacts]
+            max_disk_bytes = 1048576
+            graph_schema_version = 2
+            derived_schema_version = 3
+        "#;
+        let cfg = DaemonConfig::from_toml_str(text).expect("parse");
+        assert_eq!(cfg.revision_artifacts.max_disk_bytes, 1_048_576);
+        assert_eq!(cfg.revision_artifacts.graph_schema_version, 2);
+        assert_eq!(cfg.revision_artifacts.derived_schema_version, 3);
+    }
+
+    #[test]
+    fn rws03_revision_artifact_config_validation_rejects_zeroes() {
+        let zero_budget = DaemonConfig {
+            revision_artifacts: RevisionArtifactConfig {
+                max_disk_bytes: 0,
+                ..RevisionArtifactConfig::default()
+            },
+            ..DaemonConfig::default()
+        };
+        assert!(zero_budget.validate().is_err());
+
+        let zero_graph_schema = DaemonConfig {
+            revision_artifacts: RevisionArtifactConfig {
+                graph_schema_version: 0,
+                ..RevisionArtifactConfig::default()
+            },
+            ..DaemonConfig::default()
+        };
+        assert!(zero_graph_schema.validate().is_err());
+
+        let zero_derived_schema = DaemonConfig {
+            revision_artifacts: RevisionArtifactConfig {
+                derived_schema_version: 0,
+                ..RevisionArtifactConfig::default()
+            },
+            ..DaemonConfig::default()
+        };
+        assert!(zero_derived_schema.validate().is_err());
+    }
+
+    #[test]
+    fn rws08_managed_worktree_config_defaults_when_absent() {
+        let cfg = DaemonConfig::from_toml_str("memory_limit_mb = 1024").expect("parse");
+        assert_eq!(cfg.managed_worktrees.root, None);
+        assert_eq!(
+            cfg.managed_worktrees.safe_branch_prefixes,
+            vec![DEFAULT_MANAGED_WORKTREE_BRANCH_PREFIX.to_owned()]
+        );
+        assert!(
+            cfg.managed_worktrees
+                .protected_branches
+                .contains(&"main".to_owned())
+        );
+        assert!(
+            cfg.managed_worktrees
+                .protected_branch_prefixes
+                .contains(&"release/".to_owned())
+        );
+    }
+
+    #[test]
+    fn rws08_managed_worktree_config_parses_from_toml() {
+        let text = r#"
+            [managed_worktrees]
+            root = "/tmp/sqry-managed-worktrees"
+            safe_branch_prefixes = ["sqry/agent/", "users/alice/"]
+            protected_branches = ["main", "prod"]
+            protected_branch_prefixes = ["release/", "hotfix/"]
+        "#;
+        let cfg = DaemonConfig::from_toml_str(text).expect("parse");
+
+        assert_eq!(
+            cfg.managed_worktrees.root,
+            Some(PathBuf::from("/tmp/sqry-managed-worktrees"))
+        );
+        assert_eq!(
+            cfg.managed_worktrees.safe_branch_prefixes,
+            vec!["sqry/agent/".to_owned(), "users/alice/".to_owned()]
+        );
+        assert_eq!(
+            cfg.managed_worktrees.protected_branches,
+            vec!["main".to_owned(), "prod".to_owned()]
+        );
+        assert_eq!(
+            cfg.managed_worktrees.protected_branch_prefixes,
+            vec!["release/".to_owned(), "hotfix/".to_owned()]
+        );
+    }
+
+    #[test]
+    fn rws08_managed_worktree_config_validation_rejects_empty_prefix_policy() {
+        let no_prefixes = DaemonConfig {
+            managed_worktrees: ManagedWorktreeConfig {
+                safe_branch_prefixes: Vec::new(),
+                ..ManagedWorktreeConfig::default()
+            },
+            ..DaemonConfig::default()
+        };
+        assert!(no_prefixes.validate().is_err());
+
+        let blank_prefix = DaemonConfig {
+            managed_worktrees: ManagedWorktreeConfig {
+                safe_branch_prefixes: vec![" ".to_owned()],
+                ..ManagedWorktreeConfig::default()
+            },
+            ..DaemonConfig::default()
+        };
+        assert!(blank_prefix.validate().is_err());
+    }
+
+    #[test]
+    fn rws10_revision_artifact_repo_budget_defaults_parses_and_validates() {
+        let cfg = DaemonConfig::from_toml_str(
+            r"
+            [revision_artifacts]
+            max_disk_bytes = 4096
+            max_repo_disk_bytes = 1024
+        ",
+        )
+        .expect("parse revision artifact budget config");
+
+        assert_eq!(cfg.revision_artifacts.max_disk_bytes, 4096);
+        assert_eq!(cfg.revision_artifacts.max_repo_disk_bytes, 1024);
+        assert!(cfg.validate().is_ok());
+
+        let mut invalid = cfg;
+        invalid.revision_artifacts.max_repo_disk_bytes = 0;
+        assert!(invalid.validate().is_err());
+    }
+
+    #[test]
+    fn rws03_graph_config_hash_is_stable_and_changes_on_inputs() {
+        let first = DaemonConfig::default();
+        let second = DaemonConfig::default();
+        assert_eq!(
+            first.revision_graph_config_hash().unwrap(),
+            second.revision_graph_config_hash().unwrap()
+        );
+
+        let changed = DaemonConfig {
+            revision_artifacts: RevisionArtifactConfig {
+                graph_schema_version: first.revision_artifacts.graph_schema_version + 1,
+                ..first.revision_artifacts.clone()
+            },
+            ..first
+        };
+        assert_ne!(
+            changed.revision_graph_config_hash().unwrap(),
+            second.revision_graph_config_hash().unwrap()
+        );
     }
 
     #[test]

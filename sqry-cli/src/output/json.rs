@@ -149,8 +149,17 @@ impl Formatter for JsonFormatter {
                 stats = stats.with_scope_info(is_ancestor, meta.filtered_to.clone());
             }
 
-            let response = JsonResponse::new(query_meta, stats, results);
-            serde_json::to_string_pretty(&response)?
+            if let Some(revision) = &meta.revision {
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "query": query_meta,
+                    "stats": stats,
+                    "revision": revision,
+                    "results": results,
+                }))?
+            } else {
+                let response = JsonResponse::new(query_meta, stats, results);
+                serde_json::to_string_pretty(&response)?
+            }
         } else {
             // Legacy: plain array (for backward compatibility in non-search contexts)
             serde_json::to_string_pretty(&results)?

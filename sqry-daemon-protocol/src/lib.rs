@@ -16,6 +16,8 @@
 //!   [`ResponseEnvelope`], [`ResponseMeta`], [`WorkspaceState`],
 //!   [`JsonRpcVersion`], [`JsonRpcId`], [`JsonRpcRequest`],
 //!   [`JsonRpcResponse`], [`JsonRpcPayload`], [`JsonRpcError`].
+//! - [`revision`] — revision-aware workspace selectors, identities,
+//!   artifact ids, resident status, and daemon management payloads.
 //!
 //! # First-frame discrimination
 //!
@@ -30,12 +32,21 @@
 
 pub mod framing;
 pub mod protocol;
+pub mod revision;
 
 pub use protocol::{
     CancelRebuildResult, DaemonHello, DaemonHelloResponse, ENVELOPE_VERSION, JsonRpcError,
     JsonRpcId, JsonRpcPayload, JsonRpcRequest, JsonRpcResponse, JsonRpcVersion, LoadResult,
-    LogicalWorkspaceWire, RebuildResult, RebuildStatus, ResponseEnvelope, ResponseMeta, SearchItem,
-    SearchMode, SearchRequest, SearchResult, ShimProtocol, ShimRegister, ShimRegisterAck,
-    SourceRootBinding, WorkspaceId, WorkspaceIndexStatus, WorkspaceSourceRootStatus,
-    WorkspaceState,
+    LogicalWorkspaceWire, QueryRequest, QueryResult, RebuildResult, RebuildStatus,
+    ResponseEnvelope, ResponseMeta, SearchItem, SearchMode, SearchRequest, SearchResult,
+    ShimProtocol, ShimRegister, ShimRegisterAck, SourceRootBinding, WorkspaceId,
+    WorkspaceIndexStatus, WorkspaceSourceRootStatus, WorkspaceState,
+};
+pub use revision::{
+    ArtifactId, ArtifactInputDigest, ListRevisionsRequest, ListRevisionsResult,
+    LoadRevisionRequest, LoadRevisionResult, ObjectFormat, PruneRefusal, PruneRevisionCandidate,
+    PruneRevisionsRequest, PruneRevisionsResult, PruneWorktreeCandidate, RepositoryIdentity,
+    ResidentHandleKind, ResolvedRevision, RevisionId, RevisionLoadState, RevisionQueryMetadata,
+    RevisionQueryTarget, RevisionSelector, RevisionStatus, RevisionStatusRequest, SourceByteMode,
+    UnloadRevisionRequest, UnloadRevisionResult,
 };

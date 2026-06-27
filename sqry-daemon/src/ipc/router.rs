@@ -357,8 +357,16 @@ where
             // per daemon-hosted LSP shim. Shared session state across
             // connections is a deferred performance optimisation, not
             // a correctness requirement for Phase 8c.
+            let manager = Arc::clone(&ctx.manager);
             let session =
-                sqry_lsp::session::SessionManager::new(sqry_lsp::LspOptions::default_daemon());
+                sqry_lsp::session::SessionManager::new(sqry_lsp::LspOptions::default_daemon())
+                    .with_revision_status_provider(move || {
+                        manager
+                            .resident_revision_statuses(None, false)
+                            .into_iter()
+                            .filter_map(|status| serde_json::to_value(status).ok())
+                            .collect()
+                    });
             if let Err(e) = sqry_lsp::daemon_host::host_on_streams(
                 reader,
                 writer,

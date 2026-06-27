@@ -39,6 +39,8 @@ use std::marker::PhantomData;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
+use crate::revision::{RevisionQueryMetadata, RevisionQueryTarget};
+
 // ---------------------------------------------------------------------------
 // WorkspaceId — protocol-side wire wrapper for sqry-core's WorkspaceId.
 // ---------------------------------------------------------------------------
@@ -704,7 +706,7 @@ pub struct CancelRebuildResult {
 }
 
 // ---------------------------------------------------------------------------
-// `daemon/search` wire types (verivus-oss/sqry#238 Tier 2).
+// `daemon/search` / `daemon/query` wire types.
 //
 // Mirror the relevant arguments of `commands::search::run_search` so the
 // CLI shim at `sqry-cli/src/commands/search.rs` can attempt the daemon
@@ -768,6 +770,11 @@ pub struct SearchRequest {
     /// default and continue to pass without modification).
     #[serde(default = "default_include_generated")]
     pub include_generated: bool,
+    /// Optional explicit revision target. When absent, daemon search keeps
+    /// the legacy behavior and queries only the live workspace identified by
+    /// `search_path`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<RevisionQueryTarget>,
 }
 
 fn default_envelope_version() -> u32 {
@@ -842,6 +849,49 @@ pub struct SearchResult {
     /// `None`; clients should not assume any specific format.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor: Option<String>,
+    /// Revision metadata for revision-aware searches. Absent for legacy
+    /// live-workspace searches.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<RevisionQueryMetadata>,
+}
+
+/// `daemon/query` request payload.
+///
+/// The request mirrors the structural `sqry query` CLI surface and can target
+/// either the loaded live workspace (`revision == None`) or an explicit
+/// resident revision handle / selector. Explicit revision responses carry
+/// provenance; omitted selectors preserve live-workspace behavior.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct QueryRequest {
+    /// Wire envelope version.
+    #[serde(default = "default_envelope_version")]
+    pub envelope_version: u32,
+    /// Structural query expression.
+    pub query: String,
+    /// Workspace or repository root used to resolve the graph.
+    pub search_path: String,
+    /// Optional result cap. `None` means the daemon default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+    /// Optional explicit revision target. Absent means live workspace only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<RevisionQueryTarget>,
+}
+
+/// `daemon/query` success result payload.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct QueryResult {
+    /// Query matches converted to the common symbol wire shape.
+    pub items: Vec<SearchItem>,
+    /// Pre-truncation match count.
+    pub total: u64,
+    /// True when `items` was capped by [`QueryRequest::limit`].
+    pub truncated: bool,
+    /// Revision metadata for explicit revision queries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<RevisionQueryMetadata>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1178,6 +1228,7 @@ mod tests {
             lang: None,
             limit: None,
             include_generated: true,
+            revision: None,
         };
         let wire = serde_json::to_string(&req).expect("serialize");
         let back: SearchRequest = serde_json::from_str(&wire).expect("deserialize");
@@ -1195,6 +1246,7 @@ mod tests {
             lang: Some("rust".into()),
             limit: Some(50),
             include_generated: false,
+            revision: None,
         };
         let wire = serde_json::to_string(&req).expect("serialize");
         let back: SearchRequest = serde_json::from_str(&wire).expect("deserialize");
@@ -1212,6 +1264,7 @@ mod tests {
             lang: None,
             limit: None,
             include_generated: true,
+            revision: None,
         };
         let wire = serde_json::to_string(&req).expect("serialize");
         // The `#[serde(rename_all = "lowercase")]` attribute on SearchMode
@@ -1245,6 +1298,7 @@ mod tests {
         let req: SearchRequest =
             serde_json::from_str(wire).expect("deserialize w/o include_generated");
         assert!(req.include_generated);
+        assert_eq!(req.revision, None);
     }
 
     #[test]
@@ -1278,10 +1332,36 @@ mod tests {
             total: 0,
             truncated: false,
             cursor: None,
+            revision: None,
         };
         let wire = serde_json::to_string(&result).expect("serialize");
+        assert!(
+            !wire.contains("\"revision\""),
+            "legacy live-workspace search result must omit revision metadata: {wire}"
+        );
         let back: SearchResult = serde_json::from_str(&wire).expect("deserialize");
         assert_eq!(back, result);
+    }
+
+    #[test]
+    fn search_request_revision_target_round_trips_when_present() {
+        let req = SearchRequest {
+            envelope_version: ENVELOPE_VERSION,
+            pattern: "foo".into(),
+            search_path: "/tmp/ws".into(),
+            mode: SearchMode::Exact,
+            kind: None,
+            lang: None,
+            limit: None,
+            include_generated: true,
+            revision: Some(crate::revision::RevisionQueryTarget::RevisionId {
+                revision_id: crate::revision::RevisionId("rev-1".to_owned()),
+            }),
+        };
+        let wire = serde_json::to_string(&req).expect("serialize");
+        assert!(wire.contains(r#""revision""#));
+        let back: SearchRequest = serde_json::from_str(&wire).expect("deserialize");
+        assert_eq!(back, req);
     }
 
     #[test]
@@ -1302,6 +1382,7 @@ mod tests {
             total: 1,
             truncated: false,
             cursor: None,
+            revision: None,
         };
         let wire = serde_json::to_string(&result).expect("serialize");
         let back: SearchResult = serde_json::from_str(&wire).expect("deserialize");
@@ -1328,6 +1409,7 @@ mod tests {
             total: 101,
             truncated: true,
             cursor: None,
+            revision: None,
         };
         let wire = serde_json::to_string(&result).expect("serialize");
         let back: SearchResult = serde_json::from_str(&wire).expect("deserialize");
@@ -1383,6 +1465,7 @@ mod tests {
                 total: 0,
                 truncated: false,
                 cursor: None,
+                revision: None,
             },
             meta: ResponseMeta::management("test"),
         };

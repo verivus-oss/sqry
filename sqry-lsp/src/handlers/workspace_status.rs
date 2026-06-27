@@ -28,7 +28,9 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-use crate::session::{SessionManager, WorkspaceStatusInfo, build_workspace_status_info};
+use crate::session::{
+    SessionManager, WorkspaceStatusInfo, build_workspace_status_info_with_revisions,
+};
 
 /// Wire-side parameters for `sqry/workspaceStatus`.
 ///
@@ -69,7 +71,8 @@ pub fn workspace_status(
     _params: &SqryWorkspaceStatusParams,
 ) -> Result<SqryWorkspaceStatusResult> {
     let workspace = session.logical_workspace();
-    let info = build_workspace_status_info(workspace.as_ref());
+    let info =
+        build_workspace_status_info_with_revisions(workspace.as_ref(), session.revision_statuses());
     Ok(SqryWorkspaceStatusResult { info })
 }
 
@@ -127,5 +130,18 @@ mod tests {
         );
         assert_eq!(result.info.member_folders.len(), 0);
         assert_eq!(result.info.exclusions.len(), 0);
+    }
+
+    #[test]
+    fn workspace_status_surfaces_daemon_hosted_revisions() {
+        let session = make_session().with_revision_status_provider(|| {
+            vec![serde_json::json!({
+                "revision_id": "rev-test",
+                "state": "loaded"
+            })]
+        });
+        let result = workspace_status(&session, &SqryWorkspaceStatusParams::default()).unwrap();
+        assert_eq!(result.info.revisions.len(), 1);
+        assert_eq!(result.info.revisions[0]["revision_id"], "rev-test");
     }
 }

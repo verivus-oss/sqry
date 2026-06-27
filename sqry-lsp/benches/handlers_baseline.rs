@@ -71,6 +71,7 @@ fn bench_search(c: &mut Criterion) {
         query: "kind:function".into(),
         path: None,
         limit: Some(20),
+        ..SqrySearchParams::default()
     };
 
     c.bench_function("sqry_search_baseline", |b| {

@@ -9,6 +9,48 @@ pub use sort::SortField;
 use sqry_lsp::LspOptions;
 use std::path::PathBuf;
 
+/// Optional revision target accepted by query-like CLI surfaces.
+#[derive(Args, Debug, Clone, Default)]
+#[group(id = "revision_target", multiple = false)]
+pub struct RevisionQueryArgs {
+    /// Query a loaded revision by resident revision id.
+    #[arg(long, value_name = "REVISION_ID", group = "revision_target", help_heading = headings::SEARCH_INPUT)]
+    pub revision_id: Option<String>,
+
+    /// Query a loaded revision resolved from a Git ref.
+    #[arg(long = "revision-ref", value_name = "REF", group = "revision_target", help_heading = headings::SEARCH_INPUT)]
+    pub revision_ref: Option<String>,
+
+    /// Query a loaded revision resolved from a commit object id.
+    #[arg(long = "revision-commit", value_name = "OID", group = "revision_target", help_heading = headings::SEARCH_INPUT)]
+    pub revision_commit: Option<String>,
+
+    /// Query a loaded revision resolved from a tree object id.
+    #[arg(long = "revision-tree", value_name = "OID", group = "revision_target", help_heading = headings::SEARCH_INPUT)]
+    pub revision_tree: Option<String>,
+
+    /// Query a loaded dirty snapshot for this workspace.
+    #[arg(long = "revision-dirty", group = "revision_target", help_heading = headings::SEARCH_INPUT)]
+    pub revision_dirty: bool,
+
+    /// Include untracked files when using `--revision-dirty`.
+    #[arg(long = "revision-include-untracked", requires = "revision_dirty", help_heading = headings::SEARCH_INPUT)]
+    pub revision_include_untracked: bool,
+
+    /// Include ignored files when using `--revision-dirty`.
+    #[arg(long = "revision-include-ignored", requires = "revision_dirty", help_heading = headings::SEARCH_INPUT)]
+    pub revision_include_ignored: bool,
+}
+
+/// Source byte mode for `sqry daemon load-revision`.
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RevisionSourceByteModeArg {
+    /// Read immutable bytes directly from Git objects.
+    RawGitObjects,
+    /// Capture bytes from the dirty live workspace.
+    DirtySnapshot,
+}
+
 /// sqry - Semantic Query for Code
 ///
 /// Search code by what it means, not just what it says.
@@ -628,6 +670,10 @@ pub enum Command {
         /// `RUST_LOG=info`) before invocation.
         #[arg(long, short = 'v', help_heading = headings::OUTPUT_CONTROL, display_order = 50)]
         verbose: bool,
+
+        /// Optional revision selector for daemon-backed searches.
+        #[command(flatten)]
+        revision: Box<RevisionQueryArgs>,
     },
 
     /// Execute a structural AST-aware query (sqry-core query parser)
@@ -768,6 +814,10 @@ pub enum Command {
         ///   sqry query "kind:\$k AND lang:\$l" --var k=function --var l=rust
         #[arg(long = "var", value_name = "KEY=VALUE", help_heading = headings::QUERY_INPUT, display_order = 30)]
         var: Vec<String>,
+
+        /// Optional revision selector for daemon-backed structural queries.
+        #[command(flatten)]
+        revision: Box<RevisionQueryArgs>,
 
         #[command(flatten)]
         plugin_selection: PluginSelectionArgs,
@@ -1987,6 +2037,81 @@ pub enum DaemonAction {
     Load {
         /// Workspace root directory to load.
         path: PathBuf,
+    },
+    /// Load an explicit revision into the running daemon.
+    LoadRevision {
+        /// Repository or workspace root used to resolve the selector.
+        root: PathBuf,
+        /// Resolve a Git ref at load time.
+        #[arg(long = "ref", value_name = "REF", group = "load_revision_selector")]
+        git_ref: Option<String>,
+        /// Resolve a commit object id.
+        #[arg(long, value_name = "OID", group = "load_revision_selector")]
+        commit: Option<String>,
+        /// Resolve a tree object id.
+        #[arg(long, value_name = "OID", group = "load_revision_selector")]
+        tree: Option<String>,
+        /// Capture a dirty snapshot of the live workspace.
+        #[arg(long, group = "load_revision_selector")]
+        dirty: bool,
+        /// Include untracked files when using `--dirty`.
+        #[arg(long, requires = "dirty")]
+        include_untracked: bool,
+        /// Include ignored files when using `--dirty`.
+        #[arg(long, requires = "dirty")]
+        include_ignored: bool,
+        /// Source byte mode. Defaults to raw Git objects for immutable selectors.
+        #[arg(long, value_enum)]
+        source_byte_mode: Option<RevisionSourceByteModeArg>,
+        /// Pin the loaded revision against eviction and pruning.
+        #[arg(long)]
+        pin: bool,
+        /// Emit machine-readable JSON output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// List resident revision handles.
+    ListRevisions {
+        /// Optional repository/workspace root filter.
+        #[arg(long)]
+        root: Option<PathBuf>,
+        /// Include unloaded handles if retained by the daemon.
+        #[arg(long)]
+        include_unloaded: bool,
+        /// Emit machine-readable JSON output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show one resident revision handle.
+    RevisionStatus {
+        /// Resident revision id.
+        revision_id: String,
+        /// Emit machine-readable JSON output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Unload one resident revision handle.
+    UnloadRevision {
+        /// Resident revision id.
+        revision_id: String,
+        /// Unload even if the handle is pinned.
+        #[arg(long)]
+        force: bool,
+        /// Emit machine-readable JSON output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Prune removable revision artifacts and managed worktrees.
+    PruneRevisions {
+        /// Optional repository/workspace root filter.
+        #[arg(long)]
+        root: Option<PathBuf>,
+        /// Actually remove candidates. Omit for a dry run.
+        #[arg(long)]
+        apply: bool,
+        /// Emit machine-readable JSON output.
+        #[arg(long)]
+        json: bool,
     },
     /// Trigger an in-place graph rebuild for a loaded workspace.
     ///

@@ -37,6 +37,7 @@ use arc_swap::ArcSwap;
 use parking_lot::RwLock;
 use sqry_core::graph::CodeGraph;
 use sqry_core::watch::{ChangeSet, LastIndexedGitState};
+use sqry_daemon_protocol::ResidentHandleKind;
 
 use crate::error::DaemonError;
 
@@ -291,6 +292,18 @@ impl LoadedWorkspace {
         self.memory_high_water_bytes
             .fetch_max(new_bytes, Ordering::Relaxed);
         prior
+    }
+
+    /// Resident handle kind represented by the existing live workspace state.
+    #[must_use]
+    pub fn resident_handle_kind(&self) -> ResidentHandleKind {
+        ResidentHandleKind::LiveWorkspace
+    }
+
+    /// Current graph memory bytes as a wire-sized integer.
+    #[must_use]
+    pub fn current_memory_bytes(&self) -> u64 {
+        self.memory_bytes.load(Ordering::Acquire) as u64
     }
 
     /// Stamp `last_accessed = now` on a query. Held under an `RwLock`

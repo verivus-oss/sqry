@@ -11,6 +11,7 @@
 use std::{path::PathBuf, time::SystemTime};
 
 use serde::{Deserialize, Serialize};
+use sqry_daemon_protocol::RevisionStatus;
 
 use super::state::WorkspaceState;
 
@@ -35,6 +36,10 @@ pub struct DaemonStatus {
     /// One entry per loaded or otherwise-tracked workspace, sorted
     /// by `index_root` for deterministic CLI output.
     pub workspaces: Vec<WorkspaceStatus>,
+
+    /// Resident non-live revision handles.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub revisions: Vec<RevisionStatus>,
 }
 
 /// Aggregate memory accounting readout. Mirrors Amendment 2 §D.
@@ -62,6 +67,14 @@ pub struct MemoryStatus {
     /// the cancellation path. At rest (no rebuild in flight) this is
     /// always `0`.
     pub reserved_bytes: u64,
+
+    /// Existing live-workspace memory contribution.
+    #[serde(default)]
+    pub live_workspace_bytes: u64,
+
+    /// Resident immutable/dirty revision memory contribution.
+    #[serde(default)]
+    pub resident_revision_bytes: u64,
 
     /// Monotonic peak of `current_bytes` over the daemon's uptime.
     /// Updated on every publish via `fetch_max`.
@@ -132,6 +145,8 @@ mod tests {
                 limit_bytes: 2 * 1024 * 1024 * 1024,
                 current_bytes: 450 * 1024 * 1024,
                 reserved_bytes: 0,
+                live_workspace_bytes: 450 * 1024 * 1024,
+                resident_revision_bytes: 0,
                 high_water_bytes: 1_200 * 1024 * 1024,
             },
             workspaces: vec![WorkspaceStatus {
@@ -146,6 +161,7 @@ mod tests {
                 workspace_id_short: None,
                 workspace_id_full: None,
             }],
+            revisions: Vec::new(),
         };
         let json = serde_json::to_string(&status).expect("serialise");
         let back: DaemonStatus = serde_json::from_str(&json).expect("round-trip");

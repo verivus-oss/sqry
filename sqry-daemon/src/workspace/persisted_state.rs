@@ -37,6 +37,7 @@
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
+use sqry_daemon_protocol::ArtifactId;
 
 use super::state::WorkspaceKey;
 
@@ -51,6 +52,13 @@ pub struct PersistedState {
     /// `.sqry/graph/snapshot.sqry` on reload, so we only persist the
     /// keys themselves.
     pub keys: Vec<WorkspaceKey>,
+    /// Immutable revision artifacts known to the daemon when state was written.
+    ///
+    /// This is bookkeeping only. Each artifact remains authoritative through
+    /// its own manifest under the revision artifact store; startup must still
+    /// validate the artifact manifest before loading a graph.
+    #[serde(default)]
+    pub revision_artifacts: Vec<PersistedRevisionArtifact>,
 }
 
 impl PersistedState {
@@ -66,8 +74,18 @@ impl PersistedState {
         Self {
             format_version: Self::FORMAT_VERSION,
             keys,
+            revision_artifacts: Vec::new(),
         }
     }
+}
+
+/// Persisted pointer to a revision artifact manifest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersistedRevisionArtifact {
+    /// Local repository identity hash.
+    pub repo_identity_hash: String,
+    /// Opaque artifact id.
+    pub artifact_id: ArtifactId,
 }
 
 /// Parse a v1-shaped persisted-state payload. Used by the on-load

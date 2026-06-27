@@ -1858,6 +1858,13 @@ fn convert_semantic_search_params(
         resolved_via: params
             .resolved_via
             .map(|v| v.into_iter().map(Into::into).collect()),
+        revision_id: params.revision_id,
+        revision_ref: params.revision_ref,
+        revision_commit: params.revision_commit,
+        revision_tree: params.revision_tree,
+        revision_dirty: params.revision_dirty,
+        revision_include_untracked: params.revision_include_untracked,
+        revision_include_ignored: params.revision_include_ignored,
     })
 }
 

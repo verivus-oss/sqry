@@ -64,9 +64,15 @@ pub use config::{
 };
 pub use error::{DaemonError, DaemonResult};
 pub use ipc::{
-    CancelRebuildResult, DaemonHello, DaemonHelloResponse, IpcServer, JsonRpcError, JsonRpcId,
-    JsonRpcPayload, JsonRpcRequest, JsonRpcResponse, JsonRpcVersion, RebuildResult,
-    ResponseEnvelope, ResponseMeta,
+    ArtifactId, ArtifactInputDigest, CancelRebuildResult, DaemonHello, DaemonHelloResponse,
+    IpcServer, JsonRpcError, JsonRpcId, JsonRpcPayload, JsonRpcRequest, JsonRpcResponse,
+    JsonRpcVersion, ListRevisionsRequest, ListRevisionsResult, LoadRevisionRequest,
+    LoadRevisionResult, ObjectFormat, PruneRefusal, PruneRevisionCandidate, PruneRevisionsRequest,
+    PruneRevisionsResult, PruneWorktreeCandidate, RebuildResult, RepositoryIdentity,
+    ResidentHandleKind, ResolvedRevision, ResponseEnvelope, ResponseMeta, RevisionId,
+    RevisionLoadState, RevisionQueryMetadata, RevisionQueryTarget, RevisionSelector,
+    RevisionStatus, RevisionStatusRequest, SourceByteMode, UnloadRevisionRequest,
+    UnloadRevisionResult,
 };
 pub use rebuild::{
     CapturedIteration, RebuildDispatcher, RebuildMode, TestCapture, TestGate, decide_mode,
@@ -187,6 +193,36 @@ pub const JSONRPC_RESET_CANCELLATION_DISPATCHED: i32 = -32009;
 ///
 /// Source: `G_daemon_control_plane.md` §3.2.
 pub const JSONRPC_WORKSPACE_PINNED: i32 = -32010;
+
+/// JSON-RPC error code: a revision selector resolved ambiguously.
+pub const JSONRPC_REVISION_SELECTOR_AMBIGUOUS: i32 = -32011;
+
+/// JSON-RPC error code: a required Git object is missing locally.
+pub const JSONRPC_REVISION_OBJECT_MISSING: i32 = -32012;
+
+/// JSON-RPC error code: revision source bytes cannot be read locally.
+pub const JSONRPC_REVISION_SOURCE_UNAVAILABLE: i32 = -32013;
+
+/// JSON-RPC error code: checkout-byte mode needs unsupported filters.
+pub const JSONRPC_CHECKOUT_FILTER_UNSUPPORTED: i32 = -32014;
+
+/// JSON-RPC error code: a submodule gitlink cannot be represented safely.
+pub const JSONRPC_SUBMODULE_UNAVAILABLE: i32 = -32015;
+
+/// JSON-RPC error code: a dirty snapshot changed during capture.
+pub const JSONRPC_DIRTY_SNAPSHOT_CHANGED: i32 = -32016;
+
+/// JSON-RPC error code: an artifact id and manifest inputs disagree.
+pub const JSONRPC_ARTIFACT_KEY_MISMATCH: i32 = -32017;
+
+/// JSON-RPC error code: a requested managed worktree is already in use.
+pub const JSONRPC_MANAGED_WORKTREE_IN_USE: i32 = -32018;
+
+/// JSON-RPC error code: revision artifact disk budget would be exceeded.
+pub const JSONRPC_REVISION_DISK_BUDGET_EXCEEDED: i32 = -32019;
+
+/// JSON-RPC error code: query path requires an explicit revision selector.
+pub const JSONRPC_REVISION_QUERY_REQUIRES_EXPLICIT_SELECTOR: i32 = -32020;
 
 /// JSON-RPC error code: pre-flight cost gate rejected a query because
 /// its evaluator cost is structurally unbounded (no scope filter, no

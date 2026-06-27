@@ -53,6 +53,8 @@ pub struct FormatterMetadata {
     pub used_ancestor_index: Option<bool>,
     /// Scope filter applied (e.g., "src/**" or "main.rs")
     pub filtered_to: Option<String>,
+    /// Revision provenance for daemon-backed explicit revision queries.
+    pub revision: Option<serde_json::Value>,
 }
 
 /// Trait for formatting search results

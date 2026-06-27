@@ -63,6 +63,10 @@ use super::{
     builder::WorkspaceBuilder,
     hook::{NoOpHook, SharedHook, SqrydHook},
     loaded::LoadedWorkspace,
+    revision::{
+        ResidentQueryGuard, ResidentRevisionHandle, ResidentRevisionLoad, ResidentRevisionRegistry,
+        recover_startup,
+    },
     staleness::{StalenessVerdict, classify_staleness},
     state::{OldGraphToken, WorkspaceKey, WorkspaceState},
     status::{DaemonStatus, MemoryStatus, WorkspaceStatus},
@@ -162,6 +166,11 @@ pub struct WorkspaceManager {
     /// critical section, and the hook is only consulted on publish
     /// (not on every query) — the `RwLock` is never a hot path.
     hook: RwLock<SharedHook>,
+
+    /// Resident non-live revision handles. Kept separate from the live
+    /// workspace map so immutable revisions never inherit watcher or rebuild
+    /// semantics.
+    resident_revisions: ResidentRevisionRegistry,
 }
 
 enum LoadGate {
@@ -170,6 +179,22 @@ enum LoadGate {
         workspace: Arc<LoadedWorkspace>,
         registered_key: WorkspaceKey,
     },
+}
+
+fn run_revision_startup_recovery(config: &DaemonConfig) {
+    match recover_startup(config) {
+        Ok(summary) => {
+            tracing::debug!(
+                partial_artifacts_removed = summary.partial_artifacts_removed.len(),
+                worktree_repos_reconciled = summary.worktree_repos_reconciled.len(),
+                orphaned_worktree_dirs_removed = summary.orphaned_worktree_dirs_removed.len(),
+                "revision workspace startup recovery completed"
+            );
+        }
+        Err(err) => {
+            warn!(error = %err, "revision workspace startup recovery failed");
+        }
+    }
 }
 
 impl WorkspaceManager {
@@ -182,6 +207,7 @@ impl WorkspaceManager {
     /// [`Self::new_without_reaper`].
     #[must_use]
     pub fn new(config: &Arc<DaemonConfig>) -> Arc<Self> {
+        run_revision_startup_recovery(config);
         let mgr = Arc::new(Self {
             config: Arc::clone(config),
             workspaces: RwLock::new(HashMap::new()),
@@ -190,6 +216,7 @@ impl WorkspaceManager {
             started_at: Instant::now(),
             total_memory_high_water: AtomicU64::new(0),
             hook: RwLock::new(Arc::new(NoOpHook) as SharedHook),
+            resident_revisions: ResidentRevisionRegistry::new(),
         });
         let handle = tokio::spawn(retention_reaper(Arc::downgrade(&mgr)));
         *mgr.reaper.lock() = Some(handle);
@@ -210,6 +237,7 @@ impl WorkspaceManager {
             started_at: Instant::now(),
             total_memory_high_water: AtomicU64::new(0),
             hook: RwLock::new(Arc::new(NoOpHook) as SharedHook),
+            resident_revisions: ResidentRevisionRegistry::new(),
         })
     }
 
@@ -252,6 +280,78 @@ impl WorkspaceManager {
     pub(crate) fn dispatch_publish_hook(&self, workspace_root: &Path, graph: Arc<CodeGraph>) {
         let hook = self.hook_snapshot();
         hook.on_publish(workspace_root, graph);
+    }
+
+    /// Resident non-live revision registry.
+    #[must_use]
+    pub fn resident_revisions(&self) -> &ResidentRevisionRegistry {
+        &self.resident_revisions
+    }
+
+    /// Load or reuse a resident revision graph.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DaemonError`] if graph hydration/building fails or a
+    /// coalesced load failed in another caller.
+    pub fn load_resident_revision<F>(
+        &self,
+        load: ResidentRevisionLoad,
+        build_graph: F,
+    ) -> Result<Arc<ResidentRevisionHandle>, DaemonError>
+    where
+        F: FnOnce() -> Result<CodeGraph, DaemonError>,
+    {
+        self.resident_revisions.load_or_coalesce(load, build_graph)
+    }
+
+    /// Acquire a query guard for a resident revision.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DaemonError::RevisionSourceUnavailable`] if the handle is
+    /// absent or not queryable.
+    pub fn acquire_resident_query(
+        &self,
+        revision_id: &sqry_daemon_protocol::RevisionId,
+    ) -> Result<ResidentQueryGuard, DaemonError> {
+        self.resident_revisions.acquire_query(revision_id)
+    }
+
+    /// Unload a resident revision handle.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DaemonError::RevisionSourceUnavailable`] when the handle is
+    /// pinned or has active queries and `force` is false.
+    pub fn unload_resident_revision(
+        &self,
+        revision_id: &sqry_daemon_protocol::RevisionId,
+        force: bool,
+    ) -> Result<bool, DaemonError> {
+        self.resident_revisions.unload(revision_id, force)
+    }
+
+    /// Status rows for resident revisions.
+    #[must_use]
+    pub fn resident_revision_statuses(
+        &self,
+        root: Option<&Path>,
+        include_unloaded: bool,
+    ) -> Vec<sqry_daemon_protocol::RevisionStatus> {
+        self.resident_revisions.statuses(root, include_unloaded)
+    }
+
+    /// Artifact ids protected from artifact pruning by active or pinned handles.
+    #[must_use]
+    pub fn pinned_revision_artifact_ids(&self) -> Vec<sqry_daemon_protocol::ArtifactId> {
+        self.resident_revisions.pinned_artifact_ids()
+    }
+
+    /// Evict the least-recently-used inactive resident revision handle.
+    #[must_use]
+    pub fn evict_inactive_resident_revision_lru(&self) -> Option<sqry_daemon_protocol::RevisionId> {
+        self.resident_revisions.evict_inactive_lru()
     }
 
     /// Memory budget in bytes (derived from `config.memory_limit_mb`).
@@ -1232,6 +1332,10 @@ impl WorkspaceManager {
             let entries: Vec<_> = raw_entries
                 .into_iter()
                 .filter_map(|(k, ws)| {
+                    debug_assert_eq!(
+                        ws.resident_handle_kind(),
+                        sqry_daemon_protocol::ResidentHandleKind::LiveWorkspace
+                    );
                     if k.workspace_id.is_none()
                         && !seen_anonymous_roots.insert(k.source_root.clone())
                     {
@@ -1241,7 +1345,7 @@ impl WorkspaceManager {
                         index_root: k.source_root.clone(),
                         state: ws.load_state(),
                         pinned: ws.pinned,
-                        current_bytes: ws.memory_bytes.load(Ordering::Acquire) as u64,
+                        current_bytes: ws.current_memory_bytes(),
                         high_water_bytes: ws.memory_high_water_bytes.load(Ordering::Acquire) as u64,
                         last_good_at: *ws.last_good_at.read(),
                         last_error: ws
@@ -1268,10 +1372,15 @@ impl WorkspaceManager {
             entries
         };
 
-        let (current_bytes, reserved_bytes, high_water_bytes) = {
+        let revisions = self.resident_revision_statuses(None, false);
+        let resident_revision_bytes = self.resident_revisions.memory_bytes();
+        let resident_revision_high_water = self.resident_revisions.memory_high_water_bytes();
+
+        let (live_workspace_bytes, reserved_bytes, high_water_bytes) = {
             let state = self.admission.lock();
             let current = state.total_committed_bytes();
             let reserved = state.reserved_bytes;
+            let combined_current = current.saturating_add(resident_revision_bytes);
             // Bump high-water here in case the status read saw a
             // higher value than the last mutation captured. The
             // `drop(state)` at the end of this block keeps the
@@ -1279,11 +1388,12 @@ impl WorkspaceManager {
             // the high-water update with any concurrent publish.
             let peak = self
                 .total_memory_high_water
-                .fetch_max(current, Ordering::AcqRel);
-            let peak = peak.max(current);
+                .fetch_max(combined_current, Ordering::AcqRel);
+            let peak = peak.max(combined_current).max(resident_revision_high_water);
             drop(state);
             (current, reserved, peak)
         };
+        let current_bytes = live_workspace_bytes.saturating_add(resident_revision_bytes);
 
         DaemonStatus {
             uptime_seconds: self.started_at.elapsed().as_secs(),
@@ -1292,9 +1402,12 @@ impl WorkspaceManager {
                 limit_bytes: self.memory_limit_bytes(),
                 current_bytes,
                 reserved_bytes,
+                live_workspace_bytes,
+                resident_revision_bytes,
                 high_water_bytes,
             },
             workspaces: workspaces_snapshot,
+            revisions,
         }
     }
 
@@ -2298,6 +2411,64 @@ fn clone_lifecycle_or_storage_err(err: &DaemonError) -> DaemonError {
             reason: reason.clone(),
             details: details.clone(),
         },
+        DaemonError::RevisionSelectorAmbiguous { selector, matches } => {
+            DaemonError::RevisionSelectorAmbiguous {
+                selector: selector.clone(),
+                matches: matches.clone(),
+            }
+        }
+        DaemonError::RevisionObjectMissing { object, path } => DaemonError::RevisionObjectMissing {
+            object: object.clone(),
+            path: path.clone(),
+        },
+        DaemonError::RevisionSourceUnavailable { reason, path } => {
+            DaemonError::RevisionSourceUnavailable {
+                reason: reason.clone(),
+                path: path.clone(),
+            }
+        }
+        DaemonError::CheckoutFilterUnsupported { filter, path } => {
+            DaemonError::CheckoutFilterUnsupported {
+                filter: filter.clone(),
+                path: path.clone(),
+            }
+        }
+        DaemonError::SubmoduleUnavailable { path, gitlink_oid } => {
+            DaemonError::SubmoduleUnavailable {
+                path: path.clone(),
+                gitlink_oid: gitlink_oid.clone(),
+            }
+        }
+        DaemonError::DirtySnapshotChanged { root } => {
+            DaemonError::DirtySnapshotChanged { root: root.clone() }
+        }
+        DaemonError::ArtifactKeyMismatch {
+            artifact_id,
+            reason,
+        } => DaemonError::ArtifactKeyMismatch {
+            artifact_id: artifact_id.clone(),
+            reason: reason.clone(),
+        },
+        DaemonError::ManagedWorktreeInUse { worktree, reason } => {
+            DaemonError::ManagedWorktreeInUse {
+                worktree: worktree.clone(),
+                reason: reason.clone(),
+            }
+        }
+        DaemonError::RevisionDiskBudgetExceeded {
+            limit_bytes,
+            requested_bytes,
+            current_bytes,
+        } => DaemonError::RevisionDiskBudgetExceeded {
+            limit_bytes: *limit_bytes,
+            requested_bytes: *requested_bytes,
+            current_bytes: *current_bytes,
+        },
+        DaemonError::RevisionQueryRequiresExplicitSelector { reason } => {
+            DaemonError::RevisionQueryRequiresExplicitSelector {
+                reason: reason.clone(),
+            }
+        }
         other @ (DaemonError::Config { .. } | DaemonError::Io(_)) => {
             DaemonError::WorkspaceBuildFailed {
                 root: Path::new("<unknown>").to_path_buf(),
@@ -2313,7 +2484,9 @@ fn clone_lifecycle_or_storage_err(err: &DaemonError) -> DaemonError {
         | DaemonError::ToolTimeout { .. }
         | DaemonError::InvalidArgument { .. }
         | DaemonError::RpcErrorPreserved(_)
-        | DaemonError::Internal(_) => unreachable!("workspace errors handled by clone_err"),
+        | DaemonError::Internal(_) => {
+            unreachable!("workspace errors handled by clone_err")
+        }
     }
 }
 
@@ -2447,6 +2620,10 @@ mod tests {
     };
 
     use sqry_core::project::ProjectRootMode;
+    use sqry_daemon_protocol::{
+        ArtifactId, ArtifactInputDigest, ObjectFormat, RepositoryIdentity, ResidentHandleKind,
+        ResolvedRevision, RevisionId, RevisionSelector, SourceByteMode,
+    };
 
     use crate::config::DaemonConfig;
 
@@ -2472,6 +2649,35 @@ mod tests {
             ),
             false,
         ))
+    }
+
+    fn resident_load_request(artifact: &str, revision: &str) -> ResidentRevisionLoad {
+        ResidentRevisionLoad {
+            source_root: PathBuf::from("/repos/example"),
+            revision_id: RevisionId(revision.to_owned()),
+            handle_kind: ResidentHandleKind::ImmutableRevision,
+            artifact_id: ArtifactId(artifact.to_owned()),
+            artifact_inputs: ArtifactInputDigest {
+                schema_version: 1,
+                digest: "digest".to_owned(),
+            },
+            resolved: ResolvedRevision {
+                selector: RevisionSelector::Commit {
+                    oid: "b".repeat(40),
+                },
+                repository: RepositoryIdentity {
+                    repo_identity_hash: "repo".to_owned(),
+                    object_format: ObjectFormat::Sha1,
+                    remote_fingerprint: None,
+                },
+                commit_oid: Some("b".repeat(40)),
+                tree_oid: "a".repeat(40),
+                object_format: ObjectFormat::Sha1,
+                source_byte_mode: SourceByteMode::RawGitObjects,
+                resolved_at: "2026-06-26T00:00:00Z".to_owned(),
+            },
+            pinned: false,
+        }
     }
 
     /// Register a workspace under `key` on `mgr` so that
@@ -3116,6 +3322,54 @@ mod tests {
         assert!(
             status.memory.high_water_bytes >= status.memory.current_bytes,
             "high_water_bytes must be monotonic wrt current_bytes",
+        );
+    }
+
+    #[test]
+    fn status_includes_resident_revision_memory_and_rows() {
+        let mgr = WorkspaceManager::new_without_reaper(make_config());
+        let load = resident_load_request("artifact-a", "rev-a");
+        mgr.load_resident_revision(load, || Ok(CodeGraph::new()))
+            .unwrap();
+
+        let status = mgr.status();
+
+        assert_eq!(status.revisions.len(), 1);
+        assert_eq!(
+            status.revisions[0].handle_kind,
+            ResidentHandleKind::ImmutableRevision
+        );
+        assert_eq!(
+            status.memory.resident_revision_bytes,
+            status.revisions[0].memory_bytes
+        );
+        assert_eq!(status.memory.live_workspace_bytes, 0);
+        assert_eq!(
+            status.memory.current_bytes,
+            status.memory.resident_revision_bytes
+        );
+    }
+
+    #[test]
+    fn manager_query_guard_prevents_resident_lru_eviction_until_drop() {
+        let mgr = WorkspaceManager::new_without_reaper(make_config());
+        let load = resident_load_request("artifact-a", "rev-a");
+        mgr.load_resident_revision(load.clone(), || Ok(CodeGraph::new()))
+            .unwrap();
+
+        let guard = mgr.acquire_resident_query(&load.revision_id).unwrap();
+
+        assert_eq!(mgr.evict_inactive_resident_revision_lru(), None);
+        assert_eq!(
+            mgr.pinned_revision_artifact_ids(),
+            vec![ArtifactId("artifact-a".to_owned())]
+        );
+
+        drop(guard);
+
+        assert_eq!(
+            mgr.evict_inactive_resident_revision_lru(),
+            Some(load.revision_id)
         );
     }
 

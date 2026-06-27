@@ -115,6 +115,7 @@ fn search_returns_symbols() {
         query: "name:LoadAsync".into(),
         path: None,
         limit: Some(10),
+        ..SqrySearchParams::default()
     };
 
     let result = search::execute(&session, &params).expect("search executes");

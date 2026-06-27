@@ -37,7 +37,10 @@ use std::time::Duration;
 
 use sqry_daemon_protocol::{
     DaemonHello, DaemonHelloResponse, ENVELOPE_VERSION, JsonRpcId, JsonRpcPayload, JsonRpcRequest,
-    JsonRpcResponse, JsonRpcVersion, LoadResult, ResponseEnvelope, framing,
+    JsonRpcResponse, JsonRpcVersion, ListRevisionsRequest, ListRevisionsResult, LoadResult,
+    LoadRevisionRequest, LoadRevisionResult, PruneRevisionsRequest, PruneRevisionsResult,
+    ResponseEnvelope, RevisionStatus, RevisionStatusRequest, UnloadRevisionRequest,
+    UnloadRevisionResult, framing,
 };
 
 use crate::{AsyncReadWrite, ClientError, DEFAULT_CONNECT_TIMEOUT, platform_connect};
@@ -437,6 +440,98 @@ impl DaemonClient {
             }
         })
     }
+
+    /// Send a `daemon/loadRevision` request and return the typed result.
+    ///
+    /// # Errors
+    ///
+    /// Propagates errors from [`Self::send_request`]. Additionally returns
+    /// [`ClientError::SchemaMismatch`] if the daemon response does not decode
+    /// as [`ResponseEnvelope<LoadRevisionResult>`].
+    pub async fn load_revision(
+        &mut self,
+        request: LoadRevisionRequest,
+    ) -> Result<ResponseEnvelope<LoadRevisionResult>, ClientError> {
+        let raw = self
+            .send_request("daemon/loadRevision", serde_json::json!(request))
+            .await?;
+        decode_envelope("daemon/loadRevision", raw)
+    }
+
+    /// Send a `daemon/unloadRevision` request.
+    ///
+    /// # Errors
+    ///
+    /// Propagates errors from [`Self::send_request`] and strict response
+    /// decoding errors.
+    pub async fn unload_revision(
+        &mut self,
+        request: UnloadRevisionRequest,
+    ) -> Result<ResponseEnvelope<UnloadRevisionResult>, ClientError> {
+        let raw = self
+            .send_request("daemon/unloadRevision", serde_json::json!(request))
+            .await?;
+        decode_envelope("daemon/unloadRevision", raw)
+    }
+
+    /// Send a `daemon/listRevisions` request.
+    ///
+    /// # Errors
+    ///
+    /// Propagates errors from [`Self::send_request`] and strict response
+    /// decoding errors.
+    pub async fn list_revisions(
+        &mut self,
+        request: ListRevisionsRequest,
+    ) -> Result<ResponseEnvelope<ListRevisionsResult>, ClientError> {
+        let raw = self
+            .send_request("daemon/listRevisions", serde_json::json!(request))
+            .await?;
+        decode_envelope("daemon/listRevisions", raw)
+    }
+
+    /// Send a `daemon/revisionStatus` request.
+    ///
+    /// # Errors
+    ///
+    /// Propagates errors from [`Self::send_request`] and strict response
+    /// decoding errors.
+    pub async fn revision_status(
+        &mut self,
+        request: RevisionStatusRequest,
+    ) -> Result<ResponseEnvelope<RevisionStatus>, ClientError> {
+        let raw = self
+            .send_request("daemon/revisionStatus", serde_json::json!(request))
+            .await?;
+        decode_envelope("daemon/revisionStatus", raw)
+    }
+
+    /// Send a `daemon/pruneRevisions` request.
+    ///
+    /// # Errors
+    ///
+    /// Propagates errors from [`Self::send_request`] and strict response
+    /// decoding errors.
+    pub async fn prune_revisions(
+        &mut self,
+        request: PruneRevisionsRequest,
+    ) -> Result<ResponseEnvelope<PruneRevisionsResult>, ClientError> {
+        let raw = self
+            .send_request("daemon/pruneRevisions", serde_json::json!(request))
+            .await?;
+        decode_envelope("daemon/pruneRevisions", raw)
+    }
+}
+
+fn decode_envelope<T>(
+    method: &'static str,
+    value: serde_json::Value,
+) -> Result<ResponseEnvelope<T>, ClientError>
+where
+    T: serde::de::DeserializeOwned,
+{
+    serde_json::from_value::<ResponseEnvelope<T>>(value)
+        .map_err(|source| ClientError::SchemaMismatch { method, source })
 }
 
 // ---------------------------------------------------------------------------
@@ -1058,6 +1153,150 @@ mod tests {
         );
         assert_eq!(envelope.result.current_bytes, 2_097_152_u64);
         assert_eq!(envelope.meta.daemon_version, "8.0.6");
+        handle.await.expect("join").expect("server ok");
+    }
+
+    #[tokio::test]
+    async fn daemon_client_load_revision_sends_typed_request() {
+        use sqry_daemon_protocol::{
+            ArtifactId, ArtifactInputDigest, LoadRevisionRequest, ObjectFormat, RepositoryIdentity,
+            ResidentHandleKind, ResolvedRevision, RevisionId, RevisionLoadState, RevisionSelector,
+            RevisionStatus, SourceByteMode,
+        };
+
+        let (client_stream, handle) = spawn_fake_daemon(|mut server| async move {
+            let _hello = read_hello(&mut server).await?;
+            write_hello_response(&mut server, "8.0.6").await?;
+
+            let req: JsonRpcRequest = framing::read_frame_json::<_, JsonRpcRequest>(&mut server)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("expected request"))?;
+            assert_eq!(req.method, "daemon/loadRevision");
+            assert_eq!(req.params["selector"]["kind"], "ref");
+            assert_eq!(req.params["selector"]["name"], "main");
+
+            let payload = serde_json::json!({
+                "result": {
+                    "revision_id": "rev-1",
+                    "artifact_id": "artifact-1",
+                    "artifact_inputs": {
+                        "schema_version": 1,
+                        "digest": "digest-1"
+                    },
+                    "resolved": {
+                        "selector": { "kind": "ref", "name": "main" },
+                        "repository": {
+                            "repo_identity_hash": "repo-hash",
+                            "object_format": "sha1"
+                        },
+                        "commit_oid": "1111111111111111111111111111111111111111",
+                        "tree_oid": "2222222222222222222222222222222222222222",
+                        "object_format": "sha1",
+                        "source_byte_mode": "raw_git_objects",
+                        "resolved_at": "2026-06-26T00:00:00Z"
+                    },
+                    "status": {
+                        "revision_id": "rev-1",
+                        "handle_kind": "immutable_revision",
+                        "resolved": {
+                            "selector": { "kind": "ref", "name": "main" },
+                            "repository": {
+                                "repo_identity_hash": "repo-hash",
+                                "object_format": "sha1"
+                            },
+                            "commit_oid": "1111111111111111111111111111111111111111",
+                            "tree_oid": "2222222222222222222222222222222222222222",
+                            "object_format": "sha1",
+                            "source_byte_mode": "raw_git_objects",
+                            "resolved_at": "2026-06-26T00:00:00Z"
+                        },
+                        "artifact_id": "artifact-1",
+                        "artifact_inputs": {
+                            "schema_version": 1,
+                            "digest": "digest-1"
+                        },
+                        "state": "loaded",
+                        "pinned": false,
+                        "active_queries": 0,
+                        "memory_bytes": 128
+                    }
+                },
+                "meta": { "stale": false, "daemon_version": "8.0.6" }
+            });
+            let resp = JsonRpcResponse::success(req.id.clone(), payload);
+            framing::write_frame_json(&mut server, &resp).await?;
+            Ok(())
+        })
+        .await;
+
+        let mut client = do_hello_handshake(
+            client_stream,
+            Path::new("<in-memory-duplex>"),
+            DEFAULT_HELLO_TIMEOUT,
+        )
+        .await
+        .expect("hello ok");
+
+        let request = LoadRevisionRequest {
+            root: PathBuf::from("/repos/my-project"),
+            selector: RevisionSelector::Ref {
+                name: "main".to_owned(),
+            },
+            source_byte_mode: Some(SourceByteMode::RawGitObjects),
+            pin: false,
+        };
+        let envelope = client
+            .load_revision(request)
+            .await
+            .expect("loadRevision must decode");
+
+        assert_eq!(envelope.result.revision_id, RevisionId("rev-1".to_owned()));
+        assert_eq!(
+            envelope.result.artifact_id,
+            ArtifactId("artifact-1".to_owned())
+        );
+        assert_eq!(
+            envelope.result.artifact_inputs,
+            ArtifactInputDigest {
+                schema_version: 1,
+                digest: "digest-1".to_owned()
+            }
+        );
+        assert_eq!(envelope.result.resolved.object_format, ObjectFormat::Sha1);
+        assert_eq!(
+            envelope.result.resolved.source_byte_mode,
+            SourceByteMode::RawGitObjects
+        );
+        assert_eq!(
+            envelope.result.status.handle_kind,
+            ResidentHandleKind::ImmutableRevision
+        );
+        assert_eq!(envelope.result.status.state, RevisionLoadState::Loaded);
+        assert_eq!(
+            envelope.result.status.resolved.repository,
+            RepositoryIdentity {
+                repo_identity_hash: "repo-hash".to_owned(),
+                object_format: ObjectFormat::Sha1,
+                remote_fingerprint: None,
+            }
+        );
+        let expected_resolved = ResolvedRevision {
+            selector: RevisionSelector::Ref {
+                name: "main".to_owned(),
+            },
+            repository: RepositoryIdentity {
+                repo_identity_hash: "repo-hash".to_owned(),
+                object_format: ObjectFormat::Sha1,
+                remote_fingerprint: None,
+            },
+            commit_oid: Some("1111111111111111111111111111111111111111".to_owned()),
+            tree_oid: "2222222222222222222222222222222222222222".to_owned(),
+            object_format: ObjectFormat::Sha1,
+            source_byte_mode: SourceByteMode::RawGitObjects,
+            resolved_at: "2026-06-26T00:00:00Z".to_owned(),
+        };
+        assert_eq!(envelope.result.resolved, expected_resolved);
+        let _status: RevisionStatus = envelope.result.status;
         handle.await.expect("join").expect("server ok");
     }
 

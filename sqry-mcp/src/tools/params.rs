@@ -577,6 +577,35 @@ pub struct SemanticSearchParams {
     /// (`U_WS2_8_MCP_FILTERS`) wires the predicate end-to-end.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved_via: Option<Vec<ResolvedViaParam>>,
+
+    /// Optional loaded revision id. When omitted, semantic_search targets the
+    /// live workspace exactly as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision_id: Option<String>,
+
+    /// Optional Git ref selector for a loaded revision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision_ref: Option<String>,
+
+    /// Optional commit object id selector for a loaded revision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision_commit: Option<String>,
+
+    /// Optional tree object id selector for a loaded revision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision_tree: Option<String>,
+
+    /// Select a loaded dirty snapshot revision.
+    #[serde(default)]
+    pub revision_dirty: bool,
+
+    /// Include untracked files for `revision_dirty`.
+    #[serde(default)]
+    pub revision_include_untracked: bool,
+
+    /// Include ignored files for `revision_dirty`.
+    #[serde(default)]
+    pub revision_include_ignored: bool,
 }
 
 /// `hierarchical_search` params.

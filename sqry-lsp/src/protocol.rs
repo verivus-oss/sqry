@@ -5,13 +5,27 @@ use tower_lsp::lsp_types::Location;
 // Re-export canonical schema types for protocol compatibility
 pub use sqry_core::schema::RelationKind;
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct SqrySearchParams {
     pub query: String,
     #[serde(default)]
     pub path: Option<String>,
     #[serde(default)]
     pub limit: Option<usize>,
+    #[serde(default)]
+    pub revision_id: Option<String>,
+    #[serde(default)]
+    pub revision_ref: Option<String>,
+    #[serde(default)]
+    pub revision_commit: Option<String>,
+    #[serde(default)]
+    pub revision_tree: Option<String>,
+    #[serde(default)]
+    pub revision_dirty: bool,
+    #[serde(default)]
+    pub revision_include_untracked: bool,
+    #[serde(default)]
+    pub revision_include_ignored: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -32,6 +46,8 @@ pub struct SqrySearchResult {
     #[serde(rename = "truncated")]
     pub is_truncated: bool,
     pub used_index: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revision: Option<serde_json::Value>,
 }
 
 /// Sort order for cross-language results

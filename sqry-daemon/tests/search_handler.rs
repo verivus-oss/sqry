@@ -223,6 +223,7 @@ fn in_process_exact_projection(graph: &CodeGraph, pattern: &str) -> SearchResult
         total,
         truncated: false,
         cursor: None,
+        revision: None,
     }
 }
 

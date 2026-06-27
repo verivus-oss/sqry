@@ -64,6 +64,13 @@ pub struct SemanticSearchArgs {
     /// it as a `Predicate::ResolvedViaEq` AND filter on the parsed plan.
     /// `None` means no resolved-via filter is applied (back-compat default).
     pub resolved_via: Option<Vec<ResolvedVia>>,
+    pub revision_id: Option<String>,
+    pub revision_ref: Option<String>,
+    pub revision_commit: Option<String>,
+    pub revision_tree: Option<String>,
+    pub revision_dirty: bool,
+    pub revision_include_untracked: bool,
+    pub revision_include_ignored: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -485,6 +492,34 @@ pub fn validate_semantic_search_args(args: &Value) -> Result<SemanticSearchArgs>
         // populate these from the params struct.
         framework: None,
         resolved_via: None,
+        revision_id: args
+            .get("revision_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+        revision_ref: args
+            .get("revision_ref")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+        revision_commit: args
+            .get("revision_commit")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+        revision_tree: args
+            .get("revision_tree")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+        revision_dirty: args
+            .get("revision_dirty")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        revision_include_untracked: args
+            .get("revision_include_untracked")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        revision_include_ignored: args
+            .get("revision_include_ignored")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
     })
 }
 

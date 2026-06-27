@@ -32,6 +32,43 @@ use sqry_daemon::{
 };
 use tempfile::TempDir;
 
+/// Initialize a small Git repository with a `main` branch and one Rust file.
+pub fn revision_git_repo() -> TempDir {
+    let repo = TempDir::new().expect("tempdir");
+    fs::create_dir_all(repo.path().join("src")).expect("src dir");
+    fs::write(repo.path().join("src/lib.rs"), b"pub fn original() {}\n").expect("write source");
+    git(repo.path(), &["init", "-b", "main"]);
+    git(
+        repo.path(),
+        &["config", "user.email", "revision@example.invalid"],
+    );
+    git(repo.path(), &["config", "user.name", "Revision Test"]);
+    git(repo.path(), &["add", "src/lib.rs"]);
+    git(repo.path(), &["commit", "-m", "initial"]);
+    repo
+}
+
+/// Run Git with network-free environment guards used by revision tests.
+pub fn git(root: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .env("GIT_NO_LAZY_FETCH", "1")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .output()
+        .expect("spawn git");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed in {}\nstderr: {}\nstdout: {}",
+        root.display(),
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
 // ---------------------------------------------------------------------------
 // WorkspaceBuilder that drives the real sqry-core pipeline (reused from
 // sqry-daemon/tests/rebuild_dispatcher_integration.rs).

@@ -31,11 +31,16 @@ use sqry_core::graph::acquisition::GraphAcquisitionError;
 use thiserror::Error;
 
 use crate::{
-    JSONRPC_INTERNAL_ERROR, JSONRPC_INVALID_PARAMS, JSONRPC_MEMORY_BUDGET_EXCEEDED,
-    JSONRPC_QUERY_TOO_BROAD, JSONRPC_RESET_CANCELLATION_DISPATCHED, JSONRPC_RESET_WHILE_LOADING,
-    JSONRPC_SOCKET_SETUP, JSONRPC_TOOL_TIMEOUT, JSONRPC_WORKSPACE_BUILD_FAILED,
-    JSONRPC_WORKSPACE_EVICTED, JSONRPC_WORKSPACE_INCOMPATIBLE_GRAPH, JSONRPC_WORKSPACE_OVERSIZE,
-    JSONRPC_WORKSPACE_PINNED, JSONRPC_WORKSPACE_STALE_EXPIRED,
+    JSONRPC_ARTIFACT_KEY_MISMATCH, JSONRPC_CHECKOUT_FILTER_UNSUPPORTED,
+    JSONRPC_DIRTY_SNAPSHOT_CHANGED, JSONRPC_INTERNAL_ERROR, JSONRPC_INVALID_PARAMS,
+    JSONRPC_MANAGED_WORKTREE_IN_USE, JSONRPC_MEMORY_BUDGET_EXCEEDED, JSONRPC_QUERY_TOO_BROAD,
+    JSONRPC_RESET_CANCELLATION_DISPATCHED, JSONRPC_RESET_WHILE_LOADING,
+    JSONRPC_REVISION_DISK_BUDGET_EXCEEDED, JSONRPC_REVISION_OBJECT_MISSING,
+    JSONRPC_REVISION_QUERY_REQUIRES_EXPLICIT_SELECTOR, JSONRPC_REVISION_SELECTOR_AMBIGUOUS,
+    JSONRPC_REVISION_SOURCE_UNAVAILABLE, JSONRPC_SOCKET_SETUP, JSONRPC_SUBMODULE_UNAVAILABLE,
+    JSONRPC_TOOL_TIMEOUT, JSONRPC_WORKSPACE_BUILD_FAILED, JSONRPC_WORKSPACE_EVICTED,
+    JSONRPC_WORKSPACE_INCOMPATIBLE_GRAPH, JSONRPC_WORKSPACE_OVERSIZE, JSONRPC_WORKSPACE_PINNED,
+    JSONRPC_WORKSPACE_STALE_EXPIRED,
 };
 
 /// Wire-stable `kind` tag for the cost-gate rejection on the
@@ -379,6 +384,87 @@ pub enum DaemonError {
         reason: String,
         details: serde_json::Value,
     },
+
+    /// Revision selector resolved to more than one candidate.
+    ///
+    /// Wire code: `-32011`.
+    #[error("revision selector {selector} is ambiguous: {matches:?}")]
+    RevisionSelectorAmbiguous {
+        selector: String,
+        matches: Vec<String>,
+    },
+
+    /// Required Git object is not present in the local object database.
+    ///
+    /// Wire code: `-32012`.
+    #[error("revision object {object} is missing locally")]
+    RevisionObjectMissing {
+        object: String,
+        path: Option<PathBuf>,
+    },
+
+    /// Revision source bytes cannot be read from the selected local source.
+    ///
+    /// Wire code: `-32013`.
+    #[error("revision source unavailable: {reason}")]
+    RevisionSourceUnavailable {
+        reason: String,
+        path: Option<PathBuf>,
+    },
+
+    /// Checkout-byte mode encountered a filter that cannot be reproduced.
+    ///
+    /// Wire code: `-32014`.
+    #[error("checkout filter unsupported: {filter}")]
+    CheckoutFilterUnsupported {
+        filter: String,
+        path: Option<PathBuf>,
+    },
+
+    /// Submodule gitlink cannot be indexed safely for this revision.
+    ///
+    /// Wire code: `-32015`.
+    #[error("submodule unavailable at {}", path.display())]
+    SubmoduleUnavailable {
+        path: PathBuf,
+        gitlink_oid: Option<String>,
+    },
+
+    /// Dirty snapshot changed during capture and failed the retry policy.
+    ///
+    /// Wire code: `-32016`.
+    #[error("dirty snapshot changed during capture at {}", root.display())]
+    DirtySnapshotChanged { root: PathBuf },
+
+    /// Artifact id does not match manifest-verifiable inputs.
+    ///
+    /// Wire code: `-32017`.
+    #[error("artifact key mismatch for {artifact_id}: {reason}")]
+    ArtifactKeyMismatch { artifact_id: String, reason: String },
+
+    /// Managed worktree is already leased or unsafe to reuse.
+    ///
+    /// Wire code: `-32018`.
+    #[error("managed worktree {} is in use: {reason}", worktree.display())]
+    ManagedWorktreeInUse { worktree: PathBuf, reason: String },
+
+    /// Revision artifact disk budget would be exceeded.
+    ///
+    /// Wire code: `-32019`.
+    #[error(
+        "revision disk budget exceeded: requested {requested_bytes} B, current {current_bytes} B / limit {limit_bytes} B"
+    )]
+    RevisionDiskBudgetExceeded {
+        limit_bytes: u64,
+        requested_bytes: u64,
+        current_bytes: u64,
+    },
+
+    /// Query route requires an explicit revision selector.
+    ///
+    /// Wire code: `-32020`.
+    #[error("revision query requires an explicit selector: {reason}")]
+    RevisionQueryRequiresExplicitSelector { reason: String },
 }
 
 impl DaemonError {
@@ -416,6 +502,18 @@ impl DaemonError {
             Self::ResetCancellationDispatched { .. } => Some(JSONRPC_RESET_CANCELLATION_DISPATCHED),
             Self::SocketSetup { .. } => Some(JSONRPC_SOCKET_SETUP),
             Self::QueryTooBroad { .. } => Some(JSONRPC_QUERY_TOO_BROAD),
+            Self::RevisionSelectorAmbiguous { .. } => Some(JSONRPC_REVISION_SELECTOR_AMBIGUOUS),
+            Self::RevisionObjectMissing { .. } => Some(JSONRPC_REVISION_OBJECT_MISSING),
+            Self::RevisionSourceUnavailable { .. } => Some(JSONRPC_REVISION_SOURCE_UNAVAILABLE),
+            Self::CheckoutFilterUnsupported { .. } => Some(JSONRPC_CHECKOUT_FILTER_UNSUPPORTED),
+            Self::SubmoduleUnavailable { .. } => Some(JSONRPC_SUBMODULE_UNAVAILABLE),
+            Self::DirtySnapshotChanged { .. } => Some(JSONRPC_DIRTY_SNAPSHOT_CHANGED),
+            Self::ArtifactKeyMismatch { .. } => Some(JSONRPC_ARTIFACT_KEY_MISMATCH),
+            Self::ManagedWorktreeInUse { .. } => Some(JSONRPC_MANAGED_WORKTREE_IN_USE),
+            Self::RevisionDiskBudgetExceeded { .. } => Some(JSONRPC_REVISION_DISK_BUDGET_EXCEEDED),
+            Self::RevisionQueryRequiresExplicitSelector { .. } => {
+                Some(JSONRPC_REVISION_QUERY_REQUIRES_EXPLICIT_SELECTOR)
+            }
             // Lifecycle errors don't cross the IPC boundary.
             Self::AlreadyRunning { .. }
             | Self::AutoStartTimeout { .. }
@@ -471,7 +569,17 @@ impl DaemonError {
             | Self::ResetWhileLoading { .. }
             | Self::ResetCancellationDispatched { .. }
             | Self::SocketSetup { .. }
-            | Self::QueryTooBroad { .. } => 70,
+            | Self::QueryTooBroad { .. }
+            | Self::RevisionSelectorAmbiguous { .. }
+            | Self::RevisionObjectMissing { .. }
+            | Self::RevisionSourceUnavailable { .. }
+            | Self::CheckoutFilterUnsupported { .. }
+            | Self::SubmoduleUnavailable { .. }
+            | Self::DirtySnapshotChanged { .. }
+            | Self::ArtifactKeyMismatch { .. }
+            | Self::ManagedWorktreeInUse { .. }
+            | Self::RevisionDiskBudgetExceeded { .. }
+            | Self::RevisionQueryRequiresExplicitSelector { .. } => 70,
         }
     }
 
@@ -598,6 +706,75 @@ impl DaemonError {
             // arm verbatim — this layer only owns the 4-key
             // envelope.
             Self::QueryTooBroad { details, .. } => Some(query_too_broad_data(details)),
+            Self::RevisionSelectorAmbiguous { selector, matches } => Some(json!({
+                "kind": "revision_selector_ambiguous",
+                "retryable": false,
+                "selector": selector,
+                "matches": matches,
+            })),
+            Self::RevisionObjectMissing { object, path } => Some(json!({
+                "kind": "revision_object_missing",
+                "retryable": false,
+                "object": object,
+                "path": path,
+                "hint": "fetch or provide the missing Git object explicitly; sqryd does not fetch implicitly",
+            })),
+            Self::RevisionSourceUnavailable { reason, path } => Some(json!({
+                "kind": "revision_source_unavailable",
+                "retryable": false,
+                "reason": reason,
+                "path": path,
+            })),
+            Self::CheckoutFilterUnsupported { filter, path } => Some(json!({
+                "kind": "checkout_filter_unsupported",
+                "retryable": false,
+                "filter": filter,
+                "path": path,
+                "hint": "use raw_git_objects mode or configure a supported explicit checkout-byte source",
+            })),
+            Self::SubmoduleUnavailable { path, gitlink_oid } => Some(json!({
+                "kind": "submodule_unavailable",
+                "retryable": false,
+                "path": path,
+                "gitlink_oid": gitlink_oid,
+            })),
+            Self::DirtySnapshotChanged { root } => Some(json!({
+                "kind": "dirty_snapshot_changed",
+                "retryable": true,
+                "root": root,
+                "hint": "retry after file writes settle",
+            })),
+            Self::ArtifactKeyMismatch {
+                artifact_id,
+                reason,
+            } => Some(json!({
+                "kind": "artifact_key_mismatch",
+                "retryable": false,
+                "artifact_id": artifact_id,
+                "reason": reason,
+            })),
+            Self::ManagedWorktreeInUse { worktree, reason } => Some(json!({
+                "kind": "managed_worktree_in_use",
+                "retryable": true,
+                "worktree": worktree,
+                "reason": reason,
+            })),
+            Self::RevisionDiskBudgetExceeded {
+                limit_bytes,
+                requested_bytes,
+                current_bytes,
+            } => Some(json!({
+                "kind": "revision_disk_budget_exceeded",
+                "retryable": false,
+                "limit_bytes": limit_bytes,
+                "requested_bytes": requested_bytes,
+                "current_bytes": current_bytes,
+            })),
+            Self::RevisionQueryRequiresExplicitSelector { reason } => Some(json!({
+                "kind": "revision_query_requires_explicit_selector",
+                "retryable": false,
+                "reason": reason,
+            })),
         }
     }
 }
@@ -817,6 +994,98 @@ mod tests {
             root: PathBuf::from("/repo"),
         };
         assert_eq!(evicted.jsonrpc_code(), Some(JSONRPC_WORKSPACE_EVICTED));
+    }
+
+    #[test]
+    fn revision_errors_have_dedicated_jsonrpc_codes_and_data() {
+        let cases = [
+            (
+                DaemonError::RevisionSelectorAmbiguous {
+                    selector: "main".to_owned(),
+                    matches: vec!["refs/heads/main".to_owned(), "refs/tags/main".to_owned()],
+                },
+                JSONRPC_REVISION_SELECTOR_AMBIGUOUS,
+                "revision_selector_ambiguous",
+            ),
+            (
+                DaemonError::RevisionObjectMissing {
+                    object: "a".repeat(40),
+                    path: Some(PathBuf::from("/repo")),
+                },
+                JSONRPC_REVISION_OBJECT_MISSING,
+                "revision_object_missing",
+            ),
+            (
+                DaemonError::RevisionSourceUnavailable {
+                    reason: "not a git repository".to_owned(),
+                    path: Some(PathBuf::from("/repo")),
+                },
+                JSONRPC_REVISION_SOURCE_UNAVAILABLE,
+                "revision_source_unavailable",
+            ),
+            (
+                DaemonError::CheckoutFilterUnsupported {
+                    filter: "lfs".to_owned(),
+                    path: Some(PathBuf::from("large.bin")),
+                },
+                JSONRPC_CHECKOUT_FILTER_UNSUPPORTED,
+                "checkout_filter_unsupported",
+            ),
+            (
+                DaemonError::SubmoduleUnavailable {
+                    path: PathBuf::from("vendor/lib"),
+                    gitlink_oid: Some("b".repeat(40)),
+                },
+                JSONRPC_SUBMODULE_UNAVAILABLE,
+                "submodule_unavailable",
+            ),
+            (
+                DaemonError::DirtySnapshotChanged {
+                    root: PathBuf::from("/repo"),
+                },
+                JSONRPC_DIRTY_SNAPSHOT_CHANGED,
+                "dirty_snapshot_changed",
+            ),
+            (
+                DaemonError::ArtifactKeyMismatch {
+                    artifact_id: "artifact".to_owned(),
+                    reason: "manifest digest mismatch".to_owned(),
+                },
+                JSONRPC_ARTIFACT_KEY_MISMATCH,
+                "artifact_key_mismatch",
+            ),
+            (
+                DaemonError::ManagedWorktreeInUse {
+                    worktree: PathBuf::from("/repo-agent"),
+                    reason: "leased by task-1".to_owned(),
+                },
+                JSONRPC_MANAGED_WORKTREE_IN_USE,
+                "managed_worktree_in_use",
+            ),
+            (
+                DaemonError::RevisionDiskBudgetExceeded {
+                    limit_bytes: 100,
+                    requested_bytes: 80,
+                    current_bytes: 40,
+                },
+                JSONRPC_REVISION_DISK_BUDGET_EXCEEDED,
+                "revision_disk_budget_exceeded",
+            ),
+            (
+                DaemonError::RevisionQueryRequiresExplicitSelector {
+                    reason: "cross-revision query disabled by default".to_owned(),
+                },
+                JSONRPC_REVISION_QUERY_REQUIRES_EXPLICIT_SELECTOR,
+                "revision_query_requires_explicit_selector",
+            ),
+        ];
+
+        for (err, code, kind) in cases {
+            assert_eq!(err.jsonrpc_code(), Some(code), "{err:?}");
+            let data = err.error_data().expect("revision error must emit data");
+            assert_eq!(data["kind"], kind, "{data}");
+            assert_eq!(err.exit_code(), 70, "{err:?}");
+        }
     }
 
     // -----------------------------------------------------------------

@@ -35,6 +35,25 @@ sqry workspace status . --json
 
 Status reports aggregate health for each source root, including whether graph artifacts are present, stale, building, missing, or errored.
 
+## Revision Selectors
+
+Workspace resolution and revision selection are separate dimensions. A
+workspace identifies the source root set; a revision selector identifies which
+view of a source root to query.
+
+When a query omits a revision selector, sqry queries the live workspace only.
+Explicit revision selectors can target:
+
+- `live`
+- `dirty`
+- `ref`
+- `commit`
+- `tree`
+- `worktree`
+
+Refs are pinned when loaded. A branch moving after `load-revision` does not
+change the already loaded revision handle.
+
 ## Cleanup
 
 Preview cleanup first:
@@ -49,6 +68,10 @@ Then remove stale generated artifacts and rebuild:
 sqry workspace clean .
 sqry index --force .
 ```
+
+Revision artifacts use daemon cache storage, not the live `.sqry/graph` path.
+Use `sqry daemon prune-revisions --root .` for revision artifacts and
+managed worktrees.
 
 ## Ignore Rules
 
@@ -65,3 +88,6 @@ Commit `.sqry-workspace` only when it is part of your team workflow and contains
 ## MCP Source Roots
 
 MCP `workspace_status` reports `source_root_id` as an opaque display/correlation token. It is useful for matching redacted result paths back to status entries, but it is not a path. Tools that accept `path` arguments require workspace-relative paths or normal filesystem paths.
+
+Revision-aware MCP tools accept optional revision selectors. Omitting the
+selector preserves the live-workspace behavior described above.

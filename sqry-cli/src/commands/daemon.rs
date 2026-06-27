@@ -26,8 +26,13 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use sqry_daemon_protocol::{
+    ListRevisionsRequest, LoadRevisionRequest, PruneRevisionsRequest, RevisionId,
+    RevisionQueryTarget, RevisionSelector, RevisionStatusRequest, SourceByteMode,
+    UnloadRevisionRequest,
+};
 
-use crate::args::{Cli, DaemonAction};
+use crate::args::{Cli, DaemonAction, RevisionQueryArgs, RevisionSourceByteModeArg};
 
 // ---------------------------------------------------------------------------
 // Constants.
@@ -66,6 +71,45 @@ pub fn run(_cli: &Cli, action: &DaemonAction) -> Result<()> {
         DaemonAction::Status { json } => run_daemon_status(*json),
         DaemonAction::Logs { lines, follow } => run_daemon_logs(*lines, *follow),
         DaemonAction::Load { path } => run_daemon_load(path),
+        DaemonAction::LoadRevision {
+            root,
+            git_ref,
+            commit,
+            tree,
+            dirty,
+            include_untracked,
+            include_ignored,
+            source_byte_mode,
+            pin,
+            json,
+        } => run_daemon_load_revision(
+            root,
+            git_ref.as_deref(),
+            commit.as_deref(),
+            tree.as_deref(),
+            *dirty,
+            *include_untracked,
+            *include_ignored,
+            *source_byte_mode,
+            *pin,
+            *json,
+        ),
+        DaemonAction::ListRevisions {
+            root,
+            include_unloaded,
+            json,
+        } => run_daemon_list_revisions(root.as_deref(), *include_unloaded, *json),
+        DaemonAction::RevisionStatus { revision_id, json } => {
+            run_daemon_revision_status(revision_id, *json)
+        }
+        DaemonAction::UnloadRevision {
+            revision_id,
+            force,
+            json,
+        } => run_daemon_unload_revision(revision_id, *force, *json),
+        DaemonAction::PruneRevisions { root, apply, json } => {
+            run_daemon_prune_revisions(root.as_deref(), *apply, *json)
+        }
         DaemonAction::Rebuild {
             path,
             force,
@@ -74,6 +118,257 @@ pub fn run(_cli: &Cli, action: &DaemonAction) -> Result<()> {
         } => run_daemon_rebuild(path, *force, *timeout, *json),
         DaemonAction::Reset { path, force } => run_daemon_reset(path, *force),
     }
+}
+
+pub(crate) fn revision_query_target_from_args(
+    args: &RevisionQueryArgs,
+) -> Result<Option<RevisionQueryTarget>> {
+    if let Some(revision_id) = &args.revision_id {
+        return Ok(Some(RevisionQueryTarget::RevisionId {
+            revision_id: RevisionId(revision_id.clone()),
+        }));
+    }
+    let selector = if let Some(name) = &args.revision_ref {
+        Some(RevisionSelector::Ref { name: name.clone() })
+    } else if let Some(oid) = &args.revision_commit {
+        Some(RevisionSelector::Commit { oid: oid.clone() })
+    } else if let Some(oid) = &args.revision_tree {
+        Some(RevisionSelector::Tree { oid: oid.clone() })
+    } else if args.revision_dirty {
+        Some(RevisionSelector::Dirty {
+            include_untracked: args.revision_include_untracked,
+            include_ignored: args.revision_include_ignored,
+        })
+    } else {
+        None
+    };
+    Ok(selector.map(|selector| RevisionQueryTarget::Selector { selector }))
+}
+
+fn source_byte_mode_from_arg(arg: RevisionSourceByteModeArg) -> SourceByteMode {
+    match arg {
+        RevisionSourceByteModeArg::RawGitObjects => SourceByteMode::RawGitObjects,
+        RevisionSourceByteModeArg::DirtySnapshot => SourceByteMode::DirtySnapshot,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_daemon_load_revision(
+    root: &Path,
+    git_ref: Option<&str>,
+    commit: Option<&str>,
+    tree: Option<&str>,
+    dirty: bool,
+    include_untracked: bool,
+    include_ignored: bool,
+    source_byte_mode: Option<RevisionSourceByteModeArg>,
+    pin: bool,
+    json: bool,
+) -> Result<()> {
+    let selector = revision_selector_from_daemon_args(
+        git_ref,
+        commit,
+        tree,
+        dirty,
+        include_untracked,
+        include_ignored,
+    )?;
+    let canonical = std::fs::canonicalize(root)
+        .with_context(|| format!("failed to canonicalize {}", root.display()))?;
+    let request = LoadRevisionRequest {
+        root: canonical.clone(),
+        selector,
+        source_byte_mode: source_byte_mode.map(source_byte_mode_from_arg),
+        pin,
+    };
+    let envelope = with_daemon_client("load revision", |mut client| async move {
+        client.load_revision(request).await
+    })?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&envelope)?);
+    } else {
+        eprintln!(
+            "sqry: loaded revision {} for {} (artifact {})",
+            envelope.result.revision_id.0,
+            canonical.display(),
+            envelope.result.artifact_id.0
+        );
+    }
+    Ok(())
+}
+
+fn run_daemon_list_revisions(
+    root: Option<&Path>,
+    include_unloaded: bool,
+    json: bool,
+) -> Result<()> {
+    let root = root
+        .map(|path| {
+            std::fs::canonicalize(path)
+                .with_context(|| format!("failed to canonicalize {}", path.display()))
+        })
+        .transpose()?;
+    let envelope = with_daemon_client("list revisions", |mut client| async move {
+        client
+            .list_revisions(ListRevisionsRequest {
+                root,
+                include_unloaded,
+            })
+            .await
+    })?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&envelope)?);
+    } else if envelope.result.revisions.is_empty() {
+        eprintln!("sqry: no resident revisions");
+    } else {
+        for revision in envelope.result.revisions {
+            println!(
+                "{}\t{:?}\t{:?}\t{} bytes",
+                revision.revision_id.0, revision.handle_kind, revision.state, revision.memory_bytes
+            );
+        }
+    }
+    Ok(())
+}
+
+fn run_daemon_revision_status(revision_id: &str, json: bool) -> Result<()> {
+    let envelope = with_daemon_client("revision status", |mut client| async move {
+        client
+            .revision_status(RevisionStatusRequest {
+                revision_id: RevisionId(revision_id.to_owned()),
+            })
+            .await
+    })?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&envelope)?);
+    } else {
+        let status = envelope.result;
+        println!(
+            "{}\t{:?}\t{:?}\t{} bytes\tartifact {}",
+            status.revision_id.0,
+            status.handle_kind,
+            status.state,
+            status.memory_bytes,
+            status.artifact_id.0
+        );
+    }
+    Ok(())
+}
+
+fn run_daemon_unload_revision(revision_id: &str, force: bool, json: bool) -> Result<()> {
+    let envelope = with_daemon_client("unload revision", |mut client| async move {
+        client
+            .unload_revision(UnloadRevisionRequest {
+                revision_id: RevisionId(revision_id.to_owned()),
+                force,
+            })
+            .await
+    })?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&envelope)?);
+    } else if envelope.result.unloaded {
+        eprintln!("sqry: unloaded revision {}", envelope.result.revision_id.0);
+    } else {
+        eprintln!(
+            "sqry: revision {} was not resident",
+            envelope.result.revision_id.0
+        );
+    }
+    Ok(())
+}
+
+fn run_daemon_prune_revisions(root: Option<&Path>, apply: bool, json: bool) -> Result<()> {
+    let root = root
+        .map(|path| {
+            std::fs::canonicalize(path)
+                .with_context(|| format!("failed to canonicalize {}", path.display()))
+        })
+        .transpose()?;
+    let envelope = with_daemon_client("prune revisions", |mut client| async move {
+        client
+            .prune_revisions(PruneRevisionsRequest { root, apply })
+            .await
+    })?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&envelope)?);
+    } else {
+        eprintln!(
+            "sqry: {} revision candidates, {} worktree candidates, {} refusals, {} bytes reclaimable{}",
+            envelope.result.candidates.len(),
+            envelope.result.worktree_candidates.len(),
+            envelope.result.refusals.len(),
+            envelope.result.reclaimed_bytes,
+            if envelope.result.applied {
+                " (applied)"
+            } else {
+                ""
+            }
+        );
+    }
+    Ok(())
+}
+
+fn revision_selector_from_daemon_args(
+    git_ref: Option<&str>,
+    commit: Option<&str>,
+    tree: Option<&str>,
+    dirty: bool,
+    include_untracked: bool,
+    include_ignored: bool,
+) -> Result<RevisionSelector> {
+    let selected = usize::from(git_ref.is_some())
+        + usize::from(commit.is_some())
+        + usize::from(tree.is_some())
+        + usize::from(dirty);
+    anyhow::ensure!(
+        selected == 1,
+        "select exactly one revision source: --ref, --commit, --tree, or --dirty"
+    );
+    if let Some(name) = git_ref {
+        Ok(RevisionSelector::Ref {
+            name: name.to_owned(),
+        })
+    } else if let Some(oid) = commit {
+        Ok(RevisionSelector::Commit {
+            oid: oid.to_owned(),
+        })
+    } else if let Some(oid) = tree {
+        Ok(RevisionSelector::Tree {
+            oid: oid.to_owned(),
+        })
+    } else {
+        Ok(RevisionSelector::Dirty {
+            include_untracked,
+            include_ignored,
+        })
+    }
+}
+
+fn with_daemon_client<T, Fut, F>(operation: &'static str, f: F) -> Result<T>
+where
+    F: FnOnce(sqry_daemon_client::DaemonClient) -> Fut,
+    Fut: std::future::Future<Output = Result<T, sqry_daemon_client::ClientError>>,
+{
+    let config = load_daemon_config()?;
+    let socket_path = config.socket_path();
+    if !try_connect_sync(&socket_path)? {
+        anyhow::bail!(
+            "daemon is not running (socket {}). Start it with `sqry daemon start`.",
+            socket_path.display()
+        );
+    }
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .with_context(|| format!("failed to build tokio runtime for daemon {operation}"))?;
+    rt.block_on(async {
+        let client = sqry_daemon_client::DaemonClient::connect(&socket_path)
+            .await
+            .with_context(|| format!("failed to connect to daemon at {}", socket_path.display()))?;
+        f(client)
+            .await
+            .with_context(|| format!("daemon {operation} request failed"))
+    })
 }
 
 // ---------------------------------------------------------------------------

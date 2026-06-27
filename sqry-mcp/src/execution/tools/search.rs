@@ -10,7 +10,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use sqry_core::graph::unified::node::NodeId;
 use sqry_core::graph::unified::{FileScope, ResolutionMode, SymbolQuery, SymbolResolutionOutcome};
 use sqry_core::search::matcher::{FuzzyMatcher, MatchConfig};
@@ -144,6 +144,9 @@ pub fn execute_semantic_search(
     args: &SemanticSearchArgs,
     cancel: &sqry_core::query::cancellation::CancellationToken,
 ) -> Result<ToolExecution<SemanticSearchData>> {
+    if has_revision_selector(args) {
+        bail!("revision selectors require daemon-hosted semantic_search with a loaded revision");
+    }
     // SECURITY: Validate path BEFORE loading workspace/engine.
     // SGA03 keeps this preflight in place: the standalone-MCP
     // `canonicalize_in_workspace` enforces invalid-params for symlink-escape
@@ -179,6 +182,16 @@ pub fn execute_semantic_search(
         executor: engine.executor_arc(),
     };
     inner::execute_semantic_search(&ctx, args, &search_root, start, cancel)
+}
+
+pub(crate) fn has_revision_selector(args: &SemanticSearchArgs) -> bool {
+    args.revision_id.is_some()
+        || args.revision_ref.is_some()
+        || args.revision_commit.is_some()
+        || args.revision_tree.is_some()
+        || args.revision_dirty
+        || args.revision_include_untracked
+        || args.revision_include_ignored
 }
 
 pub(crate) mod inner {

@@ -9,6 +9,7 @@ This guide covers the stable public workflows for local semantic code search.
 - [Indexing](indexing.md): build graph artifacts, choose plugins, clean generated state, and rebuild after graph-format changes.
 - [Workspaces](workspace.md): configure `.sqry-workspace`, VS Code `.code-workspace` `sqry.workspace`, multi-root status, and workspace cleanup.
 - [Daemon Mode](daemon.md): run `sqryd`, load and rebuild workspaces, inspect logs, and use daemon-backed MCP/LSP workflows.
+- [Revision-Aware Workspaces](revision-aware-workspaces.md): load immutable revisions, dirty snapshots, and managed agent worktrees while preserving live-workspace query defaults.
 - [MCP](mcp.md): configure AI assistants, choose standalone versus daemon mode, inspect the live tool catalog, and handle `source_root_id` safely.
 - [Advanced Analysis](advanced-analysis.md): use graph predicates, `resolved_via`, `returns`, context propagation, semantic diff, impact, and visualization.
 - [Structural Shape Matching](shape-match.md): find functions by identifier-blind body shape with `shape-match`, `diff --structural`, the `shape~=` predicate, and the `structural_similar` MCP tool.

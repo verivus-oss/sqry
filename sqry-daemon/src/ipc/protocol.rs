@@ -13,3 +13,11 @@ pub use sqry_daemon_protocol::protocol::{
     JsonRpcRequest, JsonRpcResponse, JsonRpcVersion, RebuildResult, ResponseEnvelope, ResponseMeta,
     ShimProtocol, ShimRegister, ShimRegisterAck, WorkspaceState,
 };
+pub use sqry_daemon_protocol::revision::{
+    ArtifactId, ArtifactInputDigest, ListRevisionsRequest, ListRevisionsResult,
+    LoadRevisionRequest, LoadRevisionResult, ObjectFormat, PruneRefusal, PruneRevisionCandidate,
+    PruneRevisionsRequest, PruneRevisionsResult, PruneWorktreeCandidate, RepositoryIdentity,
+    ResidentHandleKind, ResolvedRevision, RevisionId, RevisionLoadState, RevisionQueryMetadata,
+    RevisionQueryTarget, RevisionSelector, RevisionStatus, RevisionStatusRequest, SourceByteMode,
+    UnloadRevisionRequest, UnloadRevisionResult,
+};

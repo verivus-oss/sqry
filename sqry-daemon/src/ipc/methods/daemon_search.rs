@@ -36,11 +36,13 @@ use sqry_core::graph::unified::node::{NodeId, NodeKind};
 use sqry_core::search::fuzzy::{CandidateGenerator, FuzzyConfig};
 use sqry_core::search::matcher::{FuzzyMatcher, MatchConfig};
 use sqry_core::search::trigram::TrigramIndex;
-use sqry_daemon_protocol::{SearchItem, SearchMode, SearchRequest, SearchResult};
+use sqry_daemon_protocol::{
+    RevisionQueryTarget, SearchItem, SearchMode, SearchRequest, SearchResult,
+};
 
 use super::super::protocol::{ResponseEnvelope, ResponseMeta};
 use super::super::tool_core;
-use super::{HandlerContext, MethodError};
+use super::{HandlerContext, MethodError, daemon_load_revision};
 
 /// Default per-mode result cap, mirroring the CLI defaults in
 /// `sqry-cli/src/commands/search.rs::run_search` (search=100, fuzzy=50).
@@ -72,6 +74,10 @@ pub(crate) async fn handle(ctx: &HandlerContext, params: Value) -> Result<Value,
     // since `acquire_and_execute` wraps closure errors as
     // `DaemonError::Internal` (-32603 per `DaemonError::jsonrpc_code`).
     let regex = validate_request(&req)?;
+
+    if let Some(target) = req.revision.clone() {
+        return handle_revision_search(ctx, req, target, regex).await;
+    }
 
     // Capture path + tool timeout up front; the `req` is moved into the
     // closure below so this avoids a clone of every owned field on req.
@@ -122,6 +128,61 @@ pub(crate) async fn handle(ctx: &HandlerContext, params: Value) -> Result<Value,
                 .map_err(|e| MethodError::Internal(anyhow::anyhow!("envelope serialise: {e}")))
         }
     }
+}
+
+async fn handle_revision_search(
+    ctx: &HandlerContext,
+    req: SearchRequest,
+    target: RevisionQueryTarget,
+    regex: Option<Regex>,
+) -> Result<Value, MethodError> {
+    let root = std::path::PathBuf::from(&req.search_path)
+        .canonicalize()
+        .map_err(|err| {
+            MethodError::Daemon(crate::error::DaemonError::InvalidArgument {
+                reason: format!(
+                    "daemon/search revision target path {} could not be canonicalized: {err}",
+                    req.search_path
+                ),
+            })
+        })?;
+    let (revision_id, metadata) = daemon_load_revision::resolve_query_target(ctx, &root, &target)?;
+    let guard = ctx.manager.acquire_resident_query(&revision_id)?;
+    let graph = guard.graph().ok_or_else(|| {
+        MethodError::Daemon(crate::error::DaemonError::RevisionSourceUnavailable {
+            reason: format!("resident revision {} had no loaded graph", revision_id.0),
+            path: Some(root.clone()),
+        })
+    })?;
+    let tool_timeout = Duration::from_secs(ctx.config.tool_timeout_secs);
+    let result = tokio::time::timeout(
+        tool_timeout,
+        tokio::task::spawn_blocking(move || {
+            let mut result = run_search_on_graph(&graph, &req, regex.as_ref());
+            result.revision = Some(metadata);
+            result
+        }),
+    )
+    .await
+    .map_err(|_| {
+        MethodError::Daemon(crate::error::DaemonError::ToolTimeout {
+            root: root.clone(),
+            secs: tool_timeout.as_secs(),
+            deadline_ms: u64::try_from(tool_timeout.as_millis()).unwrap_or(u64::MAX),
+        })
+    })?
+    .map_err(MethodError::JoinError)?;
+    drop(guard);
+
+    let envelope = ResponseEnvelope {
+        result: serde_json::to_value(result)
+            .map_err(|err| MethodError::Internal(anyhow::Error::new(err)))?,
+        meta: ResponseMeta::fresh_from(
+            crate::workspace::WorkspaceState::Loaded,
+            ctx.daemon_version,
+        ),
+    };
+    serde_json::to_value(&envelope).map_err(|err| MethodError::Internal(anyhow::Error::new(err)))
 }
 
 /// Validate a `SearchRequest` against its declared mode.
@@ -266,6 +327,7 @@ fn run_search_on_graph(
         total,
         truncated,
         cursor: None,
+        revision: None,
     }
 }
 
@@ -838,6 +900,7 @@ mod tests {
             // Match the wire default (`true`): keep macro-generated symbols.
             // Tests that exercise the `false` arm set this explicitly.
             include_generated: true,
+            revision: None,
         }
     }
 
