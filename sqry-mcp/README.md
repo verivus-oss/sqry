@@ -1,6 +1,6 @@
 # sqry MCP Server
 
-**Version**: 23.0.2
+**Version**: 23.1.0
 
 `sqry-mcp` exposes sqry semantic code-search tools to Model Context Protocol clients.
 
@@ -28,7 +28,7 @@ sqry-mcp --list-tools
 
 MCP clients can also call `tools/list`, and sqry clients can read `sqry://meta/manifest`.
 
-> **Removed in 23.0.2:** the `sqry_ask` natural-language MCP tool was removed. Use `sqry_query`, `semantic_search`, and `relation_query` instead; see [Removed features](../docs/TROUBLESHOOTING.md#removed-features) for migration.
+> **Removed in 23.1.0:** the `sqry_ask` natural-language MCP tool was removed. Use `sqry_query`, `semantic_search`, and `relation_query` instead; see [Removed features](../docs/TROUBLESHOOTING.md#removed-features) for migration.
 
 ## Setup
 

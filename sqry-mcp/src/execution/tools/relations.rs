@@ -65,11 +65,12 @@ use crate::execution::utils::{duration_to_ms, paginate};
 /// If path is "." (default), returns None to trigger discovery.
 /// Otherwise returns Some(path) for explicit workspace resolution.
 fn resolve_workspace_path(path: &str) -> Option<PathBuf> {
-    if path == "." {
-        None
-    } else {
-        Some(PathBuf::from(path))
-    }
+    // Issue #394: resolve a subdirectory `path` to its owning workspace instead
+    // of failing as if it were a workspace root. Subtree scoping for list/scan
+    // tools is applied separately via `resolve_workspace_scope`.
+    crate::execution::workspace_scope::resolve_workspace_selector(path)
+        .ok()
+        .flatten()
 }
 
 /// Execute the `relation_query` tool to find symbol relations.
@@ -1286,17 +1287,20 @@ mod tests {
     }
 
     #[test]
-    fn resolve_workspace_path_explicit_returns_some() {
-        let result = resolve_workspace_path("/workspace/project");
-        assert!(result.is_some());
-        assert_eq!(result.unwrap(), PathBuf::from("/workspace/project"));
+    fn resolve_workspace_path_nonexistent_explicit_returns_none() {
+        // Issue #394: the shim delegates to the shared scope resolver, so a
+        // nonexistent path falls back to ambient discovery (`None`) instead of
+        // echoing `Some(path)` that would later fail engine resolution.
+        let result = resolve_workspace_path("/workspace/project/does/not/exist");
+        assert!(result.is_none());
     }
 
     #[test]
-    fn resolve_workspace_path_empty_string_returns_some() {
-        // Empty string is not "." so it's treated as explicit
+    fn resolve_workspace_path_empty_string_returns_none() {
+        // Issue #394: empty string now means "whole ambient workspace" (None),
+        // matching the "." case, rather than being treated as an explicit path.
         let result = resolve_workspace_path("");
-        assert!(result.is_some());
+        assert!(result.is_none());
     }
 
     // ===== is_definition_kind tests =====

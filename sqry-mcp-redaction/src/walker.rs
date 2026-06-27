@@ -210,6 +210,7 @@ fn redact_excluded_in_passthrough(
                 ctx.config.normalized_salt(),
                 ctx.config.aggregate_workspace_paths,
                 ctx.config.workspace_root.as_ref().and_then(|p| p.to_str()),
+                ctx.config.reveal_workspace_relative_layout,
             );
             let Ok(redacted_path) = outcome else {
                 return;
@@ -488,6 +489,7 @@ fn redact_path_for_config(content: &str, config: &RedactionConfig) -> String {
             config.normalized_salt(),
             config.aggregate_workspace_paths,
             config.workspace_root.as_ref().and_then(|p| p.to_str()),
+            config.reveal_workspace_relative_layout,
         ) {
             Ok(r) => r.rendered,
             Err(_) => config.workspace_placeholder.clone(),

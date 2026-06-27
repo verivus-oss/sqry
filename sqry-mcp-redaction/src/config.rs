@@ -289,6 +289,21 @@ pub struct RedactionConfig {
     /// (the member-folder path is then treated as out-of-source-root and
     /// the redactor falls back to the legacy `<external>` prefix).
     pub aggregate_workspace_paths: bool,
+
+    /// Reveal the clean workspace-relative path layout (issue #394 item 4).
+    ///
+    /// Defaults to `false` (the anonymizing behaviour): in a bound logical
+    /// workspace, in-workspace paths render with the anonymizing
+    /// `<source_root_id>/...` / `<workspace_id_short>/...` prefix. When `true`
+    /// (the `relative` preset), that prefix is dropped and the path renders as
+    /// the clean workspace-relative remainder (e.g. `kernel/time.rs`).
+    ///
+    /// This NEVER relaxes the absolute-host-path strip: the emitted remainder is
+    /// always workspace-relative, and genuinely-external paths still render as
+    /// `<external>/<basename>`. The only thing revealed is the workspace-relative
+    /// layout and the loss of multi-source-root disambiguation that the prefix
+    /// provided. It is opt-in and intended for trusted local analysis.
+    pub reveal_workspace_relative_layout: bool,
 }
 
 impl RedactionConfig {
@@ -327,6 +342,7 @@ impl RedactionConfig {
             max_depth: redaction_max_depth(),
             logical_workspace: None,
             aggregate_workspace_paths: true,
+            reveal_workspace_relative_layout: false,
         }
     }
 
@@ -360,6 +376,7 @@ impl RedactionConfig {
             max_depth: redaction_max_depth(),
             logical_workspace: None,
             aggregate_workspace_paths: true,
+            reveal_workspace_relative_layout: false,
         }
     }
 
@@ -394,6 +411,7 @@ impl RedactionConfig {
             max_depth: redaction_max_depth(),
             logical_workspace: None,
             aggregate_workspace_paths: true,
+            reveal_workspace_relative_layout: false,
         }
     }
 
@@ -428,6 +446,25 @@ impl RedactionConfig {
             max_depth: redaction_max_depth(),
             logical_workspace: None,
             aggregate_workspace_paths: true,
+            reveal_workspace_relative_layout: false,
+        }
+    }
+
+    /// Legible workspace-relative redaction (issue #394 item 4).
+    ///
+    /// Same security posture as [`Self::minimal`] (Whitelist mode; code/docs
+    /// preserved; absolute host paths stripped) EXCEPT that in-workspace paths
+    /// render as the clean workspace-relative remainder
+    /// (e.g. `kernel/time.rs`) instead of the anonymizing
+    /// `<source_root_id>/...` / `<workspace_id_short>/...` prefix. External paths
+    /// still render as `<external>/<basename>`; no absolute host path is ever
+    /// emitted. Opt-in, for trusted local analysis where mapping results back to
+    /// source matters more than source-root anonymization.
+    #[must_use]
+    pub fn relative() -> Self {
+        Self {
+            reveal_workspace_relative_layout: true,
+            ..Self::minimal()
         }
     }
 
@@ -437,7 +474,7 @@ impl RedactionConfig {
     ///
     /// | Variable | Values | Default | Description |
     /// |----------|--------|---------|-------------|
-    /// | `SQRY_REDACTION_PRESET` | `none`, `minimal`, `standard`, `strict` | `standard` | Base preset |
+    /// | `SQRY_REDACTION_PRESET` | `none`, `minimal`, `relative`, `standard`, `strict` | `standard` | Base preset |
     /// | `SQRY_REDACT_PATHS` | `0`, `1` | per preset | Redact absolute paths |
     /// | `SQRY_REDACT_WORKSPACE` | `0`, `1` | per preset | Redact workspace_path |
     /// | `SQRY_REDACT_URIS` | `0`, `1` | per preset | Redact file:// URIs |
@@ -445,6 +482,7 @@ impl RedactionConfig {
     /// | `SQRY_REDACT_DOCS` | `0`, `1` | per preset | Redact documentation |
     /// | `SQRY_REDACT_PATTERNS` | `0`, `1` | per preset | Enable pattern detection |
     /// | `SQRY_HASH_FILENAMES` | `0`, `1` | per preset | Enable filename hashing |
+    /// | `SQRY_REVEAL_PATHS` | `0`, `1` | per preset | Reveal clean workspace-relative paths (drop anonymizing prefix) |
     /// | `SQRY_HASH_SALT` | string | none | Optional salt for hashing |
     /// | `SQRY_WORKSPACE_ROOT` | path | none | Workspace root path |
     /// | `SQRY_REDACTION_MAX_DEPTH` | `8`-`512` | `128` | Max walker recursion depth |
@@ -455,6 +493,7 @@ impl RedactionConfig {
             .and_then(|s| match s.to_lowercase().as_str() {
                 "none" => Some(Self::none()),
                 "minimal" => Some(Self::minimal()),
+                "relative" => Some(Self::relative()),
                 "standard" => Some(Self::standard()),
                 "strict" => Some(Self::strict()),
                 _ => {
@@ -519,6 +558,10 @@ impl RedactionConfig {
             workspace_root,
             whitelist_fields,
             preserve_paths,
+            reveal_workspace_relative_layout: parse_bool(
+                "SQRY_REVEAL_PATHS",
+                preset.reveal_workspace_relative_layout,
+            ),
             ..preset
         }
     }
@@ -534,6 +577,7 @@ impl RedactionConfig {
         let preset = match preset_name {
             "none" => Self::none(),
             "minimal" => Self::minimal(),
+            "relative" => Self::relative(),
             "strict" => Self::strict(),
             // Default to standard for unknown presets
             _ => Self::standard(),
@@ -587,6 +631,10 @@ impl RedactionConfig {
             workspace_root,
             whitelist_fields,
             preserve_paths,
+            reveal_workspace_relative_layout: parse_bool(
+                "SQRY_REVEAL_PATHS",
+                preset.reveal_workspace_relative_layout,
+            ),
             ..preset
         }
     }

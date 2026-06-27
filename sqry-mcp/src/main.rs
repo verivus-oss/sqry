@@ -75,7 +75,7 @@ ENVIRONMENT VARIABLES:
     SQRY_MCP_TRACE_CACHE_SIZE             Trace path payload cache capacity (default: 256)
     SQRY_MCP_SUBGRAPH_CACHE_SIZE          Subgraph payload cache capacity (default: 128)
     SQRY_MCP_MAX_CROSS_LANG_EDGES         Max edges for cross-language analysis (default: 50000)
-    SQRY_REDACTION_PRESET                 Response redaction: none|minimal|standard|strict (default: minimal)
+    SQRY_REDACTION_PRESET                 Response redaction: none|minimal|relative|standard|strict (default: minimal)
     SQRYD_SOCKET                          Daemon socket path override for default probe and --daemon mode
     SQRY_DAEMON_NO_AUTO_START             Set to 1 to disable sqryd auto-start in --daemon mode
     SQRYD_PATH                            Explicit path to sqryd binary for --daemon auto-start

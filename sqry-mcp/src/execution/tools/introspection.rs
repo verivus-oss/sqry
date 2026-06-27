@@ -24,11 +24,12 @@ use crate::tools::{ExpandCacheStatusArgs, GetGraphStatsArgs, ListFilesArgs, List
 /// If path is "." (default), returns None to trigger discovery.
 /// Otherwise returns Some(path) for explicit workspace resolution.
 fn resolve_workspace_path(path: &str) -> Option<PathBuf> {
-    if path == "." {
-        None
-    } else {
-        Some(PathBuf::from(path))
-    }
+    // Issue #394: resolve a subdirectory `path` to its owning workspace instead
+    // of failing as if it were a workspace root. Subtree scoping for list/scan
+    // tools is applied separately via `resolve_workspace_scope`.
+    crate::execution::workspace_scope::resolve_workspace_selector(path)
+        .ok()
+        .flatten()
 }
 /// Check if a file's language matches the filter.
 fn matches_language_filter(language: Option<&str>, filter: &str) -> bool {
@@ -45,6 +46,7 @@ fn collect_filtered_files(
     files: &sqry_core::graph::unified::storage::registry::FileRegistry,
     args: &ListFilesArgs,
     workspace_root: &std::path::Path,
+    subtree: Option<&str>,
 ) -> (Vec<FileEntryData>, u64) {
     let mut file_entries: Vec<FileEntryData> = Vec::new();
     let mut total_count = 0u64;
@@ -59,18 +61,26 @@ fn collect_filtered_files(
             continue;
         }
 
+        // Make path relative to workspace (forward slashes for cross-platform JSON).
+        let rel_path = crate::execution::symbol_utils::relative_path_forward_slash(
+            path.as_ref(),
+            workspace_root,
+        );
+
+        // Scope to the requested subtree, if any. `total_count` reflects the
+        // scoped set so pagination and the reported total stay consistent.
+        if let Some(subtree) = subtree
+            && !crate::execution::workspace_scope::path_in_subtree(&rel_path, subtree)
+        {
+            continue;
+        }
+
         total_count += 1;
 
         // Apply pagination
         let offset = args.pagination.offset;
         let limit = args.max_results;
         if total_count > offset as u64 && file_entries.len() < limit {
-            // Make path relative to workspace (forward slashes for cross-platform JSON)
-            let rel_path = crate::execution::symbol_utils::relative_path_forward_slash(
-                path.as_ref(),
-                workspace_root,
-            );
-
             file_entries.push(FileEntryData {
                 path: rel_path,
                 language,
@@ -88,18 +98,20 @@ fn collect_filtered_files(
 /// Returns an error if workspace resolution or graph acquisition fails.
 pub fn execute_list_files(args: &ListFilesArgs) -> Result<ToolExecution<ListFilesData>> {
     let start = Instant::now();
-    let workspace_path = resolve_workspace_path(&args.path);
-    let engine = engine_for_workspace(workspace_path.as_ref())?;
+    let selector = crate::execution::workspace_scope::resolve_workspace_selector(&args.path)?;
+    let engine = engine_for_workspace(selector.as_ref())?;
     let workspace_root = engine.workspace_root().to_path_buf();
+    let subtree = crate::execution::workspace_scope::subtree_within(&args.path, &workspace_root);
 
-    tracing::debug!(path = %args.path, language = ?args.language, "Executing list_files tool");
+    tracing::debug!(path = %args.path, language = ?args.language, subtree = ?subtree, "Executing list_files tool");
 
     let graph = engine.ensure_graph()?;
 
     let files = graph.files();
 
-    // Collect files with optional language filter
-    let (file_entries, total_count) = collect_filtered_files(files, args, &workspace_root);
+    // Collect files with optional language filter, scoped to the requested subtree.
+    let (file_entries, total_count) =
+        collect_filtered_files(files, args, &workspace_root, subtree.as_deref());
 
     let data = ListFilesData {
         files: file_entries,
@@ -158,14 +170,16 @@ fn matches_symbol_filters(kind_str: &str, language: &str, args: &ListSymbolsArgs
 /// pagination fails.
 pub fn execute_list_symbols(args: &ListSymbolsArgs) -> Result<ToolExecution<ListSymbolsData>> {
     let start = Instant::now();
-    let workspace_path = resolve_workspace_path(&args.path);
-    let engine = engine_for_workspace(workspace_path.as_ref())?;
+    let selector = crate::execution::workspace_scope::resolve_workspace_selector(&args.path)?;
+    let engine = engine_for_workspace(selector.as_ref())?;
     let workspace_root = engine.workspace_root().to_path_buf();
+    let subtree = crate::execution::workspace_scope::subtree_within(&args.path, &workspace_root);
 
     tracing::debug!(
         path = %args.path,
         kind = ?args.kind,
         language = ?args.language,
+        subtree = ?subtree,
         "Executing list_symbols tool"
     );
 
@@ -215,6 +229,14 @@ pub fn execute_list_symbols(args: &ListSymbolsArgs) -> Result<ToolExecution<List
             .map_or_else(|| "unknown".to_string(), |l| l.to_string());
 
         if !matches_symbol_filters(&kind_str, &language, args) {
+            continue;
+        }
+
+        // Scope to the requested subtree, if any. Counted into `total_count` so
+        // pagination and the reported total reflect the scoped set.
+        if let Some(subtree) = subtree.as_deref()
+            && !crate::execution::workspace_scope::path_in_subtree(&file_path, subtree)
+        {
             continue;
         }
 
@@ -993,8 +1015,12 @@ pub fn execute_complexity_metrics(
 ) -> Result<ToolExecution<super::super::types::ComplexityMetricsData>> {
     // Pre-refactor timing: `start` fires before engine resolution.
     let start = std::time::Instant::now();
-    let workspace_path = resolve_workspace_path(&args.path);
-    let engine = engine_for_workspace(workspace_path.as_ref())?;
+    // Issue #394: resolve via the shared scope resolver so an invalid or
+    // escaping subdir `path` produces a clear error, matching list_files /
+    // list_symbols / find_unused rather than silently falling back to the whole
+    // workspace.
+    let selector = crate::execution::workspace_scope::resolve_workspace_selector(&args.path)?;
+    let engine = engine_for_workspace(selector.as_ref())?;
     let workspace_root = engine.workspace_root().to_path_buf();
 
     tracing::debug!(
@@ -1032,6 +1058,12 @@ pub(crate) mod inner {
         let snapshot = ctx.graph.snapshot();
         let target_filter = args.target.as_ref().map(|target| target.to_lowercase());
 
+        // Issue #394: scope to the requested subtree (relative to the resolved
+        // workspace root) so `complexity_metrics(path="<subdir>")` reports only
+        // that subtree. `None` => whole workspace (unchanged).
+        let subtree =
+            crate::execution::workspace_scope::subtree_within(&args.path, &ctx.workspace_root);
+
         let mut metrics: Vec<ComplexityMetricData> = Vec::new();
 
         let macro_meta_store = snapshot.macro_metadata();
@@ -1041,6 +1073,19 @@ pub(crate) mod inner {
             // `complexity_metrics`. See `NodeEntry::is_unified_loser`.
             if entry.is_unified_loser() {
                 continue;
+            }
+
+            // Subtree scope filter.
+            if let Some(subtree) = subtree.as_deref()
+                && let Some(file_path) = snapshot.files().resolve(entry.file)
+            {
+                let rel = crate::execution::symbol_utils::relative_path_forward_slash(
+                    file_path.as_ref(),
+                    &ctx.workspace_root,
+                );
+                if !crate::execution::workspace_scope::path_in_subtree(&rel, subtree) {
+                    continue;
+                }
             }
             // Skip macro-generated symbols — they are compiler output, not human code
             if let Some(meta) = macro_meta_store.get_macro(node_id)
@@ -1379,10 +1424,13 @@ mod tests {
     }
 
     #[test]
-    fn resolve_workspace_path_explicit_returns_some() {
-        let result = resolve_workspace_path("/some/path");
-        assert!(result.is_some());
-        assert_eq!(result.unwrap(), PathBuf::from("/some/path"));
+    fn resolve_workspace_path_nonexistent_explicit_returns_none() {
+        // Issue #394: the shim now delegates to the shared scope resolver, which
+        // resolves a real subdirectory/workspace rather than blindly echoing the
+        // input. A nonexistent path no longer resolves to `Some(path)`; it falls
+        // back to ambient discovery (`None`) instead of producing a path that
+        // would later fail engine resolution.
+        assert!(resolve_workspace_path("/some/path/that/does/not/exist").is_none());
     }
 
     // ===== matches_language_filter tests =====

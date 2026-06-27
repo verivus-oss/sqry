@@ -154,7 +154,7 @@ impl SqryServer {
     /// degrades to no-redaction rather than panicking.
     pub fn create_redactor(preset: &str) -> Option<Arc<Redactor>> {
         match preset {
-            "none" | "minimal" | "standard" | "strict" => {}
+            "none" | "minimal" | "relative" | "standard" | "strict" => {}
             other => {
                 tracing::warn!("Unknown redaction preset '{other}', disabling redaction");
                 return None;
@@ -2596,6 +2596,27 @@ mod tests {
     fn test_sqry_server_creation() {
         let server = SqryServer::new(FeatureFlags::default());
         assert_eq!(server.timeout_ms, 60_000);
+    }
+
+    #[test]
+    fn create_redactor_accepts_relative_preset_and_keeps_redaction_enabled() {
+        // Issue #394 item 4 regression: `relative` MUST be an accepted preset so
+        // the server builds an enabled redactor. If it fell into the unknown-preset
+        // branch, `create_redactor` would return None and the server would run
+        // with redaction DISABLED, leaking absolute host paths and code/docs.
+        assert!(
+            SqryServer::create_redactor("relative").is_some(),
+            "relative preset must produce an enabled redactor, not disable redaction"
+        );
+        // The known presets all stay enabled.
+        for preset in ["none", "minimal", "standard", "strict"] {
+            assert!(
+                SqryServer::create_redactor(preset).is_some(),
+                "preset `{preset}` must produce a redactor"
+            );
+        }
+        // A genuinely-unknown preset still degrades to no redactor (documented).
+        assert!(SqryServer::create_redactor("bogus-preset").is_none());
     }
 
     #[test]

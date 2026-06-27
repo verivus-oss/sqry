@@ -12,6 +12,7 @@ pub(crate) mod symbol_utils;
 mod tools;
 pub(crate) mod types;
 pub(crate) mod utils;
+pub(crate) mod workspace_scope;
 
 // Re-export cache initialization functions for server initialization (binary)
 #[doc(hidden)]

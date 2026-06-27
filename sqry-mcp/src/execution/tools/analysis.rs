@@ -80,11 +80,12 @@ use crate::execution::types::{
 use crate::execution::utils::{duration_to_ms, paginate};
 
 fn resolve_workspace_path(path: &str) -> Option<std::path::PathBuf> {
-    if path == "." {
-        None
-    } else {
-        Some(std::path::PathBuf::from(path))
-    }
+    // Issue #394: resolve a subdirectory `path` to its owning workspace instead
+    // of failing as if it were a workspace root. Subtree scoping for list/scan
+    // tools is applied separately via `resolve_workspace_scope`.
+    crate::execution::workspace_scope::resolve_workspace_selector(path)
+        .ok()
+        .flatten()
 }
 
 /// Resolve a symbol to a single `NodeId` using strict resolution.
@@ -2176,6 +2177,11 @@ pub(crate) mod inner {
         let strings = snapshot.strings();
         let files = snapshot.files();
 
+        // Issue #394: scope to the requested subtree relative to the resolved
+        // workspace root so `find_unused(path="<subdir>")` reports only that
+        // subtree. `None` => whole workspace (unchanged).
+        let subtree = crate::execution::workspace_scope::subtree_within(&args.path, workspace_root);
+
         let mut unused_symbols: Vec<UnusedSymbolData> = Vec::new();
         for &node_id in &unused_ids {
             if unused_symbols.len() >= args.max_results {
@@ -2188,6 +2194,18 @@ pub(crate) mod inner {
             // the scope using MCP's stricter `Private` semantic.
             if !should_include_in_unused_results(entry, args, strings, files) {
                 continue;
+            }
+            // Subtree scope filter (issue #394).
+            if let Some(subtree) = subtree.as_deref()
+                && let Some(file_path) = files.resolve(entry.file)
+            {
+                let rel = crate::execution::symbol_utils::relative_path_forward_slash(
+                    file_path.as_ref(),
+                    workspace_root,
+                );
+                if !crate::execution::workspace_scope::path_in_subtree(&rel, subtree) {
+                    continue;
+                }
             }
             // T3.8 (Cluster G): drop cfg-gated symbols when the caller
             // opted in via `exclude_cfg_gated`. The metadata-store
@@ -2705,10 +2723,11 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_workspace_path_explicit_path_returns_some() {
-        let result = resolve_workspace_path("/some/path");
-        assert!(result.is_some());
-        assert_eq!(result.unwrap(), std::path::PathBuf::from("/some/path"));
+    fn test_resolve_workspace_path_nonexistent_explicit_returns_none() {
+        // Issue #394: the shim delegates to the shared scope resolver, so a
+        // nonexistent path falls back to ambient discovery (`None`) instead of
+        // echoing `Some(path)` that would later fail engine resolution.
+        assert!(resolve_workspace_path("/some/path/that/does/not/exist").is_none());
     }
 
     // ========================================================================

@@ -9,7 +9,7 @@ rust-version.workspace = true
 description = "JVM classpath analysis for sqry - bytecode parsing, build system resolution, and graph integration"
 
 [dependencies]
-sqry-core = { version = "23.0.2", path = "../sqry-core" }
+sqry-core = { version = "23.1.0", path = "../sqry-core" }
 anyhow.workspace = true
 thiserror.workspace = true
 log.workspace = true

@@ -1,6 +1,6 @@
 # sqry VS Code Extension - Troubleshooting Guide
 
-**Version**: 23.0.2
+**Version**: 23.1.0
 **Last Updated**: 2026-06-27
 
 Quick solutions to common issues with the sqry VS Code extension.
@@ -22,7 +22,7 @@ For shared CLI workspace semantics, see
 2. **Check sqry CLI**:
    ```bash
    sqry --version
-   # Should output: sqry 23.0.2 or later
+   # Should output: sqry 23.1.0 or later
    ```
 
 3. **Check extension logs**:
@@ -154,7 +154,7 @@ For shared CLI workspace semantics, see
 ```bash
 cd /path/to/sqry/repo
 cargo install --path sqry-cli --force
-sqry --version  # Verify: 23.0.2+
+sqry --version  # Verify: 23.1.0+
 ```
 
 ### Binary Execution Fails
@@ -543,7 +543,7 @@ sqry index --force .
 1. **Check sqry version**:
    ```bash
    sqry --version
-   # Extension version 23.0.2+ required for progress indicators
+   # Extension version 23.1.0+ required for progress indicators
    ```
 
 2. **Check notifications are enabled**:

@@ -651,6 +651,12 @@ fn format_external_plain_path(canonical: &CanonicalPath) -> String {
     if let Some(prefix) = canonical.network_prefix.as_deref() {
         format!("{prefix}{}", canonical.path)
     } else {
+        // External paths render as `<external>/<basename>` in every preset.
+        // Revealing the directory tail of a genuinely-external path would leak
+        // the absolute host layout, so even the `relative` preset keeps the
+        // basename-only collapse here. The `relative` preset's legibility win is
+        // the in-workspace prefix drop in `emit_workspace_relative`, not external
+        // paths.
         let filename = canonical
             .path
             .rsplit(['/', '\\'])
@@ -821,6 +827,7 @@ pub fn redact_path_with_workspace(
     hash_salt: Option<&str>,
     aggregate_workspace_paths: bool,
     workspace_root_for_legacy: Option<&str>,
+    reveal_layout: bool,
 ) -> Result<RedactedPath, PathError> {
     let canonical = canonicalize_for_hash(path, workspace_root_for_legacy)?;
     // STEP_7 codex iter3 fix: `canonicalize_for_hash` strips
@@ -871,6 +878,7 @@ pub fn redact_path_with_workspace(
             &relative,
             hash_filenames,
             hash_salt,
+            reveal_layout,
         )),
         WorkspaceRelativeForm::MemberFolderRelative {
             workspace_id_short,
@@ -880,6 +888,7 @@ pub fn redact_path_with_workspace(
             &relative,
             hash_filenames,
             hash_salt,
+            reveal_layout,
         )),
         WorkspaceRelativeForm::OutsideWorkspace => {
             // Fall back to the legacy single-workspace pipeline so paths
@@ -908,11 +917,20 @@ pub fn redact_path_with_workspace(
 /// `hash_filenames = true`) hashes the **whole** prefixed token so the
 /// workspace prefix never escapes in cleartext (criterion 7); minimal
 /// mode emits the prefixed cleartext directly (criteria 4 + 5).
+///
+/// `reveal_layout` (issue #394 item 4, the `relative` preset) drops the
+/// anonymizing `source_root_id` / `workspace_id_short` prefix and emits the
+/// clean workspace-relative remainder. It only applies in the non-hashed
+/// (`hash_filenames = false`) path: strict mode still hashes the whole token.
+/// The remainder is always workspace-relative, so no absolute host path is
+/// emitted; `reveal_layout` only sacrifices the multi-source-root
+/// disambiguation that the prefix provides.
 fn emit_workspace_relative(
     prefix: &str,
     relative: &str,
     hash_filenames: bool,
     hash_salt: Option<&str>,
+    reveal_layout: bool,
 ) -> RedactedPath {
     let token = if relative.is_empty() {
         prefix.to_string()
@@ -925,6 +943,15 @@ fn emit_workspace_relative(
         // SHA-256 input so the hashed token covers it (criterion 7).
         let hash = hash_path(&token, hash_salt);
         format!("<redacted>/[{hash}]")
+    } else if reveal_layout {
+        // Relative preset: drop the anonymizing prefix, emit the clean
+        // workspace-relative remainder. The root itself (empty remainder)
+        // renders as "." rather than an empty string.
+        if relative.is_empty() {
+            ".".to_string()
+        } else {
+            relative.to_string()
+        }
     } else {
         token
     };

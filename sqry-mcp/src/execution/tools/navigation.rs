@@ -33,11 +33,12 @@ use crate::tools::{
 /// If path is "." (default), returns None to trigger discovery.
 /// Otherwise returns Some(path) for explicit workspace resolution.
 fn resolve_workspace_path(path: &str) -> Option<PathBuf> {
-    if path == "." {
-        None
-    } else {
-        Some(PathBuf::from(path))
-    }
+    // Issue #394: resolve a subdirectory `path` to its owning workspace instead
+    // of failing as if it were a workspace root. Subtree scoping for list/scan
+    // tools is applied separately via `resolve_workspace_scope`.
+    crate::execution::workspace_scope::resolve_workspace_selector(path)
+        .ok()
+        .flatten()
 }
 
 fn candidate_nodes_for_symbol(

@@ -168,6 +168,7 @@ fn excluded_path_emits_opaque_hash_with_excluded_flag() {
             None,
             true,
             None,
+            false,
         )
         .expect("excluded path canonicalizes");
 
