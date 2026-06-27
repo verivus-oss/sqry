@@ -1,6 +1,6 @@
 # sqry Quick Start
 
-**Version**: 23.1.0
+**Version**: 23.2.0
 **Rust**: 1.94+ (Edition 2024; repository toolchain 1.94.1)
 
 This guide gets you from install to useful semantic queries.

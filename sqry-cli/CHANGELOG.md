@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+## [23.2.0](https://github.com/verivus-oss/sqry/compare/v23.1.0...v23.2.0) - 2026-06-27
+
+### Other
+- update Cargo.lock dependencies
 ## [23.1.0](https://github.com/verivus-oss/sqry/compare/v23.0.2...v23.1.0) - 2026-06-27
 
 ### Other

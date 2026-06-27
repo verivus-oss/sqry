@@ -1942,6 +1942,9 @@ pub struct ListSymbolsArgs {
     pub kind: Option<String>,
     /// Optional language filter
     pub language: Option<String>,
+    /// Budget-safe summary mode (issue #394): return only aggregate counts, no
+    /// per-symbol rows.
+    pub summary: bool,
     /// Maximum results
     pub max_results: usize,
     /// Pagination

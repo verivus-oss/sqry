@@ -188,6 +188,41 @@ pub fn execute_list_symbols(args: &ListSymbolsArgs) -> Result<ToolExecution<List
     let files = graph.files();
     let strings = graph.strings();
 
+    // Issue #394 Slice C: budget-safe summary mode. Aggregate counts over the
+    // scoped set without materializing rows and without the planner row budget,
+    // so a kernel-scale subtree summary succeeds where `semantic_search` trips
+    // `query_too_broad`. Uses the same filters + unified-loser skip as the
+    // listing path so the counts equal what a full listing would total.
+    if args.summary {
+        let summary = compute_scoped_summary(
+            graph.nodes(),
+            graph.indices(),
+            files,
+            args,
+            &workspace_root,
+            subtree.as_deref(),
+        );
+        let total = summary.by_kind.values().sum();
+        let data = ListSymbolsData {
+            symbols: Vec::new(),
+            total,
+            summary: Some(summary),
+        };
+        tracing::debug!(total, "list_symbols summary completed");
+        return Ok(ToolExecution {
+            data,
+            used_index: false,
+            used_graph: true,
+            graph_metadata: None,
+            execution_ms: duration_to_ms(start.elapsed()),
+            next_page_token: None,
+            total: Some(total),
+            truncated: Some(false),
+            candidates_scanned: None,
+            workspace_path: crate::execution::symbol_utils::path_to_forward_slash(workspace_root),
+        });
+    }
+
     // Collect symbols with optional filters
     let mut symbol_entries: Vec<SymbolEntryData> = Vec::new();
     let mut total_count = 0u64;
@@ -263,6 +298,7 @@ pub fn execute_list_symbols(args: &ListSymbolsArgs) -> Result<ToolExecution<List
     let data = ListSymbolsData {
         symbols: symbol_entries,
         total: total_count,
+        summary: None,
     };
 
     let truncated = total_count > (args.pagination.offset + args.max_results) as u64;
@@ -286,6 +322,76 @@ pub fn execute_list_symbols(args: &ListSymbolsArgs) -> Result<ToolExecution<List
         candidates_scanned: None,
         workspace_path: crate::execution::symbol_utils::path_to_forward_slash(workspace_root),
     })
+}
+
+/// Aggregate per-kind / per-language counts for `list_symbols` summary mode
+/// (issue #394 Slice C).
+///
+/// Applies the SAME unified-loser skip and kind/language filters as the listing
+/// path so the counts equal what a full listing would total. When a `subtree` is
+/// given, iteration is bounded to that subtree's files via
+/// `indices().by_file(..)` (so a kernel-scale subtree summary does not scan the
+/// whole arena); otherwise a single budget-free arena scan is used. Neither path
+/// touches the planner / executor row budget.
+///
+/// `iter_kinds()` is deliberately NOT used: it counts unified-loser tombstones,
+/// which the listing path skips, so it would over-count and break the
+/// count-equals-listing contract.
+fn compute_scoped_summary(
+    nodes: &sqry_core::graph::unified::storage::arena::NodeArena,
+    indices: &sqry_core::graph::unified::storage::indices::AuxiliaryIndices,
+    files: &sqry_core::graph::unified::storage::registry::FileRegistry,
+    args: &ListSymbolsArgs,
+    workspace_root: &std::path::Path,
+    subtree: Option<&str>,
+) -> crate::execution::types::ListSymbolsSummary {
+    use std::collections::BTreeMap;
+
+    let mut by_kind: BTreeMap<String, u64> = BTreeMap::new();
+    let mut by_language: BTreeMap<String, u64> = BTreeMap::new();
+
+    let mut tally = |entry: &sqry_core::graph::unified::storage::arena::NodeEntry| {
+        if entry.is_unified_loser() {
+            return;
+        }
+        let kind_str = format!("{:?}", entry.kind);
+        let language = files
+            .language_for_file(entry.file)
+            .map_or_else(|| "unknown".to_string(), |l| l.to_string());
+        if !matches_symbol_filters(&kind_str, &language, args) {
+            return;
+        }
+        *by_kind.entry(kind_str.to_lowercase()).or_insert(0) += 1;
+        *by_language.entry(language).or_insert(0) += 1;
+    };
+
+    if let Some(subtree) = subtree {
+        // Bounded to the subtree's files (issue #394 AC4).
+        for (file_id, path) in files.iter() {
+            let rel = crate::execution::symbol_utils::relative_path_forward_slash(
+                path.as_ref(),
+                workspace_root,
+            );
+            if !crate::execution::workspace_scope::path_in_subtree(&rel, subtree) {
+                continue;
+            }
+            for &node_id in indices.by_file(file_id) {
+                if let Some(entry) = nodes.get(node_id) {
+                    tally(entry);
+                }
+            }
+        }
+    } else {
+        // Whole workspace: a single budget-free arena scan.
+        for (_node_id, entry) in nodes.iter() {
+            tally(entry);
+        }
+    }
+
+    crate::execution::types::ListSymbolsSummary {
+        by_kind,
+        by_language,
+    }
 }
 
 /// Execute the `get_graph_stats` tool to get graph statistics.
@@ -1463,6 +1569,7 @@ mod tests {
             path: ".".to_string(),
             kind: None,
             language: None,
+            summary: false,
             max_results: 100,
             pagination: crate::tools::PaginationArgs {
                 offset: 0,
@@ -1478,6 +1585,7 @@ mod tests {
             path: ".".to_string(),
             kind: Some("function".to_string()),
             language: None,
+            summary: false,
             max_results: 100,
             pagination: crate::tools::PaginationArgs {
                 offset: 0,
@@ -1494,6 +1602,7 @@ mod tests {
             path: ".".to_string(),
             kind: None,
             language: Some("python".to_string()),
+            summary: false,
             max_results: 100,
             pagination: crate::tools::PaginationArgs {
                 offset: 0,
@@ -1502,6 +1611,154 @@ mod tests {
         };
         assert!(matches_symbol_filters("Function", "python", &args));
         assert!(!matches_symbol_filters("Function", "rust", &args));
+    }
+
+    // ===== issue #394 Slice C: budget-safe summary mode =====
+
+    fn summary_args(kind: Option<&str>, language: Option<&str>) -> ListSymbolsArgs {
+        ListSymbolsArgs {
+            path: ".".to_string(),
+            kind: kind.map(str::to_string),
+            language: language.map(str::to_string),
+            summary: true,
+            max_results: 100,
+            pagination: crate::tools::PaginationArgs {
+                offset: 0,
+                size: 100,
+            },
+        }
+    }
+
+    /// Build a tiny two-subdir Rust workspace. Returns the `TempDir` guard (kept
+    /// alive by the caller), the canonical root, and the built graph.
+    fn build_summary_fixture() -> (tempfile::TempDir, PathBuf, CodeGraph) {
+        use sqry_core::graph::unified::build::{BuildConfig, build_unified_graph};
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().canonicalize().expect("canonical root");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("rust")).unwrap();
+        std::fs::write(root.join("src/a.rs"), "pub fn alpha() -> u32 { 1 }\n").unwrap();
+        std::fs::write(
+            root.join("rust/b.rs"),
+            "pub fn beta() -> u32 { 2 }\npub struct Widget { pub x: u32 }\n",
+        )
+        .unwrap();
+        let plugins = sqry_plugin_registry::create_plugin_manager();
+        let graph = build_unified_graph(&root, &plugins, &BuildConfig::default())
+            .expect("build fixture graph");
+        (tmp, root, graph)
+    }
+
+    /// Manual non-loser count of nodes whose file is in `subtree`, applying the
+    /// same kind/language filters, used to assert count-equals-listing.
+    fn manual_count(
+        graph: &CodeGraph,
+        args: &ListSymbolsArgs,
+        root: &std::path::Path,
+        subtree: Option<&str>,
+    ) -> u64 {
+        let files = graph.files();
+        let mut n = 0u64;
+        for (_id, entry) in graph.nodes().iter() {
+            if entry.is_unified_loser() {
+                continue;
+            }
+            let kind_str = format!("{:?}", entry.kind);
+            let language = files
+                .language_for_file(entry.file)
+                .map_or_else(|| "unknown".to_string(), |l| l.to_string());
+            if !matches_symbol_filters(&kind_str, &language, args) {
+                continue;
+            }
+            if let Some(sub) = subtree {
+                let rel = files.resolve(entry.file).map(|p| {
+                    crate::execution::symbol_utils::relative_path_forward_slash(p.as_ref(), root)
+                });
+                if !rel
+                    .as_deref()
+                    .is_some_and(|r| crate::execution::workspace_scope::path_in_subtree(r, sub))
+                {
+                    continue;
+                }
+            }
+            n += 1;
+        }
+        n
+    }
+
+    #[test]
+    fn summary_whole_workspace_counts_equal_listing() {
+        let (_tmp, root, graph) = build_summary_fixture();
+        let args = summary_args(None, None);
+        let summary = compute_scoped_summary(
+            graph.nodes(),
+            graph.indices(),
+            graph.files(),
+            &args,
+            &root,
+            None,
+        );
+        let total: u64 = summary.by_kind.values().sum();
+        // Count-equals-listing: summary total equals a manual non-loser scan.
+        assert_eq!(total, manual_count(&graph, &args, &root, None));
+        // The two declared functions and the struct are present.
+        assert!(summary.by_kind.get("function").copied().unwrap_or(0) >= 2);
+        assert!(summary.by_kind.get("struct").copied().unwrap_or(0) >= 1);
+        assert!(summary.by_language.get("rust").copied().unwrap_or(0) >= 3);
+    }
+
+    #[test]
+    fn summary_subtree_is_bounded_and_excludes_siblings() {
+        let (_tmp, root, graph) = build_summary_fixture();
+        let args = summary_args(None, None);
+
+        let whole = compute_scoped_summary(
+            graph.nodes(),
+            graph.indices(),
+            graph.files(),
+            &args,
+            &root,
+            None,
+        );
+        let rust = compute_scoped_summary(
+            graph.nodes(),
+            graph.indices(),
+            graph.files(),
+            &args,
+            &root,
+            Some("rust"),
+        );
+
+        let whole_total: u64 = whole.by_kind.values().sum();
+        let rust_total: u64 = rust.by_kind.values().sum();
+        // Subtree scope is a strict subset (src/a.rs's alpha is excluded).
+        assert!(rust_total < whole_total, "rust/ subtree must exclude src/");
+        // Subtree counts equal a manual subtree scan (count-equals-listing).
+        assert_eq!(rust_total, manual_count(&graph, &args, &root, Some("rust")));
+        // beta + Widget live under rust/.
+        assert!(rust.by_kind.get("function").copied().unwrap_or(0) >= 1);
+        assert!(rust.by_kind.get("struct").copied().unwrap_or(0) >= 1);
+    }
+
+    #[test]
+    fn summary_kind_filter_restricts_histogram() {
+        let (_tmp, root, graph) = build_summary_fixture();
+        let args = summary_args(Some("function"), None);
+        let summary = compute_scoped_summary(
+            graph.nodes(),
+            graph.indices(),
+            graph.files(),
+            &args,
+            &root,
+            None,
+        );
+        // Only function-kind nodes are counted.
+        assert!(summary.by_kind.get("function").copied().unwrap_or(0) >= 2);
+        assert!(
+            summary.by_kind.keys().all(|k| k.contains("function")),
+            "kind=function summary must only contain function-ish kinds, got {:?}",
+            summary.by_kind.keys().collect::<Vec<_>>()
+        );
     }
 
     // ===== macro boundary tests =====

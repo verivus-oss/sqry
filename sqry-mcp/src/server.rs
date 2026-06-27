@@ -2463,6 +2463,7 @@ fn convert_list_symbols_params(params: ListSymbolsParams) -> Result<ListSymbolsA
         path: params.path,
         kind: params.kind,
         language: params.language,
+        summary: params.summary,
         max_results,
         pagination,
     })

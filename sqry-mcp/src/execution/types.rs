@@ -907,10 +907,28 @@ pub struct SymbolEntryData {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ListSymbolsData {
-    /// Symbols in the workspace
+    /// Symbols in the workspace (empty in summary mode).
     pub symbols: Vec<SymbolEntryData>,
-    /// Total number of symbols
+    /// Total number of symbols (matching the scope filters).
     pub total: u64,
+    /// Budget-safe aggregate summary (issue #394). Present only when the request
+    /// asked for `summary` mode; omitted otherwise so non-summary responses stay
+    /// byte-identical.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<ListSymbolsSummary>,
+}
+
+/// Aggregate counts for `list_symbols` summary mode (issue #394). Computed over
+/// the scoped set without materializing per-symbol rows and without the planner
+/// row budget, so it succeeds on large subtrees where `semantic_search` would
+/// trip `query_too_broad`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListSymbolsSummary {
+    /// Count of matching symbols per `NodeKind` (lowercased Debug name).
+    pub by_kind: std::collections::BTreeMap<String, u64>,
+    /// Count of matching symbols per language.
+    pub by_language: std::collections::BTreeMap<String, u64>,
 }
 
 /// Response data for `get_graph_stats` tool

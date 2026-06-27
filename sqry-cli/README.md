@@ -1,11 +1,11 @@
 # sqry CLI
 
-**Version**: 23.1.0
+**Version**: 23.2.0
 **Rust**: 1.94+ (Edition 2024; repository toolchain 1.94.1)
 
 `sqry` is the command-line interface for local semantic code search.
 
-> **Removed in 23.1.0:** the natural-language `sqry ask` command was removed. Use `sqry query`, `sqry graph direct-callers`, and `sqry graph trace-path` instead; see [Removed features](../docs/TROUBLESHOOTING.md#removed-features) for migration.
+> **Removed in 23.2.0:** the natural-language `sqry ask` command was removed. Use `sqry query`, `sqry graph direct-callers`, and `sqry graph trace-path` instead; see [Removed features](../docs/TROUBLESHOOTING.md#removed-features) for migration.
 
 ## Install
 

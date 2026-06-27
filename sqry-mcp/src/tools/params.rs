@@ -1922,6 +1922,14 @@ pub struct ListSymbolsParams {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
 
+    /// Budget-safe summary mode (issue #394). When true, return only aggregate
+    /// counts (total + per-kind + per-language histograms) for the scoped set,
+    /// with no per-symbol rows. Use this to overview a large subtree (e.g.
+    /// `path="rust/"`) where a full `semantic_search` would exhaust the row
+    /// budget. Default false (normal per-symbol listing).
+    #[serde(default)]
+    pub summary: bool,
+
     #[serde(default = "default_max_results_500")]
     #[schemars(range(min = 1, max = 10000))]
     pub max_results: i64,
