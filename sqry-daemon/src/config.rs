@@ -173,9 +173,10 @@ pub const DEFAULT_REBUILD_DRAIN_TIMEOUT_MS: u64 = 5_000;
 /// 5 s cap fired on every publish, the timeout was absorbed at WARN, and
 /// `derived.sqry` was never persisted, forcing every whole-graph derived
 /// query (`complexity_metrics`, `find_cycles`) to recompute live and blow
-/// the 60 s query deadline. 120 s comfortably covers the SHA-256 +
-/// query-warmup + serialize cost at that scale while still bounding a
-/// runaway task.
+/// the 60 s query deadline. Issue #436 removed publish-time synthetic
+/// relation warmup because timing out the awaiter cannot preempt work that
+/// is already running inside `spawn_blocking`; this cap now covers the
+/// snapshot SHA-256 and derived-cache serialization work.
 pub const DEFAULT_DERIVED_SAVE_TIMEOUT_MS: u64 = 120_000;
 /// Default: `live_ratio < 0.5` triggers a mandatory full rebuild at the next
 /// debounce tick (interner compaction housekeeping).

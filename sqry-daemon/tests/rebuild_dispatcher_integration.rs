@@ -532,15 +532,15 @@ async fn durable_rebuild_persistence_failure_does_not_publish_or_leave_stale_man
 //
 // Verifies that when the daemon installs `QueryDbHook` (matching what
 // `entrypoint::build_daemon_components` does), a publish leaves the canonical
-// snapshot untouched, warms useful derived-cache entries, and persists
-// derived.sqry with a SHA bound to the verified existing snapshot identity.
+// snapshot untouched and persists derived.sqry with a SHA bound to the
+// verified existing snapshot identity. Issue #436 removed daemon publish-time
+// synthetic relation warmup, so this test deliberately expects a valid empty
+// derived-cache container rather than precomputed callers/callees entries.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn pf08_pf09_query_db_hook_writes_useful_derived_sqry_after_publish() {
-    use sqry_core::graph::unified::persistence::load_from_path;
+async fn pf08_pf09_query_db_hook_writes_derived_sqry_header_after_publish() {
     use sqry_daemon::workspace::{QueryDbHook, SharedHook};
-    use sqry_db::queries::{CalleesQuery, RelationKey};
     use std::time::Duration;
 
     let tmp = make_tempdir_fixture();
@@ -615,9 +615,9 @@ async fn pf08_pf09_query_db_hook_writes_useful_derived_sqry_after_publish() {
 
     let (header, _tail) =
         sqry_db::persistence::deserialize_derived_header(&bytes).expect("decode header");
-    assert!(
-        header.entry_count > 0,
-        "PF08: daemon-written derived.sqry must contain useful persisted entries"
+    assert_eq!(
+        header.entry_count, 0,
+        "Issue #436: daemon publish hook must not synthesize relation-query warmup entries"
     );
     let current_sha =
         sqry_db::persistence::compute_file_sha256(&snapshot_path).expect("hash current snapshot");
@@ -629,28 +629,6 @@ async fn pf08_pf09_query_db_hook_writes_useful_derived_sqry_after_publish() {
         hex_lower(&header.snapshot_sha256),
         manifest_sha_before,
         "RPI: derived header SHA must match manifest.snapshot_sha256"
-    );
-
-    let persisted_graph = load_from_path(&snapshot_path, None).expect("load persisted snapshot");
-    let persisted_snapshot = persisted_graph.snapshot();
-    let first_symbol = persisted_snapshot
-        .iter_nodes()
-        .find_map(|(_node_id, node)| persisted_snapshot.strings().resolve(node.name))
-        .expect("fixture has at least one resolvable symbol")
-        .to_string();
-
-    let cold_db = sqry_db::make_query_db_cold(Arc::new(persisted_snapshot), &workspace_root);
-    let before = cold_db.metrics();
-    let _ = cold_db.get::<CalleesQuery>(&RelationKey::exact(first_symbol));
-    let after = cold_db.metrics();
-    assert_eq!(
-        after.cache_misses, before.cache_misses,
-        "PF08: first matching cold query must not recompute"
-    );
-    assert_eq!(
-        after.cache_hits,
-        before.cache_hits + 1,
-        "PF08: first matching cold query must be served from daemon-written derived.sqry"
     );
 }
 
