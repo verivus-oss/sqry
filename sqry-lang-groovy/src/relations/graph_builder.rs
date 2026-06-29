@@ -97,6 +97,8 @@ impl GraphBuilder for GroovyGraphBuilder {
             } else {
                 helper.add_class(&context.qualified_name, span)
             };
+            // issue #394: real declaration; opt dual-use bare helper into is_definition
+            helper.mark_definition(node_id);
             context_to_node.insert(context.qualified_name.clone(), node_id);
         }
 
@@ -107,6 +109,8 @@ impl GraphBuilder for GroovyGraphBuilder {
                 context.byte_range.end,
             ));
             let node_id = helper.add_function(&context.qualified_name, span, false, false);
+            // issue #394: real declaration; opt dual-use bare helper into is_definition
+            helper.mark_definition(node_id);
             context_to_node.insert(context.qualified_name.clone(), node_id);
         }
 
@@ -491,6 +495,9 @@ fn process_field_declaration(
         // Variable: private, protected, or static final field
         helper.add_variable(&qualified_name, span)
     };
+    // issue #394: real declaration (Property or field/variable); opt dual-use
+    // bare helper into is_definition
+    helper.mark_definition(node_id);
 
     context_to_node.insert(qualified_name.clone(), node_id);
 

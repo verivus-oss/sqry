@@ -511,6 +511,8 @@ fn build_protocol_node(
                     let span = span_from_node(protocol_node);
                     // Protocols are like interfaces in other languages
                     let protocol_id = helper.add_interface(name, Some(span));
+                    // issue #394: real declaration; opt dual-use bare helper into is_definition
+                    helper.mark_definition(protocol_id);
                     return Ok(Some(protocol_id));
                 }
             }
@@ -595,6 +597,8 @@ fn build_protocol_impl(
                 // Name it as "ProtocolName.TargetType" for uniqueness
                 let impl_name = format!("{protocol}.{target}");
                 let impl_id = helper.add_struct(&impl_name, Some(span));
+                // issue #394: real declaration; opt dual-use bare helper into is_definition
+                helper.mark_definition(impl_id);
 
                 // If we have the protocol in the map, create an Implements edge
                 if let Some(&protocol_id) = protocol_map.get(&protocol) {

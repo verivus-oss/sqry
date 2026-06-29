@@ -145,6 +145,8 @@ pub fn extract_table_schema(
     if !element.is_empty() {
         let field_qname = format!("table.{table_name}.{element}");
         let field_id = helper.add_variable(&field_qname, None);
+        // issue #394: real declaration; opt dual-use bare helper into is_definition
+        helper.mark_definition(field_id);
         helper.add_contains_edge(table_id, field_id);
     }
 }

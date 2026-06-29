@@ -361,6 +361,7 @@ fn apply_node_metadata(
     is_unsafe: bool,
     visibility: Option<StringId>,
     signature: Option<StringId>,
+    is_definition: bool,
 ) {
     if let Some(span) = span {
         apply_span_to_entry(entry, &span);
@@ -376,6 +377,13 @@ fn apply_node_metadata(
 
     if is_unsafe {
         entry.is_unsafe = true;
+    }
+
+    // Monotonic OR-in: once a node is known to be a real declaration, never
+    // clear the signal (stub-first/declaration-later and the reverse both
+    // converge to `true`).
+    if is_definition {
+        entry.is_definition = true;
     }
 
     if entry.visibility.is_none()
@@ -846,6 +854,7 @@ impl StagingGraph {
     /// Update an existing staged node entry with additional metadata.
     ///
     /// Returns true if the node was found and updated.
+    #[allow(clippy::too_many_arguments)] // is_definition (issue #394) OR-in threaded alongside the existing attr params
     pub fn update_node_entry(
         &mut self,
         node_id: NodeId,
@@ -855,6 +864,7 @@ impl StagingGraph {
         is_unsafe: bool,
         visibility: Option<StringId>,
         signature: Option<StringId>,
+        is_definition: bool,
     ) -> bool {
         for op in &mut self.operations {
             if let StagingOp::AddNode {
@@ -867,7 +877,14 @@ impl StagingGraph {
                 }
 
                 apply_node_metadata(
-                    entry, span, is_async, is_static, is_unsafe, visibility, signature,
+                    entry,
+                    span,
+                    is_async,
+                    is_static,
+                    is_unsafe,
+                    visibility,
+                    signature,
+                    is_definition,
                 );
                 return true;
             }

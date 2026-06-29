@@ -201,6 +201,7 @@ fn translate_node_entry_v13_to_v14(entry: &NodeEntryV13) -> NodeEntry {
         is_static: entry.is_static,
         body_hash: entry.body_hash,
         is_unsafe: entry.is_unsafe,
+        is_definition: false,
     }
 }
 

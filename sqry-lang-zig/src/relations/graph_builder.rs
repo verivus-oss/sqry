@@ -94,7 +94,10 @@ impl GraphBuilder for ZigGraphBuilder {
 
         // Phase 1b: Insert type/const declarations as nodes
         for decl in ast_graph.decl_nodes() {
-            helper.add_type(&decl.name, Some(Span::from_bytes(decl.span.0, decl.span.1)));
+            let decl_id =
+                helper.add_type(&decl.name, Some(Span::from_bytes(decl.span.0, decl.span.1)));
+            // issue #394: real declaration; opt dual-use bare helper into is_definition
+            helper.mark_definition(decl_id);
         }
 
         // Phase 1c: Emit Export edges for pub declarations at module level
@@ -871,7 +874,10 @@ fn handle_variable_declaration(
             } else {
                 // Create variable node if it doesn't exist
                 let span = Span::from_bytes(node.start_byte(), node.end_byte());
-                helper.add_variable(&name, Some(span))
+                // issue #394: real declaration; opt dual-use bare helper into is_definition
+                let id = helper.add_variable(&name, Some(span));
+                helper.mark_definition(id);
+                id
             };
 
             // Extract full type string for TypeOf edge

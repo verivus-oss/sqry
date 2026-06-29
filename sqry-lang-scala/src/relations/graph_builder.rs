@@ -310,6 +310,11 @@ fn walk_tree_for_graph(
                 } else {
                     helper.add_class_with_visibility(&qualified_name, Some(span), visibility)
                 };
+                // issue #394: real declaration; opt dual-use bare helper into
+                // is_definition (class branch already marks via
+                // add_class_with_visibility; the monotonic OR-in is a no-op there
+                // and sets the trait_definition case).
+                helper.mark_definition(node_id);
 
                 // Export if not private (Scala members are public by default)
                 let is_public_type = !is_private(node, content);

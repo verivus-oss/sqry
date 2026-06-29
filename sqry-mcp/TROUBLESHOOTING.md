@@ -1,6 +1,6 @@
 # sqry MCP Troubleshooting
 
-**Version**: 23.2.0
+**Version**: 24.0.1
 
 ## Confirm The Binary
 
@@ -9,7 +9,7 @@ sqry-mcp --version
 sqry-mcp --list-tools
 ```
 
-Standalone mode currently lists 36 tools. If the count differs, trust the live output and update local docs or client expectations.
+Standalone mode currently lists 37 tools. Daemon-hosted MCP currently exposes a 16-tool subset. If the count differs, trust the live output and update local docs or client expectations.
 
 ## MCP Client Does Not See Tools
 

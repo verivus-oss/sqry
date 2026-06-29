@@ -106,6 +106,13 @@ impl QueryPlan {
     pub fn operator_count(&self) -> usize {
         self.root.operator_count()
     }
+
+    /// Returns `true` when this plan contains an `is_definition` / `items`
+    /// predicate anywhere in its tree, including relation subqueries.
+    #[must_use]
+    pub fn uses_definition_predicate(&self) -> bool {
+        self.root.uses_definition_predicate()
+    }
 }
 
 /// Operator tree for a structural query.
@@ -218,6 +225,20 @@ impl PlanNode {
     pub fn is_context_free(&self) -> bool {
         matches!(self, PlanNode::NodeScan { .. } | PlanNode::SetOp { .. })
     }
+
+    /// Returns `true` when this node or any nested plan node contains an
+    /// `is_definition` / `items` predicate.
+    #[must_use]
+    pub fn uses_definition_predicate(&self) -> bool {
+        match self {
+            PlanNode::NodeScan { .. } | PlanNode::EdgeTraversal { .. } => false,
+            PlanNode::Filter { predicate } => predicate.uses_definition_predicate(),
+            PlanNode::SetOp { left, right, .. } => {
+                left.uses_definition_predicate() || right.uses_definition_predicate()
+            }
+            PlanNode::Chain { steps } => steps.iter().any(PlanNode::uses_definition_predicate),
+        }
+    }
 }
 
 /// Direction of an edge traversal relative to the input node set.
@@ -303,6 +324,7 @@ pub enum SetOperation {
 /// | `Exports(v)`     | `match_exports` / `match_exports_subquery`       | `exports:v`    |
 /// | `References(v)`  | `match_references` / `match_references_subquery` | `references:v` (supports `~=` regex) |
 /// | `Implements(v)`  | `match_implements` / `match_implements_subquery` | `impl:v` / `implements:v` |
+/// | `IsDefinition(b)` | `NodeEntry::is_definition == b` | `is_definition:b` / `items:b` |
 ///
 /// The text frontend in DB13 must accept both `impl:` and `implements:`
 /// aliases for [`Predicate::Implements`] (spec §M8).
@@ -432,6 +454,18 @@ pub enum Predicate {
     InScope(ScopeKind),
     /// `name:<pattern>`: true iff the node's name matches the pattern.
     MatchesName(StringPattern),
+    /// `is_definition:true|false` / `items:true|false`: true iff the node's
+    /// declaration-fidelity marker matches the requested polarity.
+    ///
+    /// Fresh graphs and V16+ snapshots carry trustworthy
+    /// [`NodeEntry::is_definition`] data. Pre-V16 snapshots default the bit to
+    /// false because the field was absent on the wire; high-level consumers that
+    /// expose items-only listings must consult the graph's R3
+    /// `definition_signal_present` marker before applying this predicate to
+    /// persisted data.
+    ///
+    /// [`NodeEntry::is_definition`]: sqry_core::graph::unified::storage::arena::NodeEntry::is_definition
+    IsDefinition(bool),
     /// `returns:<TypeName>`: true iff the node (a function or method) has at
     /// least one outgoing
     /// [`EdgeKind::TypeOf { context: Some(TypeOfContext::Return), .. }`][crate::queries]
@@ -510,6 +544,40 @@ pub enum WrapKindFilter {
 }
 
 impl Predicate {
+    /// Returns `true` if this predicate or any nested predicate/subquery uses
+    /// the definition-fidelity marker.
+    #[must_use]
+    pub fn uses_definition_predicate(&self) -> bool {
+        match self {
+            Predicate::IsDefinition(_) => true,
+            Predicate::Callers(value)
+            | Predicate::Callees(value)
+            | Predicate::Imports(value)
+            | Predicate::Exports(value)
+            | Predicate::References(value)
+            | Predicate::Implements(value) => value.uses_definition_predicate(),
+            Predicate::And(list) | Predicate::Or(list) => {
+                list.iter().any(Predicate::uses_definition_predicate)
+            }
+            Predicate::Not(inner) => inner.uses_definition_predicate(),
+            Predicate::HasCaller
+            | Predicate::HasCallee
+            | Predicate::IsUnused
+            | Predicate::IsAddressTaken(_)
+            | Predicate::ResolvedVia(_)
+            | Predicate::HasCallsitePromiscuous(_)
+            | Predicate::FrameworkEq(_)
+            | Predicate::ResolvedViaEq(_)
+            | Predicate::ShapeSimilar(_)
+            | Predicate::InFile(_)
+            | Predicate::InScope(_)
+            | Predicate::MatchesName(_)
+            | Predicate::Returns(_)
+            | Predicate::CfgCondition(_)
+            | Predicate::Wraps(_) => false,
+        }
+    }
+
     /// Returns `true` if this predicate (or any nested predicate through
     /// boolean combinators) references a [`PredicateValue::Subquery`].
     ///
@@ -530,6 +598,7 @@ impl Predicate {
             | Predicate::InFile(_)
             | Predicate::InScope(_)
             | Predicate::MatchesName(_)
+            | Predicate::IsDefinition(_)
             | Predicate::Returns(_)
             | Predicate::CfgCondition(_)
             | Predicate::Wraps(_) => false,
@@ -575,6 +644,16 @@ pub enum PredicateValue {
 }
 
 impl PredicateValue {
+    /// Returns `true` when this value carries a subquery that uses the
+    /// definition-fidelity marker.
+    #[must_use]
+    pub fn uses_definition_predicate(&self) -> bool {
+        match self {
+            PredicateValue::Subquery(plan) => plan.uses_definition_predicate(),
+            PredicateValue::Pattern(_) | PredicateValue::Regex(_) => false,
+        }
+    }
+
     /// Returns `true` if this value is a [`PredicateValue::Subquery`].
     #[must_use]
     pub const fn is_subquery(&self) -> bool {
@@ -929,6 +1008,48 @@ mod tests {
 
         let and_no_sub = Predicate::And(vec![leaf.clone(), attr.clone()]);
         assert!(!and_no_sub.has_subquery());
+    }
+
+    #[test]
+    fn definition_predicate_detection_walks_plan_and_subqueries() {
+        let plain = QueryPlan::new(PlanNode::NodeScan {
+            kind: Some(NodeKind::Function),
+            visibility: None,
+            name_pattern: None,
+        });
+        assert!(!plain.uses_definition_predicate());
+
+        let direct = QueryPlan::new(PlanNode::Chain {
+            steps: vec![
+                PlanNode::NodeScan {
+                    kind: Some(NodeKind::Function),
+                    visibility: None,
+                    name_pattern: None,
+                },
+                PlanNode::Filter {
+                    predicate: Predicate::IsDefinition(true),
+                },
+            ],
+        });
+        assert!(direct.uses_definition_predicate());
+
+        let nested_subquery = QueryPlan::new(PlanNode::Chain {
+            steps: vec![
+                PlanNode::NodeScan {
+                    kind: Some(NodeKind::Function),
+                    visibility: None,
+                    name_pattern: None,
+                },
+                PlanNode::Filter {
+                    predicate: Predicate::Callers(PredicateValue::Subquery(Box::new(
+                        PlanNode::Filter {
+                            predicate: Predicate::Not(Box::new(Predicate::IsDefinition(false))),
+                        },
+                    ))),
+                },
+            ],
+        });
+        assert!(nested_subquery.uses_definition_predicate());
     }
 
     #[test]

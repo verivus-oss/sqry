@@ -99,6 +99,8 @@ impl GraphBuilder for AbapGraphBuilder {
         // Create module node from file path
         let module_name = extract_module_name_from_path(file);
         let module_id = helper.add_module(&module_name, None);
+        // issue #394: real declaration; opt dual-use bare helper into is_definition
+        helper.mark_definition(module_id);
 
         // Compile tree-sitter queries
         let language = tree_sitter_abap_sqry::language();
@@ -834,6 +836,8 @@ fn extract_typeof_and_reference_edges(
             (id, decl.var_name.clone(), TypeOfContext::Field)
         } else {
             let id = helper.add_variable(&decl.var_name, decl.span);
+            // issue #394: real declaration; opt dual-use bare helper into is_definition
+            helper.mark_definition(id);
             (id, decl.var_name.clone(), TypeOfContext::Variable)
         };
 

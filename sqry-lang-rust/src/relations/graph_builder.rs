@@ -1294,8 +1294,11 @@ fn walk_tree_for_staging(
                 );
                 if !qualified.is_empty() {
                     // Create module node for ALL mod declarations (pub or not)
-                    // This ensures the module hierarchy is captured in the graph
+                    // This ensures the module hierarchy is captured in the graph.
+                    // Real module declaration (issue #394): opt the dual-use
+                    // add_module bare helper into is_definition = true.
                     let mod_id = helper.add_module(&qualified, Some(span));
+                    helper.mark_definition(mod_id);
                     build_ctx
                         .node_map
                         .insert(node.id(), (mod_id, qualified.clone()));

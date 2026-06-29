@@ -145,6 +145,8 @@ impl GraphBuilder for ShellGraphBuilder {
 
                         if exported_variables.insert(text.clone()) {
                             let var_id = helper.add_variable(&text, Some(span_from_node(arg_node)));
+                            // issue #394: real declaration; opt dual-use bare helper into is_definition
+                            helper.mark_definition(var_id);
                             helper.add_export_edge_full(
                                 module_id,
                                 var_id,
@@ -159,6 +161,8 @@ impl GraphBuilder for ShellGraphBuilder {
                             if exported_variables.insert(name.clone()) {
                                 let var_id =
                                     helper.add_variable(&name, Some(span_from_node(name_node)));
+                                // issue #394: real declaration; opt dual-use bare helper into is_definition
+                                helper.mark_definition(var_id);
                                 helper.add_export_edge_full(
                                     module_id,
                                     var_id,

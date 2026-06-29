@@ -41,6 +41,27 @@ Population varies by language and resolver. Treat missing provenance as absent m
 
 MCP tool schemas expose a typed `framework` parameter for framework-aware filtering surfaces. The text grammar form `framework:<id>` is not documented as generally available here; rely on MCP parameters or verify parser support in your installed version before using text grammar.
 
+## Definition-Only Queries
+
+Planner/query surfaces that document definition-only filtering accept `items:true` or `is_definition:true` as query predicates:
+
+```bash
+sqry query "kind:function items:true"
+sqry plan-query "kind:function is_definition:true"
+```
+
+For MCP `list_symbols`, use the structured parameter instead of a query predicate:
+
+```json
+{
+  "kind": "function",
+  "language": "rust",
+  "items_only": true
+}
+```
+
+Snapshots before V16 do not carry trustworthy definition signal. When a pre-V16 graph is loaded, definition-only query predicates and `list_symbols.items_only` return a `reindexRequired` / reindex-required advisory instead of silently evaluating stale default-false marker data. Rebuild with `sqry index --force .`.
+
 ## Context Propagation
 
 Go context propagation analysis detects call sites where `context.Context` is available but not threaded into ctx-accepting callees.
@@ -81,4 +102,4 @@ The relation query is positional. The old `--relation`/`--symbol` form is not th
 
 ## Snapshot Wording
 
-Binding-plane support was introduced historically in V9. Current releases write the current snapshot format, and the current writer format is V14. Avoid using historical format names as shorthand for current graph behavior.
+Binding-plane support was introduced historically in V9. Current releases write the current snapshot format, and the current writer format is V16. Avoid using historical format names as shorthand for current graph behavior.

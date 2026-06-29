@@ -14,7 +14,7 @@ use std::collections::HashMap;
 
 use super::format::{
     FormatVersion, GraphHeader, MAGIC_BYTES_V9, MAGIC_BYTES_V10, MAGIC_BYTES_V11, MAGIC_BYTES_V12,
-    MAGIC_BYTES_V14, MAGIC_BYTES_V15, VERSION,
+    MAGIC_BYTES_V14, MAGIC_BYTES_V16, VERSION,
 };
 use super::manifest::ConfigProvenance;
 use crate::config::buffers::max_snapshot_bytes;
@@ -1476,6 +1476,21 @@ fn upconvert_v14_to_v15(v14: GraphSnapshotDataV14) -> GraphSnapshotDataV15 {
     }
 }
 
+/// Upconvert a V15 snapshot to V16 (definition-signal `NodeEntry.is_definition`).
+///
+/// V16 is wire-identical to V15 except every `NodeEntry` gains a trailing
+/// `is_definition: bool` (positional postcard, `#[serde(default)]`). A V15
+/// stream therefore decodes into the live (V16-shaped) `GraphSnapshotDataV15`
+/// in-memory type with `is_definition = false` on every node by serde default,
+/// so this upconvert is an identity move that exists only to document the
+/// version advance and keep the chain explicit. The `definition_signal_present`
+/// marker (stamped from `format_version` in `graph_from_snapshot_data`) is what
+/// records that a V15 snapshot carried no genuine definition signal, so the
+/// defaulted `false` bits are never mistaken for real data.
+fn upconvert_v15_to_v16(v15: GraphSnapshotDataV15) -> GraphSnapshotDataV15 {
+    v15
+}
+
 /// Rebuilds a `FileSegmentTable` by scanning the node arena.
 ///
 /// For each occupied slot, records the `FileId` and slot index. Then for each
@@ -1542,8 +1557,9 @@ fn read_magic_and_header_len(
             found: magic.to_vec(),
         })?;
 
-    // V10–V15 magics are all 14 bytes — all consumed. Read full u32 header length.
-    // V7-V9 magic is 13 bytes — byte 14 is the first byte of the header length.
+    // V10..V16 magics are all 14 bytes (all consumed). Read full u32 header
+    // length. V7-V9 magic is 13 bytes (byte 14 is the first byte of the header
+    // length).
     if matches!(
         format_version,
         FormatVersion::V10
@@ -1552,6 +1568,7 @@ fn read_magic_and_header_len(
             | FormatVersion::V13
             | FormatVersion::V14
             | FormatVersion::V15
+            | FormatVersion::V16
     ) {
         let hl = read_u32_le(reader)? as usize;
         Ok((format_version, hl, 18)) // 14 magic + 4 header_len
@@ -2043,14 +2060,17 @@ fn write_framed_v14<W: Write>(
     Ok(())
 }
 
-/// Writes a V15 snapshot with length-prefixed framing.
+/// Writes a V16 snapshot with length-prefixed framing.
 ///
-/// V15 is the current writer format (body-shape-descriptor side table). On the
-/// wire it is the V14 envelope plus one appended `shape_descriptors_table` slot
-/// under the V15 magic, so that V14-or-earlier readers reject the snapshot at the
-/// magic gate rather than mis-decoding the trailing slot. The frame shape
-/// (magic + header + data) is identical to V14.
-fn write_framed_v15<W: Write>(
+/// V16 is the current writer format (definition-signal `NodeEntry.is_definition`).
+/// On the wire it is the V15 envelope with a trailing `is_definition: bool`
+/// appended to every `NodeEntry` (positional postcard, `#[serde(default)]`),
+/// emitted under the V16 magic so V15-or-earlier readers reject the snapshot at
+/// the magic gate rather than mis-decoding the trailing per-node byte. The frame
+/// shape (magic + header + data) is identical to V15; the in-memory data type
+/// (`GraphSnapshotDataV15`) is reused because the new field rides inside
+/// `NodeEntry`, not as a new envelope slot.
+fn write_framed_v16<W: Write>(
     writer: &mut W,
     header: &GraphHeader,
     snapshot_data: &GraphSnapshotDataV15,
@@ -2081,7 +2101,7 @@ fn write_framed_v15<W: Write>(
         )));
     }
 
-    writer.write_all(MAGIC_BYTES_V15)?;
+    writer.write_all(MAGIC_BYTES_V16)?;
     writer.write_all(
         &u32::try_from(header_bytes.len())
             .map_err(|_| {
@@ -2263,7 +2283,7 @@ pub fn save_to_path(graph: &CodeGraph, path: impl AsRef<Path>) -> Result<(), Per
         snapshot_data.strings.len(),
         snapshot_data.files.len(),
     );
-    header.version = FormatVersion::V15.as_u32();
+    header.version = FormatVersion::V16.as_u32();
     header.set_fact_epoch(fact_epoch);
 
     // Atomic write per `G_daemon_control_plane.md` §4.2: an
@@ -2272,7 +2292,7 @@ pub fn save_to_path(graph: &CodeGraph, path: impl AsRef<Path>) -> Result<(), Per
     // --status` previously misreported as "No graph snapshot
     // found").
     write_atomic(path, |writer| {
-        write_framed_v15(writer, &header, &snapshot_data)
+        write_framed_v16(writer, &header, &snapshot_data)
     })
 }
 
@@ -2376,12 +2396,12 @@ pub fn save_to_path_with_provenance(
         provenance,
         plugin_versions,
     );
-    header.version = FormatVersion::V15.as_u32();
+    header.version = FormatVersion::V16.as_u32();
     header.set_fact_epoch(fact_epoch);
 
     // Atomic write per `G_daemon_control_plane.md` §4.2.
     write_atomic(path, |writer| {
-        write_framed_v15(writer, &header, &snapshot_data)
+        write_framed_v16(writer, &header, &snapshot_data)
     })
 }
 
@@ -2505,9 +2525,10 @@ fn validate_snapshot_header(
         && header.version != FormatVersion::V13.as_u32()
         && header.version != FormatVersion::V14.as_u32()
         && header.version != FormatVersion::V15.as_u32()
+        && header.version != FormatVersion::V16.as_u32()
     {
         return Err(PersistenceError::IncompatibleVersion {
-            expected: FormatVersion::V15.as_u32(),
+            expected: FormatVersion::V16.as_u32(),
             found: header.version,
         });
     }
@@ -2596,13 +2617,22 @@ fn decode_snapshot_data(
         }
         FormatVersion::V14 => {
             let v14: GraphSnapshotDataV14 = postcard::from_bytes(data_buf)?;
-            Ok(upconvert_v14_to_v15(v14))
+            Ok(upconvert_v15_to_v16(upconvert_v14_to_v15(v14)))
         }
-        FormatVersion::V15 => Ok(postcard::from_bytes(data_buf)?),
+        FormatVersion::V15 => {
+            // Pre-V16 stream: the `is_definition` byte is absent, so every node
+            // decodes `false` via serde default. `upconvert_v15_to_v16` is an
+            // identity move; the all-`false` bits are flagged as
+            // "no signal present" by the format-version marker downstream.
+            let v15: GraphSnapshotDataV15 = postcard::from_bytes(data_buf)?;
+            Ok(upconvert_v15_to_v16(v15))
+        }
+        FormatVersion::V16 => Ok(postcard::from_bytes(data_buf)?),
     }
 }
 
 fn graph_from_snapshot_data(
+    format_version: FormatVersion,
     header: &GraphHeader,
     mut snapshot_data: GraphSnapshotDataV15,
 ) -> Result<CodeGraph, PersistenceError> {
@@ -2640,6 +2670,10 @@ fn graph_from_snapshot_data(
     graph.set_scope_provenance_store(snapshot_data.scope_provenance);
     graph.set_file_segments(snapshot_data.file_segments);
     graph.set_c_indirect_tables(snapshot_data.c_indirect_tables);
+    // R3 marker: only V16+ snapshots carry genuine is_definition signal. Pre-V16
+    // snapshots decode every node's is_definition as a defaulted `false`, which
+    // must not be interpreted as real signal.
+    graph.set_definition_signal_present(format_version.as_u32() >= FormatVersion::V16.as_u32());
     Ok(graph)
 }
 
@@ -2675,7 +2709,7 @@ pub fn load_from_bytes(
     let data_buf = read_snapshot_data_section(&mut reader, total_len, &mut bytes_consumed)?;
     let snapshot_data = decode_snapshot_data(format_version, &header, &data_buf)?;
     reject_trailing_snapshot_bytes(&mut reader)?;
-    graph_from_snapshot_data(&header, snapshot_data)
+    graph_from_snapshot_data(format_version, &header, snapshot_data)
 }
 
 /// Loads a graph from the specified path.
@@ -2704,7 +2738,7 @@ pub fn load_from_path(
     let data_buf = read_snapshot_data_section(&mut reader, file_len, &mut bytes_consumed)?;
     let snapshot_data = decode_snapshot_data(format_version, &header, &data_buf)?;
     reject_trailing_snapshot_bytes(&mut reader)?;
-    graph_from_snapshot_data(&header, snapshot_data)
+    graph_from_snapshot_data(format_version, &header, snapshot_data)
 }
 
 /// Validates a graph snapshot file without fully loading it.
@@ -2750,9 +2784,10 @@ pub fn validate_snapshot(path: impl AsRef<Path>) -> Result<bool, PersistenceErro
         && header.version != FormatVersion::V13.as_u32()
         && header.version != FormatVersion::V14.as_u32()
         && header.version != FormatVersion::V15.as_u32()
+        && header.version != FormatVersion::V16.as_u32()
     {
         return Err(PersistenceError::IncompatibleVersion {
-            expected: FormatVersion::V15.as_u32(),
+            expected: FormatVersion::V16.as_u32(),
             found: header.version,
         });
     }
@@ -2802,9 +2837,10 @@ pub fn load_header_from_path(path: impl AsRef<Path>) -> Result<GraphHeader, Pers
         && header.version != FormatVersion::V13.as_u32()
         && header.version != FormatVersion::V14.as_u32()
         && header.version != FormatVersion::V15.as_u32()
+        && header.version != FormatVersion::V16.as_u32()
     {
         return Err(PersistenceError::IncompatibleVersion {
-            expected: FormatVersion::V15.as_u32(),
+            expected: FormatVersion::V16.as_u32(),
             found: header.version,
         });
     }
@@ -2945,13 +2981,13 @@ mod tests {
         let path = temp_file.path();
         save_to_path(&graph, path).expect("save_to_path");
 
-        // On-disk magic must be V15 (the current writer version; a
+        // On-disk magic must be V16 (the current writer version; a
         // Wraps-bearing graph still round-trips, the variant is additive).
         let raw = std::fs::read(path).expect("read snapshot bytes");
         assert_eq!(
-            &raw[..MAGIC_BYTES_V15.len()],
-            MAGIC_BYTES_V15.as_slice(),
-            "current writer must persist as V15",
+            &raw[..MAGIC_BYTES_V16.len()],
+            MAGIC_BYTES_V16.as_slice(),
+            "current writer must persist as V16",
         );
 
         fn assert_wraps_survived(graph: &CodeGraph) {
@@ -4360,17 +4396,17 @@ mod tests {
         let path = temp_file.path();
         save_to_path(&graph, path).expect("save_to_path");
 
-        // Verify magic on disk is V15 (body-shape side table — current writer).
+        // Verify magic on disk is V16 (definition-signal: current writer).
         let raw = std::fs::read(path).expect("read snapshot bytes");
         assert_eq!(
-            &raw[..MAGIC_BYTES_V15.len()],
-            MAGIC_BYTES_V15.as_slice(),
-            "current writer must stamp V15 magic on disk",
+            &raw[..MAGIC_BYTES_V16.len()],
+            MAGIC_BYTES_V16.as_slice(),
+            "current writer must stamp V16 magic on disk",
         );
 
-        // Header version must be V15.
+        // Header version must be V16.
         let header = load_header_from_path(path).expect("load header");
-        assert_eq!(header.version, FormatVersion::V15.as_u32());
+        assert_eq!(header.version, FormatVersion::V16.as_u32());
 
         // Loader returns a usable graph (V15 arm in `load_from_path`).
         let plugins = create_test_plugin_manager();
@@ -4460,12 +4496,12 @@ mod tests {
         let path = temp_file.path();
         save_to_path(&graph, path).expect("save_to_path");
 
-        // On disk it is a V15 snapshot.
+        // On disk it is a V16 snapshot (current writer).
         let raw = std::fs::read(path).expect("read snapshot bytes");
-        assert_eq!(&raw[..MAGIC_BYTES_V15.len()], MAGIC_BYTES_V15.as_slice());
+        assert_eq!(&raw[..MAGIC_BYTES_V16.len()], MAGIC_BYTES_V16.as_slice());
 
         let plugins = create_test_plugin_manager();
-        let loaded = load_from_path(path, Some(&plugins)).expect("load V15");
+        let loaded = load_from_path(path, Some(&plugins)).expect("load V16");
         let snap = loaded.snapshot();
         let descriptors = snap.macro_metadata().shape_descriptors();
         assert_eq!(

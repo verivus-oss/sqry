@@ -13,7 +13,7 @@ use crate::engine::engine_for_workspace;
 use crate::execution::location::node_location_for_reporting;
 use crate::execution::types::{
     CrateCacheEntry, ExpandCacheStatusData, FileEntryData, GraphStatsData, ListFilesData,
-    ListSymbolsData, MacroBoundariesStatsData, SymbolEntryData, ToolExecution,
+    ListSymbolsData, MacroBoundariesStatsData, ReindexRequiredData, SymbolEntryData, ToolExecution,
 };
 use crate::execution::utils::duration_to_ms;
 use crate::tools::{ExpandCacheStatusArgs, GetGraphStatsArgs, ListFilesArgs, ListSymbolsArgs};
@@ -141,8 +141,34 @@ pub fn execute_list_files(args: &ListFilesArgs) -> Result<ToolExecution<ListFile
     })
 }
 
-/// Check whether a symbol node matches the kind and language filters.
-fn matches_symbol_filters(kind_str: &str, language: &str, args: &ListSymbolsArgs) -> bool {
+const DEFINITION_SIGNAL_REINDEX_REASON: &str =
+    "definition signal requires a reindex (snapshot predates definition fidelity marker)";
+
+fn items_only_enabled(args: &ListSymbolsArgs) -> bool {
+    args.items_only.unwrap_or(false)
+}
+
+fn definition_reindex_required(args: &ListSymbolsArgs, definition_signal_present: bool) -> bool {
+    items_only_enabled(args) && !definition_signal_present
+}
+
+fn definition_reindex_data() -> ReindexRequiredData {
+    ReindexRequiredData {
+        reason: DEFINITION_SIGNAL_REINDEX_REASON.to_string(),
+    }
+}
+
+/// Check whether a symbol node matches the items-only, kind, and language filters.
+fn matches_symbol_filters(
+    kind_str: &str,
+    language: &str,
+    is_definition: bool,
+    args: &ListSymbolsArgs,
+) -> bool {
+    if items_only_enabled(args) && !is_definition {
+        return false;
+    }
+
     // Apply kind filter if specified
     if let Some(ref filter_kind) = args.kind {
         let filter_kind_lower = filter_kind.to_lowercase();
@@ -168,6 +194,10 @@ fn matches_symbol_filters(kind_str: &str, language: &str, args: &ListSymbolsArgs
 ///
 /// Returns an error if workspace resolution, graph acquisition, or result
 /// pagination fails.
+#[allow(
+    clippy::too_many_lines,
+    reason = "list_symbols keeps graph acquisition, R3 soft reindex, summary, and paginated row paths together for response parity"
+)]
 pub fn execute_list_symbols(args: &ListSymbolsArgs) -> Result<ToolExecution<ListSymbolsData>> {
     let start = Instant::now();
     let selector = crate::execution::workspace_scope::resolve_workspace_selector(&args.path)?;
@@ -179,11 +209,34 @@ pub fn execute_list_symbols(args: &ListSymbolsArgs) -> Result<ToolExecution<List
         path = %args.path,
         kind = ?args.kind,
         language = ?args.language,
+        items_only = ?args.items_only,
         subtree = ?subtree,
         "Executing list_symbols tool"
     );
 
     let graph = engine.ensure_graph()?;
+
+    if definition_reindex_required(args, graph.definition_signal_present()) {
+        let data = ListSymbolsData {
+            symbols: Vec::new(),
+            total: 0,
+            summary: None,
+            reindex_required: Some(definition_reindex_data()),
+        };
+        tracing::debug!("list_symbols items-only requires reindex");
+        return Ok(ToolExecution {
+            data,
+            used_index: false,
+            used_graph: true,
+            graph_metadata: None,
+            execution_ms: duration_to_ms(start.elapsed()),
+            next_page_token: None,
+            total: Some(0),
+            truncated: Some(false),
+            candidates_scanned: None,
+            workspace_path: crate::execution::symbol_utils::path_to_forward_slash(workspace_root),
+        });
+    }
 
     let files = graph.files();
     let strings = graph.strings();
@@ -207,6 +260,7 @@ pub fn execute_list_symbols(args: &ListSymbolsArgs) -> Result<ToolExecution<List
             symbols: Vec::new(),
             total,
             summary: Some(summary),
+            reindex_required: None,
         };
         tracing::debug!(total, "list_symbols summary completed");
         return Ok(ToolExecution {
@@ -263,7 +317,7 @@ pub fn execute_list_symbols(args: &ListSymbolsArgs) -> Result<ToolExecution<List
             .language_for_file(entry.file)
             .map_or_else(|| "unknown".to_string(), |l| l.to_string());
 
-        if !matches_symbol_filters(&kind_str, &language, args) {
+        if !matches_symbol_filters(&kind_str, &language, entry.is_definition(), args) {
             continue;
         }
 
@@ -299,6 +353,7 @@ pub fn execute_list_symbols(args: &ListSymbolsArgs) -> Result<ToolExecution<List
         symbols: symbol_entries,
         total: total_count,
         summary: None,
+        reindex_required: None,
     };
 
     let truncated = total_count > (args.pagination.offset + args.max_results) as u64;
@@ -358,7 +413,7 @@ fn compute_scoped_summary(
         let language = files
             .language_for_file(entry.file)
             .map_or_else(|| "unknown".to_string(), |l| l.to_string());
-        if !matches_symbol_filters(&kind_str, &language, args) {
+        if !matches_symbol_filters(&kind_str, &language, entry.is_definition(), args) {
             return;
         }
         *by_kind.entry(kind_str.to_lowercase()).or_insert(0) += 1;
@@ -1570,13 +1625,14 @@ mod tests {
             kind: None,
             language: None,
             summary: false,
+            items_only: None,
             max_results: 100,
             pagination: crate::tools::PaginationArgs {
                 offset: 0,
                 size: 100,
             },
         };
-        assert!(matches_symbol_filters("Function", "rust", &args));
+        assert!(matches_symbol_filters("Function", "rust", true, &args));
     }
 
     #[test]
@@ -1586,14 +1642,15 @@ mod tests {
             kind: Some("function".to_string()),
             language: None,
             summary: false,
+            items_only: None,
             max_results: 100,
             pagination: crate::tools::PaginationArgs {
                 offset: 0,
                 size: 100,
             },
         };
-        assert!(matches_symbol_filters("Function", "rust", &args));
-        assert!(!matches_symbol_filters("Struct", "rust", &args));
+        assert!(matches_symbol_filters("Function", "rust", true, &args));
+        assert!(!matches_symbol_filters("Struct", "rust", true, &args));
     }
 
     #[test]
@@ -1603,14 +1660,57 @@ mod tests {
             kind: None,
             language: Some("python".to_string()),
             summary: false,
+            items_only: None,
             max_results: 100,
             pagination: crate::tools::PaginationArgs {
                 offset: 0,
                 size: 100,
             },
         };
-        assert!(matches_symbol_filters("Function", "python", &args));
-        assert!(!matches_symbol_filters("Function", "rust", &args));
+        assert!(matches_symbol_filters("Function", "python", true, &args));
+        assert!(!matches_symbol_filters("Function", "rust", true, &args));
+    }
+
+    #[test]
+    fn matches_symbol_filters_items_only_requires_definition() {
+        let args = ListSymbolsArgs {
+            path: ".".to_string(),
+            kind: None,
+            language: None,
+            summary: false,
+            items_only: Some(true),
+            max_results: 100,
+            pagination: crate::tools::PaginationArgs {
+                offset: 0,
+                size: 100,
+            },
+        };
+        assert!(matches_symbol_filters("Function", "rust", true, &args));
+        assert!(!matches_symbol_filters("Function", "rust", false, &args));
+    }
+
+    #[test]
+    fn items_only_pre_v16_requires_soft_reindex_result() {
+        let args = ListSymbolsArgs {
+            path: ".".to_string(),
+            kind: None,
+            language: None,
+            summary: false,
+            items_only: Some(true),
+            max_results: 100,
+            pagination: crate::tools::PaginationArgs {
+                offset: 0,
+                size: 100,
+            },
+        };
+        assert!(definition_reindex_required(&args, false));
+        assert!(!definition_reindex_required(&args, true));
+
+        let reason = definition_reindex_data().reason;
+        assert_eq!(
+            reason,
+            "definition signal requires a reindex (snapshot predates definition fidelity marker)"
+        );
     }
 
     // ===== issue #394 Slice C: budget-safe summary mode =====
@@ -1621,6 +1721,7 @@ mod tests {
             kind: kind.map(str::to_string),
             language: language.map(str::to_string),
             summary: true,
+            items_only: None,
             max_results: 100,
             pagination: crate::tools::PaginationArgs {
                 offset: 0,
@@ -1667,7 +1768,7 @@ mod tests {
             let language = files
                 .language_for_file(entry.file)
                 .map_or_else(|| "unknown".to_string(), |l| l.to_string());
-            if !matches_symbol_filters(&kind_str, &language, args) {
+            if !matches_symbol_filters(&kind_str, &language, entry.is_definition(), args) {
                 continue;
             }
             if let Some(sub) = subtree {
@@ -1705,6 +1806,27 @@ mod tests {
         assert!(summary.by_kind.get("function").copied().unwrap_or(0) >= 2);
         assert!(summary.by_kind.get("struct").copied().unwrap_or(0) >= 1);
         assert!(summary.by_language.get("rust").copied().unwrap_or(0) >= 3);
+    }
+
+    #[test]
+    fn summary_items_only_counts_equal_items_listing() {
+        let (_tmp, root, graph) = build_summary_fixture();
+        let mut args = summary_args(None, None);
+        args.items_only = Some(true);
+        let summary = compute_scoped_summary(
+            graph.nodes(),
+            graph.indices(),
+            graph.files(),
+            &args,
+            &root,
+            None,
+        );
+        let total: u64 = summary.by_kind.values().sum();
+        assert_eq!(total, manual_count(&graph, &args, &root, None));
+        assert!(
+            total > 0,
+            "fixture must expose at least one definition item"
+        );
     }
 
     #[test]

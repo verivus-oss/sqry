@@ -192,6 +192,8 @@ fn collect_class_definitions(
 
                     // Create class node
                     let class_id = helper.add_class(&class_name, span);
+                    // issue #394: real declaration; opt dual-use bare helper into is_definition
+                    helper.mark_definition(class_id);
                     class_ids.insert(class_name.clone(), class_id);
 
                     // Export this class from the module
@@ -314,6 +316,8 @@ fn extract_single_param_type(
         // Scope-qualify: <class_name>::<param_name> (e.g., "myapp::pkg")
         let qualified_name = format!("{class_name}::{name}");
         let param_id = helper.add_variable(&qualified_name, Some(span_from_node(param)));
+        // issue #394: real declaration; opt dual-use bare helper into is_definition
+        helper.mark_definition(param_id);
         let type_id = helper.add_type(&type_str, None);
         helper.add_typeof_edge_with_context(
             param_id,

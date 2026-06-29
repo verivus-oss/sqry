@@ -222,6 +222,21 @@ pub struct NodeEntry {
     /// Uses `#[serde(default)]` to read older snapshots that lack this field.
     #[serde(default)]
     pub is_unsafe: bool,
+    /// Whether this node is a real source-defined declaration (as opposed to a
+    /// call/FFI/callee/reference stub created during edge construction).
+    ///
+    /// Set to `true` only at creation sites that KNOW they are materializing a
+    /// genuine declaration (typed declaration helpers, classpath bytecode
+    /// emitter); every other path defaults to `false`. Monotonic: once `true`
+    /// it is never cleared (OR-in on metadata update + unification merge).
+    ///
+    /// CRITICAL: This field is placed AFTER `is_unsafe` as the LAST field to
+    /// maintain postcard serialization compatibility. Adding fields before it
+    /// would corrupt existing snapshots due to positional deserialization.
+    /// Uses `#[serde(default)]` to read older snapshots that lack this field
+    /// (decodes to `false`, preserving pre-V16 behavior byte-for-byte).
+    #[serde(default)]
+    pub is_definition: bool,
 }
 
 impl NodeEntry {
@@ -246,6 +261,7 @@ impl NodeEntry {
             is_static: false,
             is_unsafe: false,
             body_hash: None,
+            is_definition: false,
         }
     }
 
@@ -296,6 +312,17 @@ impl NodeEntry {
     #[must_use]
     pub fn is_unified_loser(&self) -> bool {
         self.name == StringId::INVALID
+    }
+
+    /// Whether this node is a real source-defined declaration.
+    ///
+    /// See the [`is_definition`](Self::is_definition) field for the precise
+    /// contract (default `false`, opt-in `true` at declaration sites,
+    /// monotonic).
+    #[inline]
+    #[must_use]
+    pub fn is_definition(&self) -> bool {
+        self.is_definition
     }
 
     /// Whether this entry is a synthetic placeholder according to its name shape.
@@ -388,6 +415,17 @@ impl NodeEntry {
     #[must_use]
     pub fn with_unsafe(mut self, is_unsafe: bool) -> Self {
         self.is_unsafe = is_unsafe;
+        self
+    }
+
+    /// Sets the definition flag for this node.
+    ///
+    /// See [`is_definition`](Self::is_definition) (the field) for the contract.
+    /// Used by direct-construction sinks (e.g. the classpath bytecode emitter)
+    /// to mark genuine decoded declarations.
+    #[must_use]
+    pub fn with_definition(mut self, is_definition: bool) -> Self {
+        self.is_definition = is_definition;
         self
     }
 

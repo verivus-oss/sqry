@@ -383,6 +383,8 @@ pub(crate) fn merge_node_into(
     winner_entry.is_async |= loser_entry.is_async;
     winner_entry.is_static |= loser_entry.is_static;
     winner_entry.is_unsafe |= loser_entry.is_unsafe;
+    // Monotonic: a declaration on either side makes the merged node a definition.
+    winner_entry.is_definition |= loser_entry.is_definition;
 
     // NOTE: We intentionally do NOT remove the loser from the arena.
     // The NodeRemapTable ensures all PendingEdge references now point at

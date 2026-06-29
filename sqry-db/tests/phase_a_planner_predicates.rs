@@ -93,19 +93,20 @@ impl Fixture {
         let epsilon_name = intern(&mut graph, "epsilon");
         let kappa_name = intern(&mut graph, "kappa");
 
-        let alloc_fn = |g: &mut CodeGraph, name_id, start: u32| {
+        let alloc_fn = |g: &mut CodeGraph, name_id, start: u32, is_definition| {
             let entry = NodeEntry::new(NodeKind::Function, name_id, lib_file)
                 .with_qualified_name(name_id)
-                .with_byte_range(start, start + 50);
+                .with_byte_range(start, start + 50)
+                .with_definition(is_definition);
             g.nodes_mut().alloc(entry).expect("alloc")
         };
 
-        let alpha = alloc_fn(&mut graph, alpha_name, 10);
-        let beta = alloc_fn(&mut graph, beta_name, 70);
-        let gamma = alloc_fn(&mut graph, gamma_name, 130);
-        let delta = alloc_fn(&mut graph, delta_name, 190);
-        let epsilon = alloc_fn(&mut graph, epsilon_name, 250);
-        let kappa = alloc_fn(&mut graph, kappa_name, 310);
+        let alpha = alloc_fn(&mut graph, alpha_name, 10, true);
+        let beta = alloc_fn(&mut graph, beta_name, 70, true);
+        let gamma = alloc_fn(&mut graph, gamma_name, 130, true);
+        let delta = alloc_fn(&mut graph, delta_name, 190, false);
+        let epsilon = alloc_fn(&mut graph, epsilon_name, 250, false);
+        let kappa = alloc_fn(&mut graph, kappa_name, 310, false);
 
         // Mirror the by-kind index for these nodes so `kind:function`
         // scans pick them up.
@@ -224,6 +225,23 @@ fn query_address_taken_set_returns_marked_functions() {
     // Negative polarity: not-address-taken functions.
     let negated = fx.run("kind:function address_taken:false");
     assert_eq!(negated, sorted(vec![fx.delta, fx.epsilon]));
+}
+
+#[test]
+fn query_items_and_is_definition_filter_on_definition_marker() {
+    let fx = Fixture::build();
+
+    let items = fx.run("kind:function items");
+    assert_eq!(items, sorted(vec![fx.alpha, fx.beta, fx.gamma]));
+
+    let explicit = fx.run("kind:function is_definition:true");
+    assert_eq!(explicit, items);
+
+    let non_definitions = fx.run("kind:function is_definition:false");
+    assert_eq!(
+        non_definitions,
+        sorted(vec![fx.delta, fx.epsilon, fx.kappa])
+    );
 }
 
 // ---------------------------------------------------------------------------

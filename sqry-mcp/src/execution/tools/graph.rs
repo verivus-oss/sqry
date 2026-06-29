@@ -1509,6 +1509,7 @@ mod tests {
             is_static: false,
             body_hash: None,
             is_unsafe: false,
+            is_definition: false,
         };
         let main_id = nodes.alloc(main_entry.clone()).unwrap();
         indices.add(
@@ -1537,6 +1538,7 @@ mod tests {
             is_static: false,
             body_hash: None,
             is_unsafe: false,
+            is_definition: false,
         };
         let helper_id = nodes.alloc(helper_entry.clone()).unwrap();
         indices.add(

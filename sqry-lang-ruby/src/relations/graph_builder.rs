@@ -426,6 +426,8 @@ fn walk_tree_for_graph_impl(
                 let span = span_from_points(node.start_position(), node.end_position());
                 let qualified_name = class_name.to_string();
                 let class_id = helper.add_class(&qualified_name, Some(span));
+                // issue #394: real declaration; opt dual-use bare helper into is_definition
+                helper.mark_definition(class_id);
 
                 // Export all classes from the file module
                 // In Ruby, all classes are public by default and accessible from outside
@@ -472,6 +474,8 @@ fn walk_tree_for_graph_impl(
                 let span = span_from_points(node.start_position(), node.end_position());
                 let qualified_name = module_name.to_string();
                 let mod_id = helper.add_module(&qualified_name, Some(span));
+                // issue #394: real declaration; opt dual-use bare helper into is_definition
+                helper.mark_definition(mod_id);
 
                 // Export all modules from the file module
                 // In Ruby, all modules are public by default and accessible from outside

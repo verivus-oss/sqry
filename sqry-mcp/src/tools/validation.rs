@@ -1280,7 +1280,8 @@ fn parse_filters(value: Option<&Value>, root: &Value) -> Result<SearchFilters> {
         val.is_object(),
         "filters must be a JSON object (e.g., {{\"language\":[\"rust\"]}}), \
          not a string. For string-style filtering, use query predicates \
-         like 'lang:rust' in the `query` parameter instead."
+         like 'lang:rust' in the `query` parameter instead. Correct example: \
+         query='kind:function lang:rust' or filters={{\"language\":[\"rust\"]}}."
     );
     let mut filters = SearchFilters::default();
 
@@ -1945,6 +1946,9 @@ pub struct ListSymbolsArgs {
     /// Budget-safe summary mode (issue #394): return only aggregate counts, no
     /// per-symbol rows.
     pub summary: bool,
+    /// When true, return only definition items. Pre-V16 graphs return a soft
+    /// reindex-required result because the marker was absent on the wire.
+    pub items_only: Option<bool>,
     /// Maximum results
     pub max_results: usize,
     /// Pagination
@@ -2277,6 +2281,14 @@ mod tests {
         assert!(
             msg.contains("query"),
             "Error should reference the `query` parameter, got: {msg}"
+        );
+        assert!(
+            msg.contains("{\"language\":[\"rust\"]}"),
+            "Error should show correct object syntax, got: {msg}"
+        );
+        assert!(
+            msg.contains("lang:rust"),
+            "Error should mention query predicate syntax, got: {msg}"
         );
     }
 

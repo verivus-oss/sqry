@@ -26,7 +26,7 @@ use sqry_core::schema::{
 // Helper Types
 // ============================================================================
 
-/// Structured search filter object for narrowing `semantic_search` and
+/// Structured JSON search filter object for narrowing `semantic_search` and
 /// `hierarchical_search` results by language, symbol kind, visibility, or
 /// minimum relevance score.
 ///
@@ -518,8 +518,8 @@ pub struct SemanticSearchParams {
     #[serde(default = "default_path")]
     pub path: String,
 
-    /// Structured filter object for pre-filtering by language, kind,
-    /// visibility, or minimum score. Pass a JSON object — for string-style
+    /// Structured JSON object for pre-filtering by language, kind,
+    /// visibility, or minimum score. Pass a JSON object; for string-style
     /// predicates, use the `query` parameter instead.
     #[serde(default)]
     pub filters: Option<SearchFiltersParams>,
@@ -634,8 +634,8 @@ pub struct HierarchicalSearchParams {
     #[serde(default = "default_path")]
     pub path: String,
 
-    /// Structured filter object for pre-filtering by language, kind,
-    /// visibility, or minimum score. Pass a JSON object — for string-style
+    /// Structured JSON object for pre-filtering by language, kind,
+    /// visibility, or minimum score. Pass a JSON object; for string-style
     /// predicates, use the `query` parameter instead.
     #[serde(default)]
     pub filters: Option<SearchFiltersParams>,
@@ -1929,6 +1929,13 @@ pub struct ListSymbolsParams {
     /// budget. Default false (normal per-symbol listing).
     #[serde(default)]
     pub summary: bool,
+
+    /// When true, return only declaration items whose graph node carries the
+    /// definition-fidelity marker. On pre-V16 persisted graphs, this request
+    /// returns a soft reindex result instead of scanning stale default-false
+    /// marker data.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub items_only: Option<bool>,
 
     #[serde(default = "default_max_results_500")]
     #[schemars(range(min = 1, max = 10000))]

@@ -757,6 +757,7 @@ pub(crate) fn handle_identifier_for_reference(
                 let span = Span::from_bytes(binding.decl_start_byte, binding.decl_end_byte);
                 let qualified_var = format!("{identifier}@{}", binding.decl_start_byte);
                 let var_id = helper.add_variable(&qualified_var, Some(span));
+                helper.mark_definition(var_id);
                 scope_tree.attach_node_id(identifier, binding.decl_start_byte, var_id);
                 var_id
             };

@@ -117,6 +117,11 @@ impl GraphBuilder for CSharpGraphBuilder {
                 ContextKind::Class => helper.add_class(qualified_name, Some(span)),
                 ContextKind::Interface => helper.add_interface(qualified_name, Some(span)),
             };
+            // Every arm above materializes a real source declaration (function,
+            // method, class, interface). Opt the dual-use bare add_class/
+            // add_interface helpers into is_definition = true (issue #394); the
+            // _with_signature function/method variants are already definition.
+            helper.mark_definition(node_id);
             node_map.insert(qualified_name.clone(), node_id);
         }
 
@@ -1776,6 +1781,7 @@ fn process_local_variables(
 
             // Create variable node
             let var_id = helper.add_variable(var_name, Some(span));
+            helper.mark_definition(var_id);
 
             // Create TypeOf edge with full type signature and Variable context
             let type_id = helper.add_type(&type_text, None);
@@ -2188,6 +2194,7 @@ fn process_method_parameters(
             // Create parameter variable node
             let param_span = Span::from_bytes(child.start_byte(), child.end_byte());
             let param_id = helper.add_variable(param_name, Some(param_span));
+            helper.mark_definition(param_id);
 
             // Create TypeOf edge with full type signature and Parameter context
             let type_id = helper.add_type(&type_text, None);
@@ -2258,6 +2265,7 @@ fn process_method_return_type(
     // Get or find the method node ID
     let method_span = Span::from_bytes(node.start_byte(), node.end_byte());
     let method_id = helper.add_method(method_name, Some(method_span), false, false);
+    helper.mark_definition(method_id);
 
     // Create TypeOf edge with full type signature and Return context
     let type_id = helper.add_type(&type_text, None);
@@ -2361,6 +2369,7 @@ fn process_type_parameter_declarations(
         // "Find Definition" / hover navigation lands on the declaration
         // site rather than the synthetic `(0, 0)` sentinel.
         let param_id = helper.add_type(&qualified_param, Some(span));
+        helper.mark_definition(param_id);
         param_ids.insert(param_name.to_string(), param_id);
     }
 

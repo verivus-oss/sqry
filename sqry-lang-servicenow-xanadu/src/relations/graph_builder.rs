@@ -210,7 +210,9 @@ impl GraphBuilder for ServiceNowGraphBuilder {
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("<module>");
+        // issue #394: real declaration; opt dual-use bare helper into is_definition
         let module_id = helper.add_module(module_name, None);
+        helper.mark_definition(module_id);
 
         // Walk tree to extract nodes and edges
         walk_ast(
@@ -504,7 +506,9 @@ fn handle_function_declaration(
 ) {
     if let Some(name) = extract_named_field(node, "name", content) {
         let span = node_to_span(node);
-        helper.add_function(&name, Some(span), false, false);
+        // issue #394: real declaration; opt dual-use bare helper into is_definition
+        let fn_id = helper.add_function(&name, Some(span), false, false);
+        helper.mark_definition(fn_id);
     }
 }
 
@@ -515,7 +519,9 @@ fn handle_class_declaration(
 ) {
     if let Some(name) = extract_named_field(node, "name", content) {
         let span = node_to_span(node);
+        // issue #394: real declaration; opt dual-use bare helper into is_definition
         let child_id = helper.add_class(&name, Some(span));
+        helper.mark_definition(child_id);
 
         // Handle class inheritance (extends clause via class_heritage)
         let heritage = node
@@ -548,7 +554,9 @@ fn handle_method_definition(
         let qualified = find_enclosing_class_name(node, content)
             .map(|class_name| format!("{class_name}.{name}"))
             .unwrap_or(name);
-        helper.add_method(&qualified, Some(span), false, false);
+        // issue #394: real declaration; opt dual-use bare helper into is_definition
+        let method_id = helper.add_method(&qualified, Some(span), false, false);
+        helper.mark_definition(method_id);
     }
 }
 
@@ -578,14 +586,19 @@ fn handle_variable_declarator(
     ) {
         let var_span = node_to_span(node);
         let fn_span = node_to_span(&value_node);
-        helper.add_variable(&name, Some(var_span));
-        helper.add_function(&name, Some(fn_span), false, false);
+        // issue #394: real declarations; opt dual-use bare helpers into is_definition
+        let var_id = helper.add_variable(&name, Some(var_span));
+        helper.mark_definition(var_id);
+        let fn_id = helper.add_function(&name, Some(fn_span), false, false);
+        helper.mark_definition(fn_id);
         return;
     }
 
     if value_node.kind() == "call_expression" && is_class_create_call(&value_node, content) {
         let span = node_to_span(&value_node);
+        // issue #394: real declaration; opt dual-use bare helper into is_definition
         let child_id = helper.add_class(&name, Some(span));
+        helper.mark_definition(child_id);
 
         // Handle Class.create(BaseClass) inheritance
         if let Some(args_node) = value_node.child_by_field_name("arguments")

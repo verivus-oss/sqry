@@ -600,6 +600,10 @@ fn plan_not_in_ka_fields_parses_real_plan() {
         // Phase-4e pass drains before Pass 5; never reaches publish with
         // un-drained NodeId hints. See 02_DESIGN §3.2 + §6.
         "go_hints",
+        // Issue #394 Slice A: R3 definition-signal marker. A scalar bool that
+        // records whether the graph carries genuine NodeEntry.is_definition
+        // data; never carries a NodeId payload. See plan §K exclusion bullet.
+        "definition_signal_present",
     ]
     .iter()
     .map(|s| (*s).to_string())

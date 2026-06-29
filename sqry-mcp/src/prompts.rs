@@ -98,11 +98,13 @@ Translate the user's query into sqry predicates in the `query` parameter:
 - For symbol types: use `kind:` predicate (e.g., `kind:function`, `kind:class`, `kind:method`)
 - For visibility: use `visibility:` predicate (e.g., `visibility:public`, `visibility:private`)
 - For language: use `lang:` predicate (e.g., `lang:rust`, `lang:typescript`)
+- For definition-only results: use `items:true` or `is_definition:true` in planner/query-capable surfaces that document those predicates
 
 Example queries:
 - "authentication functions" → semantic_search with query="name~=/^auth/ AND kind:function"
 - "public classes" → semantic_search with query="visibility:public AND kind:class"
 - "all methods in User class" → semantic_search with query="name~=/^User::/ AND kind:method"
+- "declaration functions only" → semantic_search with query="kind:function items:true"
 
 Alternatively, use the `filters` parameter for simple structured constraints:
   filters={{"language":["rust"],"symbol_kind":["function"]}}
@@ -111,6 +113,11 @@ Use `query` for complex boolean expressions with AND/OR/NOT/regex.
 Use `filters` for simple pre-filtering by language, kind, or visibility.
 Both can be combined:
   query="name~=/^auth/" filters={{"language":["typescript"],"visibility":"public"}}
+
+For list_symbols, use the structured parameter `items_only=true` instead of a
+query predicate. If the loaded graph was built before the V16 definition-signal
+format, definition-only requests return a reindexRequired/reindex-required
+advisory instead of silently trusting stale default-false marker data.
 
 Use hierarchical_search for RAG-optimized results with file/container grouping."#
     );

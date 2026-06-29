@@ -136,6 +136,20 @@ pub const MAGIC_BYTES_V14: &[u8; 14] = b"SQRY_GRAPH_V14";
 /// it at the magic gate.
 pub const MAGIC_BYTES_V15: &[u8; 14] = b"SQRY_GRAPH_V15";
 
+/// Definition-signal V16 magic bytes.
+///
+/// Emitted by the V16 writer and accepted by the V16 reader. V16 is
+/// shape-identical to V15 on the wire: the only change is the `NodeEntry`
+/// gains a trailing `is_definition: bool` field (positional postcard, appended
+/// last with `#[serde(default)]`). A pre-V16 stream therefore decodes
+/// `is_definition = false` for every node, so the `upconvert_v15_to_v16`
+/// upconvert is a no-op that only advances the version. The bump exists so the
+/// `definition_signal_present` runtime marker can distinguish a snapshot that
+/// carried genuine definition signal (>= V16) from a pre-V16 snapshot whose
+/// `is_definition` bits are all defaulted `false`. A V15-or-earlier reader
+/// opening a V16 snapshot rejects it at the magic gate.
+pub const MAGIC_BYTES_V16: &[u8; 14] = b"SQRY_GRAPH_V16";
+
 /// Legacy V7 numeric version, exposed with a versioned name so the Phase 1 reader
 /// dispatch can cite it explicitly. Equal to [`VERSION`].
 pub const LEGACY_VERSION_V7: u32 = 7;
@@ -194,6 +208,16 @@ pub enum FormatVersion {
     /// `sqry index --force` repopulates them. A V14-or-earlier reader rejects a
     /// V15 snapshot at the magic gate.
     V15 = 15,
+    /// V16: read/write after the definition-signal feature. Shape-identical to
+    /// V15 on the wire plus a trailing `NodeEntry.is_definition: bool`
+    /// (`#[serde(default)]`, appended last). V15 snapshots upconvert to V16
+    /// inline on load via `upconvert_v15_to_v16` (a no-op that advances the
+    /// version; every node decodes `is_definition = false`). The
+    /// `definition_signal_present` marker is `true` only for V16+ loads (and
+    /// fresh in-process builds), so a pre-V16 snapshot's all-`false`
+    /// `is_definition` bits are never mistaken for genuine signal. A
+    /// V15-or-earlier reader rejects a V16 snapshot at the magic gate.
+    V16 = 16,
 }
 
 impl FormatVersion {
@@ -210,6 +234,7 @@ impl FormatVersion {
             Self::V13 => MAGIC_BYTES_V13.as_slice(),
             Self::V14 => MAGIC_BYTES_V14.as_slice(),
             Self::V15 => MAGIC_BYTES_V15.as_slice(),
+            Self::V16 => MAGIC_BYTES_V16.as_slice(),
         }
     }
 
@@ -224,9 +249,14 @@ impl FormatVersion {
     /// Returns `None` if the bytes do not match any known format magic.
     #[must_use]
     pub fn from_magic(bytes: &[u8]) -> Option<Self> {
-        // V15, V14, V13, V12, V11, and V10 magics are all 14 bytes. Check newest
-        // first (V15 → V14 → … → V10) so a longer / newer magic is never
-        // mis-classified as an older one by a less-strict comparison path.
+        // V16, V15, V14, V13, V12, V11, and V10 magics are all 14 bytes. Check
+        // newest first (V16, V15, V14, ..., V10) so a longer / newer magic is
+        // never mis-classified as an older one by a less-strict comparison path.
+        if bytes.len() >= MAGIC_BYTES_V16.len()
+            && bytes[..MAGIC_BYTES_V16.len()] == *MAGIC_BYTES_V16
+        {
+            return Some(Self::V16);
+        }
         if bytes.len() >= MAGIC_BYTES_V15.len()
             && bytes[..MAGIC_BYTES_V15.len()] == *MAGIC_BYTES_V15
         {
@@ -273,8 +303,8 @@ impl FormatVersion {
     }
 }
 
-/// Current writer format version (body-shape-descriptor side table: V15).
-pub const CURRENT_VERSION: FormatVersion = FormatVersion::V15;
+/// Current writer format version (definition-signal `NodeEntry.is_definition`: V16).
+pub const CURRENT_VERSION: FormatVersion = FormatVersion::V16;
 
 /// Header for persisted graph files.
 ///
@@ -692,11 +722,41 @@ mod tests {
         assert_eq!(FormatVersion::V13 as u32, 13);
         assert_eq!(FormatVersion::V14 as u32, 14);
         assert_eq!(FormatVersion::V15 as u32, 15);
+        assert_eq!(FormatVersion::V16 as u32, 16);
     }
 
     #[test]
-    fn current_version_is_v15() {
-        assert_eq!(CURRENT_VERSION, FormatVersion::V15);
+    fn current_version_is_v16() {
+        assert_eq!(CURRENT_VERSION, FormatVersion::V16);
+    }
+
+    #[test]
+    fn definition_magic_bytes_v16_is_distinct_and_14_bytes() {
+        assert_eq!(MAGIC_BYTES_V16, b"SQRY_GRAPH_V16");
+        assert_eq!(MAGIC_BYTES_V16.len(), 14);
+        assert_ne!(MAGIC_BYTES_V16.as_slice(), MAGIC_BYTES_V15.as_slice());
+        assert_ne!(MAGIC_BYTES_V16.as_slice(), MAGIC_BYTES_V14.as_slice());
+    }
+
+    /// V16 must be tried before V15/older so a `SQRY_GRAPH_V16` prefix is never
+    /// mis-classified as an older 14-byte magic.
+    #[test]
+    fn definition_format_version_dispatch_v16_before_older() {
+        let mut buf = MAGIC_BYTES_V16.to_vec();
+        buf.extend_from_slice(&[0u8; 8]);
+        assert_eq!(FormatVersion::from_magic(&buf), Some(FormatVersion::V16));
+
+        let mut buf15 = MAGIC_BYTES_V15.to_vec();
+        buf15.extend_from_slice(&[0u8; 8]);
+        assert_eq!(FormatVersion::from_magic(&buf15), Some(FormatVersion::V15));
+    }
+
+    #[test]
+    fn definition_format_version_v16_magic_round_trip() {
+        let v = FormatVersion::V16;
+        let bytes = v.magic();
+        assert_eq!(bytes, MAGIC_BYTES_V16.as_slice());
+        assert_eq!(FormatVersion::from_magic(bytes), Some(v));
     }
 
     #[test]

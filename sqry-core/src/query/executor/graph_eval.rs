@@ -2281,6 +2281,7 @@ mod tests {
                 is_async: false,
                 is_static: false,
                 is_unsafe: false,
+                is_definition: false,
                 body_hash: None,
             })
             .unwrap();
@@ -2303,6 +2304,7 @@ mod tests {
                 is_async: false,
                 is_static: false,
                 is_unsafe: false,
+                is_definition: false,
                 body_hash: None,
             })
             .unwrap();
@@ -2404,6 +2406,7 @@ mod tests {
                 is_async: false,
                 is_static: false,
                 is_unsafe: false,
+                is_definition: false,
                 body_hash: None,
             })
             .unwrap();
@@ -2426,6 +2429,7 @@ mod tests {
                 is_async: false,
                 is_static: false,
                 is_unsafe: false,
+                is_definition: false,
                 body_hash: None,
             })
             .unwrap();
@@ -2448,6 +2452,7 @@ mod tests {
                 is_async: false,
                 is_static: false,
                 is_unsafe: false,
+                is_definition: false,
                 body_hash: None,
             })
             .unwrap();
@@ -2604,6 +2609,7 @@ mod tests {
                     is_async: false,
                     is_static: false,
                     is_unsafe: false,
+                    is_definition: false,
                     body_hash: None,
                 })
                 .unwrap()
@@ -2753,6 +2759,7 @@ mod tests {
                     is_async: false,
                     is_static: false,
                     is_unsafe: false,
+                    is_definition: false,
                     body_hash: None,
                 })
                 .unwrap()

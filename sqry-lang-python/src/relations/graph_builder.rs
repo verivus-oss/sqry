@@ -334,8 +334,10 @@ fn walk_tree_for_graph(
                 // Build qualified class name from scope
                 let qualified_name = class_name.to_string();
 
-                // Add class node
+                // Add class node. Real class declaration (issue #394): opt the
+                // dual-use add_class bare helper into is_definition = true.
                 let class_id = helper.add_class(&qualified_name, Some(span));
+                helper.mark_definition(class_id);
 
                 // Process inheritance (base classes)
                 process_class_inheritance(node, content, class_id, helper);

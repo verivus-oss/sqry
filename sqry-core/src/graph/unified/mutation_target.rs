@@ -952,6 +952,7 @@ mod tests {
             is_static: false,
             body_hash: None,
             is_unsafe: false,
+            is_definition: false,
         };
         graph.nodes_mut().alloc(entry).expect("alloc node")
     }

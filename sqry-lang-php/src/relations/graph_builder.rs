@@ -118,6 +118,8 @@ impl GraphBuilder for PhpGraphBuilder {
                 }
                 ContextKind::Class => helper.add_class(qualified_name, Some(span)),
             };
+            // issue #394: real declaration; opt dual-use bare helper into is_definition
+            helper.mark_definition(node_id);
             node_map.insert(qualified_name.clone(), node_id);
         }
 
@@ -1010,6 +1012,8 @@ fn process_class_oop(
     let class_id = *node_map
         .entry(class_name.to_string())
         .or_insert_with(|| helper.add_class(class_name, Some(span)));
+    // issue #394: real declaration; opt dual-use bare helper into is_definition
+    helper.mark_definition(class_id);
 
     // Process children to find base_clause (extends), class_interface_clause (implements), and use_declaration (traits)
     let mut cursor = node.walk();
@@ -1163,6 +1167,8 @@ fn process_interface_inheritance(
     let interface_id = *node_map
         .entry(interface_name.to_string())
         .or_insert_with(|| helper.add_interface(interface_name, Some(span)));
+    // issue #394: real declaration; opt dual-use bare helper into is_definition
+    helper.mark_definition(interface_id);
 
     // Process base_clause for interface inheritance (interface IFoo extends IBar, IBaz)
     let mut cursor = node.walk();
@@ -1394,6 +1400,8 @@ fn export_declaration_if_exportable(
                     namespace_prefix,
                     || helper.add_class(&qualified_name, Some(span)),
                 );
+                // issue #394: real declaration; opt dual-use bare helper into is_definition
+                helper.mark_definition(class_id);
 
                 helper.add_export_edge(module_id, class_id);
 
@@ -1423,6 +1431,8 @@ fn export_declaration_if_exportable(
                     namespace_prefix,
                     || helper.add_interface(&qualified_name, Some(span)),
                 );
+                // issue #394: real declaration; opt dual-use bare helper into is_definition
+                helper.mark_definition(interface_id);
 
                 helper.add_export_edge(module_id, interface_id);
             }
@@ -1448,6 +1458,8 @@ fn export_declaration_if_exportable(
                         )
                     },
                 );
+                // issue #394: real declaration; opt dual-use bare helper into is_definition
+                helper.mark_definition(trait_id);
 
                 helper.add_export_edge(module_id, trait_id);
             }
@@ -1488,6 +1500,8 @@ fn export_declaration_if_exportable(
                     namespace_prefix,
                     || helper.add_function(&qualified_name, Some(span), false, false),
                 );
+                // issue #394: real declaration; opt dual-use bare helper into is_definition
+                helper.mark_definition(func_id);
 
                 helper.add_export_edge(module_id, func_id);
             }

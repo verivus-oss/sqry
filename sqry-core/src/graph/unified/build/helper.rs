@@ -290,6 +290,27 @@ impl<'a> GraphBuildHelper<'a> {
         is_async: bool,
         is_unsafe: bool,
     ) -> NodeId {
+        // Dual-use bare helper (issue #394): also used to create call/FFI/callee
+        // stubs (e.g. go syscall/ffi targets, rust trait-binding callees), so it
+        // defaults is_definition = false. Real declaration sites opt in via
+        // mark_definition (or use the _with_visibility/_with_signature variants).
+        self.add_function_inner(qualified_name, span, is_async, is_unsafe, false)
+    }
+
+    /// Internal function-node sink shared by the public declaration helper
+    /// [`add_function`](Self::add_function) (`is_definition = true`) and the
+    /// call-edge wrapper [`ensure_function`](Self::ensure_function)
+    /// (`is_definition = false`). The seam keeps real declarations marked as
+    /// definitions while call-target stubs created via the `ensure_*` path stay
+    /// non-definitions.
+    fn add_function_inner(
+        &mut self,
+        qualified_name: &str,
+        span: Option<Span>,
+        is_async: bool,
+        is_unsafe: bool,
+        is_definition: bool,
+    ) -> NodeId {
         self.add_node_internal(
             qualified_name,
             span,
@@ -297,6 +318,7 @@ impl<'a> GraphBuildHelper<'a> {
             &[("async", is_async), ("unsafe", is_unsafe)],
             None,
             None,
+            is_definition,
         )
     }
 
@@ -318,6 +340,7 @@ impl<'a> GraphBuildHelper<'a> {
             &[("async", is_async), ("unsafe", is_unsafe)],
             visibility,
             None,
+            true,
         )
     }
 
@@ -341,6 +364,7 @@ impl<'a> GraphBuildHelper<'a> {
             &[("async", is_async), ("unsafe", is_unsafe)],
             visibility,
             signature,
+            true,
         )
     }
 
@@ -352,6 +376,24 @@ impl<'a> GraphBuildHelper<'a> {
         is_async: bool,
         is_static: bool,
     ) -> NodeId {
+        // Dual-use bare helper (issue #394): also used for call/callee stubs
+        // (servicenow/apex callees), so it defaults is_definition = false. Real
+        // declaration sites opt in via mark_definition (or the _with_* variants).
+        self.add_method_inner(qualified_name, span, is_async, is_static, false)
+    }
+
+    /// Internal method-node sink shared by the public declaration helper
+    /// [`add_method`](Self::add_method) (`is_definition = true`) and the
+    /// call-edge wrapper [`ensure_method`](Self::ensure_method)
+    /// (`is_definition = false`). See [`add_function_inner`](Self::add_function_inner).
+    fn add_method_inner(
+        &mut self,
+        qualified_name: &str,
+        span: Option<Span>,
+        is_async: bool,
+        is_static: bool,
+        is_definition: bool,
+    ) -> NodeId {
         self.add_node_internal(
             qualified_name,
             span,
@@ -359,6 +401,7 @@ impl<'a> GraphBuildHelper<'a> {
             &[("async", is_async), ("static", is_static)],
             None,
             None,
+            is_definition,
         )
     }
 
@@ -378,6 +421,7 @@ impl<'a> GraphBuildHelper<'a> {
             &[("async", is_async), ("static", is_static)],
             visibility,
             None,
+            true,
         )
     }
 
@@ -401,12 +445,27 @@ impl<'a> GraphBuildHelper<'a> {
             &[("async", is_async), ("static", is_static)],
             visibility,
             signature,
+            true,
         )
     }
 
     /// Add a class node.
+    ///
+    /// Dual-use bare helper (issue #394): also used to create type-reference
+    /// stubs (e.g. puppet inherited-class targets), so it defaults
+    /// `is_definition = false`. Real declaration sites opt in via
+    /// [`mark_definition`](Self::mark_definition) (or use
+    /// [`add_class_with_visibility`](Self::add_class_with_visibility)).
     pub fn add_class(&mut self, qualified_name: &str, span: Option<Span>) -> NodeId {
-        self.add_node_internal(qualified_name, span, NodeKind::Class, &[], None, None)
+        self.add_node_internal(
+            qualified_name,
+            span,
+            NodeKind::Class,
+            &[],
+            None,
+            None,
+            false,
+        )
     }
 
     /// Add a class node with visibility.
@@ -416,12 +475,34 @@ impl<'a> GraphBuildHelper<'a> {
         span: Option<Span>,
         visibility: Option<&str>,
     ) -> NodeId {
-        self.add_node_internal(qualified_name, span, NodeKind::Class, &[], visibility, None)
+        self.add_node_internal(
+            qualified_name,
+            span,
+            NodeKind::Class,
+            &[],
+            visibility,
+            None,
+            true,
+        )
     }
 
     /// Add a struct node.
+    ///
+    /// Dual-use bare helper (issue #394): also used to create reference stubs
+    /// (e.g. go embedded-parent-struct targets), so it defaults
+    /// `is_definition = false`. Real declaration sites opt in via
+    /// [`mark_definition`](Self::mark_definition) (or use
+    /// [`add_struct_with_visibility`](Self::add_struct_with_visibility)).
     pub fn add_struct(&mut self, qualified_name: &str, span: Option<Span>) -> NodeId {
-        self.add_node_internal(qualified_name, span, NodeKind::Struct, &[], None, None)
+        self.add_node_internal(
+            qualified_name,
+            span,
+            NodeKind::Struct,
+            &[],
+            None,
+            None,
+            false,
+        )
     }
 
     /// Add a struct node with visibility.
@@ -438,17 +519,39 @@ impl<'a> GraphBuildHelper<'a> {
             &[],
             visibility,
             None,
+            true,
         )
     }
 
     /// Add a module node.
+    ///
+    /// Dual-use bare helper (issue #394): also used to create FFI/import-target
+    /// stubs (e.g. python/kotlin native targets), so it defaults
+    /// `is_definition = false`. Real module-declaration sites opt in via
+    /// [`mark_definition`](Self::mark_definition).
     pub fn add_module(&mut self, qualified_name: &str, span: Option<Span>) -> NodeId {
-        self.add_node_internal(qualified_name, span, NodeKind::Module, &[], None, None)
+        self.add_node_internal(
+            qualified_name,
+            span,
+            NodeKind::Module,
+            &[],
+            None,
+            None,
+            false,
+        )
     }
 
     /// Add a resource node.
     pub fn add_resource(&mut self, qualified_name: &str, span: Option<Span>) -> NodeId {
-        self.add_node_internal(qualified_name, span, NodeKind::Resource, &[], None, None)
+        self.add_node_internal(
+            qualified_name,
+            span,
+            NodeKind::Resource,
+            &[],
+            None,
+            None,
+            true,
+        )
     }
 
     /// Add an endpoint node for HTTP route handlers.
@@ -459,12 +562,28 @@ impl<'a> GraphBuildHelper<'a> {
     /// Endpoint nodes are used by Pass 5 (cross-language linking) to match
     /// HTTP requests from client code to server-side route handlers.
     pub fn add_endpoint(&mut self, qualified_name: &str, span: Option<Span>) -> NodeId {
-        self.add_node_internal(qualified_name, span, NodeKind::Endpoint, &[], None, None)
+        self.add_node_internal(
+            qualified_name,
+            span,
+            NodeKind::Endpoint,
+            &[],
+            None,
+            None,
+            true,
+        )
     }
 
     /// Add an import node.
     pub fn add_import(&mut self, qualified_name: &str, span: Option<Span>) -> NodeId {
-        self.add_node_internal(qualified_name, span, NodeKind::Import, &[], None, None)
+        self.add_node_internal(
+            qualified_name,
+            span,
+            NodeKind::Import,
+            &[],
+            None,
+            None,
+            false,
+        )
     }
 
     /// Add an import node while preserving the original path-like identifier.
@@ -473,12 +592,25 @@ impl<'a> GraphBuildHelper<'a> {
     /// similar asset filenames where `.` is part of the path rather than a
     /// language-native qualified-name separator.
     pub fn add_verbatim_import(&mut self, name: &str, span: Option<Span>) -> NodeId {
-        self.add_node_verbatim(name, span, NodeKind::Import, &[], None, None)
+        self.add_node_verbatim(name, span, NodeKind::Import, &[], None, None, false)
     }
 
     /// Add a variable node.
+    ///
+    /// Dual-use bare helper (issue #394): also used to create reference stubs
+    /// (e.g. rust field targets, sap-abap typed references), so it defaults
+    /// `is_definition = false`. Real variable/parameter/field declaration sites
+    /// opt in via [`mark_definition`](Self::mark_definition).
     pub fn add_variable(&mut self, qualified_name: &str, span: Option<Span>) -> NodeId {
-        self.add_node_internal(qualified_name, span, NodeKind::Variable, &[], None, None)
+        self.add_node_internal(
+            qualified_name,
+            span,
+            NodeKind::Variable,
+            &[],
+            None,
+            None,
+            false,
+        )
     }
 
     /// Add a variable node while preserving the original identifier exactly.
@@ -486,12 +618,20 @@ impl<'a> GraphBuildHelper<'a> {
     /// Use this for static asset references where the literal path is the
     /// graph identity.
     pub fn add_verbatim_variable(&mut self, name: &str, span: Option<Span>) -> NodeId {
-        self.add_node_verbatim(name, span, NodeKind::Variable, &[], None, None)
+        self.add_node_verbatim(name, span, NodeKind::Variable, &[], None, None, false)
     }
 
     /// Add a constant node.
     pub fn add_constant(&mut self, qualified_name: &str, span: Option<Span>) -> NodeId {
-        self.add_node_internal(qualified_name, span, NodeKind::Constant, &[], None, None)
+        self.add_node_internal(
+            qualified_name,
+            span,
+            NodeKind::Constant,
+            &[],
+            None,
+            None,
+            true,
+        )
     }
 
     /// Add a constant node with visibility.
@@ -508,6 +648,7 @@ impl<'a> GraphBuildHelper<'a> {
             &[],
             visibility,
             None,
+            true,
         )
     }
 
@@ -527,6 +668,7 @@ impl<'a> GraphBuildHelper<'a> {
             attrs,
             visibility,
             None,
+            true,
         )
     }
 
@@ -552,6 +694,7 @@ impl<'a> GraphBuildHelper<'a> {
             attrs,
             visibility,
             None,
+            true,
         )
     }
 
@@ -571,6 +714,7 @@ impl<'a> GraphBuildHelper<'a> {
             attrs,
             visibility,
             None,
+            true,
         )
     }
 
@@ -596,12 +740,13 @@ impl<'a> GraphBuildHelper<'a> {
             attrs,
             visibility,
             None,
+            true,
         )
     }
 
     /// Add an enum node.
     pub fn add_enum(&mut self, qualified_name: &str, span: Option<Span>) -> NodeId {
-        self.add_node_internal(qualified_name, span, NodeKind::Enum, &[], None, None)
+        self.add_node_internal(qualified_name, span, NodeKind::Enum, &[], None, None, true)
     }
 
     /// Add an enum node with visibility.
@@ -611,12 +756,34 @@ impl<'a> GraphBuildHelper<'a> {
         span: Option<Span>,
         visibility: Option<&str>,
     ) -> NodeId {
-        self.add_node_internal(qualified_name, span, NodeKind::Enum, &[], visibility, None)
+        self.add_node_internal(
+            qualified_name,
+            span,
+            NodeKind::Enum,
+            &[],
+            visibility,
+            None,
+            true,
+        )
     }
 
     /// Add an interface/trait node.
+    ///
+    /// Dual-use bare helper (issue #394): also used to create type-reference
+    /// stubs (e.g. go interface-type references), so it defaults
+    /// `is_definition = false`. Real declaration sites opt in via
+    /// [`mark_definition`](Self::mark_definition) (or use
+    /// [`add_interface_with_visibility`](Self::add_interface_with_visibility)).
     pub fn add_interface(&mut self, qualified_name: &str, span: Option<Span>) -> NodeId {
-        self.add_node_internal(qualified_name, span, NodeKind::Interface, &[], None, None)
+        self.add_node_internal(
+            qualified_name,
+            span,
+            NodeKind::Interface,
+            &[],
+            None,
+            None,
+            false,
+        )
     }
 
     /// Add an interface/trait node with visibility.
@@ -633,12 +800,20 @@ impl<'a> GraphBuildHelper<'a> {
             &[],
             visibility,
             None,
+            true,
         )
     }
 
     /// Add a type alias node.
+    ///
+    /// Irreducibly dual-use bare helper (issue #394): used for BOTH typedef/
+    /// type-alias declarations AND type references (the dominant use), so it
+    /// defaults `is_definition = false`. A type DECLARED in the workspace opts
+    /// in at its declaration site via [`mark_definition`](Self::mark_definition)
+    /// (references then dedupe into it and the OR-in keeps it true); a type only
+    /// ever referenced stays false.
     pub fn add_type(&mut self, qualified_name: &str, span: Option<Span>) -> NodeId {
-        self.add_node_internal(qualified_name, span, NodeKind::Type, &[], None, None)
+        self.add_node_internal(qualified_name, span, NodeKind::Type, &[], None, None, false)
     }
 
     /// Add a type alias node with visibility.
@@ -648,12 +823,28 @@ impl<'a> GraphBuildHelper<'a> {
         span: Option<Span>,
         visibility: Option<&str>,
     ) -> NodeId {
-        self.add_node_internal(qualified_name, span, NodeKind::Type, &[], visibility, None)
+        self.add_node_internal(
+            qualified_name,
+            span,
+            NodeKind::Type,
+            &[],
+            visibility,
+            None,
+            true,
+        )
     }
 
     /// Add a lifetime node.
     pub fn add_lifetime(&mut self, qualified_name: &str, span: Option<Span>) -> NodeId {
-        self.add_node_internal(qualified_name, span, NodeKind::Lifetime, &[], None, None)
+        self.add_node_internal(
+            qualified_name,
+            span,
+            NodeKind::Lifetime,
+            &[],
+            None,
+            None,
+            true,
+        )
     }
 
     /// Add a lifetime constraint edge.
@@ -741,11 +932,19 @@ impl<'a> GraphBuildHelper<'a> {
     }
 
     /// Add a generic node with custom kind.
+    ///
+    /// Generic nodes default to `is_definition = false`: the caller passes a raw
+    /// `NodeKind` so the helper cannot know whether the node is a real
+    /// declaration or a structural/reference stub. Real-declaration callers are
+    /// marked explicitly in Stage 2.
     pub fn add_node(&mut self, qualified_name: &str, span: Option<Span>, kind: NodeKind) -> NodeId {
-        self.add_node_internal(qualified_name, span, kind, &[], None, None)
+        self.add_node_internal(qualified_name, span, kind, &[], None, None, false)
     }
 
     /// Add a generic node with visibility.
+    ///
+    /// Defaults to `is_definition = false` for the same reason as
+    /// [`add_node`](Self::add_node).
     pub fn add_node_with_visibility(
         &mut self,
         qualified_name: &str,
@@ -753,7 +952,30 @@ impl<'a> GraphBuildHelper<'a> {
         kind: NodeKind,
         visibility: Option<&str>,
     ) -> NodeId {
-        self.add_node_internal(qualified_name, span, kind, &[], visibility, None)
+        self.add_node_internal(qualified_name, span, kind, &[], visibility, None, false)
+    }
+
+    /// Mark a just-created staged node as a real source declaration
+    /// (`is_definition = true`).
+    ///
+    /// This is the explicit opt-in (issue #394) for declaration sites that
+    /// create their node through a DUAL-USE bare helper (`add_function`,
+    /// `add_method`, `add_class`, `add_struct`, `add_enum`-less kinds aside,
+    /// `add_interface`, `add_type`, `add_module`, `add_variable`) or the generic
+    /// `add_node`/`add_node_with_visibility`, all of which default
+    /// `is_definition = false` because the helper cannot tell a declaration from
+    /// a call/FFI/reference/import stub. A declaration handler calls this right
+    /// after creating its node.
+    ///
+    /// The signal is monotonic (OR-in): once marked true it is never cleared, so
+    /// calling this on a node that was also reached as a stub (or vice-versa)
+    /// converges to true, which is correct (a symbol declared in the workspace
+    /// IS a definition regardless of also being referenced).
+    pub fn mark_definition(&mut self, node_id: NodeId) {
+        // Neutral metadata update (no span / no attribute changes); only the
+        // is_definition = true bit is OR-ed in by apply_node_metadata.
+        self.staging
+            .update_node_entry(node_id, None, false, false, false, None, None, true);
     }
 
     /// Internal helper for adding nodes.
@@ -773,6 +995,7 @@ impl<'a> GraphBuildHelper<'a> {
         attributes: &[(&str, bool)],
         visibility: Option<&str>,
         signature: Option<&str>,
+        is_definition: bool,
     ) -> NodeId {
         let canonical_qualified_name =
             canonicalize_graph_qualified_name(self.language, qualified_name);
@@ -785,9 +1008,11 @@ impl<'a> GraphBuildHelper<'a> {
             attributes,
             visibility,
             signature,
+            is_definition,
         )
     }
 
+    #[allow(clippy::too_many_arguments)] // internal builder sink; is_definition (issue #394) threaded alongside span/kind/attrs
     fn add_node_internal_with_name(
         &mut self,
         semantic_name: &str,
@@ -797,6 +1022,7 @@ impl<'a> GraphBuildHelper<'a> {
         attributes: &[(&str, bool)],
         visibility: Option<&str>,
         signature: Option<&str>,
+        is_definition: bool,
     ) -> NodeId {
         let canonical_qualified_name =
             canonicalize_graph_qualified_name(self.language, qualified_name);
@@ -808,9 +1034,11 @@ impl<'a> GraphBuildHelper<'a> {
             attributes,
             visibility,
             signature,
+            is_definition,
         )
     }
 
+    #[allow(clippy::too_many_arguments)] // internal builder sink; is_definition (issue #394) threaded alongside span/kind/attrs
     fn add_node_internal_with_canonical_name(
         &mut self,
         semantic_name: &str,
@@ -820,6 +1048,7 @@ impl<'a> GraphBuildHelper<'a> {
         attributes: &[(&str, bool)],
         visibility: Option<&str>,
         signature: Option<&str>,
+        is_definition: bool,
     ) -> NodeId {
         let mut is_async = false;
         let mut is_static = false;
@@ -848,6 +1077,7 @@ impl<'a> GraphBuildHelper<'a> {
                 is_unsafe,
                 visibility_id,
                 signature_id,
+                is_definition,
             );
             return id;
         }
@@ -856,6 +1086,7 @@ impl<'a> GraphBuildHelper<'a> {
 
         // Create node entry
         let mut entry = NodeEntry::new(kind, name_id, self.file_id);
+        entry.is_definition = is_definition;
         if semantic_name != canonical_qualified_name {
             let qualified_name_id = self.intern(canonical_qualified_name);
             entry = entry.with_qualified_name(qualified_name_id);
@@ -911,6 +1142,7 @@ impl<'a> GraphBuildHelper<'a> {
         attributes: &[(&str, bool)],
         visibility: Option<&str>,
         signature: Option<&str>,
+        is_definition: bool,
     ) -> NodeId {
         let mut is_async = false;
         let mut is_static = false;
@@ -935,12 +1167,14 @@ impl<'a> GraphBuildHelper<'a> {
                 is_unsafe,
                 visibility_id,
                 signature_id,
+                is_definition,
             );
             return id;
         }
 
         let name_id = self.intern(name);
         let mut entry = NodeEntry::new(kind, name_id, self.file_id);
+        entry.is_definition = is_definition;
 
         if let Some(s) = span {
             let start_line = u32::try_from(s.start.line.saturating_add(1)).unwrap_or(u32::MAX);
@@ -1597,7 +1831,8 @@ impl<'a> GraphBuildHelper<'a> {
         if let Some(id) = self.reuse_across_call_compatible_kinds(&canonical, target_kind) {
             return id;
         }
-        // Create a new node with the call-site span (never None)
+        // Create a new node with the call-site span (never None). Callee stubs
+        // are never declarations -> is_definition = false.
         self.add_node_internal(
             qualified_name,
             Some(call_site_span),
@@ -1605,6 +1840,7 @@ impl<'a> GraphBuildHelper<'a> {
             &[],
             None,
             None,
+            false,
         )
     }
 
@@ -1630,7 +1866,8 @@ impl<'a> GraphBuildHelper<'a> {
         if let Some(id) = self.reuse_across_call_compatible_kinds(&canonical, NodeKind::Function) {
             return id;
         }
-        self.add_function(qualified_name, span, is_async, is_unsafe)
+        // Call-edge target stubs are not declarations -> is_definition = false.
+        self.add_function_inner(qualified_name, span, is_async, is_unsafe, false)
     }
 
     /// Ensure a method node exists, creating it if needed.
@@ -1650,7 +1887,8 @@ impl<'a> GraphBuildHelper<'a> {
         if let Some(id) = self.reuse_across_call_compatible_kinds(&canonical, NodeKind::Method) {
             return id;
         }
-        self.add_method(qualified_name, span, is_async, is_static)
+        // Call-edge target stubs are not declarations -> is_definition = false.
+        self.add_method_inner(qualified_name, span, is_async, is_static, false)
     }
 
     /// Get statistics about what's been staged.
@@ -2644,8 +2882,15 @@ mod tests {
         let mut helper = GraphBuildHelper::new(&mut staging, &file, Language::Css);
 
         // Create a StyleRule node — NOT a call-compatible kind
-        let style_id =
-            helper.add_node_verbatim(".container", None, NodeKind::StyleRule, &[], None, None);
+        let style_id = helper.add_node_verbatim(
+            ".container",
+            None,
+            NodeKind::StyleRule,
+            &[],
+            None,
+            None,
+            false,
+        );
 
         // ensure_function with the same name should NOT reuse the StyleRule
         let func_id = helper.ensure_function(".container", None, false, false);

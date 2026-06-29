@@ -15,7 +15,7 @@ Website: https://sqry.dev
 - Edge-backed `returns:<TypeName>` and resolution-aware `resolved_via:<kind>` predicates for supported graph paths.
 - Workspace-aware indexing through `.sqry-workspace` registries and VS Code `.code-workspace` `sqry.workspace` blocks. <!-- claim:multi-root-supported test:resolve_logical_workspace_short_circuits_in_documented_order -->
 - Daemon-backed shared graph loading through `sqryd` for editor, MCP, and repeated-agent workflows.
-- MCP integration for AI assistants. Standalone `sqry-mcp` currently exposes 36 tools; daemon-hosted MCP exposes a 15-tool subset. Use `tools/list`, `sqry-mcp --list-tools`, or `sqry://meta/manifest` as the authoritative catalog.
+- MCP integration for AI assistants. Standalone `sqry-mcp` currently exposes 37 tools; daemon-hosted MCP exposes a 16-tool subset. Use `tools/list`, `sqry-mcp --list-tools`, or `sqry://meta/manifest` as the authoritative catalog.
 - LSP and VS Code extension support for editor workflows.
 
 > **Removed in 21.0.0:** the experimental natural-language surface (`sqry ask` CLI command, `sqry_ask` MCP tool, `sqry/ask` LSP request) was removed. Use the structured query and graph commands shown below; see [Removed features](docs/TROUBLESHOOTING.md#removed-features) for migration.
@@ -201,6 +201,36 @@ sqry mcp setup --tool gemini
 
 Standalone `sqry-mcp` is the full local tool surface. `sqry-mcp --daemon` attaches to `sqryd` and exposes the daemon-hosted subset. `workspace_status.source_root_id` is an opaque display/correlation token, not a path. See [MCP Guide](docs/user-guide/mcp.md) and the component docs in [sqry-mcp/README.md](sqry-mcp/README.md).
 
+MCP search tools keep string predicates and structured JSON parameters separate:
+
+```json
+{
+  "name": "semantic_search",
+  "arguments": {
+    "query": "kind:function items:true",
+    "filters": {
+      "language": ["rust"],
+      "visibility": "public"
+    }
+  }
+}
+```
+
+Use `items:true` or `is_definition:true` in `query` for definition-only query predicates. When calling `list_symbols`, use the structured `items_only` parameter:
+
+```json
+{
+  "name": "list_symbols",
+  "arguments": {
+    "kind": "function",
+    "language": "rust",
+    "items_only": true
+  }
+}
+```
+
+If a graph was built before the V16 definition-signal snapshot format, definition-only query predicates and `list_symbols.items_only` return a `reindexRequired` / reindex-required advisory rather than trusting stale marker data.
+
 For the VS Code extension, see [sqry-vscode/README.md](sqry-vscode/README.md) and [sqry-vscode/USER_GUIDE.md](sqry-vscode/USER_GUIDE.md).
 
 ## User Guides
@@ -211,7 +241,10 @@ For the VS Code extension, see [sqry-vscode/README.md](sqry-vscode/README.md) an
 - [Workspaces](docs/user-guide/workspace.md)
 - [Daemon Mode](docs/user-guide/daemon.md)
 - [MCP Guide](docs/user-guide/mcp.md)
+- [Revision-Aware Workspaces](docs/user-guide/revision-aware-workspaces.md)
 - [Advanced Analysis](docs/user-guide/advanced-analysis.md)
+- [Structural Shape Matching](docs/user-guide/shape-match.md)
+- [Visualization](docs/user-guide/visualization.md)
 
 ## Project Scope
 

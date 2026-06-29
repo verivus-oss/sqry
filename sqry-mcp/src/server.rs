@@ -1599,7 +1599,10 @@ impl ServerHandler for SqryServer {
                  - Explain symbol context: explain_code\n\n\
                  The `filters` parameter on semantic_search/hierarchical_search is a JSON object \
                  (e.g., {\"language\":[\"rust\"]}), not a string. \
-                 For string-style predicates like `lang:rust`, use the `query` parameter.\n\n\
+                 For string-style predicates like `lang:rust`, `items:true`, or \
+                 `is_definition:true`, use the `query` parameter. \
+                 For list_symbols, use the structured `items_only` parameter \
+                 for definition-only listings.\n\n\
                  Detailed docs available as resources: \
                  sqry://docs/tool-guide, sqry://docs/query-syntax, \
                  sqry://docs/patterns, sqry://docs/architecture"
@@ -2464,6 +2467,7 @@ fn convert_list_symbols_params(params: ListSymbolsParams) -> Result<ListSymbolsA
         kind: params.kind,
         language: params.language,
         summary: params.summary,
+        items_only: params.items_only,
         max_results,
         pagination,
     })

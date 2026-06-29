@@ -15,7 +15,7 @@ use sqry_db::planner::{execute_plan, parse_query};
 use sqry_db::queries::dispatch::make_query_db_cold;
 
 use crate::engine::{canonicalize_in_workspace, engine_for_workspace};
-use crate::execution::types::{SqryQueryData, SqryQueryHit, ToolExecution};
+use crate::execution::types::{ReindexRequiredData, SqryQueryData, SqryQueryHit, ToolExecution};
 use crate::execution::utils::duration_to_ms;
 use crate::tools::SqryQueryParams;
 
@@ -26,6 +26,42 @@ const DEFAULT_LIMIT: usize = 1_000;
 /// Upper cap on the limit parameter — prevents a single tool call from
 /// serialising tens of thousands of results into the MCP channel.
 const MAX_LIMIT: usize = 10_000;
+
+const DEFINITION_SIGNAL_REINDEX_REASON: &str =
+    "definition signal requires a reindex (snapshot predates definition fidelity marker)";
+
+fn definition_reindex_data() -> ReindexRequiredData {
+    ReindexRequiredData {
+        reason: DEFINITION_SIGNAL_REINDEX_REASON.to_string(),
+    }
+}
+
+fn definition_reindex_execution(
+    query: String,
+    workspace_path: String,
+    execution_ms: u64,
+) -> ToolExecution<SqryQueryData> {
+    let data = SqryQueryData {
+        query,
+        total_matches: 0,
+        truncated: false,
+        hits: Vec::new(),
+        reindex_required: Some(definition_reindex_data()),
+    };
+
+    ToolExecution {
+        data,
+        used_index: false,
+        used_graph: true,
+        graph_metadata: None,
+        execution_ms,
+        next_page_token: None,
+        total: Some(0),
+        truncated: Some(false),
+        candidates_scanned: None,
+        workspace_path,
+    }
+}
 
 /// Executes the `sqry_query` tool against the current workspace graph.
 ///
@@ -65,6 +101,14 @@ pub fn execute_sqry_query(params: &SqryQueryParams) -> Result<ToolExecution<Sqry
     overlay_phase_beta_filters(&mut plan.root, params);
 
     let snapshot = Arc::new(graph.snapshot());
+
+    if plan.uses_definition_predicate() && !snapshot.definition_signal_present() {
+        return Ok(definition_reindex_execution(
+            params.query.clone(),
+            workspace_root.display().to_string(),
+            duration_to_ms(start.elapsed()),
+        ));
+    }
 
     // Pre-flight cost gate (`B_cost_gate.md` §B4 + `00_contracts.md`
     // §3.CC-2). Inspects the planner IR shape against the snapshot's
@@ -131,6 +175,7 @@ pub fn execute_sqry_query(params: &SqryQueryParams) -> Result<ToolExecution<Sqry
         total_matches,
         truncated,
         hits,
+        reindex_required: None,
     };
 
     Ok(ToolExecution {
@@ -214,6 +259,48 @@ mod tests {
             framework: None,
             resolved_via: None,
         }
+    }
+
+    #[test]
+    fn definition_reindex_data_reason_is_stable() {
+        let data = definition_reindex_data();
+        assert_eq!(
+            data.reason,
+            "definition signal requires a reindex (snapshot predates definition fidelity marker)"
+        );
+    }
+
+    #[test]
+    fn definition_reindex_execution_shape_is_stable() {
+        let execution = definition_reindex_execution(
+            "kind:function items".to_string(),
+            "/workspace".to_string(),
+            7,
+        );
+
+        assert!(!execution.used_index);
+        assert!(execution.used_graph);
+        assert_eq!(execution.execution_ms, 7);
+        assert_eq!(execution.total, Some(0));
+        assert_eq!(execution.truncated, Some(false));
+        assert_eq!(execution.workspace_path, "/workspace");
+        assert_eq!(execution.data.query, "kind:function items");
+        assert_eq!(execution.data.total_matches, 0);
+        assert!(!execution.data.truncated);
+        assert!(execution.data.hits.is_empty());
+        assert_eq!(
+            execution
+                .data
+                .reindex_required
+                .as_ref()
+                .map(|data| data.reason.as_str()),
+            Some(
+                "definition signal requires a reindex (snapshot predates definition fidelity marker)"
+            )
+        );
+
+        let json = serde_json::to_value(&execution.data).expect("serialize");
+        assert!(json.get("reindexRequired").is_some());
     }
 
     #[test]

@@ -1,6 +1,6 @@
 # sqry MCP Server
 
-**Version**: 23.2.0
+**Version**: 24.0.1
 
 `sqry-mcp` exposes sqry semantic code-search tools to Model Context Protocol clients.
 
@@ -20,7 +20,7 @@ sqry daemon load .
 sqry-mcp --daemon
 ```
 
-Standalone mode currently exposes 36 tools. Daemon-hosted MCP exposes a 15-tool subset backed by `sqryd`. Use dynamic discovery for exact schemas and descriptions:
+Standalone mode currently exposes 37 tools. Daemon-hosted MCP exposes a 16-tool subset backed by `sqryd`. Use dynamic discovery for exact schemas and descriptions:
 
 ```bash
 sqry-mcp --list-tools
@@ -28,7 +28,7 @@ sqry-mcp --list-tools
 
 MCP clients can also call `tools/list`, and sqry clients can read `sqry://meta/manifest`.
 
-> **Removed in 23.2.0:** the `sqry_ask` natural-language MCP tool was removed. Use `sqry_query`, `semantic_search`, and `relation_query` instead; see [Removed features](../docs/TROUBLESHOOTING.md#removed-features) for migration.
+> **Removed in 21.0.0:** the `sqry_ask` natural-language MCP tool was removed. Use `sqry_query`, `semantic_search`, and `relation_query` instead; see [Removed features](../docs/TROUBLESHOOTING.md#removed-features) for migration.
 
 ## Setup
 
@@ -59,6 +59,38 @@ Prefer discovery over copying static tables:
 - `sqry://docs/capability-map`
 
 The standalone catalog includes tools for symbol search, navigation, relation queries, graph export, impact analysis, semantic diff, duplicate/cycle/unused detection, workspace status, and context propagation.
+
+## Quick Start Tool Calls
+
+Use `query` for string predicates and `filters` for structured JSON pre-filters:
+
+```json
+{
+  "name": "semantic_search",
+  "arguments": {
+    "query": "kind:function items:true",
+    "filters": {
+      "language": ["rust"],
+      "visibility": "public"
+    }
+  }
+}
+```
+
+Use `items:true` or `is_definition:true` inside `query` for definition-only predicates. For `list_symbols`, use the structured `items_only` parameter instead:
+
+```json
+{
+  "name": "list_symbols",
+  "arguments": {
+    "kind": "function",
+    "language": "rust",
+    "items_only": true
+  }
+}
+```
+
+On pre-V16 snapshots without trustworthy definition signal, these definition-only surfaces return a `reindexRequired` / reindex-required advisory instead of silently evaluating stale default-false marker data.
 
 ## Workspaces
 

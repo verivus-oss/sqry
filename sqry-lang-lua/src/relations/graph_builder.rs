@@ -1483,7 +1483,9 @@ fn build_table_fields(
 
             // Create property node for the field
             let span = span_from_node(child);
-            helper.add_node(field_name, Some(span), NodeKind::Property);
+            // issue #394: real declaration; opt dual-use bare helper into is_definition
+            let property_id = helper.add_node(field_name, Some(span), NodeKind::Property);
+            helper.mark_definition(property_id);
         }
     }
 

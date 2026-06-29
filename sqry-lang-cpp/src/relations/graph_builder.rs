@@ -1633,6 +1633,8 @@ fn process_global_variable_declaration(
                 sqry_core::graph::unified::node::NodeKind::Variable,
                 Some("public"),
             );
+            // issue #394: real declaration; opt dual-use bare helper into is_definition
+            helper.mark_definition(var_id);
 
             // Create Type node
             let type_id = helper.add_type(&base_type, None);

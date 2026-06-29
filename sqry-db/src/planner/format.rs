@@ -251,11 +251,19 @@ fn format_chain_steps(steps: &[PlanNode], out: &mut String) {
 // Predicate formatting
 // ============================================================================
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "exhaustive predicate formatting stays in one match so canonical query output remains easy to audit"
+)]
 fn format_predicate_step(pred: &Predicate, out: &mut String) {
     match pred {
         Predicate::HasCaller => out.push_str("has:caller"),
         Predicate::HasCallee => out.push_str("has:callee"),
         Predicate::IsUnused => out.push_str("unused"),
+        Predicate::IsDefinition(b) => {
+            write!(out, "is_definition:{}", if *b { "true" } else { "false" })
+                .expect("write to String");
+        }
         Predicate::IsAddressTaken(b) => {
             // The parser accepts both `address_taken` (bare => true) and
             // `address_taken:true` / `address_taken:false`. Emit the
@@ -685,6 +693,17 @@ mod tests {
     fn smoke_callsite_promiscuous_explicit_polarity() {
         roundtrip("kind:function callsite_promiscuous:true");
         roundtrip("kind:function callsite_promiscuous:false");
+    }
+
+    #[test]
+    fn smoke_items_alias_canonicalises_to_is_definition() {
+        let formatted = format_plan(&parse_query("kind:function items").unwrap());
+        assert!(
+            formatted.contains("is_definition:true"),
+            "canonical definition predicate spelling expected, got {formatted:?}"
+        );
+        assert!(!formatted.contains("items"));
+        roundtrip("kind:function is_definition:false");
     }
 
     #[test]

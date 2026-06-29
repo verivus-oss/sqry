@@ -7,7 +7,7 @@
       "type": "integer"
     },
     "filters": {
-      "description": "Structured filter object for pre-filtering by language, kind, visibility, or minimum score. Pass a JSON object — for string-style predicates, use the `query` parameter instead.",
+      "description": "Structured JSON object for pre-filtering by language, kind, visibility, or minimum score. Pass a JSON object; for string-style predicates, use the `query` parameter instead.",
       "additionalProperties": false,
       "properties": {
         "language": {

@@ -1858,6 +1858,7 @@ mod tests {
             is_async: false,
             is_static: false,
             is_unsafe: false,
+            is_definition: false,
             body_hash: None,
         };
         let main_id = nodes.alloc(main_entry).unwrap();
@@ -1879,6 +1880,7 @@ mod tests {
             is_async: true,
             is_static: false,
             is_unsafe: false,
+            is_definition: false,
             body_hash: None,
         };
         let helper_id = nodes.alloc(helper_entry).unwrap();

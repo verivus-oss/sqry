@@ -1019,6 +1019,10 @@ fn process_property_typeof_edges(
         // Top-level variable
         helper.add_variable(&qualified_name, Some(Span::from_node(&node)))
     };
+    // issue #394: real declaration; opt dual-use bare helper into is_definition
+    // (constant/property branches already mark via *_with_* helpers; the
+    // monotonic OR-in is a no-op there and sets the top-level variable case).
+    helper.mark_definition(property_id);
 
     // Create TypeOf edge
     let type_id = helper.add_type(type_text, None);
@@ -1439,6 +1443,8 @@ fn walk_tree_for_graph_with_context(
                 let span = Span::from_node(&node);
                 let qualified_name = class_name.to_string();
                 let class_id = helper.add_class(&qualified_name, Some(span));
+                // issue #394: real declaration; opt dual-use bare helper into is_definition
+                helper.mark_definition(class_id);
 
                 // REQ:R0027 — emit per-type-parameter Type nodes for
                 // generic class declarations. Qualified name shape is
@@ -2320,6 +2326,9 @@ fn handle_identifier_for_reference(
                 let span = Span::from_bytes(binding.decl_start_byte, binding.decl_end_byte);
                 let qualified_var = format!("{identifier_text}@{}", binding.decl_start_byte);
                 let var_id = helper.add_variable(&qualified_var, Some(span));
+                // issue #394: real declaration (local binding materialized with its
+                // declaration span); opt dual-use bare helper into is_definition
+                helper.mark_definition(var_id);
                 scope_tree.attach_node_id(identifier_text, binding.decl_start_byte, var_id);
                 var_id
             };

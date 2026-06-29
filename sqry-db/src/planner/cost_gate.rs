@@ -251,6 +251,7 @@ fn check_predicate(
         Predicate::HasCaller
         | Predicate::HasCallee
         | Predicate::IsUnused
+        | Predicate::IsDefinition(_)
         | Predicate::IsAddressTaken(_)
         | Predicate::ResolvedVia(_)
         | Predicate::HasCallsitePromiscuous(_)

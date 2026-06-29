@@ -203,6 +203,8 @@ fn collect_exportable_block(
         "output" => {
             // Output blocks define module outputs (primary exports)
             let node_id = helper.add_variable(name, Some(span_from_node(node)));
+            // issue #394: real declaration; opt dual-use bare helper into is_definition
+            helper.mark_definition(node_id);
             // Outputs can optionally have `type = <expr>` attribute
             if let Some(body) = block_body
                 && let Some(raw_type) = extract_attribute_value(body, content, "type")
@@ -223,6 +225,8 @@ fn collect_exportable_block(
         "variable" => {
             // Variable blocks define module inputs (also part of module interface)
             let node_id = helper.add_variable(name, Some(span_from_node(node)));
+            // issue #394: real declaration; opt dual-use bare helper into is_definition
+            helper.mark_definition(node_id);
             // Variables can have `type = <expr>` attribute
             if let Some(body) = block_body
                 && let Some(raw_type) = extract_attribute_value(body, content, "type")
@@ -252,6 +256,8 @@ fn collect_exportable_block(
                 let resource_name = &block_labels[1];
                 let canonical_name = format!("{resource_type}.{resource_name}");
                 let node_id = helper.add_variable(&canonical_name, Some(span_from_node(node)));
+                // issue #394: real declaration; opt dual-use bare helper into is_definition
+                helper.mark_definition(node_id);
                 let type_id = helper.add_type(resource_type, None);
                 helper.add_typeof_edge_with_context(
                     node_id,
@@ -278,6 +284,8 @@ fn collect_exportable_block(
                 let qualified_name = format!("data.{data_type}.{data_name}");
                 let type_id = helper.add_type(data_type, None);
                 let node_id = helper.add_variable(&qualified_name, Some(span_from_node(node)));
+                // issue #394: real declaration; opt dual-use bare helper into is_definition
+                helper.mark_definition(node_id);
                 helper.add_typeof_edge_with_context(
                     node_id,
                     type_id,
@@ -385,6 +393,8 @@ fn extract_module_edge_with_helper(
         // Use a qualified name like "module::vpc" or just the resolved path
         let caller_name = format!("module::{name}");
         let source_id = helper.add_function(&caller_name, Some(span_from_node(node)), false, false);
+        // issue #394: real declaration; opt dual-use bare helper into is_definition
+        helper.mark_definition(source_id);
 
         // Create a callee representing the module source
         let target_id = helper.add_function(&resolved_path, None, false, false);

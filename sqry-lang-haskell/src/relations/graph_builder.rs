@@ -115,6 +115,8 @@ impl GraphBuilder for HaskellGraphBuilder {
         let module_name = extract_module_name(tree, content);
         let module_node_name = module_name.as_deref().unwrap_or("<module>");
         let module_id = helper.add_module(module_node_name, None);
+        // issue #394: real declaration; opt dual-use bare helper into is_definition
+        helper.mark_definition(module_id);
 
         // Extract export list to determine visibility
         // None = no export list (all functions public)
@@ -540,6 +542,8 @@ fn build_ffi_edges(
             false,     // is_async (always false for FFI)
             is_unsafe, // is_unsafe (propagate from FFI safety modifier)
         );
+        // issue #394: real declaration (Haskell foreign-import wrapper); opt dual-use bare helper into is_definition
+        helper.mark_definition(wrapper_node);
 
         // Create Function node for foreign target
         // Use "ffi::<convention>::<symbol>" naming pattern
@@ -1341,6 +1345,8 @@ fn process_data_type(
         data_node.end_byte(),
     ));
     let data_type_id = helper.add_type(&qualified_name, span);
+    // issue #394: real declaration; opt dual-use bare helper into is_definition
+    helper.mark_definition(data_type_id);
 
     // Process constructors
     let Some(constructors_node) = data_node.child_by_field_name("constructors") else {
@@ -1728,6 +1734,8 @@ fn process_newtype(
         newtype_node.end_byte(),
     ));
     let newtype_type_id = helper.add_type(&qualified_name, span);
+    // issue #394: real declaration; opt dual-use bare helper into is_definition
+    helper.mark_definition(newtype_type_id);
 
     // Get the constructor's field
     let Some(ctor_node) = newtype_node.child_by_field_name("constructor") else {
@@ -1842,6 +1850,8 @@ fn process_type_synonym(
 
     let span = Some(Span::from_bytes(syn_node.start_byte(), syn_node.end_byte()));
     let alias_id = helper.add_type(&qualified_name, span);
+    // issue #394: real declaration; opt dual-use bare helper into is_definition
+    helper.mark_definition(alias_id);
 
     // Extract target type
     let Some(type_node) = syn_node.child_by_field_name("type") else {
@@ -1973,9 +1983,12 @@ fn process_class_method_signature(
         let method_id = if let Some(&id) = context_to_node.get(&qualified_method) {
             id
         } else {
-            // Method may not have a separate definition — create a function node
+            // Method may not have a separate definition, create a function node
             let span = Some(Span::from_bytes(sig_node.start_byte(), sig_node.end_byte()));
-            helper.add_function(&qualified_method, span, false, false)
+            // issue #394: real declaration (typeclass method signature); opt dual-use bare helper into is_definition
+            let id = helper.add_function(&qualified_method, span, false, false);
+            helper.mark_definition(id);
+            id
         };
 
         // Parameter edges

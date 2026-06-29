@@ -39,6 +39,8 @@ impl GraphBuilder for PulumiGraphBuilder {
 
         let mut helper = GraphBuildHelper::new(staging, file, Language::Pulumi);
         let module_id = helper.add_module("<module>", None);
+        // issue #394: real declaration; opt dual-use bare helper into is_definition
+        helper.mark_definition(module_id);
 
         if let Some(package_entry) = find_entry(&root_entries, "package")
             && let Some(package_name) = package_entry.value.as_str()
@@ -68,6 +70,8 @@ impl GraphBuilder for PulumiGraphBuilder {
             for entry in config_entries {
                 let config_node = format!("config.{}", entry.key);
                 let config_id = helper.add_variable(&config_node, entry.span);
+                // issue #394: real declaration; opt dual-use bare helper into is_definition
+                helper.mark_definition(config_id);
                 helper.add_defines_edge(module_id, config_id);
             }
         }
@@ -78,6 +82,8 @@ impl GraphBuilder for PulumiGraphBuilder {
             for entry in var_entries {
                 let var_node = format!("variables.{}", entry.key);
                 let var_id = helper.add_variable(&var_node, entry.span);
+                // issue #394: real declaration; opt dual-use bare helper into is_definition
+                helper.mark_definition(var_id);
                 helper.add_defines_edge(module_id, var_id);
             }
         }
@@ -88,6 +94,8 @@ impl GraphBuilder for PulumiGraphBuilder {
             for output_entry in outputs {
                 let output_node = format!("outputs.{}", output_entry.key);
                 let output_id = helper.add_variable(&output_node, output_entry.span);
+                // issue #394: real declaration; opt dual-use bare helper into is_definition
+                helper.mark_definition(output_id);
                 helper.add_defines_edge(module_id, output_id);
                 helper.add_export_edge(module_id, output_id);
 

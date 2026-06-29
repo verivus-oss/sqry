@@ -37,6 +37,7 @@
 //!             | "scope:" scopekind                        → .filter(InScope)
 //!             | "has:" ("caller" | "callee")              → .filter(HasCaller|HasCallee)
 //!             | "unused"                                  → .filter(IsUnused)
+//!             | ("items" | "is_definition") (":" bool)?   → .filter(IsDefinition)
 //!             | "address_taken" (":" bool)?               → .filter(IsAddressTaken)
 //!             | "resolved_via:" ("direct"|"type_match"|"binding_plane")
 //!                                                         → .filter(ResolvedVia)
@@ -218,6 +219,14 @@ impl<'a> Parser<'a> {
             "scope" => self.parse_scope_step(builder, start),
             "has" => self.parse_has_step(builder, start),
             "unused" => Ok(builder.filter(Predicate::IsUnused)),
+            "items" => {
+                let want = self.parse_optional_bool_value(start, "items")?;
+                Ok(builder.filter(Predicate::IsDefinition(want)))
+            }
+            "is_definition" => {
+                let want = self.parse_optional_bool_value(start, "is_definition")?;
+                Ok(builder.filter(Predicate::IsDefinition(want)))
+            }
             "cfg" => self.parse_cfg_step(builder),
             "wraps" => self.parse_wraps_step(builder, start),
             // ----- Phase A (C indirect-call precision) -----
@@ -723,6 +732,8 @@ impl<'a> Parser<'a> {
                     "callsite_promiscuous" => {
                         "callsite_promiscuous value (expected 'true' or 'false')"
                     }
+                    "items" => "items value (expected 'true' or 'false')",
+                    "is_definition" => "is_definition value (expected 'true' or 'false')",
                     // Defensive fallback — keeps the helper reusable for
                     // any future bool-flag predicate the planner adds.
                     _ => "boolean value (expected 'true' or 'false')",
@@ -1307,6 +1318,50 @@ mod tests {
                 predicate: Predicate::IsUnused,
             }
         ));
+    }
+
+    #[test]
+    fn parse_items_alias_defaults_to_definition_true() {
+        let plan = parse_query("kind:function items").expect("parse");
+        let PlanNode::Chain { steps } = plan.root else {
+            panic!("chain");
+        };
+        assert_eq!(steps.len(), 2);
+        assert!(matches!(
+            steps[1],
+            PlanNode::Filter {
+                predicate: Predicate::IsDefinition(true),
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_is_definition_false_value() {
+        let plan = parse_query("kind:function is_definition:false").expect("parse");
+        let PlanNode::Chain { steps } = plan.root else {
+            panic!("chain");
+        };
+        assert!(matches!(
+            steps[1],
+            PlanNode::Filter {
+                predicate: Predicate::IsDefinition(false),
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_items_rejects_non_bool_value() {
+        let err = parse_query("kind:function items:maybe").unwrap_err();
+        match err {
+            ParseError::UnknownIdent { kind, value, .. } => {
+                assert!(
+                    kind.starts_with("items value"),
+                    "expected items value error, got {kind:?}"
+                );
+                assert_eq!(value, "maybe");
+            }
+            other => panic!("expected UnknownIdent, got {other:?}"),
+        }
     }
 
     // ----------------------------------------------------------------

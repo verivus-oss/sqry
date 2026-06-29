@@ -842,6 +842,12 @@ fn build_export_edges_with_helper(
         };
 
         let exported_id = helper.add_function(&exported_name, None, false, false);
+        if declaration
+            .as_ref()
+            .is_some_and(|decl| matches!(decl.kind(), "function_declaration" | "class_declaration"))
+        {
+            helper.mark_definition(exported_id);
+        }
         helper.add_export_edge_full(module_id, exported_id, ExportKind::Default, None);
     } else if let Some(ns_export) = namespace_export {
         // Namespace re-export: `export * as ns from 'module'`
@@ -944,6 +950,7 @@ fn build_export_edges_with_helper(
                     let name = name.trim().to_string();
                     if !name.is_empty() {
                         let exported_id = helper.add_function(&name, None, false, false);
+                        helper.mark_definition(exported_id);
                         helper.add_export_edge_full(
                             module_id,
                             exported_id,
@@ -960,6 +967,7 @@ fn build_export_edges_with_helper(
                     let name = name.trim().to_string();
                     if !name.is_empty() {
                         let exported_id = helper.add_class(&name, None);
+                        helper.mark_definition(exported_id);
                         helper.add_export_edge_full(
                             module_id,
                             exported_id,
@@ -980,6 +988,7 @@ fn build_export_edges_with_helper(
                         let name = name.trim().to_string();
                         if !name.is_empty() {
                             let exported_id = helper.add_variable(&name, None);
+                            helper.mark_definition(exported_id);
                             helper.add_export_edge_full(
                                 module_id,
                                 exported_id,
@@ -1090,6 +1099,7 @@ fn build_commonjs_export_edges(
         ) {
             // Anonymous/inline export: `module.exports = function() {}` -> default export
             let exported_id = helper.add_function("default", None, false, false);
+            helper.mark_definition(exported_id);
             helper.add_export_edge_full(module_id, exported_id, ExportKind::Default, None);
         }
     }

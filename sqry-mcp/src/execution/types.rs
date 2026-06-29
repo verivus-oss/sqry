@@ -223,6 +223,11 @@ pub struct SqryQueryData {
     pub truncated: bool,
     /// Matched nodes with file + line metadata.
     pub hits: Vec<SqryQueryHit>,
+    /// Soft failure for requests that require declaration-fidelity data absent
+    /// from the loaded graph snapshot. Present only when the query uses
+    /// `items` / `is_definition` against a pre-V16 graph.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reindex_required: Option<ReindexRequiredData>,
 }
 
 /// Response data for the `context_propagation` MCP tool (T3.7,
@@ -916,6 +921,20 @@ pub struct ListSymbolsData {
     /// byte-identical.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<ListSymbolsSummary>,
+    /// Soft failure for requests that require declaration-fidelity data absent
+    /// from the loaded graph snapshot. Present only when `items_only` was
+    /// requested against a pre-V16 graph.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reindex_required: Option<ReindexRequiredData>,
+}
+
+/// Soft reindex result for tool calls that need graph data absent from the
+/// loaded snapshot.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReindexRequiredData {
+    /// Human-readable reason for the soft result.
+    pub reason: String,
 }
 
 /// Aggregate counts for `list_symbols` summary mode (issue #394). Computed over

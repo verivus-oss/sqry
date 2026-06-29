@@ -56,6 +56,8 @@ impl GraphBuilder for ApexGraphBuilder {
         // Create module node from file path
         let module_name = extract_module_name_from_path(file);
         let module_id = helper.add_module(&module_name, None);
+        // issue #394: real declaration; opt dual-use bare helper into is_definition
+        helper.mark_definition(module_id);
 
         // Compile tree-sitter queries
         let language = tree_sitter_sfapex::apex::LANGUAGE.into();
@@ -556,6 +558,8 @@ fn extract_callables(
                 "method_declaration" => helper.add_method(&name, Some(span), false, false),
                 _ => helper.add_function(&name, Some(span), false, false),
             };
+            // issue #394: real declaration; opt dual-use bare helper into is_definition
+            helper.mark_definition(node_id);
             callables.push(ApexCallable {
                 node_id,
                 start_byte: node.start_byte(),
@@ -919,7 +923,11 @@ fn emit_trigger_edges(
             .get(&trigger.trigger_name)
             .copied()
             .unwrap_or_else(|| {
-                helper.add_function(&trigger.trigger_name, Some(trigger.span), false, false)
+                // issue #394: real declaration; opt dual-use bare helper into is_definition
+                let id =
+                    helper.add_function(&trigger.trigger_name, Some(trigger.span), false, false);
+                helper.mark_definition(id);
+                id
             });
         let table_id = helper.add_variable(&trigger.sobject_name, Some(trigger.span));
 
@@ -1931,6 +1939,8 @@ fn extract_local_variable_type_edges(
     );
 
     let source_id = helper.add_variable(&qualified_name, Some(span_from_node(&node)));
+    // issue #394: real declaration; opt dual-use bare helper into is_definition
+    helper.mark_definition(source_id);
 
     // TypeOf edge
     if let Some(type_str) = extract_type_string(type_n, content) {
@@ -1997,8 +2007,12 @@ fn extract_parameter_type_edges(
 
         // Find the callable's node_id
         let caller_id = find_callable_node_id(method_node, callables);
-        let source_id =
-            caller_id.unwrap_or_else(|| helper.add_variable(&p_name, Some(span_from_node(&param))));
+        let source_id = caller_id.unwrap_or_else(|| {
+            // issue #394: real declaration; opt dual-use bare helper into is_definition
+            let id = helper.add_variable(&p_name, Some(span_from_node(&param)));
+            helper.mark_definition(id);
+            id
+        });
 
         // TypeOf edge
         if let Some(type_str) = extract_type_string(type_n, content) {
@@ -2061,12 +2075,15 @@ fn extract_return_type_edges(
             .child_by_field_name("name")
             .and_then(|n| n.utf8_text(content).ok())
             .unwrap_or("unknown");
-        helper.add_function(
+        // issue #394: real declaration; opt dual-use bare helper into is_definition
+        let id = helper.add_function(
             method_name,
             Some(span_from_node(&method_node)),
             false,
             false,
-        )
+        );
+        helper.mark_definition(id);
+        id
     });
 
     // TypeOf edge

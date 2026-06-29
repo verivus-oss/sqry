@@ -533,6 +533,7 @@ pub trait NodeIdBearing {
 - `c_indirect_tables: Option<CIndirectSideTables>` — Phase A C indirect-call side tables (U09); inner maps key on `NodeId`/`StringId`/`FileId` for the resolver's binding-plane + type-match lookups but do NOT carry NodeId payloads onto the publish boundary. `pass5b_c_indirect_resolve` consumes these tables in-pass to emit precise `Calls` edges; the tables themselves are not walked by Gate 0b's K.A NodeId compaction. If a future Phase B variant routes NodeId-bearing extensions through this slot, add a K.A row in the same commit.
 - `fact_epoch: u64`, `epoch: u64`, `confidence: HashMap<String, _>` — scalars / per-language metadata.
 - `go_hints: GoHints` — build-time scratch side-channel populated by the Go plugin's Phase-1 parse and drained by the post-Phase-4e `pass_go_method_set_satisfaction` pass before Pass 5 runs (see `docs/development/go-implements-and-promotion/02_DESIGN.md` §3.2 + §6). Holds `NodeId`s only between Phase 1 and Pass 5; never reaches the publish boundary with un-drained hints, so the Gate 0c finalize-residue check does not need to enumerate it.
+- `definition_signal_present: bool` (R3 definition-signal marker for issue #394 Slice A; a scalar that records whether the graph carries genuine `NodeEntry.is_definition` data and never carries a `NodeId` payload).
 
 If any of those fields ever gains a `NodeId`-bearing payload (e.g., `ScopeProvenanceStore` adds the introducing node), a new K.A row must be added to this table and to `coverage.rs` in the same commit.
 

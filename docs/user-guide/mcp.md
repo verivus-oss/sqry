@@ -34,13 +34,23 @@ sqry daemon load .
 sqry-mcp --daemon
 ```
 
-Standalone `sqry-mcp` currently exposes 36 tools. Daemon-hosted MCP exposes a 15-tool subset for daemon-backed workflows. Prefer dynamic discovery for exact schemas:
+Standalone `sqry-mcp` currently exposes 37 tools. Daemon-hosted MCP exposes a 16-tool subset for daemon-backed workflows. Prefer dynamic discovery for exact schemas:
 
 ```bash
 sqry-mcp --list-tools
 ```
 
 MCP clients can also use `tools/list`, and sqry clients can read `sqry://meta/manifest`.
+
+## Query Predicates And Structured Parameters
+
+Search tools keep three surfaces separate:
+
+- `query`: string predicates such as `lang:rust`, `kind:function`, `items:true`, and `is_definition:true`.
+- `filters`: a structured JSON object for simple pre-filtering, such as `{ "language": ["rust"], "visibility": "public" }`.
+- tool-specific structured parameters, such as `list_symbols.items_only=true`.
+
+For definition-only behavior, including the pre-V16 `reindexRequired` advisory, see [Advanced Analysis](advanced-analysis.md#definition-only-queries).
 
 ## Source Root IDs
 

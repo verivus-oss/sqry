@@ -785,10 +785,16 @@ fn add_type_node(
     qualified_name: &str,
     span: Span,
 ) -> sqry_core::graph::unified::node::NodeId {
-    match kind {
+    // This is the type-declaration creator (sole caller is the
+    // class/interface/enum/record/annotation declaration handler). Opt the
+    // dual-use bare add_class/add_interface helpers into is_definition = true
+    // (issue #394).
+    let node_id = match kind {
         "interface_declaration" => helper.add_interface(qualified_name, Some(span)),
         _ => helper.add_class(qualified_name, Some(span)),
-    }
+    };
+    helper.mark_definition(node_id);
+    node_id
 }
 
 fn handle_method_invocation(

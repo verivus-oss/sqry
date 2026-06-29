@@ -25,6 +25,8 @@ use std::sync::Arc;
 use sqry_db::planner::{ParseError, execute_plan, parse_query};
 use sqry_db::queries::dispatch::make_query_db_cold;
 
+const DEFINITION_SIGNAL_REINDEX_REASON: &str = "definition signal requires a reindex (snapshot predates definition fidelity marker); run 'sqry index' to rebuild before using items/is_definition predicates";
+
 /// One row of CLI / JSON output describing a matched node.
 #[derive(Debug, Clone, Serialize)]
 pub struct PlanQueryHit {
@@ -71,6 +73,11 @@ pub fn run_planner_query(cli: &Cli, query: &str, path: Option<&str>, limit: usiz
 
     let plan = parse_query(query).map_err(|err| format_parse_error(&err))?;
     let snapshot = Arc::new(graph.snapshot());
+
+    if plan.uses_definition_predicate() && !snapshot.definition_signal_present() {
+        streams.write_diagnostic(DEFINITION_SIGNAL_REINDEX_REASON)?;
+        return Ok(());
+    }
 
     // Cluster-B iter-2 BLOCKER 1: gate the planner CLI path on the
     // pre-flight cost check. Without this, `sqry plan-query` accepts

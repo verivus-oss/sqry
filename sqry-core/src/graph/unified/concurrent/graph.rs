@@ -131,6 +131,17 @@ pub struct CodeGraph {
     /// rebuild owner mutates, only the pass consumes, then the field
     /// is reset.
     pub(crate) go_hints: crate::graph::unified::build::staging::GoHints,
+    /// Whether this graph carries genuine `NodeEntry.is_definition` signal
+    /// (R3 marker for the definition-signal feature).
+    ///
+    /// `true` for graphs freshly built in-process (the GraphBuilder path stamps
+    /// `is_definition` at declaration sites) and for graphs loaded from a
+    /// V16-or-newer snapshot. `false` for graphs loaded from a pre-V16 snapshot,
+    /// whose `is_definition` bits are all defaulted `false` (absent on the wire)
+    /// and must NOT be interpreted as "no declarations exist." Consumers that
+    /// filter on `is_definition` (e.g. items-only listings) read this marker to
+    /// decide whether the signal is trustworthy or a reindex is required.
+    pub(crate) definition_signal_present: bool,
 }
 
 impl CodeGraph {
@@ -165,6 +176,8 @@ impl CodeGraph {
             file_segments: Arc::new(FileSegmentTable::new()),
             c_indirect_tables: None,
             go_hints: crate::graph::unified::build::staging::GoHints::default(),
+            // Fresh in-process graph: the GraphBuilder path stamps is_definition.
+            definition_signal_present: true,
         }
     }
 
@@ -200,6 +213,10 @@ impl CodeGraph {
             file_segments: Arc::new(FileSegmentTable::new()),
             c_indirect_tables: None,
             go_hints: crate::graph::unified::build::staging::GoHints::default(),
+            // Default to present; the load path overrides via
+            // `set_definition_signal_present` based on the snapshot format
+            // version (pre-V16 loads stamp `false`).
+            definition_signal_present: true,
         }
     }
 
@@ -236,7 +253,27 @@ impl CodeGraph {
             scope_provenance_store: Arc::clone(&self.scope_provenance_store),
             file_segments: Arc::clone(&self.file_segments),
             c_indirect_tables: self.c_indirect_tables.clone(),
+            definition_signal_present: self.definition_signal_present,
         }
+    }
+
+    /// Returns whether this graph carries genuine `is_definition` signal.
+    ///
+    /// See [`definition_signal_present`](Self::definition_signal_present) (the
+    /// field) for the full contract.
+    #[inline]
+    #[must_use]
+    pub fn definition_signal_present(&self) -> bool {
+        self.definition_signal_present
+    }
+
+    /// Sets the definition-signal marker.
+    ///
+    /// Used by the snapshot load path to stamp `false` for pre-V16 snapshots
+    /// (whose `is_definition` bits are all defaulted) and `true` for V16+.
+    #[inline]
+    pub fn set_definition_signal_present(&mut self, present: bool) {
+        self.definition_signal_present = present;
     }
 
     /// Returns a reference to the node arena.
@@ -1183,6 +1220,9 @@ impl CodeGraph {
             file_segments: Arc::new(file_segments),
             c_indirect_tables: None,
             go_hints,
+            // A rebuild reparses source files, regenerating is_definition fresh,
+            // so the reassembled graph always carries genuine signal.
+            definition_signal_present: true,
         }
     }
 
@@ -1784,9 +1824,22 @@ pub struct GraphSnapshot {
     /// `Option<CIndirectSideTables>` so concurrent readers see a stable
     /// view independent of subsequent mutations to the source `CodeGraph`.
     c_indirect_tables: Option<CIndirectSideTables>,
+    /// Whether this snapshot carries genuine `NodeEntry.is_definition` signal
+    /// (R3 marker). Copied from the source [`CodeGraph`] at snapshot time. See
+    /// [`CodeGraph::definition_signal_present`] for the contract.
+    definition_signal_present: bool,
 }
 
 impl GraphSnapshot {
+    /// Returns whether this snapshot carries genuine `is_definition` signal.
+    ///
+    /// See [`CodeGraph::definition_signal_present`] for the full contract.
+    #[inline]
+    #[must_use]
+    pub fn definition_signal_present(&self) -> bool {
+        self.definition_signal_present
+    }
+
     /// Returns a reference to the node arena.
     #[inline]
     #[must_use]

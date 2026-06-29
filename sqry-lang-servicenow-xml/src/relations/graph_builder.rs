@@ -105,6 +105,8 @@ impl GraphBuilder for ServiceNowXmlGraphBuilder {
             RecordType::TableSchema => {
                 let mut helper = GraphBuildHelper::new(staging, file, Language::ServiceNow);
                 let module_id = helper.add_module("<module>", None);
+                // issue #394: real declaration; opt dual-use bare helper into is_definition
+                helper.mark_definition(module_id);
 
                 for record_elem in &record_elems {
                     extract_table_schema(record_elem, module_id, &mut helper);
@@ -113,6 +115,8 @@ impl GraphBuilder for ServiceNowXmlGraphBuilder {
             RecordType::TableDefinition => {
                 let mut helper = GraphBuildHelper::new(staging, file, Language::ServiceNow);
                 let module_id = helper.add_module("<module>", None);
+                // issue #394: real declaration; opt dual-use bare helper into is_definition
+                helper.mark_definition(module_id);
 
                 for record_elem in &record_elems {
                     extract_table_definition(record_elem, module_id, &mut helper);

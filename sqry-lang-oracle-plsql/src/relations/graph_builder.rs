@@ -247,6 +247,8 @@ fn walk_node(
         let package_module = context
             .helper
             .add_module(&package_name, Some(span_from_node(&node)));
+        // issue #394: real declaration; opt dual-use bare helper into is_definition
+        context.helper.mark_definition(package_module);
         context
             .helper
             .add_export_edge(context.file_module, package_module);
@@ -271,6 +273,8 @@ fn walk_node(
         let node_id = context
             .helper
             .add_function(&qualified_name, Some(span), false, false);
+        // issue #394: real declaration; opt dual-use bare helper into is_definition
+        context.helper.mark_definition(node_id);
         if let Some(module_id) = export_module {
             context.helper.add_export_edge(module_id, node_id);
         }

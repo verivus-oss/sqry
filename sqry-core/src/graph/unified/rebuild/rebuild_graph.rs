@@ -216,6 +216,11 @@ macro_rules! sqry_graph_fields {
             file_segments,
             c_indirect_tables,
             go_hints,
+            // Not mirrored into RebuildGraph: a rebuild reparses source files and
+            // regenerates is_definition fresh, so `finalize` stamps the marker
+            // `true` unconditionally. Destructured to `_` to keep the match
+            // exhaustive (the E0027 guard still fires for any other new field).
+            definition_signal_present: _,
         } = $this;
         RebuildGraph {
             nodes: (**nodes).clone(),

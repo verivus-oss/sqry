@@ -1030,6 +1030,7 @@ mod tests {
             is_async: false,
             is_static: false,
             is_unsafe: false,
+            is_definition: false,
             body_hash: None,
         };
         let main_id = staging.add_node(main_entry);
@@ -1051,6 +1052,7 @@ mod tests {
             is_async: false,
             is_static: false,
             is_unsafe: false,
+            is_definition: false,
             body_hash: None,
         };
         let helper_id = staging.add_node(helper_entry);
@@ -1072,6 +1074,7 @@ mod tests {
             is_async: false,
             is_static: false,
             is_unsafe: false,
+            is_definition: false,
             body_hash: None,
         };
         let utils_id = staging.add_node(utils_entry);
@@ -1212,6 +1215,7 @@ mod tests {
             is_async: false,
             is_static: false,
             is_unsafe: false,
+            is_definition: false,
             body_hash: None,
         };
         let child_id = staging.add_node(child_entry);
@@ -1233,6 +1237,7 @@ mod tests {
             is_async: false,
             is_static: false,
             is_unsafe: false,
+            is_definition: false,
             body_hash: None,
         };
         let parent_id = staging.add_node(parent_entry);
@@ -1254,6 +1259,7 @@ mod tests {
             is_async: false,
             is_static: false,
             is_unsafe: false,
+            is_definition: false,
             body_hash: None,
         };
         let myclass_id = staging.add_node(myclass_entry);
@@ -1275,6 +1281,7 @@ mod tests {
             is_async: false,
             is_static: false,
             is_unsafe: false,
+            is_definition: false,
             body_hash: None,
         };
         let interface_id = staging.add_node(interface_entry);
@@ -1296,6 +1303,7 @@ mod tests {
             is_async: false,
             is_static: false,
             is_unsafe: false,
+            is_definition: false,
             body_hash: None,
         };
         let utils_id = staging.add_node(utils_entry);
@@ -1317,6 +1325,7 @@ mod tests {
             is_async: false,
             is_static: false,
             is_unsafe: false,
+            is_definition: false,
             body_hash: None,
         };
         let helper_id = staging.add_node(helper_entry);
@@ -1372,6 +1381,7 @@ mod tests {
             is_async: false,
             is_static: false,
             is_unsafe: false,
+            is_definition: false,
             body_hash: None,
         };
         let func_id = staging.add_node(func_entry);
@@ -1395,6 +1405,7 @@ mod tests {
             is_async: false,
             is_static: false,
             is_unsafe: false,
+            is_definition: false,
             body_hash: None,
         };
         let table_id = staging.add_node(table_entry);
@@ -1536,6 +1547,7 @@ mod tests {
             is_async: false,
             is_static: false,
             is_unsafe: false,
+            is_definition: false,
             body_hash: None,
         };
         let module_id = staging.add_node(module_entry);
@@ -1558,6 +1570,7 @@ mod tests {
             is_async: false,
             is_static: false,
             is_unsafe: false,
+            is_definition: false,
             body_hash: None,
         };
         let func_id = staging.add_node(func_entry);
@@ -1602,6 +1615,7 @@ mod tests {
             is_async: false,
             is_static: false,
             is_unsafe: false,
+            is_definition: false,
             body_hash: None,
         };
         let func_id = staging.add_node(func_entry);
@@ -1624,6 +1638,7 @@ mod tests {
             is_async: false,
             is_static: false,
             is_unsafe: false,
+            is_definition: false,
             body_hash: None,
         };
         let table_id = staging.add_node(table_entry);
@@ -1781,6 +1796,7 @@ mod tests {
             is_async: false,
             is_static: false,
             is_unsafe: false,
+            is_definition: false,
             body_hash: None,
         });
 
@@ -1801,6 +1817,7 @@ mod tests {
             is_async: false,
             is_static: false,
             is_unsafe: false,
+            is_definition: false,
             body_hash: None,
         });
 
@@ -1821,6 +1838,7 @@ mod tests {
             is_async: false,
             is_static: false,
             is_unsafe: false,
+            is_definition: false,
             body_hash: None,
         });
 

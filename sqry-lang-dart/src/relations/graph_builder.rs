@@ -847,12 +847,15 @@ fn process_variable_declaration(node: Node, content: &[u8], helper: &mut GraphBu
                 let var_id = if is_const {
                     helper.add_constant_with_visibility(name, span, Some(visibility))
                 } else {
-                    helper.add_node_with_visibility(
+                    // issue #394: real declaration; opt dual-use bare helper into is_definition
+                    let id = helper.add_node_with_visibility(
                         name,
                         span,
                         NodeKind::Variable,
                         Some(visibility),
-                    )
+                    );
+                    helper.mark_definition(id);
+                    id
                 };
 
                 // Only export public variables (not starting with underscore)
@@ -1531,6 +1534,8 @@ fn walk_tree_for_edges(
                     sqry_core::graph::unified::node::NodeKind::Trait,
                     Some(visibility),
                 );
+                // issue #394: real declaration (Dart mixin); opt dual-use bare helper into is_definition
+                helper.mark_definition(mixin_id);
 
                 // Export public top-level mixins
                 // In Dart, mixins are public unless they start with underscore

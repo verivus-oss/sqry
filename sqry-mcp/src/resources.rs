@@ -360,8 +360,9 @@ const TOOL_GUIDE_BODY: &str = "\n\
 
 ### Filters Parameter
 
-The `query` parameter accepts string predicates like `lang:rust`. \
-The `filters` parameter accepts a **JSON object** for structured pre-filtering:
+The `query` parameter accepts string predicates like `lang:rust` and \
+`items:true`. The `filters` parameter accepts a **JSON object** for structured \
+pre-filtering:
 
 ```json
 {
@@ -373,6 +374,8 @@ The `filters` parameter accepts a **JSON object** for structured pre-filtering:
 ```
 
 All fields are optional. Filters are applied before query evaluation.
+Tool-specific fields such as `list_symbols.items_only` are structured \
+parameters, not query predicates or entries inside `filters`.
 
 ## Navigation
 
@@ -449,7 +452,7 @@ unified graph; results are byte-exact, not signature-substring matches:
 | `get_insights` | Health metrics: cycles, quality indicators | - |
 | `rebuild_index` | Rebuild code graph from source | force:bool? |
 | `list_files` | List indexed files | language:str? |
-| `list_symbols` | List indexed symbols | kind:str?, language:str? |
+| `list_symbols` | List indexed symbols | kind:str?, language:str?, items_only:bool? |
 | `expand_cache_status` | Macro expansion cache status (Rust) | path:str? |
 | `workspace_status` | Per-source-root index status + workspace identity | workspace_id:str? |
 
@@ -563,6 +566,12 @@ semantic_search query=\"kind:function\" filters={\"language\":[\"rust\"],\"visib
 Both can be combined: use `query` for complex expressions and `filters` for \
 simple structured constraints. Filters are applied server-side **before** query \
 evaluation (pre-filter), which can improve performance for large codebases.
+
+Definition-only predicates such as `items:true` and `is_definition:true` are \
+query predicates. For the `list_symbols` tool, use the structured parameter \
+`items_only:true` instead. On pre-V16 snapshots without trustworthy definition \
+signal, definition-only requests return a reindex-required advisory rather \
+than trusting default-false marker data.
 ";
 
 const PATTERNS_MD: &str = "\
@@ -626,7 +635,9 @@ const PATTERNS_MD: &str = "\
 ## Search with Filters
 
 Use `query` for complex expressions (AND/OR/NOT/regex). \
-Use `filters` for simple language/kind/visibility pre-filtering.
+Use `filters` for simple language/kind/visibility pre-filtering. Use \
+`list_symbols.items_only` when calling `list_symbols` instead of writing query \
+predicates.
 
 Pure query (everything in `query`):
 ```
@@ -636,6 +647,17 @@ semantic_search query=\"kind:function lang:rust vis:public\"
 With filters (`query` + `filters` object):
 ```
 semantic_search query=\"kind:function\" filters:{\"language\":[\"rust\"],\"visibility\":\"public\"}
+```
+
+Definition-only query predicate:
+```
+semantic_search query=\"kind:function items:true\"
+semantic_search query=\"kind:function is_definition:true\"
+```
+
+Structured `list_symbols` parameter for definition-only listings:
+```
+list_symbols kind:\"function\" language:\"rust\" items_only:true
 ```
 
 Combined (complex query + structured filters):

@@ -1,6 +1,6 @@
 # sqry User Guide
 
-**Version**: 19.0.5
+**Version**: 23.2.0
 
 This guide covers the stable public workflows for local semantic code search.
 

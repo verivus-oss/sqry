@@ -467,7 +467,9 @@ fn extract_class_definitions(node: Node<'_>, content: &[u8], helper: &mut GraphB
                             let class_name = text.trim().trim_matches('"').trim_matches('\'');
                             if !class_name.is_empty() {
                                 let span = span_from_node(node);
-                                helper.add_class(class_name, Some(span));
+                                let class_id = helper.add_class(class_name, Some(span));
+                                // issue #394: real declaration; opt dual-use bare helper into is_definition
+                                helper.mark_definition(class_id);
                             }
                             return; // Found the class name, done
                         }
@@ -483,7 +485,9 @@ fn extract_class_definitions(node: Node<'_>, content: &[u8], helper: &mut GraphB
                                         text.trim().trim_matches('"').trim_matches('\'');
                                     if !class_name.is_empty() {
                                         let span = span_from_node(node);
-                                        helper.add_class(class_name, Some(span));
+                                        let class_id = helper.add_class(class_name, Some(span));
+                                        // issue #394: real declaration; opt dual-use bare helper into is_definition
+                                        helper.mark_definition(class_id);
                                     }
                                     return; // Found the class name, done
                                 }
@@ -542,7 +546,9 @@ fn extract_variable_assignments(node: Node<'_>, content: &[u8], helper: &mut Gra
 
                     if !is_function_assignment && !var_name.is_empty() {
                         let span = span_from_node(var_node);
-                        helper.add_variable(var_name, Some(span));
+                        let var_id = helper.add_variable(var_name, Some(span));
+                        // issue #394: real declaration; opt dual-use bare helper into is_definition
+                        helper.mark_definition(var_id);
                     }
                 }
             }

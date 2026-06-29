@@ -1,6 +1,6 @@
 # sqry MCP User Guide
 
-**Version**: 23.2.0
+**Version**: 24.0.1
 
 This guide is the component-level MCP reference. For the public workflow overview, see [docs/user-guide/mcp.md](../docs/user-guide/mcp.md).
 
@@ -28,7 +28,7 @@ sqry-mcp --list-tools
 
 MCP clients can call `tools/list`. sqry MCP resources expose `sqry://meta/manifest`, `sqry://docs/tool-guide`, and `sqry://docs/capability-map`.
 
-Standalone `sqry-mcp` currently exposes 36 tools. Daemon-hosted MCP exposes a 15-tool subset.
+Standalone `sqry-mcp` currently exposes 37 tools. Daemon-hosted MCP exposes a 16-tool subset.
 
 ## Common Tools
 
@@ -44,6 +44,41 @@ Representative standalone tools include:
 - `sqry_query`
 
 The exact catalog is the live discovery output.
+
+## Query Predicates
+
+`semantic_search` and `hierarchical_search` accept string predicates in the `query` parameter:
+
+```json
+{
+  "query": "kind:function lang:rust items:true"
+}
+```
+
+Use query predicates for boolean logic, regex, path/name matching, and definition-only predicates such as `items:true` or `is_definition:true`.
+
+## Structured Filters Parameter
+
+The `filters` parameter is a structured JSON object, not a string:
+
+```json
+{
+  "query": "kind:function",
+  "filters": {
+    "language": ["rust"],
+    "symbol_kind": ["function"],
+    "visibility": "public"
+  }
+}
+```
+
+| Surface | Where it goes | Example | Use for |
+| --- | --- | --- | --- |
+| Query predicate | `query` string | `"kind:function lang:rust items:true"` | Boolean logic, regex, path/name predicates, definition-only query predicates |
+| Structured filters | `filters` object | `{ "language": ["rust"], "visibility": "public" }` | Simple pre-filtering by language, kind, visibility, score, or cfg metadata |
+| Tool parameter | Tool-specific field | `list_symbols.items_only=true` | Definition-only symbol listing with `list_symbols` |
+
+For `list_symbols`, use `items_only=true` instead of writing an `items:true` query predicate. If the loaded graph was built before the V16 definition-signal snapshot format, definition-only predicates and `list_symbols.items_only` return a `reindexRequired` / reindex-required advisory instead of trusting stale default-false marker data.
 
 ## Workspace Resolution
 

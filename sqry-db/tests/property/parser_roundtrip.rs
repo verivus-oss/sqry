@@ -137,6 +137,7 @@ fn chain_step_strategy() -> impl Strategy<Value = String> {
         1 => Just("has:caller".to_string()),
         1 => Just("has:callee".to_string()),
         1 => Just("unused".to_string()),
+        1 => bool_strategy().prop_map(|b| format!("is_definition:{b}")),
         // Phase A flag predicates with explicit polarity (the formatter
         // always emits the explicit form; the bare form is parser-only).
         1 => bool_strategy().prop_map(|b| format!("address_taken:{b}")),

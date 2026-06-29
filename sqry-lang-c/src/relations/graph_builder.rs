@@ -1262,7 +1262,10 @@ fn handle_struct_specifier(node: Node, content: &[u8], helper: &mut GraphBuildHe
     {
         let name = name.trim();
         if !name.is_empty() {
-            helper.add_struct(name, Some(span_from_node(node)));
+            // Real struct declaration (issue #394): opt the dual-use add_struct
+            // bare helper into is_definition = true.
+            let struct_id = helper.add_struct(name, Some(span_from_node(node)));
+            helper.mark_definition(struct_id);
 
             // Process struct fields for TypeOf/Reference edges
             process_struct_fields(node, name, content, helper);
@@ -1276,8 +1279,10 @@ fn handle_union_specifier(node: Node, content: &[u8], helper: &mut GraphBuildHel
     {
         let name = name.trim();
         if !name.is_empty() {
-            // Use add_struct for unions (they're similar in the graph)
-            helper.add_struct(name, Some(span_from_node(node)));
+            // Use add_struct for unions (they're similar in the graph). Real
+            // union declaration (issue #394): opt into is_definition = true.
+            let union_id = helper.add_struct(name, Some(span_from_node(node)));
+            helper.mark_definition(union_id);
 
             // Process union fields for TypeOf/Reference edges
             process_union_fields(node, name, content, helper);
@@ -1303,7 +1308,10 @@ fn handle_type_definition(node: Node, content: &[u8], helper: &mut GraphBuildHel
     if name.trim().is_empty() {
         return;
     }
-    helper.add_type(&name, Some(span_from_node(node)));
+    // Real typedef declaration (issue #394): opt the dual-use add_type bare
+    // helper into is_definition = true.
+    let typedef_id = helper.add_type(&name, Some(span_from_node(node)));
+    helper.mark_definition(typedef_id);
 
     // Process typedef TypeOf/Reference edges
     process_typedef_edges(node, content, helper);
@@ -2646,8 +2654,10 @@ fn process_single_typedef_declarator(
     let mut all_types = base_type_names.to_vec();
     all_types.extend(extract_all_type_names_from_c_type(declarator, content));
 
-    // Create type node for the typedef alias
+    // Create type node for the typedef alias. Real typedef-alias declaration
+    // (issue #394): opt the dual-use add_type bare helper into definition.
     let typedef_id = helper.add_type(&typedef_name, None);
+    helper.mark_definition(typedef_id);
 
     // Create TypeOf edge from typedef to underlying type
     let underlying_type_text = base_type_names.join(" ");

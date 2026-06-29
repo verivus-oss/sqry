@@ -377,7 +377,8 @@ fn emit_class_stub(
         .with_qualified_name(qname_id)
         .with_visibility(vis_id)
         .with_static(stub.access.is_static())
-        .with_unsafe(false);
+        .with_unsafe(false)
+        .with_definition(true);
 
     let class_node_id = staging.add_node(class_entry);
     record_node_ref(
@@ -412,7 +413,8 @@ fn emit_class_stub(
         let method_entry = NodeEntry::new(NodeKind::Method, method_name_id, file_id)
             .with_qualified_name(method_qname_id)
             .with_visibility(method_vis_id)
-            .with_static(method.access.is_static());
+            .with_static(method.access.is_static())
+            .with_definition(true);
 
         let method_node_id = staging.add_node(method_entry);
         record_node_ref(
@@ -439,7 +441,8 @@ fn emit_class_stub(
         let field_entry = NodeEntry::new(NodeKind::Property, field_name_id, file_id)
             .with_qualified_name(field_qname_id)
             .with_visibility(field_vis_id)
-            .with_static(field.access.is_static());
+            .with_static(field.access.is_static())
+            .with_definition(true);
 
         let field_node_id = staging.add_node(field_entry);
         record_node_ref(
@@ -464,7 +467,8 @@ fn emit_class_stub(
 
         let const_entry = NodeEntry::new(NodeKind::EnumConstant, const_name_id, file_id)
             .with_qualified_name(const_qname_id)
-            .with_visibility(helper.intern("public")?);
+            .with_visibility(helper.intern("public")?)
+            .with_definition(true);
 
         let const_node_id = staging.add_node(const_entry);
         record_node_ref(
@@ -489,7 +493,8 @@ fn emit_class_stub(
             let tp_qname_id = helper.intern(&tp_fqn)?;
 
             let tp_entry = NodeEntry::new(NodeKind::TypeParameter, tp_name_id, file_id)
-                .with_qualified_name(tp_qname_id);
+                .with_qualified_name(tp_qname_id)
+                .with_definition(true);
 
             let tp_node_id = staging.add_node(tp_entry);
             record_node_ref(
@@ -515,7 +520,8 @@ fn emit_class_stub(
         let lambda_qname_id = helper.intern(&lambda_fqn)?;
 
         let lambda_entry = NodeEntry::new(NodeKind::LambdaTarget, lambda_name_id, file_id)
-            .with_qualified_name(lambda_qname_id);
+            .with_qualified_name(lambda_qname_id)
+            .with_definition(true);
 
         let lambda_node_id = staging.add_node(lambda_entry);
         record_node_ref(
@@ -552,7 +558,8 @@ fn emit_class_stub(
         let mod_qname_id = helper.intern(&mod_fqn)?;
 
         let mod_entry = NodeEntry::new(NodeKind::JavaModule, mod_name_id, file_id)
-            .with_qualified_name(mod_qname_id);
+            .with_qualified_name(mod_qname_id)
+            .with_definition(true);
 
         let mod_node_id = staging.add_node(mod_entry);
         record_node_ref(

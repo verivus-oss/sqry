@@ -499,6 +499,8 @@ fn extract_procedures(
         if let (Some(name), Some(node)) = (func_name, func_node) {
             let span = Span::from_node(&node);
             let node_id = helper.add_function(&name, Some(span), false, false);
+            // issue #394: real declaration; opt dual-use bare helper into is_definition
+            helper.mark_definition(node_id);
             callables.push(SqlCallable {
                 node_id,
                 start_byte: node.start_byte(),
@@ -552,6 +554,8 @@ fn extract_triggers(
             let span = Span::from_node(&node);
 
             let trigger_id = helper.add_function(&trigger, Some(span), false, false);
+            // issue #394: real declaration; opt dual-use bare helper into is_definition
+            helper.mark_definition(trigger_id);
             callables.push(SqlCallable {
                 node_id: trigger_id,
                 start_byte: node.start_byte(),
@@ -890,6 +894,8 @@ fn extract_table_definitions(
             let (_, table_only) = split_schema_table(&name);
             let span = Span::from_node(&node);
             let node_id = helper.add_variable(table_only, Some(span));
+            // issue #394: real declaration; opt dual-use bare helper into is_definition
+            helper.mark_definition(node_id);
             objects.push(SqlDatabaseObject { node_id });
         }
     }
@@ -931,6 +937,8 @@ fn extract_view_definitions(
             let (_, view_only) = split_schema_table(&name);
             let span = Span::from_node(&node);
             let node_id = helper.add_variable(view_only, Some(span));
+            // issue #394: real declaration; opt dual-use bare helper into is_definition
+            helper.mark_definition(node_id);
             objects.push(SqlDatabaseObject { node_id });
         }
     }

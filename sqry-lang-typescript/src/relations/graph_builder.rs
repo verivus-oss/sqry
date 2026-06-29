@@ -602,7 +602,11 @@ fn process_member_node(
                     })?
                     .trim()
                     .to_string();
-                Some(helper.add_function(&name, Some(span_from_node(node)), false, false))
+                // Real function declaration (issue #394): opt the dual-use
+                // add_function bare helper into is_definition = true.
+                let id = helper.add_function(&name, Some(span_from_node(node)), false, false);
+                helper.mark_definition(id);
+                Some(id)
             } else {
                 None
             }
@@ -617,7 +621,11 @@ fn process_member_node(
                     })?
                     .trim()
                     .to_string();
-                Some(helper.add_class(&name, Some(span_from_node(node))))
+                // Real class declaration (issue #394): opt the dual-use
+                // add_class bare helper into is_definition = true.
+                let id = helper.add_class(&name, Some(span_from_node(node)));
+                helper.mark_definition(id);
+                Some(id)
             } else {
                 None
             }
@@ -632,7 +640,11 @@ fn process_member_node(
                     })?
                     .trim()
                     .to_string();
-                Some(helper.add_interface(&name, Some(span_from_node(node))))
+                // Real interface declaration (issue #394): opt the dual-use
+                // add_interface bare helper into is_definition = true.
+                let id = helper.add_interface(&name, Some(span_from_node(node)));
+                helper.mark_definition(id);
+                Some(id)
             } else {
                 None
             }
@@ -647,7 +659,11 @@ fn process_member_node(
                     })?
                     .trim()
                     .to_string();
-                Some(helper.add_type(&name, Some(span_from_node(node))))
+                // Real type-alias declaration (issue #394): opt the dual-use
+                // add_type bare helper into is_definition = true.
+                let id = helper.add_type(&name, Some(span_from_node(node)));
+                helper.mark_definition(id);
+                Some(id)
             } else {
                 None
             }
@@ -1116,6 +1132,11 @@ fn build_export_edges(
                         _ => helper.add_function(&name, Some(span_from_node(child)), false, false),
                     };
 
+                    // Exported function/class/interface/type/enum declarations
+                    // are real source definitions (issue #394): opt the dual-use
+                    // bare helpers into is_definition = true (enum is already
+                    // definition-true; the OR-in is idempotent).
+                    helper.mark_definition(exported_id);
                     helper.add_export_edge_full(module_id, exported_id, ExportKind::Direct, None);
                 }
             }

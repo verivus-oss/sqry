@@ -234,7 +234,10 @@ fn extract_extensions(node: Node, content: &[u8], helper: &mut GraphBuildHelper)
             if let Some(type_name) = extract_type_name(&node, content) {
                 let extension_name = format!("extension {type_name}");
                 let span = node_to_span(&node);
-                helper.add_module(&extension_name, Some(span));
+                // issue #394: real declaration (Swift extension block); opt dual-use
+                // bare helper into is_definition
+                let extension_id = helper.add_module(&extension_name, Some(span));
+                helper.mark_definition(extension_id);
             }
         }
     }
@@ -1466,6 +1469,9 @@ fn process_toplevel_variable(node: Node, content: &[u8], helper: &mut GraphBuild
     for binding in bindings {
         for (var_name, name_node) in binding.names {
             let var_id = helper.add_variable(&var_name, Some(node_to_span(&name_node)));
+            // issue #394: real declaration (top-level var/let); opt dual-use bare
+            // helper into is_definition
+            helper.mark_definition(var_id);
 
             let type_id = helper.add_type(&binding.type_text, None);
             helper.add_typeof_edge_with_context(

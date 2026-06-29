@@ -330,6 +330,8 @@ fn walk_value(root: &Value, ctx: &mut WalkContext, helper: &mut GraphBuildHelper
                 let qname = escape_segment(&entry.key);
                 let kind = ctx.profile.node_kind_for(None, 0);
                 let node_id = helper.add_node(&qname, entry.span, kind);
+                // issue #394: real declaration; opt dual-use bare helper into is_definition
+                helper.mark_definition(node_id);
                 if !ctx.inc() {
                     return;
                 }
@@ -357,6 +359,8 @@ fn walk_value(root: &Value, ctx: &mut WalkContext, helper: &mut GraphBuildHelper
                 }
                 let qname = format!("[{i}]");
                 let node_id = helper.add_variable(&qname, entry.span);
+                // issue #394: real declaration; opt dual-use bare helper into is_definition
+                helper.mark_definition(node_id);
                 if !ctx.inc() {
                     return;
                 }
@@ -394,6 +398,8 @@ fn walk_value(root: &Value, ctx: &mut WalkContext, helper: &mut GraphBuildHelper
                         .profile
                         .node_kind_for(frame.parent_key.as_deref(), frame.depth);
                     let node_id = helper.add_node(&qname, entry.span, kind);
+                    // issue #394: real declaration; opt dual-use bare helper into is_definition
+                    helper.mark_definition(node_id);
                     if !ctx.inc() {
                         return;
                     }
@@ -424,6 +430,8 @@ fn walk_value(root: &Value, ctx: &mut WalkContext, helper: &mut GraphBuildHelper
                     }
                     let qname = format!("{}.[{i}]", frame.prefix);
                     let node_id = helper.add_variable(&qname, entry.span);
+                    // issue #394: real declaration; opt dual-use bare helper into is_definition
+                    helper.mark_definition(node_id);
                     if !ctx.inc() {
                         return;
                     }

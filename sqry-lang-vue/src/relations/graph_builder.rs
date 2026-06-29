@@ -89,6 +89,7 @@ impl GraphBuilder for VueGraphBuilder {
             .and_then(|s| s.to_str())
             .unwrap_or("VueComponent");
         let component_id = helper.add_node(component_name, None, NodeKind::Component);
+        helper.mark_definition(component_id);
         helper.add_contains_edge(module_id, component_id);
 
         // Extract and process script blocks
@@ -682,6 +683,7 @@ fn extract_props_from_array(
             let prop_name = text.trim_matches(&['"', '\''][..]).trim();
             if !prop_name.is_empty() {
                 let var_id = helper.add_variable(prop_name, None);
+                helper.mark_definition(var_id);
                 helper.add_contains_edge(component_id, var_id);
             }
         }
@@ -704,6 +706,7 @@ fn extract_props_from_object(
             let prop_name = prop_name.trim_matches(&['"', '\''][..]).trim();
             if !prop_name.is_empty() {
                 let var_id = helper.add_variable(prop_name, None);
+                helper.mark_definition(var_id);
                 helper.add_contains_edge(component_id, var_id);
             }
         }
@@ -733,14 +736,7 @@ fn extract_call_edges<'a>(
             id
         } else {
             let qualified_name = format!("{prefix}::{callee_name}");
-            let visibility = extract_visibility(&qualified_name);
-            let id = helper.add_function_with_visibility(
-                &qualified_name,
-                None,
-                false,
-                false,
-                Some(visibility),
-            );
+            let id = helper.add_function(&qualified_name, None, false, false);
             local_by_name.insert(callee_name.clone(), id);
             id
         };
@@ -1004,7 +1000,14 @@ fn extract_type_edges(
                             None => format!("anon_at_{}", node.start_byte()),
                         };
                         let qualified = format!("{prefix}::{owner}");
-                        helper.add_function(&qualified, Some(span_from_node(node)), false, false)
+                        let id = helper.add_function(
+                            &qualified,
+                            Some(span_from_node(node)),
+                            false,
+                            false,
+                        );
+                        helper.mark_definition(id);
+                        id
                     });
 
                 // TypeOf edge for return type
@@ -1091,6 +1094,7 @@ fn extract_parameter_type_edges(
                 // Create qualified parameter variable node
                 let qualified_name = format!("{prefix}::{owner}::param::{name}");
                 let param_id = helper.add_variable(&qualified_name, Some(span_from_node(child)));
+                helper.mark_definition(param_id);
 
                 // Check for type annotation
                 if let Some(type_node) = child.child_by_field_name("type") {
@@ -1140,6 +1144,7 @@ fn extract_parameter_type_edges(
                 // Create qualified parameter variable node
                 let qualified_name = format!("{prefix}::{owner}::param::{name}");
                 let param_id = helper.add_variable(&qualified_name, Some(span_from_node(child)));
+                helper.mark_definition(param_id);
 
                 // Check for type annotation
                 if let Some(type_node) = child.child_by_field_name("type") {
@@ -1217,6 +1222,7 @@ fn extract_variable_type_edges(
         // Create qualified variable node (byte offset for positional uniqueness)
         let qualified_name = format!("{prefix}::var::{name}_at_{}", child.start_byte());
         let var_id = helper.add_variable(&qualified_name, Some(span_from_node(child)));
+        helper.mark_definition(var_id);
 
         // TypeOf edge
         if let Some(type_text) = extract_type_string(type_node, content) {
@@ -1703,14 +1709,7 @@ fn extract_start_tag_event_directives(
             } else {
                 // Handler not found in script - create a placeholder node
                 let qualified_name = format!("vue::template::{handler_name}");
-                let visibility = extract_visibility(&qualified_name);
-                let id = helper.add_function_with_visibility(
-                    &qualified_name,
-                    None,
-                    false,
-                    false,
-                    Some(visibility),
-                );
+                let id = helper.add_function(&qualified_name, None, false, false);
                 local_by_name.insert(handler_name.clone(), id);
                 id
             };

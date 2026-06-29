@@ -868,6 +868,7 @@ fn validate_predicate(predicate: &Predicate) -> Result<(), BuildError> {
         Predicate::HasCaller
         | Predicate::HasCallee
         | Predicate::IsUnused
+        | Predicate::IsDefinition(_)
         | Predicate::IsAddressTaken(_)
         | Predicate::ResolvedVia(_)
         | Predicate::HasCallsitePromiscuous(_)
