@@ -239,9 +239,9 @@ impl GraphBuilder for ServiceNowGraphBuilder {
     }
 }
 
-/// Per-language [`ShapeMapping`] for ServiceNow server-side scripts.
+/// Per-language [`ShapeMapping`] for `ServiceNow` server-side scripts.
 ///
-/// ServiceNow business rules, script includes, and client scripts are JavaScript,
+/// `ServiceNow` business rules, script includes, and client scripts are JavaScript,
 /// parsed with the tree-sitter-javascript grammar. This maps that grammar's full
 /// control-flow surface onto the canonical [`CfBucket`] schema. Because this crate
 /// is a separate workspace member, the JS map is implemented directly here rather
@@ -286,7 +286,7 @@ impl ShapeMapping for ServiceNowJsShapeMapping {
             let mut cursor = params.walk();
             for child in params.named_children(&mut cursor) {
                 match child.kind() {
-                    "identifier" => {
+                    "identifier" | "object_pattern" | "array_pattern" => {
                         shape.arity_positional = shape.arity_positional.saturating_add(1);
                     }
                     // `function f(a = 1)` default-valued parameter.
@@ -297,9 +297,6 @@ impl ShapeMapping for ServiceNowJsShapeMapping {
                     // `function f(...rest)` rest parameter.
                     "rest_pattern" => shape.has_varargs = true,
                     // Destructured params still occupy one positional slot.
-                    "object_pattern" | "array_pattern" => {
-                        shape.arity_positional = shape.arity_positional.saturating_add(1);
-                    }
                     _ => {}
                 }
             }
@@ -335,7 +332,7 @@ fn cf_bucket_for_js_kind(name: &str) -> Option<CfBucket> {
     Some(bucket)
 }
 
-/// The process-wide ServiceNow JavaScript shape mapping, built once on first use.
+/// The process-wide `ServiceNow` JavaScript shape mapping, built once on first use.
 #[must_use]
 pub fn servicenow_js_shape_mapping() -> &'static ServiceNowJsShapeMapping {
     static MAPPING: OnceLock<ServiceNowJsShapeMapping> = OnceLock::new();

@@ -18,10 +18,10 @@ use crate::tools::params::{
     GetGraphStatsParams, GetHoverInfoParams, GetIndexStatusParams, GetInsightsParams,
     GetReferencesParams, GetWorkspaceSymbolsParams, GraphFormatParam, HierarchicalSearchParams,
     IsNodeInCycleParams, ListFilesParams, ListSymbolsParams, PaginationParams, PatternSearchParams,
-    RebuildIndexParams, RelationQueryParams, RelationTypeParam, SearchFiltersParams,
-    SearchSimilarParams, SemanticDiffParams, SemanticSearchParams, ShowDependenciesParams,
-    SqryQueryParams, StructuralSimilarParams, SubgraphParams, TracePathParams, UnusedScopeParam,
-    VisibilityParam, WorkspaceStatusParams,
+    RebuildIndexParams, RelationQueryParams, RelationTypeParam, RulesRunParams,
+    SearchFiltersParams, SearchSimilarParams, SemanticDiffParams, SemanticSearchParams,
+    ShowDependenciesParams, SqryQueryParams, StructuralSimilarParams, SubgraphParams,
+    TracePathParams, UnusedScopeParam, VisibilityParam, WorkspaceStatusParams,
 };
 use crate::workspace_session::{self, WorkspaceSessionRegistry};
 use rmcp::{
@@ -818,7 +818,7 @@ impl SqryServer {
     }
 
     /// Find functions structurally similar to a reference function via the
-    /// identifier-blind body-shape descriptor (control-flow shape + MinHash).
+    /// identifier-blind body-shape descriptor (control-flow shape + `MinHash`).
     #[tool(
         description = "Find functions structurally similar to a reference function via the identifier-blind body-shape descriptor (control-flow shape + MinHash); reports exact shape_hash identity plus approximate Jaccard. Distinct from name-based search_similar.",
         annotations(read_only_hint = true, open_world_hint = false)
@@ -1186,6 +1186,28 @@ impl SqryServer {
         let result = self
             .execute_tool_for_request("sqry_query", &params, &context, move |_cancel| {
                 execution::execute_sqry_query(&args)
+            })
+            .await?;
+
+        Ok(Self::success_result(&result))
+    }
+
+    /// Execute a declarative rule-layer rule or pack (P5U10).
+    #[tool(
+        description = "Run a declarative rule-layer rule or pack against the workspace graph: resolves a shipped Rust DSL rule/pack by stable id (e.g. bbnty.recipes, bbnty.intake, bbnty.all) or a TOML rule pack by workspace path, runs the production rule engine, and returns each rule's structured output plus witness. Rules needing cross-snapshot or similarity routes are reported as unsupported until the coordinator surface lands.",
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
+    async fn rules_run(
+        &self,
+        Parameters(params): Parameters<RulesRunParams>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        self.ensure_tool_enabled("rules_run")?;
+
+        let args = params.clone();
+        let result = self
+            .execute_tool_for_request("rules_run", &params, &context, move |_cancel| {
+                execution::execute_rules_run(&args)
             })
             .await?;
 
@@ -1861,13 +1883,7 @@ fn convert_semantic_search_params(
         resolved_via: params
             .resolved_via
             .map(|v| v.into_iter().map(Into::into).collect()),
-        revision_id: params.revision_id,
-        revision_ref: params.revision_ref,
-        revision_commit: params.revision_commit,
-        revision_tree: params.revision_tree,
-        revision_dirty: params.revision_dirty,
-        revision_include_untracked: params.revision_include_untracked,
-        revision_include_ignored: params.revision_include_ignored,
+        revision: params.revision.into(),
     })
 }
 

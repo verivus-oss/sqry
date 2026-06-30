@@ -21,6 +21,7 @@ public = [
     "sqry-mcp-redaction/",
     "sqry-lang-support/",
     "sqry-plugin-registry/",
+    "sqry-rules/",
     "sqry-tree-sitter-support/",
     "sqry-lang-c/",
     "sqry-lang-cpp/",
@@ -392,6 +393,7 @@ publish_order = [
     "sqry-lang-vue",
     "sqry-lang-zig",
     # Phase 5: Registry & servers
+    "sqry-rules",
     "sqry-plugin-registry",
     "sqry-lsp",
     "sqry-mcp",

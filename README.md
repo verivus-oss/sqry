@@ -15,7 +15,7 @@ Website: https://sqry.dev
 - Edge-backed `returns:<TypeName>` and resolution-aware `resolved_via:<kind>` predicates for supported graph paths.
 - Workspace-aware indexing through `.sqry-workspace` registries and VS Code `.code-workspace` `sqry.workspace` blocks. <!-- claim:multi-root-supported test:resolve_logical_workspace_short_circuits_in_documented_order -->
 - Daemon-backed shared graph loading through `sqryd` for editor, MCP, and repeated-agent workflows.
-- MCP integration for AI assistants. Standalone `sqry-mcp` currently exposes 37 tools; daemon-hosted MCP exposes a 16-tool subset. Use `tools/list`, `sqry-mcp --list-tools`, or `sqry://meta/manifest` as the authoritative catalog.
+- MCP integration for AI assistants. Standalone `sqry-mcp` currently exposes 38 tools; daemon-hosted MCP exposes a 16-tool subset. Use `tools/list`, `sqry-mcp --list-tools`, or `sqry://meta/manifest` as the authoritative catalog.
 - LSP and VS Code extension support for editor workflows.
 
 > **Removed in 21.0.0:** the experimental natural-language surface (`sqry ask` CLI command, `sqry_ask` MCP tool, `sqry/ask` LSP request) was removed. Use the structured query and graph commands shown below; see [Removed features](docs/TROUBLESHOOTING.md#removed-features) for migration.

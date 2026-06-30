@@ -95,30 +95,30 @@ async fn handle_revision_semantic_search(
 fn revision_target_from_args(
     args: &SemanticSearchArgs,
 ) -> Result<Option<RevisionQueryTarget>, MethodError> {
-    if let Some(revision_id) = &args.revision_id {
+    if let Some(revision_id) = &args.revision.id {
         return Ok(Some(RevisionQueryTarget::RevisionId {
             revision_id: RevisionId(revision_id.clone()),
         }));
     }
-    let selector_count = usize::from(args.revision_ref.is_some())
-        + usize::from(args.revision_commit.is_some())
-        + usize::from(args.revision_tree.is_some())
-        + usize::from(args.revision_dirty);
+    let selector_count = usize::from(args.revision.git_ref.is_some())
+        + usize::from(args.revision.commit.is_some())
+        + usize::from(args.revision.tree.is_some())
+        + usize::from(args.revision.dirty);
     if selector_count > 1 {
         return Err(MethodError::InvalidRequest(
             "semantic_search accepts only one revision selector".to_owned(),
         ));
     }
-    let selector = if let Some(name) = &args.revision_ref {
+    let selector = if let Some(name) = &args.revision.git_ref {
         Some(RevisionSelector::Ref { name: name.clone() })
-    } else if let Some(oid) = &args.revision_commit {
+    } else if let Some(oid) = &args.revision.commit {
         Some(RevisionSelector::Commit { oid: oid.clone() })
-    } else if let Some(oid) = &args.revision_tree {
+    } else if let Some(oid) = &args.revision.tree {
         Some(RevisionSelector::Tree { oid: oid.clone() })
-    } else if args.revision_dirty {
+    } else if args.revision.dirty {
         Some(RevisionSelector::Dirty {
-            include_untracked: args.revision_include_untracked,
-            include_ignored: args.revision_include_ignored,
+            include_untracked: args.revision.include_untracked,
+            include_ignored: args.revision.include_ignored,
         })
     } else {
         None

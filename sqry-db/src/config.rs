@@ -30,7 +30,7 @@ pub struct QueryDbConfig {
 
     /// LSH band count for the structural-neighbour index (`StructuralNeighborsQuery`).
     ///
-    /// The MinHash signature ([`MINHASH_LANES`](sqry_core::graph::unified::storage::shape::MINHASH_LANES)
+    /// The `MinHash` signature ([`MINHASH_LANES`](sqry_core::graph::unified::storage::shape::MINHASH_LANES)
     /// = 64 lanes) is split into `structural_lsh_bands` bands of
     /// `structural_lsh_rows` lanes each; two functions are LSH candidates when
     /// they collide in at least one band. More bands (fewer rows) raises recall
@@ -43,7 +43,7 @@ pub struct QueryDbConfig {
     /// Default: 16.
     pub structural_lsh_bands: usize,
     /// LSH rows-per-band for the structural-neighbour index. Default: 4
-    /// (`16 x 4 = 64` = the full MinHash lane count).
+    /// (`16 x 4 = 64` = the full `MinHash` lane count).
     pub structural_lsh_rows: usize,
 
     /// Test-only knob: disables planner fusion. Default: `false` (fusion

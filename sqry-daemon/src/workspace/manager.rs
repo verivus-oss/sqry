@@ -296,7 +296,7 @@ impl WorkspaceManager {
     /// coalesced load failed in another caller.
     pub fn load_resident_revision<F>(
         &self,
-        load: ResidentRevisionLoad,
+        load: &ResidentRevisionLoad,
         build_graph: F,
     ) -> Result<Arc<ResidentRevisionHandle>, DaemonError>
     where
@@ -2346,13 +2346,31 @@ pub(crate) fn clone_err(err: &DaemonError) -> DaemonError {
 }
 
 fn clone_lifecycle_or_storage_err(err: &DaemonError) -> DaemonError {
+    if let Some(cloned) = clone_lifecycle_err(err) {
+        return cloned;
+    }
+    if let Some(cloned) = clone_storage_or_revision_err(err) {
+        return cloned;
+    }
     match err {
-        // Task 9 U1 — lifecycle variants (AlreadyRunning, AutoStartTimeout,
-        // SignalSetup). These errors all fire before IpcServer::bind and
-        // therefore before any workspace is registered; they should never
-        // reach `clone_err`. If they somehow do (e.g. a future code path
-        // stores them in `last_error`), collapse to WorkspaceBuildFailed so
-        // the clone contract is preserved without losing observability.
+        DaemonError::WorkspaceBuildFailed { .. }
+        | DaemonError::WorkspaceStaleExpired { .. }
+        | DaemonError::MemoryBudgetExceeded { .. }
+        | DaemonError::WorkspaceEvicted { .. }
+        | DaemonError::WorkspaceNotLoaded { .. }
+        | DaemonError::WorkspaceIncompatibleGraph { .. }
+        | DaemonError::ToolTimeout { .. }
+        | DaemonError::InvalidArgument { .. }
+        | DaemonError::RpcErrorPreserved(_)
+        | DaemonError::Internal(_) => {
+            unreachable!("workspace errors handled by clone_err")
+        }
+        _ => unreachable!("lifecycle/storage errors handled above"),
+    }
+}
+
+fn clone_lifecycle_err(err: &DaemonError) -> Option<DaemonError> {
+    match err {
         DaemonError::AlreadyRunning { socket, lock, .. } => DaemonError::WorkspaceBuildFailed {
             root: Path::new("<unknown>").to_path_buf(),
             reason: format!(
@@ -2375,10 +2393,19 @@ fn clone_lifecycle_or_storage_err(err: &DaemonError) -> DaemonError {
             root: Path::new("<unknown>").to_path_buf(),
             reason: format!("failed to install signal handlers: {source}"),
         },
-        // sqry-mcp flakiness P0/P1 admission + recovery variants
-        // (G_daemon_control_plane.md §1.4 / §3.2 / §5.2 +
-        // B_cost_gate.md §3 + 00_contracts.md §3.CC-2 / §3.CC-4).
-        // Each carries cheap Clone-able payload; round-trip in place.
+        other @ (DaemonError::Config { .. } | DaemonError::Io(_)) => {
+            DaemonError::WorkspaceBuildFailed {
+                root: Path::new("<unknown>").to_path_buf(),
+                reason: other.to_string(),
+            }
+        }
+        _ => return None,
+    }
+    .into()
+}
+
+fn clone_storage_or_revision_err(err: &DaemonError) -> Option<DaemonError> {
+    match err {
         DaemonError::WorkspaceOversize {
             root,
             measured_bytes,
@@ -2469,25 +2496,9 @@ fn clone_lifecycle_or_storage_err(err: &DaemonError) -> DaemonError {
                 reason: reason.clone(),
             }
         }
-        other @ (DaemonError::Config { .. } | DaemonError::Io(_)) => {
-            DaemonError::WorkspaceBuildFailed {
-                root: Path::new("<unknown>").to_path_buf(),
-                reason: other.to_string(),
-            }
-        }
-        DaemonError::WorkspaceBuildFailed { .. }
-        | DaemonError::WorkspaceStaleExpired { .. }
-        | DaemonError::MemoryBudgetExceeded { .. }
-        | DaemonError::WorkspaceEvicted { .. }
-        | DaemonError::WorkspaceNotLoaded { .. }
-        | DaemonError::WorkspaceIncompatibleGraph { .. }
-        | DaemonError::ToolTimeout { .. }
-        | DaemonError::InvalidArgument { .. }
-        | DaemonError::RpcErrorPreserved(_)
-        | DaemonError::Internal(_) => {
-            unreachable!("workspace errors handled by clone_err")
-        }
+        _ => return None,
     }
+    .into()
 }
 
 // ---------------------------------------------------------------------------
@@ -3329,7 +3340,7 @@ mod tests {
     fn status_includes_resident_revision_memory_and_rows() {
         let mgr = WorkspaceManager::new_without_reaper(make_config());
         let load = resident_load_request("artifact-a", "rev-a");
-        mgr.load_resident_revision(load, || Ok(CodeGraph::new()))
+        mgr.load_resident_revision(&load, || Ok(CodeGraph::new()))
             .unwrap();
 
         let status = mgr.status();
@@ -3354,7 +3365,7 @@ mod tests {
     fn manager_query_guard_prevents_resident_lru_eviction_until_drop() {
         let mgr = WorkspaceManager::new_without_reaper(make_config());
         let load = resident_load_request("artifact-a", "rev-a");
-        mgr.load_resident_revision(load.clone(), || Ok(CodeGraph::new()))
+        mgr.load_resident_revision(&load, || Ok(CodeGraph::new()))
             .unwrap();
 
         let guard = mgr.acquire_resident_query(&load.revision_id).unwrap();

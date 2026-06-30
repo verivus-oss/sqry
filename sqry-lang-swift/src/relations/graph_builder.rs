@@ -1361,19 +1361,46 @@ fn process_toplevel_variables(root: Node, content: &[u8], helper: &mut GraphBuil
     }
 }
 
+struct SwiftTopLevelBinding<'a> {
+    names: Vec<(String, Node<'a>)>,
+    type_text: String,
+    referenced_types: Vec<String>,
+}
+
+fn swift_binding_from_type_annotation<'a>(
+    type_ann: Node<'a>,
+    names: Vec<(String, Node<'a>)>,
+    content: &[u8],
+) -> Option<SwiftTopLevelBinding<'a>> {
+    let mut type_node = None;
+    let mut type_cursor = type_ann.walk();
+    for type_child in type_ann.children(&mut type_cursor) {
+        if is_swift_type_node(type_child.kind()) {
+            type_node = Some(type_child);
+            break;
+        }
+    }
+
+    let type_node = type_node?;
+    let type_text = type_node.utf8_text(content).map_or_else(
+        |_| "<unknown_type>".to_string(),
+        std::string::ToString::to_string,
+    );
+    let referenced_types = crate::relations::extract_type_names_from_swift_type(type_node, content);
+
+    Some(SwiftTopLevelBinding {
+        names,
+        type_text,
+        referenced_types,
+    })
+}
+
 /// Process a single top-level variable/constant declaration.
 fn process_toplevel_variable(node: Node, content: &[u8], helper: &mut GraphBuildHelper) {
     // FIX M-1 (Iteration 3): Pair each pattern with its adjacent type_annotation.
     // Swift can have multiple bindings where each has its own type annotation.
     // Collect pattern+type pairs by iterating children and tracking adjacent nodes.
-
-    struct Binding<'a> {
-        names: Vec<(String, Node<'a>)>,
-        type_text: String,
-        referenced_types: Vec<String>,
-    }
-
-    let mut bindings: Vec<Binding> = Vec::new();
+    let mut bindings: Vec<SwiftTopLevelBinding<'_>> = Vec::new();
     let mut current_names = Vec::new();
     let mut pending_type: Option<Node> = None;
 
@@ -1399,33 +1426,14 @@ fn process_toplevel_variable(node: Node, content: &[u8], helper: &mut GraphBuild
 
                 // If we have current names and a type, create a binding
                 if !current_names.is_empty() {
-                    if let Some(type_ann) = pending_type {
-                        // Find the actual type node within type_annotation
-                        let mut type_node = None;
-                        let mut type_cursor = type_ann.walk();
-                        for type_child in type_ann.children(&mut type_cursor) {
-                            if is_swift_type_node(type_child.kind()) {
-                                type_node = Some(type_child);
-                                break;
-                            }
-                        }
-
-                        if let Some(type_node) = type_node {
-                            let type_text = type_node.utf8_text(content).map_or_else(
-                                |_| "<unknown_type>".to_string(),
-                                std::string::ToString::to_string,
-                            );
-                            let referenced_types =
-                                crate::relations::extract_type_names_from_swift_type(
-                                    type_node, content,
-                                );
-
-                            bindings.push(Binding {
-                                names: current_names.clone(),
-                                type_text,
-                                referenced_types,
-                            });
-                        }
+                    if let Some(type_ann) = pending_type
+                        && let Some(binding) = swift_binding_from_type_annotation(
+                            type_ann,
+                            current_names.clone(),
+                            content,
+                        )
+                    {
+                        bindings.push(binding);
                     }
                     current_names.clear();
                     pending_type = None;
@@ -1439,30 +1447,9 @@ fn process_toplevel_variable(node: Node, content: &[u8], helper: &mut GraphBuild
     if !current_names.is_empty()
         && pending_type.is_some()
         && let Some(type_ann) = pending_type
+        && let Some(binding) = swift_binding_from_type_annotation(type_ann, current_names, content)
     {
-        let mut type_node = None;
-        let mut type_cursor = type_ann.walk();
-        for type_child in type_ann.children(&mut type_cursor) {
-            if is_swift_type_node(type_child.kind()) {
-                type_node = Some(type_child);
-                break;
-            }
-        }
-
-        if let Some(type_node) = type_node {
-            let type_text = type_node.utf8_text(content).map_or_else(
-                |_| "<unknown_type>".to_string(),
-                std::string::ToString::to_string,
-            );
-            let referenced_types =
-                crate::relations::extract_type_names_from_swift_type(type_node, content);
-
-            bindings.push(Binding {
-                names: current_names,
-                type_text,
-                referenced_types,
-            });
-        }
+        bindings.push(binding);
     }
 
     // Create TypeOf and Reference edges for each binding

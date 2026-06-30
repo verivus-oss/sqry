@@ -58,12 +58,11 @@ impl VirtualPath {
     pub fn to_path_buf_under(&self, root: &Path) -> Result<PathBuf, DaemonError> {
         let mut out = root.to_path_buf();
         for component in self.bytes.split(|byte| *byte == b'/') {
-            out.push(os_string_from_git_component(component).map_err(|reason| {
-                DaemonError::RevisionSourceUnavailable {
-                    reason,
-                    path: Some(PathBuf::from(self.display_lossy())),
-                }
-            })?);
+            #[cfg(unix)]
+            push_git_component(&mut out, component);
+
+            #[cfg(not(unix))]
+            push_git_component(&mut out, component, self)?;
         }
         Ok(out)
     }
@@ -271,17 +270,25 @@ fn validate_git_path_bytes(bytes: &[u8]) -> Result<(), DaemonError> {
 }
 
 #[cfg(unix)]
-fn os_string_from_git_component(component: &[u8]) -> Result<OsString, String> {
+fn push_git_component(out: &mut PathBuf, component: &[u8]) {
     use std::os::unix::ffi::OsStringExt as _;
 
-    Ok(OsString::from_vec(component.to_vec()))
+    out.push(OsString::from_vec(component.to_vec()));
 }
 
 #[cfg(not(unix))]
-fn os_string_from_git_component(component: &[u8]) -> Result<OsString, String> {
-    let value = std::str::from_utf8(component)
-        .map_err(|_| "non-UTF-8 Git paths are unsupported on this platform".to_owned())?;
-    Ok(OsString::from(value))
+fn push_git_component(
+    out: &mut PathBuf,
+    component: &[u8],
+    virtual_path: &VirtualPath,
+) -> Result<(), DaemonError> {
+    let value =
+        std::str::from_utf8(component).map_err(|_| DaemonError::RevisionSourceUnavailable {
+            reason: "non-UTF-8 Git paths are unsupported on this platform".to_owned(),
+            path: Some(PathBuf::from(virtual_path.display_lossy())),
+        })?;
+    out.push(OsString::from(value));
+    Ok(())
 }
 
 #[cfg(test)]

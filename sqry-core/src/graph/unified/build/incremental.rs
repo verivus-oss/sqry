@@ -546,7 +546,7 @@ pub fn compute_reverse_dep_closure(changed_files: &[FileId], graph: &CodeGraph) 
 /// - at every iteration of the sub-step 4 re-parse loop (Phase 3c);
 /// - post sub-step 4 (between re-parse and Pass 2 range assignment);
 /// - post sub-step 6 (before sub-step 8 Phase 4d begins, Phase 3d —
-///   formerly bracketed the removed sub-step 7 ExportMap rebuild and
+///   formerly bracketed the removed sub-step 7 `ExportMap` rebuild and
 ///   retained as a defensive poll boundary);
 /// - between sub-step 8 (Phase 4d) and sub-step 9 (Pass 5), Phase 3d —
 ///   formerly the post-ExportMap boundary, retained as defensive;

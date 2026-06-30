@@ -24,10 +24,15 @@ use crate::input::FileInputStore;
 pub type FileDep = (FileId, u64);
 
 thread_local! {
-    /// Thread-local accumulator for file dependencies during query execution.
+    /// Thread-local stack of dependency accumulators during query execution.
     ///
-    /// Cleared by `DependencyRecorderGuard::drop` to prevent cross-query leaks.
-    static FILE_DEPS: RefCell<Vec<FileId>> = const { RefCell::new(Vec::new()) };
+    /// Nested derived queries get their own accumulator so their cache entry can
+    /// store precise deps. On successful `finish`, child deps are also merged
+    /// into the parent scope so wrapper queries inherit the data they read
+    /// through nested `QueryDb::get` calls.
+    static FILE_DEPS: RefCell<Vec<Vec<FileId>>> = const { RefCell::new(Vec::new()) };
+    /// Number of live [`DependencyRecorderGuard`] scopes on this thread.
+    static ACTIVE_DEPTH: RefCell<usize> = const { RefCell::new(0) };
 }
 
 /// Records a file dependency from within a query's `execute` method.
@@ -44,7 +49,12 @@ pub fn record_file_dep(file_id: FileId) {
         return;
     }
     FILE_DEPS.with(|deps| {
-        deps.borrow_mut().push(file_id);
+        let mut deps = deps.borrow_mut();
+        if let Some(current) = deps.last_mut() {
+            current.push(file_id);
+        } else {
+            deps.push(vec![file_id]);
+        }
     });
 }
 
@@ -57,6 +67,7 @@ pub fn record_file_dep(file_id: FileId) {
 /// even if a query panics mid-execution. Create one guard per `QueryDb::get`
 /// call, before invoking `Q::execute`.
 pub struct DependencyRecorderGuard {
+    finished: bool,
     /// Marker to prevent `Send` (thread-local is per-thread).
     _not_send: std::marker::PhantomData<*const ()>,
 }
@@ -65,8 +76,16 @@ impl DependencyRecorderGuard {
     /// Creates a new guard, clearing any stale state in the thread-local.
     #[must_use]
     pub fn new() -> Self {
-        FILE_DEPS.with(|deps| deps.borrow_mut().clear());
+        ACTIVE_DEPTH.with(|depth| {
+            let mut depth = depth.borrow_mut();
+            if *depth == 0 {
+                FILE_DEPS.with(|deps| deps.borrow_mut().clear());
+            }
+            *depth += 1;
+        });
+        FILE_DEPS.with(|deps| deps.borrow_mut().push(Vec::new()));
         Self {
+            finished: false,
             _not_send: std::marker::PhantomData,
         }
     }
@@ -78,8 +97,9 @@ impl DependencyRecorderGuard {
     /// `SmallVec<[(FileId, u64); 8]>` for the common case of queries
     /// touching 8 or fewer files.
     #[must_use]
-    pub fn finish(self, inputs: &FileInputStore) -> SmallVec<[FileDep; 8]> {
-        let raw = FILE_DEPS.with(|deps| std::mem::take(&mut *deps.borrow_mut()));
+    pub fn finish(mut self, inputs: &FileInputStore) -> SmallVec<[FileDep; 8]> {
+        self.finished = true;
+        let raw = finish_current_scope(true);
 
         // Deduplicate: sort + dedup (cheaper than a HashSet for small N)
         let mut unique: Vec<FileId> = raw;
@@ -101,8 +121,31 @@ impl Default for DependencyRecorderGuard {
 
 impl Drop for DependencyRecorderGuard {
     fn drop(&mut self) {
+        if !self.finished {
+            let _ = finish_current_scope(false);
+        }
+    }
+}
+
+fn finish_current_scope(should_merge_into_parent: bool) -> Vec<FileId> {
+    let raw = FILE_DEPS.with(|deps| deps.borrow_mut().pop().unwrap_or_default());
+    let parent_is_active = ACTIVE_DEPTH.with(|depth| {
+        let mut depth = depth.borrow_mut();
+        *depth = depth.saturating_sub(1);
+        *depth > 0
+    });
+
+    if should_merge_into_parent && parent_is_active {
+        FILE_DEPS.with(|deps| {
+            if let Some(parent) = deps.borrow_mut().last_mut() {
+                parent.extend(raw.iter().copied());
+            }
+        });
+    } else if !parent_is_active {
         FILE_DEPS.with(|deps| deps.borrow_mut().clear());
     }
+
+    raw
 }
 
 #[cfg(test)]
@@ -112,15 +155,18 @@ mod tests {
     #[test]
     fn guard_clears_on_drop() {
         // Record some deps without a guard to verify the thread-local works
-        FILE_DEPS.with(|deps| {
-            deps.borrow_mut().push(FileId::new(1));
-            deps.borrow_mut().push(FileId::new(2));
-        });
+        record_file_dep(FileId::new(1));
+        record_file_dep(FileId::new(2));
 
-        // Guard creation should clear stale state
+        // Guard creation should clear stale ambient state and create one active scope.
         let guard = DependencyRecorderGuard::new();
         FILE_DEPS.with(|deps| {
-            assert!(deps.borrow().is_empty(), "guard should clear on creation");
+            let deps = deps.borrow();
+            assert_eq!(deps.len(), 1, "guard should create one active scope");
+            assert!(
+                deps.last().is_some_and(Vec::is_empty),
+                "guard should clear stale deps on creation"
+            );
         });
 
         // Record new deps

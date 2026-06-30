@@ -134,7 +134,7 @@ pub struct CodeGraph {
     /// Whether this graph carries genuine `NodeEntry.is_definition` signal
     /// (R3 marker for the definition-signal feature).
     ///
-    /// `true` for graphs freshly built in-process (the GraphBuilder path stamps
+    /// `true` for graphs freshly built in-process (the `GraphBuilder` path stamps
     /// `is_definition` at declaration sites) and for graphs loaded from a
     /// V16-or-newer snapshot. `false` for graphs loaded from a pre-V16 snapshot,
     /// whose `is_definition` bits are all defaulted `false` (absent on the wire)

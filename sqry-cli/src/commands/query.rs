@@ -178,7 +178,7 @@ pub fn run_query(
         Some(&parsed_variables)
     };
 
-    if let Some(revision_target) = revision_query_target_from_args(revision)? {
+    if let Some(revision_target) = revision_query_target_from_args(revision) {
         if explain {
             anyhow::bail!("revision query does not support --explain");
         }

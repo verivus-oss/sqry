@@ -252,9 +252,12 @@ fn tool_category(name: &str) -> ToolCategory {
 
         "find_cycles" | "is_node_in_cycle" | "find_unused" | "find_duplicates"
         | "complexity_metrics"
-        // U04 (#299 review follow-up) — Go context.Context leak detection
+        // U04 (#299 review follow-up): Go context.Context leak detection
         // is a code-quality analysis.
-        | "context_propagation" => ToolCategory::CodeQuality,
+        | "context_propagation"
+        // P5U10: the declarative rule layer runs analysis/quality rules
+        // (the bbnty vuln-hunting recipes + standard intake pack).
+        | "rules_run" => ToolCategory::CodeQuality,
 
         "semantic_diff" => ToolCategory::VersionComparison,
 
@@ -430,6 +433,7 @@ unified graph; results are byte-exact, not signature-substring matches:
 | `find_duplicates` | Duplicate functions/signatures/structs | duplicate_type:enum?, threshold:int? |
 | `complexity_metrics` | Function complexity from call graph + LOC | target:str?, min_complexity:int? |
 | `context_propagation` | Go context.Context propagation-leak detection | scope:enum?, mode:enum?, max_results:int? |
+| `rules_run` | Run a declarative rule-layer rule/pack (bbnty recipes + intake) and return per-rule output + witness | rule_or_pack:str!, path:str? |
 
 ## Version Comparison
 
@@ -862,6 +866,7 @@ mod tests {
             "workspace_status".into(),
             "sqry_query".into(),
             "context_propagation".into(),
+            "rules_run".into(),
         ]);
         let result = read_resource(RESOURCE_CAPABILITY_MAP);
         assert!(result.is_some(), "capability-map resource missing");
@@ -955,6 +960,7 @@ mod tests {
             "workspace_status",
             "sqry_query",
             "context_propagation",
+            "rules_run",
         ];
 
         // Set up

@@ -12,6 +12,7 @@ mod introspection;
 mod navigation;
 mod planner_query;
 mod relations;
+mod rules;
 mod search;
 mod trace;
 
@@ -42,6 +43,7 @@ pub use navigation::{
 };
 pub use planner_query::execute_sqry_query;
 pub use relations::{execute_call_hierarchy, execute_relation_query};
+pub use rules::execute_rules_run;
 pub use search::{execute_find_similar, execute_semantic_search, execute_structural_similar};
 pub use trace::execute_trace_path;
 

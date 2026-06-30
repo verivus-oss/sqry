@@ -139,7 +139,7 @@ Indexing behavior highlights:
 
 ## MCP Tools (Model Context Protocol)
 
-sqry provides **36 MCP tools** for AI/LLM integration:
+sqry provides **37 MCP tools** for AI/LLM integration:
 
 ### MCP Response Redaction
 
@@ -222,6 +222,7 @@ sqry provides **36 MCP tools** for AI/LLM integration:
 | `find_unused` | Find unused/dead code via reachability analysis |
 | `is_node_in_cycle` | Check if a specific symbol is part of a cycle |
 | `structural_similar` | Find functions structurally similar to a reference by identifier-blind body shape (rename/relocate invariant); returns `shape_hash_exact` + `jaccard` per match. Distinct from name-based `search_similar` |
+| `rules_run` | Run a declarative rule-layer rule or pack (shipped bbnty recipes + standard intake by stable id, or a workspace TOML pack) and return each rule's structured output plus witness; cross-snapshot / similarity rules report `unsupported` until the coordinator surface lands |
 
 ### MCP Prompts (Claude Code `/` menu)
 
@@ -252,6 +253,7 @@ These environment variables can disable specific MCP tool groups at runtime:
 | `SQRY_MCP_ENABLE_SEMANTIC_DIFF` | `semantic_diff` |
 | `SQRY_MCP_ENABLE_DEPENDENCY_IMPACT` | `dependency_impact` |
 | `SQRY_MCP_ENABLE_STRUCTURAL_SIMILAR` | `structural_similar` |
+| `SQRY_MCP_ENABLE_RULES` | `rules_run` |
 
 ---
 

@@ -272,7 +272,7 @@ impl RealWorkspaceBuilder {
         &self,
         source_options: RawGitSourceOptions,
         store: &RevisionArtifactStore,
-        artifact_id: ArtifactId,
+        artifact_id: &ArtifactId,
         resolved_revision: ResolvedRevision,
         key_inputs: ArtifactKeyInputs,
     ) -> Result<ArtifactPublishResult, DaemonError> {

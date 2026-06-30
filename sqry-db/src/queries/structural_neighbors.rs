@@ -1,11 +1,11 @@
-//! `StructuralNeighborsQuery` — LSH index over per-function MinHash signatures
+//! `StructuralNeighborsQuery` — LSH index over per-function `MinHash` signatures
 //! for sublinear structural-nearest-neighbour lookup (body-shape-descriptor
 //! feature, U06).
 //!
 //! # What it builds
 //!
 //! Each Function/Method node carries a `ShapeDescriptor` (U01–U04) with a
-//! 64-lane MinHash sketch of its identifier-blind structure. This query builds a
+//! 64-lane `MinHash` sketch of its identifier-blind structure. This query builds a
 //! locality-sensitive-hashing (LSH) band index over those sketches: the 64 lanes
 //! are split into `bands` bands of `rows` lanes each (default `16 x 4 = 64`), and
 //! every node is bucketed by the hash of each band. Two functions are *candidate*
@@ -87,7 +87,7 @@ fn band_hash(band_index: usize, lanes: &[u32]) -> u64 {
     h
 }
 
-/// Estimated Jaccard similarity of two MinHash sketches: the fraction of lanes
+/// Estimated Jaccard similarity of two `MinHash` sketches: the fraction of lanes
 /// that agree. Both sketches must have the same length (always [`MINHASH_LANES`]).
 #[must_use]
 fn minhash_jaccard(a: &[u32; MINHASH_LANES], b: &[u32; MINHASH_LANES]) -> f32 {
@@ -98,7 +98,7 @@ fn minhash_jaccard(a: &[u32; MINHASH_LANES], b: &[u32; MINHASH_LANES]) -> f32 {
     }
 }
 
-/// LSH band index over per-function MinHash signatures.
+/// LSH band index over per-function `MinHash` signatures.
 ///
 /// `band_tables[b]` maps a band hash to the sorted node ids whose descriptor
 /// hashes to that bucket in band `b`. Deterministic (`BTreeMap` + sorted
@@ -135,7 +135,7 @@ impl StructuralLshIndex {
             .sum()
     }
 
-    /// Band hashes for one MinHash sketch under this index's banding.
+    /// Band hashes for one `MinHash` sketch under this index's banding.
     fn band_hashes(&self, minhash: &[u32; MINHASH_LANES]) -> Vec<u64> {
         (0..self.bands)
             .map(|b| {
@@ -224,7 +224,7 @@ impl DerivedQuery for StructuralNeighborsQuery {
 
 /// One structural-neighbour match, carrying the two distinct numbers the surfaces
 /// report: exact structural identity (`shape_hash_exact`) and the approximate
-/// MinHash Jaccard similarity (`jaccard`).
+/// `MinHash` Jaccard similarity (`jaccard`).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct StructuralNeighbor {
     /// The neighbour node.
@@ -232,7 +232,7 @@ pub struct StructuralNeighbor {
     /// True when the neighbour's `shape_hash` is byte-identical to the probe's
     /// (an exact rename/relocate-invariant structural match), and non-zero.
     pub shape_hash_exact: bool,
-    /// Estimated Jaccard similarity of the two MinHash sketches (`0.0..=1.0`).
+    /// Estimated Jaccard similarity of the two `MinHash` sketches (`0.0..=1.0`).
     pub jaccard: f32,
 }
 

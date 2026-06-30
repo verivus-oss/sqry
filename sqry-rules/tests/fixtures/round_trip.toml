@@ -1,0 +1,15 @@
+schema_version = 1
+
+[[rules]]
+id = "demo.diff"
+
+[rules.plan.root.cross_snapshot_diff.base]
+edge_revision = 11
+metadata_revision = 12
+
+[rules.plan.root.cross_snapshot_diff.head]
+edge_revision = 21
+metadata_revision = 22
+
+[rules.plan.root.cross_snapshot_diff]
+include_unchanged = true

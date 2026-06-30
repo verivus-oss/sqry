@@ -2144,6 +2144,9 @@ mod tests {
     // default log file equals the canonical `runtime_dir()` result.
     #[test]
     fn default_log_file_parent_matches_canonical_runtime_dir() {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let log = default_log_file().expect("default_log_file must return Some");
         let parent = log.parent().expect("log path has no parent").to_path_buf();
         // Compare against the canonical helper that drives

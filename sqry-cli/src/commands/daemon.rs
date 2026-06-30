@@ -82,18 +82,20 @@ pub fn run(_cli: &Cli, action: &DaemonAction) -> Result<()> {
             source_byte_mode,
             pin,
             json,
-        } => run_daemon_load_revision(
+        } => run_daemon_load_revision(&DaemonLoadRevisionArgs {
             root,
-            git_ref.as_deref(),
-            commit.as_deref(),
-            tree.as_deref(),
-            *dirty,
-            *include_untracked,
-            *include_ignored,
-            *source_byte_mode,
-            *pin,
-            *json,
-        ),
+            git_ref: git_ref.as_deref(),
+            commit: commit.as_deref(),
+            tree: tree.as_deref(),
+            dirty: DirtyRevisionSelection {
+                enabled: *dirty,
+                include_untracked: *include_untracked,
+                include_ignored: *include_ignored,
+            },
+            source_byte_mode: *source_byte_mode,
+            pin: *pin,
+            json: *json,
+        }),
         DaemonAction::ListRevisions {
             root,
             include_unloaded,
@@ -122,27 +124,27 @@ pub fn run(_cli: &Cli, action: &DaemonAction) -> Result<()> {
 
 pub(crate) fn revision_query_target_from_args(
     args: &RevisionQueryArgs,
-) -> Result<Option<RevisionQueryTarget>> {
-    if let Some(revision_id) = &args.revision_id {
-        return Ok(Some(RevisionQueryTarget::RevisionId {
+) -> Option<RevisionQueryTarget> {
+    if let Some(revision_id) = &args.id {
+        return Some(RevisionQueryTarget::RevisionId {
             revision_id: RevisionId(revision_id.clone()),
-        }));
+        });
     }
-    let selector = if let Some(name) = &args.revision_ref {
+    let selector = if let Some(name) = &args.git_ref {
         Some(RevisionSelector::Ref { name: name.clone() })
-    } else if let Some(oid) = &args.revision_commit {
+    } else if let Some(oid) = &args.commit {
         Some(RevisionSelector::Commit { oid: oid.clone() })
-    } else if let Some(oid) = &args.revision_tree {
+    } else if let Some(oid) = &args.tree {
         Some(RevisionSelector::Tree { oid: oid.clone() })
-    } else if args.revision_dirty {
+    } else if args.dirty {
         Some(RevisionSelector::Dirty {
-            include_untracked: args.revision_include_untracked,
-            include_ignored: args.revision_include_ignored,
+            include_untracked: args.include_untracked,
+            include_ignored: args.include_ignored,
         })
     } else {
         None
     };
-    Ok(selector.map(|selector| RevisionQueryTarget::Selector { selector }))
+    selector.map(|selector| RevisionQueryTarget::Selector { selector })
 }
 
 fn source_byte_mode_from_arg(arg: RevisionSourceByteModeArg) -> SourceByteMode {
@@ -153,38 +155,44 @@ fn source_byte_mode_from_arg(arg: RevisionSourceByteModeArg) -> SourceByteMode {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn run_daemon_load_revision(
-    root: &Path,
-    git_ref: Option<&str>,
-    commit: Option<&str>,
-    tree: Option<&str>,
-    dirty: bool,
-    include_untracked: bool,
-    include_ignored: bool,
+struct DaemonLoadRevisionArgs<'a> {
+    root: &'a Path,
+    git_ref: Option<&'a str>,
+    commit: Option<&'a str>,
+    tree: Option<&'a str>,
+    dirty: DirtyRevisionSelection,
     source_byte_mode: Option<RevisionSourceByteModeArg>,
     pin: bool,
     json: bool,
-) -> Result<()> {
+}
+
+struct DirtyRevisionSelection {
+    enabled: bool,
+    include_untracked: bool,
+    include_ignored: bool,
+}
+
+fn run_daemon_load_revision(args: &DaemonLoadRevisionArgs<'_>) -> Result<()> {
     let selector = revision_selector_from_daemon_args(
-        git_ref,
-        commit,
-        tree,
-        dirty,
-        include_untracked,
-        include_ignored,
+        args.git_ref,
+        args.commit,
+        args.tree,
+        args.dirty.enabled,
+        args.dirty.include_untracked,
+        args.dirty.include_ignored,
     )?;
-    let canonical = std::fs::canonicalize(root)
-        .with_context(|| format!("failed to canonicalize {}", root.display()))?;
+    let canonical = std::fs::canonicalize(args.root)
+        .with_context(|| format!("failed to canonicalize {}", args.root.display()))?;
     let request = LoadRevisionRequest {
         root: canonical.clone(),
         selector,
-        source_byte_mode: source_byte_mode.map(source_byte_mode_from_arg),
-        pin,
+        source_byte_mode: args.source_byte_mode.map(source_byte_mode_from_arg),
+        pin: args.pin,
     };
     let envelope = with_daemon_client("load revision", |mut client| async move {
         client.load_revision(request).await
     })?;
-    if json {
+    if args.json {
         println!("{}", serde_json::to_string_pretty(&envelope)?);
     } else {
         eprintln!(

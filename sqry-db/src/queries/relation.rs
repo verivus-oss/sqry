@@ -230,6 +230,7 @@ pub fn compute_relation_source_set(
     let mut results: Vec<NodeId> = Vec::new();
 
     for (node_id, entry) in snapshot.nodes().iter() {
+        record_file_dep(entry.file);
         // Gate 0d iter-2 fix: skip unified losers from relation
         // query results. See `NodeEntry::is_unified_loser`.
         if entry.is_unified_loser() {

@@ -37,6 +37,11 @@ pub struct FeatureFlags {
     /// Environment variable: `SQRY_MCP_ENABLE_STRUCTURAL_SIMILAR`
     /// Default: true
     pub is_structural_similar_enabled: bool,
+
+    /// Whether the `rules_run` declarative rule-layer tool is enabled (P5U10).
+    /// Environment variable: `SQRY_MCP_ENABLE_RULES`
+    /// Default: true
+    pub is_rules_enabled: bool,
 }
 
 impl Default for FeatureFlags {
@@ -50,6 +55,7 @@ impl Default for FeatureFlags {
             is_semantic_diff_enabled: true,
             is_dependency_impact_enabled: true,
             is_structural_similar_enabled: true,
+            is_rules_enabled: true,
         }
     }
 }
@@ -64,6 +70,7 @@ impl FeatureFlags {
             is_semantic_diff_enabled: env_flag("SQRY_MCP_ENABLE_SEMANTIC_DIFF", true),
             is_dependency_impact_enabled: env_flag("SQRY_MCP_ENABLE_DEPENDENCY_IMPACT", true),
             is_structural_similar_enabled: env_flag("SQRY_MCP_ENABLE_STRUCTURAL_SIMILAR", true),
+            is_rules_enabled: env_flag("SQRY_MCP_ENABLE_RULES", true),
         }
     }
 
@@ -76,6 +83,8 @@ impl FeatureFlags {
             "semantic_diff" => self.is_semantic_diff_enabled,
             "dependency_impact" => self.is_dependency_impact_enabled,
             "structural_similar" => self.is_structural_similar_enabled,
+            // Declarative rule-layer surface (P5U10). Opt-out via env flag.
+            "rules_run" => self.is_rules_enabled,
             // Core tools always enabled
             "semantic_search"
             | "hierarchical_search"
@@ -144,6 +153,9 @@ impl FeatureFlags {
             ),
             "dependency_impact" => Some(
                 "Dependency impact analysis is currently disabled. Set SQRY_MCP_ENABLE_DEPENDENCY_IMPACT=true to enable.".to_string()
+            ),
+            "rules_run" => Some(
+                "The declarative rule-layer tool is currently disabled. Set SQRY_MCP_ENABLE_RULES=true to enable.".to_string()
             ),
             _ => Some(format!("Unknown tool: {tool_name}")),
         }
@@ -228,6 +240,21 @@ mod tests {
             env_flags.is_tool_enabled("expand_cache_status"),
             "expand_cache_status must be enabled via from_env() with no env overrides"
         );
+    }
+
+    /// P5U10: `rules_run` is enabled by default and gated by
+    /// `SQRY_MCP_ENABLE_RULES`, with a user-friendly disabled reason.
+    #[test]
+    fn rules_run_default_enabled_and_gated() {
+        let mut flags = FeatureFlags::default();
+        assert!(flags.is_rules_enabled);
+        assert!(flags.is_tool_enabled("rules_run"));
+        assert_eq!(flags.disabled_reason("rules_run"), None);
+
+        flags.is_rules_enabled = false;
+        assert!(!flags.is_tool_enabled("rules_run"));
+        let reason = flags.disabled_reason("rules_run").expect("disabled reason");
+        assert!(reason.contains("SQRY_MCP_ENABLE_RULES=true"), "{reason}");
     }
 
     #[test]

@@ -210,16 +210,17 @@ fn plan_managed_worktrees(
         .collect();
 
     for entry in reconciliation.managed_entries {
-        if entry.prunable {
+        if entry.is_prunable() {
             plan.worktree_candidates.push(worktree_candidate(
                 &entry,
                 "Git marks managed worktree prunable",
             ));
         } else {
+            let is_locked = entry.is_locked();
             plan.refusals.push(PruneRefusal {
                 artifact_id: None,
                 worktree_path: Some(entry.path),
-                reason: if entry.locked {
+                reason: if is_locked {
                     "managed worktree is locked and considered active".to_owned()
                 } else {
                     "managed worktree is registered and not prunable".to_owned()
@@ -257,7 +258,7 @@ fn worktree_candidate(entry: &GitWorktreeEntry, reason: &str) -> PruneWorktreeCa
     PruneWorktreeCandidate {
         path: entry.path.clone(),
         reclaimable_bytes: dir_size(&entry.path),
-        locked: entry.locked,
+        locked: entry.is_locked(),
         reason: reason.to_owned(),
     }
 }

@@ -579,7 +579,7 @@ static QUERY_CACHE_TTL: OnceLock<Duration> = OnceLock::new();
 static TRACE_PATH_TELEMETRY: OnceLock<Mutex<CacheTelemetry>> = OnceLock::new();
 static SUBGRAPH_TELEMETRY: OnceLock<Mutex<CacheTelemetry>> = OnceLock::new();
 
-/// Test probe: whether the trace_path telemetry cell has been initialized.
+/// Test probe: whether the `trace_path` telemetry cell has been initialized.
 /// Used by the isolated `init_mcp_caches` regression guard to assert the
 /// telemetry is unset before init and set after, in a fresh process where no
 /// other test has touched the global `OnceLock`. `allow(dead_code)` because

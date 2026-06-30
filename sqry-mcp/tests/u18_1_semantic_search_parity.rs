@@ -40,7 +40,9 @@ use sqry_mcp::execution::execute_sqry_query;
 use sqry_mcp::test_setup::{
     init_discovery_cache, init_engine_cache, init_subgraph_cache, init_trace_path_cache,
 };
-use sqry_mcp::tool_args::{PaginationArgs, SearchFilters, SemanticSearchArgs, SqryQueryParams};
+use sqry_mcp::tool_args::{
+    PaginationArgs, SearchFilters, SemanticSearchArgs, SemanticSearchRevisionArgs, SqryQueryParams,
+};
 use sqry_mcp::workspace_session_test_api::with_workspace_override;
 use std::collections::HashSet;
 use std::fs;
@@ -130,13 +132,7 @@ fn mk_search_args(query: &str, workspace: String) -> SemanticSearchArgs {
         budget_rows: None,
         framework: None,
         resolved_via: None,
-        revision_id: None,
-        revision_ref: None,
-        revision_commit: None,
-        revision_tree: None,
-        revision_dirty: false,
-        revision_include_untracked: false,
-        revision_include_ignored: false,
+        revision: SemanticSearchRevisionArgs::default(),
     }
 }
 

@@ -592,190 +592,186 @@ impl DaemonError {
     /// without parsing the free-form `message` string.
     #[must_use]
     pub fn error_data(&self) -> Option<serde_json::Value> {
-        use serde_json::json;
         match self {
-            Self::MemoryBudgetExceeded {
-                limit_bytes,
-                current_bytes,
-                reserved_bytes,
-                retained_bytes,
-                requested_bytes,
-            } => Some(json!({
-                "limit_bytes": limit_bytes,
-                "current_bytes": current_bytes,
-                "reserved_bytes": reserved_bytes,
-                "retained_bytes": retained_bytes,
-                "requested_bytes": requested_bytes,
-            })),
-            Self::WorkspaceStaleExpired {
-                root,
-                age_hours,
-                cap_hours,
-                last_good_at,
-                last_error,
-            } => Some(workspace_stale_data(
-                root,
-                *age_hours,
-                *cap_hours,
-                *last_good_at,
-                last_error.as_deref(),
-            )),
-            Self::WorkspaceBuildFailed { root, reason }
-            | Self::WorkspaceIncompatibleGraph { root, reason } => Some(json!({
-                    "root": root,
-                    "reason": reason,
-            })),
-            Self::WorkspaceEvicted { root } => Some(json!({ "root": root })),
-            Self::WorkspaceNotLoaded { root } => Some(json!({
-                "root": root,
-                "hint": "use daemon/load to load the workspace before calling daemon/rebuild",
-            })),
-            // Phase 8c §O canonical 4-key envelope
-            // `{kind, retryable, retry_after_ms, details}` matching
-            // standalone `sqry-mcp::rpc_error_to_mcp` shape so clients
-            // can handle daemon-path and direct-path errors with a
-            // single parser.
-            Self::ToolTimeout {
-                root: _,
-                secs: _,
-                deadline_ms,
-            } => Some(tool_timeout_data(*deadline_ms)),
-            Self::InvalidArgument { reason } => Some(json!({
-                "kind": "validation_error",
-                "retryable": false,
-                "retry_after_ms": serde_json::Value::Null,
-                "details": {
-                    "reason": reason,
-                },
-            })),
-            // Cluster-C iter-3: preserve the inner RpcError's wire
-            // shape verbatim so the daemon-hosted MCP envelope is
-            // byte-identical to the standalone path's
-            // `rpc_error_to_mcp` output.
-            Self::RpcErrorPreserved(rpc) => Some(rpc_error_data(rpc)),
-            Self::Internal(_) => Some(json!({
-                "kind": "internal",
-                "retryable": false,
-                "retry_after_ms": serde_json::Value::Null,
-                "details": serde_json::Value::Null,
-            })),
-            Self::Io(_)
-            | Self::Config { .. }
-            | Self::AlreadyRunning { .. }
-            | Self::AutoStartTimeout { .. }
-            | Self::SignalSetup { .. } => None,
-            // Lifecycle errors don't cross the IPC boundary; no structured
-            // payload is needed.
-            Self::WorkspaceOversize {
-                root,
-                measured_bytes,
-                limit_bytes,
-                current_loaded_bytes,
-            } => Some(json!({
-                "root": root,
-                "measured_bytes": measured_bytes,
-                "limit_bytes": limit_bytes,
-                "current_loaded_bytes": current_loaded_bytes,
-            })),
-            Self::WorkspacePinned { root } => Some(json!({
-                "root": root,
-                "hint": "pass force=true to reset a pinned workspace",
-            })),
-            Self::ResetWhileLoading { root } => Some(json!({
-                "root": root,
-                "hint": "wait for the load to settle, then retry",
-            })),
-            Self::ResetCancellationDispatched {
-                root,
-                retry_after_ms,
-            } => Some(json!({
-                "root": root,
-                "retry_after_ms": retry_after_ms,
-            })),
-            Self::SocketSetup { path, reason } => Some(json!({
-                "path": path,
-                "reason": reason,
-            })),
-            // Phase 8c §O canonical 4-key envelope. The standalone
-            // `sqry-mcp::RpcError::query_too_broad` envelope shape is
-            // mirrored byte-for-byte (`B_cost_gate.md` §3 +
-            // `00_contracts.md` §3.CC-2). The caller assembles the
-            // CC-2 seven-key `details` value (source, kind, limit,
-            // estimated_visited_nodes / examined / predicate_shape /
-            // suggested_predicates / doc_url) and hands it to this
-            // arm verbatim — this layer only owns the 4-key
-            // envelope.
-            Self::QueryTooBroad { details, .. } => Some(query_too_broad_data(details)),
-            Self::RevisionSelectorAmbiguous { selector, matches } => Some(json!({
-                "kind": "revision_selector_ambiguous",
-                "retryable": false,
-                "selector": selector,
-                "matches": matches,
-            })),
-            Self::RevisionObjectMissing { object, path } => Some(json!({
-                "kind": "revision_object_missing",
-                "retryable": false,
-                "object": object,
-                "path": path,
-                "hint": "fetch or provide the missing Git object explicitly; sqryd does not fetch implicitly",
-            })),
-            Self::RevisionSourceUnavailable { reason, path } => Some(json!({
-                "kind": "revision_source_unavailable",
-                "retryable": false,
-                "reason": reason,
-                "path": path,
-            })),
-            Self::CheckoutFilterUnsupported { filter, path } => Some(json!({
-                "kind": "checkout_filter_unsupported",
-                "retryable": false,
-                "filter": filter,
-                "path": path,
-                "hint": "use raw_git_objects mode or configure a supported explicit checkout-byte source",
-            })),
-            Self::SubmoduleUnavailable { path, gitlink_oid } => Some(json!({
-                "kind": "submodule_unavailable",
-                "retryable": false,
-                "path": path,
-                "gitlink_oid": gitlink_oid,
-            })),
-            Self::DirtySnapshotChanged { root } => Some(json!({
-                "kind": "dirty_snapshot_changed",
-                "retryable": true,
-                "root": root,
-                "hint": "retry after file writes settle",
-            })),
-            Self::ArtifactKeyMismatch {
-                artifact_id,
-                reason,
-            } => Some(json!({
-                "kind": "artifact_key_mismatch",
-                "retryable": false,
-                "artifact_id": artifact_id,
-                "reason": reason,
-            })),
-            Self::ManagedWorktreeInUse { worktree, reason } => Some(json!({
-                "kind": "managed_worktree_in_use",
-                "retryable": true,
-                "worktree": worktree,
-                "reason": reason,
-            })),
-            Self::RevisionDiskBudgetExceeded {
-                limit_bytes,
-                requested_bytes,
-                current_bytes,
-            } => Some(json!({
-                "kind": "revision_disk_budget_exceeded",
-                "retryable": false,
-                "limit_bytes": limit_bytes,
-                "requested_bytes": requested_bytes,
-                "current_bytes": current_bytes,
-            })),
-            Self::RevisionQueryRequiresExplicitSelector { reason } => Some(json!({
-                "kind": "revision_query_requires_explicit_selector",
-                "retryable": false,
-                "reason": reason,
-            })),
+            Self::QueryTooBroad { .. }
+            | Self::RevisionSelectorAmbiguous { .. }
+            | Self::RevisionObjectMissing { .. }
+            | Self::RevisionSourceUnavailable { .. }
+            | Self::CheckoutFilterUnsupported { .. }
+            | Self::SubmoduleUnavailable { .. }
+            | Self::DirtySnapshotChanged { .. }
+            | Self::ArtifactKeyMismatch { .. }
+            | Self::ManagedWorktreeInUse { .. }
+            | Self::RevisionDiskBudgetExceeded { .. }
+            | Self::RevisionQueryRequiresExplicitSelector { .. } => revision_error_data(self),
+            _ => workspace_error_data(self),
         }
+    }
+}
+
+fn workspace_error_data(err: &DaemonError) -> Option<serde_json::Value> {
+    use serde_json::json;
+    match err {
+        DaemonError::MemoryBudgetExceeded {
+            limit_bytes,
+            current_bytes,
+            reserved_bytes,
+            retained_bytes,
+            requested_bytes,
+        } => Some(json!({
+            "limit_bytes": limit_bytes,
+            "current_bytes": current_bytes,
+            "reserved_bytes": reserved_bytes,
+            "retained_bytes": retained_bytes,
+            "requested_bytes": requested_bytes,
+        })),
+        DaemonError::WorkspaceStaleExpired {
+            root,
+            age_hours,
+            cap_hours,
+            last_good_at,
+            last_error,
+        } => Some(workspace_stale_data(
+            root,
+            *age_hours,
+            *cap_hours,
+            *last_good_at,
+            last_error.as_deref(),
+        )),
+        DaemonError::WorkspaceBuildFailed { root, reason }
+        | DaemonError::WorkspaceIncompatibleGraph { root, reason } => Some(json!({
+                "root": root,
+                "reason": reason,
+        })),
+        DaemonError::WorkspaceEvicted { root } => Some(json!({ "root": root })),
+        DaemonError::WorkspaceNotLoaded { root } => Some(json!({
+            "root": root,
+            "hint": "use daemon/load to load the workspace before calling daemon/rebuild",
+        })),
+        DaemonError::ToolTimeout { deadline_ms, .. } => Some(tool_timeout_data(*deadline_ms)),
+        DaemonError::InvalidArgument { reason } => Some(json!({
+            "kind": "validation_error",
+            "retryable": false,
+            "retry_after_ms": serde_json::Value::Null,
+            "details": {
+                "reason": reason,
+            },
+        })),
+        DaemonError::RpcErrorPreserved(rpc) => Some(rpc_error_data(rpc)),
+        DaemonError::Internal(_) => Some(json!({
+            "kind": "internal",
+            "retryable": false,
+            "retry_after_ms": serde_json::Value::Null,
+            "details": serde_json::Value::Null,
+        })),
+        DaemonError::WorkspaceOversize {
+            root,
+            measured_bytes,
+            limit_bytes,
+            current_loaded_bytes,
+        } => Some(json!({
+            "root": root,
+            "measured_bytes": measured_bytes,
+            "limit_bytes": limit_bytes,
+            "current_loaded_bytes": current_loaded_bytes,
+        })),
+        DaemonError::WorkspacePinned { root } => Some(json!({
+            "root": root,
+            "hint": "pass force=true to reset a pinned workspace",
+        })),
+        DaemonError::ResetWhileLoading { root } => Some(json!({
+            "root": root,
+            "hint": "wait for the load to settle, then retry",
+        })),
+        DaemonError::ResetCancellationDispatched {
+            root,
+            retry_after_ms,
+        } => Some(json!({
+            "root": root,
+            "retry_after_ms": retry_after_ms,
+        })),
+        DaemonError::SocketSetup { path, reason } => Some(json!({
+            "path": path,
+            "reason": reason,
+        })),
+        _ => None,
+    }
+}
+
+fn revision_error_data(err: &DaemonError) -> Option<serde_json::Value> {
+    use serde_json::json;
+    match err {
+        DaemonError::QueryTooBroad { details, .. } => Some(query_too_broad_data(details)),
+        DaemonError::RevisionSelectorAmbiguous { selector, matches } => Some(json!({
+            "kind": "revision_selector_ambiguous",
+            "retryable": false,
+            "selector": selector,
+            "matches": matches,
+        })),
+        DaemonError::RevisionObjectMissing { object, path } => Some(json!({
+            "kind": "revision_object_missing",
+            "retryable": false,
+            "object": object,
+            "path": path,
+            "hint": "fetch or provide the missing Git object explicitly; sqryd does not fetch implicitly",
+        })),
+        DaemonError::RevisionSourceUnavailable { reason, path } => Some(json!({
+            "kind": "revision_source_unavailable",
+            "retryable": false,
+            "reason": reason,
+            "path": path,
+        })),
+        DaemonError::CheckoutFilterUnsupported { filter, path } => Some(json!({
+            "kind": "checkout_filter_unsupported",
+            "retryable": false,
+            "filter": filter,
+            "path": path,
+            "hint": "use raw_git_objects mode or configure a supported explicit checkout-byte source",
+        })),
+        DaemonError::SubmoduleUnavailable { path, gitlink_oid } => Some(json!({
+            "kind": "submodule_unavailable",
+            "retryable": false,
+            "path": path,
+            "gitlink_oid": gitlink_oid,
+        })),
+        DaemonError::DirtySnapshotChanged { root } => Some(json!({
+            "kind": "dirty_snapshot_changed",
+            "retryable": true,
+            "root": root,
+            "hint": "retry after file writes settle",
+        })),
+        DaemonError::ArtifactKeyMismatch {
+            artifact_id,
+            reason,
+        } => Some(json!({
+            "kind": "artifact_key_mismatch",
+            "retryable": false,
+            "artifact_id": artifact_id,
+            "reason": reason,
+        })),
+        DaemonError::ManagedWorktreeInUse { worktree, reason } => Some(json!({
+            "kind": "managed_worktree_in_use",
+            "retryable": true,
+            "worktree": worktree,
+            "reason": reason,
+        })),
+        DaemonError::RevisionDiskBudgetExceeded {
+            limit_bytes,
+            requested_bytes,
+            current_bytes,
+        } => Some(json!({
+            "kind": "revision_disk_budget_exceeded",
+            "retryable": false,
+            "limit_bytes": limit_bytes,
+            "requested_bytes": requested_bytes,
+            "current_bytes": current_bytes,
+        })),
+        DaemonError::RevisionQueryRequiresExplicitSelector { reason } => Some(json!({
+            "kind": "revision_query_requires_explicit_selector",
+            "retryable": false,
+            "reason": reason,
+        })),
+        _ => None,
     }
 }
 

@@ -364,29 +364,10 @@ fn try_daemon_search(
     verbose: bool,
 ) -> Result<Option<sqry_daemon_protocol::SearchResult>> {
     let requires_daemon = revision.is_some();
-    // Resolve socket path. Missing/malformed config is treated as
-    // "daemon unavailable" — fall through without diagnostic.
-    let socket_path = sqry_daemon::config::DaemonConfig::load()
-        .ok()
-        .map(|c| c.socket_path());
-    let Some(socket_path) = socket_path else {
-        if requires_daemon {
-            anyhow::bail!("revision search requires a running sqry daemon configuration");
-        }
+    let Some(socket_path) = daemon_socket_path(requires_daemon)? else {
         return Ok(None);
     };
-
-    // Spin a current-thread tokio runtime for the async client. The runtime
-    // is dropped before this function returns, so its bookkeeping never
-    // outlives the search call.
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .ok();
-    let Some(rt) = rt else {
-        if requires_daemon {
-            anyhow::bail!("revision search could not create a tokio runtime");
-        }
+    let Some(rt) = daemon_search_runtime(requires_daemon)? else {
         return Ok(None);
     };
 
@@ -399,25 +380,11 @@ fn try_daemon_search(
             &format!("attaching to daemon at {}", socket_path.display()),
         );
 
-        // 250ms budget for connect + hello-handshake per DAG spec 3.2.3.
-        // A wedged or absent daemon must never block the user search.
-        let probe = Duration::from_millis(250);
-        let Ok(mut client) =
-            sqry_daemon_client::DaemonClient::connect_with_timeouts(&socket_path, probe, probe)
-                .await
+        let Some(mut client) = connect_daemon_search_client(&socket_path, requires_daemon).await?
         else {
-            if requires_daemon {
-                anyhow::bail!(
-                    "revision search requires sqryd at {}",
-                    socket_path.display()
-                );
-            }
             return Ok(None);
         };
 
-        // Workspace-Loaded gate. Forcing the daemon to load synchronously
-        // would defeat the latency goal — verify state via `daemon/status`
-        // and fall through if not yet loaded.
         let status_val =
             match tokio::time::timeout(DAEMON_SEARCH_RPC_TIMEOUT, client.status()).await {
                 Ok(Ok(status)) => status,
@@ -497,6 +464,46 @@ fn try_daemon_search(
 
         Ok(Some(envelope.result))
     })
+}
+
+fn daemon_socket_path(requires_daemon: bool) -> Result<Option<PathBuf>> {
+    let socket_path = sqry_daemon::config::DaemonConfig::load()
+        .ok()
+        .map(|c| c.socket_path());
+    if socket_path.is_none() && requires_daemon {
+        anyhow::bail!("revision search requires a running sqry daemon configuration");
+    }
+    Ok(socket_path)
+}
+
+fn daemon_search_runtime(requires_daemon: bool) -> Result<Option<tokio::runtime::Runtime>> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .ok();
+    if rt.is_none() && requires_daemon {
+        anyhow::bail!("revision search could not create a tokio runtime");
+    }
+    Ok(rt)
+}
+
+async fn connect_daemon_search_client(
+    socket_path: &Path,
+    requires_daemon: bool,
+) -> Result<Option<sqry_daemon_client::DaemonClient>> {
+    let probe = Duration::from_millis(250);
+    let Ok(client) =
+        sqry_daemon_client::DaemonClient::connect_with_timeouts(socket_path, probe, probe).await
+    else {
+        if requires_daemon {
+            anyhow::bail!(
+                "revision search requires sqryd at {}",
+                socket_path.display()
+            );
+        }
+        return Ok(None);
+    };
+    Ok(Some(client))
 }
 
 /// Convert a wire `SearchItem` into the CLI's `DisplaySymbol`, populating the
@@ -829,7 +836,7 @@ pub fn run_search(
     // skips fuzzy / JSON-stream / macro-boundary paths where the in-process
     // pipeline carries semantics the daemon does not yet replicate
     // (fuzzy-tuning knobs, streaming events, macro-metadata filtering).
-    let revision_target = revision_query_target_from_args(revision)?;
+    let revision_target = revision_query_target_from_args(revision);
     let explicit_revision = revision_target.is_some();
     if explicit_revision
         && (cli.json_stream || macro_flags.cfg_filter.is_some() || macro_flags.macro_boundaries)

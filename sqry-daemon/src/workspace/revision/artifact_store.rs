@@ -133,7 +133,7 @@ impl RevisionArtifactStore {
     pub fn publish_graph(
         &self,
         graph: &CodeGraph,
-        artifact_id: ArtifactId,
+        artifact_id: &ArtifactId,
         resolved_revision: ResolvedRevision,
         key_inputs: ArtifactKeyInputs,
         derived_bytes: Option<&[u8]>,
@@ -144,23 +144,23 @@ impl RevisionArtifactStore {
                     artifact_id: artifact_id.0.clone(),
                     reason: err.to_string(),
                 })?;
-        self.validate_manifest_identity(&manifest)?;
+        Self::validate_manifest_identity(&manifest)?;
 
         let repo_dir = self.repo_dir(&manifest.key_inputs.repo_identity_hash)?;
         fs::create_dir_all(&repo_dir).map_err(|err| DaemonError::RevisionSourceUnavailable {
             reason: format!("failed to create revision artifact repo dir: {err}"),
             path: Some(repo_dir.clone()),
         })?;
-        let _lock = ArtifactPublishLock::acquire(&repo_dir, &artifact_id)?;
+        let _lock = ArtifactPublishLock::acquire(&repo_dir, artifact_id)?;
 
         let artifact_dir =
-            self.artifact_dir(&manifest.key_inputs.repo_identity_hash, &artifact_id)?;
+            self.artifact_dir(&manifest.key_inputs.repo_identity_hash, artifact_id)?;
         let graph_path = artifact_dir.join(GRAPH_FILE_NAME);
         if artifact_dir.join(MANIFEST_FILE_NAME).exists() {
             if graph_path.exists() {
                 match self.load_manifest_for_inputs(
                     &manifest.key_inputs.repo_identity_hash,
-                    &artifact_id,
+                    artifact_id,
                     &manifest.key_inputs,
                 ) {
                     Ok(existing) => {
@@ -263,7 +263,7 @@ impl RevisionArtifactStore {
                 artifact_id: artifact_id.0.clone(),
                 reason: format!("invalid revision artifact manifest JSON: {err}"),
             })?;
-        self.validate_manifest_identity(&manifest)?;
+        Self::validate_manifest_identity(&manifest)?;
         self.validate_artifact_files(repo_identity_hash, artifact_id, &manifest)?;
         if &manifest.artifact_id != artifact_id {
             return Err(DaemonError::ArtifactKeyMismatch {
@@ -350,7 +350,7 @@ impl RevisionArtifactStore {
             if validate_safe_component(&repo_identity_hash, "repo_identity_hash").is_err() {
                 continue;
             }
-            self.inventory_repo(&repo_identity_hash, &repo_path, &mut entries)?;
+            Self::inventory_repo(&repo_identity_hash, &repo_path, &mut entries)?;
         }
         entries.sort_by(|left, right| {
             left.repo_identity_hash
@@ -399,7 +399,6 @@ impl RevisionArtifactStore {
     }
 
     fn inventory_repo(
-        &self,
         repo_identity_hash: &str,
         repo_path: &Path,
         entries: &mut Vec<ArtifactInventoryEntry>,
@@ -442,10 +441,7 @@ impl RevisionArtifactStore {
         Ok(())
     }
 
-    fn validate_manifest_identity(
-        &self,
-        manifest: &RevisionArtifactManifest,
-    ) -> Result<(), DaemonError> {
+    fn validate_manifest_identity(manifest: &RevisionArtifactManifest) -> Result<(), DaemonError> {
         let computed_id =
             manifest
                 .key_inputs
@@ -719,7 +715,7 @@ mod tests {
         let result = store
             .publish_graph(
                 &CodeGraph::new(),
-                artifact_id.clone(),
+                &artifact_id,
                 resolved_revision(),
                 inputs.clone(),
                 Some(b"derived bytes"),
@@ -752,7 +748,7 @@ mod tests {
         let published = store
             .publish_graph(
                 &CodeGraph::new(),
-                artifact_id.clone(),
+                &artifact_id,
                 resolved_revision(),
                 inputs.clone(),
                 None,
@@ -776,7 +772,7 @@ mod tests {
         let published = store
             .publish_graph(
                 &CodeGraph::new(),
-                artifact_id.clone(),
+                &artifact_id,
                 resolved_revision(),
                 inputs.clone(),
                 None,
@@ -787,7 +783,7 @@ mod tests {
         let republished = store
             .publish_graph(
                 &CodeGraph::new(),
-                artifact_id,
+                &artifact_id,
                 resolved_revision(),
                 inputs,
                 Some(b"healed derived"),
@@ -814,7 +810,7 @@ mod tests {
         store
             .publish_graph(
                 &CodeGraph::new(),
-                artifact_id.clone(),
+                &artifact_id,
                 resolved_revision(),
                 inputs.clone(),
                 None,
@@ -839,7 +835,7 @@ mod tests {
         store
             .publish_graph(
                 &CodeGraph::new(),
-                artifact_id.clone(),
+                &artifact_id,
                 resolved_revision(),
                 inputs.clone(),
                 None,
@@ -863,7 +859,7 @@ mod tests {
         let first = store
             .publish_graph(
                 &CodeGraph::new(),
-                artifact_id.clone(),
+                &artifact_id,
                 resolved_revision(),
                 inputs.clone(),
                 None,
@@ -874,7 +870,7 @@ mod tests {
         let second = store
             .publish_graph(
                 &CodeGraph::new(),
-                artifact_id,
+                &artifact_id,
                 resolved_revision(),
                 inputs,
                 Some(b"new derived"),
@@ -904,7 +900,7 @@ mod tests {
         let result = store
             .publish_graph(
                 &CodeGraph::new(),
-                artifact_id,
+                &artifact_id,
                 resolved_revision(),
                 inputs,
                 None,
@@ -934,7 +930,7 @@ mod tests {
         let result = store
             .publish_graph(
                 &CodeGraph::new(),
-                artifact_id,
+                &artifact_id,
                 resolved_revision(),
                 inputs,
                 None,
@@ -959,7 +955,7 @@ mod tests {
         store
             .publish_graph(
                 &CodeGraph::new(),
-                artifact_id,
+                &artifact_id,
                 resolved_revision(),
                 inputs,
                 None,

@@ -66,7 +66,7 @@ pub use pagination::{decode_cursor, encode_cursor};
 pub use mcp_config::McpConfig;
 
 /// Initialize the process-global MCP payload caches (engine, discovery,
-/// trace_path, subgraph) from `config`.
+/// `trace_path`, `subgraph`) from `config`.
 ///
 /// Any host that serves the workspace-resolved MCP tools through this
 /// crate's `daemon_adapter` / engine paths MUST call this once before the
@@ -75,12 +75,17 @@ pub use mcp_config::McpConfig;
 /// target, so it must call this helper (otherwise `trace_path` / `subgraph`
 /// panic with "telemetry not initialized" and engine-backed tools fail with
 /// "Engine cache not initialized", which is exactly the gap that left
-/// daemon-hosted trace_path/subgraph crashing the daemon).
+/// daemon-hosted `trace_path`/`subgraph` crashing the daemon).
 ///
 /// The four `OnceLock`-backed inits are idempotent, so a repeat call is a
 /// harmless no-op. Capacities come from `config`; the TTL is the fixed
 /// `execution::graph_cache::CACHE_TTL_SECS`. Keeping all four in one place
 /// stops the daemon host from drifting out of sync when a cache is added.
+///
+/// # Errors
+///
+/// Returns an error if any cache initialization routine rejects the supplied
+/// configuration.
 pub fn init_mcp_caches(config: &McpConfig) -> anyhow::Result<()> {
     use std::num::NonZeroUsize;
     use std::time::Duration;
@@ -151,6 +156,7 @@ pub mod tool_args {
         SemanticDiffArgs, SemanticDiffFilters, SemanticSearchArgs, ShowDependenciesArgs,
         SqryQueryParams, SubgraphArgs, TracePathArgs, UnusedScope, WorkspaceStatusArgs,
     };
+    pub type SemanticSearchRevisionArgs = crate::tools::validation::SemanticSearchRevisionArgs;
 }
 
 /// Re-export the relation-family + analysis-family + trace-family execute

@@ -121,16 +121,63 @@ pub struct GitWorktreeEntry {
     pub head: Option<String>,
     /// Full ref name such as `refs/heads/main`, if attached.
     pub branch: Option<String>,
-    /// Whether the worktree is detached.
-    pub detached: bool,
-    /// Whether Git marks this entry as bare.
-    pub bare: bool,
-    /// Whether Git marks this worktree as locked.
-    pub locked: bool,
+    /// Parsed worktree state flags.
+    pub flags: GitWorktreeFlags,
     /// Optional lock reason.
     pub lock_reason: Option<String>,
-    /// Whether Git marks this worktree as prunable.
-    pub prunable: bool,
+}
+
+/// Compact flags reported by `git worktree list --porcelain`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GitWorktreeFlags {
+    bits: u8,
+}
+
+impl GitWorktreeFlags {
+    const DETACHED: u8 = 1 << 0;
+    const BARE: u8 = 1 << 1;
+    const LOCKED: u8 = 1 << 2;
+    const PRUNABLE: u8 = 1 << 3;
+
+    fn set_detached(&mut self) {
+        self.bits |= Self::DETACHED;
+    }
+
+    fn set_bare(&mut self) {
+        self.bits |= Self::BARE;
+    }
+
+    fn set_locked(&mut self) {
+        self.bits |= Self::LOCKED;
+    }
+
+    fn set_prunable(&mut self) {
+        self.bits |= Self::PRUNABLE;
+    }
+
+    /// Returns true when Git reports a detached worktree.
+    #[must_use]
+    pub const fn is_detached(self) -> bool {
+        self.bits & Self::DETACHED != 0
+    }
+
+    /// Returns true when Git reports a bare worktree.
+    #[must_use]
+    pub const fn is_bare(self) -> bool {
+        self.bits & Self::BARE != 0
+    }
+
+    /// Returns true when Git reports a locked worktree.
+    #[must_use]
+    pub const fn is_locked(self) -> bool {
+        self.bits & Self::LOCKED != 0
+    }
+
+    /// Returns true when Git reports a prunable worktree.
+    #[must_use]
+    pub const fn is_prunable(self) -> bool {
+        self.bits & Self::PRUNABLE != 0
+    }
 }
 
 impl GitWorktreeEntry {
@@ -139,12 +186,21 @@ impl GitWorktreeEntry {
             path,
             head: None,
             branch: None,
-            detached: false,
-            bare: false,
-            locked: false,
+            flags: GitWorktreeFlags::default(),
             lock_reason: None,
-            prunable: false,
         }
+    }
+
+    /// Returns true when Git reports this worktree as locked.
+    #[must_use]
+    pub const fn is_locked(&self) -> bool {
+        self.flags.is_locked()
+    }
+
+    /// Returns true when Git reports this worktree as prunable.
+    #[must_use]
+    pub const fn is_prunable(&self) -> bool {
+        self.flags.is_prunable()
     }
 }
 
@@ -262,10 +318,7 @@ impl ManagedWorktreeRegistry {
                 reason: "managed worktree path already exists".to_owned(),
             });
         }
-        let parent = path
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| self.root());
+        let parent = path.parent().map_or_else(|| self.root(), Path::to_path_buf);
         fs::create_dir_all(&parent).map_err(|err| DaemonError::RevisionSourceUnavailable {
             reason: format!("failed to create managed worktree parent: {err}"),
             path: Some(parent),
@@ -692,16 +745,16 @@ fn parse_worktree_porcelain_z(bytes: &[u8]) -> Vec<GitWorktreeEntry> {
             } else if let Some(branch) = line.strip_prefix("branch ") {
                 entry.branch = Some(branch.to_owned());
             } else if line == "detached" {
-                entry.detached = true;
+                entry.flags.set_detached();
             } else if line == "bare" {
-                entry.bare = true;
+                entry.flags.set_bare();
             } else if let Some(reason) = line.strip_prefix("locked ") {
-                entry.locked = true;
+                entry.flags.set_locked();
                 entry.lock_reason = Some(reason.to_owned());
             } else if line == "locked" {
-                entry.locked = true;
+                entry.flags.set_locked();
             } else if line.starts_with("prunable") {
-                entry.prunable = true;
+                entry.flags.set_prunable();
             }
         }
     }
@@ -759,10 +812,10 @@ mod tests {
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].path, PathBuf::from("/repo"));
         assert_eq!(entries[0].branch.as_deref(), Some("refs/heads/main"));
-        assert!(entries[1].detached);
-        assert!(entries[1].locked);
+        assert!(entries[1].flags.is_detached());
+        assert!(entries[1].is_locked());
         assert_eq!(entries[1].lock_reason.as_deref(), Some("sqry reason"));
-        assert!(entries[1].prunable);
+        assert!(entries[1].is_prunable());
     }
 
     #[test]
@@ -817,7 +870,7 @@ mod tests {
         assert!(
             entries
                 .iter()
-                .any(|entry| entry.path == record.path && entry.locked)
+                .any(|entry| entry.path == record.path && entry.is_locked())
         );
         let reconciliation = registry.reconcile(tmp.path()).unwrap();
         assert!(

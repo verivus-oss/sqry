@@ -56,6 +56,7 @@ members = [
     "sqry-plugin-registry",
     "sqry-classpath",
     "sqry-db",
+    "sqry-rules",
     "sqry-daemon",
     "sqry-daemon-client",
     "sqry-daemon-protocol",
@@ -113,6 +114,7 @@ default-members = [
     "sqry-mcp-redaction",
     "sqry-plugin-registry",
     "sqry-db",
+    "sqry-rules",
     "sqry-daemon",
     "sqry-daemon-client",
     "sqry-daemon-protocol",
@@ -127,7 +129,7 @@ exclude = [
 ]
 
 [workspace.package]
-version = "24.0.1"
+version = "25.0.2"
 edition = "2024"
 authors = ["Verivus Pty Ltd"]
 license = "MIT"

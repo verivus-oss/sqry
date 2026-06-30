@@ -975,7 +975,7 @@ impl<'db> PlanExecutor<'db> {
 }
 
 /// Default Jaccard floor for the `shape~=<symbol>` planner predicate: a candidate
-/// must agree with the probe in at least half its MinHash lanes to be reported as
+/// must agree with the probe in at least half its `MinHash` lanes to be reported as
 /// structurally similar. The MCP / CLI surfaces (U07 / U08) expose a tunable floor;
 /// the planner predicate uses this fixed, documented default.
 const SHAPE_SIMILARITY_FLOOR: f32 = 0.5;

@@ -312,7 +312,7 @@ impl NodeIdBearing for AuxiliaryIndices {
 
 impl NodeIdBearing for NodeMetadataStore {
     /// Yields the `NodeId` for every node carrying ANY metadata: the
-    /// reconstructed key of every `(index, generation)` entry, UNIONed with the
+    /// reconstructed key of every `(index, generation)` entry, unioned with the
     /// key of every node carrying only a shape descriptor.
     ///
     /// The shape-descriptor union is load-bearing for the tombstone-residue

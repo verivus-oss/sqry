@@ -465,6 +465,11 @@ fn run() -> Result<()> {
                 .context("Plan-query command failed")?;
         }
 
+        // Declarative rule-layer execution (P5 L5)
+        Some(Command::Rules { action }) => {
+            commands::run_rules(&cli, action).context("Rules command failed")?;
+        }
+
         // T3.7 Cluster G-ext: context-propagation analysis CLI surface.
         Some(Command::ContextPropagation {
             path,

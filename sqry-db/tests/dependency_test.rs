@@ -98,3 +98,26 @@ fn sequential_guards_are_isolated() {
         assert_eq!(deps[0].0, FileId::new(2));
     }
 }
+
+#[test]
+fn nested_finished_guards_propagate_deps_to_parent_scope() {
+    let mut store = FileInputStore::new();
+    store.insert(FileId::new(1), FileInput::new(Default::default()));
+    store.insert(FileId::new(2), FileInput::new(Default::default()));
+
+    let outer = DependencyRecorderGuard::new();
+    record_file_dep(FileId::new(1));
+
+    {
+        let inner = DependencyRecorderGuard::new();
+        record_file_dep(FileId::new(2));
+        let inner_deps = inner.finish(&store);
+        assert_eq!(inner_deps.as_slice(), &[(FileId::new(2), 1)]);
+    }
+
+    let outer_deps = outer.finish(&store);
+    assert_eq!(
+        outer_deps.as_slice(),
+        &[(FileId::new(1), 1), (FileId::new(2), 1)]
+    );
+}

@@ -201,7 +201,7 @@ impl ShapeMapping for CSharpShapeMapping {
             .flatten()
     }
 
-    fn signature_shape(&self, fn_node: Node, _src: &[u8]) -> SignatureShape {
+    fn signature_shape(&self, fn_node: Node, src: &[u8]) -> SignatureShape {
         let mut shape = SignatureShape::default();
         // A `method_declaration` exposes its parameters through the `parameters`
         // field (a `parameter_list`), holding `parameter` children. The `type` and
@@ -225,7 +225,7 @@ impl ShapeMapping for CSharpShapeMapping {
                     match part.kind() {
                         "attribute_list" => {}
                         "modifier" => {
-                            if part.utf8_text(_src).map(str::trim) == Ok("params") {
+                            if part.utf8_text(src).map(str::trim) == Ok("params") {
                                 shape.has_varargs = true;
                             }
                         }

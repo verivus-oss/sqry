@@ -575,7 +575,7 @@ impl GraphBuilder for RustGraphBuilder {
 /// single array index per node instead of a grammar string lookup. The table is
 /// built once from the tree-sitter-rust grammar and shared process-wide via
 /// [`rust_shape_mapping`]. Everything except this mapping (the subtree walk,
-/// histogram counting, shingling, WL relabel, MinHash, shape_hash) is the one
+/// histogram counting, shingling, WL relabel, `MinHash`, `shape_hash`) is the one
 /// shared `compute_shape_descriptor` routine in sqry-core.
 pub struct RustShapeMapping {
     /// `cf_by_kind_id[id]` is the canonical control-flow bucket for grammar

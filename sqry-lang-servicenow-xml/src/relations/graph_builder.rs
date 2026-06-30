@@ -136,9 +136,9 @@ impl GraphBuilder for ServiceNowXmlGraphBuilder {
     }
 }
 
-/// Per-language [`ShapeMapping`] for ServiceNow XML update-set records.
+/// Per-language [`ShapeMapping`] for `ServiceNow` XML update-set records.
 ///
-/// This plugin is declarative: it extracts ServiceNow record metadata and table
+/// This plugin is declarative: it extracts `ServiceNow` record metadata and table
 /// schemas from XML, and delegates any embedded server-side script to the
 /// ServiceNow-Xanadu (JavaScript) builder. The XML plugin itself emits no
 /// `NodeKind::Function`/`Method` whose span resolves inside its own (HTML) parse
@@ -196,7 +196,7 @@ fn cf_bucket_for_xml_kind(_name: &str) -> Option<CfBucket> {
     None
 }
 
-/// The process-wide ServiceNow XML shape mapping, built once on first use.
+/// The process-wide `ServiceNow` XML shape mapping, built once on first use.
 #[must_use]
 pub fn servicenow_xml_shape_mapping() -> &'static ServiceNowXmlShapeMapping {
     static MAPPING: OnceLock<ServiceNowXmlShapeMapping> = OnceLock::new();

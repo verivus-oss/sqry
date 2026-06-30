@@ -13,12 +13,7 @@ pub(crate) fn handle_list(ctx: &HandlerContext, params: Value) -> Result<Value, 
         Value::Null => ListRevisionsRequest::default(),
         other => serde_json::from_value(other).map_err(MethodError::InvalidParams)?,
     };
-    let root = req
-        .root
-        .as_deref()
-        .map(canonical_or_original)
-        .transpose()
-        .map_err(MethodError::Daemon)?;
+    let root = req.root.as_deref().map(canonical_or_original);
     let result = ListRevisionsResult {
         revisions: ctx
             .manager
@@ -48,6 +43,6 @@ pub(crate) fn handle_status(ctx: &HandlerContext, params: Value) -> Result<Value
         .map_err(|err| MethodError::Internal(anyhow::Error::new(err)))
 }
 
-fn canonical_or_original(path: &Path) -> Result<std::path::PathBuf, crate::error::DaemonError> {
-    Ok(path.canonicalize().unwrap_or_else(|_| path.to_path_buf()))
+fn canonical_or_original(path: &Path) -> std::path::PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }

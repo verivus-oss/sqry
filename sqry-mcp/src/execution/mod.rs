@@ -54,6 +54,7 @@ pub use tools::{
     // Index tools
     execute_rebuild_index,
     execute_relation_query,
+    execute_rules_run,
     execute_semantic_diff,
     execute_semantic_search,
     execute_sqry_query,

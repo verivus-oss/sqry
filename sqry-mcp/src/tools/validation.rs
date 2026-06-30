@@ -64,13 +64,32 @@ pub struct SemanticSearchArgs {
     /// it as a `Predicate::ResolvedViaEq` AND filter on the parsed plan.
     /// `None` means no resolved-via filter is applied (back-compat default).
     pub resolved_via: Option<Vec<ResolvedVia>>,
-    pub revision_id: Option<String>,
-    pub revision_ref: Option<String>,
-    pub revision_commit: Option<String>,
-    pub revision_tree: Option<String>,
-    pub revision_dirty: bool,
-    pub revision_include_untracked: bool,
-    pub revision_include_ignored: bool,
+    pub revision: SemanticSearchRevisionArgs,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SemanticSearchRevisionArgs {
+    pub id: Option<String>,
+    pub git_ref: Option<String>,
+    pub commit: Option<String>,
+    pub tree: Option<String>,
+    pub dirty: bool,
+    pub include_untracked: bool,
+    pub include_ignored: bool,
+}
+
+impl From<crate::tools::params::SemanticSearchRevisionParams> for SemanticSearchRevisionArgs {
+    fn from(params: crate::tools::params::SemanticSearchRevisionParams) -> Self {
+        Self {
+            id: params.id,
+            git_ref: params.git_ref,
+            commit: params.commit,
+            tree: params.tree,
+            dirty: params.dirty,
+            include_untracked: params.include_untracked,
+            include_ignored: params.include_ignored,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -314,7 +333,7 @@ pub struct StructuralSimilarArgs {
     /// Optional file to disambiguate the probe symbol.
     pub file_path: Option<String>,
     pub symbol_name: String,
-    /// Minimum MinHash Jaccard floor (0.0–1.0).
+    /// Minimum `MinHash` Jaccard floor (0.0–1.0).
     pub similarity_threshold: f64,
     pub max_results: usize,
 }
@@ -492,34 +511,36 @@ pub fn validate_semantic_search_args(args: &Value) -> Result<SemanticSearchArgs>
         // populate these from the params struct.
         framework: None,
         resolved_via: None,
-        revision_id: args
-            .get("revision_id")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned),
-        revision_ref: args
-            .get("revision_ref")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned),
-        revision_commit: args
-            .get("revision_commit")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned),
-        revision_tree: args
-            .get("revision_tree")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned),
-        revision_dirty: args
-            .get("revision_dirty")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false),
-        revision_include_untracked: args
-            .get("revision_include_untracked")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false),
-        revision_include_ignored: args
-            .get("revision_include_ignored")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false),
+        revision: SemanticSearchRevisionArgs {
+            id: args
+                .get("revision_id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned),
+            git_ref: args
+                .get("revision_ref")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned),
+            commit: args
+                .get("revision_commit")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned),
+            tree: args
+                .get("revision_tree")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned),
+            dirty: args
+                .get("revision_dirty")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+            include_untracked: args
+                .get("revision_include_untracked")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+            include_ignored: args
+                .get("revision_include_ignored")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+        },
     })
 }
 

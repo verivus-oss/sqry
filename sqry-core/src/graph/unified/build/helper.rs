@@ -44,7 +44,8 @@ use std::path::Path;
 use super::super::edge::kind::{LifetimeConstraintKind, MacroExpansionKind, TypeOfContext};
 use super::super::resolution::canonicalize_graph_qualified_name;
 use super::staging::{
-    CIndirectStagingPayload, PendingBinding, PendingIndirectCallsite, StagingGraph,
+    CIndirectStagingPayload, NodeMetadataFlag, NodeMetadataUpdate, PendingBinding,
+    PendingIndirectCallsite, StagingGraph,
 };
 use crate::graph::node::{Language, Span};
 use crate::graph::unified::edge::kind::{
@@ -972,10 +973,8 @@ impl<'a> GraphBuildHelper<'a> {
     /// converges to true, which is correct (a symbol declared in the workspace
     /// IS a definition regardless of also being referenced).
     pub fn mark_definition(&mut self, node_id: NodeId) {
-        // Neutral metadata update (no span / no attribute changes); only the
-        // is_definition = true bit is OR-ed in by apply_node_metadata.
-        self.staging
-            .update_node_entry(node_id, None, false, false, false, None, None, true);
+        let update = NodeMetadataUpdate::new().mark_if(NodeMetadataFlag::Definition, true);
+        self.staging.update_node_entry(node_id, &update);
     }
 
     /// Internal helper for adding nodes.
@@ -1069,16 +1068,15 @@ impl<'a> GraphBuildHelper<'a> {
         {
             let visibility_id = visibility.map(|vis| self.intern(vis));
             let signature_id = signature.map(|sig| self.intern(sig));
-            self.staging.update_node_entry(
-                id,
-                span,
-                is_async,
-                is_static,
-                is_unsafe,
-                visibility_id,
-                signature_id,
-                is_definition,
-            );
+            let update = NodeMetadataUpdate::new()
+                .with_optional_span(span)
+                .mark_if(NodeMetadataFlag::Async, is_async)
+                .mark_if(NodeMetadataFlag::Static, is_static)
+                .mark_if(NodeMetadataFlag::Unsafe, is_unsafe)
+                .mark_if(NodeMetadataFlag::Definition, is_definition)
+                .with_optional_visibility(visibility_id)
+                .with_optional_signature(signature_id);
+            self.staging.update_node_entry(id, &update);
             return id;
         }
 
@@ -1159,16 +1157,15 @@ impl<'a> GraphBuildHelper<'a> {
         if let Some(&id) = self.node_cache.get(&(name.to_string(), kind)) {
             let visibility_id = visibility.map(|vis| self.intern(vis));
             let signature_id = signature.map(|sig| self.intern(sig));
-            self.staging.update_node_entry(
-                id,
-                span,
-                is_async,
-                is_static,
-                is_unsafe,
-                visibility_id,
-                signature_id,
-                is_definition,
-            );
+            let update = NodeMetadataUpdate::new()
+                .with_optional_span(span)
+                .mark_if(NodeMetadataFlag::Async, is_async)
+                .mark_if(NodeMetadataFlag::Static, is_static)
+                .mark_if(NodeMetadataFlag::Unsafe, is_unsafe)
+                .mark_if(NodeMetadataFlag::Definition, is_definition)
+                .with_optional_visibility(visibility_id)
+                .with_optional_signature(signature_id);
+            self.staging.update_node_entry(id, &update);
             return id;
         }
 

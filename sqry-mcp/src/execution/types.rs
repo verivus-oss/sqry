@@ -515,12 +515,12 @@ pub struct StructuralNeighborData {
     /// True when the neighbour's `shape_hash` is byte-identical to the probe's
     /// (a rename/relocate-invariant exact structural match).
     pub shape_hash_exact: bool,
-    /// Approximate MinHash Jaccard similarity (0.0–1.0).
+    /// Approximate `MinHash` Jaccard similarity (0.0–1.0).
     pub jaccard: f64,
 }
 
 /// `structural_similar` result: a probe plus its identifier-blind structural
-/// neighbours, ranked exact-first then by MinHash similarity.
+/// neighbours, ranked exact-first then by `MinHash` similarity.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StructuralSimilarData {
@@ -935,6 +935,60 @@ pub struct ListSymbolsData {
 pub struct ReindexRequiredData {
     /// Human-readable reason for the soft result.
     pub reason: String,
+}
+
+/// Response data for the `rules_run` tool (P5U10, declarative rule layer).
+///
+/// One [`RulesRunResultData`] per rule in the loaded pack. The nested
+/// [`sqry_rules::engine::RuleOutput`] and [`sqry_rules::witness::RuleWitness`]
+/// keep their own serde shape; their `RuleCitation.file_path` fields are
+/// redacted by the standard response walker (the field is in
+/// `sqry-mcp-redaction` `PATH_FIELDS`), so the tool emits no raw IR and leaks
+/// no unredacted paths.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RulesRunData {
+    /// Resolved rule-or-pack selector (echoed for traceability).
+    ///
+    /// Named `selector` rather than `source` deliberately: `source` is a
+    /// `sqry-mcp-redaction` `PATH_FIELDS` key, so a `source` field would be
+    /// rewritten by the path-redaction walker under the minimal preset and
+    /// the selector echo (e.g. `bbnty.intake`) would not survive verbatim.
+    pub selector: String,
+    /// One result per rule in the loaded pack.
+    pub results: Vec<RulesRunResultData>,
+}
+
+/// Per-rule entry in a [`RulesRunData`] response.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RulesRunResultData {
+    /// Rule identifier.
+    pub id: String,
+    /// Outcome class for this rule.
+    pub status: RulesRunStatus,
+    /// Structured rule output, present when `status` is `ok`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output: Option<sqry_rules::engine::RuleOutput>,
+    /// Execution witness, present when `status` is `ok`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub witness: Option<sqry_rules::witness::RuleWitness>,
+    /// Error or unsupported-route message, present when `status` is not `ok`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Outcome class for a single rule in a `rules_run` response.
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RulesRunStatus {
+    /// Rule executed and produced output plus a witness.
+    Ok,
+    /// Rule requires a beside-cache / coordinator-only route not available on
+    /// this surface yet (mirrors the P5U09 CLI handling).
+    Unsupported,
+    /// Rule execution returned a typed error.
+    Error,
 }
 
 /// Aggregate counts for `list_symbols` summary mode (issue #394). Computed over

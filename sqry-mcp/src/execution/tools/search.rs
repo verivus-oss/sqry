@@ -186,13 +186,13 @@ pub fn execute_semantic_search(
 }
 
 pub(crate) fn has_revision_selector(args: &SemanticSearchArgs) -> bool {
-    args.revision_id.is_some()
-        || args.revision_ref.is_some()
-        || args.revision_commit.is_some()
-        || args.revision_tree.is_some()
-        || args.revision_dirty
-        || args.revision_include_untracked
-        || args.revision_include_ignored
+    args.revision.id.is_some()
+        || args.revision.git_ref.is_some()
+        || args.revision.commit.is_some()
+        || args.revision.tree.is_some()
+        || args.revision.dirty
+        || args.revision.include_untracked
+        || args.revision.include_ignored
 }
 
 pub(crate) mod inner {
@@ -638,7 +638,7 @@ pub fn execute_find_similar(args: &SearchSimilarArgs) -> Result<ToolExecution<Fi
 /// Resolves the probe to a Function/Method carrying a shape descriptor, then
 /// routes through the sqry-db `StructuralNeighborsQuery` LSH index (NOT a
 /// hand-rolled traversal) via the shared `structural_neighbors` helper. Each
-/// match reports the AC-4 two numbers: exact `shape_hash` identity + MinHash
+/// match reports the AC-4 two numbers: exact `shape_hash` identity + `MinHash`
 /// Jaccard. Distinct from the name-based `search_similar`.
 ///
 /// # Errors

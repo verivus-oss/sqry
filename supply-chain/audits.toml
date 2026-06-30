@@ -1,6 +1,12 @@
 
 # cargo-vet audits file
 
+[[audits.indicatif]]
+who = "Werner Kasselman <werner@sqry.dev>"
+criteria = "safe-to-deploy"
+delta = "0.18.4 -> 0.18.5"
+notes = "Reviewed 0.18.4 to 0.18.5 patch diff: terminal rendering/wrapping fixes including CJK width handling, MSRV metadata bump, example cleanup, and dev-dependency updates; no build scripts, new runtime dependencies, network/file-system side effects, or unsafe code introduced."
+
 [[audits.tree-sitter-kotlin]]
 who = "Werner Kasselman <werner@sqry.dev>"
 criteria = "safe-to-deploy"

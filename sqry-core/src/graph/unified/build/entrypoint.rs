@@ -2229,7 +2229,7 @@ pub(super) fn parse_file(path: &Path, plugins: &PluginManager) -> Result<ParsedF
     let shape_ctx = builder
         .shape_mapping()
         .map(|mapping| super::staging::ShapeAttachCtx::new(&tree, parse_content, mapping));
-    staging.attach_body_hashes(raw_content, shape_ctx);
+    staging.attach_body_hashes(raw_content, shape_ctx.as_ref());
 
     Ok(ParsedFileOutcome::Parsed(ParsedFile {
         language: builder.language(),

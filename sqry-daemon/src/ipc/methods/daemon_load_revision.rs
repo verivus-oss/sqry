@@ -37,7 +37,7 @@ pub(crate) async fn handle_load(ctx: &HandlerContext, params: Value) -> Result<V
     let builder = Arc::clone(&ctx.workspace_builder);
 
     let handle = tokio::task::spawn_blocking(move || {
-        load_revision_sync(&manager, builder, &config, root, req)
+        load_revision_sync(&manager, &builder, &config, root, req)
     })
     .await
     .map_err(MethodError::JoinError)??;
@@ -143,7 +143,7 @@ pub(crate) fn resolve_query_target(
 
 fn load_revision_sync(
     manager: &crate::workspace::WorkspaceManager,
-    builder: Arc<dyn WorkspaceBuilder>,
+    builder: &Arc<dyn WorkspaceBuilder>,
     config: &crate::config::DaemonConfig,
     root: PathBuf,
     req: LoadRevisionRequest,
@@ -195,7 +195,7 @@ fn load_revision_sync(
             config,
             root,
             req.selector,
-            SnapshotKind::Dirty {
+            &SnapshotKind::Dirty {
                 include_untracked,
                 include_ignored,
             },
@@ -214,7 +214,7 @@ fn load_revision_sync(
                 config,
                 worktree_root,
                 req.selector,
-                SnapshotKind::Worktree { worktree_id },
+                &SnapshotKind::Worktree { worktree_id },
                 req.source_byte_mode,
                 req.pin,
             )
@@ -224,7 +224,7 @@ fn load_revision_sync(
 
 fn load_immutable_revision(
     manager: &crate::workspace::WorkspaceManager,
-    builder: Arc<dyn WorkspaceBuilder>,
+    builder: &Arc<dyn WorkspaceBuilder>,
     config: &crate::config::DaemonConfig,
     root: PathBuf,
     selector: RevisionSelector,
@@ -239,7 +239,7 @@ fn load_immutable_revision(
             path: Some(root),
         });
     }
-    let identity = LocalRepositoryIdentity::discover(&root).map_err(identity_error)?;
+    let identity = LocalRepositoryIdentity::discover(&root).map_err(|err| identity_error(&err))?;
     let resolved = ResolvedRevision {
         selector,
         repository: identity.to_wire(),
@@ -284,7 +284,7 @@ fn load_immutable_revision(
         pinned,
     };
     let store = RevisionArtifactStore::new(RevisionArtifactStore::default_cache_root());
-    manager.load_resident_revision(load, || {
+    manager.load_resident_revision(&load, || {
         if let Ok((graph, _manifest)) =
             store.load_graph_for_inputs(&identity.repo_identity_hash, &artifact_id, &key_inputs)
         {
@@ -292,7 +292,7 @@ fn load_immutable_revision(
         }
         let source = RawGitSource::open(RawGitSourceOptions::new(&root, &object.tree_oid))?;
         let graph = builder.build_virtual_source(&source)?;
-        store.publish_graph(&graph, artifact_id.clone(), resolved, key_inputs, None)?;
+        store.publish_graph(&graph, &artifact_id, resolved, key_inputs, None)?;
         let mut protected = manager.pinned_revision_artifact_ids();
         protected.push(artifact_id.clone());
         if let Err(err) = enforce_disk_budgets(
@@ -309,11 +309,11 @@ fn load_immutable_revision(
 
 fn load_snapshot_revision(
     manager: &crate::workspace::WorkspaceManager,
-    builder: Arc<dyn WorkspaceBuilder>,
+    builder: &Arc<dyn WorkspaceBuilder>,
     config: &crate::config::DaemonConfig,
     root: PathBuf,
     selector: RevisionSelector,
-    snapshot_kind: SnapshotKind,
+    snapshot_kind: &SnapshotKind,
     requested_mode: Option<SourceByteMode>,
     pinned: bool,
 ) -> Result<Arc<crate::workspace::ResidentRevisionHandle>, DaemonError> {
@@ -324,21 +324,21 @@ fn load_snapshot_revision(
             path: Some(root),
         });
     }
-    let identity = LocalRepositoryIdentity::discover(&root).map_err(identity_error)?;
+    let identity = LocalRepositoryIdentity::discover(&root).map_err(|err| identity_error(&err))?;
     let mut options = DirtySnapshotOptions::new(&root);
     if let SnapshotKind::Dirty {
         include_untracked,
         include_ignored,
     } = snapshot_kind
     {
-        options.include_untracked = include_untracked;
-        options.include_ignored = include_ignored;
+        options.include_untracked = *include_untracked;
+        options.include_ignored = *include_ignored;
     }
     let source = DirtySnapshotSource::capture(&options)?;
     let fingerprint = source.fingerprint().clone();
     let source_digest = match snapshot_kind {
         SnapshotKind::Dirty { .. } => fingerprint.source_digest(),
-        SnapshotKind::Worktree { ref worktree_id } => SourceDigest::Worktree {
+        SnapshotKind::Worktree { worktree_id } => SourceDigest::Worktree {
             worktree_id: worktree_id.clone().unwrap_or_else(|| {
                 fingerprint
                     .base_head_commit_oid
@@ -381,18 +381,16 @@ fn load_snapshot_revision(
             })?
             .artifact_inputs;
     let graph = builder.build_virtual_source(&source)?;
-    manager.load_resident_revision(
-        ResidentRevisionLoad {
-            source_root: root,
-            revision_id,
-            handle_kind,
-            artifact_id,
-            artifact_inputs,
-            resolved,
-            pinned,
-        },
-        || Ok(graph),
-    )
+    let load = ResidentRevisionLoad {
+        source_root: root,
+        revision_id,
+        handle_kind,
+        artifact_id,
+        artifact_inputs,
+        resolved,
+        pinned,
+    };
+    manager.load_resident_revision(&load, || Ok(graph))
 }
 
 fn artifact_inputs(
@@ -574,7 +572,7 @@ fn git_failure_to_error(args: &[&str], root: &Path, output: &Output) -> DaemonEr
     }
 }
 
-fn identity_error(err: crate::workspace::revision::RepositoryIdentityError) -> DaemonError {
+fn identity_error(err: &crate::workspace::revision::RepositoryIdentityError) -> DaemonError {
     DaemonError::RevisionSourceUnavailable {
         reason: err.to_string(),
         path: None,

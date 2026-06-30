@@ -223,14 +223,14 @@ pub fn run_diff(
 // Structural lineage diff (U08)
 // ============================================================================
 
-/// Floor MinHash Jaccard for a near-match in structural diff mode.
+/// Floor `MinHash` Jaccard for a near-match in structural diff mode.
 const STRUCTURAL_DIFF_NEAR_FLOOR: f32 = 0.6;
 
 #[derive(Debug, serde::Serialize)]
 struct StructuralPair {
     base: String,
     target: String,
-    /// `exact` (byte-identical `shape_hash`) or `near` (MinHash only).
+    /// `exact` (byte-identical `shape_hash`) or `near` (`MinHash` only).
     match_kind: &'static str,
     /// True when the base and target qualified names differ (a rename/relocate).
     renamed: bool,
@@ -298,7 +298,7 @@ fn structural_jaccard(
 }
 
 /// Structural lineage diff: pair base functions to target functions by exact
-/// `shape_hash` first, then by MinHash near-match, reporting rename/relocate
+/// `shape_hash` first, then by `MinHash` near-match, reporting rename/relocate
 /// twins that name-based diff would miss.
 fn run_structural_diff(
     cli: &Cli,
@@ -396,19 +396,21 @@ fn run_structural_diff(
         streams.write_result(&json)?;
     } else {
         let mut text = format!("Structural lineage {base_ref} -> {target_ref}\n");
-        text.push_str(&format!(
-            "  {} paired ({} shown), {} base-only, {} target-only\n",
+        let _ = writeln!(
+            text,
+            "  {} paired ({} shown), {} base-only, {} target-only",
             output.total_pairs,
             output.pairs.len(),
             output.base_only.len(),
             output.target_only.len()
-        ));
+        );
         for p in &output.pairs {
             let tag = if p.renamed { "RENAMED" } else { "stable " };
-            text.push_str(&format!(
-                "  {tag} [{}:{:.3}] {} -> {}\n",
+            let _ = writeln!(
+                text,
+                "  {tag} [{}:{:.3}] {} -> {}",
                 p.match_kind, p.jaccard, p.base, p.target
-            ));
+            );
         }
         streams.write_result(&text)?;
     }

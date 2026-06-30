@@ -30,12 +30,12 @@
 
 pub mod params;
 #[cfg_attr(test, allow(dead_code))]
-mod validation;
+pub mod validation;
 pub mod workspace_status;
 
 pub use workspace_status::{WorkspaceStatusArgs, execute_workspace_status};
 
-pub use params::{ContextPropagationParams, SqryQueryParams};
+pub use params::{ContextPropagationParams, RulesRunParams, SqryQueryParams};
 pub use validation::{
     CallHierarchyArgs,
     CallHierarchyDirection,

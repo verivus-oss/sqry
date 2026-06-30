@@ -332,9 +332,14 @@ impl ResidentRevisionRegistry {
     ///
     /// Returns [`DaemonError`] when the graph loader fails or when a coalesced
     /// load failed in another caller.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the first caller's loading slot disappears before the load
+    /// completes. That indicates internal registry state corruption.
     pub fn load_or_coalesce<F>(
         &self,
-        load: ResidentRevisionLoad,
+        load: &ResidentRevisionLoad,
         build_graph: F,
     ) -> Result<Arc<ResidentRevisionHandle>, DaemonError>
     where
@@ -431,7 +436,7 @@ impl ResidentRevisionRegistry {
     /// handle is returned unchanged.
     pub fn register_loaded(
         &self,
-        load: ResidentRevisionLoad,
+        load: &ResidentRevisionLoad,
         graph: CodeGraph,
     ) -> Result<Arc<ResidentRevisionHandle>, DaemonError> {
         self.load_or_coalesce(load, || Ok(graph))
@@ -658,7 +663,7 @@ mod tests {
             let builds = Arc::clone(&builds);
             threads.push(thread::spawn(move || {
                 registry
-                    .load_or_coalesce(load_request("artifact-a", &format!("rev-{idx}")), || {
+                    .load_or_coalesce(&load_request("artifact-a", &format!("rev-{idx}")), || {
                         builds.fetch_add(1, Ordering::AcqRel);
                         thread::sleep(Duration::from_millis(25));
                         Ok(CodeGraph::new())
@@ -683,9 +688,7 @@ mod tests {
     fn active_query_guard_pins_until_drop() {
         let registry = ResidentRevisionRegistry::new();
         let load = load_request("artifact-a", "rev-a");
-        registry
-            .register_loaded(load.clone(), CodeGraph::new())
-            .unwrap();
+        registry.register_loaded(&load, CodeGraph::new()).unwrap();
 
         let guard = registry.acquire_query(&load.revision_id).unwrap();
         assert_eq!(guard.status().active_queries, 1);
@@ -706,9 +709,7 @@ mod tests {
         let registry = ResidentRevisionRegistry::new();
         let mut load = load_request("artifact-a", "rev-a");
         load.pinned = true;
-        registry
-            .register_loaded(load.clone(), CodeGraph::new())
-            .unwrap();
+        registry.register_loaded(&load, CodeGraph::new()).unwrap();
 
         let err = registry.unload(&load.revision_id, false).unwrap_err();
         assert!(matches!(err, DaemonError::RevisionSourceUnavailable { .. }));
@@ -721,12 +722,8 @@ mod tests {
         let first = load_request("artifact-a", "rev-a");
         let mut second = load_request("artifact-b", "rev-b");
         second.source_root = PathBuf::from("/other");
-        registry
-            .register_loaded(first.clone(), CodeGraph::new())
-            .unwrap();
-        registry
-            .register_loaded(second.clone(), CodeGraph::new())
-            .unwrap();
+        registry.register_loaded(&first, CodeGraph::new()).unwrap();
+        registry.register_loaded(&second, CodeGraph::new()).unwrap();
         registry.unload(&second.revision_id, true).unwrap();
 
         assert_eq!(registry.statuses(Some(Path::new("/repo")), false).len(), 1);

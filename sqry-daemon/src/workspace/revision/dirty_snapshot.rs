@@ -375,35 +375,21 @@ fn zsplit(bytes: &[u8]) -> Vec<Vec<u8>> {
         .collect()
 }
 
+type CapturedDirtyEntry = (
+    VirtualSourceEntry,
+    Option<Vec<u8>>,
+    DirtySnapshotEntryDigest,
+);
+
 fn capture_entry(
     virtual_path: &VirtualPath,
     full_path: &Path,
     max_file_bytes: u64,
-) -> Result<
-    (
-        VirtualSourceEntry,
-        Option<Vec<u8>>,
-        DirtySnapshotEntryDigest,
-    ),
-    DaemonError,
-> {
+) -> Result<CapturedDirtyEntry, DaemonError> {
     let metadata = match fs::symlink_metadata(full_path) {
         Ok(metadata) => metadata,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            let entry = VirtualSourceEntry::new(
-                virtual_path.clone(),
-                VirtualSourceKind::Deletion,
-                None,
-                None,
-            );
-            let digest = DirtySnapshotEntryDigest {
-                path: virtual_path.display_lossy(),
-                kind: "deletion".to_owned(),
-                executable: false,
-                size_bytes: None,
-                byte_sha256: None,
-            };
-            return Ok((entry, None, digest));
+            return Ok(deleted_entry(virtual_path));
         }
         Err(err) => {
             return Err(DaemonError::RevisionSourceUnavailable {
@@ -414,72 +400,21 @@ fn capture_entry(
     };
 
     if metadata.file_type().is_symlink() {
-        let target =
-            fs::read_link(full_path).map_err(|err| DaemonError::RevisionSourceUnavailable {
-                reason: format!("failed to read symlink target: {err}"),
-                path: Some(full_path.to_path_buf()),
-            })?;
-        let bytes = target.as_os_str().to_string_lossy().as_bytes().to_vec();
-        let digest = hex_sha256(&bytes);
-        return Ok((
-            VirtualSourceEntry::new(
-                virtual_path.clone(),
-                VirtualSourceKind::Symlink,
-                Some(format!("dirty-symlink:{digest}")),
-                Some(bytes.len() as u64),
-            ),
-            None,
-            DirtySnapshotEntryDigest {
-                path: virtual_path.display_lossy(),
-                kind: "symlink".to_owned(),
-                executable: false,
-                size_bytes: Some(bytes.len() as u64),
-                byte_sha256: Some(digest),
-            },
-        ));
+        return symlink_entry(virtual_path, full_path);
     }
 
     if !metadata.is_file() {
-        let reason = "dirty snapshot path is not a regular file".to_owned();
-        return Ok((
-            VirtualSourceEntry::new(
-                virtual_path.clone(),
-                VirtualSourceKind::Unsupported {
-                    reason: reason.clone(),
-                },
-                None,
-                None,
-            ),
-            None,
-            DirtySnapshotEntryDigest {
-                path: virtual_path.display_lossy(),
-                kind: "unsupported".to_owned(),
-                executable: false,
-                size_bytes: None,
-                byte_sha256: Some(hex_sha256(reason.as_bytes())),
-            },
-        ));
+        return Ok(unsupported_entry(virtual_path));
     }
 
     let size = metadata.len();
     if size > max_file_bytes {
-        let entry = VirtualSourceEntry::new(
-            virtual_path.clone(),
-            VirtualSourceKind::TooLarge {
-                size_bytes: size,
-                max_bytes: max_file_bytes,
-            },
-            None,
-            Some(size),
-        );
-        let digest = DirtySnapshotEntryDigest {
-            path: virtual_path.display_lossy(),
-            kind: "too_large".to_owned(),
-            executable: is_executable(&metadata),
-            size_bytes: Some(size),
-            byte_sha256: None,
-        };
-        return Ok((entry, None, digest));
+        return Ok(too_large_entry(
+            virtual_path,
+            &metadata,
+            size,
+            max_file_bytes,
+        ));
     }
 
     let bytes = fs::read(full_path).map_err(|err| DaemonError::RevisionSourceUnavailable {
@@ -493,7 +428,120 @@ fn capture_entry(
     } else {
         VirtualSourceKind::RegularFile
     };
+    Ok(file_entry(
+        virtual_path,
+        kind,
+        bytes,
+        size,
+        executable,
+        byte_hash,
+    ))
+}
+
+fn deleted_entry(virtual_path: &VirtualPath) -> CapturedDirtyEntry {
+    let entry = VirtualSourceEntry::new(
+        virtual_path.clone(),
+        VirtualSourceKind::Deletion,
+        None,
+        None,
+    );
+    let digest = DirtySnapshotEntryDigest {
+        path: virtual_path.display_lossy(),
+        kind: "deletion".to_owned(),
+        executable: false,
+        size_bytes: None,
+        byte_sha256: None,
+    };
+    (entry, None, digest)
+}
+
+fn symlink_entry(
+    virtual_path: &VirtualPath,
+    full_path: &Path,
+) -> Result<CapturedDirtyEntry, DaemonError> {
+    let target =
+        fs::read_link(full_path).map_err(|err| DaemonError::RevisionSourceUnavailable {
+            reason: format!("failed to read symlink target: {err}"),
+            path: Some(full_path.to_path_buf()),
+        })?;
+    let bytes = target.as_os_str().to_string_lossy().as_bytes().to_vec();
+    let digest = hex_sha256(&bytes);
     Ok((
+        VirtualSourceEntry::new(
+            virtual_path.clone(),
+            VirtualSourceKind::Symlink,
+            Some(format!("dirty-symlink:{digest}")),
+            Some(bytes.len() as u64),
+        ),
+        None,
+        DirtySnapshotEntryDigest {
+            path: virtual_path.display_lossy(),
+            kind: "symlink".to_owned(),
+            executable: false,
+            size_bytes: Some(bytes.len() as u64),
+            byte_sha256: Some(digest),
+        },
+    ))
+}
+
+fn unsupported_entry(virtual_path: &VirtualPath) -> CapturedDirtyEntry {
+    let reason = "dirty snapshot path is not a regular file".to_owned();
+    (
+        VirtualSourceEntry::new(
+            virtual_path.clone(),
+            VirtualSourceKind::Unsupported {
+                reason: reason.clone(),
+            },
+            None,
+            None,
+        ),
+        None,
+        DirtySnapshotEntryDigest {
+            path: virtual_path.display_lossy(),
+            kind: "unsupported".to_owned(),
+            executable: false,
+            size_bytes: None,
+            byte_sha256: Some(hex_sha256(reason.as_bytes())),
+        },
+    )
+}
+
+fn too_large_entry(
+    virtual_path: &VirtualPath,
+    metadata: &fs::Metadata,
+    size: u64,
+    max_file_bytes: u64,
+) -> CapturedDirtyEntry {
+    (
+        VirtualSourceEntry::new(
+            virtual_path.clone(),
+            VirtualSourceKind::TooLarge {
+                size_bytes: size,
+                max_bytes: max_file_bytes,
+            },
+            None,
+            Some(size),
+        ),
+        None,
+        DirtySnapshotEntryDigest {
+            path: virtual_path.display_lossy(),
+            kind: "too_large".to_owned(),
+            executable: is_executable(metadata),
+            size_bytes: Some(size),
+            byte_sha256: None,
+        },
+    )
+}
+
+fn file_entry(
+    virtual_path: &VirtualPath,
+    kind: VirtualSourceKind,
+    bytes: Vec<u8>,
+    size: u64,
+    executable: bool,
+    byte_hash: String,
+) -> CapturedDirtyEntry {
+    (
         VirtualSourceEntry::new(
             virtual_path.clone(),
             kind,
@@ -512,7 +560,7 @@ fn capture_entry(
             size_bytes: Some(size),
             byte_sha256: Some(byte_hash),
         },
-    ))
+    )
 }
 
 #[cfg(unix)]

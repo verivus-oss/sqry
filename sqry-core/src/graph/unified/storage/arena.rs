@@ -167,6 +167,7 @@ impl<T> Slot<T> {
 /// A node entry stored in the arena.
 ///
 /// This is the actual data stored for each node in the graph.
+#[allow(clippy::struct_excessive_bools)] // persisted graph row keeps compact flag fields for compatibility
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NodeEntry {
     /// The kind of code entity this node represents.

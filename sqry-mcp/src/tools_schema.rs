@@ -2,13 +2,13 @@
 //!
 //! The sqryd daemon hosts a 16-tool MCP subset via the shim byte-pump
 //! transport. Standalone `sqry-mcp` (no daemon) exposes the full
-//! 37-tool runtime MCP standalone surface via
+//! 38-tool runtime MCP standalone surface via
 //! [`crate::server::SqryServer::get_filtered_tools`]. These two are
-//! intentionally NOT identical — 21 standalone-only tools are
+//! intentionally NOT identical: 22 standalone-only tools are
 //! unavailable when connecting through the daemon (per Codex iter-0 B3:
 //! "the daemon-hosted MCP surface is finally honest").
 //!
-//! Users wanting the full 37-tool inventory continue to invoke
+//! Users wanting the full 38-tool inventory continue to invoke
 //! `sqry-mcp` without `--daemon`.
 
 /// Names of the 16 tools that the daemon MCP host exposes via
@@ -115,16 +115,16 @@ mod tests {
         );
     }
 
-    /// C045 — exact-gap pin between the standalone and daemon tool
-    /// surfaces. With C091 enabling `expand_cache_status` and T3
-    /// Cluster G adding `context_propagation` at runtime, the
-    /// standalone inventory is **37 tools** and the daemon subset is
-    /// **16 tools** (per `DAEMON_SUPPORTED_TOOL_NAMES`), giving a
-    /// strict gap of **21 standalone-only tools**. `context_propagation`
-    /// is deliberately NOT added to the daemon subset in this iter —
-    /// daemon dispatch wiring requires a lockstep update to
-    /// sqry-daemon's `dispatch_tool` match and the daemon MCP host
-    /// allow-list (Phase 8b/c), which is out of scope for Cluster G.
+    /// C045: exact-gap pin between the standalone and daemon tool
+    /// surfaces. With C091 enabling `expand_cache_status`, T3 Cluster G
+    /// adding `context_propagation`, and P5U10 adding `rules_run` at
+    /// runtime, the standalone inventory is **38 tools** and the daemon
+    /// subset is **16 tools** (per `DAEMON_SUPPORTED_TOOL_NAMES`), giving
+    /// a strict gap of **22 standalone-only tools**. `rules_run` is
+    /// deliberately NOT added to the daemon subset in this iter: daemon
+    /// dispatch wiring requires a lockstep update to sqry-daemon's
+    /// `dispatch_tool` match and the daemon MCP host allow-list (Phase
+    /// 8b/c), which the rule-layer coordinator surface (P5U11) owns.
     ///
     /// This constant is the canonical CI guard: any change to either
     /// `DAEMON_SUPPORTED_TOOL_NAMES` or the rmcp-registered standalone
@@ -132,14 +132,14 @@ mod tests {
     /// same PR. The
     /// [`daemon_supported_tool_names_is_strict_subset_of_standalone`]
     /// test asserts the live measurement matches this constant.
-    pub const EXPECTED_STANDALONE_ONLY_COUNT: usize = 21;
+    pub const EXPECTED_STANDALONE_ONLY_COUNT: usize = 22;
 
     /// Every `DAEMON_SUPPORTED_TOOL_NAMES` entry must appear in the
-    /// standalone `SqryServer::get_filtered_tools()` inventory — the
-    /// daemon subset is a STRICT subset of the standalone 37-tool
+    /// standalone `SqryServer::get_filtered_tools()` inventory: the
+    /// daemon subset is a STRICT subset of the standalone 38-tool
     /// surface. Also verifies the standalone inventory is strictly
-    /// larger by exactly [`EXPECTED_STANDALONE_ONLY_COUNT`] (= 21)
-    /// tools — the strict gap is pinned to guard against silent
+    /// larger by exactly [`EXPECTED_STANDALONE_ONLY_COUNT`] (= 22)
+    /// tools; the strict gap is pinned to guard against silent
     /// drift on either side of the partition.
     #[test]
     fn daemon_supported_tool_names_is_strict_subset_of_standalone() {

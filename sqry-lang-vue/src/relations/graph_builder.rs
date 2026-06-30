@@ -893,7 +893,7 @@ fn process_script_block_with_locals(
     let shape_ctx = ShapeAttachCtx::new(&tree, block.content.as_bytes(), mapping);
     helper
         .staging_mut()
-        .attach_body_hashes(block.content.as_bytes(), Some(shape_ctx));
+        .attach_body_hashes(block.content.as_bytes(), Some(&shape_ctx));
 
     Ok(())
 }

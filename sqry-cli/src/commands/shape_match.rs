@@ -4,8 +4,9 @@
 //! shared `structural_neighbors` helper. Unlike `sqry similar` (fuzzy name
 //! matching), this matches on the identifier-blind body-shape descriptor, so it
 //! surfaces rename-and-relocate twins. Each match carries the AC-4 two-number
-//! output: exact `shape_hash` identity and approximate MinHash Jaccard.
+//! output: exact `shape_hash` identity and approximate `MinHash` Jaccard.
 
+use std::fmt::Write as _;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
@@ -42,7 +43,7 @@ struct ShapeNeighbor {
     /// True when the neighbour's structural `shape_hash` is byte-identical to
     /// the probe's (an exact rename/relocate-invariant match).
     shape_hash_exact: bool,
-    /// Approximate MinHash Jaccard similarity (0.0–1.0).
+    /// Approximate `MinHash` Jaccard similarity (0.0–1.0).
     jaccard: f32,
 }
 
@@ -217,24 +218,27 @@ fn node_ref(
 /// Human-readable rendering.
 fn format_text(output: &ShapeMatchOutput) -> String {
     let mut out = String::new();
-    out.push_str(&format!(
-        "Structural neighbours of {} ({}:{})\n",
+    let _ = writeln!(
+        out,
+        "Structural neighbours of {} ({}:{})",
         output.reference.qualified_name, output.reference.file, output.reference.line
-    ));
-    out.push_str(&format!(
-        "  floor {:.2}, {} match(es)\n",
+    );
+    let _ = writeln!(
+        out,
+        "  floor {:.2}, {} match(es)",
         output.stats.similarity_floor, output.stats.total_found
-    ));
+    );
     if output.neighbors.is_empty() {
         out.push_str("  (no structural neighbours above the floor)\n");
         return out;
     }
     for n in &output.neighbors {
         let exact = if n.shape_hash_exact { " [exact]" } else { "" };
-        out.push_str(&format!(
-            "  {:.3}{}  {}  {}:{}\n",
+        let _ = writeln!(
+            out,
+            "  {:.3}{}  {}  {}:{}",
             n.jaccard, exact, n.qualified_name, n.file, n.line
-        ));
+        );
     }
     out
 }

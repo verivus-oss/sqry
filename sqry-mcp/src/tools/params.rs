@@ -578,34 +578,58 @@ pub struct SemanticSearchParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved_via: Option<Vec<ResolvedViaParam>>,
 
-    /// Optional loaded revision id. When omitted, semantic_search targets the
+    /// Revision selector fields. Flattened to preserve the public MCP schema.
+    #[serde(default, flatten)]
+    pub revision: SemanticSearchRevisionParams,
+}
+
+/// Revision selector fields for `semantic_search`.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
+pub struct SemanticSearchRevisionParams {
+    /// Optional loaded revision id. When omitted, `semantic_search` targets the
     /// live workspace exactly as before.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub revision_id: Option<String>,
+    #[serde(
+        default,
+        rename = "revision_id",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub id: Option<String>,
 
     /// Optional Git ref selector for a loaded revision.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub revision_ref: Option<String>,
+    #[serde(
+        default,
+        rename = "revision_ref",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub git_ref: Option<String>,
 
     /// Optional commit object id selector for a loaded revision.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub revision_commit: Option<String>,
+    #[serde(
+        default,
+        rename = "revision_commit",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub commit: Option<String>,
 
     /// Optional tree object id selector for a loaded revision.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub revision_tree: Option<String>,
+    #[serde(
+        default,
+        rename = "revision_tree",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub tree: Option<String>,
 
     /// Select a loaded dirty snapshot revision.
-    #[serde(default)]
-    pub revision_dirty: bool,
+    #[serde(default, rename = "revision_dirty")]
+    pub dirty: bool,
 
     /// Include untracked files for `revision_dirty`.
-    #[serde(default)]
-    pub revision_include_untracked: bool,
+    #[serde(default, rename = "revision_include_untracked")]
+    pub include_untracked: bool,
 
     /// Include ignored files for `revision_dirty`.
-    #[serde(default)]
-    pub revision_include_ignored: bool,
+    #[serde(default, rename = "revision_include_ignored")]
+    pub include_ignored: bool,
 }
 
 /// `hierarchical_search` params.
@@ -844,7 +868,7 @@ pub struct StructuralSimilarParams {
     #[serde(default = "default_path")]
     pub path: String,
 
-    /// Minimum MinHash similarity floor (0.0-1.0).
+    /// Minimum `MinHash` similarity floor (0.0-1.0).
     #[serde(default = "default_similarity_threshold")]
     #[schemars(range(min = 0.0, max = 1.0))]
     pub similarity_threshold: f64,
@@ -1240,6 +1264,35 @@ pub struct SqryQueryParams {
     /// for the contract.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved_via: Option<Vec<ResolvedViaParam>>,
+}
+
+// ============================================================================
+// Declarative Rule Layer Tool (P5U10, rules_run)
+// ============================================================================
+
+/// `rules_run` params.
+///
+/// Executes a declarative rule-layer rule or pack through the production
+/// `RuleEngine` plus `SqryDbRuleBackend` over the workspace graph and returns
+/// each rule's structured output plus witness. The selector resolution and
+/// honest beside-cache handling mirror the `sqry rules run` CLI surface
+/// (P5U09); rules whose IR requires cross-snapshot or similarity routes are
+/// reported as `unsupported` until the coordinator surface (P5U11) lands.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[schemars(example = "json!({
+    \"rule_or_pack\": \"bbnty.intake\",
+    \"path\": \".\"
+})")]
+pub struct RulesRunParams {
+    /// Rule or pack selector. Resolves in order: a shipped pack name
+    /// (`bbnty.recipes`, `bbnty.intake`, `bbnty.all`), an exact shipped
+    /// rule ID, otherwise a path (relative to `path`) to a TOML rule pack
+    /// loaded from the workspace.
+    pub rule_or_pack: String,
+
+    /// Workspace path. Defaults to the current directory if omitted.
+    #[serde(default = "default_path")]
+    pub path: String,
 }
 
 // ============================================================================

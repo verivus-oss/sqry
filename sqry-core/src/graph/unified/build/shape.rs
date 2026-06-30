@@ -240,7 +240,7 @@ struct WalkState {
 fn walk_body(
     body: tree_sitter::Node,
     mapping: &dyn ShapeMapping,
-    budget: &ShapeBudget,
+    budget: ShapeBudget,
 ) -> WalkState {
     let mut state = WalkState {
         token_count: 0,
@@ -336,7 +336,7 @@ fn minhash_of(wl_labels: &[u64]) -> [u32; MINHASH_LANES] {
 /// nodes get no descriptor, matching `body_hash`.
 ///
 /// `fn_node` is the whole function/method node; the histogram, shingle, WL, and
-/// `MinHash` are computed over its [`body_subtree`], while `signature_shape` reads
+/// `MinHash` is computed over its [`body_subtree`], while `signature_shape` reads
 /// the parameter list off `fn_node` directly.
 #[must_use]
 pub fn compute_shape_descriptor(
@@ -347,7 +347,7 @@ pub fn compute_shape_descriptor(
 ) -> ShapeDescriptor {
     let signature_shape = mapping.signature_shape(fn_node, src);
     let body = body_subtree(fn_node);
-    let mut state = walk_body(body, mapping, budget);
+    let mut state = walk_body(body, mapping, *budget);
 
     // A genuinely tiny body (below the token floor and NOT cut short by the
     // budget) gets the honest unhashable marker. A truncated body is large by

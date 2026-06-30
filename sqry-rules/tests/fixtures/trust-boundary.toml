@@ -1,0 +1,35 @@
+schema_version = 1
+
+[[rules]]
+id = "bbnty.pr_r5.trust_boundary_audit"
+
+[rules.plan.root.chain]
+
+[[rules.plan.root.chain.steps]]
+[rules.plan.root.chain.steps.entry_point_union]
+extensions = [
+  { name = { raw = "Recv", mode = "contains" } },
+]
+
+[[rules.plan.root.chain.steps]]
+[rules.plan.root.chain.steps.relation_edges]
+kind = "references"
+with_metadata = true
+
+[rules.plan.root.chain.steps.relation_edges.from.query.node_scan]
+kind = "method"
+name_pattern = { raw = "Recv", mode = "contains" }
+
+[[rules.plan.root.chain.steps]]
+[rules.plan.root.chain.steps.path_query]
+kind = "calls"
+max_depth = 6
+max_paths = 32
+
+[rules.plan.root.chain.steps.path_query.from.query.node_scan]
+kind = "method"
+name_pattern = { raw = "Recv", mode = "contains" }
+
+[rules.plan.root.chain.steps.path_query.to.query.node_scan]
+kind = "function"
+name_pattern = { raw = "Validate", mode = "contains" }

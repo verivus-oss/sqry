@@ -14,32 +14,32 @@ use std::path::PathBuf;
 #[group(id = "revision_target", multiple = false)]
 pub struct RevisionQueryArgs {
     /// Query a loaded revision by resident revision id.
-    #[arg(long, value_name = "REVISION_ID", group = "revision_target", help_heading = headings::SEARCH_INPUT)]
-    pub revision_id: Option<String>,
+    #[arg(long = "revision-id", value_name = "REVISION_ID", group = "revision_target", help_heading = headings::SEARCH_INPUT)]
+    pub id: Option<String>,
 
     /// Query a loaded revision resolved from a Git ref.
     #[arg(long = "revision-ref", value_name = "REF", group = "revision_target", help_heading = headings::SEARCH_INPUT)]
-    pub revision_ref: Option<String>,
+    pub git_ref: Option<String>,
 
     /// Query a loaded revision resolved from a commit object id.
     #[arg(long = "revision-commit", value_name = "OID", group = "revision_target", help_heading = headings::SEARCH_INPUT)]
-    pub revision_commit: Option<String>,
+    pub commit: Option<String>,
 
     /// Query a loaded revision resolved from a tree object id.
     #[arg(long = "revision-tree", value_name = "OID", group = "revision_target", help_heading = headings::SEARCH_INPUT)]
-    pub revision_tree: Option<String>,
+    pub tree: Option<String>,
 
     /// Query a loaded dirty snapshot for this workspace.
     #[arg(long = "revision-dirty", group = "revision_target", help_heading = headings::SEARCH_INPUT)]
-    pub revision_dirty: bool,
+    pub dirty: bool,
 
     /// Include untracked files when using `--revision-dirty`.
-    #[arg(long = "revision-include-untracked", requires = "revision_dirty", help_heading = headings::SEARCH_INPUT)]
-    pub revision_include_untracked: bool,
+    #[arg(long = "revision-include-untracked", requires = "dirty", help_heading = headings::SEARCH_INPUT)]
+    pub include_untracked: bool,
 
     /// Include ignored files when using `--revision-dirty`.
-    #[arg(long = "revision-include-ignored", requires = "revision_dirty", help_heading = headings::SEARCH_INPUT)]
-    pub revision_include_ignored: bool,
+    #[arg(long = "revision-include-ignored", requires = "dirty", help_heading = headings::SEARCH_INPUT)]
+    pub include_ignored: bool,
 }
 
 /// Source byte mode for `sqry daemon load-revision`.
@@ -545,6 +545,45 @@ pub struct CompletionsCommand {
     pub shell: Shell,
 }
 
+/// Output format for `sqry rules` command payloads.
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RulesOutputFormat {
+    /// Human-readable rule status, output summary, and witness summary.
+    Text,
+    /// Machine-readable rule report with serialized output and witness data.
+    Json,
+}
+
+/// `sqry rules` actions.
+#[derive(Subcommand, Debug, Clone)]
+#[command(verbatim_doc_comment)]
+pub enum RulesAction {
+    /// Execute a shipped rule, shipped rule pack, or TOML rule pack.
+    ///
+    /// Built-in selectors:
+    ///   - `bbnty.recipes`  seven bbnty proof-recipe rules
+    ///   - `bbnty.intake`   standard first-run intake pack
+    ///   - `bbnty.all`      recipes plus intake rules
+    ///
+    /// A selector matching a shipped rule ID executes that single rule. Any
+    /// other selector is treated as a TOML rule-pack path.
+    #[command(display_order = 10, verbatim_doc_comment)]
+    Run {
+        /// Shipped rule ID, shipped pack selector, or TOML rule-pack path.
+        #[arg(value_name = "RULE_OR_PACK", help_heading = headings::QUERY_INPUT, display_order = 10)]
+        rule_or_pack: String,
+
+        /// Workspace path (defaults to current directory). If no
+        /// `.sqry-index` exists here, walks up to find the nearest.
+        #[arg(help_heading = headings::QUERY_INPUT, display_order = 20)]
+        path: Option<String>,
+
+        /// Output format for the rule run report.
+        #[arg(long, value_enum, default_value_t = RulesOutputFormat::Text, help_heading = headings::OUTPUT_CONTROL, display_order = 10)]
+        format: RulesOutputFormat,
+    },
+}
+
 /// Available subcommands
 #[derive(Subcommand, Debug, Clone)]
 #[command(verbatim_doc_comment)]
@@ -861,6 +900,19 @@ pub enum Command {
         limit: usize,
     },
 
+    /// Execute declarative rule-layer rules and packs (P5 L5).
+    ///
+    /// Runs stable shipped rule IDs/packs or TOML rule packs through the
+    /// declarative rule engine. Rules that require beside-cache coordination
+    /// are reported as unsupported on this single-snapshot CLI path and are
+    /// reserved for the coordinator/MCP surface.
+    #[command(display_order = 4, verbatim_doc_comment)]
+    Rules {
+        /// Rule action.
+        #[command(subcommand)]
+        action: RulesAction,
+    },
+
     /// Context-propagation analysis for Go code (T3.7).
     ///
     /// Surfaces `context.Context` plumbing breaks: sync callers that drop a
@@ -875,7 +927,7 @@ pub enum Command {
     ///   0  success (zero leaks is a valid finding, NOT an error)
     ///   2  invalid `--scope` or `--mode`
     ///   3  no `.sqry-index` discoverable from the working directory
-    #[command(name = "context-propagation", display_order = 4, verbatim_doc_comment)]
+    #[command(name = "context-propagation", display_order = 5, verbatim_doc_comment)]
     ContextPropagation {
         /// Workspace path (defaults to current directory). If no
         /// `.sqry-index` exists here, walks up to find the nearest.
@@ -1747,13 +1799,13 @@ pub enum Command {
     /// Find functions structurally similar to a reference function
     ///
     /// Matches on the identifier-blind body-shape descriptor (control-flow
-    /// shape + MinHash), so it finds rename-and-relocate twins that fuzzy name
+    /// shape + `MinHash`), so it finds rename-and-relocate twins that fuzzy name
     /// matching misses. Reports two numbers per match: whether the structural
-    /// shape_hash is byte-identical, and the approximate MinHash similarity.
+    /// `shape_hash` is byte-identical, and the approximate `MinHash` similarity.
     ///
     /// Examples:
-    ///   sqry shape-match parse_config            # Structural neighbours of parse_config
-    ///   sqry shape-match --threshold 0.8 handler # 80% MinHash floor
+    ///   sqry shape-match `parse_config`          # Structural neighbours of `parse_config`
+    ///   sqry shape-match --threshold 0.8 handler # 80% `MinHash` floor
     ///   sqry shape-match --file src/a.rs run      # Disambiguate by file
     #[command(alias = "shape", display_order = 27, verbatim_doc_comment)]
     ShapeMatch {
@@ -1769,7 +1821,7 @@ pub enum Command {
         #[arg(long, help_heading = headings::SEARCH_INPUT, display_order = 30)]
         path: Option<String>,
 
-        /// Minimum MinHash similarity floor (0.0 to 1.0, default: 0.6).
+        /// Minimum `MinHash` similarity floor (0.0 to 1.0, default: 0.6).
         #[arg(long, short = 't', default_value = "0.6", help_heading = headings::GRAPH_FILTERING, display_order = 10)]
         threshold: f64,
 
@@ -1909,7 +1961,7 @@ pub enum Command {
 
         /// Structural lineage mode: pair functions across the two refs by their
         /// identifier-blind body-shape descriptor (exact `shape_hash` first, then
-        /// MinHash near-matches) instead of by name. Surfaces rename+relocate
+        /// `MinHash` near-matches) instead of by name. Surfaces rename+relocate
         /// twins that name-based diff reports as add/remove pairs.
         #[arg(long, help_heading = headings::GRAPH_FILTERING, display_order = 40)]
         structural: bool,

@@ -47,8 +47,7 @@ pub(crate) async fn handle(ctx: &HandlerContext, params: Value) -> Result<Value,
         &path,
         Some("daemon/query"),
         move |wctx, _cancel| -> anyhow::Result<Value> {
-            let result =
-                run_query_on_graph(Arc::clone(&wctx.graph), &req, Path::new(&req.search_path))?;
+            let result = run_query_on_graph(&wctx.graph, &req, Path::new(&req.search_path))?;
             serde_json::to_value(&result).context("serialise QueryResult")
         },
     )
@@ -108,7 +107,7 @@ async fn handle_revision_query(
     let timeout_root = root.clone();
     let mut result = tokio::time::timeout(
         tool_timeout,
-        tokio::task::spawn_blocking(move || run_query_on_graph(graph, &req, &query_root)),
+        tokio::task::spawn_blocking(move || run_query_on_graph(&graph, &req, &query_root)),
     )
     .await
     .map_err(|_| {
@@ -147,27 +146,22 @@ fn validate_request(req: &QueryRequest) -> Result<(), MethodError> {
 }
 
 fn run_query_on_graph(
-    graph: Arc<CodeGraph>,
+    graph: &Arc<CodeGraph>,
     req: &QueryRequest,
     workspace_root: &Path,
 ) -> anyhow::Result<QueryResult> {
     let executor =
         QueryExecutor::with_plugin_manager(sqry_plugin_registry::create_plugin_manager());
-    let query_results = executor.execute_on_preloaded_graph(
-        Arc::clone(&graph),
-        &req.query,
-        workspace_root,
-        None,
-    )?;
+    let query_results =
+        executor.execute_on_preloaded_graph(Arc::clone(graph), &req.query, workspace_root, None)?;
     let total = query_results.len();
-    let limit = req
-        .limit
-        .map(|limit| usize::try_from(limit).unwrap_or(usize::MAX))
-        .unwrap_or(DEFAULT_QUERY_LIMIT);
+    let limit = req.limit.map_or(DEFAULT_QUERY_LIMIT, |limit| {
+        usize::try_from(limit).unwrap_or(usize::MAX)
+    });
     let items = query_results
         .iter()
         .take(limit)
-        .map(query_match_to_search_item)
+        .map(|query_match| query_match_to_search_item(&query_match))
         .collect();
 
     Ok(QueryResult {
@@ -179,7 +173,7 @@ fn run_query_on_graph(
 }
 
 fn query_match_to_search_item(
-    query_match: sqry_core::query::results::QueryMatch<'_>,
+    query_match: &sqry_core::query::results::QueryMatch<'_>,
 ) -> SearchItem {
     let name = query_match
         .name()

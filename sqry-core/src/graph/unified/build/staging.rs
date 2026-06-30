@@ -241,6 +241,105 @@ pub struct PendingIndirectCallsite {
     pub is_async: bool,
 }
 
+/// Metadata flags that are monotonic when merging duplicate staged nodes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NodeMetadataFlag {
+    /// The staged node represents async code.
+    Async,
+    /// The staged node represents static code.
+    Static,
+    /// The staged node represents unsafe code.
+    Unsafe,
+    /// The staged node is a real source declaration.
+    Definition,
+}
+
+/// Compact set of [`NodeMetadataFlag`] values.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct NodeMetadataFlags {
+    bits: u8,
+}
+
+impl NodeMetadataFlags {
+    const ASYNC: u8 = 1 << 0;
+    const STATIC: u8 = 1 << 1;
+    const UNSAFE: u8 = 1 << 2;
+    const DEFINITION: u8 = 1 << 3;
+
+    /// Returns an empty flag set.
+    #[must_use]
+    pub const fn empty() -> Self {
+        Self { bits: 0 }
+    }
+
+    /// Adds `flag` to the set.
+    pub fn insert(&mut self, flag: NodeMetadataFlag) {
+        self.bits |= Self::bit(flag);
+    }
+
+    /// Returns true when `flag` is present.
+    #[must_use]
+    pub const fn contains(self, flag: NodeMetadataFlag) -> bool {
+        self.bits & Self::bit(flag) != 0
+    }
+
+    const fn bit(flag: NodeMetadataFlag) -> u8 {
+        match flag {
+            NodeMetadataFlag::Async => Self::ASYNC,
+            NodeMetadataFlag::Static => Self::STATIC,
+            NodeMetadataFlag::Unsafe => Self::UNSAFE,
+            NodeMetadataFlag::Definition => Self::DEFINITION,
+        }
+    }
+}
+
+/// Metadata to merge into an existing staged node.
+#[derive(Debug, Clone, Default)]
+pub struct NodeMetadataUpdate {
+    span: Option<crate::graph::node::Span>,
+    flags: NodeMetadataFlags,
+    visibility: Option<StringId>,
+    signature: Option<StringId>,
+}
+
+impl NodeMetadataUpdate {
+    /// Returns an update with no fields set.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Adds a span update when `span` is present.
+    #[must_use]
+    pub fn with_optional_span(mut self, span: Option<crate::graph::node::Span>) -> Self {
+        self.span = span;
+        self
+    }
+
+    /// Marks `flag` when `enabled` is true.
+    #[must_use]
+    pub fn mark_if(mut self, flag: NodeMetadataFlag, enabled: bool) -> Self {
+        if enabled {
+            self.flags.insert(flag);
+        }
+        self
+    }
+
+    /// Adds a visibility update when `visibility` is present.
+    #[must_use]
+    pub fn with_optional_visibility(mut self, visibility: Option<StringId>) -> Self {
+        self.visibility = visibility;
+        self
+    }
+
+    /// Adds a signature update when `signature` is present.
+    #[must_use]
+    pub fn with_optional_signature(mut self, signature: Option<StringId>) -> Self {
+        self.signature = signature;
+        self
+    }
+}
+
 /// Error during staging commit.
 #[derive(Debug, Clone)]
 pub enum StagingError {
@@ -353,47 +452,38 @@ impl std::error::Error for StagingError {}
 /// Apply metadata updates to a staged `NodeEntry`.
 ///
 /// Updates span, async/static/unsafe flags, visibility, and signature on the entry.
-fn apply_node_metadata(
-    entry: &mut NodeEntry,
-    span: Option<crate::graph::node::Span>,
-    is_async: bool,
-    is_static: bool,
-    is_unsafe: bool,
-    visibility: Option<StringId>,
-    signature: Option<StringId>,
-    is_definition: bool,
-) {
-    if let Some(span) = span {
-        apply_span_to_entry(entry, &span);
+fn apply_node_metadata(entry: &mut NodeEntry, update: &NodeMetadataUpdate) {
+    if let Some(span) = &update.span {
+        apply_span_to_entry(entry, span);
     }
 
-    if is_async {
+    if update.flags.contains(NodeMetadataFlag::Async) {
         entry.is_async = true;
     }
 
-    if is_static {
+    if update.flags.contains(NodeMetadataFlag::Static) {
         entry.is_static = true;
     }
 
-    if is_unsafe {
+    if update.flags.contains(NodeMetadataFlag::Unsafe) {
         entry.is_unsafe = true;
     }
 
     // Monotonic OR-in: once a node is known to be a real declaration, never
     // clear the signal (stub-first/declaration-later and the reverse both
     // converge to `true`).
-    if is_definition {
+    if update.flags.contains(NodeMetadataFlag::Definition) {
         entry.is_definition = true;
     }
 
     if entry.visibility.is_none()
-        && let Some(vis) = visibility
+        && let Some(vis) = update.visibility
     {
         entry.visibility = Some(vis);
     }
 
     if entry.signature.is_none()
-        && let Some(sig) = signature
+        && let Some(sig) = update.signature
     {
         entry.signature = Some(sig);
     }
@@ -854,18 +944,7 @@ impl StagingGraph {
     /// Update an existing staged node entry with additional metadata.
     ///
     /// Returns true if the node was found and updated.
-    #[allow(clippy::too_many_arguments)] // is_definition (issue #394) OR-in threaded alongside the existing attr params
-    pub fn update_node_entry(
-        &mut self,
-        node_id: NodeId,
-        span: Option<crate::graph::node::Span>,
-        is_async: bool,
-        is_static: bool,
-        is_unsafe: bool,
-        visibility: Option<StringId>,
-        signature: Option<StringId>,
-        is_definition: bool,
-    ) -> bool {
+    pub fn update_node_entry(&mut self, node_id: NodeId, update: &NodeMetadataUpdate) -> bool {
         for op in &mut self.operations {
             if let StagingOp::AddNode {
                 entry,
@@ -876,16 +955,7 @@ impl StagingGraph {
                     continue;
                 }
 
-                apply_node_metadata(
-                    entry,
-                    span,
-                    is_async,
-                    is_static,
-                    is_unsafe,
-                    visibility,
-                    signature,
-                    is_definition,
-                );
+                apply_node_metadata(entry, update);
                 return true;
             }
         }
@@ -1577,7 +1647,7 @@ impl StagingGraph {
     /// - Bodies smaller than 4 bytes are not hashed to avoid trivial matches; the
     ///   shape walker independently emits an explicit `unhashable` marker for tiny
     ///   bodies (it never silently drops one).
-    pub fn attach_body_hashes(&mut self, content: &[u8], shape: Option<ShapeAttachCtx<'_>>) {
+    pub fn attach_body_hashes(&mut self, content: &[u8], shape: Option<&ShapeAttachCtx<'_>>) {
         use super::body_hash::{build_line_offsets, compute_node_body_hash, has_valid_body_span};
         use crate::graph::unified::node::kind::NodeKind;
 
@@ -1601,7 +1671,7 @@ impl StagingGraph {
                 // Sibling computation: identifier-blind shape descriptor for
                 // Function/Method bodies, gated on the same span-validity contract
                 // as body_hash above.
-                if let Some(ctx) = shape.as_ref()
+                if let Some(ctx) = shape
                     && let Some(node_id) = *expected_id
                     && matches!(entry.kind, NodeKind::Function | NodeKind::Method)
                     && has_valid_body_span(entry)
@@ -1785,21 +1855,21 @@ impl<'a> ShapeAttachCtx<'a> {
     /// Resolve the tree node whose byte span exactly matches `entry` and compute
     /// its identifier-blind descriptor.
     ///
-    /// The recorded span is first converted to a byte range with the SAME
-    /// `resolve_body_span` body_hash uses. Going through the byte range (rather than
+    /// The recorded span is first converted to a byte range with the same
+    /// `resolve_body_span` `body_hash` uses. Going through the byte range (rather than
     /// feeding the recorded line/column straight to `descendant_for_point_range`) is
     /// what makes this work across the whole plugin set: most plugins record true
     /// `(row, column)`, but several (php, perl, r, elixir, plsql, ...) encode the
     /// span as line 1 plus an absolute byte offset in the column. `resolve_body_span`
     /// maps both conventions to the correct bytes via `line_offsets`, exactly as it
-    /// does for body_hash, so the two seams stay in lock-step.
+    /// does for `body_hash`, so the two seams stay in lock-step.
     ///
     /// `descendant_for_byte_range` returns the SMALLEST node spanning the range,
     /// which for a recorded function/method span is the function node itself. A
     /// non-exact match means the recorded span does not correspond to a real
     /// subtree (e.g. a genuine preprocessing skew where the recorded coordinates
     /// belong to a different content buffer), so we return `None` rather than
-    /// fingerprint the wrong node, the same conservative stance body_hash takes for
+    /// fingerprint the wrong node, the same conservative stance `body_hash` takes for
     /// an invalid span.
     fn descriptor_for(
         &self,
@@ -2738,7 +2808,7 @@ mod tests {
         let var_node_id = staging.add_node(var_entry);
 
         let ctx = ShapeAttachCtx::new(&tree, src.as_bytes(), &SeamTestMapping);
-        staging.attach_body_hashes(src.as_bytes(), Some(ctx));
+        staging.attach_body_hashes(src.as_bytes(), Some(&ctx));
 
         let metadata = staging.take_macro_metadata();
         let descriptors = metadata.shape_descriptors();

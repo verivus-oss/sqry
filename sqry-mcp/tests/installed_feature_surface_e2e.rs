@@ -158,6 +158,7 @@ fn tool_arguments(name: &str, project: &Path) -> Option<Value> {
         "relation_query" => {
             json!({"symbol": "process", "relation_type": "callees", "max_depth": 1, "max_results": 20})
         }
+        "rules_run" => json!({"rule_or_pack": "bbnty.intake"}),
         "search_similar" => {
             json!({"reference": {"file_path": rust_lib, "symbol_name": "helper"}, "max_results": 20})
         }
