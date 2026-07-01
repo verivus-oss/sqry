@@ -190,6 +190,24 @@ impl FileWatcher {
             .unwrap_or_default()
     }
 
+    /// Invoke the registered callback for `path` without waiting for the
+    /// platform file-watcher backend. Test-only so session manager tests can
+    /// cover watcher-triggered invalidation deterministically.
+    #[cfg(test)]
+    pub(crate) fn trigger_for_test(&self, path: &Path) -> bool {
+        let callback = self
+            .state
+            .as_ref()
+            .and_then(|state| state.lock_callbacks().get(path).cloned());
+
+        if let Some(callback) = callback {
+            callback();
+            true
+        } else {
+            false
+        }
+    }
+
     /// Drain pending filesystem events and invoke registered callbacks.
     ///
     /// # Errors

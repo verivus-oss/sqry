@@ -81,10 +81,6 @@ const { SqryHoverProvider } = proxyquire("../src/hoverProvider", {
 // ===== Helpers =====
 
 const TEST_URI = "file:///src/main.rs";
-const TEST_WORKSPACE = {
-  uri: { fsPath: "/workspace" },
-  name: "test-workspace",
-};
 
 /** Build a stub CancellationToken */
 function makeToken(cancelled = false): { isCancellationRequested: boolean } {

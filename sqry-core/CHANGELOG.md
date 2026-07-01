@@ -6,7 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
-## [25.0.0](https://github.com/verivus-oss/sqry/compare/v24.0.1...v25.0.0) - 2026-06-30
+## [26.0.0](https://github.com/verivus-oss/sqry/compare/v25.0.2...v26.0.0) - 2026-07-01
+
+### Fixed
+- *(security)* resolve code-scanning alerts across webview and logging- *(session)* reclaim session load locks- *(session)* harden graph cache semantics- *(session)* use session graph cache for queries## [25.0.0](https://github.com/verivus-oss/sqry/compare/v24.0.1...v25.0.0) - 2026-06-30
 
 ### Added
 - *(rules)* Phase 5 declarative rule layer## [24.0.0](https://github.com/verivus-oss/sqry/compare/v23.2.0...v24.0.0) - 2026-06-29

@@ -11,16 +11,38 @@
   let svgElement = null;
   const transform = { x: 0, y: 0, scale: 1 };
 
+  function isObject(value) {
+    return value !== null && typeof value === "object";
+  }
+
+  function isValidGraphMessage(message) {
+    return (
+      isObject(message) &&
+      message.type === "graphData" &&
+      Array.isArray(message.nodes) &&
+      Array.isArray(message.edges)
+    );
+  }
+
+  function isValidErrorMessage(message) {
+    return isObject(message) && message.type === "error" && typeof message.message === "string";
+  }
+
   // Handle messages from extension
   window.addEventListener("message", function(event) {
+    // Reject cross-origin messages. Some VS Code builds deliver host->webview
+    // messages with an empty origin, so only reject when a mismatching origin
+    // is actually present (an empty origin still comes through the trusted
+    // extension channel).
+    if (event.origin && event.origin !== globalThis.location.origin) {
+      return;
+    }
+
     const message = event.data;
-    switch (message.type) {
-      case "graphData":
-        renderGraph(message.nodes, message.edges, message.truncated, message.totalNodes, message.totalEdges);
-        break;
-      case "error":
-        showError(message.message);
-        break;
+    if (isValidGraphMessage(message)) {
+      renderGraph(message.nodes, message.edges, message.truncated, message.totalNodes, message.totalEdges);
+    } else if (isValidErrorMessage(message)) {
+      showError(message.message);
     }
   });
 

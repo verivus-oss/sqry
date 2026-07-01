@@ -354,9 +354,8 @@ fn install_systemd_system_output_contains_percent_i_template() {
 
         assert!(
             output.status.success(),
-            "sqryd install-systemd-system --user {username} must exit 0; status={}, stderr={}",
+            "sqryd install-systemd-system must exit 0; status={}",
             output.status,
-            String::from_utf8_lossy(&output.stderr),
         );
 
         let unit_text = String::from_utf8_lossy(&output.stdout);

@@ -1036,10 +1036,7 @@ fn run_query_with_session(
 
     if guard.is_none() {
         // Cold start: create session (graph will be loaded on first query)
-        let config = sqry_core::session::SessionConfig::default();
-        *guard = Some(
-            SessionManager::with_config(config).context("failed to initialise session manager")?,
-        );
+        *guard = Some(create_session_manager_for_cli(cli, &workspace)?);
     }
 
     let session = guard.as_ref().expect("session manager must be initialised");
@@ -1073,6 +1070,25 @@ fn run_query_with_session(
         &diagnostics,
         relation_ctx,
     )
+}
+
+/// Create a session manager using the same read-only plugin selection as
+/// normal graph-backed query execution.
+///
+/// # Errors
+///
+/// Returns an error if plugin selection resolution fails or the session manager
+/// cannot initialize its watcher/background maintenance state.
+pub(crate) fn create_session_manager_for_cli(
+    cli: &Cli,
+    workspace: &Path,
+) -> Result<SessionManager> {
+    let plugin_root = find_nearest_index(workspace)
+        .map_or_else(|| workspace.to_path_buf(), |location| location.index_root);
+    let plugin_manager = plugin_defaults::resolve_read_only_plugin_manager(cli, &plugin_root)?;
+    let config = sqry_core::session::SessionConfig::default();
+    SessionManager::with_config_and_plugins(config, plugin_manager)
+        .context("failed to initialise session manager")
 }
 
 /// Resolve index location for session mode, walking up directory tree if needed.
@@ -1445,7 +1461,7 @@ fn emit_session_cache_stats(streams: &mut OutputStreams, stats: &SessionStats) -
 
     streams.write_diagnostic("")?;
     streams.write_diagnostic("Session statistics:")?;
-    let _ = streams.write_diagnostic(&format!("  Cached indexes : {}", stats.cached_graphs));
+    let _ = streams.write_diagnostic(&format!("  Cached graphs  : {}", stats.cached_graphs));
     let _ = streams.write_diagnostic(&format!("  Total queries  : {}", stats.total_queries));
     let _ = streams.write_diagnostic(&format!(
         "  Cache hits     : {} ({hit_rate:.1}% hit rate)",

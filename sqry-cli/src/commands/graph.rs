@@ -409,6 +409,7 @@ fn run_stats_unified(
         lang_counts: &lang_counts,
         file_counts: &file_counts,
         file_count,
+        detailed_edge_stats: compute_detailed,
     };
     let display_options = StatsDisplayOptions {
         by_language,
@@ -445,8 +446,9 @@ fn collect_edge_stats_unified(
     // Only iterate for detailed stats when requested (expensive operation)
     if compute_detailed {
         for (src_id, tgt_id, kind) in snapshot.iter_edges() {
-            let kind_str = format!("{kind:?}");
-            *kind_counts.entry(kind_str).or_insert(0) += 1;
+            *kind_counts
+                .entry(edge_kind_stats_key(&kind).to_string())
+                .or_insert(0) += 1;
 
             // Check for cross-language edges
             if let (Some(src_entry), Some(tgt_entry)) =
@@ -462,6 +464,10 @@ fn collect_edge_stats_unified(
     }
 
     (node_count, edge_count, cross_language_count, kind_counts)
+}
+
+fn edge_kind_stats_key(kind: &UnifiedEdgeKind) -> &'static str {
+    kind.tag()
 }
 
 fn collect_language_counts_unified(
@@ -511,6 +517,7 @@ struct GraphStats<'a> {
     lang_counts: &'a HashMap<String, usize>,
     file_counts: &'a HashMap<String, usize>,
     file_count: usize,
+    detailed_edge_stats: bool,
 }
 
 /// Display options for statistics output.
@@ -528,8 +535,7 @@ fn print_stats_unified_text(stats: &GraphStats<'_>, options: &StatsDisplayOption
     println!("Total Edges: {edge_count}", edge_count = stats.edge_count);
     println!("Files: {file_count}", file_count = stats.file_count);
 
-    // Only show detailed stats if computed
-    if !stats.kind_counts.is_empty() {
+    if stats.detailed_edge_stats {
         println!();
         println!(
             "Cross-Language Edges: {cross_language_count}",
@@ -540,9 +546,16 @@ fn print_stats_unified_text(stats: &GraphStats<'_>, options: &StatsDisplayOption
         println!("Edges by Kind:");
         let mut sorted_kinds: Vec<_> = stats.kind_counts.iter().collect();
         sorted_kinds.sort_by_key(|(kind, _)| kind.as_str());
-        for (kind, count) in sorted_kinds {
-            println!("  {kind}: {count}");
+        if sorted_kinds.is_empty() {
+            println!("  (none)");
+        } else {
+            for (kind, count) in sorted_kinds {
+                println!("  {kind}: {count}");
+            }
         }
+    } else {
+        println!();
+        println!("Detailed edge stats: skipped (pass --by-language or --by-file to compute)");
     }
     println!();
 
@@ -570,16 +583,41 @@ fn print_stats_unified_text(stats: &GraphStats<'_>, options: &StatsDisplayOption
 
 /// Print unified graph stats in JSON format.
 fn print_stats_unified_json(stats: &GraphStats<'_>, options: &StatsDisplayOptions) -> Result<()> {
+    let value = stats_unified_json_value(stats, options);
+    println!("{}", serde_json::to_string_pretty(&value)?);
+
+    Ok(())
+}
+
+fn stats_unified_json_value(
+    stats: &GraphStats<'_>,
+    options: &StatsDisplayOptions,
+) -> serde_json::Value {
     use serde_json::{Map, Value, json};
 
     let mut output = Map::new();
     output.insert("node_count".into(), json!(stats.node_count));
     output.insert("edge_count".into(), json!(stats.edge_count));
     output.insert(
-        "cross_language_edge_count".into(),
-        json!(stats.cross_language_count),
+        "detailed_edge_stats".into(),
+        json!(stats.detailed_edge_stats),
     );
-    output.insert("edges_by_kind".into(), json!(stats.kind_counts));
+    if stats.detailed_edge_stats {
+        output.insert(
+            "cross_language_edge_count".into(),
+            json!(stats.cross_language_count),
+        );
+        output.insert("edges_by_kind".into(), json!(stats.kind_counts));
+    } else {
+        output.insert("cross_language_edge_count".into(), Value::Null);
+        output.insert("edges_by_kind".into(), Value::Null);
+        output.insert(
+            "detailed_edge_stats_hint".into(),
+            json!(
+                "Pass --by-language or --by-file to compute edge kind and cross-language counts."
+            ),
+        );
+    }
     output.insert("file_count".into(), json!(stats.file_count));
 
     if options.by_language {
@@ -591,10 +629,7 @@ fn print_stats_unified_json(stats: &GraphStats<'_>, options: &StatsDisplayOption
         output.insert("nodes_by_file".into(), json!(stats.file_counts));
     }
 
-    let value = Value::Object(output);
-    println!("{}", serde_json::to_string_pretty(&value)?);
-
-    Ok(())
+    Value::Object(output)
 }
 
 // ===== Unified Graph Trace Path =====
@@ -4460,6 +4495,95 @@ mod tests {
         let result = parse_language("unknown_language");
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Unknown language"));
+    }
+
+    // ==========================================================================
+    // graph stats output tests
+    // ==========================================================================
+
+    #[test]
+    fn test_edge_kind_stats_key_uses_stable_tags() {
+        let direct_call = UnifiedEdgeKind::Calls {
+            argument_count: 1,
+            is_async: false,
+            resolved_via: ResolvedVia::Direct,
+        };
+        let binding_call = UnifiedEdgeKind::Calls {
+            argument_count: 7,
+            is_async: true,
+            resolved_via: ResolvedVia::BindingPlane,
+        };
+        let table_read = UnifiedEdgeKind::TableRead {
+            table_name: StringId::new(1),
+            schema: None,
+        };
+
+        assert_eq!(edge_kind_stats_key(&direct_call), "calls");
+        assert_eq!(edge_kind_stats_key(&binding_call), "calls");
+        assert_eq!(edge_kind_stats_key(&table_read), "table_read");
+    }
+
+    #[test]
+    fn test_stats_json_marks_detail_fields_uncomputed() {
+        let kind_counts = HashMap::new();
+        let lang_counts = HashMap::new();
+        let file_counts = HashMap::new();
+        let stats = GraphStats {
+            node_count: 10,
+            edge_count: 20,
+            cross_language_count: 0,
+            kind_counts: &kind_counts,
+            lang_counts: &lang_counts,
+            file_counts: &file_counts,
+            file_count: 3,
+            detailed_edge_stats: false,
+        };
+        let options = StatsDisplayOptions {
+            by_language: false,
+            by_file: false,
+        };
+
+        let value = stats_unified_json_value(&stats, &options);
+
+        assert_eq!(value["detailed_edge_stats"].as_bool(), Some(false));
+        assert!(value["edges_by_kind"].is_null());
+        assert!(value["cross_language_edge_count"].is_null());
+        assert!(
+            value["detailed_edge_stats_hint"]
+                .as_str()
+                .is_some_and(|hint| hint.contains("--by-language"))
+        );
+    }
+
+    #[test]
+    fn test_stats_json_emits_coarse_detailed_edge_counts() {
+        let mut kind_counts = HashMap::new();
+        kind_counts.insert("calls".to_string(), 2);
+        kind_counts.insert("table_read".to_string(), 1);
+        let lang_counts = HashMap::new();
+        let file_counts = HashMap::new();
+        let stats = GraphStats {
+            node_count: 10,
+            edge_count: 3,
+            cross_language_count: 1,
+            kind_counts: &kind_counts,
+            lang_counts: &lang_counts,
+            file_counts: &file_counts,
+            file_count: 3,
+            detailed_edge_stats: true,
+        };
+        let options = StatsDisplayOptions {
+            by_language: false,
+            by_file: false,
+        };
+
+        let value = stats_unified_json_value(&stats, &options);
+
+        assert_eq!(value["detailed_edge_stats"].as_bool(), Some(true));
+        assert_eq!(value["cross_language_edge_count"].as_u64(), Some(1));
+        assert_eq!(value["edges_by_kind"]["calls"].as_u64(), Some(2));
+        assert_eq!(value["edges_by_kind"]["table_read"].as_u64(), Some(1));
+        assert!(value["detailed_edge_stats_hint"].is_null());
     }
 
     // ==========================================================================

@@ -1,16 +1,17 @@
 //! Interactive session shell for repeated semantic queries.
 //!
-//! Provides a REPL that keeps the `.sqry-index` cache warm via
+//! Provides a REPL that keeps the unified graph cache warm via
 //! [`SessionManager`] so subsequent queries execute quickly.
 
 use crate::args::Cli;
+use crate::commands::query::create_session_manager_for_cli;
 use crate::output::{DisplaySymbol, FormatterMetadata, OutputStreams, create_formatter};
 use anyhow::{Context, Result, anyhow};
 use rustyline::history::History;
 use rustyline::{DefaultEditor, error::ReadlineError};
 use sqry_core::json_response::Filters;
 use sqry_core::query::results::QueryResults;
-use sqry_core::session::{SessionConfig, SessionManager};
+use sqry_core::session::SessionManager;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -25,10 +26,9 @@ pub fn run_shell(cli: &Cli, path: &str) -> Result<()> {
     let workspace = PathBuf::from(path);
     ensure_index_exists(&workspace)?;
 
-    // Create session manager for unified graph caching
-    let config = SessionConfig::default();
-    let session =
-        SessionManager::with_config(config).context("failed to initialise session manager")?;
+    // Create session manager for unified graph caching with the same plugin
+    // selection normal graph-backed query execution uses.
+    let session = create_session_manager_for_cli(cli, &workspace)?;
 
     // Warm the cache so the first query is instant.
     let start = Instant::now();
@@ -265,13 +265,15 @@ fn execute_query(cli: &Cli, session: &SessionManager, workspace: &Path, query: &
 
     formatter.format(&results, Some(&metadata), &mut streams)?;
 
-    if !cli.json && total_matches > limit && limit > 0 {
+    let is_structured_output = cli.json || cli.csv || cli.tsv;
+
+    if !is_structured_output && total_matches > limit && limit > 0 {
         streams.write_diagnostic(&format!(
             "\nShowing {limit} of {total_matches} matches (use --limit to adjust)"
         ))?;
     }
 
-    if !cli.json {
+    if !is_structured_output {
         let served_from_cache = after_stats.cache_hits > before_stats.cache_hits;
         let cache_status = if served_from_cache {
             "cache hit"

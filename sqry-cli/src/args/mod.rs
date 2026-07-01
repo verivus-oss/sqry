@@ -769,7 +769,12 @@ pub enum Command {
         #[arg(help_heading = headings::QUERY_INPUT, display_order = 20)]
         path: Option<String>,
 
-        /// Use persistent session (keeps .sqry-index hot for repeated queries).
+        /// Use the in-process session cache for this query.
+        ///
+        /// This cache is retained only for the lifetime of the current sqry
+        /// process. Separate `sqry query --session ...` invocations do not
+        /// share memory; use `sqry shell` or `sqry daemon` for a warm
+        /// multi-query workflow.
         #[arg(long, help_heading = headings::PERFORMANCE_DEBUGGING, display_order = 10)]
         session: bool,
 
@@ -997,6 +1002,9 @@ pub enum Command {
         /// Directory containing the `.sqry-index` file.
         #[arg(value_name = "PATH", help_heading = headings::SHELL_CONFIGURATION, display_order = 10)]
         path: Option<String>,
+
+        #[command(flatten)]
+        plugin_selection: PluginSelectionArgs,
     },
 
     /// Execute multiple queries from a batch file using a warm session
@@ -3770,6 +3778,9 @@ impl Cli {
                     plugin_selection, ..
                 }
                 | Command::Watch {
+                    plugin_selection, ..
+                }
+                | Command::Shell {
                     plugin_selection, ..
                 },
             ) => plugin_selection.clone(),

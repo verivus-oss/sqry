@@ -13,6 +13,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [25.0.2] - 2026-07-01
+
+### Fixed
+
+- Fixed `sqry graph stats --json` to distinguish cheap summary fields from
+  detailed edge-kind accounting. Plain stats now reports detailed-only fields as
+  uncomputed instead of emitting misleading empty maps; `--by-language` keeps
+  emitting detailed, stable edge-kind tags.
+- Aligned repository source-of-truth version metadata, managed `VERSION` stamps,
+  cargo-vet first-party exemptions, and package metadata with `25.0.2`.
+
 ## [21.0.0] - 2026-06-16
 
 ### Removed

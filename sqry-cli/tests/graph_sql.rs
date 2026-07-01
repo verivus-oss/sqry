@@ -99,20 +99,22 @@ fn sql_graph_stats_reports_functions_triggers_and_table_operations() {
     );
 
     // Edge kind counts should reflect SQL relationships:
-    // - TriggeredBy (trigger -> table)
-    // - TableRead (function -> table for SELECT)
-    // - TableWrite (function -> table for INSERT/UPDATE/DELETE)
+    // - triggered_by (trigger -> table)
+    // - table_read (function -> table for SELECT)
+    // - table_write (function -> table for INSERT/UPDATE/DELETE)
     let edge_summary = stats["edges_by_kind"]
         .as_object()
         .expect("edges_by_kind map missing");
 
-    // Verify we have table operation edges (TableRead and/or TableWrite)
-    let has_table_edges = edge_summary.keys().any(|kind| {
-        kind.contains("TableRead") || kind.contains("TableWrite") || kind.contains("TriggeredBy")
-    });
+    assert_eq!(stats["detailed_edge_stats"].as_bool(), Some(true));
+
+    // Verify we have table operation edges (table_read and/or table_write).
+    let has_table_edges = edge_summary
+        .keys()
+        .any(|kind| matches!(kind.as_str(), "table_read" | "table_write" | "triggered_by"));
     assert!(
         has_table_edges,
-        "expected table operation edges (TableRead/TableWrite/TriggeredBy), got {edge_summary:?}"
+        "expected table operation edges (table_read/table_write/triggered_by), got {edge_summary:?}"
     );
 }
 

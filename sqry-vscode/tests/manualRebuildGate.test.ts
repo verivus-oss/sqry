@@ -45,7 +45,7 @@ class StubGate implements ReadyGate {
     }
     return new Promise((resolve, reject) => {
       const t = timeoutMs ?? 30_000;
-      const timer = setTimeout(() => {
+      setTimeout(() => {
         if (this.ready) {
           resolve();
         } else if (this.failure) {

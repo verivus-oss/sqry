@@ -1,11 +1,35 @@
 
 # cargo-vet audits file
 
+[[audits.clap_complete]]
+who = "Werner Kasselman <werner@sqry.dev>"
+criteria = "safe-to-deploy"
+delta = "4.6.5 -> 4.6.6"
+notes = "Reviewed 4.6.5 to 4.6.6 patch diff: bash positional placeholder handling and fish generated-helper formatting fixes plus version/link metadata updates; no build scripts, new dependencies, network/file-system side effects, or unsafe code introduced."
+
 [[audits.indicatif]]
 who = "Werner Kasselman <werner@sqry.dev>"
 criteria = "safe-to-deploy"
 delta = "0.18.4 -> 0.18.5"
 notes = "Reviewed 0.18.4 to 0.18.5 patch diff: terminal rendering/wrapping fixes including CJK width handling, MSRV metadata bump, example cleanup, and dev-dependency updates; no build scripts, new runtime dependencies, network/file-system side effects, or unsafe code introduced."
+
+[[audits.time]]
+who = "Werner Kasselman <werner@sqry.dev>"
+criteria = "safe-to-deploy"
+delta = "0.3.51 -> 0.3.52"
+notes = "Reviewed 0.3.51 to 0.3.52 patch diff: parsing APIs with default parsed components, nested format-description bracket depth fix, time-macros 0.2.31 dependency update, tests, and docs; no build scripts, new non-time-macros runtime dependencies, network/file-system side effects, or unsafe code introduced."
+
+[[audits.time]]
+who = "Werner Kasselman <werner@sqry.dev>"
+criteria = "safe-to-deploy"
+delta = "0.3.52 -> 0.3.53"
+notes = "Reviewed 0.3.52 to 0.3.53 patch diff: formatting/parsing traits are further sealed with crate-private tokens, private-interface lint expectations are added, and public Date/Time/OffsetDateTime parsing/formatting call sites are updated accordingly; no build scripts, new dependencies, network/file-system side effects, or unsafe blocks introduced beyond existing formatting buffer handling."
+
+[[audits.time-macros]]
+who = "Werner Kasselman <werner@sqry.dev>"
+criteria = "safe-to-deploy"
+delta = "0.2.30 -> 0.2.31"
+notes = "Reviewed 0.2.30 to 0.2.31 patch diff: ISO week/year overflow validation and subsecond literal parsing without floating-point conversion loss; no build scripts, new dependencies, network/file-system side effects, or unsafe code introduced."
 
 [[audits.tree-sitter-kotlin]]
 who = "Werner Kasselman <werner@sqry.dev>"
@@ -16,6 +40,12 @@ version = "0.3.9"
 who = "Werner Kasselman <werner@sqry.dev>"
 criteria = "safe-to-deploy"
 version = "0.3.11"
+
+[[audits.zlib-rs]]
+who = "Werner Kasselman <werner@sqry.dev>"
+criteria = "safe-to-deploy"
+delta = "0.6.3 -> 0.6.5"
+notes = "Reviewed 0.6.3 to 0.6.5 patch diff: SIMD Adler/CRC/deflate fixes, LoongArch LSX optional feature support, inflate window-bits validation, uninitialized output buffer APIs, test hardening, and documented Raptor Lake store-corruption workaround; no build scripts, new runtime dependencies, network/file-system side effects, or default-feature expansion introduced."
 
 [[trusted.anstream]]
 criteria = "safe-to-deploy"

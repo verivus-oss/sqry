@@ -168,7 +168,7 @@ fn kernel_fixture_callees_have_nonzero_lines() {
     for (name, kind, line) in &callees {
         assert_ne!(
             *line, 0,
-            "Callee {name} (kind={kind:?}) of nft_add_set_elem has line == 0 — \
+            "Callee {name} (kind={kind:?}) of nft_add_set_elem has line == 0: \
              the holistic fix should have resolved this"
         );
     }

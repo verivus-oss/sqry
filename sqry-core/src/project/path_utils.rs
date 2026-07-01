@@ -51,9 +51,8 @@ pub fn canonicalize_path(path: &Path) -> Result<PathBuf, io::Error> {
         Err(e) => {
             // Log the fallback - caller should handle appropriately
             log::debug!(
-                "Canonicalization failed for '{}': {}. Using absolutize fallback.",
-                path.display(),
-                e
+                "Canonicalization failed with {:?}; using absolutize fallback.",
+                e.kind()
             );
             absolutize_without_resolution(path)
         }

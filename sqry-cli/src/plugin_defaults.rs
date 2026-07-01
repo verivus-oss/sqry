@@ -75,6 +75,20 @@ pub fn resolve_plugin_selection(
     })
 }
 
+/// Resolve the read-only plugin manager used by query-like execution surfaces.
+///
+/// Session-backed CLI paths use this helper so their `SessionManager`
+/// validates and deserializes persisted graphs with the same plugin roster as
+/// normal `sqry query` execution.
+///
+/// # Errors
+///
+/// Returns an error if plugin overrides are invalid, a persisted manifest cannot
+/// be loaded safely, or a read-only command would reinterpret an indexed workspace.
+pub fn resolve_read_only_plugin_manager(cli: &Cli, root: &Path) -> Result<PluginManager> {
+    Ok(resolve_plugin_selection(cli, root, PluginSelectionMode::ReadOnly)?.plugin_manager)
+}
+
 /// Resolve the plugin selection for `sqry index`.
 ///
 /// # Errors

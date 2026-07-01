@@ -482,7 +482,7 @@ fn run() -> Result<()> {
         }
 
         // Interactive shell command
-        Some(Command::Shell { path }) => {
+        Some(Command::Shell { path, .. }) => {
             commands::run_shell(&cli, path.as_deref().unwrap_or("."))
                 .context("Shell command failed")?;
         }

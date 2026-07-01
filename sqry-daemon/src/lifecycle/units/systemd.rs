@@ -668,12 +668,13 @@ mod tests {
             ..InstallOptions::default()
         };
         let result = resolve_system_unit_user(&opts);
-        assert!(
-            result.is_ok(),
-            "resolve_system_unit_user must succeed for the current user {username_str:?}, \
-             got: {result:?}"
-        );
-        assert_eq!(result.unwrap(), username_str);
+        match result {
+            Ok(resolved_user) => assert!(
+                resolved_user == username_str,
+                "resolve_system_unit_user must return the current POSIX user"
+            ),
+            Err(_) => panic!("resolve_system_unit_user must succeed for the current POSIX user"),
+        }
     }
 
     /// An account name that does not exist on any system must return an error.

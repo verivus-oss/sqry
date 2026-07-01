@@ -9,12 +9,12 @@ rust-version.workspace = true
 description = "Kotlin language plugin for sqry"
 
 [dependencies]
-sqry-core = { version = "25.0.2", path = "../sqry-core" }
-sqry-lang-support = { version = "25.0.2", path = "../sqry-lang-support" }
+sqry-core = { version = "26.0.1", path = "../sqry-core" }
+sqry-lang-support = { version = "26.0.1", path = "../sqry-lang-support" }
 anyhow.workspace = true
 log.workspace = true
 tree-sitter.workspace = true
-tree-sitter-kotlin-sqry = { version = "25.0.2", path = "../crates/tree-sitter-kotlin-sqry" }
+tree-sitter-kotlin-sqry = { version = "26.0.1", path = "../crates/tree-sitter-kotlin-sqry" }
 streaming-iterator.workspace = true
 
 [dev-dependencies]
