@@ -513,7 +513,7 @@
   "dependencies": {
     "elkjs": "^0.11.1",
     "https-proxy-agent": "^7.0.6",
-    "sigstore": "^4.1.0",
+    "sigstore": "^4.1.1",
     "vscode-languageclient": "^9.0.1",
     "which": "^4.0.0"
   },
