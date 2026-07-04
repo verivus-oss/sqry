@@ -25,7 +25,11 @@ pub const RESOURCE_CAPABILITY_MAP: &str = "sqry://docs/capability-map";
 pub const LANGUAGE_COUNT_TOTAL: u32 = 37;
 pub const LANGUAGE_COUNT_FULL_RELATION: u32 = 28;
 pub const LANGUAGE_COUNT_SYMBOL_EXTRACTION: u32 = 9;
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 7;
+/// Current graph snapshot writer format, derived from sqry-core so the
+/// manifest resource can never drift from the actual on-disk format
+/// (it sat frozen at the legacy value 7 while the writer moved to V17).
+pub const SNAPSHOT_FORMAT_VERSION: u32 =
+    sqry_core::graph::unified::persistence::format::CURRENT_VERSION as u32;
 pub const DEFAULT_QUERY_TIMEOUT_MS: u64 = 60_000;
 pub const DEFAULT_INDEX_TIMEOUT_MS: u64 = 600_000;
 pub const DEFAULT_REDACTION_PRESET: &str = "minimal";
@@ -728,7 +732,9 @@ CompanionOf, SealedPermit
 ## Persistence
 
 - **Location**: `.sqry/graph/snapshot.sqry`
-- **Format**: V7 (postcard serialization, SHA-256 integrity verification)
+- **Format**: versioned `SQRY_GRAPH_V*` snapshots (postcard serialization, SHA-256 integrity \
+verification); the `sqry://meta/manifest` resource reports the current writer version, and older \
+snapshots upconvert inline on load
 - **CLI**: `sqry index` builds/saves, `sqry graph *` loads
 
 ## Language Support
