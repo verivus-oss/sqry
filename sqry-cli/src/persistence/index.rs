@@ -126,6 +126,9 @@ impl UserMetadataIndex {
     /// # Errors
     ///
     /// Returns an error if the file cannot be written.
+    // Reserved: direct save (update() is the wired path), not yet wired into a
+    // CLI command.
+    #[allow(dead_code)]
     pub fn save(&self, scope: StorageScope, metadata: &UserMetadata) -> anyhow::Result<()> {
         let path = self.path_for_scope(scope)?;
         Self::save_to_path(&path, metadata)?;
@@ -183,6 +186,8 @@ impl UserMetadataIndex {
     /// # Errors
     ///
     /// Returns an error if the path cannot be determined.
+    // Reserved: on-disk size probe, not yet wired into a CLI command.
+    #[allow(dead_code)]
     pub fn index_size(&self, scope: StorageScope) -> anyhow::Result<u64> {
         let path = self.path_for_scope(scope)?;
         match fs::metadata(&path) {
@@ -197,6 +202,8 @@ impl UserMetadataIndex {
     /// # Errors
     ///
     /// Returns an error if the index size cannot be determined.
+    // Reserved: rotation check, not yet wired into a CLI command.
+    #[allow(dead_code)]
     pub fn needs_rotation(&self, scope: StorageScope) -> anyhow::Result<bool> {
         let size = self.index_size(scope)?;
         Ok(size > self.config.max_index_bytes)
@@ -205,6 +212,8 @@ impl UserMetadataIndex {
     /// Invalidate the cache for a scope.
     ///
     /// Forces the next load to read from disk.
+    // Reserved: per-scope cache invalidation, not yet wired into a CLI command.
+    #[allow(dead_code)]
     pub fn invalidate_cache(&self, scope: StorageScope) {
         let cache = match scope {
             StorageScope::Global => &self.global_cache,
@@ -214,6 +223,8 @@ impl UserMetadataIndex {
     }
 
     /// Invalidate all caches.
+    // Reserved: full cache invalidation, not yet wired into a CLI command.
+    #[allow(dead_code)]
     pub fn invalidate_all_caches(&self) {
         *self.global_cache.write() = None;
         *self.local_cache.write() = None;
@@ -226,7 +237,9 @@ impl UserMetadataIndex {
     }
 
     /// Get the project root if set.
+    // Reserved: project-root accessor, not yet wired into a CLI command.
     #[must_use]
+    #[allow(dead_code)]
     pub fn project_root(&self) -> Option<&Path> {
         self.project_root.as_deref()
     }

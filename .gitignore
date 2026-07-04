@@ -188,3 +188,8 @@ tools/naming-audit/Cargo.lock
 # (docs/development/dependency-upgrades/RUNBOOK.md)
 .sqry-dep-scans/
 .sqry-dep-worktrees/
+
+# Orchestrator transient capture logs
+docs/reviews/issue-*/**/*-diff.txt
+docs/reviews/issue-*/**/*-tests.txt
+docs/reviews/issue-*/**/*-full.txt

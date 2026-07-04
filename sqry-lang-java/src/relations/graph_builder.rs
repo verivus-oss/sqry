@@ -344,7 +344,6 @@ impl ASTGraph {
 }
 
 #[derive(Debug, Clone)]
-#[allow(clippy::struct_excessive_bools)] // Captures explicit method traits for graph resolution.
 struct MethodContext {
     /// Fully qualified name: `com.example.Class.method` or `com.example.Class.<init>`
     qualified_name: String,
@@ -354,13 +353,9 @@ struct MethodContext {
     depth: usize,
     /// Whether this is a static method
     is_static: bool,
-    /// Whether this is synchronized
-    #[allow(dead_code)] // Reserved for threading analysis
-    is_synchronized: bool,
     /// Whether this is a constructor
     is_constructor: bool,
     /// Whether this is a native method (JNI)
-    #[allow(dead_code)] // Reserved for JNI bridge analysis
     is_native: bool,
     /// Package name for use in call resolution (e.g., `com.example`)
     package_name: Option<String>,
@@ -533,7 +528,6 @@ fn extract_method_context(
     let method_name = extract_identifier(name_node, content);
 
     let is_static = has_modifier(method_node, "static", content);
-    let is_synchronized = has_modifier(method_node, "synchronized", content);
     let is_native = has_modifier(method_node, "native", content);
     let visibility = extract_visibility(method_node, content);
 
@@ -551,7 +545,6 @@ fn extract_method_context(
         span: (method_node.start_byte(), method_node.end_byte()),
         depth,
         is_static,
-        is_synchronized,
         is_constructor: false,
         is_native,
         package_name: package_name.map(std::string::ToString::to_string),
@@ -577,7 +570,6 @@ fn extract_constructor_context(
         span: (constructor_node.start_byte(), constructor_node.end_byte()),
         depth,
         is_static: false,
-        is_synchronized: false,
         is_constructor: true,
         is_native: false,
         package_name: package_name.map(std::string::ToString::to_string),

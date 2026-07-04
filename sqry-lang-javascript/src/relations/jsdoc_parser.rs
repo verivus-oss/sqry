@@ -20,8 +20,6 @@ pub struct JsDocTags {
 pub struct ParamTag {
     pub name: String,
     pub type_str: String,
-    #[allow(dead_code)] // Reserved for future use
-    pub description: Option<String>,
 }
 
 /// Extract `JSDoc` comment immediately preceding a node
@@ -136,17 +134,7 @@ fn parse_param_tag(line: &str) -> Option<ParamTag> {
     // NOTE: Using simple parsing instead of regex for better maintainability
     let name = extract_param_name(after_type)?;
 
-    // Extract description after name
-    let description = after_type
-        .split_once(&name)
-        .and_then(|(_, rest)| rest.trim().strip_prefix('-'))
-        .map(|s| s.trim().to_string());
-
-    Some(ParamTag {
-        name,
-        type_str,
-        description,
-    })
+    Some(ParamTag { name, type_str })
 }
 
 /// Extract parameter name from text after type
@@ -281,7 +269,6 @@ mod tests {
         let tag = parse_param_tag("@param {string} name - description").unwrap();
         assert_eq!(tag.name, "name");
         assert_eq!(tag.type_str, "string");
-        assert_eq!(tag.description, Some("description".to_string()));
 
         let tag = parse_param_tag("@param {number} [count=10]").unwrap();
         assert_eq!(tag.name, "count");

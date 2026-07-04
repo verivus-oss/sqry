@@ -1,7 +1,7 @@
 # Semantic Versioning Guide
 
-**Version**: 26.0.1
-**Last Updated**: 2026-07-01
+**Version**: 27.0.4
+**Last Updated**: 2026-07-04
 
 ---
 
@@ -61,7 +61,7 @@ sqry's changelog follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/
 
 ## [Unreleased]
 
-## [26.0.1] - 2026-05-31
+## [27.0.4] - 2026-05-31
 ### Fixed
 - Summary of bug fixes
 
@@ -100,5 +100,5 @@ Guidelines:
 
 | Version | Date | Changes |
 |---------|------|---------|
-| 26.0.1 | 2026-05-31 | Full rewrite; align with current release process |
+| 27.0.4 | 2026-05-31 | Full rewrite; align with current release process |
 | 4.5.11 | 2026-02-27 | Initial draft |

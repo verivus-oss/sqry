@@ -9,7 +9,7 @@ rust-version.workspace = true
 description = "Rust language plugin for sqry"
 
 [dependencies]
-sqry-core = { version = "26.0.1", path = "../sqry-core" }
+sqry-core = { version = "27.0.4", path = "../sqry-core" }
 anyhow.workspace = true
 tree-sitter.workspace = true
 tree-sitter-rust.workspace = true

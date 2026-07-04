@@ -64,6 +64,9 @@ pub enum HistoryError {
     /// History recording is disabled.
     Disabled,
     /// Entry not found.
+    // Reserved: only constructed by the unwired accessors `get` (id lookup) and
+    // `at_offset` (offset-from-latest, on a zero or out-of-range offset).
+    #[allow(dead_code)]
     NotFound { id: u64 },
     /// Storage operation failed.
     Storage(anyhow::Error),
@@ -184,6 +187,8 @@ impl HistoryManager {
     /// # Errors
     ///
     /// Returns an error if the entry is not found or storage fails.
+    // Reserved: id-keyed lookup, not yet wired into a CLI command.
+    #[allow(dead_code)]
     pub fn get(&self, id: u64) -> Result<HistoryEntry, HistoryError> {
         let metadata = self.index.load(StorageScope::Global)?;
         metadata
@@ -200,6 +205,8 @@ impl HistoryManager {
     /// # Errors
     ///
     /// Returns an error if history is empty or storage fails.
+    // Reserved: most-recent-entry accessor, not yet wired into a CLI command.
+    #[allow(dead_code)]
     pub fn last(&self) -> Result<Option<HistoryEntry>, HistoryError> {
         let metadata = self.index.load(StorageScope::Global)?;
         Ok(metadata.history.entries.last().cloned())
@@ -288,6 +295,8 @@ impl HistoryManager {
     /// # Errors
     ///
     /// Returns an error if storage fails.
+    // Reserved: age-based pruning, not yet wired into a CLI command.
+    #[allow(dead_code)]
     pub fn clear_older_than_duration(&self, older_than: Duration) -> Result<usize, HistoryError> {
         let cutoff = Utc::now() - chrono::Duration::from_std(older_than).unwrap_or_default();
         self.clear_older_than(cutoff)
@@ -320,6 +329,8 @@ impl HistoryManager {
     /// # Errors
     ///
     /// Returns an error if storage fails.
+    // Reserved: entry-count accessor, not yet wired into a CLI command.
+    #[allow(dead_code)]
     pub fn count(&self) -> Result<usize, HistoryError> {
         let metadata = self.index.load(StorageScope::Global)?;
         Ok(metadata.history.entries.len())
@@ -330,6 +341,8 @@ impl HistoryManager {
     /// # Errors
     ///
     /// Returns an error if storage fails.
+    // Reserved: per-directory history filter, not yet wired into a CLI command.
+    #[allow(dead_code)]
     pub fn for_directory(
         &self,
         dir: &std::path::Path,
@@ -355,6 +368,8 @@ impl HistoryManager {
     /// # Errors
     ///
     /// Returns an error if the offset is out of range or storage fails.
+    // Reserved: offset-from-latest accessor, not yet wired into a CLI command.
+    #[allow(dead_code)]
     pub fn at_offset(&self, offset: usize) -> Result<HistoryEntry, HistoryError> {
         if offset == 0 {
             return Err(HistoryError::NotFound { id: 0 });
@@ -371,7 +386,9 @@ impl HistoryManager {
     }
 
     /// Check if history recording is enabled.
+    // Reserved: enable-state probe, not yet wired into a CLI command.
     #[must_use]
+    #[allow(dead_code)]
     pub fn is_enabled(&self) -> bool {
         self.index.config().history_enabled
     }
@@ -448,7 +465,10 @@ pub fn redact_secrets(args: &[String]) -> Vec<String> {
 }
 
 /// Check if a string contains potential secrets.
+// Reserved: standalone secret probe (redact_secrets is the wired path), not yet
+// wired into a CLI command.
 #[must_use]
+#[allow(dead_code)]
 pub fn contains_secrets(text: &str) -> bool {
     SECRET_PATTERNS.iter().any(|p| p.is_match(text))
 }

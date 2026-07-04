@@ -543,35 +543,6 @@ mod tests {
             .expect("Failed to parse Zig code")
     }
 
-    #[allow(dead_code)] // Helper function for future tests
-    fn extract_from_var_decl(code: &str) -> Vec<String> {
-        let tree = parse_zig_code(code);
-        let root = tree.root_node();
-
-        // Find variable_declaration node
-        let mut cursor = root.walk();
-        for child in root.children(&mut cursor) {
-            if child.kind() == "variable_declaration" {
-                // Find type node (after identifier and =)
-                let mut var_cursor = child.walk();
-
-                for var_child in child.children(&mut var_cursor) {
-                    if var_child.kind() == ":" {
-                        // Type annotation after colon
-                        let mut type_cursor = var_child.parent().unwrap().walk();
-                        for sibling in var_child.parent().unwrap().children(&mut type_cursor) {
-                            if is_type_node(sibling.kind()) {
-                                return extract_type_names_from_zig_type(sibling, code.as_bytes());
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        Vec::new()
-    }
-
     #[test]
     fn test_is_builtin_type() {
         assert!(is_builtin_type("i32"));

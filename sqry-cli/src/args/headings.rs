@@ -27,13 +27,6 @@ pub const OUTPUT_CONTROL: &str = "Output Control";
 /// File filtering and traversal
 pub const FILE_FILTERING: &str = "File Filtering & Traversal";
 
-/// Index management operations
-///
-/// Reserved for Phase 2.2+ command grouping of `index`, `update`, and `cache`.
-/// Suppress `dead_code` lint until integrated in root help layout.
-#[allow(dead_code)]
-pub const INDEX_MANAGEMENT: &str = "Index Management";
-
 // ===== Phase 1.5 Headings (Utilities) =====
 
 /// Utilities grouping for batch and completions

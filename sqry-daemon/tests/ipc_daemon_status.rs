@@ -54,6 +54,11 @@ async fn daemon_status_reports_loaded_workspaces() {
     let workspaces = result["result"]["workspaces"].as_array().expect("array");
     assert_eq!(workspaces.len(), 1);
     assert_eq!(workspaces[0]["state"].as_str(), Some("Loaded"));
+    assert_eq!(
+        workspaces[0]["watching"].as_bool(),
+        Some(false),
+        "direct manager preload has no dispatcher watcher"
+    );
     drop(client);
     server.stop().await;
 }

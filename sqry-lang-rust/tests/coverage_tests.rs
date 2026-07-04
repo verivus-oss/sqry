@@ -88,16 +88,14 @@ fn config_new_enables_all_features() {
     assert!(cfg.enable_macro_expansion);
     assert!(cfg.enable_trait_binding);
     assert!(cfg.enable_lifetime_extraction);
-    assert!(cfg.enable_rust_analyzer);
 }
 
 #[test]
-fn config_safe_mode_disables_macro_and_ra() {
+fn config_safe_mode_disables_macro_expansion() {
     let cfg = RustGraphConfig::safe_mode();
     assert!(!cfg.enable_macro_expansion);
     assert!(cfg.enable_trait_binding);
     assert!(cfg.enable_lifetime_extraction);
-    assert!(!cfg.enable_rust_analyzer);
 }
 
 #[test]
@@ -106,21 +104,14 @@ fn config_ast_only_disables_all() {
     assert!(!cfg.enable_macro_expansion);
     assert!(!cfg.enable_trait_binding);
     assert!(!cfg.enable_lifetime_extraction);
-    assert!(!cfg.enable_rust_analyzer);
 }
 
 #[test]
 fn config_builder_without_macro_expansion() {
     let cfg = RustGraphConfig::new().without_macro_expansion();
     assert!(!cfg.enable_macro_expansion);
-    assert!(cfg.enable_rust_analyzer); // unchanged
-}
-
-#[test]
-fn config_builder_without_rust_analyzer() {
-    let cfg = RustGraphConfig::new().without_rust_analyzer();
-    assert!(!cfg.enable_rust_analyzer);
-    assert!(cfg.enable_macro_expansion); // unchanged
+    assert!(cfg.enable_trait_binding);
+    assert!(cfg.enable_lifetime_extraction);
 }
 
 #[test]

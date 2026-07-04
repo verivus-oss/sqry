@@ -71,78 +71,6 @@ impl KotlinGraphBuilder {
         Self
     }
 
-    /// Extract class attributes from modifiers.
-    #[allow(dead_code)] // Scaffolding for class attribute analysis
-    fn extract_class_attributes(node: &tree_sitter::Node, content: &[u8]) -> Vec<String> {
-        let mut attributes = Vec::new();
-        let mut cursor = node.walk();
-        for child in node.children(&mut cursor) {
-            if child.kind() == "modifiers" {
-                let mut mod_cursor = child.walk();
-                for modifier in child.children(&mut mod_cursor) {
-                    if let Ok(mod_text) = modifier.utf8_text(content) {
-                        match mod_text {
-                            "data" => attributes.push("data".to_string()),
-                            "sealed" => attributes.push("sealed".to_string()),
-                            "abstract" => attributes.push("abstract".to_string()),
-                            "open" => attributes.push("open".to_string()),
-                            "final" => attributes.push("final".to_string()),
-                            "inner" => attributes.push("inner".to_string()),
-                            "value" => attributes.push("value".to_string()),
-                            _ => {}
-                        }
-                    }
-                }
-            }
-        }
-        attributes
-    }
-
-    /// Check if a function is suspend (async).
-    #[allow(dead_code)] // Scaffolding for suspend function detection
-    fn extract_is_suspend(node: &tree_sitter::Node, content: &[u8]) -> bool {
-        let mut cursor = node.walk();
-        for child in node.children(&mut cursor) {
-            if child.kind() == "modifiers" {
-                let mut mod_cursor = child.walk();
-                for modifier in child.children(&mut mod_cursor) {
-                    if let Ok(mod_text) = modifier.utf8_text(content)
-                        && mod_text == "suspend"
-                    {
-                        return true;
-                    }
-                }
-            }
-        }
-        false
-    }
-
-    /// Extract function attributes from modifiers.
-    #[allow(dead_code)] // Scaffolding for function attribute analysis
-    fn extract_function_attributes(node: &tree_sitter::Node, content: &[u8]) -> Vec<String> {
-        let mut attributes = Vec::new();
-        let mut cursor = node.walk();
-        for child in node.children(&mut cursor) {
-            if child.kind() == "modifiers" {
-                let mut mod_cursor = child.walk();
-                for modifier in child.children(&mut mod_cursor) {
-                    if let Ok(mod_text) = modifier.utf8_text(content) {
-                        match mod_text {
-                            "suspend" => attributes.push("suspend".to_string()),
-                            "inline" => attributes.push("inline".to_string()),
-                            "infix" => attributes.push("infix".to_string()),
-                            "operator" => attributes.push("operator".to_string()),
-                            "override" => attributes.push("override".to_string()),
-                            "abstract" => attributes.push("abstract".to_string()),
-                            _ => {}
-                        }
-                    }
-                }
-            }
-        }
-        attributes
-    }
-
     /// Check if a node has the `private` or `internal` visibility modifier.
     ///
     /// In Kotlin:
@@ -219,11 +147,9 @@ impl GraphBuilder for KotlinGraphBuilder {
 #[derive(Debug, Clone)]
 struct CallContext {
     qualified_name: String,
-    #[allow(dead_code)] // Reserved for scope analysis
     span: (usize, usize),
     is_async: bool,
     is_method: bool,
-    #[allow(dead_code)] // Reserved for class context tracking
     class_name: Option<String>,
     /// Return type of the function (e.g., `Deferred<Int>`, `String`)
     return_type: Option<String>,

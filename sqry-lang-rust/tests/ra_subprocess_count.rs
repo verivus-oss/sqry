@@ -1,7 +1,7 @@
-//! Integration tests for RA bridge subprocess spawn count.
+//! Integration tests for graph builder rust-analyzer subprocess behavior.
 //!
-//! These tests verify that the performance fix correctly caches rust-analyzer
-//! availability checks, reducing subprocess spawns from O(2N) to O(1).
+//! The graph builder does not have production rust-analyzer-backed inference,
+//! so graph builds must not probe or start rust-analyzer.
 //!
 //! Note: Unix-only tests that manipulate PATH require `serial_test` for isolation.
 
@@ -53,14 +53,14 @@ mod unix_tests {
     use sqry_lang_rust::relations::graph_builder::RustGraphBuilder;
     use std::os::unix::fs::PermissionsExt;
 
-    /// T4: Verify exactly 1 subprocess spawn per builder instance
+    /// Verify graph builds do not spawn rust-analyzer.
     ///
     /// This test creates a shim that counts invocations, then builds graphs
-    /// for multiple files using the SAME builder. The counter should only
-    /// increment once (on first file), proving the cache works.
+    /// for multiple files using the same builder. The counter must remain
+    /// zero because the graph builder no longer advertises RA-backed inference.
     #[test]
     #[serial]
-    fn test_single_subprocess_per_builder() {
+    fn test_graph_builder_does_not_spawn_rust_analyzer() {
         use tempfile::tempdir;
 
         let _guard = PathGuard::new();
@@ -116,7 +116,7 @@ echo "rust-analyzer 1.85.0 (fake)"
                 .unwrap();
         }
 
-        // Verify exactly 1 subprocess call
+        // Verify no subprocess calls
         let count: u32 = std::fs::read_to_string(&counter_file)
             .unwrap()
             .trim()
@@ -125,21 +125,18 @@ echo "rust-analyzer 1.85.0 (fake)"
 
         assert_eq!(
             count,
-            1,
-            "Expected exactly 1 subprocess spawn for {} files, got {}",
+            0,
+            "Expected no rust-analyzer subprocess spawns for {} files, got {}",
             files.len(),
             count
         );
     }
 
-    /// Additional test: Verify cloned builders each get their own subprocess call.
-    ///
-    /// Clone creates independent cache, so each cloned builder should
-    /// trigger its own subprocess spawn (but still only once per builder).
+    /// Verify cloned builders also do not spawn rust-analyzer.
     #[test]
     #[serial]
     #[allow(clippy::used_underscore_binding)] // Underscore prefix pattern
-    fn test_cloned_builders_separate_subprocess_calls() {
+    fn test_cloned_builders_do_not_spawn_rust_analyzer() {
         use tempfile::tempdir;
 
         let _guard = PathGuard::new();
@@ -190,13 +187,13 @@ echo "rust-analyzer 1.85.0 (fake)"
             .build_graph(&tree, &content, &file_path, &mut staging)
             .unwrap();
 
-        // Count should be 1
+        // Count should stay 0
         let count1: u32 = std::fs::read_to_string(&counter_file)
             .unwrap()
             .trim()
             .parse()
             .unwrap();
-        assert_eq!(count1, 1, "First builder should spawn 1 subprocess");
+        assert_eq!(count1, 0, "First builder should not spawn rust-analyzer");
 
         // Clone and use second builder
         let builder2 = builder1.clone();
@@ -211,18 +208,15 @@ echo "rust-analyzer 1.85.0 (fake)"
             .build_graph(&tree2, &content2, &file_path2, &mut staging2)
             .unwrap();
 
-        // Count should be 2 (cloned builder has fresh cache)
+        // Count should stay 0
         let count2: u32 = std::fs::read_to_string(&counter_file)
             .unwrap()
             .trim()
             .parse()
             .unwrap();
-        assert_eq!(
-            count2, 2,
-            "Cloned builder should spawn its own subprocess (total 2)"
-        );
+        assert_eq!(count2, 0, "Cloned builder should not spawn rust-analyzer");
 
-        // Use original builder again - should NOT increment (cached)
+        // Use original builder again.
         let file_path3 = temp.path().join("test3.rs");
         std::fs::write(&file_path3, "fn bar() {}").unwrap();
 
@@ -240,8 +234,8 @@ echo "rust-analyzer 1.85.0 (fake)"
             .parse()
             .unwrap();
         assert_eq!(
-            count3, 2,
-            "Original builder should still use cache (no new subprocess)"
+            count3, 0,
+            "Original builder should still not spawn rust-analyzer"
         );
     }
 }

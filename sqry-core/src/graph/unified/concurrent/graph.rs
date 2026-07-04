@@ -142,6 +142,19 @@ pub struct CodeGraph {
     /// filter on `is_definition` (e.g. items-only listings) read this marker to
     /// decide whether the signal is trustworthy or a reindex is required.
     pub(crate) definition_signal_present: bool,
+    /// Whether this graph carries genuine import-classification signal
+    /// (`NodeFlags::IMPORT_STDLIB` / `NodeFlags::IMPORT_RELATIVE` on import
+    /// nodes, issue #467).
+    ///
+    /// `true` for graphs freshly built in-process (the Go `GraphBuilder` path
+    /// classifies imports as it commits them) and for graphs loaded from a
+    /// V17-or-newer snapshot. `false` for graphs loaded from a pre-V17 snapshot,
+    /// whose import nodes never had their classification bits computed: the bits
+    /// are all clear, and clear must NOT be interpreted as "classified, not
+    /// stdlib." Consumers that read `IMPORT_STDLIB` / `IMPORT_RELATIVE` check
+    /// this marker to decide whether a clear bit is authoritative or whether a
+    /// reindex is required to obtain the signal.
+    pub(crate) import_classification_signal_present: bool,
 }
 
 impl CodeGraph {
@@ -178,6 +191,8 @@ impl CodeGraph {
             go_hints: crate::graph::unified::build::staging::GoHints::default(),
             // Fresh in-process graph: the GraphBuilder path stamps is_definition.
             definition_signal_present: true,
+            // Fresh in-process graph: the Go GraphBuilder path classifies imports.
+            import_classification_signal_present: true,
         }
     }
 
@@ -217,6 +232,10 @@ impl CodeGraph {
             // `set_definition_signal_present` based on the snapshot format
             // version (pre-V16 loads stamp `false`).
             definition_signal_present: true,
+            // Default to present; the load path overrides via
+            // `set_import_classification_signal_present` based on the snapshot
+            // format version (pre-V17 loads stamp `false`).
+            import_classification_signal_present: true,
         }
     }
 
@@ -254,6 +273,7 @@ impl CodeGraph {
             file_segments: Arc::clone(&self.file_segments),
             c_indirect_tables: self.c_indirect_tables.clone(),
             definition_signal_present: self.definition_signal_present,
+            import_classification_signal_present: self.import_classification_signal_present,
         }
     }
 
@@ -274,6 +294,26 @@ impl CodeGraph {
     #[inline]
     pub fn set_definition_signal_present(&mut self, present: bool) {
         self.definition_signal_present = present;
+    }
+
+    /// Returns whether this graph carries genuine import-classification signal.
+    ///
+    /// See [`import_classification_signal_present`](Self::import_classification_signal_present)
+    /// (the field) for the full contract.
+    #[inline]
+    #[must_use]
+    pub fn import_classification_signal_present(&self) -> bool {
+        self.import_classification_signal_present
+    }
+
+    /// Sets the import-classification-signal marker.
+    ///
+    /// Used by the snapshot load path to stamp `false` for pre-V17 snapshots
+    /// (whose import classification bits are all cleared but were never
+    /// computed) and `true` for V17+.
+    #[inline]
+    pub fn set_import_classification_signal_present(&mut self, present: bool) {
+        self.import_classification_signal_present = present;
     }
 
     /// Returns a reference to the node arena.
@@ -1062,10 +1102,15 @@ impl CodeGraph {
     /// [`NodeEntry`]: crate::graph::unified::storage::arena::NodeEntry
     /// [`NodeEntry.file`]: crate::graph::unified::storage::arena::NodeEntry::file
     /// [`NodeIdBearing::retain_nodes`]: crate::graph::unified::rebuild::coverage::NodeIdBearing::retain_nodes
-    #[allow(dead_code)] // Consumer is Task 4 Step 4 (`incremental_rebuild`)
-    // and the unit tests below; published in this commit so the §F.2
-    // invariant surface can be reviewed in isolation per the Gate 0c
-    // split contract.
+    // The only live consumer today is the unit-test suite below (the
+    // full-rebuild housekeeping fallback described above is not yet
+    // wired), so the gate is `not(test)` rather than the rebuild-path
+    // form: the lint stays suppressed on both production default and
+    // `rebuild-internals` builds and fires under `test`, catching the
+    // method going stale once its callers land. Published in this
+    // commit so the §F.2 invariant surface can be reviewed in isolation
+    // per the Gate 0c split contract.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn remove_file(
         &mut self,
         file_id: FileId,
@@ -1223,6 +1268,9 @@ impl CodeGraph {
             // A rebuild reparses source files, regenerating is_definition fresh,
             // so the reassembled graph always carries genuine signal.
             definition_signal_present: true,
+            // A rebuild reparses source files, reclassifying imports fresh, so
+            // the reassembled graph always carries genuine signal.
+            import_classification_signal_present: true,
         }
     }
 
@@ -1828,6 +1876,10 @@ pub struct GraphSnapshot {
     /// (R3 marker). Copied from the source [`CodeGraph`] at snapshot time. See
     /// [`CodeGraph::definition_signal_present`] for the contract.
     definition_signal_present: bool,
+    /// Whether this snapshot carries genuine import-classification signal
+    /// (issue #467). Copied from the source [`CodeGraph`] at snapshot time. See
+    /// [`CodeGraph::import_classification_signal_present`] for the contract.
+    import_classification_signal_present: bool,
 }
 
 impl GraphSnapshot {
@@ -1838,6 +1890,15 @@ impl GraphSnapshot {
     #[must_use]
     pub fn definition_signal_present(&self) -> bool {
         self.definition_signal_present
+    }
+
+    /// Returns whether this snapshot carries genuine import-classification signal.
+    ///
+    /// See [`CodeGraph::import_classification_signal_present`] for the full contract.
+    #[inline]
+    #[must_use]
+    pub fn import_classification_signal_present(&self) -> bool {
+        self.import_classification_signal_present
     }
 
     /// Returns a reference to the node arena.

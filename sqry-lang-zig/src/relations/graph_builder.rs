@@ -746,7 +746,6 @@ fn map_descendants_to_context(node: &Node, context_idx: usize, map: &mut HashMap
 struct CallContext {
     qualified_name: String,
     span: (usize, usize),
-    #[allow(dead_code)] // Reserved for visibility filtering in graph queries
     is_pub: bool,
 }
 

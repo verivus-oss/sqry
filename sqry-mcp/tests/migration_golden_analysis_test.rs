@@ -50,7 +50,6 @@ use sqry_mcp::tool_handlers::{
 };
 use std::fs;
 use std::num::NonZeroUsize;
-use std::path::PathBuf;
 use std::sync::Once;
 use std::time::Duration;
 use tempfile::TempDir;
@@ -1115,10 +1114,4 @@ pub fn root_fn() {
         result.data.edges
     );
     Ok(())
-}
-
-// Avoid a dead-code clippy lint if only some tests run.
-#[allow(dead_code)]
-fn _silence_unused_pathbuf_warning() {
-    let _: PathBuf = PathBuf::new();
 }

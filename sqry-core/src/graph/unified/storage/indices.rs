@@ -201,13 +201,13 @@ impl AuxiliaryIndices {
     /// per-index `by_kind` / `by_name` / `by_qualified_name` /
     /// `by_file` accessors.
     ///
-    /// `#[allow(dead_code)]` is present because Gate 0b delivers only
-    /// scaffolding; the call site in `RebuildGraph::finalize()` lands
-    /// with Gate 0c. Unit coverage lives in
-    /// `sqry-core/src/graph/unified/rebuild/coverage.rs::tests`.
+    /// Live in the default build: the consumer is the
+    /// `NodeIdBearing::all_node_ids` impl driven by the debug-build
+    /// residue check, reached from the ungated public
+    /// `build::incremental::incremental_rebuild` -> `finalize` path (the
+    /// `rebuild::coverage` unit tests exercise it too).
     ///
     /// [`NodeIdBearing`]: crate::graph::unified::rebuild::coverage::NodeIdBearing
-    #[allow(dead_code)]
     pub(crate) fn iter_all_node_ids(&self) -> impl Iterator<Item = NodeId> + '_ {
         self.kind_index
             .values()
@@ -236,8 +236,10 @@ impl AuxiliaryIndices {
     /// could reference a `StringId` slot that `recycle_unreferenced` is
     /// about to free (§H line 735 / iter-2 B1).
     ///
-    /// Empty `remap` is a no-op.
-    #[allow(dead_code)]
+    /// Empty `remap` is a no-op. Live in the default build: the consumer
+    /// is `RebuildGraph::finalize()` step 1, reached from the ungated
+    /// public `build::incremental::incremental_rebuild` -> `finalize`
+    /// path.
     pub(crate) fn rewrite_string_ids_through_remap(
         &mut self,
         remap: &std::collections::HashMap<StringId, StringId>,
@@ -296,11 +298,13 @@ impl AuxiliaryIndices {
     /// `NodeIds` uniformly across all four inner indices during
     /// `RebuildGraph::finalize()`.
     ///
-    /// `#[allow(dead_code)]` is present because Gate 0b delivers only
-    /// scaffolding; the call site lands with Gate 0c.
+    /// Live in the default build: the consumer is the
+    /// `NodeIdBearing::retain_nodes` impl driven by
+    /// `RebuildGraph::finalize()`, reached from the ungated public
+    /// `build::incremental::incremental_rebuild` -> `finalize` path (the
+    /// `rebuild::coverage` unit tests exercise it too).
     ///
     /// [`NodeIdBearing`]: crate::graph::unified::rebuild::coverage::NodeIdBearing
-    #[allow(dead_code)]
     pub(crate) fn retain_node_ids<F>(&mut self, keep: &F)
     where
         F: Fn(NodeId) -> bool + ?Sized,

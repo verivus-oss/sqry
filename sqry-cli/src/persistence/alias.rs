@@ -175,6 +175,8 @@ impl AliasManager {
     /// # Errors
     ///
     /// Returns an error if the alias is not found or storage fails.
+    // Reserved: scope-targeted lookup, not yet wired into a CLI command.
+    #[allow(dead_code)]
     pub fn get_from_scope(
         &self,
         name: &str,
@@ -239,6 +241,8 @@ impl AliasManager {
     /// # Errors
     ///
     /// Returns an error if storage fails.
+    // Reserved: single-scope listing, not yet wired into a CLI command.
+    #[allow(dead_code)]
     pub fn list_scope(&self, scope: StorageScope) -> Result<Vec<AliasWithScope>, AliasError> {
         let metadata = self.index.load(scope)?;
         let mut result: Vec<AliasWithScope> = metadata
@@ -439,7 +443,9 @@ impl AliasManager {
     /// Check if an alias exists.
     ///
     /// Checks both local and global storage.
+    // Reserved: existence check, not yet wired into a CLI command.
     #[must_use]
+    #[allow(dead_code)]
     pub fn exists(&self, name: &str) -> bool {
         self.get(name).is_ok()
     }
@@ -449,6 +455,8 @@ impl AliasManager {
     /// # Errors
     ///
     /// Returns an error if storage fails.
+    // Reserved: per-scope alias counts, not yet wired into a CLI command.
+    #[allow(dead_code)]
     pub fn count(&self) -> Result<(usize, usize), AliasError> {
         let local_count = if self.index.has_project_root() {
             self.index.load(StorageScope::Local)?.aliases.len()

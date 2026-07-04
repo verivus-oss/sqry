@@ -2850,6 +2850,101 @@ mod tests {
         );
     }
 
+    /// T2 (issue #467): the Go import-classification bits ride the SAME store
+    /// seam the synthetic marker uses. A `NodeMetadataStore` keyed by
+    /// staging-local `NodeId`s is merged into staging via `merge_macro_metadata`
+    /// (the exact call the Go plugin makes at `graph_builder.rs:386-388`), then
+    /// carried to the committed graph by the existing Phase 4d-prime rekey
+    /// (`rekey_staging_metadata_to_arena` -> `phase4d_prime_propagate_staging_metadata`).
+    /// No new production carriage seam is introduced or under test.
+    #[test]
+    fn import_classification_flags_ride_merge_and_phase4d_prime_rekey() {
+        use crate::graph::unified::build::parallel_commit::{
+            phase4d_prime_propagate_staging_metadata, rekey_staging_metadata_to_arena,
+        };
+        use crate::graph::unified::build::unification::NodeRemapTable;
+        use crate::graph::unified::concurrent::CodeGraph;
+        use crate::graph::unified::storage::metadata::{NodeFlags, NodeMetadataStore};
+
+        // Three staging-local import nodes: stdlib, relative, and third-party
+        // residual (the node that stays unmarked). `add_node` emits sequential
+        // staging-local `NodeId(i, 1)` (see `add_node` at :355), so their indices
+        // are 0, 1, 2.
+        let mut staging = StagingGraph::new();
+        let file_id = FileId::new(0);
+        let stdlib_sid =
+            staging.add_node(NodeEntry::new(NodeKind::Import, StringId::new(1), file_id));
+        let relative_sid =
+            staging.add_node(NodeEntry::new(NodeKind::Import, StringId::new(2), file_id));
+        let thirdparty_sid =
+            staging.add_node(NodeEntry::new(NodeKind::Import, StringId::new(3), file_id));
+
+        // Classify exactly as the Go plugin will: mark the flags on a
+        // `NodeMetadataStore` keyed by the staging-local ids, then merge into
+        // staging through the production `merge_macro_metadata` seam. The
+        // third-party node is deliberately left unmarked.
+        let mut store = NodeMetadataStore::new();
+        store.mark_import_stdlib(stdlib_sid);
+        store.mark_import_relative(relative_sid);
+        staging.merge_macro_metadata(&store);
+
+        // Drive the commit carriage: drain the staging store, rekey staging-local
+        // ids to arena ids by the per-file commit order, then propagate into the
+        // live graph's `macro_metadata` via Phase 4d-prime. `per_file_node_ids[i]`
+        // is the arena `NodeId` Phase 3 assigned to staging `NodeId(i, 1)`.
+        let staged = staging.take_macro_metadata();
+        let per_file_node_ids = [
+            NodeId::new(100, 1),
+            NodeId::new(101, 1),
+            NodeId::new(102, 1),
+        ];
+        let rekeyed = rekey_staging_metadata_to_arena(&staged, &per_file_node_ids);
+
+        let mut graph = CodeGraph::new();
+        // No Phase 4c-prime unification losers in this focused seam test.
+        let remap = NodeRemapTable::default();
+        let merged =
+            phase4d_prime_propagate_staging_metadata(&mut graph, vec![(file_id, rekeyed)], &remap);
+        assert!(
+            merged,
+            "the classified import entries must merge into the live graph's macro_metadata"
+        );
+
+        let arena_stdlib = per_file_node_ids[stdlib_sid.index() as usize];
+        let arena_relative = per_file_node_ids[relative_sid.index() as usize];
+        let arena_thirdparty = per_file_node_ids[thirdparty_sid.index() as usize];
+        let committed = graph.macro_metadata();
+
+        // Stdlib import: IMPORT_STDLIB set, IMPORT_RELATIVE clear, at the arena key.
+        assert!(
+            committed
+                .get_flags(arena_stdlib)
+                .contains(NodeFlags::IMPORT_STDLIB),
+            "stdlib import must carry IMPORT_STDLIB after the rekey + merge"
+        );
+        assert!(committed.is_import_stdlib(arena_stdlib));
+        assert!(!committed.is_import_relative(arena_stdlib));
+
+        // Relative import: IMPORT_RELATIVE set, IMPORT_STDLIB clear, at the arena key.
+        assert!(
+            committed
+                .get_flags(arena_relative)
+                .contains(NodeFlags::IMPORT_RELATIVE),
+            "relative import must carry IMPORT_RELATIVE after the rekey + merge"
+        );
+        assert!(committed.is_import_relative(arena_relative));
+        assert!(!committed.is_import_stdlib(arena_relative));
+
+        // Third-party residual: neither classification bit at the arena key.
+        assert!(!committed.is_import_stdlib(arena_thirdparty));
+        assert!(!committed.is_import_relative(arena_thirdparty));
+
+        // The rekey moved the flags OFF the staging-local keys: the committed
+        // store must not report them under the original staging ids.
+        assert!(!committed.is_import_stdlib(stdlib_sid));
+        assert!(!committed.is_import_relative(relative_sid));
+    }
+
     // ==================== Query API Tests ====================
 
     #[test]

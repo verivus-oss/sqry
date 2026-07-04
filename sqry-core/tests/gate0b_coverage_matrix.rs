@@ -604,6 +604,11 @@ fn plan_not_in_ka_fields_parses_real_plan() {
         // records whether the graph carries genuine NodeEntry.is_definition
         // data; never carries a NodeId payload. See plan §K exclusion bullet.
         "definition_signal_present",
+        // Issue #467: import-classification-signal marker. A scalar bool that
+        // records whether the graph's import nodes carry genuine stdlib /
+        // relative classification bits; never carries a NodeId payload. See
+        // plan §K exclusion bullet.
+        "import_classification_signal_present",
     ]
     .iter()
     .map(|s| (*s).to_string())

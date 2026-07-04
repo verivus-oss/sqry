@@ -203,7 +203,6 @@ enum Visibility {
 }
 
 impl Visibility {
-    #[allow(dead_code)] // Reserved for visibility filtering in graph queries
     fn as_str(self) -> &'static str {
         match self {
             Visibility::Public => "public",
@@ -228,18 +227,9 @@ enum RubyContextKind {
     SingletonMethod,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ControllerDslKind {
-    Before,
-    After,
-    Around,
-}
-
-#[allow(dead_code)] // Scaffolding for Rails controller DSL analysis
 #[derive(Debug, Clone)]
 struct ControllerDslHook {
     container: String,
-    kind: ControllerDslKind,
     callbacks: Vec<String>,
     only: Option<Vec<String>>,   // action filters
     except: Option<Vec<String>>, // action filters
@@ -256,14 +246,6 @@ struct RubyContext {
 }
 
 impl RubyContext {
-    #[allow(dead_code)] // Reserved for future filtering logic
-    fn is_method(&self) -> bool {
-        matches!(
-            self.kind,
-            RubyContextKind::Method | RubyContextKind::SingletonMethod
-        )
-    }
-
     fn is_singleton(&self) -> bool {
         matches!(self.kind, RubyContextKind::SingletonMethod)
     }
@@ -287,7 +269,6 @@ struct ASTGraph {
     attr_visibility: HashMap<usize, Visibility>,
     /// Scopes (namespaces) that have `extend FFI::Library` - used for FFI edge emission
     ffi_enabled_scopes: HashSet<Vec<String>>,
-    #[allow(dead_code)] // Reserved for Rails controller DSL analysis
     controller_dsl_hooks: Vec<ControllerDslHook>,
 }
 
@@ -302,11 +283,6 @@ impl ASTGraph {
             ffi_enabled_scopes: builder.ffi_enabled_scopes,
             controller_dsl_hooks: builder.controller_dsl_hooks,
         })
-    }
-
-    #[allow(dead_code)] // Reserved for future context queries
-    fn contexts(&self) -> &[RubyContext] {
-        &self.contexts
     }
 
     fn context_for_node(&self, node: &Node<'_>) -> Option<&RubyContext> {
@@ -1355,15 +1331,13 @@ impl<'a> ContextBuilder<'a> {
         };
         let dsl = self.node_text(name_node)?;
 
-        let kind = match dsl.as_str() {
-            "before_action" => Some(ControllerDslKind::Before),
-            "after_action" => Some(ControllerDslKind::After),
-            "around_action" => Some(ControllerDslKind::Around),
-            _ => None,
-        };
-        let Some(kind) = kind else {
+        let is_controller_callback = matches!(
+            dsl.as_str(),
+            "before_action" | "after_action" | "around_action"
+        );
+        if !is_controller_callback {
             return Ok(());
-        };
+        }
 
         if self.namespace.is_empty() {
             return Ok(());
@@ -1444,7 +1418,6 @@ impl<'a> ContextBuilder<'a> {
 
         self.controller_dsl_hooks.push(ControllerDslHook {
             container,
-            kind,
             callbacks,
             only,
             except,

@@ -706,34 +706,6 @@ fn populate_ffi_aliases(node: Node, content: &[u8], aliases: &mut FfiAliasTable)
     }
 }
 
-#[cfg(test)]
-#[allow(dead_code)]
-fn debug_node_structure(node: Node, content: &[u8], indent: usize) {
-    let indent_str = "  ".repeat(indent);
-    let text = node.utf8_text(content).ok().and_then(|t| {
-        let trimmed = t.trim();
-        if trimmed.len() > 50 || trimmed.is_empty() {
-            None
-        } else {
-            Some(trimmed)
-        }
-    });
-
-    eprintln!(
-        "{}{}{}",
-        indent_str,
-        node.kind(),
-        text.map(|t| format!(" [{t}]")).unwrap_or_default()
-    );
-
-    if indent < 10 {
-        let mut cursor = node.walk();
-        for child in node.children(&mut cursor) {
-            debug_node_structure(child, content, indent + 1);
-        }
-    }
-}
-
 /// Extract FFI assignments from local/assignment statements
 fn extract_ffi_assignment(node: Node, content: &[u8], aliases: &mut FfiAliasTable) {
     // For variable_declaration, look for assignment_statement child
@@ -1115,7 +1087,6 @@ fn build_call_for_staging(
         // Create synthetic module-level context for top-level calls
         module_context = CallContext {
             qualified_name: "<module>".to_string(),
-            span: (0, content.len()),
             is_method: false,
             module_name: None,
         };
@@ -1541,8 +1512,6 @@ fn build_field_access(
 #[derive(Debug, Clone)]
 struct CallContext {
     qualified_name: String,
-    #[allow(dead_code)] // Reserved for scope analysis
-    span: (usize, usize),
     is_method: bool,
     /// Module/class name for resolving self (e.g., "`MyModule`" from "`MyModule::method`")
     module_name: Option<String>,
@@ -1671,7 +1640,6 @@ fn handle_local_function(
     let context_idx = state.contexts.len();
     state.contexts.push(CallContext {
         qualified_name: qualified_name.clone(),
-        span: (node.start_byte(), node.end_byte()),
         is_method: false, // Local functions are never methods
         module_name: state.module_context.clone(),
     });
@@ -1751,7 +1719,6 @@ fn handle_function_declaration(
     let context_idx = state.contexts.len();
     state.contexts.push(CallContext {
         qualified_name: qualified_name.clone(),
-        span: (node.start_byte(), node.end_byte()),
         is_method,
         module_name: module_name.clone(),
     });
@@ -1858,7 +1825,6 @@ fn handle_function_assignment(
     let context_idx = state.contexts.len();
     state.contexts.push(CallContext {
         qualified_name: qualified_name.clone(),
-        span: (func_def.start_byte(), func_def.end_byte()),
         is_method,
         module_name: module_name.clone(),
     });

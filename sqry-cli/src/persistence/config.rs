@@ -36,6 +36,8 @@ pub struct PersistenceConfig {
     pub max_history_entries: usize,
 
     /// Maximum index size in bytes before rotation
+    // Reserved: rotation threshold, populated but not yet read by any command.
+    #[allow(dead_code)]
     pub max_index_bytes: u64,
 
     /// Whether to redact detected secrets from history
@@ -151,6 +153,8 @@ impl PersistenceConfig {
 /// # Errors
 ///
 /// Returns an error if the config directory cannot be determined.
+// Reserved: standalone config-dir helper, not yet wired into a CLI command.
+#[allow(dead_code)]
 pub fn global_config_dir() -> anyhow::Result<PathBuf> {
     dirs::config_dir()
         .map(|p| p.join("sqry"))

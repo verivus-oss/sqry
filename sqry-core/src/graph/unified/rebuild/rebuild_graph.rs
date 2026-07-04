@@ -221,6 +221,10 @@ macro_rules! sqry_graph_fields {
             // `true` unconditionally. Destructured to `_` to keep the match
             // exhaustive (the E0027 guard still fires for any other new field).
             definition_signal_present: _,
+            // Not mirrored into RebuildGraph: a rebuild reparses source files and
+            // reclassifies imports fresh, so the reassembled graph carries genuine
+            // signal. Destructured to `_` to keep the match exhaustive.
+            import_classification_signal_present: _,
         } = $this;
         RebuildGraph {
             nodes: (**nodes).clone(),
@@ -953,12 +957,14 @@ impl RebuildGraph {
     /// call. The bucket is already drained, `take_nodes` returns an
     /// empty `Vec`, the rest of the method short-circuits, and the
     /// `tombstones` set is unchanged.
-    #[allow(dead_code)] // Intra-crate consumer is Task 4 Step 4
-    // (`incremental_rebuild`); external consumer is sqry-daemon's
-    // Task 6 `WorkspaceManager` via the feature-gated `pub use` of
-    // `RebuildGraph`. The visibility is `pub` (not `pub(crate)`) so
-    // the daemon can drive file removals through the rebuild plane,
-    // which is the canonical path for file-deletion events per §F.2.
+    // Live in the default build: the intra-crate consumer is
+    // `remove_closure_from_rebuild`, reached from the ungated public
+    // `build::incremental::incremental_rebuild` path; the external
+    // consumer is sqry-daemon's `WorkspaceManager` via the feature-gated
+    // `pub use` of `RebuildGraph`. The visibility is `pub` (not
+    // `pub(crate)`) so the daemon can drive file removals through the
+    // rebuild plane, which is the canonical path for file-deletion
+    // events per §F.2.
     pub fn remove_file(&mut self, file_id: super::super::file::FileId) -> Vec<NodeId> {
         // Drain the rebuild-local FileRegistry bucket.
         let tombstoned: Vec<NodeId> = self.files.take_nodes(file_id);

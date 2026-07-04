@@ -1160,7 +1160,6 @@ fn phase3c_reparse_closure<S: std::hash::BuildHasher>(
 /// by name and the `Default` derive covers the zero-initialised case
 /// for new counters.
 #[derive(Debug, Default, Clone)]
-#[cfg_attr(not(any(test, feature = "rebuild-internals")), allow(dead_code))]
 pub struct PostCommitDiagnostics {
     /// Number of closure files successfully re-parsed and included in
     /// the commit plan. Zero when the closure was empty OR every file
@@ -1447,7 +1446,6 @@ fn split_reparse_inputs(
 /// test reads fields by name and the `Default` derive covers the
 /// zero-initialised case for new counters.
 #[derive(Debug, Default, Clone)]
-#[cfg_attr(not(any(test, feature = "rebuild-internals")), allow(dead_code))]
 pub struct Pass4dDiagnostics {
     /// Total `PendingEdge` entries submitted to the Phase 4d bulk
     /// insert (sum of per-file vector lengths at entry).

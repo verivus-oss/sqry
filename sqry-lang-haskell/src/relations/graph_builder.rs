@@ -2193,13 +2193,6 @@ struct CallContext {
     span: (usize, usize),
 }
 
-impl CallContext {
-    #[allow(dead_code)] // Reserved for future context queries
-    fn qualified_name(&self) -> String {
-        self.qualified_name.clone()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;

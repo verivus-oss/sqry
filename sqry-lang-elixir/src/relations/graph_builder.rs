@@ -274,7 +274,6 @@ fn build_call_edge_with_helper(
         // Create synthetic module-level context for top-level calls
         module_context = CallContext {
             qualified_name: "<module>".to_string(),
-            span: (0, content.len()),
             is_private: false,
         };
         &module_context
@@ -310,35 +309,6 @@ fn build_call_edge_with_helper(
 // ============================================================================
 // Helper Functions
 // ============================================================================
-
-/// Extract module name from defmodule declaration
-#[allow(dead_code)] // Scaffolding for module-level analysis
-fn extract_module_name(tree: &Tree, content: &[u8]) -> Option<String> {
-    let query = tree_sitter::Query::new(
-        &tree_sitter_elixir_sqry::language(),
-        r#"(call
-            target: (identifier) @def
-            (arguments
-              (alias) @module_name)
-            (#eq? @def "defmodule")
-        )"#,
-    )
-    .ok()?;
-
-    let mut cursor = tree_sitter::QueryCursor::new();
-    let root = tree.root_node();
-    let mut matches = cursor.matches(&query, root, content);
-
-    if let Some(m) = matches.next() {
-        for capture in m.captures {
-            if query.capture_names()[capture.index as usize] == "module_name" {
-                return capture.node.utf8_text(content).ok().map(String::from);
-            }
-        }
-    }
-
-    None
-}
 
 /// Check if a call node is a function definition (def/defp)
 fn is_function_definition(call_node: &Node, content: &[u8]) -> bool {
@@ -1179,7 +1149,6 @@ impl ASTGraph {
                 let context_idx = contexts.len();
                 contexts.push(CallContext {
                     qualified_name: name,
-                    span: (func_node.start_byte(), func_node.end_byte()),
                     is_private,
                 });
 
@@ -1192,11 +1161,6 @@ impl ASTGraph {
             contexts,
             node_to_context,
         })
-    }
-
-    #[allow(dead_code)] // Reserved for future context queries
-    fn contexts(&self) -> &[CallContext] {
-        &self.contexts
     }
 
     fn get_callable_context(&self, node_id: usize) -> Option<&CallContext> {
@@ -1219,17 +1183,7 @@ fn map_descendants_to_context(node: &Node, context_idx: usize, map: &mut HashMap
 #[derive(Debug, Clone)]
 struct CallContext {
     qualified_name: String,
-    #[allow(dead_code)] // Reserved for scope analysis
-    span: (usize, usize),
-    #[allow(dead_code)] // Reserved for visibility filtering
     is_private: bool,
-}
-
-impl CallContext {
-    #[allow(dead_code)] // Reserved for future context queries
-    fn qualified_name(&self) -> String {
-        self.qualified_name.clone()
-    }
 }
 
 #[cfg(test)]

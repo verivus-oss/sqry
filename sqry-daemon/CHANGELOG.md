@@ -6,7 +6,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
-## [26.0.1](https://github.com/verivus-oss/sqry/compare/v26.0.0...v26.0.1) - 2026-07-01
+## [27.0.4](https://github.com/verivus-oss/sqry/compare/v27.0.3...v27.0.4) - 2026-07-04
+
+### Other
+- update Cargo.lock dependencies
+## [27.0.3](https://github.com/verivus-oss/sqry/compare/v27.0.2...v27.0.3) - 2026-07-04
+
+### Other
+- update Cargo.lock dependencies
+## [27.0.2](https://github.com/verivus-oss/sqry/compare/v27.0.1...v27.0.2) - 2026-07-04
+
+### Other
+- update Cargo.lock dependencies
+## [27.0.1](https://github.com/verivus-oss/sqry/compare/v27.0.0...v27.0.1) - 2026-07-04
+
+### Other
+- update Cargo.lock dependencies
+## [27.0.0](https://github.com/verivus-oss/sqry/compare/v26.0.3...v27.0.0) - 2026-07-03
+
+### Other
+- update Cargo.lock dependencies
+## [26.0.2](https://github.com/verivus-oss/sqry/compare/v26.0.1...v26.0.2) - 2026-07-01
+
+### Fixed
+- *(daemon)* start file watcher on workspace load and pinned pre-load ([#463](https://github.com/verivus-oss/sqry/pull/463))## [26.0.1](https://github.com/verivus-oss/sqry/compare/v26.0.0...v26.0.1) - 2026-07-01
 
 ### Other
 - update Cargo.lock dependencies

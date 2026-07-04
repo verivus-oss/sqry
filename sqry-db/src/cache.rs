@@ -44,9 +44,6 @@ use crate::query::{DerivedQuery, QueryKey};
 /// shard (while holding the shard lock) does only cheap reference-count bumps,
 /// not byte copies. The save loop can then release all shard locks before
 /// performing any I/O.
-// SAVE_PATH (the next DAG unit) constructs and consumes this type.
-// Allow dead-code lint until that unit is implemented.
-#[allow(dead_code)]
 pub(crate) struct PersistableEntry {
     /// Stable on-disk discriminator from [`DerivedQuery::QUERY_TYPE_ID`].
     pub query_type_id: u32,
@@ -610,8 +607,6 @@ impl ShardedCache {
     /// `Arc` clones within each shard lock, then releases the lock before
     /// yielding from the collected `Vec`. No bytes are copied — the `Arc`
     /// reference counts are simply incremented.
-    // SAVE_PATH (the next DAG unit) calls this method. Allow dead-code until then.
-    #[allow(dead_code)]
     pub(crate) fn iter_persistent(&self) -> impl Iterator<Item = PersistableEntry> + '_ {
         self.shards.iter().flat_map(|shard| {
             // Take the read lock, collect persistent entries as cheap Arc clones,

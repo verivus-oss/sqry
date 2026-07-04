@@ -99,12 +99,8 @@ impl GraphBuilder for ScalaGraphBuilder {
 #[derive(Debug, Clone)]
 struct CallContext {
     qualified_name: String,
-    #[allow(dead_code)] // Reserved for scope analysis
-    span: (usize, usize),
     is_async: bool,
     is_method: bool,
-    #[allow(dead_code)] // Reserved for class context tracking
-    class_name: Option<String>,
 }
 
 impl CallContext {
@@ -233,15 +229,12 @@ fn walk_ast(node: Node, context: &mut WalkContext<'_>) -> Result<(), String> {
 
             // Determine if this is a method (inside a class)
             let is_method = !context.class_stack.is_empty();
-            let class_name = context.class_stack.last().cloned();
 
             let context_idx = context.contexts.len();
             context.contexts.push(CallContext {
                 qualified_name: qualified_func.clone(),
-                span: (node.start_byte(), node.end_byte()),
                 is_async,
                 is_method,
-                class_name,
             });
 
             // Associate all descendants with this context
@@ -485,10 +478,8 @@ fn build_call_for_staging(
         // Create synthetic module-level context for top-level calls
         module_context = CallContext {
             qualified_name: "<module>".to_string(),
-            span: (0, content.len()),
             is_async: false,
             is_method: false,
-            class_name: None,
         };
         &module_context
     };

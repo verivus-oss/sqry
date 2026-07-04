@@ -93,6 +93,12 @@ pub struct WorkspaceStatus {
     /// Whether this workspace is LRU-exempt.
     pub pinned: bool,
 
+    /// Whether the daemon currently has a live file watcher for this
+    /// workspace. `false` means edits require an explicit rebuild to be
+    /// observed.
+    #[serde(default)]
+    pub watching: bool,
+
     /// Live graph size (from [`super::LoadedWorkspace::memory_bytes`]).
     pub current_bytes: u64,
 
@@ -153,6 +159,7 @@ mod tests {
                 index_root: PathBuf::from("/repos/example"),
                 state: WorkspaceState::Loaded,
                 pinned: true,
+                watching: true,
                 current_bytes: 320 * 1024 * 1024,
                 high_water_bytes: 890 * 1024 * 1024,
                 last_good_at: None,
@@ -166,5 +173,22 @@ mod tests {
         let json = serde_json::to_string(&status).expect("serialise");
         let back: DaemonStatus = serde_json::from_str(&json).expect("round-trip");
         assert_eq!(back, status);
+    }
+
+    #[test]
+    fn workspace_status_missing_watching_defaults_false() {
+        let status: WorkspaceStatus = serde_json::from_value(serde_json::json!({
+            "index_root": "/repos/example",
+            "state": "Loaded",
+            "pinned": false,
+            "current_bytes": 0_u64,
+            "high_water_bytes": 0_u64,
+            "last_good_at": null,
+            "last_error": null,
+            "retry_count": 0
+        }))
+        .expect("deserialize old workspace status without watching");
+
+        assert!(!status.watching);
     }
 }

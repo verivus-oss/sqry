@@ -43,11 +43,10 @@ use tree_sitter::Node;
 /// listed here pass through unchanged (identity), so non-aliased types
 /// such as `struct foo` or typedef names are unaffected.
 ///
-/// Consumed by [`normalize_width_alias`] and (in a follow-up Phase A
-/// unit, `U07_SIGNATURE_BUILDER`) by the canonical type-signature builder
-/// in `sqry-lang-c/src/relations/signature_builder.rs`. The unit-tests
-/// in `width_alias_tests` exercise every row.
-#[allow(dead_code)] // wired by U07_SIGNATURE_BUILDER in a follow-up commit on this branch
+/// Consumed by [`normalize_width_alias`], which the canonical
+/// type-signature builder in `sqry-lang-c/src/relations/signature_builder.rs`
+/// calls from the live `build_function_signature` path. The unit-tests in
+/// `width_alias_tests` exercise every row.
 const WIDTH_ALIAS_TABLE: &[(&str, &str)] = &[
     // Canonical → `int`
     ("signed int", "int"),
@@ -96,7 +95,6 @@ const WIDTH_ALIAS_TABLE: &[(&str, &str)] = &[
 /// This function operates on base-type tokens only (per DESIGN §3.2);
 /// callers are responsible for stripping qualifiers and declarator
 /// structure before invoking it.
-#[allow(dead_code)] // consumed by U07_SIGNATURE_BUILDER in a follow-up commit on this branch
 pub(crate) fn normalize_width_alias(token: &str) -> &str {
     for (source, canonical) in WIDTH_ALIAS_TABLE {
         if *source == token {

@@ -150,6 +150,22 @@ pub const MAGIC_BYTES_V15: &[u8; 14] = b"SQRY_GRAPH_V15";
 /// opening a V16 snapshot rejects it at the magic gate.
 pub const MAGIC_BYTES_V16: &[u8; 14] = b"SQRY_GRAPH_V16";
 
+/// Import-classification-signal V17 magic bytes.
+///
+/// Emitted by the V17 writer and accepted by the V17 reader. V17 is
+/// shape-identical to V16 on the wire: the import-classification bits
+/// (`NodeFlags::IMPORT_STDLIB` / `NodeFlags::IMPORT_RELATIVE`) ride the existing
+/// `StoredEntry.flags` channel that has round-tripped since V11, so no field is
+/// added or removed. The `upconvert_v16_to_v17` upconvert is a no-op that only
+/// advances the version. The bump exists so the
+/// `import_classification_signal_present` runtime marker can distinguish a
+/// snapshot that carried genuine import-classification signal (>= V17) from a
+/// pre-V17 snapshot whose import nodes never had their stdlib / relative bits
+/// classified (all clear, but clear-on-purpose is indistinguishable from
+/// never-classified without the marker). A V16-or-earlier reader opening a V17
+/// snapshot rejects it at the magic gate.
+pub const MAGIC_BYTES_V17: &[u8; 14] = b"SQRY_GRAPH_V17";
+
 /// Legacy V7 numeric version, exposed with a versioned name so the Phase 1 reader
 /// dispatch can cite it explicitly. Equal to [`VERSION`].
 pub const LEGACY_VERSION_V7: u32 = 7;
@@ -218,6 +234,18 @@ pub enum FormatVersion {
     /// `is_definition` bits are never mistaken for genuine signal. A
     /// V15-or-earlier reader rejects a V16 snapshot at the magic gate.
     V16 = 16,
+    /// V17: read/write after the import-classification-signal feature.
+    /// Shape-identical to V16 on the wire: the import-classification bits
+    /// (`NodeFlags::IMPORT_STDLIB` / `NodeFlags::IMPORT_RELATIVE`) ride the
+    /// existing `StoredEntry.flags` channel (round-tripped since V11), so no
+    /// field is added. V16 snapshots upconvert to V17 inline on load via
+    /// `upconvert_v16_to_v17` (a no-op that advances the version). The
+    /// `import_classification_signal_present` marker is `true` only for V17+
+    /// loads (and fresh in-process builds), so a pre-V17 snapshot's cleared
+    /// import bits are reported as unclassified rather than as authoritative
+    /// "not stdlib / not relative". A V16-or-earlier reader rejects a V17
+    /// snapshot at the magic gate.
+    V17 = 17,
 }
 
 impl FormatVersion {
@@ -235,6 +263,7 @@ impl FormatVersion {
             Self::V14 => MAGIC_BYTES_V14.as_slice(),
             Self::V15 => MAGIC_BYTES_V15.as_slice(),
             Self::V16 => MAGIC_BYTES_V16.as_slice(),
+            Self::V17 => MAGIC_BYTES_V17.as_slice(),
         }
     }
 
@@ -249,9 +278,14 @@ impl FormatVersion {
     /// Returns `None` if the bytes do not match any known format magic.
     #[must_use]
     pub fn from_magic(bytes: &[u8]) -> Option<Self> {
-        // V16, V15, V14, V13, V12, V11, and V10 magics are all 14 bytes. Check
-        // newest first (V16, V15, V14, ..., V10) so a longer / newer magic is
-        // never mis-classified as an older one by a less-strict comparison path.
+        // V17, V16, V15, V14, V13, V12, V11, and V10 magics are all 14 bytes.
+        // Check newest first (V17, V16, V15, ..., V10) so a longer / newer magic
+        // is never mis-classified as an older one by a less-strict comparison path.
+        if bytes.len() >= MAGIC_BYTES_V17.len()
+            && bytes[..MAGIC_BYTES_V17.len()] == *MAGIC_BYTES_V17
+        {
+            return Some(Self::V17);
+        }
         if bytes.len() >= MAGIC_BYTES_V16.len()
             && bytes[..MAGIC_BYTES_V16.len()] == *MAGIC_BYTES_V16
         {
@@ -303,8 +337,8 @@ impl FormatVersion {
     }
 }
 
-/// Current writer format version (definition-signal `NodeEntry.is_definition`: V16).
-pub const CURRENT_VERSION: FormatVersion = FormatVersion::V16;
+/// Current writer format version (import-classification-signal marker: V17).
+pub const CURRENT_VERSION: FormatVersion = FormatVersion::V17;
 
 /// Header for persisted graph files.
 ///
@@ -723,11 +757,41 @@ mod tests {
         assert_eq!(FormatVersion::V14 as u32, 14);
         assert_eq!(FormatVersion::V15 as u32, 15);
         assert_eq!(FormatVersion::V16 as u32, 16);
+        assert_eq!(FormatVersion::V17 as u32, 17);
     }
 
     #[test]
-    fn current_version_is_v16() {
-        assert_eq!(CURRENT_VERSION, FormatVersion::V16);
+    fn current_version_is_v17() {
+        assert_eq!(CURRENT_VERSION, FormatVersion::V17);
+    }
+
+    #[test]
+    fn import_classification_magic_bytes_v17_is_distinct_and_14_bytes() {
+        assert_eq!(MAGIC_BYTES_V17, b"SQRY_GRAPH_V17");
+        assert_eq!(MAGIC_BYTES_V17.len(), 14);
+        assert_ne!(MAGIC_BYTES_V17.as_slice(), MAGIC_BYTES_V16.as_slice());
+        assert_ne!(MAGIC_BYTES_V17.as_slice(), MAGIC_BYTES_V15.as_slice());
+    }
+
+    /// V17 must be tried before V16/older so a `SQRY_GRAPH_V17` prefix is never
+    /// mis-classified as an older 14-byte magic.
+    #[test]
+    fn import_classification_format_version_dispatch_v17_before_older() {
+        let mut buf = MAGIC_BYTES_V17.to_vec();
+        buf.extend_from_slice(&[0u8; 8]);
+        assert_eq!(FormatVersion::from_magic(&buf), Some(FormatVersion::V17));
+
+        let mut buf16 = MAGIC_BYTES_V16.to_vec();
+        buf16.extend_from_slice(&[0u8; 8]);
+        assert_eq!(FormatVersion::from_magic(&buf16), Some(FormatVersion::V16));
+    }
+
+    #[test]
+    fn import_classification_format_version_v17_magic_round_trip() {
+        let v = FormatVersion::V17;
+        let bytes = v.magic();
+        assert_eq!(bytes, MAGIC_BYTES_V17.as_slice());
+        assert_eq!(FormatVersion::from_magic(bytes), Some(v));
     }
 
     #[test]

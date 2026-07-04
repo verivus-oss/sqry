@@ -159,6 +159,17 @@ impl NodeFlags {
     /// so planners and consumers can surface the over-cap fan-out.
     pub const CALLSITE_PROMISCUOUS: NodeFlags = NodeFlags(1 << 2);
 
+    /// Import node that resolves to a Go standard-library package (e.g.
+    /// `fmt`, `net/http`, `encoding/json`). Populated by the Go plugin's
+    /// import classifier so callers can separate stdlib dependencies from
+    /// third-party and relative imports.
+    pub const IMPORT_STDLIB: NodeFlags = NodeFlags(1 << 3);
+
+    /// Import node that resolves to a relative (intra-module) path (e.g. a
+    /// `./sub` or `../pkg` style import). Populated by the Go plugin's
+    /// import classifier; mutually distinct from [`Self::IMPORT_STDLIB`].
+    pub const IMPORT_RELATIVE: NodeFlags = NodeFlags(1 << 4);
+
     /// Empty bitset.
     pub const EMPTY: NodeFlags = NodeFlags(0);
 
@@ -503,6 +514,18 @@ impl NodeMetadataStore {
             .contains(NodeFlags::CALLSITE_PROMISCUOUS)
     }
 
+    /// Returns `true` iff the node has [`NodeFlags::IMPORT_STDLIB`] set.
+    #[must_use]
+    pub fn is_import_stdlib(&self, node_id: NodeId) -> bool {
+        self.get_flags(node_id).contains(NodeFlags::IMPORT_STDLIB)
+    }
+
+    /// Returns `true` iff the node has [`NodeFlags::IMPORT_RELATIVE`] set.
+    #[must_use]
+    pub fn is_import_relative(&self, node_id: NodeId) -> bool {
+        self.get_flags(node_id).contains(NodeFlags::IMPORT_RELATIVE)
+    }
+
     /// Set [`NodeFlags::SYNTHETIC`] on this node.
     ///
     /// Does NOT disturb any existing typed payload — a macro-generated node
@@ -525,6 +548,22 @@ impl NodeMetadataStore {
     /// Does NOT disturb any existing typed payload.
     pub fn mark_callsite_promiscuous(&mut self, node_id: NodeId) {
         self.set_flag(node_id, NodeFlags::CALLSITE_PROMISCUOUS);
+    }
+
+    /// Set [`NodeFlags::IMPORT_STDLIB`] on this node.
+    ///
+    /// Does NOT disturb any existing typed payload (an import node keeps its
+    /// provenance channel while gaining the stdlib classification).
+    pub fn mark_import_stdlib(&mut self, node_id: NodeId) {
+        self.set_flag(node_id, NodeFlags::IMPORT_STDLIB);
+    }
+
+    /// Set [`NodeFlags::IMPORT_RELATIVE`] on this node.
+    ///
+    /// Does NOT disturb any existing typed payload (an import node keeps its
+    /// provenance channel while gaining the relative classification).
+    pub fn mark_import_relative(&mut self, node_id: NodeId) {
+        self.set_flag(node_id, NodeFlags::IMPORT_RELATIVE);
     }
 
     fn set_flag(&mut self, node_id: NodeId, flag: NodeFlags) {
@@ -668,15 +707,33 @@ impl NodeMetadataStore {
 
     /// Merge another metadata store into this one.
     ///
-    /// Entries from `other` overwrite existing entries with the same key. Shape
-    /// descriptors are merged identically (overwrite on key collision): unlike
-    /// the `framework_routes` / `dispatch_tables` stubs (which are reattached
-    /// only at load time and so are deliberately NOT merged here), shape
-    /// descriptors are produced per-file during staging and reach the
+    /// On key collision the two [`StoredEntry`] channels merge independently,
+    /// mirroring [`Self::insert_typed`]'s documented "marker flags on the
+    /// existing entry are preserved" contract:
+    ///
+    /// - **flags** are OR-ed in (they are independently-composable markers, so
+    ///   a later merge must never clear a bit an earlier one set). This keeps
+    ///   the Go import-classification bits (`IMPORT_STDLIB` / `IMPORT_RELATIVE`)
+    ///   alive when a build-tagged file later stamps a `cfg_condition` macro
+    ///   payload (whose store carries empty flags) onto the same import node via
+    ///   `stamp_cfg_condition_for_file`. A whole-entry overwrite here silently
+    ///   dropped that classification (issue #467).
+    /// - the **typed payload** takes `other`'s value when present, else keeps the
+    ///   existing one, so a flags-only incoming entry never erases a typed
+    ///   payload (and vice versa).
+    ///
+    /// Shape descriptors are whole-value per node and merge by overwrite on key
+    /// collision: unlike the `framework_routes` / `dispatch_tables` stubs (which
+    /// are reattached only at load time and so are deliberately NOT merged here),
+    /// shape descriptors are produced per-file during staging and reach the
     /// authoritative store through exactly this merge, so they must ride it.
     pub fn merge(&mut self, other: &NodeMetadataStore) {
         for (&key, value) in &other.entries {
-            self.entries.insert(key, value.clone());
+            let slot = self.entries.entry(key).or_default();
+            slot.flags |= value.flags;
+            if value.typed.is_some() {
+                slot.typed = value.typed.clone();
+            }
         }
         for (&node_id, descriptor) in &other.shape_descriptors {
             self.shape_descriptors.insert(node_id, descriptor.clone());
@@ -693,17 +750,14 @@ impl NodeMetadataStore {
     /// downstream callers use the targeted [`Self::remove`] /
     /// [`Self::remove_entry`] entry points.
     ///
-    /// `#[allow(dead_code)]` is present because Gate 0b delivers only
-    /// the scaffolding — the call sites in `RebuildGraph::finalize()`
-    /// (Gate 0c) and the residue check (Gate 0d) land in follow-up
-    /// commits. Unit coverage in
-    /// `sqry-core/src/graph/unified/rebuild/coverage.rs::tests` already
-    /// exercises this helper through the [`NodeIdBearing::retain_nodes`]
-    /// impl.
+    /// Live in the default build: the consumers are
+    /// `RebuildGraph::finalize()` and the residue check (both via the
+    /// [`NodeIdBearing::retain_nodes`] impl), reached from the ungated
+    /// public `build::incremental::incremental_rebuild` -> `finalize`
+    /// path (the `rebuild::coverage` unit tests exercise it too).
     ///
     /// [`NodeIdBearing`]: crate::graph::unified::rebuild::coverage::NodeIdBearing
     /// [`NodeIdBearing::retain_nodes`]: crate::graph::unified::rebuild::coverage::NodeIdBearing::retain_nodes
-    #[allow(dead_code)]
     pub(crate) fn retain_entries<F>(&mut self, mut keep: F)
     where
         F: FnMut(u32, u64) -> bool,
@@ -1607,6 +1661,59 @@ mod tests {
             store.mark_synthetic(node);
             assert!(store.is_callsite_promiscuous(node));
             assert!(store.is_synthetic(node));
+        }
+
+        #[test]
+        fn import_classification_flags_distinct_bits_no_collision() {
+            // IMPORT_STDLIB (1<<3) and IMPORT_RELATIVE (1<<4) occupy fresh bits
+            // that do not overlap each other or the pre-existing trio.
+            assert_eq!(NodeFlags::IMPORT_STDLIB.bits(), 1 << 3);
+            assert_eq!(NodeFlags::IMPORT_RELATIVE.bits(), 1 << 4);
+
+            let existing =
+                NodeFlags::SYNTHETIC | NodeFlags::ADDRESS_TAKEN | NodeFlags::CALLSITE_PROMISCUOUS;
+            assert!(!existing.contains(NodeFlags::IMPORT_STDLIB));
+            assert!(!existing.contains(NodeFlags::IMPORT_RELATIVE));
+            assert!(!NodeFlags::IMPORT_STDLIB.contains(NodeFlags::IMPORT_RELATIVE));
+            assert!(!NodeFlags::IMPORT_RELATIVE.contains(NodeFlags::IMPORT_STDLIB));
+        }
+
+        #[test]
+        fn mark_import_flags_roundtrip_via_set_flag() {
+            let mut store = NodeMetadataStore::new();
+            let stdlib_node = NodeId::new(303, 0);
+            let relative_node = NodeId::new(404, 0);
+
+            // Missing entries report false before any marking.
+            assert!(!store.is_import_stdlib(stdlib_node));
+            assert!(!store.is_import_relative(stdlib_node));
+
+            store.mark_import_stdlib(stdlib_node);
+            store.mark_import_relative(relative_node);
+
+            // Each helper sets exactly its own bit, nothing else.
+            assert!(store.is_import_stdlib(stdlib_node));
+            assert!(!store.is_import_relative(stdlib_node));
+            assert!(!store.is_synthetic(stdlib_node));
+            assert!(!store.is_address_taken(stdlib_node));
+            assert!(!store.is_callsite_promiscuous(stdlib_node));
+
+            assert!(store.is_import_relative(relative_node));
+            assert!(!store.is_import_stdlib(relative_node));
+
+            // Marker-only entries carry no typed payload.
+            assert!(store.get_typed(stdlib_node).is_none());
+            assert!(store.get_typed(relative_node).is_none());
+
+            // Both classifications may co-occur on one node without clobber.
+            store.mark_import_relative(stdlib_node);
+            assert!(store.is_import_stdlib(stdlib_node));
+            assert!(store.is_import_relative(stdlib_node));
+
+            // Stale generation must NOT observe the flags.
+            let stale = NodeId::new(303, 1);
+            assert!(!store.is_import_stdlib(stale));
+            assert!(!store.is_import_relative(stale));
         }
 
         #[test]

@@ -304,10 +304,10 @@ impl ScopeArena {
     /// impl (A2 §K row K.A11). Callers that hold the arena behind an `Arc`
     /// must reach it through `Arc::make_mut` before invoking this method.
     ///
-    /// `#[allow(dead_code)]` mirrors the `NodeIdBearing` trait itself: Gate 0b
-    /// lands the scaffolding and unit tests, Gate 0c adds the production
-    /// call site in `RebuildGraph::finalize()`.
-    #[allow(dead_code)]
+    /// Live in the default build: the consumer is `RebuildGraph::finalize()`
+    /// via the `retain_nodes` impl, reached from the ungated public
+    /// `build::incremental::incremental_rebuild` -> `finalize` path (the
+    /// `rebuild::coverage` unit tests exercise it too).
     pub(crate) fn retain_by_node(&mut self, keep: &dyn Fn(NodeId) -> bool) {
         let to_drop: Vec<ScopeId> = self
             .iter()

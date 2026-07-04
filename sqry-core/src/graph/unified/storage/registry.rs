@@ -310,7 +310,10 @@ impl FileRegistry {
     ///
     /// Empty `remap` is a no-op; entries whose `source_uri` is `None`
     /// are left alone.
-    #[allow(dead_code)]
+    ///
+    /// Live in the default build: the consumer is `RebuildGraph::finalize()`
+    /// step 1, reached from the ungated public
+    /// `build::incremental::incremental_rebuild` -> `finalize` path.
     pub(crate) fn rewrite_string_ids_through_remap(&mut self, remap: &HashMap<StringId, StringId>) {
         if remap.is_empty() {
             return;
@@ -332,7 +335,12 @@ impl FileRegistry {
     /// compaction. It runs *after* the arena's tombstone predicate has
     /// been fixed (step 2), so `keep` is backed by "arena has this
     /// `NodeId` live" semantics.
-    #[allow(dead_code)]
+    ///
+    /// Live in the default build: the consumer is the
+    /// `NodeIdBearing::retain_nodes` impl driven by
+    /// `RebuildGraph::finalize()` step 6, reached from the ungated public
+    /// `build::incremental::incremental_rebuild` -> `finalize` path (the
+    /// `rebuild::coverage` unit tests exercise it too).
     pub(crate) fn retain_nodes_in_buckets<F>(&mut self, keep: &F)
     where
         F: Fn(NodeId) -> bool + ?Sized,
@@ -354,7 +362,12 @@ impl FileRegistry {
     /// uses set membership.
     ///
     /// [`NodeIdBearing`]: crate::graph::unified::rebuild::coverage::NodeIdBearing
-    #[allow(dead_code)]
+    ///
+    /// Live in the default build: the consumer is the
+    /// `NodeIdBearing::all_node_ids` impl driven by the debug-build
+    /// residue check, reached from the ungated public
+    /// `build::incremental::incremental_rebuild` -> `finalize` path (the
+    /// `rebuild::coverage` unit tests exercise it too).
     pub(crate) fn iter_all_bucket_node_ids(&self) -> impl Iterator<Item = NodeId> + '_ {
         self.per_file_nodes.values().flat_map(|v| v.iter().copied())
     }

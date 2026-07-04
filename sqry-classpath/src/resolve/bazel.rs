@@ -24,9 +24,6 @@ const BAZEL_CACHE_FILE: &str = "bazel-resolved-classpath.json";
 const BAZEL_CQUERY_KIND_PATTERN: &str =
     r#"kind("java_library|java_import|jvm_import", deps(//...))"#;
 
-/// Default Coursier cache directory (relative to user home).
-const COURSIER_CACHE_REL: &str = ".cache/coursier/v1";
-
 // ── Public API ──────────────────────────────────────────────────────────────
 
 /// Resolve classpath for a Bazel project.
@@ -428,17 +425,6 @@ fn infer_module_name(project_root: &Path) -> String {
     project_root
         .file_name()
         .map_or_else(|| "root".to_string(), |n| n.to_string_lossy().to_string())
-}
-
-/// Return the default Coursier cache directory.
-#[allow(dead_code)]
-fn coursier_cache_dir() -> Option<PathBuf> {
-    dirs_path_home().map(|home| home.join(COURSIER_CACHE_REL))
-}
-
-/// Get the user's home directory.
-fn dirs_path_home() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(PathBuf::from)
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────

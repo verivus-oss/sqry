@@ -116,38 +116,6 @@ fn collect_typeof_edges_by_context(
         .collect()
 }
 
-/// Collect all `TypeOf` edges (any context).
-#[allow(dead_code)] // Helper function for future tests
-fn collect_all_typeof_edges(staging: &StagingGraph) -> Vec<(String, String)> {
-    let node_names = build_node_name_lookup(staging);
-
-    staging
-        .operations()
-        .iter()
-        .filter_map(|op| {
-            if let StagingOp::AddEdge {
-                source,
-                target,
-                kind,
-                ..
-            } = op
-                && matches!(kind, EdgeKind::TypeOf { .. })
-            {
-                let source_name = node_names
-                    .get(&source.index())
-                    .cloned()
-                    .unwrap_or_else(|| format!("<unknown:{}>", source.index()));
-                let target_name = node_names
-                    .get(&target.index())
-                    .cloned()
-                    .unwrap_or_else(|| format!("<unknown:{}>", target.index()));
-                return Some((source_name, target_name));
-            }
-            None
-        })
-        .collect()
-}
-
 /// Collect Reference edges.
 fn collect_reference_edges(staging: &StagingGraph) -> Vec<(String, String)> {
     let node_names = build_node_name_lookup(staging);

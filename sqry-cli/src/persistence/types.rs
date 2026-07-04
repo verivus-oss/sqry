@@ -159,6 +159,8 @@ pub struct ImportResult {
     /// Number of aliases skipped due to conflicts
     pub skipped: usize,
     /// Number of aliases that failed to import
+    // Reserved: populated by import accounting, not yet read by any command.
+    #[allow(dead_code)]
     pub failed: usize,
     /// Number of aliases overwritten
     pub overwritten: usize,

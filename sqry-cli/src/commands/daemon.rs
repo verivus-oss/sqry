@@ -6,9 +6,6 @@
 //! - `sqry daemon status` -- connect via [`DaemonClient`], send `daemon/status`, render.
 //! - `sqry daemon logs`  -- tail / follow the daemon log file.
 //!
-//! Additionally exposes [`try_auto_start_daemon`] for future Task 13 wiring into
-//! query commands via the `SQRY_DAEMON_AUTO_START=1` opt-in environment variable.
-//!
 //! # Tokio runtime
 //!
 //! The `stop` and `status` subcommands need async I/O for [`DaemonClient`].
@@ -37,13 +34,6 @@ use crate::args::{Cli, DaemonAction, RevisionQueryArgs, RevisionSourceByteModeAr
 // ---------------------------------------------------------------------------
 // Constants.
 // ---------------------------------------------------------------------------
-
-/// Environment variable that enables auto-start of the daemon before query
-/// commands. Set to `"1"` to opt in. Not wired into query commands until
-/// Task 13 — this module exposes the plumbing only.
-// Not yet used by run() — Task 13 wires this into query command dispatch.
-#[allow(dead_code)]
-const ENV_DAEMON_AUTO_START: &str = "SQRY_DAEMON_AUTO_START";
 
 /// How long to poll for the socket to disappear after sending `daemon/stop`.
 const STOP_POLL_INTERVAL_MS: u64 = 100;
@@ -1001,69 +991,6 @@ fn resolve_sqryd_binary(explicit: Option<&Path>) -> Result<PathBuf> {
 }
 
 // ---------------------------------------------------------------------------
-// Auto-start helper (Task 13 wiring point).
-// ---------------------------------------------------------------------------
-
-/// Check whether the daemon auto-start opt-in is active, and if so, try to
-/// start the daemon.
-///
-/// Returns `true` if a daemon is now running (either was already running or
-/// was successfully started), `false` if auto-start is disabled (`SQRY_DAEMON_AUTO_START`
-/// is not set to `"1"`).
-///
-/// Not wired into query commands until Task 13. Exported here so Task 13 can
-/// `use sqry_cli::commands::daemon::try_auto_start_daemon` without moving code.
-///
-/// # Errors
-///
-/// Propagates errors from [`resolve_sqryd_binary`] and
-/// `std::process::Command::status`. Errors during the binary execution are
-/// treated as a failed auto-start (returns `Ok(false)` after logging a
-/// warning).
-// Not yet called from run() — Task 13 wires this into query command dispatch.
-#[allow(dead_code)]
-pub fn try_auto_start_daemon() -> Result<bool> {
-    if std::env::var_os(ENV_DAEMON_AUTO_START).as_deref() != Some(std::ffi::OsStr::new("1")) {
-        return Ok(false);
-    }
-
-    // Resolve binary; any resolution error is surfaced to the caller.
-    let binary = resolve_sqryd_binary(None)?;
-
-    // Check if already running.
-    let socket_path = load_config_socket_path();
-    if socket_path
-        .as_ref()
-        .is_some_and(|sp| try_connect_sync(sp).unwrap_or(false))
-    {
-        return Ok(true);
-    }
-
-    // Exec sqryd start --detach.
-    let status = std::process::Command::new(&binary)
-        .args(["start", "--detach"])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::inherit())
-        .status()
-        .with_context(|| format!("auto-start: failed to exec sqryd at {}", binary.display()))?;
-
-    if !status.success() {
-        let code = status.code().unwrap_or(1);
-        if code != 75 {
-            // 75 = already running; any other nonzero means start failed.
-            eprintln!(
-                "sqry: Warning: daemon auto-start failed (sqryd exited {code}); \
-                 falling back to local mode"
-            );
-            return Ok(false);
-        }
-    }
-
-    Ok(true)
-}
-
-// ---------------------------------------------------------------------------
 // Formatting helpers.
 // ---------------------------------------------------------------------------
 
@@ -1162,6 +1089,7 @@ fn render_status_human(envelope: &serde_json::Value) {
 ///         "index_root": "/repos/example",
 ///         "state": "Loaded",
 ///         "pinned": true,
+///         "watching": true,
 ///         "current_bytes": 335544320,
 ///         "high_water_bytes": 933232896,
 ///         "last_good_at": null,
@@ -1185,7 +1113,7 @@ fn render_status_human(envelope: &serde_json::Value) {
 /// Memory: 450 MB / 2048 MB  (peak: 1.2 GB)
 ///
 /// Workspaces (1 loaded):
-///   ~/repos/main-project      320 MB  (peak: 890 MB)  [pinned, Loaded]
+///   ~/repos/main-project      320 MB  (peak: 890 MB)  [pinned, watching, Loaded]
 /// ```
 fn render_status_human_into(
     envelope: &serde_json::Value,
@@ -1259,21 +1187,6 @@ fn render_status_human_into(
     Ok(())
 }
 
-/// Render a single workspace line from the status response to stdout.
-///
-/// Thin wrapper around [`render_workspace_line_into`] that writes to
-/// `std::io::stdout()`. Call [`render_workspace_line_into`] directly in tests
-/// to capture and assert the rendered output.
-///
-/// Called indirectly via [`render_status_human`] → [`render_status_human_into`] →
-/// [`render_workspace_line_into`]. Kept for standalone use and API completeness.
-#[allow(dead_code)]
-fn render_workspace_line(ws: &serde_json::Value) {
-    let stdout = std::io::stdout();
-    let mut handle = stdout.lock();
-    let _ = render_workspace_line_into(ws, &mut handle);
-}
-
 /// Render a single workspace line from the status response into `out`.
 ///
 /// Field names match `WorkspaceStatus` in `sqry-daemon/src/workspace/status.rs`:
@@ -1282,6 +1195,7 @@ fn render_workspace_line(ws: &serde_json::Value) {
 /// - `high_water_bytes` — monotonic peak.
 /// - `state` — serde form of `WorkspaceState` (e.g. `"Loaded"`, `"Rebuilding"`).
 /// - `pinned` — LRU-exempt flag.
+/// - `watching` — whether a live daemon file watcher exists for the workspace.
 /// - `last_error` — most recent error string if any.
 fn render_workspace_line_into(ws: &serde_json::Value, out: &mut dyn Write) -> std::io::Result<()> {
     // `index_root` is the canonical field. Accept `path` as a fallback for
@@ -1313,6 +1227,9 @@ fn render_workspace_line_into(ws: &serde_json::Value, out: &mut dyn Write) -> st
         .unwrap_or(false)
     {
         tags.push("pinned");
+    }
+    if let Some(watching) = ws.get("watching").and_then(serde_json::Value::as_bool) {
+        tags.push(if watching { "watching" } else { "not watching" });
     }
     let state = ws
         .get("state")
@@ -1821,6 +1738,7 @@ mod tests {
                         "index_root": "/home/user/repos/main-project",
                         "state": "Loaded",
                         "pinned": true,
+                        "watching": true,
                         "current_bytes":   335_544_320_u64,
                         "high_water_bytes": 933_232_896_u64,
                         "last_good_at": null,
@@ -1831,6 +1749,7 @@ mod tests {
                         "index_root": "/home/user/repos/auth-service",
                         "state": "Loaded",
                         "pinned": false,
+                        "watching": false,
                         "current_bytes":    83_886_080_u64,
                         "high_water_bytes": 324_534_016_u64,
                         "last_good_at": null,
@@ -1878,6 +1797,14 @@ mod tests {
         assert!(
             output.contains("auth-service"),
             "must contain workspace path; got:\n{output}"
+        );
+        assert!(
+            output.contains("watching"),
+            "must contain watching tag; got:\n{output}"
+        );
+        assert!(
+            output.contains("not watching"),
+            "must contain not watching tag; got:\n{output}"
         );
     }
 
@@ -1962,6 +1889,7 @@ mod tests {
             "index_root": "/home/user/repos/sqry",
             "state": "Loaded",
             "pinned": true,
+            "watching": true,
             "current_bytes": 335_544_320_u64,
             "high_water_bytes": 671_088_640_u64,
             "last_good_at": null,
@@ -1994,6 +1922,10 @@ mod tests {
         assert!(
             output.contains("pinned"),
             "rendered output must contain 'pinned' tag; got:\n{output}"
+        );
+        assert!(
+            output.contains("watching"),
+            "rendered output must contain 'watching' tag; got:\n{output}"
         );
     }
 
@@ -2073,34 +2005,5 @@ mod tests {
             err_msg.contains("nonexistent.sock"),
             "error must contain the socket path; got:\n{err_msg}"
         );
-    }
-
-    // -----------------------------------------------------------------------
-    // try_auto_start_daemon disabled test.
-    // -----------------------------------------------------------------------
-
-    /// When SQRY_DAEMON_AUTO_START is not set (or set to a value other than
-    /// "1"), try_auto_start_daemon must return Ok(false) immediately.
-    #[test]
-    #[serial_test::serial]
-    fn try_auto_start_daemon_returns_false_when_disabled() {
-        unsafe {
-            std::env::remove_var(ENV_DAEMON_AUTO_START);
-        }
-        let result = try_auto_start_daemon().expect("try_auto_start_daemon must not error");
-        assert!(
-            !result,
-            "expected false when SQRY_DAEMON_AUTO_START is unset"
-        );
-
-        // Also verify with a non-"1" value.
-        unsafe {
-            std::env::set_var(ENV_DAEMON_AUTO_START, "0");
-        }
-        let result = try_auto_start_daemon().expect("try_auto_start_daemon must not error");
-        unsafe {
-            std::env::remove_var(ENV_DAEMON_AUTO_START);
-        }
-        assert!(!result, "expected false when SQRY_DAEMON_AUTO_START=0");
     }
 }

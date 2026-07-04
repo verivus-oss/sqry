@@ -44,7 +44,7 @@ use sqry_core::graph::{GraphBuilder, GraphBuilderError, GraphResult, Language, S
 use sqry_lang_typescript::relations::type_extractor::{
     extract_all_type_names_from_annotation, extract_type_string,
 };
-use tree_sitter::{Node, Parser, Point, Tree};
+use tree_sitter::{Node, Parser, Tree};
 
 /// `GraphBuilder` for Svelte SFC files
 #[derive(Debug, Clone, Copy)]
@@ -325,8 +325,6 @@ struct ScriptBlock {
     lang: ScriptLanguage,
     context: ScriptContext,
     content: String,
-    #[allow(dead_code)] // Reserved for future position offset calculations
-    start_point: Point,
 }
 
 /// Collect script blocks from a parsed Svelte tree
@@ -343,7 +341,6 @@ fn collect_script_blocks(tree: &Tree, source: &str) -> Vec<ScriptBlock> {
         let mut lang: Option<String> = None;
         let mut context_attr: Option<String> = None;
         let mut script_content = None;
-        let mut start_point = child.start_position();
 
         let mut script_cursor = child.walk();
         for node in child.children(&mut script_cursor) {
@@ -366,7 +363,6 @@ fn collect_script_blocks(tree: &Tree, source: &str) -> Vec<ScriptBlock> {
                 "raw_text" => {
                     if let Ok(text) = node.utf8_text(source.as_bytes()) {
                         script_content = Some(text.to_string());
-                        start_point = node.start_position();
                     }
                 }
                 _ => {}
@@ -378,7 +374,6 @@ fn collect_script_blocks(tree: &Tree, source: &str) -> Vec<ScriptBlock> {
                 lang: ScriptLanguage::from_lang_attr(lang.as_deref()),
                 context: ScriptContext::from_context_attr(context_attr.as_deref()),
                 content: script_content,
-                start_point,
             };
             blocks.push(block);
         }
@@ -1547,24 +1542,6 @@ mod tests {
             .operations()
             .iter()
             .filter(|op| matches!(op, StagingOp::AddNode { .. }))
-            .count()
-    }
-
-    /// Count Calls edges in the staging graph
-    #[allow(dead_code)]
-    fn count_calls_edges(staging: &StagingGraph) -> usize {
-        staging
-            .operations()
-            .iter()
-            .filter(|op| {
-                matches!(
-                    op,
-                    StagingOp::AddEdge {
-                        kind: EdgeKind::Calls { .. },
-                        ..
-                    }
-                )
-            })
             .count()
     }
 

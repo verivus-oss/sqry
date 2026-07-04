@@ -138,9 +138,7 @@ fn send_sigterm(child: &Child) {
 /// we never leave a stray daemon process behind even when a test panics.
 struct ChildGuard {
     child: Child,
-    #[allow(dead_code)]
     _stdin: Option<ChildStdin>,
-    #[allow(dead_code)]
     _stdout_reader: Option<BufReader<ChildStdout>>,
 }
 

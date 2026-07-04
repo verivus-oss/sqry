@@ -14,7 +14,7 @@ use sqry_core::plugin::PluginManager;
 use sqry_core::query::QueryExecutor;
 use sqry_plugin_registry::{create_plugin_manager, create_plugin_manager_all};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 //=============================================================================
@@ -1045,15 +1045,6 @@ fn read_daemon_pid_from_socket_dir(socket_path: &Path) -> Option<u32> {
     contents.trim().parse::<u32>().ok()
 }
 
-/// Simple concurrency guard for future mutable operations (e.g., index updates).
-#[allow(dead_code)]
-pub static WORKSPACE_LOCK: OnceLock<RwLock<()>> = OnceLock::new();
-
-#[allow(dead_code)]
-pub fn workspace_lock() -> &'static RwLock<()> {
-    WORKSPACE_LOCK.get_or_init(|| RwLock::new(()))
-}
-
 //=============================================================================
 // GraphIdentity Operations
 //=============================================================================
@@ -1975,16 +1966,6 @@ mod engine_cache_tests {
         let identity = get_graph_identity(workspace.path())?;
         assert!(!identity.snapshot_sha256.is_empty());
         Ok(())
-    }
-
-    // ===== workspace_lock tests =====
-
-    #[test]
-    fn test_workspace_lock_returns_same_instance() {
-        let lock1 = workspace_lock();
-        let lock2 = workspace_lock();
-        // Same static reference
-        assert!(std::ptr::eq(lock1, lock2));
     }
 
     // ===== is_manifest_fresh with modified file =====

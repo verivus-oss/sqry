@@ -139,12 +139,13 @@ use super::super::storage::registry::FileRegistry;
 /// The trait is `pub(crate)` until Gate 0c lifts the surface into a
 /// daemon-only feature; external crates must not depend on it.
 ///
-/// `#[allow(dead_code)]` is applied because Gate 0b delivers only the
-/// scaffolding — the call sites in `RebuildGraph::finalize()` (Gate 0c)
-/// and the debug-build residue check (Gate 0d) land in follow-up
-/// commits. `assert_impl_all!` still enforces that every K.A/K.B row
-/// implements the trait at compile time.
-#[allow(dead_code)]
+/// Live in the default build: the callers are `RebuildGraph::finalize()`
+/// (via the `retain_nodes` impls) and the debug-build residue check (via
+/// `all_node_ids`), reached from the ungated public
+/// `build::incremental::incremental_rebuild` -> `finalize` path (the
+/// `rebuild::coverage` unit tests exercise it too). `assert_impl_all!`
+/// still enforces that every K.A/K.B row implements the trait at compile
+/// time.
 pub(crate) trait NodeIdBearing {
     /// Return every [`NodeId`] this container currently references,
     /// with duplicates permitted (the residue check uses

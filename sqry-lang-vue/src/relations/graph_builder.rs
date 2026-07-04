@@ -47,7 +47,7 @@ use sqry_core::graph::{GraphBuilder, GraphBuilderError, GraphResult, Language, S
 use sqry_lang_typescript::relations::type_extractor::{
     extract_all_type_names_from_annotation, extract_type_string,
 };
-use tree_sitter::{Node, Parser, Point, Tree};
+use tree_sitter::{Node, Parser, Tree};
 
 /// `GraphBuilder` for Vue SFC files
 #[derive(Debug, Clone, Copy)]
@@ -321,20 +321,6 @@ struct ScriptBlock {
     lang: ScriptLanguage,
     script_type: ScriptType,
     content: String,
-    #[allow(dead_code)] // Reserved for future position offset calculations
-    start_point: Point,
-}
-
-impl ScriptBlock {
-    #[allow(dead_code)] // Reserved for future position offset calculations
-    fn start_line_offset(&self) -> usize {
-        self.start_point.row
-    }
-
-    #[allow(dead_code)] // Reserved for future position offset calculations
-    fn start_column_offset(&self) -> usize {
-        self.start_point.column
-    }
 }
 
 /// Collect script blocks from a parsed Vue tree
@@ -351,7 +337,6 @@ fn collect_script_blocks(tree: &Tree, source: &str) -> Vec<ScriptBlock> {
         let mut lang: Option<String> = None;
         let mut setup: Option<String> = None;
         let mut content = None;
-        let mut start_point = child.start_position();
 
         let mut script_cursor = child.walk();
         for node in child.children(&mut script_cursor) {
@@ -374,7 +359,6 @@ fn collect_script_blocks(tree: &Tree, source: &str) -> Vec<ScriptBlock> {
                 "raw_text" => {
                     if let Ok(text) = node.utf8_text(source.as_bytes()) {
                         content = Some(text.to_string());
-                        start_point = node.start_position();
                     }
                 }
                 _ => {}
@@ -386,7 +370,6 @@ fn collect_script_blocks(tree: &Tree, source: &str) -> Vec<ScriptBlock> {
                 lang: ScriptLanguage::from_lang_attr(lang.as_deref()),
                 script_type: ScriptType::from_setup_attr(setup.as_deref()),
                 content,
-                start_point,
             };
             blocks.push(block);
         }

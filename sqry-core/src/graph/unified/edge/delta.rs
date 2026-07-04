@@ -334,7 +334,10 @@ impl DeltaBuffer {
     /// buffer's edge payloads — they go through `RebuildGraph::finalize()`
     /// which invokes the remap helper internally. See Gate 0c plan §H
     /// and iter-4 blocker.
-    #[allow(dead_code)] // Only reachable through the rebuild-internals-gated path.
+    // Live in the default build: the consumer is
+    // `rewrite_edge_kind_string_ids_through_remap` (finalize step 1),
+    // reached from the ungated public
+    // `build::incremental::incremental_rebuild` -> `finalize` path.
     pub(crate) fn iter_mut(&mut self) -> impl Iterator<Item = &mut DeltaEdge> {
         self.edges.values_mut().flatten()
     }
@@ -430,16 +433,15 @@ impl DeltaBuffer {
     /// original seq values so merge ordering stays correct after
     /// tombstone compaction.
     ///
-    /// `#[allow(dead_code)]` is present because Gate 0b delivers only
-    /// scaffolding; the call site in the Gate 0c `RebuildGraph::finalize()`
-    /// step 3 lands in a follow-up commit. Unit coverage in
-    /// `sqry-core/src/graph/unified/rebuild/coverage.rs::tests` already
-    /// exercises this helper through the [`NodeIdBearing::retain_nodes`]
-    /// impl on `BidirectionalEdgeStore`.
+    /// Live in the default build: the consumer is
+    /// `RebuildGraph::finalize()` step 3 via the
+    /// [`NodeIdBearing::retain_nodes`] impl on `BidirectionalEdgeStore`,
+    /// reached from the ungated public
+    /// `build::incremental::incremental_rebuild` -> `finalize` path (the
+    /// `rebuild::coverage` unit tests exercise it too).
     ///
     /// [`NodeIdBearing`]: crate::graph::unified::rebuild::coverage::NodeIdBearing
     /// [`NodeIdBearing::retain_nodes`]: crate::graph::unified::rebuild::coverage::NodeIdBearing::retain_nodes
-    #[allow(dead_code)]
     pub(crate) fn retain_if<F>(&mut self, mut keep: F)
     where
         F: FnMut(&DeltaEdge) -> bool,

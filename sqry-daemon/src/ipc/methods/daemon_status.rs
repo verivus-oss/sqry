@@ -26,7 +26,10 @@ pub(crate) fn handle(ctx: &HandlerContext, params: Value) -> Result<Value, Metho
         Value::Null => StatusParams::default(),
         other => serde_json::from_value(other).map_err(MethodError::InvalidParams)?,
     };
-    let status = ctx.manager.status();
+    let live_watcher_keys = ctx.dispatcher.live_watcher_keys();
+    let status = ctx
+        .manager
+        .status_with_watcher_state(|key| live_watcher_keys.contains(key));
     let envelope = ResponseEnvelope {
         result: status,
         meta: ResponseMeta::management(ctx.daemon_version),

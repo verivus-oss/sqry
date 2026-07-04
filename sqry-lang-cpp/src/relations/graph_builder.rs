@@ -142,24 +142,21 @@ struct ASTGraph {
     /// Maps (`class_fqn`, `field_name`) to field's FQN type.
     /// Example: ("`demo::Service`", "repo") -> "`demo::Repository`"
     /// This avoids collisions when multiple classes have fields with the same name.
-    /// Used to resolve method calls on member variables (e.g., repo.save -> `demo::Repository::save`)
-    /// Reserved for future call resolution enhancements
-    #[allow(dead_code)]
+    /// Consumed by `resolve_member_call` to resolve method calls on member
+    /// variables (e.g., `repo.save()` inside `demo::Service` -> `demo::Repository::save`).
     field_types: QualifiedNameMap,
 
     /// Maps (`namespace_context`, `simple_type_name`) to FQN.
-    /// Example: ("demo", "Repository") -> "`demo::Repository`"
-    /// This handles the fact that the same simple type name can resolve differently
-    /// in different namespaces and using-directive scopes.
-    /// Used to resolve static method calls (e.g., `Repository::save` -> `demo::Repository::save`)
-    /// Reserved for future call resolution enhancements
-    #[allow(dead_code)]
+    /// Example: ("app", "Widget") -> "`lib::Widget`"
+    /// Populated exclusively by using-declaration aliases (`using lib::Widget;`),
+    /// so the same simple name resolves differently per using-declaration scope.
+    /// Consumed by `resolve_static_call` to resolve `Widget::make()` through a
+    /// using-declaration alias to `lib::Widget::make`.
     type_map: QualifiedNameMap,
 
     /// Maps byte ranges to namespace prefixes (e.g., range -> "`demo::`")
-    /// Used to determine which namespace context a symbol is defined in
-    /// Reserved for future namespace-aware resolution
-    #[allow(dead_code)]
+    /// Consumed by `resolve_static_call` (via `find_namespace_for_offset`) to
+    /// determine the caller's namespace context when keying `type_map`.
     namespace_map: HashMap<std::ops::Range<usize>, String>,
 }
 
@@ -223,19 +220,21 @@ struct FunctionContext {
     /// Whether this is a static method
     /// Reserved for future method resolution enhancements
     is_static: bool,
-    /// Whether this is a virtual method
-    /// Reserved for future polymorphic call analysis
+    /// Whether this is a virtual method.
+    /// Not wired by #466 (virtual-dispatch target-set expansion is out of scope);
+    /// asserted by context-extraction tests only, so kept behind `dead_code`.
     #[allow(dead_code)]
     is_virtual: bool,
-    /// Whether this is inline
-    /// Reserved for future optimization hints
+    /// Whether this is inline.
+    /// Not wired by #466; asserted by context-extraction tests only, so kept
+    /// behind `dead_code`.
     #[allow(dead_code)]
     is_inline: bool,
     /// Namespace stack for use in call resolution (e.g., [`demo`])
     namespace_stack: Vec<String>,
-    /// Class stack for use in call resolution (e.g., [`Service`])
-    /// Reserved for future method resolution enhancements
-    #[allow(dead_code)] // Used in tests and reserved for future call resolution
+    /// Class stack for use in call resolution (e.g., [`Service`], or
+    /// [`Outer`, `Nested`] for an in-class nested method). Reconstructed into the
+    /// enclosing-class FQN by `enclosing_class_fqn` for `field_types` lookups.
     class_stack: Vec<String>,
     /// Return type of the function (e.g., `int`, `std::string`)
     return_type: Option<String>,
@@ -1000,10 +999,29 @@ fn extract_field_and_type_info(
     let mut type_map = HashMap::new();
     let mut class_stack = Vec::new();
 
+    // First pass: collect the FQN of EVERY class/struct declared in this
+    // translation unit at the class-visit site, so the store-site scope walk in
+    // `extract_field_declaration` can qualify a bare field type against declared
+    // classes. This must be collected here, not from `field_types.keys()`: a
+    // method-only class (no field declarations) is never a `field_types` key, so
+    // sourcing the set from `field_types` would omit it, keep a field of that
+    // type bare, and fail Phase 4c-prime unification (02_DESIGN Section 3.2.2).
+    let mut declared_classes: HashSet<String> = HashSet::new();
+    let mut collect_stack: Vec<String> = Vec::new();
+    collect_declared_class_fqns(
+        node,
+        content,
+        namespace_map,
+        &mut declared_classes,
+        &mut collect_stack,
+        budget,
+    )?;
+
     extract_fields_recursive(
         node,
         content,
         namespace_map,
+        &declared_classes,
         &mut field_types,
         &mut type_map,
         &mut class_stack,
@@ -1013,11 +1031,175 @@ fn extract_field_and_type_info(
     Ok((field_types, type_map))
 }
 
+/// Compute a class/struct's FQN from its simple name, the enclosing namespace,
+/// and the enclosing class stack. Shared by `collect_declared_class_fqns` and
+/// `extract_fields_recursive` so both passes key classes identically:
+/// - nested class: `parent_fqn::class_name` (the parent FQN is `class_stack.last()`);
+/// - top-level class in a namespace: `namespace::class_name`;
+/// - top-level class in the global namespace: `class_name`.
+fn build_class_fqn(class_name: &str, namespace: &str, class_stack: &[String]) -> String {
+    if let Some(parent_fqn) = class_stack.last() {
+        format!("{parent_fqn}::{class_name}")
+    } else if namespace.is_empty() {
+        class_name.to_string()
+    } else {
+        format!("{}::{}", namespace.trim_end_matches("::"), class_name)
+    }
+}
+
+/// First-pass collection of every declared class/struct FQN in the translation
+/// unit, keyed identically to `field_types` (via `build_class_fqn`). Includes
+/// method-only classes, which never appear as a `field_types` key.
+fn collect_declared_class_fqns(
+    node: Node,
+    content: &[u8],
+    namespace_map: &HashMap<std::ops::Range<usize>, String>,
+    declared: &mut HashSet<String>,
+    class_stack: &mut Vec<String>,
+    budget: &mut BuildBudget,
+) -> GraphResult<()> {
+    budget.checkpoint("cpp:collect_declared_classes")?;
+    match node.kind() {
+        "class_specifier" | "struct_specifier" => {
+            if let Some(name_node) = node.child_by_field_name("name") {
+                let class_name = extract_identifier(name_node, content);
+                let namespace = find_namespace_for_offset(node.start_byte(), namespace_map);
+                let class_fqn = build_class_fqn(&class_name, &namespace, class_stack);
+
+                declared.insert(class_fqn.clone());
+                class_stack.push(class_fqn);
+
+                let mut cursor = node.walk();
+                for child in node.children(&mut cursor) {
+                    collect_declared_class_fqns(
+                        child,
+                        content,
+                        namespace_map,
+                        declared,
+                        class_stack,
+                        budget,
+                    )?;
+                }
+
+                class_stack.pop();
+            }
+        }
+        _ => {
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                collect_declared_class_fqns(
+                    child,
+                    content,
+                    namespace_map,
+                    declared,
+                    class_stack,
+                    budget,
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// C++ built-in / primitive type names. A field of a primitive type never
+/// receives a member call, so `qualify_field_type` keeps it bare rather than
+/// walking enclosing scopes.
+fn is_cpp_primitive(name: &str) -> bool {
+    matches!(
+        name,
+        "int"
+            | "void"
+            | "bool"
+            | "char"
+            | "double"
+            | "float"
+            | "long"
+            | "short"
+            | "unsigned"
+            | "signed"
+            | "wchar_t"
+            | "auto"
+            | "char8_t"
+            | "char16_t"
+            | "char32_t"
+            | "int8_t"
+            | "int16_t"
+            | "int32_t"
+            | "int64_t"
+            | "uint8_t"
+            | "uint16_t"
+            | "uint32_t"
+            | "uint64_t"
+            | "intptr_t"
+            | "uintptr_t"
+            | "size_t"
+            | "ssize_t"
+            | "ptrdiff_t"
+    )
+}
+
+/// Namespace-qualify a stored field-type value by a C++ unqualified-name-lookup
+/// scope walk (innermost enclosing scope first), so a member call through the
+/// field emits a qualified target that Phase 4c-prime can unify.
+///
+/// Keeps `::`-qualified values (using-declaration hits or explicit qualification)
+/// and primitives bare. Otherwise walks enclosing scopes from innermost to
+/// outermost and takes the FIRST that names a declared class: the enclosing
+/// class scope (`{class_fqn}::{type}`), then each strict prefix of `class_fqn`,
+/// then the namespace (`{namespace}::{type}`). If no enclosing scope names a
+/// declared class, the value is kept BARE (an unresolvable stub), never a
+/// namespace guess that could collide with a different real type. Class scope
+/// winning over namespace scope is what keeps the nested-class case sound (a
+/// field `Inner inner` inside `demo::Outer` binds to `demo::Outer::Inner`, not a
+/// distinct top-level `demo::Inner`).
+fn qualify_field_type(
+    resolved_type: &str,
+    class_fqn: &str,
+    namespace: &str,
+    declared_classes: &HashSet<String>,
+) -> String {
+    // Already qualified (using-decl hit or explicit ::), or a primitive: keep.
+    if resolved_type.contains("::") || is_cpp_primitive(resolved_type) {
+        return resolved_type.to_string();
+    }
+
+    // 1. Enclosing class scope.
+    let candidate = format!("{class_fqn}::{resolved_type}");
+    if declared_classes.contains(&candidate) {
+        return candidate;
+    }
+
+    // 2. Each strict prefix of the enclosing class FQN, innermost first.
+    let mut prefix = class_fqn;
+    while let Some(idx) = prefix.rfind("::") {
+        prefix = &prefix[..idx];
+        let candidate = format!("{prefix}::{resolved_type}");
+        if declared_classes.contains(&candidate) {
+            return candidate;
+        }
+    }
+
+    // 3. The enclosing namespace.
+    let namespace_key = namespace.trim_end_matches("::");
+    if !namespace_key.is_empty() {
+        let candidate = format!("{namespace_key}::{resolved_type}");
+        if declared_classes.contains(&candidate) {
+            return candidate;
+        }
+    }
+
+    // No enclosing scope names a declared class: keep the value bare. This is
+    // either a declared global-scope class (bare FQN is correct) or an
+    // unresolvable stub; never a false edge to a different real node.
+    resolved_type.to_string()
+}
+
 /// Recursive helper for field and type extraction
 fn extract_fields_recursive(
     node: Node,
     content: &[u8],
     namespace_map: &HashMap<std::ops::Range<usize>, String>,
+    declared_classes: &HashSet<String>,
     field_types: &mut HashMap<(String, String), String>,
     type_map: &mut HashMap<(String, String), String>,
     class_stack: &mut Vec<String>,
@@ -1032,17 +1214,7 @@ fn extract_fields_recursive(
                 let namespace = find_namespace_for_offset(node.start_byte(), namespace_map);
 
                 // Build FQN including parent classes from class_stack
-                let class_fqn = if class_stack.is_empty() {
-                    // Top-level class: just namespace + class name
-                    if namespace.is_empty() {
-                        class_name.clone()
-                    } else {
-                        format!("{}::{}", namespace.trim_end_matches("::"), class_name)
-                    }
-                } else {
-                    // Nested class: parent_fqn + class name
-                    format!("{}::{}", class_stack.last().unwrap(), class_name)
-                };
+                let class_fqn = build_class_fqn(&class_name, &namespace, class_stack);
 
                 class_stack.push(class_fqn.clone());
 
@@ -1053,6 +1225,7 @@ fn extract_fields_recursive(
                         child,
                         content,
                         namespace_map,
+                        declared_classes,
                         field_types,
                         type_map,
                         class_stack,
@@ -1072,9 +1245,28 @@ fn extract_fields_recursive(
                     content,
                     class_fqn,
                     namespace_map,
+                    declared_classes,
                     field_types,
                     type_map,
                 );
+            }
+
+            // A nested class/struct declaration appears inside a
+            // `field_declaration` in tree-sitter-cpp. Recurse so fields on that
+            // nested class are added to `field_types` and can resolve calls from
+            // inline nested methods (issue #466 T7).
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                extract_fields_recursive(
+                    child,
+                    content,
+                    namespace_map,
+                    declared_classes,
+                    field_types,
+                    type_map,
+                    class_stack,
+                    budget,
+                )?;
             }
         }
 
@@ -1096,6 +1288,7 @@ fn extract_fields_recursive(
                     child,
                     content,
                     namespace_map,
+                    declared_classes,
                     field_types,
                     type_map,
                     class_stack,
@@ -1114,6 +1307,7 @@ fn extract_field_declaration(
     content: &[u8],
     class_fqn: &str,
     namespace_map: &HashMap<std::ops::Range<usize>, String>,
+    declared_classes: &HashSet<String>,
     field_types: &mut HashMap<(String, String), String>,
     type_map: &HashMap<(String, String), String>,
 ) {
@@ -1148,10 +1342,13 @@ fn extract_field_declaration(
         }
     }
 
-    // Resolve field type to FQN using namespace/type_map
+    // Resolve field type to FQN using namespace/type_map, then scope-qualify a
+    // still-bare class type through C++ unqualified-name lookup so member calls
+    // through the field emit a unifiable target (02_DESIGN Section 3.2.2).
     if let Some(ftype) = field_type {
         let namespace = find_namespace_for_offset(node.start_byte(), namespace_map);
-        let field_type_fqn = resolve_type_to_fqn(&ftype, &namespace, type_map);
+        let resolved = resolve_type_to_fqn(&ftype, &namespace, type_map);
+        let field_type_fqn = qualify_field_type(&resolved, class_fqn, &namespace, declared_classes);
 
         // Store each field name with the same type
         for fname in field_names {
@@ -1297,15 +1494,56 @@ fn extract_using_declaration(
 
 /// Resolve a callee name to its fully qualified name using `ASTGraph` context.
 ///
-/// This function handles:
-/// - Simple names: "helper" -> "`demo::helper`" (using namespace context)
-/// - Qualified names: "`Service::process`" -> "`demo::Service::process`" (adding namespace)
-/// - Static method calls: "`Repository::save`" -> "`demo::Repository::save`"
-/// - Member calls would require parsing the AST node further (future work)
+/// Branches on the callee expression's AST node kind (authoritative), not on
+/// text parsing:
+/// - `field_expression` (`repo.save()` / `p->frobnicate()`): resolve the
+///   receiver's static type through `field_types` and emit `Type::method`
+///   (`resolve_member_call`).
+/// - qualified name (`Widget::make()`): resolve the qualifier through a
+///   using-declaration alias in `type_map` (`resolve_static_call`).
+/// - simple names and every non-hit path: fall back to the exact
+///   namespace-prefix string the pre-#466 resolver produced
+///   (`resolve_callee_name_namespace_prefixed`), so no existing edge and no
+///   `is_unqualified`/FFI-routing bit regresses (02_DESIGN Section 3.4).
+///
+/// The fallback is byte-identical to the old behavior on every miss, ambiguity,
+/// missing class context, or unhandled node kind, so a map that cannot type a
+/// receiver never emits a wrong target.
 fn resolve_callee_name(
+    function_node: Node<'_>,
     callee_name: &str,
     caller_ctx: &FunctionContext,
-    _ast_graph: &ASTGraph,
+    ast_graph: &ASTGraph,
+    content: &[u8],
+) -> String {
+    // Member call through a field of the enclosing class.
+    if function_node.kind() == "field_expression" {
+        if let Some(fqn) = resolve_member_call(function_node, caller_ctx, ast_graph, content) {
+            return fqn;
+        }
+        return resolve_callee_name_namespace_prefixed(callee_name, caller_ctx);
+    }
+
+    // Qualified call (`Scope::method`): try a using-declaration alias, else fall
+    // back to the namespace-prefix behavior (the specified path for
+    // same-namespace static calls, 02_DESIGN Section 3.3).
+    if !callee_name.starts_with("::")
+        && callee_name.contains("::")
+        && let Some(fqn) = resolve_static_call(function_node, callee_name, ast_graph)
+    {
+        return fqn;
+    }
+
+    resolve_callee_name_namespace_prefixed(callee_name, caller_ctx)
+}
+
+/// The pre-#466 namespace-prefix resolution, extracted verbatim as a pure text
+/// helper (no `ASTGraph` dependency). Every non-hit path in `resolve_callee_name`
+/// returns exactly this string, guaranteeing no regression of existing edges or
+/// of the `is_unqualified`/FFI-routing bit read at the call-emission site.
+fn resolve_callee_name_namespace_prefixed(
+    callee_name: &str,
+    caller_ctx: &FunctionContext,
 ) -> String {
     // If already fully qualified (starts with ::), return as-is
     if callee_name.starts_with("::") {
@@ -1332,12 +1570,97 @@ fn resolve_callee_name(
 
     // For simple names within a class, don't add class context automatically
     // (the call might be to a free function or static method from another class)
-    // Future work: Parse the call expression to determine if it's a member call
 
     // Add function name
     parts.push(callee_name.to_string());
 
     parts.join("::")
+}
+
+/// Reconstruct the enclosing class's fully namespace-qualified, fully nested FQN
+/// from a `FunctionContext`, matching the `field_types` key format built at
+/// `extract_fields_recursive`. `class_stack` holds bare simple class names for
+/// in-class methods (or a single combined prefix for out-of-class definitions),
+/// so the key is rebuilt by `::`-joining `namespace_stack ++ class_stack` rather
+/// than reading `class_stack.last()` alone (which is a bare name and misses the
+/// namespace-qualified key). Returns `None` for a free function (no enclosing
+/// class), where member lookup is skipped.
+fn enclosing_class_fqn(caller_ctx: &FunctionContext) -> Option<String> {
+    if caller_ctx.class_stack.is_empty() {
+        return None;
+    }
+    let mut parts: Vec<&str> = Vec::new();
+    parts.extend(caller_ctx.namespace_stack.iter().map(String::as_str));
+    parts.extend(caller_ctx.class_stack.iter().map(String::as_str));
+    Some(parts.join("::"))
+}
+
+/// Resolve a member call (`receiver.method()` / `receiver->method()`) through the
+/// enclosing class's fields. Conservative: only a bare-identifier receiver that
+/// names a field of the enclosing class is typed; `this`, chained expressions,
+/// locals, parameters, and smart pointers miss `field_types` and force the
+/// caller to fall back (no wrong edge). Returns `Some("Type::method")` on a
+/// single unambiguous hit, where `Type` is already a fully namespace-qualified
+/// FQN because the stored field-type value is scope-qualified at the store site
+/// (`qualify_field_type`).
+fn resolve_member_call(
+    function_node: Node<'_>,
+    caller_ctx: &FunctionContext,
+    ast_graph: &ASTGraph,
+    content: &[u8],
+) -> Option<String> {
+    let receiver_node = function_node.child_by_field_name("argument")?;
+    let method_node = function_node.child_by_field_name("field")?;
+
+    // Only trust a single-identifier receiver: anything else (this->, nested
+    // field/call expressions) is not a plain field access we can type.
+    if !matches!(receiver_node.kind(), "identifier" | "field_identifier") {
+        return None;
+    }
+
+    let receiver_text = receiver_node.utf8_text(content).ok()?.trim();
+    let method_text = method_node.utf8_text(content).ok()?.trim();
+    if receiver_text.is_empty() || method_text.is_empty() {
+        return None;
+    }
+
+    let class_fqn = enclosing_class_fqn(caller_ctx)?;
+    let field_type = ast_graph
+        .field_types
+        .get(&(class_fqn, receiver_text.to_string()))?;
+
+    Some(format!("{field_type}::{method_text}"))
+}
+
+/// Resolve a qualified static call (`Qualifier::method()`) through a
+/// using-declaration alias in `type_map`, keyed by the caller's namespace
+/// context (looked up from the stored `namespace_map`). Only a single-segment
+/// qualifier is resolved (multi-segment qualifiers fall back); a miss returns
+/// `None` so the caller keeps the specified namespace-prefix behavior.
+fn resolve_static_call(
+    function_node: Node<'_>,
+    callee_name: &str,
+    ast_graph: &ASTGraph,
+) -> Option<String> {
+    let (qualifier, method) = callee_name.rsplit_once("::")?;
+    // Only a bare, single-segment qualifier is a using-declaration alias key.
+    if qualifier.is_empty() || qualifier.contains("::") || method.is_empty() {
+        return None;
+    }
+
+    let namespace = find_namespace_for_offset(function_node.start_byte(), &ast_graph.namespace_map);
+    let namespace_key = namespace.trim_end_matches("::").to_string();
+
+    let resolved_qualifier = ast_graph
+        .type_map
+        .get(&(namespace_key, qualifier.to_string()))
+        .or_else(|| {
+            ast_graph
+                .type_map
+                .get(&(String::new(), qualifier.to_string()))
+        })?;
+
+    Some(format!("{resolved_qualifier}::{method}"))
 }
 
 /// Strip type qualifiers (const, volatile, *, &) to extract the base type name.
@@ -2249,7 +2572,7 @@ fn build_call_for_staging(
 
     // Resolve callee name using context
     let target_qualified_name = if let Some(ctx) = call_context {
-        resolve_callee_name(callee_text, ctx, ast_graph)
+        resolve_callee_name(function_node, callee_text, ctx, ast_graph, content)
     } else {
         callee_text.to_string()
     };
@@ -2777,8 +3100,8 @@ fn count_arguments(node: Node<'_>) -> usize {
 mod tests {
     use super::*;
     use sqry_core::graph::unified::build::test_helpers::{
-        assert_has_node, assert_has_node_with_kind, assert_has_node_with_kind_exact,
-        collect_call_edges,
+        assert_has_ffi_call_edge, assert_has_node, assert_has_node_with_kind,
+        assert_has_node_with_kind_exact, collect_call_edges,
     };
     use sqry_core::graph::unified::node::NodeKind;
     use tree_sitter::Parser;
@@ -3559,10 +3882,14 @@ mod tests {
             Some(&"int".to_string())
         );
 
-        // Outer's nested instance field
+        // Outer's nested instance field. Its bare type `Inner` is scope-qualified
+        // at the store site (issue #466, 02_DESIGN Section 3.2.2): the innermost
+        // enclosing scope that names a declared class is `demo::Outer::Inner`, so
+        // the stored value is the nested FQN, not the bare `Inner`. This is what
+        // lets a member call through `nested_instance` unify with the real node.
         assert_eq!(
             field_types.get(&("demo::Outer".to_string(), "nested_instance".to_string())),
-            Some(&"Inner".to_string())
+            Some(&"demo::Outer::Inner".to_string())
         );
 
         // If Inner's field is extracted, verify it uses the correct parent-qualified FQN
@@ -3645,6 +3972,188 @@ mod tests {
             )
             .expect("build_graph must succeed for the test fixture");
         staging
+    }
+
+    fn staged_node_name_by_id(
+        staging: &StagingGraph,
+        id: sqry_core::graph::unified::NodeId,
+    ) -> Option<&str> {
+        staging.nodes().find_map(|node| {
+            if node.expected_id == Some(id) {
+                staging.resolve_node_canonical_name(node.entry)
+            } else {
+                None
+            }
+        })
+    }
+
+    fn call_edge_pairs(staging: &StagingGraph) -> Vec<(String, String)> {
+        staging
+            .edges()
+            .filter_map(|edge| {
+                if matches!(edge.kind, EdgeKind::Calls { .. }) {
+                    let source = staged_node_name_by_id(staging, edge.source)?.to_string();
+                    let target = staged_node_name_by_id(staging, edge.target)?.to_string();
+                    Some((source, target))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    fn assert_has_call_edge(staging: &StagingGraph, caller: &str, callee: &str) {
+        let calls = call_edge_pairs(staging);
+        assert!(
+            calls
+                .iter()
+                .any(|(source, target)| source == caller && target == callee),
+            "expected Calls edge {caller} -> {callee}; staged Calls edges: {calls:?}"
+        );
+    }
+
+    fn assert_no_call_target(staging: &StagingGraph, forbidden_target: &str) {
+        let calls = call_edge_pairs(staging);
+        assert!(
+            !calls.iter().any(|(_, target)| target == forbidden_target),
+            "unexpected Calls edge target {forbidden_target}; staged Calls edges: {calls:?}"
+        );
+    }
+
+    fn assert_no_call_target_suffix(staging: &StagingGraph, forbidden_suffix: &str) {
+        let calls = call_edge_pairs(staging);
+        assert!(
+            !calls
+                .iter()
+                .any(|(_, target)| target.ends_with(forbidden_suffix)),
+            "unexpected Calls edge target ending with {forbidden_suffix}; staged Calls edges: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn test_issue_466_t1_member_call_through_field_resolves_to_method_fqn() {
+        let source = r"
+namespace demo {
+    struct Repository { void save(); };
+    struct Service { Repository repo; void run() { repo.save(); } };
+}
+";
+        let staging = build_cpp(source);
+
+        assert_has_call_edge(&staging, "demo::Service::run", "demo::Repository::save");
+        assert_no_call_target(&staging, "demo::repo.save");
+        assert_no_call_target(&staging, "Repository::save");
+    }
+
+    #[test]
+    fn test_issue_466_t2_same_namespace_static_call_uses_fallback_prefix() {
+        let source = r"
+namespace demo {
+    struct Repository { static void save(); };
+    void use() { Repository::save(); }
+}
+";
+        let staging = build_cpp(source);
+
+        assert_has_call_edge(&staging, "demo::use", "demo::Repository::save");
+    }
+
+    #[test]
+    fn test_issue_466_t3_using_declaration_alias_resolves_static_call() {
+        let source = r"
+namespace lib { struct Widget { static void make(); }; }
+namespace app { using lib::Widget; void run() { Widget::make(); } }
+";
+        let staging = build_cpp(source);
+
+        assert_has_call_edge(&staging, "app::run", "lib::Widget::make");
+        assert_no_call_target(&staging, "app::Widget::make");
+    }
+
+    #[test]
+    fn test_issue_466_t4_unknown_receiver_does_not_invent_member_target() {
+        let source = r"
+namespace demo {
+    struct Service { void run(int* p) { p->frobnicate(); } };
+}
+";
+        let staging = build_cpp(source);
+
+        assert_no_call_target_suffix(&staging, "::frobnicate");
+        assert_has_call_edge(&staging, "demo::Service::run", "demo::p->frobnicate");
+    }
+
+    #[test]
+    fn test_issue_466_t5_qualified_and_ffi_fallback_behavior_is_unchanged() {
+        let source = r#"
+extern "C" { int printf(const char*); }
+namespace demo { void helper() {} }
+void run() {
+    demo::helper();
+    printf("x");
+}
+"#;
+        let staging = build_cpp(source);
+
+        assert_has_call_edge(&staging, "run", "demo::helper");
+        assert_has_ffi_call_edge(&staging, "run", "extern::C::printf");
+    }
+
+    #[test]
+    fn test_issue_466_t6_same_class_name_collision_does_not_cross_namespace() {
+        let source = r"
+namespace a { struct Repository { void save(); }; }
+namespace b {
+    struct Repository { void wipe(); };
+    struct Service { Repository repo; void run() { repo.save(); } };
+}
+";
+        let staging = build_cpp(source);
+
+        assert_no_call_target(&staging, "a::Repository::save");
+        assert_has_call_edge(&staging, "b::Service::run", "b::Repository::save");
+    }
+
+    #[test]
+    fn test_issue_466_t7_nested_class_member_access_resolves() {
+        let source = r"
+namespace demo {
+    struct Inner { void tick(); };
+    struct Outer { struct Nested { Inner inner; void go() { inner.tick(); } }; };
+}
+";
+        let staging = build_cpp(source);
+
+        assert_has_call_edge(&staging, "demo::Outer::Nested::go", "demo::Inner::tick");
+    }
+
+    #[test]
+    fn test_issue_466_t8_out_of_class_method_definition_resolves_member_field() {
+        let source = r"
+namespace demo {
+    struct Repository { void save(); };
+    struct Service { Repository repo; void run(); };
+    void Service::run() { repo.save(); }
+}
+";
+        let staging = build_cpp(source);
+
+        assert_has_call_edge(&staging, "demo::Service::run", "demo::Repository::save");
+    }
+
+    #[test]
+    fn test_issue_466_t9_same_named_fields_bind_to_enclosing_class() {
+        let source = r"
+namespace demo {
+    struct Base { struct Handle { void base_op(); }; Handle h; };
+    struct Repository { void save(); };
+    struct Service { Repository h; void run() { h.save(); } };
+}
+";
+        let staging = build_cpp(source);
+
+        assert_has_call_edge(&staging, "demo::Service::run", "demo::Repository::save");
+        assert_no_call_target(&staging, "demo::Base::Handle::base_op");
     }
 
     /// AC-1 + AC-2 + AC-4 (struct default visibility) + AC-5:

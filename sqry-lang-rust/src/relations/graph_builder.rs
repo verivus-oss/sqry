@@ -18,7 +18,6 @@ use crate::confidence::{ConfidenceLevel, ConfidenceTracker};
 use crate::lifetime_extractor::{LifetimeExtractionResult, LifetimeExtractor};
 use crate::module_resolver::ModuleResolver;
 use crate::proc_macro_detector::ProcMacroDetector;
-use crate::ra_bridge::{RaAvailabilityCheck, RustAnalyzerBridge};
 use crate::trait_binder::{BindingResult, TraitMethodBinder};
 
 use super::local_scopes;
@@ -55,14 +54,12 @@ type FfiRegistry = HashMap<String, (String, FfiConvention)>;
 /// - Macro expansion (derive macros, function-like macros)
 /// - Trait method binding resolution
 /// - Lifetime constraint extraction
-/// - rust-analyzer integration (when available)
 ///
 /// # Safe Mode
 ///
-/// For environments where macro expansion or external tools are restricted,
+/// For environments where macro expansion is restricted,
 /// use [`RustGraphConfig::safe_mode()`] which disables:
 /// - Macro expansion (avoids executing build scripts)
-/// - rust-analyzer integration (no external process)
 #[allow(
     clippy::struct_excessive_bools,
     reason = "Independent feature toggles keep graph config explicit"
@@ -76,14 +73,6 @@ pub struct RustGraphConfig {
     pub enable_trait_binding: bool,
     /// Enable lifetime constraint extraction. Default: true.
     pub enable_lifetime_extraction: bool,
-    /// Enable rust-analyzer integration for enhanced type inference. Default: true.
-    /// When enabled, type inference uses rust-analyzer for more accurate results.
-    /// Falls back gracefully if rust-analyzer is not available.
-    pub enable_rust_analyzer: bool,
-    /// Optional rust-analyzer executable override for tests or specialized environments.
-    ///
-    /// When set, availability checks use this executable path instead of PATH lookup.
-    pub rust_analyzer_command: Option<std::path::PathBuf>,
     /// Workspace root for proc-macro detection and macro expansion.
     pub workspace_root: Option<std::path::PathBuf>,
 }
@@ -96,15 +85,12 @@ impl RustGraphConfig {
     /// - Macro expansion
     /// - Trait method binding
     /// - Lifetime extraction
-    /// - rust-analyzer integration
     #[must_use]
     pub fn new() -> Self {
         Self {
             enable_macro_expansion: true,
             enable_trait_binding: true,
             enable_lifetime_extraction: true,
-            enable_rust_analyzer: true,
-            rust_analyzer_command: None,
             workspace_root: None,
         }
     }
@@ -113,7 +99,6 @@ impl RustGraphConfig {
     ///
     /// Use this in environments where:
     /// - Macro expansion is not safe (untrusted code)
-    /// - External tools (rust-analyzer) should not be invoked
     /// - Minimal resource usage is required
     ///
     /// Enabled features:
@@ -122,15 +107,12 @@ impl RustGraphConfig {
     ///
     /// Disabled features:
     /// - Macro expansion (no build script execution)
-    /// - rust-analyzer integration (no external process)
     #[must_use]
     pub fn safe_mode() -> Self {
         Self {
             enable_macro_expansion: false,
             enable_trait_binding: true,
             enable_lifetime_extraction: true,
-            enable_rust_analyzer: false,
-            rust_analyzer_command: None,
             workspace_root: None,
         }
     }
@@ -145,8 +127,6 @@ impl RustGraphConfig {
             enable_macro_expansion: false,
             enable_trait_binding: false,
             enable_lifetime_extraction: false,
-            enable_rust_analyzer: false,
-            rust_analyzer_command: None,
             workspace_root: None,
         }
     }
@@ -164,38 +144,6 @@ impl RustGraphConfig {
         self.enable_macro_expansion = false;
         self
     }
-
-    /// Builder method to disable rust-analyzer integration.
-    #[must_use]
-    pub fn without_rust_analyzer(mut self) -> Self {
-        self.enable_rust_analyzer = false;
-        self
-    }
-
-    /// Builder method to override the rust-analyzer executable path.
-    #[must_use]
-    pub fn with_rust_analyzer_command(mut self, command: std::path::PathBuf) -> Self {
-        self.rust_analyzer_command = Some(command);
-        self
-    }
-}
-
-// === RA Bridge Performance Fix (iter16) ===
-// The following struct caches rust-analyzer availability to avoid
-// O(2N) subprocess spawns during indexing.
-
-/// Cached rust-analyzer availability check with pre-computed limitation message.
-///
-/// This is computed once per `RustGraphBuilder` instance (1 subprocess call)
-/// rather than per-file (which was causing O(2N) subprocess spawns).
-#[derive(Debug, Clone)]
-struct CachedRaCheck {
-    /// The raw availability check result from `RustAnalyzerBridge::check_availability()`
-    check: RaAvailabilityCheck,
-    /// Pre-computed limitation message for confidence tracker (None = no limitation)
-    limitation: Option<String>,
-    /// True if RA was disabled via config (not a limitation, user's choice)
-    disabled_by_config: bool,
 }
 
 /// Graph builder for Rust files using unified `CodeGraph` architecture.
@@ -225,8 +173,6 @@ struct CachedRaCheck {
 pub struct RustGraphBuilder {
     max_scope_depth: usize,
     config: RustGraphConfig,
-    /// Cached rust-analyzer availability (checked once per builder, 1 subprocess)
-    ra_check: OnceLock<CachedRaCheck>,
 }
 
 impl Default for RustGraphBuilder {
@@ -234,7 +180,6 @@ impl Default for RustGraphBuilder {
         Self {
             max_scope_depth: DEFAULT_SCOPE_DEPTH,
             config: RustGraphConfig::new(),
-            ra_check: OnceLock::new(),
         }
     }
 }
@@ -245,7 +190,6 @@ impl RustGraphBuilder {
         Self {
             max_scope_depth,
             config: RustGraphConfig::new(),
-            ra_check: OnceLock::new(),
         }
     }
 
@@ -255,7 +199,6 @@ impl RustGraphBuilder {
         Self {
             max_scope_depth,
             config,
-            ra_check: OnceLock::new(),
         }
     }
 
@@ -263,80 +206,6 @@ impl RustGraphBuilder {
     #[must_use]
     pub fn config(&self) -> &RustGraphConfig {
         &self.config
-    }
-
-    /// Check RA availability (cached after first call, single subprocess).
-    ///
-    /// This method performs the RA check exactly once per builder instance,
-    /// reducing subprocess spawns from O(2N) to O(1) for N files.
-    fn get_ra_check(&self) -> &CachedRaCheck {
-        self.ra_check.get_or_init(|| {
-            if !self.config.enable_rust_analyzer {
-                return CachedRaCheck {
-                    check: RaAvailabilityCheck {
-                        available: false,
-                        version: None,
-                        version_warning: None,
-                    },
-                    limitation: None, // User disabled, not a limitation
-                    disabled_by_config: true,
-                };
-            }
-
-            let check = RustAnalyzerBridge::check_availability_with_command(
-                self.config.rust_analyzer_command.as_deref(),
-            );
-
-            // Compute limitation message once (only for unavailable RA)
-            // Version parse warnings are NOT limitations - RA is still usable
-            let limitation = if check.available {
-                None // RA available - no limitation, even if version parse failed
-            } else {
-                // Use the version_warning if it contains exit status info, otherwise generic message
-                Some(
-                    check
-                        .version_warning
-                        .clone()
-                        .unwrap_or_else(|| "rust-analyzer not found in PATH".to_string()),
-                )
-            };
-
-            // Log version warning at debug level for developer visibility.
-            // This covers cases like:
-            // - RA exited with non-zero status (unavailable)
-            // - RA version string couldn't be parsed (still available)
-            if let Some(ref warning) = check.version_warning {
-                log::debug!("rust-analyzer check: {warning}");
-            }
-
-            CachedRaCheck {
-                check,
-                limitation,
-                disabled_by_config: false,
-            }
-        })
-    }
-
-    /// Check if the RA availability check has been cached (for testing).
-    #[cfg(test)]
-    pub(crate) fn is_ra_check_cached(&self) -> bool {
-        self.ra_check.get().is_some()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn set_ra_check_for_test(
-        &self,
-        check: RaAvailabilityCheck,
-        limitation: Option<String>,
-        disabled_by_config: bool,
-    ) {
-        self.ra_check
-            .set(CachedRaCheck {
-                check,
-                limitation,
-                disabled_by_config,
-            })
-            .expect("test RA check should only be initialized once");
     }
 }
 
@@ -348,7 +217,6 @@ impl Clone for RustGraphBuilder {
         Self {
             max_scope_depth: self.max_scope_depth,
             config: self.config.clone(),
-            ra_check: OnceLock::new(),
         }
     }
 }
@@ -358,7 +226,6 @@ impl std::fmt::Debug for RustGraphBuilder {
         f.debug_struct("RustGraphBuilder")
             .field("max_scope_depth", &self.max_scope_depth)
             .field("config", &self.config)
-            .field("ra_check", &self.ra_check.get())
             .finish()
     }
 }
@@ -380,9 +247,6 @@ struct BuildContext<'a> {
     config: &'a RustGraphConfig,
     /// Whether rust-analyzer is available and initialized
     ra_available: bool,
-    /// rust-analyzer bridge for enhanced type inference (optional)
-    #[allow(dead_code)] // Used when enable_rust_analyzer is true
-    ra_bridge: Option<RustAnalyzerBridge>,
     /// File-level module path for qualified name prefixing.
     ///
     /// - `None` for crate roots (`lib.rs`, `main.rs`)
@@ -400,7 +264,7 @@ struct BuildContext<'a> {
 }
 
 impl<'a> BuildContext<'a> {
-    fn new(config: &'a RustGraphConfig, file_path: &Path, ra_check: &CachedRaCheck) -> Self {
+    fn new(config: &'a RustGraphConfig, file_path: &Path) -> Self {
         // Determine workspace root for proc-macro detection and module resolution
         let workspace_root = config.workspace_root.as_deref().unwrap_or_else(|| {
             // Without workspace root, use file's parent as best guess
@@ -429,25 +293,9 @@ impl<'a> BuildContext<'a> {
             tracker
         };
 
-        // Handle capability metadata based on RA status:
-        // - User disabled RA: No limitation, no unavailable feature (their choice)
-        // - RA not found: Limitation message + type_inference unavailable
-        // - RA found but not used (R2): type_inference unavailable (no limitation msg)
-        //
-        // Since this fix forces ra_available=false (R2), type_inference is ALWAYS
-        // unavailable unless user explicitly disabled RA.
-        // NO SUBPROCESS CALL HERE - uses pre-computed CachedRaCheck
-        if !ra_check.disabled_by_config {
-            // User wants RA, so report capability as unavailable
-            if !ra_check.check.available {
-                // RA not found - add limitation message
-                if let Some(ref limitation) = ra_check.limitation {
-                    confidence.add_limitation(limitation);
-                }
-            }
-            // Type inference is unavailable in this fix (R2), regardless of RA installation
-            confidence.add_unavailable_feature("type_inference");
-        }
+        // The graph builder currently performs AST-based analysis only.
+        // Do not probe rust-analyzer here unless production RA inference is wired in.
+        confidence.add_unavailable_feature("type_inference");
 
         Self {
             confidence,
@@ -455,12 +303,8 @@ impl<'a> BuildContext<'a> {
             proc_macro_detector,
             module_resolver,
             config,
-            // CRITICAL (R2): Force ra_available=false until RA-based inference is implemented.
-            // This ensures TraitMethodBinder uses AST heuristics instead of DeferToRa.
-            // The cached ra_check.check.available value is preserved for future use
-            // when RA-backed type inference is wired in.
+            // Keep trait binding on AST heuristics until production RA inference exists.
             ra_available: false,
-            ra_bridge: None,
             file_module_path,
             node_map: std::collections::HashMap::new(),
         }
@@ -478,9 +322,7 @@ impl GraphBuilder for RustGraphBuilder {
         // Create helper for staging graph population
         let mut helper = GraphBuildHelper::new(staging, file, Language::Rust);
 
-        // Use cached RA check (single subprocess for all files)
-        let ra_check = self.get_ra_check();
-        let mut build_ctx = BuildContext::new(&self.config, file, ra_check);
+        let mut build_ctx = BuildContext::new(&self.config, file);
 
         // Build AST graph for call context tracking (O(1) context lookups)
         let ast_graph = ASTGraph::from_tree(tree, content, self.max_scope_depth).map_err(|e| {
@@ -5828,435 +5670,31 @@ fn simple_function() {
         assert_eq!(result, Some("test_impl.rs".to_string()));
     }
 
-    // === T9: RA Check Caching Unit Tests ===
+    // === Rust Analyzer Capability Metadata Tests ===
 
     #[test]
-    fn test_ra_check_not_cached_initially() {
-        // T9 Scenario 1: Fresh builder has no cached check
-        let builder = RustGraphBuilder::default();
-        assert!(
-            !builder.is_ra_check_cached(),
-            "Fresh builder should not have cached RA check"
-        );
-    }
-
-    #[test]
-    fn test_ra_check_cached_after_build_graph() {
-        // T9 Scenario 2: After build_graph(), check should be cached
-        let source = "fn main() {}";
-        let tree = parse_rust(source);
-        let mut staging = StagingGraph::new();
-        let builder = RustGraphBuilder::default();
-        let file = PathBuf::from("test.rs");
-
-        builder
-            .build_graph(&tree, source.as_bytes(), &file, &mut staging)
-            .expect("build_graph should succeed");
-
-        assert!(
-            builder.is_ra_check_cached(),
-            "After build_graph, RA check should be cached"
-        );
-    }
-
-    #[test]
-    fn test_ra_check_cached_after_first_call() {
-        // T9 Scenario 3: Calling get_ra_check() caches the result
-        let builder = RustGraphBuilder::default();
-        assert!(!builder.is_ra_check_cached());
-
-        // Access the check (internal method)
-        let _ = builder.get_ra_check();
-
-        assert!(
-            builder.is_ra_check_cached(),
-            "After get_ra_check(), result should be cached"
-        );
-    }
-
-    #[test]
-    fn test_clone_creates_independent_cache() {
-        // T9 Scenario 4: Clone creates independent builder with fresh cache
-        let builder1 = RustGraphBuilder::default();
-
-        // Populate cache on builder1
-        let _ = builder1.get_ra_check();
-        assert!(builder1.is_ra_check_cached());
-
-        // Clone should have fresh cache
-        let builder2 = builder1.clone();
-        assert!(
-            !builder2.is_ra_check_cached(),
-            "Cloned builder should have fresh (uncached) OnceLock"
-        );
-
-        // Original still cached
-        assert!(
-            builder1.is_ra_check_cached(),
-            "Original builder cache should be unaffected by clone"
-        );
-    }
-
-    #[test]
-    fn test_ra_check_disabled_by_config() {
-        // T9 Scenario 5: When RA is disabled by config, disabled_by_config flag is true
-        let config = RustGraphConfig::safe_mode();
-        assert!(
-            !config.enable_rust_analyzer,
-            "safe_mode should disable rust_analyzer"
-        );
-
-        let builder = RustGraphBuilder::with_config(DEFAULT_SCOPE_DEPTH, config);
-        let check = builder.get_ra_check();
-
-        assert!(
-            check.disabled_by_config,
-            "When RA disabled by config, disabled_by_config should be true"
-        );
-        assert!(
-            check.limitation.is_none(),
-            "When RA disabled by config, no limitation should be recorded"
-        );
-    }
-
-    #[test]
-    fn test_multiple_build_graph_uses_same_cache() {
-        // T9 Scenario 6: Multiple files use the same cached check
-        let builder = RustGraphBuilder::default();
-        let file1 = PathBuf::from("file1.rs");
-        let file2 = PathBuf::from("file2.rs");
-        let source = "fn main() {}";
-        let tree = parse_rust(source);
-
-        // Build first file
-        let mut staging1 = StagingGraph::new();
-        builder
-            .build_graph(&tree, source.as_bytes(), &file1, &mut staging1)
-            .unwrap();
-        assert!(builder.is_ra_check_cached());
-
-        // Build second file - should use same cached check (no new subprocess)
-        let mut staging2 = StagingGraph::new();
-        builder
-            .build_graph(&tree, source.as_bytes(), &file2, &mut staging2)
-            .unwrap();
-
-        // Still cached (same instance)
-        assert!(builder.is_ra_check_cached());
-    }
-
-    // === T9: Unix Caching Tests with Shim ===
-    // These tests use PATH manipulation and require serial_test for isolation.
-
-    #[cfg(unix)]
-    mod unix_caching_tests {
-        use super::*;
-        use serial_test::serial;
-        use std::os::unix::fs::PermissionsExt;
-
-        #[test]
-        #[serial]
-        fn test_ra_check_cached_no_recheck_with_shim() {
-            use tempfile::tempdir;
-
-            // Create counter file and shim
-            let temp = tempdir().unwrap();
-            let counter_file = temp.path().join("ra_call_count");
-            std::fs::write(&counter_file, "0").unwrap();
-
-            let shim_dir = temp.path().join("shim");
-            std::fs::create_dir_all(&shim_dir).unwrap();
-
-            let shim_path = shim_dir.join("rust-analyzer");
-            std::fs::write(
-                &shim_path,
-                format!(
-                    r#"#!/bin/sh
-count=$(cat {counter})
-echo $((count + 1)) > {counter}
-echo "rust-analyzer 1.85.0 (fake)"
-"#,
-                    counter = counter_file.display()
-                ),
-            )
-            .unwrap();
-
-            let mut perms = std::fs::metadata(&shim_path).unwrap().permissions();
-            perms.set_mode(0o755);
-            std::fs::set_permissions(&shim_path, perms).unwrap();
-
-            let config = RustGraphConfig::new().with_rust_analyzer_command(shim_path.clone());
-            let builder = RustGraphBuilder::with_config(DEFAULT_SCOPE_DEPTH, config);
-
-            // Before first call - cache should be empty
-            assert!(
-                !builder.is_ra_check_cached(),
-                "Cache should be empty initially"
-            );
-
-            // First call - triggers check, increments counter
-            let _ra1 = builder.get_ra_check();
-            assert!(
-                builder.is_ra_check_cached(),
-                "Cache should be populated after first call"
-            );
-
-            let count1: u32 = std::fs::read_to_string(&counter_file)
-                .unwrap()
-                .trim()
-                .parse()
-                .unwrap();
-            assert_eq!(count1, 1, "Should have called RA once");
-
-            // Second call - should use cache, NOT increment counter
-            let _ra2 = builder.get_ra_check();
-            let count2: u32 = std::fs::read_to_string(&counter_file)
-                .unwrap()
-                .trim()
-                .parse()
-                .unwrap();
-            assert_eq!(count2, 1, "Counter should still be 1 (cached, no re-check)");
-
-            // Third call - still cached
-            let _ra3 = builder.get_ra_check();
-            let count3: u32 = std::fs::read_to_string(&counter_file)
-                .unwrap()
-                .trim()
-                .parse()
-                .unwrap();
-            assert_eq!(count3, 1, "Counter should still be 1 (cached, no re-check)");
-        }
-    }
-
-    // === T10: Limitation Behavior Tests (R5 Coverage) ===
-
-    /// T10 Scenario 1: User disabled RA via config
-    /// Expected: No limitation, no unavailable feature (user's choice)
-    #[test]
-    fn test_t10_ra_disabled_by_config_no_limitation() {
+    fn test_build_context_marks_type_inference_unavailable_without_ra_limitation() {
         use tempfile::tempdir;
 
-        let config = RustGraphConfig {
-            enable_rust_analyzer: false,
-            ..RustGraphConfig::new()
-        };
-        let builder = RustGraphBuilder::with_config(4, config.clone());
-        let ra_check = builder.get_ra_check();
-
-        // Verify CachedRaCheck state
-        assert!(
-            ra_check.disabled_by_config,
-            "Should be marked as disabled by config"
-        );
-        assert!(
-            !ra_check.check.available,
-            "Available should be false when disabled"
-        );
-        assert!(
-            ra_check.limitation.is_none(),
-            "No limitation message when user disabled"
-        );
-
-        // Verify BuildContext confidence behavior
+        let config = RustGraphConfig::new();
         let temp = tempdir().unwrap();
         let temp_path = temp.path().join("test.rs");
-        let ctx = BuildContext::new(&config, &temp_path, ra_check);
+        let ctx = BuildContext::new(&config, &temp_path);
         let metadata = ctx.confidence.to_metadata();
 
-        // When user disabled RA: NO unavailable feature should be added
         assert!(
-            !metadata
+            metadata
                 .unavailable_features
                 .contains(&"type_inference".to_string()),
-            "type_inference should NOT be marked unavailable when user disabled RA"
+            "type_inference should be marked unavailable until production RA inference exists"
         );
         assert!(
-            metadata.limitations.is_empty()
-                || !metadata
-                    .limitations
-                    .iter()
-                    .any(|l| l.contains("rust-analyzer")),
-            "No RA-related limitation when user disabled"
+            !metadata
+                .limitations
+                .iter()
+                .any(|limitation| limitation.contains("rust-analyzer")),
+            "graph builder should not report rust-analyzer probing limitations"
         );
-    }
-
-    /// T10 Scenario 2: RA not found (unavailable)
-    /// Expected: Limitation message + `type_inference` unavailable
-    #[cfg(unix)]
-    mod t10_ra_not_found_tests {
-        use super::*;
-        use serial_test::serial;
-
-        #[test]
-        #[serial]
-        fn test_t10_ra_not_found_adds_limitation_and_unavailable() {
-            use tempfile::tempdir;
-
-            let temp = tempdir().unwrap();
-            let missing_binary = temp.path().join("missing-rust-analyzer");
-            let config = RustGraphConfig::new().with_rust_analyzer_command(missing_binary);
-            let builder = RustGraphBuilder::with_config(4, config.clone());
-            let ra_check = builder.get_ra_check();
-
-            // Verify CachedRaCheck state
-            assert!(!ra_check.disabled_by_config, "Not disabled by config");
-            assert!(
-                !ra_check.check.available,
-                "RA should be unavailable with empty PATH"
-            );
-            assert!(
-                ra_check.limitation.is_some(),
-                "Should have limitation message"
-            );
-
-            // Verify BuildContext confidence behavior
-            let temp = tempdir().unwrap();
-            let temp_path = temp.path().join("test.rs");
-            let ctx = BuildContext::new(&config, &temp_path, ra_check);
-            let metadata = ctx.confidence.to_metadata();
-
-            // When RA not found: limitation + unavailable feature
-            assert!(
-                metadata
-                    .unavailable_features
-                    .contains(&"type_inference".to_string()),
-                "type_inference should be marked unavailable when RA not found"
-            );
-            assert!(
-                metadata
-                    .limitations
-                    .iter()
-                    .any(|l| l.contains("rust-analyzer") || l.contains("not found")),
-                "Should have RA-related limitation message"
-            );
-        }
-    }
-
-    /// T10 Scenario 3: RA available but not used (R2) - DETERMINISTIC via shim
-    /// Expected: `type_inference` unavailable (no limitation message)
-    #[cfg(unix)]
-    mod t10_ra_available_tests {
-        use super::*;
-        use crate::ra_bridge::RaVersionInfo;
-        use serial_test::serial;
-
-        #[test]
-        #[serial]
-        #[allow(clippy::used_underscore_binding)] // Underscore prefix pattern
-        fn test_t10_ra_available_still_marks_type_inference_unavailable() {
-            use tempfile::tempdir;
-
-            let temp = tempdir().unwrap();
-            let config = RustGraphConfig::new();
-            let builder = RustGraphBuilder::with_config(4, config.clone());
-            builder.set_ra_check_for_test(
-                RaAvailabilityCheck {
-                    available: true,
-                    version: Some(RaVersionInfo {
-                        version_string: "rust-analyzer 1.85.0 (test-shim)".to_string(),
-                        date: "1.85.0".to_string(),
-                        commit_hash: "(test-shim)".to_string(),
-                    }),
-                    version_warning: None,
-                },
-                None,
-                false,
-            );
-            let ra_check = builder.get_ra_check();
-
-            // Verify CachedRaCheck state
-            assert!(!ra_check.disabled_by_config, "Not disabled by config");
-            assert!(
-                ra_check.check.available,
-                "RA should be available (via shim)"
-            );
-            assert!(
-                ra_check.limitation.is_none(),
-                "No limitation when RA is available"
-            );
-
-            // Verify BuildContext confidence behavior
-            let temp_path = temp.path().join("test.rs");
-            let ctx = BuildContext::new(&config, &temp_path, ra_check);
-            let metadata = ctx.confidence.to_metadata();
-
-            // When RA available but R2 forces AST-only: type_inference unavailable but NO limitation
-            assert!(
-                metadata
-                    .unavailable_features
-                    .contains(&"type_inference".to_string()),
-                "type_inference should be marked unavailable (R2 forces AST-only)"
-            );
-            assert!(
-                !metadata
-                    .limitations
-                    .iter()
-                    .any(|l| l.contains("rust-analyzer")),
-                "No limitation message when RA is available (just not used)"
-            );
-        }
-
-        /// T10 Scenario 4: RA available but version parse fails (R5 edge case)
-        /// Expected: available=true, limitation=None, `version_warning=Some`, `type_inference` unavailable
-        #[test]
-        #[serial]
-        #[allow(clippy::used_underscore_binding)] // Underscore prefix pattern
-        fn test_t10_version_parse_failure_still_available() {
-            use tempfile::tempdir;
-
-            let temp = tempdir().unwrap();
-            let config = RustGraphConfig::new();
-            let builder = RustGraphBuilder::with_config(4, config.clone());
-            builder.set_ra_check_for_test(
-                RaAvailabilityCheck {
-                    available: true,
-                    version: None,
-                    version_warning: Some(
-                        "rust-analyzer version parse failed: 'not a valid version string'; continuing without version verification"
-                            .to_string(),
-                    ),
-                },
-                None,
-                false,
-            );
-            let ra_check = builder.get_ra_check();
-
-            // Verify CachedRaCheck state - available despite parse failure
-            assert!(!ra_check.disabled_by_config, "Not disabled by config");
-            assert!(ra_check.check.available, "RA should be available (exit 0)");
-            assert!(
-                ra_check.limitation.is_none(),
-                "No limitation (RA is available)"
-            );
-            assert!(
-                ra_check.check.version.is_none(),
-                "Version should be None (parse failed)"
-            );
-            assert!(
-                ra_check.check.version_warning.is_some(),
-                "Should have version warning"
-            );
-
-            // Verify BuildContext confidence behavior
-            let temp_path = temp.path().join("test.rs");
-            let ctx = BuildContext::new(&config, &temp_path, ra_check);
-            let metadata = ctx.confidence.to_metadata();
-
-            // When RA available (even with parse warning): type_inference unavailable, NO limitation
-            assert!(
-                metadata
-                    .unavailable_features
-                    .contains(&"type_inference".to_string()),
-                "type_inference should be marked unavailable (R2 forces AST-only)"
-            );
-            assert!(
-                !metadata
-                    .limitations
-                    .iter()
-                    .any(|l| l.contains("rust-analyzer")),
-                "No limitation message (RA is available, just version unparseable)"
-            );
-        }
     }
 
     // === Visibility Extraction Tests ===

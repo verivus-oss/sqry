@@ -52,16 +52,13 @@
 //!
 //! ## Wiring status
 //!
-//! This module is **landed independent of its consumer**. The Phase-1
-//! parse pipeline that calls into [`build_function_signature`] /
-//! [`build_local_type_token`] lands in `U10_PHASE1_INSTRUMENT` on the
-//! same feature branch (`feat/c-icall-precision-phase-a`). Until that
-//! unit ships, every helper and the two `pub(crate)` entry-points are
-//! `#[allow(dead_code)]` to match the pattern set by U01's
-//! `WIDTH_ALIAS_TABLE` / `normalize_width_alias` (see
-//! `type_extractor.rs:50,99`).
-
-#![allow(dead_code)] // module-wide allowance — consumers land in U10_PHASE1_INSTRUMENT
+//! [`build_function_signature`] is live: the Phase-1 parse pipeline
+//! calls it from `graph_builder.rs::process_single_field_declarator`
+//! (the `U10_PHASE1_INSTRUMENT` consumer that has since landed) to stage
+//! struct-field function-pointer signatures. A few graph-driven and
+//! local-declaration helpers remain unwired pending the U11/U12
+//! resolution passes; those carry narrow item-level `#[allow(dead_code)]`
+//! with a per-item reason rather than a module-wide blanket allow.
 
 use std::collections::HashMap;
 
@@ -143,6 +140,11 @@ impl TypedefChain {
     /// known for this name" rather than panicking on a partially
     /// loaded graph. `StringId`s that don't resolve through the
     /// interner are likewise skipped.
+    // Exercised by `from_type_of_edges_ignores_variable_typeof_edges` but
+    // not yet called from the lib: the workspace-level typedef chain is
+    // built here for U11's post-commit pass, which has not landed. Narrow
+    // allow keeps the lib build clean until U11 wires it in.
+    #[allow(dead_code)]
     pub(crate) fn from_type_of_edges(graph: &CodeGraph) -> Self {
         let mut aliases = HashMap::new();
         let snapshot = graph.snapshot();
@@ -183,11 +185,19 @@ impl TypedefChain {
     /// Inserts an explicit alias mapping. Intended for unit-tests and
     /// the (future) phase-1 instrumentation path that builds the chain
     /// from staging data before the snapshot is committed.
+    // Test-only today (the resolve-chain tests build chains via `insert`);
+    // the phase-1 instrumentation path that seeds it from staging data
+    // lands with U11. Narrow allow rather than a module-wide blanket.
+    #[allow(dead_code)]
     pub(crate) fn insert(&mut self, alias: String, target: String) {
         self.aliases.insert(alias, target);
     }
 
     /// Returns `true` when no aliases have been recorded.
+    // Unwired: reserved for U12's resolution pass, which short-circuits
+    // canonicalisation when no typedef aliases are known. Narrow allow
+    // until that consumer lands.
+    #[allow(dead_code)]
     pub(crate) fn is_empty(&self) -> bool {
         self.aliases.is_empty()
     }
@@ -278,6 +288,10 @@ pub(crate) fn build_function_signature(
 /// typedef chasing applied.
 ///
 /// Returns `None` on malformed input.
+// Unwired: the local-declaration canonicalisation path consuming this
+// (parameter / variable type tokens for the callsite type-match) lands
+// with U12's resolver. Narrow allow until then; delete when U12 wires it.
+#[allow(dead_code)]
 pub(crate) fn build_local_type_token(
     decl_node: Node,
     content: &[u8],

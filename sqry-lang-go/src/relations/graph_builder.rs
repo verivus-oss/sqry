@@ -396,7 +396,6 @@ const GO_BUILTINS: &[&str] = &[
 ];
 
 /// Go standard library packages (common ones for stdlib detection)
-#[allow(dead_code)] // Scaffolding for stdlib vs third-party package detection
 const GO_STDLIB_PACKAGES: &[&str] = &[
     "archive",
     "bufio",
@@ -2202,7 +2201,6 @@ fn is_builtin(name: &str) -> bool {
     GO_BUILTINS.contains(&name)
 }
 
-#[allow(dead_code)] // Scaffolding for stdlib package detection
 fn is_stdlib_package(path: &str) -> bool {
     if path.contains('.') {
         return false;
@@ -3803,6 +3801,28 @@ fn process_import_spec_unified(
 
         // Add import edge
         helper.add_import_edge(from_id, to_module_id);
+
+        // Classify the imported package and carry the result on the import
+        // node's `NodeFlags` via the store-merge seam (the same channel used
+        // by `add_synthetic_variable`). The classification is total and
+        // ordered:
+        //   1. stdlib   iff `is_stdlib_package` (no `.` and first `/`-segment
+        //      is a standard-library root), e.g. `fmt`, `net/http`.
+        //   2. relative iff the path starts with `./` or `../` (the exact Go
+        //      relative-import grammar), e.g. `./util`, `../pkg`.
+        //   3. third-party is the residual (neither bit): dotted-domain module
+        //      paths (`github.com/foo/bar`) and bare no-dot tokens
+        //      (`internalpkg`, `internal/foo`), neither of which is relative in
+        //      Go. The three buckets partition the whole import-string space.
+        if is_stdlib_package(&import_path) {
+            let mut store = NodeMetadataStore::new();
+            store.mark_import_stdlib(to_module_id);
+            helper.staging_mut().merge_macro_metadata(&store);
+        } else if import_path.starts_with("./") || import_path.starts_with("../") {
+            let mut store = NodeMetadataStore::new();
+            store.mark_import_relative(to_module_id);
+            helper.staging_mut().merge_macro_metadata(&store);
+        }
     }
 }
 

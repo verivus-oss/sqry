@@ -195,6 +195,16 @@ pub(crate) async fn handle(
         if *key == primary_key {
             primary_graph_arc = Some(graph);
         }
+
+        // Start the file watcher for this source root so subsequent
+        // edits trigger a debounced incremental rebuild. Best-effort:
+        // `start_watching` logs (WARN) and never fails the load if the
+        // watcher cannot be created (for example a non-git workspace).
+        // Idempotent, so a repeated `daemon/load` for an already-watched
+        // key is a no-op. This is the production wiring the
+        // `ensure_watching` placement comment defers to
+        // (verivus-oss/sqry#461).
+        ctx.dispatcher.start_watching(key);
     }
 
     let primary_graph = primary_graph_arc

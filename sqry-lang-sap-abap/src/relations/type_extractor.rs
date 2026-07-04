@@ -22,7 +22,7 @@ use sqry_core::graph::{Position, Span};
 /// Information about an ABAP type declaration.
 //
 // The bool fields encode independent facets of an ABAP declaration
-// (table-vs-scalar, `LIKE` vs `TYPE`, class-attribute vs report-local,
+// (`LIKE` vs `TYPE`, class-attribute vs report-local,
 // static vs instance, immutable vs mutable). They are documented
 // individually and used as a flat data carrier rather than a state
 // machine, so collapsing them into an enum or bitflags would obscure
@@ -34,14 +34,8 @@ pub struct AbapTypeDecl {
     pub var_name: String,
     /// The declared type name
     pub type_name: String,
-    /// Whether this is a table type (TYPE TABLE OF / STANDARD TABLE OF / etc.)
-    #[allow(dead_code)]
-    pub is_table_type: bool,
     /// Base type for table types (the type after TABLE OF)
     pub base_type: Option<String>,
-    /// Byte offset of the declaration in the source (reserved for future span creation)
-    #[allow(dead_code)]
-    pub byte_offset: usize,
     /// Whether this uses LIKE instead of TYPE
     pub is_like: bool,
     /// Enclosing class name when the declaration sits inside a
@@ -180,7 +174,6 @@ fn span_from_line(line_idx: usize, len: usize) -> Span {
 #[must_use]
 pub fn extract_type_declarations(content: &str) -> Vec<AbapTypeDecl> {
     let mut decls = Vec::new();
-    let mut offset = 0usize;
     let mut current_class: Option<String> = None;
     let mut current_section: Option<&'static str> = None;
 
@@ -190,7 +183,6 @@ pub fn extract_type_declarations(content: &str) -> Vec<AbapTypeDecl> {
 
         // Skip comments
         if trimmed.starts_with('*') || trimmed.starts_with('"') {
-            offset += line.len() + 1;
             continue;
         }
 
@@ -203,18 +195,15 @@ pub fn extract_type_declarations(content: &str) -> Vec<AbapTypeDecl> {
         if let Some(name) = parse_class_definition_open(&upper, trimmed) {
             current_class = Some(name);
             current_section = None;
-            offset += line.len() + 1;
             continue;
         }
         if upper.starts_with("ENDCLASS") {
             current_class = None;
             current_section = None;
-            offset += line.len() + 1;
             continue;
         }
         if let Some(vis) = parse_section_keyword(&upper) {
             current_section = Some(vis);
-            offset += line.len() + 1;
             continue;
         }
 
@@ -222,7 +211,6 @@ pub fn extract_type_declarations(content: &str) -> Vec<AbapTypeDecl> {
         let Some((keyword_len, kw_is_static, kw_is_immutable, kw_class_attr_eligible)) =
             classify_decl_keyword(&upper)
         else {
-            offset += line.len() + 1;
             continue;
         };
 
@@ -263,7 +251,7 @@ pub fn extract_type_declarations(content: &str) -> Vec<AbapTypeDecl> {
             // immutable from the keyword itself.
             let is_immutable = kw_is_immutable || (is_class_attribute && read_only);
 
-            if let Some(mut decl) = parse_single_declaration(decl_clean, offset) {
+            if let Some(mut decl) = parse_single_declaration(decl_clean) {
                 decl.enclosing_class.clone_from(&current_class);
                 decl.is_class_attribute = is_class_attribute;
                 decl.is_static = is_static;
@@ -273,15 +261,13 @@ pub fn extract_type_declarations(content: &str) -> Vec<AbapTypeDecl> {
                 decls.push(decl);
             }
         }
-
-        offset += line.len() + 1;
     }
 
     decls
 }
 
 /// Parse a single declaration like `var TYPE type` or `<fs> TYPE type`.
-fn parse_single_declaration(text: &str, byte_offset: usize) -> Option<AbapTypeDecl> {
+fn parse_single_declaration(text: &str) -> Option<AbapTypeDecl> {
     let parts: Vec<&str> = text.split_whitespace().collect();
     if parts.len() < 3 {
         return None;
@@ -298,7 +284,7 @@ fn parse_single_declaration(text: &str, byte_offset: usize) -> Option<AbapTypeDe
     match keyword.as_str() {
         "TYPE" => {
             let type_parts = &parts[2..];
-            parse_type_declaration(var_name, type_parts, byte_offset)
+            parse_type_declaration(var_name, type_parts)
         }
         "LIKE" => {
             // LIKE references another variable's type
@@ -313,9 +299,7 @@ fn parse_single_declaration(text: &str, byte_offset: usize) -> Option<AbapTypeDe
             Some(AbapTypeDecl {
                 var_name: var_name.to_string(),
                 type_name: like_ref.clone(),
-                is_table_type: false,
                 base_type: None,
-                byte_offset,
                 is_like: true,
                 enclosing_class: None,
                 is_class_attribute: false,
@@ -330,11 +314,7 @@ fn parse_single_declaration(text: &str, byte_offset: usize) -> Option<AbapTypeDe
 }
 
 /// Parse type after `TYPE` keyword.
-fn parse_type_declaration(
-    var_name: &str,
-    type_parts: &[&str],
-    byte_offset: usize,
-) -> Option<AbapTypeDecl> {
+fn parse_type_declaration(var_name: &str, type_parts: &[&str]) -> Option<AbapTypeDecl> {
     if type_parts.is_empty() {
         return None;
     }
@@ -364,9 +344,7 @@ fn parse_type_declaration(
         return Some(AbapTypeDecl {
             var_name: var_name.to_string(),
             type_name: full_type,
-            is_table_type: true,
             base_type: Some(base_type.to_string()),
-            byte_offset,
             is_like: false,
             enclosing_class: None,
             is_class_attribute: false,
@@ -391,9 +369,7 @@ fn parse_type_declaration(
         return Some(AbapTypeDecl {
             var_name: var_name.to_string(),
             type_name: joined.trim_end_matches('.').trim().to_string(),
-            is_table_type: true,
             base_type: Some(base_type.to_string()),
-            byte_offset,
             is_like: false,
             enclosing_class: None,
             is_class_attribute: false,
@@ -417,9 +393,7 @@ fn parse_type_declaration(
         return Some(AbapTypeDecl {
             var_name: var_name.to_string(),
             type_name: full_type,
-            is_table_type: false,
             base_type: Some(class_name.to_string()),
-            byte_offset,
             is_like: false,
             enclosing_class: None,
             is_class_attribute: false,
@@ -439,9 +413,7 @@ fn parse_type_declaration(
     Some(AbapTypeDecl {
         var_name: var_name.to_string(),
         type_name: type_name.to_string(),
-        is_table_type: false,
         base_type: None,
-        byte_offset,
         is_like: false,
         enclosing_class: None,
         is_class_attribute: false,
@@ -545,7 +517,6 @@ mod tests {
         assert_eq!(decls.len(), 1);
         assert_eq!(decls[0].var_name, "lv_name");
         assert_eq!(decls[0].type_name, "string");
-        assert!(!decls[0].is_table_type);
     }
 
     #[test]
@@ -554,7 +525,6 @@ mod tests {
         let decls = extract_type_declarations(content);
         assert_eq!(decls.len(), 1);
         assert_eq!(decls[0].var_name, "lt_data");
-        assert!(decls[0].is_table_type);
         assert_eq!(decls[0].base_type.as_deref(), Some("zstructure"));
     }
 
@@ -563,7 +533,6 @@ mod tests {
         let content = "DATA lt_items TYPE STANDARD TABLE OF zmaterial.\n";
         let decls = extract_type_declarations(content);
         assert_eq!(decls.len(), 1);
-        assert!(decls[0].is_table_type);
         assert_eq!(decls[0].base_type.as_deref(), Some("zmaterial"));
     }
 
@@ -642,7 +611,6 @@ mod tests {
         assert_eq!(decls[0].var_name, "lo_obj");
         assert_eq!(decls[0].type_name, "REF TO zcl_processor");
         assert_eq!(decls[0].base_type, Some("zcl_processor".to_string()));
-        assert!(!decls[0].is_table_type);
     }
 
     #[test]

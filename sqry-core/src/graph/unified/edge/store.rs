@@ -240,7 +240,9 @@ impl EdgeStore {
     /// to mutate the committed CSR in place. External crates must go
     /// through `RebuildGraph::finalize()` or the regular `swap_csr`
     /// write path. See Gate 0c plan §H and iter-4 blocker.
-    #[allow(dead_code)] // Only reachable through the rebuild-internals-gated path.
+    // Live in the default build: the consumer is `BidirectionalEdgeStore`'s
+    // finalize-step-1 remap helper, reached from the ungated public
+    // `build::incremental::incremental_rebuild` -> `finalize` path.
     #[must_use]
     pub(crate) fn csr_mut(&mut self) -> Option<&mut CsrGraph> {
         self.csr.as_mut()
@@ -400,9 +402,12 @@ impl EdgeStore {
     /// were *at the moment of tombstoning*; callers pass the `NodeIds`
     /// they drained from `FileRegistry::take_nodes` or the arena's live
     /// enumeration before calling `NodeArena::remove`.
-    #[allow(dead_code)] // Consumer is
-    // `BidirectionalEdgeStore::tombstone_edges_for_nodes` (Task 4
-    // Steps 2–3) and the unit tests below.
+    // Live in the default build: the consumer is
+    // `BidirectionalEdgeStore::tombstone_edges_for_nodes` (the §F.2
+    // invalidation primitive on the `remove_file` path), reached from the
+    // ungated public `build::incremental::incremental_rebuild` ->
+    // `remove_closure_from_rebuild` -> `remove_file` path (the unit tests
+    // below exercise it too).
     pub(crate) fn tombstone_edges_for_nodes(
         &mut self,
         dead: &std::collections::HashSet<NodeId>,

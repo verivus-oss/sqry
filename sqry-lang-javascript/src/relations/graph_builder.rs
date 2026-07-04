@@ -335,7 +335,6 @@ fn build_call_edge_with_helper(
     } else {
         // Create synthetic module-level context for top-level calls
         module_context = CallContext {
-            name: Arc::from("<module>"),
             qualified_name: "<module>".to_string(),
             span: (0, content.len()),
             is_async: false,
@@ -690,7 +689,6 @@ fn build_constructor_edge_with_helper(
         ctx
     } else {
         module_context = CallContext {
-            name: Arc::from("<module>"),
             qualified_name: "<module>".to_string(),
             span: (0, content.len()),
             is_async: false,
@@ -1296,8 +1294,6 @@ fn extract_string_literal(node: &Node, content: &[u8]) -> Option<String> {
 
 #[derive(Debug, Clone)]
 pub struct CallContext {
-    #[allow(dead_code)] // Reserved for future context queries
-    pub name: Arc<str>,
     pub qualified_name: String,
     pub span: (usize, usize),
     pub is_async: bool,
@@ -1353,8 +1349,6 @@ struct ASTGraphBuilder<'a> {
     max_scope_depth: usize,
     callable_map: HashMap<usize, usize>,
     context_map: HashMap<usize, CallContext>,
-    #[allow(dead_code)] // Reserved for nested callable tracking
-    current_callable: Option<usize>,
     current_scope: Vec<Arc<str>>,
 }
 
@@ -1365,7 +1359,6 @@ impl<'a> ASTGraphBuilder<'a> {
             max_scope_depth,
             callable_map: HashMap::new(),
             context_map: HashMap::new(),
-            current_callable: None,
             current_scope: Vec::new(),
         }
     }
@@ -1410,7 +1403,6 @@ impl<'a> ASTGraphBuilder<'a> {
             };
 
             let context = CallContext {
-                name: Arc::from(name),
                 qualified_name,
                 span: (start, end),
                 is_async,
@@ -2555,7 +2547,6 @@ fn get_caller_node_id(
         ctx
     } else {
         module_context = CallContext {
-            name: Arc::from("<module>"),
             qualified_name: "<module>".to_string(),
             span: (0, content.len()),
             is_async: false,

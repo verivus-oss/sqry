@@ -66,7 +66,10 @@ use sqry_daemon_protocol::LogicalWorkspaceWire;
 #[derive(Clone)]
 pub(crate) struct HandlerContext {
     pub manager: Arc<WorkspaceManager>,
-    #[allow(dead_code)] // held so Phase 8b can drive rebuilds from tool-method paths
+    /// Drives incremental rebuilds and owns the per-workspace file
+    /// watchers. The `daemon/load` handler calls
+    /// [`RebuildDispatcher::start_watching`] on it after each successful
+    /// `get_or_load` so edits auto-trigger a debounced rebuild.
     pub dispatcher: Arc<RebuildDispatcher>,
     pub workspace_builder: Arc<dyn WorkspaceBuilder>,
     /// Shared query executor used by Task 7's tool-dispatch handlers.

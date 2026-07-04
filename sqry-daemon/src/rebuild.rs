@@ -87,7 +87,7 @@
 //!   retention-reaper paths — never reacquired by the dispatcher.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::{
         Arc, OnceLock,
@@ -1725,6 +1725,71 @@ impl RebuildDispatcher {
         Ok(())
     }
 
+    /// Production bootstrap hook: start watching `key` after a
+    /// successful [`crate::workspace::WorkspaceManager::get_or_load`].
+    ///
+    /// This is the "Task 9 daemon bootstrap" the [`Self::ensure_watching`]
+    /// placement comment defers to. Before this method existed,
+    /// `ensure_watching` was reachable only from test harnesses, so loaded
+    /// graphs silently drifted from disk and refreshed only on an explicit
+    /// `sqry daemon rebuild` (see verivus-oss/sqry#461). Both production
+    /// load paths (the `daemon/load` IPC handler and the pinned pre-load at
+    /// startup) now call this so edits trigger a debounced incremental
+    /// rebuild.
+    ///
+    /// It resolves the freshly-loaded `Arc<LoadedWorkspace>` from the
+    /// manager it already holds and delegates to [`Self::ensure_watching`],
+    /// keeping the watcher lifecycle on `RebuildDispatcher` (the placement
+    /// constraint) rather than leaking it into `WorkspaceManager`.
+    ///
+    /// # Non-fatal by contract
+    ///
+    /// Watching is best-effort and MUST NOT fail the load. A failure to
+    /// start the watcher (a non-git workspace, since `SourceTreeWatcher::new`
+    /// requires a `.git` directory; inotify-instance exhaustion; or a
+    /// `.gitignore` read error) leaves the graph resident and queryable;
+    /// the workspace merely behaves as it did before this wiring existed
+    /// (refreshed only by explicit `sqry daemon rebuild`). The failure is
+    /// logged at WARN so a missing watcher is observable rather than
+    /// silent.
+    ///
+    /// # Idempotence
+    ///
+    /// Safe to call after every `get_or_load`, including reloads: an
+    /// already-live watcher is a no-op via `ensure_watching`'s liveness
+    /// fast-path.
+    pub fn start_watching(self: &Arc<Self>, key: &WorkspaceKey) {
+        let Some(ws) = self.manager.lookup(key) else {
+            // The workspace is not resident (evicted under memory
+            // pressure, or a racing unload between load and this call).
+            // Nothing to watch; not an error.
+            tracing::debug!(
+                root = %key.source_root.display(),
+                "start_watching: workspace not resident, skipping watcher setup"
+            );
+            return;
+        };
+
+        let root = key.source_root.clone();
+        match self.ensure_watching(key, &ws, &root) {
+            Ok(()) => {
+                tracing::info!(
+                    root = %root.display(),
+                    debounce_ms = self.config.debounce_ms,
+                    "file watcher active; edits trigger debounced incremental rebuild"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    root = %root.display(),
+                    err = %e,
+                    "failed to start file watcher; workspace will not auto-rebuild on \
+                     edits (refresh manually with `sqry daemon rebuild`)"
+                );
+            }
+        }
+    }
+
     /// Remove the watcher entry for `key` if and only if the stored
     /// entry's generation equals `my_generation`. Called by the
     /// per-workspace async task as its LAST action before exit.
@@ -1768,6 +1833,21 @@ impl RebuildDispatcher {
     #[must_use]
     pub fn watchers_len(&self) -> usize {
         self.watchers.lock().len()
+    }
+
+    /// Snapshot the workspace keys with currently live watcher entries.
+    ///
+    /// Used by `daemon/status` to expose watcher observability without
+    /// changing watcher bootstrap or moving watcher ownership into
+    /// [`WorkspaceManager`].
+    #[must_use]
+    pub fn live_watcher_keys(&self) -> HashSet<WorkspaceKey> {
+        self.watchers
+            .lock()
+            .iter()
+            .filter(|(_, entry)| entry.live.load(Ordering::Acquire))
+            .map(|(key, _)| key.clone())
+            .collect()
     }
 }
 

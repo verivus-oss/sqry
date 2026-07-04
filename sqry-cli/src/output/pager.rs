@@ -345,13 +345,8 @@ pub struct BufferedOutput {
     config: PagerConfig,
     decision: PagerDecision,
     mode: OutputMode,
-    /// Terminal width for future display row calculation (currently unused)
-    #[allow(dead_code)]
+    /// Terminal width for display row calculation.
     terminal_width: Option<usize>,
-    /// Number of complete lines in buffer (lines ending with \n)
-    complete_lines: usize,
-    /// Length of partial line at end of buffer (content after last \n)
-    partial_line_len: usize,
     /// Deferred spawn error for non-NotFound failures (per CLI spec: exit 1)
     spawn_error: Option<io::Error>,
 }
@@ -414,8 +409,6 @@ impl BufferedOutput {
             decision,
             mode,
             terminal_width,
-            complete_lines: 0,
-            partial_line_len: 0,
             spawn_error,
         }
     }
@@ -436,8 +429,6 @@ impl BufferedOutput {
             decision,
             mode: OutputMode::Buffering, // Always buffer for testing
             terminal_width,
-            complete_lines: 0,
-            partial_line_len: 0,
             spawn_error: None,
         }
     }
@@ -454,22 +445,8 @@ impl BufferedOutput {
         }
     }
 
-    fn update_line_counts(&mut self, content: &str) {
-        let newline_count = content.bytes().filter(|&b| b == b'\n').count();
-        self.complete_lines += newline_count;
-        self.update_partial_line_len(content);
-    }
-
-    fn update_partial_line_len(&mut self, content: &str) {
-        if let Some(last_nl_offset) = content.rfind('\n') {
-            self.partial_line_len = content.len().saturating_sub(last_nl_offset + 1);
-        } else {
-            self.partial_line_len += content.len();
-        }
-    }
-
     fn displayed_row_estimate(&self) -> usize {
-        self.complete_lines + usize::from(self.partial_line_len > 0)
+        count_displayed_rows(&self.buffer, self.terminal_width)
     }
 
     fn should_transition_to_pager(&self, displayed_rows: usize) -> bool {
@@ -534,15 +511,8 @@ impl BufferedOutput {
                 // Append to buffer first
                 self.buffer.push_str(content);
 
-                // Incremental line counting: count newlines in the new content
-                // This is O(n) in the new content, not O(n) in the entire buffer
-                self.update_line_counts(content);
-
-                // Calculate displayed rows:
-                // - Each complete line is 1+ rows (depends on wrapping)
-                // - Partial line at end is 1 row (if non-empty)
-                // For simplicity in threshold checking, use complete_lines + 1 if partial exists
-                // This is a conservative estimate that may trigger paging slightly early
+                // Calculate displayed rows using the same width-aware accounting
+                // that the terminal uses for wrapping.
                 let displayed_rows = self.displayed_row_estimate();
 
                 // Check thresholds
@@ -638,7 +608,6 @@ fn exit_status_to_pager_status(status: ExitStatus) -> PagerExitStatus {
 }
 
 /// Standard tab width for display calculation
-#[allow(dead_code)]
 const TAB_WIDTH: usize = 8;
 
 fn skip_csi_sequence(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
@@ -671,7 +640,6 @@ fn skip_osc_sequence(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
 ///
 /// Removes CSI sequences (ESC [ ... `final_byte`) and OSC sequences (ESC ] ... ST).
 /// This ensures ANSI color codes don't inflate width calculations.
-#[allow(dead_code)]
 fn strip_ansi(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
     let mut chars = s.chars().peekable();
@@ -700,7 +668,6 @@ fn strip_ansi(s: &str) -> String {
 /// Calculate displayed width of a line, accounting for tabs
 ///
 /// Tabs expand to the next tab stop (every 8 columns by default).
-#[allow(dead_code)]
 fn displayed_line_width(line: &str) -> usize {
     let mut width = 0;
     for c in line.chars() {
@@ -719,10 +686,9 @@ fn displayed_line_width(line: &str) -> usize {
 /// Uses unicode-width for accurate character width calculation,
 /// which handles CJK characters, emoji, and other wide characters.
 /// Strips ANSI escape sequences and expands tabs before calculation.
-#[allow(dead_code)]
 #[must_use]
 pub fn count_displayed_rows(content: &str, terminal_width: Option<usize>) -> usize {
-    let width = terminal_width.unwrap_or(80);
+    let width = terminal_width.filter(|&width| width > 0).unwrap_or(80);
 
     content
         .lines()
@@ -979,6 +945,12 @@ mod tests {
         assert_eq!(count_displayed_rows(content, None), 1);
     }
 
+    #[test]
+    fn test_count_displayed_rows_zero_width_falls_back_to_default() {
+        let content = "test line\n";
+        assert_eq!(count_displayed_rows(content, Some(0)), 1);
+    }
+
     // ===== PagerWriter Tests =====
 
     #[test]
@@ -1050,6 +1022,23 @@ mod tests {
                 || matches!(output.mode, OutputMode::Buffering),
             "Expected Direct (non-TTY) or Buffering (TTY), got neither"
         );
+    }
+
+    #[test]
+    fn test_buffered_output_auto_pages_when_single_display_line_wraps() {
+        let config = PagerConfig {
+            command: "cat".to_string(),
+            enabled: PagerMode::Auto,
+            threshold: Some(1),
+        };
+        let mut output = BufferedOutput::new_for_testing(config.clone());
+        output.decision = PagerDecision::for_testing(config, true, Some(1));
+        output.terminal_width = Some(10);
+
+        output.write("\x1b[31mabc\tdef\x1b[0m").unwrap();
+
+        assert!(matches!(output.mode, OutputMode::Pager(_)));
+        output.finish().unwrap();
     }
 
     // ===== is_broken_pipe_exit Tests =====
@@ -1188,89 +1177,5 @@ mod tests {
         // After stripping: "\tindented" = 8 + 8 = 16 chars
         assert_eq!(count_displayed_rows(content, Some(80)), 1);
         assert_eq!(count_displayed_rows(content, Some(10)), 2);
-    }
-
-    // ===== Incremental Line Counting Tests =====
-
-    #[test]
-    fn test_incremental_line_counting_single_write() {
-        // Create a BufferedOutput that forces Buffering mode for testing
-        let config = PagerConfig::default();
-        let mut output = BufferedOutput::new_for_testing(config);
-
-        // Write 5 complete lines
-        output.write("line1\nline2\nline3\nline4\nline5\n").unwrap();
-
-        assert_eq!(output.complete_lines, 5);
-        assert_eq!(output.partial_line_len, 0);
-    }
-
-    #[test]
-    fn test_incremental_line_counting_chunked_writes() {
-        // This is the case that was broken before the fix
-        // Tests the pattern used by write_result: content followed by newline
-        let config = PagerConfig::default();
-        let mut output = BufferedOutput::new_for_testing(config);
-
-        // Simulate how write_result sends content and newlines separately
-        output.write("line1").unwrap();
-        assert_eq!(output.complete_lines, 0);
-        assert_eq!(output.partial_line_len, 5);
-
-        output.write("\n").unwrap();
-        assert_eq!(output.complete_lines, 1);
-        assert_eq!(output.partial_line_len, 0);
-
-        output.write("line2").unwrap();
-        assert_eq!(output.complete_lines, 1);
-        assert_eq!(output.partial_line_len, 5);
-
-        output.write("\n").unwrap();
-        assert_eq!(output.complete_lines, 2);
-        assert_eq!(output.partial_line_len, 0);
-
-        // Continue for more lines
-        for i in 3..=10 {
-            output.write(&format!("line{i}")).unwrap();
-            output.write("\n").unwrap();
-        }
-
-        // Should have 10 complete lines
-        assert_eq!(output.complete_lines, 10);
-        assert_eq!(output.partial_line_len, 0);
-    }
-
-    #[test]
-    fn test_incremental_line_counting_mixed_writes() {
-        let config = PagerConfig::default();
-        let mut output = BufferedOutput::new_for_testing(config);
-
-        // Mix of complete lines and chunked writes
-        output.write("line1\nline2\n").unwrap();
-        assert_eq!(output.complete_lines, 2);
-        assert_eq!(output.partial_line_len, 0);
-
-        output.write("partial").unwrap();
-        assert_eq!(output.complete_lines, 2);
-        assert_eq!(output.partial_line_len, 7);
-
-        output.write(" more").unwrap();
-        assert_eq!(output.complete_lines, 2);
-        assert_eq!(output.partial_line_len, 12);
-
-        output.write("\nline4\n").unwrap();
-        assert_eq!(output.complete_lines, 4);
-        assert_eq!(output.partial_line_len, 0);
-    }
-
-    #[test]
-    fn test_incremental_line_counting_multiple_newlines_in_one_write() {
-        let config = PagerConfig::default();
-        let mut output = BufferedOutput::new_for_testing(config);
-
-        // Write content with multiple embedded newlines
-        output.write("a\nb\nc\nd\ne").unwrap();
-        assert_eq!(output.complete_lines, 4); // 4 newlines = 4 complete lines
-        assert_eq!(output.partial_line_len, 1); // "e" is partial
     }
 }

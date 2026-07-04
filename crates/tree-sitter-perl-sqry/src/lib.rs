@@ -1,6 +1,9 @@
 //! Tree-sitter grammar for Perl (vendored for sqry)
 //!
-//! This is a first-party binding maintained in the sqry repository.
+//! The Rust binding in this crate is first-party (maintained in the sqry
+//! repository). The grammar under grammar-src/ is vendored THIRD-PARTY code
+//! reproduced under its upstream license; the full license text and copyright
+//! notice are in the repository-root THIRD-PARTY-LICENSES file.
 //!
 //! **Source Grammar**: <https://github.com/tree-sitter-perl/tree-sitter-perl>
 //! **Commit**: 0c24d001dd1921e418fb933d208a7bd7dd3f923a

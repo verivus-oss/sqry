@@ -6,7 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
-## [16.0.8](https://github.com/verivus-oss/sqry/compare/v16.0.6...v16.0.8) - 2026-05-31
+## [27.0.3](https://github.com/verivus-oss/sqry/compare/v26.0.1...v27.0.3) - 2026-07-04
+
+### Fixed
+- *(licensing)* reproduce vendored tree-sitter-perl/elixir/kotlin grammar licenses## [16.0.8](https://github.com/verivus-oss/sqry/compare/v16.0.6...v16.0.8) - 2026-05-31
 
 ### Fixed
 - *(cpp)* emit nested C++ type nodes## [7.2.0](https://github.com/verivus-oss/sqry/compare/v7.1.4...v7.2.0) - 2026-04-06

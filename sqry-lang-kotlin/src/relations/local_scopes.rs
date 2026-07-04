@@ -25,11 +25,11 @@ pub(crate) use sqry_core::graph::local_scopes::{ResolutionOutcome, ScopeId};
 // ============================================================================
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
-#[allow(dead_code)] // Block reserved for bare block scopes
 pub(crate) enum ScopeKind {
     Method,
     Constructor,
     InitBlock,
+    #[allow(dead_code)] // Reserved for bare block scopes
     Block,
     IfBranch,
     ForLoop,

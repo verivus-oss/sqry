@@ -25,7 +25,16 @@ use sqry_mcp::engine::{Engine, canonicalize_in_workspace};
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::Mutex;
 use tempfile::TempDir;
+
+/// Serializes the tests in this file that mutate the process-global
+/// `SQRY_AUTO_INDEX` / `SQRY_FORCE_STANDALONE` env vars. Without this, a
+/// concurrent test clearing `SQRY_AUTO_INDEX` re-enables auto-index inside
+/// `standalone_mcp_rebuild_index_stays_mutating` and flips its expected
+/// failure into a success (the long-standing flake). Poison is recovered so a
+/// panicking assertion in one test does not cascade-fail the rest of the binary.
+static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 /// Build a small Rust workspace and run `sqry index` against it. Returns
 /// the canonicalized workspace root for use by `Engine::for_workspace`.
@@ -99,6 +108,7 @@ fn sqry_bin_for_test() -> PathBuf {
 /// the same acquisition contract for fresh, valid graphs.
 #[test]
 fn standalone_mcp_semantic_search_matches_cli() -> Result<()> {
+    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let (_tmp, workspace) = build_indexed_workspace();
 
     // Force the MCP engine into standalone mode (no daemon-conflict probe)
@@ -146,6 +156,7 @@ fn standalone_mcp_invalid_path_preflight_before_ensure_graph() {
 /// path that does not consult this acquirer.
 #[test]
 fn standalone_mcp_rebuild_index_stays_mutating() {
+    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let tmp = TempDir::new().expect("tempdir");
     let workspace = tmp.path().canonicalize().expect("canon ws");
 
@@ -183,6 +194,7 @@ fn standalone_mcp_rebuild_index_stays_mutating() {
 /// the snapshot and lost the language plugin silently.
 #[test]
 fn standalone_mcp_existing_disk_snapshot_uses_provider() -> Result<()> {
+    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let (_tmp, workspace) = build_indexed_workspace();
 
     // Force standalone mode — same convention as the other tests in this

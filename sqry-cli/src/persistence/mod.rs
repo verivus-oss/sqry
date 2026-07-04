@@ -1,7 +1,3 @@
-// Allow unused items in this module - these are public API methods that may be
-// used by external consumers or in future features (shell integration, LSP, etc.)
-#![allow(dead_code)]
-
 //! Query persistence subsystem.
 //!
 //! This module provides persistence for user aliases and query history,

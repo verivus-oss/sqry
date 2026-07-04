@@ -717,7 +717,10 @@ enum WordCharType {
     End,
 }
 
-/// Public lexer wrapper retained for compatibility until pooling integration lands.
+/// Public, non-pooled lexer wrapper over [`RawLexer`], re-exported for the query
+/// parser tests and external callers that want a one-shot tokenizer. Production
+/// query parsing goes through the thread-local pool via `with_lexer` (see
+/// `parser_new`); this wrapper stays for the simpler owned-`Vec<Token>` API.
 pub struct Lexer<'a> {
     raw: RawLexer<'a>,
 }
@@ -753,7 +756,6 @@ impl<'a> Lexer<'a> {
     }
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ShrinkPolicy {
     pub max_capacity: usize,
@@ -1014,7 +1016,6 @@ pub fn tokenize_with_pool(input: &str) -> Result<Vec<Token>, LexError> {
 }
 
 #[cfg(debug_assertions)]
-#[allow(dead_code)]
 #[derive(Debug, Default, Clone, Copy)]
 struct LexerDiagnostics {
     reuse_count: usize,
@@ -1023,7 +1024,6 @@ struct LexerDiagnostics {
 }
 
 #[cfg(debug_assertions)]
-#[allow(dead_code)]
 impl LexerDiagnostics {
     fn record_reuse(&mut self, capacity: usize) {
         self.reuse_count += 1;
@@ -1039,7 +1039,6 @@ impl LexerDiagnostics {
 
 /// Policy controlling how aggressively reusable lexer buffers shrink.
 /// Reusable lexer that owns its input, token buffer, and shrink policy.
-#[allow(dead_code)]
 pub(crate) struct ReusableLexer {
     input: String,
     token_buffer: Vec<Token>,
@@ -1048,8 +1047,11 @@ pub(crate) struct ReusableLexer {
     diagnostics: LexerDiagnostics,
 }
 
-#[allow(dead_code)]
 impl ReusableLexer {
+    // Only the in-crate test suite constructs a lexer with the default policy;
+    // the pool always goes through `with_policy`, so gate the lint to non-test
+    // builds instead of silencing it everywhere.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn new() -> Self {
         Self::with_policy(ShrinkPolicy::default())
     }
@@ -1086,7 +1088,10 @@ impl ReusableLexer {
         })
     }
 
+    // Read back by the debug-assertion reuse/shrink tests only; the runtime path
+    // records into `diagnostics` but never reads it back.
     #[cfg(debug_assertions)]
+    #[cfg_attr(not(test), allow(dead_code))]
     fn diagnostics(&self) -> &LexerDiagnostics {
         &self.diagnostics
     }
@@ -1099,7 +1104,6 @@ impl ReusableLexer {
 /// a mutable borrow to the underlying buffer so additional tokenization cannot
 /// start until it is dropped. On drop the buffer is cleared and, if the shrink
 /// policy deems it oversized, the capacity is reduced.
-#[allow(dead_code)]
 pub(crate) struct TokenBatch<'a> {
     tokens: &'a mut Vec<Token>,
     shrink_policy: ShrinkPolicy,
@@ -1107,8 +1111,10 @@ pub(crate) struct TokenBatch<'a> {
     diagnostics: &'a mut LexerDiagnostics,
 }
 
-#[allow(dead_code)]
 impl TokenBatch<'_> {
+    // Runtime callers drain the batch via `into_vec`; only the tests borrow the
+    // buffer read-only, so keep the lint live outside test builds.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn as_slice(&self) -> &[Token] {
         self.tokens.as_slice()
     }

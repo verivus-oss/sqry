@@ -358,7 +358,9 @@ impl BidirectionalEdgeStore {
     /// finalize contract is the single publish path. See Gate 0c plan
     /// §H "Type-enforced publish path" and iter-4 blocker.
     #[allow(clippy::implicit_hasher)]
-    #[allow(dead_code)] // Only reachable through the rebuild-internals-gated path.
+    // Live in the default build: the consumer is `RebuildGraph::finalize()`
+    // step 1, reached from the ungated public
+    // `build::incremental::incremental_rebuild` -> `finalize` path.
     pub(crate) fn rewrite_edge_kind_string_ids_through_remap(
         &mut self,
         remap: &std::collections::HashMap<
@@ -439,10 +441,13 @@ impl BidirectionalEdgeStore {
     ///
     /// [`NodeArena::remove`]: super::super::storage::arena::NodeArena::remove
     #[allow(clippy::implicit_hasher)]
-    #[allow(dead_code)] // Consumer is `CodeGraph::remove_file` +
-    // `RebuildGraph::remove_file` (Task 4 Steps 2–3) and the unit
-    // tests below; lives here so the §F.2 invalidation primitive is
-    // reviewable independently of the higher-level entry points.
+    // Live in the default build: the consumers are `CodeGraph::remove_file`
+    // and `RebuildGraph::remove_file` (the §F.2 invalidation primitive),
+    // the latter reached from the ungated public
+    // `build::incremental::incremental_rebuild` -> `remove_closure_from_rebuild`
+    // -> `remove_file` path (the unit tests below exercise it too). Lives
+    // here so the primitive is reviewable independently of the
+    // higher-level entry points.
     pub(crate) fn tombstone_edges_for_nodes(
         &mut self,
         dead: &std::collections::HashSet<super::super::node::NodeId>,

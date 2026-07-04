@@ -52,7 +52,6 @@ impl BindSecurity {
     }
 
     /// Returns true if this binding type is considered safe by default.
-    #[allow(dead_code)] // Public API for future use
     pub fn is_safe(self) -> bool {
         matches!(self, BindSecurity::Localhost)
     }
@@ -65,6 +64,17 @@ impl BindSecurity {
             BindSecurity::Public => "all network interfaces (exposed to LAN/WAN)",
         }
     }
+}
+
+/// Result of validating a socket bind address.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BindValidation {
+    /// The bind address is safe by default and needs no warning.
+    Safe(BindSecurity),
+    /// The bind address is unsafe by default and emitted a warning.
+    Warn(BindSecurity),
+    /// The bind address is unsafe by default, but warning output was suppressed.
+    Suppressed(BindSecurity),
 }
 
 /// Validate and warn about potentially unsafe socket bindings.
@@ -91,14 +101,21 @@ impl BindSecurity {
 ///
 /// When `allow_suppress` is true, the caller acknowledges the security implications
 /// and warnings are logged at DEBUG level for audit purposes.
-pub fn validate_bind_address(addr: SocketAddr, allow_suppress: bool) {
+pub(crate) fn validate_bind_address(addr: SocketAddr, allow_suppress: bool) -> BindValidation {
     let security = BindSecurity::classify(addr);
+    if security.is_safe() {
+        return BindValidation::Safe(security);
+    }
 
-    match security {
-        BindSecurity::Localhost => {
-            // Safe - no warning needed
-        }
-        BindSecurity::PrivateNetwork => {
+    let validation = if allow_suppress {
+        BindValidation::Suppressed(security)
+    } else {
+        BindValidation::Warn(security)
+    };
+
+    match (security, allow_suppress) {
+        (BindSecurity::Localhost, _) => unreachable!("safe bind should return before warning path"),
+        (BindSecurity::PrivateNetwork, _) => {
             if allow_suppress {
                 debug!(
                     "Security validation suppressed (--allow-public-bind): LSP server binding to private network address {} ({})",
@@ -121,7 +138,7 @@ pub fn validate_bind_address(addr: SocketAddr, allow_suppress: bool) {
                 );
             }
         }
-        BindSecurity::Public => {
+        (BindSecurity::Public, _) => {
             if allow_suppress {
                 debug!(
                     "Security validation suppressed (--allow-public-bind): LSP server binding to {} ({})",
@@ -150,6 +167,8 @@ pub fn validate_bind_address(addr: SocketAddr, allow_suppress: bool) {
             }
         }
     }
+
+    validation
 }
 
 #[cfg(test)]
@@ -244,42 +263,73 @@ mod tests {
     }
 
     #[test]
-    fn validate_localhost_no_panic() {
-        // Should not panic or log warnings (but we can't easily test log output)
+    fn validate_localhost_returns_safe() {
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9257);
-        validate_bind_address(addr, false);
-        validate_bind_address(addr, true); // Should also work with suppression
+        assert_eq!(
+            validate_bind_address(addr, false),
+            BindValidation::Safe(BindSecurity::Localhost)
+        );
+        assert_eq!(
+            validate_bind_address(addr, true),
+            BindValidation::Safe(BindSecurity::Localhost)
+        );
     }
 
     #[test]
-    fn validate_private_network_no_panic() {
+    fn validate_private_network_returns_warning_or_suppression() {
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)), 9257);
-        validate_bind_address(addr, false); // With warnings
-        validate_bind_address(addr, true); // Suppressed
+        assert_eq!(
+            validate_bind_address(addr, false),
+            BindValidation::Warn(BindSecurity::PrivateNetwork)
+        );
+        assert_eq!(
+            validate_bind_address(addr, true),
+            BindValidation::Suppressed(BindSecurity::PrivateNetwork)
+        );
     }
 
     #[test]
-    fn validate_public_no_panic() {
+    fn validate_public_returns_warning_or_suppression() {
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 9257);
-        validate_bind_address(addr, false); // With warnings
-        validate_bind_address(addr, true); // Suppressed
+        assert_eq!(
+            validate_bind_address(addr, false),
+            BindValidation::Warn(BindSecurity::Public)
+        );
+        assert_eq!(
+            validate_bind_address(addr, true),
+            BindValidation::Suppressed(BindSecurity::Public)
+        );
     }
 
     #[test]
     fn validate_private_network_suppression() {
-        // Test that suppression doesn't panic and changes behavior
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)), 9257);
-        // Both should complete without panic
-        validate_bind_address(addr, false);
-        validate_bind_address(addr, true);
+        let security = BindSecurity::classify(addr);
+
+        assert!(!security.is_safe());
+        assert_eq!(
+            validate_bind_address(addr, false),
+            BindValidation::Warn(security)
+        );
+        assert_eq!(
+            validate_bind_address(addr, true),
+            BindValidation::Suppressed(security)
+        );
     }
 
     #[test]
     fn validate_public_suppression() {
-        // Test that suppression doesn't panic for most severe case
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 9257);
-        // Both should complete without panic
-        validate_bind_address(addr, false);
-        validate_bind_address(addr, true);
+        let security = BindSecurity::classify(addr);
+
+        assert!(!security.is_safe());
+        assert_eq!(
+            validate_bind_address(addr, false),
+            BindValidation::Warn(security)
+        );
+        assert_eq!(
+            validate_bind_address(addr, true),
+            BindValidation::Suppressed(security)
+        );
     }
 }

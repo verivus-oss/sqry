@@ -63,7 +63,7 @@ use std::time::Duration;
 pub use format::{
     FormatVersion, GraphHeader, MAGIC_BYTES, MAGIC_BYTES_V7, MAGIC_BYTES_V8, MAGIC_BYTES_V9,
     MAGIC_BYTES_V10, MAGIC_BYTES_V11, MAGIC_BYTES_V12, MAGIC_BYTES_V13, MAGIC_BYTES_V14,
-    MAGIC_BYTES_V15, MAGIC_BYTES_V16, VERSION,
+    MAGIC_BYTES_V15, MAGIC_BYTES_V16, MAGIC_BYTES_V17, VERSION,
 };
 pub use manifest::{
     BuildProvenance, ConfigProvenance, ConfigProvenanceBuilder, MANIFEST_SCHEMA_VERSION, Manifest,

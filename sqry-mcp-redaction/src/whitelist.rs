@@ -3,53 +3,6 @@
 //! Each preset defines which fields are allowed to pass through redaction.
 //! Fields not in the whitelist are redacted in whitelist security mode.
 
-/// Semantic information fields - always preserved in all whitelists.
-#[allow(dead_code)]
-pub const WHITELIST_SEMANTIC: &[&str] = &[
-    "name",
-    "qualified_name",
-    "qualifiedName",
-    "kind",
-    "symbol_kind",
-    "symbolKind",
-    "language",
-    "lang",
-];
-
-/// Position information fields - always preserved in all whitelists.
-#[allow(dead_code)]
-pub const WHITELIST_POSITION: &[&str] = &[
-    "range",
-    "start",
-    "end",
-    "line",
-    "column",
-    "offset",
-    "start_line",
-    "end_line",
-    "startLine",
-    "endLine",
-    "start_column",
-    "end_column",
-    "startColumn",
-    "endColumn",
-];
-
-/// Graph structure fields - preserved but URIs within may be redacted.
-#[allow(dead_code)]
-pub const WHITELIST_STRUCTURE: &[&str] = &[
-    "edges",
-    "nodes",
-    "relation_type",
-    "relationType",
-    "score",
-    "confidence",
-    "relevance",
-    "visibility",
-    "is_public",
-    "isPublic",
-];
-
 /// Code context fields - only preserved in `minimal` preset.
 pub const CODE_CONTEXT_FIELDS: &[&str] = &[
     "context",

@@ -1,6 +1,9 @@
 //! Tree-sitter grammar for Elixir (vendored for sqry)
 //!
-//! This is a first-party binding maintained in the sqry repository.
+//! The Rust binding in this crate is first-party (maintained in the sqry
+//! repository). The grammar under grammar-src/ is vendored THIRD-PARTY code
+//! reproduced under its upstream license; the full license text and copyright
+//! notice are in the repository-root THIRD-PARTY-LICENSES file.
 //!
 //! **Source Grammar**: <https://github.com/elixir-lang/tree-sitter-elixir>
 //! **Commit**: 5c22791c9836d436ce31de5e454fbad0e706ea96

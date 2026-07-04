@@ -1322,6 +1322,17 @@ impl WorkspaceManager {
 
     /// Snapshot of daemon-wide status. Point-in-time, non-transactional.
     pub fn status(&self) -> DaemonStatus {
+        self.status_with_watcher_state(|_| false)
+    }
+
+    /// Snapshot of daemon-wide status with caller-supplied watcher
+    /// liveness. The [`WorkspaceManager`] does not own file watchers;
+    /// production `daemon/status` supplies this from
+    /// [`crate::RebuildDispatcher`].
+    pub fn status_with_watcher_state<F>(&self, mut is_watching: F) -> DaemonStatus
+    where
+        F: FnMut(&WorkspaceKey) -> bool,
+    {
         let workspaces_snapshot: Vec<WorkspaceStatus> = {
             let workspaces = self.workspaces.read();
             let mut raw_entries: Vec<_> = workspaces.iter().collect();
@@ -1345,6 +1356,7 @@ impl WorkspaceManager {
                         index_root: k.source_root.clone(),
                         state: ws.load_state(),
                         pinned: ws.pinned,
+                        watching: is_watching(k),
                         current_bytes: ws.current_memory_bytes(),
                         high_water_bytes: ws.memory_high_water_bytes.load(Ordering::Acquire) as u64,
                         last_good_at: *ws.last_good_at.read(),
@@ -3327,6 +3339,7 @@ mod tests {
         );
         assert_eq!(status.workspaces[0].state, WorkspaceState::Loaded);
         assert!(!status.workspaces[0].pinned);
+        assert!(!status.workspaces[0].watching);
         assert_eq!(status.memory.limit_bytes, 1024 * 1024);
         // current_bytes is at least as large as the graph (empty here,
         // but loaded_bytes tracks an entry regardless).
@@ -3334,6 +3347,19 @@ mod tests {
             status.memory.high_water_bytes >= status.memory.current_bytes,
             "high_water_bytes must be monotonic wrt current_bytes",
         );
+    }
+
+    #[test]
+    fn status_with_watcher_state_reflects_supplied_watcher_snapshot() {
+        let mgr = WorkspaceManager::new_without_reaper(make_config());
+        let builder = super::super::builder::EmptyGraphBuilder;
+        let key = make_key_at("/repos/example", 0x1);
+        mgr.get_or_load(&key, &builder, 100_000).unwrap();
+
+        let status = mgr.status_with_watcher_state(|candidate| candidate == &key);
+
+        assert_eq!(status.workspaces.len(), 1);
+        assert!(status.workspaces[0].watching);
     }
 
     #[test]

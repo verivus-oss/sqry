@@ -35,7 +35,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use sqry_core::workspace::{
@@ -599,13 +599,6 @@ fn probe_daemon_active_artifacts() -> (Vec<PathBuf>, Option<&'static str>) {
             ),
         }
     })
-}
-
-/// Suppress unused warning for `SystemTime` which we keep around for
-/// future last-modified-via-now diagnostics.
-#[allow(dead_code)]
-fn _assert_time_imports() {
-    let _ = SystemTime::now();
 }
 
 #[cfg(test)]

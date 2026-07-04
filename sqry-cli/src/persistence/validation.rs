@@ -22,6 +22,8 @@ static RESERVED_WORDS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
 });
 
 /// Minimum alias name length.
+// Reserved: length floor, not yet enforced by any command.
+#[allow(dead_code)]
 pub const MIN_ALIAS_LENGTH: usize = 1;
 
 /// Maximum alias name length.
@@ -140,7 +142,9 @@ fn is_valid_alias_char(c: char) -> bool {
 /// Suggest a valid alias name based on an invalid input.
 ///
 /// This is used to provide helpful error messages.
+// Reserved: suggestion helper, not yet wired into a CLI command.
 #[must_use]
+#[allow(dead_code)]
 pub fn suggest_alias_name(input: &str) -> Option<String> {
     if input.is_empty() {
         return None;
@@ -156,6 +160,8 @@ pub fn suggest_alias_name(input: &str) -> Option<String> {
     Some(suggestion)
 }
 
+// Reserved: helper for suggest_alias_name, dead until that helper is wired.
+#[allow(dead_code)]
 fn append_suggestion_char(buffer: &mut String, c: char, first: bool) {
     if first {
         if c.is_ascii_alphabetic() {
@@ -176,6 +182,8 @@ fn append_suggestion_char(buffer: &mut String, c: char, first: bool) {
     }
 }
 
+// Reserved: helper for suggest_alias_name, dead until that helper is wired.
+#[allow(dead_code)]
 fn normalize_suggestion(suggestion: &mut String, input: &str) -> Option<()> {
     // Truncate if too long
     if suggestion.len() > MAX_ALIAS_LENGTH {

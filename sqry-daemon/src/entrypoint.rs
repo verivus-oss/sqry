@@ -411,7 +411,7 @@ async fn run_start_foreground(
     info!("signal handlers installed");
 
     // Step 13 -- Pre-load pinned workspaces (log + continue on failure).
-    preload_pinned_workspaces(&cfg, &manager, &builder);
+    preload_pinned_workspaces(&cfg, &manager, &dispatcher, &builder);
 
     // Step 14 -- Bind IPC server.
     let server = IpcServer::bind(
@@ -781,7 +781,7 @@ async fn run_start_foreground_inner(
     let _signal_guard = install_signal_handlers(shutdown.clone())?;
 
     // Step 13.
-    preload_pinned_workspaces(&cfg, &manager, &builder);
+    preload_pinned_workspaces(&cfg, &manager, &dispatcher, &builder);
 
     // Step 14.
     let server = IpcServer::bind(
@@ -1305,6 +1305,7 @@ fn signal_ready(cfg: &DaemonConfig, socket_path: &std::path::Path) {
 fn preload_pinned_workspaces(
     cfg: &DaemonConfig,
     manager: &Arc<WorkspaceManager>,
+    dispatcher: &Arc<RebuildDispatcher>,
     builder: &Arc<dyn crate::workspace::WorkspaceBuilder>,
 ) {
     use sqry_core::project::ProjectRootMode;
@@ -1328,7 +1329,14 @@ fn preload_pinned_workspaces(
                 err = %e,
                 "pinned workspace pre-load failed (log + continue per §C.3.1 step 13)"
             );
+            continue;
         }
+
+        // Start the file watcher for the pre-loaded workspace so edits
+        // trigger a debounced incremental rebuild without an explicit
+        // `sqry daemon rebuild`. Best-effort: `start_watching` logs and
+        // never aborts startup on watcher failure (verivus-oss/sqry#461).
+        dispatcher.start_watching(&key);
     }
 }
 
@@ -1714,6 +1722,111 @@ mod tests {
         assert!(
             std::env::var_os("SQRY_DAEMON_CONFIG").is_none(),
             "load_config must NOT mutate SQRY_DAEMON_CONFIG (M-3 fix)"
+        );
+    }
+
+    // ---- pinned pre-load starts the file watcher (sqry#461) -----------------
+
+    /// Seed a minimal git repo so `SourceTreeWatcher::new` succeeds.
+    #[cfg(test)]
+    fn seed_git_repo(root: &std::path::Path) {
+        use std::process::Command;
+        let git = |args: &[&str]| {
+            let ok = Command::new("git")
+                .args(args)
+                .current_dir(root)
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            assert!(ok, "git {args:?} failed");
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "test@sqry.dev"]);
+        git(&["config", "user.name", "Sqry Test"]);
+        git(&["config", "commit.gpgsign", "false"]);
+        std::fs::write(root.join("seed.rs"), b"pub fn seed() {}\n").expect("write seed");
+        git(&["add", "seed.rs"]);
+        git(&["commit", "-q", "-m", "seed"]);
+    }
+
+    /// `preload_pinned_workspaces` must start a file watcher for each pinned
+    /// workspace it loads, so a freshly-started daemon tracks edits without a
+    /// manual `sqry daemon rebuild` (verivus-oss/sqry#461).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn preload_pinned_workspace_starts_file_watcher() {
+        use crate::config::WorkspaceConfig;
+        use crate::workspace::WorkspaceManager;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().to_path_buf();
+        seed_git_repo(&root);
+
+        let cfg = Arc::new(DaemonConfig {
+            workspaces: vec![WorkspaceConfig {
+                path: root.clone(),
+                pinned: true,
+                exclude: false,
+            }],
+            ..DaemonConfig::default()
+        });
+
+        let plugins = Arc::new(sqry_plugin_registry::create_plugin_manager());
+        // `new_without_reaper` keeps the test free of the background reaper
+        // task; the pre-load path under test does not depend on it.
+        let manager = WorkspaceManager::new_without_reaper(Arc::clone(&cfg));
+        let dispatcher =
+            RebuildDispatcher::new(Arc::clone(&manager), Arc::clone(&cfg), Arc::clone(&plugins));
+        let builder: Arc<dyn crate::workspace::WorkspaceBuilder> =
+            Arc::new(RealWorkspaceBuilder::new(Arc::clone(&plugins)));
+
+        assert_eq!(
+            dispatcher.watchers_len(),
+            0,
+            "no watcher should exist before pre-load"
+        );
+
+        preload_pinned_workspaces(&cfg, &manager, &dispatcher, &builder);
+
+        assert_eq!(
+            dispatcher.watchers_len(),
+            1,
+            "pinned pre-load must start exactly one file watcher (sqry#461)"
+        );
+    }
+
+    /// A non-pinned (or excluded) workspace is not pre-loaded, so no watcher
+    /// is started for it. Guards against over-eager wiring.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn preload_skips_non_pinned_workspace() {
+        use crate::config::WorkspaceConfig;
+        use crate::workspace::WorkspaceManager;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().to_path_buf();
+        seed_git_repo(&root);
+
+        let cfg = Arc::new(DaemonConfig {
+            workspaces: vec![WorkspaceConfig {
+                path: root.clone(),
+                pinned: false,
+                exclude: false,
+            }],
+            ..DaemonConfig::default()
+        });
+
+        let plugins = Arc::new(sqry_plugin_registry::create_plugin_manager());
+        let manager = WorkspaceManager::new_without_reaper(Arc::clone(&cfg));
+        let dispatcher =
+            RebuildDispatcher::new(Arc::clone(&manager), Arc::clone(&cfg), Arc::clone(&plugins));
+        let builder: Arc<dyn crate::workspace::WorkspaceBuilder> =
+            Arc::new(RealWorkspaceBuilder::new(Arc::clone(&plugins)));
+
+        preload_pinned_workspaces(&cfg, &manager, &dispatcher, &builder);
+
+        assert_eq!(
+            dispatcher.watchers_len(),
+            0,
+            "a non-pinned workspace must not be pre-loaded or watched"
         );
     }
 }

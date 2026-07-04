@@ -43,7 +43,6 @@ use sqry_mcp::tool_handlers::{
 };
 use std::fs;
 use std::num::NonZeroUsize;
-use std::path::PathBuf;
 use std::sync::Once;
 use std::time::Duration;
 use tempfile::TempDir;
@@ -566,10 +565,4 @@ fn relation_query_callers_max_depth_2_walks_full_chain_in_ambiguous_fixture() ->
         "expected root_b in depth>=2 callers, got {deep_callers:?}"
     );
     Ok(())
-}
-
-// Avoid `clippy::path_buf_push_overwrite` warnings with explicit type.
-#[allow(dead_code)]
-fn _silence_unused_pathbuf_warning() {
-    let _: PathBuf = PathBuf::new();
 }

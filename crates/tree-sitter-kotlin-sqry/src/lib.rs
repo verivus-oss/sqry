@@ -1,6 +1,9 @@
 //! Tree-sitter grammar for Kotlin (vendored for sqry)
 //!
-//! This is a first-party binding maintained in the sqry repository.
+//! The Rust binding in this crate is first-party (maintained in the sqry
+//! repository). The grammar under grammar-src/ is vendored THIRD-PARTY code
+//! reproduced under its upstream license; the full license text and copyright
+//! notice are in the repository-root THIRD-PARTY-LICENSES file.
 //!
 //! **Source Grammar**: <https://github.com/fwcd/tree-sitter-kotlin>
 //! **Commit**: f3a1ea74304adad67164a0a6ffe729428748a7a7
