@@ -62,25 +62,20 @@ async fn handle_revision_semantic_search(
         graph,
         executor: std::sync::Arc::clone(&ctx.tool_executor),
     };
-    let cancel = sqry_core::query::cancellation::CancellationToken::new();
+    // issue #503 Phase 2: submit on the shared dedicated CPU pool. Phase 1
+    // fixed the moved-token bug here; Phase 2 replaces the hand-rolled
+    // spawn_blocking + timeout + flip with `CpuExecutor::run`, which owns and
+    // flips the token on deadline (fire-and-forget) and maps the result
+    // through the shared ladder. The wire envelope is unchanged.
     let tool_timeout = std::time::Duration::from_secs(ctx.config.tool_timeout_secs);
-    let result = tokio::time::timeout(
-        tool_timeout,
-        tokio::task::spawn_blocking(move || {
-            let exec = execute_semantic_search_for_daemon(&wctx, &args, &cancel)?;
+    let result = ctx
+        .cpu_executor
+        .run(tool_timeout, &root, move |cancel| {
+            let exec = execute_semantic_search_for_daemon(&wctx, &args, cancel)?;
             tool_response_json(exec).map_err(|err| anyhow::anyhow!("response build: {err:?}"))
-        }),
-    )
-    .await
-    .map_err(|_| {
-        MethodError::Daemon(crate::error::DaemonError::ToolTimeout {
-            root: root.clone(),
-            secs: tool_timeout.as_secs(),
-            deadline_ms: u64::try_from(tool_timeout.as_millis()).unwrap_or(u64::MAX),
         })
-    })?
-    .map_err(MethodError::JoinError)?
-    .map_err(MethodError::Internal)?;
+        .await
+        .map_err(MethodError::Daemon)?;
 
     let envelope = ResponseEnvelope {
         result,

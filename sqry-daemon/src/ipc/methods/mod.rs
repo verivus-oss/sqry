@@ -77,6 +77,13 @@ pub(crate) struct HandlerContext {
     /// to the `inner::execute_*` functions in `sqry-mcp::daemon_adapter`.
     #[allow(dead_code)] // consumed by Phase 8b Task 7's tool-dispatch handlers
     pub tool_executor: Arc<QueryExecutor>,
+    /// issue #503 Phase 2: dedicated bounded CPU executor. The revision
+    /// read-path handlers submit their `spawn_blocking`-shaped work through
+    /// this so it runs on the num_cpus Rayon pool instead of pinning a Tokio
+    /// blocking thread and contending on the global pool. `CpuExecutor` is
+    /// `Arc`-backed, so this clone shares the one pool created in
+    /// [`super::super::server::IpcServer::bind`].
+    pub cpu_executor: crate::ipc::tool_core::cpu_executor::CpuExecutor,
     /// Shim-connection registry. U10's router consumes this on every
     /// `ShimRegister` first frame via
     /// [`ShimRegistry::try_register_bounded`] under
@@ -198,6 +205,13 @@ pub enum MethodError {
     #[error("spawn_blocking join error: {0}")]
     JoinError(#[from] JoinError),
 }
+
+// issue #503: the Phase 1 `tool_timeout_method_error` / `map_cancelled_closure_err`
+// helpers (per-handler deadline mapping) were subsumed in Phase 2 by
+// `tool_core::cpu_executor::CpuExecutor::run`, which owns the deadline flip and
+// maps closure errors through the shared `tool_core::classify_closure_error`
+// ladder. The revision handlers now call `ctx.cpu_executor.run(...)` and map
+// its `DaemonError` into `MethodError::Daemon`, so those helpers are gone.
 
 impl MethodError {
     /// Build the wire-level JSON-RPC response for this error.

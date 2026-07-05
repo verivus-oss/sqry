@@ -43,11 +43,13 @@ pub(crate) async fn handle(ctx: &HandlerContext, params: Value) -> Result<Value,
         Arc::clone(&ctx.manager),
         Arc::clone(&ctx.workspace_builder),
         Arc::clone(&ctx.tool_executor),
+        &ctx.cpu_executor,
         tool_timeout,
         &path,
         Some("daemon/query"),
-        move |wctx, _cancel| -> anyhow::Result<Value> {
-            let result = run_query_on_graph(&wctx.graph, &req, Path::new(&req.search_path))?;
+        move |wctx, cancel| -> anyhow::Result<Value> {
+            let result =
+                run_query_on_graph(&wctx.graph, &req, Path::new(&req.search_path), cancel)?;
             serde_json::to_value(&result).context("serialise QueryResult")
         },
     )
@@ -104,20 +106,19 @@ async fn handle_revision_query(
     })?;
     let tool_timeout = Duration::from_secs(ctx.config.tool_timeout_secs);
     let query_root = root.clone();
-    let timeout_root = root.clone();
-    let mut result = tokio::time::timeout(
-        tool_timeout,
-        tokio::task::spawn_blocking(move || run_query_on_graph(&graph, &req, &query_root)),
-    )
-    .await
-    .map_err(|_| {
-        MethodError::Daemon(crate::error::DaemonError::ToolTimeout {
-            root: timeout_root,
-            secs: tool_timeout.as_secs(),
-            deadline_ms: u64::try_from(tool_timeout.as_millis()).unwrap_or(u64::MAX),
+
+    // issue #503 Phase 2: submit the query on the shared dedicated CPU pool.
+    // `CpuExecutor::run` owns the token, flips it on deadline (fire-and-forget),
+    // and maps the result through the same `classify_closure_error` ladder the
+    // central path uses, so the ToolTimeout / envelope shape is unchanged. The
+    // async caller holds no Tokio blocking thread while the query runs.
+    let mut result = ctx
+        .cpu_executor
+        .run(tool_timeout, &root, move |cancel| {
+            run_query_on_graph(&graph, &req, &query_root, cancel)
         })
-    })?
-    .map_err(MethodError::JoinError)??;
+        .await
+        .map_err(MethodError::Daemon)?;
     result.revision = Some(metadata);
     drop(guard);
 
@@ -149,11 +150,22 @@ fn run_query_on_graph(
     graph: &Arc<CodeGraph>,
     req: &QueryRequest,
     workspace_root: &Path,
+    cancel: &sqry_core::query::cancellation::CancellationToken,
 ) -> anyhow::Result<QueryResult> {
     let executor =
         QueryExecutor::with_plugin_manager(sqry_plugin_registry::create_plugin_manager());
-    let query_results =
-        executor.execute_on_preloaded_graph(Arc::clone(graph), &req.query, workspace_root, None)?;
+    // Cancellable variant so a deadline-flipped token reaches the
+    // evaluator's per-batch poll. `None` is the `variables` argument, not a
+    // token (issue #503 Phase 1). This helper takes the token in place
+    // rather than via a never-cancelled wrapper because daemon_query.rs has
+    // no in-crate test callers, so a wrapper would be dead code.
+    let query_results = executor.execute_on_preloaded_graph_cancellable(
+        Arc::clone(graph),
+        &req.query,
+        workspace_root,
+        None,
+        cancel,
+    )?;
     let total = query_results.len();
     let limit = req.limit.map_or(DEFAULT_QUERY_LIMIT, |limit| {
         usize::try_from(limit).unwrap_or(usize::MAX)

@@ -56,6 +56,10 @@ pub struct IpcServer {
     dispatcher: Arc<RebuildDispatcher>,
     workspace_builder: Arc<dyn WorkspaceBuilder>,
     tool_executor: Arc<QueryExecutor>,
+    /// issue #503 Phase 2: single dedicated bounded CPU executor shared by
+    /// every connection's `HandlerContext` (cheap `Arc`-backed clone), so all
+    /// daemon read-path CPU work runs on one num_cpus Rayon pool.
+    cpu_executor: crate::ipc::tool_core::cpu_executor::CpuExecutor,
     shim_registry: Arc<ShimRegistry>,
     shutdown: CancellationToken,
     active_connections: Arc<AtomicU64>,
@@ -117,6 +121,7 @@ impl IpcServer {
             dispatcher,
             workspace_builder,
             tool_executor,
+            cpu_executor: crate::ipc::tool_core::cpu_executor::CpuExecutor::new(),
             shim_registry: ShimRegistry::new(),
             shutdown,
             active_connections: Arc::new(AtomicU64::new(0)),
@@ -160,6 +165,7 @@ impl IpcServer {
             dispatcher,
             workspace_builder,
             tool_executor,
+            cpu_executor,
             shim_registry,
             shutdown,
             active_connections,
@@ -184,6 +190,7 @@ impl IpcServer {
                             dispatcher: Arc::clone(&dispatcher),
                             workspace_builder: Arc::clone(&workspace_builder),
                             tool_executor: Arc::clone(&tool_executor),
+                            cpu_executor: cpu_executor.clone(),
                             shim_registry: Arc::clone(&shim_registry),
                             shutdown: shutdown.clone(),
                             config: Arc::clone(&config),

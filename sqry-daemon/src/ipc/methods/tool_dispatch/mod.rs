@@ -158,6 +158,7 @@ where
         Arc::clone(&ctx.manager),
         Arc::clone(&ctx.workspace_builder),
         Arc::clone(&ctx.tool_executor),
+        &ctx.cpu_executor,
         tool_timeout,
         path,
         Some(tool_name),

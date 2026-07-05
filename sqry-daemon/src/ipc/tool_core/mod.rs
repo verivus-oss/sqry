@@ -25,6 +25,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
+pub mod cpu_executor;
+
 fn f64_hours_to_u64(hours: f64) -> u64 {
     if !hours.is_finite() || hours <= 0.0 {
         return 0;
@@ -319,6 +321,7 @@ pub(crate) async fn acquire_and_execute<F>(
     manager: Arc<WorkspaceManager>,
     builder: Arc<dyn WorkspaceBuilder>,
     tool_executor: Arc<QueryExecutor>,
+    cpu_executor: &cpu_executor::CpuExecutor,
     tool_timeout: Duration,
     path: &str,
     tool_name: Option<&'static str>,
@@ -368,7 +371,8 @@ where
         graph,
         executor: tool_executor,
     };
-    let inner = execute_with_timeout(tool_timeout, &canonical_root, wctx, run).await?;
+    let inner =
+        execute_with_timeout(cpu_executor, tool_timeout, &canonical_root, wctx, run).await?;
 
     match freshness {
         // Fresh and Reloaded both produce the existing fresh response
@@ -466,6 +470,7 @@ where
 pub(crate) async fn classify_and_execute<F>(
     manager: Arc<WorkspaceManager>,
     tool_executor: Arc<QueryExecutor>,
+    cpu_executor: &cpu_executor::CpuExecutor,
     tool_timeout: Duration,
     path: &str,
     run: F,
@@ -492,7 +497,9 @@ where
                 graph,
                 executor: tool_executor,
             };
-            let inner = execute_with_timeout(tool_timeout, &canonical_root, wctx, run).await?;
+            let inner =
+                execute_with_timeout(cpu_executor, tool_timeout, &canonical_root, wctx, run)
+                    .await?;
             Ok(ExecuteVerdict::Fresh { inner, state })
         }
         ServeVerdict::Stale {
@@ -506,7 +513,9 @@ where
                 graph,
                 executor: tool_executor,
             };
-            let inner = execute_with_timeout(tool_timeout, &canonical_root, wctx, run).await?;
+            let inner =
+                execute_with_timeout(cpu_executor, tool_timeout, &canonical_root, wctx, run)
+                    .await?;
             let stale_warning = render_stale_warning(
                 &canonical_root,
                 age_hours,
@@ -535,6 +544,7 @@ where
 /// thread continues but the result is discarded); on join failure the
 /// error is wrapped in [`DaemonError::Internal`].
 async fn execute_with_timeout<F>(
+    cpu_executor: &cpu_executor::CpuExecutor,
     tool_timeout: Duration,
     canonical_root: &Path,
     wctx: WorkspaceContext,
@@ -543,10 +553,10 @@ async fn execute_with_timeout<F>(
 where
     // `A_cancellation.md` §2 + `00_contracts.md` §3.CC-1: the daemon
     // closure receives both the `WorkspaceContext` and a borrowed
-    // per-request `CancellationToken`. The wrapper retains ownership
-    // of the canonical clone and signals on deadline so the in-flight
-    // `spawn_blocking` thread observes the cancellation cooperatively
-    // (per GT-6, a running blocking task cannot be aborted).
+    // per-request `CancellationToken`. `CpuExecutor::run` retains the
+    // token and signals on deadline so the in-flight pooled closure
+    // observes the cancellation cooperatively (per GT-6, a running task
+    // cannot be aborted).
     F: FnOnce(
             &WorkspaceContext,
             &sqry_core::query::cancellation::CancellationToken,
@@ -554,142 +564,81 @@ where
         + Send
         + 'static,
 {
-    // Derive the canonical wire fields BEFORE spawning so the borrow
-    // of `canonical_root` does not cross the `.await`.
-    let deadline_ms = u64::try_from(tool_timeout.as_millis()).unwrap_or(u64::MAX);
-    let secs = tool_timeout.as_secs();
-    let root_owned = canonical_root.to_path_buf();
-
-    // Capture the canonical workspace path so the spawn_blocking closure
-    // can call `thread_start_hook::notify(&path)` as its first action.
-    // This is the path-keyed test instrumentation hook (iter-8 redesign):
-    // a registered test notifier is fired only when its workspace path
-    // matches `canonical_root`. Tests use unique tempdirs, so concurrent
-    // tests cannot fire each other's flags. The hook is a no-op for the
-    // common case of no test registration (one uncontended Mutex<Vec>
-    // lock + linear scan over an always-empty vector).
+    // issue #503 Phase 2: run on the shared dedicated CPU pool. The test
+    // instrumentation hook fires as the first action inside the pooled
+    // closure (proving the dispatch reached the executor) before any graph
+    // work; then the user closure runs with the per-request token. Token
+    // construction, the deadline flip (fire-and-forget), and closure-error
+    // classification (`classify_closure_error`) all live in
+    // `CpuExecutor::run`, so the central path and the revision bypasses share
+    // one bridge and one fairness domain.
     let hook_path = canonical_root.to_path_buf();
+    cpu_executor
+        .run(tool_timeout, canonical_root, move |cancel| {
+            thread_start_hook::notify(&hook_path);
+            run(&wctx, cancel)
+        })
+        .await
+}
 
-    // Per-request cancellation token. Wrapper owns the canonical clone;
-    // closure owns a Send/Clone copy moved into spawn_blocking. Both
-    // observe the same `Arc<AtomicBool>` flag.
-    let cancel = sqry_core::query::cancellation::CancellationToken::new();
-    let cancel_for_closure = cancel.clone();
-
-    let join_handle = tokio::task::spawn_blocking(move || {
-        // Signal that the real OS thread has started by firing the
-        // registered notifier (if any) for the dispatched workspace path.
-        // This is the FIRST action inside the closure so the test's
-        // server-side barrier resolves before any graph work begins,
-        // proving the real daemon dispatch path reached `spawn_blocking`
-        // and the OS scheduler dispatched it.
-        thread_start_hook::notify(&hook_path);
-        run(&wctx, &cancel_for_closure)
-    });
-    let result = tokio::time::timeout(tool_timeout, join_handle).await;
-
-    // Deadline elapsed → flip the token *before* falling through so
-    // the detached blocking thread observes cancellation on its next
-    // `evaluate_all` per-batch poll. We must NOT await the JoinHandle
-    // here — the contract on the deadline arm is fire-and-forget; the
-    // cooperative-cancellation token is what frees the blocking-pool
-    // slot once the closure body returns. (Mirrors the standalone
-    // `sqry-mcp::SqryServer::execute_tool_with_timeout` deadline path.)
-    if result.is_err() {
-        cancel.cancel();
-    }
-
-    match result {
-        Ok(Ok(Ok(value))) => Ok(value),
-        Ok(Ok(Err(err))) => {
-            // `A_cancellation.md` §4: when the closure returned because
-            // it observed the cancellation we just signalled, surface
-            // the canonical `ToolTimeout` envelope so the wire shape is
-            // identical to the wrapper-only timeout arm. `kind =
-            // "deadline_exceeded"` is preserved across both paths so
-            // MCP clients use a single discriminator regardless of
-            // which side observed first.
-            if let Some(sqry_core::query::QueryError::Cancelled) =
-                err.downcast_ref::<sqry_core::query::QueryError>()
-            {
-                Err(DaemonError::ToolTimeout {
-                    root: root_owned,
-                    secs,
-                    deadline_ms,
-                })
-            } else if let Some(gate_err) =
-                err.downcast_ref::<sqry_core::query::cost_gate::CostGateError>()
-            {
-                // `B_cost_gate.md` §3 + `00_contracts.md` §3.CC-2:
-                // pre-flight cost-gate rejection on the daemon-hosted
-                // MCP path. `DaemonError::QueryTooBroad` carries the
-                // CC-2 7-key `details` payload through to
-                // `daemon_err_to_mcp` which emits the canonical 4-key
-                // envelope (byte-identical to the standalone
-                // `RpcError::query_too_broad` shape).
-                Err(DaemonError::QueryTooBroad {
-                    reason: gate_err.to_string(),
-                    details: gate_err.to_query_too_broad_details(),
-                })
-            } else if let Some(gate_err) =
-                err.downcast_ref::<sqry_db::planner::cost_gate::PlannerCostGateError>()
-            {
-                // Planner-side cost gate (`sqry_query`, `plan-query`).
-                // Distinct error type, identical wire envelope.
-                Err(DaemonError::QueryTooBroad {
-                    reason: gate_err.to_string(),
-                    details: gate_err.to_query_too_broad_details(),
-                })
-            } else if let Some(rpc_err) = err.downcast_ref::<sqry_mcp::error::RpcError>() {
-                // Cluster-C iter-3: a typed `RpcError` propagated up
-                // from the daemon adapter's argument-parsing layer
-                // (`sqry-mcp/src/daemon_adapter/dispatch.rs`). Without
-                // this arm, validation errors like `budget_rows: 0`
-                // fall through to `DaemonError::Internal` and surface
-                // as `McpError::internal_error` (-32603) on the wire,
-                // diverging from the standalone path which emits
-                // `McpError::invalid_params` (-32602). The
-                // `RpcErrorPreserved` variant carries the typed
-                // RpcError through to `daemon_err_to_mcp` so the
-                // wire envelope is byte-identical to standalone.
-                Err(DaemonError::RpcErrorPreserved(rpc_err.clone()))
-            } else if let Some(budget_err) =
-                err.downcast_ref::<sqry_core::query::budget::BudgetExceeded>()
-            {
-                // `C_budget.md` §3 + `00_contracts.md` §3.CC-2:
-                // runtime row-budget exceedance surfaces with
-                // `details.source = "runtime_budget"`. Cluster-C
-                // iter-2: include the sanitised `predicate_shape` so
-                // the daemon-hosted envelope is wire-comparable to
-                // the standalone path and to the cluster-B static
-                // estimate envelope.
-                let details = serde_json::json!({
-                    "source": "runtime_budget",
-                    "kind": sqry_core::query::cost_gate::KIND_QUERY_TOO_BROAD,
-                    "examined": budget_err.examined,
-                    "limit": budget_err.limit,
-                    "predicate_shape": budget_err.predicate_shape.clone(),
-                    "suggested_predicates":
-                        sqry_core::query::cost_gate::SCOPE_FILTER_FIELDS,
-                    "doc_url":
-                        sqry_core::query::cost_gate::QUERY_TOO_BROAD_DOC_URL,
-                });
-                Err(DaemonError::QueryTooBroad {
-                    reason: budget_err.to_string(),
-                    details,
-                })
-            } else {
-                Err(DaemonError::Internal(err))
-            }
-        }
-        Ok(Err(join_err)) => Err(DaemonError::Internal(anyhow::anyhow!(
-            "spawn_blocking join: {join_err}"
-        ))),
-        Err(_elapsed) => Err(DaemonError::ToolTimeout {
-            root: root_owned,
+/// Classify a closure's `anyhow::Error` into the canonical [`DaemonError`]
+/// wire envelope. Shared verbatim by [`execute_with_timeout`] (spawn_blocking
+/// bridge) and [`cpu_executor::CpuExecutor::run`] (spawn_fifo + channel
+/// bridge) so both produce byte-identical envelopes (issue #503 Phase 2).
+///
+/// `QueryError::Cancelled` (a closure that observed a deadline-flipped token)
+/// maps to `ToolTimeout` with `kind = "deadline_exceeded"`; cost-gate,
+/// planner cost-gate, and runtime-budget errors map to `QueryTooBroad`; a
+/// typed `RpcError` is preserved for `-32602` parity with the standalone MCP
+/// path; anything else is `Internal` (`-32603`).
+pub(crate) fn classify_closure_error(
+    err: anyhow::Error,
+    root: &Path,
+    secs: u64,
+    deadline_ms: u64,
+) -> DaemonError {
+    if let Some(sqry_core::query::QueryError::Cancelled) =
+        err.downcast_ref::<sqry_core::query::QueryError>()
+    {
+        DaemonError::ToolTimeout {
+            root: root.to_path_buf(),
             secs,
             deadline_ms,
-        }),
+        }
+    } else if let Some(gate_err) = err.downcast_ref::<sqry_core::query::cost_gate::CostGateError>()
+    {
+        DaemonError::QueryTooBroad {
+            reason: gate_err.to_string(),
+            details: gate_err.to_query_too_broad_details(),
+        }
+    } else if let Some(gate_err) =
+        err.downcast_ref::<sqry_db::planner::cost_gate::PlannerCostGateError>()
+    {
+        DaemonError::QueryTooBroad {
+            reason: gate_err.to_string(),
+            details: gate_err.to_query_too_broad_details(),
+        }
+    } else if let Some(rpc_err) = err.downcast_ref::<sqry_mcp::error::RpcError>() {
+        DaemonError::RpcErrorPreserved(rpc_err.clone())
+    } else if let Some(budget_err) = err.downcast_ref::<sqry_core::query::budget::BudgetExceeded>()
+    {
+        let details = serde_json::json!({
+            "source": "runtime_budget",
+            "kind": sqry_core::query::cost_gate::KIND_QUERY_TOO_BROAD,
+            "examined": budget_err.examined,
+            "limit": budget_err.limit,
+            "predicate_shape": budget_err.predicate_shape.clone(),
+            "suggested_predicates":
+                sqry_core::query::cost_gate::SCOPE_FILTER_FIELDS,
+            "doc_url":
+                sqry_core::query::cost_gate::QUERY_TOO_BROAD_DOC_URL,
+        });
+        DaemonError::QueryTooBroad {
+            reason: budget_err.to_string(),
+            details,
+        }
+    } else {
+        DaemonError::Internal(err)
     }
 }
 
@@ -806,6 +755,7 @@ mod tests {
         let err = classify_and_execute(
             manager,
             executor,
+            &super::cpu_executor::CpuExecutor::with_threads(1),
             Duration::from_secs(10),
             "/this/path/does/not/exist/for/real",
             run,
@@ -845,6 +795,7 @@ mod tests {
         let err = classify_and_execute(
             manager,
             executor,
+            &super::cpu_executor::CpuExecutor::with_threads(1),
             Duration::from_secs(10),
             root.to_str().unwrap(),
             run,
@@ -896,6 +847,7 @@ mod tests {
         let err = classify_and_execute(
             manager,
             executor,
+            &super::cpu_executor::CpuExecutor::with_threads(1),
             Duration::from_millis(50),
             root.to_str().unwrap(),
             run,
@@ -939,6 +891,7 @@ mod tests {
         let err = classify_and_execute(
             manager,
             executor,
+            &super::cpu_executor::CpuExecutor::with_threads(1),
             Duration::from_secs(10),
             root.to_str().unwrap(),
             run,
@@ -977,6 +930,7 @@ mod tests {
         let verdict = classify_and_execute(
             manager,
             executor,
+            &super::cpu_executor::CpuExecutor::with_threads(1),
             Duration::from_secs(10),
             root.to_str().unwrap(),
             run,

@@ -88,11 +88,13 @@ pub(crate) async fn handle(ctx: &HandlerContext, params: Value) -> Result<Value,
         Arc::clone(&ctx.manager),
         Arc::clone(&ctx.workspace_builder),
         Arc::clone(&ctx.tool_executor),
+        &ctx.cpu_executor,
         tool_timeout,
         &path,
         Some("daemon/search"),
-        move |wctx, _cancel| -> anyhow::Result<Value> {
-            let result = run_search_on_graph(&wctx.graph, &req, regex.as_ref());
+        move |wctx, cancel| -> anyhow::Result<Value> {
+            let result =
+                run_search_on_graph_cancellable(&wctx.graph, &req, regex.as_ref(), cancel)?;
             serde_json::to_value(&result).context("serialise SearchResult")
         },
     )
@@ -155,23 +157,26 @@ async fn handle_revision_search(
         })
     })?;
     let tool_timeout = Duration::from_secs(ctx.config.tool_timeout_secs);
-    let result = tokio::time::timeout(
-        tool_timeout,
-        tokio::task::spawn_blocking(move || {
-            let mut result = run_search_on_graph(&graph, &req, regex.as_ref());
-            result.revision = Some(metadata);
-            result
-        }),
-    )
-    .await
-    .map_err(|_| {
-        MethodError::Daemon(crate::error::DaemonError::ToolTimeout {
-            root: root.clone(),
-            secs: tool_timeout.as_secs(),
-            deadline_ms: u64::try_from(tool_timeout.as_millis()).unwrap_or(u64::MAX),
-        })
-    })?
-    .map_err(MethodError::JoinError)?;
+
+    // issue #503 Phase 2: submit the scan on the shared dedicated CPU pool.
+    // `CpuExecutor::run` owns and flips the token on deadline (fire-and-forget)
+    // and maps the result through the shared ladder, so a timed-out scan stops
+    // at its next CANCEL_POLL_STRIDE poll without pinning a Tokio blocking
+    // thread. The wire envelope is unchanged.
+    let result = ctx
+        .cpu_executor
+        .run(
+            tool_timeout,
+            &root,
+            move |cancel| -> anyhow::Result<SearchResult> {
+                let mut result =
+                    run_search_on_graph_cancellable(&graph, &req, regex.as_ref(), cancel)?;
+                result.revision = Some(metadata);
+                Ok(result)
+            },
+        )
+        .await
+        .map_err(MethodError::Daemon)?;
     drop(guard);
 
     let envelope = ResponseEnvelope {
@@ -249,22 +254,59 @@ struct ScoredHit {
 /// (matching the protocol crate's lower-bound-sentinel docstring at
 /// `sqry-daemon-protocol/src/protocol.rs:758` while in practice carrying
 /// the exact count, since the daemon knows it).
+/// Poll the cancellation token once per this many strings / candidates in
+/// the search scan loops. Keeps the atomic load off the hot path while
+/// bounding how long a timed-out search runs before it observes the
+/// deadline-flipped token (issue #503 Phase 1).
+const CANCEL_POLL_STRIDE: usize = 1024;
+
+/// Never-cancelled convenience wrapper over [`run_search_on_graph_cancellable`].
+///
+/// Test-only (`#[cfg(test)]`): production code (the central and revision
+/// handlers) calls the cancellable variant directly, so the sole callers of
+/// this simple form are the 11 in-crate unit tests, which it keeps untouched.
+/// It constructs a token it never flips, so the inner scan can never yield
+/// [`sqry_core::query::QueryError::Cancelled`], hence the `expect`.
+#[cfg(test)]
 fn run_search_on_graph(
     graph: &CodeGraph,
     req: &SearchRequest,
     precompiled_regex: Option<&Regex>,
 ) -> SearchResult {
-    // Step 1: per-mode candidate generation. Each branch returns hits
-    // in its mode-appropriate order — exact/regex are NodeId-keyed
-    // (sorted below), fuzzy is score-descending.
+    run_search_on_graph_cancellable(
+        graph,
+        req,
+        precompiled_regex,
+        &sqry_core::query::cancellation::CancellationToken::new(),
+    )
+    .expect("never-cancelled token cannot yield QueryError::Cancelled")
+}
+
+/// Cancellable search scan. Polls `cancel` in the regex / fuzzy candidate
+/// loops (exact is an index lookup and needs no poll), so a deadline-flipped
+/// token stops the scan promptly and frees the blocking-pool slot.
+fn run_search_on_graph_cancellable(
+    graph: &CodeGraph,
+    req: &SearchRequest,
+    precompiled_regex: Option<&Regex>,
+    cancel: &sqry_core::query::cancellation::CancellationToken,
+) -> Result<SearchResult, sqry_core::query::QueryError> {
+    // Step 1: per-mode candidate generation. Each branch returns hits in its
+    // mode-appropriate order (exact/regex are NodeId-keyed and sorted below,
+    // fuzzy is score-descending).
     let hits: Vec<ScoredHit> = match req.mode {
         SearchMode::Exact => exact_hits(graph, &req.pattern),
         SearchMode::Regex => regex_hits(
             graph,
             precompiled_regex.expect("validate_request must precompile regex"),
-        ),
-        SearchMode::Fuzzy => fuzzy_hits(graph, &req.pattern),
+            cancel,
+        )?,
+        SearchMode::Fuzzy => fuzzy_hits(graph, &req.pattern, cancel)?,
     };
+
+    // Steps 2..5 run on the already-bounded hit vector and are cheap; one
+    // poll here covers them.
+    cancel.query_check()?;
 
     // Step 2: dedup. Fuzzy must preserve order (first occurrence has
     // the highest score) — sorting by NodeId would destroy ranking.
@@ -322,13 +364,13 @@ fn run_search_on_graph(
     }
     let total = pre_truncate_count as u64;
 
-    SearchResult {
+    Ok(SearchResult {
         items,
         total,
         truncated,
         cursor: None,
         revision: None,
-    }
+    })
 }
 
 /// Drop candidates whose `NodeMetadataStore` entry reports
@@ -383,11 +425,18 @@ fn exact_hits(graph: &CodeGraph, pattern: &str) -> Vec<ScoredHit> {
         .collect()
 }
 
-fn regex_hits(graph: &CodeGraph, regex: &Regex) -> Vec<ScoredHit> {
+fn regex_hits(
+    graph: &CodeGraph,
+    regex: &Regex,
+    cancel: &sqry_core::query::cancellation::CancellationToken,
+) -> Result<Vec<ScoredHit>, sqry_core::query::QueryError> {
     let strings = graph.strings();
     let indices = graph.indices();
     let mut matches: Vec<ScoredHit> = Vec::new();
-    for (str_id, s) in strings.iter() {
+    for (i, (str_id, s)) in strings.iter().enumerate() {
+        if i % CANCEL_POLL_STRIDE == 0 {
+            cancel.query_check()?;
+        }
         if regex.is_match(s) {
             matches.extend(
                 indices
@@ -404,16 +453,23 @@ fn regex_hits(graph: &CodeGraph, regex: &Regex) -> Vec<ScoredHit> {
             }));
         }
     }
-    matches
+    Ok(matches)
 }
 
-fn fuzzy_hits(graph: &CodeGraph, pattern: &str) -> Vec<ScoredHit> {
+fn fuzzy_hits(
+    graph: &CodeGraph,
+    pattern: &str,
+    cancel: &sqry_core::query::cancellation::CancellationToken,
+) -> Result<Vec<ScoredHit>, sqry_core::query::QueryError> {
     // Build trigram index on the fly from the graph's interned strings.
     // This mirrors `build_trigram_index_from_graph` in
     // `sqry-cli/src/commands/search.rs:903` so daemon and in-process
     // paths score identical candidate sets.
     let mut trigram = TrigramIndex::new();
-    for (str_id, s) in graph.strings().iter() {
+    for (i, (str_id, s)) in graph.strings().iter().enumerate() {
+        if i % CANCEL_POLL_STRIDE == 0 {
+            cancel.query_check()?;
+        }
         trigram.add_symbol(str_id.index() as usize, s);
     }
     let trigram_arc = Arc::new(trigram);
@@ -424,8 +480,15 @@ fn fuzzy_hits(graph: &CodeGraph, pattern: &str) -> Vec<ScoredHit> {
     };
     let generator = CandidateGenerator::with_config(trigram_arc, fuzzy_config);
     let candidate_ids = generator.generate(pattern);
+    // Candidate generation walks the query trigrams' posting lists, which are
+    // corpus-sized (bounded by the same interned-string set the build loop
+    // above scans). Poll once here so a token flipped during the build or the
+    // generate step is observed before the bounded (<= FUZZY_MAX_CANDIDATES)
+    // resolve / score / sort work below, rather than only after it (issue #503
+    // Phase 1, Gate B codex finding).
+    cancel.query_check()?;
     if candidate_ids.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
     let match_config = MatchConfig {
@@ -456,7 +519,10 @@ fn fuzzy_hits(graph: &CodeGraph, pattern: &str) -> Vec<ScoredHit> {
 
     let indices = graph.indices();
     let mut hits: Vec<ScoredHit> = Vec::new();
-    for result in scored {
+    for (i, result) in scored.into_iter().enumerate() {
+        if i % CANCEL_POLL_STRIDE == 0 {
+            cancel.query_check()?;
+        }
         let Ok(raw) = u32::try_from(result.entry_id) else {
             continue;
         };
@@ -478,7 +544,7 @@ fn fuzzy_hits(graph: &CodeGraph, pattern: &str) -> Vec<ScoredHit> {
                 .map(|&n| ScoredHit { node_id: n, score }),
         );
     }
-    hits
+    Ok(hits)
 }
 
 // ---------------------------------------------------------------------------
@@ -902,6 +968,154 @@ mod tests {
             include_generated: true,
             revision: None,
         }
+    }
+
+    // -------------------------------------------------------------------
+    // issue #503 Phase 1: cancellation is delivered on the search read
+    // paths, and the deadline envelope is unchanged.
+    // -------------------------------------------------------------------
+
+    /// AC2 (scan): the regex candidate scan observes a flipped token and
+    /// returns `QueryError::Cancelled` instead of scanning to completion.
+    #[test]
+    fn search_regex_scan_observes_flipped_token() {
+        let graph = build_populated_graph();
+        let req = req_for(SearchMode::Regex, "alpha", None);
+        let regex = Regex::new("alpha").expect("valid regex");
+        let cancel = sqry_core::query::cancellation::CancellationToken::new();
+        cancel.cancel();
+        let res = run_search_on_graph_cancellable(&graph, &req, Some(&regex), &cancel);
+        assert!(
+            matches!(res, Err(sqry_core::query::QueryError::Cancelled)),
+            "flipped token must yield Cancelled, got: {res:?}"
+        );
+    }
+
+    /// AC2 (fuzzy): the fuzzy path (trigram build loop, then the poll after
+    /// candidate generation) observes a flipped token and returns Cancelled
+    /// rather than building/scoring to completion.
+    #[test]
+    fn search_fuzzy_scan_observes_flipped_token() {
+        let graph = build_populated_graph();
+        let req = req_for(SearchMode::Fuzzy, "alpha", None);
+        let cancel = sqry_core::query::cancellation::CancellationToken::new();
+        cancel.cancel();
+        let res = run_search_on_graph_cancellable(&graph, &req, None, &cancel);
+        assert!(
+            matches!(res, Err(sqry_core::query::QueryError::Cancelled)),
+            "flipped token must yield Cancelled for fuzzy mode, got: {res:?}"
+        );
+    }
+
+    /// AC2 (pre-step poll): exact mode has no per-string poll, but the
+    /// poll before the post-processing steps still observes the flip.
+    #[test]
+    fn search_exact_pre_step_poll_observes_flipped_token() {
+        let graph = build_populated_graph();
+        let req = req_for(SearchMode::Exact, "alpha", None);
+        let cancel = sqry_core::query::cancellation::CancellationToken::new();
+        cancel.cancel();
+        let res = run_search_on_graph_cancellable(&graph, &req, None, &cancel);
+        assert!(
+            matches!(res, Err(sqry_core::query::QueryError::Cancelled)),
+            "flipped token must yield Cancelled even for exact mode, got: {res:?}"
+        );
+    }
+
+    /// Negative control: a live (never-flipped) token does not false-trigger;
+    /// the scan completes and returns the same items the wrapper would.
+    #[test]
+    fn search_live_token_completes_and_matches_wrapper() {
+        let graph = build_populated_graph();
+        let req = req_for(SearchMode::Regex, "alpha", None);
+        let regex = Regex::new("alpha").expect("valid regex");
+        let cancel = sqry_core::query::cancellation::CancellationToken::new();
+        let cancellable = run_search_on_graph_cancellable(&graph, &req, Some(&regex), &cancel)
+            .expect("live token must not cancel");
+        let wrapper = run_search_on_graph(&graph, &req, Some(&regex));
+        assert_eq!(cancellable.total, wrapper.total);
+        assert_eq!(cancellable.items.len(), wrapper.items.len());
+        assert!(cancellable.total > 0, "regex 'alpha' should match symbols");
+    }
+
+    /// AC3: the shared `classify_closure_error` ladder (used by both
+    /// `CpuExecutor::run` and the central `execute_with_timeout`) routes a
+    /// `QueryError::Cancelled` closure error to the `-32000` `ToolTimeout`
+    /// envelope and every other error to `Internal` (-32603). This is the
+    /// envelope contract the revision handlers now rely on via
+    /// `ctx.cpu_executor.run(...)`.
+    #[test]
+    fn classify_closure_error_routes_cancelled_and_other() {
+        let cancelled = crate::ipc::tool_core::classify_closure_error(
+            anyhow::Error::new(sqry_core::query::QueryError::Cancelled),
+            std::path::Path::new("/ws"),
+            0,
+            50,
+        );
+        let resp = MethodError::Daemon(cancelled).into_jsonrpc_response(None);
+        let code = serde_json::to_value(&resp)
+            .expect("to_value")
+            .get("error")
+            .and_then(|e| e.get("code"))
+            .and_then(|c| c.as_i64())
+            .expect("error.code");
+        assert_eq!(
+            code, -32000,
+            "Cancelled must map to ToolTimeout wire -32000"
+        );
+
+        let other = crate::ipc::tool_core::classify_closure_error(
+            anyhow::anyhow!("some other failure"),
+            std::path::Path::new("/ws"),
+            0,
+            50,
+        );
+        assert!(
+            matches!(other, crate::error::DaemonError::Internal(_)),
+            "non-cancellation error must stay Internal, got: {other:?}"
+        );
+    }
+
+    /// AC2 (mechanism): the revision-handler wrapper shape (spawn_blocking +
+    /// timeout + fire-and-forget flip) makes a cooperative closure observe
+    /// the deadline-flipped token and stop, rather than running to natural
+    /// completion. This is the exact mechanism the timed-out revision search
+    /// / query now relies on to free its blocking-pool slot.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn revision_deadline_flip_makes_closure_observe_and_stop() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let cancel = sqry_core::query::cancellation::CancellationToken::new();
+        let cancel_for_closure = cancel.clone();
+        let observed = Arc::new(AtomicBool::new(false));
+        let observed_c = Arc::clone(&observed);
+
+        let join = tokio::task::spawn_blocking(move || {
+            // Cooperative spin, bounded so a broken test cannot hang.
+            for _ in 0..5_000 {
+                if cancel_for_closure.is_cancelled() {
+                    observed_c.store(true, Ordering::SeqCst);
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        });
+
+        let timed = tokio::time::timeout(Duration::from_millis(30), join).await;
+        assert!(timed.is_err(), "the short deadline must fire first");
+        // Handler contract: flip on deadline, do NOT await the JoinHandle.
+        cancel.cancel();
+
+        // Confirm the detached closure observed the flip and stopped.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !observed.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await
+        .expect("closure must observe the flipped token and stop");
+        assert!(observed.load(Ordering::SeqCst));
     }
 
     // -------------------------------------------------------------------

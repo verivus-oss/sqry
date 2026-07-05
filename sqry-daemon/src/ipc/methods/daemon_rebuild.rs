@@ -228,6 +228,7 @@ mod tests {
             dispatcher,
             workspace_builder: Arc::new(EmptyGraphBuilder),
             tool_executor: executor,
+            cpu_executor: crate::ipc::tool_core::cpu_executor::CpuExecutor::with_threads(1),
             shim_registry: ShimRegistry::new(),
             shutdown: CancellationToken::new(),
             config,

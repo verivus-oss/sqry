@@ -386,6 +386,7 @@ where
                 Arc::clone(&ctx.manager),
                 Arc::clone(&ctx.workspace_builder),
                 Arc::clone(&ctx.tool_executor),
+                ctx.cpu_executor.clone(),
                 tool_timeout,
                 ctx.daemon_version,
                 ctx.shutdown.clone(),

@@ -84,6 +84,11 @@ pub struct DaemonMcpHandler {
     manager: Arc<WorkspaceManager>,
     workspace_builder: Arc<dyn WorkspaceBuilder>,
     tool_executor: Arc<QueryExecutor>,
+    /// issue #503 Phase 2: shared dedicated CPU executor so daemon-hosted MCP
+    /// tool work runs on the same num_cpus Rayon pool as the JSON-RPC path
+    /// (one fairness domain), not the global pool. `Arc`-backed clone of the
+    /// pool created in `IpcServer::bind`.
+    cpu_executor: crate::ipc::tool_core::cpu_executor::CpuExecutor,
     tool_timeout: Duration,
     daemon_version: &'static str,
     tools: Vec<rmcp::model::Tool>,
@@ -112,6 +117,7 @@ impl DaemonMcpHandler {
         manager: Arc<WorkspaceManager>,
         workspace_builder: Arc<dyn WorkspaceBuilder>,
         tool_executor: Arc<QueryExecutor>,
+        cpu_executor: crate::ipc::tool_core::cpu_executor::CpuExecutor,
         tool_timeout: Duration,
         daemon_version: &'static str,
     ) -> Self {
@@ -119,6 +125,7 @@ impl DaemonMcpHandler {
             manager,
             workspace_builder,
             tool_executor,
+            cpu_executor,
             tool_timeout,
             daemon_version,
             tools_schema::daemon_supported_tools(),
@@ -136,6 +143,7 @@ impl DaemonMcpHandler {
         manager: Arc<WorkspaceManager>,
         workspace_builder: Arc<dyn WorkspaceBuilder>,
         tool_executor: Arc<QueryExecutor>,
+        cpu_executor: crate::ipc::tool_core::cpu_executor::CpuExecutor,
         tool_timeout: Duration,
         daemon_version: &'static str,
         tools: Vec<rmcp::model::Tool>,
@@ -146,6 +154,7 @@ impl DaemonMcpHandler {
             manager,
             workspace_builder,
             tool_executor,
+            cpu_executor,
             tool_timeout,
             daemon_version,
             tools,
@@ -329,6 +338,7 @@ impl ServerHandler for DaemonMcpHandler {
             Arc::clone(&self.manager),
             Arc::clone(&self.workspace_builder),
             Arc::clone(&self.tool_executor),
+            &self.cpu_executor,
             self.tool_timeout,
             &path,
             static_tool_name,
@@ -681,12 +691,17 @@ fn call_tool_result_with_text_and_structured(
 ///   * rmcp initialisation errors (`Self::InitializeError`).
 ///   * `tokio::task::JoinError` from `service.waiting()` surfaces as
 ///     `anyhow::Error`.
+// Wiring entrypoint: forwards the daemon's shared dependencies (manager,
+// builder, executors, timeout, shutdown) into the MCP handler. issue #503
+// Phase 2 adds `cpu_executor`, taking the count to 9.
+#[allow(clippy::too_many_arguments)]
 pub async fn host_mcp_on_streams<R, W>(
     reader: R,
     writer: W,
     manager: Arc<WorkspaceManager>,
     workspace_builder: Arc<dyn WorkspaceBuilder>,
     tool_executor: Arc<QueryExecutor>,
+    cpu_executor: crate::ipc::tool_core::cpu_executor::CpuExecutor,
     tool_timeout: Duration,
     daemon_version: &'static str,
     shutdown: CancellationToken,
@@ -701,6 +716,7 @@ where
         manager,
         workspace_builder,
         tool_executor,
+        cpu_executor,
         tool_timeout,
         daemon_version,
     );
@@ -797,6 +813,7 @@ mod tests {
             manager,
             test_builder(),
             executor,
+            crate::ipc::tool_core::cpu_executor::CpuExecutor::with_threads(1),
             Duration::from_secs(60),
             "0.0.0-test",
         );
@@ -824,6 +841,7 @@ mod tests {
             manager,
             test_builder(),
             executor,
+            crate::ipc::tool_core::cpu_executor::CpuExecutor::with_threads(1),
             Duration::from_secs(60),
             "0.0.0-test",
         );
@@ -939,6 +957,7 @@ mod tests {
             manager,
             test_builder(),
             executor,
+            crate::ipc::tool_core::cpu_executor::CpuExecutor::with_threads(1),
             Duration::from_secs(60),
             "0.0.0-test",
             filtered,
@@ -989,6 +1008,7 @@ mod tests {
             manager,
             test_builder(),
             executor,
+            crate::ipc::tool_core::cpu_executor::CpuExecutor::with_threads(1),
             Duration::from_secs(60),
             "0.0.0-test",
         );
@@ -1037,6 +1057,7 @@ mod tests {
             manager,
             test_builder(),
             executor,
+            crate::ipc::tool_core::cpu_executor::CpuExecutor::with_threads(1),
             Duration::from_secs(60),
             "0.0.0-test",
             only_semantic_search,
