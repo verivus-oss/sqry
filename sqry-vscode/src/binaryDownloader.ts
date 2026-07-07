@@ -366,7 +366,19 @@ export async function verifySha256(filePath: string, expectedHash: string): Prom
 
 /**
  * Verify a Cosign signature bundle using sigstore-js.
- * This is MANDATORY - failure means the binary is rejected.
+ *
+ * Provenance verification is enforced: a genuine signature or
+ * certificate-identity mismatch always rejects the binary. The one exception is
+ * a Sigstore *infrastructure* failure (the bundled TUF trust root has expired,
+ * or tuf-repo-cdn.sigstore.dev is unreachable), which is a Sigstore-side
+ * problem, not a problem with the artifact, and it recurs every time the
+ * embedded trust root ages out (~every few months). In that case, and only when
+ * the binary's SHA-256 has already been verified against the release checksum
+ * manifest (verifySha256 runs before this in the caller), we degrade to that
+ * integrity guarantee with a loud warning rather than hard-blocking every
+ * install until the extension ships a fresh trust root. Same posture as the
+ * sqry.allowInsecureDownload air-gapped hatch, auto-triggered on a detected
+ * Sigstore-infrastructure failure.
  */
 export async function verifyCosignBundle(
   binaryPath: string,
@@ -393,8 +405,31 @@ export async function verifyCosignBundle(
     throw new Error("Cosign signature bundle file is missing. Binary provenance cannot be verified.");
   }
 
+  // Load the verifier separately so a load failure (e.g. sigstore's Node engine
+  // floor is not met by this VS Code's runtime) is treated as an environment
+  // problem, not an artifact problem. If the SHA-256 was already verified
+  // against the release checksum manifest, degrade to that with a warning
+  // rather than blocking the install.
+  let sigstore: typeof import("sigstore");
   try {
-    const sigstore = await import("sigstore");
+    sigstore = await import("sigstore");
+  } catch (loadError) {
+    const detail = loadError instanceof Error ? loadError.message : String(loadError);
+    if (!expectedSha256) {
+      throw new Error(
+        `Binary provenance could not be verified. Download rejected. ` +
+        `The Sigstore verifier failed to load: ${detail}.`,
+      );
+    }
+    outputChannel.appendLine(
+      "[sqry] ⚠️ WARNING: the Sigstore verifier could not be loaded in this runtime " +
+      `(${detail}). The binary's SHA-256 was verified against the release checksum manifest, so it is ` +
+      "accepted on that basis. Update VS Code or the sqry extension to restore full provenance verification.",
+    );
+    return;
+  }
+
+  try {
     const bundleContent = JSON.parse(fs.readFileSync(bundlePath, "utf-8"));
     const hasEmbeddedDssePayload = isDsseAttestationBundle(bundleContent);
     if (hasEmbeddedDssePayload && assetName && expectedSha256) {
@@ -436,24 +471,55 @@ export async function verifyCosignBundle(
     try {
       await verifyWithCandidates();
     } catch (error) {
+      // A genuine signature/certificate-identity mismatch is never recoverable.
       if (!isRecoverableSigstoreTufError(error)) {
         throw error;
       }
 
+      // First attempt hit a Sigstore trust-root/TUF error. Clear the (possibly
+      // stale) cache and retry once against a freshly fetched root.
       outputChannel.appendLine(
-        "[sqry] Sigstore TUF cache appears stale or corrupt; clearing cache and retrying verification once",
+        "[sqry] Sigstore trust-root/TUF error; clearing cache and retrying verification once",
       );
       clearSigstoreTufCache(verifyOptions.tufCachePath, outputChannel);
       fs.mkdirSync(verifyOptions.tufCachePath, { recursive: true });
-      await verifyWithCandidates();
+
+      try {
+        await verifyWithCandidates();
+      } catch (retryError) {
+        // Still a genuine mismatch after the retry -> reject.
+        if (!isRecoverableSigstoreTufError(retryError)) {
+          throw retryError;
+        }
+        // Persistent Sigstore-infrastructure failure (expired bundled trust
+        // root, or the TUF CDN is unreachable). Without an independent
+        // integrity anchor there is nothing to fall back to, so stay fatal.
+        if (!expectedSha256) {
+          throw retryError;
+        }
+        // The caller already verified this binary's SHA-256 against the release
+        // checksum manifest, so accept it on that basis with a loud warning
+        // instead of hard-blocking until a fresh trust root ships.
+        const detail = retryError instanceof Error ? retryError.message : String(retryError);
+        outputChannel.appendLine(
+          "[sqry] ⚠️ WARNING: Sigstore transparency-log provenance could NOT be verified: " +
+          `${detail}. This is a Sigstore infrastructure problem (an expired or unreachable trust root), ` +
+          "not a bad binary. The binary's SHA-256 was verified against the release checksum manifest, so it " +
+          "is accepted on that basis. Update the sqry extension to restore full provenance verification.",
+        );
+        return;
+      }
     }
 
     outputChannel.appendLine("[sqry] Cosign signature verification succeeded - binary provenance confirmed");
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    const remedy = isRecoverableSigstoreTufError(error)
+      ? " This is a Sigstore trust-root/TUF error (the transparency infrastructure could not be reached, or its root has rotated beyond the bundled trust root), not a problem with the binary itself. Update the sqry extension to pick up a current Sigstore root. If Sigstore is unreachable (air-gapped/offline), set `sqry.allowInsecureDownload: true` to fall back to SHA-256 checksum verification. Or install sqry yourself and set `sqry.path` to it with `sqry.autoDownload: false`."
+      : " To bypass the download, install sqry and set `sqry.path` to it with `sqry.autoDownload: false`, or set `sqry.allowInsecureDownload: true` to fall back to SHA-256 checksum verification.";
     throw new Error(
       `Binary provenance could not be verified. Download rejected. ` +
-      `Cosign verification failed: ${message}`
+      `Cosign verification failed: ${message}.` + remedy
     );
   }
 }

@@ -2,8 +2,8 @@
   "name": "sqry-vscode",
   "displayName": "sqry Semantic Search",
   "description": "Semantic code search for 35 languages. Navigate call graphs, inheritance hierarchies, FFI boundaries, imports/exports - powered by unified graph architecture.",
-  "version": "28.0.0",
-  "binaryVersion": "28.0.0",
+  "version": "28.0.1",
+  "binaryVersion": "28.0.1",
   "publisher": "verivus",
   "license": "MIT",
   "icon": "media/sqry-icon-512.png",
@@ -513,7 +513,7 @@
   "dependencies": {
     "elkjs": "^0.11.1",
     "https-proxy-agent": "^7.0.6",
-    "sigstore": "^4.1.0",
+    "sigstore": "^5.0.0",
     "vscode-languageclient": "^9.0.1",
     "which": "^4.0.0"
   },

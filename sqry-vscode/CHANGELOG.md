@@ -6,6 +6,19 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 
 ## [Unreleased]
 
+## [28.0.1] - 2026-07-07
+
+### Fixed
+- Stop rejecting valid binary downloads when the bundled Sigstore trust root
+  expires. The trust root shipped inside sigstore-js expires roughly every few
+  months; once it lapsed, provenance verification failed with `root was signed
+  by 0/3 keys` and the extension blocked the install even though the binary and
+  its SHA-256 were valid. sigstore is updated to v5 (current trust root), and
+  when cosign fails specifically because the Sigstore trust root is expired or
+  unreachable and the binary's SHA-256 already matched the release checksum
+  manifest, the download is now accepted with a loud warning instead of being
+  rejected. A genuine signature or certificate-identity mismatch still fails.
+
 ## [25.0.2] - 2026-07-01
 
 ### Changed

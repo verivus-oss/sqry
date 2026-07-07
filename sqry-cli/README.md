@@ -1,6 +1,6 @@
 # sqry CLI
 
-**Version**: 28.0.0
+**Version**: 28.0.1
 **Rust**: 1.94+ (Edition 2024; repository toolchain 1.94.1)
 
 `sqry` is the command-line interface for local semantic code search.

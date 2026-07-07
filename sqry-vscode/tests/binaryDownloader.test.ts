@@ -545,6 +545,71 @@ describe("binaryDownloader", () => {
         certificateIdentityURI: "https://github.com/verivus-oss/sqry/.github/workflows/release-distribute.yml@refs/tags/v19.0.4",
       });
     });
+
+    const writeCosignBundle = (dir: string) => {
+      const binaryPath = path.join(dir, "sqry-linux-x86_64");
+      fs.writeFileSync(binaryPath, "release binary");
+      const sha256 = crypto.createHash("sha256").update("release binary").digest("hex");
+      const bundlePath = path.join(dir, "sqry-linux-x86_64.bundle");
+      // Non-DSSE cosign bundle so verification routes through sigstore.verify(bundle, bytes).
+      fs.writeFileSync(bundlePath, JSON.stringify({
+        mediaType: "application/vnd.dev.sigstore.bundle.v0.3+json",
+        verificationMaterial: {},
+        messageSignature: {},
+      }));
+      return { binaryPath, bundlePath, sha256 };
+    };
+
+    it("degrades to SHA-256 acceptance on a persistent Sigstore trust-root failure when the checksum was verified", async () => {
+      const { binaryPath, bundlePath, sha256 } = writeCosignBundle(tmpDir);
+      const mod = loadModule({
+        sigstore: { verify: async () => { throw new Error("root was signed by 0/3 keys"); } },
+      });
+      const { channel, lines } = createOutputChannel();
+
+      // Must NOT throw: SHA-256 was already verified, so the persistent TUF
+      // infrastructure failure degrades to acceptance with a warning.
+      await mod.verifyCosignBundle(
+        binaryPath, bundlePath, "28.0.1", channel, { fsPath: tmpDir }, "sqry-linux-x86_64", sha256,
+      );
+      expect(lines.join("\n")).to.match(/provenance could NOT be verified/i);
+      expect(lines.join("\n")).to.match(/SHA-256 was verified/i);
+    });
+
+    it("rejects on a persistent Sigstore trust-root failure when there is no checksum anchor", async () => {
+      const { binaryPath, bundlePath } = writeCosignBundle(tmpDir);
+      const mod = loadModule({
+        sigstore: { verify: async () => { throw new Error("root was signed by 0/3 keys"); } },
+      });
+      const { channel } = createOutputChannel();
+      let threw = false;
+      try {
+        // No expectedSha256 argument -> no integrity anchor -> stay fatal.
+        await mod.verifyCosignBundle(binaryPath, bundlePath, "28.0.1", channel, { fsPath: tmpDir }, "sqry-linux-x86_64");
+      } catch (error) {
+        threw = true;
+        expect((error as Error).message).to.match(/Download rejected/);
+      }
+      expect(threw).to.equal(true);
+    });
+
+    it("still rejects a genuine signature/identity mismatch even with a verified checksum", async () => {
+      const { binaryPath, bundlePath, sha256 } = writeCosignBundle(tmpDir);
+      const mod = loadModule({
+        sigstore: { verify: async () => { throw new Error("certificate identity error"); } },
+      });
+      const { channel } = createOutputChannel();
+      let threw = false;
+      try {
+        await mod.verifyCosignBundle(
+          binaryPath, bundlePath, "28.0.1", channel, { fsPath: tmpDir }, "sqry-linux-x86_64", sha256,
+        );
+      } catch (error) {
+        threw = true;
+        expect((error as Error).message).to.match(/Download rejected/);
+      }
+      expect(threw).to.equal(true);
+    });
   });
 
   describe("isRecoverableSigstoreTufError()", () => {
