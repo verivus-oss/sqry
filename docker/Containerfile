@@ -1,0 +1,49 @@
+# Containerfile for Podman (rootless-friendly).
+#
+# Same build as ../Dockerfile, but runs as root INSIDE the container. Under
+# rootless Podman that maps to your host user, so a bind-mounted repo and the
+# .sqry index it writes just work with no --user juggling. On SELinux hosts add
+# :Z to the volume mount.
+#
+#   podman build -t sqry-mcp -f docker/Containerfile docker
+#   podman run -i --rm -v "$PWD:/workspace:Z" sqry-mcp
+
+ARG SQRY_VERSION=27.0.8
+
+FROM debian:stable-slim AS fetch
+ARG SQRY_VERSION
+ARG TARGETARCH
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends ca-certificates curl; \
+    case "${TARGETARCH:-amd64}" in \
+      amd64) arch="x86_64" ;; \
+      arm64) arch="arm64" ;; \
+      *) echo "unsupported TARGETARCH=${TARGETARCH:-}" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL --retry 3 --proto '=https' --tlsv1.2 \
+      -o /sqry-mcp \
+      "https://github.com/verivus-oss/sqry/releases/download/v${SQRY_VERSION}/sqry-mcp-linux-${arch}"; \
+    chmod 0755 /sqry-mcp; \
+    /sqry-mcp --version
+
+FROM debian:stable-slim AS runtime
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends ca-certificates libstdc++6; \
+    rm -rf /var/lib/apt/lists/*; \
+    mkdir -p /workspace
+
+COPY --from=fetch /sqry-mcp /usr/local/bin/sqry-mcp
+
+LABEL org.opencontainers.image.title="sqry-mcp" \
+      org.opencontainers.image.description="Semantic code search MCP server (stdio)." \
+      org.opencontainers.image.source="https://github.com/verivus-oss/sqry" \
+      org.opencontainers.image.url="https://sqry.dev" \
+      org.opencontainers.image.licenses="MIT" \
+      io.modelcontextprotocol.server.name="dev.sqry/sqry"
+
+ENV SQRY_MCP_WORKSPACE_ROOT=/workspace \
+    SQRY_REDACTION_PRESET=relative
+WORKDIR /workspace
+ENTRYPOINT ["sqry-mcp", "--no-daemon"]
