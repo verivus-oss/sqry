@@ -2,14 +2,15 @@
 #
 # sqry-mcp: semantic code search MCP server (stdio transport).
 #
-# Installs the prebuilt release binary instead of compiling the Rust +
-# tree-sitter workspace, so the image is small and builds in seconds.
-# Multi-arch: linux/amd64 and linux/arm64.
+# The published sqry release binaries are glibc-dynamic: `ldd` shows they need
+# glibc and libstdc++6, and there is no musl/static build in the release matrix.
+# So the runtime is distroless/cc, which bundles exactly glibc + libstdc++ +
+# libgcc + ca-certificates and nothing else (no shell, no package manager).
+# A truly static `FROM scratch` image would require a musl build target upstream.
 #
+# Multi-arch: linux/amd64 and linux/arm64.
 #   docker build -t sqry-mcp -f docker/Dockerfile docker
 #   docker run -i --rm -v "$PWD:/workspace" --user "$(id -u):$(id -g)" sqry-mcp
-#
-# See docker/README.md for MCP client config and the bind-mount notes.
 
 ARG SQRY_VERSION=27.0.8
 
@@ -30,15 +31,9 @@ RUN set -eux; \
     chmod 0755 /sqry-mcp; \
     /sqry-mcp --version
 
-FROM debian:stable-slim AS runtime
-# Runtime deps for the glibc-linked binary: libstdc++6 (libgcc-s1, libc6 are in base).
-RUN set -eux; \
-    apt-get update; \
-    apt-get install -y --no-install-recommends ca-certificates libstdc++6; \
-    rm -rf /var/lib/apt/lists/*; \
-    useradd --create-home --uid 10001 --shell /usr/sbin/nologin sqry; \
-    mkdir -p /workspace; chown sqry:sqry /workspace
-
+# distroless/cc: glibc + libstdc++ + libgcc + ca-certs only (~22 MB), runs as
+# the built-in nonroot user (uid 65532).
+FROM gcr.io/distroless/cc-debian12:nonroot AS runtime
 COPY --from=fetch /sqry-mcp /usr/local/bin/sqry-mcp
 
 LABEL org.opencontainers.image.title="sqry-mcp" \
@@ -53,5 +48,4 @@ LABEL org.opencontainers.image.title="sqry-mcp" \
 ENV SQRY_MCP_WORKSPACE_ROOT=/workspace \
     SQRY_REDACTION_PRESET=relative
 WORKDIR /workspace
-USER sqry
-ENTRYPOINT ["sqry-mcp", "--no-daemon"]
+ENTRYPOINT ["/usr/local/bin/sqry-mcp", "--no-daemon"]
